@@ -32,9 +32,9 @@
 
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/logical_session_cache_noop.h"
-#include "mongo/db/op_observer_impl.h"
-#include "mongo/db/op_observer_noop.h"
-#include "mongo/db/op_observer_registry.h"
+#include "mongo/db/op_observer/op_observer_impl.h"
+#include "mongo/db/op_observer/op_observer_noop.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/repl/primary_only_service_test_fixture.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/config/config_server_test_fixture.h"
@@ -44,6 +44,7 @@
 #include "mongo/db/s/resharding/resharding_service_test_helpers.h"
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/session_catalog_mongod.h"
 #include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/logv2/log.h"
@@ -110,15 +111,19 @@ class ExternalStateForTest : public ReshardingCoordinatorExternalState {
 class ReshardingCoordinatorServiceForTest : public ReshardingCoordinatorService {
 public:
     explicit ReshardingCoordinatorServiceForTest(ServiceContext* serviceContext)
-        : ReshardingCoordinatorService(serviceContext) {}
+        : ReshardingCoordinatorService(serviceContext), _serviceContext(serviceContext) {}
 
     std::shared_ptr<PrimaryOnlyService::Instance> constructInstance(BSONObj initialState) override {
         return std::make_shared<ReshardingCoordinator>(
             this,
-            ReshardingCoordinatorDocument::parse(
-                IDLParserErrorContext("ReshardingCoordinatorStateDoc"), std::move(initialState)),
-            std::make_shared<ExternalStateForTest>());
+            ReshardingCoordinatorDocument::parse(IDLParserContext("ReshardingCoordinatorStateDoc"),
+                                                 std::move(initialState)),
+            std::make_shared<ExternalStateForTest>(),
+            _serviceContext);
     }
+
+private:
+    ServiceContext* _serviceContext;
 };
 
 class ReshardingCoordinatorServiceTest : public ConfigServerTestFixture {
@@ -226,7 +231,7 @@ public:
         DBDirectClient client(opCtx);
 
         auto doc = client.findOne(NamespaceString::kConfigReshardingOperationsNamespace, BSONObj{});
-        IDLParserErrorContext errCtx("reshardingCoordFromTest");
+        IDLParserContext errCtx("reshardingCoordFromTest");
         return ReshardingCoordinatorDocument::parse(errCtx, doc);
     }
 
@@ -346,7 +351,7 @@ public:
                                 std::move(uuid),
                                 shardKey);
         if (reshardingFields)
-            collType.setReshardingFields(std::move(reshardingFields.get()));
+            collType.setReshardingFields(std::move(reshardingFields.value()));
 
         if (coordinatorDoc.getState() == CoordinatorStateEnum::kDone ||
             coordinatorDoc.getState() == CoordinatorStateEnum::kAborting) {

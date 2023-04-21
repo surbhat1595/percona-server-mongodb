@@ -35,7 +35,7 @@
 
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/repl/tenant_migration_access_blocker_registry.h"
 #include "mongo/db/repl/tenant_migration_conflict_info.h"
@@ -86,7 +86,9 @@ std::shared_ptr<TenantMigrationRecipientAccessBlocker> getTenantMigrationRecipie
             .getTenantMigrationAccessBlockerForTenantId(tenantId, MtabType::kRecipient));
 }
 
-void startRejectingReadsBefore(OperationContext* opCtx, UUID migrationId, mongo::Timestamp ts) {
+void startRejectingReadsBefore(OperationContext* opCtx,
+                               const UUID& migrationId,
+                               mongo::Timestamp ts) {
     auto callback = [&](std::shared_ptr<TenantMigrationAccessBlocker> mtab) {
         auto recipientMtab = checked_pointer_cast<TenantMigrationRecipientAccessBlocker>(mtab);
         recipientMtab->startRejectingReadsBefore(ts);
@@ -97,20 +99,14 @@ void startRejectingReadsBefore(OperationContext* opCtx, UUID migrationId, mongo:
 }
 
 void addTenantMigrationRecipientAccessBlocker(ServiceContext* serviceContext,
-                                              StringData tenantId,
-                                              UUID migrationId,
-                                              MigrationProtocolEnum protocol,
-                                              StringData donorConnectionString) {
+                                              const StringData& tenantId,
+                                              const UUID& migrationId) {
     if (getTenantMigrationRecipientAccessBlocker(serviceContext, tenantId)) {
         return;
     }
 
     auto mtab =
-        std::make_shared<TenantMigrationRecipientAccessBlocker>(serviceContext,
-                                                                migrationId,
-                                                                tenantId.toString(),
-                                                                protocol,
-                                                                donorConnectionString.toString());
+        std::make_shared<TenantMigrationRecipientAccessBlocker>(serviceContext, migrationId);
 
     TenantMigrationAccessBlockerRegistry::get(serviceContext).add(tenantId, mtab);
 }
@@ -127,7 +123,7 @@ boost::optional<std::string> parseTenantIdFromDB(StringData dbName) {
 
 TenantMigrationDonorDocument parseDonorStateDocument(const BSONObj& doc) {
     auto donorStateDoc =
-        TenantMigrationDonorDocument::parse(IDLParserErrorContext("donorStateDoc"), doc);
+        TenantMigrationDonorDocument::parse(IDLParserContext("donorStateDoc"), doc);
 
     if (donorStateDoc.getExpireAt()) {
         uassert(ErrorCodes::BadValue,
@@ -352,12 +348,8 @@ void recoverTenantMigrationAccessBlockers(OperationContext* opCtx) {
         }
 
         auto protocol = doc.getProtocol().value_or(MigrationProtocolEnum::kMultitenantMigrations);
-        auto mtab = std::make_shared<TenantMigrationDonorAccessBlocker>(
-            opCtx->getServiceContext(),
-            doc.getId(),
-            doc.getTenantId().toString(),
-            protocol,
-            doc.getRecipientConnectionString().toString());
+        auto mtab = std::make_shared<TenantMigrationDonorAccessBlocker>(opCtx->getServiceContext(),
+                                                                        doc.getId());
 
         auto& registry = TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext());
         if (protocol == MigrationProtocolEnum::kMultitenantMigrations) {
@@ -373,20 +365,20 @@ void recoverTenantMigrationAccessBlockers(OperationContext* opCtx) {
             case TenantMigrationDonorStateEnum::kBlocking:
                 invariant(doc.getBlockTimestamp());
                 mtab->startBlockingWrites();
-                mtab->startBlockingReadsAfter(doc.getBlockTimestamp().get());
+                mtab->startBlockingReadsAfter(doc.getBlockTimestamp().value());
                 break;
             case TenantMigrationDonorStateEnum::kCommitted:
                 invariant(doc.getBlockTimestamp());
                 mtab->startBlockingWrites();
-                mtab->startBlockingReadsAfter(doc.getBlockTimestamp().get());
-                mtab->setCommitOpTime(opCtx, doc.getCommitOrAbortOpTime().get());
+                mtab->startBlockingReadsAfter(doc.getBlockTimestamp().value());
+                mtab->setCommitOpTime(opCtx, doc.getCommitOrAbortOpTime().value());
                 break;
             case TenantMigrationDonorStateEnum::kAborted:
                 if (doc.getBlockTimestamp()) {
                     mtab->startBlockingWrites();
-                    mtab->startBlockingReadsAfter(doc.getBlockTimestamp().get());
+                    mtab->startBlockingReadsAfter(doc.getBlockTimestamp().value());
                 }
-                mtab->setAbortOpTime(opCtx, doc.getCommitOrAbortOpTime().get());
+                mtab->setAbortOpTime(opCtx, doc.getCommitOrAbortOpTime().value());
                 break;
             case TenantMigrationDonorStateEnum::kUninitialized:
                 MONGO_UNREACHABLE;
@@ -409,11 +401,7 @@ void recoverTenantMigrationAccessBlockers(OperationContext* opCtx) {
         }
 
         auto mtab = std::make_shared<TenantMigrationRecipientAccessBlocker>(
-            opCtx->getServiceContext(),
-            doc.getId(),
-            doc.getTenantId().toString(),
-            doc.getProtocol().value_or(MigrationProtocolEnum::kMultitenantMigrations),
-            doc.getDonorConnectionString().toString());
+            opCtx->getServiceContext(), doc.getId());
 
         TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext())
             .add(doc.getTenantId(), mtab);
@@ -426,7 +414,7 @@ void recoverTenantMigrationAccessBlockers(OperationContext* opCtx) {
             case TenantMigrationRecipientStateEnum::kConsistent:
             case TenantMigrationRecipientStateEnum::kDone:
                 if (doc.getRejectReadsBeforeTimestamp()) {
-                    mtab->startRejectingReadsBefore(doc.getRejectReadsBeforeTimestamp().get());
+                    mtab->startRejectingReadsBefore(doc.getRejectReadsBeforeTimestamp().value());
                 }
                 break;
             case TenantMigrationRecipientStateEnum::kUninitialized:
@@ -450,14 +438,9 @@ void recoverTenantMigrationAccessBlockers(OperationContext* opCtx) {
 
         auto optionalTenants = doc.getTenantIds();
         invariant(optionalTenants);
-        for (const auto& tenantId : optionalTenants.get()) {
-            invariant(doc.getRecipientConnectionString());
+        for (const auto& tenantId : optionalTenants.value()) {
             auto mtab = std::make_shared<TenantMigrationDonorAccessBlocker>(
-                opCtx->getServiceContext(),
-                doc.getId(),
-                tenantId.toString(),
-                MigrationProtocolEnum::kMultitenantMigrations,
-                doc.getRecipientConnectionString()->toString());
+                opCtx->getServiceContext(), doc.getId());
             TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext())
                 .add(tenantId.toString(), mtab);
 
@@ -467,20 +450,20 @@ void recoverTenantMigrationAccessBlockers(OperationContext* opCtx) {
                 case ShardSplitDonorStateEnum::kBlocking:
                     invariant(doc.getBlockTimestamp());
                     mtab->startBlockingWrites();
-                    mtab->startBlockingReadsAfter(doc.getBlockTimestamp().get());
+                    mtab->startBlockingReadsAfter(doc.getBlockTimestamp().value());
                     break;
                 case ShardSplitDonorStateEnum::kCommitted:
                     invariant(doc.getBlockTimestamp());
                     mtab->startBlockingWrites();
-                    mtab->startBlockingReadsAfter(doc.getBlockTimestamp().get());
-                    mtab->setCommitOpTime(opCtx, doc.getCommitOrAbortOpTime().get());
+                    mtab->startBlockingReadsAfter(doc.getBlockTimestamp().value());
+                    mtab->setCommitOpTime(opCtx, doc.getCommitOrAbortOpTime().value());
                     break;
                 case ShardSplitDonorStateEnum::kAborted:
                     if (doc.getBlockTimestamp()) {
                         mtab->startBlockingWrites();
-                        mtab->startBlockingReadsAfter(doc.getBlockTimestamp().get());
+                        mtab->startBlockingReadsAfter(doc.getBlockTimestamp().value());
                     }
-                    mtab->setAbortOpTime(opCtx, doc.getCommitOrAbortOpTime().get());
+                    mtab->setAbortOpTime(opCtx, doc.getCommitOrAbortOpTime().value());
                     break;
                 case ShardSplitDonorStateEnum::kUninitialized:
                     MONGO_UNREACHABLE;

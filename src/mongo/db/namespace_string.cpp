@@ -173,8 +173,11 @@ const NamespaceString NamespaceString::kConfigsvrShardsNamespace(NamespaceString
 const NamespaceString NamespaceString::kConfigsvrIndexCatalogNamespace(NamespaceString::kConfigDb,
                                                                        "csrs.indexes");
 
-const NamespaceString NamespaceString::kShardsIndexCatalogNamespace(NamespaceString::kConfigDb,
-                                                                    "shard.indexes");
+const NamespaceString NamespaceString::kShardIndexCatalogNamespace(NamespaceString::kConfigDb,
+                                                                   "shard.indexes");
+
+const NamespaceString NamespaceString::kShardCollectionCatalogNamespace(NamespaceString::kConfigDb,
+                                                                        "shard.collections");
 
 NamespaceString NamespaceString::parseFromStringExpectTenantIdInMultitenancyMode(StringData ns) {
     if (!gMultitenancySupport) {
@@ -280,19 +283,22 @@ bool NamespaceString::isLegalClientSystemNS(
  * Process updates to 'admin.system.version' individually as well so the secondary's FCV when
  * processing each operation matches the primary's when committing that operation.
  *
- * Process updates to config.tenantMigrationRecipients individually so they serialize after inserts
- * into config.donatedFiles.<migrationId>.
+ * Process updates to 'config.tenantMigrationRecipients' individually so they serialize after
+ * inserts into 'config.donatedFiles.<migrationId>'.
  *
  * Oplog entries on 'config.shards' should be processed one at a time, otherwise the in-memory state
  * that its kept on the TopologyTimeTicker might be wrong.
  *
+ * Serialize updates to 'config.tenantMigrationDonors' and 'config.shardSplitDonors' to avoid races
+ * with creating tenant access blockers on secondaries.
  */
 bool NamespaceString::mustBeAppliedInOwnOplogBatch() const {
     return isSystemDotViews() || isServerConfigurationCollection() || isPrivilegeCollection() ||
         _ns == kDonorReshardingOperationsNamespace.ns() ||
         _ns == kForceOplogBatchBoundaryNamespace.ns() ||
         _ns == kTenantMigrationDonorsNamespace.ns() ||
-        _ns == kTenantMigrationRecipientsNamespace.ns() || _ns == kConfigsvrShardsNamespace.ns();
+        _ns == kTenantMigrationRecipientsNamespace.ns() || _ns == kShardSplitDonorsNamespace.ns() ||
+        _ns == kConfigsvrShardsNamespace.ns();
 }
 
 NamespaceString NamespaceString::makeListCollectionsNSS(const DatabaseName& dbName) {
@@ -313,6 +319,12 @@ NamespaceString NamespaceString::makeChangeCollectionNSS(
     const boost::optional<TenantId>& tenantId) {
     // TODO: SERVER-65950 create namespace for a particular tenant.
     return NamespaceString{NamespaceString::kConfigDb, NamespaceString::kChangeCollectionName};
+}
+
+NamespaceString NamespaceString::makePreImageCollectionNSS(
+    const boost::optional<TenantId>& tenantId) {
+    return tenantId ? NamespaceString(tenantId, kConfigDb, "system.preimages")
+                    : kChangeStreamPreImagesNamespace;
 }
 
 std::string NamespaceString::getSisterNS(StringData local) const {

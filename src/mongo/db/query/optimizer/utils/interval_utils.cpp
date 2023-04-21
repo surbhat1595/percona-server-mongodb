@@ -110,14 +110,10 @@ std::vector<IntervalRequirement> intersectIntervals(const IntervalRequirement& i
         return {i1};
     }
 
-    const ABT low1 =
-        i1.getLowBound().isInfinite() ? Constant::minKey() : i1.getLowBound().getBound();
-    const ABT high1 =
-        i1.getHighBound().isInfinite() ? Constant::maxKey() : i1.getHighBound().getBound();
-    const ABT low2 =
-        i2.getLowBound().isInfinite() ? Constant::minKey() : i2.getLowBound().getBound();
-    const ABT high2 =
-        i2.getHighBound().isInfinite() ? Constant::maxKey() : i2.getHighBound().getBound();
+    const ABT& low1 = i1.getLowBound().getBound();
+    const ABT& high1 = i1.getHighBound().getBound();
+    const ABT& low2 = i2.getLowBound().getBound();
+    const ABT& high2 = i2.getHighBound().getBound();
 
     const auto foldFn = [](ABT expr) {
         // Performs constant folding.
@@ -151,12 +147,8 @@ std::vector<IntervalRequirement> intersectIntervals(const IntervalRequirement& i
 
     // We form a "main" result interval which is closed on any side with "agreement" between the two
     // intervals. For example [low1, high1] ^ [low2, high2) -> [max(low1, low2), min(high1, high2))
-    BoundRequirement lowBoundMain = (maxLow == Constant::minKey())
-        ? BoundRequirement::makeInfinite()
-        : BoundRequirement{low1Inc && low2Inc, maxLow};
-    BoundRequirement highBoundMain = (minHigh == Constant::maxKey())
-        ? BoundRequirement::makeInfinite()
-        : BoundRequirement{high1Inc && high2Inc, minHigh};
+    BoundRequirement lowBoundMain(low1Inc && low2Inc, maxLow);
+    BoundRequirement highBoundMain(high1Inc && high2Inc, minHigh);
 
     const bool boundsEqual =
         foldFn(make<BinaryOp>(Operations::Eq, maxLow, minHigh)) == Constant::boolean(true);
@@ -180,7 +172,7 @@ std::vector<IntervalRequirement> intersectIntervals(const IntervalRequirement& i
     // (max(low1, low2), min(high1, high2)). Then we add an extra closed interval for each side with
     // disagreement. For example for the lower sides we add: [low2 >= low1 ? MaxKey : low1,
     // min(max(low1, low2), min(high1, high2)] This is a closed interval which would reduce to
-    // [max(low1, low2), max(low1, low2)] if low1 < low2. If low2 >= low1 the interval reduces to an
+    // [max(low1, low2), max(low1, low2)] if low2 < low1. If low2 >= low1 the interval reduces to an
     // empty one [MaxKey, min(max(low1, low2), min(high1, high2)] which will return no results from
     // an index scan. We do not know that in general if we do not have constants (we cannot fold).
     //
@@ -199,7 +191,7 @@ std::vector<IntervalRequirement> intersectIntervals(const IntervalRequirement& i
         if (comparison == Constant::boolean(true)) {
             if (interval.isEquality()) {
                 // We can determine the two bounds are equal.
-                bound.setInclusive(true);
+                bound = {true /*inclusive*/, bound.getBound()};
             } else {
                 result.push_back(std::move(interval));
             }
@@ -274,7 +266,11 @@ boost::optional<IntervalReqExpr::Node> intersectDNFIntervals(
             auto conjunction =
                 IntervalReqExpr::make<IntervalReqExpr::Conjunction>(IntervalReqExpr::makeSeq(
                     IntervalReqExpr::make<IntervalReqExpr::Atom>(std::move(interval))));
-            disjuncts.emplace_back(conjunction);
+
+            // Remove redundant conjunctions.
+            if (std::find(disjuncts.cbegin(), disjuncts.cend(), conjunction) == disjuncts.cend()) {
+                disjuncts.emplace_back(conjunction);
+            }
         }
     }
 
@@ -285,7 +281,8 @@ boost::optional<IntervalReqExpr::Node> intersectDNFIntervals(
 }
 
 bool combineMultiKeyIntervalsDNF(MultiKeyIntervalReqExpr::Node& targetIntervals,
-                                 const IntervalReqExpr::Node& sourceIntervals) {
+                                 const IntervalReqExpr::Node& sourceIntervals,
+                                 const bool reverseSource) {
     MultiKeyIntervalReqExpr::NodeVector newDisjunction;
 
     for (const auto& sourceConjunction :
@@ -305,11 +302,17 @@ bool combineMultiKeyIntervalsDNF(MultiKeyIntervalReqExpr::Node& targetIntervals,
                     if (!targetInterval.empty() && !targetInterval.back().isEquality() &&
                         !sourceInterval.isFullyOpen()) {
                         // We do not have an equality prefix. Reject.
-                        return {};
+                        return false;
                     }
 
                     auto newInterval = targetInterval;
-                    newInterval.push_back(sourceInterval);
+                    if (reverseSource) {
+                        auto newSource = sourceInterval;
+                        newSource.reverse();
+                        newInterval.push_back(std::move(newSource));
+                    } else {
+                        newInterval.push_back(sourceInterval);
+                    }
                     newConjunction.emplace_back(
                         MultiKeyIntervalReqExpr::make<MultiKeyIntervalReqExpr::Atom>(
                             std::move(newInterval)));

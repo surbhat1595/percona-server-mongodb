@@ -48,7 +48,7 @@
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/session_catalog_mongod.h"
 #include "mongo/db/stats/counters.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
 
@@ -333,7 +333,7 @@ void ReshardingOplogApplicationRules::_applyUpdate_inlock(OperationContext* opCt
     BSONObj oField = op.getObject();
     BSONObj o2Field;
     if (op.getObject2())
-        o2Field = op.getObject2().get();
+        o2Field = op.getObject2().value();
 
     // If the 'o2' field does not have an _id, the oplog entry is corrupted.
     auto idField = o2Field["_id"];

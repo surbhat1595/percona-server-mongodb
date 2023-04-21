@@ -32,8 +32,6 @@
 
 #include <memory>
 
-#include <boost/optional/optional_io.hpp>
-
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/client/replica_set_monitor_protocol_test_util.h"
 #include "mongo/client/sdam/sdam.h"
@@ -238,7 +236,7 @@ protected:
         while (elapsed() < deadline) {
             ASSERT_FALSE(hasReadyRequests());
             if (hostAndPort) {
-                ASSERT_FALSE(_topologyListener->hasIsMasterResponse(hostAndPort.get()));
+                ASSERT_FALSE(_topologyListener->hasIsMasterResponse(hostAndPort.value()));
             }
             advanceTime(Milliseconds(1));
         }

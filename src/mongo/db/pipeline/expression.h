@@ -90,16 +90,16 @@ class DocumentSource;
 /**
  * Registers a Parser so it can be called from parseExpression and friends. Use this version if your
  * expression can only be persisted to a catalog data structure in a feature compatibility version
- * >= X.
+ * that enables the featureFlag.
  *
  * As an example, if your expression looks like {"$foo": [1,2,3]}, and can only be used in a feature
- * compatibility version >= X, you would add this line:
- * REGISTER_EXPRESSION_WITH_MIN_VERSION(
+ * compatibility version that enables featureFlag, you would add this line:
+ * REGISTER_EXPRESSION_WITH_FEATURE_FLAG(
  *  foo,
  *  ExpressionFoo::parse,
  *  AllowedWithApiStrict::kNeverInVersion1,
  *  AllowedWithClientType::kAny,
- *  X);
+ *  featureFlag);
  *
  * Generally new language features should be excluded from the stable API for a stabilization period
  * to allow for incorporating feedback or fixing accidental semantics bugs.
@@ -108,21 +108,25 @@ class DocumentSource;
  * parser and enforce the 'sometimes' behavior during that invocation. No extra validation will be
  * done here.
  */
-#define REGISTER_EXPRESSION_WITH_MIN_VERSION(                                               \
-    key, parser, allowedWithApiStrict, allowedClientType, minVersion)                       \
-    MONGO_INITIALIZER_GENERAL(addToExpressionParserMap_##key,                               \
-                              ("BeginExpressionRegistration"),                              \
-                              ("EndExpressionRegistration"))                                \
-    (InitializerContext*) {                                                                 \
-        Expression::registerExpression(                                                     \
-            "$" #key, (parser), (allowedWithApiStrict), (allowedClientType), (minVersion)); \
+#define REGISTER_EXPRESSION_WITH_FEATURE_FLAG(                                               \
+    key, parser, allowedWithApiStrict, allowedClientType, featureFlag)                       \
+    MONGO_INITIALIZER_GENERAL(addToExpressionParserMap_##key,                                \
+                              ("BeginExpressionRegistration"),                               \
+                              ("EndExpressionRegistration"))                                 \
+    (InitializerContext*) {                                                                  \
+        if (boost::optional<FeatureFlag>(featureFlag) != boost::none &&                      \
+            !boost::optional<FeatureFlag>(featureFlag)->isEnabledAndIgnoreFCV()) {           \
+            return;                                                                          \
+        }                                                                                    \
+        Expression::registerExpression(                                                      \
+            "$" #key, (parser), (allowedWithApiStrict), (allowedClientType), (featureFlag)); \
     }
 
 /**
  * Registers a Parser only if test commands are enabled. Use this if your expression is only used
  * for testing purposes.
  */
-#define REGISTER_TEST_EXPRESSION(key, allowedWithApiStrict, allowedClientType, parser)       \
+#define REGISTER_TEST_EXPRESSION(key, parser, allowedWithApiStrict, allowedClientType)       \
     MONGO_INITIALIZER_GENERAL(addToExpressionParserMap_##key,                                \
                               ("BeginExpressionRegistration"),                               \
                               ("EndExpressionRegistration"))                                 \
@@ -133,10 +137,9 @@ class DocumentSource;
         Expression::registerExpression(                                                      \
             "$" #key, (parser), (allowedWithApiStrict), (allowedClientType), (boost::none)); \
     }
-
 /**
- * Like REGISTER_EXPRESSION_WITH_MIN_VERSION, except you can also specify a condition,
- * evaluated during startup, that decides whether to register the parser.
+ * You can specify a condition, evaluated during startup,
+ * that decides whether to register the parser.
  *
  * For example, you could check a feature flag, and register the parser only when it's enabled.
  *
@@ -146,17 +149,19 @@ class DocumentSource;
  *
  * This is the most general REGISTER_EXPRESSION* macro, which all others should delegate to.
  */
-#define REGISTER_EXPRESSION_CONDITIONALLY(                                                  \
-    key, parser, allowedWithApiStrict, allowedClientType, minVersion, ...)                  \
-    MONGO_INITIALIZER_GENERAL(addToExpressionParserMap_##key,                               \
-                              ("BeginExpressionRegistration"),                              \
-                              ("EndExpressionRegistration"))                                \
-    (InitializerContext*) {                                                                 \
-        if (!(__VA_ARGS__)) {                                                               \
-            return;                                                                         \
-        }                                                                                   \
-        Expression::registerExpression(                                                     \
-            "$" #key, (parser), (allowedWithApiStrict), (allowedClientType), (minVersion)); \
+#define REGISTER_EXPRESSION_CONDITIONALLY(                                                   \
+    key, parser, allowedWithApiStrict, allowedClientType, featureFlag, ...)                  \
+    MONGO_INITIALIZER_GENERAL(addToExpressionParserMap_##key,                                \
+                              ("BeginExpressionRegistration"),                               \
+                              ("EndExpressionRegistration"))                                 \
+    (InitializerContext*) {                                                                  \
+        if (!__VA_ARGS__ ||                                                                  \
+            (boost::optional<FeatureFlag>(featureFlag) != boost::none &&                     \
+             !boost::optional<FeatureFlag>(featureFlag)->isEnabledAndIgnoreFCV())) {         \
+            return;                                                                          \
+        }                                                                                    \
+        Expression::registerExpression(                                                      \
+            "$" #key, (parser), (allowedWithApiStrict), (allowedClientType), (featureFlag)); \
     }
 
 class Expression : public RefCountable {
@@ -321,12 +326,11 @@ public:
      * DO NOT call this method directly. Instead, use the REGISTER_EXPRESSION macro defined in this
      * file.
      */
-    static void registerExpression(
-        std::string key,
-        Parser parser,
-        AllowedWithApiStrict allowedWithApiStrict,
-        AllowedWithClientType allowedWithClientType,
-        boost::optional<multiversion::FeatureCompatibilityVersion> requiredMinVersion);
+    static void registerExpression(std::string key,
+                                   Parser parser,
+                                   AllowedWithApiStrict allowedWithApiStrict,
+                                   AllowedWithClientType allowedWithClientType,
+                                   boost::optional<FeatureFlag> featureFlag);
 
     const auto& getChildren() const {
         return _children;
@@ -385,8 +389,10 @@ public:
     */
     virtual void addOperand(const boost::intrusive_ptr<Expression>& pExpression);
 
-    virtual bool isAssociative() const {
-        return false;
+    enum class Associativity { kFull, kLeft, kNone };
+
+    virtual Associativity getAssociativity() const {
+        return Associativity::kNone;
     }
 
     virtual bool isCommutative() const {
@@ -517,13 +523,13 @@ public:
         return accum.getValue(false);
     }
 
-    bool isAssociative() const final {
+    ExpressionNary::Associativity getAssociativity() const final {
         // Return false if a single argument is given to avoid a single array argument being treated
         // as an array instead of as a list of arguments.
         if (this->_children.size() == 1) {
-            return false;
+            return ExpressionNary::Associativity::kNone;
         }
-        return AccumulatorState(this->getExpressionContext()).isAssociative();
+        return AccumulatorState(this->getExpressionContext()).getAssociativity();
     }
 
     bool isCommutative() const final {
@@ -704,6 +710,13 @@ public:
     }
 
     /**
+     * Returns true if 'expression' is an instance of an ExpressionConstant.
+     */
+    static bool isConstant(boost::intrusive_ptr<Expression> expression) {
+        return dynamic_cast<ExpressionConstant*>(expression.get());
+    }
+
+    /**
      * Returns true if every expression in 'expressions' is either a nullptr or an instance of an
      * ExpressionConstant.
      */
@@ -756,25 +769,14 @@ public:
         }
         auto date = dateVal.coerceToDate();
 
-        if (!_timeZone) {
-            return evaluateDate(date, TimeZoneDatabase::utcZone());
+        boost::optional<TimeZone> timeZone = _parsedTimeZone;
+        if (!timeZone) {
+            timeZone = makeTimeZone(_timeZone, root, variables);
+            if (!timeZone) {
+                return Value(BSONNULL);
+            }
         }
-        auto timeZoneId = _timeZone->evaluate(root, variables);
-        if (timeZoneId.nullish()) {
-            return Value(BSONNULL);
-        }
-
-        uassert(40533,
-                str::stream() << _opName
-                              << " requires a string for the timezone argument, but was given a "
-                              << typeName(timeZoneId.getType()) << " (" << timeZoneId.toString()
-                              << ")",
-                timeZoneId.getType() == BSONType::String);
-
-        invariant(getExpressionContext()->timeZoneDatabase);
-        auto timeZone =
-            getExpressionContext()->timeZoneDatabase->getTimeZone(timeZoneId.getString());
-        return evaluateDate(date, timeZone);
+        return evaluateDate(date, *timeZone);
     }
 
     /**
@@ -797,6 +799,10 @@ public:
             // Everything is a constant, so we can turn into a constant.
             return ExpressionConstant::create(
                 getExpressionContext(), evaluate(Document{}, &(getExpressionContext()->variables)));
+        }
+        if (ExpressionConstant::isNullOrConstant(_timeZone)) {
+            _parsedTimeZone =
+                makeTimeZone(_timeZone, Document{}, &(getExpressionContext()->variables));
         }
         return this;
     }
@@ -879,14 +885,40 @@ protected:
      */
     virtual Value evaluateDate(Date_t date, const TimeZone& timezone) const = 0;
 
+    boost::optional<TimeZone> makeTimeZone(boost::intrusive_ptr<Expression> timeZone,
+                                           const Document& root,
+                                           Variables* variables) const {
+        if (!timeZone) {
+            return mongo::TimeZoneDatabase::utcZone();
+        }
+        auto timeZoneId = timeZone->evaluate(root, variables);
+        if (timeZoneId.nullish()) {
+            return {};
+        }
+
+        uassert(40533,
+                str::stream() << _opName
+                              << " requires a string for the timezone argument, but was given a "
+                              << typeName(timeZoneId.getType()) << " (" << timeZoneId.toString()
+                              << ")",
+                timeZoneId.getType() == BSONType::String);
+
+        invariant(getExpressionContext()->timeZoneDatabase);
+        return getExpressionContext()->timeZoneDatabase->getTimeZone(timeZoneId.getStringData());
+    }
+
 private:
     // The name of this expression, e.g. $week or $month.
     StringData _opName;
 
     // The expression representing the date argument.
     boost::intrusive_ptr<Expression>& _date;
+
     // The expression representing the timezone argument.
     boost::intrusive_ptr<Expression>& _timeZone;
+
+    // Pre-parsed timezone, if the above expression is a constant.
+    boost::optional<TimeZone> _parsedTimeZone;
 };
 
 class ExpressionAbs final : public ExpressionSingleNumericArg<ExpressionAbs> {
@@ -928,12 +960,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    bool isAssociative() const final {
-        return true;
-    }
-
-    bool isCommutative() const final {
-        return true;
+    // ExpressionAdd is left associative because it processes its operands by iterating
+    // left-to-right through its _children vector, but the order of operations impacts the result
+    // due to integer overflow, floating-point rounding and type promotion.
+    Associativity getAssociativity() const final {
+        return Associativity::kLeft;
     }
 
     void acceptVisitor(ExpressionMutableVisitor* visitor) final {
@@ -982,8 +1013,8 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    bool isAssociative() const final {
-        return true;
+    Associativity getAssociativity() const final {
+        return Associativity::kFull;
     }
 
     bool isCommutative() const final {
@@ -1280,8 +1311,8 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    bool isAssociative() const final {
-        return true;
+    Associativity getAssociativity() const final {
+        return Associativity::kFull;
     }
 
     void acceptVisitor(ExpressionMutableVisitor* visitor) final {
@@ -1305,8 +1336,8 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    bool isAssociative() const final {
-        return true;
+    Associativity getAssociativity() const final {
+        return Associativity::kFull;
     }
 
     void acceptVisitor(ExpressionMutableVisitor* visitor) final {
@@ -1380,6 +1411,10 @@ protected:
 private:
     boost::intrusive_ptr<Expression>& _dateString;
     boost::intrusive_ptr<Expression>& _timeZone;
+
+    // Pre-parsed timezone, if the above expression is a constant.
+    boost::optional<TimeZone> _parsedTimeZone;
+
     boost::intrusive_ptr<Expression>& _format;
     boost::intrusive_ptr<Expression>& _onNull;
     boost::intrusive_ptr<Expression>& _onError;
@@ -1463,6 +1498,9 @@ private:
     boost::intrusive_ptr<Expression>& _isoDayOfWeek;
     boost::intrusive_ptr<Expression>& _timeZone;
 
+    // Pre-parsed timezone, if the above expression is a constant.
+    boost::optional<TimeZone> _parsedTimeZone;
+
     // Some date conversions spend a long time iterating through date tables when dealing with large
     // input numbers, so we place a reasonable limit on the magnitude of any argument to
     // $dateFromParts: inputs that fit within a 16-bit int are permitted.
@@ -1504,6 +1542,10 @@ private:
 
     boost::intrusive_ptr<Expression>& _date;
     boost::intrusive_ptr<Expression>& _timeZone;
+
+    // Pre-parsed timezone, if the above expression is a constant.
+    boost::optional<TimeZone> _parsedTimeZone;
+
     boost::intrusive_ptr<Expression>& _iso8601;
 };
 
@@ -1537,6 +1579,10 @@ private:
     boost::intrusive_ptr<Expression>& _format;
     boost::intrusive_ptr<Expression>& _date;
     boost::intrusive_ptr<Expression>& _timeZone;
+
+    // Pre-parsed timezone, if the above expression is a constant.
+    boost::optional<TimeZone> _parsedTimeZone;
+
     boost::intrusive_ptr<Expression>& _onNull;
 };
 
@@ -1672,13 +1718,22 @@ private:
     // values: enumerators from TimeUnit enumeration.
     boost::intrusive_ptr<Expression>& _unit;
 
+    // Pre-parsed time unit, if the above expression is a constant.
+    boost::optional<TimeUnit> _parsedUnit;
+
     // Timezone to use for the difference calculation. Accepted type: std::string. If not specified,
     // UTC is used.
     boost::intrusive_ptr<Expression>& _timeZone;
 
+    // Pre-parsed timezone, if the above expression is a constant.
+    boost::optional<TimeZone> _parsedTimeZone;
+
     // First/start day of the week to use for the date difference calculation when time unit is the
     // week. Accepted type: std::string. If not specified, "sunday" is used.
     boost::intrusive_ptr<Expression>& _startOfWeek;
+
+    // Pre-parsed start of week, if the above expression is a constant.
+    boost::optional<DayOfWeek> _parsedStartOfWeek;
 };
 
 class ExpressionDivide final : public ExpressionFixedArity<ExpressionDivide, 2> {
@@ -2391,12 +2446,11 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    bool isAssociative() const final {
-        return true;
-    }
-
-    bool isCommutative() const final {
-        return true;
+    // ExpressionMultiply is left associative because it processes its operands by iterating
+    // left-to-right through its _children vector, but the order of operations impacts the result
+    // due to integer overflow, floating-point rounding and type promotion.
+    Associativity getAssociativity() const final {
+        return Associativity::kLeft;
     }
 
     void acceptVisitor(ExpressionMutableVisitor* visitor) final {
@@ -2525,8 +2579,8 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    bool isAssociative() const final {
-        return true;
+    Associativity getAssociativity() const final {
+        return Associativity::kFull;
     }
 
     bool isCommutative() const final {
@@ -2798,8 +2852,8 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    bool isAssociative() const final {
-        return true;
+    Associativity getAssociativity() const final {
+        return Associativity::kFull;
     }
 
     bool isCommutative() const final {
@@ -2853,8 +2907,8 @@ public:
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
-    bool isAssociative() const final {
-        return true;
+    Associativity getAssociativity() const final {
+        return Associativity::kFull;
     }
 
     bool isCommutative() const final {
@@ -3990,11 +4044,17 @@ private:
     // Unit of time: year, quarter, week, etc.
     boost::intrusive_ptr<Expression>& _unit;
 
+    // Pre-parsed time unit, if the above expression is a constant.
+    boost::optional<TimeUnit> _parsedUnit;
+
     // Amount of units to be added or subtracted.
     boost::intrusive_ptr<Expression>& _amount;
 
     // The expression representing the timezone argument.
     boost::intrusive_ptr<Expression>& _timeZone;
+
+    // Pre-parsed timezone, if the above expression is a constant.
+    boost::optional<TimeZone> _parsedTimeZone;
 
     // The name of this expression, e.g. $dateAdd or $dateSubtract.
     StringData _opName;
@@ -4137,18 +4197,30 @@ private:
     // enumerators from TimeUnit enumeration.
     boost::intrusive_ptr<Expression>& _unit;
 
+    // Pre-parsed time unit, if the above expression is a constant.
+    boost::optional<TimeUnit> _parsedUnit;
+
     // Size of bins in time units '_unit'. Accepted BSON types: NumberInt, NumberLong, NumberDouble,
     // NumberDecimal. Accepted are only values that can be coerced to a 64-bit integer without loss.
     // If not specified, 1 is used.
     boost::intrusive_ptr<Expression>& _binSize;
 
+    // Pre-parsed bin size, if the above expression is a constant.
+    boost::optional<long long> _parsedBinSize;
+
     // Timezone to use for the truncation operation. Accepted BSON type: String. If not specified,
     // UTC is used.
     boost::intrusive_ptr<Expression>& _timeZone;
 
+    // Pre-parsed timezone, if the above expression is a constant.
+    boost::optional<TimeZone> _parsedTimeZone;
+
     // First/start day of the week to use for date truncation when the time unit is the week.
     // Accepted BSON type: String. If not specified, "sunday" is used.
     boost::intrusive_ptr<Expression>& _startOfWeek;
+
+    // Pre-parsed start of week, if the above expression is a constant.
+    boost::optional<DayOfWeek> _parsedStartOfWeek;
 };
 
 class ExpressionGetField final : public Expression {

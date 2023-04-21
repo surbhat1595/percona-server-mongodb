@@ -62,10 +62,10 @@
 #include "mongo/db/s/type_shard_identity.h"
 #include "mongo/db/server_recovery.h"
 #include "mongo/db/session_catalog_mongod.h"
-#include "mongo/db/session_txn_record_gen.h"
 #include "mongo/db/storage/historical_ident_tracker.h"
 #include "mongo/db/storage/remove_saver.h"
-#include "mongo/db/transaction_history_iterator.h"
+#include "mongo/db/transaction/session_txn_record_gen.h"
+#include "mongo/db/transaction/transaction_history_iterator.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/type_config_version.h"
 #include "mongo/util/scopeguard.h"
@@ -524,6 +524,7 @@ void RollbackImpl::_restoreTxnsTableEntryFromRetryableWrites(OperationContext* o
         }
         const auto nss = NamespaceString::kSessionTransactionsTableNamespace;
         writeConflictRetry(opCtx, "updateSessionTransactionsTableInRollback", nss.ns(), [&] {
+            opCtx->recoveryUnit()->allowUntimestampedWrite();
             AutoGetCollection collection(opCtx, nss, MODE_IX);
             auto filter = BSON(SessionTxnRecord::kSessionIdFieldName << sessionId.toBSON());
             UnreplicatedWritesBlock uwb(opCtx);
@@ -925,7 +926,7 @@ Status RollbackImpl::_processRollbackOp(OperationContext* opCtx, const OplogEntr
             // We call BSONElement::wrap() on each _id element to create a new BSONObj with an owned
             // buffer, as the underlying storage may be gone when we access this map to write
             // rollback files.
-            _observerInfo.rollbackDeletedIdsMap[uuid.get()].insert(idElem.wrap());
+            _observerInfo.rollbackDeletedIdsMap[uuid.value()].insert(idElem.wrap());
             const auto cmdName = opType == OpTypeEnum::kInsert ? kInsertCmdName : kUpdateCmdName;
             ++_observerInfo.rollbackCommandCounts[cmdName];
         }
@@ -954,19 +955,19 @@ Status RollbackImpl::_processRollbackOp(OperationContext* opCtx, const OplogEntr
         }
 
         // Rolling back an insert must decrement the count by 1.
-        _countDiffs[oplogEntry.getUuid().get()] -= 1;
+        _countDiffs[oplogEntry.getUuid().value()] -= 1;
     } else if (opType == OpTypeEnum::kDelete) {
         // Rolling back a delete must increment the count by 1.
-        _countDiffs[oplogEntry.getUuid().get()] += 1;
+        _countDiffs[oplogEntry.getUuid().value()] += 1;
     } else if (opType == OpTypeEnum::kCommand) {
         if (oplogEntry.getCommandType() == OplogEntry::CommandType::kCreate) {
             // If we roll back a create, then we do not need to change the size of that uuid.
-            _countDiffs.erase(oplogEntry.getUuid().get());
-            _pendingDrops.erase(oplogEntry.getUuid().get());
-            _newCounts.erase(oplogEntry.getUuid().get());
+            _countDiffs.erase(oplogEntry.getUuid().value());
+            _pendingDrops.erase(oplogEntry.getUuid().value());
+            _newCounts.erase(oplogEntry.getUuid().value());
         } else if (oplogEntry.getCommandType() == OplogEntry::CommandType::kImportCollection) {
             auto importEntry = mongo::ImportCollectionOplogEntry::parse(
-                IDLParserErrorContext("importCollectionOplogEntry"), oplogEntry.getObject());
+                IDLParserContext("importCollectionOplogEntry"), oplogEntry.getObject());
             // Nothing to roll back if this is a dryRun.
             if (!importEntry.getDryRun()) {
                 const auto& catalogEntry = importEntry.getCatalogEntry();
@@ -987,7 +988,7 @@ Status RollbackImpl::_processRollbackOp(OperationContext* opCtx, const OplogEntr
             // collection is managed by the storage engine and is not accessible through the UUID
             // catalog.
             // Adding a _newCounts entry ensures that the count will be set after the rollback.
-            const auto uuid = oplogEntry.getUuid().get();
+            const auto uuid = oplogEntry.getUuid().value();
             invariant(_countDiffs.find(uuid) == _countDiffs.end(),
                       str::stream() << "Unexpected existing count diff for " << uuid.toString()
                                     << " op: " << redact(oplogEntry.toBSONForLogging()));

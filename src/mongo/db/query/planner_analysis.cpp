@@ -429,7 +429,12 @@ std::unique_ptr<QuerySolutionNode> analyzeProjection(const CanonicalQuery& query
         // the time if say we needed an extra field for a sort or for shard filtering.
         const auto* columnScan = treeSourceIsColumnScan(solnRoot.get());
         if (columnScan &&
-            columnScan->outputFields.size() == projection.getRequiredFields().size()) {
+            columnScan->outputFields.size() == projection.getRequiredFields().size() &&
+            // TODO SERVER-64258 once filtering is supported we should be able to have meaningful
+            // support for matched but not output fields. Until then, any match fields are treated
+            // as output fields.
+            (columnScan->matchFields.empty() ||
+             columnScan->allFields.size() == columnScan->outputFields.size())) {
             // No projection needed. We already checked that all necessary fields are provided, so
             // if the set sizes match, they match exactly.
             return solnRoot;
@@ -625,9 +630,9 @@ void removeInclusionProjectionBelowGroupRecursive(QuerySolutionNode* solnRoot) {
             // Multiple $group stages may be pushed down. So, if the child is a GROUP, then recurse.
             return removeInclusionProjectionBelowGroupRecursive(projectNodeCandidate);
         } else if (auto projection = attemptToGetProjectionFromQuerySolution(*projectNodeCandidate);
-                   projection && projection.get()->isInclusionOnly()) {
+                   projection && projection.value()->isInclusionOnly()) {
             // Check to see if the projectNode's field set is a super set of the groupNodes.
-            if (!isSubset(groupNode->requiredFields, projection.get()->getRequiredFields())) {
+            if (!isSubset(groupNode->requiredFields, projection.value()->getRequiredFields())) {
                 // The dependency set of the GROUP stage is wider than the projectNode field set.
                 return;
             }
@@ -644,18 +649,6 @@ void removeInclusionProjectionBelowGroupRecursive(QuerySolutionNode* solnRoot) {
     }
 }
 
-// Checks if the foreign collection is eligible for the hash join algorithm. We conservatively
-// choose the hash join algorithm for cases when the hash table is unlikely to spill data.
-bool isEligibleForHashJoin(const SecondaryCollectionInfo& foreignCollInfo) {
-    return !internalQueryDisableLookupExecutionUsingHashJoin.load() && foreignCollInfo.exists &&
-        foreignCollInfo.noOfRecords <=
-        internalQueryCollectionMaxNoOfDocumentsToChooseHashJoin.load() &&
-        foreignCollInfo.approximateDataSizeBytes <=
-        internalQueryCollectionMaxDataSizeBytesToChooseHashJoin.load() &&
-        foreignCollInfo.storageSizeBytes <=
-        internalQueryCollectionMaxStorageSizeBytesToChooseHashJoin.load();
-}
-
 // Determines whether 'index' is eligible for executing the right side of a pushed down $lookup over
 // 'foreignField'.
 bool isIndexEligibleForRightSideOfLookupPushdown(const IndexEntry& index,
@@ -666,6 +659,16 @@ bool isIndexEligibleForRightSideOfLookupPushdown(const IndexEntry& index,
         !index.sparse && CollatorInterface::collatorsMatch(collator, index.collator);
 }
 }  // namespace
+
+bool QueryPlannerAnalysis::isEligibleForHashJoin(const SecondaryCollectionInfo& foreignCollInfo) {
+    return !internalQueryDisableLookupExecutionUsingHashJoin.load() && foreignCollInfo.exists &&
+        foreignCollInfo.noOfRecords <=
+        internalQueryCollectionMaxNoOfDocumentsToChooseHashJoin.load() &&
+        foreignCollInfo.approximateDataSizeBytes <=
+        internalQueryCollectionMaxDataSizeBytesToChooseHashJoin.load() &&
+        foreignCollInfo.storageSizeBytes <=
+        internalQueryCollectionMaxStorageSizeBytesToChooseHashJoin.load();
+}
 
 // static
 std::unique_ptr<QuerySolution> QueryPlannerAnalysis::removeInclusionProjectionBelowGroup(
@@ -985,7 +988,7 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAnalysis::analyzeSort(
             solnSortPattern = providedSorts.getBaseSortPattern();
         }
 
-        if (sortMatchesTraversalPreference(params.traversalPreference.get(), solnSortPattern) &&
+        if (sortMatchesTraversalPreference(params.traversalPreference.value(), solnSortPattern) &&
             QueryPlannerCommon::scanDirectionsEqual(solnRoot.get(),
                                                     -params.traversalPreference->direction)) {
             QueryPlannerCommon::reverseScans(solnRoot.get(), true);

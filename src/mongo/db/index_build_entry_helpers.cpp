@@ -101,7 +101,7 @@ std::pair<const BSONObj, const BSONObj> buildIndexBuildEntryFilterAndUpdate(
     // '$addToSet' to prevent any duplicate entries written to "commitReadyMembers" field.
     if (auto commitReadyMembers = indexBuildEntry.getCommitReadyMembers()) {
         BSONArrayBuilder arrayBuilder;
-        for (const auto& item : commitReadyMembers.get()) {
+        for (const auto& item : commitReadyMembers.value()) {
             arrayBuilder.append(item.toString());
         }
         const auto commitReadyMemberList = BSON(IndexBuildEntry::kCommitReadyMembersFieldName
@@ -172,7 +172,7 @@ void ensureIndexBuildEntriesNamespaceExists(OperationContext* opCtx) {
         "createIndexBuildCollection",
         NamespaceString::kIndexBuildEntryNamespace.ns(),
         [&]() -> void {
-            AutoGetDb autoDb(opCtx, NamespaceString::kIndexBuildEntryNamespace.db(), MODE_IX);
+            AutoGetDb autoDb(opCtx, NamespaceString::kIndexBuildEntryNamespace.dbName(), MODE_IX);
             auto db = autoDb.ensureDbExists(opCtx);
 
             // Ensure the database exists.
@@ -311,7 +311,7 @@ StatusWith<IndexBuildEntry> getIndexBuildEntry(OperationContext* opCtx, UUID ind
     }
 
     try {
-        IDLParserErrorContext ctx("IndexBuildsEntry Parser");
+        IDLParserContext ctx("IndexBuildsEntry Parser");
         IndexBuildEntry indexBuildEntry = IndexBuildEntry::parse(ctx, obj);
         return indexBuildEntry;
     } catch (DBException& ex) {

@@ -606,6 +606,7 @@ std::unique_ptr<MatchExpression> splitMatchExpressionForColumns(
         case MatchExpression::ALWAYS_TRUE:
         case MatchExpression::ELEM_MATCH_OBJECT:
         case MatchExpression::ELEM_MATCH_VALUE:  // This one should be feasible. May be valuable.
+        case MatchExpression::ENCRYPTED_BETWEEN:
         case MatchExpression::EXPRESSION:
         case MatchExpression::GEO:
         case MatchExpression::GEO_NEAR:
@@ -835,7 +836,8 @@ bool isIndependentOf(const MatchExpression& expr, const OrderedPathSet& pathSet)
 
     auto depsTracker = DepsTracker{};
     expr.addDependencies(&depsTracker);
-    if (depsTracker.needWholeDocument) {
+    // Match expressions that generate random numbers can't be safely split out and pushed down.
+    if (depsTracker.needRandomGenerator || depsTracker.needWholeDocument) {
         return false;
     }
     return areIndependent(pathSet, depsTracker.fields);
@@ -858,6 +860,10 @@ bool isOnlyDependentOn(const MatchExpression& expr, const OrderedPathSet& pathSe
     // Now add the match expression's paths and see if the dependencies are the same.
     auto exprDepsTracker = DepsTracker{};
     expr.addDependencies(&exprDepsTracker);
+    // Match expressions that generate random numbers can't be safely split out and pushed down.
+    if (exprDepsTracker.needRandomGenerator) {
+        return false;
+    }
     pathsDepsCopy.insert(exprDepsTracker.fields.begin(), exprDepsTracker.fields.end());
 
     return pathsDeps ==

@@ -29,8 +29,9 @@
 
 #include <string>
 
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/analyze_command_gen.h"
+#include "mongo/db/query/analyze_command_gen.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 
 namespace mongo {
@@ -67,14 +68,21 @@ public:
         void typedRun(OperationContext* opCtx) {
             uassert(6660400,
                     "Analyze command requires common query framework feature flag to be enabled",
-                    feature_flags::gFeatureFlagCommonQueryFramework.isEnabled(
-                        serverGlobalParams.featureCompatibility));
+                    serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+                        feature_flags::gFeatureFlagCommonQueryFramework.isEnabled(
+                            serverGlobalParams.featureCompatibility));
+
             uasserted(ErrorCodes::NotImplemented, "Analyze command not yet implemented");
         }
 
     private:
         void doCheckAuthorization(OperationContext* opCtx) const override {
-            // TODO SERVER-67656
+            auto* authzSession = AuthorizationSession::get(opCtx->getClient());
+            const NamespaceString& ns = request().getNamespace();
+
+            uassert(ErrorCodes::Unauthorized,
+                    str::stream() << "Not authorized to call analyze on collection " << ns,
+                    authzSession->isAuthorizedForActionsOnNamespace(ns, ActionType::analyze));
         }
     };
 

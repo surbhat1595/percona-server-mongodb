@@ -30,13 +30,11 @@
 #include "mongo/db/catalog/collection_catalog.h"
 
 #include <algorithm>
-#include <boost/optional/optional_io.hpp>
 
 #include "mongo/db/catalog/catalog_test_fixture.h"
 #include "mongo/db/catalog/collection_catalog_helper.h"
 #include "mongo/db/catalog/collection_mock.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/operation_context_noop.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
@@ -91,9 +89,12 @@ protected:
     UUID prevUUID;
 };
 
-class CollectionCatalogIterationTest : public unittest::Test {
+class CollectionCatalogIterationTest : public ServiceContextMongoDTest {
 public:
     void setUp() {
+        ServiceContextMongoDTest::setUp();
+        opCtx = makeOperationContext();
+
         for (int counter = 0; counter < 5; ++counter) {
             NamespaceString fooNss("foo", "coll" + std::to_string(counter));
             NamespaceString barNss("bar", "coll" + std::to_string(counter));
@@ -107,15 +108,15 @@ public:
             dbMap["foo"].insert(std::make_pair(fooUuid, fooColl.get()));
             dbMap["bar"].insert(std::make_pair(barUuid, barColl.get()));
 
-            catalog.registerCollection(&opCtx, fooUuid, fooColl);
-            catalog.registerCollection(&opCtx, barUuid, barColl);
+            catalog.registerCollection(opCtx.get(), fooUuid, fooColl);
+            catalog.registerCollection(opCtx.get(), barUuid, barColl);
         }
     }
 
     void tearDown() {
         for (auto& it : dbMap) {
             for (auto& kv : it.second) {
-                catalog.deregisterCollection(&opCtx, kv.first);
+                catalog.deregisterCollection(opCtx.get(), kv.first, /*isDropPending=*/false);
             }
         }
     }
@@ -136,8 +137,9 @@ public:
         unsigned long counter = 0;
 
         for (auto [orderedIt, catalogIt] =
-                 std::tuple{collsIterator(dbName.toString()), catalog.begin(&opCtx, dbName)};
-             catalogIt != catalog.end(&opCtx) && orderedIt != collsIteratorEnd(dbName.toString());
+                 std::tuple{collsIterator(dbName.toString()), catalog.begin(opCtx.get(), dbName)};
+             catalogIt != catalog.end(opCtx.get()) &&
+             orderedIt != collsIteratorEnd(dbName.toString());
              ++catalogIt, ++orderedIt) {
 
             auto catalogColl = *catalogIt;
@@ -156,7 +158,7 @@ public:
 
 protected:
     CollectionCatalog catalog;
-    OperationContextNoop opCtx;
+    ServiceContext::UniqueOperationContext opCtx;
     std::map<std::string, std::map<UUID, CollectionPtr>> dbMap;
 };
 
@@ -164,26 +166,26 @@ class CollectionCatalogResourceMapTest : public unittest::Test {
 public:
     void setUp() {
         // The first and second collection namespaces map to the same ResourceId.
-        firstCollection = "1661880728";
-        secondCollection = "1626936312";
+        firstCollection = NamespaceString(boost::none, "1661880728");
+        secondCollection = NamespaceString(boost::none, "1626936312");
 
         firstResourceId = ResourceId(RESOURCE_COLLECTION, firstCollection);
         secondResourceId = ResourceId(RESOURCE_COLLECTION, secondCollection);
         ASSERT_EQ(firstResourceId, secondResourceId);
 
-        thirdCollection = "2930102946";
+        thirdCollection = NamespaceString(boost::none, "2930102946");
         thirdResourceId = ResourceId(RESOURCE_COLLECTION, thirdCollection);
         ASSERT_NE(firstResourceId, thirdResourceId);
     }
 
 protected:
-    std::string firstCollection;
+    NamespaceString firstCollection;
     ResourceId firstResourceId;
 
-    std::string secondCollection;
+    NamespaceString secondCollection;
     ResourceId secondResourceId;
 
-    std::string thirdCollection;
+    NamespaceString thirdCollection;
     ResourceId thirdResourceId;
 
     CollectionCatalog catalog;
@@ -206,10 +208,10 @@ TEST_F(CollectionCatalogResourceMapTest, InsertTest) {
     catalog.addResource(thirdResourceId, thirdCollection);
 
     resource = catalog.lookupResourceName(firstResourceId);
-    ASSERT_EQ(firstCollection, *resource);
+    ASSERT_EQ(firstCollection.toStringWithTenantId(), *resource);
 
     resource = catalog.lookupResourceName(thirdResourceId);
-    ASSERT_EQ(thirdCollection, resource);
+    ASSERT_EQ(thirdCollection.toStringWithTenantId(), resource);
 }
 
 TEST_F(CollectionCatalogResourceMapTest, RemoveTest) {
@@ -217,9 +219,9 @@ TEST_F(CollectionCatalogResourceMapTest, RemoveTest) {
     catalog.addResource(thirdResourceId, thirdCollection);
 
     // This fails to remove the resource because of an invalid namespace.
-    catalog.removeResource(firstResourceId, "BadNamespace");
+    catalog.removeResource(firstResourceId, NamespaceString(boost::none, "BadNamespace"));
     boost::optional<std::string> resource = catalog.lookupResourceName(firstResourceId);
-    ASSERT_EQ(firstCollection, *resource);
+    ASSERT_EQ(firstCollection.toStringWithTenantId(), *resource);
 
     catalog.removeResource(firstResourceId, firstCollection);
     catalog.removeResource(firstResourceId, firstCollection);
@@ -248,12 +250,12 @@ TEST_F(CollectionCatalogResourceMapTest, CollisionTest) {
     // We remove a namespace, resolving the collision.
     catalog.removeResource(firstResourceId, firstCollection);
     resource = catalog.lookupResourceName(secondResourceId);
-    ASSERT_EQ(secondCollection, *resource);
+    ASSERT_EQ(secondCollection.toStringWithTenantId(), *resource);
 
     // Adding the same namespace twice does not create a collision.
     catalog.addResource(secondResourceId, secondCollection);
     resource = catalog.lookupResourceName(secondResourceId);
-    ASSERT_EQ(secondCollection, *resource);
+    ASSERT_EQ(secondCollection.toStringWithTenantId(), *resource);
 
     // The map should function normally for entries without collisions.
     catalog.addResource(firstResourceId, firstCollection);
@@ -262,7 +264,7 @@ TEST_F(CollectionCatalogResourceMapTest, CollisionTest) {
 
     catalog.addResource(thirdResourceId, thirdCollection);
     resource = catalog.lookupResourceName(thirdResourceId);
-    ASSERT_EQ(thirdCollection, *resource);
+    ASSERT_EQ(thirdCollection.toStringWithTenantId(), *resource);
 
     catalog.removeResource(thirdResourceId, thirdCollection);
     resource = catalog.lookupResourceName(thirdResourceId);
@@ -278,23 +280,26 @@ TEST_F(CollectionCatalogResourceMapTest, CollisionTest) {
     ASSERT_EQ(boost::none, resource);
 }
 
-class CollectionCatalogResourceTest : public unittest::Test {
+class CollectionCatalogResourceTest : public ServiceContextMongoDTest {
 public:
     void setUp() {
+        ServiceContextMongoDTest::setUp();
+        opCtx = makeOperationContext();
+
         for (int i = 0; i < 5; i++) {
             NamespaceString nss("resourceDb", "coll" + std::to_string(i));
             std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
             auto uuid = collection->uuid();
 
-            catalog.registerCollection(&opCtx, uuid, std::move(collection));
+            catalog.registerCollection(opCtx.get(), uuid, std::move(collection));
         }
 
         int numEntries = 0;
-        for (auto it = catalog.begin(&opCtx, DatabaseName(boost::none, "resourceDb"));
-             it != catalog.end(&opCtx);
+        for (auto it = catalog.begin(opCtx.get(), DatabaseName(boost::none, "resourceDb"));
+             it != catalog.end(opCtx.get());
              it++) {
             auto coll = *it;
-            std::string collName = coll->ns().ns();
+            auto collName = coll->ns();
             ResourceId rid(RESOURCE_COLLECTION, collName);
 
             ASSERT_NE(catalog.lookupResourceName(rid), boost::none);
@@ -305,8 +310,8 @@ public:
 
     void tearDown() {
         std::vector<UUID> collectionsToDeregister;
-        for (auto it = catalog.begin(&opCtx, DatabaseName(boost::none, "resourceDb"));
-             it != catalog.end(&opCtx);
+        for (auto it = catalog.begin(opCtx.get(), DatabaseName(boost::none, "resourceDb"));
+             it != catalog.end(opCtx.get());
              ++it) {
             auto coll = *it;
             auto uuid = coll->uuid();
@@ -318,12 +323,12 @@ public:
         }
 
         for (auto&& uuid : collectionsToDeregister) {
-            catalog.deregisterCollection(&opCtx, uuid);
+            catalog.deregisterCollection(opCtx.get(), uuid, /*isDropPending=*/false);
         }
 
         int numEntries = 0;
-        for (auto it = catalog.begin(&opCtx, DatabaseName(boost::none, "resourceDb"));
-             it != catalog.end(&opCtx);
+        for (auto it = catalog.begin(opCtx.get(), DatabaseName(boost::none, "resourceDb"));
+             it != catalog.end(opCtx.get());
              it++) {
             numEntries++;
         }
@@ -331,58 +336,58 @@ public:
     }
 
 protected:
-    OperationContextNoop opCtx;
+    ServiceContext::UniqueOperationContext opCtx;
     CollectionCatalog catalog;
 };
 
 TEST_F(CollectionCatalogResourceTest, RemoveAllResources) {
     catalog.deregisterAllCollectionsAndViews();
 
-    const std::string dbName = "resourceDb";
+    const DatabaseName dbName = DatabaseName(boost::none, "resourceDb");
     auto rid = ResourceId(RESOURCE_DATABASE, dbName);
     ASSERT_EQ(boost::none, catalog.lookupResourceName(rid));
 
     for (int i = 0; i < 5; i++) {
         NamespaceString nss("resourceDb", "coll" + std::to_string(i));
-        rid = ResourceId(RESOURCE_COLLECTION, nss.ns());
+        rid = ResourceId(RESOURCE_COLLECTION, nss);
         ASSERT_EQ(boost::none, catalog.lookupResourceName((rid)));
     }
 }
 
 TEST_F(CollectionCatalogResourceTest, LookupDatabaseResource) {
-    const std::string dbName = "resourceDb";
+    const DatabaseName dbName = DatabaseName(boost::none, "resourceDb");
     auto rid = ResourceId(RESOURCE_DATABASE, dbName);
     boost::optional<std::string> ridStr = catalog.lookupResourceName(rid);
 
     ASSERT(ridStr);
-    ASSERT(ridStr->find(dbName) != std::string::npos);
+    ASSERT(ridStr->find(dbName.toStringWithTenantId()) != std::string::npos);
 }
 
 TEST_F(CollectionCatalogResourceTest, LookupMissingDatabaseResource) {
-    const std::string dbName = "missingDb";
+    const DatabaseName dbName = DatabaseName(boost::none, "missingDb");
     auto rid = ResourceId(RESOURCE_DATABASE, dbName);
     ASSERT(!catalog.lookupResourceName(rid));
 }
 
 TEST_F(CollectionCatalogResourceTest, LookupCollectionResource) {
-    const std::string collNs = "resourceDb.coll1";
+    const NamespaceString collNs = NamespaceString(boost::none, "resourceDb.coll1");
     auto rid = ResourceId(RESOURCE_COLLECTION, collNs);
     boost::optional<std::string> ridStr = catalog.lookupResourceName(rid);
 
     ASSERT(ridStr);
-    ASSERT(ridStr->find(collNs) != std::string::npos);
+    ASSERT(ridStr->find(collNs.toStringWithTenantId()) != std::string::npos);
 }
 
 TEST_F(CollectionCatalogResourceTest, LookupMissingCollectionResource) {
-    const std::string dbName = "resourceDb.coll5";
-    auto rid = ResourceId(RESOURCE_COLLECTION, dbName);
+    const NamespaceString nss = NamespaceString(boost::none, "resourceDb.coll5");
+    auto rid = ResourceId(RESOURCE_COLLECTION, nss);
     ASSERT(!catalog.lookupResourceName(rid));
 }
 
 TEST_F(CollectionCatalogResourceTest, RemoveCollection) {
-    const std::string collNs = "resourceDb.coll1";
-    auto coll = catalog.lookupCollectionByNamespace(&opCtx, NamespaceString(collNs));
-    catalog.deregisterCollection(&opCtx, coll->uuid());
+    const NamespaceString collNs = NamespaceString(boost::none, "resourceDb.coll1");
+    auto coll = catalog.lookupCollectionByNamespace(opCtx.get(), NamespaceString(collNs));
+    catalog.deregisterCollection(opCtx.get(), coll->uuid(), /*isDropPending=*/false);
     auto rid = ResourceId(RESOURCE_COLLECTION, collNs);
     ASSERT(!catalog.lookupResourceName(rid));
 }
@@ -401,10 +406,10 @@ TEST_F(CollectionCatalogIterationTest, EndAtEndOfSection) {
 }
 
 TEST_F(CollectionCatalogIterationTest, GetUUIDWontRepositionEvenIfEntryIsDropped) {
-    auto it = catalog.begin(&opCtx, DatabaseName(boost::none, "bar"));
+    auto it = catalog.begin(opCtx.get(), DatabaseName(boost::none, "bar"));
     auto collsIt = collsIterator("bar");
     auto uuid = collsIt->first;
-    catalog.deregisterCollection(&opCtx, uuid);
+    catalog.deregisterCollection(opCtx.get(), uuid, /*isDropPending=*/false);
     dropColl("bar", uuid);
 
     ASSERT_EQUALS(uuid, it.uuid());
@@ -467,7 +472,7 @@ TEST_F(CollectionCatalogTest, OnDropCollection) {
     yieldableColl.yield();
     ASSERT_FALSE(yieldableColl);
 
-    catalog.deregisterCollection(opCtx.get(), colUUID);
+    catalog.deregisterCollection(opCtx.get(), colUUID, /*isDropPending=*/false);
     // Ensure the lookup returns a null pointer upon removing the colUUID entry.
     ASSERT(catalog.lookupCollectionByUUID(opCtx.get(), colUUID) == nullptr);
 
@@ -521,7 +526,7 @@ TEST_F(CollectionCatalogTest, LookupNSSByUUIDForClosedCatalogReturnsOldNSSIfDrop
         catalog.onCloseCatalog(opCtx.get());
     }
 
-    catalog.deregisterCollection(opCtx.get(), colUUID);
+    catalog.deregisterCollection(opCtx.get(), colUUID, /*isDropPending=*/false);
     ASSERT(catalog.lookupCollectionByUUID(opCtx.get(), colUUID) == nullptr);
     ASSERT_EQUALS(*catalog.lookupNSSByUUID(opCtx.get(), colUUID), nss);
 
@@ -571,7 +576,7 @@ TEST_F(CollectionCatalogTest, LookupNSSByUUIDForClosedCatalogReturnsFreshestNSS)
         catalog.onCloseCatalog(opCtx.get());
     }
 
-    catalog.deregisterCollection(opCtx.get(), colUUID);
+    catalog.deregisterCollection(opCtx.get(), colUUID, /*isDropPending=*/false);
     ASSERT(catalog.lookupCollectionByUUID(opCtx.get(), colUUID) == nullptr);
     ASSERT_EQUALS(*catalog.lookupNSSByUUID(opCtx.get(), colUUID), nss);
     catalog.registerCollection(opCtx.get(), colUUID, std::move(newCollShared));
@@ -604,7 +609,7 @@ TEST_F(CollectionCatalogTest, CollectionCatalogEpoch) {
 
 DEATH_TEST_F(CollectionCatalogResourceTest, AddInvalidResourceType, "invariant") {
     auto rid = ResourceId(RESOURCE_GLOBAL, 0);
-    catalog.addResource(rid, "");
+    catalog.addResource(rid, NamespaceString(boost::none, ""));
 }
 
 TEST_F(CollectionCatalogTest, GetAllCollectionNamesAndGetAllDbNames) {

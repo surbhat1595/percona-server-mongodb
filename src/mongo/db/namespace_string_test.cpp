@@ -34,10 +34,13 @@
 #include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
 namespace {
+
+using namespace fmt::literals;
 
 TEST(NamespaceStringTest, Oplog) {
     ASSERT(!NamespaceString::oplog("a"));
@@ -324,6 +327,13 @@ TEST(NamespaceStringTest, NSSWithTenantId) {
     ASSERT_EQ(nss3.toStringWithTenantId(), tenantNsStr);
     ASSERT(nss3.tenantId());
     ASSERT_EQ(*nss3.tenantId(), tenantId);
+
+    NamespaceString nss4(dbName);
+    ASSERT_EQ(nss4.ns(), "foo");
+    ASSERT_EQ(nss4.toString(), "foo");
+    ASSERT_EQ(nss4.toStringWithTenantId(), "{}_foo"_format(tenantId.toString()));
+    ASSERT(nss4.tenantId());
+    ASSERT_EQ(*nss4.tenantId(), tenantId);
 }
 
 TEST(NamespaceStringTest, NSSNoCollectionWithTenantId) {
@@ -348,7 +358,7 @@ TEST(NamespaceStringTest, NSSNoCollectionWithTenantId) {
 }
 
 TEST(NamespaceStringTest, ParseNSSWithTenantId) {
-    gMultitenancySupport = true;
+    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
 
     TenantId tenantId(OID::gen());
     std::string tenantNsStr = str::stream() << tenantId.toString() << "_foo.bar";

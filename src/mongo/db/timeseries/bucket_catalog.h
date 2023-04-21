@@ -54,6 +54,10 @@ protected:
 
     using StripeNumber = std::uint8_t;
 
+    using EraCountMap = std::map<uint64_t, uint64_t>;
+
+    using ShouldClearFn = std::function<bool(const NamespaceString&)>;
+
     struct BucketHandle {
         const OID id;
         const StripeNumber stripe;
@@ -349,7 +353,7 @@ public:
     /**
      * Clears any bucket whose namespace satisfies the predicate.
      */
-    void clear(const std::function<bool(const NamespaceString&)>& shouldClear);
+    void clear(ShouldClearFn&& shouldClear);
 
     /**
      * Clears the buckets for the given namespace.
@@ -520,6 +524,55 @@ protected:
     };
 
     /**
+     * A helper class to maintain global state about the catalog era used to support asynchronous
+     * 'clear' operations. Provides thread-safety by taking the catalog '_mutex' for all operations.
+     */
+    class EraManager {
+    public:
+        EraManager(Mutex* m);
+        uint64_t getEra();
+        uint64_t incrementEra();
+        uint64_t getEraAndIncrementCount();
+        void decrementCountForEra(uint64_t value);
+        uint64_t getCountForEra(uint64_t value);
+
+        // Records a clear operation in the clearRegistry. The key is the new era after the clear
+        // operation has occurred, and the value is a function which takes a namespace and returns
+        // whether this namespace should be cleared.
+        void insertToRegistry(uint64_t era,
+                              std::function<bool(const NamespaceString&)>&& shouldClear);
+
+        // Returns the number of clear operations currently stored in the clear registry.
+        uint64_t getClearOperationsCount();
+
+        // Returns whether the Bucket has been marked as cleared by checking against the
+        // clearRegistry. Advances Bucket's era up to current global era if the bucket has not been
+        // cleared.
+        bool hasBeenCleared(Bucket* bucket);
+
+    protected:
+        void _decrementEraCountHelper(uint64_t era);
+        void _incrementEraCountHelper(uint64_t era);
+
+        // Removes clear operations from the clear registry that no longer need to be tracked.
+        void _cleanClearRegistry();
+
+        // Pointer to 'BucketCatalog::_mutex'.
+        Mutex* _mutex;
+
+        // Global number tracking the current number of eras that have passed. Incremented each time
+        // a bucket is cleared.
+        uint64_t _era;
+
+        // Mapping of era to counts of how many buckets are associated with that era.
+        EraCountMap _countMap;
+
+        // Registry storing clear operations. Maps from era to a lambda function which takes in
+        // information about a Bucket and returns whether the Bucket has been cleared.
+        std::map<uint64_t, ShouldClearFn> _clearRegistry;
+    };
+
+    /**
      * The in-memory representation of a time-series bucket document. Maintains all the information
      * needed to add additional measurements, but does not generally store the full contents of the
      * document that have already been committed to disk.
@@ -529,9 +582,13 @@ protected:
     public:
         friend class BucketCatalog;
 
-        Bucket(const OID& id, StripeNumber stripe, BucketKey::Hash hash, uint64_t era);
+        Bucket(const OID& id, StripeNumber stripe, BucketKey::Hash hash, EraManager* eraManager);
 
-        uint64_t era() const;
+        ~Bucket();
+
+        uint64_t getEra() const;
+
+        void setEra(uint64_t era);
 
         /**
          * Returns the ID for the underlying bucket.
@@ -567,6 +624,11 @@ protected:
         uint32_t numMeasurements() const;
 
         /**
+         * Sets the namespace of the bucket.
+         */
+        void setNamespace(const NamespaceString& ns);
+
+        /**
          * Determines if the schema for an incoming measurement is incompatible with those already
          * stored in the bucket.
          *
@@ -600,6 +662,8 @@ protected:
     protected:
         // The era number of the last log operation the bucket has caught up to
         uint64_t _lastCheckedEra;
+
+        EraManager* _eraManager;
 
     private:
         // The bucket ID for the underlying document
@@ -742,7 +806,7 @@ protected:
         const TimeseriesOptions& options,
         ExecutionStatsController stats,
         boost::optional<BucketToReopen> bucketToReopen,
-        boost::optional<const BucketKey&> expectedKey) const;
+        boost::optional<const BucketKey&> expectedKey);
 
     /**
      * Given a rehydrated 'bucket', passes ownership of that bucket to the catalog, marking the
@@ -911,11 +975,13 @@ protected:
     static long long _marginalMemoryUsageForArchivedBucket(const ArchivedBucket& bucket,
                                                            bool onlyEntryForMatchingMetaHash);
 
-    static constexpr std::size_t kNumberOfStripes = 32;
-    std::array<Stripe, kNumberOfStripes> _stripes;
-
     mutable Mutex _mutex =
         MONGO_MAKE_LATCH(HierarchicalAcquisitionLevel(0), "BucketCatalog::_mutex");
+
+    EraManager _eraManager = {&_mutex};
+
+    static constexpr std::size_t kNumberOfStripes = 32;
+    std::array<Stripe, kNumberOfStripes> _stripes;
 
     // Bucket state for synchronization with direct writes, protected by '_mutex'
     stdx::unordered_map<OID, BucketState, OID::Hasher> _bucketStates;
@@ -930,10 +996,6 @@ protected:
 
     // Approximate memory usage of the bucket catalog.
     AtomicWord<uint64_t> _memoryUsage;
-
-    // Global number tracking the current number of eras that have passed. Incremented each time a
-    // bucket is cleared
-    uint64_t _era = 0;
 
     class ServerStatus;
 };

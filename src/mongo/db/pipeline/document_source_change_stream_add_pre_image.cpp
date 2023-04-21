@@ -36,7 +36,7 @@
 #include "mongo/bson/simple_bsonelement_comparator.h"
 #include "mongo/db/pipeline/change_stream_helpers_legacy.h"
 #include "mongo/db/pipeline/change_stream_preimage_gen.h"
-#include "mongo/db/transaction_history_iterator.h"
+#include "mongo/db/transaction/transaction_history_iterator.h"
 #include "mongo/util/intrusive_counter.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
@@ -69,7 +69,7 @@ DocumentSourceChangeStreamAddPreImage::createFromBson(
             str::stream() << "the '" << kStageName << "' stage spec must be an object",
             elem.type() == BSONType::Object);
     auto parsedSpec = DocumentSourceChangeStreamAddPreImageSpec::parse(
-        IDLParserErrorContext("DocumentSourceChangeStreamAddPreImageSpec"), elem.Obj());
+        IDLParserContext("DocumentSourceChangeStreamAddPreImageSpec"), elem.Obj());
     return make_intrusive<DocumentSourceChangeStreamAddPreImage>(
         expCtx, parsedSpec.getFullDocumentBeforeChange());
 }

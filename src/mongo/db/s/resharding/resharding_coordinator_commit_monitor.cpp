@@ -61,7 +61,7 @@ MONGO_FAIL_POINT_DEFINE(hangBeforeQueryingRecipients);
 
 BSONObj makeCommandObj(const NamespaceString& ns) {
     auto command = _shardsvrReshardingOperationTime(ns);
-    command.setDbName("admin");
+    command.setDbName(DatabaseName(ns.tenantId(), "admin"));
     return command.toBSON({});
 }
 
@@ -169,11 +169,11 @@ CoordinatorCommitMonitor::queryRemainingOperationTimeForRecipients() const {
         const auto remainingTime = extractOperationRemainingTime(shardResponse.data);
         // A recipient shard does not report the remaining operation time when there is no data
         // to copy and no oplog entry to apply.
-        if (remainingTime && remainingTime.get() < minRemainingTime) {
-            minRemainingTime = remainingTime.get();
+        if (remainingTime && remainingTime.value() < minRemainingTime) {
+            minRemainingTime = remainingTime.value();
         }
-        if (remainingTime && remainingTime.get() > maxRemainingTime) {
-            maxRemainingTime = remainingTime.get();
+        if (remainingTime && remainingTime.value() > maxRemainingTime) {
+            maxRemainingTime = remainingTime.value();
         }
     }
 

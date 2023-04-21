@@ -128,7 +128,7 @@ void TLSCATrustsSetParameter::append(OperationContext*,
 
     BSONArrayBuilder trusts;
 
-    for (const auto& cait : sslGlobalParams.tlsCATrusts.get()) {
+    for (const auto& cait : sslGlobalParams.tlsCATrusts.value()) {
         BSONArrayBuilder roles;
 
         for (const auto& rolename : cait.second) {
@@ -185,7 +185,7 @@ Status TLSCATrustsSetParameter::set(const BSONElement& element) try {
             return {ErrorCodes::BadValue, "Value must be an array of trust definitions"};
         }
 
-        IDLParserErrorContext ctx("tlsCATrusts");
+        IDLParserContext ctx("tlsCATrusts");
         auto trust = TLSCATrust::parse(ctx, trustElement.Obj());
 
         if (trusts.find(trust.getSha256()) != trusts.end()) {

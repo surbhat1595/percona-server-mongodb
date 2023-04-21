@@ -41,7 +41,7 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/index_builds_coordinator.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/ops/delete.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/repl/repl_client_info.h"
@@ -86,7 +86,7 @@ Timestamp generateMinFetchTimestamp(OperationContext* opCtx, const NamespaceStri
     // Do a no-op write and use the OpTime as the minFetchTimestamp
     writeConflictRetry(
         opCtx, "resharding donor minFetchTimestamp", NamespaceString::kRsOplogNamespace.ns(), [&] {
-            AutoGetDb db(opCtx, sourceNss.db(), MODE_IX);
+            AutoGetDb db(opCtx, sourceNss.dbName(), MODE_IX);
             Lock::CollectionLock collLock(opCtx, sourceNss, MODE_S);
 
             AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
@@ -204,20 +204,23 @@ std::shared_ptr<repl::PrimaryOnlyService::Instance> ReshardingDonorService::cons
     return std::make_shared<DonorStateMachine>(
         this,
         ReshardingDonorDocument::parse({"DonorStateMachine"}, initialState),
-        std::make_unique<ExternalStateImpl>());
+        std::make_unique<ExternalStateImpl>(),
+        _serviceContext);
 }
 
 ReshardingDonorService::DonorStateMachine::DonorStateMachine(
     const ReshardingDonorService* donorService,
     const ReshardingDonorDocument& donorDoc,
-    std::unique_ptr<DonorStateMachineExternalState> externalState)
+    std::unique_ptr<DonorStateMachineExternalState> externalState,
+    ServiceContext* serviceContext)
     : repl::PrimaryOnlyService::TypedInstance<DonorStateMachine>(),
       _donorService(donorService),
-      _metrics{ReshardingMetrics::initializeFrom(donorDoc, getGlobalServiceContext())},
+      _serviceContext(serviceContext),
+      _metrics{ReshardingMetrics::initializeFrom(donorDoc, _serviceContext)},
       _metadata{donorDoc.getCommonReshardingMetadata()},
       _recipientShardIds{donorDoc.getRecipientShards()},
       _donorCtx{donorDoc.getMutableState()},
-      _donorMetricsToRestore{donorDoc.getMetrics() ? donorDoc.getMetrics().get()
+      _donorMetricsToRestore{donorDoc.getMetrics() ? donorDoc.getMetrics().value()
                                                    : ReshardingDonorMetrics()},
       _externalState{std::move(externalState)},
       _markKilledExecutor(std::make_shared<ThreadPool>([] {
@@ -231,7 +234,7 @@ ReshardingDonorService::DonorStateMachine::DonorStateMachine(
                           << "resharding_donor"
                           << "collection" << _metadata.getSourceNss().toString())),
       _isAlsoRecipient([&] {
-          auto myShardId = _externalState->myShardId(getGlobalServiceContext());
+          auto myShardId = _externalState->myShardId(_serviceContext);
           return std::find(_recipientShardIds.begin(), _recipientShardIds.end(), myShardId) !=
               _recipientShardIds.end();
       }()) {
@@ -509,7 +512,7 @@ boost::optional<BSONObj> ReshardingDonorService::DonorStateMachine::reportForCur
 void ReshardingDonorService::DonorStateMachine::onReshardingFieldsChanges(
     OperationContext* opCtx, const TypeCollectionReshardingFields& reshardingFields) {
     if (reshardingFields.getState() == CoordinatorStateEnum::kAborting) {
-        abort(reshardingFields.getUserCanceled().get());
+        abort(reshardingFields.getUserCanceled().value());
         return;
     }
 

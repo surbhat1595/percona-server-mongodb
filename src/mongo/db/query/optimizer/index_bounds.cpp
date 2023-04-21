@@ -34,12 +34,16 @@
 
 namespace mongo::optimizer {
 
-BoundRequirement::BoundRequirement() : _inclusive(false), _bound() {}
-
-BoundRequirement::BoundRequirement(bool inclusive, boost::optional<ABT> bound)
-    : _inclusive(inclusive), _bound(std::move(bound)) {
-    uassert(6624077, "Infinite bound cannot be inclusive", !inclusive || !isInfinite());
+BoundRequirement BoundRequirement::makeMinusInf() {
+    return {true /*inclusive*/, Constant::minKey()};
 }
+
+BoundRequirement BoundRequirement::makePlusInf() {
+    return {true /*inclusive*/, Constant::maxKey()};
+}
+
+BoundRequirement::BoundRequirement(bool inclusive, ABT bound)
+    : _inclusive(inclusive), _bound(std::move(bound)) {}
 
 bool BoundRequirement::operator==(const BoundRequirement& other) const {
     return _inclusive == other._inclusive && _bound == other._bound;
@@ -49,18 +53,20 @@ bool BoundRequirement::isInclusive() const {
     return _inclusive;
 }
 
-void BoundRequirement::setInclusive(bool value) {
-    _inclusive = value;
+bool BoundRequirement::isMinusInf() const {
+    return _inclusive && _bound == Constant::minKey();
 }
 
-bool BoundRequirement::isInfinite() const {
-    return !_bound.has_value();
+bool BoundRequirement::isPlusInf() const {
+    return _inclusive && _bound == Constant::maxKey();
 }
 
 const ABT& BoundRequirement::getBound() const {
-    uassert(6624078, "Cannot retrieve infinite bound", !isInfinite());
-    return _bound.get();
+    return _bound;
 }
+
+IntervalRequirement::IntervalRequirement()
+    : IntervalRequirement(BoundRequirement::makeMinusInf(), BoundRequirement::makePlusInf()) {}
 
 IntervalRequirement::IntervalRequirement(BoundRequirement lowBound, BoundRequirement highBound)
     : _lowBound(std::move(lowBound)), _highBound(std::move(highBound)) {}
@@ -70,7 +76,7 @@ bool IntervalRequirement::operator==(const IntervalRequirement& other) const {
 }
 
 bool IntervalRequirement::isFullyOpen() const {
-    return _lowBound.isInfinite() && _highBound.isInfinite();
+    return _lowBound.isMinusInf() && _highBound.isPlusInf();
 }
 
 bool IntervalRequirement::isEquality() const {
@@ -91,6 +97,10 @@ const BoundRequirement& IntervalRequirement::getHighBound() const {
 
 BoundRequirement& IntervalRequirement::getHighBound() {
     return _highBound;
+}
+
+void IntervalRequirement::reverse() {
+    std::swap(_lowBound, _highBound);
 }
 
 PartialSchemaKey::PartialSchemaKey() : PartialSchemaKey({}, make<PathIdentity>()) {}
@@ -152,9 +162,9 @@ IntervalReqExpr::Node& PartialSchemaRequirement::getIntervals() {
 /**
  * Helper class used to compare PartialSchemaKey objects.
  */
-class Path3WCompare {
+class IndexPath3WCompare {
 public:
-    Path3WCompare() {}
+    IndexPath3WCompare() {}
 
     int compareTags(const ABT& n, const ABT& other) {
         const auto t1 = n.tagOf();
@@ -188,10 +198,14 @@ public:
     }
 
     static int compare(const ABT& node, const ABT& other) {
-        Path3WCompare instance;
+        IndexPath3WCompare instance;
         return node.visit(instance, other);
     }
 };
+
+bool IndexPath3WComparator::operator()(const ABT& path1, const ABT& path2) const {
+    return IndexPath3WCompare::compare(path1, path2) < 0;
+}
 
 bool PartialSchemaKeyLessComparator::operator()(const PartialSchemaKey& k1,
                                                 const PartialSchemaKey& k2) const {
@@ -199,7 +213,7 @@ bool PartialSchemaKeyLessComparator::operator()(const PartialSchemaKey& k1,
     if (projCmp != 0) {
         return projCmp < 0;
     }
-    return Path3WCompare::compare(k1._path, k2._path) < 0;
+    return IndexPath3WCompare::compare(k1._path, k2._path) < 0;
 }
 
 ResidualRequirement::ResidualRequirement(PartialSchemaKey key,

@@ -19,7 +19,6 @@ const coll = db.plan_cache_replan_group_lookup;
 const foreignCollName = "foreign";
 coll.drop();
 
-const sbePlanCacheEnabled = checkSBEEnabled(db, ["featureFlagSbePlanCache"]);
 const sbeFullEnabled = checkSBEEnabled(db, ["featureFlagSbeFull"]);
 
 function getPlansForCacheEntry(match) {
@@ -166,7 +165,7 @@ const aIndexPredicate = [{$match: {a: 1042, b: 1}}];
 // {a: 1} index is used.
 const bIndexPredicate = [{$match: {a: 1, b: 1042}}];
 
-const expectedVersion = sbePlanCacheEnabled ? 2 : 1;
+const expectedVersion = sbeFullEnabled ? 2 : 1;
 // $group tests.
 const groupSuffix = [{$group: {_id: "$c"}}, {$count: "n"}];
 testFn(aIndexPredicate.concat(groupSuffix),
@@ -260,9 +259,9 @@ assert.eq(2, coll.aggregate(aLookup).toArray()[0].n);
 // If SBE plan cache is enabled, a new cache entry will be created in the SBE plan cache after
 // invalidation. The corresponding cache entry in SBE plan cache should be inactive because the SBE
 // plan cache is invalidated on index drop.
-assertCacheUsage(sbePlanCacheEnabled /*multiPlanning*/,
+assertCacheUsage(sbeFullEnabled /*multiPlanning*/,
                  expectedVersion /* cacheEntryVersion */,
-                 !sbePlanCacheEnabled /*cacheEntryIsActive*/,
+                 !sbeFullEnabled /*cacheEntryIsActive*/,
                  "a_1" /*cachedIndexName*/,
                  aLookup);
 
@@ -271,7 +270,7 @@ verifyCorrectLookupAlgorithmUsed("NestedLoopJoin", aLookup, {allowDiskUse: false
 assert.eq(2, coll.aggregate(aLookup).toArray()[0].n);
 // Note that multi-planning is expected here when the SBE plan cache is enabled because the
 // 'allowDiskUse' value is part of the SBE plan cache key encoding.
-assertCacheUsage(sbePlanCacheEnabled /*multiPlanning*/,
+assertCacheUsage(sbeFullEnabled /*multiPlanning*/,
                  expectedVersion /* cacheEntryVersion */,
                  true /*cacheEntryIsActive*/,
                  "a_1" /*cachedIndexName*/,
@@ -281,9 +280,9 @@ assertCacheUsage(sbePlanCacheEnabled /*multiPlanning*/,
 dropLookupForeignColl();
 verifyCorrectLookupAlgorithmUsed("NonExistentForeignCollection", aLookup, {allowDiskUse: true});
 assert.eq(2, coll.aggregate(aLookup).toArray()[0].n);
-assertCacheUsage(sbePlanCacheEnabled /*multiPlanning*/,
+assertCacheUsage(sbeFullEnabled /*multiPlanning*/,
                  expectedVersion /* cacheEntryVersion */,
-                 !sbePlanCacheEnabled /*cacheEntryIsActive*/,
+                 !sbeFullEnabled /*cacheEntryIsActive*/,
                  "a_1" /*cachedIndexName*/,
                  aLookup);
 
@@ -346,10 +345,10 @@ verifyCorrectLookupAlgorithmUsed(
 
 // If SBE plan cache is enabled, after dropping index, the $lookup plan cache will be invalidated.
 // We will need to rerun the multi-planner.
-if (sbePlanCacheEnabled) {
+if (sbeFullEnabled) {
     runLookupQuery({allowDiskUse: false});
     assertCacheUsage(true /*multiPlanning*/,
-                     sbeFullEnabled ? 2 : 1 /* cacheEntryVersion */,
+                     2 /* cacheEntryVersion */,
                      false /*activeCacheEntry*/,
                      "b_1" /*cachedIndexName*/,
                      avoidReplanLookupPipeline,
@@ -357,7 +356,7 @@ if (sbePlanCacheEnabled) {
 
     runLookupQuery({allowDiskUse: false});
     assertCacheUsage(true /*multiPlanning*/,
-                     sbeFullEnabled ? 2 : 1 /* cacheEntryVersion */,
+                     2 /* cacheEntryVersion */,
                      true /*activeCacheEntry*/,
                      "b_1" /*cachedIndexName*/,
                      avoidReplanLookupPipeline,
@@ -366,7 +365,7 @@ if (sbePlanCacheEnabled) {
 
 runLookupQuery({allowDiskUse: false});
 assertCacheUsage(false /*multiPlanning*/,
-                 sbePlanCacheEnabled && sbeFullEnabled ? 2 : 1 /* cacheEntryVersion */,
+                 sbeFullEnabled ? 2 : 1 /* cacheEntryVersion */,
                  true /*activeCacheEntry*/,
                  "b_1" /*cachedIndexName*/,
                  avoidReplanLookupPipeline,
@@ -374,7 +373,7 @@ assertCacheUsage(false /*multiPlanning*/,
 
 runLookupQuery({allowDiskUse: false});
 assertCacheUsage(false /*multiPlanning*/,
-                 sbePlanCacheEnabled && sbeFullEnabled ? 2 : 1 /* cacheEntryVersion */,
+                 sbeFullEnabled ? 2 : 1 /* cacheEntryVersion */,
                  true /*activeCacheEntry*/,
                  "b_1" /*cachedIndexName*/,
                  avoidReplanLookupPipeline,
@@ -386,7 +385,7 @@ verifyCorrectLookupAlgorithmUsed("HashJoin", avoidReplanLookupPipeline, {allowDi
 
 // If SBE plan cache is enabled, using different 'allowDiskUse' option will result in
 // different plan cache key.
-if (sbePlanCacheEnabled) {
+if (sbeFullEnabled) {
     runLookupQuery({allowDiskUse: true});
     assertCacheUsage(true /*multiPlanning*/,
                      2 /* cacheEntryVersion */,
@@ -406,14 +405,14 @@ if (sbePlanCacheEnabled) {
 
 runLookupQuery({allowDiskUse: true});
 assertCacheUsage(false /*multiPlanning*/,
-                 sbePlanCacheEnabled ? 2 : 1 /* cacheEntryVersion */,
+                 sbeFullEnabled ? 2 : 1 /* cacheEntryVersion */,
                  true /*activeCacheEntry*/,
                  "b_1" /*cachedIndexName*/,
                  avoidReplanLookupPipeline,
                  {allowDiskUse: true});
 runLookupQuery({allowDiskUse: true});
 assertCacheUsage(false /*multiPlanning*/,
-                 sbePlanCacheEnabled ? 2 : 1 /* cacheEntryVersion */,
+                 sbeFullEnabled ? 2 : 1 /* cacheEntryVersion */,
                  true /*activeCacheEntry*/,
                  "b_1" /*cachedIndexName*/,
                  avoidReplanLookupPipeline,
@@ -439,28 +438,119 @@ verifyCorrectLookupAlgorithmUsed("IndexedLoopJoin", avoidReplanLookupPipeline);
 // Set up an active cache entry.
 runLookupQuery();
 assertCacheUsage(true /*multiPlanning*/,
-                 sbePlanCacheEnabled ? 2 : 1 /* cacheEntryVersion */,
+                 sbeFullEnabled ? 2 : 1 /* cacheEntryVersion */,
                  false /*activeCacheEntry*/,
                  "b_1" /*cachedIndexName*/,
                  avoidReplanLookupPipeline);
 runLookupQuery();
 assertCacheUsage(true /*multiPlanning*/,
-                 sbePlanCacheEnabled ? 2 : 1 /* cacheEntryVersion */,
+                 sbeFullEnabled ? 2 : 1 /* cacheEntryVersion */,
                  true /*activeCacheEntry*/,
                  "b_1" /*cachedIndexName*/,
                  avoidReplanLookupPipeline);
 runLookupQuery();
 assertCacheUsage(false /*multiPlanning*/,
-                 sbePlanCacheEnabled ? 2 : 1 /* cacheEntryVersion */,
+                 sbeFullEnabled ? 2 : 1 /* cacheEntryVersion */,
                  true /*activeCacheEntry*/,
                  "b_1" /*cachedIndexName*/,
                  avoidReplanLookupPipeline);
 runLookupQuery();
 assertCacheUsage(false /*multiPlanning*/,
-                 sbePlanCacheEnabled ? 2 : 1 /* cacheEntryVersion */,
+                 sbeFullEnabled ? 2 : 1 /* cacheEntryVersion */,
                  true /*activeCacheEntry*/,
                  "b_1" /*cachedIndexName*/,
                  avoidReplanLookupPipeline);
+
+/**
+ * Tests if replanning and cache invalidation are performed for hash-join plans, when foreign
+ * collection size increases.
+ *
+ * 'singleSolution' indicates whether the initial aggregation pipeline run will result in a single
+ * solution.
+ */
+function testReplanningAndCacheInvalidationOnForeignCollSizeIncrease(singleSolution) {
+    if (!sbeFullEnabled) {
+        return;
+    }
+
+    const coll = db.plan_cache_replan_group_lookup_coll_resize;
+    const foreignColl = db.plan_cache_replan_group_lookup_coll_resize_foreign;
+
+    const pipeline = [
+        {$match: {a: 2, b: 2}},
+        {$lookup: {from: foreignColl.getName(), localField: "a", foreignField: "a", as: "out"}}
+    ];
+
+    function runLookup() {
+        assert.eq([{_id: 2, a: 2, b: 2, out: [{_id: 1, a: 2, b: 1}]}],
+                  coll.aggregate(pipeline).toArray());
+    }
+
+    // Asserts that the plan cache has only one entry and checks if it has a hash_lookup stage.
+    function assertPlanCacheEntry(shouldHaveHashLookup) {
+        const entries = coll.getPlanCache().list();
+        assert.eq(entries.length, 1, entries);
+        assert(entries[0].isActive, entries[0]);
+        const hasHashLookup = entries[0].cachedPlan.stages.includes("hash_lookup");
+        assert.eq(shouldHaveHashLookup, hasHashLookup, entries[0]);
+    }
+
+    // Set maximum number of documents in the foreign collection to 5.
+    const initialMaxNoOfDocuments =
+        assert
+            .commandWorked(db.adminCommand(
+                {getParameter: 1, internalQueryCollectionMaxNoOfDocumentsToChooseHashJoin: 1}))
+            .internalQueryCollectionMaxNoOfDocumentsToChooseHashJoin;
+    assert.commandWorked(db.adminCommand(
+        {setParameter: 1, internalQueryCollectionMaxNoOfDocumentsToChooseHashJoin: 5}));
+
+    coll.drop();
+    foreignColl.drop();
+
+    if (!singleSolution) {
+        assert.commandWorked(coll.createIndex({a: 1}));
+        assert.commandWorked(coll.createIndex({b: 1}));
+    }
+
+    assert.commandWorked(coll.insert({_id: 1, a: 1, b: 1}));
+    assert.commandWorked(coll.insert({_id: 2, a: 2, b: 2}));
+    assert.commandWorked(coll.insert({_id: 3, a: 2, b: 3}));
+    assert.commandWorked(coll.insert({_id: 4, a: 3, b: 4}));
+    assert.commandWorked(coll.insert({_id: 5, a: 5, b: 5}));
+    assert.commandWorked(coll.insert({_id: 6, a: 6, b: 6}));
+    assert.commandWorked(coll.insert({_id: 7, a: 6, b: 7}));
+    assert.commandWorked(foreignColl.insert({_id: 1, a: 2, b: 1}));
+    assert.commandWorked(foreignColl.insert({_id: 2, a: 3, b: 2}));
+
+    // Ensure that plan cache entry has a plan with hash-join in it.
+    runLookup();
+    runLookup();
+    assertPlanCacheEntry(true /* shouldHaveHashLookup */);
+    verifyCorrectLookupAlgorithmUsed("HashJoin", pipeline);
+
+    // Increase the size of the foreign collection
+    assert.commandWorked(foreignColl.insert({a: 3, b: 3}));
+    assert.commandWorked(foreignColl.insert({a: 5, b: 4}));
+    assert.commandWorked(foreignColl.insert({a: 6, b: 5}));
+    assert.commandWorked(foreignColl.insert({a: 6, b: 6}));
+    assert.commandWorked(foreignColl.insert({a: 7, b: 7}));
+
+    // Ensure that plan cache entry does not have a plan with hash-join in it.
+    runLookup();
+    runLookup();
+    assertPlanCacheEntry(false /* shouldHaveHashLookup */);
+
+    // Ensure that hash-join is no longer used in the plan.
+    verifyCorrectLookupAlgorithmUsed("NestedLoopJoin", pipeline);
+
+    // Reset the 'internalQueryCollectionMaxNoOfDocumentsToChooseHashJoin' knob.
+    assert.commandWorked(db.adminCommand({
+        setParameter: 1,
+        internalQueryCollectionMaxNoOfDocumentsToChooseHashJoin: initialMaxNoOfDocuments
+    }));
+}
+testReplanningAndCacheInvalidationOnForeignCollSizeIncrease(true /* singleSolution */);
+testReplanningAndCacheInvalidationOnForeignCollSizeIncrease(false /* singleSolution */);
 
 // Disable $lookup pushdown. This should not invalidate the cache entry, but it should prevent
 // $lookup from being pushed down.
@@ -472,7 +562,7 @@ let explain = coll.explain().aggregate(avoidReplanLookupPipeline);
 const eqLookupNodes = getAggPlanStages(explain, "EQ_LOOKUP");
 assert.eq(eqLookupNodes.length, 0, "expected no EQ_LOOKUP nodes; got " + tojson(explain));
 
-if (sbePlanCacheEnabled) {
+if (sbeFullEnabled) {
     runLookupQuery();
     const profileObj = getLatestProfilerEntry(db, {op: "command", ns: coll.getFullName()});
     const matchingCacheEntries =
@@ -541,7 +631,7 @@ explain = coll.explain().aggregate(avoidReplanLookupPipeline);
 groupNodes = getAggPlanStages(explain, "GROUP");
 assert.eq(groupNodes.length, 0);
 
-if (sbePlanCacheEnabled) {
+if (sbeFullEnabled) {
     runGroupQuery();
     const profileObj = getLatestProfilerEntry(db, {op: "command", ns: coll.getFullName()});
     const matchingCacheEntries =

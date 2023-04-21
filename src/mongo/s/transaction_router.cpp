@@ -410,7 +410,7 @@ void TransactionRouter::Observer::_reportTransactionState(OperationContext* opCt
 }
 
 bool TransactionRouter::Observer::_atClusterTimeHasBeenSet() const {
-    return o().atClusterTime.is_initialized() && o().atClusterTime->timeHasBeenSet();
+    return o().atClusterTime.has_value() && o().atClusterTime->timeHasBeenSet();
 }
 
 const LogicalSessionId& TransactionRouter::Observer::_sessionId() const {
@@ -588,7 +588,7 @@ bool TransactionRouter::AtClusterTime::canChange(StmtId currentStmtId) const {
 }
 
 bool TransactionRouter::Router::mustUseAtClusterTime() const {
-    return o().atClusterTime.is_initialized();
+    return o().atClusterTime.has_value();
 }
 
 LogicalTime TransactionRouter::Router::getSelectedAtClusterTime() const {
@@ -959,7 +959,14 @@ void TransactionRouter::Router::_continueTxn(OperationContext* opCtx,
             APIParameters::get(opCtx) = o().apiParameters;
             repl::ReadConcernArgs::get(opCtx) = o().readConcernArgs;
 
-            ++p().latestStmtId;
+            // Don't increment latestStmtId if no shards have been targeted, since that implies no
+            // statements would have been executed inside this transaction at this point. This can
+            // occur when an internal transaction is invoked within a client's transaction that
+            // hasn't executed any statements yet.
+            if (!o().participants.empty()) {
+                ++p().latestStmtId;
+            }
+
             _onContinue(opCtx);
             break;
         }
@@ -1095,7 +1102,9 @@ BSONObj TransactionRouter::Router::_handOffCommitToCoordinator(OperationContext*
     }
 
     CoordinateCommitTransaction coordinateCommitCmd;
-    coordinateCommitCmd.setDbName("admin");
+    // Empty tenant id is acceptable here as command's tenant id will not be serialized to BSON.
+    // TODO SERVER-62491: Use system tenant id.
+    coordinateCommitCmd.setDbName(DatabaseName(boost::none, "admin"));
     coordinateCommitCmd.setParticipants(participantList);
     const auto coordinateCommitCmdObj = coordinateCommitCmd.toBSON(
         BSON(WriteConcernOptions::kWriteConcernField << opCtx->getWriteConcern().toBSON()));
@@ -1511,7 +1520,9 @@ BSONObj TransactionRouter::Router::_commitWithRecoveryToken(OperationContext* op
 
     auto coordinateCommitCmd = [&] {
         CoordinateCommitTransaction coordinateCommitCmd;
-        coordinateCommitCmd.setDbName("admin");
+        // Empty tenant id is acceptable here as command's tenant id will not be serialized to BSON.
+        // TODO SERVER-62491: Use system tenant id.
+        coordinateCommitCmd.setDbName(DatabaseName(boost::none, "admin"));
         coordinateCommitCmd.setParticipants({});
 
         auto rawCoordinateCommit = coordinateCommitCmd.toBSON(

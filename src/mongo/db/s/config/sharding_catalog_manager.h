@@ -36,7 +36,7 @@
 #include "mongo/db/logical_session_cache.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime_with.h"
-#include "mongo/db/transaction_api.h"
+#include "mongo/db/transaction/transaction_api.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/s/catalog/type_chunk.h"
@@ -425,6 +425,13 @@ public:
                                       boost::optional<int32_t> chunkSizeMB,
                                       boost::optional<bool> defragmentCollection,
                                       boost::optional<bool> enableAutoSplitter);
+
+    /**
+     * Removes the maxChunkSize constraint from config.system.collection to ensure compatibility
+     * with the balancing strategy implemented in v6.1.
+     * TODO SERVER-65332 remove the function once 6.1 branches out.
+     */
+    void applyLegacyConfigurationToSessionsCollection(OperationContext* opCtx);
 
     /**
      * Updates the granularity value of a time-series collection. Also bumps the shard versions for

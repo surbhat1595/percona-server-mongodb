@@ -110,7 +110,7 @@ void RecoverableCriticalSectionService::acquireRecoverableCriticalSectionBlockWr
         if (cursor->more()) {
             const auto bsonObj = cursor->next();
             const auto collCSDoc = CollectionCriticalSectionDocument::parse(
-                IDLParserErrorContext("AcquireRecoverableCSBW"), bsonObj);
+                IDLParserContext("AcquireRecoverableCSBW"), bsonObj);
 
             invariant(collCSDoc.getReason().woCompare(reason) == 0,
                       str::stream()
@@ -199,7 +199,7 @@ void RecoverableCriticalSectionService::promoteRecoverableCriticalSectionToBlock
                           << " but the critical section wasn't acquired first blocking writers.");
         BSONObj bsonObj = cursor->next();
         const auto collCSDoc = CollectionCriticalSectionDocument::parse(
-            IDLParserErrorContext("AcquireRecoverableCSBR"), bsonObj);
+            IDLParserContext("AcquireRecoverableCSBR"), bsonObj);
 
         invariant(
             collCSDoc.getReason().woCompare(reason) == 0,
@@ -307,7 +307,7 @@ void RecoverableCriticalSectionService::releaseRecoverableCriticalSection(
 
         BSONObj bsonObj = cursor->next();
         const auto collCSDoc = CollectionCriticalSectionDocument::parse(
-            IDLParserErrorContext("ReleaseRecoverableCS"), bsonObj);
+            IDLParserContext("ReleaseRecoverableCS"), bsonObj);
 
         invariant(
             collCSDoc.getReason().woCompare(reason) == 0,

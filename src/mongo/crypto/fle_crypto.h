@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "mongo/base/data_range.h"
+#include "mongo/base/data_type_validated.h"
 #include "mongo/base/secure_allocator.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -50,6 +51,7 @@
 #include "mongo/crypto/symmetric_crypto.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/rpc/object_check.h"
 #include "mongo/util/uuid.h"
 
 namespace mongo {
@@ -1189,14 +1191,27 @@ struct ParsedFindPayload {
 };
 
 /**
- * Utility functions manipulating buffers
+ * Utility functions manipulating buffers.
  */
-PrfBlock PrfBlockfromCDR(ConstDataRange block);
+PrfBlock PrfBlockfromCDR(const ConstDataRange& block);
+
+ConstDataRange binDataToCDR(BSONElement element);
+
+template <typename T>
+T parseFromCDR(ConstDataRange cdr) {
+    ConstDataRangeCursor cdc(cdr);
+    auto obj = cdc.readAndAdvance<Validated<BSONObj>>();
+
+    IDLParserContext ctx("root");
+    return T::parse(ctx, obj);
+}
 
 std::vector<uint8_t> toEncryptedVector(EncryptedBinDataType dt, const PrfBlock& block);
 
 BSONBinData toBSONBinData(const std::vector<uint8_t>& buf);
 
 std::pair<EncryptedBinDataType, ConstDataRange> fromEncryptedBinData(const Value& value);
+
+bool hasQueryType(const EncryptedFieldConfig& config, QueryTypeEnum queryType);
 
 }  // namespace mongo

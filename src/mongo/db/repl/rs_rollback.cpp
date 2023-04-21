@@ -27,13 +27,9 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/repl/rs_rollback.h"
 
 #include <algorithm>
-#include <memory>
 
 #include "mongo/bson/bsonelement_comparator.h"
 #include "mongo/bson/util/bson_extract.h"
@@ -44,6 +40,7 @@
 #include "mongo/db/catalog/index_build_oplog_entry.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/rename_collection.h"
+#include "mongo/db/catalog/unique_collection_name.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
@@ -74,7 +71,7 @@
 #include "mongo/db/session_catalog_mongod.h"
 #include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/db/storage/remove_saver.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
@@ -83,7 +80,6 @@
 #include "mongo/util/scopeguard.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplicationRollback
-
 
 namespace mongo {
 
@@ -313,7 +309,7 @@ Status rollback_internal::updateFixUpInfoFromLocalOplogEntry(OperationContext* o
             txnBob.append("_id", sessionId->toBSON());
             auto txnObj = txnBob.obj();
 
-            DocID txnDoc(txnObj, txnObj.firstElement(), transactionTableUUID.get());
+            DocID txnDoc(txnObj, txnObj.firstElement(), transactionTableUUID.value());
             txnDoc.ns = NamespaceString::kSessionTransactionsTableNamespace.ns();
 
             fixUpInfo.docsToRefetch.insert(txnDoc);
@@ -404,7 +400,7 @@ Status rollback_internal::updateFixUpInfoFromLocalOplogEntry(OperationContext* o
                         "Missing index name in dropIndexes operation on rollback.");
                 }
 
-                BSONObj obj2 = oplogEntry.getObject2().get().getOwned();
+                BSONObj obj2 = oplogEntry.getObject2().value().getOwned();
 
                 // Inserts the index name and the index spec of the index to be created into the map
                 // of index name and index specs that need to be created for the given collection.
@@ -1091,11 +1087,11 @@ void renameOutOfTheWay(OperationContext* opCtx, RenameCollectionInfo info, Datab
 
     // The generated unique collection name is only guaranteed to exist if the database is
     // exclusively locked.
-    invariant(opCtx->lockState()->isDbLockedForMode(db->name().db(), LockMode::MODE_X));
+    invariant(opCtx->lockState()->isDbLockedForMode(db->name(), LockMode::MODE_X));
     // Creates the oplog entry to temporarily rename the collection that is
     // preventing the renameCollection command from rolling back to a unique
     // namespace.
-    auto tmpNameResult = db->makeUniqueCollectionNamespace(opCtx, "rollback.tmp%%%%%");
+    auto tmpNameResult = makeUniqueCollectionName(opCtx, db->name(), "rollback.tmp%%%%%");
     if (!tmpNameResult.isOK()) {
         LOGV2_FATAL_CONTINUE(
             21743,
@@ -1507,7 +1503,7 @@ void rollback_internal::syncFixUp(OperationContext* opCtx,
                   "Dropping collection",
                   "namespace"_attr = *nss,
                   "uuid"_attr = uuid);
-            AutoGetDb dbLock(opCtx, nss->db(), MODE_X);
+            AutoGetDb dbLock(opCtx, nss->dbName(), MODE_X);
 
             Database* db = dbLock.getDb();
             if (db) {

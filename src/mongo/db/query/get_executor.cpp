@@ -266,7 +266,7 @@ void applyIndexFilters(const CollectionPtr& collection,
     if (!isIdHackEligibleQuery(collection, canonicalQuery)) {
         const QuerySettings* querySettings =
             QuerySettingsDecoration::get(collection->getSharedDecorations());
-        const auto key = canonicalQuery.encodeKeyForIndexFilters();
+        const auto key = canonicalQuery.encodeKeyForPlanCacheCommand();
 
         // Filter index catalog if index filters are specified for query.
         // Also, signal to planner that application hint should be ignored.
@@ -325,7 +325,7 @@ void fillOutPlannerParams(OperationContext* opCtx,
                         canonicalQuery,
                         collection,
                         plannerParams->indices,
-                        plannerParams->columnarIndexes);
+                        plannerParams->columnStoreIndexes);
 
     // If query supports index filters, filter params.indices by indices in query settings.
     // Ignore index filters when it is possible to use the id-hack.
@@ -934,7 +934,7 @@ protected:
                                                                       _ws,
                                                                       _cq,
                                                                       _plannerParams,
-                                                                      cs->decisionWorks.get(),
+                                                                      cs->decisionWorks.value(),
                                                                       std::move(root)),
                                     std::move(querySolution));
                     return result;
@@ -1021,7 +1021,7 @@ protected:
         // go through the normal planning and plan compilation process, resulting in an
         // auto-parameterized SBE plan cache entry. Subsequent idhack queries can simply re-use this
         // cache entry, and the hot path for recovering cached plans is already carefully optimized.
-        if (feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV()) {
+        if (feature_flags::gFeatureFlagSbeFull.isEnabledAndIgnoreFCV()) {
             return nullptr;
         }
 
@@ -1099,7 +1099,7 @@ protected:
     std::unique_ptr<SlotBasedPrepareExecutionResult> buildCachedPlan(
         const sbe::PlanCacheKey& planCacheKey) final {
         if (shouldCacheQuery(*_cq)) {
-            if (!feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV()) {
+            if (!feature_flags::gFeatureFlagSbeFull.isEnabledAndIgnoreFCV()) {
                 // If the feature flag is off, we first try to build an "id hack" plan because the
                 // id hack plans are not cached in the classic cache. We then fall back to use the
                 // classic plan cache.
@@ -1138,8 +1138,11 @@ protected:
         return buildIdHackPlan();
     }
 
-    // A temporary function to allow recovering SBE plans from the classic plan cache.
-    // TODO SERVER-61314: Remove this function when "featureFlagSbePlanCache" is removed.
+    // A temporary function to allow recovering SBE plans from the classic plan cache. When the
+    // feature flag for "SBE full" is disabled, we are still able to use the classic plan cache for
+    // queries that execute in SBE.
+    //
+    // TODO SERVER-64882: Remove this function when "featureFlagSbeFull" is removed.
     std::unique_ptr<SlotBasedPrepareExecutionResult> buildCachedPlanFromClassicCache() {
         const auto& mainColl = getMainCollection();
         auto planCacheKey = plan_cache_key_factory::make<PlanCacheKey>(*_cq, mainColl);
@@ -1244,7 +1247,8 @@ std::unique_ptr<sbe::RuntimePlanner> makeRuntimePlannerIfNeeded(
     boost::optional<size_t> decisionWorks,
     bool needsSubplanning,
     PlanYieldPolicySBE* yieldPolicy,
-    size_t plannerOptions) {
+    size_t plannerOptions,
+    const boost::optional<stage_builder::PlanStageData>& planStageData) {
     // If we have multiple solutions, we always need to do the runtime planning.
     if (numSolutions > 1) {
         invariant(!needsSubplanning && !decisionWorks);
@@ -1276,15 +1280,16 @@ std::unique_ptr<sbe::RuntimePlanner> makeRuntimePlannerIfNeeded(
 
     invariant(numSolutions == 1);
 
-    // If we have a single solution but it was created from a cached plan, we will need to do the
-    // runtime planning to check if the cached plan still performs efficiently, or requires
-    // re-planning. The 'decisionWorks' is used to determine whether the existing cache entry should
-    // be evicted, and the query re-planned.
-    if (decisionWorks) {
+    // If we have a single solution and the plan is not pinned or plan contains a hash_lookup stage,
+    // we will need we will need to do the runtime planning to check if the cached plan still
+    // performs efficiently, or requires re-planning.
+    tassert(6693503, "PlanStageData must be present", planStageData);
+    const bool hasHashLookup = !planStageData->foreignHashJoinCollections.empty();
+    if (decisionWorks || hasHashLookup) {
         QueryPlannerParams plannerParams;
         plannerParams.options = plannerOptions;
         return std::make_unique<sbe::CachedSolutionPlanner>(
-            opCtx, collections, *canonicalQuery, plannerParams, *decisionWorks, yieldPolicy);
+            opCtx, collections, *canonicalQuery, plannerParams, decisionWorks, yieldPolicy);
     }
 
     // Runtime planning is not required.
@@ -1332,6 +1337,12 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
 
     auto&& planningResult = planningResultWithStatus.getValue();
     auto&& [roots, solutions] = planningResult->extractResultData();
+
+    // When query requires sub-planning, we may not get any executable plans.
+    const auto planStageData = roots.empty()
+        ? boost::none
+        : boost::optional<stage_builder::PlanStageData>(roots[0].second);
+
     // In some circumstances (e.g. when have multiple candidate plans or using a cached one), we
     // might need to execute the plan(s) to pick the best one or to confirm the choice.
     if (auto planner = makeRuntimePlannerIfNeeded(opCtx,
@@ -1341,7 +1352,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
                                                   planningResult->decisionWorks(),
                                                   planningResult->needsSubplanning(),
                                                   yieldPolicy.get(),
-                                                  plannerParams.options)) {
+                                                  plannerParams.options,
+                                                  planStageData)) {
         // Do the runtime planning and pick the best candidate plan.
         auto candidates = planner->plan(std::move(solutions), std::move(roots));
 

@@ -54,7 +54,7 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds_coordinator.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/ops/insert.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/repl_set_config.h"
@@ -203,12 +203,6 @@ void validateTTLOptions(OperationContext* opCtx,
 void checkEncryptedFieldIndexRestrictions(OperationContext* opCtx,
                                           const NamespaceString& ns,
                                           const CreateIndexesCommand& cmd) {
-    // TODO (SERVER-65077): Remove FCV check once 6.0 is released
-    if (serverGlobalParams.featureCompatibility.isVersionInitialized() &&
-        !gFeatureFlagFLE2.isEnabled(serverGlobalParams.featureCompatibility)) {
-        return;
-    }
-
     AutoGetCollection collection(opCtx, ns, MODE_IS);
     if (!collection) {
         return;
@@ -448,7 +442,7 @@ CreateIndexesReply runCreateIndexesOnNewCollection(
 }
 
 bool isCreatingInternalConfigTxnsPartialIndex(const CreateIndexesCommand& cmd) {
-    if (cmd.getIndexes().size() > 1) {
+    if (cmd.getIndexes().size() != 1) {
         return false;
     }
     const auto& index = cmd.getIndexes()[0];
@@ -483,7 +477,7 @@ CreateIndexesReply runCreateIndexesWithCoordinator(OperationContext* opCtx,
                                                               : IndexBuildProtocol::kSinglePhase;
     auto commitQuorum = parseAndGetCommitQuorum(opCtx, protocol, cmd);
     if (commitQuorum) {
-        uassertStatusOK(replCoord->checkIfCommitQuorumCanBeSatisfied(commitQuorum.get()));
+        uassertStatusOK(replCoord->checkIfCommitQuorumCanBeSatisfied(commitQuorum.value()));
     }
 
     validateTTLOptions(opCtx, ns, cmd);
@@ -759,7 +753,7 @@ public:
                     opCtx, origCmd.getNamespace(), !isCommandOnTimeseriesBucketNamespace)) {
                 timeseriesCmdOwnership =
                     timeseries::makeTimeseriesCreateIndexesCommand(opCtx, origCmd, *options);
-                cmd = &timeseriesCmdOwnership.get();
+                cmd = &timeseriesCmdOwnership.value();
             }
 
             // If we encounter an IndexBuildAlreadyInProgress error for any of the requested index

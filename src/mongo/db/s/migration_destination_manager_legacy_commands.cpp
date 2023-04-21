@@ -79,8 +79,8 @@ public:
         return true;
     }
 
-    std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const override {
-        return CommandHelpers::parseNsFullyQualified(cmdObj);
+    NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
+        return NamespaceString(dbName.tenantId(), CommandHelpers::parseNsFullyQualified(cmdObj));
     }
 
     void addRequiredPrivileges(const std::string& dbname,
@@ -107,7 +107,7 @@ public:
         opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
         uassertStatusOK(ShardingState::get(opCtx)->canAcceptShardedCommands());
 
-        auto nss = NamespaceString(parseNs(dbname, cmdObj));
+        auto nss = NamespaceString(parseNs({boost::none, dbname}, cmdObj));
 
         auto cloneRequest = uassertStatusOK(StartChunkCloneRequest::createFromCommand(nss, cmdObj));
 
@@ -120,7 +120,11 @@ public:
         // Ensure this shard is not currently receiving or donating any chunks.
         auto scopedReceiveChunk(
             uassertStatusOK(ActiveMigrationsRegistry::get(opCtx).registerReceiveChunk(
-                opCtx, nss, chunkRange, cloneRequest.getFromShardId(), false)));
+                opCtx,
+                nss,
+                chunkRange,
+                cloneRequest.getFromShardId(),
+                false /* waitForCompletionOfConflictingOps*/)));
 
         // We force a refresh immediately after registering this migration to guarantee that this
         // shard will not receive a chunk after refreshing.
@@ -240,10 +244,7 @@ public:
         auto const sessionId = uassertStatusOK(MigrationSessionId::extractFromBSON(cmdObj));
         auto const mdm = MigrationDestinationManager::get(opCtx);
 
-        const auto elem = cmdObj.getField("acquireCSOnRecipient");
-        const auto acquireCSOnRecipient = elem ? elem.boolean() : false;
-
-        Status const status = mdm->startCommit(sessionId, acquireCSOnRecipient);
+        Status const status = mdm->startCommit(sessionId);
         mdm->report(result, opCtx, false);
         if (!status.isOK()) {
             LOGV2(22014,

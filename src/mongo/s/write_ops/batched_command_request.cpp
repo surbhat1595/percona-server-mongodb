@@ -44,9 +44,9 @@ template <class T>
 BatchedCommandRequest constructBatchedCommandRequest(const OpMsgRequest& request) {
     auto batchRequest = BatchedCommandRequest{T::parse(request)};
 
-    auto shardVersionField = request.body[ChunkVersion::kShardVersionField];
+    auto shardVersionField = request.body[ShardVersion::kShardVersionField];
     if (!shardVersionField.eoo()) {
-        auto shardVersion = ChunkVersion::parse(shardVersionField);
+        auto shardVersion = ShardVersion::parse(shardVersionField);
         if (shardVersion == ChunkVersion::UNSHARDED()) {
             batchRequest.setDbVersion(DatabaseVersion(request.body));
         }
@@ -200,7 +200,7 @@ void BatchedCommandRequest::setWriteCommandRequestBase(
 void BatchedCommandRequest::serialize(BSONObjBuilder* builder) const {
     _visit([&](auto&& op) { op.serialize({}, builder); });
     if (_shardVersion) {
-        _shardVersion->serializeToBSON(ChunkVersion::kShardVersionField, builder);
+        ShardVersion(*_shardVersion).serialize(ShardVersion::kShardVersionField, builder);
     }
 
     if (_dbVersion) {
@@ -263,7 +263,7 @@ BatchedCommandRequest BatchedCommandRequest::buildDeleteOp(const NamespaceString
             entry.setMulti(multiDelete);
 
             if (hint) {
-                entry.setHint(hint.get());
+                entry.setHint(hint.value());
             }
             return entry;
         }()});
@@ -295,7 +295,7 @@ BatchedCommandRequest BatchedCommandRequest::buildUpdateOp(const NamespaceString
             entry.setUpsert(upsert);
             entry.setMulti(multi);
             if (hint) {
-                entry.setHint(hint.get());
+                entry.setHint(hint.value());
             }
             return entry;
         }()});

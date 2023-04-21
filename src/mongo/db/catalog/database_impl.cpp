@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/catalog/database_impl.h"
 
 #include <algorithm>
@@ -57,7 +54,7 @@
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/introspect.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
@@ -120,15 +117,9 @@ Status validateDBNameForWindows(StringData dbname) {
     return Status::OK();
 }
 
-// Random number generator used to create unique collection namespaces suitable for temporary
-// collections.
-PseudoRandom uniqueCollectionNamespacePseudoRandom(Date_t::now().asInt64());
-
-Mutex uniqueCollectionNamespaceMutex = MONGO_MAKE_LATCH("DatabaseUniqueCollectionNamespaceMutex");
-
 void assertMovePrimaryInProgress(OperationContext* opCtx, NamespaceString const& nss) {
-    invariant(opCtx->lockState()->isDbLockedForMode(nss.db(), MODE_IS));
-    auto dss = DatabaseShardingState::get(opCtx, nss.db().toString());
+    invariant(opCtx->lockState()->isDbLockedForMode(nss.dbName(), MODE_IS));
+    auto dss = DatabaseShardingState::get(opCtx, nss.dbName().toStringWithTenantId());
     if (!dss) {
         return;
     }
@@ -173,8 +164,7 @@ Status DatabaseImpl::validateDBName(StringData dbname) {
 }
 
 DatabaseImpl::DatabaseImpl(const DatabaseName& dbName)
-    : _name(dbName),
-      _viewsName(_name.toString() + "." + DurableViewCatalog::viewsCollectionName().toString()) {}
+    : _name(dbName), _viewsName(_name, DurableViewCatalog::viewsCollectionName().toString()) {}
 
 Status DatabaseImpl::init(OperationContext* const opCtx) {
     Status status = validateDBName(_name.db());
@@ -314,7 +304,7 @@ Status DatabaseImpl::init(OperationContext* const opCtx) {
 }
 
 void DatabaseImpl::clearTmpCollections(OperationContext* opCtx) const {
-    invariant(opCtx->lockState()->isDbLockedForMode(name().db(), MODE_IX));
+    invariant(opCtx->lockState()->isDbLockedForMode(name(), MODE_IX));
 
     CollectionCatalog::CollectionInfoFn callback = [&](const CollectionPtr& collection) {
         try {
@@ -348,17 +338,17 @@ void DatabaseImpl::clearTmpCollections(OperationContext* opCtx) const {
 
 void DatabaseImpl::setDropPending(OperationContext* opCtx, bool dropPending) {
     auto mode = dropPending ? MODE_X : MODE_IX;
-    invariant(opCtx->lockState()->isDbLockedForMode(name().db(), mode));
+    invariant(opCtx->lockState()->isDbLockedForMode(name(), mode));
     _dropPending.store(dropPending);
 }
 
 bool DatabaseImpl::isDropPending(OperationContext* opCtx) const {
-    invariant(opCtx->lockState()->isDbLockedForMode(name().db(), MODE_IS));
+    invariant(opCtx->lockState()->isDbLockedForMode(name(), MODE_IS));
     return _dropPending.load();
 }
 
 void DatabaseImpl::getStats(OperationContext* opCtx,
-                            BSONObjBuilder* output,
+                            DBStats* output,
                             bool includeFreeStorage,
                             double scale) const {
 
@@ -372,7 +362,7 @@ void DatabaseImpl::getStats(OperationContext* opCtx,
     long long indexSize = 0;
     long long indexFreeStorageSize = 0;
 
-    invariant(opCtx->lockState()->isDbLockedForMode(name().db(), MODE_IS));
+    invariant(opCtx->lockState()->isDbLockedForMode(name(), MODE_IS));
 
     catalog::forEachCollectionFromDb(
         opCtx, name(), MODE_IS, [&](const CollectionPtr& collection) -> bool {
@@ -402,26 +392,22 @@ void DatabaseImpl::getStats(OperationContext* opCtx,
 
     // Make sure that the same fields are returned for non-existing dbs
     // in `DBStats::errmsgRun`
-    output->appendNumber("collections", nCollections);
-    output->appendNumber("views", nViews);
-    output->appendNumber("objects", objects);
-    output->append("avgObjSize", objects == 0 ? 0 : double(size) / double(objects));
-    output->appendNumber("dataSize", size / scale);
-    output->appendNumber("storageSize", storageSize / scale);
+    output->setCollections(nCollections);
+    output->setViews(nViews);
+    output->setObjects(objects);
+    output->setAvgObjSize(objects ? (double(size) / double(objects)) : 0);
+    output->setDataSize(size / scale);
+    output->setStorageSize(storageSize / scale);
+
+    output->setIndexes(indexes);
+    output->setIndexSize(indexSize / scale);
+    output->setTotalSize((storageSize + indexSize) / scale);
     if (includeFreeStorage) {
-        output->appendNumber("freeStorageSize", freeStorageSize / scale);
-        output->appendNumber("indexes", indexes);
-        output->appendNumber("indexSize", indexSize / scale);
-        output->appendNumber("indexFreeStorageSize", indexFreeStorageSize / scale);
-        output->appendNumber("totalSize", (storageSize + indexSize) / scale);
-        output->appendNumber("totalFreeStorageSize",
-                             (freeStorageSize + indexFreeStorageSize) / scale);
-    } else {
-        output->appendNumber("indexes", indexes);
-        output->appendNumber("indexSize", indexSize / scale);
-        output->appendNumber("totalSize", (storageSize + indexSize) / scale);
+        output->setFreeStorageSize(freeStorageSize / scale);
+        output->setIndexFreeStorageSize(indexFreeStorageSize / scale);
+        output->setTotalFreeStorageSize((freeStorageSize + indexFreeStorageSize) / scale);
     }
-    output->appendNumber("scaleFactor", scale);
+    output->setScaleFactor(scale);
 
     if (!opCtx->getServiceContext()->getStorageEngine()->isEphemeral()) {
         boost::filesystem::path dbpath(
@@ -429,11 +415,11 @@ void DatabaseImpl::getStats(OperationContext* opCtx,
         boost::system::error_code ec;
         boost::filesystem::space_info spaceInfo = boost::filesystem::space(dbpath, ec);
         if (!ec) {
-            output->appendNumber("fsUsedSize", (spaceInfo.capacity - spaceInfo.available) / scale);
-            output->appendNumber("fsTotalSize", spaceInfo.capacity / scale);
+            output->setFsUsedSize((spaceInfo.capacity - spaceInfo.available) / scale);
+            output->setFsTotalSize(spaceInfo.capacity / scale);
         } else {
-            output->appendNumber("fsUsedSize", -1);
-            output->appendNumber("fsTotalSize", -1);
+            output->setFsUsedSize(-1);
+            output->setFsTotalSize(-1);
             LOGV2(20312,
                   "Failed to query filesystem disk stats (code: {ec_value}): {ec_message}",
                   "Failed to query filesystem disk stats",
@@ -444,7 +430,7 @@ void DatabaseImpl::getStats(OperationContext* opCtx,
 }
 
 Status DatabaseImpl::dropView(OperationContext* opCtx, NamespaceString viewName) const {
-    dassert(opCtx->lockState()->isDbLockedForMode(name().db(), MODE_IX));
+    dassert(opCtx->lockState()->isDbLockedForMode(name(), MODE_IX));
     dassert(opCtx->lockState()->isCollectionLockedForMode(viewName, MODE_IX));
     dassert(opCtx->lockState()->isCollectionLockedForMode(NamespaceString(_viewsName), MODE_X));
 
@@ -685,10 +671,11 @@ Status DatabaseImpl::_finishDropCollection(OperationContext* opCtx,
                 return;
             }
 
-            HistoricalIdentTracker::get(opCtx).recordDrop(ident, nss, uuid, commitTime.get());
+            HistoricalIdentTracker::get(opCtx).recordDrop(ident, nss, uuid, commitTime.value());
         });
 
-    CollectionCatalog::get(opCtx)->dropCollection(opCtx, collection);
+    CollectionCatalog::get(opCtx)->dropCollection(
+        opCtx, collection, opCtx->getServiceContext()->getStorageEngine()->supportsPendingDrops());
 
 
     return Status::OK();
@@ -747,16 +734,16 @@ Status DatabaseImpl::renameCollection(OperationContext* opCtx,
             writableCollection->getSharedIdent()->getIdent(),
             fromNss,
             writableCollection->uuid(),
-            commitTime.get());
+            commitTime.value());
 
         const auto readyIndexes = writableCollection->getIndexCatalog()->getAllReadyEntriesShared();
         for (const auto& readyIndex : readyIndexes) {
             HistoricalIdentTracker::get(opCtx).recordRename(
-                readyIndex->getIdent(), fromNss, writableCollection->uuid(), commitTime.get());
+                readyIndex->getIdent(), fromNss, writableCollection->uuid(), commitTime.value());
         }
 
         // Ban reading from this collection on committed reads on snapshots before now.
-        writableCollection->setMinimumVisibleSnapshot(commitTime.get());
+        writableCollection->setMinimumVisibleSnapshot(commitTime.value());
     });
 
     return status;
@@ -792,7 +779,7 @@ void DatabaseImpl::_checkCanCreateCollection(OperationContext* opCtx,
 Status DatabaseImpl::createView(OperationContext* opCtx,
                                 const NamespaceString& viewName,
                                 const CollectionOptions& options) const {
-    dassert(opCtx->lockState()->isDbLockedForMode(name().db(), MODE_IX));
+    dassert(opCtx->lockState()->isDbLockedForMode(name(), MODE_IX));
     dassert(opCtx->lockState()->isCollectionLockedForMode(viewName, MODE_IX));
     dassert(opCtx->lockState()->isCollectionLockedForMode(NamespaceString(_viewsName), MODE_X));
 
@@ -884,7 +871,7 @@ Collection* DatabaseImpl::createCollection(OperationContext* opCtx,
           "createCollection",
           "namespace"_attr = nss,
           "uuidDisposition"_attr = (generatedUUID ? "generated" : "provided"),
-          "uuid"_attr = optionsWithUUID.uuid.get(),
+          "uuid"_attr = optionsWithUUID.uuid.value(),
           "options"_attr = options);
 
     // Create Collection object
@@ -892,7 +879,7 @@ Collection* DatabaseImpl::createCollection(OperationContext* opCtx,
     std::pair<RecordId, std::unique_ptr<RecordStore>> catalogIdRecordStorePair =
         uassertStatusOK(storageEngine->getCatalog()->createCollection(
             opCtx, nss, optionsWithUUID, true /*allocateDefaultSpace*/));
-    auto catalogId = catalogIdRecordStorePair.first;
+    auto& catalogId = catalogIdRecordStorePair.first;
     std::shared_ptr<Collection> ownedCollection = Collection::Factory::get(opCtx)->make(
         opCtx, nss, catalogId, optionsWithUUID, std::move(catalogIdRecordStorePair.second));
     auto collection = ownedCollection.get();
@@ -928,7 +915,9 @@ Collection* DatabaseImpl::createCollection(OperationContext* opCtx,
     }
 
     if (MONGO_unlikely(createColumnIndex)) {
-        invariant(!internalQueryForceClassicEngine.load(),
+        invariant(ServerParameterSet::getNodeParameterSet()
+                          ->get<QueryFrameworkControl>("internalQueryFrameworkControl")
+                          ->_data.get() != QueryFrameworkControlEnum::kForceClassicEngine,
                   "Column Store Indexes failpoint in use without enabling SBE engine");
         uassertStatusOK(collection->getIndexCatalog()->createIndexOnEmptyCollection(
             opCtx, collection, kColumnStoreSpec));
@@ -950,57 +939,6 @@ Collection* DatabaseImpl::createCollection(OperationContext* opCtx,
     }
 
     return collection;
-}
-
-StatusWith<NamespaceString> DatabaseImpl::makeUniqueCollectionNamespace(
-    OperationContext* opCtx, StringData collectionNameModel) const {
-    invariant(opCtx->lockState()->isDbLockedForMode(name().db(), MODE_IX));
-
-    // There must be at least one percent sign in the collection name model.
-    auto numPercentSign = std::count(collectionNameModel.begin(), collectionNameModel.end(), '%');
-    if (numPercentSign == 0) {
-        return Status(ErrorCodes::FailedToParse,
-                      str::stream()
-                          << "Cannot generate collection name for temporary collection: "
-                             "model for collection name "
-                          << collectionNameModel << " must contain at least one percent sign.");
-    }
-
-    const auto charsToChooseFrom =
-        "0123456789"
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        "abcdefghijklmnopqrstuvwxyz"_sd;
-    invariant((10U + 26U * 2) == charsToChooseFrom.size());
-
-    stdx::lock_guard<Latch> lk(uniqueCollectionNamespaceMutex);
-
-    auto replacePercentSign = [&](char c) {
-        if (c != '%') {
-            return c;
-        }
-        auto i = uniqueCollectionNamespacePseudoRandom.nextInt32(charsToChooseFrom.size());
-        return charsToChooseFrom[i];
-    };
-
-    auto numGenerationAttempts = numPercentSign * charsToChooseFrom.size() * 100U;
-    for (decltype(numGenerationAttempts) i = 0; i < numGenerationAttempts; ++i) {
-        auto collectionName = collectionNameModel.toString();
-        std::transform(collectionName.begin(),
-                       collectionName.end(),
-                       collectionName.begin(),
-                       replacePercentSign);
-
-        NamespaceString nss(_name, collectionName);
-        if (!CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss)) {
-            return nss;
-        }
-    }
-
-    return Status(
-        ErrorCodes::NamespaceExists,
-        str::stream() << "Cannot generate collection name for temporary collection with model "
-                      << collectionNameModel << " after " << numGenerationAttempts
-                      << " attempts due to namespace conflicts with existing collections.");
 }
 
 void DatabaseImpl::checkForIdIndexesAndDropPendingCollections(OperationContext* opCtx) const {

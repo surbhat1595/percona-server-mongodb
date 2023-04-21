@@ -50,7 +50,6 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/timestamp_block.h"
-#include "mongo/db/sorter/sorter.h"
 #include "mongo/db/storage/execution_context.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/logv2/log.h"
@@ -100,6 +99,8 @@ public:
         builder.append("resumed", resumed.loadRelaxed());
         builder.append("filesOpenedForExternalSort", sorterFileStats.opened.loadRelaxed());
         builder.append("filesClosedForExternalSort", sorterFileStats.closed.loadRelaxed());
+        builder.append("spilledRanges", sorterTracker.spilledRanges.loadRelaxed());
+        builder.append("bytesSpilled", sorterTracker.bytesSpilled.loadRelaxed());
         return builder.obj();
     }
 
@@ -110,11 +111,15 @@ public:
     // This value should not exceed 'count'.
     AtomicWord<long long> resumed;
 
+    // Sorter statistics that are aggregate of all sorters.
+    SorterTracker sorterTracker;
+
     // Number of times the external sorter opened/closed a file handle to spill data to disk.
     // This pair of counters in aggregate indicate the number of open file handles used by
     // the external sorter and may be useful in diagnosing situations where the process is
     // close to exhausting this finite resource.
-    SorterFileStats sorterFileStats;
+    SorterFileStats sorterFileStats = {&sorterTracker};
+
 } indexBulkBuilderSSS;
 
 /**
@@ -128,12 +133,13 @@ bool isMultikeyFromPaths(const MultikeyPaths& multikeyPaths) {
                        [](const MultikeyComponents& components) { return !components.empty(); });
 }
 
-SortOptions makeSortOptions(size_t maxMemoryUsageBytes, StringData dbName) {
+SortOptions makeSortOptions(size_t maxMemoryUsageBytes, StringData dbName, SorterFileStats* stats) {
     return SortOptions()
         .TempDir(storageGlobalParams.dbpath + "/_tmp")
         .ExtSortAllowed()
         .MaxMemoryUsageBytes(maxMemoryUsageBytes)
-        .FileStats(&indexBulkBuilderSSS.sorterFileStats)
+        .FileStats(stats)
+        .Tracker(&indexBulkBuilderSSS.sorterTracker)
         .DBName(dbName.toString());
 }
 
@@ -438,7 +444,7 @@ RecordId SortedDataIndexAccessMethod::findSingle(OperationContext* opCtx,
 
     if (auto loc = _newInterface->findLoc(opCtx, actualKey)) {
         dassert(!loc->isNull());
-        return *loc;
+        return std::move(*loc);
     }
 
     return RecordId();
@@ -610,6 +616,55 @@ Ident* SortedDataIndexAccessMethod::getIdentPtr() const {
     return this->_newInterface.get();
 }
 
+void IndexAccessMethod::BulkBuilder::countNewBuildInStats() {
+    indexBulkBuilderSSS.count.addAndFetch(1);
+}
+
+void IndexAccessMethod::BulkBuilder::countResumedBuildInStats() {
+    indexBulkBuilderSSS.count.addAndFetch(1);
+    indexBulkBuilderSSS.resumed.addAndFetch(1);
+}
+
+SorterFileStats* IndexAccessMethod::BulkBuilder::bulkBuilderFileStats() {
+    return &indexBulkBuilderSSS.sorterFileStats;
+}
+
+SorterTracker* IndexAccessMethod::BulkBuilder::bulkBuilderTracker() {
+    return &indexBulkBuilderSSS.sorterTracker;
+}
+
+void IndexAccessMethod::BulkBuilder::yield(OperationContext* opCtx,
+                                           const Yieldable* yieldable,
+                                           const NamespaceString& ns) {
+    // Releasing locks means a new snapshot should be acquired when restored.
+    opCtx->recoveryUnit()->abandonSnapshot();
+    yieldable->yield();
+
+    auto locker = opCtx->lockState();
+    Locker::LockSnapshot snapshot;
+    if (locker->saveLockStateAndUnlock(&snapshot)) {
+
+        // Track the number of yields in CurOp.
+        CurOp::get(opCtx)->yielded();
+
+        auto failPointHang = [opCtx, &ns](FailPoint* fp) {
+            fp->executeIf(
+                [fp](auto&&) {
+                    LOGV2(5180600, "Hanging index build during bulk load yield");
+                    fp->pauseWhileSet();
+                },
+                [opCtx, &ns](auto&& config) {
+                    return config.getStringField("namespace") == ns.ns();
+                });
+        };
+        failPointHang(&hangDuringIndexBuildBulkLoadYield);
+        failPointHang(&hangDuringIndexBuildBulkLoadYieldSecond);
+
+        locker->restoreLockState(opCtx, snapshot);
+    }
+    yieldable->restore();
+}
+
 class SortedDataIndexAccessMethod::BulkBuilderImpl final : public IndexAccessMethod::BulkBuilder {
 public:
     using Sorter = mongo::Sorter<KeyString::Value, mongo::NullValue>;
@@ -646,9 +701,6 @@ public:
     IndexStateInfo persistDataForShutdown() final;
 
 private:
-    void _yield(OperationContext* opCtx,
-                const Yieldable* yieldable,
-                const NamespaceString& ns) const;
     void _insertMultikeyMetadataKeysIntoSorter();
 
     Sorter* _makeSorter(
@@ -689,7 +741,7 @@ SortedDataIndexAccessMethod::BulkBuilderImpl::BulkBuilderImpl(SortedDataIndexAcc
                                                               size_t maxMemoryUsageBytes,
                                                               StringData dbName)
     : _iam(iam), _sorter(_makeSorter(maxMemoryUsageBytes, dbName)) {
-    indexBulkBuilderSSS.count.addAndFetch(1);
+    countNewBuildInStats();
 }
 
 SortedDataIndexAccessMethod::BulkBuilderImpl::BulkBuilderImpl(SortedDataIndexAccessMethod* iam,
@@ -702,8 +754,7 @@ SortedDataIndexAccessMethod::BulkBuilderImpl::BulkBuilderImpl(SortedDataIndexAcc
       _keysInserted(stateInfo.getNumKeys().value_or(0)),
       _isMultiKey(stateInfo.getIsMultikey()),
       _indexMultikeyPaths(createMultikeyPaths(stateInfo.getMultikeyPaths())) {
-    indexBulkBuilderSSS.count.addAndFetch(1);
-    indexBulkBuilderSSS.resumed.addAndFetch(1);
+    countResumedBuildInStats();
 }
 
 Status SortedDataIndexAccessMethod::BulkBuilderImpl::insert(
@@ -731,7 +782,7 @@ Status SortedDataIndexAccessMethod::BulkBuilderImpl::insert(
                       &_multikeyMetadataKeys,
                       multikeyPaths.get(),
                       loc,
-                      [&](Status status, const BSONObj&, boost::optional<RecordId>) {
+                      [&](Status status, const BSONObj&, const boost::optional<RecordId>&) {
                           // If a key generation error was suppressed, record the document as
                           // "skipped" so the index builder can retry at a point when data is
                           // consistent.
@@ -825,46 +876,16 @@ SortedDataIndexAccessMethod::BulkBuilderImpl::_makeSorter(
     StringData dbName,
     boost::optional<StringData> fileName,
     const boost::optional<std::vector<SorterRange>>& ranges) const {
-    return fileName ? Sorter::makeFromExistingRanges(fileName->toString(),
-                                                     *ranges,
-                                                     makeSortOptions(maxMemoryUsageBytes, dbName),
-                                                     BtreeExternalSortComparison(),
-                                                     _makeSorterSettings())
-                    : Sorter::make(makeSortOptions(maxMemoryUsageBytes, dbName),
-                                   BtreeExternalSortComparison(),
-                                   _makeSorterSettings());
-}
-
-void SortedDataIndexAccessMethod::BulkBuilderImpl::_yield(OperationContext* opCtx,
-                                                          const Yieldable* yieldable,
-                                                          const NamespaceString& ns) const {
-    // Releasing locks means a new snapshot should be acquired when restored.
-    opCtx->recoveryUnit()->abandonSnapshot();
-    yieldable->yield();
-
-    auto locker = opCtx->lockState();
-    Locker::LockSnapshot snapshot;
-    if (locker->saveLockStateAndUnlock(&snapshot)) {
-
-        // Track the number of yields in CurOp.
-        CurOp::get(opCtx)->yielded();
-
-        auto failPointHang = [opCtx, &ns](FailPoint* fp) {
-            fp->executeIf(
-                [fp](auto&&) {
-                    LOGV2(5180600, "Hanging index build during bulk load yield");
-                    fp->pauseWhileSet();
-                },
-                [opCtx, &ns](auto&& config) {
-                    return config.getStringField("namespace") == ns.ns();
-                });
-        };
-        failPointHang(&hangDuringIndexBuildBulkLoadYield);
-        failPointHang(&hangDuringIndexBuildBulkLoadYieldSecond);
-
-        locker->restoreLockState(opCtx, snapshot);
-    }
-    yieldable->restore();
+    return fileName
+        ? Sorter::makeFromExistingRanges(
+              fileName->toString(),
+              *ranges,
+              makeSortOptions(maxMemoryUsageBytes, dbName, bulkBuilderFileStats()),
+              BtreeExternalSortComparison(),
+              _makeSorterSettings())
+        : Sorter::make(makeSortOptions(maxMemoryUsageBytes, dbName, bulkBuilderFileStats()),
+                       BtreeExternalSortComparison(),
+                       _makeSorterSettings());
 }
 
 Status SortedDataIndexAccessMethod::BulkBuilderImpl::commit(
@@ -979,7 +1000,7 @@ Status SortedDataIndexAccessMethod::BulkBuilderImpl::commit(
 
         // Starts yielding locks after the first non-zero 'yieldIterations' inserts.
         if (yieldIterations && (i + 1) % yieldIterations == 0) {
-            _yield(opCtx, &collection, ns);
+            yield(opCtx, &collection, ns);
         }
 
         // If we're here either it's a dup and we're cool with it or the addKey went just fine.
@@ -1008,7 +1029,7 @@ void SortedDataIndexAccessMethod::getKeys(OperationContext* opCtx,
                                           KeyStringSet* keys,
                                           KeyStringSet* multikeyMetadataKeys,
                                           MultikeyPaths* multikeyPaths,
-                                          boost::optional<RecordId> id,
+                                          const boost::optional<RecordId>& id,
                                           OnSuppressedErrorFn&& onSuppressedError) const {
     invariant(!id || _newInterface->rsKeyFormat() != KeyFormat::String || id->isStr(),
               fmt::format("RecordId is not in the same string format as its RecordStore; id: {}",

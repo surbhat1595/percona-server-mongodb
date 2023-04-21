@@ -83,11 +83,14 @@ public:
     }
 
     bool runWithRequestParser(OperationContext* opCtx,
-                              const std::string& dbName,
+                              const DatabaseName& dbName,
                               const BSONObj& cmdObj,
                               const RequestParser&,
                               BSONObjBuilder& output) final {
-        const NamespaceString nss(CommandHelpers::parseNsCollectionRequired(dbName, cmdObj));
+        // TODO SERVER-67519 Change CommandHelpers::parseNs* methods to construct NamespaceStrings
+        // with tenantId
+        const NamespaceString nss(
+            CommandHelpers::parseNsCollectionRequired(dbName.toStringWithTenantId(), cmdObj));
         LOGV2_DEBUG(22750,
                     1,
                     "createIndexes: {namespace} cmd: {command}",
@@ -95,7 +98,8 @@ public:
                     "namespace"_attr = nss,
                     "command"_attr = redact(cmdObj));
 
-        cluster::createDatabase(opCtx, dbName);
+        // TODO SERVER-67798 Change cluster::createDatabase to use DatabaseName
+        cluster::createDatabase(opCtx, dbName.toStringWithTenantId());
 
         auto targeter = ChunkManagerTargeter(opCtx, nss);
         auto routingInfo = targeter.getRoutingInfo();
@@ -136,7 +140,7 @@ public:
      * 'code' & 'codeName' are permitted in either scenario, but non-zero 'code' indicates "not ok".
      */
     void validateResult(const BSONObj& result) final {
-        auto ctx = IDLParserErrorContext("createIndexesReply");
+        auto ctx = IDLParserContext("createIndexesReply");
         if (checkIsErrorStatus(result, ctx)) {
             return;
         }
@@ -155,7 +159,7 @@ public:
             return;
         }
 
-        auto rawCtx = IDLParserErrorContext(kRawFieldName, &ctx);
+        auto rawCtx = IDLParserContext(kRawFieldName, &ctx);
         for (const auto& element : rawData.Obj()) {
             if (!rawCtx.checkAndAssertType(element, Object)) {
                 return;

@@ -35,9 +35,11 @@
 
 #pragma once
 
+#include <boost/optional.hpp>
 #include <cmath>
 #include <fmt/format.h>
 #include <functional>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <tuple>
@@ -51,6 +53,7 @@
 #include "mongo/logv2/log_detail.h"
 #include "mongo/unittest/bson_test_util.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/optional_util.h"
 #include "mongo/util/str.h"
 
 /**
@@ -148,6 +151,21 @@
  */
 #define ASSERT_THROWS(EXPRESSION, EXCEPTION_TYPE) \
     ASSERT_THROWS_WITH_CHECK(EXPRESSION, EXCEPTION_TYPE, ([](const EXCEPTION_TYPE&) {}))
+
+/**
+ * Verify that the evaluation of "EXPRESSION" does not throw any exceptions.
+ *
+ * If "EXPRESSION" throws an exception the test is considered a failure and further evaluation
+ * halts.
+ */
+#define ASSERT_DOES_NOT_THROW(EXPRESSION)                          \
+    try {                                                          \
+        EXPRESSION;                                                \
+    } catch (const AssertionException& e) {                        \
+        str::stream err;                                           \
+        err << "Threw an exception incorrectly: " << e.toString(); \
+        FAIL(err);                                                 \
+    }
 
 /**
  * Behaves like ASSERT_THROWS, above, but also fails if calling what() on the thrown exception
@@ -344,6 +362,13 @@
     UnitTest_SuiteName##SUITE_NAME##TestName##TEST_NAME
 
 namespace mongo::unittest {
+
+template <typename T>
+std::string extendedFormat(T&& t) {
+    std::ostringstream os;
+    os << optional_io::Extension{t};
+    return os.str();
+}
 
 bool searchRegex(const std::string& pattern, const std::string& string);
 
@@ -796,15 +821,8 @@ private:
                    name(),
                    aExpression,
                    bExpression,
-                   _stringify(a),
-                   _stringify(b)));
-    }
-
-    template <typename T>
-    static std::string _stringify(const T& t) {
-        std::ostringstream os;
-        os << t;
-        return os.str();
+                   extendedFormat(a),
+                   extendedFormat(b)));
     }
 
 public:

@@ -82,7 +82,6 @@
 #include "mongo/db/dbmessage.h"
 #include "mongo/db/encryption/error.h"
 #include "mongo/db/exec/working_set_common.h"
-#include "mongo/db/fcv_op_observer.h"
 #include "mongo/db/fle_crud.h"
 #include "mongo/db/free_mon/free_mon_mongod.h"
 #include "mongo/db/ftdc/ftdc_mongod.h"
@@ -92,7 +91,6 @@
 #include "mongo/db/index_builds_coordinator_mongod.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/initialize_server_global_state.h"
-#include "mongo/db/internal_transactions_reap_service.h"
 #include "mongo/db/introspect.h"
 #include "mongo/db/json.h"
 #include "mongo/db/keys_collection_client_direct.h"
@@ -108,8 +106,12 @@
 #include "mongo/db/mirror_maestro.h"
 #include "mongo/db/mongod_options.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer_impl.h"
-#include "mongo/db/op_observer_registry.h"
+#include "mongo/db/op_observer/fcv_op_observer.h"
+#include "mongo/db/op_observer/op_observer_impl.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
+#include "mongo/db/op_observer/oplog_writer_impl.h"
+#include "mongo/db/op_observer/oplog_writer_transaction_proxy.h"
+#include "mongo/db/op_observer/user_write_block_mode_op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/periodic_runner_job_abort_expired_transactions.h"
 #include "mongo/db/pipeline/change_stream_expired_pre_image_remover.h"
@@ -179,9 +181,9 @@
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/system_index.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/internal_transactions_reap_service.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/ttl.h"
-#include "mongo/db/user_write_block_mode_op_observer.h"
 #include "mongo/db/vector_clock_metadata_hook.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/network_connection_hook.h"
@@ -281,7 +283,7 @@ void logStartup(OperationContext* opCtx) {
     BSONObj o = toLog.obj();
 
     Lock::GlobalWrite lk(opCtx);
-    AutoGetDb autoDb(opCtx, startupLogCollectionName.db(), mongo::MODE_X);
+    AutoGetDb autoDb(opCtx, startupLogCollectionName.dbName(), mongo::MODE_X);
     auto db = autoDb.ensureDbExists(opCtx);
     CollectionPtr collection =
         CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, startupLogCollectionName);
@@ -647,11 +649,10 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     auto shardingInitialized = ShardingInitializationMongoD::get(startupOpCtx.get())
                                    ->initializeShardingAwarenessIfNeeded(startupOpCtx.get());
     if (shardingInitialized) {
-        auto status = waitForShardRegistryReload(startupOpCtx.get());
+        auto status = loadGlobalSettingsFromConfigServer(startupOpCtx.get());
         if (!status.isOK()) {
             LOGV2(20545,
-                  "Error loading shard registry at startup {error}",
-                  "Error loading shard registry at startup",
+                  "Error loading global settings from config server at startup",
                   "error"_attr = redact(status));
         }
     }
@@ -1142,7 +1143,8 @@ void setUpObservers(ServiceContext* serviceContext) {
     if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
         DurableHistoryRegistry::get(serviceContext)
             ->registerPin(std::make_unique<ReshardingHistoryHook>());
-        opObserverRegistry->addObserver(std::make_unique<OpObserverShardingImpl>());
+        opObserverRegistry->addObserver(std::make_unique<OpObserverShardingImpl>(
+            std::make_unique<OplogWriterTransactionProxy>(std::make_unique<OplogWriterImpl>())));
         opObserverRegistry->addObserver(std::make_unique<ShardServerOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ReshardingOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<repl::TenantMigrationDonorOpObserver>());
@@ -1153,11 +1155,13 @@ void setUpObservers(ServiceContext* serviceContext) {
             opObserverRegistry->addObserver(std::make_unique<ShardSplitDonorOpObserver>());
         }
     } else if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
-        opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>());
+        opObserverRegistry->addObserver(
+            std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
         opObserverRegistry->addObserver(std::make_unique<ConfigServerOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ReshardingOpObserver>());
     } else {
-        opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>());
+        opObserverRegistry->addObserver(
+            std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
         opObserverRegistry->addObserver(std::make_unique<repl::TenantMigrationDonorOpObserver>());
         opObserverRegistry->addObserver(
             std::make_unique<repl::TenantMigrationRecipientOpObserver>());

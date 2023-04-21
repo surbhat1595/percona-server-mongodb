@@ -49,6 +49,12 @@ namespace mongo {
 class Ticket;
 class ReaderWriterTicketHolder;
 
+/**
+ * A ticket mechanism is required for global lock acquisition to reduce contention on storage
+ * engine resources.
+ *
+ * Manages the distribution of tickets across operations.
+ */
 class TicketHolder {
     friend class Ticket;
 

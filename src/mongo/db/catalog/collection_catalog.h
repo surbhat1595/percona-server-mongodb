@@ -226,13 +226,30 @@ public:
                             const NamespaceString& fromCollection) const;
 
     /**
+     * Marks an index as dropped for this OperationContext. The drop will be committed into the
+     * catalog on commit.
+     *
+     * Maintains the index in a drop pending state in the catalog until the underlying data files
+     * are deleted.
+     *
+     * Must be called within a WriteUnitOfWork.
+     */
+    void dropIndex(OperationContext* opCtx,
+                   const NamespaceString& nss,
+                   std::shared_ptr<IndexCatalogEntry> indexEntry,
+                   bool isDropPending) const;
+
+    /**
      * Marks a collection as dropped for this OperationContext. Will cause the collection
      * to appear dropped for this OperationContext. The drop will be committed into the catalog on
      * commit.
      *
+     * Maintains the collection in a drop pending state in the catalog until the underlying data
+     * files are deleted.
+     *
      * Must be called within a WriteUnitOfWork.
      */
-    void dropCollection(OperationContext* opCtx, Collection* coll) const;
+    void dropCollection(OperationContext* opCtx, Collection* coll, bool isDropPending) const;
 
     /**
      * Initializes view records for database 'dbName'. Can throw a 'WriteConflictException' if this
@@ -258,8 +275,12 @@ public:
 
     /**
      * Deregister the collection.
+     *
+     * Adds the collection to the drop pending state in the catalog when isDropPending=true.
      */
-    std::shared_ptr<Collection> deregisterCollection(OperationContext* opCtx, const UUID& uuid);
+    std::shared_ptr<Collection> deregisterCollection(OperationContext* opCtx,
+                                                     const UUID& uuid,
+                                                     bool isDropPending);
 
     /**
      * Create a temporary record of an uncommitted view namespace to aid in detecting a simultaneous
@@ -278,11 +299,24 @@ public:
     void deregisterAllCollectionsAndViews();
 
     /**
+     * Adds the index entry to the drop pending state in the catalog.
+     */
+    void deregisterIndex(OperationContext* opCtx,
+                         std::shared_ptr<IndexCatalogEntry> indexEntry,
+                         bool isDropPending);
+
+    /**
      * Clears the in-memory state for the views associated with a particular database.
      *
      * Callers must re-fetch the catalog to observe changes.
      */
     void clearViews(OperationContext* opCtx, const DatabaseName& dbName) const;
+
+    /**
+     * Notifies the collection catalog that the data files for the drop pending ident have been
+     * removed from disk.
+     */
+    void notifyIdentDropped(const std::string& ident);
 
     /**
      * This function gets the Collection pointer that corresponds to the UUID.
@@ -522,20 +556,24 @@ public:
     boost::optional<std::string> lookupResourceName(const ResourceId& rid) const;
 
     /**
-     * Removes an existing ResourceId 'rid' with namespace 'entry' from the map.
-     *
-     * TODO SERVER-67442 Create versions of removeResource that take in NamespaceString and
-     * DatabaseName and make the method that takes in a string private.
+     * Removes an existing ResourceId 'rid' with namespace 'nss' from the map.
      */
-    void removeResource(const ResourceId& rid, const std::string& entry);
+    void removeResource(const ResourceId& rid, const NamespaceString& nss);
 
     /**
-     * Inserts a new ResourceId 'rid' into the map with namespace 'entry'.
-     *
-     * TODO SERVER-67442 Create versions of addResource that take in NamespaceString and
-     * DatabaseName and make the method that takes in a string private.
+     * Removes an existing ResourceId 'rid' with database name 'dbName' from the map.
      */
-    void addResource(const ResourceId& rid, const std::string& entry);
+    void removeResource(const ResourceId& rid, const DatabaseName& dbName);
+
+    /**
+     * Inserts a new ResourceId 'rid' into the map with namespace 'nss'.
+     */
+    void addResource(const ResourceId& rid, const NamespaceString& nss);
+
+    /**
+     * Inserts a new ResourceId 'rid' into the map with database name 'dbName'.
+     */
+    void addResource(const ResourceId& rid, const DatabaseName& dbName);
 
     /**
      * Ensures we have a MODE_X lock on a collection or MODE_IX lock for newly created collections.
@@ -585,6 +623,15 @@ private:
      */
     bool _alreadyClonedForBatchedWriter(const std::shared_ptr<Collection>& collection) const;
 
+    /**
+     * Inserts a new ResourceId 'rid' into the map with namespace 'entry'.
+     */
+    void _addResource(const ResourceId& rid, const std::string& entry);
+
+    /**
+     * Removes an existing ResourceId 'rid' with namespace 'entry' from the map.
+     */
+    void _removeResource(const ResourceId& rid, const std::string& entry);
 
     /**
      * Throws 'WriteConflictException' if given namespace is already registered with the catalog, as
@@ -622,6 +669,12 @@ private:
 
     // Map of database names to their corresponding views and other associated state.
     ViewsForDatabaseMap _viewsForDatabase;
+
+    // Map of drop pending idents to their instance of Collection/IndexCatalogEntry. To avoid
+    // affecting the lifetime and delay of the ident drop from the ident reaper, these need to be a
+    // weak_ptr.
+    StringMap<std::weak_ptr<Collection>> _dropPendingCollection;
+    StringMap<std::weak_ptr<IndexCatalogEntry>> _dropPendingIndex;
 
     // Incremented whenever the CollectionCatalog gets closed and reopened (onCloseCatalog and
     // onOpenCatalog).

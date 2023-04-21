@@ -322,7 +322,7 @@ auto authorizationManagerCreateRegistration =
 MONGO_FAIL_POINT_DEFINE(waitForUserCacheInvalidation);
 void handleWaitForUserCacheInvalidation(OperationContext* opCtx, const UserHandle& user) {
     auto fp = waitForUserCacheInvalidation.scopedIf([&](const auto& bsonData) {
-        IDLParserErrorContext ctx("waitForUserCacheInvalidation");
+        IDLParserContext ctx("waitForUserCacheInvalidation");
         auto data = WaitForUserCacheInvalidationFailPoint::parse(ctx, bsonData);
 
         const auto& blockedUserName = data.getUserName();
@@ -659,7 +659,7 @@ void AuthorizationManagerImpl::_pinnedUsersThreadRoutine() noexcept try {
             _pinnedUsersCond, lk, timeout, [&] { return _usersToPin.has_value(); });
 
         if (waitRes) {
-            usersToPin = std::move(_usersToPin.get());
+            usersToPin = std::move(_usersToPin.value());
             _usersToPin = boost::none;
         }
         lk.unlock();

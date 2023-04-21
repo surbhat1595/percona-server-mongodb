@@ -31,6 +31,8 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/s/resharding/resharding_cumulative_metrics.h"
+#include "mongo/db/s/resharding/resharding_metrics_field_name_provider.h"
 #include "mongo/db/s/resharding/resharding_metrics_helpers.h"
 #include "mongo/db/s/resharding/resharding_oplog_applier_progress_gen.h"
 #include "mongo/db/s/sharding_data_transform_instance_metrics.h"
@@ -41,10 +43,9 @@ namespace mongo {
 class ReshardingMetrics : public ShardingDataTransformInstanceMetrics {
 public:
     using State = stdx::variant<CoordinatorStateEnum, RecipientStateEnum, DonorStateEnum>;
-
     class DonorState {
     public:
-        using MetricsType = ShardingDataTransformCumulativeMetrics::DonorStateEnum;
+        using MetricsType = ReshardingCumulativeMetrics::DonorStateEnum;
 
         explicit DonorState(DonorStateEnum enumVal);
         MetricsType toMetrics() const;
@@ -56,7 +57,7 @@ public:
 
     class RecipientState {
     public:
-        using MetricsType = ShardingDataTransformCumulativeMetrics::RecipientStateEnum;
+        using MetricsType = ReshardingCumulativeMetrics::RecipientStateEnum;
 
         explicit RecipientState(RecipientStateEnum enumVal);
         MetricsType toMetrics() const;
@@ -68,7 +69,7 @@ public:
 
     class CoordinatorState {
     public:
-        using MetricsType = ShardingDataTransformCumulativeMetrics::CoordinatorStateEnum;
+        using MetricsType = ReshardingCumulativeMetrics::CoordinatorStateEnum;
 
         explicit CoordinatorState(CoordinatorStateEnum enumVal);
         MetricsType toMetrics() const;
@@ -78,6 +79,10 @@ public:
         CoordinatorStateEnum _enumVal;
     };
 
+    ReshardingMetrics(const CommonReshardingMetadata& metadata,
+                      Role role,
+                      ClockSource* clockSource,
+                      ShardingDataTransformCumulativeMetrics* cumulativeMetrics);
     ReshardingMetrics(UUID instanceId,
                       BSONObj shardKey,
                       NamespaceString nss,
@@ -85,10 +90,7 @@ public:
                       Date_t startTime,
                       ClockSource* clockSource,
                       ShardingDataTransformCumulativeMetrics* cumulativeMetrics);
-    ReshardingMetrics(const CommonReshardingMetadata& metadata,
-                      Role role,
-                      ClockSource* clockSource,
-                      ShardingDataTransformCumulativeMetrics* cumulativeMetrics);
+    ~ReshardingMetrics();
 
     static std::unique_ptr<ReshardingMetrics> makeInstance(UUID instanceId,
                                                            BSONObj shardKey,
@@ -122,28 +124,22 @@ public:
 
     template <typename T>
     void onStateTransition(T before, boost::none_t after) {
-        getCumulativeMetrics()->onStateTransition<typename T::MetricsType>(before.toMetrics(),
-                                                                           after);
+        getReshardingCumulativeMetrics()->onStateTransition<typename T::MetricsType>(
+            before.toMetrics(), after);
     }
 
     template <typename T>
     void onStateTransition(boost::none_t before, T after) {
         setState(after.getState());
-        getCumulativeMetrics()->onStateTransition<typename T::MetricsType>(before,
-                                                                           after.toMetrics());
+        getReshardingCumulativeMetrics()->onStateTransition<typename T::MetricsType>(
+            before, after.toMetrics());
     }
 
     template <typename T>
     void onStateTransition(T before, T after) {
         setState(after.getState());
-        getCumulativeMetrics()->onStateTransition<typename T::MetricsType>(before.toMetrics(),
-                                                                           after.toMetrics());
-    }
-
-    template <typename T>
-    void setState(T state) {
-        static_assert(std::is_assignable_v<State, T>);
-        _state.store(state);
+        getReshardingCumulativeMetrics()->onStateTransition<typename T::MetricsType>(
+            before.toMetrics(), after.toMetrics());
     }
 
     void accumulateFrom(const ReshardingOplogApplierProgress& progressDoc);
@@ -158,6 +154,9 @@ public:
     void restoreOplogEntriesApplied(int64_t numEntries);
     void onApplyingBegin();
     void onApplyingEnd();
+    void onLocalInsertDuringOplogFetching(Milliseconds elapsed);
+    void onBatchRetrievedDuringOplogApplying(Milliseconds elapsed);
+    void onOplogLocalBatchApplied(Milliseconds elapsed);
 
     Seconds getApplyingElapsedTimeSecs() const;
     Date_t getApplyingBegin() const;
@@ -166,19 +165,6 @@ public:
 
 protected:
     virtual StringData getStateString() const noexcept override;
-
-    static constexpr auto kInsertsApplied = "insertsApplied";
-    static constexpr auto kUpdatesApplied = "updatesApplied";
-    static constexpr auto kDeletesApplied = "deletesApplied";
-    static constexpr auto kOplogEntriesApplied = "oplogEntriesApplied";
-    static constexpr auto kOplogEntriesFetched = "oplogEntriesFetched";
-    static constexpr auto kApplyTimeElapsed = "totalApplyTimeElapsedSecs";
-    static constexpr auto kAllShardsLowestRemainingOperationTimeEstimatedSecs =
-        "allShardsLowestRemainingOperationTimeEstimatedSecs";
-    static constexpr auto kAllShardsHighestRemainingOperationTimeEstimatedSecs =
-        "allShardsHighestRemainingOperationTimeEstimatedSecs";
-    static constexpr auto kRemainingOpTimeEstimated = "remainingOperationTimeEstimatedSecs";
-
     void restoreApplyingBegin(Date_t date);
     void restoreApplyingEnd(Date_t date);
 
@@ -186,6 +172,13 @@ private:
     std::string createOperationDescription() const noexcept override;
     void restoreRecipientSpecificFields(const ReshardingRecipientDocument& document);
     void restoreCoordinatorSpecificFields(const ReshardingCoordinatorDocument& document);
+    ReshardingCumulativeMetrics* getReshardingCumulativeMetrics();
+
+    template <typename T>
+    void setState(T state) {
+        static_assert(std::is_assignable_v<State, T>);
+        _state.store(state);
+    }
 
     template <typename T>
     void restoreRoleSpecificFields(const T& document) {
@@ -238,6 +231,10 @@ private:
     AtomicWord<int64_t> _oplogEntriesFetched;
     AtomicWord<Date_t> _applyingStartTime;
     AtomicWord<Date_t> _applyingEndTime;
+
+    ReshardingMetricsFieldNameProvider* _reshardingFieldNames;
+
+    ShardingDataTransformInstanceMetrics::UniqueScopedObserver _scopedObserver;
 };
 
 }  // namespace mongo

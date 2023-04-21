@@ -87,10 +87,11 @@
 #include "mongo/db/stats/resource_consumption_metrics.h"
 #include "mongo/db/stats/server_read_concern_metrics.h"
 #include "mongo/db/stats/top.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction_validation.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/logv2/log.h"
+#include "mongo/rpc/check_allowed_op_query_cmd.h"
 #include "mongo/rpc/factory.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/message.h"
@@ -101,7 +102,6 @@
 #include "mongo/rpc/metadata/tracking_metadata.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/reply_builder_interface.h"
-#include "mongo/rpc/warn_unsupported_wire_ops.h"
 #include "mongo/s/shard_cannot_refresh_due_to_locks_held_exception.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/transport/hello_metrics.h"
@@ -143,17 +143,18 @@ using namespace fmt::literals;
 
 Future<void> runCommandInvocation(std::shared_ptr<RequestExecutionContext> rec,
                                   std::shared_ptr<CommandInvocation> invocation) {
-    auto threadingModel = [client = rec->getOpCtx()->getClient()] {
+    auto useDedicatedThread = [&] {
+        auto client = rec->getOpCtx()->getClient();
         if (auto context = transport::ServiceExecutorContext::get(client); context) {
-            return context->getThreadingModel();
+            return context->useDedicatedThread();
         }
         tassert(5453901,
                 "Threading model may only be absent for internal and direct clients",
                 !client->hasRemote() || client->isInDirectClient());
-        return transport::ServiceExecutor::ThreadingModel::kDedicated;
+        return true;
     }();
     return CommandHelpers::runCommandInvocation(
-        std::move(rec), std::move(invocation), threadingModel);
+        std::move(rec), std::move(invocation), useDedicatedThread);
 }
 
 /*
@@ -322,7 +323,7 @@ StatusWith<repl::ReadConcernArgs> _extractReadConcern(OperationContext* opCtx,
                     const auto readConcernSource = rwcDefaults.getDefaultReadConcernSource();
                     customDefaultWasApplied =
                         (readConcernSource &&
-                         readConcernSource.get() == DefaultReadConcernSourceEnum::kGlobal);
+                         readConcernSource.value() == DefaultReadConcernSourceEnum::kGlobal);
 
                     applyDefaultReadConcern(*rcDefault);
                 }
@@ -832,7 +833,7 @@ Future<void> InvokeCommand::run() {
     return makeReadyFutureWith([&] {
                auto execContext = _ecd->getExecutionContext();
                // TODO SERVER-53761: find out if we can do this more asynchronously. The client
-               // Strand is locked to current thread in ServiceStateMachine::Impl::startNewLoop().
+               // Strand is locked to current thread in SessionWorkflow::Impl::startNewLoop().
                tenant_migration_access_blocker::checkIfCanReadOrBlock(execContext->getOpCtx(),
                                                                       execContext->getRequest())
                    .get(execContext->getOpCtx());
@@ -1407,7 +1408,7 @@ void ExecCommandDatabase::_initiateCommand() {
                 str::stream() << "Command " << command->getName()
                               << " is not supported in multitenancy mode",
                 command->allowedWithSecurityToken());
-        _tokenAuthorizationSessionGuard.emplace(opCtx, request.validatedTenancyScope.get());
+        _tokenAuthorizationSessionGuard.emplace(opCtx, request.validatedTenancyScope.value());
     }
 
     if (isHello()) {
@@ -1678,8 +1679,8 @@ void ExecCommandDatabase::_initiateCommand() {
             : _invocation->ns();
 
         boost::optional<ChunkVersion> shardVersion;
-        if (auto shardVersionElem = request.body[ChunkVersion::kShardVersionField]) {
-            shardVersion = ChunkVersion::parse(shardVersionElem);
+        if (auto shardVersionElem = request.body[ShardVersion::kShardVersionField]) {
+            shardVersion = ShardVersion::parse(shardVersionElem);
         }
 
         boost::optional<DatabaseVersion> databaseVersion;
@@ -2091,8 +2092,6 @@ Future<DbResponse> receivedCommands(std::shared_ptr<HandleRequest::ExecutionCont
 
             auto opCtx = execContext->getOpCtx();
             BSONObjBuilder metadataBob;
-            execContext->behaviors->appendReplyMetadataOnError(opCtx, &metadataBob);
-
             BSONObjBuilder extraFieldsBuilder;
             appendClusterAndOperationTime(
                 opCtx, &extraFieldsBuilder, &metadataBob, LogicalTime::kUninitialized);
@@ -2130,9 +2129,6 @@ struct QueryOpRunner : SynchronousOpRunner {
     using SynchronousOpRunner::SynchronousOpRunner;
     DbResponse runSync() override {
         invariant(!executionContext->nsString().isCommand());
-
-        globalOpCounters.gotQueryDeprecated();
-        warnUnsupportedOp(executionContext->client(), networkOpToString(dbQuery));
         return makeErrorResponseToUnsupportedOpQuery("OP_QUERY is no longer supported");
     }
 };
@@ -2140,8 +2136,6 @@ struct QueryOpRunner : SynchronousOpRunner {
 struct GetMoreOpRunner : SynchronousOpRunner {
     using SynchronousOpRunner::SynchronousOpRunner;
     DbResponse runSync() override {
-        globalOpCounters.gotGetMoreDeprecated();
-        warnUnsupportedOp(executionContext->client(), networkOpToString(dbGetMore));
         return makeErrorResponseToUnsupportedOpQuery("OP_GET_MORE is no longer supported");
     }
 };
@@ -2161,7 +2155,6 @@ struct FireAndForgetOpRunner : SynchronousOpRunner {
 struct KillCursorsOpRunner : FireAndForgetOpRunner {
     using FireAndForgetOpRunner::FireAndForgetOpRunner;
     void runAndForget() override {
-        globalOpCounters.gotKillCursorsDeprecated();
         uasserted(5745703, "OP_KILL_CURSORS is no longer supported");
     }
 };
@@ -2169,9 +2162,6 @@ struct KillCursorsOpRunner : FireAndForgetOpRunner {
 struct InsertOpRunner : FireAndForgetOpRunner {
     using FireAndForgetOpRunner::FireAndForgetOpRunner;
     void runAndForget() override {
-        auto insertOp = InsertOp::parseLegacy(executionContext->getMessage());
-        const auto nDocs = insertOp.getDocuments().size();
-        globalOpCounters.gotInsertsDeprecated(nDocs);
         uasserted(5745702, "OP_INSERT is no longer supported");
     }
 };
@@ -2179,7 +2169,6 @@ struct InsertOpRunner : FireAndForgetOpRunner {
 struct UpdateOpRunner : FireAndForgetOpRunner {
     using FireAndForgetOpRunner::FireAndForgetOpRunner;
     void runAndForget() override {
-        globalOpCounters.gotUpdateDeprecated();
         uasserted(5745701, "OP_UPDATE is no longer supported");
     }
 };
@@ -2187,7 +2176,6 @@ struct UpdateOpRunner : FireAndForgetOpRunner {
 struct DeleteOpRunner : FireAndForgetOpRunner {
     using FireAndForgetOpRunner::FireAndForgetOpRunner;
     void runAndForget() override {
-        globalOpCounters.gotDeleteDeprecated();
         uasserted(5745700, "OP_DELETE is no longer supported");
     }
 };
@@ -2234,7 +2222,6 @@ std::unique_ptr<HandleRequest::OpRunner> HandleRequest::makeOpRunner() {
 }
 
 DbResponse FireAndForgetOpRunner::runSync() {
-    warnUnsupportedOp(executionContext->client(), networkOpToString(executionContext->op()));
     runAndForget();
     return {};
 }
@@ -2348,8 +2335,7 @@ Future<DbResponse> ServiceEntryPointCommon::handleRequest(
                     invocation && !invocation->isSafeForBorrowedThreads()) {
                     // If the last command wasn't safe for a borrowed thread, then let's move
                     // off of it.
-                    seCtx->setThreadingModel(
-                        transport::ServiceExecutor::ThreadingModel::kDedicated);
+                    seCtx->setUseDedicatedThread(true);
                 }
             }
 

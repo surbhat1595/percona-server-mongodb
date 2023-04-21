@@ -40,7 +40,7 @@
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/document_source_add_fields.h"
 #include "mongo/db/pipeline/document_source_find_and_modify_image_lookup.h"
@@ -175,7 +175,7 @@ void checkForHolesAndOverlapsInChunks(std::vector<ReshardedChunk>& chunks,
         if (prevMax) {
             uassert(ErrorCodes::BadValue,
                     "Chunk ranges must be contiguous",
-                    SimpleBSONObjComparator::kInstance.evaluate(prevMax.get() == chunk.getMin()));
+                    SimpleBSONObjComparator::kInstance.evaluate(prevMax.value() == chunk.getMin()));
         }
         prevMax = boost::optional<BSONObj>(chunk.getMax());
     }
@@ -202,7 +202,7 @@ Timestamp getHighestMinFetchTimestamp(const std::vector<DonorShardEntry>& donorS
         uassert(4957300,
                 "All donors must have a minFetchTimestamp, but donor {} does not."_format(
                     StringData{donor.getId()}),
-                donorFetchTimestamp.is_initialized());
+                donorFetchTimestamp.has_value());
         if (maxMinFetchTimestamp < donorFetchTimestamp.value()) {
             maxMinFetchTimestamp = donorFetchTimestamp.value();
         }
@@ -221,7 +221,7 @@ void checkForOverlappingZones(std::vector<ReshardingZoneType>& zones) {
         if (prevMax) {
             uassert(ErrorCodes::BadValue,
                     "Zone ranges must not overlap",
-                    SimpleBSONObjComparator::kInstance.evaluate(prevMax.get() <= zone.getMin()));
+                    SimpleBSONObjComparator::kInstance.evaluate(prevMax.value() <= zone.getMin()));
         }
         prevMax = boost::optional<BSONObj>(zone.getMax());
     }

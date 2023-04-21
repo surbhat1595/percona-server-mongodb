@@ -30,7 +30,6 @@
 
 #include "mongo/platform/basic.h"
 
-#include <boost/optional/optional_io.hpp>
 #include <vector>
 
 #include "mongo/db/auth/authorization_session.h"
@@ -47,8 +46,8 @@
 #include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/session_catalog_mongod.h"
-#include "mongo/db/session_txn_record_gen.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/session_txn_record_gen.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/vector_clock_metadata_hook.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
@@ -179,7 +178,7 @@ protected:
     }
 
     LogicalSessionId getTxnRecordLsid(BSONObj txnRecord) {
-        return SessionTxnRecord::parse(IDLParserErrorContext("ReshardingTxnClonerTest"), txnRecord)
+        return SessionTxnRecord::parse(IDLParserContext("ReshardingTxnClonerTest"), txnRecord)
             .getSessionId();
     }
 
@@ -262,9 +261,9 @@ protected:
         auto bsonOplog = client.findOne(std::move(findCmd));
         ASSERT(!bsonOplog.isEmpty());
         auto oplogEntry = repl::MutableOplogEntry::parse(bsonOplog).getValue();
-        ASSERT_EQ(oplogEntry.getTxnNumber().get(), txnNum);
+        ASSERT_EQ(oplogEntry.getTxnNumber().value(), txnNum);
         ASSERT_BSONOBJ_EQ(oplogEntry.getObject(), BSON("$sessionMigrateInfo" << 1));
-        ASSERT_BSONOBJ_EQ(oplogEntry.getObject2().get(), BSON("$incompleteOplogHistory" << 1));
+        ASSERT_BSONOBJ_EQ(oplogEntry.getObject2().value(), BSON("$incompleteOplogHistory" << 1));
         ASSERT(oplogEntry.getOpType() == repl::OpTypeEnum::kNoop);
 
         auto bsonTxn =
@@ -272,7 +271,7 @@ protected:
                            BSON(SessionTxnRecord::kSessionIdFieldName << sessionId.toBSON()));
         ASSERT(!bsonTxn.isEmpty());
         auto txn = SessionTxnRecord::parse(
-            IDLParserErrorContext("resharding config transactions cloning test"), bsonTxn);
+            IDLParserContext("resharding config transactions cloning test"), bsonTxn);
         ASSERT_EQ(txn.getTxnNum(), txnNum);
         ASSERT_EQ(txn.getLastWriteOpTime(), oplogEntry.getOpTime());
     }
@@ -303,8 +302,8 @@ protected:
             return boost::none;
         }
 
-        return ReshardingTxnClonerProgress::parse(
-            IDLParserErrorContext("ReshardingTxnClonerProgress"), progressDoc);
+        return ReshardingTxnClonerProgress::parse(IDLParserContext("ReshardingTxnClonerProgress"),
+                                                  progressDoc);
     }
 
     boost::optional<LogicalSessionId> getProgressLsid(const ReshardingSourceId& sourceId) {
@@ -355,8 +354,8 @@ protected:
         std::shared_ptr<executor::ThreadPoolTaskExecutor> cleanupExecutor,
         boost::optional<CancellationToken> customCancelToken = boost::none) {
         // Allows callers to control the cancellation of the cloner's run() function when specified.
-        auto cancelToken = customCancelToken.is_initialized()
-            ? customCancelToken.get()
+        auto cancelToken = customCancelToken.has_value()
+            ? customCancelToken.value()
             : operationContext()->getCancellationToken();
 
         auto cancelableOpCtxExecutor = std::make_shared<ThreadPool>([] {

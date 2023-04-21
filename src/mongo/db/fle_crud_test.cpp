@@ -385,7 +385,7 @@ EncryptedFieldConfig getTestEncryptedFieldConfig() {
     ]
 })";
 
-    return EncryptedFieldConfig::parse(IDLParserErrorContext("root"), fromjson(schema));
+    return EncryptedFieldConfig::parse(IDLParserContext("root"), fromjson(schema));
 }
 
 void FleCrudTest::assertDocumentCounts(uint64_t edc, uint64_t esc, uint64_t ecc, uint64_t ecoc) {
@@ -547,7 +547,7 @@ void FleCrudTest::doSingleUpdateWithUpdateDoc(int id,
     auto efc = getTestEncryptedFieldConfig();
     auto doc = EncryptionInformationHelpers::encryptionInformationSerializeForDelete(
         _edcNs, efc, &_keyVault);
-    auto ei = EncryptionInformation::parse(IDLParserErrorContext("test"), doc);
+    auto ei = EncryptionInformation::parse(IDLParserContext("test"), doc);
 
     write_ops::UpdateOpEntry entry;
     entry.setQ(BSON("_id" << id));
@@ -574,7 +574,7 @@ void FleCrudTest::doSingleDelete(int id) {
     auto doc = EncryptionInformationHelpers::encryptionInformationSerializeForDelete(
         _edcNs, efc, &_keyVault);
 
-    auto ei = EncryptionInformation::parse(IDLParserErrorContext("test"), doc);
+    auto ei = EncryptionInformation::parse(IDLParserContext("test"), doc);
 
     write_ops::DeleteOpEntry entry;
     entry.setQ(BSON("_id" << id));
@@ -598,7 +598,7 @@ void FleCrudTest::doFindAndModify(write_ops::FindAndModifyCommandRequest& reques
     auto efc = getTestEncryptedFieldConfig();
     auto doc = EncryptionInformationHelpers::encryptionInformationSerializeForDelete(
         _edcNs, efc, &_keyVault);
-    auto ei = EncryptionInformation::parse(IDLParserErrorContext("test"), doc);
+    auto ei = EncryptionInformation::parse(IDLParserContext("test"), doc);
 
     request.setEncryptionInformation(ei);
 
@@ -1105,6 +1105,48 @@ TEST_F(FleCrudTest, FindAndModify_SetSafeContent) {
     ASSERT_THROWS_CODE(doFindAndModify(req), DBException, 6666200);
 }
 
+BSONObj makeInsertUpdatePayload(StringData path, const UUID& uuid) {
+    // Actual values don't matter for these tests (apart from indexKeyId).
+    auto bson = FLE2InsertUpdatePayload({}, {}, {}, {}, uuid, BSONType::String, {}, {}).toBSON();
+    std::vector<std::uint8_t> bindata;
+    bindata.resize(bson.objsize() + 1);
+    bindata[0] = static_cast<std::uint8_t>(EncryptedBinDataType::kFLE2InsertUpdatePayload);
+    memcpy(bindata.data() + 1, bson.objdata(), bson.objsize());
+
+    BSONObjBuilder bob;
+    bob.appendBinData(path, bindata.size(), BinDataType::Encrypt, bindata.data());
+    return bob.obj();
+}
+
+TEST(FleCrudTest, validateIndexKeyValid) {
+    // This test assumes we have at least one field in EFC.
+    auto fields = getTestEncryptedFieldConfig().getFields();
+    ASSERT_GTE(fields.size(), 1);
+    auto field = fields[0];
+
+    auto validInsert = makeInsertUpdatePayload(field.getPath(), field.getKeyId());
+    auto validPayload = EDCServerCollection::getEncryptedFieldInfo(validInsert);
+    validateInsertUpdatePayloads(fields, validPayload);
+}
+
+TEST(FleCrudTest, validateIndexKeyInvalid) {
+    // This test assumes we have at least one field in EFC.
+    auto fields = getTestEncryptedFieldConfig().getFields();
+    ASSERT_GTE(fields.size(), 1);
+    auto field = fields[0];
+
+    auto invalidInsert = makeInsertUpdatePayload(field.getPath(), UUID::gen());
+    auto invalidPayload = EDCServerCollection::getEncryptedFieldInfo(invalidInsert);
+    ASSERT_THROWS_WITH_CHECK(validateInsertUpdatePayloads(fields, invalidPayload),
+                             DBException,
+                             [&](const DBException& ex) {
+                                 ASSERT_STRING_CONTAINS(ex.what(),
+                                                        str::stream()
+                                                            << "Mismatched keyId for field '"
+                                                            << field.getPath() << "'");
+                             });
+}
+
 TEST_F(FleTagsTest, InsertOne) {
     auto doc = BSON("encrypted"
                     << "a");
@@ -1186,7 +1228,7 @@ TEST_F(FleTagsTest, InsertAndUpdate) {
 }
 
 TEST_F(FleTagsTest, ContentionFactor) {
-    auto efc = EncryptedFieldConfig::parse(IDLParserErrorContext("root"), fromjson(R"({
+    auto efc = EncryptedFieldConfig::parse(IDLParserContext("root"), fromjson(R"({
         "escCollection": "esc",
         "eccCollection": "ecc",
         "ecocCollection": "ecoc",

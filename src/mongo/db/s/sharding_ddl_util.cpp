@@ -40,7 +40,6 @@
 #include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/sharding_logging.h"
 #include "mongo/db/s/sharding_util.h"
-#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/db/write_block_bypass.h"
 #include "mongo/logv2/log.h"
@@ -175,6 +174,93 @@ void setAllowMigrations(OperationContext* opCtx,
     }
 }
 
+
+// Check that the collection UUID is the same in every shard knowing the collection
+void checkCollectionUUIDConsistencyAcrossShards(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    const UUID& collectionUuid,
+    const std::vector<mongo::ShardId>& shardIds,
+    std::shared_ptr<executor::ScopedTaskExecutor> executor) {
+    const BSONObj filterObj = BSON("name" << nss.coll());
+    BSONObj cmdObj = BSON("listCollections" << 1 << "filter" << filterObj);
+
+    auto responses = sharding_ddl_util::sendAuthenticatedCommandToShards(
+        opCtx, nss.db().toString(), cmdObj, shardIds, **executor);
+
+    struct MismatchedShard {
+        std::string shardId;
+        std::string uuid;
+    };
+
+    std::vector<MismatchedShard> mismatches;
+
+    for (auto cmdResponse : responses) {
+        auto responseData = uassertStatusOK(cmdResponse.swResponse);
+        auto collectionVector = responseData.data.firstElement()["firstBatch"].Array();
+        auto shardId = cmdResponse.shardId;
+
+        if (collectionVector.empty()) {
+            // Collection does not exist on the shard
+            continue;
+        }
+
+        auto bsonCollectionUuid = collectionVector.front()["info"]["uuid"];
+        if (collectionUuid.data() != bsonCollectionUuid.uuid()) {
+            mismatches.push_back({shardId.toString(), bsonCollectionUuid.toString()});
+        }
+    }
+
+    if (!mismatches.empty()) {
+        std::stringstream errorMessage;
+        errorMessage << "The collection " << nss.toString()
+                     << " with expected UUID: " << collectionUuid.toString()
+                     << " has different UUIDs on the following shards: [";
+
+        for (auto mismatch : mismatches) {
+            errorMessage << "{ " << mismatch.shardId << ":" << mismatch.uuid << " },";
+        }
+        errorMessage << "]";
+        uasserted(ErrorCodes::InvalidUUID, errorMessage.str());
+    }
+}
+
+
+// Check the collection does not exist in any shard when `dropTarget` is set to false
+void checkTargetCollectionDoesNotExistInCluster(
+    OperationContext* opCtx,
+    const NamespaceString& toNss,
+    const std::vector<mongo::ShardId>& shardIds,
+    std::shared_ptr<executor::ScopedTaskExecutor> executor) {
+    const BSONObj filterObj = BSON("name" << toNss.coll());
+    BSONObj cmdObj = BSON("listCollections" << 1 << "filter" << filterObj);
+
+    auto responses = sharding_ddl_util::sendAuthenticatedCommandToShards(
+        opCtx, toNss.db(), cmdObj, shardIds, **executor);
+
+    std::vector<std::string> shardsContainingTargetCollection;
+    for (auto cmdResponse : responses) {
+        uassertStatusOK(cmdResponse.swResponse);
+        auto responseData = uassertStatusOK(cmdResponse.swResponse);
+        auto collectionVector = responseData.data.firstElement()["firstBatch"].Array();
+
+        if (!collectionVector.empty()) {
+            shardsContainingTargetCollection.push_back(cmdResponse.shardId.toString());
+        }
+    }
+
+    if (!shardsContainingTargetCollection.empty()) {
+        std::stringstream errorMessage;
+        errorMessage << "The collection " << toNss.toString()
+                     << " already exists in the following shards: [";
+        std::move(shardsContainingTargetCollection.begin(),
+                  shardsContainingTargetCollection.end(),
+                  std::ostream_iterator<std::string>(errorMessage, ", "));
+        errorMessage << "]";
+        uasserted(ErrorCodes::NamespaceExists, errorMessage.str());
+    }
+}
+
 }  // namespace
 
 void linearizeCSRSReads(OperationContext* opCtx) {
@@ -195,23 +281,12 @@ std::vector<AsyncRequestsSender::Response> sendAuthenticatedCommandToShards(
     const BSONObj& command,
     const std::vector<ShardId>& shardIds,
     const std::shared_ptr<executor::TaskExecutor>& executor) {
-    // TODO SERVER-57519: remove the following scope
-    {
-        // Ensure ShardRegistry is initialized before using the AsyncRequestsSender that relies on
-        // unsafe functions (SERVER-57280)
-        auto shardRegistry = Grid::get(opCtx)->shardRegistry();
-        if (!shardRegistry->isUp()) {
-            shardRegistry->reload(opCtx);
-        }
-    }
 
     // The AsyncRequestsSender ignore impersonation metadata so we need to manually attach them to
     // the command
     BSONObjBuilder bob(command);
     rpc::writeAuthDataToImpersonatedUserMetadata(opCtx, &bob);
-    if (gFeatureFlagUserWriteBlocking.isEnabled(serverGlobalParams.featureCompatibility)) {
-        WriteBlockBypass::get(opCtx).writeAsMetadata(&bob);
-    }
+    WriteBlockBypass::get(opCtx).writeAsMetadata(&bob);
     auto authenticatedCommand = bob.obj();
     return sharding_util::sendCommandToShards(
         opCtx, dbName, authenticatedCommand, shardIds, executor);
@@ -347,6 +422,24 @@ void shardedRenameMetadata(OperationContext* opCtx,
         opCtx, CollectionType::ConfigNS, fromCollType.toBSON(), writeConcern));
 }
 
+void checkCatalogConsistencyAcrossShardsForRename(
+    OperationContext* opCtx,
+    const NamespaceString& fromNss,
+    const NamespaceString& toNss,
+    const bool dropTarget,
+    std::shared_ptr<executor::ScopedTaskExecutor> executor) {
+
+    auto participants = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
+
+    auto sourceCollUuid = *getCollectionUUID(opCtx, fromNss);
+    checkCollectionUUIDConsistencyAcrossShards(
+        opCtx, fromNss, sourceCollUuid, participants, executor);
+
+    if (!dropTarget) {
+        checkTargetCollectionDoesNotExistInCluster(opCtx, toNss, participants, executor);
+    }
+}
+
 void checkRenamePreconditions(OperationContext* opCtx,
                               bool sourceIsSharded,
                               const NamespaceString& toNss,
@@ -465,7 +558,7 @@ void performNoopRetryableWriteOnShards(OperationContext* opCtx,
 
     sharding_ddl_util::sendAuthenticatedCommandToShards(
         opCtx,
-        updateOp.getDbName(),
+        updateOp.getDbName().db(),
         CommandHelpers::appendMajorityWriteConcern(updateOp.toBSON(osi.toBSON())),
         shardIds,
         executor);
@@ -475,8 +568,8 @@ void performNoopMajorityWriteLocally(OperationContext* opCtx) {
     const auto updateOp = buildNoopWriteRequestCommand();
 
     DBDirectClient client(opCtx);
-    const auto commandResponse =
-        client.runCommand(OpMsgRequest::fromDBAndBody(updateOp.getDbName(), updateOp.toBSON({})));
+    const auto commandResponse = client.runCommand(
+        OpMsgRequest::fromDBAndBody(updateOp.getDbName().db(), updateOp.toBSON({})));
 
     const auto commandReply = commandResponse->getCommandReply();
     uassertStatusOK(getStatusFromWriteCommandReply(commandReply));

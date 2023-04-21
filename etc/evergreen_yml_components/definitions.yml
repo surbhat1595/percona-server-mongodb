@@ -45,9 +45,6 @@ parameters:
 - key: antithesis_image_tag
   description: "The docker tag to use when pushing images to Antithesis"
 
-- key: burn_in_tests
-  description: "Comma separated list of jstests to include when running burn_in_tests"
-
 ## Cron parameters.
 - key: project_required_suggested_cron
   value: "0 */4 * * *" # Every 4 hours starting at 0000 UTC
@@ -1038,36 +1035,6 @@ functions:
       files:
       - src/generated_resmoke_config/*.json
 
-  "generate burn in tags":
-  - *f_expansions_write
-  - *configure_evergreen_api_credentials
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-      - "./src/evergreen/burn_in_tests_generate.sh"
-  - command: archive.targz_pack
-    params:
-      target: burn_in_tags_gen.tgz
-      source_dir: src/generated_burn_in_tags_config
-      include:
-      - "*"
-  - command: s3.put
-    params:
-      aws_key: ${aws_key}
-      aws_secret: ${aws_secret}
-      local_file: burn_in_tags_gen.tgz
-      remote_file: ${project}/${build_variant}/${revision}/burn_in_tags_gen/burn_in_tags_gen-${build_id}.tgz
-      bucket: mciuploads
-      permissions: public-read
-      content_type: application/gzip
-      display_name: Burn_in_tags Task Config - Execution ${execution}
-  - command: generate.tasks
-    params:
-      files:
-      - src/generated_burn_in_tags_config/burn_in_tags_gen.json
-
   "generate resmoke tasks":
   - *fetch_artifacts
   - *f_expansions_write
@@ -1505,19 +1472,14 @@ functions:
       - "./src/evergreen/powercycle_exit.sh"
 
   "run packager.py":
+  - *get_version_expansions
+  - *apply_version_expansions
   - *f_expansions_write
   - command: subprocess.exec
     params:
       binary: bash
       args:
       - "./src/evergreen/packager.py_run.sh"
-
-  "do snmp setup":
-    command: subprocess.exec
-    params:
-      binary: bash
-      args:
-      - "./src/evergreen/do_snmp_setup.sh"
 
   "do watchdog setup":
     command: subprocess.exec
@@ -2224,6 +2186,14 @@ tasks:
         archive-dist-test
       task_compile_flags: >-
         PREFIX=dist-test
+  - command: subprocess.exec
+    params:
+      binary: bash
+      add_expansions_to_env: true
+      args:
+      - "src/evergreen/run_python_script.sh"
+      - "evergreen/macos_notary.py"
+      - "mongodb-binaries.${ext|tgz}"
 
   - command: s3.put
     params:
@@ -3208,46 +3178,11 @@ tasks:
       args:
       - "src/evergreen/check_idl_compat.sh"
 
-- name: burn_in_tests_gen
+- <<: *gen_task_template
+  name: burn_in_tests_gen
   tags: []
   commands:
-  - command: manifest.load
-  - func: "git get project and add git tag"
-  - *f_expansions_write
-  - *kill_processes
-  - *cleanup_environment
-  - func: "set up venv"
-  - func: "upload pip requirements"
-  - func: "configure evergreen api credentials"
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-      - "src/evergreen/burn_in_tests.sh"
-      env:
-        BURN_IN_TESTS: ${burn_in_tests}
-  - command: archive.targz_pack
-    params:
-      target: src/burn_in_tests_gen.tgz
-      source_dir: src
-      include:
-      - burn_in_tests_gen.json
-
-  - command: s3.put
-    params:
-      aws_key: ${aws_key}
-      aws_secret: ${aws_secret}
-      local_file: src/burn_in_tests_gen.tgz
-      remote_file: ${project}/${build_variant}/${revision}/burn_in_tests_gen/burn_in_tests_gen-${build_id}.tgz
-      bucket: mciuploads
-      permissions: public-read
-      content_type: application/gzip
-      display_name: Burn_in_tests Task Config - Execution ${execution}
-  - command: generate.tasks
-    params:
-      files:
-      - src/burn_in_tests_gen.json
+  - func: "generate resmoke tasks"
 
 - <<: *benchmark_template
   name: benchmarks_orphaned
@@ -3257,7 +3192,7 @@ tasks:
   - func: "run tests"
     vars:
       suite: benchmarks
-      exec_timeout_secs: 14400  # 4 hour timeout.
+      exec_timeout_secs: 18000  # 5 hour timeout.
       resmoke_jobs_max: 1
   - func: "send benchmark results"
 #  - func: "analyze benchmark results"
@@ -3472,6 +3407,21 @@ tasks:
       num_files: 5
       num_tasks: 5
       jstestfuzz_vars: --diffTestingMode wildcard
+      npm_command: agg-fuzzer
+      suite: generational_fuzzer
+      resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
+
+## Standalone fuzzer for checking columnstore index correctness ##
+- <<: *jstestfuzz_template
+  name: aggregation_columnstore_fuzzer_gen
+  tags: ["aggfuzzer", "common", "columnstore", "require_npm", "random_name", "sbe_only", "feature_flag_guarded"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      <<: *jstestfuzz_config_vars
+      num_files: 5
+      num_tasks: 5
+      jstestfuzz_vars: --diffTestingMode columnstore
       npm_command: agg-fuzzer
       suite: generational_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
@@ -4293,25 +4243,11 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
 
-- name: burn_in_tags_gen
+- <<: *gen_task_template
+  name: burn_in_tags_gen
   tags: []
-  depends_on:
-  - name: archive_dist_test
   commands:
-  - command: manifest.load
-  - func: "git get project and add git tag"
-  - *f_expansions_write
-  - *kill_processes
-  - *cleanup_environment
-  - func: "set up venv"
-  - func: "upload pip requirements"
-  - func: "configure evergreen api credentials"
-  - func: "generate burn in tags"
-    vars:
-      max_revisions: 25
-      repeat_tests_secs: 600
-      repeat_tests_min: 2
-      repeat_tests_max: 1000
+  - func: "generate resmoke tasks"
 
 - name: version_gen
   commands:
@@ -5039,10 +4975,23 @@ tasks:
 
 - <<: *task_template
   name: replica_sets_kill_secondaries_jscore_passthrough
-  tags: ["replica_sets", "san", "large", "non_live_record"]
+  tags: ["replica_sets", "san", "large", "non_live_record", "ignore_on_code_coverage"]
   commands:
   - func: "do setup"
   - func: "run tests"
+
+- <<: *task_template
+  name: jsCore_column_store_indexes
+  # TODO SERVER-61644 Remove the 'feature_flag_guarded' tag and ensure this suite is run on all
+  # variants.
+  depends_on:
+  - name: jsCore
+  tags: ["jscore", "sbe_only", "feature_flag_guarded"]
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+    vars:
+      suite: core_column_store_indexes
 
 - <<: *task_template
   name: mongosTest
@@ -5678,12 +5627,13 @@ tasks:
     vars:
       use_large_distro: "true"
 
-- <<: *task_template
-  name: write_concern_majority_passthrough
+- <<: *gen_task_template
+  name: write_concern_majority_passthrough_gen
   tags: ["read_write_concern", "large", "write"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
 
 - <<: *task_template
   name: cwrwc_passthrough
@@ -5870,17 +5820,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       use_large_distro: "true"
-
-- <<: *task_template
-  name: snmp
-  tags: []
-  commands:
-  - *f_expansions_write
-  - func: "do setup"
-  - func: "do snmp setup"
-  - func: "run tests"
-    vars:
-      snmp_config_path: SNMPCONFPATH=snmpconf
 
 - <<: *gen_task_template
   name: ssl_gen
@@ -6687,6 +6626,8 @@ tasks:
   commands:
   - command: manifest.load
   - func: "git get project and add git tag"
+  - func: "get version expansions"
+  - func: "apply version expansions"
   - func: "f_expansions_write"
   - func: "kill processes"
   - func: "cleanup environment"
@@ -7171,6 +7112,9 @@ tasks:
   - func: "upload pip requirements"
   - func: "get buildnumber"
   - func: "f_expansions_write"
+  - func: "get version expansions"
+  - func: "apply version expansions"
+  - func: "f_expansions_write"
   - func: "generate compile expansions"
   - func: "apply compile expansions"
   - func: "f_expansions_write"
@@ -7292,6 +7236,13 @@ tasks:
 
 - <<: *task_template
   name: cqf
+  tags: []
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
+- <<: *task_template
+  name: cqf_disabled_pipeline_opt
   tags: []
   commands:
   - func: "do setup"
@@ -7547,6 +7498,19 @@ task_groups:
   - compile_all
   - package
 
+# The *no_unittests_TG taskgroups remove compile/run unittests to work around
+# limitations in the size of debug info. See SERVER-68024.
+- <<: *compile_task_group_template
+  name: compile_test_and_package_serial_no_unittests_TG
+  tasks:
+  - compile_dist_test
+  - archive_dist_test
+  - archive_dist_test_debug
+  - compile_dbtest
+  - run_dbtest
+  - archive_dbtest
+  - package
+
 - <<: *compile_task_group_template
   name: compile_test_benchmark_and_package_serial_TG
   tasks:
@@ -7559,7 +7523,18 @@ task_groups:
   - run_dbtest
   - archive_dbtest
   - compile_upload_benchmarks
-  - compile_all
+  - package
+
+- <<: *compile_task_group_template
+  name: compile_test_benchmark_and_package_serial_no_unittests_TG
+  tasks:
+  - compile_dist_test
+  - archive_dist_test
+  - archive_dist_test_debug
+  - compile_dbtest
+  - run_dbtest
+  - archive_dbtest
+  - compile_upload_benchmarks
   - package
 
 - <<: *compile_task_group_template

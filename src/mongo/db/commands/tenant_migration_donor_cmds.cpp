@@ -191,7 +191,7 @@ public:
                     optionalDonor);
 
             // Retrieve the shared_ptr from boost::optional to improve readability
-            auto donorPtr = optionalDonor.get();
+            auto donorPtr = optionalDonor.value();
 
             // always ensure we wait for the initial state document to be inserted.
             donorPtr->getInitialStateDocumentDurableFuture().get(opCtx);
@@ -204,7 +204,7 @@ public:
                         durableState->state == TenantMigrationDonorStateEnum::kAborted);
 
             donorPtr->onReceiveDonorForgetMigration();
-            donorPtr->getCompletionFuture().get(opCtx);
+            donorPtr->getForgetMigrationDurableFuture().get(opCtx);
         }
 
     private:
@@ -281,7 +281,7 @@ public:
             }
 
             // Retrieve the shared_ptr from boost::optional to improve readability
-            auto donorPtr = optionalDonor.get();
+            auto donorPtr = optionalDonor.value();
 
             donorPtr->onReceiveDonorAbortMigration();
             donorPtr->getDecisionFuture().get(opCtx);

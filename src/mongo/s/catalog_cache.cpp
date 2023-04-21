@@ -30,6 +30,7 @@
 #include "mongo/s/catalog_cache.h"
 
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/curop.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/repl/optime_with.h"
 #include "mongo/logv2/log.h"
@@ -109,7 +110,7 @@ std::shared_ptr<RoutingTableHistory> createUpdatedRoutingTableHistory(
             return 0;
         }
         if (collectionAndChunks.maxChunkSizeBytes) {
-            invariant(collectionAndChunks.maxChunkSizeBytes.get() > 0);
+            invariant(collectionAndChunks.maxChunkSizeBytes.value() > 0);
             return uint64_t(*collectionAndChunks.maxChunkSizeBytes);
         }
         return boost::none;
@@ -256,6 +257,11 @@ StatusWith<CachedDatabaseInfo> CatalogCache::getDatabase(OperationContext* opCtx
             "SERVER-37398.");
     }
 
+    Timer t{};
+    ScopeGuard finishTiming([&] {
+        CurOp::get(opCtx)->debug().catalogCacheDatabaseLookupMillis += Milliseconds(t.millis());
+    });
+
     try {
         auto dbEntry = _databaseCache.acquire(opCtx, dbName, CacheCausalConsistency::kLatestKnown);
         uassert(ErrorCodes::NamespaceNotFound,
@@ -294,6 +300,12 @@ StatusWith<ChunkManager> CatalogCache::_getCollectionRoutingInfoAt(
             }
             return swDbInfo.getStatus();
         }
+
+        Timer curOpTimer{};
+        ScopeGuard finishTiming([&] {
+            CurOp::get(opCtx)->debug().catalogCacheCollectionLookupMillis +=
+                Milliseconds(curOpTimer.millis());
+        });
 
         const auto dbInfo = std::move(swDbInfo.getValue());
 
@@ -419,7 +431,7 @@ void CatalogCache::onStaleDatabaseVersion(const StringData dbName,
                                           const boost::optional<DatabaseVersion>& databaseVersion) {
     if (databaseVersion) {
         const auto version =
-            ComparableDatabaseVersion::makeComparableDatabaseVersion(databaseVersion.get());
+            ComparableDatabaseVersion::makeComparableDatabaseVersion(databaseVersion.value());
         LOGV2_FOR_CATALOG_REFRESH(4899101,
                                   2,
                                   "Registering new database version",

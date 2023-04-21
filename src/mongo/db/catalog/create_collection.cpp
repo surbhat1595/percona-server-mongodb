@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/catalog/create_collection.h"
 
 #include <fmt/printf.h>
@@ -41,6 +38,7 @@
 #include "mongo/db/catalog/collection_catalog_helper.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/index_key_validate.h"
+#include "mongo/db/catalog/unique_collection_name.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/create_gen.h"
 #include "mongo/db/concurrency/exception_util.h"
@@ -50,11 +48,12 @@
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/insert.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_options.h"
@@ -69,7 +68,6 @@ namespace mongo {
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(failTimeseriesViewCreation);
-MONGO_FAIL_POINT_DEFINE(failPreimagesCollectionCreation);
 MONGO_FAIL_POINT_DEFINE(clusterAllCollectionsByDefault);
 
 using IndexVersion = IndexDescriptor::IndexVersion;
@@ -159,12 +157,12 @@ Status _createView(OperationContext* opCtx,
             !nss.isSystemDotViews());
 
     return writeConflictRetry(opCtx, "create", nss.ns(), [&] {
-        AutoGetDb autoDb(opCtx, nss.db(), MODE_IX);
+        AutoGetDb autoDb(opCtx, nss.dbName(), MODE_IX);
         Lock::CollectionLock collLock(opCtx, nss, MODE_IX);
         // Operations all lock system.views in the end to prevent deadlock.
         Lock::CollectionLock systemViewsLock(
             opCtx,
-            NamespaceString(nss.db(), NamespaceString::kSystemDotViewsCollectionName),
+            NamespaceString(nss.dbName(), NamespaceString::kSystemDotViewsCollectionName),
             MODE_X);
 
         auto db = autoDb.ensureDbExists(opCtx);
@@ -174,6 +172,8 @@ Status _createView(OperationContext* opCtx,
             return Status(ErrorCodes::NotWritablePrimary,
                           str::stream() << "Not primary while creating collection " << nss);
         }
+
+        CollectionShardingState::get(opCtx, nss)->checkShardVersionOrThrow(opCtx);
 
         if (collectionOptions.changeStreamPreAndPostImagesOptions.getEnabled()) {
             return Status(ErrorCodes::InvalidOptions,
@@ -256,9 +256,24 @@ Status _createTimeseries(OperationContext* opCtx,
 
     CollectionOptions options = optionsArg;
 
-    // Users may not pass a 'bucketMaxSpanSeconds' other than the default. Instead they should rely
-    // on the default behavior from the 'granularity'.
+    // TODO (SERVER-67598) Modify this comment as it will be out of date.
+    // Users may not pass a 'bucketMaxSpanSeconds' or 'bucketRoundingSeconds' other than the
+    // default. Instead they should rely on the default behavior from the 'granularity'.
     auto granularity = options.timeseries->getGranularity();
+    if (feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
+            serverGlobalParams.featureCompatibility) &&
+        options.timeseries->getBucketRoundingSeconds()) {
+        uassert(
+            6759501,
+            "Timeseries 'bucketMaxSpanSeconds' needs to be set alongside 'bucketRoundingSeconds'",
+            options.timeseries->getBucketMaxSpanSeconds());
+
+        auto roundingSeconds = timeseries::getBucketRoundingSecondsFromGranularity(granularity);
+        // TODO (SERVER-67598): add checks for bucketRoundingSeconds (that it divides evenly and is
+        // less than bucketMaxSpanSeconds)
+        options.timeseries->setBucketRoundingSeconds(roundingSeconds);
+    }
+
     auto maxSpanSeconds = timeseries::getMaxSpanSecondsFromGranularity(granularity);
     uassert(5510500,
             fmt::format("Timeseries 'bucketMaxSpanSeconds' is not configurable to a value other "
@@ -313,7 +328,7 @@ Status _createTimeseries(OperationContext* opCtx,
 
     Status ret =
         writeConflictRetry(opCtx, "createBucketCollection", bucketsNs.ns(), [&]() -> Status {
-            AutoGetDb autoDb(opCtx, bucketsNs.db(), MODE_IX);
+            AutoGetDb autoDb(opCtx, bucketsNs.dbName(), MODE_IX);
             Lock::CollectionLock bucketsCollLock(opCtx, bucketsNs, MODE_X);
             auto db = autoDb.ensureDbExists(opCtx);
 
@@ -333,6 +348,8 @@ Status _createTimeseries(OperationContext* opCtx,
                 return Status(ErrorCodes::NotWritablePrimary,
                               str::stream() << "Not primary while creating collection " << ns);
             }
+
+            CollectionShardingState::get(opCtx, bucketsNs)->checkShardVersionOrThrow(opCtx);
 
             WriteUnitOfWork wuow(opCtx);
             AutoStatsTracker bucketsStatsTracker(
@@ -415,6 +432,7 @@ Status _createTimeseries(OperationContext* opCtx,
                     str::stream() << "Not primary while creating collection " << ns};
         }
 
+        CollectionShardingState::get(opCtx, ns)->checkShardVersionOrThrow(opCtx);
 
         _createSystemDotViewsIfNecessary(opCtx, db);
 
@@ -470,7 +488,7 @@ Status _createCollection(OperationContext* opCtx,
                          const CollectionOptions& collectionOptions,
                          const boost::optional<BSONObj>& idIndex) {
     return writeConflictRetry(opCtx, "create", nss.ns(), [&] {
-        AutoGetDb autoDb(opCtx, nss.db(), MODE_IX);
+        AutoGetDb autoDb(opCtx, nss.dbName(), MODE_IX);
         Lock::CollectionLock collLock(opCtx, nss, MODE_IX);
         auto db = autoDb.ensureDbExists(opCtx);
 
@@ -480,16 +498,6 @@ Status _createCollection(OperationContext* opCtx,
         Status status = catalog::checkIfNamespaceExists(opCtx, nss);
         if (!status.isOK()) {
             return status;
-        }
-
-        // If the FCV has changed while executing the command to the version, where the feature flag
-        // is disabled, enabling changeStreamPreAndPostImagesOptions is not allowed.
-        // TODO SERVER-58584: remove the feature flag.
-        if (!feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabled(
-                serverGlobalParams.featureCompatibility) &&
-            collectionOptions.changeStreamPreAndPostImagesOptions.getEnabled()) {
-            return Status(ErrorCodes::InvalidOptions,
-                          "The 'changeStreamPreAndPostImages' is an unknown field.");
         }
 
         if (!collectionOptions.clusteredIndex && collectionOptions.expireAfterSeconds) {
@@ -539,6 +547,8 @@ Status _createCollection(OperationContext* opCtx,
                           str::stream() << "Not primary while creating collection " << nss);
         }
 
+        CollectionShardingState::get(opCtx, nss)->checkShardVersionOrThrow(opCtx);
+
         WriteUnitOfWork wunit(opCtx);
 
         AutoStatsTracker statsTracker(
@@ -575,7 +585,7 @@ CollectionOptions clusterByDefaultIfNecessary(const NamespaceString& nss,
                                               CollectionOptions collectionOptions,
                                               const boost::optional<BSONObj>& idIndex) {
     if (MONGO_unlikely(clusterAllCollectionsByDefault.shouldFail()) &&
-        !collectionOptions.isView() && !collectionOptions.clusteredIndex.is_initialized() &&
+        !collectionOptions.isView() && !collectionOptions.clusteredIndex.has_value() &&
         (!idIndex || idIndex->isEmpty()) && !collectionOptions.capped &&
         !clustered_util::requiresLegacyFormat(nss) &&
         feature_flags::gClusteredIndexes.isEnabled(serverGlobalParams.featureCompatibility)) {
@@ -665,32 +675,14 @@ Status createCollection(OperationContext* opCtx,
     return createCollection(opCtx, ns, options, idIndex);
 }
 
-void createChangeStreamPreImagesCollection(OperationContext* opCtx) {
-    uassert(5868501,
-            "Failpoint failPreimagesCollectionCreation enabled. Throwing exception",
-            !MONGO_unlikely(failPreimagesCollectionCreation.shouldFail()));
-
-    const auto nss = NamespaceString::kChangeStreamPreImagesNamespace;
-    CollectionOptions preImagesCollectionOptions;
-
-    // Make the collection clustered by _id.
-    preImagesCollectionOptions.clusteredIndex.emplace(
-        clustered_util::makeCanonicalClusteredInfoForLegacyFormat());
-    const auto status = _createCollection(opCtx, nss, preImagesCollectionOptions, BSONObj());
-    uassert(status.code(),
-            str::stream() << "Failed to create the pre-images collection: " << nss.coll()
-                          << causedBy(status.reason()),
-            status.isOK() || status.code() == ErrorCodes::NamespaceExists);
-}
-
-// TODO SERVER-62880 pass DatabaseName instead of dbName.
+// TODO SERVER-62395 Pass DatabaseName instead of dbName, and pass to isDbLockedForMode.
 Status createCollectionForApplyOps(OperationContext* opCtx,
                                    const std::string& dbName,
                                    const boost::optional<UUID>& ui,
                                    const BSONObj& cmdObj,
                                    const bool allowRenameOutOfTheWay,
                                    const boost::optional<BSONObj>& idIndex) {
-    invariant(opCtx->lockState()->isDbLockedForMode(dbName, MODE_IX));
+    invariant(opCtx->lockState()->isDbLockedForMode(DatabaseName(boost::none, dbName), MODE_IX));
 
     const NamespaceString newCollName(CommandHelpers::parseNsCollectionRequired(dbName, cmdObj));
     auto newCmd = cmdObj;
@@ -706,7 +698,7 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
     // create a database, which could result in createCollection failing if the database
     // does not yet exist.
     if (ui) {
-        auto uuid = ui.get();
+        auto uuid = ui.value();
         uassert(ErrorCodes::InvalidUUID,
                 "Invalid UUID in applyOps create command: " + uuid.toString(),
                 uuid.isRFC4122v4());
@@ -743,7 +735,7 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
                                 << ". Future collection name: " << newCollName);
 
         for (int tries = 0; needsRenaming && tries < 10; ++tries) {
-            auto tmpNameResult = db->makeUniqueCollectionNamespace(opCtx, "tmp%%%%%.create");
+            auto tmpNameResult = makeUniqueCollectionName(opCtx, tenantDbName, "tmp%%%%%.create");
             if (!tmpNameResult.isOK()) {
                 return tmpNameResult.getStatus().withContext(str::stream()
                                                              << "Cannot generate temporary "

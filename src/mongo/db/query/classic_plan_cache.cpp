@@ -129,7 +129,8 @@ bool shouldCacheQuery(const CanonicalQuery& query) {
     const MatchExpression* expr = query.root();
 
     if (!query.getSortPattern() && expr->matchType() == MatchExpression::AND &&
-        expr->numChildren() == 0) {
+        expr->numChildren() == 0 &&
+        !(feature_flags::gFeatureFlagSbeFull.isEnabledAndIgnoreFCV() && query.isSbeCompatible())) {
         return false;
     }
 
@@ -151,8 +152,8 @@ bool shouldCacheQuery(const CanonicalQuery& query) {
     //
     // There is one exception: $lookup's implementation in the DocumentSource engine relies on
     // caching the plan on the inner side in order to avoid repeating the planning process for every
-    // document on the outer side. To ensure that the 'executionTimeMillis' value is accurate for
-    // $lookup, we allow the inner side to use the cache even if the query is an explain.
+    // document on the outer side. To ensure that the 'executionTime' value is accurate for $lookup,
+    // we allow the inner side to use the cache even if the query is an explain.
     tassert(6497600, "expCtx is null", query.getExpCtxRaw());
     if (query.getExplain() && !query.getExpCtxRaw()->inLookup) {
         return false;

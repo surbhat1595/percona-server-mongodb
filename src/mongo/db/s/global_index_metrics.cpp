@@ -60,7 +60,15 @@ GlobalIndexMetrics::GlobalIndexMetrics(UUID instanceId,
                                            role,
                                            startTime,
                                            clockSource,
-                                           cumulativeMetrics} {}
+                                           cumulativeMetrics,
+                                           std::make_unique<GlobalIndexMetricsFieldNameProvider>()},
+      _scopedObserver(registerInstanceMetrics()) {}
+
+GlobalIndexMetrics::~GlobalIndexMetrics() {
+    // Deregister the observer first to ensure that the observer will no longer be able to reach
+    // this object while destructor is running.
+    _scopedObserver.reset();
+}
 
 std::string GlobalIndexMetrics::createOperationDescription() const noexcept {
     return fmt::format("GlobalIndexMetrics{}Service {}",

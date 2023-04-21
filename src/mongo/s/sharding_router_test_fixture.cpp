@@ -62,7 +62,6 @@
 #include "mongo/s/client/shard_factory.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/client/shard_remote.h"
-#include "mongo/s/committed_optime_metadata_hook.h"
 #include "mongo/s/config_server_catalog_cache_loader.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/query/cluster_cursor_manager.h"
@@ -107,7 +106,6 @@ ShardingTestFixture::ShardingTestFixture()
     auto makeMetadataHookList = [&] {
         auto hookList = std::make_unique<rpc::EgressMetadataHookList>();
         hookList->addHook(std::make_unique<rpc::VectorClockMetadataHook>(service));
-        hookList->addHook(std::make_unique<rpc::CommittedOpTimeMetadataHook>(service));
         hookList->addHook(std::make_unique<rpc::ClientMetadataPropagationEgressHook>());
         return hookList;
     };
@@ -159,7 +157,7 @@ ShardingTestFixture::ShardingTestFixture()
     auto shardFactory =
         std::make_unique<ShardFactory>(std::move(buildersMap), std::move(targeterFactory));
 
-    auto shardRegistry(std::make_unique<ShardRegistry>(std::move(shardFactory), configCS));
+    auto shardRegistry(std::make_unique<ShardRegistry>(service, std::move(shardFactory), configCS));
     executorPool->startup();
 
     CatalogCacheLoader::set(service, std::make_unique<ConfigServerCatalogCacheLoader>());
@@ -261,7 +259,7 @@ void ShardingTestFixture::expectGetShards(const std::vector<ShardType>& shards) 
 
         ASSERT_BSONOBJ_EQ(query->getFilter(), BSONObj());
         ASSERT_BSONOBJ_EQ(query->getSort(), BSONObj());
-        ASSERT_FALSE(query->getLimit().is_initialized());
+        ASSERT_FALSE(query->getLimit().has_value());
 
         checkReadConcern(request.cmdObj,
                          VectorClock::kInitialComponentTime.asTimestamp(),

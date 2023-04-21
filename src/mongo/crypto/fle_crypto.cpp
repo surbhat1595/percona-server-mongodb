@@ -48,7 +48,6 @@
 #include "mongo/base/data_range.h"
 #include "mongo/base/data_range_cursor.h"
 #include "mongo/base/data_type_endian.h"
-#include "mongo/base/data_type_validated.h"
 #include "mongo/base/data_view.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -65,13 +64,13 @@
 #include "mongo/crypto/encryption_fields_util.h"
 #include "mongo/crypto/fle_data_frames.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
+#include "mongo/crypto/fle_fields_util.h"
 #include "mongo/crypto/sha256_block.h"
 #include "mongo/crypto/symmetric_key.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/idl/basic_types.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/platform/random.h"
-#include "mongo/rpc/object_check.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/scopeguard.h"
@@ -154,17 +153,6 @@ PrfBlock blockToArray(const SHA256Block& block) {
     return data;
 }
 
-}  // namespace
-
-PrfBlock PrfBlockfromCDR(ConstDataRange block) {
-    uassert(6373501, "Invalid prf length", block.length() == sizeof(PrfBlock));
-
-    PrfBlock ret;
-    std::copy(block.data(), block.data() + block.length(), ret.data());
-    return ret;
-}
-
-namespace {
 ConstDataRange hmacKey(const KeyMaterial& keyMaterial) {
     static_assert(kHmacKeyOffset + crypto::sym256KeySize <= crypto::kFieldLevelEncryptionKeySize);
     invariant(crypto::kFieldLevelEncryptionKeySize == keyMaterial->size());
@@ -208,13 +196,6 @@ PrfBlock prf(ConstDataRange key, uint64_t value, int64_t value2) {
     return blockToArray(block);
 }
 
-ConstDataRange binDataToCDR(const BSONElement element) {
-    uassert(6338501, "Expected binData BSON element", element.type() == BinData);
-
-    int len;
-    const char* data = element.binData(len);
-    return ConstDataRange(data, data + len);
-}
 
 ConstDataRange binDataToCDR(const BSONBinData binData) {
     int len = binData.length;
@@ -251,14 +232,6 @@ void appendTag(PrfBlock block, BSONArrayBuilder* builder) {
     builder->appendBinData(block.size(), BinDataType::BinDataGeneral, block.data());
 }
 
-template <typename T>
-T parseFromCDR(ConstDataRange cdr) {
-    ConstDataRangeCursor cdc(cdr);
-    auto obj = cdc.readAndAdvance<Validated<BSONObj>>();
-
-    IDLParserErrorContext ctx("root");
-    return T::parse(ctx, obj);
-}
 
 std::vector<uint8_t> vectorFromCDR(ConstDataRange cdr) {
     std::vector<uint8_t> buf(cdr.length());
@@ -1192,6 +1165,14 @@ std::vector<uint8_t> toEncryptedVector(EncryptedBinDataType dt, const PrfBlock& 
     return buf;
 }
 
+PrfBlock PrfBlockfromCDR(const ConstDataRange& block) {
+    uassert(6373501, "Invalid prf length", block.length() == sizeof(PrfBlock));
+
+    PrfBlock ret;
+    std::copy(block.data(), block.data() + block.length(), ret.data());
+    return ret;
+}
+
 CollectionsLevel1Token FLELevel1TokenGenerator::generateCollectionsLevel1Token(
     FLEIndexKey indexKey) {
     return prf(hmacKey(indexKey.data), kLevel1Collection);
@@ -1815,7 +1796,7 @@ BSONObj ECOCCollection::generateDocument(StringData fieldName, ConstDataRange pa
 }
 
 ECOCCompactionDocument ECOCCollection::parseAndDecrypt(const BSONObj& doc, ECOCToken token) {
-    IDLParserErrorContext ctx("root");
+    IDLParserContext ctx("root");
     auto ecocDoc = EcocDocument::parse(ctx, doc);
 
     auto swTokens = EncryptedStateCollectionTokens::decryptAndParse(token, ecocDoc.getValue());
@@ -2373,7 +2354,7 @@ EncryptedFieldConfig EncryptionInformationHelpers::getAndValidateSchema(
             "Expected an object for schema in EncryptionInformation",
             !element.eoo() && element.type() == Object);
 
-    auto efc = EncryptedFieldConfig::parse(IDLParserErrorContext("schema"), element.Obj());
+    auto efc = EncryptedFieldConfig::parse(IDLParserContext("schema"), element.Obj());
 
     uassert(6371206, "Expected a value for eccCollection", efc.getEccCollection().has_value());
     uassert(6371207, "Expected a value for escCollection", efc.getEscCollection().has_value());
@@ -2388,7 +2369,7 @@ std::pair<EncryptedBinDataType, ConstDataRange> fromEncryptedConstDataRange(Cons
 
     uint8_t subTypeByte = cdrc.readAndAdvance<uint8_t>();
 
-    auto subType = EncryptedBinDataType_parse(IDLParserErrorContext("subtype"), subTypeByte);
+    auto subType = EncryptedBinDataType_parse(IDLParserContext("subtype"), subTypeByte);
     return {subType, cdrc};
 }
 
@@ -2421,8 +2402,7 @@ StringMap<FLEDeleteToken> EncryptionInformationHelpers::getDeleteTokens(
     for (const auto& deleteTokenBSON : element.Obj()) {
         uassert(6371310, "DeleteToken is not an object", deleteTokenBSON.type() == Object);
 
-        auto payload =
-            FLE2DeletePayload::parse(IDLParserErrorContext("delete"), deleteTokenBSON.Obj());
+        auto payload = FLE2DeletePayload::parse(IDLParserContext("delete"), deleteTokenBSON.Obj());
 
         auto deleteToken =
             FLEDeleteToken{FLETokenFromCDR<FLETokenType::ECOCToken>(payload.getEcocToken()),
@@ -2515,6 +2495,40 @@ uint64_t CompactionHelpers::countDeleted(const std::vector<ECCDocument>& rangeLi
         sum += range.end - range.start + 1;
     }
     return sum;
+}
+
+ConstDataRange binDataToCDR(BSONElement element) {
+    uassert(6338501, "Expected binData BSON element", element.type() == BinData);
+
+    int len;
+    const char* data = element.binData(len);
+    return ConstDataRange(data, data + len);
+}
+
+bool hasQueryType(const EncryptedFieldConfig& config, QueryTypeEnum queryType) {
+
+    for (const auto& field : config.getFields()) {
+
+        if (field.getQueries().has_value()) {
+            auto queriesVariant = field.getQueries().get();
+
+            bool hasQuery = stdx::visit(
+                OverloadedVisitor{
+                    [&](QueryTypeConfig query) { return (query.getQueryType() == queryType); },
+                    [&](std::vector<QueryTypeConfig> queries) {
+                        return std::any_of(
+                            queries.cbegin(), queries.cend(), [&](const QueryTypeConfig& qtc) {
+                                return qtc.getQueryType() == queryType;
+                            });
+                    }},
+                queriesVariant);
+            if (hasQuery) {
+                return hasQuery;
+            }
+        }
+    }
+
+    return false;
 }
 
 }  // namespace mongo

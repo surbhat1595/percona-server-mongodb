@@ -1,2 +1,4 @@
 psutil
 jsonschema
+memory_profiler
+puremagic

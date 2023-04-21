@@ -29,6 +29,7 @@
 
 #include "mongo/db/query/optimizer/syntax/expr.h"
 #include "mongo/db/query/optimizer/node.h"
+#include "mongo/platform/decimal128.h"
 
 namespace mongo::optimizer {
 
@@ -66,6 +67,14 @@ ABT Constant::int64(int64_t valueInt64) {
 
 ABT Constant::fromDouble(double value) {
     return make<Constant>(TypeTags::NumberDouble, bitcastFrom<double>(value));
+}
+
+ABT Constant::timestamp(const Timestamp& t) {
+    return make<Constant>(TypeTags::Timestamp, bitcastFrom<uint64_t>(t.asULL()));
+}
+
+ABT Constant::date(const Date_t& d) {
+    return make<Constant>(TypeTags::Date, bitcastFrom<int64_t>(d.toMillisSinceEpoch()));
 }
 
 ABT Constant::emptyObject() {
@@ -132,5 +141,24 @@ int32_t Constant::getValueInt32() const {
     uassert(6624354, "Constant value type is not int32_t", isValueInt32());
     return bitcastTo<int32_t>(_val);
 }
+
+bool Constant::isValueDouble() const {
+    return _tag == TypeTags::NumberDouble;
+}
+
+double Constant::getValueDouble() const {
+    uassert(673180, "Constant value type is not double", isValueDouble());
+    return bitcastTo<double>(_val);
+}
+
+bool Constant::isValueDecimal() const {
+    return _tag == TypeTags::NumberDecimal;
+}
+
+Decimal128 Constant::getValueDecimal() const {
+    uassert(673181, "Constant value type is not Decimal128", isValueDecimal());
+    return bitcastTo<Decimal128>(_val);
+}
+
 
 }  // namespace mongo::optimizer

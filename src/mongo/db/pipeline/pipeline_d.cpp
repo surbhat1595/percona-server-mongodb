@@ -40,6 +40,7 @@
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/exec/cached_plan.h"
 #include "mongo/db/exec/collection_scan.h"
@@ -116,12 +117,12 @@ namespace {
  * pipeline to prepare for pushdown of $group and $lookup into the inner query layer so that it
  * can be executed using SBE.
  * Group stages are extracted from the pipeline when all of the following conditions are met:
- *    - When the 'internalQueryForceClassicEngine' feature flag is 'false'.
+ *    - When the 'internalQueryFrameworkControl' is not set to "forceClassicEngine".
  *    - When the 'internalQuerySlotBasedExecutionDisableGroupPushdown' query knob is 'false'.
  *    - When the DocumentSourceGroup has 'doingMerge=false'.
  *
  * Lookup stages are extracted from the pipeline when all of the following conditions are met:
- *    - When the 'internalQueryForceClassicEngine' feature flag is 'false'.
+ *    - When the 'internalQueryFrameworkControl' is not set to "forceClassicEngine".
  *    - When the 'internalQuerySlotBasedExecutionDisableLookupPushdown' query knob is 'false'.
  *    - The $lookup uses only the 'localField'/'foreignField' syntax (no pipelines).
  *    - The foreign collection is neither sharded nor a view.
@@ -184,6 +185,7 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> extractSbeCompatibleSt
 
         // $lookup pushdown logic.
         if (auto lookupStage = dynamic_cast<DocumentSourceLookUp*>(itr->get())) {
+            CurOp::get(expCtx->opCtx)->debug().pipelineUsesLookup = true;
             if (disallowLookupPushdown) {
                 break;
             }
@@ -223,7 +225,6 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> extractSbeCompatibleSt
         // Current stage cannot be pushed down.
         break;
     }
-
     return stagesForPushdown;
 }
 
@@ -1200,8 +1201,6 @@ PipelineD::buildInnerQueryExecutorGeneric(const MultipleCollectionAccessor& coll
     auto [unpack, sort] = findUnpackThenSort(pipeline->_sources);
     QueryPlannerParams plannerOpts;
     if (serverGlobalParams.featureCompatibility.isVersionInitialized() &&
-        serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
-            multiversion::FeatureCompatibilityVersion::kVersion_6_0) &&
         feature_flags::gFeatureFlagBucketUnpackWithSort.isEnabled(
             serverGlobalParams.featureCompatibility) &&
         unpack && sort) {
@@ -1227,8 +1226,6 @@ PipelineD::buildInnerQueryExecutorGeneric(const MultipleCollectionAccessor& coll
     // If this is a query on a time-series collection then it may be eligible for a post-planning
     // sort optimization. We check eligibility and perform the rewrite here.
     if (serverGlobalParams.featureCompatibility.isVersionInitialized() &&
-        serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
-            multiversion::FeatureCompatibilityVersion::kVersion_6_0) &&
         feature_flags::gFeatureFlagBucketUnpackWithSort.isEnabled(
             serverGlobalParams.featureCompatibility) &&
         unpack && sort) {

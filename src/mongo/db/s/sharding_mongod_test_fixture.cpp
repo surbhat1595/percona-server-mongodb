@@ -41,8 +41,9 @@
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer_impl.h"
-#include "mongo/db/op_observer_registry.h"
+#include "mongo/db/op_observer/op_observer_impl.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
+#include "mongo/db/op_observer/oplog_writer_impl.h"
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/oplog.h"
@@ -162,7 +163,8 @@ std::unique_ptr<ShardRegistry> ShardingMongodTestFixture::makeShardRegistry(
     auto shardFactory =
         std::make_unique<ShardFactory>(std::move(buildersMap), std::move(targeterFactory));
 
-    return std::make_unique<ShardRegistry>(std::move(shardFactory), configConnStr);
+    return std::make_unique<ShardRegistry>(
+        getServiceContext(), std::move(shardFactory), configConnStr);
 }
 
 std::unique_ptr<DistLockManager> ShardingMongodTestFixture::makeDistLockManager() {
@@ -359,7 +361,8 @@ repl::ReplicationCoordinatorMock* ShardingMongodTestFixture::replicationCoordina
 void ShardingMongodTestFixture::setupOpObservers() {
     auto opObserverRegistry =
         checked_cast<OpObserverRegistry*>(getServiceContext()->getOpObserver());
-    opObserverRegistry->addObserver(std::make_unique<OpObserverShardingImpl>());
+    opObserverRegistry->addObserver(
+        std::make_unique<OpObserverShardingImpl>(std::make_unique<OplogWriterImpl>()));
     opObserverRegistry->addObserver(std::make_unique<ShardServerOpObserver>());
 }
 

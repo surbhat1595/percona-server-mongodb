@@ -33,7 +33,10 @@
 #include "mongo/db/exec/sbe/abt/abt_lower.h"
 #include "mongo/db/pipeline/abt/document_source_visitor.h"
 #include "mongo/db/pipeline/abt/match_expression_visitor.h"
+#include "mongo/db/query/ce/ce_histogram.h"
 #include "mongo/db/query/ce/ce_sampling.h"
+#include "mongo/db/query/ce/collection_statistics.h"
+#include "mongo/db/query/ce_mode_parameter.h"
 #include "mongo/db/query/optimizer/cascades/ce_heuristic.h"
 #include "mongo/db/query/optimizer/cascades/cost_derivation.h"
 #include "mongo/db/query/optimizer/explain.h"
@@ -164,7 +167,7 @@ static opt::unordered_map<std::string, optimizer::IndexDefinition> buildIndexSpe
             for (size_t i = fieldPath.size(); i-- > 0;) {
                 if (isMultiKey && elementMultiKeyInfo.find(i) != elementMultiKeyInfo.cend()) {
                     // This is a multikey element of the path.
-                    abtPath = make<PathTraverse>(std::move(abtPath));
+                    abtPath = make<PathTraverse>(std::move(abtPath), PathTraverse::kSingleLevel);
                 }
                 abtPath = make<PathGet>(fieldPath.at(i), std::move(abtPath));
             }
@@ -184,14 +187,17 @@ static opt::unordered_map<std::string, optimizer::IndexDefinition> buildIndexSpe
                 ExtensionsCallbackNoop(),
                 MatchExpressionParser::kBanAllSpecialFeatures);
 
-            ABT exprABT = generateMatchExpression(expr.get(), false /*allowAggExpression*/, "", "");
+            ABT exprABT = generateMatchExpression(expr.get(),
+                                                  false /*allowAggExpression*/,
+                                                  "" /*rootProjection*/,
+                                                  "" /*uniquePrefix*/);
             exprABT = make<EvalFilter>(std::move(exprABT), make<Variable>(scanProjName));
 
             // TODO: simplify expression.
 
             auto conversion = convertExprToPartialSchemaReq(exprABT, true /*isFilterContext*/);
-            if (!conversion || conversion->_hasEmptyInterval) {
-                // Unsatisfiable partial index filter?
+            if (!conversion) {
+                // TODO: should this conversion be always possible?
                 continue;
             }
             tassert(6624257,
@@ -457,8 +463,8 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOp
     OPTIMIZER_DEBUG_LOG(
         6264803, 5, "Translated ABT", "explain"_attr = ExplainGenerator::explainV2(abtTree));
 
-    if (collectionExists && numRecords > 0 &&
-        internalQueryEnableSamplingCardinalityEstimator.load()) {
+    if (internalQueryCardinalityEstimatorMode == ce::kSampling && collectionExists &&
+        numRecords > 0) {
         Metadata metadataForSampling = metadata;
         // Do not use indexes for sampling.
         for (auto& entry : metadataForSampling._scanDefs) {
@@ -486,17 +492,33 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOp
 
         return optimizeAndCreateExecutor(
             phaseManager, std::move(abtTree), opCtx, expCtx, nss, collection);
+
+    } else if (internalQueryCardinalityEstimatorMode == ce::kHistogram &&
+               ce::CollectionStatistics::hasCollectionStatistics(nss)) {
+        const auto& stats = ce::CollectionStatistics::getCollectionStatistics(nss);
+        auto ceDerivation = std::make_unique<CEHistogramTransport>(stats);
+        OptPhaseManager phaseManager{OptPhaseManager::getAllRewritesSet(),
+                                     prefixId,
+                                     false /*requireRID*/,
+                                     std::move(metadata),
+                                     std::move(ceDerivation),
+                                     std::make_unique<DefaultCosting>(),
+                                     DebugInfo::kDefaultForProd};
+
+        return optimizeAndCreateExecutor(
+            phaseManager, std::move(abtTree), opCtx, expCtx, nss, collection);
+
+    } else {
+        // Default to using heuristics.
+        OptPhaseManager phaseManager{OptPhaseManager::getAllRewritesSet(),
+                                     prefixId,
+                                     std::move(metadata),
+                                     DebugInfo::kDefaultForProd};
+        phaseManager.getHints() = queryHints;
+
+        return optimizeAndCreateExecutor(
+            phaseManager, std::move(abtTree), opCtx, expCtx, nss, collection);
     }
-
-    // Use heuristics.
-    OptPhaseManager phaseManager{OptPhaseManager::getAllRewritesSet(),
-                                 prefixId,
-                                 std::move(metadata),
-                                 DebugInfo::kDefaultForProd};
-    phaseManager.getHints() = queryHints;
-
-    return optimizeAndCreateExecutor(
-        phaseManager, std::move(abtTree), opCtx, expCtx, nss, collection);
 }
 
 }  // namespace mongo

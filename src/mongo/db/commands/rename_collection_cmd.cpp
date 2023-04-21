@@ -42,7 +42,7 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/ops/insert.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
@@ -85,8 +85,8 @@ public:
         return " example: { renameCollection: foo.a, to: bar.b }";
     }
 
-    std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const override {
-        return CommandHelpers::parseNsFullyQualified(cmdObj);
+    NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
+        return NamespaceString(dbName.tenantId(), CommandHelpers::parseNsFullyQualified(cmdObj));
     }
 
     virtual bool errmsgRun(OperationContext* opCtx,
@@ -95,7 +95,7 @@ public:
                            string& errmsg,
                            BSONObjBuilder& result) {
         auto renameRequest =
-            RenameCollectionCommand::parse(IDLParserErrorContext("renameCollection"), cmdObj);
+            RenameCollectionCommand::parse(IDLParserContext("renameCollection"), cmdObj);
 
         const auto& fromNss = renameRequest.getCommandParameter();
         const auto& toNss = renameRequest.getTo();

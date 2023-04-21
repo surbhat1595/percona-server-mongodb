@@ -49,6 +49,11 @@ const auto kShardKey = BSON("newKey" << 1);
 class ReshardingMetricsTest : public ShardingDataTransformMetricsTestFixture {
 
 public:
+    virtual std::unique_ptr<ShardingDataTransformCumulativeMetrics> initializeCumulativeMetrics()
+        override {
+        return std::make_unique<ReshardingCumulativeMetrics>();
+    }
+
     std::unique_ptr<ReshardingMetrics> createInstanceMetrics(ClockSource* clockSource,
                                                              UUID instanceId = UUID::gen(),
                                                              Role role = Role::kDonor) {
@@ -58,7 +63,7 @@ public:
                                                    role,
                                                    clockSource->now(),
                                                    clockSource,
-                                                   &_cumulativeMetrics);
+                                                   _cumulativeMetrics.get());
     }
 
     const UUID& getSourceCollectionId() {
@@ -69,7 +74,7 @@ public:
     template <typename T>
     BSONObj getReportFromStateDocument(T document) {
         auto metrics =
-            ReshardingMetrics::initializeFrom(document, getClockSource(), &_cumulativeMetrics);
+            ReshardingMetrics::initializeFrom(document, getClockSource(), _cumulativeMetrics.get());
         return metrics->reportForCurrentOp();
     }
 
@@ -169,7 +174,7 @@ public:
         doc.setMetrics(metricsDoc);
 
         auto metrics =
-            ReshardingMetrics::initializeFrom(doc, getClockSource(), &_cumulativeMetrics);
+            ReshardingMetrics::initializeFrom(doc, getClockSource(), _cumulativeMetrics.get());
 
         clock->advance(kInterval);
         auto report = metrics->reportForCurrentOp();
@@ -181,8 +186,7 @@ public:
     }
 };
 
-
-TEST_F(ReshardingMetricsTest, ReportForCurrentOpShouldHaveGlobalIndexDescription) {
+TEST_F(ReshardingMetricsTest, ReportForCurrentOpShouldHaveReshardingMetricsDescription) {
     std::vector<Role> roles{Role::kCoordinator, Role::kDonor, Role::kRecipient};
 
     std::for_each(roles.begin(), roles.end(), [&](Role role) {
@@ -233,7 +237,7 @@ TEST_F(ReshardingMetricsTest, RestoresByteAndDocumentCountsDuringCloning) {
     constexpr auto kBytesCopied = 500;
 
     auto metrics = createInstanceMetrics(getClockSource(), UUID::gen(), Role::kRecipient);
-    metrics->restoreDocumentsCopied(kDocsCopied, kBytesCopied);
+    metrics->restoreDocumentsProcessed(kDocsCopied, kBytesCopied);
     auto report = metrics->reportForCurrentOp();
 
     ASSERT_EQ(report.getIntField("documentsCopied"), kDocsCopied);
@@ -416,7 +420,7 @@ TEST_F(ReshardingMetricsTest, RecipientReportsRemainingTime) {
     constexpr auto kOpsPerIncrement = 25;
     const auto kIncrementSecs = durationCount<Seconds>(kIncrement);
     const auto kExpectedTotal = kIncrementSecs * 8;
-    metrics->setDocumentsToCopyCounts(0, kOpsPerIncrement * 4);
+    metrics->setDocumentsToProcessCounts(0, kOpsPerIncrement * 4);
     metrics->onOplogEntriesFetched(kOpsPerIncrement * 4, Milliseconds(1));
 
     // Before cloning.
@@ -425,20 +429,20 @@ TEST_F(ReshardingMetricsTest, RecipientReportsRemainingTime) {
 
     // During cloning.
     metrics->onCopyingBegin();
-    metrics->onDocumentsCopied(0, kOpsPerIncrement, Milliseconds(1));
+    metrics->onDocumentsProcessed(0, kOpsPerIncrement, Milliseconds(1));
     clock->advance(kIncrement);
     report = metrics->reportForCurrentOp();
     ASSERT_EQ(report.getIntField("remainingOperationTimeEstimatedSecs"),
               kExpectedTotal - kIncrementSecs);
 
-    metrics->onDocumentsCopied(0, kOpsPerIncrement * 2, Milliseconds(1));
+    metrics->onDocumentsProcessed(0, kOpsPerIncrement * 2, Milliseconds(1));
     clock->advance(kIncrement * 2);
     report = metrics->reportForCurrentOp();
     ASSERT_EQ(report.getIntField("remainingOperationTimeEstimatedSecs"),
               kExpectedTotal - (kIncrementSecs * 3));
 
     // During applying.
-    metrics->onDocumentsCopied(0, kOpsPerIncrement, Milliseconds(1));
+    metrics->onDocumentsProcessed(0, kOpsPerIncrement, Milliseconds(1));
     clock->advance(kIncrement);
     metrics->onCopyingEnd();
     metrics->onApplyingBegin();

@@ -1077,6 +1077,7 @@ HeartbeatResponseAction TopologyCoordinator::processHeartbeatResponse(
     const MemberConfig member = _rsConfig.getMemberAt(memberIndex);
     bool advancedOpTimeOrUpdatedConfig = false;
     bool becameElectable = false;
+    bool changedMemberState = false;
     if (!hbResponse.isOK()) {
         if (isUnauthorized) {
             hbData.setAuthIssue(now);
@@ -1105,7 +1106,10 @@ HeartbeatResponseAction TopologyCoordinator::processHeartbeatResponse(
                     "memberId"_attr = member.getId());
         pingsInConfig++;
         auto wasUnelectable = hbData.isUnelectable();
-        advancedOpTimeOrUpdatedConfig = hbData.setUpValues(now, std::move(hbr));
+        auto hbChanges = hbData.setUpValues(now, std::move(hbr));
+        advancedOpTimeOrUpdatedConfig =
+            hbChanges.getOpTimeAdvanced() || hbChanges.getConfigChanged();
+        changedMemberState = hbChanges.getMemberStateChanged();
         becameElectable = wasUnelectable && !hbData.isUnelectable();
     }
 
@@ -1121,6 +1125,7 @@ HeartbeatResponseAction TopologyCoordinator::processHeartbeatResponse(
     nextAction.setNextHeartbeatStartDate(nextHeartbeatStartDate);
     nextAction.setAdvancedOpTimeOrUpdatedConfig(advancedOpTimeOrUpdatedConfig);
     nextAction.setBecameElectable(becameElectable);
+    nextAction.setChangedMemberState(changedMemberState);
     return nextAction;
 }
 
@@ -2941,6 +2946,14 @@ bool TopologyCoordinator::advanceLastCommittedOpTimeAndWallTime(OpTimeAndWallTim
                     "committedOpTime"_attr = committedOpTime,
                     "currentCommittedOpTime"_attr = _lastCommittedOpTimeAndWallTime);
         return false;
+    }
+
+    if (committedOpTime.opTime.getTerm() != _lastCommittedOpTimeAndWallTime.opTime.getTerm()) {
+        LOGV2(6795400,
+              "Advancing committed opTime to a new term",
+              "newCommittedOpTime"_attr = committedOpTime.opTime,
+              "newCommittedWallime"_attr = committedOpTime.wallTime,
+              "oldTerm"_attr = _lastCommittedOpTimeAndWallTime.opTime.getTerm());
     }
 
     LOGV2_DEBUG(21826,

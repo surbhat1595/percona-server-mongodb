@@ -45,7 +45,7 @@
 #include "mongo/db/repl/storage_interface_mock.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/session_catalog_mongod.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/util/clock_source_mock.h"
 
@@ -131,7 +131,7 @@ TEST_F(AuthOpObserverTest, MultipleAboutToDeleteAndOnDelete) {
     AuthOpObserver opObserver;
     auto opCtx = cc().makeOperationContext();
     NamespaceString nss = {"test", "coll"};
-    AutoGetDb autoDb(opCtx.get(), nss.db(), MODE_X);
+    AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
     WriteUnitOfWork wunit(opCtx.get());
     opObserver.aboutToDelete(opCtx.get(), nss, uuid, BSON("_id" << 1));
     opObserver.onDelete(opCtx.get(), nss, uuid, {}, {});

@@ -58,16 +58,6 @@
 #include "mongo/unittest/temp_dir.h"
 #include "mongo/unittest/unittest.h"
 
-#define ASSERT_DOES_NOT_THROW(EXPRESSION)                                          \
-    try {                                                                          \
-        EXPRESSION;                                                                \
-    } catch (const AssertionException& e) {                                        \
-        ::mongo::str::stream err;                                                  \
-        err << "Threw an exception incorrectly: " << e.toString()                  \
-            << " Exception occured in: " << #EXPRESSION;                           \
-        ::mongo::unittest::TestAssertionFailure(__FILE__, __LINE__, err).stream(); \
-    }
-
 namespace mongo {
 namespace {
 
@@ -129,7 +119,7 @@ TEST_F(PipelineMetadataTreeTest, LinearPipelinesConstructProperTrees) {
         return makeTree<TestThing>(
             {{NamespaceString("test.collection"), initial}}, *pipePtr, ignoreDocumentSourceAddOne);
     }()
-               .first.get() == Stage(TestThing{23}, {}, {}));
+               .first.value() == Stage(TestThing{23}, {}, {}));
 
     ASSERT([&]() {
         auto pipePtr = jsonToPipeline(
@@ -138,7 +128,7 @@ TEST_F(PipelineMetadataTreeTest, LinearPipelinesConstructProperTrees) {
         return makeTree<TestThing>(
             {{NamespaceString("test.collection"), initial}}, *pipePtr, ignoreDocumentSourceAddOne);
     }()
-               .first.get() == Stage(TestThing{24}, makeUniqueStage(TestThing{23}, {}, {}), {}));
+               .first.value() == Stage(TestThing{24}, makeUniqueStage(TestThing{23}, {}, {}), {}));
 
     ASSERT([&]() {
         auto pipePtr = jsonToPipeline(
@@ -151,7 +141,7 @@ TEST_F(PipelineMetadataTreeTest, LinearPipelinesConstructProperTrees) {
         return makeTree<TestThing>(
             {{NamespaceString("test.collection"), initial}}, *pipePtr, ignoreDocumentSourceAddOne);
     }()
-               .first.get() ==
+               .first.value() ==
            Stage(TestThing{28},
                  makeUniqueStage(
                      TestThing{27},
@@ -250,7 +240,7 @@ TEST_F(PipelineMetadataTreeTest, BranchingPipelinesConstructProperTrees) {
                                    *pipePtr,
                                    buildRepresentativeString);
     }()
-               .first.get() ==
+               .first.value() ==
            Stage(TestThing{"1mpxul[2m]ulu"},
                  makeUniqueStage(
                      TestThing{"1mpxul[2m]ul"},
@@ -287,7 +277,7 @@ TEST_F(PipelineMetadataTreeTest, BranchingPipelinesConstructProperTrees) {
         return makeTree<TestThing>(
             {{NamespaceString("test.collection"), {""}}}, *pipePtr, buildRepresentativeString);
     }()
-               .first.get() ==
+               .first.value() ==
            Stage(TestThing{"f[tugs, tmgs, tb]"},
                  makeUniqueStage(
                      TestThing{""},
@@ -366,7 +356,7 @@ TEST_F(PipelineMetadataTreeTest, ZipWalksAPipelineAndTreeInTandemAndInOrder) {
                                         *pipePtr,
                                         takeTypeInfo)
                         .first;
-        zip<TestThing>(&tree.get(), &*pipePtr, tookTypeInfoOrThrow);
+        zip<TestThing>(&tree.value(), &*pipePtr, tookTypeInfoOrThrow);
         previousStack.pop();
     }());
 
@@ -384,7 +374,7 @@ TEST_F(PipelineMetadataTreeTest, ZipWalksAPipelineAndTreeInTandemAndInOrder) {
                                         *pipePtr,
                                         takeTypeInfo)
                         .first;
-        zip<TestThing>(&tree.get(), &*pipePtr, tookTypeInfoOrThrow);
+        zip<TestThing>(&tree.value(), &*pipePtr, tookTypeInfoOrThrow);
         previousStack.pop();
     }());
 }

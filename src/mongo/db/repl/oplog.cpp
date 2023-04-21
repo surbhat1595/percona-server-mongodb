@@ -59,6 +59,7 @@
 #include "mongo/db/catalog/multi_index_block.h"
 #include "mongo/db/catalog/rename_collection.h"
 #include "mongo/db/change_stream_change_collection_manager.h"
+#include "mongo/db/change_stream_pre_images_collection_manager.h"
 #include "mongo/db/client.h"
 #include "mongo/db/coll_mod_gen.h"
 #include "mongo/db/commands.h"
@@ -73,12 +74,11 @@
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/keypattern.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer.h"
-#include "mongo/db/op_observer_util.h"
+#include "mongo/db/op_observer/op_observer.h"
+#include "mongo/db/op_observer/op_observer_util.h"
 #include "mongo/db/ops/delete.h"
 #include "mongo/db/ops/delete_request_gen.h"
 #include "mongo/db/ops/update.h"
-#include "mongo/db/pipeline/change_stream_pre_image_helpers.h"
 #include "mongo/db/pipeline/change_stream_preimage_gen.h"
 #include "mongo/db/repl/apply_ops.h"
 #include "mongo/db/repl/bgsync.h"
@@ -98,7 +98,7 @@
 #include "mongo/db/stats/server_write_concern_metrics.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_options.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/random.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -291,23 +291,6 @@ void writeToImageCollection(OperationContext* opCtx,
     DisableDocumentValidation documentValidationDisabler(
         opCtx, DocumentValidationSettings::kDisableInternalValidation);
 
-    BSONObj existingImageEntryBson;
-    Helpers::findOne(opCtx,
-                     autoColl.getCollection(),
-                     BSON("_id" << imageEntry.get_id().toBSON() << "ts" << imageEntry.getTs()),
-                     existingImageEntryBson);
-    if (!existingImageEntryBson.isEmpty()) {
-        auto existingImageEntry = repl::ImageEntry::parse(
-            IDLParserErrorContext("writeToImageCollection"), existingImageEntryBson);
-        uassert(
-            6652600,
-            str::stream()
-                << "Found an existing findAndModify image entry with unexpected content. Found: "
-                << existingImageEntry.toBSON() << ". Expected: " << imageEntry.toBSON(),
-            existingImageEntry.toBSON().woCompare(imageEntry.toBSON()) == 0);
-        return;
-    }
-
     UpdateRequest request;
     request.setNamespaceString(NamespaceString::kConfigImagesNamespace);
     request.setQuery(
@@ -444,7 +427,7 @@ OpTime logOp(OperationContext* opCtx, MutableOplogEntry* oplogEntry) {
     }
     // If this oplog entry is from a tenant migration, include the tenant migration
     // UUID.
-    const auto& recipientInfo = tenantMigrationRecipientInfo(opCtx);
+    const auto& recipientInfo = tenantMigrationInfo(opCtx);
     if (recipientInfo) {
         oplogEntry->setFromTenantMigration(recipientInfo->uuid);
     }
@@ -511,7 +494,7 @@ std::vector<OpTime> logInsertOps(
     oplogEntryTemplate->setOpType(repl::OpTypeEnum::kInsert);
     // If this oplog entry is from a tenant migration, include the tenant migration
     // UUID.
-    const auto& recipientInfo = tenantMigrationRecipientInfo(opCtx);
+    const auto& recipientInfo = tenantMigrationInfo(opCtx);
     if (recipientInfo) {
         oplogEntryTemplate->setFromTenantMigration(recipientInfo->uuid);
     }
@@ -811,7 +794,7 @@ NamespaceString extractNsFromUUIDorNs(OperationContext* opCtx,
                                       const NamespaceString& ns,
                                       const boost::optional<UUID>& ui,
                                       const BSONObj& cmd) {
-    return ui ? extractNsFromUUID(opCtx, ui.get()) : extractNs(ns.db(), cmd);
+    return ui ? extractNsFromUUID(opCtx, ui.value()) : extractNs(ns.db(), cmd);
 }
 
 using OpApplyFn = std::function<Status(
@@ -840,6 +823,11 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
           const auto& ui = entry.getUuid();
           const auto& cmd = entry.getObject();
           const NamespaceString nss(extractNs(entry.getNss().db(), cmd));
+
+          const auto& migrationId = entry.getFromTenantMigration();
+          if (migrationId) {
+              tenantMigrationInfo(opCtx) = boost::optional<TenantMigrationInfo>(migrationId);
+          }
 
           // Mode SECONDARY steady state replication should not allow create collection to rename an
           // existing collection out of the way. This leaves a collection orphaned and is a bug.
@@ -969,7 +957,7 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
      {[](OperationContext* opCtx, const OplogEntry& entry, OplogApplication::Mode mode) -> Status {
           const auto& cmd = entry.getObject();
           auto opMsg = OpMsgRequest::fromDBAndBody(entry.getNss().db(), cmd);
-          auto collModCmd = CollMod::parse(IDLParserErrorContext("collModOplogEntry"), opMsg);
+          auto collModCmd = CollMod::parse(IDLParserContext("collModOplogEntry"), opMsg);
           const auto nssOrUUID([&collModCmd, &entry, mode]() -> NamespaceStringOrUUID {
               // Oplog entries from secondary oplog application will allways have the Uuid set and
               // it is only invocations of applyOps directly that may omit it
@@ -1018,28 +1006,28 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
      {[](OperationContext* opCtx, const OplogEntry& entry, OplogApplication::Mode mode) -> Status {
           const auto& cmd = entry.getObject();
           return dropIndexesForApplyOps(
-              opCtx, extractNsFromUUID(opCtx, entry.getUuid().get()), cmd);
+              opCtx, extractNsFromUUID(opCtx, entry.getUuid().value()), cmd);
       },
       {ErrorCodes::NamespaceNotFound, ErrorCodes::IndexNotFound}}},
     {"deleteIndexes",
      {[](OperationContext* opCtx, const OplogEntry& entry, OplogApplication::Mode mode) -> Status {
           const auto& cmd = entry.getObject();
           return dropIndexesForApplyOps(
-              opCtx, extractNsFromUUID(opCtx, entry.getUuid().get()), cmd);
+              opCtx, extractNsFromUUID(opCtx, entry.getUuid().value()), cmd);
       },
       {ErrorCodes::NamespaceNotFound, ErrorCodes::IndexNotFound}}},
     {"dropIndex",
      {[](OperationContext* opCtx, const OplogEntry& entry, OplogApplication::Mode mode) -> Status {
           const auto& cmd = entry.getObject();
           return dropIndexesForApplyOps(
-              opCtx, extractNsFromUUID(opCtx, entry.getUuid().get()), cmd);
+              opCtx, extractNsFromUUID(opCtx, entry.getUuid().value()), cmd);
       },
       {ErrorCodes::NamespaceNotFound, ErrorCodes::IndexNotFound}}},
     {"dropIndexes",
      {[](OperationContext* opCtx, const OplogEntry& entry, OplogApplication::Mode mode) -> Status {
           const auto& cmd = entry.getObject();
           return dropIndexesForApplyOps(
-              opCtx, extractNsFromUUID(opCtx, entry.getUuid().get()), cmd);
+              opCtx, extractNsFromUUID(opCtx, entry.getUuid().value()), cmd);
       },
       {ErrorCodes::NamespaceNotFound, ErrorCodes::IndexNotFound}}},
     {"renameCollection",
@@ -1057,7 +1045,7 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
     {"importCollection",
      {[](OperationContext* opCtx, const OplogEntry& entry, OplogApplication::Mode mode) -> Status {
           auto importEntry = mongo::ImportCollectionOplogEntry::parse(
-              IDLParserErrorContext("importCollectionOplogEntry"), entry.getObject());
+              IDLParserContext("importCollectionOplogEntry"), entry.getObject());
           applyImportCollection(opCtx,
                                 importEntry.getImportUUID(),
                                 importEntry.getImportCollection(),
@@ -1112,7 +1100,10 @@ void writeChangeStreamPreImage(OperationContext* opCtx,
                                       static_cast<int64_t>(oplogEntry.getApplyOpsIndex())};
     ChangeStreamPreImage preImageDocument{
         std::move(preImageId), oplogEntry.getWallClockTimeForPreImage(), preImage};
-    writeToChangeStreamPreImagesCollection(opCtx, preImageDocument);
+
+    // TODO SERVER-66643 Pass tenant id to the pre-images collection if running in the serverless.
+    ChangeStreamPreImagesCollectionManager::insertPreImage(
+        opCtx, /* tenantId */ boost::none, preImageDocument);
 }
 }  // namespace
 
@@ -1191,10 +1182,10 @@ Status applyOperation_inlock(OperationContext* opCtx,
     CollectionPtr collection = nullptr;
     if (auto uuid = op.getUuid()) {
         auto catalog = CollectionCatalog::get(opCtx);
-        collection = catalog->lookupCollectionByUUID(opCtx, uuid.get());
+        collection = catalog->lookupCollectionByUUID(opCtx, uuid.value());
         uassert(ErrorCodes::NamespaceNotFound,
                 str::stream() << "Failed to apply operation due to missing collection ("
-                              << uuid.get() << "): " << redact(opOrGroupedInserts.toBSON()),
+                              << uuid.value() << "): " << redact(opOrGroupedInserts.toBSON()),
                 collection);
         requestNss = collection->ns();
         dassert(opCtx->lockState()->isCollectionLockedForMode(requestNss, MODE_IX));
@@ -1224,7 +1215,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
 
     BSONObj o2;
     if (op.getObject2())
-        o2 = op.getObject2().get();
+        o2 = op.getObject2().value();
 
     const IndexCatalog* indexCatalog =
         collection == nullptr ? nullptr : collection->getIndexCatalog();
@@ -1297,7 +1288,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                 // inserts on primary as part of a tenant migration.
                 uassert(ErrorCodes::OperationFailed,
                         "Cannot apply an array insert with applyOps",
-                        !opCtx->writesAreReplicated() || tenantMigrationRecipientInfo(opCtx));
+                        !opCtx->writesAreReplicated() || tenantMigrationInfo(opCtx));
 
                 std::vector<InsertStatement> insertObjs;
                 const auto insertOps = opOrGroupedInserts.getGroupedInserts();
@@ -1306,7 +1297,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                     for (const auto iOp : insertOps) {
                         invariant(iOp->getTerm());
                         insertObjs.emplace_back(
-                            iOp->getObject(), iOp->getTimestamp(), iOp->getTerm().get());
+                            iOp->getObject(), iOp->getTimestamp(), iOp->getTerm().value());
                     }
                 } else {
                     // Applying grouped inserts on the primary as part of a tenant migration.
@@ -1394,7 +1385,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                     InsertStatement insertStmt(o);
                     if (assignOperationTimestamp) {
                         invariant(op.getTerm());
-                        insertStmt.oplogSlot = OpTime(op.getTimestamp(), op.getTerm().get());
+                        insertStmt.oplogSlot = OpTime(op.getTimestamp(), op.getTerm().value());
                     } else if (!repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(
                                    opCtx, collection->ns())) {
                         // Primaries processing inserts always pre-allocate timestamps. For parity,
@@ -1652,10 +1643,10 @@ Status applyOperation_inlock(OperationContext* opCtx,
 
                 if (op.getNeedsRetryImage()) {
                     writeToImageCollection(opCtx,
-                                           op.getSessionId().get(),
-                                           op.getTxnNumber().get(),
+                                           op.getSessionId().value(),
+                                           op.getTxnNumber().value(),
                                            op.getApplyOpsTimestamp().value_or(op.getTimestamp()),
-                                           op.getNeedsRetryImage().get(),
+                                           op.getNeedsRetryImage().value(),
                                            // If we did not request an image because we're in
                                            // initial sync, the value passed in here is conveniently
                                            // the empty BSONObj.
@@ -1747,8 +1738,8 @@ Status applyOperation_inlock(OperationContext* opCtx,
                     // is responsible for whether to retry. The motivation here is to simply reduce
                     // the number of states related documents in the two collections can be in.
                     writeToImageCollection(opCtx,
-                                           op.getSessionId().get(),
-                                           op.getTxnNumber().get(),
+                                           op.getSessionId().value(),
+                                           op.getTxnNumber().value(),
                                            op.getApplyOpsTimestamp().value_or(op.getTimestamp()),
                                            repl::RetryImageEnum::kPreImage,
                                            result.requestedPreImage.value_or(BSONObj()),
@@ -1964,51 +1955,15 @@ Status applyCommand_inlock(OperationContext* opCtx,
 
                 auto ns = cmd->parse(opCtx, OpMsgRequest::fromDBAndBody(nss.db(), o))->ns();
 
-                // TODO (SERVER-61481): Once kLastLTS is 6.0, this error will only be possible in
-                // mode kInitialSync.
-                if (mode == OplogApplication::Mode::kInitialSync) {
-                    abortIndexBuilds(opCtx,
-                                     entry.getCommandType(),
-                                     ns,
-                                     "Aborting index builds during initial sync");
-                    LOGV2_DEBUG(4665901,
-                                1,
-                                "Conflicting DDL operation encountered during initial sync; "
-                                "aborting index build and retrying",
-                                logAttrs(ns));
-                } else {
-                    auto lockState = opCtx->lockState();
-                    Locker::LockSnapshot lockSnapshot;
-                    auto locksReleased = lockState->saveLockStateAndUnlock(&lockSnapshot);
-
-                    ScopeGuard guard{[&] {
-                        if (locksReleased) {
-                            invariant(!lockState->isLocked());
-                            lockState->restoreLockState(lockSnapshot);
-                        }
-                    }};
-
-                    auto swUUID = entry.getUuid();
-                    if (!swUUID) {
-                        LOGV2_ERROR(21261,
-                                    "Failed command during oplog application. Expected a UUID",
-                                    "command"_attr = redact(o),
-                                    logAttrs(ns));
-                    }
-                    IndexBuildsCoordinator::get(opCtx)->awaitNoIndexBuildInProgressForCollection(
-                        opCtx, swUUID.get());
-
-                    opCtx->recoveryUnit()->abandonSnapshot();
-                    opCtx->checkForInterrupt();
-
-                    LOGV2_DEBUG(
-                        51775,
-                        1,
-                        "Acceptable error during oplog application: background operation in "
-                        "progress for namespace",
-                        logAttrs(ns),
-                        "oplogEntry"_attr = redact(entry.toBSONForLogging()));
-                }
+                // This error is only possible during initial sync mode.
+                invariant(mode == OplogApplication::Mode::kInitialSync);
+                abortIndexBuilds(
+                    opCtx, entry.getCommandType(), ns, "Aborting index builds during initial sync");
+                LOGV2_DEBUG(4665901,
+                            1,
+                            "Conflicting DDL operation encountered during initial sync; "
+                            "aborting index build and retrying",
+                            logAttrs(ns));
 
                 break;
             }

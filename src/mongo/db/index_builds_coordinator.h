@@ -44,6 +44,7 @@
 #include "mongo/db/catalog/index_builds_manager.h"
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/index/column_key_generator.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/rebuild_indexes.h"
 #include "mongo/db/repl/oplog_entry.h"
@@ -690,7 +691,7 @@ protected:
     void _scanCollectionAndInsertSortedKeysIntoIndex(
         OperationContext* opCtx,
         std::shared_ptr<ReplIndexBuildState> replState,
-        boost::optional<RecordId> resumeAfterRecordId = boost::none);
+        const boost::optional<RecordId>& resumeAfterRecordId = boost::none);
     /**
      * Performs the second phase of the index build, for use when resuming from the second phase.
      */

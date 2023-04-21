@@ -258,9 +258,8 @@ void Cloner::_copy(OperationContext* opCtx,
     FindCommandRequest findCmd{nss};
     findCmd.setNoCursorTimeout(true);
     findCmd.setReadConcern(repl::ReadConcernArgs::kLocal);
-    auto cursor = conn->find(std::move(findCmd),
-                             ReadPreferenceSetting{ReadPreference::SecondaryPreferred},
-                             ExhaustMode::kOn);
+    auto cursor = conn->find(
+        std::move(findCmd), ReadPreferenceSetting{ReadPreference::PrimaryOnly}, ExhaustMode::kOn);
 
     // Process the results of the cursor in batches.
     while (cursor->more()) {
@@ -348,7 +347,7 @@ Status Cloner::_createCollectionsForDb(
     auto databaseHolder = DatabaseHolder::get(opCtx);
     const DatabaseName tenantDbName(boost::none, dbName);
     auto db = databaseHolder->openDb(opCtx, tenantDbName);
-    invariant(opCtx->lockState()->isDbLockedForMode(dbName, MODE_X));
+    invariant(opCtx->lockState()->isDbLockedForMode(tenantDbName, MODE_X));
 
     auto catalog = CollectionCatalog::get(opCtx);
     auto collCount = 0;

@@ -37,7 +37,7 @@
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/ops/write_ops_retryability.h"
 #include "mongo/db/repl/apply_ops_command_info.h"
 #include "mongo/db/repl/image_collection_entry_gen.h"
@@ -46,9 +46,9 @@
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/s/session_catalog_migration.h"
 #include "mongo/db/session.h"
-#include "mongo/db/session_txn_record_gen.h"
-#include "mongo/db/transaction_history_iterator.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/session_txn_record_gen.h"
+#include "mongo/db/transaction/transaction_history_iterator.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/platform/random.h"
 #include "mongo/s/catalog/type_chunk.h"
@@ -78,7 +78,7 @@ boost::optional<repl::OplogEntry> forgeNoopEntryFromImageCollection(
         return boost::none;
     }
 
-    auto image = repl::ImageEntry::parse(IDLParserErrorContext("image entry"), imageObj);
+    auto image = repl::ImageEntry::parse(IDLParserContext("image entry"), imageObj);
     if (image.getTxnNumber() != retryableFindAndModifyOplogEntry.getTxnNumber()) {
         // In our snapshot, fetch the current transaction number for a session. If that transaction
         // number doesn't match what's found on the image lookup, it implies that the image is not
@@ -243,8 +243,8 @@ SessionCatalogMigrationSource::SessionCatalogMigrationSource(OperationContext* o
 
     boost::optional<LastTxnSession> lastTxnSession;
     while (cursor->more()) {
-        const auto txnRecord = SessionTxnRecord::parse(
-            IDLParserErrorContext("Session migration cloning"), cursor->next());
+        const auto txnRecord =
+            SessionTxnRecord::parse(IDLParserContext("Session migration cloning"), cursor->next());
 
         const auto sessionId = txnRecord.getSessionId();
         const auto parentSessionId = castToParentSessionId(sessionId);
@@ -420,7 +420,7 @@ bool SessionCatalogMigrationSource::shouldSkipOplogEntry(const mongo::repl::Oplo
             // prevent a multi-statement transaction from being retried as a retryable write.
             return false;
         }
-        auto shardKey = shardKeyPattern.extractShardKeyFromOplogEntry(object2.get());
+        auto shardKey = shardKeyPattern.extractShardKeyFromOplogEntry(object2.value());
         return !chunkRange.containsKey(shardKey);
     }
 
@@ -506,7 +506,7 @@ bool SessionCatalogMigrationSource::_handleWriteHistory(WithLock lk, OperationCo
 
             // Skipping an entry here will also result in the pre/post images to also not be
             // sent in the migration as they're handled by 'fetchPrePostImageOplog' below.
-            if (shouldSkipOplogEntry(nextOplog.get(), _keyPattern, _chunkRange)) {
+            if (shouldSkipOplogEntry(nextOplog.value(), _keyPattern, _chunkRange)) {
                 continue;
             }
 
@@ -770,8 +770,8 @@ boost::optional<repl::OplogEntry> SessionCatalogMigrationSource::SessionOplogIte
             // Otherwise, skip the record by returning boost::none.
             auto result = [&]() -> boost::optional<repl::OplogEntry> {
                 if (!_record.getState() ||
-                    _record.getState().get() == DurableTxnStateEnum::kCommitted ||
-                    _record.getState().get() == DurableTxnStateEnum::kPrepared) {
+                    _record.getState().value() == DurableTxnStateEnum::kCommitted ||
+                    _record.getState().value() == DurableTxnStateEnum::kPrepared) {
                     return makeSentinelOplogEntry(
                         _record.getSessionId(),
                         _record.getTxnNum(),

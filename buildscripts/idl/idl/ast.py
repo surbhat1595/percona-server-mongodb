@@ -113,6 +113,7 @@ class Type(common.SourceLocation):
         # A variant can have at most one alternative type which is a struct. Otherwise, if we saw
         # a sub-object while parsing BSON, we wouldn't know which struct to interpret it as.
         self.variant_struct_type = None  # type: Type
+        self.deserialize_with_tenant = False  # type: bool
         super(Type, self).__init__(file_name, line, column)
 
 
@@ -144,6 +145,7 @@ class Struct(common.SourceLocation):
         self.allow_global_collection_name = False  # type: bool
         self.non_const_getter = False  # type: bool
         self.cpp_validator_func = None  # type: str
+        self.is_command_reply = False  # type: bool
         super(Struct, self).__init__(file_name, line, column)
 
 
@@ -205,7 +207,7 @@ class Field(common.SourceLocation):
         self.chained = False  # type: bool
         self.comparison_order = -1  # type: int
         self.non_const_getter = False  # type: bool
-        self.unstable = None  # type: Optional[bool]
+        self.stability = None  # type: Optional[str]
         self.default = None  # type: str
         self.type = None  # type: Type
         self.always_serialize = False  # type: bool

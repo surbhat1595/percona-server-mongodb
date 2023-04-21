@@ -1018,20 +1018,6 @@ BSONObj transformBSON(
     return frameStack.top().builder.obj();
 }
 
-
-template <typename T>
-T parseFromCDR(ConstDataRange cdr) {
-    ConstDataRangeCursor cdc(cdr);
-    auto swObj = cdc.readAndAdvanceNoThrow<Validated<BSONObj>>();
-
-    uassertStatusOK(swObj);
-
-    BSONObj obj = swObj.getValue();
-
-    IDLParserErrorContext ctx("root");
-    return T::parse(ctx, obj);
-}
-
 template <typename T>
 std::vector<uint8_t> toEncryptedVector(EncryptedBinDataType dt, T t) {
     BSONObj obj = t.toBSON();
@@ -1274,7 +1260,7 @@ EncryptedFieldConfig getTestEncryptedFieldConfig() {
         ]
     })";
 
-    return EncryptedFieldConfig::parse(IDLParserErrorContext("root"), fromjson(schema));
+    return EncryptedFieldConfig::parse(IDLParserContext("root"), fromjson(schema));
 }
 
 TEST(EncryptionInformation, RoundTrip) {
@@ -1285,7 +1271,7 @@ TEST(EncryptionInformation, RoundTrip) {
 
 
     EncryptedFieldConfig efc2 = EncryptionInformationHelpers::getAndValidateSchema(
-        ns, EncryptionInformation::parse(IDLParserErrorContext("foo"), obj));
+        ns, EncryptionInformation::parse(IDLParserContext("foo"), obj));
 
     ASSERT_BSONOBJ_EQ(efc.toBSON(), efc2.toBSON());
 }
@@ -1301,7 +1287,7 @@ TEST(EncryptionInformation, BadSchema) {
 
     NamespaceString ns("test.test");
     ASSERT_THROWS_CODE(EncryptionInformationHelpers::getAndValidateSchema(
-                           ns, EncryptionInformation::parse(IDLParserErrorContext("foo"), obj)),
+                           ns, EncryptionInformation::parse(IDLParserContext("foo"), obj)),
                        DBException,
                        6371205);
 }
@@ -1314,7 +1300,7 @@ TEST(EncryptionInformation, MissingStateCollection) {
         efc.setEscCollection(boost::none);
         auto obj = EncryptionInformationHelpers::encryptionInformationSerialize(ns, efc);
         ASSERT_THROWS_CODE(EncryptionInformationHelpers::getAndValidateSchema(
-                               ns, EncryptionInformation::parse(IDLParserErrorContext("foo"), obj)),
+                               ns, EncryptionInformation::parse(IDLParserContext("foo"), obj)),
                            DBException,
                            6371207);
     }
@@ -1323,7 +1309,7 @@ TEST(EncryptionInformation, MissingStateCollection) {
         efc.setEccCollection(boost::none);
         auto obj = EncryptionInformationHelpers::encryptionInformationSerialize(ns, efc);
         ASSERT_THROWS_CODE(EncryptionInformationHelpers::getAndValidateSchema(
-                               ns, EncryptionInformation::parse(IDLParserErrorContext("foo"), obj)),
+                               ns, EncryptionInformation::parse(IDLParserContext("foo"), obj)),
                            DBException,
                            6371206);
     }
@@ -1332,7 +1318,7 @@ TEST(EncryptionInformation, MissingStateCollection) {
         efc.setEcocCollection(boost::none);
         auto obj = EncryptionInformationHelpers::encryptionInformationSerialize(ns, efc);
         ASSERT_THROWS_CODE(EncryptionInformationHelpers::getAndValidateSchema(
-                               ns, EncryptionInformation::parse(IDLParserErrorContext("foo"), obj)),
+                               ns, EncryptionInformation::parse(IDLParserContext("foo"), obj)),
                            DBException,
                            6371208);
     }
@@ -1426,7 +1412,7 @@ TEST(DeleteTokens, Fetch) {
         EncryptionInformationHelpers::encryptionInformationSerializeForDelete(ns, efc, &keyVault);
 
     auto tokenMap = EncryptionInformationHelpers::getDeleteTokens(
-        ns, EncryptionInformation::parse(IDLParserErrorContext("foo"), obj));
+        ns, EncryptionInformation::parse(IDLParserContext("foo"), obj));
 
     ASSERT_EQ(tokenMap.size(), 2);
 
@@ -1829,7 +1815,7 @@ TEST(FLE_Update, PullTokens) {
         EncryptionInformationHelpers::encryptionInformationSerializeForDelete(ns, efc, &keyVault);
 
     auto tokenMap = EncryptionInformationHelpers::getDeleteTokens(
-        ns, EncryptionInformation::parse(IDLParserErrorContext("foo"), obj));
+        ns, EncryptionInformation::parse(IDLParserContext("foo"), obj));
 
     ASSERT_EQ(tokenMap.size(), 2);
 

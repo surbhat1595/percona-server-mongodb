@@ -56,8 +56,9 @@
 #include "mongo/db/index_build_entry_helpers.h"
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/multi_key_path_tracker.h"
-#include "mongo/db/op_observer_impl.h"
-#include "mongo/db/op_observer_registry.h"
+#include "mongo/db/op_observer/op_observer_impl.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
+#include "mongo/db/op_observer/oplog_writer_impl.h"
 #include "mongo/db/query/wildcard_multikey_paths.h"
 #include "mongo/db/repl/apply_ops.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
@@ -85,8 +86,8 @@
 #include "mongo/db/session_catalog_mongod.h"
 #include "mongo/db/storage/snapshot_manager.h"
 #include "mongo/db/storage/storage_engine_impl.h"
-#include "mongo/db/transaction_participant.h"
-#include "mongo/db/transaction_participant_gen.h"
+#include "mongo/db/transaction/transaction_participant.h"
+#include "mongo/db/transaction/transaction_participant_gen.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/db/vector_clock_mutable.h"
 #include "mongo/dbtests/dbtests.h"
@@ -114,7 +115,7 @@ Status createIndexFromSpec(OperationContext* opCtx,
     // on this namespace would have a dangling Collection pointer after this function has run.
     invariant(!opCtx->lockState()->isCollectionLockedForMode(nss, MODE_IX));
 
-    AutoGetDb autoDb(opCtx, nsToDatabaseSubstring(ns), MODE_X);
+    AutoGetDb autoDb(opCtx, nss.dbName(), MODE_X);
     {
         WriteUnitOfWork wunit(opCtx);
         auto coll =
@@ -136,7 +137,8 @@ Status createIndexFromSpec(OperationContext* opCtx,
                               collection,
                               spec,
                               [opCtx, clock](const std::vector<BSONObj>& specs) -> Status {
-                                  if (opCtx->recoveryUnit()->getCommitTimestamp().isNull()) {
+                                  if (opCtx->writesAreReplicated() &&
+                                      opCtx->recoveryUnit()->getCommitTimestamp().isNull()) {
                                       return opCtx->recoveryUnit()->setTimestamp(
                                           clock->tickClusterTime(1).asTimestamp());
                                   }
@@ -166,8 +168,10 @@ Status createIndexFromSpec(OperationContext* opCtx,
                              collection.getWritableCollection(opCtx),
                              MultiIndexBlock::kNoopOnCreateEachFn,
                              MultiIndexBlock::kNoopOnCommitFn));
-    LogicalTime indexTs = clock->tickClusterTime(1);
-    ASSERT_OK(opCtx->recoveryUnit()->setTimestamp(indexTs.asTimestamp()));
+    if (opCtx->writesAreReplicated()) {
+        LogicalTime indexTs = clock->tickClusterTime(1);
+        ASSERT_OK(opCtx->recoveryUnit()->setTimestamp(indexTs.asTimestamp()));
+    }
     wunit.commit();
     abortOnExit.dismiss();
     return Status::OK();
@@ -300,7 +304,8 @@ public:
         repl::ReplClientInfo::forClient(_opCtx->getClient()).clearLastOp();
 
         auto registry = std::make_unique<OpObserverRegistry>();
-        registry->addObserver(std::make_unique<OpObserverImpl>());
+        registry->addObserver(
+            std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
         _opCtx->getServiceContext()->setOpObserver(std::move(registry));
 
         repl::createOplog(_opCtx);
@@ -354,7 +359,8 @@ public:
             AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_IX);
             auto db = autoColl.ensureDbExists(_opCtx);
             WriteUnitOfWork wunit(_opCtx);
-            if (_opCtx->recoveryUnit()->getCommitTimestamp().isNull()) {
+            if (_opCtx->writesAreReplicated() &&
+                _opCtx->recoveryUnit()->getCommitTimestamp().isNull()) {
                 ASSERT_OK(_opCtx->recoveryUnit()->setTimestamp(Timestamp(1, 1)));
             }
             invariant(db->createCollection(_opCtx, nss));
@@ -425,7 +431,7 @@ public:
             printStackTrace();
             FAIL("Did not find any documents.");
         }
-        return optRecord.get().data.toBson();
+        return optRecord.value().data.toBson();
     }
 
     std::shared_ptr<BSONCollectionCatalogEntry::MetaData> getMetaDataAtTime(
@@ -498,7 +504,7 @@ public:
         OneOffRead oor(_opCtx, ts);
 
         auto doc =
-            repl::MinValidDocument::parse(IDLParserErrorContext("MinValidDocument"), findOne(coll));
+            repl::MinValidDocument::parse(IDLParserContext("MinValidDocument"), findOne(coll));
         ASSERT_EQ(expectedDoc.getMinValidTimestamp(), doc.getMinValidTimestamp())
             << "minValid timestamps weren't equal at " << ts.toString()
             << ". Expected: " << expectedDoc.toBSON() << ". Found: " << doc.toBSON();
@@ -563,7 +569,8 @@ public:
     void assertOldestActiveTxnTimestampEquals(const boost::optional<Timestamp>& ts,
                                               const Timestamp& atTs) {
         auto oldest = TransactionParticipant::getOldestActiveTimestamp(atTs);
-        ASSERT_EQ(oldest, ts);
+        ASSERT_TRUE(oldest.isOK());
+        ASSERT_EQ(oldest.getValue(), ts);
     }
 
     void assertHasStartOpTime() {
@@ -1664,6 +1671,7 @@ TEST_F(StorageTimestampTest, PrimarySetIndexMultikeyOnInsert) {
 
 TEST_F(StorageTimestampTest, PrimarySetIndexMultikeyOnInsertUnreplicated) {
     // Use an unreplicated collection.
+    repl::UnreplicatedWritesBlock noRep(_opCtx);
     NamespaceString nss("unittests.system.profile");
     create(nss);
 
@@ -3050,8 +3058,8 @@ TEST_F(StorageTimestampTest, ViewCreationSeparateTransaction) {
             << " incorrectly exists before creation. CreateTs: " << systemViewsCreateTs;
 
         systemViewsMd = getMetaDataAtTime(durableCatalog, catalogId, systemViewsCreateTs);
-        auto nss = systemViewsMd->ns;
-        ASSERT_EQ(systemViewsNss.ns(), nss);
+        auto nss = systemViewsMd->nss;
+        ASSERT_EQ(systemViewsNss, nss);
 
         assertDocumentAtTimestamp(autoColl.getCollection(), systemViewsCreateTs, BSONObj());
         assertDocumentAtTimestamp(autoColl.getCollection(),

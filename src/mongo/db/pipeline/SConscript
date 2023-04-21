@@ -402,6 +402,7 @@ pipelineEnv.Library(
         '$BUILD_DIR/mongo/db/query/projection_ast',
         '$BUILD_DIR/mongo/db/repl/image_collection_entry',
         '$BUILD_DIR/mongo/db/sorter/sorter_idl',
+        '$BUILD_DIR/mongo/db/sorter/sorter_stats',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_conversion_util',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         '$BUILD_DIR/mongo/rpc/command_status',
@@ -485,7 +486,6 @@ env.Library(
         'exchange_spec.idl',
         'resume_token.cpp',
         'storage_stats_spec.idl',
-        'value.idl',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -494,6 +494,18 @@ env.Library(
         '$BUILD_DIR/mongo/idl/idl_parser',
         '$BUILD_DIR/mongo/s/common_s',
         'runtime_constants_idl',
+        'value_idl',
+    ],
+)
+
+env.Library(
+    target='value_idl',
+    source=[
+        'value.idl',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/exec/document_value/document_value',
+        '$BUILD_DIR/mongo/idl/idl_parser',
     ],
 )
 
@@ -502,33 +514,10 @@ env.Library(
     source=[
         'change_stream_expired_pre_image_remover.cpp',
     ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/db/change_stream_options_manager',
-        '$BUILD_DIR/mongo/db/concurrency/exception_util',
-        '$BUILD_DIR/mongo/db/db_raii',
-        '$BUILD_DIR/mongo/db/query_exec',
-        '$BUILD_DIR/mongo/db/record_id_helpers',
-        '$BUILD_DIR/mongo/db/repl/oplog_entry',
-        '$BUILD_DIR/mongo/db/repl/storage_interface',
-        '$BUILD_DIR/mongo/util/periodic_runner',
-        'change_stream_preimage',
-    ],
-)
-
-env.Library(
-    target='change_stream_pre_image_helpers',
-    source=[
-        'change_stream_pre_image_helpers.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/db/service_context',
-        'change_stream_preimage',
-    ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/catalog_raii',
-        '$BUILD_DIR/mongo/db/concurrency/lock_manager_defs',
-        '$BUILD_DIR/mongo/db/dbhelpers',
-        '$BUILD_DIR/mongo/db/namespace_string',
+        '$BUILD_DIR/mongo/db/change_stream_pre_images_collection_manager',
+        '$BUILD_DIR/mongo/db/db_raii',
+        '$BUILD_DIR/mongo/util/periodic_runner',
     ],
 )
 
@@ -662,6 +651,7 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/auth/authmocks',
         '$BUILD_DIR/mongo/db/change_stream_options',
         '$BUILD_DIR/mongo/db/change_stream_options_manager',
+        '$BUILD_DIR/mongo/db/change_stream_pre_images_collection_manager',
         '$BUILD_DIR/mongo/db/cst/cst',
         '$BUILD_DIR/mongo/db/exec/document_value/document_value',
         '$BUILD_DIR/mongo/db/exec/document_value/document_value_test_util',

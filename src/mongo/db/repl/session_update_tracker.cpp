@@ -33,11 +33,12 @@
 #include "mongo/db/repl/session_update_tracker.h"
 
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/ops/write_ops_retryability.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session.h"
-#include "mongo/db/session_txn_record_gen.h"
-#include "mongo/db/transaction_participant_gen.h"
+#include "mongo/db/transaction/session_txn_record_gen.h"
+#include "mongo/db/transaction/transaction_participant_gen.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
@@ -212,7 +213,8 @@ boost::optional<std::vector<OplogEntry>> SessionUpdateTracker::_updateSessionInf
             return {};
         }
 
-        if (!entry.getObject2()) {
+        if (!entry.getObject2() ||
+            (entry.getObject2()->isEmpty() && !isWouldChangeOwningShardSentinelOplogEntry(entry))) {
             return {};
         }
     }
@@ -287,7 +289,7 @@ std::vector<OplogEntry> SessionUpdateTracker::flushAll() {
 std::vector<OplogEntry> SessionUpdateTracker::_flushForQueryPredicate(
     const BSONObj& queryPredicate) {
     auto idField = queryPredicate["_id"].Obj();
-    auto lsid = LogicalSessionId::parse(IDLParserErrorContext("lsidInOplogQuery"), idField);
+    auto lsid = LogicalSessionId::parse(IDLParserContext("lsidInOplogQuery"), idField);
     auto iter = _sessionsToUpdate.find(lsid);
 
     if (iter == _sessionsToUpdate.end()) {

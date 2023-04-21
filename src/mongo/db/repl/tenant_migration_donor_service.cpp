@@ -298,7 +298,7 @@ TenantMigrationDonorService::Instance::Instance(ServiceContext* const serviceCon
         // The migration was resumed on stepup.
 
         if (_stateDoc.getAbortReason()) {
-            auto abortReasonBson = _stateDoc.getAbortReason().get();
+            auto abortReasonBson = _stateDoc.getAbortReason().value();
             auto code = abortReasonBson["code"].Int();
             auto errmsg = abortReasonBson["errmsg"].String();
             _abortReason = Status(ErrorCodes::Error(code), errmsg);
@@ -394,7 +394,7 @@ boost::optional<BSONObj> TenantMigrationDonorService::Instance::reportForCurrent
     // sessions and they run in a background thread pool.
     BSONObjBuilder bob;
     bob.append("desc", "tenant donor migration");
-    bob.append("migrationCompleted", _completionPromise.getFuture().isReady());
+    bob.append("garbageCollectable", _forgetMigrationDurablePromise.getFuture().isReady());
     _migrationUuid.appendToBuilder(&bob, "instanceID"_sd);
     if (getProtocol() == MigrationProtocolEnum::kMultitenantMigrations) {
         bob.append("tenantId", _tenantId);
@@ -403,7 +403,7 @@ boost::optional<BSONObj> TenantMigrationDonorService::Instance::reportForCurrent
     bob.append("readPreference", _readPreference.toInnerBSON());
     bob.append("receivedCancellation", _abortRequested);
     if (_durableState) {
-        bob.append("lastDurableState", _durableState.get().state);
+        bob.append("lastDurableState", _durableState.value().state);
     } else {
         bob.appendUndefined("lastDurableState");
     }
@@ -473,7 +473,7 @@ void TenantMigrationDonorService::Instance::interrupt(Status status) {
     // Resolve any unresolved promises to avoid hanging.
     setPromiseErrorIfNotReady(lg, _initialDonorStateDurablePromise, status);
     setPromiseErrorIfNotReady(lg, _receiveDonorForgetMigrationPromise, status);
-    setPromiseErrorIfNotReady(lg, _completionPromise, status);
+    setPromiseErrorIfNotReady(lg, _forgetMigrationDurablePromise, status);
     setPromiseErrorIfNotReady(lg, _decisionPromise, status);
 
     if (auto fetcher = _recipientKeysFetcher.lock()) {
@@ -589,7 +589,7 @@ ExecutorFuture<repl::OpTime> TenantMigrationDonorService::Instance::_updateState
 
                                    invariant(_abortReason);
                                    BSONObjBuilder bob;
-                                   _abortReason.get().serializeErrorToBSON(&bob);
+                                   _abortReason.value().serializeErrorToBSON(&bob);
                                    _stateDoc.setAbortReason(bob.obj());
                                    break;
                                }
@@ -626,7 +626,7 @@ ExecutorFuture<repl::OpTime> TenantMigrationDonorService::Instance::_updateState
                    });
 
                invariant(updateOpTime);
-               return updateOpTime.get();
+               return updateOpTime.value();
            })
         .until([](StatusWith<repl::OpTime> swOpTime) { return swOpTime.getStatus().isOK(); })
         .withBackoffBetweenIterations(kExponentialBackoff)
@@ -772,9 +772,7 @@ ExecutorFuture<void> TenantMigrationDonorService::Instance::_sendRecipientSyncDa
 
         stdx::lock_guard<Latch> lg(_mutex);
 
-        if (_isAtLeastFCV52AtStart) {
-            commonData.setProtocol(_protocol);
-        }
+        commonData.setProtocol(_protocol);
         request.setMigrationRecipientCommonData(commonData);
 
         invariant(_stateDoc.getStartMigrationDonorTimestamp());
@@ -802,14 +800,8 @@ ExecutorFuture<void> TenantMigrationDonorService::Instance::_sendRecipientForget
     commonData.setRecipientCertificateForDonor(_recipientCertificateForDonor);
     // TODO SERVER-63454: Pass tenantId only for 'kMultitenantMigrations' protocol.
     commonData.setTenantId(_tenantId);
-    auto isAtLeastFCV52AtStart = [&]() -> bool {
-        stdx::lock_guard<Latch> lg(_mutex);
-        return _isAtLeastFCV52AtStart;
-    };
 
-    if (isAtLeastFCV52AtStart()) {
-        commonData.setProtocol(_protocol);
-    }
+    commonData.setProtocol(_protocol);
     request.setMigrationRecipientCommonData(commonData);
 
     return _sendCommandToRecipient(executor, recipientTargeterRS, request.toBSON(BSONObj()), token);
@@ -827,33 +819,6 @@ CancellationToken TenantMigrationDonorService::Instance::_initAbortMigrationSour
     }
 
     return _abortMigrationSource->token();
-}
-
-bool TenantMigrationDonorService::Instance::_checkifProtocolRemainsFCVCompatible() {
-    stdx::lock_guard<Latch> lg(_mutex);
-
-    // Ensure that the on-disk protocol and cached value remains the same.
-    invariant(!_stateDoc.getProtocol() || _stateDoc.getProtocol().value() == getProtocol());
-
-    _isAtLeastFCV52AtStart = serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
-        multiversion::FeatureCompatibilityVersion::kVersion_5_2);
-    if (_isAtLeastFCV52AtStart) {
-        // When the instance is started using state doc < 5.2 FCV format, _stateDoc._protocol field
-        // won't be set. In that case, the cached value Instance::_protocol will be set to
-        // "kMultitenantMigrations".
-        return true;
-    }
-
-    if (getProtocol() == MigrationProtocolEnum::kShardMerge) {
-        LOGV2(5949503,
-              "Must abort tenant migration as 'Merge' protocol is not supported for FCV "
-              "below 5.2");
-        return false;
-    }
-    // For backward compatibility, ensure that the 'protocol' field is not set in the
-    // document.
-    _stateDoc.setProtocol(boost::none);
-    return true;
 }
 
 SemiFuture<void> TenantMigrationDonorService::Instance::run(
@@ -884,7 +849,7 @@ SemiFuture<void> TenantMigrationDonorService::Instance::run(
     // SetFeatureCompatibilityVersionCommand::_cancelTenantMigrations(), we might miss aborting this
     // tenant migration and FCV might have updated or downgraded at this point. So, need to ensure
     // that the protocol is still compatible with FCV.
-    if (isFCVUpgradingOrDowngrading() || !_checkifProtocolRemainsFCVCompatible()) {
+    if (isFCVUpgradingOrDowngrading()) {
         onReceiveDonorAbortMigration();
     }
 
@@ -972,8 +937,9 @@ SemiFuture<void> TenantMigrationDonorService::Instance::run(
                        self = shared_from_this(),
                        token,
                        scopedCounter{std::move(scopedOutstandingMigrationCounter)}](Status status) {
-            // Don't set the completion promise if the instance has been canceled. We assume
-            // whatever canceled the token will also set the promise with an appropriate error.
+            // Don't set the forget migration durable promise if the instance has been canceled. We
+            // assume whatever canceled the token will also set the promise with an appropriate
+            // error.
             checkForTokenInterrupt(token);
 
             stdx::lock_guard<Latch> lg(_mutex);
@@ -983,8 +949,8 @@ SemiFuture<void> TenantMigrationDonorService::Instance::run(
                   "migrationId"_attr = _migrationUuid,
                   "expireAt"_attr = _stateDoc.getExpireAt(),
                   "status"_attr = status);
+            setPromiseFromStatusIfNotReady(lg, _forgetMigrationDurablePromise, status);
 
-            setPromiseFromStatusIfNotReady(lg, _completionPromise, status);
             LOGV2(5006601,
                   "Tenant migration completed",
                   "migrationId"_attr = _migrationUuid,
@@ -1229,7 +1195,7 @@ TenantMigrationDonorService::Instance::_waitUntilStartMigrationDonorTimestampIsC
            })
         .until([this, self = shared_from_this(), startMigrationDonorTimestamp](Status status) {
             uassertStatusOK(status);
-            auto storageEngine = getGlobalServiceContext()->getStorageEngine();
+            auto storageEngine = _serviceContext->getStorageEngine();
             if (storageEngine->getLastStableRecoveryTimestamp() < startMigrationDonorTimestamp) {
                 return false;
             }

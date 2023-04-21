@@ -52,7 +52,7 @@ public:
     bool isDropPending(OperationContext* opCtx) const final;
 
     void getStats(OperationContext* opCtx,
-                  BSONObjBuilder* output,
+                  DBStats* output,
                   bool includeFreeStorage,
                   double scale = 1) const final;
 
@@ -104,19 +104,6 @@ public:
     const NamespaceString& getSystemViewsName() const final {
         return _viewsName;
     }
-
-    /**
-     * Given an input pattern `collectionNameModel`, returns a namespace string where `%` characters
-     * are replaced with random alpha-numerics.
-     *
-     * When called while holding an exclusive database lock, the collection name is guaranteed to
-     * not exist. Otherwise the caller is responsible for acquiring locks to check uniqueness.
-     *
-     * Returns a NamespaceExists error status if multiple attempts fail to generate a possible
-     * unique name.
-     */
-    StatusWith<NamespaceString> makeUniqueCollectionNamespace(
-        OperationContext* opCtx, StringData collectionNameModel) const final;
 
     void checkForIdIndexesAndDropPendingCollections(OperationContext* opCtx) const final;
 

@@ -90,7 +90,7 @@ IndexBuildInterceptor::IndexBuildInterceptor(OperationContext* opCtx,
             entry->descriptor()->unique() == dupKeyTrackerIdentExists);
     if (duplicateKeyTrackerIdent) {
         _duplicateKeyTracker =
-            std::make_unique<DuplicateKeyTracker>(opCtx, entry, duplicateKeyTrackerIdent.get());
+            std::make_unique<DuplicateKeyTracker>(opCtx, entry, duplicateKeyTrackerIdent.value());
     }
 }
 
@@ -162,6 +162,15 @@ Status IndexBuildInterceptor::drainWritesIntoIndex(OperationContext* opCtx,
     // Returns true if the cursor has reached the end of the table, false if there are more records,
     // and an error Status otherwise.
     auto applySingleBatch = [&]() -> StatusWith<bool> {
+        // This write is performed without a durable/commit timestamp. This transaction trips the
+        // ordered assertion for the side-table documents which are inserted with a timestamp and,
+        // in here, being deleted without a timestamp. Because the data being read is majority
+        // committed, there's no risk of needing to roll back the writes done by this "drain".
+        //
+        // Note that index builds will only "resume" once. A second resume results in the index
+        // build starting from scratch. A "resumed" index build does not use a majority read
+        // concern. And thus will observe data that can be rolled back via replication.
+        opCtx->recoveryUnit()->allowUntimestampedWrite();
         WriteUnitOfWork wuow(opCtx);
 
         int32_t batchSize = 0;
@@ -177,7 +186,7 @@ Status IndexBuildInterceptor::drainWritesIntoIndex(OperationContext* opCtx,
         while (record) {
             opCtx->checkForInterrupt();
 
-            RecordId currentRecordId = record->id;
+            auto& currentRecordId = record->id;
             BSONObj unownedDoc = record->data.toBson();
 
             // Don't apply this record if the total batch size in bytes would be too large.
@@ -207,7 +216,7 @@ Status IndexBuildInterceptor::drainWritesIntoIndex(OperationContext* opCtx,
 
             // Save the record ids of the documents inserted into the index for deletion later.
             // We can't delete records while holding a positioned cursor.
-            recordsAddedToIndex.push_back(currentRecordId);
+            recordsAddedToIndex.emplace_back(std::move(currentRecordId));
 
             // Don't continue if the batch is full. Allow the transaction to commit.
             if (batchSize == kBatchMaxSize) {
@@ -436,7 +445,7 @@ Status IndexBuildInterceptor::sideWrite(OperationContext* opCtx,
         // expectations.
         stdx::unique_lock<Latch> lk(_multikeyPathMutex);
         if (_multikeyPaths) {
-            MultikeyPathTracker::mergeMultikeyPaths(&_multikeyPaths.get(), multikeyPaths);
+            MultikeyPathTracker::mergeMultikeyPaths(&_multikeyPaths.value(), multikeyPaths);
         } else {
             // `mergeMultikeyPaths` is sensitive to the two inputs having the same multikey
             // "shape". Initialize `_multikeyPaths` with the right shape from the first result.

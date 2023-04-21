@@ -185,8 +185,8 @@ bool isLastShardKeyIndex(OperationContext* opCtx,
                          const std::string& indexName,
                          const BSONObj& shardKey) {
     return !_findShardKeyPrefixedIndex(
-                opCtx, collection, indexCatalog, indexName, shardKey, false /* requireSingleKey */)
-                .is_initialized();
+                opCtx, collection, indexCatalog, indexName, shardKey, true /* requireSingleKey */)
+                .has_value();
 }
 
 boost::optional<ShardKeyIndex> findShardKeyPrefixedIndex(OperationContext* opCtx,

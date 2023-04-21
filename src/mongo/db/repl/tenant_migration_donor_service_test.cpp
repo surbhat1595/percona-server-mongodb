@@ -27,15 +27,15 @@
  *    it in the license file.
  */
 
-#include <boost/optional/optional_io.hpp>
 #include <fstream>
 #include <memory>
 
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/client/replica_set_monitor_protocol_test_util.h"
 #include "mongo/config.h"
-#include "mongo/db/op_observer_impl.h"
-#include "mongo/db/op_observer_registry.h"
+#include "mongo/db/op_observer/op_observer_impl.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
+#include "mongo/db/op_observer/oplog_writer_mock.h"
 #include "mongo/db/repl/primary_only_service.h"
 #include "mongo/db/repl/primary_only_service_op_observer.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
@@ -72,7 +72,8 @@ class TenantMigrationDonorServiceTest : public ServiceContextMongoDTest {
             // ReplClientInfo.
             OpObserverRegistry* opObserverRegistry =
                 dynamic_cast<OpObserverRegistry*>(serviceContext->getOpObserver());
-            opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>());
+            opObserverRegistry->addObserver(
+                std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterMock>()));
             opObserverRegistry->addObserver(
                 std::make_unique<PrimaryOnlyServiceOpObserver>(serviceContext));
 

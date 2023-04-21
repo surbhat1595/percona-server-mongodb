@@ -61,7 +61,7 @@
 #include "mongo/db/stats/server_read_concern_metrics.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/util/fail_point.h"
@@ -89,7 +89,7 @@ std::unique_ptr<FindCommandRequest> parseCmdObjectToFindCommandRequest(Operation
     // Rewrite any FLE find payloads that exist in the query if this is a FLE 2 query.
     if (shouldDoFLERewrite(findCommand)) {
         invariant(findCommand->getNamespaceOrUUID().nss());
-        processFLEFindD(opCtx, findCommand->getNamespaceOrUUID().nss().get(), findCommand.get());
+        processFLEFindD(opCtx, findCommand->getNamespaceOrUUID().nss().value(), findCommand.get());
     }
 
     if (findCommand->getMirrored().value_or(false)) {
@@ -182,6 +182,9 @@ public:
         return AllowedOnSecondary::kOptIn;
     }
 
+    bool allowedWithSecurityToken() const final {
+        return true;
+    }
     bool maintenanceOk() const override {
         return false;
     }
@@ -274,7 +277,7 @@ public:
             uassertStatusOK(auth::checkAuthForFind(
                 authSession,
                 CollectionCatalog::get(opCtx)->resolveNamespaceStringOrUUID(
-                    opCtx, CommandHelpers::parseNsOrUUID(_dbName, _request.body)),
+                    opCtx, CommandHelpers::parseNsOrUUID({boost::none, _dbName}, _request.body)),
                 hasTerm));
         }
 
@@ -459,12 +462,12 @@ public:
             // request into an aggregation command.
             boost::optional<AutoGetCollectionForReadCommandMaybeLockFree> ctx;
             ctx.emplace(opCtx,
-                        CommandHelpers::parseNsOrUUID(_dbName, _request.body),
+                        CommandHelpers::parseNsOrUUID({boost::none, _dbName}, _request.body),
                         AutoGetCollectionViewMode::kViewsPermitted);
             const auto& nss = ctx->getNss();
 
             uassert(ErrorCodes::NamespaceNotFound,
-                    str::stream() << "UUID " << findCommand->getNamespaceOrUUID().uuid().get()
+                    str::stream() << "UUID " << findCommand->getNamespaceOrUUID().uuid().value()
                                   << " specified in query request not found",
                     ctx || !findCommand->getNamespaceOrUUID().uuid());
 
@@ -558,7 +561,7 @@ public:
 
             // If the executor supports it, find operations will maintain the storage engine state
             // across commands.
-            if (gYieldingSupportForSBE && !opCtx->inMultiDocumentTransaction() &&
+            if (gMaintainValidCursorsAcrossReadCommands && !opCtx->inMultiDocumentTransaction() &&
                 repl::ReadConcernArgs::get(opCtx).getLevel() !=
                     repl::ReadConcernLevel::kSnapshotReadConcern) {
                 exec->enableSaveRecoveryUnitAcrossCommandsIfSupported();

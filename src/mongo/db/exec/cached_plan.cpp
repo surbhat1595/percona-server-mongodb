@@ -77,9 +77,8 @@ CachedPlanStage::CachedPlanStage(ExpressionContext* expCtx,
 }
 
 Status CachedPlanStage::pickBestPlan(PlanYieldPolicy* yieldPolicy) {
-    // Adds the amount of time taken by pickBestPlan() to executionTimeMillis. There's lots of
-    // execution work that happens here, so this is needed for the time accounting to
-    // make sense.
+    // Adds the amount of time taken by pickBestPlan() to executionTime. There's lots of execution
+    // work that happens here, so this is needed for the time accounting to make sense.
     auto optTimer = getOptTimer();
 
     // During plan selection, the list of indices we are using to plan must remain stable, so the
@@ -146,6 +145,9 @@ Status CachedPlanStage::pickBestPlan(PlanYieldPolicy* yieldPolicy) {
             return Status::OK();
         } else if (PlanStage::NEED_YIELD == state) {
             invariant(id == WorkingSet::INVALID_ID);
+            // Run-time plan selection occurs before a WriteUnitOfWork is opened and it's not
+            // subject to TemporarilyUnavailableException's.
+            invariant(!expCtx()->getTemporarilyUnavailableException());
             if (!yieldPolicy->canAutoYield()) {
                 throwWriteConflictException();
             }

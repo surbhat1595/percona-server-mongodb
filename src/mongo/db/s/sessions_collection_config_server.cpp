@@ -27,10 +27,10 @@
  *    it in the license file.
  */
 
-
 #include "mongo/db/s/sessions_collection_config_server.h"
 
 #include "mongo/logv2/log.h"
+#include "mongo/s/chunk_constraints.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/cluster_ddl.h"
@@ -56,7 +56,7 @@ void SessionsCollectionConfigServer::_shardCollectionIfNeeded(OperationContext* 
     uassert(ErrorCodes::ShardNotFound,
             str::stream() << "Failed to create " << NamespaceString::kLogicalSessionsNamespace
                           << ": cannot create the collection until there are shards",
-            Grid::get(opCtx)->shardRegistry()->getNumShardsNoReload() != 0);
+            Grid::get(opCtx)->shardRegistry()->getNumShards(opCtx) != 0);
 
     ShardsvrCreateCollection shardsvrCollRequest(NamespaceString::kLogicalSessionsNamespace);
     CreateCollectionRequest requestParamsObj;
@@ -118,15 +118,11 @@ void SessionsCollectionConfigServer::setupSessionsCollection(OperationContext* o
 
     _shardCollectionIfNeeded(opCtx);
     _generateIndexesIfNeeded(opCtx);
-    static constexpr int64_t kAverageSessionDocSizeBytes = 200;
-    static constexpr int64_t kDesiredDocsInChunks = 1000;
-    static constexpr int64_t kMaxChunkSizeBytes =
-        kAverageSessionDocSizeBytes * kDesiredDocsInChunks;
     auto filterQuery =
         BSON("_id" << NamespaceString::kLogicalSessionsNamespace.ns()
                    << CollectionType::kMaxChunkSizeBytesFieldName << BSON("$exists" << false));
     auto updateQuery = BSON("$set" << BSON(CollectionType::kMaxChunkSizeBytesFieldName
-                                           << kMaxChunkSizeBytes
+                                           << logical_sessions::kMaxChunkSizeBytes
                                            << CollectionType::kNoAutoSplitFieldName << true));
 
     uassertStatusOK(Grid::get(opCtx)->catalogClient()->updateConfigDocument(

@@ -100,7 +100,7 @@ Status MovePrimarySourceManager::clone(OperationContext* opCtx) {
     {
         // We use AutoGetDb::ensureDbExists() the first time just in case movePrimary was called
         // before any data was inserted into the database.
-        AutoGetDb autoDb(opCtx, getNss().toString(), MODE_X);
+        AutoGetDb autoDb(opCtx, getNss().dbName(), MODE_X);
         invariant(autoDb.ensureDbExists(opCtx), getNss().toString());
 
         auto dss = DatabaseShardingState::get(opCtx, getNss().toString());
@@ -164,7 +164,7 @@ Status MovePrimarySourceManager::enterCriticalSection(OperationContext* opCtx) {
         // The critical section must be entered with the database X lock in order to ensure there
         // are no writes which could have entered and passed the database version check just before
         // we entered the critical section, but will potentially complete after we left it.
-        AutoGetDb autoDb(opCtx, getNss().toString(), MODE_X);
+        AutoGetDb autoDb(opCtx, getNss().dbName(), MODE_X);
 
         if (!autoDb.getDb()) {
             uasserted(ErrorCodes::ConflictingOperationInProgress,
@@ -213,7 +213,7 @@ Status MovePrimarySourceManager::commitOnConfig(OperationContext* opCtx) {
     ScopeGuard scopedGuard([&] { cleanupOnError(opCtx); });
 
     {
-        AutoGetDb autoDb(opCtx, getNss().toString(), MODE_X);
+        AutoGetDb autoDb(opCtx, getNss().dbName(), MODE_X);
 
         if (!autoDb.getDb()) {
             uasserted(ErrorCodes::ConflictingOperationInProgress,
@@ -273,7 +273,7 @@ Status MovePrimarySourceManager::commitOnConfig(OperationContext* opCtx) {
         // this node can accept writes for this collection as a proxy for it being primary.
         if (!validateStatus.isOK()) {
             UninterruptibleLockGuard noInterrupt(opCtx->lockState());
-            AutoGetDb autoDb(opCtx, getNss().toString(), MODE_IX);
+            AutoGetDb autoDb(opCtx, getNss().dbName(), MODE_IX);
 
             if (!autoDb.getDb()) {
                 uasserted(ErrorCodes::ConflictingOperationInProgress,
@@ -329,23 +329,26 @@ Status MovePrimarySourceManager::commitOnConfig(OperationContext* opCtx) {
 Status MovePrimarySourceManager::_commitOnConfig(OperationContext* opCtx) {
     auto const configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
 
-    auto findResponse = uassertStatusOK(
-        configShard->exhaustiveFindOnConfig(opCtx,
-                                            ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                            repl::ReadConcernLevel::kMajorityReadConcern,
-                                            NamespaceString::kConfigDatabasesNamespace,
-                                            BSON(DatabaseType::kNameFieldName << _dbname),
-                                            BSON(DatabaseType::kNameFieldName << -1),
-                                            1));
+    auto getDatabaseEntry = [&]() {
+        auto findResponse = uassertStatusOK(
+            configShard->exhaustiveFindOnConfig(opCtx,
+                                                ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                                repl::ReadConcernLevel::kMajorityReadConcern,
+                                                NamespaceString::kConfigDatabasesNamespace,
+                                                BSON(DatabaseType::kNameFieldName << _dbname),
+                                                BSON(DatabaseType::kNameFieldName << -1),
+                                                1));
 
-    const auto databasesVector = std::move(findResponse.docs);
-    uassert(ErrorCodes::IncompatibleShardingMetadata,
-            str::stream() << "Tried to find max database version for database '" << _dbname
-                          << "', but found no databases",
-            !databasesVector.empty());
+        const auto databasesVector = std::move(findResponse.docs);
+        uassert(ErrorCodes::IncompatibleShardingMetadata,
+                str::stream() << "Tried to find max database version for database '" << _dbname
+                              << "', but found no databases",
+                !databasesVector.empty());
 
-    const auto dbType =
-        DatabaseType::parse(IDLParserErrorContext("DatabaseType"), databasesVector.front());
+        return DatabaseType::parse(IDLParserContext("DatabaseType"), databasesVector.front());
+    };
+
+    const auto dbType = getDatabaseEntry();
 
     if (dbType.getPrimary() == _toShard) {
         return Status::OK();
@@ -358,9 +361,17 @@ Status MovePrimarySourceManager::_commitOnConfig(OperationContext* opCtx) {
 
     newDbType.setVersion(currentDatabaseVersion.makeUpdated());
 
-    auto const updateQuery =
-        BSON(DatabaseType::kNameFieldName << _dbname << DatabaseType::kVersionFieldName
-                                          << currentDatabaseVersion.toBSON());
+    auto const updateQuery = [&] {
+        BSONObjBuilder queryBuilder;
+        queryBuilder.append(DatabaseType::kNameFieldName, _dbname);
+        // Include the version in the update filter to be resilient to potential network retries and
+        // delayed messages.
+        for (auto [fieldName, elem] : currentDatabaseVersion.toBSON()) {
+            auto dottedFieldName = DatabaseType::kVersionFieldName + "." + fieldName;
+            queryBuilder.appendAs(elem, dottedFieldName);
+        }
+        return queryBuilder.obj();
+    }();
 
     auto updateStatus = Grid::get(opCtx)->catalogClient()->updateConfigDocument(
         opCtx,
@@ -378,6 +389,14 @@ Status MovePrimarySourceManager::_commitOnConfig(OperationContext* opCtx) {
               "error"_attr = redact(updateStatus.getStatus()));
         return updateStatus.getStatus();
     }
+
+    const auto updatedDbType = getDatabaseEntry();
+    tassert(6851100,
+            "Error committing movePrimary: database version went backwards",
+            updatedDbType.getVersion() > currentDatabaseVersion);
+    uassert(6851101,
+            "Error committing movePrimary: update of `config.databases` failed",
+            updatedDbType.getPrimary() != _fromShard);
 
     return Status::OK();
 }
@@ -443,7 +462,7 @@ void MovePrimarySourceManager::_cleanup(OperationContext* opCtx) {
     {
         // Unregister from the database's sharding state if we're still registered.
         UninterruptibleLockGuard noInterrupt(opCtx->lockState());
-        AutoGetDb autoDb(opCtx, getNss().toString(), MODE_IX);
+        AutoGetDb autoDb(opCtx, getNss().dbName(), MODE_IX);
 
         auto dss = DatabaseShardingState::get(opCtx, getNss().db());
         dss->clearMovePrimarySourceManager(opCtx);

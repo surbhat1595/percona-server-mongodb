@@ -252,7 +252,7 @@ void PrimaryOnlyService::reportInstanceInfoForCurrentOp(
     for (auto& [_, instance] : _activeInstances) {
         auto op = instance.getInstance()->reportForCurrentOp(connMode, sessionMode);
         if (op.has_value()) {
-            ops->push_back(std::move(op.get()));
+            ops->push_back(std::move(op.value()));
         }
     }
 }
@@ -263,6 +263,14 @@ void PrimaryOnlyService::registerOpCtx(OperationContext* opCtx, bool allowOpCtxW
     invariant(inserted);
 
     if (_state == State::kRunning || (_state == State::kRebuilding && allowOpCtxWhileRebuilding)) {
+        // We do not allow creating an opCtx while in kRebuilding (unless the thread has explicitly
+        // requested it) in case the node has stepped down and back up. In that case the second
+        // stepup would join the instance from the first stepup which could wait on the opCtx which
+        // would not get interrupted. This could cause the second stepup to take a long time
+        // to join the old instance. Note that opCtx's created through a
+        // CancelableOperationContextFactory with a cancellation token *would* be interrupted (and
+        // would not delay the join), because the stepdown would have cancelled the cancellation
+        // token.
         return;
     } else {
         // If this service isn't running when an OpCtx associated with this service is created, then
@@ -752,7 +760,7 @@ void PrimaryOnlyService::_rebuildInstances(long long term) noexcept {
 std::shared_ptr<PrimaryOnlyService::Instance> PrimaryOnlyService::_insertNewInstance(
     WithLock wl, std::shared_ptr<Instance> instance, InstanceID instanceID) {
     CancellationSource instanceSource(_source.token());
-    auto instanceCompleteFuture =
+    auto runCompleteFuture =
         ExecutorFuture<void>(**_scopedExecutor)
             .then([serviceName = getServiceName(),
                    instance,
@@ -771,10 +779,8 @@ std::shared_ptr<PrimaryOnlyService::Instance> PrimaryOnlyService::_insertNewInst
             })
             .semi();
 
-    auto [it, inserted] = _activeInstances.try_emplace(instanceID,
-                                                       std::move(instance),
-                                                       std::move(instanceSource),
-                                                       std::move(instanceCompleteFuture));
+    auto [it, inserted] = _activeInstances.try_emplace(
+        instanceID, std::move(instance), std::move(instanceSource), std::move(runCompleteFuture));
     invariant(inserted);
     return it->second.getInstance();
 }

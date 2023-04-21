@@ -47,7 +47,7 @@
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/storage/storage_engine.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/util/md5.hpp"
@@ -134,7 +134,11 @@ public:
             }
         }
 
-        const std::string ns = parseNs(dbname, cmdObj);
+        // TODO SERVER-67827: Pass dbName obj directly.
+        const DatabaseName dbName(boost::none, dbname);
+        // For empty databasename on first command field, the following code depends on the "."
+        // on ns to find the invalid empty db name instead of checking empty db name directly.
+        const std::string ns = parseNs(dbName, cmdObj).ns();
         uassert(ErrorCodes::InvalidNamespace,
                 str::stream() << "Invalid db name: " << ns,
                 NamespaceString::validDBName(ns, NamespaceString::DollarInDbNameBehavior::Allow));
@@ -221,7 +225,9 @@ public:
             // later commitTransaction or abortTransaction oplog entry.
             shouldNotConflictBlock.emplace(opCtx->lockState());
         }
-        AutoGetDb autoDb(opCtx, ns, lockMode);
+
+        // TODO SERVER-67827: Pass dbName obj directly.
+        AutoGetDb autoDb(opCtx, DatabaseName(boost::none, ns), lockMode);
         Database* db = autoDb.getDb();
 
         result.append("host", prettyHostName());
@@ -234,9 +240,8 @@ public:
         std::set<std::string> cappedCollectionSet;
 
         bool noError = true;
-        const DatabaseName tenantDbName(boost::none, dbname);
         catalog::forEachCollectionFromDb(
-            opCtx, tenantDbName, MODE_IS, [&](const CollectionPtr& collection) {
+            opCtx, dbName, MODE_IS, [&](const CollectionPtr& collection) {
                 auto collNss = collection->ns();
 
                 if (collNss.size() - 1 <= dbname.size()) {
@@ -344,7 +349,7 @@ private:
                                   << minSnapshot->toString(),
                     !minSnapshot || *mySnapshot >= *minSnapshot);
         } else {
-            invariant(opCtx->lockState()->isDbLockedForMode(db->name().db(), MODE_S));
+            invariant(opCtx->lockState()->isDbLockedForMode(db->name(), MODE_S));
         }
 
         auto desc = collection->getIndexCatalog()->findIdIndex(opCtx);

@@ -33,7 +33,7 @@
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/db_raii.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/s/reshard_collection_coordinator.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/grid.h"
@@ -65,10 +65,10 @@ void notifyChangeStreamsOnReshardCollectionComplete(OperationContext* opCtx,
 
     cmdBuilder.append("unique", doc.getUnique().get_value_or(false));
     if (doc.getNumInitialChunks()) {
-        cmdBuilder.append("numInitialChunks", doc.getNumInitialChunks().get());
+        cmdBuilder.append("numInitialChunks", doc.getNumInitialChunks().value());
     }
     if (doc.getCollation()) {
-        cmdBuilder.append("collation", doc.getCollation().get());
+        cmdBuilder.append("collation", doc.getCollation().value());
     }
 
     if (doc.getZones()) {
@@ -112,7 +112,7 @@ ReshardCollectionCoordinator::ReshardCollectionCoordinator(ShardingDDLCoordinato
 
 void ReshardCollectionCoordinator::checkIfOptionsConflict(const BSONObj& doc) const {
     const auto otherDoc = ReshardCollectionCoordinatorDocument::parse(
-        IDLParserErrorContext("ReshardCollectionCoordinatorDocument"), doc);
+        IDLParserContext("ReshardCollectionCoordinatorDocument"), doc);
 
     uassert(ErrorCodes::ConflictingOperationInProgress,
             "Another reshard collection with different arguments is already running for the same "

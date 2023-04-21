@@ -116,7 +116,7 @@ ReadConcernLevel ReadConcernArgs::getLevel() const {
 }
 
 bool ReadConcernArgs::hasLevel() const {
-    return _level.is_initialized();
+    return _level.has_value();
 }
 
 boost::optional<OpTime> ReadConcernArgs::getArgsOpTime() const {
@@ -206,7 +206,7 @@ Status ReadConcernArgs::parse(const BSONObj& readConcernObj) {
         } else if (fieldName == ReadWriteConcernProvenance::kSourceFieldName) {
             try {
                 _provenance = ReadWriteConcernProvenance::parse(
-                    IDLParserErrorContext("ReadConcernArgs::parse"), readConcernObj);
+                    IDLParserContext("ReadConcernArgs::parse"), readConcernObj);
             } catch (const DBException&) {
                 return exceptionToStatus();
             }
@@ -299,7 +299,7 @@ bool ReadConcernArgs::isSpeculativeMajority() const {
 
 void ReadConcernArgs::_appendInfoInner(BSONObjBuilder* builder) const {
     if (_level) {
-        builder->append(kLevelFieldName, readConcernLevels::toString(_level.get()));
+        builder->append(kLevelFieldName, readConcernLevels::toString(_level.value()));
     }
 
     if (_opTime) {

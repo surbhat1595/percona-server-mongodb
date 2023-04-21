@@ -63,7 +63,6 @@
 #include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/repl/tenant_migration_conflict_info.h"
 #include "mongo/db/repl/tenant_migration_decoration.h"
-#include "mongo/db/retryable_writes_stats.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/stats/counters.h"
@@ -72,9 +71,11 @@
 #include "mongo/db/timeseries/bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_compression.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
+#include "mongo/db/timeseries/timeseries_extended_range.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/timeseries/timeseries_stats.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/retryable_writes_stats.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/redaction.h"
@@ -211,7 +212,7 @@ write_ops::UpdateOpEntry makeTimeseriesUpdateOpEntry(
     }
     write_ops::UpdateModification::DiffOptions options;
     options.mustCheckExistenceForInsertOperations =
-        static_cast<bool>(repl::tenantMigrationRecipientInfo(opCtx));
+        static_cast<bool>(repl::tenantMigrationInfo(opCtx));
     write_ops::UpdateModification u(
         updateBuilder.obj(), write_ops::UpdateModification::DeltaTag{}, options);
     write_ops::UpdateOpEntry update(BSON("_id" << batch->bucket().id), std::move(u));
@@ -495,6 +496,10 @@ class CmdInsert final : public write_ops::InsertCmdVersion1Gen<CmdInsert> {
 public:
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const final {
         return AllowedOnSecondary::kNever;
+    }
+
+    bool allowedWithSecurityToken() const final {
+        return true;
     }
 
     void snipForLogging(mutablebson::Document* cmdObj) const final {
@@ -1335,6 +1340,33 @@ public:
                 curOp.debug().additiveMetrics.ninserted = 0;
             }
 
+            {
+                // Check if any of the measurements have dates outside the standard range. We need
+                // to do this before we start doing any inserts so we can mark the collection as
+                // requiring extended range support before the measurements land. (Other threads
+                // could potentially commit our inserts for us.)
+                //
+                // If our writes end up erroring out or getting rolled back, then this flag will
+                // stay set. This is okay though, as it only disables some query optimizations and
+                // won't result in any correctness issues if the flag is set when it doesn't need to
+                // be (as opposed to NOT being set when it DOES need to be -- that will cause
+                // correctness issues). Additionally, if the user tried to insert measurements with
+                // dates outside the standard range, chances are they will do so again, and we will
+                // have just set the flag a little early.
+                auto bucketsNs = makeTimeseriesBucketsNamespace(ns());
+                auto bucketsColl =
+                    CollectionCatalog::get(opCtx)->lookupCollectionByNamespaceForRead(opCtx,
+                                                                                      bucketsNs);
+                auto timeSeriesOptions = *bucketsColl->getTimeseriesOptions();
+
+                if (auto currentSetting = bucketsColl->getRequiresTimeseriesExtendedRangeSupport();
+                    !currentSetting &&
+                    timeseries::measurementsHaveDateOutsideStandardRange(
+                        timeSeriesOptions, request().getDocuments())) {
+                    bucketsColl->setRequiresTimeseriesExtendedRangeSupport(opCtx);
+                }
+            }
+
             std::vector<write_ops::WriteError> errors;
             boost::optional<repl::OpTime> opTime;
             boost::optional<OID> electionId;
@@ -1382,6 +1414,10 @@ class CmdUpdate final : public write_ops::UpdateCmdVersion1Gen<CmdUpdate> {
 public:
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const final {
         return AllowedOnSecondary::kNever;
+    }
+
+    bool allowedWithSecurityToken() const final {
+        return true;
     }
 
     void snipForLogging(mutablebson::Document* cmdObj) const final {
@@ -1485,7 +1521,7 @@ public:
             OperationSource source = OperationSource::kStandard;
 
             if (request().getEncryptionInformation().has_value() &&
-                !request().getEncryptionInformation().get().getCrudProcessed()) {
+                !request().getEncryptionInformation().value().getCrudProcessed()) {
                 return processFLEUpdate(opCtx, request());
             }
 
@@ -1628,6 +1664,10 @@ class CmdDelete final : public write_ops::DeleteCmdVersion1Gen<CmdDelete> {
 public:
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const final {
         return AllowedOnSecondary::kNever;
+    }
+
+    bool allowedWithSecurityToken() const final {
+        return true;
     }
 
     void snipForLogging(mutablebson::Document* cmdObj) const final {

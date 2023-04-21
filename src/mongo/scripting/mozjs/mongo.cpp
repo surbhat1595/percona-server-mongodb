@@ -585,8 +585,8 @@ void MongoExternalInfo::construct(JSContext* cx, JS::CallArgs args) {
             uassert(4938001,
                     "the 'api' option for Mongo() must be an object",
                     options["api"].isABSONObj());
-            apiParameters = ClientAPIVersionParameters::parse(IDLParserErrorContext("api"_sd),
-                                                              options["api"].Obj());
+            apiParameters =
+                ClientAPIVersionParameters::parse(IDLParserContext("api"_sd), options["api"].Obj());
             if (apiParameters.getDeprecationErrors().value_or(false) ||
                 apiParameters.getStrict().value_or(false)) {
                 uassert(4938002,
@@ -628,7 +628,7 @@ void MongoExternalInfo::construct(JSContext* cx, JS::CallArgs args) {
     // the global retryWrites value. This is checked in sessions.js by using the injected
     // _shouldRetryWrites() function, which returns true if the --retryWrites flag was passed.
     if (retryWrites) {
-        o.setBoolean(InternedString::_retryWrites, retryWrites.get());
+        o.setBoolean(InternedString::_retryWrites, retryWrites.value());
     }
 
     args.rval().setObjectOrNull(thisv);

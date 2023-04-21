@@ -630,7 +630,7 @@ BenchRunOp opFromBson(const BSONObj& op) {
 
             ReadPreference mode;
             try {
-                mode = ReadPreference_parse(IDLParserErrorContext("mode"), arg.str());
+                mode = ReadPreference_parse(IDLParserContext("mode"), arg.str());
             } catch (DBException& e) {
                 e.addContext("benchRun(): Could not parse readPrefMode argument");
                 throw;
@@ -900,8 +900,7 @@ void BenchRunWorker::generateLoadOnConnection(DBClientBase* conn) {
                 str::stream() << "Unable to create session due to error " << result,
                 conn->runCommand("admin", BSON("startSession" << 1), result));
 
-        lsid.emplace(
-            LogicalSessionIdToClient::parse(IDLParserErrorContext("lsid"), result["id"].Obj()));
+        lsid.emplace(LogicalSessionIdToClient::parse(IDLParserContext("lsid"), result["id"].Obj()));
     }
 
     BenchRunOp::State opState(&_rng, &bsonTemplateEvaluator, &_statsBlackHole);
@@ -998,7 +997,7 @@ void BenchRunOp::executeOnce(DBClientBase* conn,
             // to test underlying system variability.
             long long limit = 10000 * this->cpuFactor;
             // volatile used to ensure that loop is not optimized away
-            volatile uint64_t result = 0;  // NOLINT
+            volatile uint64_t result [[maybe_unused]] = 0;  // NOLINT
             uint64_t x = 100;
             for (long long i = 0; i < limit; i++) {
                 x *= 13;

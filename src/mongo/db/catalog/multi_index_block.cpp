@@ -43,7 +43,7 @@
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/multi_key_path_tracker.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/collection_query_info.h"
 #include "mongo/db/repl/repl_set_config.h"
@@ -68,6 +68,7 @@
 
 namespace mongo {
 
+MONGO_FAIL_POINT_DEFINE(constrainMemoryForBulkBuild);
 MONGO_FAIL_POINT_DEFINE(hangAfterSettingUpIndexBuild);
 MONGO_FAIL_POINT_DEFINE(hangAfterSettingUpIndexBuildUnlocked);
 MONGO_FAIL_POINT_DEFINE(hangAfterStartingIndexBuild);
@@ -83,8 +84,16 @@ size_t getEachIndexBuildMaxMemoryUsageBytes(size_t numIndexSpecs) {
         return 0;
     }
 
-    return static_cast<std::size_t>(maxIndexBuildMemoryUsageMegabytes.load()) * 1024 * 1024 /
+    auto result = static_cast<std::size_t>(maxIndexBuildMemoryUsageMegabytes.load()) * 1024 * 1024 /
         numIndexSpecs;
+
+    // When enabled by a test, this failpoint allows the test to set the maximum allowed memory for
+    // an index build to an unreasonably low value that is below what the user configuration will
+    // allow.
+    constrainMemoryForBulkBuild.execute(
+        [&](const BSONObj& data) { result = data["maxBytes"].numberLong(); });
+
+    return result;
 }
 
 Status timeseriesMixedSchemaDataFailure(const Collection* collection) {
@@ -121,7 +130,7 @@ void MultiIndexBlock::abortIndexBuild(OperationContext* opCtx,
     if (_collectionUUID) {
         // init() was previously called with a collection pointer, so ensure that the same
         // collection is being provided for clean up and the interface in not being abused.
-        invariant(_collectionUUID.get() == collection->uuid());
+        invariant(_collectionUUID.value() == collection->uuid());
     }
 
     if (_buildIsCleanedUp) {
@@ -389,13 +398,13 @@ StatusWith<std::vector<BSONObj>> MultiIndexBlock::init(
 Status MultiIndexBlock::insertAllDocumentsInCollection(
     OperationContext* opCtx,
     const CollectionPtr& collection,
-    boost::optional<RecordId> resumeAfterRecordId) {
+    const boost::optional<RecordId>& resumeAfterRecordId) {
     invariant(!_buildIsCleanedUp);
     invariant(opCtx->lockState()->isNoop() || !opCtx->lockState()->inAWriteUnitOfWork());
 
     // UUIDs are not guaranteed during startup because the check happens after indexes are rebuilt.
     if (_collectionUUID) {
-        invariant(_collectionUUID.get() == collection->uuid());
+        invariant(_collectionUUID.value() == collection->uuid());
     }
 
     // Refrain from persisting any multikey updates as a result from building the index. Instead,
@@ -591,7 +600,7 @@ Status MultiIndexBlock::insertAllDocumentsInCollection(
 
 void MultiIndexBlock::_doCollectionScan(OperationContext* opCtx,
                                         const CollectionPtr& collection,
-                                        boost::optional<RecordId> resumeAfterRecordId,
+                                        const boost::optional<RecordId>& resumeAfterRecordId,
                                         ProgressMeterHolder* progress) {
     PlanYieldPolicy::YieldPolicy yieldPolicy;
     if (isBackgroundBuilding()) {
@@ -843,7 +852,7 @@ Status MultiIndexBlock::drainBackgroundWrites(
     ReadSourceScope readSourceScope(opCtx, readSource);
 
     const CollectionPtr& coll =
-        CollectionCatalog::get(opCtx)->lookupCollectionByUUID(opCtx, _collectionUUID.get());
+        CollectionCatalog::get(opCtx)->lookupCollectionByUUID(opCtx, _collectionUUID.value());
 
     // Drain side-writes table for each index. This only drains what is visible. Assuming intent
     // locks are held on the user collection, more writes can come in after this drain completes.
@@ -916,7 +925,7 @@ Status MultiIndexBlock::commit(OperationContext* opCtx,
 
     // UUIDs are not guaranteed during startup because the check happens after indexes are rebuilt.
     if (_collectionUUID) {
-        invariant(_collectionUUID.get() == collection->uuid());
+        invariant(_collectionUUID.value() == collection->uuid());
     }
 
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
@@ -955,12 +964,12 @@ Status MultiIndexBlock::commit(OperationContext* opCtx,
         if (interceptor) {
             auto multikeyPaths = interceptor->getMultikeyPaths();
             if (multikeyPaths) {
-                indexCatalogEntry->setMultikey(opCtx, collection, {}, multikeyPaths.get());
+                indexCatalogEntry->setMultikey(opCtx, collection, {}, multikeyPaths.value());
             }
 
             multikeyPaths = interceptor->getSkippedRecordTracker()->getMultikeyPaths();
             if (multikeyPaths) {
-                indexCatalogEntry->setMultikey(opCtx, collection, {}, multikeyPaths.get());
+                indexCatalogEntry->setMultikey(opCtx, collection, {}, multikeyPaths.value());
             }
         }
 

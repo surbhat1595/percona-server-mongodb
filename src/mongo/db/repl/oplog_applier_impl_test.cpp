@@ -41,6 +41,7 @@
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
+#include "mongo/db/change_stream_pre_images_collection_manager.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/feature_compatibility_version_parser.h"
 #include "mongo/db/concurrency/d_concurrency.h"
@@ -64,9 +65,9 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/session_catalog_mongod.h"
-#include "mongo/db/session_txn_record_gen.h"
 #include "mongo/db/stats/counters.h"
-#include "mongo/db/transaction_participant_gen.h"
+#include "mongo/db/transaction/session_txn_record_gen.h"
+#include "mongo/db/transaction/transaction_participant_gen.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/platform/mutex.h"
@@ -402,9 +403,8 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsDeleteDocumentCollec
 
 TEST_F(OplogApplierImplTest, applyOplogEntryToRecordChangeStreamPreImages) {
     // Setup the pre-images collection.
-    RAIIServerParameterControllerForTest changeStreamPreAndPostImages{
-        "featureFlagChangeStreamPreAndPostImages", true};
-    createChangeStreamPreImagesCollection(_opCtx.get());
+    ChangeStreamPreImagesCollectionManager::createPreImagesCollection(_opCtx.get(),
+                                                                      boost::none /* tenantId */);
 
     // Create the collection.
     const NamespaceString nss("test.t");
@@ -489,7 +489,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryToRecordChangeStreamPreImages) {
 
             // Verify that the pre-image document is correct.
             const auto preImageDocument = ChangeStreamPreImage::parse(
-                IDLParserErrorContext{"test"}, preImageLoadResult.getValue());
+                IDLParserContext{"test"}, preImageLoadResult.getValue());
             ASSERT_BSONOBJ_EQ(preImageDocument.getPreImage(), document);
             ASSERT_EQUALS(preImageDocument.getOperationTime(), op.getWallClockTime()) << testDesc;
 
@@ -515,7 +515,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsCommand) {
                                             const BSONObj&) {
         applyCmdCalled = true;
         ASSERT_TRUE(opCtx);
-        ASSERT_TRUE(opCtx->lockState()->isDbLockedForMode(nss.db(), MODE_IX));
+        ASSERT_TRUE(opCtx->lockState()->isDbLockedForMode(nss.dbName(), MODE_IX));
         ASSERT_EQUALS(nss, collNss);
         return Status::OK();
     };
@@ -2683,6 +2683,11 @@ public:
     void setUp() override {
         OplogApplierImplTest::setUp();
 
+        // This fixture sets up some replication, but notably omits installing an
+        // OpObserverImpl. This state causes collection creation to timestamp catalog writes, but
+        // secondary index creation does not. We use an UnreplicatedWritesBlock to avoid
+        // timestamping any of the catalog setup.
+        repl::UnreplicatedWritesBlock noRep(_opCtx.get());
         MongoDSessionCatalog::onStepUp(_opCtx.get());
 
         DBDirectClient client(_opCtx.get());
@@ -3162,7 +3167,7 @@ TEST_F(OplogApplierImplTxnTableTest, MultiApplyUpdatesTheTransactionTable) {
     ASSERT_TRUE(!resultSingleDoc.isEmpty());
 
     auto resultSingle =
-        SessionTxnRecord::parse(IDLParserErrorContext("resultSingleDoc test"), resultSingleDoc);
+        SessionTxnRecord::parse(IDLParserContext("resultSingleDoc test"), resultSingleDoc);
 
     ASSERT_EQ(resultSingle.getTxnNum(), 5LL);
     ASSERT_EQ(resultSingle.getLastWriteOpTime(), repl::OpTime(Timestamp(Seconds(1), 0), 1));
@@ -3174,7 +3179,7 @@ TEST_F(OplogApplierImplTxnTableTest, MultiApplyUpdatesTheTransactionTable) {
     ASSERT_TRUE(!resultDiffTxnDoc.isEmpty());
 
     auto resultDiffTxn =
-        SessionTxnRecord::parse(IDLParserErrorContext("resultDiffTxnDoc test"), resultDiffTxnDoc);
+        SessionTxnRecord::parse(IDLParserContext("resultDiffTxnDoc test"), resultDiffTxnDoc);
 
     ASSERT_EQ(resultDiffTxn.getTxnNum(), 20LL);
     ASSERT_EQ(resultDiffTxn.getLastWriteOpTime(), repl::OpTime(Timestamp(Seconds(3), 0), 1));
@@ -3186,7 +3191,7 @@ TEST_F(OplogApplierImplTxnTableTest, MultiApplyUpdatesTheTransactionTable) {
     ASSERT_TRUE(!resultSameTxnDoc.isEmpty());
 
     auto resultSameTxn =
-        SessionTxnRecord::parse(IDLParserErrorContext("resultSameTxnDoc test"), resultSameTxnDoc);
+        SessionTxnRecord::parse(IDLParserContext("resultSameTxnDoc test"), resultSameTxnDoc);
 
     ASSERT_EQ(resultSameTxn.getTxnNum(), 30LL);
     ASSERT_EQ(resultSameTxn.getLastWriteOpTime(), repl::OpTime(Timestamp(Seconds(6), 0), 1));

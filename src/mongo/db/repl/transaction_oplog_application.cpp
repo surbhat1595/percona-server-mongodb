@@ -41,8 +41,8 @@
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/repl/timestamp_block.h"
 #include "mongo/db/session_catalog_mongod.h"
-#include "mongo/db/transaction_history_iterator.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/transaction_history_iterator.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/logv2/log.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
@@ -173,7 +173,7 @@ Status _applyTransactionFromOplogChain(OperationContext* opCtx,
 repl::OplogEntry getPreviousOplogEntry(OperationContext* opCtx, const repl::OplogEntry& entry) {
     const auto prevOpTime = entry.getPrevWriteOpTimeInTransaction();
     invariant(prevOpTime);
-    TransactionHistoryIterator iter(prevOpTime.get());
+    TransactionHistoryIterator iter(prevOpTime.value());
     invariant(iter.hasNext());
     const auto prevOplogEntry = iter.next(opCtx);
 
@@ -184,7 +184,7 @@ repl::OplogEntry getPreviousOplogEntry(OperationContext* opCtx, const repl::Oplo
 Status applyCommitTransaction(OperationContext* opCtx,
                               const OplogEntry& entry,
                               repl::OplogApplication::Mode mode) {
-    IDLParserErrorContext ctx("commitTransaction");
+    IDLParserContext ctx("commitTransaction");
     auto commitOplogEntryOpTime = entry.getOpTime();
     auto commitCommand = CommitTransactionOplogObject::parse(ctx, entry.getObject());
     invariant(commitCommand.getCommitTimestamp());
@@ -299,7 +299,7 @@ std::pair<std::vector<OplogEntry>, bool> _readTransactionOperationsFromOplogChai
     const auto lastEntryWrittenToOplogOpTime = oldestEntryInBatch.getPrevWriteOpTimeInTransaction();
     invariant(lastEntryWrittenToOplogOpTime < lastEntryInTxn.getOpTime());
 
-    TransactionHistoryIterator iter(lastEntryWrittenToOplogOpTime.get());
+    TransactionHistoryIterator iter(lastEntryWrittenToOplogOpTime.value());
 
     // If we started with a prepared commit, we want to forget about that operation and move onto
     // the prepare.
@@ -595,7 +595,7 @@ void reconstructPreparedTransactions(OperationContext* opCtx, repl::OplogApplica
     while (cursor->more()) {
         const auto txnRecordObj = cursor->next();
         const auto txnRecord = SessionTxnRecord::parse(
-            IDLParserErrorContext("recovering prepared transaction"), txnRecordObj);
+            IDLParserContext("recovering prepared transaction"), txnRecordObj);
 
         invariant(txnRecord.getState() == DurableTxnStateEnum::kPrepared);
 

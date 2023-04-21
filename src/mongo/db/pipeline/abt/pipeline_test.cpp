@@ -75,7 +75,7 @@ TEST(ABTTranslate, MatchWithInSingletonList) {
         "|   EvalFilter []\n"
         "|   |   Variable [scan_0]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
         "Scan [collection]\n"
@@ -85,8 +85,9 @@ TEST(ABTTranslate, MatchWithInSingletonList) {
         singletonListIn);
 }
 
+
 TEST(ABTTranslate, MatchWithInList) {
-    // A $match with $in and a list of equalities becomes a series of nested comparisons.
+    // A $match with $in and a list of equalities becomes a comparison to an EqMember list.
     ABT listIn = translatePipeline("[{$match: {a: {$in: [1, 2, 3]}}}]");
     ASSERT_EXPLAIN_V2(
         "Root []\n"
@@ -98,15 +99,9 @@ TEST(ABTTranslate, MatchWithInList) {
         "|   EvalFilter []\n"
         "|   |   Variable [scan_0]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
-        "|   PathComposeA []\n"
-        "|   |   PathCompare [Eq]\n"
-        "|   |   Const [3]\n"
-        "|   PathComposeA []\n"
-        "|   |   PathCompare [Eq]\n"
-        "|   |   Const [2]\n"
-        "|   PathCompare [Eq]\n"
-        "|   Const [1]\n"
+        "|   PathTraverse [1]\n"
+        "|   PathCompare [EqMember]\n"
+        "|   Const [[1, 2, 3]]\n"
         "Scan [collection]\n"
         "    BindBlock:\n"
         "        [scan_0]\n"
@@ -127,15 +122,9 @@ TEST(ABTTranslate, MatchWithInDuplicateElementsRemoved) {
         "|   EvalFilter []\n"
         "|   |   Variable [scan_0]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
-        "|   PathComposeA []\n"
-        "|   |   PathCompare [Eq]\n"
-        "|   |   Const [\"ghi\"]\n"
-        "|   PathComposeA []\n"
-        "|   |   PathCompare [Eq]\n"
-        "|   |   Const [\"def\"]\n"
-        "|   PathCompare [Eq]\n"
-        "|   Const [\"abc\"]\n"
+        "|   PathTraverse [1]\n"
+        "|   PathCompare [EqMember]\n"
+        "|   Const [[\"abc\", \"def\", \"ghi\"]]\n"
         "Scan [collection]\n"
         "    BindBlock:\n"
         "        [scan_0]\n"
@@ -157,7 +146,7 @@ TEST(ABTTranslate, EmptyElemMatch) {
         "|   PathGet [a]\n"
         "|   PathComposeM []\n"
         "|   |   PathArr []\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathComposeM []\n"
         "|   |   PathComposeA []\n"
         "|   |   |   PathArr []\n"
@@ -185,19 +174,13 @@ TEST(ABTTranslate, MatchWithElemMatchAndIn) {
         "|   EvalFilter []\n"
         "|   |   Variable [scan_0]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathGet [b]\n"
         "|   PathComposeM []\n"
         "|   |   PathArr []\n"
-        "|   PathTraverse []\n"
-        "|   PathComposeA []\n"
-        "|   |   PathCompare [Eq]\n"
-        "|   |   Const [3]\n"
-        "|   PathComposeA []\n"
-        "|   |   PathCompare [Eq]\n"
-        "|   |   Const [2]\n"
-        "|   PathCompare [Eq]\n"
-        "|   Const [1]\n"
+        "|   PathTraverse [1]\n"
+        "|   PathCompare [EqMember]\n"
+        "|   Const [[1, 2, 3]]\n"
         "Scan [collection]\n"
         "    BindBlock:\n"
         "        [scan_0]\n"
@@ -231,7 +214,7 @@ TEST(ABTTranslate, MatchWithOrConvertedToIn) {
         "|       Variable [scan_0]\n"
         "Sargable [Complete]\n"
         "|   |   |   |   requirementsMap: \n"
-        "|   |   |   |       refProjection: scan_0, path: 'PathGet [a] PathTraverse [] "
+        "|   |   |   |       refProjection: scan_0, path: 'PathGet [a] PathTraverse [1] "
         "PathIdentity []', intervals: {{{[Const [1], Const [1]]}} U {{[Const [2], Const [2]]}} U "
         "{{[Const [3], Const [3]]}}}\n"
         "|   |   |   candidateIndexes: \n"
@@ -245,7 +228,8 @@ TEST(ABTTranslate, MatchWithOrConvertedToIn) {
         "        [scan_0]\n"
         "            Source []\n",
         orTranslated);
-    ASSERT(orTranslated == inTranslated);
+    // TODO SERVER-67819 Support indexing for eqMember op type
+    // ASSERT(orTranslated == inTranslated);
 }
 
 TEST(ABTTranslate, SortLimitSkip) {
@@ -341,7 +325,7 @@ TEST(ABTTranslate, ProjectRetain) {
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [fieldProj_1]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [2]\n"
         "PhysicalScan [{'_id': fieldProj_0, 'a': fieldProj_1, 'b': fieldProj_2}, collection]\n"
@@ -429,7 +413,7 @@ TEST(ABTTranslate, ProjectRenames) {
         "|           |   Variable [scan_0]\n"
         "|           PathComposeM []\n"
         "|           |   PathField [a]\n"
-        "|           |   PathTraverse []\n"
+        "|           |   PathTraverse [inf]\n"
         "|           |   PathComposeM []\n"
         "|           |   |   PathDefault []\n"
         "|           |   |   Const [{}]\n"
@@ -469,10 +453,10 @@ TEST(ABTTranslate, ProjectPaths) {
         "|           |   Variable [scan_0]\n"
         "|           PathComposeM []\n"
         "|           |   PathField [a]\n"
-        "|           |   PathTraverse []\n"
+        "|           |   PathTraverse [inf]\n"
         "|           |   PathComposeM []\n"
         "|           |   |   PathField [b]\n"
-        "|           |   |   PathTraverse []\n"
+        "|           |   |   PathTraverse [inf]\n"
         "|           |   |   PathComposeM []\n"
         "|           |   |   |   PathDefault []\n"
         "|           |   |   |   Const [{}]\n"
@@ -489,9 +473,9 @@ TEST(ABTTranslate, ProjectPaths) {
         "|           EvalPath []\n"
         "|           |   Variable [scan_0]\n"
         "|           PathGet [x]\n"
-        "|           PathTraverse []\n"
+        "|           PathTraverse [inf]\n"
         "|           PathGet [y]\n"
-        "|           PathTraverse []\n"
+        "|           PathTraverse [inf]\n"
         "|           PathGet [z]\n"
         "|           PathIdentity []\n"
         "Scan [collection]\n"
@@ -517,7 +501,7 @@ TEST(ABTTranslate, ProjectPaths1) {
         "|           |   Variable [scan_0]\n"
         "|           PathComposeM []\n"
         "|           |   PathField [a]\n"
-        "|           |   PathTraverse []\n"
+        "|           |   PathTraverse [inf]\n"
         "|           |   PathComposeM []\n"
         "|           |   |   PathKeep [b, c]\n"
         "|           |   PathObj []\n"
@@ -559,7 +543,7 @@ TEST(ABTTranslate, ProjectInclusion) {
         "|           EvalPath []\n"
         "|           |   Variable [scan_0]\n"
         "|           PathGet [c]\n"
-        "|           PathTraverse []\n"
+        "|           PathTraverse [inf]\n"
         "|           PathGet [d]\n"
         "|           PathIdentity []\n"
         "Scan [collection]\n"
@@ -630,14 +614,14 @@ TEST(ABTTranslate, MatchBasic) {
         "|   EvalFilter []\n"
         "|   |   Variable [scan_0]\n"
         "|   PathGet [b]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [2]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [scan_0]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
         "Scan [collection]\n"
@@ -665,13 +649,13 @@ TEST(ABTTranslate, MatchBasic) {
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_1]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [2]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_0]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
         "PhysicalScan [{'<root>': scan_0, 'a': evalTemp_0, 'b': evalTemp_1}, collection]\n"
@@ -726,7 +710,7 @@ TEST(ABTTranslate, MatchPath2) {
         "|   EvalPath []\n"
         "|   |   Variable [scan_0]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [inf]\n"
         "|   PathGet [b]\n"
         "|   PathIdentity []\n"
         "Scan [collection]\n"
@@ -754,7 +738,7 @@ TEST(ABTTranslate, ElemMatchPath) {
         "|   PathGet [a]\n"
         "|   PathComposeM []\n"
         "|   |   PathArr []\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathComposeM []\n"
         "|   |   PathComposeM []\n"
         "|   |   |   PathCompare [Lt]\n"
@@ -806,14 +790,14 @@ TEST(ABTTranslate, MatchProject) {
         "|   |   Variable [combinedProjection_0]\n"
         "|   PathComposeA []\n"
         "|   |   PathGet [s]\n"
-        "|   |   PathTraverse []\n"
+        "|   |   PathTraverse [1]\n"
         "|   |   PathComposeM []\n"
         "|   |   |   PathCompare [Lt]\n"
         "|   |   |   Const [\"\"]\n"
         "|   |   PathCompare [Gte]\n"
         "|   |   Const [10]\n"
         "|   PathGet [c]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [2]\n"
         "Evaluation []\n"
@@ -864,10 +848,10 @@ TEST(ABTTranslate, ProjectComplex) {
         "|           |   Variable [scan_0]\n"
         "|           PathComposeM []\n"
         "|           |   PathField [a1]\n"
-        "|           |   PathTraverse []\n"
+        "|           |   PathTraverse [inf]\n"
         "|           |   PathComposeM []\n"
         "|           |   |   PathField [b]\n"
-        "|           |   |   PathTraverse []\n"
+        "|           |   |   PathTraverse [inf]\n"
         "|           |   |   PathComposeM []\n"
         "|           |   |   |   PathKeep [c]\n"
         "|           |   |   PathObj []\n"
@@ -876,16 +860,16 @@ TEST(ABTTranslate, ProjectComplex) {
         "|           |   PathObj []\n"
         "|           PathComposeM []\n"
         "|           |   PathField [a]\n"
-        "|           |   PathTraverse []\n"
+        "|           |   PathTraverse [inf]\n"
         "|           |   PathComposeM []\n"
         "|           |   |   PathField [b]\n"
-        "|           |   |   PathTraverse []\n"
+        "|           |   |   PathTraverse [inf]\n"
         "|           |   |   PathComposeM []\n"
         "|           |   |   |   PathField [c]\n"
-        "|           |   |   |   PathTraverse []\n"
+        "|           |   |   |   PathTraverse [inf]\n"
         "|           |   |   |   PathComposeM []\n"
         "|           |   |   |   |   PathField [d]\n"
-        "|           |   |   |   |   PathTraverse []\n"
+        "|           |   |   |   |   PathTraverse [inf]\n"
         "|           |   |   |   |   PathComposeM []\n"
         "|           |   |   |   |   |   PathDefault []\n"
         "|           |   |   |   |   |   Const [{}]\n"
@@ -944,7 +928,7 @@ TEST(ABTTranslate, ExprFilter) {
         "|           |   PathConstant []\n"
         "|           |   EvalPath []\n"
         "|           |   |   Const [[1, 2, \"str\", {\"a\" : 2, \"b\" : \"s\"}, 3, 4]]\n"
-        "|           |   PathTraverse []\n"
+        "|           |   PathTraverse [inf]\n"
         "|           |   PathLambda []\n"
         "|           |   LambdaAbstraction [projGetPath_0_var_1]\n"
         "|           |   If []\n"
@@ -1013,7 +997,7 @@ TEST(ABTTranslate, GroupBasic) {
         "|           EvalPath []\n"
         "|           |   Variable [scan_0]\n"
         "|           PathGet [a]\n"
-        "|           PathTraverse []\n"
+        "|           PathTraverse [inf]\n"
         "|           PathGet [b]\n"
         "|           PathIdentity []\n"
         "Scan [collection]\n"
@@ -1155,9 +1139,9 @@ TEST(ABTTranslate, UnwindBasic) {
         "|           EvalPath []\n"
         "|           |   Variable [scan_0]\n"
         "|           PathField [a]\n"
-        "|           PathTraverse []\n"
+        "|           PathTraverse [inf]\n"
         "|           PathField [b]\n"
-        "|           PathTraverse []\n"
+        "|           PathTraverse [inf]\n"
         "|           PathField [c]\n"
         "|           PathConstant []\n"
         "|           Variable [unwoundProj_0]\n"
@@ -1214,9 +1198,9 @@ TEST(ABTTranslate, UnwindComplex) {
         "|           EvalPath []\n"
         "|           |   Variable [scan_0]\n"
         "|           PathField [a]\n"
-        "|           PathTraverse []\n"
+        "|           PathTraverse [inf]\n"
         "|           PathField [b]\n"
-        "|           PathTraverse []\n"
+        "|           PathTraverse [inf]\n"
         "|           PathField [c]\n"
         "|           PathLambda []\n"
         "|           LambdaAbstraction [unwoundLambdaVarName_0]\n"
@@ -1278,7 +1262,7 @@ TEST(ABTTranslate, UnwindAndGroup) {
         "|           EvalPath []\n"
         "|           |   Variable [embedProj_0]\n"
         "|           PathGet [a]\n"
-        "|           PathTraverse []\n"
+        "|           PathTraverse [inf]\n"
         "|           PathGet [b]\n"
         "|           PathIdentity []\n"
         "Evaluation []\n"
@@ -1287,7 +1271,7 @@ TEST(ABTTranslate, UnwindAndGroup) {
         "|           EvalPath []\n"
         "|           |   Variable [scan_0]\n"
         "|           PathField [a]\n"
-        "|           PathTraverse []\n"
+        "|           PathTraverse [inf]\n"
         "|           PathField [b]\n"
         "|           PathLambda []\n"
         "|           LambdaAbstraction [unwoundLambdaVarName_0]\n"
@@ -1401,7 +1385,7 @@ TEST(ABTTranslate, MatchIndex) {
         "|   EvalFilter []\n"
         "|   |   Variable [scan_0]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [10]\n"
         "Scan [collection]\n"
@@ -1757,7 +1741,7 @@ TEST(ABTTranslate, MatchSortIndex) {
         "|   EvalFilter []\n"
         "|   |   Variable [scan_0]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [10]\n"
         "Scan [collection]\n"
@@ -1821,7 +1805,7 @@ TEST(ABTTranslate, RangeIndex) {
         "|   EvalFilter []\n"
         "|   |   Variable [scan_0]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathComposeM []\n"
         "|   |   PathCompare [Gte]\n"
         "|   |   Const [nan]\n"
@@ -1831,7 +1815,7 @@ TEST(ABTTranslate, RangeIndex) {
         "|   EvalFilter []\n"
         "|   |   Variable [scan_0]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathComposeM []\n"
         "|   |   PathCompare [Lt]\n"
         "|   |   Const [\"\"]\n"
@@ -1850,11 +1834,8 @@ TEST(ABTTranslate, RangeIndex) {
                                  metadata,
                                  DebugInfo::kDefaultForTests);
 
-    // Demonstrate we can get an intersection plan, even though it might not be the best one under
-    // the heuristic CE.
-    phaseManager.getHints()._disableScan = true;
-
     ABT optimized = std::move(translated);
+    phaseManager.getHints()._disableScan = true;
     ASSERT_TRUE(phaseManager.optimize(optimized));
 
     ASSERT_EXPLAIN_V2(
@@ -1941,14 +1922,14 @@ TEST(ABTTranslate, Index1) {
             "|   EvalFilter []\n"
             "|   |   Variable [scan_0]\n"
             "|   PathGet [b]\n"
-            "|   PathTraverse []\n"
+            "|   PathTraverse [1]\n"
             "|   PathCompare [Eq]\n"
             "|   Const [2]\n"
             "Filter []\n"
             "|   EvalFilter []\n"
             "|   |   Variable [scan_0]\n"
             "|   PathGet [a]\n"
-            "|   PathTraverse []\n"
+            "|   PathTraverse [1]\n"
             "|   PathCompare [Eq]\n"
             "|   Const [2]\n"
             "Scan [collection]\n"
@@ -2013,14 +1994,14 @@ TEST(ABTTranslate, Index1) {
             "|   EvalFilter []\n"
             "|   |   Variable [scan_0]\n"
             "|   PathGet [b]\n"
-            "|   PathTraverse []\n"
+            "|   PathTraverse [1]\n"
             "|   PathCompare [Eq]\n"
             "|   Const [2]\n"
             "Filter []\n"
             "|   EvalFilter []\n"
             "|   |   Variable [scan_0]\n"
             "|   PathGet [a]\n"
-            "|   PathTraverse []\n"
+            "|   PathTraverse [1]\n"
             "|   PathCompare [Eq]\n"
             "|   Const [2]\n"
             "Scan [collection]\n"
@@ -2052,7 +2033,7 @@ TEST(ABTTranslate, Index1) {
             "|   Filter []\n"
             "|   |   EvalFilter []\n"
             "|   |   |   Variable [evalTemp_2]\n"
-            "|   |   PathTraverse []\n"
+            "|   |   PathTraverse [1]\n"
             "|   |   PathCompare [Eq]\n"
             "|   |   Const [2]\n"
             "|   LimitSkip []\n"
@@ -2270,7 +2251,7 @@ TEST(ABTTranslate, Union) {
         "|   EvalFilter []\n"
         "|   |   Variable [scan_0]\n"
         "|   PathGet [_id]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
         "Union []\n"
@@ -2319,7 +2300,7 @@ TEST(ABTTranslate, Union) {
         "|   |   EvalFilter []\n"
         "|   |   |   Variable [scan_0]\n"
         "|   |   PathGet [_id]\n"
-        "|   |   PathTraverse []\n"
+        "|   |   PathTraverse [1]\n"
         "|   |   PathCompare [Eq]\n"
         "|   |   Const [1]\n"
         "|   Evaluation []\n"
@@ -2335,7 +2316,7 @@ TEST(ABTTranslate, Union) {
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_0]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
         "PhysicalScan [{'<root>': scan_0, '_id': evalTemp_0}, collA]\n"
@@ -2356,12 +2337,12 @@ TEST(ABTTranslate, PartialIndex) {
     // By default the constant is translated as "int32".
     auto conversionResult = convertExprToPartialSchemaReq(
         make<EvalFilter>(
-            make<PathGet>(
-                "b", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int32(2)))),
+            make<PathGet>("b",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int32(2)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>(scanProjName)),
         true /*isFilterContext*/);
     ASSERT_TRUE(conversionResult.has_value());
-    ASSERT_FALSE(conversionResult->_hasEmptyInterval);
     ASSERT_FALSE(conversionResult->_retainPredicate);
 
     Metadata metadata = {
@@ -2426,12 +2407,12 @@ TEST(ABTTranslate, PartialIndexNegative) {
     // The expression does not match the pipeline.
     auto conversionResult = convertExprToPartialSchemaReq(
         make<EvalFilter>(
-            make<PathGet>(
-                "b", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int32(2)))),
+            make<PathGet>("b",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int32(2)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>(scanProjName)),
         true /*isFilterContext*/);
     ASSERT_TRUE(conversionResult.has_value());
-    ASSERT_FALSE(conversionResult->_hasEmptyInterval);
     ASSERT_FALSE(conversionResult->_retainPredicate);
 
     Metadata metadata = {
@@ -2619,7 +2600,7 @@ TEST(ABTTranslate, NotEquals) {
         "|   EvalFilter []\n"
         "|   |   Variable [scan_0]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [2]\n"
         "Scan [test]\n"

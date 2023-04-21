@@ -65,8 +65,7 @@
 #include "mongo/db/s/type_shard_identity.h"
 #include "mongo/db/s/user_writes_critical_section_document_gen.h"
 #include "mongo/db/s/user_writes_recoverable_critical_section_service.h"
-#include "mongo/db/server_feature_flags_gen.h"
-#include "mongo/db/transaction_api.h"
+#include "mongo/db/transaction/transaction_api.h"
 #include "mongo/db/vector_clock_mutable.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/task_executor.h"
@@ -440,7 +439,7 @@ StatusWith<ShardType> ShardingCatalogManager::_validateHostAsShard(
                                   << " The CWWC on the shard is (" << cwwcOnShard << ")."};
         }
 
-        auto cwwcOnConfig = cachedCWWC.get().toBSON();
+        auto cwwcOnConfig = cachedCWWC.value().toBSON();
         BSONObjComparator comparator(
             BSONObj(), BSONObjComparator::FieldNamesMode::kConsider, nullptr);
         if (comparator.compare(cwwcOnShard, cwwcOnConfig) != 0) {
@@ -1029,12 +1028,6 @@ void ShardingCatalogManager::_setUserWriteBlockingStateOnNewShard(OperationConte
     store.forEach(opCtx, BSONObj(), [&](const UserWriteBlockingCriticalSectionDocument& doc) {
         invariant(doc.getNss() ==
                   UserWritesRecoverableCriticalSectionService::kGlobalUserWritesNamespace);
-
-        // We must be running in an FCV that supports user writes blocking. This has to be true
-        // because it is only possible to enable user-write blocking on an FCV that supports it, and
-        // because it's not possible to downgrade to an FCV that doesn't support user write blocking
-        // is enabled.
-        invariant(gFeatureFlagUserWriteBlocking.isEnabled(serverGlobalParams.featureCompatibility));
 
         const auto makeShardsvrSetUserWriteBlockModeCommand =
             [](ShardsvrSetUserWriteBlockModePhaseEnum phase) -> BSONObj {

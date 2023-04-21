@@ -123,7 +123,7 @@ public:
 
     bool requiresIdIndex() const final;
 
-    Snapshotted<BSONObj> docFor(OperationContext* opCtx, RecordId loc) const final {
+    Snapshotted<BSONObj> docFor(OperationContext* opCtx, const RecordId& loc) const final {
         return Snapshotted<BSONObj>(opCtx->recoveryUnit()->getSnapshotId(),
                                     _shared->_recordStore->dataFor(opCtx, loc).releaseToBson());
     }
@@ -132,7 +132,9 @@ public:
      * @param out - contents set to the right docs if exists, or nothing.
      * @return true iff loc exists
      */
-    bool findDoc(OperationContext* opCtx, RecordId loc, Snapshotted<BSONObj>* out) const final;
+    bool findDoc(OperationContext* opCtx,
+                 const RecordId& loc,
+                 Snapshotted<BSONObj>* out) const final;
 
     std::unique_ptr<SeekableRecordCursor> getCursor(OperationContext* opCtx,
                                                     bool forward = true) const final;
@@ -144,7 +146,7 @@ public:
     void deleteDocument(
         OperationContext* opCtx,
         StmtId stmtId,
-        RecordId loc,
+        const RecordId& loc,
         OpDebug* opDebug,
         bool fromMigrate = false,
         bool noWarn = false,
@@ -172,7 +174,7 @@ public:
         OperationContext* opCtx,
         Snapshotted<BSONObj> doc,
         StmtId stmtId,
-        RecordId loc,
+        const RecordId& loc,
         OpDebug* opDebug,
         bool fromMigrate = false,
         bool noWarn = false,
@@ -232,7 +234,7 @@ public:
      * @return the post update location of the doc (may or may not be the same as oldLocation)
      */
     RecordId updateDocument(OperationContext* opCtx,
-                            RecordId oldLocation,
+                            const RecordId& oldLocation,
                             const Snapshotted<BSONObj>& oldDoc,
                             const BSONObj& newDoc,
                             bool indexesAffected,
@@ -249,7 +251,7 @@ public:
      * @return the contents of the updated record.
      */
     StatusWith<RecordData> updateDocumentWithDamages(OperationContext* opCtx,
-                                                     RecordId loc,
+                                                     const RecordId& loc,
                                                      const Snapshotted<RecordData>& oldRec,
                                                      const char* damageSource,
                                                      const mutablebson::DamageVector& damages,
@@ -276,7 +278,9 @@ public:
      * The caller should hold a collection X lock and ensure there are no index builds in progress
      * on the collection.
      */
-    void cappedTruncateAfter(OperationContext* opCtx, RecordId end, bool inclusive) const final;
+    void cappedTruncateAfter(OperationContext* opCtx,
+                             const RecordId& end,
+                             bool inclusive) const final;
 
     /**
      * Returns a non-ok Status if validator is not legal for this collection.
@@ -330,6 +334,9 @@ public:
                                                     boost::optional<bool> setting) final;
 
     bool doesTimeseriesBucketsDocContainMixedSchemaData(const BSONObj& bucketsDoc) const final;
+
+    bool getRequiresTimeseriesExtendedRangeSupport() const final;
+    void setRequiresTimeseriesExtendedRangeSupport(OperationContext* opCtx) const final;
 
     /**
      * isClustered() relies on the object returned from getClusteredInfo(). If
@@ -424,11 +431,10 @@ public:
         const CollectionPtr& yieldableCollection,
         PlanYieldPolicy::YieldPolicy yieldPolicy,
         ScanDirection scanDirection,
-        boost::optional<RecordId> resumeAfterRecordId) const final;
+        const boost::optional<RecordId>& resumeAfterRecordId) const final;
 
     void indexBuildSuccess(OperationContext* opCtx, IndexCatalogEntry* index) final;
 
-    void establishOplogCollectionForLogging(OperationContext* opCtx) const final;
     void onDeregisterFromCatalog(OperationContext* opCtx) final;
 
     StatusWith<int> checkMetaDataForIndex(const std::string& indexName,
@@ -578,6 +584,18 @@ private:
         const bool _needCappedLock;
 
         AtomicWord<bool> _committed{true};
+
+        // Time-series collections are allowed to contain measurements with arbitrary dates;
+        // however, many of our query optimizations only work properly with dates that can be stored
+        // as an offset in seconds from the Unix epoch within 31 bits (roughly 1970-2038). When this
+        // flag is set to true, these optimizations will be disabled. It must be set to true if the
+        // collection contains any measurements with dates outside this normal range.
+        //
+        // This is set from the write path where we only hold an IX lock, so we want to be able to
+        // set it from a const method on the Collection. In order to do this, we need to make it
+        // mutable. Given that the value may only transition from false to true, but never back
+        // again, and that we store and retrieve it atomically, this should be safe.
+        mutable AtomicWord<bool> _requiresTimeseriesExtendedRangeSupport{false};
 
         // Capped information.
         const bool _isCapped;

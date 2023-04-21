@@ -84,7 +84,7 @@ public:
     }
 
     bool runWithRequestParser(OperationContext* opCtx,
-                              const std::string& db,
+                              const DatabaseName& dbName,
                               const BSONObj& cmdObj,
                               const RequestParser& requestParser,
                               BSONObjBuilder& result) final {
@@ -97,7 +97,8 @@ public:
                     "namespace"_attr = nss,
                     "command"_attr = redact(cmdObj));
 
-        auto swDbInfo = Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, cmd.getDbName());
+        auto swDbInfo = Grid::get(opCtx)->catalogCache()->getDatabase(
+            opCtx, cmd.getDbName().toStringWithTenantId());
         if (swDbInfo == ErrorCodes::NamespaceNotFound) {
             uassert(CollectionUUIDMismatchInfo(cmd.getDbName().toString(),
                                                *cmd.getCollectionUUID(),
@@ -110,10 +111,11 @@ public:
 
         ShardsvrCollMod collModCommand(nss);
         collModCommand.setCollModRequest(cmd.getCollModRequest());
+        // TODO SERVER-67411 change executeCommandAgainstDatabasePrimary to take in DatabaseName
         auto cmdResponse =
             uassertStatusOK(executeCommandAgainstDatabasePrimary(
                                 opCtx,
-                                db,
+                                dbName.toStringWithTenantId(),
                                 dbInfo,
                                 CommandHelpers::appendMajorityWriteConcern(
                                     collModCommand.toBSON({}), opCtx->getWriteConcern()),
@@ -126,7 +128,7 @@ public:
     }
 
     void validateResult(const BSONObj& resultObj) final {
-        auto ctx = IDLParserErrorContext("CollModReply");
+        auto ctx = IDLParserContext("CollModReply");
         if (checkIsErrorStatus(resultObj, ctx)) {
             return;
         }
@@ -147,7 +149,7 @@ public:
             return;
         }
 
-        auto rawCtx = IDLParserErrorContext(kRawFieldName, &ctx);
+        auto rawCtx = IDLParserContext(kRawFieldName, &ctx);
         for (const auto& element : rawData.Obj()) {
             if (!rawCtx.checkAndAssertType(element, Object)) {
                 return;

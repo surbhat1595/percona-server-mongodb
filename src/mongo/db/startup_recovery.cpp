@@ -53,6 +53,7 @@
 #include "mongo/db/repl_set_member_in_standalone_mode.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/storage/storage_repair_observer.h"
+#include "mongo/db/timeseries/timeseries_extended_range.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/exit_code.h"
@@ -248,6 +249,11 @@ Status ensureCollectionProperties(OperationContext* opCtx,
                 return downgradeError;
             }
         }
+
+        if (coll->getTimeseriesOptions() &&
+            timeseries::collectionMayRequireExtendedRangeSupport(opCtx, coll)) {
+            coll->setRequiresTimeseriesExtendedRangeSupport(opCtx);
+        }
     }
     return Status::OK();
 }
@@ -292,7 +298,7 @@ bool hasReplSetConfigDoc(OperationContext* opCtx) {
  */
 void assertCappedOplog(OperationContext* opCtx, Database* db) {
     const NamespaceString oplogNss(NamespaceString::kRsOplogNamespace);
-    invariant(opCtx->lockState()->isDbLockedForMode(oplogNss.db(), MODE_IS));
+    invariant(opCtx->lockState()->isDbLockedForMode(oplogNss.dbName(), MODE_IS));
     const CollectionPtr& oplogCollection =
         CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, oplogNss);
     if (oplogCollection && !oplogCollection->isCapped()) {

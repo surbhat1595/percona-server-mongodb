@@ -55,6 +55,7 @@
 #include "mongo/db/views/view.h"
 #include "mongo/db/views/view_catalog_helpers.h"
 #include "mongo/db/views/view_graph.h"
+#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/str.h"
 
@@ -78,17 +79,23 @@ const auto kTinyMatchStage = BSON("$match" << BSONObj());
 
 class ViewCatalogFixture : public CatalogTestFixture {
 public:
+    ViewCatalogFixture() : ViewCatalogFixture(DatabaseName(boost::none, "db")) {}
+
+    ViewCatalogFixture(DatabaseName dbName) : _dbName(std::move(dbName)) {}
+
     void setUp() override {
         CatalogTestFixture::setUp();
 
         WriteUnitOfWork wuow(operationContext());
-        AutoGetDb autoDb(operationContext(), "db", MODE_X);
+        AutoGetDb autoDb(operationContext(), _dbName, MODE_X);
         _db = autoDb.ensureDbExists(operationContext());
         invariant(_db);
 
         // Create any additional databases used throughout the test.
-        ASSERT(AutoGetDb(operationContext(), "db1", MODE_X).ensureDbExists(operationContext()));
-        ASSERT(AutoGetDb(operationContext(), "db2", MODE_X).ensureDbExists(operationContext()));
+        ASSERT(AutoGetDb(operationContext(), DatabaseName(_dbName.tenantId(), "db1"), MODE_X)
+                   .ensureDbExists(operationContext()));
+        ASSERT(AutoGetDb(operationContext(), DatabaseName(_dbName.tenantId(), "db2"), MODE_X)
+                   .ensureDbExists(operationContext()));
 
         auto durableViewCatalogUnique = std::make_unique<DurableViewCatalogImpl>(_db);
         durableViewCatalog = durableViewCatalogUnique.get();
@@ -96,7 +103,7 @@ public:
         // Create the system views collection for the database.
         ASSERT(_db->createCollection(
             operationContext(),
-            NamespaceString("db", NamespaceString::kSystemDotViewsCollectionName)));
+            NamespaceString(_dbName, NamespaceString::kSystemDotViewsCollectionName)));
 
         wuow.commit();
     }
@@ -118,7 +125,7 @@ public:
         Lock::CollectionLock collLock(operationContext(), viewName, MODE_IX);
         Lock::CollectionLock sysCollLock(
             operationContext(),
-            NamespaceString(viewName.db(), NamespaceString::kSystemDotViewsCollectionName),
+            NamespaceString(viewName.dbName(), NamespaceString::kSystemDotViewsCollectionName),
             MODE_X);
 
         WriteUnitOfWork wuow(opCtx);
@@ -137,7 +144,7 @@ public:
         Lock::CollectionLock collLock(operationContext(), viewName, MODE_X);
         Lock::CollectionLock sysCollLock(
             operationContext(),
-            NamespaceString(viewName.db(), NamespaceString::kSystemDotViewsCollectionName),
+            NamespaceString(viewName.dbName(), NamespaceString::kSystemDotViewsCollectionName),
             MODE_X);
 
         WriteUnitOfWork wuow(opCtx);
@@ -153,7 +160,7 @@ public:
         Lock::CollectionLock collLock(operationContext(), viewName, MODE_IX);
         Lock::CollectionLock sysCollLock(
             operationContext(),
-            NamespaceString(viewName.db(), NamespaceString::kSystemDotViewsCollectionName),
+            NamespaceString(viewName.dbName(), NamespaceString::kSystemDotViewsCollectionName),
             MODE_X);
 
         WriteUnitOfWork wuow(opCtx);
@@ -174,6 +181,7 @@ public:
     }
 
 private:
+    DatabaseName _dbName;
     Database* _db;
 
 protected:
@@ -517,8 +525,8 @@ TEST_F(ViewCatalogFixture, LookupRIDExistingView) {
 
     ASSERT_OK(createView(operationContext(), viewName, viewOn, emptyPipeline, emptyCollation));
 
-    auto resourceID = ResourceId(RESOURCE_COLLECTION, "db.view"_sd);
-    ASSERT(getCatalog()->lookupResourceName(resourceID).get() == "db.view");
+    auto resourceID = ResourceId(RESOURCE_COLLECTION, NamespaceString(boost::none, "db.view"));
+    ASSERT(getCatalog()->lookupResourceName(resourceID).value() == "db.view");
 }
 
 TEST_F(ViewCatalogFixture, LookupRIDExistingViewRollback) {
@@ -540,7 +548,7 @@ TEST_F(ViewCatalogFixture, LookupRIDExistingViewRollback) {
                                            emptyCollation,
                                            view_catalog_helpers::validatePipeline));
     }
-    auto resourceID = ResourceId(RESOURCE_COLLECTION, "db.view"_sd);
+    auto resourceID = ResourceId(RESOURCE_COLLECTION, NamespaceString(boost::none, "db.view"));
     ASSERT(!getCatalog()->lookupResourceName(resourceID));
 }
 
@@ -551,7 +559,7 @@ TEST_F(ViewCatalogFixture, LookupRIDAfterDrop) {
     ASSERT_OK(createView(operationContext(), viewName, viewOn, emptyPipeline, emptyCollation));
     ASSERT_OK(dropView(operationContext(), viewName));
 
-    auto resourceID = ResourceId(RESOURCE_COLLECTION, "db.view"_sd);
+    auto resourceID = ResourceId(RESOURCE_COLLECTION, NamespaceString(boost::none, "db.view"));
     ASSERT(!getCatalog()->lookupResourceName(resourceID));
 }
 
@@ -559,12 +567,12 @@ TEST_F(ViewCatalogFixture, LookupRIDAfterDropRollback) {
     const NamespaceString viewName("db.view");
     const NamespaceString viewOn("db.coll");
 
-    auto resourceID = ResourceId(RESOURCE_COLLECTION, "db.view"_sd);
+    auto resourceID = ResourceId(RESOURCE_COLLECTION, NamespaceString(boost::none, "db.view"));
     {
         WriteUnitOfWork wunit(operationContext());
         ASSERT_OK(createView(operationContext(), viewName, viewOn, emptyPipeline, emptyCollation));
         wunit.commit();
-        ASSERT(getCatalog()->lookupResourceName(resourceID).get() == viewName.ns());
+        ASSERT(getCatalog()->lookupResourceName(resourceID).value() == viewName.ns());
     }
 
     {
@@ -580,29 +588,29 @@ TEST_F(ViewCatalogFixture, LookupRIDAfterDropRollback) {
         // Do not commit, rollback.
     }
     // Make sure drop was rolled back and view is still in catalog.
-    ASSERT(getCatalog()->lookupResourceName(resourceID).get() == viewName.ns());
+    ASSERT(getCatalog()->lookupResourceName(resourceID).value() == viewName.ns());
 }
 
 TEST_F(ViewCatalogFixture, LookupRIDAfterModify) {
     const NamespaceString viewName("db.view");
     const NamespaceString viewOn("db.coll");
 
-    auto resourceID = ResourceId(RESOURCE_COLLECTION, "db.view"_sd);
+    auto resourceID = ResourceId(RESOURCE_COLLECTION, NamespaceString(boost::none, "db.view"));
     ASSERT_OK(createView(operationContext(), viewName, viewOn, emptyPipeline, emptyCollation));
     ASSERT_OK(modifyView(operationContext(), viewName, viewOn, emptyPipeline));
-    ASSERT(getCatalog()->lookupResourceName(resourceID).get() == viewName.ns());
+    ASSERT(getCatalog()->lookupResourceName(resourceID).value() == viewName.ns());
 }
 
 TEST_F(ViewCatalogFixture, LookupRIDAfterModifyRollback) {
     const NamespaceString viewName("db.view");
     const NamespaceString viewOn("db.coll");
 
-    auto resourceID = ResourceId(RESOURCE_COLLECTION, "db.view"_sd);
+    auto resourceID = ResourceId(RESOURCE_COLLECTION, NamespaceString(boost::none, "db.view"));
     {
         WriteUnitOfWork wunit(operationContext());
         ASSERT_OK(createView(operationContext(), viewName, viewOn, emptyPipeline, emptyCollation));
         wunit.commit();
-        ASSERT(getCatalog()->lookupResourceName(resourceID).get() == viewName.ns());
+        ASSERT(getCatalog()->lookupResourceName(resourceID).value() == viewName.ns());
     }
 
     {
@@ -619,11 +627,11 @@ TEST_F(ViewCatalogFixture, LookupRIDAfterModifyRollback) {
                                            viewOn,
                                            emptyPipeline,
                                            view_catalog_helpers::validatePipeline));
-        ASSERT(getCatalog()->lookupResourceName(resourceID).get() == viewName.ns());
+        ASSERT(getCatalog()->lookupResourceName(resourceID).value() == viewName.ns());
         // Do not commit, rollback.
     }
     // Make sure view resource is still available after rollback.
-    ASSERT(getCatalog()->lookupResourceName(resourceID).get() == viewName.ns());
+    ASSERT(getCatalog()->lookupResourceName(resourceID).value() == viewName.ns());
 }
 
 TEST_F(ViewCatalogFixture, CreateViewThenDropAndLookup) {
@@ -742,6 +750,67 @@ TEST_F(ViewCatalogFixture, ResolveViewCorrectlyExtractsDefaultCollation) {
     ASSERT_OK(expectedCollation.getStatus());
     ASSERT_BSONOBJ_EQ(resolvedView.getValue().getDefaultCollation(),
                       expectedCollation.getValue()->getSpec().toBSON());
+}
+
+class ServerlessViewCatalogFixture : public ViewCatalogFixture {
+public:
+    ServerlessViewCatalogFixture() : ViewCatalogFixture(DatabaseName(TenantId(OID::gen()), "db")) {}
+};
+
+TEST_F(ServerlessViewCatalogFixture, LookupExistingViewBeforeAndAfterDropFeatureFlagOff) {
+    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    const NamespaceString viewName(db()->name(), "view");
+    const NamespaceString viewOn(db()->name(), "coll");
+
+    ASSERT_OK(createView(operationContext(), viewName, viewOn, emptyPipeline, emptyCollation));
+    ASSERT(lookup(operationContext(), viewName));
+
+    ASSERT_OK(dropView(operationContext(), viewName));
+    ASSERT(!lookup(operationContext(), viewName));
+}
+
+TEST_F(ServerlessViewCatalogFixture, LookupExistingViewBeforeAndAfterDropFeatureFlagOn) {
+    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
+    const NamespaceString viewName(db()->name(), "view");
+    const NamespaceString viewOn(db()->name(), "coll");
+
+    ASSERT_OK(createView(operationContext(), viewName, viewOn, emptyPipeline, emptyCollation));
+    ASSERT(lookup(operationContext(), viewName));
+
+    ASSERT_OK(dropView(operationContext(), viewName));
+    ASSERT(!lookup(operationContext(), viewName));
+}
+
+TEST_F(ServerlessViewCatalogFixture, ModifyViewBelongingToTenantFeatureFlagOff) {
+    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    const NamespaceString viewName(db()->name(), "db1.view");
+    const NamespaceString viewOn(db()->name(), "db2.coll");
+
+    ASSERT_OK(createView(operationContext(), viewName, viewOn, emptyPipeline, emptyCollation));
+    ASSERT_EQ(lookup(operationContext(), viewName)->pipeline().size(), 0);
+
+    // Modify the view and pass a non-empty pipeline.
+    BSONArrayBuilder builder;
+    builder << kTinyMatchStage;
+    ASSERT_OK(modifyView(operationContext(), viewName, viewOn, builder.arr()));
+    ASSERT_EQ(lookup(operationContext(), viewName)->pipeline().size(), 1);
+}
+
+TEST_F(ServerlessViewCatalogFixture, ModifyViewBelongingToTenantFeatureFlagOn) {
+    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
+    const NamespaceString viewName(db()->name(), "db1.view");
+    const NamespaceString viewOn(db()->name(), "db2.coll");
+
+    ASSERT_OK(createView(operationContext(), viewName, viewOn, emptyPipeline, emptyCollation));
+    ASSERT_EQ(lookup(operationContext(), viewName)->pipeline().size(), 0);
+
+    // Modify the view and pass a non-empty pipeline.
+    BSONArrayBuilder builder;
+    builder << kTinyMatchStage;
+    ASSERT_OK(modifyView(operationContext(), viewName, viewOn, builder.arr()));
+    ASSERT_EQ(lookup(operationContext(), viewName)->pipeline().size(), 1);
 }
 
 }  // namespace

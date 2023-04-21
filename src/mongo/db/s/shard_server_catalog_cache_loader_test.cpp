@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/optional/optional_io.hpp>
-
 #include "mongo/db/s/shard_server_catalog_cache_loader.h"
 #include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/s/catalog/type_chunk.h"
@@ -212,7 +210,7 @@ ShardServerCatalogCacheLoaderTest::setUpChunkLoaderWithFiveChunks() {
 
     ASSERT_EQUALS(collAndChunksRes.epoch, collectionType.getEpoch());
     ASSERT_EQUALS(collAndChunksRes.changedChunks.size(), 5UL);
-    ASSERT(!collAndChunksRes.timeseriesFields.is_initialized());
+    ASSERT(!collAndChunksRes.timeseriesFields.has_value());
     for (unsigned int i = 0; i < collAndChunksRes.changedChunks.size(); ++i) {
         ASSERT_BSONOBJ_EQ(collAndChunksRes.changedChunks[i].toShardBSON(), chunks[i].toShardBSON());
     }
@@ -454,7 +452,7 @@ TEST_F(ShardServerCatalogCacheLoaderTest, TimeseriesFieldsAreProperlyPropagatedO
         _remoteLoaderMock->setChunkRefreshReturnValue(chunks);
 
         auto collAndChunksRes = _shardLoader->getChunksSince(kNss, ChunkVersion::UNSHARDED()).get();
-        ASSERT(collAndChunksRes.timeseriesFields.is_initialized());
+        ASSERT(collAndChunksRes.timeseriesFields.has_value());
         ASSERT(collAndChunksRes.timeseriesFields->getGranularity() ==
                BucketGranularityEnum::Seconds);
     }
@@ -475,7 +473,7 @@ TEST_F(ShardServerCatalogCacheLoaderTest, TimeseriesFieldsAreProperlyPropagatedO
         _remoteLoaderMock->setChunkRefreshReturnValue(std::vector{lastChunk});
 
         auto collAndChunksRes = _shardLoader->getChunksSince(kNss, maxLoaderVersion).get();
-        ASSERT(collAndChunksRes.timeseriesFields.is_initialized());
+        ASSERT(collAndChunksRes.timeseriesFields.has_value());
         ASSERT(collAndChunksRes.timeseriesFields->getGranularity() == BucketGranularityEnum::Hours);
     }
 }

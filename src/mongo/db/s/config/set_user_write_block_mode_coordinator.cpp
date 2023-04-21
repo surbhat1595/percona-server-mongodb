@@ -74,7 +74,7 @@ void sendSetUserWriteBlockModeCmdToAllShards(OperationContext* opCtx,
         makeShardsvrSetUserWriteBlockModeCommand(block, phase);
 
     sharding_util::sendCommandToShards(opCtx,
-                                       shardsvrSetUserWriteBlockModeCmd.getDbName(),
+                                       shardsvrSetUserWriteBlockModeCmd.getDbName().db(),
                                        CommandHelpers::appendMajorityWriteConcern(
                                            shardsvrSetUserWriteBlockModeCmd.toBSON(osi.toBSON())),
                                        allShards,
@@ -84,8 +84,8 @@ void sendSetUserWriteBlockModeCmdToAllShards(OperationContext* opCtx,
 }  // namespace
 
 bool SetUserWriteBlockModeCoordinator::hasSameOptions(const BSONObj& otherDocBSON) const {
-    const auto otherDoc = StateDoc::parse(
-        IDLParserErrorContext("SetUserWriteBlockModeCoordinatorDocument"), otherDocBSON);
+    const auto otherDoc =
+        StateDoc::parse(IDLParserContext("SetUserWriteBlockModeCoordinatorDocument"), otherDocBSON);
 
     return _doc.getBlock() == otherDoc.getBlock();
 }

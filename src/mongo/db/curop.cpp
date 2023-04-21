@@ -218,9 +218,7 @@ void CurOp::reportCurrentOpForClient(OperationContext* opCtx,
     }
 
     if (const auto seCtx = transport::ServiceExecutorContext::get(client)) {
-        bool isDedicated = (seCtx->getThreadingModel() ==
-                            transport::ServiceExecutorContext::ThreadingModel::kDedicated);
-        infoBuilder->append("threaded"_sd, isDedicated);
+        infoBuilder->append("threaded"_sd, seCtx->useDedicatedThread());
     }
 
     if (clientOpCtx) {
@@ -623,7 +621,7 @@ BSONObj CurOp::truncateAndSerializeGenericCursor(GenericCursor* cursor,
     if (maxQuerySize) {
         BSONObjBuilder tempObj;
         appendAsObjOrString(
-            "truncatedObj", cursor->getOriginatingCommand().get(), maxQuerySize, &tempObj);
+            "truncatedObj", cursor->getOriginatingCommand().value(), maxQuerySize, &tempObj);
         auto originatingCommand = tempObj.done().getObjectField("truncatedObj");
         cursor->setOriginatingCommand(originatingCommand.getOwned());
     }
@@ -834,6 +832,14 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->add("prepareConflictDuration", prepareConflictDurationMillis);
     }
 
+    if (catalogCacheDatabaseLookupMillis > Milliseconds::zero()) {
+        pAttrs->add("catalogCacheDatabaseLookupDuration", catalogCacheDatabaseLookupMillis);
+    }
+
+    if (catalogCacheCollectionLookupMillis > Milliseconds::zero()) {
+        pAttrs->add("catalogCacheCollectionLookupDuration", catalogCacheCollectionLookupMillis);
+    }
+
     if (databaseVersionRefreshMillis > Milliseconds::zero()) {
         pAttrs->add("databaseVersionRefreshDuration", databaseVersionRefreshMillis);
     }
@@ -896,7 +902,7 @@ void OpDebug::report(OperationContext* opCtx,
     }
 
     if (classicEngineUsed) {
-        pAttrs->add("queryExecutionEngine", classicEngineUsed.get() ? "classic" : "sbe");
+        pAttrs->add("queryExecutionEngine", classicEngineUsed.value() ? "classic" : "sbe");
     }
 
     if (!errInfo.isOK()) {
@@ -1065,7 +1071,7 @@ void OpDebug::append(OperationContext* opCtx,
     }
 
     if (classicEngineUsed) {
-        b.append("queryExecutionEngine", classicEngineUsed.get() ? "classic" : "sbe");
+        b.append("queryExecutionEngine", classicEngineUsed.value() ? "classic" : "sbe");
     }
 
     {
@@ -1333,7 +1339,7 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
 
     addIfNeeded("queryExecutionEngine", [](auto field, auto args, auto& b) {
         if (args.op.classicEngineUsed) {
-            b.append("queryExecutionEngine", args.op.classicEngineUsed.get() ? "classic" : "sbe");
+            b.append("queryExecutionEngine", args.op.classicEngineUsed.value() ? "classic" : "sbe");
         }
     });
 
@@ -1501,9 +1507,9 @@ BSONObj OpDebug::makeFlowControlObject(FlowControlTicketholder::CurOp stats) {
 BSONObj OpDebug::makeMongotDebugStatsObject() const {
     BSONObjBuilder cursorBuilder;
     invariant(mongotCursorId);
-    cursorBuilder.append("cursorid", mongotCursorId.get());
+    cursorBuilder.append("cursorid", mongotCursorId.value());
     if (msWaitingForMongot) {
-        cursorBuilder.append("timeWaitingMillis", msWaitingForMongot.get());
+        cursorBuilder.append("timeWaitingMillis", msWaitingForMongot.value());
     }
     cursorBuilder.append("batchNum", mongotBatchNum);
     return cursorBuilder.obj();

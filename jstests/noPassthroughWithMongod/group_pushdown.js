@@ -60,7 +60,7 @@ let assertResultsMatchWithAndWithoutPushdown = function(
     assertGroupPushdown(coll, pipeline, expectedResults, expectedGroupCountInExplain);
 
     // Turn sbe off.
-    db.adminCommand({setParameter: 1, internalQueryForceClassicEngine: true});
+    db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "forceClassicEngine"});
 
     // Sanity check the results when no pushdown happens.
     let resultNoGroupPushdown = coll.aggregate(pipeline).toArray();
@@ -68,17 +68,17 @@ let assertResultsMatchWithAndWithoutPushdown = function(
 
     // Turn sbe on which will allow $group stages that contain supported accumulators to be pushed
     // down under certain conditions.
-    db.adminCommand({setParameter: 1, internalQueryForceClassicEngine: false});
+    db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "tryBonsai"});
 
     let resultWithGroupPushdown = coll.aggregate(pipeline).toArray();
     assert.sameMembers(resultNoGroupPushdown, resultWithGroupPushdown);
 };
 
 let assertShardedGroupResultsMatch = function(coll, pipeline, expectedGroupCountInExplain = 1) {
-    const originalSBEEngineStatus =
+    const originalFrameworkControl =
         assert
-            .commandWorked(
-                db.adminCommand({setParameter: 1, internalQueryForceClassicEngine: true}))
+            .commandWorked(db.adminCommand(
+                {setParameter: 1, internalQueryFrameworkControl: "forceClassicEngine"}))
             .was;
 
     const cmd = {
@@ -91,7 +91,7 @@ let assertShardedGroupResultsMatch = function(coll, pipeline, expectedGroupCount
 
     const classicalRes = coll.runCommand(cmd).cursor.firstBatch;
     assert.commandWorked(
-        db.adminCommand({setParameter: 1, internalQueryForceClassicEngine: false}));
+        db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "tryBonsai"}));
     const explainCmd = {
         aggregate: coll.getName(),
         pipeline: pipeline,
@@ -107,7 +107,7 @@ let assertShardedGroupResultsMatch = function(coll, pipeline, expectedGroupCount
     assert.sameMembers(sbeRes, classicalRes);
 
     assert.commandWorked(db.adminCommand(
-        {setParameter: 1, internalQueryForceClassicEngine: originalSBEEngineStatus}));
+        {setParameter: 1, internalQueryFrameworkControl: originalFrameworkControl}));
 };
 
 // Try a pipeline with no group stage.
@@ -557,4 +557,17 @@ assertNoGroupPushdown(coll, basicGroup, basicGroupResults);
 // Reset 'internalQuerySlotBasedExecutionDisableGroupPushdown' to its original value.
 assert.commandWorked(db.adminCommand(
     {setParameter: 1, internalQuerySlotBasedExecutionDisableGroupPushdown: oldValue}));
+
+(function testConstNothingForIdMappedToNull() {
+    // Prepare a collection.
+    const coll = db.nothing_id;
+    coll.drop();
+    coll.insert({_id: 0});
+
+    // $$REMOVE produce Nothing constant and it should be converted to Null. Without an accumulator
+    // $group is not pushed down and we need an accumulator.
+    assert.eq(
+        coll.aggregate([{$group: {_id: "$$REMOVE", o: {$first: "$non_existent_field"}}}]).toArray(),
+        [{_id: null, o: null}]);
+})();
 })();

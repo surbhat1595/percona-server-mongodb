@@ -96,7 +96,7 @@ class EchoCommand final : public TypedCommand<EchoCommand> {
 public:
     struct Request {
         static constexpr auto kCommandName = "echo"_sd;
-        static Request parse(const IDLParserErrorContext&, const OpMsgRequest& request) {
+        static Request parse(const IDLParserContext&, const OpMsgRequest& request) {
             return Request{request};
         }
 
@@ -236,7 +236,7 @@ public:
                             3,
                             "Non-debug severity levels must not pass 'debugLevel'",
                             "severity"_attr = obj[Request::kSeverityFieldName].valueStringData(),
-                            "debugLevel"_attr = optDebugLevel.get());
+                            "debugLevel"_attr = optDebugLevel.value());
             }
 
             switch (severity) {

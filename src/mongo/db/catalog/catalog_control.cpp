@@ -43,19 +43,19 @@
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/rebuild_indexes.h"
+#include "mongo/db/repl/oplog.h"
+#include "mongo/db/timeseries/timeseries_extended_range.h"
 #include "mongo/logv2/log.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
-
 namespace mongo {
 namespace catalog {
 namespace {
-void reopenAllDatabasesAndReloadCollectionCatalog(
-    OperationContext* opCtx,
-    StorageEngine* storageEngine,
-    const MinVisibleTimestampMap& minVisibleTimestampMap,
-    Timestamp stableTimestamp) {
+void reopenAllDatabasesAndReloadCollectionCatalog(OperationContext* opCtx,
+                                                  StorageEngine* storageEngine,
+                                                  const PreviousCatalogState& previousCatalogState,
+                                                  Timestamp stableTimestamp) {
 
     // Open all databases and repopulate the CollectionCatalog.
     LOGV2(20276, "openCatalog: reopening all databases");
@@ -74,14 +74,14 @@ void reopenAllDatabasesAndReloadCollectionCatalog(
             23992, 1, "openCatalog: dbholder reopening database", "db"_attr = dbName);
         auto db = databaseHolder->openDb(opCtx, dbName);
         invariant(db, str::stream() << "failed to reopen database " << dbName.toString());
-        for (auto&& collNss : catalogWriter.get()->getAllCollectionNamesFromDb(opCtx, dbName)) {
+        for (auto&& collNss : catalogWriter.value()->getAllCollectionNamesFromDb(opCtx, dbName)) {
             // Note that the collection name already includes the database component.
-            auto collection = catalogWriter.get()->lookupCollectionByNamespace(opCtx, collNss);
+            auto collection = catalogWriter.value()->lookupCollectionByNamespace(opCtx, collNss);
             invariant(collection,
                       str::stream()
                           << "failed to get valid collection pointer for namespace " << collNss);
 
-            if (minVisibleTimestampMap.count(collection->uuid()) > 0) {
+            if (previousCatalogState.minVisibleTimestampMap.count(collection->uuid()) > 0) {
                 // After rolling back to a stable timestamp T, the minimum visible timestamp for
                 // each collection must be reset to (at least) its value at T. Additionally, there
                 // cannot exist a minimum visible timestamp greater than lastApplied. This allows us
@@ -91,12 +91,29 @@ void reopenAllDatabasesAndReloadCollectionCatalog(
                 // bound the minimum visible timestamp (where necessary) to the stable timestamp.
                 // The benefit of fine grained tracking is assumed to be low-value compared to the
                 // cost/effort.
-                auto minVisible = std::min(stableTimestamp,
-                                           minVisibleTimestampMap.find(collection->uuid())->second);
+                auto minVisible = std::min(
+                    stableTimestamp,
+                    previousCatalogState.minVisibleTimestampMap.find(collection->uuid())->second);
                 auto writableCollection =
-                    catalogWriter.get()->lookupCollectionByUUIDForMetadataWrite(opCtx,
-                                                                                collection->uuid());
+                    catalogWriter.value()->lookupCollectionByUUIDForMetadataWrite(
+                        opCtx, collection->uuid());
                 writableCollection->setMinimumVisibleSnapshot(minVisible);
+            }
+
+            if (collection->getTimeseriesOptions()) {
+                bool extendedRangeSetting;
+                if (auto it = previousCatalogState.requiresTimestampExtendedRangeSupportMap.find(
+                        collection->uuid());
+                    it != previousCatalogState.requiresTimestampExtendedRangeSupportMap.end()) {
+                    extendedRangeSetting = it->second;
+                } else {
+                    extendedRangeSetting =
+                        timeseries::collectionMayRequireExtendedRangeSupport(opCtx, collection);
+                }
+
+                if (extendedRangeSetting) {
+                    collection->setRequiresTimeseriesExtendedRangeSupport(opCtx);
+                }
             }
 
             // If this is the oplog collection, re-establish the replication system's cached pointer
@@ -107,7 +124,9 @@ void reopenAllDatabasesAndReloadCollectionCatalog(
                 // The oplog collection must be visible when establishing for repl. Finish our
                 // batched catalog write and continue on a new batch afterwards.
                 catalogWriter.reset();
-                collection->establishOplogCollectionForLogging(opCtx);
+
+                repl::establishOplogCollectionForLogging(
+                    opCtx, {collection.get(), CollectionPtr::NoYieldTag{}});
                 catalogWriter.emplace(opCtx);
             }
         }
@@ -122,12 +141,12 @@ void reopenAllDatabasesAndReloadCollectionCatalog(
 }
 }  // namespace
 
-MinVisibleTimestampMap closeCatalog(OperationContext* opCtx) {
+PreviousCatalogState closeCatalog(OperationContext* opCtx) {
     invariant(opCtx->lockState()->isW());
 
     IndexBuildsCoordinator::get(opCtx)->assertNoIndexBuildInProgress();
 
-    MinVisibleTimestampMap minVisibleTimestampMap;
+    PreviousCatalogState previousCatalogState;
     std::vector<DatabaseName> allDbs =
         opCtx->getServiceContext()->getStorageEngine()->listDatabases();
 
@@ -150,7 +169,12 @@ MinVisibleTimestampMap closeCatalog(OperationContext* opCtx) {
                             "coll_ns"_attr = coll->ns(),
                             "uuid"_attr = coll->uuid(),
                             "minVisible"_attr = minVisible);
-                minVisibleTimestampMap[coll->uuid()] = *minVisible;
+                previousCatalogState.minVisibleTimestampMap[coll->uuid()] = *minVisible;
+            }
+
+            if (coll->getTimeseriesOptions()) {
+                previousCatalogState.requiresTimestampExtendedRangeSupportMap[coll->uuid()] =
+                    coll->getRequiresTimeseriesExtendedRangeSupport();
             }
         }
     }
@@ -178,11 +202,11 @@ MinVisibleTimestampMap closeCatalog(OperationContext* opCtx) {
     opCtx->getServiceContext()->getStorageEngine()->closeCatalog(opCtx);
 
     reopenOnFailure.dismiss();
-    return minVisibleTimestampMap;
+    return previousCatalogState;
 }
 
 void openCatalog(OperationContext* opCtx,
-                 const MinVisibleTimestampMap& minVisibleTimestampMap,
+                 const PreviousCatalogState& previousCatalogState,
                  Timestamp stableTimestamp) {
     invariant(opCtx->lockState()->isW());
 
@@ -200,7 +224,7 @@ void openCatalog(OperationContext* opCtx,
 
     // Determine which indexes need to be rebuilt. rebuildIndexesOnCollection() requires that all
     // indexes on that collection are done at once, so we use a map to group them together.
-    StringMap<IndexNameObjs> nsToIndexNameObjMap;
+    stdx::unordered_map<NamespaceString, IndexNameObjs> nsToIndexNameObjMap;
     auto catalog = CollectionCatalog::get(opCtx);
     for (StorageEngine::IndexIdentifier indexIdentifier : reconcileResult.indexesToRebuild) {
         auto indexName = indexIdentifier.indexName;
@@ -223,7 +247,7 @@ void openCatalog(OperationContext* opCtx,
             str::stream() << "expected to find a list containing exactly 1 index spec, but found "
                           << indexesToRebuild.second.size());
 
-        auto& ino = nsToIndexNameObjMap[indexIdentifier.nss.ns()];
+        auto& ino = nsToIndexNameObjMap[indexIdentifier.nss];
         ino.first.emplace_back(std::move(indexesToRebuild.first.back()));
         ino.second.emplace_back(std::move(indexesToRebuild.second.back()));
     }
@@ -254,7 +278,7 @@ void openCatalog(OperationContext* opCtx,
         opCtx, reconcileResult.indexBuildsToRestart, reconcileResult.indexBuildsToResume);
 
     reopenAllDatabasesAndReloadCollectionCatalog(
-        opCtx, storageEngine, minVisibleTimestampMap, stableTimestamp);
+        opCtx, storageEngine, previousCatalogState, stableTimestamp);
 }
 
 

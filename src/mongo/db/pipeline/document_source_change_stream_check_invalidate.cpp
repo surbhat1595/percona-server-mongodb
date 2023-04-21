@@ -86,8 +86,7 @@ DocumentSourceChangeStreamCheckInvalidate::createFromBson(
             spec.type() == Object);
 
     auto parsed = DocumentSourceChangeStreamCheckInvalidateSpec::parse(
-        IDLParserErrorContext("DocumentSourceChangeStreamCheckInvalidateSpec"),
-        spec.embeddedObject());
+        IDLParserContext("DocumentSourceChangeStreamCheckInvalidateSpec"), spec.embeddedObject());
     return new DocumentSourceChangeStreamCheckInvalidate(
         expCtx,
         parsed.getStartAfterInvalidate() ? parsed.getStartAfterInvalidate()->getData()
@@ -99,7 +98,7 @@ DocumentSource::GetNextResult DocumentSourceChangeStreamCheckInvalidate::doGetNe
     // then throws a 'ChangeStreamInvalidated' exception on the next call to this method.
 
     if (_queuedInvalidate) {
-        const auto res = DocumentSource::GetNextResult(std::move(_queuedInvalidate.get()));
+        const auto res = DocumentSource::GetNextResult(std::move(_queuedInvalidate.value()));
         _queuedInvalidate.reset();
         return res;
     }

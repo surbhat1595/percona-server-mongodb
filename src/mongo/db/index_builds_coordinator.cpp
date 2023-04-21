@@ -46,7 +46,7 @@
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/index/wildcard_key_generator.h"
 #include "mongo/db/index_build_entry_helpers.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/cloner_utils.h"
 #include "mongo/db/repl/member_state.h"
@@ -189,6 +189,11 @@ void removeIndexBuildEntryAfterCommitOrAbort(OperationContext* opCtx,
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     if (!replCoord->canAcceptWritesFor(opCtx, dbAndUUID)) {
         return;
+    }
+
+    if (replCoord->getSettings().shouldRecoverFromOplogAsStandalone()) {
+        // TODO SERVER-60753: Remove this mixed-mode write.
+        opCtx->recoveryUnit()->allowUntimestampedWrite();
     }
 
     auto status = indexbuildentryhelpers::removeIndexBuildEntry(
@@ -545,6 +550,10 @@ Status IndexBuildsCoordinator::_startIndexBuildForRecovery(OperationContext* opC
 
     CollectionWriter collection(opCtx, nss);
     {
+        // TODO SERVER-64760: Remove this usage of `allowUntimestampedWrite`. We often have a valid
+        // timestamp for this write, but the callers of this function don't pass it through.
+        opCtx->recoveryUnit()->allowUntimestampedWrite();
+
         // These steps are combined into a single WUOW to ensure there are no commits without
         // the indexes.
         // 1) Drop all unfinished indexes.
@@ -580,8 +589,7 @@ Status IndexBuildsCoordinator::_startIndexBuildForRecovery(OperationContext* opC
             const auto durableBuildUUID = collection->getIndexBuildUUID(indexNames[i]);
 
             // A build UUID is present if and only if we are rebuilding a two-phase build.
-            invariant((protocol == IndexBuildProtocol::kTwoPhase) ==
-                      durableBuildUUID.is_initialized());
+            invariant((protocol == IndexBuildProtocol::kTwoPhase) == durableBuildUUID.has_value());
             // When a buildUUID is present, it must match the build UUID parameter to this
             // function.
             invariant(!durableBuildUUID || *durableBuildUUID == buildUUID,
@@ -1565,7 +1573,7 @@ void IndexBuildsCoordinator::restartIndexBuildsForRecovery(
               "Index build: resuming",
               "buildUUID"_attr = buildUUID,
               "collectionUUID"_attr = collUUID,
-              logAttrs(nss.get()),
+              logAttrs(nss.value()),
               "details"_attr = resumeInfo.toBSON());
 
         try {
@@ -1625,7 +1633,7 @@ void IndexBuildsCoordinator::restartIndexBuildsForRecovery(
               "Index build: restarting",
               "buildUUID"_attr = buildUUID,
               "collectionUUID"_attr = build.collUUID,
-              logAttrs(nss.get()));
+              logAttrs(nss.value()));
         IndexBuildsCoordinator::IndexBuildOptions indexBuildOptions;
         // Indicate that the initialization should not generate oplog entries or timestamps for the
         // first catalog write, and that the original durable catalog entries should be dropped and
@@ -1880,6 +1888,12 @@ Status IndexBuildsCoordinator::_setUpIndexBuildForTwoPhaseRecovery(
     const UUID& buildUUID) {
     NamespaceStringOrUUID nssOrUuid{dbName.toString(), collectionUUID};
 
+    if (opCtx->recoveryUnit()->isActive()) {
+        // This function is shared by multiple callers. Some of which have opened a transaction to
+        // perform reads. This function may make mixed-mode writes. Mixed-mode assertions can only
+        // be suppressed when beginning a fresh transaction.
+        opCtx->recoveryUnit()->abandonSnapshot();
+    }
     // Don't use the AutoGet helpers because they require an open database, which may not be the
     // case when an index builds is restarted during recovery.
 
@@ -2030,7 +2044,7 @@ IndexBuildsCoordinator::PostSetupAction IndexBuildsCoordinator::_setUpIndexBuild
             // Persist the commit quorum value in the config.system.indexBuilds collection.
             IndexBuildEntry indexBuildEntry(replState->buildUUID,
                                             replState->collectionUUID,
-                                            indexBuildOptions.commitQuorum.get(),
+                                            indexBuildOptions.commitQuorum.value(),
                                             replState->indexNames);
             uassertStatusOK(indexbuildentryhelpers::addIndexBuildEntry(opCtx, indexBuildEntry));
 
@@ -2057,6 +2071,10 @@ IndexBuildsCoordinator::PostSetupAction IndexBuildsCoordinator::_setUpIndexBuild
     options.protocol = replState->protocol;
 
     try {
+        // TODO SERVER-64760: Remove this usage of `allowUntimestampedWrite`. There are cases where
+        // a timestamp is available to use, but the information is not passed through.
+        opCtx->recoveryUnit()->allowUntimestampedWrite();
+
         if (!replSetAndNotPrimary) {
             // On standalones and primaries, call setUpIndexBuild(), which makes the initial catalog
             // write. On primaries, this replicates the startIndexBuild oplog entry.
@@ -2309,7 +2327,7 @@ void IndexBuildsCoordinator::_runIndexBuildInner(
             PrepareConflictBehavior::kIgnoreConflictsAllowWrites);
 
         if (resumeInfo) {
-            _resumeIndexBuildFromPhase(opCtx, replState, indexBuildOptions, resumeInfo.get());
+            _resumeIndexBuildFromPhase(opCtx, replState, indexBuildOptions, resumeInfo.value());
         } else {
             _buildIndex(opCtx, replState, indexBuildOptions);
         }
@@ -2534,7 +2552,7 @@ void IndexBuildsCoordinator::_buildIndex(OperationContext* opCtx,
 void IndexBuildsCoordinator::_scanCollectionAndInsertSortedKeysIntoIndex(
     OperationContext* opCtx,
     std::shared_ptr<ReplIndexBuildState> replState,
-    boost::optional<RecordId> resumeAfterRecordId) {
+    const boost::optional<RecordId>& resumeAfterRecordId) {
     // Collection scan and insert into index.
     {
         indexBuildsSSS.scanCollection.addAndFetch(1);
@@ -2681,7 +2699,10 @@ IndexBuildsCoordinator::CommitResult IndexBuildsCoordinator::_insertKeysFromSide
         hangIndexBuildBeforeCommit.pauseWhileSet();
     }
 
-    AutoGetDb autoDb(opCtx, replState->dbName, MODE_IX);
+    // TODO SERVER-67437 Once ReplIndexBuildState holds DatabaseName, use dbName directly for
+    // lock
+    DatabaseName dbName(boost::none, replState->dbName);
+    AutoGetDb autoDb(opCtx, dbName, MODE_IX);
 
     // Unlock RSTL to avoid deadlocks with prepare conflicts and state transitions caused by waiting
     // for a a strong collection lock. See SERVER-42621.
@@ -3029,23 +3050,43 @@ std::vector<BSONObj> IndexBuildsCoordinator::normalizeIndexSpecs(
     // not impact our internal index comparison semantics, since we compare based on the parsed
     // MatchExpression trees rather than the serialized BSON specs. See SERVER-54357.
 
-    // If any of the specs describe wildcard indexes, normalize the wildcard projections if present.
-    // This will change all specs of the form {"a.b.c": 1} to normalized form {a: {b: {c : 1}}}.
+    // If any of the specs describe wildcard or columnstore indexes, normalize the respective
+    // projections if present. This will change all specs of the form {"a.b.c": 1} to normalized
+    // form {a: {b: {c : 1}}}.
     std::transform(normalSpecs.begin(), normalSpecs.end(), normalSpecs.begin(), [](auto& spec) {
-        const auto kProjectionName = IndexDescriptor::kPathProjectionFieldName;
-        const auto pathProjectionSpec = spec.getObjectField(kProjectionName);
-        static const auto kWildcardKeyPattern = BSON("$**" << 1);
-        // It's illegal for the user to explicitly specify an empty wildcardProjection for creating
-        // a {"$**":1} index, and specify any wildcardProjection for a {"field.$**": 1} index. If
-        // the projection is empty, then it means that there is no projection to normalize.
-        if (pathProjectionSpec.isEmpty()) {
+        BSONObj pathProjectionSpec;
+        bool isWildcard = false;
+        auto wildcardProjection = spec[IndexDescriptor::kWildcardProjectionFieldName];
+        auto columnStoreProjection = spec[IndexDescriptor::kColumnStoreProjectionFieldName];
+        if (wildcardProjection) {
+            pathProjectionSpec = wildcardProjection.Obj();
+            invariant(!spec[IndexDescriptor::kColumnStoreProjectionFieldName]);
+            isWildcard = true;
+        } else if (columnStoreProjection) {
+            pathProjectionSpec = columnStoreProjection.Obj();
+            invariant(!spec[IndexDescriptor::kWildcardProjectionFieldName]);
+        } else {
+            // No projection to normalize.
             return spec;
         }
-        auto wildcardProjection =
-            WildcardKeyGenerator::createProjectionExecutor(kWildcardKeyPattern, pathProjectionSpec);
+        uassert(ErrorCodes::InvalidIndexSpecificationOption,
+                "Can't enable both wildcardProjection and columnstoreProjection",
+                !(wildcardProjection && columnStoreProjection));
+
+        // Exactly one of wildcardProjection or columnstoreProjection is enabled
+        const auto projectionName = isWildcard ? IndexDescriptor::kWildcardProjectionFieldName
+                                               : IndexDescriptor::kColumnStoreProjectionFieldName;
+        static const auto kFieldSetKeyPattern = isWildcard ? BSON("$**" << 1)
+                                                           : BSON("$**"
+                                                                  << "columnstore");
+        auto indexPathProjection = isWildcard
+            ? static_cast<IndexPathProjection>(WildcardKeyGenerator::createProjectionExecutor(
+                  kFieldSetKeyPattern, pathProjectionSpec))
+            : static_cast<IndexPathProjection>(ColumnKeyGenerator::createProjectionExecutor(
+                  kFieldSetKeyPattern, pathProjectionSpec));
         auto normalizedProjection =
-            wildcardProjection.exec()->serializeTransformation(boost::none).toBson();
-        return spec.addField(BSON(kProjectionName << normalizedProjection).firstElement());
+            indexPathProjection.exec()->serializeTransformation(boost::none).toBson();
+        return spec.addField(BSON(projectionName << normalizedProjection).firstElement());
     });
     return normalSpecs;
 }

@@ -50,9 +50,9 @@
 #include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session_catalog_mongod.h"
-#include "mongo/db/session_txn_record_gen.h"
-#include "mongo/db/transaction_history_iterator.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/session_txn_record_gen.h"
+#include "mongo/db/transaction/transaction_history_iterator.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/s/catalog/sharding_catalog_client_mock.h"
 #include "mongo/s/catalog/type_shard.h"
@@ -274,7 +274,7 @@ public:
     }
 
     void setUnshardedFilteringMetadata(const NamespaceString& nss) {
-        AutoGetDb autoDb(operationContext(), nss.db(), MODE_IX);
+        AutoGetDb autoDb(operationContext(), nss.dbName(), MODE_IX);
         Lock::CollectionLock collLock(operationContext(), nss, MODE_IX);
         CollectionShardingRuntime::get(operationContext(), nss)
             ->setFilteringMetadata(operationContext(), CollectionMetadata());

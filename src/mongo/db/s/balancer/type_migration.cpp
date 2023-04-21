@@ -136,8 +136,8 @@ StatusWith<MigrationType> MigrationType::fromBSON(const BSONObj& source) {
         if (!status.isOK())
             return status;
 
-        migrationType._forceJumbo = ForceJumbo_parse(IDLParserErrorContext("ForceJumbo"),
-                                                     static_cast<int32_t>(forceJumboVal));
+        migrationType._forceJumbo =
+            ForceJumbo_parse(IDLParserContext("ForceJumbo"), static_cast<int32_t>(forceJumboVal));
     }
 
     {
@@ -174,14 +174,14 @@ BSONObj MigrationType::toBSON() const {
     builder.append(fromShard.name(), _fromShard.toString());
     builder.append(toShard.name(), _toShard.toString());
 
-    _chunkVersion.serializeToBSON(chunkVersion.name(), &builder);
+    _chunkVersion.serialize(chunkVersion.name(), &builder);
 
     builder.append(waitForDelete.name(), _waitForDelete);
     builder.append(forceJumbo.name(), _forceJumbo);
-    if (_maxChunkSizeBytes.is_initialized()) {
+    if (_maxChunkSizeBytes.has_value()) {
         builder.appendNumber(maxChunkSizeBytes.name(), static_cast<long long>(*_maxChunkSizeBytes));
     }
-    if (_secondaryThrottle.is_initialized()) {
+    if (_secondaryThrottle.has_value()) {
         _secondaryThrottle->append(&builder);
     }
     return builder.obj();

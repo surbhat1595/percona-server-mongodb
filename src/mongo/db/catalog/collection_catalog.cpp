@@ -35,6 +35,8 @@
 #include "mongo/db/catalog/uncommitted_catalog_updates.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/multitenancy_gen.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/snapshot_helper.h"
@@ -132,21 +134,20 @@ public:
                         [& from = entry.nss, &to = entry.renameTo](CollectionCatalog& catalog) {
                             catalog._collections.erase(from);
 
-                            auto fromStr = from.ns();
-                            auto toStr = to.ns();
+                            ResourceId oldRid = ResourceId(RESOURCE_COLLECTION, from);
+                            ResourceId newRid = ResourceId(RESOURCE_COLLECTION, to);
 
-                            ResourceId oldRid = ResourceId(RESOURCE_COLLECTION, fromStr);
-                            ResourceId newRid = ResourceId(RESOURCE_COLLECTION, toStr);
-
-                            catalog.removeResource(oldRid, fromStr);
-                            catalog.addResource(newRid, toStr);
+                            catalog.removeResource(oldRid, from);
+                            catalog.addResource(newRid, to);
                         });
                     break;
                 }
                 case UncommittedCatalogUpdates::Entry::Action::kDroppedCollection: {
                     writeJobs.push_back(
-                        [opCtx = _opCtx, uuid = *entry.uuid()](CollectionCatalog& catalog) {
-                            catalog.deregisterCollection(opCtx, uuid);
+                        [opCtx = _opCtx,
+                         uuid = *entry.uuid(),
+                         isDropPending = *entry.isDropPending](CollectionCatalog& catalog) {
+                            catalog.deregisterCollection(opCtx, uuid, isDropPending);
                         });
                     break;
                 }
@@ -172,7 +173,7 @@ public:
                     // fine because the collection should not be visible in the catalog until we
                     // call setCommitted(true).
                     if (commitTime) {
-                        collPtr->setMinimumVisibleSnapshot(commitTime.get());
+                        collPtr->setMinimumVisibleSnapshot(commitTime.value());
                     }
                     collPtr->setCommitted(true);
                     break;
@@ -180,24 +181,33 @@ public:
                 case UncommittedCatalogUpdates::Entry::Action::kReplacedViewsForDatabase: {
                     writeJobs.push_back(
                         [dbName = entry.nss.dbName(),
-                         &viewsForDb = entry.viewsForDb.get()](CollectionCatalog& catalog) {
+                         &viewsForDb = entry.viewsForDb.value()](CollectionCatalog& catalog) {
                             catalog._replaceViewsForDatabase(dbName, std::move(viewsForDb));
                         });
                     break;
                 }
                 case UncommittedCatalogUpdates::Entry::Action::kAddViewResource: {
                     writeJobs.push_back([& viewName = entry.nss](CollectionCatalog& catalog) {
-                        auto viewRid = ResourceId(RESOURCE_COLLECTION, viewName.ns());
-                        catalog.addResource(viewRid, viewName.ns());
+                        auto viewRid = ResourceId(RESOURCE_COLLECTION, viewName);
+                        catalog.addResource(viewRid, viewName);
                         catalog.deregisterUncommittedView(viewName);
                     });
                     break;
                 }
                 case UncommittedCatalogUpdates::Entry::Action::kRemoveViewResource: {
                     writeJobs.push_back([& viewName = entry.nss](CollectionCatalog& catalog) {
-                        auto viewRid = ResourceId(RESOURCE_COLLECTION, viewName.ns());
-                        catalog.removeResource(viewRid, viewName.ns());
+                        auto viewRid = ResourceId(RESOURCE_COLLECTION, viewName);
+                        catalog.removeResource(viewRid, viewName);
                     });
+                    break;
+                }
+                case UncommittedCatalogUpdates::Entry::Action::kDroppedIndex: {
+                    writeJobs.push_back(
+                        [opCtx = _opCtx,
+                         indexEntry = entry.indexEntry,
+                         isDropPending = *entry.isDropPending](CollectionCatalog& catalog) {
+                            catalog.deregisterIndex(opCtx, std::move(indexEntry), isDropPending);
+                        });
                     break;
                 }
             };
@@ -481,7 +491,8 @@ Status CollectionCatalog::createView(OperationContext* opCtx,
     invariant(insertViewMode == ViewUpsertMode::kAlreadyDurableView ||
               opCtx->lockState()->isCollectionLockedForMode(viewName, MODE_IX));
     invariant(opCtx->lockState()->isCollectionLockedForMode(
-        NamespaceString(viewName.db(), NamespaceString::kSystemDotViewsCollectionName), MODE_X));
+        NamespaceString(viewName.dbName(), NamespaceString::kSystemDotViewsCollectionName),
+        MODE_X));
 
     invariant(_viewsForDatabase.contains(viewName.dbName()));
     const ViewsForDatabase& viewsForDb = *_getViewsForDatabase(opCtx, viewName.dbName());
@@ -531,7 +542,8 @@ Status CollectionCatalog::modifyView(
     const ViewsForDatabase::PipelineValidatorFn& pipelineValidator) const {
     invariant(opCtx->lockState()->isCollectionLockedForMode(viewName, MODE_X));
     invariant(opCtx->lockState()->isCollectionLockedForMode(
-        NamespaceString(viewName.db(), NamespaceString::kSystemDotViewsCollectionName), MODE_X));
+        NamespaceString(viewName.dbName(), NamespaceString::kSystemDotViewsCollectionName),
+        MODE_X));
     invariant(_viewsForDatabase.contains(viewName.dbName()));
     const ViewsForDatabase& viewsForDb = *_getViewsForDatabase(opCtx, viewName.dbName());
 
@@ -568,7 +580,8 @@ Status CollectionCatalog::modifyView(
 Status CollectionCatalog::dropView(OperationContext* opCtx, const NamespaceString& viewName) const {
     invariant(opCtx->lockState()->isCollectionLockedForMode(viewName, MODE_IX));
     invariant(opCtx->lockState()->isCollectionLockedForMode(
-        NamespaceString(viewName.db(), NamespaceString::kSystemDotViewsCollectionName), MODE_X));
+        NamespaceString(viewName.dbName(), NamespaceString::kSystemDotViewsCollectionName),
+        MODE_X));
     invariant(_viewsForDatabase.contains(viewName.dbName()));
     const ViewsForDatabase& viewsForDb = *_getViewsForDatabase(opCtx, viewName.dbName());
     viewsForDb.requireValidCatalog();
@@ -587,7 +600,7 @@ Status CollectionCatalog::dropView(OperationContext* opCtx, const NamespaceStrin
 
         writable.durable->remove(opCtx, viewName);
         writable.viewGraph.remove(viewName);
-        writable.viewMap.erase(viewName.ns());
+        writable.viewMap.erase(viewName);
         writable.stats = {};
 
         // Reload the view catalog with the changes applied.
@@ -595,7 +608,8 @@ Status CollectionCatalog::dropView(OperationContext* opCtx, const NamespaceStrin
         if (result.isOK()) {
             auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
             uncommittedCatalogUpdates.removeView(viewName);
-            uncommittedCatalogUpdates.replaceViewsForDatabase(viewName.db(), std::move(writable));
+            uncommittedCatalogUpdates.replaceViewsForDatabase(viewName.dbName(),
+                                                              std::move(writable));
 
             PublishCatalogUpdates::ensureRegisteredWithRecoveryUnit(opCtx,
                                                                     uncommittedCatalogUpdates);
@@ -667,11 +681,22 @@ void CollectionCatalog::onCollectionRename(OperationContext* opCtx,
     uncommittedCatalogUpdates.renameCollection(coll, fromCollection);
 }
 
-void CollectionCatalog::dropCollection(OperationContext* opCtx, Collection* coll) const {
+void CollectionCatalog::dropIndex(OperationContext* opCtx,
+                                  const NamespaceString& nss,
+                                  std::shared_ptr<IndexCatalogEntry> indexEntry,
+                                  bool isDropPending) const {
+    auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
+    uncommittedCatalogUpdates.dropIndex(nss, std::move(indexEntry), isDropPending);
+    PublishCatalogUpdates::ensureRegisteredWithRecoveryUnit(opCtx, uncommittedCatalogUpdates);
+}
+
+void CollectionCatalog::dropCollection(OperationContext* opCtx,
+                                       Collection* coll,
+                                       bool isDropPending) const {
     invariant(coll);
 
     auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
-    uncommittedCatalogUpdates.dropCollection(coll);
+    uncommittedCatalogUpdates.dropCollection(coll, isDropPending);
 
     // Requesting a writable collection normally ensures we have registered PublishCatalogUpdates
     // with the recovery unit. However, when the writable Collection was requested in Inplace mode
@@ -682,7 +707,7 @@ void CollectionCatalog::dropCollection(OperationContext* opCtx, Collection* coll
 void CollectionCatalog::onOpenDatabase(OperationContext* opCtx,
                                        const DatabaseName& dbName,
                                        ViewsForDatabase&& viewsForDb) {
-    invariant(opCtx->lockState()->isDbLockedForMode(dbName.db(), MODE_IS));
+    invariant(opCtx->lockState()->isDbLockedForMode(dbName, MODE_IS));
     uassert(ErrorCodes::AlreadyInitialized,
             str::stream() << "Database " << dbName << " is already initialized",
             _viewsForDatabase.find(dbName) == _viewsForDatabase.end());
@@ -691,9 +716,9 @@ void CollectionCatalog::onOpenDatabase(OperationContext* opCtx,
 }
 
 void CollectionCatalog::onCloseDatabase(OperationContext* opCtx, DatabaseName dbName) {
-    invariant(opCtx->lockState()->isDbLockedForMode(dbName.db(), MODE_X));
-    auto rid = ResourceId(RESOURCE_DATABASE, dbName.toString());
-    removeResource(rid, dbName.toString());
+    invariant(opCtx->lockState()->isDbLockedForMode(dbName, MODE_X));
+    auto rid = ResourceId(RESOURCE_DATABASE, dbName);
+    removeResource(rid, dbName);
     _viewsForDatabase.erase(dbName);
 }
 
@@ -920,8 +945,8 @@ boost::optional<NamespaceString> CollectionCatalog::lookupNSSByUUID(OperationCon
     auto foundIt = _catalog.find(uuid);
     if (foundIt != _catalog.end()) {
         boost::optional<NamespaceString> ns = foundIt->second->ns();
-        invariant(!ns.get().isEmpty());
-        return _collections.find(ns.get())->second->isCommitted() ? ns : boost::none;
+        invariant(!ns.value().isEmpty());
+        return _collections.find(ns.value())->second->isCommitted() ? ns : boost::none;
     }
 
     // Only in the case that the catalog is closed and a UUID is currently unknown, resolve it
@@ -1057,7 +1082,7 @@ std::vector<UUID> CollectionCatalog::getAllCollectionUUIDsFromDb(const DatabaseN
 
 std::vector<NamespaceString> CollectionCatalog::getAllCollectionNamesFromDb(
     OperationContext* opCtx, const DatabaseName& dbName) const {
-    invariant(opCtx->lockState()->isDbLockedForMode(dbName.db(), MODE_S));
+    invariant(opCtx->lockState()->isDbLockedForMode(dbName, MODE_S));
 
     auto minUuid = UUID::parse("00000000-0000-0000-0000-000000000000").getValue();
 
@@ -1172,15 +1197,16 @@ void CollectionCatalog::registerCollection(OperationContext* opCtx,
 
     invariant(static_cast<size_t>(_stats.internal + _stats.userCollections) == _collections.size());
 
-    auto dbRid = ResourceId(RESOURCE_DATABASE, nss.dbName().toStringWithTenantId());
-    addResource(dbRid, nss.dbName().toString());
+    auto dbRid = ResourceId(RESOURCE_DATABASE, nss.dbName());
+    addResource(dbRid, nss.dbName());
 
-    auto collRid = ResourceId(RESOURCE_COLLECTION, nss.ns());
-    addResource(collRid, nss.ns());
+    auto collRid = ResourceId(RESOURCE_COLLECTION, nss);
+    addResource(collRid, nss);
 }
 
 std::shared_ptr<Collection> CollectionCatalog::deregisterCollection(OperationContext* opCtx,
-                                                                    const UUID& uuid) {
+                                                                    const UUID& uuid,
+                                                                    bool isDropPending) {
     invariant(_catalog.find(uuid) != _catalog.end());
 
     auto coll = std::move(_catalog[uuid]);
@@ -1192,6 +1218,15 @@ std::shared_ptr<Collection> CollectionCatalog::deregisterCollection(OperationCon
     // Make sure collection object exists.
     invariant(_collections.find(ns) != _collections.end());
     invariant(_orderedCollections.find(dbIdPair) != _orderedCollections.end());
+
+    if (isDropPending) {
+        auto ident = coll->getSharedIdent()->getIdent();
+        LOGV2_DEBUG(6825300, 1, "Registering drop pending collection ident", "ident"_attr = ident);
+
+        auto it = _dropPendingCollection.find(ident);
+        invariant(it == _dropPendingCollection.end());
+        _dropPendingCollection[ident] = coll;
+    }
 
     _orderedCollections.erase(dbIdPair);
     _collections.erase(ns);
@@ -1213,8 +1248,8 @@ std::shared_ptr<Collection> CollectionCatalog::deregisterCollection(OperationCon
 
     coll->onDeregisterFromCatalog(opCtx);
 
-    auto collRid = ResourceId(RESOURCE_COLLECTION, ns.ns());
-    removeResource(collRid, ns.ns());
+    auto collRid = ResourceId(RESOURCE_COLLECTION, ns);
+    removeResource(collRid, ns);
 
     return coll;
 }
@@ -1222,7 +1257,7 @@ std::shared_ptr<Collection> CollectionCatalog::deregisterCollection(OperationCon
 void CollectionCatalog::registerUncommittedView(OperationContext* opCtx,
                                                 const NamespaceString& nss) {
     invariant(opCtx->lockState()->isCollectionLockedForMode(
-        NamespaceString(nss.db(), NamespaceString::kSystemDotViewsCollectionName), MODE_X));
+        NamespaceString(nss.dbName(), NamespaceString::kSystemDotViewsCollectionName), MODE_X));
 
     // Since writing to system.views requires an X lock, we only need to cross-check collection
     // namespaces here.
@@ -1283,6 +1318,8 @@ void CollectionCatalog::deregisterAllCollectionsAndViews() {
     _orderedCollections.clear();
     _catalog.clear();
     _viewsForDatabase.clear();
+    _dropPendingCollection.clear();
+    _dropPendingIndex.clear();
     _stats = {};
 
     _resourceInformation.clear();
@@ -1304,6 +1341,48 @@ void CollectionCatalog::clearViews(OperationContext* opCtx, const DatabaseName& 
     CollectionCatalog::write(opCtx, [&](CollectionCatalog& catalog) {
         catalog._replaceViewsForDatabase(dbName, std::move(viewsForDb));
     });
+}
+
+void CollectionCatalog::deregisterIndex(OperationContext* opCtx,
+                                        std::shared_ptr<IndexCatalogEntry> indexEntry,
+                                        bool isDropPending) {
+    if (!isDropPending) {
+        // No-op.
+        return;
+    }
+
+    // Unfinished index builds return a nullptr for getSharedIdent(). Use getIdent() instead.
+    std::string ident = indexEntry->getIdent();
+
+    auto it = _dropPendingIndex.find(ident);
+    invariant(it == _dropPendingIndex.end());
+
+    LOGV2_DEBUG(6825301, 1, "Registering drop pending index entry ident", "ident"_attr = ident);
+    _dropPendingIndex[ident] = indexEntry;
+}
+
+void CollectionCatalog::notifyIdentDropped(const std::string& ident) {
+    // It's possible that the ident doesn't exist in either map when the collection catalog is
+    // re-opened, the _dropPendingIdent map is cleared. During rollback-to-stable we re-open the
+    // collection catalog. The TimestampMonitor is a background thread that continues to run during
+    // rollback-to-stable and maintains its own drop pending ident information. It generates a set
+    // of drop pending idents outside of the global lock. However, during rollback-to-stable, we
+    // clear the TimestampMonitors drop pending state. But it's possible that the TimestampMonitor
+    // already generated a set of idents to drop for its next iteration, which would call into this
+    // function, for idents we've already cleared from the collection catalogs in-memory state.
+    LOGV2_DEBUG(6825302, 1, "Deregistering drop pending ident", "ident"_attr = ident);
+
+    auto collIt = _dropPendingCollection.find(ident);
+    if (collIt != _dropPendingCollection.end()) {
+        _dropPendingCollection.erase(collIt);
+        return;
+    }
+
+    auto indexIt = _dropPendingIndex.find(ident);
+    if (indexIt != _dropPendingIndex.end()) {
+        _dropPendingIndex.erase(indexIt);
+        return;
+    }
 }
 
 CollectionCatalog::iterator CollectionCatalog::begin(OperationContext* opCtx,
@@ -1334,9 +1413,8 @@ boost::optional<std::string> CollectionCatalog::lookupResourceName(const Resourc
     return *namespaces.begin();
 }
 
-void CollectionCatalog::removeResource(const ResourceId& rid, const std::string& entry) {
-    invariant(rid.getType() == RESOURCE_DATABASE || rid.getType() == RESOURCE_COLLECTION);
 
+void CollectionCatalog::_removeResource(const ResourceId& rid, const std::string& entry) {
     auto search = _resourceInformation.find(rid);
     if (search == _resourceInformation.end()) {
         return;
@@ -1351,9 +1429,17 @@ void CollectionCatalog::removeResource(const ResourceId& rid, const std::string&
     }
 }
 
-void CollectionCatalog::addResource(const ResourceId& rid, const std::string& entry) {
-    invariant(rid.getType() == RESOURCE_DATABASE || rid.getType() == RESOURCE_COLLECTION);
+void CollectionCatalog::removeResource(const ResourceId& rid, const NamespaceString& nss) {
+    invariant(rid.getType() == RESOURCE_COLLECTION);
+    _removeResource(rid, nss.toStringWithTenantId());
+}
 
+void CollectionCatalog::removeResource(const ResourceId& rid, const DatabaseName& dbName) {
+    invariant(rid.getType() == RESOURCE_DATABASE);
+    _removeResource(rid, dbName.toStringWithTenantId());
+}
+
+void CollectionCatalog::_addResource(const ResourceId& rid, const std::string& entry) {
     auto search = _resourceInformation.find(rid);
     if (search == _resourceInformation.end()) {
         std::set<std::string> newSet = {entry};
@@ -1367,6 +1453,16 @@ void CollectionCatalog::addResource(const ResourceId& rid, const std::string& en
     }
 
     namespaces.insert(entry);
+}
+
+void CollectionCatalog::addResource(const ResourceId& rid, const NamespaceString& nss) {
+    invariant(rid.getType() == RESOURCE_COLLECTION);
+    _addResource(rid, nss.toStringWithTenantId());
+}
+
+void CollectionCatalog::addResource(const ResourceId& rid, const DatabaseName& dbName) {
+    invariant(rid.getType() == RESOURCE_DATABASE);
+    _addResource(rid, dbName.toStringWithTenantId());
 }
 
 void CollectionCatalog::invariantHasExclusiveAccessToCollection(OperationContext* opCtx,
@@ -1412,14 +1508,21 @@ Status CollectionCatalog::_createOrUpdateView(
     invariant(insertViewMode == ViewUpsertMode::kAlreadyDurableView ||
               opCtx->lockState()->isCollectionLockedForMode(viewName, MODE_IX));
     invariant(opCtx->lockState()->isCollectionLockedForMode(
-        NamespaceString(viewName.db(), NamespaceString::kSystemDotViewsCollectionName), MODE_X));
+        NamespaceString(viewName.dbName(), NamespaceString::kSystemDotViewsCollectionName),
+        MODE_X));
 
     viewsForDb.requireValidCatalog();
 
     // Build the BSON definition for this view to be saved in the durable view catalog and/or to
     // insert in the viewMap. If the collation is empty, omit it from the definition altogether.
     BSONObjBuilder viewDefBuilder;
-    viewDefBuilder.append("_id", viewName.ns());
+    // TODO SERVER-65457 Use serialize function on NamespaceString to create the string to write.
+    if (gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility) ||
+        !gMultitenancySupport) {
+        viewDefBuilder.append("_id", viewName.toString());
+    } else {
+        viewDefBuilder.append("_id", viewName.toStringWithTenantId());
+    }
     viewDefBuilder.append("viewOn", viewOn.coll());
     viewDefBuilder.append("pipeline", pipeline);
     if (collator) {
@@ -1429,7 +1532,7 @@ Status CollectionCatalog::_createOrUpdateView(
     BSONObj viewDef = viewDefBuilder.obj();
     BSONObj ownedPipeline = pipeline.getOwned();
     ViewDefinition view(
-        viewName.db(), viewName.coll(), viewOn.coll(), ownedPipeline, std::move(collator));
+        viewName.dbName(), viewName.coll(), viewOn.coll(), ownedPipeline, std::move(collator));
 
     // If the view is already in the durable view catalog, we don't need to validate the graph. If
     // we need to update the durable view catalog, we need to check that the resulting dependency
@@ -1450,7 +1553,7 @@ Status CollectionCatalog::_createOrUpdateView(
         switch (insertViewMode) {
             case ViewUpsertMode::kCreateView:
             case ViewUpsertMode::kAlreadyDurableView:
-                return viewsForDb.insert(opCtx, viewDef);
+                return viewsForDb.insert(opCtx, viewDef, viewName.tenantId());
             case ViewUpsertMode::kUpdateView:
                 viewsForDb.viewMap.clear();
                 viewsForDb.viewGraphNeedsRefresh = true;

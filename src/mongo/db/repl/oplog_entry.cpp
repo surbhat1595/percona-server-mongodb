@@ -85,21 +85,21 @@ BSONObj makeOplogEntryDoc(OpTime opTime,
     builder.append(OplogEntryBase::kNssFieldName, nss.toString());
     builder.append(OplogEntryBase::kWallClockTimeFieldName, wallClockTime);
     if (hash) {
-        builder.append(OplogEntryBase::kHashFieldName, hash.get());
+        builder.append(OplogEntryBase::kHashFieldName, hash.value());
     }
     if (uuid) {
         uuid->appendToBuilder(&builder, OplogEntryBase::kUuidFieldName);
     }
     if (fromMigrate) {
-        builder.append(OplogEntryBase::kFromMigrateFieldName, fromMigrate.get());
+        builder.append(OplogEntryBase::kFromMigrateFieldName, fromMigrate.value());
     }
     builder.append(OplogEntryBase::kObjectFieldName, oField);
     if (o2Field) {
-        builder.append(OplogEntryBase::kObject2FieldName, o2Field.get());
+        builder.append(OplogEntryBase::kObject2FieldName, o2Field.value());
     }
     if (isUpsert) {
         invariant(o2Field);
-        builder.append(OplogEntryBase::kUpsertFieldName, isUpsert.get());
+        builder.append(OplogEntryBase::kUpsertFieldName, isUpsert.value());
     }
     if (statementIds.size() == 1) {
         builder.append(OplogEntryBase::kStatementIdsFieldName, statementIds.front());
@@ -107,26 +107,26 @@ BSONObj makeOplogEntryDoc(OpTime opTime,
         builder.append(OplogEntryBase::kStatementIdsFieldName, statementIds);
     }
     if (prevWriteOpTimeInTransaction) {
-        const BSONObj localObject = prevWriteOpTimeInTransaction.get().toBSON();
+        const BSONObj localObject = prevWriteOpTimeInTransaction.value().toBSON();
         builder.append(OplogEntryBase::kPrevWriteOpTimeInTransactionFieldName, localObject);
     }
     if (preImageOpTime) {
-        const BSONObj localObject = preImageOpTime.get().toBSON();
+        const BSONObj localObject = preImageOpTime.value().toBSON();
         builder.append(OplogEntryBase::kPreImageOpTimeFieldName, localObject);
     }
     if (postImageOpTime) {
-        const BSONObj localObject = postImageOpTime.get().toBSON();
+        const BSONObj localObject = postImageOpTime.value().toBSON();
         builder.append(OplogEntryBase::kPostImageOpTimeFieldName, localObject);
     }
 
     if (destinedRecipient) {
         builder.append(OplogEntryBase::kDestinedRecipientFieldName,
-                       destinedRecipient.get().toString());
+                       destinedRecipient.value().toString());
     }
 
     if (needsRetryImage) {
         builder.append(OplogEntryBase::kNeedsRetryImageFieldName,
-                       RetryImage_serializer(needsRetryImage.get()));
+                       RetryImage_serializer(needsRetryImage.value()));
     }
     return builder.obj();
 }
@@ -184,9 +184,7 @@ ReplOperation MutableOplogEntry::makeInsertOperation(const NamespaceString& nss,
     ReplOperation op;
     op.setOpType(OpTypeEnum::kInsert);
 
-    // TODO SERVER-62114 Change to check for upgraded FCV rather than feature flag
-    if (gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))
-        op.setTid(nss.tenantId());
+    op.setTid(nss.tenantId());
     op.setNss(nss);
     op.setUuid(uuid);
     op.setObject(docToInsert.getOwned());
@@ -226,9 +224,7 @@ ReplOperation MutableOplogEntry::makeUpdateOperation(const NamespaceString nss,
     ReplOperation op;
     op.setOpType(OpTypeEnum::kUpdate);
 
-    // TODO SERVER-62114 Change to check for upgraded FCV rather than feature flag
-    if (gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))
-        op.setTid(nss.tenantId());
+    op.setTid(nss.tenantId());
     op.setNss(nss);
     op.setUuid(uuid);
     op.setObject(update.getOwned());
@@ -242,6 +238,8 @@ ReplOperation MutableOplogEntry::makeCreateCommand(const NamespaceString nss,
 
     ReplOperation op;
     op.setOpType(OpTypeEnum::kCommand);
+
+    op.setTid(nss.tenantId());
     op.setNss(nss.getCommandNS());
     op.setUuid(options.uuid);
     op.setObject(makeCreateCollCmdObj(nss, options, idIndex));
@@ -253,6 +251,8 @@ ReplOperation MutableOplogEntry::makeCreateIndexesCommand(const NamespaceString 
                                                           const BSONObj& indexDoc) {
     ReplOperation op;
     op.setOpType(OpTypeEnum::kCommand);
+
+    op.setTid(nss.tenantId());
     op.setNss(nss.getCommandNS());
     op.setUuid(uuid);
 
@@ -271,9 +271,7 @@ ReplOperation MutableOplogEntry::makeDeleteOperation(const NamespaceString& nss,
     ReplOperation op;
     op.setOpType(OpTypeEnum::kDelete);
 
-    // TODO SERVER-62114 Change to check for upgraded FCV rather than feature flag
-    if (gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))
-        op.setTid(nss.tenantId());
+    op.setTid(nss.tenantId());
     op.setNss(nss);
     op.setUuid(uuid);
     op.setObject(docToDelete.getOwned());
@@ -283,7 +281,7 @@ ReplOperation MutableOplogEntry::makeDeleteOperation(const NamespaceString& nss,
 StatusWith<MutableOplogEntry> MutableOplogEntry::parse(const BSONObj& object) {
     try {
         MutableOplogEntry oplogEntry;
-        oplogEntry.parseProtected(IDLParserErrorContext("OplogEntryBase"), object);
+        oplogEntry.parseProtected(IDLParserContext("OplogEntryBase"), object);
         return oplogEntry;
     } catch (...) {
         return exceptionToStatus();
@@ -300,7 +298,7 @@ void MutableOplogEntry::setOpTime(const OpTime& opTime) & {
 OpTime MutableOplogEntry::getOpTime() const {
     long long term = OpTime::kUninitializedTerm;
     if (getTerm()) {
-        term = getTerm().get();
+        term = getTerm().value();
     }
     return OpTime(getTimestamp(), term);
 }
@@ -324,7 +322,7 @@ StatusWith<DurableOplogEntry> DurableOplogEntry::parse(const BSONObj& object) {
 DurableOplogEntry::DurableOplogEntry(BSONObj rawInput) : _raw(std::move(rawInput)) {
     _raw = _raw.getOwned();
 
-    parseProtected(IDLParserErrorContext("OplogEntryBase"), _raw);
+    parseProtected(IDLParserContext("OplogEntryBase"), _raw);
 
     // Parse command type from 'o' and 'o2' fields.
     if (isCommand()) {

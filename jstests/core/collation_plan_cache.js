@@ -14,8 +14,7 @@
 load("jstests/libs/analyze_plan.js");  // For getPlanCacheKeyFromExplain.
 load("jstests/libs/sbe_util.js");      // For checkSBEEnabled.
 
-const isSbePlanCacheEnabled =
-    checkSBEEnabled(db, ["featureFlagSbePlanCache", "featureFlagSbeFull"]);
+const isSbeEnabled = checkSBEEnabled(db, ["featureFlagSbeFull"]);
 var coll = db.collation_plan_cache;
 coll.drop();
 
@@ -49,7 +48,7 @@ assert.commandWorked(
 // The query shape should have been added.
 var shapes = coll.aggregate([{$planCacheStats: {}}]).toArray();
 assert.eq(1, shapes.length, 'unexpected cache size after running query');
-if (!isSbePlanCacheEnabled) {
+if (!isSbeEnabled) {
     assert.eq(shapes[0].createdFromQuery.query, {a: 'foo', b: 5}, shapes);
     assert.eq(shapes[0].createdFromQuery.sort, {}, shapes);
     assert.eq(shapes[0].createdFromQuery.projection, {}, shapes);
@@ -119,12 +118,18 @@ coll.getPlanCache().clearPlansByQuery(
     {query: {a: 'foo', b: 5}, sort: {}, projection: {}, collation: {locale: 'fr_CA'}});
 assert.eq(1, coll.aggregate([{$planCacheStats: {}}]).itcount(), dumpPlanCacheState());
 
-// Dropping a query shape with different string locations should have no effect.
+// Dropping a query shape with different string locations should clear the cache.
 coll.getPlanCache().clearPlansByQuery(
     {query: {a: 'foo', b: 'bar'}, sort: {}, projection: {}, collation: {locale: 'en_US'}});
+assert.eq(0, coll.aggregate([{$planCacheStats: {}}]).itcount(), dumpPlanCacheState());
+
+// Run a query so that an entry is inserted into the cache.
+assert.commandWorked(
+    coll.runCommand("find", {filter: {a: 'foo', b: 5}, collation: {locale: 'en_US'}}),
+    'find command failed');
 assert.eq(1, coll.aggregate([{$planCacheStats: {}}]).itcount(), dumpPlanCacheState());
 
-// Dropping query shape.
+// Dropping query shape using the same filter.
 coll.getPlanCache().clearPlansByQuery(
     {query: {a: 'foo', b: 5}, sort: {}, projection: {}, collation: {locale: 'en_US'}});
 assert.eq(0, coll.aggregate([{$planCacheStats: {}}]).itcount(), dumpPlanCacheState());

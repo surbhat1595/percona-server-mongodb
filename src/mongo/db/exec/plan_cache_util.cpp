@@ -82,14 +82,14 @@ void updatePlanCache(OperationContext* opCtx,
     // TODO SERVER-67576: re-enable caching of "explode for sort" plans in the SBE cache.
     if (shouldCacheQuery(query) && collections.getMainCollection() &&
         !solution.hasExplodedForSort &&
-        feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV()) {
+        feature_flags::gFeatureFlagSbeFull.isEnabledAndIgnoreFCV()) {
         auto key = plan_cache_key_factory::make(query, collections);
         auto plan = std::make_unique<sbe::CachedSbePlan>(root.clone(), data);
         plan->indexFilterApplied = solution.indexFilterApplied;
         sbe::getPlanCache(opCtx).setPinned(
             std::move(key),
             canonical_query_encoder::computeHash(
-                canonical_query_encoder::encodeForIndexFilters(query)),
+                canonical_query_encoder::encodeForPlanCacheCommand(query)),
             std::move(plan),
             opCtx->getServiceContext()->getPreciseClockSource()->now(),
             buildDebugInfo(&solution));
@@ -176,7 +176,7 @@ plan_cache_debug_info::DebugInfoSBE buildDebugInfo(const QuerySolution* solution
             }
             case STAGE_EQ_LOOKUP: {
                 auto eln = static_cast<const EqLookupNode*>(node);
-                auto& secondaryStats = debugInfo.secondaryStats[eln->foreignCollection];
+                auto& secondaryStats = debugInfo.secondaryStats[eln->foreignCollection.toString()];
                 if (eln->lookupStrategy == EqLookupNode::LookupStrategy::kIndexedLoopJoin) {
                     tassert(6466200, "Index join lookup should have an index entry", eln->idxEntry);
                     secondaryStats.indexesUsed.push_back(eln->idxEntry->identifier.catalogName);

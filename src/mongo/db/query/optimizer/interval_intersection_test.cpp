@@ -55,10 +55,15 @@ std::string optimizedQueryPlan(const std::string& query,
     ABT translated =
         translatePipeline(metadata, "[{$match: " + query + "}]", scanDefName, prefixId);
 
-    OptPhaseManager phaseManager(
-        OptPhaseManager::getAllRewritesSet(), prefixId, metadata, DebugInfo::kDefaultForTests);
+    OptPhaseManager phaseManager({OptPhaseManager::OptPhase::MemoSubstitutionPhase,
+                                  OptPhaseManager::OptPhase::MemoExplorationPhase,
+                                  OptPhaseManager::OptPhase::MemoImplementationPhase},
+                                 prefixId,
+                                 metadata,
+                                 DebugInfo::kDefaultForTests);
 
     ABT optimized = translated;
+    phaseManager.getHints()._disableScan = true;
     ASSERT_TRUE(phaseManager.optimize(optimized));
     return ExplainGenerator::explainV2(optimized);
 }
@@ -114,8 +119,8 @@ TEST(IntervalIntersection, SingleFieldIntersection) {
          "    BindBlock:\n"
          "        [rid_0]\n"
          "            Source []\n"},
-        {"{$or: [{$and: [{a0: {$gt:9}}, {a0: {$lt: 12}}]}, {$and: [{a0: {$gt:40}}, {a0: {$lt: "
-         "44}}]}]}",
+        {"{$or: [{$and: [{a0: {$gt:9, $lt:999}}, {a0: {$gt: 0, $lt: 12}}]},"
+         "       {$and: [{a0: {$gt:40, $lt:997}}, {a0: {$gt:0, $lt: 44}}]}]}",
          "Root []\n"
          "|   |   projections: \n"
          "|   |       scan_0\n"
@@ -252,7 +257,7 @@ TEST(IntervalIntersection, MultiFieldIntersection) {
         {"index1", makeCompositeIndexDefinition(indexFields, false /*isMultiKey*/)}};
 
     std::vector<QueryTest> queryTests = {
-        {"{$and: [{a0: {$gt:11}}, {a0: {$lt:14}}, {b0: {$gt: 21}}, {b0: {$lt: 12}}]}",
+        {"{$and: [{a0: {$gt: 11}}, {a0: {$lt: 14}}, {b0: {$gt: 21}}, {b0: {$lt: 12}}]}",
          "Root []\n"
          "|   |   projections: \n"
          "|   |       scan_0\n"
@@ -267,7 +272,7 @@ TEST(IntervalIntersection, MultiFieldIntersection) {
          "|       limit: 0\n"
          "|       skip: 0\n"
          "CoScan []\n"},
-        {"{$and: [{a0: {$gt:14}}, {a0: {$lt:11}}, {b0: {$gt: 12}}, {b0: {$lt: 21}}]}",
+        {"{$and: [{a0: {$gt: 14}}, {a0: {$lt: 11}}, {b0: {$gt: 12}}, {b0: {$lt: 21}}]}",
          "Root []\n"
          "|   |   projections: \n"
          "|   |       scan_0\n"
@@ -306,7 +311,7 @@ TEST(IntervalIntersection, MultiFieldIntersection) {
          "|       limit: 0\n"
          "|       skip: 0\n"
          "CoScan []\n"},
-        {"{$and: [{a0: {$gt:14}}, {a0: {$lt:11}}, {b0: {$gt: 21}}, {b0: {$lt: 12}}]}",
+        {"{$and: [{a0: {$gt: 14}}, {a0: {$lt: 11}}, {b0: {$gt: 21}}, {b0: {$lt: 12}}]}",
          "Root []\n"
          "|   |   projections: \n"
          "|   |       scan_0\n"
@@ -383,10 +388,10 @@ TEST(IntervalIntersection, VariableIntervals) {
                 IntervalReqExpr::make<IntervalReqExpr::Conjunction>(IntervalReqExpr::NodeVector{
                     IntervalReqExpr::make<IntervalReqExpr::Atom>(IntervalRequirement{
                         BoundRequirement(true /*inclusive*/, make<Variable>("v1")),
-                        BoundRequirement::makeInfinite()}),
+                        BoundRequirement::makePlusInf()}),
                     IntervalReqExpr::make<IntervalReqExpr::Atom>(IntervalRequirement{
                         BoundRequirement(false /*inclusive*/, make<Variable>("v2")),
-                        BoundRequirement::makeInfinite()})})});
+                        BoundRequirement::makePlusInf()})})});
 
         auto result = intersectDNFIntervals(interval);
         ASSERT_TRUE(result);
@@ -401,7 +406,7 @@ TEST(IntervalIntersection, VariableIntervals) {
             " U \n"
             "    {\n"
             "        {(If [] BinaryOp [Gte] Variable [v1] Variable [v2] Variable [v1] Variable "
-            "[v2], +inf)}\n"
+            "[v2], Const [maxKey]]}\n"
             "    }\n"
             "}\n",
             ExplainGenerator::explainIntervalExpr(*result));

@@ -30,7 +30,6 @@
 #include "mongo/platform/basic.h"
 
 #include <algorithm>
-#include <boost/optional/optional_io.hpp>
 #include <functional>
 #include <map>
 #include <utility>
@@ -105,7 +104,7 @@ TEST_F(OplogTest, LogOpReturnsOpTimeOnSuccessfulInsertIntoOplogCollection) {
         oplogEntry.setNss(nss);
         oplogEntry.setObject(msgObj);
         oplogEntry.setWallClockTime(Date_t::now());
-        AutoGetDb autoDb(opCtx.get(), nss.db(), MODE_X);
+        AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
         WriteUnitOfWork wunit(opCtx.get());
         opTime = logOp(opCtx.get(), &oplogEntry);
         ASSERT_FALSE(opTime.isNull());
@@ -242,7 +241,7 @@ TEST_F(OplogTest, ConcurrentLogOp) {
            unittest::Barrier* barrier) {
             return [=] {
                 auto opCtx = cc().makeOperationContext();
-                AutoGetDb autoDb(opCtx.get(), nss.db(), MODE_X);
+                AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
                 WriteUnitOfWork wunit(opCtx.get());
 
                 _logOpNoopWithMsg(opCtx.get(), mtx, opTimeNssMap, nss);
@@ -273,7 +272,7 @@ TEST_F(OplogTest, ConcurrentLogOpRevertFirstOplogEntry) {
            unittest::Barrier* barrier) {
             return [=] {
                 auto opCtx = cc().makeOperationContext();
-                AutoGetDb autoDb(opCtx.get(), nss.db(), MODE_X);
+                AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
                 WriteUnitOfWork wunit(opCtx.get());
 
                 auto opTime = _logOpNoopWithMsg(opCtx.get(), mtx, opTimeNssMap, nss);
@@ -319,7 +318,7 @@ TEST_F(OplogTest, ConcurrentLogOpRevertLastOplogEntry) {
            unittest::Barrier* barrier) {
             return [=] {
                 auto opCtx = cc().makeOperationContext();
-                AutoGetDb autoDb(opCtx.get(), nss.db(), MODE_X);
+                AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
                 WriteUnitOfWork wunit(opCtx.get());
 
                 auto opTime = _logOpNoopWithMsg(opCtx.get(), mtx, opTimeNssMap, nss);
@@ -357,8 +356,7 @@ TEST_F(OplogTest, ConcurrentLogOpRevertLastOplogEntry) {
 TEST_F(OplogTest, MigrationIdAddedToOplog) {
     auto opCtx = cc().makeOperationContext();
     auto migrationUuid = UUID::gen();
-    tenantMigrationRecipientInfo(opCtx.get()) =
-        boost::make_optional<TenantMigrationRecipientInfo>(migrationUuid);
+    tenantMigrationInfo(opCtx.get()) = boost::make_optional<TenantMigrationInfo>(migrationUuid);
 
     const NamespaceString nss("test.coll");
     auto msgObj = BSON("msg"
@@ -372,7 +370,7 @@ TEST_F(OplogTest, MigrationIdAddedToOplog) {
         oplogEntry.setNss(nss);
         oplogEntry.setObject(msgObj);
         oplogEntry.setWallClockTime(Date_t::now());
-        AutoGetDb autoDb(opCtx.get(), nss.db(), MODE_X);
+        AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
         WriteUnitOfWork wunit(opCtx.get());
         opTime = logOp(opCtx.get(), &oplogEntry);
         ASSERT_FALSE(opTime.isNull());

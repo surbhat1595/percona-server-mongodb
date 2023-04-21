@@ -32,12 +32,14 @@
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/chrono.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/unittest/barrier.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/time_support.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
@@ -59,16 +61,11 @@ public:
         _opCtx = getGlobalServiceContext()->makeOperationContext(Client::getCurrent());
     }
 
-    void busyWait(Nanoseconds delay) const {
-        AtomicWord<bool> mayJoin{false};
-        stdx::thread blocker([&] {
-            sleepFor(delay);
-            mayJoin.store(true);
-        });
-        while (!mayJoin.load()) {
-            // Busy wait for the blocker thread.
+    void busyWait(Microseconds delay) const {
+        auto start = stdx::chrono::steady_clock::now();
+        auto end = start + stdx::chrono::microseconds{durationCount<Microseconds>(delay)};
+        while (stdx::chrono::steady_clock::now() <= end) {
         }
-        blocker.join();
     }
 
 private:
@@ -81,12 +78,12 @@ TEST_F(OperationCPUTimerTest, TestTimer) {
     auto timer = getTimer();
 
     timer->start();
-    busyWait(Nanoseconds(100));  // A small delay to make sure the timer advances.
+    busyWait(Microseconds(1));  // A small delay to make sure the timer advances.
     ASSERT_GT(timer->getElapsed(), Nanoseconds(0));
     timer->stop();
 
     const auto elapsedAfterStop = timer->getElapsed();
-    busyWait(Microseconds(1));  // A relatively longer delay to ensure the timer doesn't proceed.
+    busyWait(Microseconds(10));  // A relatively longer delay to ensure the timer doesn't proceed.
     const auto elapsedAfterSleep = timer->getElapsed();
     ASSERT_EQ(elapsedAfterStop, elapsedAfterSleep);
 }

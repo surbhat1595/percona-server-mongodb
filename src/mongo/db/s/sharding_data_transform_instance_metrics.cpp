@@ -40,7 +40,8 @@ ShardingDataTransformInstanceMetrics::ShardingDataTransformInstanceMetrics(
     Role role,
     Date_t startTime,
     ClockSource* clockSource,
-    ShardingDataTransformCumulativeMetrics* cumulativeMetrics)
+    ShardingDataTransformCumulativeMetrics* cumulativeMetrics,
+    FieldNameProviderPtr fieldNames)
     : ShardingDataTransformInstanceMetrics{
           std::move(instanceId),
           std::move(originalCommand),
@@ -49,6 +50,7 @@ ShardingDataTransformInstanceMetrics::ShardingDataTransformInstanceMetrics(
           startTime,
           clockSource,
           cumulativeMetrics,
+          std::move(fieldNames),
           std::make_unique<ShardingDataTransformMetricsObserver>(this)} {}
 
 ShardingDataTransformInstanceMetrics::ShardingDataTransformInstanceMetrics(
@@ -59,33 +61,28 @@ ShardingDataTransformInstanceMetrics::ShardingDataTransformInstanceMetrics(
     Date_t startTime,
     ClockSource* clockSource,
     ShardingDataTransformCumulativeMetrics* cumulativeMetrics,
+    FieldNameProviderPtr fieldNames,
     ObserverPtr observer)
     : _instanceId{std::move(instanceId)},
       _originalCommand{std::move(originalCommand)},
       _sourceNs{std::move(sourceNs)},
       _role{role},
+      _fieldNames{std::move(fieldNames)},
       _startTime{startTime},
       _clockSource{clockSource},
       _observer{std::move(observer)},
       _cumulativeMetrics{cumulativeMetrics},
-      _deregister{_cumulativeMetrics->registerInstanceMetrics(_observer.get())},
       _copyingStartTime{kNoDate},
       _copyingEndTime{kNoDate},
-      _approxDocumentsToCopy{0},
-      _documentsCopied{0},
-      _approxBytesToCopy{0},
-      _bytesCopied{0},
+      _approxDocumentsToProcess{0},
+      _documentsProcessed{0},
+      _approxBytesToScan{0},
+      _bytesWritten{0},
       _coordinatorHighEstimateRemainingTimeMillis{Milliseconds{0}},
       _coordinatorLowEstimateRemainingTimeMillis{Milliseconds{0}},
       _criticalSectionStartTime{kNoDate},
       _criticalSectionEndTime{kNoDate},
       _writesDuringCriticalSection{0} {}
-
-ShardingDataTransformInstanceMetrics::~ShardingDataTransformInstanceMetrics() {
-    if (_deregister) {
-        _deregister();
-    }
-}
 
 Milliseconds ShardingDataTransformInstanceMetrics::getHighEstimateRemainingTimeMillis() const {
     switch (_role) {
@@ -136,41 +133,46 @@ StringData ShardingDataTransformInstanceMetrics::getStateString() const noexcept
 BSONObj ShardingDataTransformInstanceMetrics::reportForCurrentOp() const noexcept {
 
     BSONObjBuilder builder;
-    builder.append(kType, "op");
-    builder.append(kDescription, createOperationDescription());
-    builder.append(kOp, "command");
-    builder.append(kNamespace, _sourceNs.toString());
-    builder.append(kOriginatingCommand, _originalCommand);
-    builder.append(kOpTimeElapsed, getOperationRunningTimeSecs().count());
-
+    builder.append(_fieldNames->getForType(), "op");
+    builder.append(_fieldNames->getForDescription(), createOperationDescription());
+    builder.append(_fieldNames->getForOp(), "command");
+    builder.append(_fieldNames->getForNamespace(), _sourceNs.toString());
+    builder.append(_fieldNames->getForOriginatingCommand(), _originalCommand);
+    builder.append(_fieldNames->getForOpTimeElapsed(), getOperationRunningTimeSecs().count());
     switch (_role) {
         case Role::kCoordinator:
-            builder.append(kAllShardsHighestRemainingOperationTimeEstimatedSecs,
+            builder.append(_fieldNames->getForAllShardsHighestRemainingOperationTimeEstimatedSecs(),
                            durationCount<Seconds>(getHighEstimateRemainingTimeMillis()));
-            builder.append(kAllShardsLowestRemainingOperationTimeEstimatedSecs,
+            builder.append(_fieldNames->getForAllShardsLowestRemainingOperationTimeEstimatedSecs(),
                            durationCount<Seconds>(getLowEstimateRemainingTimeMillis()));
-            builder.append(kCoordinatorState, getStateString());
-            builder.append(kCopyTimeElapsed, getCopyingElapsedTimeSecs().count());
-            builder.append(kCriticalSectionTimeElapsed,
+            builder.append(_fieldNames->getForCoordinatorState(), getStateString());
+            builder.append(_fieldNames->getForCopyTimeElapsed(),
+                           getCopyingElapsedTimeSecs().count());
+            builder.append(_fieldNames->getForCriticalSectionTimeElapsed(),
                            getCriticalSectionElapsedTimeSecs().count());
             break;
         case Role::kDonor:
-            builder.append(kDonorState, getStateString());
-            builder.append(kCriticalSectionTimeElapsed,
+            builder.append(_fieldNames->getForDonorState(), getStateString());
+            builder.append(_fieldNames->getForCriticalSectionTimeElapsed(),
                            getCriticalSectionElapsedTimeSecs().count());
-            builder.append(kCountWritesDuringCriticalSection, _writesDuringCriticalSection.load());
-            builder.append(kCountReadsDuringCriticalSection, _readsDuringCriticalSection.load());
+            builder.append(_fieldNames->getForCountWritesDuringCriticalSection(),
+                           _writesDuringCriticalSection.load());
+            builder.append(_fieldNames->getForCountReadsDuringCriticalSection(),
+                           _readsDuringCriticalSection.load());
             break;
         case Role::kRecipient:
-            builder.append(kRecipientState, getStateString());
-            builder.append(kCopyTimeElapsed, getCopyingElapsedTimeSecs().count());
-            builder.append(kRemainingOpTimeEstimated,
+            builder.append(_fieldNames->getForRecipientState(), getStateString());
+            builder.append(_fieldNames->getForCopyTimeElapsed(),
+                           getCopyingElapsedTimeSecs().count());
+            builder.append(_fieldNames->getForRemainingOpTimeEstimated(),
                            durationCount<Seconds>(getHighEstimateRemainingTimeMillis()));
-            builder.append(kApproxDocumentsToCopy, _approxDocumentsToCopy.load());
-            builder.append(kApproxBytesToCopy, _approxBytesToCopy.load());
-            builder.append(kBytesCopied, _bytesCopied.load());
-            builder.append(kCountWritesToStashCollections, _writesToStashCollections.load());
-            builder.append(kDocumentsCopied, _documentsCopied.load());
+            builder.append(_fieldNames->getForApproxDocumentsToProcess(),
+                           _approxDocumentsToProcess.load());
+            builder.append(_fieldNames->getForApproxBytesToScan(), _approxBytesToScan.load());
+            builder.append(_fieldNames->getForBytesWritten(), _bytesWritten.load());
+            builder.append(_fieldNames->getForCountWritesToStashCollections(),
+                           _writesToStashCollections.load());
+            builder.append(_fieldNames->getForDocumentsProcessed(), _documentsProcessed.load());
             break;
         default:
             MONGO_UNREACHABLE;
@@ -203,36 +205,36 @@ Date_t ShardingDataTransformInstanceMetrics::getCopyingEnd() const {
     return _copyingEndTime.load();
 }
 
-void ShardingDataTransformInstanceMetrics::onDocumentsCopied(int64_t documentCount,
-                                                             int64_t totalDocumentsSizeBytes,
-                                                             Milliseconds elapsed) {
-    _documentsCopied.addAndFetch(documentCount);
-    _bytesCopied.addAndFetch(totalDocumentsSizeBytes);
+void ShardingDataTransformInstanceMetrics::onDocumentsProcessed(int64_t documentCount,
+                                                                int64_t totalDocumentsSizeBytes,
+                                                                Milliseconds elapsed) {
+    _documentsProcessed.addAndFetch(documentCount);
+    _bytesWritten.addAndFetch(totalDocumentsSizeBytes);
     _cumulativeMetrics->onInsertsDuringCloning(documentCount, totalDocumentsSizeBytes, elapsed);
 }
 
-int64_t ShardingDataTransformInstanceMetrics::getDocumentsCopiedCount() const {
-    return _documentsCopied.load();
+int64_t ShardingDataTransformInstanceMetrics::getDocumentsProcessedCount() const {
+    return _documentsProcessed.load();
 }
 
-int64_t ShardingDataTransformInstanceMetrics::getBytesCopiedCount() const {
-    return _bytesCopied.load();
+int64_t ShardingDataTransformInstanceMetrics::getBytesWrittenCount() const {
+    return _bytesWritten.load();
 }
 
-int64_t ShardingDataTransformInstanceMetrics::getApproxBytesToCopyCount() const {
-    return _approxBytesToCopy.load();
+int64_t ShardingDataTransformInstanceMetrics::getApproxBytesToScanCount() const {
+    return _approxBytesToScan.load();
 }
 
-void ShardingDataTransformInstanceMetrics::restoreDocumentsCopied(int64_t documentCount,
-                                                                  int64_t totalDocumentsSizeBytes) {
-    _documentsCopied.store(documentCount);
-    _bytesCopied.store(totalDocumentsSizeBytes);
-}
-
-void ShardingDataTransformInstanceMetrics::setDocumentsToCopyCounts(
+void ShardingDataTransformInstanceMetrics::restoreDocumentsProcessed(
     int64_t documentCount, int64_t totalDocumentsSizeBytes) {
-    _approxDocumentsToCopy.store(documentCount);
-    _approxBytesToCopy.store(totalDocumentsSizeBytes);
+    _documentsProcessed.store(documentCount);
+    _bytesWritten.store(totalDocumentsSizeBytes);
+}
+
+void ShardingDataTransformInstanceMetrics::setDocumentsToProcessCounts(
+    int64_t documentCount, int64_t totalDocumentsSizeBytes) {
+    _approxDocumentsToProcess.store(documentCount);
+    _approxBytesToScan.store(totalDocumentsSizeBytes);
 }
 
 void ShardingDataTransformInstanceMetrics::setCoordinatorHighEstimateRemainingTimeMillis(
@@ -243,15 +245,6 @@ void ShardingDataTransformInstanceMetrics::setCoordinatorHighEstimateRemainingTi
 void ShardingDataTransformInstanceMetrics::setCoordinatorLowEstimateRemainingTimeMillis(
     Milliseconds milliseconds) {
     _coordinatorLowEstimateRemainingTimeMillis.store(milliseconds);
-}
-
-void ShardingDataTransformInstanceMetrics::onLocalInsertDuringOplogFetching(Milliseconds elapsed) {
-    _cumulativeMetrics->onLocalInsertDuringOplogFetching(elapsed);
-}
-
-void ShardingDataTransformInstanceMetrics::onBatchRetrievedDuringOplogApplying(
-    Milliseconds elapsed) {
-    _cumulativeMetrics->onBatchRetrievedDuringOplogApplying(elapsed);
 }
 
 void ShardingDataTransformInstanceMetrics::onWriteDuringCriticalSection() {
@@ -299,10 +292,6 @@ void ShardingDataTransformInstanceMetrics::onCloningTotalRemoteBatchRetrieval(
     _cumulativeMetrics->onCloningTotalRemoteBatchRetrieval(elapsed);
 }
 
-void ShardingDataTransformInstanceMetrics::onOplogLocalBatchApplied(Milliseconds elapsed) {
-    _cumulativeMetrics->onOplogLocalBatchApplied(elapsed);
-}
-
 ShardingDataTransformCumulativeMetrics*
 ShardingDataTransformInstanceMetrics::getCumulativeMetrics() {
     return _cumulativeMetrics;
@@ -330,6 +319,11 @@ void ShardingDataTransformInstanceMetrics::onCanceled() {
 
 void ShardingDataTransformInstanceMetrics::setLastOpEndingChunkImbalance(int64_t imbalanceCount) {
     _cumulativeMetrics->setLastOpEndingChunkImbalance(imbalanceCount);
+}
+
+ShardingDataTransformInstanceMetrics::UniqueScopedObserver
+ShardingDataTransformInstanceMetrics::registerInstanceMetrics() {
+    return _cumulativeMetrics->registerInstanceMetrics(_observer.get());
 }
 
 }  // namespace mongo

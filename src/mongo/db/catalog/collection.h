@@ -344,14 +344,14 @@ public:
 
     virtual bool requiresIdIndex() const = 0;
 
-    virtual Snapshotted<BSONObj> docFor(OperationContext* opCtx, RecordId loc) const = 0;
+    virtual Snapshotted<BSONObj> docFor(OperationContext* opCtx, const RecordId& loc) const = 0;
 
     /**
      * @param out - contents set to the right docs if exists, or nothing.
      * @return true iff loc exists
      */
     virtual bool findDoc(OperationContext* opCtx,
-                         RecordId loc,
+                         const RecordId& loc,
                          Snapshotted<BSONObj>* out) const = 0;
 
     virtual std::unique_ptr<SeekableRecordCursor> getCursor(OperationContext* opCtx,
@@ -363,7 +363,7 @@ public:
      */
     virtual void deleteDocument(OperationContext* opCtx,
                                 StmtId stmtId,
-                                RecordId loc,
+                                const RecordId& loc,
                                 OpDebug* opDebug,
                                 bool fromMigrate = false,
                                 bool noWarn = false,
@@ -388,7 +388,7 @@ public:
     virtual void deleteDocument(OperationContext* opCtx,
                                 Snapshotted<BSONObj> doc,
                                 StmtId stmtId,
-                                RecordId loc,
+                                const RecordId& loc,
                                 OpDebug* opDebug,
                                 bool fromMigrate = false,
                                 bool noWarn = false,
@@ -449,7 +449,7 @@ public:
      * @return the post update location of the doc (may or may not be the same as oldLocation)
      */
     virtual RecordId updateDocument(OperationContext* opCtx,
-                                    RecordId oldLocation,
+                                    const RecordId& oldLocation,
                                     const Snapshotted<BSONObj>& oldDoc,
                                     const BSONObj& newDoc,
                                     bool indexesAffected,
@@ -467,7 +467,7 @@ public:
      */
     virtual StatusWith<RecordData> updateDocumentWithDamages(
         OperationContext* opCtx,
-        RecordId loc,
+        const RecordId& loc,
         const Snapshotted<RecordData>& oldRec,
         const char* damageSource,
         const mutablebson::DamageVector& damages,
@@ -495,7 +495,7 @@ public:
      * on the collection.
      */
     virtual void cappedTruncateAfter(OperationContext* opCtx,
-                                     RecordId end,
+                                     const RecordId& end,
                                      bool inclusive) const = 0;
 
     /**
@@ -561,6 +561,22 @@ public:
      */
     virtual bool doesTimeseriesBucketsDocContainMixedSchemaData(
         const BSONObj& bucketsDoc) const = 0;
+
+    /**
+     * Returns true if the time-series collection may have dates outside the standard range (roughly
+     * 1970-2038). The value may be updated in the background by another thread between calls, even
+     * if the caller holds a lock on the collection. The value may only transition from false to
+     * true.
+     */
+    virtual bool getRequiresTimeseriesExtendedRangeSupport() const = 0;
+
+    /**
+     * Sets the in-memory flag for this collection. This value can be retrieved by
+     * 'getRequiresTimeseriesExtendedRangeSupport'.
+     *
+     * Throws if this is not a time-series collection.
+     */
+    virtual void setRequiresTimeseriesExtendedRangeSupport(OperationContext* opCtx) const = 0;
 
     /*
      * Returns true if this collection is clustered. That is, its RecordIds store the value of the
@@ -816,17 +832,9 @@ public:
         const CollectionPtr& yieldableCollection,
         PlanYieldPolicy::YieldPolicy yieldPolicy,
         ScanDirection scanDirection,
-        boost::optional<RecordId> resumeAfterRecordId = boost::none) const = 0;
+        const boost::optional<RecordId>& resumeAfterRecordId = boost::none) const = 0;
 
     virtual void indexBuildSuccess(OperationContext* opCtx, IndexCatalogEntry* index) = 0;
-
-    /**
-     * Use this Collection as the new cached pointer to the local oplog.
-     *
-     * Called by catalog::openCatalog() to re-establish the oplog collection pointer while holding
-     * onto the global lock in exclusive mode.
-     */
-    virtual void establishOplogCollectionForLogging(OperationContext* opCtx) const = 0;
 
     /**
      * Called when this Collection is deregistered from the catalog

@@ -169,7 +169,7 @@ std::pair<OID, Date_t> generateBucketId(const Date_t& time, const TimeseriesOpti
     // time. The second, and more important reason, is so that we reliably group measurements
     // together into predictable chunks for sharding. This way we know from a measurement timestamp
     // what the bucket timestamp will be, so we can route measurements to the right shard chunk.
-    auto roundedTime = timeseries::roundTimestampToGranularity(time, options.getGranularity());
+    auto roundedTime = timeseries::roundTimestampToGranularity(time, options);
     int64_t const roundedSeconds = durationCount<Seconds>(roundedTime.toDurationSinceEpoch());
     bucketId.setTimestamp(roundedSeconds);
 
@@ -311,14 +311,121 @@ void BucketCatalog::ExecutionStatsController::incNumBucketsKeptOpenDueToLargeMea
     _globalStats->numBucketsKeptOpenDueToLargeMeasurements.fetchAndAddRelaxed(increment);
 }
 
+BucketCatalog::EraManager::EraManager(Mutex* m) : _mutex(m), _era(0) {}
+
+uint64_t BucketCatalog::EraManager::getEra() {
+    stdx::lock_guard lk{*_mutex};
+    return _era;
+}
+
+uint64_t BucketCatalog::EraManager::incrementEra() {
+    stdx::lock_guard lk{*_mutex};
+    return ++_era;
+}
+
+uint64_t BucketCatalog::EraManager::getEraAndIncrementCount() {
+    stdx::lock_guard lk{*_mutex};
+    _incrementEraCountHelper(_era);
+    return _era;
+}
+
+void BucketCatalog::EraManager::decrementCountForEra(uint64_t value) {
+    stdx::lock_guard lk{*_mutex};
+    _decrementEraCountHelper(value);
+}
+
+uint64_t BucketCatalog::EraManager::getCountForEra(uint64_t value) {
+    stdx::lock_guard lk{*_mutex};
+    auto it = _countMap.find(value);
+    if (it == _countMap.end()) {
+        return 0;
+    } else {
+        return it->second;
+    }
+}
+
+void BucketCatalog::EraManager::insertToRegistry(uint64_t era, ShouldClearFn&& shouldClear) {
+    stdx::lock_guard lk{*_mutex};
+    _clearRegistry[era] = std::move(shouldClear);
+}
+
+uint64_t BucketCatalog::EraManager::getClearOperationsCount() {
+    return _clearRegistry.size();
+}
+
+void BucketCatalog::EraManager::_decrementEraCountHelper(uint64_t era) {
+    auto it = _countMap.find(era);
+    invariant(it != _countMap.end());
+    if (it->second == 1) {
+        _countMap.erase(it);
+        _cleanClearRegistry();
+    } else {
+        --it->second;
+    }
+}
+
+void BucketCatalog::EraManager::_incrementEraCountHelper(uint64_t era) {
+    auto it = _countMap.find(era);
+    if (it == _countMap.end()) {
+        (_countMap)[era] = 1;
+    } else {
+        ++it->second;
+    }
+}
+
+bool BucketCatalog::EraManager::hasBeenCleared(Bucket* bucket) {
+    stdx::lock_guard lk{*_mutex};
+    for (auto it = _clearRegistry.find(bucket->getEra() + 1); it != _clearRegistry.end(); ++it) {
+        if (it->second(bucket->_ns)) {
+            return true;
+        }
+    }
+    if (bucket->getEra() != _era) {
+        _decrementEraCountHelper(bucket->getEra());
+        _incrementEraCountHelper(_era);
+        bucket->setEra(_era);
+    }
+
+    return false;
+}
+
+void BucketCatalog::EraManager::_cleanClearRegistry() {
+    // An edge case occurs when the count map is empty. In this case, we can clean the whole clear
+    // registry.
+    if (_countMap.begin() == _countMap.end()) {
+        _clearRegistry.erase(_clearRegistry.begin(), _clearRegistry.end());
+        return;
+    }
+
+    uint64_t smallestEra = _countMap.begin()->first;
+    auto endIt = upper_bound(_clearRegistry.begin(),
+                             _clearRegistry.end(),
+                             smallestEra,
+                             [](uint64_t val, auto kv) { return val < kv.first; });
+
+    _clearRegistry.erase(_clearRegistry.begin(), endIt);
+}
+
 BucketCatalog::Bucket::Bucket(const OID& id,
                               StripeNumber stripe,
                               BucketKey::Hash hash,
-                              uint64_t era)
-    : _lastCheckedEra(era), _id(id), _stripe(stripe), _keyHash(hash) {}
+                              EraManager* eraManager)
+    : _lastCheckedEra(eraManager->getEraAndIncrementCount()),
+      _eraManager(eraManager),
+      _id(id),
+      _stripe(stripe),
+      _keyHash(hash) {}
 
-uint64_t BucketCatalog::Bucket::era() const {
+BucketCatalog::Bucket::~Bucket() {
+    _eraManager->decrementCountForEra(getEra());
+}
+
+uint64_t BucketCatalog::Bucket::getEra() const {
     return _lastCheckedEra;
+}
+
+void BucketCatalog::Bucket::setEra(uint64_t era) {
+    _lastCheckedEra = era;
 }
 
 const OID& BucketCatalog::Bucket::id() const {
@@ -347,6 +454,10 @@ bool BucketCatalog::Bucket::allCommitted() const {
 
 uint32_t BucketCatalog::Bucket::numMeasurements() const {
     return _numMeasurements;
+}
+
+void BucketCatalog::Bucket::setNamespace(const NamespaceString& ns) {
+    _ns = ns;
 }
 
 bool BucketCatalog::Bucket::schemaIncompatible(const BSONObj& input,
@@ -743,12 +854,7 @@ void BucketCatalog::clear(const OID& oid) {
     }
 }
 
-void BucketCatalog::clear(const std::function<bool(const NamespaceString&)>& shouldClear) {
-    {
-        stdx::unique_lock<Mutex> lk(_mutex);
-        ++_era;
-    }
-
+void BucketCatalog::clear(ShouldClearFn&& shouldClear) {
     for (auto& stripe : _stripes) {
         stdx::lock_guard stripeLock{stripe.mutex};
         for (auto it = stripe.allBuckets.begin(); it != stripe.allBuckets.end();) {
@@ -769,6 +875,12 @@ void BucketCatalog::clear(const std::function<bool(const NamespaceString&)>& sho
 
             it = nextIt;
         }
+    }
+
+    uint64_t era = _eraManager.incrementEra();
+    if (feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        _eraManager.insertToRegistry(era, std::move(shouldClear));
     }
 }
 
@@ -977,7 +1089,7 @@ StatusWith<std::unique_ptr<BucketCatalog::Bucket>> BucketCatalog::_rehydrateBuck
     const TimeseriesOptions& options,
     ExecutionStatsController stats,
     boost::optional<BucketToReopen> bucketToReopen,
-    boost::optional<const BucketKey&> expectedKey) const {
+    boost::optional<const BucketKey&> expectedKey) {
     if (!bucketToReopen) {
         // Nothing to rehydrate.
         return {ErrorCodes::BadValue, "No bucket to rehydrate"};
@@ -1015,10 +1127,10 @@ StatusWith<std::unique_ptr<BucketCatalog::Bucket>> BucketCatalog::_rehydrateBuck
 
     auto bucketId = bucketIdElem.OID();
     std::unique_ptr<Bucket> bucket =
-        std::make_unique<Bucket>(bucketId, stripeNumber, key.hash, _era);
+        std::make_unique<Bucket>(bucketId, stripeNumber, key.hash, &_eraManager);
 
     // Initialize the remaining member variables from the bucket document.
-    bucket->_ns = ns;
+    bucket->setNamespace(ns);
     bucket->_metadata = key.metadata;
     bucket->_timeField = options.getTimeField().toString();
     bucket->_size = bucketDoc.objsize();
@@ -1215,7 +1327,7 @@ std::shared_ptr<BucketCatalog::WriteBatch> BucketCatalog::_insertIntoBucket(
     bucket->_size += sizeToBeAdded;
     if (isNewlyOpenedBucket) {
         // The namespace and metadata only need to be set if this bucket was newly created.
-        bucket->_ns = info->key.ns;
+        bucket->setNamespace(info->key.ns);
         bucket->_metadata = info->key.metadata;
 
         // The namespace is stored two times: the bucket itself and openBuckets.
@@ -1227,8 +1339,9 @@ std::shared_ptr<BucketCatalog::WriteBatch> BucketCatalog::_insertIntoBucket(
         bucket->_memoryUsage += (info->key.ns.size() * 2) + doc.objsize() + sizeof(Bucket) +
             sizeof(std::unique_ptr<Bucket>) + (sizeof(Bucket*) * 2);
 
-        bucket->_schema.update(
+        auto updateStatus = bucket->_schema.update(
             doc, info->options.getMetaField(), info->key.metadata.getComparator());
+        invariant(updateStatus == timeseries::Schema::UpdateStatus::Updated);
     } else {
         _memoryUsage.fetchAndSubtract(bucket->_memoryUsage);
     }
@@ -1465,7 +1578,7 @@ BucketCatalog::Bucket* BucketCatalog::_allocateBucket(Stripe* stripe,
     auto [bucketId, roundedTime] = generateBucketId(info.time, info.options);
 
     auto [it, inserted] = stripe->allBuckets.try_emplace(
-        bucketId, std::make_unique<Bucket>(bucketId, info.stripe, info.key.hash, _era));
+        bucketId, std::make_unique<Bucket>(bucketId, info.stripe, info.key.hash, &_eraManager));
     tassert(6130900, "Expected bucket to be inserted", inserted);
     Bucket* bucket = it->second.get();
     stripe->openBuckets[info.key] = bucket;

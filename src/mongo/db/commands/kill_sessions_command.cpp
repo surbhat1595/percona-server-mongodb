@@ -61,7 +61,7 @@ KillAllSessionsByPatternSet patternsForLoggedInUser(OperationContext* opCtx) {
         auto* as = AuthorizationSession::get(client);
         if (auto user = as->getAuthenticatedUser()) {
             auto item = makeKillAllSessionsByPattern(opCtx);
-            item.pattern.setUid(user.get()->getDigest());
+            item.pattern.setUid(user.value()->getDigest());
             patterns.emplace(std::move(item));
         }
     } else {
@@ -111,7 +111,7 @@ public:
                      const std::string& db,
                      const BSONObj& cmdObj,
                      BSONObjBuilder& result) override {
-        IDLParserErrorContext ctx("KillSessionsCmd");
+        IDLParserContext ctx("KillSessionsCmd");
         auto ksc = KillSessionsCmdFromClient::parse(ctx, cmdObj);
 
         KillAllSessionsByPatternSet patterns;

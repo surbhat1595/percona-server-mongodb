@@ -30,6 +30,7 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/crypto/fle_crypto.h"
 #include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog/index_key_validate.h"
@@ -79,6 +80,10 @@ public:
 
     bool adminOnly() const final {
         return false;
+    }
+
+    bool allowedWithSecurityToken() const final {
+        return true;
     }
 
     bool collectsResourceConsumptionMetrics() const final {
@@ -194,6 +199,14 @@ public:
                         "Encrypted collections are not supported on standalone",
                         repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() ==
                             repl::ReplicationCoordinator::Mode::modeReplSet);
+
+                if (hasQueryType(cmd.getEncryptedFields().get(), QueryTypeEnum::Range)) {
+                    uassert(
+                        6775220,
+                        "Queryable Encryption Range support is only supported when FCV supports "
+                        "6.1",
+                        gFeatureFlagFLE2Range.isEnabled(serverGlobalParams.featureCompatibility));
+                }
             }
 
             if (auto timeseries = cmd.getTimeseries()) {
@@ -317,19 +330,11 @@ public:
             const auto isChangeStreamPreAndPostImagesEnabled =
                 (cmd.getChangeStreamPreAndPostImages() &&
                  cmd.getChangeStreamPreAndPostImages()->getEnabled());
-
-            if (feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabled(
-                    serverGlobalParams.featureCompatibility)) {
-                const auto isRecordPreImagesEnabled = cmd.getRecordPreImages().get_value_or(false);
-                uassert(ErrorCodes::InvalidOptions,
-                        "'recordPreImages' and 'changeStreamPreAndPostImages.enabled' can not be "
-                        "set to true simultaneously",
-                        !(isChangeStreamPreAndPostImagesEnabled && isRecordPreImagesEnabled));
-            } else {
-                uassert(ErrorCodes::InvalidOptions,
-                        "BSON field 'changeStreamPreAndPostImages' is an unknown field.",
-                        !cmd.getChangeStreamPreAndPostImages().has_value());
-            }
+            const auto isRecordPreImagesEnabled = cmd.getRecordPreImages().get_value_or(false);
+            uassert(ErrorCodes::InvalidOptions,
+                    "'recordPreImages' and 'changeStreamPreAndPostImages.enabled' can not be "
+                    "set to true simultaneously",
+                    !(isChangeStreamPreAndPostImagesEnabled && isRecordPreImagesEnabled));
 
             OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
                 unsafeCreateCollection(opCtx);

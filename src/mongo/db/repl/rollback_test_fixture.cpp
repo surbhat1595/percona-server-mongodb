@@ -37,8 +37,8 @@
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/client.h"
 #include "mongo/db/db_raii.h"
-#include "mongo/db/op_observer_noop.h"
-#include "mongo/db/op_observer_registry.h"
+#include "mongo/db/op_observer/op_observer_noop.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/read_write_concern_defaults_cache_lookup_mock.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/replication_consistency_markers_mock.h"
@@ -176,7 +176,7 @@ std::pair<BSONObj, RecordId> RollbackTest::makeCommandOp(Timestamp ts,
     bob.append("ts", ts);
     bob.append("op", "c");
     if (uuid) {  // Not all ops have UUID fields.
-        uuid.get().appendToBuilder(&bob, "ui");
+        uuid.value().appendToBuilder(&bob, "ui");
     }
     bob.append("ns", nss);
     bob.append("o", cmdObj);
@@ -196,7 +196,7 @@ std::pair<BSONObj, RecordId> RollbackTest::makeCommandOpForApplyOps(boost::optio
     BSONObjBuilder bob;
     bob.append("op", "c");
     if (uuid) {  // Not all ops have UUID fields.
-        uuid.get().appendToBuilder(&bob, "ui");
+        uuid.value().appendToBuilder(&bob, "ui");
     }
     bob.append("ns", nss);
     bob.append("o", cmdObj);

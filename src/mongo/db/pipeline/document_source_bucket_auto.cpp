@@ -221,7 +221,7 @@ void DocumentSourceBucketAuto::initializeBucketIteration() {
 
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(pExpCtx->opCtx);
     metricsCollector.incrementKeysSorted(_sorter->numSorted());
-    metricsCollector.incrementSorterSpills(_sorter->numSpills());
+    metricsCollector.incrementSorterSpills(_sorter->stats().spilledRanges());
 
     _sorter.reset();
 
@@ -519,7 +519,7 @@ intrusive_ptr<DocumentSource> DocumentSourceBucketAuto::createFromBson(
             groupByExpression && numBuckets);
 
     return DocumentSourceBucketAuto::create(
-        pExpCtx, groupByExpression, numBuckets.get(), accumulationStatements, granularityRounder);
+        pExpCtx, groupByExpression, numBuckets.value(), accumulationStatements, granularityRounder);
 }
 
 }  // namespace mongo

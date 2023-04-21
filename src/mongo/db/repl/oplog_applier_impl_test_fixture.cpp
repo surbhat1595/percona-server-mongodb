@@ -37,7 +37,7 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/index_builds_coordinator.h"
-#include "mongo/db/op_observer_registry.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/oplog_applier.h"
@@ -218,8 +218,10 @@ void OplogApplierImplTest::_testApplyOplogEntryOrGroupedInsertsCrudOperation(
 
     auto checkOpCtx = [](OperationContext* opCtx) {
         ASSERT_TRUE(opCtx);
-        ASSERT_TRUE(opCtx->lockState()->isDbLockedForMode("test", MODE_IX));
-        ASSERT_FALSE(opCtx->lockState()->isDbLockedForMode("test", MODE_X));
+        ASSERT_TRUE(
+            opCtx->lockState()->isDbLockedForMode(DatabaseName(boost::none, "test"), MODE_IX));
+        ASSERT_FALSE(
+            opCtx->lockState()->isDbLockedForMode(DatabaseName(boost::none, "test"), MODE_X));
         ASSERT_TRUE(
             opCtx->lockState()->isCollectionLockedForMode(NamespaceString("test.t"), MODE_IX));
         ASSERT_FALSE(opCtx->writesAreReplicated());
@@ -353,8 +355,7 @@ void checkTxnTable(OperationContext* opCtx,
                                  BSON(SessionTxnRecord::kSessionIdFieldName << lsid.toBSON()));
     ASSERT_FALSE(result.isEmpty());
 
-    auto txnRecord =
-        SessionTxnRecord::parse(IDLParserErrorContext("parse txn record for test"), result);
+    auto txnRecord = SessionTxnRecord::parse(IDLParserContext("parse txn record for test"), result);
 
     ASSERT_EQ(txnNum, txnRecord.getTxnNum());
     ASSERT_EQ(expectedOpTime, txnRecord.getLastWriteOpTime());
@@ -477,7 +478,7 @@ UUID createCollectionWithUuid(OperationContext* opCtx, const NamespaceString& ns
     CollectionOptions options;
     options.uuid = UUID::gen();
     createCollection(opCtx, nss, options);
-    return options.uuid.get();
+    return options.uuid.value();
 }
 
 void createDatabase(OperationContext* opCtx, StringData dbName) {
@@ -501,6 +502,10 @@ void createIndex(OperationContext* opCtx,
     Lock::DBLock dbLk(opCtx, nss.dbName(), MODE_IX);
     Lock::CollectionLock collLk(opCtx, nss, MODE_X);
     auto indexBuildsCoord = IndexBuildsCoordinator::get(opCtx);
+    // This fixture sets up some replication, but notably omits installing an OpObserverImpl. This
+    // state causes collection creation to timestamp catalog writes, but secondary index creation
+    // does not. We use an UnreplicatedWritesBlock to avoid timestamping any of the catalog setup.
+    repl::UnreplicatedWritesBlock noRep(opCtx);
     indexBuildsCoord->createIndex(
         opCtx, collUUID, spec, IndexBuildsManager::IndexConstraints::kEnforce, false);
 }

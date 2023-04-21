@@ -138,7 +138,7 @@ BaseCloner::AfterStageBehavior TenantDatabaseCloner::listCollectionsStage() {
         ListCollectionResult result;
         try {
             result = ListCollectionResult::parse(
-                IDLParserErrorContext("TenantDatabaseCloner::listCollectionsStage"), info);
+                IDLParserContext("TenantDatabaseCloner::listCollectionsStage"), info);
         } catch (const DBException& e) {
             uasserted(
                 ErrorCodes::FailedToParse,
@@ -190,8 +190,8 @@ BaseCloner::AfterStageBehavior TenantDatabaseCloner::listExistingCollectionsStag
     }
     auto opCtx = cc().makeOperationContext();
     DBDirectClient client(opCtx.get());
-    tenantMigrationRecipientInfo(opCtx.get()) =
-        boost::make_optional<TenantMigrationRecipientInfo>(getSharedData()->getMigrationId());
+    tenantMigrationInfo(opCtx.get()) =
+        boost::make_optional<TenantMigrationInfo>(getSharedData()->getMigrationId());
 
     long long sizeOfCurrCollOnDisk = 0;
     long long approxTotalDBSizeOnDisk = 0;
@@ -203,7 +203,7 @@ BaseCloner::AfterStageBehavior TenantDatabaseCloner::listExistingCollectionsStag
         ListCollectionResult result;
         try {
             result = ListCollectionResult::parse(
-                IDLParserErrorContext("TenantDatabaseCloner::listExistingCollectionsStage"), info);
+                IDLParserContext("TenantDatabaseCloner::listExistingCollectionsStage"), info);
         } catch (const DBException& e) {
             uasserted(
                 ErrorCodes::FailedToParse,

@@ -58,11 +58,7 @@ using namespace window_function_n_traits;
 REGISTER_STABLE_WINDOW_FUNCTION(derivative, ExpressionDerivative::parse);
 REGISTER_STABLE_WINDOW_FUNCTION(first, ExpressionFirst::parse);
 REGISTER_STABLE_WINDOW_FUNCTION(last, ExpressionLast::parse);
-REGISTER_WINDOW_FUNCTION_CONDITIONALLY(linearFill,
-                                       (ExpressionLinearFill::parse),
-                                       feature_flags::gFeatureFlagFill.getVersion(),
-                                       AllowedWithApiStrict::kNeverInVersion1,
-                                       feature_flags::gFeatureFlagFill.isEnabledAndIgnoreFCV());
+REGISTER_STABLE_WINDOW_FUNCTION(linearFill, ExpressionLinearFill::parse);
 REGISTER_STABLE_WINDOW_FUNCTION(minN, (ExpressionN<WindowFunctionMinN, AccumulatorMinN>::parse));
 REGISTER_STABLE_WINDOW_FUNCTION(maxN, (ExpressionN<WindowFunctionMaxN, AccumulatorMaxN>::parse));
 REGISTER_STABLE_WINDOW_FUNCTION(firstN,
@@ -99,15 +95,16 @@ intrusive_ptr<Expression> Expression::parse(BSONObj obj,
                 // be caught as invalid arguments to the Expression parser later.
                 const auto& parserRegistration = parserFCV->second;
                 const auto& parser = parserRegistration.parser;
-                const auto& fcv = parserRegistration.fcv;
+                const auto& featureFlag = parserRegistration.featureFlag;
                 uassert(ErrorCodes::QueryFeatureNotAllowed,
                         str::stream()
                             << exprName
                             << " is not allowed in the current feature compatibility version. See "
                             << feature_compatibility_version_documentation::kCompatibilityLink
                             << " for more information.",
-                        !expCtx->maxFeatureCompatibilityVersion || !fcv ||
-                            (*fcv <= *expCtx->maxFeatureCompatibilityVersion));
+                        !expCtx->maxFeatureCompatibilityVersion || !featureFlag ||
+                            featureFlag->isEnabledOnVersion(
+                                *expCtx->maxFeatureCompatibilityVersion));
 
                 auto allowedWithApi = parserRegistration.allowedWithApi;
 
@@ -151,13 +148,12 @@ intrusive_ptr<Expression> Expression::parse(BSONObj obj,
                        : ", "s + obj.firstElementFieldNameStringData()));
 }
 
-void Expression::registerParser(
-    std::string functionName,
-    Parser parser,
-    boost::optional<multiversion::FeatureCompatibilityVersion> requiredMinVersion,
-    AllowedWithApiStrict allowedWithApi) {
+void Expression::registerParser(std::string functionName,
+                                Parser parser,
+                                boost::optional<FeatureFlag> featureFlag,
+                                AllowedWithApiStrict allowedWithApi) {
     invariant(parserMap.find(functionName) == parserMap.end());
-    ExpressionParserRegistration r{parser, requiredMinVersion, allowedWithApi};
+    ExpressionParserRegistration r{parser, featureFlag, allowedWithApi};
     operatorCountersWindowAccumulatorExpressions.addCounter(functionName);
     parserMap.emplace(std::move(functionName), std::move(r));
 }

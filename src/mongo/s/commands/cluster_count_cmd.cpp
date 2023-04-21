@@ -93,14 +93,14 @@ public:
                    std::string& errmsg,
                    BSONObjBuilder& result) override {
         CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
-        const NamespaceString nss(parseNs(dbname, cmdObj));
+        const NamespaceString nss(parseNs({boost::none, dbname}, cmdObj));
         uassert(ErrorCodes::InvalidNamespace,
                 str::stream() << "Invalid namespace specified '" << nss.ns() << "'",
                 nss.isValid());
 
         std::vector<AsyncRequestsSender::Response> shardResponses;
         try {
-            auto countRequest = CountCommandRequest::parse(IDLParserErrorContext("count"), cmdObj);
+            auto countRequest = CountCommandRequest::parse(IDLParserContext("count"), cmdObj);
             if (shouldDoFLERewrite(countRequest)) {
                 processFLECountS(opCtx, nss, &countRequest);
             }
@@ -109,9 +109,9 @@ public:
             // have a value for limit, otherwise, we apply it only once we have collected all
             // counts.
             if (countRequest.getLimit() && countRequest.getSkip()) {
-                const auto limit = countRequest.getLimit().get();
+                const auto limit = countRequest.getLimit().value();
                 if (limit != 0) {
-                    countRequest.setLimit(limit + countRequest.getSkip().get());
+                    countRequest.setLimit(limit + countRequest.getSkip().value());
                 }
             }
             countRequest.setSkip(boost::none);
@@ -134,7 +134,7 @@ public:
                 collation);
         } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& ex) {
             // Rewrite the count command as an aggregation.
-            auto countRequest = CountCommandRequest::parse(IDLParserErrorContext("count"), cmdObj);
+            auto countRequest = CountCommandRequest::parse(IDLParserContext("count"), cmdObj);
             auto aggCmdOnView =
                 uassertStatusOK(countCommandAsAggregationCommand(countRequest, nss));
             auto aggCmdOnViewObj = OpMsgRequest::fromDBAndBody(nss.db(), aggCmdOnView).body;
@@ -195,17 +195,16 @@ public:
                    const OpMsgRequest& request,
                    ExplainOptions::Verbosity verbosity,
                    rpc::ReplyBuilderInterface* result) const override {
-        std::string dbname = request.getDatabase().toString();
         const BSONObj& cmdObj = request.body;
 
         CountCommandRequest countRequest(NamespaceStringOrUUID(NamespaceString{}));
         try {
-            countRequest = CountCommandRequest::parse(IDLParserErrorContext("count"), request);
+            countRequest = CountCommandRequest::parse(IDLParserContext("count"), request);
         } catch (...) {
             return exceptionToStatus();
         }
 
-        const NamespaceString nss(parseNs(dbname, cmdObj));
+        const NamespaceString nss(parseNs(request.getDatabase(), cmdObj));
         uassert(ErrorCodes::InvalidNamespace,
                 str::stream() << "Invalid namespace specified '" << nss.ns() << "'",
                 nss.isValid());
@@ -240,7 +239,7 @@ public:
         } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& ex) {
             CountCommandRequest countRequest(NamespaceStringOrUUID(NamespaceString{}));
             try {
-                countRequest = CountCommandRequest::parse(IDLParserErrorContext("count"), cmdObj);
+                countRequest = CountCommandRequest::parse(IDLParserContext("count"), cmdObj);
             } catch (...) {
                 return exceptionToStatus();
             }
@@ -286,14 +285,14 @@ private:
         BSONElement l = cmd["limit"];
 
         if (s.isNumber()) {
-            num = num - s.numberLong();
+            num = num - s.safeNumberLong();
             if (num < 0) {
                 num = 0;
             }
         }
 
         if (l.isNumber()) {
-            long long limit = l.numberLong();
+            auto limit = l.safeNumberLong();
             if (limit < 0) {
                 limit = -limit;
             }

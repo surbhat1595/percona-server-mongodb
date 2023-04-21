@@ -7,10 +7,65 @@ env = env.Clone()
 env.Library(
     target="query_ce",
     source=[
+        'array_histogram.cpp',
+        'ce_histogram.cpp',
         'ce_sampling.cpp',
+        'collection_statistics.cpp',
+        'histogram_estimation.cpp',
+        'scalar_histogram.cpp',
+        'stats_cache.cpp',
+        'stats_cache_loader.cpp',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/exec/sbe/query_sbe_abt',
         '$BUILD_DIR/mongo/db/query/optimizer/optimizer',
+    ],
+)
+
+env.Library(
+    target="ce_test_utils",
+    source=[
+        'ce_test_utils.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/exec/sbe/query_sbe_values',
+        '$BUILD_DIR/mongo/db/exec/sbe/sbe_abt_test_util',
+        '$BUILD_DIR/mongo/db/query/optimizer/unit_test_utils',
+        "$BUILD_DIR/mongo/unittest/unittest",
+        'query_ce',
+    ],
+)
+
+env.CppUnitTest(
+    target="ce_histogram_test",
+    source=[
+        "ce_histogram_test.cpp",
+    ],
+    LIBDEPS=[
+        'ce_test_utils',
+    ],
+)
+
+env.CppUnitTest(
+    target="ce_heuristic_test",
+    source=[
+        "ce_heuristic_test.cpp",
+    ],
+    LIBDEPS=[
+        'ce_test_utils',
+    ],
+)
+
+env.CppUnitTest(
+    target="stats_cache_test",
+    source=[
+        "stats_cache_test.cpp",
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/service_context',
+        'ce_test_utils',
+        'query_ce',
     ],
 )

@@ -32,7 +32,6 @@
 
 #include "mongo/db/s/rename_collection_coordinator.h"
 
-#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/catalog/database_holder.h"
@@ -97,7 +96,7 @@ RenameCollectionCoordinator::RenameCollectionCoordinator(ShardingDDLCoordinatorS
 
 void RenameCollectionCoordinator::checkIfOptionsConflict(const BSONObj& doc) const {
     const auto otherDoc = RenameCollectionCoordinatorDocument::parse(
-        IDLParserErrorContext("RenameCollectionCoordinatorDocument"), doc);
+        IDLParserContext("RenameCollectionCoordinatorDocument"), doc);
 
     const auto& selfReq = _request.toBSON();
     const auto& otherReq = otherDoc.getRenameCollectionRequest().toBSON();
@@ -123,7 +122,7 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
     return ExecutorFuture<void>(**executor)
         .then(_executePhase(
             Phase::kCheckPreconditions,
-            [this, anchor = shared_from_this()] {
+            [this, executor = executor, anchor = shared_from_this()] {
                 auto opCtxHolder = cc().makeOperationContext();
                 auto* opCtx = opCtxHolder.get();
                 getForwardableOpMetadata().setOn(opCtx);
@@ -177,19 +176,27 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                         sharding_ddl_util::checkDbPrimariesOnTheSameShard(opCtx, fromNss, toNss);
                     }
 
-                    // (SERVER-67325) Acquire critical section on the target collection in order
-                    // to disallow concurrent `createCollection`
+                    const auto optTargetCollType = getShardedCollection(opCtx, toNss);
+                    const bool targetIsSharded = (bool)optTargetCollType;
+                    _doc.setTargetIsSharded(targetIsSharded);
+                    _doc.setTargetUUID(getCollectionUUID(
+                        opCtx, toNss, optTargetCollType, /*throwNotFound*/ false));
+
                     auto criticalSection = RecoverableCriticalSectionService::get(opCtx);
-                    criticalSection->acquireRecoverableCriticalSectionBlockWrites(
-                        opCtx,
-                        toNss,
-                        criticalSectionReason,
-                        ShardingCatalogClient::kLocalWriteConcern);
-                    criticalSection->promoteRecoverableCriticalSectionToBlockAlsoReads(
-                        opCtx,
-                        toNss,
-                        criticalSectionReason,
-                        ShardingCatalogClient::kLocalWriteConcern);
+                    if (!targetIsSharded) {
+                        // (SERVER-67325) Acquire critical section on the target collection in order
+                        // to disallow concurrent `createCollection`
+                        criticalSection->acquireRecoverableCriticalSectionBlockWrites(
+                            opCtx,
+                            toNss,
+                            criticalSectionReason,
+                            ShardingCatalogClient::kLocalWriteConcern);
+                        criticalSection->promoteRecoverableCriticalSectionToBlockAlsoReads(
+                            opCtx,
+                            toNss,
+                            criticalSectionReason,
+                            ShardingCatalogClient::kLocalWriteConcern);
+                    }
 
                     // Make sure the target namespace is not a view
                     {
@@ -198,12 +205,6 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                                               << "` because it is a view.",
                                 !CollectionCatalog::get(opCtx)->lookupView(opCtx, toNss));
                     }
-
-                    const auto optTargetCollType = getShardedCollection(opCtx, toNss);
-                    const bool targetIsSharded = (bool)optTargetCollType;
-                    _doc.setTargetIsSharded(targetIsSharded);
-                    _doc.setTargetUUID(getCollectionUUID(
-                        opCtx, toNss, optTargetCollType, /*throwNotFound*/ false));
 
                     const bool targetExists = [&]() {
                         if (targetIsSharded) {
@@ -224,6 +225,9 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
 
                     sharding_ddl_util::checkRenamePreconditions(
                         opCtx, sourceIsSharded, toNss, _doc.getDropTarget());
+
+                    sharding_ddl_util::checkCatalogConsistencyAcrossShardsForRename(
+                        opCtx, fromNss, toNss, _doc.getDropTarget(), executor);
 
                     {
                         AutoGetCollection coll{opCtx, toNss, MODE_IS};
@@ -293,7 +297,7 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                 // - Locally drop the target collection
                 // - Locally rename source to target
                 ShardsvrRenameCollectionParticipant renameCollParticipantRequest(
-                    fromNss, _doc.getSourceUUID().get());
+                    fromNss, _doc.getSourceUUID().value());
                 renameCollParticipantRequest.setDbName(fromNss.db());
                 renameCollParticipantRequest.setTargetUUID(_doc.getTargetUUID());
                 renameCollParticipantRequest.setRenameCollectionRequest(_request);
@@ -335,6 +339,18 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                                             "admin",
                                             cmdObj.addFields(getCurrentSession().toBSON()),
                                             Shard::RetryPolicy::kIdempotent)));
+
+                // (SERVER-67730) Delete potential orphaned chunk entries from CSRS since
+                // ConfigsvrRenameCollectionMetadata is not idempotent in case of a CSRS step-down
+                auto uuid = _doc.getTargetUUID();
+                if (uuid) {
+                    auto query = BSON("uuid" << *uuid);
+                    uassertStatusOK(Grid::get(opCtx)->catalogClient()->removeConfigDocuments(
+                        opCtx,
+                        ChunkType::ConfigNS,
+                        query,
+                        ShardingCatalogClient::kMajorityWriteConcern));
+                }
             }))
         .then(_executePhase(
             Phase::kUnblockCRUD,
@@ -353,7 +369,7 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                 // On participant shards:
                 // - Unblock CRUD on participants for both source and destination collections
                 ShardsvrRenameCollectionUnblockParticipant unblockParticipantRequest(
-                    fromNss, _doc.getSourceUUID().get());
+                    fromNss, _doc.getSourceUUID().value());
                 unblockParticipantRequest.setDbName(fromNss.db());
                 unblockParticipantRequest.setRenameCollectionRequest(_request);
                 auto const cmdObj = CommandHelpers::appendMajorityWriteConcern(

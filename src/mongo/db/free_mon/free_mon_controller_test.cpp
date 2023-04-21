@@ -51,8 +51,8 @@
 #include "mongo/db/ftdc/controller.h"
 #include "mongo/db/ftdc/ftdc_test.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/op_observer_noop.h"
-#include "mongo/db/op_observer_registry.h"
+#include "mongo/db/op_observer/op_observer_noop.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
@@ -582,7 +582,7 @@ TEST(FreeMonRetryTest, TestMetrics) {
 // Positive: Ensure the response is validated correctly
 TEST(FreeMonProcessorTest, TestRegistrationResponseValidation) {
     ASSERT_OK(FreeMonProcessor::validateRegistrationResponse(FreeMonRegistrationResponse::parse(
-        IDLParserErrorContext("foo"),
+        IDLParserContext("foo"),
         BSON("version" << 1LL << "haltMetricsUploading" << false << "id"
                        << "mock123"
                        << "informationalURL"
@@ -593,7 +593,7 @@ TEST(FreeMonProcessorTest, TestRegistrationResponseValidation) {
 
     // max reporting interval
     ASSERT_OK(FreeMonProcessor::validateRegistrationResponse(FreeMonRegistrationResponse::parse(
-        IDLParserErrorContext("foo"),
+        IDLParserContext("foo"),
         BSON("version" << 1LL << "haltMetricsUploading" << false << "id"
                        << "mock123"
                        << "informationalURL"
@@ -604,7 +604,7 @@ TEST(FreeMonProcessorTest, TestRegistrationResponseValidation) {
 
     // Positive: version 2
     ASSERT_OK(FreeMonProcessor::validateRegistrationResponse(FreeMonRegistrationResponse::parse(
-        IDLParserErrorContext("foo"),
+        IDLParserContext("foo"),
         BSON("version" << 2LL << "haltMetricsUploading" << false << "id"
                        << "mock123"
                        << "informationalURL"
@@ -615,7 +615,7 @@ TEST(FreeMonProcessorTest, TestRegistrationResponseValidation) {
 
     // Positive: empty registration id string
     ASSERT_OK(FreeMonProcessor::validateRegistrationResponse(FreeMonRegistrationResponse::parse(
-        IDLParserErrorContext("foo"),
+        IDLParserContext("foo"),
         BSON("version" << 1LL << "haltMetricsUploading" << false << "id"
                        << ""
                        << "informationalURL"
@@ -626,7 +626,7 @@ TEST(FreeMonProcessorTest, TestRegistrationResponseValidation) {
 
     // Negative: bad protocol version
     ASSERT_NOT_OK(FreeMonProcessor::validateRegistrationResponse(FreeMonRegistrationResponse::parse(
-        IDLParserErrorContext("foo"),
+        IDLParserContext("foo"),
         BSON("version" << 42LL << "haltMetricsUploading" << false << "id"
                        << "mock123"
                        << "informationalURL"
@@ -637,7 +637,7 @@ TEST(FreeMonProcessorTest, TestRegistrationResponseValidation) {
 
     // Negative: halt uploading
     ASSERT_NOT_OK(FreeMonProcessor::validateRegistrationResponse(FreeMonRegistrationResponse::parse(
-        IDLParserErrorContext("foo"),
+        IDLParserContext("foo"),
         BSON("version" << 1LL << "haltMetricsUploading" << true << "id"
                        << "mock123"
                        << "informationalURL"
@@ -648,7 +648,7 @@ TEST(FreeMonProcessorTest, TestRegistrationResponseValidation) {
 
     // Negative: large registartation id
     ASSERT_NOT_OK(FreeMonProcessor::validateRegistrationResponse(FreeMonRegistrationResponse::parse(
-        IDLParserErrorContext("foo"),
+        IDLParserContext("foo"),
         BSON("version" << 1LL << "haltMetricsUploading" << false << "id" << std::string(5000, 'a')
                        << "informationalURL"
                        << "http://www.example.com/123"
@@ -658,7 +658,7 @@ TEST(FreeMonProcessorTest, TestRegistrationResponseValidation) {
 
     // Negative: large URL
     ASSERT_NOT_OK(FreeMonProcessor::validateRegistrationResponse(FreeMonRegistrationResponse::parse(
-        IDLParserErrorContext("foo"),
+        IDLParserContext("foo"),
         BSON("version" << 1LL << "haltMetricsUploading" << false << "id"
                        << "mock123"
                        << "informationalURL" << std::string(5000, 'b') << "message"
@@ -667,7 +667,7 @@ TEST(FreeMonProcessorTest, TestRegistrationResponseValidation) {
 
     // Negative: large message
     ASSERT_NOT_OK(FreeMonProcessor::validateRegistrationResponse(FreeMonRegistrationResponse::parse(
-        IDLParserErrorContext("foo"),
+        IDLParserContext("foo"),
         BSON("version" << 1LL << "haltMetricsUploading" << false << "id"
                        << "mock123"
                        << "informationalURL"
@@ -676,7 +676,7 @@ TEST(FreeMonProcessorTest, TestRegistrationResponseValidation) {
 
     // Negative: too small a reporting interval
     ASSERT_NOT_OK(FreeMonProcessor::validateRegistrationResponse(FreeMonRegistrationResponse::parse(
-        IDLParserErrorContext("foo"),
+        IDLParserContext("foo"),
         BSON("version" << 1LL << "haltMetricsUploading" << false << "id"
                        << "mock123"
                        << "informationalURL"
@@ -687,7 +687,7 @@ TEST(FreeMonProcessorTest, TestRegistrationResponseValidation) {
 
     // Negative: too large a reporting interval
     ASSERT_NOT_OK(FreeMonProcessor::validateRegistrationResponse(FreeMonRegistrationResponse::parse(
-        IDLParserErrorContext("foo"),
+        IDLParserContext("foo"),
         BSON("version" << 1LL << "haltMetricsUploading" << false << "id"
                        << "mock123"
                        << "informationalURL"
@@ -701,7 +701,7 @@ TEST(FreeMonProcessorTest, TestRegistrationResponseValidation) {
 // Positive: Ensure the response is validated correctly
 TEST(FreeMonProcessorTest, TestMetricsResponseValidation) {
     ASSERT_OK(FreeMonProcessor::validateMetricsResponse(
-        FreeMonMetricsResponse::parse(IDLParserErrorContext("foo"),
+        FreeMonMetricsResponse::parse(IDLParserContext("foo"),
 
                                       BSON("version" << 1LL << "haltMetricsUploading" << false
                                                      << "permanentlyDelete" << false << "id"
@@ -714,7 +714,7 @@ TEST(FreeMonProcessorTest, TestMetricsResponseValidation) {
 
     // Positive: Support version 2
     ASSERT_OK(FreeMonProcessor::validateMetricsResponse(
-        FreeMonMetricsResponse::parse(IDLParserErrorContext("foo"),
+        FreeMonMetricsResponse::parse(IDLParserContext("foo"),
 
                                       BSON("version" << 2LL << "haltMetricsUploading" << false
                                                      << "permanentlyDelete" << false << "id"
@@ -727,7 +727,7 @@ TEST(FreeMonProcessorTest, TestMetricsResponseValidation) {
 
     // Positive: Add resendRegistration
     ASSERT_OK(FreeMonProcessor::validateMetricsResponse(FreeMonMetricsResponse::parse(
-        IDLParserErrorContext("foo"),
+        IDLParserContext("foo"),
 
         BSON("version" << 2LL << "haltMetricsUploading" << false << "permanentlyDelete" << false
                        << "id"
@@ -741,7 +741,7 @@ TEST(FreeMonProcessorTest, TestMetricsResponseValidation) {
 
     // Positive: max reporting interval
     ASSERT_OK(FreeMonProcessor::validateMetricsResponse(FreeMonMetricsResponse::parse(
-        IDLParserErrorContext("foo"),
+        IDLParserContext("foo"),
 
         BSON("version" << 1LL << "haltMetricsUploading" << false << "permanentlyDelete" << false
                        << "id"
@@ -754,7 +754,7 @@ TEST(FreeMonProcessorTest, TestMetricsResponseValidation) {
 
     // Negative: bad protocol version
     ASSERT_NOT_OK(FreeMonProcessor::validateMetricsResponse(
-        FreeMonMetricsResponse::parse(IDLParserErrorContext("foo"),
+        FreeMonMetricsResponse::parse(IDLParserContext("foo"),
                                       BSON("version" << 42LL << "haltMetricsUploading" << false
                                                      << "permanentlyDelete" << false << "id"
                                                      << "mock123"
@@ -766,7 +766,7 @@ TEST(FreeMonProcessorTest, TestMetricsResponseValidation) {
 
     // Negative: halt uploading
     ASSERT_NOT_OK(FreeMonProcessor::validateMetricsResponse(
-        FreeMonMetricsResponse::parse(IDLParserErrorContext("foo"),
+        FreeMonMetricsResponse::parse(IDLParserContext("foo"),
                                       BSON("version" << 1LL << "haltMetricsUploading" << true
                                                      << "permanentlyDelete" << false << "id"
                                                      << "mock123"
@@ -778,7 +778,7 @@ TEST(FreeMonProcessorTest, TestMetricsResponseValidation) {
 
     // Negative: large registartation id
     ASSERT_NOT_OK(FreeMonProcessor::validateMetricsResponse(FreeMonMetricsResponse::parse(
-        IDLParserErrorContext("foo"),
+        IDLParserContext("foo"),
         BSON("version" << 1LL << "haltMetricsUploading" << false << "permanentlyDelete" << false
                        << "id" << std::string(5000, 'a') << "informationalURL"
                        << "http://www.example.com/123"
@@ -788,7 +788,7 @@ TEST(FreeMonProcessorTest, TestMetricsResponseValidation) {
 
     // Negative: large URL
     ASSERT_NOT_OK(FreeMonProcessor::validateMetricsResponse(FreeMonMetricsResponse::parse(
-        IDLParserErrorContext("foo"),
+        IDLParserContext("foo"),
         BSON("version" << 1LL << "haltMetricsUploading" << false
 
                        << "permanentlyDelete" << false << "id"
@@ -799,7 +799,7 @@ TEST(FreeMonProcessorTest, TestMetricsResponseValidation) {
 
     // Negative: large message
     ASSERT_NOT_OK(FreeMonProcessor::validateMetricsResponse(FreeMonMetricsResponse::parse(
-        IDLParserErrorContext("foo"),
+        IDLParserContext("foo"),
         BSON("version" << 1LL << "haltMetricsUploading" << false << "permanentlyDelete" << false
                        << "id"
                        << "mock123"
@@ -809,7 +809,7 @@ TEST(FreeMonProcessorTest, TestMetricsResponseValidation) {
 
     // Negative: too small a reporting interval
     ASSERT_NOT_OK(FreeMonProcessor::validateMetricsResponse(
-        FreeMonMetricsResponse::parse(IDLParserErrorContext("foo"),
+        FreeMonMetricsResponse::parse(IDLParserContext("foo"),
                                       BSON("version" << 1LL << "haltMetricsUploading" << false
                                                      << "permanentlyDelete" << false << "id"
                                                      << "mock123"
@@ -821,7 +821,7 @@ TEST(FreeMonProcessorTest, TestMetricsResponseValidation) {
 
     // Negative: too large a reporting interval
     ASSERT_NOT_OK(FreeMonProcessor::validateMetricsResponse(FreeMonMetricsResponse::parse(
-        IDLParserErrorContext("foo"),
+        IDLParserContext("foo"),
         BSON("version" << 1LL << "haltMetricsUploading" << false << "permanentlyDelete" << false
                        << "id"
                        << "mock123"
@@ -955,7 +955,7 @@ TEST_F(FreeMonControllerTest, TestRegister) {
 
     controller->turnCrankForTest(Turner().registerCommand());
 
-    ASSERT_TRUE(!FreeMonStorage::read(_opCtx.get()).get().getRegistrationId().empty());
+    ASSERT_TRUE(!FreeMonStorage::read(_opCtx.get()).value().getRegistrationId().empty());
 
     ASSERT_EQ(controller.registerCollector->count(), 1UL);
     ASSERT_GTE(controller.metricsCollector->count(), 0UL);
@@ -976,7 +976,7 @@ TEST_F(FreeMonControllerTest, TestRegisterTimeout) {
     ASSERT_OK(*optionalStatus);
     controller->turnCrankForTest(Turner().registerCommand(2));
 
-    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).get().getState() == StorageStateEnum::pending);
+    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).value().getState() == StorageStateEnum::pending);
     ASSERT_GTE(controller.network->getRegistersCalls(), 2);
     ASSERT_GTE(controller.registerCollector->count(), 2UL);
 }
@@ -995,7 +995,8 @@ TEST_F(FreeMonControllerTest, TestRegisterFail) {
     ASSERT_OK(*optionalStatus);
     controller->turnCrankForTest(Turner().registerCommand(1));
 
-    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).get().getState() == StorageStateEnum::disabled);
+    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).value().getState() ==
+                StorageStateEnum::disabled);
     ASSERT_EQ(controller.network->getRegistersCalls(), 1);
 
     ASSERT_EQ(controller.registerCollector->count(), 1UL);
@@ -1015,7 +1016,8 @@ TEST_F(FreeMonControllerTest, TestRegisterHalts) {
     ASSERT_OK(*optionalStatus);
     controller->turnCrankForTest(Turner().registerCommand());
 
-    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).get().getState() == StorageStateEnum::disabled);
+    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).value().getState() ==
+                StorageStateEnum::disabled);
     ASSERT_EQ(controller.network->getRegistersCalls(), 1);
 
     ASSERT_EQ(controller.registerCollector->count(), 1UL);
@@ -1030,7 +1032,7 @@ TEST_F(FreeMonControllerTest, TestMetrics) {
     controller->turnCrankForTest(
         Turner().registerServer().registerCommand().collect(2).metricsSend());
 
-    ASSERT_TRUE(!FreeMonStorage::read(_opCtx.get()).get().getRegistrationId().empty());
+    ASSERT_TRUE(!FreeMonStorage::read(_opCtx.get()).value().getRegistrationId().empty());
 
     ASSERT_GTE(controller.network->getRegistersCalls(), 1);
     ASSERT_GTE(controller.network->getMetricsCalls(), 1);
@@ -1076,7 +1078,7 @@ TEST_F(FreeMonControllerTest, TestMetricsWithEnabledStorage) {
     controller->turnCrankForTest(
         Turner().registerServer().registerCommand().collect(2).metricsSend());
 
-    ASSERT_TRUE(!FreeMonStorage::read(_opCtx.get()).get().getRegistrationId().empty());
+    ASSERT_TRUE(!FreeMonStorage::read(_opCtx.get()).value().getRegistrationId().empty());
 
     ASSERT_GTE(controller.network->getRegistersCalls(), 1);
     ASSERT_GTE(controller.network->getMetricsCalls(), 1);
@@ -1179,7 +1181,7 @@ TEST_F(FreeMonControllerTest, TestMetricsUnregisterCancelsRegister) {
     ASSERT_OK(*optionalStatus);
     controller->turnCrankForTest(Turner().registerCommand(2));
 
-    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).get().getState() == StorageStateEnum::pending);
+    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).value().getState() == StorageStateEnum::pending);
 
     ASSERT_GTE(controller.network->getRegistersCalls(), 2);
     ASSERT_GTE(controller.registerCollector->count(), 2UL);
@@ -1190,7 +1192,8 @@ TEST_F(FreeMonControllerTest, TestMetricsUnregisterCancelsRegister) {
 
     controller->turnCrankForTest(Turner().unRegisterCommand());
 
-    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).get().getState() == StorageStateEnum::disabled);
+    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).value().getState() ==
+                StorageStateEnum::disabled);
 
     ASSERT_GTE(controller.network->getRegistersCalls(), 2);
     ASSERT_GTE(controller.registerCollector->count(), 2UL);
@@ -1207,8 +1210,9 @@ TEST_F(FreeMonControllerTest, TestMetricsHalt) {
     controller->turnCrankForTest(
         Turner().registerServer().registerCommand().metricsSend().collect(4).metricsSend());
 
-    ASSERT_TRUE(!FreeMonStorage::read(_opCtx.get()).get().getRegistrationId().empty());
-    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).get().getState() == StorageStateEnum::disabled);
+    ASSERT_TRUE(!FreeMonStorage::read(_opCtx.get()).value().getRegistrationId().empty());
+    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).value().getState() ==
+                StorageStateEnum::disabled);
 
     ASSERT_GTE(controller.network->getRegistersCalls(), 1);
     ASSERT_GTE(controller.network->getMetricsCalls(), 1);
@@ -1229,7 +1233,7 @@ TEST_F(FreeMonControllerTest, TestMetricsPermanentlyDelete) {
     controller->turnCrankForTest(
         Turner().registerServer().registerCommand().collect(5).metricsSend(4));
 
-    ASSERT_FALSE(FreeMonStorage::read(_opCtx.get()).is_initialized());
+    ASSERT_FALSE(FreeMonStorage::read(_opCtx.get()).has_value());
 
     ASSERT_GTE(controller.network->getRegistersCalls(), 1);
     ASSERT_GTE(controller.network->getMetricsCalls(), 3);
@@ -1301,7 +1305,7 @@ TEST_F(FreeMonControllerTest, TestResendRegistration) {
 
     controller->turnCrankForTest(Turner().registerServer().registerCommand().collect(2));
 
-    ASSERT_TRUE(!FreeMonStorage::read(_opCtx.get()).get().getRegistrationId().empty());
+    ASSERT_TRUE(!FreeMonStorage::read(_opCtx.get()).value().getRegistrationId().empty());
 
     controller->turnCrankForTest(
         Turner().metricsSend(3).collect(3).registerCommand().metricsSend(1));
@@ -1372,7 +1376,7 @@ TEST_F(FreeMonControllerRSTest, TransitionToPrimary) {
 
     controller->turnCrankForTest(Turner().onTransitionToPrimary().registerCommand());
 
-    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).is_initialized());
+    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).has_value());
 
     ASSERT_EQ(controller.registerCollector->count(), 1UL);
     ASSERT_GTE(controller.metricsCollector->count(), 2UL);
@@ -1391,7 +1395,7 @@ TEST_F(FreeMonControllerRSTest, StartupOnSecondary) {
 
     controller->turnCrankForTest(Turner().registerServer().registerCommand().collect());
 
-    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).is_initialized());
+    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).has_value());
 
     // Validate the new registration id was not written
     ASSERT_EQ(FreeMonStorage::read(_opCtx.get())->getRegistrationId(), "Foo");
@@ -1415,7 +1419,7 @@ TEST_F(FreeMonControllerRSTest, SecondaryStartOnInsert) {
 
     controller->turnCrankForTest(Turner().notifyUpsert().registerCommand().collect());
 
-    ASSERT_FALSE(FreeMonStorage::read(_opCtx.get()).is_initialized());
+    ASSERT_FALSE(FreeMonStorage::read(_opCtx.get()).has_value());
 
     ASSERT_EQ(controller.registerCollector->count(), 1UL);
     ASSERT_GTE(controller.metricsCollector->count(), 2UL);
@@ -1439,7 +1443,7 @@ TEST_F(FreeMonControllerRSTest, SecondaryStartOnUpdate) {
     controller->turnCrankForTest(Turner().notifyUpsert().registerCommand().collect());
 
     // Since there is no local write, it remains pending
-    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).get().getState() == StorageStateEnum::pending);
+    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).value().getState() == StorageStateEnum::pending);
 
     ASSERT_EQ(controller.registerCollector->count(), 1UL);
     ASSERT_GTE(controller.metricsCollector->count(), 2UL);
@@ -1464,10 +1468,10 @@ TEST_F(FreeMonControllerRSTest, SecondaryStopOnDeRegister) {
 
     controller->turnCrankForTest(Turner().notifyUpsert().collect().metricsSend());
 
-    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).is_initialized());
+    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).has_value());
 
     // Since there is no local write, it remains enabled
-    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).get().getState() == StorageStateEnum::enabled);
+    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).value().getState() == StorageStateEnum::enabled);
 
     ASSERT_EQ(controller.registerCollector->count(), 1UL);
     ASSERT_EQ(controller.metricsCollector->count(), 2UL);
@@ -1485,7 +1489,7 @@ TEST_F(FreeMonControllerRSTest, StepdownDuringRegistration) {
 
     controller->turnCrankForTest(Turner().registerServer() + 1);
 
-    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).get().getState() == StorageStateEnum::pending);
+    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).value().getState() == StorageStateEnum::pending);
 
     // Now become a secondary
     ASSERT_OK(_getReplCoord()->setFollowerMode(repl::MemberState::RS_SECONDARY));
@@ -1495,7 +1499,7 @@ TEST_F(FreeMonControllerRSTest, StepdownDuringRegistration) {
     controller->turnCrankForTest(Turner().metricsSend().collect(2));
 
     // Registration cannot write back to the local store so remain in pending
-    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).get().getState() == StorageStateEnum::pending);
+    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).value().getState() == StorageStateEnum::pending);
 
     ASSERT_EQ(controller.registerCollector->count(), 1UL);
     ASSERT_EQ(controller.metricsCollector->count(), 2UL);
@@ -1546,10 +1550,10 @@ TEST_F(FreeMonControllerRSTest, SecondaryStopOnDocumentDrop) {
     // There is a race condition where sometimes metrics send sneaks in
     controller->turnCrankForTest(Turner().notifyDelete().collect(3));
 
-    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).is_initialized());
+    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).has_value());
 
     // Since there is no local write, it remains enabled
-    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).get().getState() == StorageStateEnum::enabled);
+    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).value().getState() == StorageStateEnum::enabled);
 
     ASSERT_EQ(controller.registerCollector->count(), 1UL);
     ASSERT_GTE(controller.metricsCollector->count(), 2UL);
@@ -1586,10 +1590,10 @@ TEST_F(FreeMonControllerRSTest, SecondaryStopOnDocumentDropDuringCollect) {
 
     controller->turnCrankForTest(Turner().metricsSend().collect(2));
 
-    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).is_initialized());
+    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).has_value());
 
     // Since there is no local write, it remains enabled
-    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).get().getState() == StorageStateEnum::enabled);
+    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).value().getState() == StorageStateEnum::enabled);
 
     BSONObjBuilder builder;
     controller->getServerStatus(_opCtx.get(), &builder);
@@ -1622,7 +1626,7 @@ TEST_F(FreeMonControllerRSTest, SecondaryStartOnBadUpdate) {
     controller->turnCrankForTest(Turner().notifyUpsert());
 
     // Since there is no local write, it remains enabled
-    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).get().getState() == StorageStateEnum::enabled);
+    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).value().getState() == StorageStateEnum::enabled);
 
     ASSERT_EQ(controller.registerCollector->count(), 1UL);
     ASSERT_EQ(controller.metricsCollector->count(), 2UL);
@@ -1655,7 +1659,7 @@ TEST_F(FreeMonControllerRSTest, SecondaryRollbackStopMetrics) {
         Turner().notifyOnRollback().registerCommand().metricsSend().collect(2).metricsSend());
 
     // Since there is no local write, it remains enabled
-    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).get().getState() == StorageStateEnum::enabled);
+    ASSERT_TRUE(FreeMonStorage::read(_opCtx.get()).value().getState() == StorageStateEnum::enabled);
 
     ASSERT_EQ(controller.registerCollector->count(), 1UL);
     ASSERT_EQ(controller.metricsCollector->count(), 4UL);

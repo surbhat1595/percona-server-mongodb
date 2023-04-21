@@ -69,7 +69,7 @@
 #include "mongo/db/json.h"
 #include "mongo/db/keypattern.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/ops/insert.h"
 #include "mongo/db/profile_filter_impl.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
@@ -168,7 +168,7 @@ protected:
         // Accessing system.profile collection should not conflict with oplog application.
         ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(
             opCtx->lockState());
-        AutoGetDb ctx(opCtx, dbName.db(), dbMode);
+        AutoGetDb ctx(opCtx, dbName, dbMode);
         Database* db = ctx.getDb();
 
         // Fetches the database profiling level + filter or the server default if the db does not
@@ -225,7 +225,8 @@ public:
         return true;
     }
 
-    virtual std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const {
+    virtual NamespaceString parseNs(const DatabaseName& dbName,
+                                    const BSONObj& cmdObj) const override {
         std::string collectionName;
         if (const auto rootElt = cmdObj["root"]) {
             uassert(ErrorCodes::InvalidNamespace,
@@ -236,7 +237,7 @@ public:
         if (collectionName.empty())
             collectionName = "fs";
         collectionName += ".chunks";
-        return NamespaceString(dbname, collectionName).ns();
+        return NamespaceString(dbName, collectionName);
     }
 
     virtual void addRequiredPrivileges(const std::string& dbname,
@@ -249,7 +250,7 @@ public:
              const std::string& dbname,
              const BSONObj& jsobj,
              BSONObjBuilder& result) {
-        const NamespaceString nss(parseNs(dbname, jsobj));
+        const NamespaceString nss(parseNs({boost::none, dbname}, jsobj));
 
         md5digest d;
         md5_state_t st;

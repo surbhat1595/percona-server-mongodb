@@ -44,6 +44,7 @@
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/local_oplog_info.h"
 #include "mongo/db/change_stream_change_collection_manager.h"
+#include "mongo/db/change_stream_pre_images_collection_manager.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/commands/rwc_defaults_commands_gen.h"
@@ -58,7 +59,7 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/kill_sessions_local.h"
 #include "mongo/db/logical_time_validator.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/repl/always_allow_non_local_writes.h"
 #include "mongo/db/repl/bgsync.h"
@@ -545,10 +546,8 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
     });
 
     // Create the pre-images collection if it doesn't exist yet.
-    if (::mongo::feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
-        createChangeStreamPreImagesCollection(opCtx);
-    }
+    ChangeStreamPreImagesCollectionManager::createPreImagesCollection(opCtx,
+                                                                      boost::none /* tenantId */);
 
     // TODO: SERVER-66631 move the change collection creation logic from here to the PM-2502 hooks.
     // The change collection will be created when the change stream is enabled.
@@ -996,7 +995,26 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
                 6280501,
                 indexStatus.withContext(str::stream()
                                         << "Failed to create index on "
-                                        << NamespaceString::kShardsIndexCatalogNamespace
+                                        << NamespaceString::kShardIndexCatalogNamespace
+                                        << " on shard's first transition to primary"));
+        }
+
+        // Create indexes in config.shard.collections if needed.
+        indexStatus = sharding_util::createShardCollectionCatalogIndexes(opCtx);
+        if (!indexStatus.isOK()) {
+            // If the node is shutting down or it lost quorum just as it was becoming primary,
+            // don't run the sharding onStepUp machinery. The onStepDown counterpart to these
+            // methods is already idempotent, so the machinery will remain in the stepped down
+            // state.
+            if (ErrorCodes::isShutdownError(indexStatus.code()) ||
+                ErrorCodes::isNotPrimaryError(indexStatus.code())) {
+                return;
+            }
+            fassertFailedWithStatus(
+                6711907,
+                indexStatus.withContext(str::stream()
+                                        << "Failed to create index on "
+                                        << NamespaceString::kShardCollectionCatalogNamespace
                                         << " on shard's first transition to primary"));
         }
     } else {  // unsharded
@@ -1033,6 +1051,13 @@ void ReplicationCoordinatorExternalStateImpl::startProducerIfStopped() {
     }
 }
 
+void ReplicationCoordinatorExternalStateImpl::notifyOtherMemberDataChanged() {
+    stdx::lock_guard<Latch> lk(_threadMutex);
+    if (_bgSync) {
+        _bgSync->notifySyncSourceSelectionDataChanged();
+    }
+}
+
 bool ReplicationCoordinatorExternalStateImpl::tooStale() {
     stdx::lock_guard<Latch> lk(_threadMutex);
     if (_bgSync) {
@@ -1061,7 +1086,7 @@ void ReplicationCoordinatorExternalStateImpl::_dropAllTempCollections(OperationC
                     "Removing temporary collections from {db}",
                     "Removing temporary collections",
                     "db"_attr = dbName);
-        AutoGetDb autoDb(opCtx, dbName.db(), MODE_IX);
+        AutoGetDb autoDb(opCtx, dbName, MODE_IX);
         invariant(autoDb.getDb(),
                   str::stream() << "Unable to get reference to database " << dbName.db());
         autoDb.getDb()->clearTmpCollections(opCtx);
@@ -1215,7 +1240,9 @@ bool ReplicationCoordinatorExternalStateImpl::isShardPartOfShardedCluster(
 bool ReplicationCoordinatorExternalStateImpl::isCWWCSetOnConfigShard(
     OperationContext* opCtx) const {
     GetDefaultRWConcern configsvrRequest;
-    configsvrRequest.setDbName(NamespaceString::kAdminDb.toString());
+    // Empty tenant id is acceptable here as command's tenant id will not be serialized to BSON.
+    // TODO SERVER-62491: Use system tenant id.
+    configsvrRequest.setDbName(DatabaseName(boost::none, NamespaceString::kAdminDb));
     auto cmdResponse = uassertStatusOK(
         Grid::get(opCtx)->shardRegistry()->getConfigShard()->runCommandWithFixedRetryAttempts(
             opCtx,

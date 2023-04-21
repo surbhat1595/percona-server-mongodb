@@ -44,7 +44,7 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/logical_session_cache.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -70,7 +70,6 @@
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/client/shard.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/pm2423_feature_flags_gen.h"
 #include "mongo/s/request_types/ensure_chunk_version_is_greater_than_gen.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/exit.h"
@@ -526,7 +525,7 @@ void resubmitRangeDeletionsOnStepUp(ServiceContext* serviceContext) {
             while (cursor->more()) {
                 retFuture = migrationutil::submitRangeDeletionTask(
                     opCtx.get(),
-                    RangeDeletionTask::parse(IDLParserErrorContext("rangeDeletionRecovery"),
+                    RangeDeletionTask::parse(IDLParserContext("rangeDeletionRecovery"),
                                              cursor->next()));
                 rangeDeletionsMarkedAsProcessing++;
             }
@@ -554,51 +553,6 @@ void resubmitRangeDeletionsOnStepUp(ServiceContext* serviceContext) {
             submitPendingDeletions(opCtx.get());
         })
         .getAsync([](auto) {});
-}
-
-template <typename Callable>
-void forEachOrphanRange(OperationContext* opCtx, const NamespaceString& nss, Callable&& handler) {
-    AutoGetCollection autoColl(opCtx, nss, MODE_IX);
-
-    const auto csr = CollectionShardingRuntime::get(opCtx, nss);
-    const auto metadata = csr->getCurrentMetadataIfKnown();
-    const auto emptyChunkMap =
-        RangeMap{SimpleBSONObjComparator::kInstance.makeBSONObjIndexedMap<BSONObj>()};
-
-    if (!metadata) {
-        LOGV2(474680,
-              "Upgrade: Skipping orphaned range enumeration because the collection's sharding "
-              "state is not known",
-              "namespace"_attr = nss);
-        return;
-    }
-
-    if (!metadata->isSharded()) {
-        LOGV2(22029,
-              "Upgrade: Skipping orphaned range enumeration because the collection is not sharded",
-              "namespace"_attr = nss);
-        return;
-    }
-
-    auto startingKey = metadata->getMinKey();
-
-    while (true) {
-        auto range = metadata->getNextOrphanRange(emptyChunkMap, startingKey);
-        if (!range) {
-            LOGV2_DEBUG(22030,
-                        2,
-                        "Upgrade: Completed orphanged range enumeration; no orphaned ranges "
-                        "remain",
-                        "namespace"_attr = nss.toString(),
-                        "startingKey"_attr = redact(startingKey));
-
-            return;
-        }
-
-        handler(*range);
-
-        startingKey = range->getMax();
-    }
 }
 
 void persistMigrationCoordinatorLocally(OperationContext* opCtx,
@@ -1020,15 +974,12 @@ void recoverMigrationCoordinations(OperationContext* opCtx,
 
     unsigned migrationRecoveryCount = 0;
 
-    const auto acquireCSOnRecipient =
-        feature_flags::gFeatureFlagMigrationRecipientCriticalSection.isEnabled(
-            serverGlobalParams.featureCompatibility);
     PersistentTaskStore<MigrationCoordinatorDocument> store(
         NamespaceString::kMigrationCoordinatorsNamespace);
     store.forEach(
         opCtx,
         BSON(MigrationCoordinatorDocument::kNssFieldName << nss.toString()),
-        [&opCtx, &nss, &migrationRecoveryCount, acquireCSOnRecipient, &cancellationToken](
+        [&opCtx, &nss, &migrationRecoveryCount, &cancellationToken](
             const MigrationCoordinatorDocument& doc) {
             LOGV2_DEBUG(4798502,
                         2,
@@ -1046,7 +997,7 @@ void recoverMigrationCoordinations(OperationContext* opCtx,
 
             if (doc.getDecision()) {
                 // The decision is already known.
-                coordinator.completeMigration(opCtx, acquireCSOnRecipient);
+                coordinator.completeMigration(opCtx);
                 return true;
             }
 
@@ -1071,7 +1022,7 @@ void recoverMigrationCoordinations(OperationContext* opCtx,
             }
 
             auto setFilteringMetadata = [&opCtx, &currentMetadata, &doc, &cancellationToken]() {
-                AutoGetDb autoDb(opCtx, doc.getNss().db(), MODE_IX);
+                AutoGetDb autoDb(opCtx, doc.getNss().dbName(), MODE_IX);
                 Lock::CollectionLock collLock(opCtx, doc.getNss(), MODE_IX);
                 auto* const csr = CollectionShardingRuntime::get(opCtx, doc.getNss());
 
@@ -1128,7 +1079,7 @@ void recoverMigrationCoordinations(OperationContext* opCtx,
                 }
             }
 
-            coordinator.completeMigration(opCtx, acquireCSOnRecipient);
+            coordinator.completeMigration(opCtx);
             setFilteringMetadata();
             return true;
         });
@@ -1247,7 +1198,7 @@ void resumeMigrationRecipientsOnStepUp(OperationContext* opCtx) {
                     nss,
                     doc.getRange(),
                     doc.getDonorShardIdForLoggingPurposesOnly(),
-                    true /* waitForOngoingMigrations */)));
+                    true /* waitForCompletionOfConflictingOps */)));
 
             const auto mdm = MigrationDestinationManager::get(opCtx);
             uassertStatusOK(

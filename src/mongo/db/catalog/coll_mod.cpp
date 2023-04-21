@@ -48,7 +48,7 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds_coordinator.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/database_sharding_state.h"
@@ -159,13 +159,7 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(Operati
     }
 
     if (cmr.getCappedSize() || cmr.getCappedMax()) {
-        // TODO (SERVER-64042): Remove FCV check once 6.1 is released.
-        if (serverGlobalParams.featureCompatibility.isVersionInitialized() &&
-            serverGlobalParams.featureCompatibility.isLessThan(
-                multiversion::FeatureCompatibilityVersion::kVersion_6_0)) {
-            return {ErrorCodes::InvalidOptions,
-                    "Cannot change the size limits of a capped collection."};
-        } else if (!coll->isCapped()) {
+        if (!coll->isCapped()) {
             return {ErrorCodes::InvalidOptions, "Collection must be capped."};
         } else if (coll->ns().isOplog()) {
             return {ErrorCodes::InvalidOptions,
@@ -271,7 +265,7 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(Operati
                     "for the collection's clusteredIndex",
                     indexSpec.getName());
 
-            if ((!indexName.empty() && indexName == StringData(indexSpec.getName().get())) ||
+            if ((!indexName.empty() && indexName == StringData(indexSpec.getName().value())) ||
                 keyPattern.woCompare(indexSpec.getKey()) == 0) {
                 // The indexName or keyPattern match the collection's clusteredIndex.
                 return {ErrorCodes::Error(6011800),
@@ -548,7 +542,7 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(Operati
     if (auto& timeseries = cmr.getTimeseries()) {
         parsed.numModifications++;
         if (!isTimeseries) {
-            return getOnlySupportedOnTimeseriesError(CollMod::kIsTimeseriesNamespaceFieldName);
+            return getOnlySupportedOnTimeseriesError(CollMod::kTimeseriesFieldName);
         }
 
         BSONObjBuilder subObjBuilder(oplogEntryBuilder.subobjStart(CollMod::kTimeseriesFieldName));
@@ -838,30 +832,17 @@ Status _collModInternal(OperationContext* opCtx,
 
         const CollectionOptions& oldCollOptions = coll->getCollectionOptions();
 
-        // TODO SERVER-58584: remove the feature flag.
-        if (feature_flags::gFeatureFlagChangeStreamPreAndPostImages.isEnabled(
-                serverGlobalParams.featureCompatibility)) {
-            // If 'changeStreamPreAndPostImagesOptions' are enabled, 'recordPreImages' must be set
-            // to false. If 'recordPreImages' is set to true, 'changeStreamPreAndPostImagesOptions'
-            // must be disabled.
-            if (cmrNew.changeStreamPreAndPostImagesOptions &&
-                cmrNew.changeStreamPreAndPostImagesOptions->getEnabled()) {
-                cmrNew.recordPreImages = false;
-            }
-
-            if (cmrNew.recordPreImages) {
-                cmrNew.changeStreamPreAndPostImagesOptions =
-                    ChangeStreamPreAndPostImagesOptions(false);
-            }
-        } else {
-            // If the FCV has changed while executing the command to the version, where the feature
-            // flag is disabled, specifying changeStreamPreAndPostImagesOptions is not allowed.
-            if (cmrNew.changeStreamPreAndPostImagesOptions) {
-                return Status(ErrorCodes::InvalidOptions,
-                              "The 'changeStreamPreAndPostImages' is an unknown field.");
-            }
+        // If 'changeStreamPreAndPostImagesOptions' are enabled, 'recordPreImages' must be set
+        // to false. If 'recordPreImages' is set to true, 'changeStreamPreAndPostImagesOptions'
+        // must be disabled.
+        if (cmrNew.changeStreamPreAndPostImagesOptions &&
+            cmrNew.changeStreamPreAndPostImagesOptions->getEnabled()) {
+            cmrNew.recordPreImages = false;
         }
 
+        if (cmrNew.recordPreImages) {
+            cmrNew.changeStreamPreAndPostImagesOptions = ChangeStreamPreAndPostImagesOptions(false);
+        }
         if (cmrNew.cappedSize || cmrNew.cappedMax) {
             // If the current capped collection size exceeds the newly set limits, future document
             // inserts will prompt document deletion.

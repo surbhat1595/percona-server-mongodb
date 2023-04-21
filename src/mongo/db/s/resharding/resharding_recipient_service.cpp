@@ -132,9 +132,9 @@ void buildStateDocumentApplyMetricsForUpdate(BSONObjBuilder& bob, ReshardingMetr
         getIntervalStartFieldName<DocT>(ReshardingRecipientMetrics::kOplogApplicationFieldName),
         metrics->getApplyingBegin());
     bob.append(metricsPrefix + ReshardingRecipientMetrics::kFinalDocumentsCopiedCountFieldName,
-               metrics->getDocumentsCopiedCount());
+               metrics->getDocumentsProcessedCount());
     bob.append(metricsPrefix + ReshardingRecipientMetrics::kFinalBytesCopiedCountFieldName,
-               metrics->getBytesCopiedCount());
+               metrics->getBytesWrittenCount());
 }
 
 void buildStateDocumentStrictConsistencyMetricsForUpdate(BSONObjBuilder& bob,
@@ -180,17 +180,20 @@ std::shared_ptr<repl::PrimaryOnlyService::Instance> ReshardingRecipientService::
         this,
         ReshardingRecipientDocument::parse({"RecipientStateMachine"}, initialState),
         std::make_unique<RecipientStateMachineExternalStateImpl>(),
-        ReshardingDataReplication::make);
+        ReshardingDataReplication::make,
+        _serviceContext);
 }
 
 ReshardingRecipientService::RecipientStateMachine::RecipientStateMachine(
     const ReshardingRecipientService* recipientService,
     const ReshardingRecipientDocument& recipientDoc,
     std::unique_ptr<RecipientStateMachineExternalState> externalState,
-    ReshardingDataReplicationFactory dataReplicationFactory)
+    ReshardingDataReplicationFactory dataReplicationFactory,
+    ServiceContext* serviceContext)
     : repl::PrimaryOnlyService::TypedInstance<RecipientStateMachine>(),
       _recipientService{recipientService},
-      _metrics{ReshardingMetrics::initializeFrom(recipientDoc, getGlobalServiceContext())},
+      _serviceContext(serviceContext),
+      _metrics{ReshardingMetrics::initializeFrom(recipientDoc, _serviceContext)},
       _metadata{recipientDoc.getCommonReshardingMetadata()},
       _minimumOperationDuration{Milliseconds{recipientDoc.getMinimumOperationDurationMillis()}},
       _recipientCtx{recipientDoc.getMutableState()},
@@ -210,7 +213,7 @@ ReshardingRecipientService::RecipientStateMachine::RecipientStateMachine(
                           << "resharding_recipient"
                           << "collection" << _metadata.getSourceNss().toString())),
       _isAlsoDonor([&]() {
-          auto myShardId = _externalState->myShardId(getGlobalServiceContext());
+          auto myShardId = _externalState->myShardId(_serviceContext);
           return std::find_if(_donorShards.begin(),
                               _donorShards.end(),
                               [&](const DonorShardFetchTimestamp& donor) {
@@ -517,7 +520,7 @@ boost::optional<BSONObj> ReshardingRecipientService::RecipientStateMachine::repo
 void ReshardingRecipientService::RecipientStateMachine::onReshardingFieldsChanges(
     OperationContext* opCtx, const TypeCollectionReshardingFields& reshardingFields) {
     if (reshardingFields.getState() == CoordinatorStateEnum::kAborting) {
-        abort(reshardingFields.getUserCanceled().get());
+        abort(reshardingFields.getUserCanceled().value());
         return;
     }
 
@@ -557,8 +560,8 @@ ExecutorFuture<void> ReshardingRecipientService::RecipientStateMachine::
                   ReshardingRecipientService::RecipientStateMachine::CloneDetails cloneDetails) {
             _transitionToCreatingCollection(
                 cloneDetails, (*executor)->now() + _minimumOperationDuration, factory);
-            _metrics->setDocumentsToCopyCounts(cloneDetails.approxDocumentsToCopy,
-                                               cloneDetails.approxBytesToCopy);
+            _metrics->setDocumentsToProcessCounts(cloneDetails.approxDocumentsToCopy,
+                                                  cloneDetails.approxBytesToCopy);
         });
 }
 
@@ -659,7 +662,7 @@ void ReshardingRecipientService::RecipientStateMachine::_ensureDataReplicationSt
                                              _recipientService->getInstanceCleanupExecutor(),
                                              abortToken,
                                              factory,
-                                             txnCloneTime.get())
+                                             txnCloneTime.value())
                 .share();
 
         stdx::lock_guard lk(_mutex);
@@ -1162,7 +1165,7 @@ void ReshardingRecipientService::RecipientStateMachine::_restoreMetrics(
             // metrics section of the recipient state document and restored during metrics
             // initialization. This is so that applied oplog entries that add or remove documents do
             // not affect the cloning metrics.
-            _metrics->restoreDocumentsCopied(documentCountCopied, documentBytesCopied);
+            _metrics->restoreDocumentsProcessed(documentCountCopied, documentBytesCopied);
         }
     }
 
@@ -1197,7 +1200,7 @@ void ReshardingRecipientService::RecipientStateMachine::_restoreMetrics(
 
             if (!result.isEmpty()) {
                 progressDoc = ReshardingOplogApplierProgress::parse(
-                    IDLParserErrorContext("resharding-recipient-service-progress-doc"), result);
+                    IDLParserContext("resharding-recipient-service-progress-doc"), result);
                 oplogEntriesApplied += progressDoc->getNumEntriesApplied();
             }
         }

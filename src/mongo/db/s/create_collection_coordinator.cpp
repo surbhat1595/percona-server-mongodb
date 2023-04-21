@@ -366,7 +366,7 @@ void CreateCollectionCoordinator::appendCommandInfo(BSONObjBuilder* cmdInfoBuild
 void CreateCollectionCoordinator::checkIfOptionsConflict(const BSONObj& doc) const {
     // If we have two shard collections on the same namespace, then the arguments must be the same.
     const auto otherDoc = CreateCollectionCoordinatorDocument::parse(
-        IDLParserErrorContext("CreateCollectionCoordinatorDocument"), doc);
+        IDLParserContext("CreateCollectionCoordinatorDocument"), doc);
 
     uassert(ErrorCodes::ConflictingOperationInProgress,
             "Another create collection with different arguments is already running for the same "
@@ -412,6 +412,8 @@ ExecutorFuture<void> CreateCollectionCoordinator::_runImpl(
                 // Log the start of the event only if we're not recovering.
                 _logStartCreateCollection(opCtx);
 
+                _checkCollectionUUIDMismatch(opCtx);
+
                 // Quick check (without critical section) to see if another create collection
                 // already succeeded.
                 if (auto createCollectionResponseOpt =
@@ -421,7 +423,6 @@ ExecutorFuture<void> CreateCollectionCoordinator::_runImpl(
                             _shardKeyPattern->getKeyPattern().toBSON(),
                             getCollation(opCtx, nss(), _request.getCollation()).second,
                             _request.getUnique().value_or(false))) {
-                    _checkCollectionUUIDMismatch(opCtx);
 
                     // The critical section can still be held here if the node committed the
                     // sharding of the collection but then it stepped down before it managed to
@@ -463,7 +464,6 @@ ExecutorFuture<void> CreateCollectionCoordinator::_runImpl(
                     }
                 }
 
-                _checkCollectionUUIDMismatch(opCtx);
                 _createPolicy(opCtx);
                 _createCollectionAndIndexes(opCtx);
 
@@ -570,7 +570,7 @@ void CreateCollectionCoordinator::_checkCommandArguments(OperationContext* opCtx
         // less danger of an OOM error.
 
         const int maxNumInitialChunksForShards =
-            Grid::get(opCtx)->shardRegistry()->getNumShardsNoReload() * shardutil::kMaxSplitPoints;
+            Grid::get(opCtx)->shardRegistry()->getNumShards(opCtx) * shardutil::kMaxSplitPoints;
         const int maxNumInitialChunksTotal = 1000 * 1000;  // Arbitrary limit to memory consumption
         int numChunks = _request.getNumInitialChunks().value();
         uassert(ErrorCodes::InvalidOptions,
@@ -617,7 +617,7 @@ void CreateCollectionCoordinator::_createCollectionAndIndexes(OperationContext* 
     // We need to implicitly create a timeseries view and underlying bucket collection.
     if (_collectionEmpty && _request.getTimeseries()) {
         const auto viewName = nss().getTimeseriesViewNamespace();
-        auto createCmd = makeCreateCommand(viewName, collation, _request.getTimeseries().get());
+        auto createCmd = makeCreateCommand(viewName, collation, _request.getTimeseries().value());
 
         BSONObj createRes;
         DBDirectClient localClient(opCtx);

@@ -166,7 +166,7 @@ private:
                 return;
             }
             updateState->updateInProgress = true;
-            update = updateState->nextUpdateToSend.get();
+            update = updateState->nextUpdateToSend.value();
             updateState->nextUpdateToSend = boost::none;
         }
 
@@ -461,7 +461,7 @@ void ShardingInitializationMongoD::updateShardIdentityConfigString(
         write_ops::UpdateModification::parseFromClassicUpdate(updateObj));
 
     try {
-        AutoGetDb autoDb(opCtx, NamespaceString::kServerConfigurationNamespace.db(), MODE_X);
+        AutoGetDb autoDb(opCtx, NamespaceString::kServerConfigurationNamespace.dbName(), MODE_X);
 
         auto result = update(opCtx, autoDb.ensureDbExists(opCtx), updateReq);
         if (result.numMatched == 0) {
@@ -495,11 +495,10 @@ void ShardingInitializationMongoD::onInitialDataAvailable(OperationContext* opCt
     // This function may take the global lock.
     auto shardingInitialized = initializeShardingAwarenessIfNeeded(opCtx);
     if (shardingInitialized) {
-        auto status = waitForShardRegistryReload(opCtx);
+        auto status = loadGlobalSettingsFromConfigServer(opCtx);
         if (!status.isOK()) {
             LOGV2(6460100,
-                  "Error loading shard registry at startup {error}",
-                  "Error loading shard registry at startup",
+                  "Error loading global settings from config server at startup",
                   "error"_attr = redact(status));
         }
     }
@@ -569,7 +568,7 @@ void initializeGlobalShardingStateForMongoD(OperationContext* opCtx,
         }};
 
     auto shardRegistry = std::make_unique<ShardRegistry>(
-        std::move(shardFactory), configCS, std::move(shardRemovalHooks));
+        service, std::move(shardFactory), configCS, std::move(shardRemovalHooks));
 
     uassertStatusOK(
         initializeGlobalShardingState(opCtx,

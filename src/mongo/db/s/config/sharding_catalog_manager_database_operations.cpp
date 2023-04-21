@@ -134,7 +134,7 @@ DatabaseType ShardingCatalogManager::createDatabase(
         auto dbObj = client.findOne(NamespaceString::kConfigDatabasesNamespace, dbMatchFilter);
         if (!dbObj.isEmpty()) {
             replClient.setLastOpToSystemLastOpTime(opCtx);
-            return DatabaseType::parse(IDLParserErrorContext("DatabaseType"), std::move(dbObj));
+            return DatabaseType::parse(IDLParserContext("DatabaseType"), std::move(dbObj));
         }
 
         if (dbLock) {
@@ -144,7 +144,7 @@ DatabaseType ShardingCatalogManager::createDatabase(
         // Do another loop, with the db lock held in order to avoid taking the expensive path on
         // concurrent create database operations
         dbLock.emplace(DistLockManager::get(opCtx)->lockDirectLocally(
-            opCtx, dbName, DistLockManager::kDefaultLockTimeout));
+            opCtx, dbName, "createDatabase" /* reason */, DistLockManager::kDefaultLockTimeout));
     }
 
     // Expensive createDatabase code path
@@ -160,7 +160,7 @@ DatabaseType ShardingCatalogManager::createDatabase(
     auto dbDoc = client.findOne(NamespaceString::kConfigDatabasesNamespace, queryBuilder.obj());
     auto const [primaryShardPtr, database] = [&] {
         if (!dbDoc.isEmpty()) {
-            auto actualDb = DatabaseType::parse(IDLParserErrorContext("DatabaseType"), dbDoc);
+            auto actualDb = DatabaseType::parse(IDLParserContext("DatabaseType"), dbDoc);
 
             uassert(ErrorCodes::DatabaseDifferCase,
                     str::stream() << "can't have 2 databases that just differ on case "

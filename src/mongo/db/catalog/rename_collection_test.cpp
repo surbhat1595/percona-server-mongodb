@@ -46,9 +46,9 @@
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer.h"
-#include "mongo/db/op_observer_noop.h"
-#include "mongo/db/op_observer_registry.h"
+#include "mongo/db/op_observer/op_observer.h"
+#include "mongo/db/op_observer/op_observer_noop.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/oplog.h"
@@ -220,7 +220,7 @@ void OpObserverMock::onInserts(OperationContext* opCtx,
     }
 
     onInsertsIsTargetDatabaseExclusivelyLocked =
-        opCtx->lockState()->isDbLockedForMode(nss.db(), MODE_X);
+        opCtx->lockState()->isDbLockedForMode(nss.dbName(), MODE_X);
 
     _logOp(opCtx, nss, "inserts");
     OpObserverNoop::onInserts(opCtx, nss, uuid, begin, end, fromMigrate);
@@ -384,7 +384,7 @@ void _createCollection(OperationContext* opCtx,
                        const NamespaceString& nss,
                        const CollectionOptions options = {}) {
     writeConflictRetry(opCtx, "_createCollection", nss.ns(), [=] {
-        AutoGetDb autoDb(opCtx, nss.db(), MODE_X);
+        AutoGetDb autoDb(opCtx, nss.dbName(), MODE_X);
         auto db = autoDb.ensureDbExists(opCtx);
         ASSERT_TRUE(db) << "Cannot create collection " << nss << " because database " << nss.db()
                         << " does not exist.";
@@ -413,7 +413,7 @@ CollectionOptions _makeCollectionOptionsWithUuid() {
 UUID _createCollectionWithUUID(OperationContext* opCtx, const NamespaceString& nss) {
     const auto options = _makeCollectionOptionsWithUuid();
     _createCollection(opCtx, nss, options);
-    return options.uuid.get();
+    return options.uuid.value();
 }
 
 /**
@@ -519,7 +519,7 @@ CollectionPtr _getCollection_inlock(OperationContext* opCtx, const NamespaceStri
 }
 
 TEST_F(RenameCollectionTest, RenameCollectionReturnsNamespaceNotFoundIfDatabaseDoesNotExist) {
-    ASSERT_FALSE(AutoGetDb(_opCtx.get(), _sourceNss.db(), MODE_X).getDb());
+    ASSERT_FALSE(AutoGetDb(_opCtx.get(), _sourceNss.dbName(), MODE_X).getDb());
     ASSERT_EQUALS(ErrorCodes::NamespaceNotFound,
                   renameCollection(_opCtx.get(), _sourceNss, _targetNss, {}));
 }

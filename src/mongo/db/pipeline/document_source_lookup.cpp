@@ -136,7 +136,7 @@ DocumentSourceLookUp::DocumentSourceLookUp(
     _fromExpCtx = expCtx->copyForSubPipeline(resolvedNamespace.ns, resolvedNamespace.uuid);
     _fromExpCtx->inLookup = true;
     if (fromCollator) {
-        _fromExpCtx->setCollator(std::move(fromCollator.get()));
+        _fromExpCtx->setCollator(std::move(fromCollator.value()));
         _hasExplicitCollation = true;
     }
 }
@@ -341,9 +341,7 @@ const char* DocumentSourceLookUp::getSourceName() const {
 }
 
 bool DocumentSourceLookUp::foreignShardedLookupAllowed() const {
-    return feature_flags::gFeatureFlagShardedLookup.isEnabled(
-               serverGlobalParams.featureCompatibility) &&
-        !pExpCtx->opCtx->inMultiDocumentTransaction();
+    return !pExpCtx->opCtx->inMultiDocumentTransaction();
 }
 
 void DocumentSourceLookUp::determineSbeCompatibility() {
@@ -444,11 +442,6 @@ DocumentSource::GetNextResult DocumentSourceLookUp::doGetNext() {
             staleInfo->getVersionWanted() != ChunkVersion::UNSHARDED()) {
             uassert(3904800,
                     "Cannot run $lookup with a sharded foreign collection in a transaction",
-                    !feature_flags::gFeatureFlagShardedLookup.isEnabled(
-                        serverGlobalParams.featureCompatibility) ||
-                        !pExpCtx->opCtx->inMultiDocumentTransaction());
-            uassert(51069,
-                    "Cannot run $lookup with sharded foreign collection",
                     foreignShardedLookupAllowed());
         }
         throw;
@@ -1041,7 +1034,7 @@ void DocumentSourceLookUp::serializeToArray(
                           << (indexPath ? Value(indexPath->fullPath()) : Value())));
         }
 
-        if (explain.get() >= ExplainOptions::Verbosity::kExecStats) {
+        if (explain.value() >= ExplainOptions::Verbosity::kExecStats) {
             appendSpecificExecStats(output);
         }
 

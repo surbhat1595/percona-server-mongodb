@@ -33,7 +33,6 @@
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/base64.h"
 
-#include <boost/optional/optional_io.hpp>
 
 namespace mongo {
 namespace {
@@ -405,6 +404,15 @@ public:
         auto buf = expected.buf();
         ASSERT_EQ(columnBinary.length, expected.len());
         ASSERT_EQ(memcmp(columnBinary.data, buf, columnBinary.length), 0);
+    }
+
+    static void verifyDecompression(const BufBuilder& columnBinary,
+                                    const std::vector<BSONElement>& expected) {
+        BSONBinData bsonBinData;
+        bsonBinData.data = columnBinary.buf();
+        bsonBinData.length = columnBinary.len();
+        bsonBinData.type = Column;
+        verifyDecompression(bsonBinData, expected);
     }
 
     static void verifyDecompression(BSONBinData columnBinary,
@@ -5022,6 +5030,22 @@ TEST_F(BSONColumnTest, NonZeroRLEInFirstBlockAfterSimple8bBlocks) {
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
     verifyDecompression(binData, elems);
+}
+
+TEST_F(BSONColumnTest, ZeroDeltaAfterInterleaved) {
+    auto obj = createElementObj(BSON("a" << 1));
+    std::vector<BSONElement> elems = {obj, obj};
+
+    BufBuilder expected;
+    appendInterleavedStart(expected, obj.Obj());
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlocks64(expected, {kDeltaForBinaryEqualValues}, 1);
+    appendEOO(expected);
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlock64(expected, kDeltaForBinaryEqualValues);
+    appendEOO(expected);
+
+    verifyDecompression(expected, elems);
 }
 
 TEST_F(BSONColumnTest, InvalidControlByte) {

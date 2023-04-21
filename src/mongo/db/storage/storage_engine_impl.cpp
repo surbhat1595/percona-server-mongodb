@@ -349,7 +349,7 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx, LastShutdownState l
             // `recoveryTimestamp`. Choose the `oldestTimestamp` for collections that existed at the
             // `oldestTimestamp` and conservatively choose the `recoveryTimestamp` for everything
             // else.
-            minVisibleTs = recoveryTs.get();
+            minVisibleTs = recoveryTs.value();
             if (existedAtOldestTs.find(entry.catalogId) != existedAtOldestTs.end()) {
                 // Collections found at the `oldestTimestamp` on startup can have their minimum
                 // visible timestamp pulled back to that value.
@@ -403,7 +403,7 @@ void StorageEngineImpl::_initCollection(OperationContext* opCtx,
     collection->setMinimumVisibleSnapshot(minVisibleTs);
 
     CollectionCatalog::write(opCtx, [&](CollectionCatalog& catalog) {
-        catalog.registerCollection(opCtx, md->options.uuid.get(), std::move(collection));
+        catalog.registerCollection(opCtx, md->options.uuid.value(), std::move(collection));
     });
 }
 
@@ -504,7 +504,7 @@ bool StorageEngineImpl::_handleInternalIdent(OperationContext* opCtx,
     auto cursor = rs->getCursor(opCtx);
     auto record = cursor->next();
     if (record) {
-        auto doc = record.get().data.toBson();
+        auto doc = record.value().data.toBson();
 
         // Parse the documents here so that we can restart the build if the document doesn't
         // contain all the necessary information to be able to resume building the index.
@@ -515,7 +515,7 @@ bool StorageEngineImpl::_handleInternalIdent(OperationContext* opCtx,
                           "failToParseResumeIndexInfo fail point is enabled");
             }
 
-            resumeInfo = ResumeIndexInfo::parse(IDLParserErrorContext("ResumeIndexInfo"), doc);
+            resumeInfo = ResumeIndexInfo::parse(IDLParserContext("ResumeIndexInfo"), doc);
         } catch (const DBException& e) {
             LOGV2(4916300, "Failed to parse resumable index info", "error"_attr = e.toStatus());
 
@@ -652,7 +652,7 @@ StatusWith<StorageEngine::ReconcileResult> StorageEngineImpl::reconcileCatalogAn
     for (DurableCatalog::Entry entry : catalogEntries) {
         std::shared_ptr<BSONCollectionCatalogEntry::MetaData> metaData =
             _catalog->getMetaData(opCtx, entry.catalogId);
-        NamespaceString nss(metaData->ns);
+        NamespaceString nss(metaData->nss);
 
         // Batch up the indexes to remove them from `metaData` outside of the iterator.
         std::vector<std::string> indexesToDrop;
@@ -909,8 +909,10 @@ Status StorageEngineImpl::_dropCollectionsNoTimestamp(OperationContext* opCtx,
 
             audit::logDropIndex(opCtx->getClient(), ice->descriptor()->indexName(), coll->ns());
 
-            catalog::removeIndex(
-                opCtx, ice->descriptor()->indexName(), coll, ice->getSharedIdent());
+            catalog::removeIndex(opCtx,
+                                 ice->descriptor()->indexName(),
+                                 coll,
+                                 coll->getIndexCatalog()->getEntryShared(ice->descriptor()));
         }
 
         audit::logDropCollection(opCtx->getClient(), coll->ns());
@@ -921,7 +923,8 @@ Status StorageEngineImpl::_dropCollectionsNoTimestamp(OperationContext* opCtx,
             firstError = result;
         }
 
-        CollectionCatalog::get(opCtx)->dropCollection(opCtx, coll);
+        CollectionCatalog::get(opCtx)->dropCollection(
+            opCtx, coll, opCtx->getServiceContext()->getStorageEngine()->supportsPendingDrops());
     }
 
     untimestampedDropWuow.commit();
@@ -995,8 +998,8 @@ Status StorageEngineImpl::repairRecordStore(OperationContext* opCtx,
 
     // After repairing, re-initialize the collection with a valid RecordStore.
     CollectionCatalog::write(opCtx, [&](CollectionCatalog& catalog) {
-        auto uuid = catalog.lookupUUIDByNSS(opCtx, nss).get();
-        catalog.deregisterCollection(opCtx, uuid);
+        auto uuid = catalog.lookupUUIDByNSS(opCtx, nss).value();
+        catalog.deregisterCollection(opCtx, uuid, /*isDropPending=*/false);
     });
 
     // When repairing a record store, keep the existing behavior of not installing a minimum visible
@@ -1193,7 +1196,7 @@ void StorageEngineImpl::_onMinOfCheckpointAndOldestTimestampChanged(const Timest
 }
 
 StorageEngineImpl::TimestampMonitor::TimestampMonitor(KVEngine* engine, PeriodicRunner* runner)
-    : _engine(engine), _running(false), _periodicRunner(runner) {
+    : _engine(engine), _periodicRunner(runner) {
     _startup();
 }
 
@@ -1278,12 +1281,16 @@ void StorageEngineImpl::TimestampMonitor::_startup() {
                     LOGV2(6183600, "Timestamp monitor got interrupted, retrying");
                     return;
                 }
-                if (!ErrorCodes::isCancellationError(ex))
+                if (ex.code() == ErrorCodes::InterruptedAtShutdown) {
+                    if (_shuttingDown) {
+                        return;
+                    }
+                    _shuttingDown = true;
+                    LOGV2(22263, "Timestamp monitor is stopping", "error"_attr = ex);
+                }
+                if (!ErrorCodes::isCancellationError(ex)) {
                     throw;
-                // If we're interrupted at shutdown or after PeriodicRunner's client has been
-                // killed, it's fine to give up on future notifications.
-                LOGV2(22263, "Timestamp monitor is stopping", "error"_attr = ex);
-                return;
+                }
             } catch (const DBException& ex) {
                 // Logs and rethrows the exceptions of other types.
                 LOGV2_ERROR(5802500, "Timestamp monitor throws an exception", "error"_attr = ex);

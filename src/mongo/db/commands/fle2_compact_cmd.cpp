@@ -71,7 +71,7 @@ CompactStats compactEncryptedCompactionCollection(OperationContext* opCtx,
 
     LOGV2(6319900, "Compacting the encrypted compaction collection", "namespace"_attr = edcNss);
 
-    AutoGetDb autoDb(opCtx, edcNss.db(), MODE_IX);
+    AutoGetDb autoDb(opCtx, edcNss.dbName(), MODE_IX);
     uassert(ErrorCodes::NamespaceNotFound,
             str::stream() << "Database '" << edcNss.db() << "' does not exist",
             autoDb.getDb());
@@ -88,11 +88,6 @@ CompactStats compactEncryptedCompactionCollection(OperationContext* opCtx,
         uasserted(ErrorCodes::NamespaceNotFound,
                   str::stream() << "Collection '" << edcNss << "' does not exist");
     }
-
-    // TODO (SERVER-65077): Remove FCV check once 6.0 is released
-    uassert(6319903,
-            "Queryable Encryption is only supported when FCV supports 6.0",
-            gFeatureFlagFLE2.isEnabled(serverGlobalParams.featureCompatibility));
 
     validateCompactRequest(request, *edc.get());
 

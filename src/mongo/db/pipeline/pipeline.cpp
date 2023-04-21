@@ -64,9 +64,10 @@ Value appendCommonExecStats(Value docSource, const CommonStats& stats) {
     invariant(docSource.getType() == BSONType::Object);
     MutableDocument doc(docSource.getDocument());
     auto nReturned = static_cast<long long>(stats.advanced);
-    invariant(stats.executionTimeMillis);
-    auto executionTimeMillisEstimate = static_cast<long long>(*stats.executionTimeMillis);
     doc.addField("nReturned", Value(nReturned));
+
+    invariant(stats.executionTime);
+    auto executionTimeMillisEstimate = durationCount<Milliseconds>(*stats.executionTime);
     doc.addField("executionTimeMillisEstimate", Value(executionTimeMillisEstimate));
     return Value(doc.freeze());
 }
@@ -721,6 +722,24 @@ Pipeline::SourceContainer::iterator Pipeline::optimizeEndOfPipeline(
     container->splice(std::next(itr), endOfPipeline);
 
     return std::next(itr);
+}
+
+Pipeline::SourceContainer::iterator Pipeline::optimizeAtEndOfPipeline(
+    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+    if (itr == container->end()) {
+        return itr;
+    }
+    itr = std::next(itr);
+    try {
+        while (itr != container->end()) {
+            invariant((*itr).get());
+            itr = (*itr).get()->optimizeAt(itr, container);
+        }
+    } catch (DBException& ex) {
+        ex.addContext("Failed to optimize pipeline");
+        throw;
+    }
+    return itr;
 }
 
 std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::makePipelineFromViewDefinition(

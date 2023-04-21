@@ -16,8 +16,8 @@ const conn = MongoRunner.runMongod({});
 assert.neq(conn, null, "mongod failed to start");
 const db = conn.getDB("sbe_plan_cache_memory_debug_info");
 
-if (!checkSBEEnabled(db, ["featureFlagSbePlanCache", "featureFlagSbeFull"])) {
-    jsTest.log("Skipping test because SBE plan cache is not enabled.");
+if (!checkSBEEnabled(db, ["featureFlagSbeFull"])) {
+    jsTest.log("Skipping test because SBE is not fully enabled");
     MongoRunner.stopMongod(conn);
     return;
 }
@@ -75,7 +75,8 @@ const planCacheSizeAfterSbeStep = getPlanCacheSize();
 assert.lt(initialPlanCacheSize, planCacheSizeAfterSbeStep);
 
 // Force classic plan cache.
-assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryForceClassicEngine: true}));
+assert.commandWorked(
+    db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "forceClassicEngine"}));
 
 // Create a new collection for classic queries so we can easily assess its plan cache.
 const classicColl = createTestCollection("classic");

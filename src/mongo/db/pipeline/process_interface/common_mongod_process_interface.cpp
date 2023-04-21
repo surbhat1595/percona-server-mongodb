@@ -67,9 +67,9 @@
 #include "mongo/db/stats/storage_stats.h"
 #include "mongo/db/storage/backup_cursor_hooks.h"
 #include "mongo/db/storage/durable_catalog.h"
-#include "mongo/db/transaction_history_iterator.h"
-#include "mongo/db/transaction_participant.h"
-#include "mongo/db/transaction_participant_resource_yielder.h"
+#include "mongo/db/transaction/transaction_history_iterator.h"
+#include "mongo/db/transaction/transaction_participant.h"
+#include "mongo/db/transaction/transaction_participant_resource_yielder.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/query/document_source_merge_cursors.h"
@@ -554,7 +554,7 @@ std::vector<BSONObj> CommonMongodProcessInterface::getMatchingPlanCacheEntryStat
     auto planCacheEntries =
         planCache->getMatchingStats({} /* cacheKeyFilterFunc */, serializer, predicate);
 
-    if (feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV()) {
+    if (feature_flags::gFeatureFlagSbeFull.isEnabledAndIgnoreFCV()) {
         // Retrieve plan cache entries from the SBE plan cache.
         const auto cacheKeyFilter = [uuid = collection->uuid(),
                                      collVersion = collQueryInfo.getPlanCacheInvalidatorVersion()](

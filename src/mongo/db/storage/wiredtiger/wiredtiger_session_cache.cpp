@@ -322,7 +322,7 @@ void WiredTigerSessionCache::waitUntilDurable(OperationContext* opCtx,
                 invariantWTOK(s2->checkpoint(s2, config), s2);
 
             if (token) {
-                journalListener->onDurable(token.get());
+                journalListener->onDurable(token.value());
             }
         }
         LOGV2_DEBUG(22418, 4, "created checkpoint (forced)");
@@ -395,7 +395,7 @@ void WiredTigerSessionCache::waitUntilDurable(OperationContext* opCtx,
     }
 
     if (token) {
-        journalListener->onDurable(token.get());
+        journalListener->onDurable(token.value());
     }
 }
 

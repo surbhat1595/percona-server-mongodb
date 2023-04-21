@@ -32,8 +32,8 @@
 
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/op_observer_noop.h"
-#include "mongo/db/op_observer_registry.h"
+#include "mongo/db/op_observer/op_observer_noop.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/oplog_entry.h"
@@ -47,6 +47,7 @@
 #include "mongo/db/s/resharding/resharding_recipient_service.h"
 #include "mongo/db/s/resharding/resharding_recipient_service_external_state.h"
 #include "mongo/db/s/resharding/resharding_service_test_helpers.h"
+#include "mongo/db/service_context.h"
 #include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/logv2/log.h"
 #include "mongo/unittest/death_test.h"
@@ -196,7 +197,7 @@ public:
 class ReshardingRecipientServiceForTest : public ReshardingRecipientService {
 public:
     explicit ReshardingRecipientServiceForTest(ServiceContext* serviceContext)
-        : ReshardingRecipientService(serviceContext) {}
+        : ReshardingRecipientService(serviceContext), _serviceContext(serviceContext) {}
 
     std::shared_ptr<repl::PrimaryOnlyService::Instance> constructInstance(
         BSONObj initialState) override {
@@ -204,8 +205,12 @@ public:
             this,
             ReshardingRecipientDocument::parse({"ReshardingRecipientServiceForTest"}, initialState),
             std::make_unique<ExternalStateForTest>(),
-            [](auto...) { return std::make_unique<DataReplicationForTest>(); });
+            [](auto...) { return std::make_unique<DataReplicationForTest>(); },
+            _serviceContext);
     }
+
+private:
+    ServiceContext* _serviceContext;
 };
 
 /**
@@ -642,7 +647,7 @@ TEST_F(ReshardingRecipientServiceTest, WritesNoopOplogEntryOnReshardDoneCatchUp)
 
     ReshardDoneCatchUpChangeEventO2Field expectedChangeEvent{sourceNss, doc.getReshardingUUID()};
     auto receivedChangeEvent = ReshardDoneCatchUpChangeEventO2Field::parse(
-        IDLParserErrorContext("ReshardDoneCatchUpChangeEventO2Field"), *op.getObject2());
+        IDLParserContext("ReshardDoneCatchUpChangeEventO2Field"), *op.getObject2());
 
     ASSERT_EQ(OpType_serializer(op.getOpType()), OpType_serializer(repl::OpTypeEnum::kNoop))
         << op.getEntry();
@@ -864,7 +869,7 @@ TEST_F(ReshardingRecipientServiceTest, RestoreMetricsAfterStepUp) {
                               ->reportForCurrentOp(
                                   MongoProcessInterface::CurrentOpConnectionsMode::kExcludeIdle,
                                   MongoProcessInterface::CurrentOpSessionsMode::kExcludeIdle)
-                              .get();
+                              .value();
 
             ASSERT_EQ(currOp.getField("documentsCopied").numberLong(), 1L);
             ASSERT_EQ(currOp.getField("bytesCopied").numberLong(), (long)reshardedDoc.objsize());
@@ -875,7 +880,7 @@ TEST_F(ReshardingRecipientServiceTest, RestoreMetricsAfterStepUp) {
                               ->reportForCurrentOp(
                                   MongoProcessInterface::CurrentOpConnectionsMode::kExcludeIdle,
                                   MongoProcessInterface::CurrentOpSessionsMode::kExcludeIdle)
-                              .get();
+                              .value();
 
             ASSERT_EQ(currOp.getField("documentsCopied").numberLong(), 1L);
             ASSERT_EQ(currOp.getField("bytesCopied").numberLong(), (long)reshardedDoc.objsize());

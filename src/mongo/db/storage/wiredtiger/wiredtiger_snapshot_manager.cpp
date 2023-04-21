@@ -83,14 +83,15 @@ boost::optional<Timestamp> WiredTigerSnapshotManager::getMinSnapshotForNextCommi
 Timestamp WiredTigerSnapshotManager::beginTransactionOnCommittedSnapshot(
     WT_SESSION* session,
     PrepareConflictBehavior prepareConflictBehavior,
-    RoundUpPreparedTimestamps roundUpPreparedTimestamps) const {
+    RoundUpPreparedTimestamps roundUpPreparedTimestamps,
+    WiredTigerBeginTxnBlock::UntimestampedWriteAssertion untimestampedWriteAssertion) const {
 
     auto committedSnapshot = [this]() {
         stdx::lock_guard<Latch> lock(_committedSnapshotMutex);
         uassert(ErrorCodes::ReadConcernMajorityNotAvailableYet,
                 "Committed view disappeared while running operation",
                 _committedSnapshot);
-        return _committedSnapshot.get();
+        return _committedSnapshot.value();
     }();
 
     if (MONGO_unlikely(hangBeforeMajorityReadTransactionStarted.shouldFail())) {
@@ -99,8 +100,11 @@ Timestamp WiredTigerSnapshotManager::beginTransactionOnCommittedSnapshot(
 
     // We need to round up our read timestamp in case the oldest timestamp has advanced past the
     // committedSnapshot we just read.
-    WiredTigerBeginTxnBlock txnOpen(
-        session, prepareConflictBehavior, roundUpPreparedTimestamps, RoundUpReadTimestamp::kRound);
+    WiredTigerBeginTxnBlock txnOpen(session,
+                                    prepareConflictBehavior,
+                                    roundUpPreparedTimestamps,
+                                    RoundUpReadTimestamp::kRound,
+                                    untimestampedWriteAssertion);
     auto status = txnOpen.setReadSnapshot(committedSnapshot);
     fassert(30635, status);
 

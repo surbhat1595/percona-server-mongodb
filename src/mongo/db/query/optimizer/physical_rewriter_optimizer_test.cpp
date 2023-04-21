@@ -40,6 +40,9 @@
 namespace mongo::optimizer {
 namespace {
 
+// Default selectivity of predicates used by HintedCE to force certain plans.
+constexpr double kDefaultSelectivity = 0.1;
+
 TEST(PhysRewriter, PhysicalRewriterBasic) {
     using namespace properties;
     PrefixId prefixId;
@@ -107,7 +110,7 @@ TEST(PhysRewriter, PhysicalRewriterBasic) {
 
     // Plan output with properties.
     ASSERT_EXPLAIN_PROPS_V2(
-        "Properties [cost: 1.02, localCost: 0, adjustedCE: 10]\n"
+        "Properties [cost: 0.620002, localCost: 0, adjustedCE: 10]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
         "|   |           ce: 10\n"
@@ -131,7 +134,7 @@ TEST(PhysRewriter, PhysicalRewriterBasic) {
         "|   |       p2\n"
         "|   RefBlock: \n"
         "|       Variable [p2]\n"
-        "Properties [cost: 1.02, localCost: 0.020001, adjustedCE: 10]\n"
+        "Properties [cost: 0.620002, localCost: 0.020001, adjustedCE: 10]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
         "|   |           ce: 10\n"
@@ -160,7 +163,7 @@ TEST(PhysRewriter, PhysicalRewriterBasic) {
         "|   PathGet [a]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
-        "Properties [cost: 1, localCost: 0.200001, adjustedCE: 100]\n"
+        "Properties [cost: 0.600001, localCost: 0, adjustedCE: 100]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
         "|   |           ce: 100\n"
@@ -187,7 +190,7 @@ TEST(PhysRewriter, PhysicalRewriterBasic) {
         "|           EvalPath []\n"
         "|           |   Variable [p1]\n"
         "|           PathIdentity []\n"
-        "Properties [cost: 0.800002, localCost: 0.200001, adjustedCE: 100]\n"
+        "Properties [cost: 0.600001, localCost: 0, adjustedCE: 100]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
         "|   |           ce: 100\n"
@@ -218,7 +221,7 @@ TEST(PhysRewriter, PhysicalRewriterBasic) {
         "|   |       projections: \n"
         "|   |           p1\n"
         "|   |       indexingAvailability: \n"
-        "|   |           [groupId: 0, scanProjection: p1, scanDefName: test, possiblyEqPredsOnly]\n"
+        "|   |           [groupId: 0, scanProjection: p1, scanDefName: test, eqPredsOnly]\n"
         "|   |       collectionAvailability: \n"
         "|   |           test\n"
         "|   |       distributionAvailability: \n"
@@ -457,15 +460,17 @@ TEST(PhysRewriter, DuplicateFilter) {
 
     ABT filterNode1 = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "a", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(0)))),
+            make<PathGet>("a",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(0)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(scanNode));
 
     ABT filterNode2 = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "a", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(0)))),
+            make<PathGet>("a",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(0)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(filterNode1));
 
@@ -494,7 +499,7 @@ TEST(PhysRewriter, DuplicateFilter) {
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_0]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [0]\n"
         "PhysicalScan [{'<root>': root, 'a': evalTemp_0}, c1]\n"
@@ -519,8 +524,9 @@ TEST(PhysRewriter, FilterCollation) {
 
     ABT filterNode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "a", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)))),
+            make<PathGet>("a",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(evalNode));
 
@@ -559,7 +565,7 @@ TEST(PhysRewriter, FilterCollation) {
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_0]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
         "PhysicalScan [{'a': evalTemp_0, 'b': pb}, c1]\n"
@@ -626,8 +632,9 @@ TEST(PhysRewriter, FilterEvalCollation) {
 
     ABT filterNode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "a", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(10)))),
+            make<PathGet>("a",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(10)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(scanNode));
 
@@ -668,7 +675,7 @@ TEST(PhysRewriter, FilterEvalCollation) {
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [pa]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [10]\n"
         "PhysicalScan [{'<root>': root, 'a': pa}, c1]\n"
@@ -687,8 +694,9 @@ TEST(PhysRewriter, FilterIndexing) {
 
     ABT filterNode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "a", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)))),
+            make<PathGet>("a",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(scanNode));
 
@@ -726,7 +734,7 @@ TEST(PhysRewriter, FilterIndexing) {
             "|               Source []\n"
             "Sargable [Index]\n"
             "|   |   |   |   requirementsMap: \n"
-            "|   |   |   |       refProjection: root, path: 'PathGet [a] PathTraverse [] "
+            "|   |   |   |       refProjection: root, path: 'PathGet [a] PathTraverse [1] "
             "PathIdentity []', intervals: {{{[Const [1], Const [1]]}}}\n"
             "|   |   |   candidateIndexes: \n"
             "|   |   |       candidateId: 1, index1, {}, {}, {{{[Const [1], Const [1]]}}}\n"
@@ -807,7 +815,7 @@ TEST(PhysRewriter, FilterIndexing) {
             "Filter []\n"
             "|   EvalFilter []\n"
             "|   |   Variable [evalTemp_0]\n"
-            "|   PathTraverse []\n"
+            "|   PathTraverse [1]\n"
             "|   PathCompare [Eq]\n"
             "|   Const [1]\n"
             "PhysicalScan [{'<root>': root, 'a': evalTemp_0}, c1]\n"
@@ -839,8 +847,9 @@ TEST(PhysRewriter, FilterIndexing1) {
 
     ABT filterNode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "a", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)))),
+            make<PathGet>("a",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("p1")),
         std::move(evalNode));
 
@@ -871,7 +880,7 @@ TEST(PhysRewriter, FilterIndexing1) {
         "|   EvalFilter []\n"
         "|   |   Variable [p1]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
         "Evaluation []\n"
@@ -899,10 +908,13 @@ TEST(PhysRewriter, FilterIndexing2) {
 
     ABT filterNode = make<FilterNode>(
         make<EvalFilter>(make<PathGet>("a",
-                                       make<PathTraverse>(make<PathGet>(
-                                           "b",
-                                           make<PathTraverse>(make<PathCompare>(
-                                               Operations::Eq, Constant::int64(1)))))),
+                                       make<PathTraverse>(
+                                           make<PathGet>("b",
+                                                         make<PathTraverse>(
+                                                             make<PathCompare>(Operations::Eq,
+                                                                               Constant::int64(1)),
+                                                             PathTraverse::kSingleLevel)),
+                                           PathTraverse::kSingleLevel)),
                          make<Variable>("root")),
         std::move(scanNode));
 
@@ -964,7 +976,8 @@ TEST(PhysRewriter, FilterIndexing2NonSarg) {
         std::move(scanNode));
 
     ABT filterNode1 = make<FilterNode>(
-        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1))),
+        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)),
+                                            PathTraverse::kSingleLevel),
                          make<Variable>("pa")),
         std::move(evalNode1));
 
@@ -977,8 +990,10 @@ TEST(PhysRewriter, FilterIndexing2NonSarg) {
     // Non-sargable filter.
     ABT filterNode2 = make<FilterNode>(
         make<EvalFilter>(
-            make<PathTraverse>(make<PathLambda>(make<LambdaAbstraction>(
-                "var", make<FunctionCall>("someFunction", makeSeq(make<Variable>("var")))))),
+            make<PathTraverse>(
+                make<PathLambda>(make<LambdaAbstraction>(
+                    "var", make<FunctionCall>("someFunction", makeSeq(make<Variable>("var"))))),
+                PathTraverse::kSingleLevel),
             make<Variable>("pb")),
         std::move(evalNode2));
 
@@ -1001,7 +1016,7 @@ TEST(PhysRewriter, FilterIndexing2NonSarg) {
 
     ABT optimized = rootNode;
     ASSERT_TRUE(phaseManager.optimize(optimized));
-    ASSERT_BETWEEN(15, 20, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+    ASSERT_BETWEEN(10, 15, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     // Demonstrate non-sargable evaluation and filter are moved under the NLJ+seek,
     ASSERT_EXPLAIN_V2(
@@ -1025,7 +1040,7 @@ TEST(PhysRewriter, FilterIndexing2NonSarg) {
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [pb]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathLambda []\n"
         "|   LambdaAbstraction [var]\n"
         "|   FunctionCall [someFunction]\n"
@@ -1059,7 +1074,8 @@ TEST(PhysRewriter, FilterIndexing3) {
         std::move(scanNode));
 
     ABT filterNode = make<FilterNode>(
-        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1))),
+        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)),
+                                            PathTraverse::kSingleLevel),
                          make<Variable>("pa")),
         std::move(evalNode));
 
@@ -1084,7 +1100,7 @@ TEST(PhysRewriter, FilterIndexing3) {
 
     ABT optimized = std::move(rootNode);
     ASSERT_TRUE(phaseManager.optimize(optimized));
-    ASSERT_EQ(5, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+    ASSERT_EQ(4, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     // We dont need a Seek if we dont have multi-key paths.
     ASSERT_EXPLAIN_V2(
@@ -1094,7 +1110,7 @@ TEST(PhysRewriter, FilterIndexing3) {
         "|   RefBlock: \n"
         "|       Variable [pa]\n"
         "IndexScan [{'<indexKey> 0': pa}, scanDefName: c1, indexDefName: index1, interval: {[Const "
-        "[1], Const [1]], (-inf, +inf)}]\n"
+        "[1], Const [1]], [Const [minKey], Const [maxKey]]}]\n"
         "    BindBlock:\n"
         "        [pa]\n"
         "            Source []\n",
@@ -1113,7 +1129,8 @@ TEST(PhysRewriter, FilterIndexing3MultiKey) {
         std::move(scanNode));
 
     ABT filterNode = make<FilterNode>(
-        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1))),
+        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)),
+                                            PathTraverse::kSingleLevel),
                          make<Variable>("pa")),
         std::move(evalNode));
 
@@ -1137,7 +1154,7 @@ TEST(PhysRewriter, FilterIndexing3MultiKey) {
 
     ABT optimized = std::move(rootNode);
     ASSERT_TRUE(phaseManager.optimize(optimized));
-    ASSERT_EQ(7, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+    ASSERT_BETWEEN(5, 8, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     // We need a Seek to obtain value for "a".
     ASSERT_EXPLAIN_V2(
@@ -1162,7 +1179,7 @@ TEST(PhysRewriter, FilterIndexing3MultiKey) {
         "|   projections: \n"
         "|       rid_0\n"
         "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {[Const "
-        "[1], Const [1]], (-inf, +inf)}]\n"
+        "[1], Const [1]], [Const [minKey], Const [maxKey]]}]\n"
         "    BindBlock:\n"
         "        [rid_0]\n"
         "            Source []\n",
@@ -1175,34 +1192,49 @@ TEST(PhysRewriter, FilterIndexing4) {
 
     ABT scanNode = make<ScanNode>("root", "c1");
 
+    // TODO: SERVER-68006 will investigate why the plan changes without the hints.
+    PartialSchemaSelHints hints;
+    hints.emplace(PartialSchemaKey{"root", make<PathGet>("a", make<PathIdentity>())},
+                  kDefaultSelectivity);
+    hints.emplace(PartialSchemaKey{"root", make<PathGet>("b", make<PathIdentity>())},
+                  kDefaultSelectivity);
+    hints.emplace(PartialSchemaKey{"root", make<PathGet>("c", make<PathIdentity>())},
+                  kDefaultSelectivity);
+    hints.emplace(PartialSchemaKey{"root", make<PathGet>("d", make<PathIdentity>())},
+                  kDefaultSelectivity);
+
     ABT evalNode = make<EvaluationNode>(
         "pa",
         make<EvalPath>(make<PathGet>("a", make<PathIdentity>()), make<Variable>("root")),
         std::move(scanNode));
 
     ABT filterANode = make<FilterNode>(
-        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Lt, Constant::int64(1))),
+        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Lt, Constant::int64(1)),
+                                            PathTraverse::kSingleLevel),
                          make<Variable>("pa")),
         std::move(evalNode));
 
     ABT filterBNode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "b", make<PathTraverse>(make<PathCompare>(Operations::Lt, Constant::int64(1)))),
+            make<PathGet>("b",
+                          make<PathTraverse>(make<PathCompare>(Operations::Lt, Constant::int64(1)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(filterANode));
 
     ABT filterCNode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "c", make<PathTraverse>(make<PathCompare>(Operations::Lt, Constant::int64(1)))),
+            make<PathGet>("c",
+                          make<PathTraverse>(make<PathCompare>(Operations::Lt, Constant::int64(1)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(filterBNode));
 
     ABT filterDNode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "d", make<PathTraverse>(make<PathCompare>(Operations::Lt, Constant::int64(1)))),
+            make<PathGet>("d",
+                          make<PathTraverse>(make<PathCompare>(Operations::Lt, Constant::int64(1)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(filterCNode));
 
@@ -1214,6 +1246,7 @@ TEST(PhysRewriter, FilterIndexing4) {
          OptPhaseManager::OptPhase::MemoExplorationPhase,
          OptPhaseManager::OptPhase::MemoImplementationPhase},
         prefixId,
+        false /*requireRID*/,
         {{{"c1",
            ScanDefinition{
                {},
@@ -1225,6 +1258,8 @@ TEST(PhysRewriter, FilterIndexing4) {
                                  false /*isMultiKey*/,
                                  {DistributionType::Centralized},
                                  {}}}}}}}},
+        std::make_unique<HintedCE>(std::move(hints)),
+        std::make_unique<DefaultCosting>(),
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
@@ -1233,7 +1268,7 @@ TEST(PhysRewriter, FilterIndexing4) {
     phaseManager.getHints()._disableHashJoinRIDIntersect = true;
 
     ASSERT_TRUE(phaseManager.optimize(optimized));
-    ASSERT_BETWEEN(65, 80, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+    ASSERT_BETWEEN(30, 50, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_V2(
         "Root []\n"
@@ -1257,8 +1292,9 @@ TEST(PhysRewriter, FilterIndexing4) {
         "|   PathCompare [Lt]\n"
         "|   Const [1]\n"
         "IndexScan [{'<indexKey> 0': pa, '<indexKey> 1': evalTemp_6, '<indexKey> 2': evalTemp_7, "
-        "'<indexKey> 3': evalTemp_8}, scanDefName: c1, indexDefName: index1, interval: {(-inf, "
-        "Const [1]), (-inf, +inf), (-inf, +inf), (-inf, +inf)}]\n"
+        "'<indexKey> 3': evalTemp_8}, scanDefName: c1, indexDefName: index1, interval: {[Const "
+        "[minKey], Const [1]), [Const [minKey], Const [maxKey]], [Const [minKey], Const [maxKey]], "
+        "[Const [minKey], Const [maxKey]]}]\n"
         "    BindBlock:\n"
         "        [evalTemp_6]\n"
         "            Source []\n"
@@ -1283,7 +1319,8 @@ TEST(PhysRewriter, FilterIndexing5) {
         std::move(scanNode));
 
     ABT filterANode = make<FilterNode>(
-        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Gt, Constant::int64(0))),
+        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Gt, Constant::int64(0)),
+                                            PathTraverse::kSingleLevel),
                          make<Variable>("pa")),
         std::move(evalANode));
 
@@ -1293,7 +1330,8 @@ TEST(PhysRewriter, FilterIndexing5) {
         std::move(filterANode));
 
     ABT filterBNode = make<FilterNode>(
-        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Gt, Constant::int64(0))),
+        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Gt, Constant::int64(0)),
+                                            PathTraverse::kSingleLevel),
                          make<Variable>("pb")),
         std::move(evalBNode));
 
@@ -1321,7 +1359,7 @@ TEST(PhysRewriter, FilterIndexing5) {
 
     ABT optimized = std::move(rootNode);
     ASSERT_TRUE(phaseManager.optimize(optimized));
-    ASSERT_BETWEEN(25, 55, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+    ASSERT_BETWEEN(25, 70, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     // We can cover both fields with the index, and need separate sort on "b".
     ASSERT_EXPLAIN_V2(
@@ -1343,7 +1381,7 @@ TEST(PhysRewriter, FilterIndexing5) {
         "|   PathCompare [Gt]\n"
         "|   Const [0]\n"
         "IndexScan [{'<indexKey> 0': pa, '<indexKey> 1': pb}, scanDefName: c1, indexDefName: "
-        "index1, interval: {(Const [0], +inf), (-inf, +inf)}]\n"
+        "index1, interval: {(Const [0], Const [maxKey]], [Const [minKey], Const [maxKey]]}]\n"
         "    BindBlock:\n"
         "        [pa]\n"
         "            Source []\n"
@@ -1364,7 +1402,8 @@ TEST(PhysRewriter, FilterIndexing6) {
         std::move(scanNode));
 
     ABT filterANode = make<FilterNode>(
-        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(0))),
+        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(0)),
+                                            PathTraverse::kSingleLevel),
                          make<Variable>("pa")),
         std::move(evalANode));
 
@@ -1374,7 +1413,8 @@ TEST(PhysRewriter, FilterIndexing6) {
         std::move(filterANode));
 
     ABT filterBNode = make<FilterNode>(
-        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Gt, Constant::int64(0))),
+        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Gt, Constant::int64(0)),
+                                            PathTraverse::kSingleLevel),
                          make<Variable>("pb")),
         std::move(evalBNode));
 
@@ -1402,7 +1442,7 @@ TEST(PhysRewriter, FilterIndexing6) {
 
     ABT optimized = std::move(rootNode);
     ASSERT_TRUE(phaseManager.optimize(optimized));
-    ASSERT_BETWEEN(9, 15, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+    ASSERT_BETWEEN(5, 10, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     // We can cover both fields with the index, and do not need a separate sort on "b".
     ASSERT_EXPLAIN_V2(
@@ -1414,7 +1454,7 @@ TEST(PhysRewriter, FilterIndexing6) {
         "|       Variable [pa]\n"
         "|       Variable [pb]\n"
         "IndexScan [{'<indexKey> 0': pa, '<indexKey> 1': pb}, scanDefName: c1, indexDefName: "
-        "index1, interval: {[Const [0], Const [0]], (Const [0], +inf)}]\n"
+        "index1, interval: {[Const [0], Const [0]], (Const [0], Const [maxKey]]}]\n"
         "    BindBlock:\n"
         "        [pa]\n"
         "            Source []\n"
@@ -1437,8 +1477,9 @@ TEST(PhysRewriter, FilterIndexingStress) {
 
         result = make<FilterNode>(
             make<EvalFilter>(make<PathGet>(os.str(),
-                                           make<PathTraverse>(make<PathCompare>(
-                                               Operations::Eq, Constant::int64(0)))),
+                                           make<PathTraverse>(make<PathCompare>(Operations::Eq,
+                                                                                Constant::int64(0)),
+                                                              PathTraverse::kSingleLevel)),
                              make<Variable>("root")),
             std::move(result));
     }
@@ -1478,7 +1519,7 @@ TEST(PhysRewriter, FilterIndexingStress) {
 
     // Without the changes to restrict SargableNode split to which this test is tied, we would
     // be exploring 2^kFilterCount plans, one for each created group.
-    ASSERT_EQ(51, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+    ASSERT_EQ(55, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     const BSONObj& explainRoot = ExplainGenerator::explainBSONObj(optimized);
     ASSERT_BSON_PATH("\"Filter\"", explainRoot, "child.nodeType");
@@ -1530,14 +1571,24 @@ TEST(PhysRewriter, FilterIndexingVariable) {
 
     ABT scanNode = make<ScanNode>("root", "c1");
 
+    // TODO: SERVER-68006 will investigate why the plan changes without the hints.
+    PartialSchemaSelHints hints;
+    hints.emplace(PartialSchemaKey{"root",
+                                   make<PathGet>("a",
+                                                 make<PathTraverse>(make<PathIdentity>(),
+                                                                    PathTraverse::kSingleLevel))},
+                  kDefaultSelectivity);
+
     // Encode a condition using two query parameters (expressed as functions):
     // "a" > param_0 AND "a" >= param_1 (observe param_1 comparison is inclusive).
     ABT filterNode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>("a",
-                          make<PathTraverse>(make<PathComposeM>(
-                              make<PathCompare>(Operations::Gt, getQueryParamFn(0)),
-                              make<PathCompare>(Operations::Gte, getQueryParamFn(1))))),
+            make<PathGet>(
+                "a",
+                make<PathTraverse>(
+                    make<PathComposeM>(make<PathCompare>(Operations::Gt, getQueryParamFn(0)),
+                                       make<PathCompare>(Operations::Gte, getQueryParamFn(1))),
+                    PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(scanNode));
 
@@ -1549,19 +1600,24 @@ TEST(PhysRewriter, FilterIndexingVariable) {
          OptPhaseManager::OptPhase::MemoExplorationPhase,
          OptPhaseManager::OptPhase::MemoImplementationPhase},
         prefixId,
+        false /*requireRID*/,
         {{{"c1",
            ScanDefinition{
                {},
                {{"index1",
                  makeIndexDefinition("a", CollationOp::Ascending, false /*isMultiKey*/)}}}}}},
+        std::make_unique<HintedCE>(std::move(hints)),
+        std::make_unique<DefaultCosting>(),
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
+    phaseManager.getHints()._disableScan = true;
     ASSERT_TRUE(phaseManager.optimize(optimized));
     ASSERT_EQ(4, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     // Observe unioning of two index scans with complex expressions for bounds. This encodes:
-    // (max(param_0, param_1), +inf) U [param_0 > param_1 ? MaxKey : param_1, max(param_0, param_1)]
+    // (max(param_0, param_1), Const [maxKey]] U [param_0 > param_1 ? MaxKey : param_1, max(param_0,
+    // param_1)]
     ASSERT_EXPLAIN_V2(
         "Root []\n"
         "|   |   projections: \n"
@@ -1591,8 +1647,8 @@ TEST(PhysRewriter, FilterIndexingVariable) {
         "|   |           Source []\n"
         "|   IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {(If [] "
         "BinaryOp [Gte] FunctionCall [getQueryParam] Const [0] FunctionCall [getQueryParam] Const "
-        "[1] FunctionCall [getQueryParam] Const [0] FunctionCall [getQueryParam] Const [1], "
-        "+inf)}]\n"
+        "[1] FunctionCall [getQueryParam] Const [0] FunctionCall [getQueryParam] Const [1], Const "
+        "[maxKey]]}]\n"
         "|       BindBlock:\n"
         "|           [rid_0]\n"
         "|               Source []\n"
@@ -1603,6 +1659,81 @@ TEST(PhysRewriter, FilterIndexingVariable) {
         "FunctionCall [getQueryParam] Const [0] FunctionCall [getQueryParam] Const [1]]}]\n"
         "    BindBlock:\n"
         "        [rid_0]\n"
+        "            Source []\n",
+        optimized);
+}
+
+TEST(PhysRewriter, FilterIndexingMaxKey) {
+    using namespace properties;
+
+    ABT scanNode = make<ScanNode>("root", "c1");
+
+    ABT filterNode1 = make<FilterNode>(
+        make<EvalFilter>(
+            make<PathGet>(
+                "a",
+                make<PathTraverse>(
+                    make<PathComposeM>(make<PathCompare>(Operations::Gt, Constant::int64(1)),
+                                       make<PathCompare>(Operations::Lte, Constant::maxKey())),
+                    PathTraverse::kSingleLevel)),
+            make<Variable>("root")),
+        std::move(scanNode));
+
+    ABT filterNode2 = make<FilterNode>(
+        make<EvalFilter>(
+            make<PathGet>(
+                "b",
+                make<PathTraverse>(
+                    make<PathComposeM>(make<PathCompare>(Operations::Gt, Constant::int64(2)),
+                                       make<PathCompare>(Operations::Lt, Constant::maxKey())),
+                    PathTraverse::kSingleLevel)),
+            make<Variable>("root")),
+        std::move(filterNode1));
+
+    ABT rootNode =
+        make<RootNode>(ProjectionRequirement{ProjectionNameVector{"root"}}, std::move(filterNode2));
+
+    PrefixId prefixId;
+    OptPhaseManager phaseManager(
+        {OptPhaseManager::OptPhase::MemoSubstitutionPhase,
+         OptPhaseManager::OptPhase::MemoExplorationPhase,
+         OptPhaseManager::OptPhase::MemoImplementationPhase},
+        prefixId,
+        {{{"c1", ScanDefinition{{}, {}}}}},
+        {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
+
+    ABT optimized = rootNode;
+    ASSERT_TRUE(phaseManager.optimize(optimized));
+
+    // Observe redundant predicate a <= MaxKey is removed.
+    ASSERT_EXPLAIN_V2(
+        "Root []\n"
+        "|   |   projections: \n"
+        "|   |       root\n"
+        "|   RefBlock: \n"
+        "|       Variable [root]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [evalTemp_1]\n"
+        "|   PathTraverse [1]\n"
+        "|   PathComposeM []\n"
+        "|   |   PathCompare [Lt]\n"
+        "|   |   Const [maxKey]\n"
+        "|   PathCompare [Gt]\n"
+        "|   Const [2]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [evalTemp_0]\n"
+        "|   PathTraverse [1]\n"
+        "|   PathCompare [Gt]\n"
+        "|   Const [1]\n"
+        "PhysicalScan [{'<root>': root, 'a': evalTemp_0, 'b': evalTemp_1}, c1]\n"
+        "    BindBlock:\n"
+        "        [evalTemp_0]\n"
+        "            Source []\n"
+        "        [evalTemp_1]\n"
+        "            Source []\n"
+        "        [root]\n"
         "            Source []\n",
         optimized);
 }
@@ -1619,12 +1750,15 @@ TEST(PhysRewriter, FilterReorder) {
         ProjectionName projName = prefixId.getNextId("field");
         hints.emplace(
             PartialSchemaKey{"root",
-                             make<PathGet>(projName, make<PathTraverse>(make<PathIdentity>()))},
-            0.1 * (kFilterCount - i));
+                             make<PathGet>(projName,
+                                           make<PathTraverse>(make<PathIdentity>(),
+                                                              PathTraverse::kSingleLevel))},
+            kDefaultSelectivity * (kFilterCount - i));
         result = make<FilterNode>(
             make<EvalFilter>(make<PathGet>(std::move(projName),
-                                           make<PathTraverse>(make<PathCompare>(
-                                               Operations::Eq, Constant::int64(i)))),
+                                           make<PathTraverse>(make<PathCompare>(Operations::Eq,
+                                                                                Constant::int64(i)),
+                                                              PathTraverse::kSingleLevel)),
                              make<Variable>("root")),
             std::move(result));
     }
@@ -1658,31 +1792,31 @@ TEST(PhysRewriter, FilterReorder) {
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_0]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [0]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_1]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_2]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [2]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_3]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [3]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_4]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [4]\n"
         "PhysicalScan [{'<root>': root, 'field_0': evalTemp_0, 'field_1': evalTemp_1, "
@@ -1740,9 +1874,8 @@ TEST(PhysRewriter, CoveredScan) {
         "|   |       pa\n"
         "|   RefBlock: \n"
         "|       Variable [pa]\n"
-        "IndexScan [{'<indexKey> 0': pa}, scanDefName: c1, indexDefName: index1, interval: "
-        "{(-inf, "
-        "+inf)}]\n"
+        "IndexScan [{'<indexKey> 0': pa}, scanDefName: c1, indexDefName: index1, interval: {[Const "
+        "[minKey], Const [maxKey]]}]\n"
         "    BindBlock:\n"
         "        [pa]\n"
         "            Source []\n",
@@ -1796,7 +1929,7 @@ TEST(PhysRewriter, EvalIndexing) {
             "|   RefBlock: \n"
             "|       Variable [pa]\n"
             "IndexScan [{'<indexKey> 0': pa}, scanDefName: c1, indexDefName: index1, "
-            "interval: {(Const [1], +inf)}]\n"
+            "interval: {(Const [1], Const [maxKey]]}]\n"
             "    BindBlock:\n"
             "        [pa]\n"
             "            Source []\n",
@@ -1834,7 +1967,7 @@ TEST(PhysRewriter, EvalIndexing) {
             "|   RefBlock: \n"
             "|       Variable [pa]\n"
             "IndexScan [{'<indexKey> 0': pa}, scanDefName: c1, indexDefName: index1, "
-            "interval: {(Const [1], +inf)}]\n"
+            "interval: {(Const [1], Const [maxKey]]}]\n"
             "    BindBlock:\n"
             "        [pa]\n"
             "            Source []\n",
@@ -1971,7 +2104,7 @@ TEST(PhysRewriter, EvalIndexing2) {
         "|           PathConstant []\n"
         "|           Variable [pa1]\n"
         "IndexScan [{'<indexKey> 0': pa1}, scanDefName: c1, indexDefName: index1, interval: "
-        "{(-inf, +inf)}]\n"
+        "{[Const [minKey], Const [maxKey]]}]\n"
         "    BindBlock:\n"
         "        [pa1]\n"
         "            Source []\n",
@@ -1981,6 +2114,12 @@ TEST(PhysRewriter, EvalIndexing2) {
 TEST(PhysRewriter, MultiKeyIndex) {
     using namespace properties;
     PrefixId prefixId;
+
+    PartialSchemaSelHints hints;
+    hints.emplace(PartialSchemaKey{"root", make<PathGet>("a", make<PathIdentity>())},
+                  kDefaultSelectivity);
+    hints.emplace(PartialSchemaKey{"root", make<PathGet>("b", make<PathIdentity>())},
+                  kDefaultSelectivity);
 
     ABT scanNode = make<ScanNode>("root", "c1");
 
@@ -2016,12 +2155,15 @@ TEST(PhysRewriter, MultiKeyIndex) {
          OptPhaseManager::OptPhase::MemoExplorationPhase,
          OptPhaseManager::OptPhase::MemoImplementationPhase},
         prefixId,
+        false /*requireRID*/,
         {{{"c1",
            ScanDefinition{
                {},
                {{"index1", makeIndexDefinition("a", CollationOp::Ascending, false /*isMultiKey*/)},
                 {"index2",
                  makeIndexDefinition("b", CollationOp::Descending, false /*isMultiKey*/)}}}}}},
+        std::make_unique<HintedCE>(std::move(hints)),
+        std::make_unique<DefaultCosting>(),
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     {
@@ -2031,10 +2173,11 @@ TEST(PhysRewriter, MultiKeyIndex) {
         phaseManager.getHints()._disableHashJoinRIDIntersect = true;
 
         ASSERT_TRUE(phaseManager.optimize(optimized));
-        ASSERT_BETWEEN(15, 25, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+        ASSERT_BETWEEN(13, 25, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
         // GroupBy+Union cannot propagate collation requirement, and we need a separate
         // CollationNode.
+
         ASSERT_EXPLAIN_V2(
             "Root []\n"
             "|   |   projections: \n"
@@ -2102,9 +2245,8 @@ TEST(PhysRewriter, MultiKeyIndex) {
             "|   |   BindBlock:\n"
             "|   |       [sideId_0]\n"
             "|   |           Const [1]\n"
-            "|   IndexScan [{'<indexKey> 0': pb, '<rid>': rid_0}, scanDefName: c1, "
-            "indexDefName: "
-            "index2, interval: {(Const [2], +inf)}]\n"
+            "|   IndexScan [{'<indexKey> 0': pb, '<rid>': rid_0}, scanDefName: c1, indexDefName: "
+            "index2, interval: {[Const [maxKey], Const [2])}]\n"
             "|       BindBlock:\n"
             "|           [pb]\n"
             "|               Source []\n"
@@ -2172,7 +2314,7 @@ TEST(PhysRewriter, MultiKeyIndex) {
             "|   |       [rid_2]\n"
             "|   |           Variable [rid_0]\n"
             "|   IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index2, interval: "
-            "{(Const [2], +inf)}, reversed]\n"
+            "{[Const [maxKey], Const [2])}, reversed]\n"
             "|       BindBlock:\n"
             "|           [rid_0]\n"
             "|               Source []\n"
@@ -2197,7 +2339,8 @@ TEST(PhysRewriter, CompoundIndex1) {
         std::move(scanNode));
 
     ABT filterANode = make<FilterNode>(
-        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1))),
+        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)),
+                                            PathTraverse::kSingleLevel),
                          make<Variable>("pa")),
         std::move(evalANode));
 
@@ -2207,21 +2350,24 @@ TEST(PhysRewriter, CompoundIndex1) {
         std::move(filterANode));
 
     ABT filterBNode = make<FilterNode>(
-        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(2))),
+        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(2)),
+                                            PathTraverse::kSingleLevel),
                          make<Variable>("pb")),
         std::move(evalBNode));
 
     ABT filterCNode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "c", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(3)))),
+            make<PathGet>("c",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(3)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(filterBNode));
 
     ABT filterDNode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "d", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(4)))),
+            make<PathGet>("d",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(4)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(filterCNode));
 
@@ -2248,7 +2394,7 @@ TEST(PhysRewriter, CompoundIndex1) {
 
     ABT optimized = rootNode;
     ASSERT_TRUE(phaseManager.optimize(optimized));
-    ASSERT_BETWEEN(60, 110, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+    ASSERT_BETWEEN(25, 35, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     const BSONObj& explainRoot = ExplainGenerator::explainBSONObj(optimized);
     ASSERT_BSON_PATH("\"BinaryJoin\"", explainRoot, "child.nodeType");
@@ -2274,7 +2420,8 @@ TEST(PhysRewriter, CompoundIndex2) {
         std::move(scanNode));
 
     ABT filterANode = make<FilterNode>(
-        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1))),
+        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)),
+                                            PathTraverse::kSingleLevel),
                          make<Variable>("pa")),
         std::move(evalANode));
 
@@ -2284,21 +2431,24 @@ TEST(PhysRewriter, CompoundIndex2) {
         std::move(filterANode));
 
     ABT filterBNode = make<FilterNode>(
-        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(2))),
+        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(2)),
+                                            PathTraverse::kSingleLevel),
                          make<Variable>("pb")),
         std::move(evalBNode));
 
     ABT filterCNode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "c", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(3)))),
+            make<PathGet>("c",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(3)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(filterBNode));
 
     ABT filterDNode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "d", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(4)))),
+            make<PathGet>("d",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(4)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(filterCNode));
 
@@ -2332,7 +2482,7 @@ TEST(PhysRewriter, CompoundIndex2) {
     ABT optimized = rootNode;
 
     ASSERT_TRUE(phaseManager.optimize(optimized));
-    ASSERT_BETWEEN(100, 170, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+    ASSERT_BETWEEN(40, 60, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     const BSONObj& explainRoot = ExplainGenerator::explainBSONObj(optimized);
     ASSERT_BSON_PATH("\"BinaryJoin\"", explainRoot, "child.nodeType");
@@ -2358,7 +2508,8 @@ TEST(PhysRewriter, CompoundIndex3) {
         std::move(scanNode));
 
     ABT filterANode = make<FilterNode>(
-        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1))),
+        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)),
+                                            PathTraverse::kSingleLevel),
                          make<Variable>("pa")),
         std::move(evalANode));
 
@@ -2368,21 +2519,24 @@ TEST(PhysRewriter, CompoundIndex3) {
         std::move(filterANode));
 
     ABT filterBNode = make<FilterNode>(
-        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(2))),
+        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(2)),
+                                            PathTraverse::kSingleLevel),
                          make<Variable>("pb")),
         std::move(evalBNode));
 
     ABT filterCNode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "c", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(3)))),
+            make<PathGet>("c",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(3)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(filterBNode));
 
     ABT filterDNode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "d", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(4)))),
+            make<PathGet>("d",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(4)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(filterCNode));
 
@@ -2412,8 +2566,9 @@ TEST(PhysRewriter, CompoundIndex3) {
 
     ABT optimized = rootNode;
     ASSERT_TRUE(phaseManager.optimize(optimized));
-    ASSERT_BETWEEN(70, 110, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+    ASSERT_BETWEEN(70, 130, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
+    // Demonstrate we have a merge join because we have point predicates.
     ASSERT_EXPLAIN_V2(
         "Root []\n"
         "|   |   projections: \n"
@@ -2473,6 +2628,10 @@ TEST(PhysRewriter, CompoundIndex4Negative) {
     using namespace properties;
     PrefixId prefixId;
 
+    PartialSchemaSelHints hints;
+    hints.emplace(PartialSchemaKey{"root", make<PathGet>("a", make<PathIdentity>())}, 0.05);
+    hints.emplace(PartialSchemaKey{"root", make<PathGet>("b", make<PathIdentity>())}, 0.1);
+
     ABT scanNode = make<ScanNode>("root", "c1");
 
     // Create the following expression: {$and: [{a: {$eq: 1}}, {b: {$eq: 2}}]}
@@ -2482,7 +2641,8 @@ TEST(PhysRewriter, CompoundIndex4Negative) {
         std::move(scanNode));
 
     ABT filterANode = make<FilterNode>(
-        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1))),
+        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)),
+                                            PathTraverse::kSingleLevel),
                          make<Variable>("pa")),
         std::move(evalANode));
 
@@ -2492,7 +2652,8 @@ TEST(PhysRewriter, CompoundIndex4Negative) {
         std::move(filterANode));
 
     ABT filterBNode = make<FilterNode>(
-        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(2))),
+        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(2)),
+                                            PathTraverse::kSingleLevel),
                          make<Variable>("pb")),
         std::move(evalBNode));
 
@@ -2505,6 +2666,7 @@ TEST(PhysRewriter, CompoundIndex4Negative) {
          OptPhaseManager::OptPhase::MemoExplorationPhase,
          OptPhaseManager::OptPhase::MemoImplementationPhase},
         prefixId,
+        false /*requireRID*/,
         {{{"c1",
            ScanDefinition{
                {},
@@ -2516,23 +2678,29 @@ TEST(PhysRewriter, CompoundIndex4Negative) {
                  IndexDefinition{{{makeNonMultikeyIndexPath("b"), CollationOp::Ascending},
                                   {makeNonMultikeyIndexPath("d"), CollationOp::Ascending}},
                                  false /*isMultiKey*/}}}}}}},
+        std::make_unique<HintedCE>(std::move(hints)),
+        std::make_unique<DefaultCosting>(),
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
     ASSERT_TRUE(phaseManager.optimize(optimized));
-    ASSERT_BETWEEN(20, 30, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+    ASSERT_BETWEEN(5, 10, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     // Index intersection via merge join relies on the fact that the RIDs of equal keys are sorted.
     // Demonstrate that we do not get a merge join when the lookup keys on both intersected indexes
     // do not cover all field indexes. In this case there is no guarantee that the RIDs of all
     // matching keys will be sorted, and therefore they cannot be merge-joined.
+    // Also demonstrate we pick index1 with the more selective predicate.
+
     const BSONObj& explainRoot = ExplainGenerator::explainBSONObj(optimized);
     ASSERT_BSON_PATH("\"BinaryJoin\"", explainRoot, "child.nodeType");
     ASSERT_BSON_PATH("\"Filter\"", explainRoot, "child.rightChild.nodeType");
-    ASSERT_BSON_PATH("\"LimitSkip\"", explainRoot, "child.rightChild.child.nodeType");
-    ASSERT_BSON_PATH("\"Seek\"", explainRoot, "child.rightChild.child.child.nodeType");
+    ASSERT_BSON_PATH("2", explainRoot, "child.rightChild.filter.path.value.value");
+    ASSERT_BSON_PATH("\"Seek\"", explainRoot, "child.rightChild.child.child.child.nodeType");
+
     ASSERT_BSON_PATH("\"IndexScan\"", explainRoot, "child.leftChild.nodeType");
-    ASSERT_BSON_PATH("\"index1\"", explainRoot, "child.leftChild.indexDefName");
+    ASSERT_BSON_PATH("1", explainRoot, "child.leftChild.interval.0.lowBound.bound.value");
+    ASSERT_BSON_PATH("1", explainRoot, "child.leftChild.interval.0.highBound.bound.value");
 }
 
 TEST(PhysRewriter, IndexBoundsIntersect) {
@@ -2543,23 +2711,23 @@ TEST(PhysRewriter, IndexBoundsIntersect) {
 
     ABT filterNode1 = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "b", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)))),
+            make<PathGet>("b",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(scanNode));
 
     ABT filterNode2 = make<FilterNode>(
         make<EvalFilter>(
-            make<PathComposeA>(
-                make<PathComposeM>(make<PathGet>("a",
-                                                 make<PathTraverse>(make<PathCompare>(
-                                                     Operations::Gt, Constant::int64(70)))),
-                                   make<PathGet>("a",
-                                                 make<PathTraverse>(make<PathCompare>(
-                                                     Operations::Lt, Constant::int64(90))))),
+            make<PathComposeM>(
                 make<PathGet>(
                     "a",
-                    make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(100))))),
+                    make<PathTraverse>(make<PathCompare>(Operations::Gt, Constant::int64(70)),
+                                       PathTraverse::kSingleLevel)),
+                make<PathGet>(
+                    "a",
+                    make<PathTraverse>(make<PathCompare>(Operations::Lt, Constant::int64(90)),
+                                       PathTraverse::kSingleLevel))),
             make<Variable>("root")),
         std::move(filterNode1));
 
@@ -2574,93 +2742,44 @@ TEST(PhysRewriter, IndexBoundsIntersect) {
         {{{"c1",
            ScanDefinition{{},
                           {{"index1",
-                            IndexDefinition{{{makeIndexPath("a"), CollationOp::Ascending},
-                                             {makeIndexPath("b"), CollationOp::Ascending}},
+                            IndexDefinition{{{makeIndexPath("b"), CollationOp::Ascending},
+                                             {makeIndexPath("a"), CollationOp::Ascending}},
                                             true /*isMultiKey*/}}}}}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
     ASSERT_TRUE(phaseManager.optimize(optimized));
-    ASSERT_BETWEEN(10, 15, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+    ASSERT_BETWEEN(30, 40, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
-    ASSERT_EXPLAIN_V2(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   RefBlock: \n"
-        "Filter []\n"
-        "|   EvalFilter []\n"
-        "|   |   Variable [evalTemp_1]\n"
-        "|   PathCompare [Eq]\n"
-        "|   Const [1]\n"
-        "GroupBy []\n"
-        "|   |   groupings: \n"
-        "|   |       RefBlock: \n"
-        "|   |           Variable [rid_0]\n"
-        "|   aggregations: \n"
-        "|       [evalTemp_1]\n"
-        "|           FunctionCall [$first]\n"
-        "|           Variable [disjunction_0]\n"
-        "Union []\n"
-        "|   |   BindBlock:\n"
-        "|   |       [disjunction_0]\n"
-        "|   |           Source []\n"
-        "|   |       [rid_0]\n"
-        "|   |           Source []\n"
-        "|   IndexScan [{'<indexKey> 1': disjunction_0, '<rid>': rid_0}, scanDefName: c1, "
-        "indexDefName: index1, interval: {[Const [100], Const [100]], (-inf, +inf)}]\n"
-        "|       BindBlock:\n"
-        "|           [disjunction_0]\n"
-        "|               Source []\n"
-        "|           [rid_0]\n"
-        "|               Source []\n"
-        "Filter []\n"
-        "|   EvalFilter []\n"
-        "|   |   FunctionCall [getArraySize]\n"
-        "|   |   Variable [sides_0]\n"
-        "|   PathCompare [Eq]\n"
-        "|   Const [2]\n"
-        "GroupBy []\n"
-        "|   |   groupings: \n"
-        "|   |       RefBlock: \n"
-        "|   |           Variable [rid_0]\n"
-        "|   aggregations: \n"
-        "|       [disjunction_0]\n"
-        "|           FunctionCall [$first]\n"
-        "|           Variable [conjunction_0]\n"
-        "|       [sides_0]\n"
-        "|           FunctionCall [$addToSet]\n"
-        "|           Variable [sideId_0]\n"
-        "Union []\n"
-        "|   |   BindBlock:\n"
-        "|   |       [conjunction_0]\n"
-        "|   |           Source []\n"
-        "|   |       [rid_0]\n"
-        "|   |           Source []\n"
-        "|   |       [sideId_0]\n"
-        "|   |           Source []\n"
-        "|   Evaluation []\n"
-        "|   |   BindBlock:\n"
-        "|   |       [sideId_0]\n"
-        "|   |           Const [1]\n"
-        "|   IndexScan [{'<indexKey> 1': conjunction_0, '<rid>': rid_0}, scanDefName: c1, "
-        "indexDefName: index1, interval: {(-inf, Const [90]), (-inf, +inf)}]\n"
-        "|       BindBlock:\n"
-        "|           [conjunction_0]\n"
-        "|               Source []\n"
-        "|           [rid_0]\n"
-        "|               Source []\n"
-        "Evaluation []\n"
-        "|   BindBlock:\n"
-        "|       [sideId_0]\n"
-        "|           Const [0]\n"
-        "IndexScan [{'<indexKey> 1': conjunction_0, '<rid>': rid_0}, scanDefName: c1, "
-        "indexDefName: index1, interval: {(Const [70], +inf), (-inf, +inf)}]\n"
-        "    BindBlock:\n"
-        "        [conjunction_0]\n"
-        "            Source []\n"
-        "        [rid_0]\n"
-        "            Source []\n",
-        optimized);
+    // Demonstrate that the predicates >70 and <90 are NOT combined into the same interval (70, 90)
+    // since the paths are multiKey. With the heuristic estimate we may get either interval in the
+    // index, and the other one as a residual filter.
+
+    const BSONObj& explainRoot = ExplainGenerator::explainBSONObj(optimized);
+    ASSERT_BSON_PATH("\"BinaryJoin\"", explainRoot, "child.nodeType");
+
+    ASSERT_BSON_PATH("\"Filter\"", explainRoot, "child.rightChild.nodeType");
+    const std::string filterVal = dotted_path_support::extractElementAtPath(
+                                      explainRoot, "child.rightChild.filter.path.input.value.value")
+                                      .toString(false /*includeFieldName*/);
+
+    ASSERT_BSON_PATH("\"Seek\"", explainRoot, "child.rightChild.child.child.nodeType");
+    ASSERT_BSON_PATH("\"Unique\"", explainRoot, "child.leftChild.nodeType");
+
+    const BSONObj& explainIndexScan =
+        dotted_path_support::extractElementAtPath(explainRoot, "child.leftChild.child").Obj();
+    ASSERT_BSON_PATH("\"IndexScan\"", explainIndexScan, "nodeType");
+    ASSERT_BSON_PATH("1", explainIndexScan, "interval.0.lowBound.bound.value");
+    ASSERT_BSON_PATH("1", explainIndexScan, "interval.0.highBound.bound.value");
+
+    const std::string lowBound = dotted_path_support::extractElementAtPath(
+                                     explainIndexScan, "interval.1.lowBound.bound.value")
+                                     .toString(false /*includeFieldName*/);
+    const std::string highBound = dotted_path_support::extractElementAtPath(
+                                      explainIndexScan, "interval.1.highBound.bound.value")
+                                      .toString(false /*includeFieldName*/);
+    ASSERT_TRUE((filterVal == "70" && lowBound == "MinKey" && highBound == "90") ||
+                (filterVal == "90" && lowBound == "70" && highBound == "MaxKey"));
 }
 
 TEST(PhysRewriter, IndexBoundsIntersect1) {
@@ -2677,8 +2796,10 @@ TEST(PhysRewriter, IndexBoundsIntersect1) {
     ABT filterNode = make<FilterNode>(
         make<EvalFilter>(
             make<PathComposeM>(
-                make<PathTraverse>(make<PathCompare>(Operations::Gt, Constant::int64(70))),
-                make<PathTraverse>(make<PathCompare>(Operations::Lt, Constant::int64(90)))),
+                make<PathTraverse>(make<PathCompare>(Operations::Gt, Constant::int64(70)),
+                                   PathTraverse::kSingleLevel),
+                make<PathTraverse>(make<PathCompare>(Operations::Lt, Constant::int64(90)),
+                                   PathTraverse::kSingleLevel)),
             make<Variable>("pa")),
         std::move(evalNode));
 
@@ -2703,8 +2824,10 @@ TEST(PhysRewriter, IndexBoundsIntersect1) {
 
     ABT optimized = rootNode;
     ASSERT_TRUE(phaseManager.optimize(optimized));
-    ASSERT_BETWEEN(15, 20, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+    ASSERT_BETWEEN(5, 10, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
+    // Demonstrate we can intersect the intervals since we have non-multikey paths, and the
+    // collation requirement is satisfied via the index scan.
     ASSERT_EXPLAIN_V2(
         "Root []\n"
         "|   |   projections: \n"
@@ -2743,10 +2866,12 @@ TEST(PhysRewriter, IndexBoundsIntersect2) {
         std::move(scanNode));
 
     ABT filterNode = make<FilterNode>(
-        make<EvalFilter>(make<PathTraverse>(make<PathComposeM>(
-                             make<PathCompare>(Operations::Gt, Constant::int64(70)),
-                             make<PathCompare>(Operations::Lt, Constant::int64(90)))),
-                         make<Variable>("pa")),
+        make<EvalFilter>(
+            make<PathTraverse>(
+                make<PathComposeM>(make<PathCompare>(Operations::Gt, Constant::int64(70)),
+                                   make<PathCompare>(Operations::Lt, Constant::int64(90))),
+                PathTraverse::kSingleLevel),
+            make<Variable>("pa")),
         std::move(evalNode));
 
     ABT rootNode =
@@ -2807,115 +2932,19 @@ TEST(PhysRewriter, IndexBoundsIntersect3) {
 
     ABT filterNode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>("a",
-                          make<PathTraverse>(make<PathComposeM>(
-                              make<PathGet>("b",
-                                            make<PathTraverse>(make<PathCompare>(
-                                                Operations::Gt, Constant::int64(70)))),
-                              make<PathGet>("b",
-                                            make<PathTraverse>(make<PathCompare>(
-                                                Operations::Lt, Constant::int64(90))))))),
-            make<Variable>("root")),
-        std::move(scanNode));
-
-    ABT rootNode =
-        make<RootNode>(ProjectionRequirement{ProjectionNameVector{"root"}}, std::move(filterNode));
-
-    OptPhaseManager phaseManager(
-        {OptPhaseManager::OptPhase::MemoSubstitutionPhase,
-         OptPhaseManager::OptPhase::MemoExplorationPhase,
-         OptPhaseManager::OptPhase::MemoImplementationPhase},
-        prefixId,
-        {{{"c1",
-           ScanDefinition{
-               {},
-               {{"index1",
-                 IndexDefinition{{{makeIndexPath(FieldPathType{"a", "b"}, true /*isMultiKey*/),
-                                   CollationOp::Ascending}},
-                                 true /*isMultiKey*/}}}}}}},
-        {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
-
-    ABT optimized = rootNode;
-    ASSERT_TRUE(phaseManager.optimize(optimized));
-    ASSERT_EQ(4, phaseManager.getMemo().getStats()._physPlanExplorationCount);
-
-    // We intersect indexes because the outer composition is over the same field ("b").
-    ASSERT_EXPLAIN_V2(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
-        "BinaryJoin [joinType: Inner, {rid_0}]\n"
-        "|   |   Const [true]\n"
-        "|   LimitSkip []\n"
-        "|   |   limitSkip:\n"
-        "|   |       limit: 1\n"
-        "|   |       skip: 0\n"
-        "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-        "|   |   BindBlock:\n"
-        "|   |       [root]\n"
-        "|   |           Source []\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
-        "Filter []\n"
-        "|   EvalFilter []\n"
-        "|   |   FunctionCall [getArraySize]\n"
-        "|   |   Variable [sides_0]\n"
-        "|   PathCompare [Eq]\n"
-        "|   Const [2]\n"
-        "GroupBy []\n"
-        "|   |   groupings: \n"
-        "|   |       RefBlock: \n"
-        "|   |           Variable [rid_0]\n"
-        "|   aggregations: \n"
-        "|       [sides_0]\n"
-        "|           FunctionCall [$addToSet]\n"
-        "|           Variable [sideId_0]\n"
-        "Union []\n"
-        "|   |   BindBlock:\n"
-        "|   |       [rid_0]\n"
-        "|   |           Source []\n"
-        "|   |       [sideId_0]\n"
-        "|   |           Source []\n"
-        "|   Evaluation []\n"
-        "|   |   BindBlock:\n"
-        "|   |       [sideId_0]\n"
-        "|   |           Const [1]\n"
-        "|   IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: "
-        "{(-inf, "
-        "Const [90])}]\n"
-        "|       BindBlock:\n"
-        "|           [rid_0]\n"
-        "|               Source []\n"
-        "Evaluation []\n"
-        "|   BindBlock:\n"
-        "|       [sideId_0]\n"
-        "|           Const [0]\n"
-        "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {(Const "
-        "[70], +inf)}]\n"
-        "    BindBlock:\n"
-        "        [rid_0]\n"
-        "            Source []\n",
-        optimized);
-}
-
-TEST(PhysRewriter, IndexBoundsIntersect4) {
-    using namespace properties;
-    PrefixId prefixId;
-
-    ABT scanNode = make<ScanNode>("root", "c1");
-
-    ABT filterNode = make<FilterNode>(
-        make<EvalFilter>(
-            make<PathGet>("a",
-                          make<PathTraverse>(make<PathComposeM>(
-                              make<PathGet>("b",
-                                            make<PathTraverse>(make<PathCompare>(
-                                                Operations::Gt, Constant::int64(70)))),
-                              make<PathGet>("c",
-                                            make<PathTraverse>(make<PathCompare>(
-                                                Operations::Lt, Constant::int64(90))))))),
+            make<PathGet>(
+                "a",
+                make<PathTraverse>(
+                    make<PathComposeM>(
+                        make<PathGet>("b",
+                                      make<PathTraverse>(
+                                          make<PathCompare>(Operations::Gt, Constant::int64(70)),
+                                          PathTraverse::kSingleLevel)),
+                        make<PathGet>("c",
+                                      make<PathTraverse>(
+                                          make<PathCompare>(Operations::Lt, Constant::int64(90)),
+                                          PathTraverse::kSingleLevel))),
+                    PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(scanNode));
 
@@ -2955,14 +2984,14 @@ TEST(PhysRewriter, IndexBoundsIntersect4) {
         "|   EvalFilter []\n"
         "|   |   Variable [root]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathComposeM []\n"
         "|   |   PathGet [c]\n"
-        "|   |   PathTraverse []\n"
+        "|   |   PathTraverse [1]\n"
         "|   |   PathCompare [Lt]\n"
         "|   |   Const [90]\n"
         "|   PathGet [b]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Gt]\n"
         "|   Const [70]\n"
         "PhysicalScan [{'<root>': root}, c1]\n"
@@ -3021,10 +3050,10 @@ TEST(PhysRewriter, IndexResidualReq) {
 
     // Make sure we can use the index to cover "b" while testing "b.c" with a separate filter.
     ASSERT_EXPLAIN_PROPS_V2(
-        "Properties [cost: 0.070002, localCost: 0, adjustedCE: 10]\n"
+        "Properties [cost: 0.402121, localCost: 0, adjustedCE: 189.571]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
-        "|   |           ce: 10\n"
+        "|   |           ce: 189.571\n"
         "|   |       projections: \n"
         "|   |           pa\n"
         "|   |           root\n"
@@ -3045,14 +3074,14 @@ TEST(PhysRewriter, IndexResidualReq) {
         "|   |       pa\n"
         "|   RefBlock: \n"
         "|       Variable [pa]\n"
-        "Properties [cost: 0.070002, localCost: 0.070002, adjustedCE: 10]\n"
+        "Properties [cost: 0.402121, localCost: 0.402121, adjustedCE: 189.571]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
-        "|   |           ce: 10\n"
+        "|   |           ce: 189.571\n"
         "|   |           requirementCEs: \n"
-        "|   |               refProjection: root, path: 'PathGet [a] PathIdentity []', ce: 100\n"
+        "|   |               refProjection: root, path: 'PathGet [a] PathIdentity []', ce: 330\n"
         "|   |               refProjection: root, path: 'PathGet [b] PathGet [c] PathIdentity []', "
-        "ce: 100\n"
+        "ce: 330\n"
         "|   |       projections: \n"
         "|   |           pa\n"
         "|   |           root\n"
@@ -3079,7 +3108,8 @@ TEST(PhysRewriter, IndexResidualReq) {
         "|   PathCompare [Gt]\n"
         "|   Const [0]\n"
         "IndexScan [{'<indexKey> 0': pa, '<indexKey> 1': evalTemp_1}, scanDefName: c1, "
-        "indexDefName: index1, interval: {(Const [0], +inf), (-inf, +inf)}]\n"
+        "indexDefName: index1, interval: {(Const [0], Const [maxKey]], [Const [minKey], Const "
+        "[maxKey]]}]\n"
         "    BindBlock:\n"
         "        [evalTemp_1]\n"
         "            Source []\n"
@@ -3147,7 +3177,7 @@ TEST(PhysRewriter, IndexResidualReq1) {
 
     ABT optimized = rootNode;
     ASSERT_TRUE(phaseManager.optimize(optimized));
-    ASSERT_BETWEEN(25, 30, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+    ASSERT_BETWEEN(25, 45, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     // Prefer index1 over index2 and index3 in order to cover all fields.
     ASSERT_EXPLAIN_V2(
@@ -3169,7 +3199,8 @@ TEST(PhysRewriter, IndexResidualReq1) {
         "|   RefBlock: \n"
         "|       Variable [rid_0]\n"
         "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {[Const "
-        "[0], Const [0]], [Const [0], Const [0]], [Const [0], Const [0]], (-inf, +inf)}]\n"
+        "[0], Const [0]], [Const [0], Const [0]], [Const [0], Const [0]], [Const [minKey], Const "
+        "[maxKey]]}]\n"
         "    BindBlock:\n"
         "        [rid_0]\n"
         "            Source []\n",
@@ -3182,17 +3213,32 @@ TEST(PhysRewriter, IndexResidualReq2) {
 
     ABT scanNode = make<ScanNode>("root", "c1");
 
+    // TODO: SERVER-68006 will investigate why the plan changes without the hints.
+    PartialSchemaSelHints hints;
+    hints.emplace(PartialSchemaKey{"root",
+                                   make<PathGet>("a",
+                                                 make<PathTraverse>(make<PathIdentity>(),
+                                                                    PathTraverse::kSingleLevel))},
+                  kDefaultSelectivity);
+    hints.emplace(PartialSchemaKey{"root",
+                                   make<PathGet>("b",
+                                                 make<PathTraverse>(make<PathIdentity>(),
+                                                                    PathTraverse::kSingleLevel))},
+                  kDefaultSelectivity);
+
     ABT filterANode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "a", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(0)))),
+            make<PathGet>("a",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(0)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(scanNode));
 
     ABT filterBNode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "b", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(0)))),
+            make<PathGet>("b",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(0)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(filterANode));
 
@@ -3204,6 +3250,7 @@ TEST(PhysRewriter, IndexResidualReq2) {
          OptPhaseManager::OptPhase::MemoExplorationPhase,
          OptPhaseManager::OptPhase::MemoImplementationPhase},
         prefixId,
+        false /*requireRID*/,
         {{{"c1",
            ScanDefinition{{},
                           {{"index1",
@@ -3211,6 +3258,8 @@ TEST(PhysRewriter, IndexResidualReq2) {
                                 {{"a", CollationOp::Ascending, true /*isMultiKey*/},
                                  {"c", CollationOp::Ascending, true /*isMultiKey*/},
                                  {"b", CollationOp::Ascending, true /*isMultiKey*/}})}}}}}},
+        std::make_unique<HintedCE>(std::move(hints)),
+        std::make_unique<DefaultCosting>(),
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -3244,9 +3293,9 @@ TEST(PhysRewriter, IndexResidualReq2) {
         "|   |   Variable [evalTemp_4]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [0]\n"
-        "IndexScan [{'<indexKey> 2': evalTemp_4, '<rid>': rid_0}, scanDefName: c1, "
-        "indexDefName: "
-        "index1, interval: {[Const [0], Const [0]], (-inf, +inf), (-inf, +inf)}]\n"
+        "IndexScan [{'<indexKey> 2': evalTemp_4, '<rid>': rid_0}, scanDefName: c1, indexDefName: "
+        "index1, interval: {[Const [0], Const [0]], [Const [minKey], Const [maxKey]], [Const "
+        "[minKey], Const [maxKey]]}]\n"
         "    BindBlock:\n"
         "        [evalTemp_4]\n"
         "            Source []\n"
@@ -3266,10 +3315,12 @@ TEST(PhysRewriter, ElemMatchIndex) {
         make<EvalFilter>(
             make<PathGet>(
                 "a",
-                make<PathComposeM>(make<PathArr>(),
-                                   make<PathTraverse>(make<PathComposeM>(
-                                       make<PathCompare>(Operations::Gt, Constant::int64(70)),
-                                       make<PathCompare>(Operations::Lt, Constant::int64(90)))))),
+                make<PathComposeM>(
+                    make<PathArr>(),
+                    make<PathTraverse>(
+                        make<PathComposeM>(make<PathCompare>(Operations::Gt, Constant::int64(70)),
+                                           make<PathCompare>(Operations::Lt, Constant::int64(90))),
+                        PathTraverse::kSingleLevel))),
             make<Variable>("root")),
         std::move(scanNode));
 
@@ -3331,8 +3382,9 @@ TEST(PhysRewriter, ElemMatchIndex1) {
 
     ABT filterNode1 = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "b", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)))),
+            make<PathGet>("b",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(scanNode));
 
@@ -3341,10 +3393,12 @@ TEST(PhysRewriter, ElemMatchIndex1) {
         make<EvalFilter>(
             make<PathGet>(
                 "a",
-                make<PathComposeM>(make<PathArr>(),
-                                   make<PathTraverse>(make<PathComposeM>(
-                                       make<PathCompare>(Operations::Gt, Constant::int64(70)),
-                                       make<PathCompare>(Operations::Lt, Constant::int64(90)))))),
+                make<PathComposeM>(
+                    make<PathArr>(),
+                    make<PathTraverse>(
+                        make<PathComposeM>(make<PathCompare>(Operations::Gt, Constant::int64(70)),
+                                           make<PathCompare>(Operations::Lt, Constant::int64(90))),
+                        PathTraverse::kSingleLevel))),
             make<Variable>("root")),
         std::move(filterNode1));
 
@@ -3414,14 +3468,19 @@ TEST(PhysRewriter, ObjectElemMatch) {
         make<EvalFilter>(
             make<PathGet>(
                 "a",
-                make<PathComposeM>(make<PathArr>(),
-                                   make<PathTraverse>(make<PathComposeM>(
-                                       make<PathGet>("b",
-                                                     make<PathTraverse>(make<PathCompare>(
-                                                         Operations::Eq, Constant::int64(1)))),
-                                       make<PathGet>("c",
-                                                     make<PathTraverse>(make<PathCompare>(
-                                                         Operations::Eq, Constant::int64(2)))))))),
+                make<PathComposeM>(
+                    make<PathArr>(),
+                    make<PathTraverse>(
+                        make<PathComposeM>(
+                            make<PathGet>("b",
+                                          make<PathTraverse>(
+                                              make<PathCompare>(Operations::Eq, Constant::int64(1)),
+                                              PathTraverse::kSingleLevel)),
+                            make<PathGet>("c",
+                                          make<PathTraverse>(
+                                              make<PathCompare>(Operations::Eq, Constant::int64(2)),
+                                              PathTraverse::kSingleLevel))),
+                        PathTraverse::kSingleLevel))),
             make<Variable>("root")),
         std::move(scanNode));
 
@@ -3456,14 +3515,14 @@ TEST(PhysRewriter, ObjectElemMatch) {
         "|   EvalFilter []\n"
         "|   |   Variable [root]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathComposeM []\n"
         "|   |   PathGet [c]\n"
-        "|   |   PathTraverse []\n"
+        "|   |   PathTraverse [1]\n"
         "|   |   PathCompare [Eq]\n"
         "|   |   Const [2]\n"
         "|   PathGet [b]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
         "Filter []\n"
@@ -3486,8 +3545,9 @@ TEST(PhysRewriter, ArrayConstantIndex) {
 
     ABT filterNode1 = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "b", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(0)))),
+            make<PathGet>("b",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(0)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(scanNode));
 
@@ -3501,10 +3561,11 @@ TEST(PhysRewriter, ArrayConstantIndex) {
     // This encodes a match against an array constant.
     ABT filterNode2 = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>("a",
-                          make<PathComposeA>(
-                              make<PathTraverse>(make<PathCompare>(Operations::Eq, arrayConst)),
-                              make<PathCompare>(Operations::Eq, arrayConst))),
+            make<PathGet>(
+                "a",
+                make<PathComposeA>(make<PathTraverse>(make<PathCompare>(Operations::Eq, arrayConst),
+                                                      PathTraverse::kSingleLevel),
+                                   make<PathCompare>(Operations::Eq, arrayConst))),
             make<Variable>("root")),
         std::move(filterNode1));
 
@@ -3544,7 +3605,7 @@ TEST(PhysRewriter, ArrayConstantIndex) {
         "|   PathComposeA []\n"
         "|   |   PathCompare [Eq]\n"
         "|   |   Const [[1, 2, 3]]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [[1, 2, 3]]\n"
         "BinaryJoin [joinType: Inner, {rid_0}]\n"
@@ -3589,8 +3650,9 @@ TEST(PhysRewriter, ParallelScan) {
 
     ABT filterNode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "a", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)))),
+            make<PathGet>("a",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(scanNode));
 
@@ -3623,7 +3685,7 @@ TEST(PhysRewriter, ParallelScan) {
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_0]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
         "PhysicalScan [{'<root>': root, 'a': evalTemp_0}, c1, parallel]\n"
@@ -3707,6 +3769,15 @@ TEST(PhysRewriter, IndexPartitioning) {
 
     ABT scanNode = make<ScanNode>("root", "c1");
 
+    // TODO: SERVER-68006 This test results in an failed assert when cardinality estimates change.
+    // The assert is in physical_rewriter.cpp:
+    // "Must optimize successfully if found compatible properties!"
+    PartialSchemaSelHints hints;
+    hints.emplace(PartialSchemaKey{"root", make<PathGet>("a", make<PathIdentity>())},
+                  kDefaultSelectivity);
+    hints.emplace(PartialSchemaKey{"root", make<PathGet>("b", make<PathIdentity>())},
+                  kDefaultSelectivity);
+
     ABT projectionANode = make<EvaluationNode>(
         "pa",
         make<EvalPath>(make<PathGet>("a", make<PathIdentity>()), make<Variable>("root")),
@@ -3740,6 +3811,7 @@ TEST(PhysRewriter, IndexPartitioning) {
          OptPhaseManager::OptPhase::MemoExplorationPhase,
          OptPhaseManager::OptPhase::MemoImplementationPhase},
         prefixId,
+        false /*requireRID*/,
         {{{"c1",
            ScanDefinition{
                {},
@@ -3751,6 +3823,8 @@ TEST(PhysRewriter, IndexPartitioning) {
                      {}}}},
                {DistributionType::HashPartitioning, makeSeq(makeNonMultikeyIndexPath("b"))}}}},
          5 /*numberOfPartitions*/},
+        std::make_unique<HintedCE>(std::move(hints)),
+        std::make_unique<DefaultCosting>(),
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -3803,7 +3877,7 @@ TEST(PhysRewriter, IndexPartitioning) {
         "|   |       type: RoundRobin\n"
         "|   RefBlock: \n"
         "IndexScan [{'<indexKey> 0': pa, '<rid>': rid_0}, scanDefName: c1, indexDefName: index1, "
-        "interval: {(Const [0], +inf)}]\n"
+        "interval: {(Const [0], Const [maxKey]]}]\n"
         "    BindBlock:\n"
         "        [pa]\n"
         "            Source []\n"
@@ -3817,6 +3891,18 @@ TEST(PhysRewriter, IndexPartitioning1) {
     PrefixId prefixId;
 
     ABT scanNode = make<ScanNode>("root", "c1");
+
+    // TODO: SERVER-68006 This test results in an failed assert when cardinality estimates change.
+    // The assert is in physical_rewriter.cpp:
+    // "Must optimize successfully if found compatible properties!"
+    // The interesting thing is that it doesn't fail on each test run, but sometimes, which
+    // makes one think the failure depends on rounding errors of cost/cardinality estimates,
+    // which in turn results in different sub-plans.
+    PartialSchemaSelHints hints;
+    hints.emplace(PartialSchemaKey{"root", make<PathGet>("a", make<PathIdentity>())},
+                  kDefaultSelectivity);
+    hints.emplace(PartialSchemaKey{"root", make<PathGet>("b", make<PathIdentity>())},
+                  kDefaultSelectivity);
 
     ABT projectionANode = make<EvaluationNode>(
         "pa",
@@ -3851,6 +3937,7 @@ TEST(PhysRewriter, IndexPartitioning1) {
          OptPhaseManager::OptPhase::MemoExplorationPhase,
          OptPhaseManager::OptPhase::MemoImplementationPhase},
         prefixId,
+        false /*requireRID*/,
         {{{"c1",
            ScanDefinition{
                {},
@@ -3868,6 +3955,8 @@ TEST(PhysRewriter, IndexPartitioning1) {
                      {}}}},
                {DistributionType::HashPartitioning, makeSeq(makeNonMultikeyIndexPath("c"))}}}},
          5 /*numberOfPartitions*/},
+        std::make_unique<HintedCE>(std::move(hints)),
+        std::make_unique<DefaultCosting>(),
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -4091,7 +4180,7 @@ TEST(PhysRewriter, LocalLimitSkip) {
         "|   |       projections: \n"
         "|   |           root\n"
         "|   |       indexingAvailability: \n"
-        "|   |           [groupId: 0, scanProjection: root, scanDefName: c1, possiblyEqPredsOnly]\n"
+        "|   |           [groupId: 0, scanProjection: root, scanDefName: c1, eqPredsOnly]\n"
         "|   |       collectionAvailability: \n"
         "|   |           c1\n"
         "|   |       distributionAvailability: \n"
@@ -4118,7 +4207,7 @@ TEST(PhysRewriter, LocalLimitSkip) {
         "|   |       projections: \n"
         "|   |           root\n"
         "|   |       indexingAvailability: \n"
-        "|   |           [groupId: 0, scanProjection: root, scanDefName: c1, possiblyEqPredsOnly]\n"
+        "|   |           [groupId: 0, scanProjection: root, scanDefName: c1, eqPredsOnly]\n"
         "|   |       collectionAvailability: \n"
         "|   |           c1\n"
         "|   |       distributionAvailability: \n"
@@ -4143,7 +4232,7 @@ TEST(PhysRewriter, LocalLimitSkip) {
         "|   |       projections: \n"
         "|   |           root\n"
         "|   |       indexingAvailability: \n"
-        "|   |           [groupId: 0, scanProjection: root, scanDefName: c1, possiblyEqPredsOnly]\n"
+        "|   |           [groupId: 0, scanProjection: root, scanDefName: c1, eqPredsOnly]\n"
         "|   |       collectionAvailability: \n"
         "|   |           c1\n"
         "|   |       distributionAvailability: \n"
@@ -4293,14 +4382,16 @@ TEST(PhysRewriter, PartialIndex1) {
 
     ABT filterANode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "a", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(3)))),
+            make<PathGet>("a",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(3)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(scanNode));
     ABT filterBNode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "b", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(2)))),
+            make<PathGet>("b",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(2)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(filterANode));
 
@@ -4312,12 +4403,12 @@ TEST(PhysRewriter, PartialIndex1) {
     // TODO: (e.g. half open interval)
     auto conversionResult = convertExprToPartialSchemaReq(
         make<EvalFilter>(
-            make<PathGet>(
-                "b", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(2)))),
+            make<PathGet>("b",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(2)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         true /*isFilterContext*/);
     ASSERT_TRUE(conversionResult.has_value());
-    ASSERT_FALSE(conversionResult->_hasEmptyInterval);
     ASSERT_FALSE(conversionResult->_retainPredicate);
 
     OptPhaseManager phaseManager(
@@ -4350,7 +4441,7 @@ TEST(PhysRewriter, PartialIndex1) {
         "|   Filter []\n"
         "|   |   EvalFilter []\n"
         "|   |   |   Variable [evalTemp_2]\n"
-        "|   |   PathTraverse []\n"
+        "|   |   PathTraverse [1]\n"
         "|   |   PathCompare [Eq]\n"
         "|   |   Const [2]\n"
         "|   LimitSkip []\n"
@@ -4381,8 +4472,9 @@ TEST(PhysRewriter, PartialIndex2) {
 
     ABT filterANode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "a", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(3)))),
+            make<PathGet>("a",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(3)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(scanNode));
 
@@ -4391,12 +4483,12 @@ TEST(PhysRewriter, PartialIndex2) {
 
     auto conversionResult = convertExprToPartialSchemaReq(
         make<EvalFilter>(
-            make<PathGet>(
-                "a", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(3)))),
+            make<PathGet>("a",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(3)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         true /*isFilterContext*/);
     ASSERT_TRUE(conversionResult.has_value());
-    ASSERT_FALSE(conversionResult->_hasEmptyInterval);
     ASSERT_FALSE(conversionResult->_retainPredicate);
 
     OptPhaseManager phaseManager(
@@ -4452,14 +4544,16 @@ TEST(PhysRewriter, PartialIndexReject) {
 
     ABT filterANode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "a", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(3)))),
+            make<PathGet>("a",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(3)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(scanNode));
     ABT filterBNode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "b", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(2)))),
+            make<PathGet>("b",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(2)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(filterANode));
 
@@ -4468,12 +4562,12 @@ TEST(PhysRewriter, PartialIndexReject) {
 
     auto conversionResult = convertExprToPartialSchemaReq(
         make<EvalFilter>(
-            make<PathGet>(
-                "b", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(4)))),
+            make<PathGet>("b",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(4)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         true /*isFilterContext*/);
     ASSERT_TRUE(conversionResult.has_value());
-    ASSERT_FALSE(conversionResult->_hasEmptyInterval);
     ASSERT_FALSE(conversionResult->_retainPredicate);
 
     OptPhaseManager phaseManager(
@@ -4504,13 +4598,13 @@ TEST(PhysRewriter, PartialIndexReject) {
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_1]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [2]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_0]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [3]\n"
         "PhysicalScan [{'<root>': root, 'a': evalTemp_0, 'b': evalTemp_1}, c1]\n"
@@ -4532,8 +4626,9 @@ TEST(PhysRewriter, RequireRID) {
 
     ABT filterNode = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "a", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(3)))),
+            make<PathGet>("a",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(3)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("root")),
         std::move(scanNode));
 
@@ -4565,7 +4660,7 @@ TEST(PhysRewriter, RequireRID) {
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_0]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [3]\n"
         "PhysicalScan [{'<rid>': rid_0, '<root>': root, 'a': evalTemp_0}, c1]\n"
@@ -4784,7 +4879,7 @@ TEST(PhysRewriter, JoinRewrite1) {
         "BinaryJoin [joinType: Inner, {p1, p2}]\n"
         "|   |   Const [true]\n"
         "|   IndexScan [{}, scanDefName: test2, indexDefName: index1, interval: {(If [] BinaryOp "
-        "[Gte] Variable [p1] Variable [p2] Variable [p1] Variable [p2], +inf)}]\n"
+        "[Gte] Variable [p1] Variable [p2] Variable [p1] Variable [p2], Const [maxKey]]}]\n"
         "|       BindBlock:\n"
         "PhysicalScan [{'a1': p1, 'a2': p2}, test1]\n"
         "    BindBlock:\n"

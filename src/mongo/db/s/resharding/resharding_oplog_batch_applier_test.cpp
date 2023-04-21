@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/optional/optional_io.hpp>
 #include <memory>
 #include <vector>
 
@@ -36,7 +35,8 @@
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/logical_session_cache_noop.h"
 #include "mongo/db/logical_session_id.h"
-#include "mongo/db/op_observer_registry.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
+#include "mongo/db/op_observer/oplog_writer_impl.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
@@ -50,7 +50,7 @@
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/session_catalog_mongod.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/vector_clock_metadata_hook.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
@@ -96,7 +96,8 @@ public:
                 dynamic_cast<OpObserverRegistry*>(serviceContext->getOpObserver());
             invariant(opObserverRegistry);
 
-            opObserverRegistry->addObserver(std::make_unique<OpObserverShardingImpl>());
+            opObserverRegistry->addObserver(
+                std::make_unique<OpObserverShardingImpl>(std::make_unique<OplogWriterImpl>()));
         }
 
         {

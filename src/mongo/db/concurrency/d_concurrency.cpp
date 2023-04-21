@@ -215,10 +215,7 @@ Lock::DBLock::DBLock(OperationContext* opCtx,
                      LockMode mode,
                      Date_t deadline,
                      bool skipGlobalAndRSTLLocks)
-    : _id(RESOURCE_DATABASE, dbName.toStringWithTenantId()),
-      _opCtx(opCtx),
-      _result(LOCK_INVALID),
-      _mode(mode) {
+    : _id(RESOURCE_DATABASE, dbName), _opCtx(opCtx), _result(LOCK_INVALID), _mode(mode) {
 
     if (!skipGlobalAndRSTLLocks) {
         _globalLock.emplace(opCtx,
@@ -273,10 +270,10 @@ Lock::CollectionLock::CollectionLock(OperationContext* opCtx,
     : _opCtx(opCtx) {
     if (nssOrUUID.nss()) {
         auto& nss = *nssOrUUID.nss();
-        _id = {RESOURCE_COLLECTION, nss.ns()};
+        _id = {RESOURCE_COLLECTION, nss};
 
         invariant(nss.coll().size(), str::stream() << "expected non-empty collection name:" << nss);
-        dassert(_opCtx->lockState()->isDbLockedForMode(nss.db(),
+        dassert(_opCtx->lockState()->isDbLockedForMode(nss.dbName(),
                                                        isSharedLockMode(mode) ? MODE_IS : MODE_IX));
 
         _opCtx->lockState()->lock(_opCtx, _id, mode, deadline);
@@ -288,7 +285,7 @@ Lock::CollectionLock::CollectionLock(OperationContext* opCtx,
     auto nss = CollectionCatalog::get(opCtx)->resolveNamespaceStringOrUUID(opCtx, nssOrUUID);
 
     // The UUID cannot move between databases so this one dassert is sufficient.
-    dassert(_opCtx->lockState()->isDbLockedForMode(nss.db(),
+    dassert(_opCtx->lockState()->isDbLockedForMode(nss.dbName(),
                                                    isSharedLockMode(mode) ? MODE_IS : MODE_IX));
 
     // We cannot be sure that the namespace we lock matches the UUID given because we resolve the
@@ -301,7 +298,7 @@ Lock::CollectionLock::CollectionLock(OperationContext* opCtx,
             _opCtx->lockState()->unlock(_id);
         }
 
-        _id = ResourceId(RESOURCE_COLLECTION, nss.ns());
+        _id = ResourceId(RESOURCE_COLLECTION, nss);
         _opCtx->lockState()->lock(_opCtx, _id, mode, deadline);
         locked = true;
 

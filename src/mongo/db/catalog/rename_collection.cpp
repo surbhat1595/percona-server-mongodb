@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/catalog/rename_collection.h"
 
 #include "mongo/bson/unordered_fields_bsonobj_comparator.h"
@@ -42,6 +39,7 @@
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/list_indexes.h"
 #include "mongo/db/catalog/local_oplog_info.h"
+#include "mongo/db/catalog/unique_collection_name.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_state.h"
@@ -51,7 +49,7 @@
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/ops/insert.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -64,7 +62,6 @@
 #include "mongo/util/scopeguard.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
-
 
 namespace mongo {
 namespace {
@@ -158,8 +155,8 @@ Status renameTargetCollectionToTmp(OperationContext* opCtx,
 
     // The generated unique collection name is only guaranteed to exist if the database is
     // exclusively locked.
-    invariant(opCtx->lockState()->isDbLockedForMode(targetDB->name().db(), LockMode::MODE_X));
-    auto tmpNameResult = targetDB->makeUniqueCollectionNamespace(opCtx, "tmp%%%%%.rename");
+    invariant(opCtx->lockState()->isDbLockedForMode(targetDB->name(), LockMode::MODE_X));
+    auto tmpNameResult = makeUniqueCollectionName(opCtx, targetDB->name(), "tmp%%%%%.rename");
     if (!tmpNameResult.isOK()) {
         return tmpNameResult.getStatus().withContext(
             str::stream() << "Cannot generate a temporary collection name for the target "
@@ -310,8 +307,7 @@ Status renameCollectionWithinDB(OperationContext* opCtx,
     // view-related operations always lock system.views in the end.
     if (!source.isSystemDotViews() &&
         (target.isSystemDotViews() ||
-         ResourceId(RESOURCE_COLLECTION, source.ns()) <
-             ResourceId(RESOURCE_COLLECTION, target.ns()))) {
+         ResourceId(RESOURCE_COLLECTION, source) < ResourceId(RESOURCE_COLLECTION, target))) {
         // To prevent deadlock, always lock source and target in ascending resourceId order.
         sourceLock.emplace(opCtx, source, MODE_X);
         targetLock.emplace(opCtx, target, MODE_X);
@@ -417,7 +413,7 @@ Status renameCollectionWithinDBForApplyOps(OperationContext* opCtx,
         // dropping the wrong collection.
         if (!targetColl && uuidToDrop) {
             invariant(options.dropTarget);
-            auto collToDropBasedOnUUID = getNamespaceFromUUID(opCtx, uuidToDrop.get());
+            auto collToDropBasedOnUUID = getNamespaceFromUUID(opCtx, uuidToDrop.value());
             if (collToDropBasedOnUUID && !collToDropBasedOnUUID->isDropPendingNamespace()) {
                 invariant(collToDropBasedOnUUID->db() == target.db());
                 targetColl = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
@@ -483,7 +479,7 @@ Status renameBetweenDBs(OperationContext* opCtx,
     }
 
     boost::optional<Lock::DBLock> targetDBLock;
-    if (!opCtx->lockState()->isDbLockedForMode(target.db(), MODE_X)) {
+    if (!opCtx->lockState()->isDbLockedForMode(target.dbName(), MODE_X)) {
         targetDBLock.emplace(opCtx, target.dbName(), MODE_X);
     }
 
@@ -548,12 +544,12 @@ Status renameBetweenDBs(OperationContext* opCtx,
 
     // The generated unique collection name is only guaranteed to exist if the database is
     // exclusively locked.
-    invariant(opCtx->lockState()->isDbLockedForMode(targetDB->name().db(), LockMode::MODE_X));
+    invariant(opCtx->lockState()->isDbLockedForMode(targetDB->name(), LockMode::MODE_X));
 
     // Note that this temporary collection name is used by MongoMirror and thus must not be changed
     // without consultation.
     auto tmpNameResult =
-        targetDB->makeUniqueCollectionNamespace(opCtx, "tmp%%%%%.renameCollection");
+        makeUniqueCollectionName(opCtx, target.dbName(), "tmp%%%%%.renameCollection");
     if (!tmpNameResult.isOK()) {
         return tmpNameResult.getStatus().withContext(
             str::stream() << "Cannot generate temporary collection name to rename " << source
@@ -756,7 +752,7 @@ void doLocalRenameIfOptionsAndIndexesHaveNotChanged(OperationContext* opCtx,
                                                     const RenameCollectionOptions& options,
                                                     std::list<BSONObj> originalIndexes,
                                                     BSONObj originalCollectionOptions) {
-    AutoGetDb dbLock(opCtx, targetNs.db(), MODE_X);
+    AutoGetDb dbLock(opCtx, targetNs.dbName(), MODE_X);
     auto collection = dbLock.getDb()
         ? CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, targetNs)
         : nullptr;
@@ -927,7 +923,7 @@ Status renameCollectionForApplyOps(OperationContext* opCtx,
     NamespaceString sourceNss(sourceNsElt.valueStringData());
     NamespaceString targetNss(targetNsElt.valueStringData());
     if (uuidToRename) {
-        auto nss = CollectionCatalog::get(opCtx)->lookupNSSByUUID(opCtx, uuidToRename.get());
+        auto nss = CollectionCatalog::get(opCtx)->lookupNSSByUUID(opCtx, uuidToRename.value());
         if (nss)
             sourceNss = *nss;
     }
@@ -968,7 +964,7 @@ Status renameCollectionForApplyOps(OperationContext* opCtx,
             dropTargetNss = targetNss;
 
         if (uuidToDrop)
-            dropTargetNss = getNamespaceFromUUID(opCtx, uuidToDrop.get());
+            dropTargetNss = getNamespaceFromUUID(opCtx, uuidToDrop.value());
 
         // Downgrade renameCollection to dropCollection.
         if (dropTargetNss) {

@@ -253,6 +253,7 @@ def _parse_type(ctxt, spec, name, node):
             "bindata_subtype": _RuleDesc('scalar'),
             "serializer": _RuleDesc('scalar'),
             "deserializer": _RuleDesc('scalar'),
+            "deserialize_with_tenant": _RuleDesc('bool_scalar'),
             "default": _RuleDesc('scalar'),
         })
 
@@ -348,7 +349,11 @@ def _parse_field(ctxt, name, node):
     field.name = name
 
     _generic_parser(
-        ctxt, node, "field", field, {
+        ctxt,
+        node,
+        "field",
+        field,
+        {
             "description":
                 _RuleDesc('scalar'),
             "cpp_name":
@@ -370,8 +375,11 @@ def _parse_field(ctxt, name, node):
                 _RuleDesc('mapping', mapping_parser_func=_parse_validator),
             "non_const_getter":
                 _RuleDesc("bool_scalar"),
+            # Allow both 'unstable' and the new alternative 'stability' options to support IDL compatibility tests with old IDLs.
             "unstable":
                 _RuleDesc("bool_scalar"),
+            "stability":
+                _RuleDesc("scalar"),
             "always_serialize":
                 _RuleDesc("bool_scalar"),
         })
@@ -416,6 +424,22 @@ def _parse_fields(ctxt, node):
 
         fields.append(field)
         field_name_set.add(first_name)
+
+    for field in fields:
+        if field.unstable is not None and field.stability is not None:
+            ctxt.add_duplicate_unstable_stability(field)
+
+        # Convert the deprecated 'unstable' option to the new 'stability' option to keep support for the IDL compatibility tests.
+        if field.unstable is not None:
+            if field.unstable:
+                field.stability = 'unstable'
+            else:
+                field.stability = 'stable'
+            field.unstable = None
+
+        if field.stability is not None and field.stability not in ("stable", "unstable",
+                                                                   "internal"):
+            ctxt.add_stability_unknown_value(field)
 
     return fields
 
@@ -527,6 +551,7 @@ def _parse_struct(ctxt, spec, name, node):
             "generate_comparison_operators": _RuleDesc("bool_scalar"),
             "non_const_getter": _RuleDesc('bool_scalar'),
             "cpp_validator_func": _RuleDesc('scalar'),
+            "is_command_reply": _RuleDesc('bool_scalar'),
         })
 
     # PyLint has difficulty with some iterables: https://github.com/PyCQA/pylint/issues/3105
@@ -851,8 +876,8 @@ def _parse_command(ctxt, spec, name, node):
 
     if not command.api_version:
         for field in command.fields:
-            if field.unstable:
-                ctxt.add_unstable_no_api_version(field, command.name)
+            if field.stability is not None and field.stability != 'stable':
+                ctxt.add_stability_no_api_version(field, command.name)
 
     spec.symbols.add_command(ctxt, command)
 

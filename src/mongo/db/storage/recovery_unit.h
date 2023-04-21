@@ -410,6 +410,14 @@ public:
     }
 
     /**
+     * MongoDB must update documents with non-decreasing timestamp values. A storage engine is
+     * allowed to assert when this contract is violated. An untimestamped write is a subset of these
+     * violations, which may be necessary in limited circumstances. This API can be called before a
+     * transaction begins to suppress this subset of errors.
+     */
+    virtual void allowUntimestampedWrite() {}
+
+    /**
      * Fetches the storage level statistics.
      */
     virtual std::shared_ptr<StorageStats> getOperationStatistics() const {

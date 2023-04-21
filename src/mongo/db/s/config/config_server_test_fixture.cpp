@@ -42,9 +42,10 @@
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer.h"
-#include "mongo/db/op_observer_impl.h"
-#include "mongo/db/op_observer_registry.h"
+#include "mongo/db/op_observer/op_observer.h"
+#include "mongo/db/op_observer/op_observer_impl.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
+#include "mongo/db/op_observer/oplog_writer_impl.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/query_request_helper.h"
@@ -444,7 +445,7 @@ std::vector<KeysCollectionDocument> ConfigServerTestFixture::getKeys(OperationCo
     std::vector<KeysCollectionDocument> keys;
     const auto& docs = findStatus.getValue().docs;
     for (const auto& doc : docs) {
-        auto key = KeysCollectionDocument::parse(IDLParserErrorContext("keyDoc"), doc);
+        auto key = KeysCollectionDocument::parse(IDLParserContext("keyDoc"), doc);
         keys.push_back(std::move(key));
     }
 
@@ -454,7 +455,8 @@ std::vector<KeysCollectionDocument> ConfigServerTestFixture::getKeys(OperationCo
 void ConfigServerTestFixture::setupOpObservers() {
     auto opObserverRegistry =
         checked_cast<OpObserverRegistry*>(getServiceContext()->getOpObserver());
-    opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>());
+    opObserverRegistry->addObserver(
+        std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
     opObserverRegistry->addObserver(std::make_unique<ConfigServerOpObserver>());
 }
 

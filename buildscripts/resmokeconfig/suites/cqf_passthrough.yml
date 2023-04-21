@@ -2,20 +2,12 @@ test_kind: js_test
 
 selector:
   roots:
+  - jstests/aggregation/**/*.js
   - jstests/core/**/*.js
   exclude_files:
-  # TODO SERVER-67427 Fix conjunctions over an array field.
-  - jstests/core/all2.js
-  - jstests/core/index_check2.js
-  - jstests/core/or5.js
-  # TODO SERVER-67369 enable once full type bracketing is supported.
-  - jstests/core/array_comparison_correctness.js
-  - jstests/core/arrayfind10.js
-  - jstests/core/arrayfind3.js
-  - jstests/core/date2.js
-  - jstests/core/expressions_matching_whole_array.js
+  # TODO SERVER-68364
   - jstests/core/index_decimal.js
-  - jstests/core/min_max_key.js
+  # TODO SERVER-67818
   - jstests/core/nan.js
   # TODO SERVER-67506
   - jstests/core/arrayfind5.js
@@ -29,9 +21,8 @@ selector:
   - jstests/core/kill_cursors.js
   - jstests/core/minmax.js
   - jstests/core/show_record_id.js
-  # TODO SERVER-67510
+  # TODO SERVER-68512
   - jstests/core/collation_with_reverse_index.js
-  - jstests/core/find_covered_projection.js
   # TODO SERVER-67548 Fix equality to null with indexes.
   - jstests/core/cover_null_queries.js
   - jstests/core/null_query_semantics.js
@@ -47,6 +38,7 @@ selector:
   # TODO SERVER-67639
   - jstests/core/index_stats.js
   # TODO SERVER-67640
+  - jstests/aggregation/sources/collStats/query_exec_stats.js
   - jstests/core/operation_latency_histogram.js
   - jstests/core/top.js
   # TODO SERVER-64007 Enable yielding for plans generated from bonsai.
@@ -105,4 +97,4 @@ executor:
       set_parameters:
         enableTestCommands: 1
         featureFlagCommonQueryFramework: true
-        internalQueryEnableCascadesOptimizer: true
+        internalQueryFrameworkControl: "tryBonsai"

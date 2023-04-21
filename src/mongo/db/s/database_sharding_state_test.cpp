@@ -29,7 +29,6 @@
 
 #include "mongo/platform/basic.h"
 
-#include "boost/optional/optional_io.hpp"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/db_raii.h"
@@ -137,7 +136,7 @@ TEST_F(DatabaseShardingStateTestWithMockedLoader, OnDbVersionMismatch) {
         auto opCtx = operationContext();
 
         auto getActiveDbVersion = [&] {
-            AutoGetDb autoDb(opCtx, kDbName, MODE_IS);
+            AutoGetDb autoDb(opCtx, DatabaseName(boost::none, kDbName), MODE_IS);
             return DatabaseHolder::get(opCtx)->getDbVersion(opCtx, kDbName);
         };
 
@@ -170,7 +169,7 @@ TEST_F(DatabaseShardingStateTestWithMockedLoader, ForceDatabaseRefresh) {
         forceDatabaseRefresh(opCtx, kDbName);
 
         boost::optional<DatabaseVersion> activeDbVersion = [&] {
-            AutoGetDb autoDb(opCtx, kDbName, MODE_IS);
+            AutoGetDb autoDb(opCtx, DatabaseName(boost::none, kDbName), MODE_IS);
             return DatabaseHolder::get(opCtx)->getDbVersion(opCtx, kDbName);
         }();
         ASSERT_TRUE(activeDbVersion);

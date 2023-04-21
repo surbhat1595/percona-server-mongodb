@@ -41,6 +41,7 @@
 #include "mongo/bson/ordering.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/storage/key_format.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/util/assert_util.h"
 
@@ -236,34 +237,80 @@ public:
     void appendDecimalZero(uint32_t whichZero);
     void appendDecimalExponent(uint8_t storedExponentBits);
 
-    class Reader {
+    class ReaderBase {
+    public:
+        virtual ~ReaderBase(){};
+
+        virtual uint8_t readStringLike() = 0;
+        virtual uint8_t readNumeric() = 0;
+        virtual uint8_t readZero() = 0;
+
+        // Given a decimal zero type between kDecimalZero0xxx and kDecimal5xxx, read the
+        // remaining 12 bits and return which of the 24576 decimal zeros to produce.
+        virtual uint32_t readDecimalZero(uint8_t zeroType) = 0;
+
+        // Reads the stored exponent bits of a non-zero decimal number.
+        virtual uint8_t readDecimalExponent() = 0;
+
+    protected:
+        ReaderBase() = default;
+        virtual uint8_t readBit() = 0;
+    };
+
+    class Reader : public ReaderBase {
     public:
         /**
          * Passed in TypeBits must outlive this Reader instance.
          */
         explicit Reader(const TypeBits& typeBits) : _curBit(0), _typeBits(typeBits) {}
+        ~Reader() = default;
 
-        uint8_t readStringLike() {
-            return readBit();
-        }
-        uint8_t readNumeric() {
-            uint8_t highBit = readBit();
-            return (highBit << 1) | readBit();
-        }
-        uint8_t readZero();
+        uint8_t readStringLike() final;
+        uint8_t readNumeric() final;
+        uint8_t readZero() final;
+        uint32_t readDecimalZero(uint8_t zeroType) final;
+        uint8_t readDecimalExponent() final;
 
-        // Given a decimal zero type between kDecimalZero0xxx and kDecimal5xxx, read the
-        // remaining 12 bits and return which of the 24576 decimal zeros to produce.
-        uint32_t readDecimalZero(uint8_t zeroType);
-
-        // Reads the stored exponent bits of a non-zero decimal number.
-        uint8_t readDecimalExponent();
+    protected:
+        uint8_t readBit() final;
 
     private:
-        uint8_t readBit();
-
         uint32_t _curBit;
         const TypeBits& _typeBits;
+    };
+
+    /**
+     * An ExplainReader wraps a TypeBits::Reader and stores a human-readable description an about
+     * the TypeBits that have been retrieved. The explanation may be retrieved with getExplain().
+
+     * Note that this class is only designed to generate an explanation for a single field. To
+     * generate explanations for multiple fields, use multiple ExplainReaders.
+     *
+     * For diagnostic purposes only.
+     */
+    class ExplainReader : public ReaderBase {
+    public:
+        explicit ExplainReader(ReaderBase& reader) : _reader(reader){};
+        ~ExplainReader() = default;
+
+        uint8_t readStringLike() final;
+        uint8_t readNumeric() final;
+        uint8_t readZero() final;
+        uint32_t readDecimalZero(uint8_t zeroType) final;
+        uint8_t readDecimalExponent() final;
+
+        std::string getExplain() const {
+            return _explain.ss.str();
+        }
+
+    protected:
+        uint8_t readBit() final {
+            MONGO_UNREACHABLE;
+        }
+
+    private:
+        ReaderBase& _reader;
+        str::stream _explain;
     };
 
     Version version;
@@ -504,7 +551,7 @@ public:
     explicit BuilderBase(Version version)
         : BuilderBase(version, ALL_ASCENDING, Discriminator::kInclusive) {}
 
-    BuilderBase(Version version, const BSONObj& obj, Ordering ord, RecordId recordId)
+    BuilderBase(Version version, const BSONObj& obj, Ordering ord, const RecordId& recordId)
         : BuilderBase(version, ord) {
         resetToKey(obj, ord, recordId);
     }
@@ -527,7 +574,7 @@ public:
         resetFromBuffer(other.getBuffer(), other.getSize());
     }
 
-    BuilderBase(Version version, RecordId rid) : BuilderBase(version) {
+    BuilderBase(Version version, const RecordId& rid) : BuilderBase(version) {
         appendRecordId(rid);
     }
 
@@ -552,7 +599,7 @@ public:
         return {version, _buffer().len(), SharedBufferFragment(newBuf.release(), newBufLen)};
     }
 
-    void appendRecordId(RecordId loc);
+    void appendRecordId(const RecordId& loc);
     void appendTypeBits(const TypeBits& bits);
 
     /*
@@ -603,7 +650,7 @@ public:
         _transition(BuildState::kEmpty);
     }
 
-    void resetToKey(const BSONObj& obj, Ordering ord, RecordId recordId);
+    void resetToKey(const BSONObj& obj, Ordering ord, const RecordId& recordId);
     void resetToKey(const BSONObj& obj,
                     Ordering ord,
                     Discriminator discriminator = Discriminator::kInclusive);
@@ -1028,7 +1075,7 @@ int compare(const char* leftBuf, const char* rightBuf, size_t leftSize, size_t r
  * unmodified.
  */
 bool readSBEValue(BufReader* reader,
-                  TypeBits::Reader* typeBits,
+                  TypeBits::ReaderBase* typeBits,
                   bool inverted,
                   Version version,
                   sbe::value::ValueBuilder* valueBuilder);
@@ -1103,6 +1150,23 @@ void logKeyString(const RecordId& recordId,
                   const BSONObj& keyPatternBson,
                   const BSONObj& keyStringBson,
                   std::string callerLogPrefix);
+
+BSONObj rehydrateKey(const BSONObj& keyPatternBson, const BSONObj& keyStringBson);
+
+/**
+ * Returns a human-readable output that explains each byte within the key string. For diagnostic
+ * purposes only.
+ *
+ * If 'keyPattern' is empty or does not have as many fields as there are in the key string, fields
+ * will be assumed to be ascending and will be assigned field names as empty string.
+ * 'keyFormat' may be provided if the caller knows the RecordId format of this key string, if
+ * any.
+ */
+std::string explain(const char* buffer,
+                    int len,
+                    const BSONObj& keyPattern,
+                    const TypeBits& typeBits,
+                    boost::optional<KeyFormat> keyFormat);
 
 }  // namespace KeyString
 

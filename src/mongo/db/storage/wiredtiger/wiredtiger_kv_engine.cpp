@@ -1272,7 +1272,7 @@ Status WiredTigerKVEngine::_rebuildIdent(WT_SESSION* session, const char* uri) {
                       "file"_attr = filePath->generic_string(),
                       "backup"_attr = corruptFile.generic_string());
 
-        auto status = fsyncRename(filePath.get(), corruptFile);
+        auto status = fsyncRename(filePath.value(), corruptFile);
         if (!status.isOK()) {
             return status;
         }
@@ -1714,7 +1714,7 @@ WiredTigerKVEngine::beginNonBlockingBackup(OperationContext* opCtx,
         std::vector<DurableCatalog::Entry> catalogEntries = catalog->getAllCatalogEntries(opCtx);
         for (const DurableCatalog::Entry& e : catalogEntries) {
             // Populate the collection ident with its namespace and UUID.
-            UUID uuid = catalog->getMetaData(opCtx, e.catalogId)->options.uuid.get();
+            UUID uuid = catalog->getMetaData(opCtx, e.catalogId)->options.uuid.value();
             _wtBackup.identToNamespaceAndUUIDMap.emplace(e.ident, std::make_pair(e.nss, uuid));
 
             // Populate the collection's index idents with the collection's namespace and UUID.
@@ -2843,7 +2843,7 @@ Status WiredTigerKVEngine::recoverOrphanedIdent(OperationContext* opCtx,
           "Renaming data file to temporary",
           "file"_attr = identFilePath->generic_string(),
           "temporary"_attr = tmpFile.generic_string());
-    auto status = fsyncRename(identFilePath.get(), tmpFile);
+    auto status = fsyncRename(identFilePath.value(), tmpFile);
     if (!status.isOK()) {
         return status;
     }
@@ -2870,7 +2870,7 @@ Status WiredTigerKVEngine::recoverOrphanedIdent(OperationContext* opCtx,
         return status;
     }
 
-    status = fsyncRename(tmpFile, identFilePath.get());
+    status = fsyncRename(tmpFile, identFilePath.value());
     if (!status.isOK()) {
         return status;
     }
@@ -3920,7 +3920,7 @@ Timestamp WiredTigerKVEngine::getPinnedOplog() const {
         }
         if (_oplogPinnedByBackup) {
             // All the oplog since `_oplogPinnedByBackup` should remain intact during the backup.
-            return std::min(_oplogPinnedByBackup.get(), pinned);
+            return std::min(_oplogPinnedByBackup.value(), pinned);
         }
     }
 

@@ -271,6 +271,7 @@ def _bind_struct_common(ctxt, parsed_spec, struct, ast_struct):
     ast_struct.qualified_cpp_name = _get_struct_qualified_cpp_name(struct)
     ast_struct.allow_global_collection_name = struct.allow_global_collection_name
     ast_struct.non_const_getter = struct.non_const_getter
+    ast_struct.is_command_reply = struct.is_command_reply
 
     # Validate naming restrictions
     if ast_struct.name.startswith("array<"):
@@ -400,7 +401,7 @@ def _inject_hidden_command_fields(command):
     db_field = syntax.Field(command.file_name, command.line, command.column)
     db_field.name = "$db"
     db_field.type = syntax.FieldTypeSingle(command.file_name, command.line, command.column)
-    db_field.type.type_name = "string"  # This comes from basic_types.idl
+    db_field.type.type_name = "database_name"  # This comes from basic_types.idl
     db_field.cpp_name = "dbName"
     db_field.serialize_op_msg_request_only = True
 
@@ -982,6 +983,7 @@ def _bind_type(idltype):
     ast_type.bindata_subtype = idltype.bindata_subtype
     ast_type.serializer = _normalize_method_name(idltype.cpp_type, idltype.serializer)
     ast_type.deserializer = _normalize_method_name(idltype.cpp_type, idltype.deserializer)
+    ast_type.deserialize_with_tenant = idltype.deserialize_with_tenant
     return ast_type
 
 
@@ -1003,7 +1005,9 @@ def _bind_field(ctxt, parsed_spec, field):
     ast_field.constructed = field.constructed
     ast_field.comparison_order = field.comparison_order
     ast_field.non_const_getter = field.non_const_getter
-    ast_field.unstable = field.unstable
+    # Ignore the 'unstable' field since it's deprecated by the 'stability' field and only there at parsing level
+    # to provide compatibility support.
+    ast_field.stability = field.stability
     ast_field.always_serialize = field.always_serialize
 
     ast_field.cpp_name = field.name

@@ -63,7 +63,7 @@
 #include "mongo/db/repl/sync_source_selector.h"
 #include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/repl/transaction_oplog_application.h"
-#include "mongo/db/session_txn_record_gen.h"
+#include "mongo/db/transaction/session_txn_record_gen.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/logv2/log.h"
@@ -807,6 +807,9 @@ Status InitialSyncer::_truncateOplogAndDropReplicatedDatabases() {
                 "namespace"_attr = NamespaceString::kRsOplogNamespace);
 
     auto opCtx = makeOpCtx();
+    // This code can make untimestamped writes (deletes) to the _mdb_catalog on top of existing
+    // timestamped updates.
+    opCtx->recoveryUnit()->allowUntimestampedWrite();
 
     // We are not replicating nor validating these writes.
     UnreplicatedWritesBlock unreplicatedWritesBlock(opCtx.get());
@@ -990,11 +993,10 @@ void InitialSyncer::_getBeginFetchingOpTimeCallback(
     OpTime beginFetchingOpTime = defaultBeginFetchingOpTime;
     if (docs.size() != 0) {
         auto entry = SessionTxnRecord::parse(
-            IDLParserErrorContext("oldest active transaction optime for initial sync"),
-            docs.front());
+            IDLParserContext("oldest active transaction optime for initial sync"), docs.front());
         auto optime = entry.getStartOpTime();
         if (optime) {
-            beginFetchingOpTime = optime.get();
+            beginFetchingOpTime = optime.value();
         }
     }
 

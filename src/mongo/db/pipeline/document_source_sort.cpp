@@ -147,7 +147,7 @@ REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(
     DocumentSourceSort::parseBoundedSort,
     AllowedWithApiStrict::kNeverInVersion1,
     AllowedWithClientType::kAny,
-    feature_flags::gFeatureFlagBucketUnpackWithSort.getVersion(),
+    feature_flags::gFeatureFlagBucketUnpackWithSort,
     feature_flags::gFeatureFlagBucketUnpackWithSort.isEnabledAndIgnoreFCV());
 
 DocumentSource::GetNextResult::ReturnStatus DocumentSourceSort::timeSorterPeek() {
@@ -300,8 +300,8 @@ void DocumentSourceSort::serializeToArray(
         if (explain >= ExplainOptions::Verbosity::kExecStats) {
             mutDoc["totalDataSizeSortedBytesEstimate"] =
                 Value(static_cast<long long>(_timeSorter->totalDataSizeBytes()));
-            mutDoc["usedDisk"] = Value(_timeSorter->numSpills() > 0);
-            mutDoc["spills"] = Value(static_cast<long long>(_timeSorter->numSpills()));
+            mutDoc["usedDisk"] = Value(_timeSorter->stats().spilledRanges() > 0);
+            mutDoc["spills"] = Value(static_cast<long long>(_timeSorter->stats().spilledRanges()));
         }
 
         array.push_back(Value{mutDoc.freeze()});
@@ -436,7 +436,7 @@ intrusive_ptr<DocumentSourceSort> DocumentSourceSort::createBoundedSort(
     }
 
     if (limit) {
-        opts.Limit(limit.get());
+        opts.Limit(limit.value());
     }
 
     if (boundBase == kMin) {

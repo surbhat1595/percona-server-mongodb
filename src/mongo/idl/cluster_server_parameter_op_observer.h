@@ -35,8 +35,8 @@
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/client.h"
-#include "mongo/db/op_observer.h"
-#include "mongo/db/op_observer_registry.h"
+#include "mongo/db/op_observer/op_observer.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 
@@ -65,7 +65,7 @@ public:
                   const UUID& uuid,
                   StmtId stmtId,
                   const OplogDeleteEntryArgs& args) final;
-    void onDropDatabase(OperationContext* opCtx, const std::string& dbName) final;
+    void onDropDatabase(OperationContext* opCtx, const DatabaseName& dbName) final;
     using OpObserver::onDropCollection;
     repl::OpTime onDropCollection(OperationContext* opCtx,
                                   const NamespaceString& collectionName,
@@ -176,7 +176,7 @@ public:
                             bool stayTemp) final {}
 
     void onApplyOps(OperationContext* opCtx,
-                    const std::string& dbName,
+                    const DatabaseName& dbName,
                     const BSONObj& applyOpCmd) final {}
 
     void onEmptyCapped(OperationContext* opCtx,

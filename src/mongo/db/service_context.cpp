@@ -39,7 +39,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/client.h"
 #include "mongo/db/default_baton.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/recovery_unit_noop.h"
 #include "mongo/logv2/log.h"
@@ -102,6 +102,7 @@ ServiceContext::ServiceContext()
     : _opIdRegistry(UniqueOperationIdRegistry::create()),
       _tickSource(std::make_unique<SystemTickSource>()),
       _fastClockSource(std::make_unique<SystemClockSource>()),
+      _clockTickSource(_fastClockSource.get()),
       _preciseClockSource(std::make_unique<SystemClockSource>()) {}
 
 
@@ -212,6 +213,7 @@ void ServiceContext::setTickSource(std::unique_ptr<TickSource> newSource) {
 }
 
 void ServiceContext::setFastClockSource(std::unique_ptr<ClockSource> newSource) {
+    _clockTickSource.setClockSource(newSource.get());
     _fastClockSource = std::move(newSource);
 }
 

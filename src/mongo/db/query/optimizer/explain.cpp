@@ -175,7 +175,6 @@ public:
         std::ostringstream os;
         std::vector<std::string> linePrefix;
 
-        bool firstAddLine = true;
         for (const auto& cmd : _cmd) {
             switch (cmd._type) {
                 case CommandType::Indent:
@@ -194,8 +193,6 @@ public:
                         }
                     }
                     os << cmd._str << "\n";
-
-                    firstAddLine = false;
                     break;
                 }
 
@@ -712,37 +709,23 @@ public:
             };
 
             printer.print(lowBound.isInclusive() ? "[" : "(");
-            if (lowBound.isInfinite()) {
-                printer.print("-inf");
-            } else {
-                printBoundFn(printer, lowBound.getBound());
-            }
+            printBoundFn(printer, lowBound.getBound());
 
             printer.print(", ");
-            if (highBound.isInfinite()) {
-                printer.print("+inf");
-            } else {
-                printBoundFn(printer, highBound.getBound());
-            }
+            printBoundFn(printer, highBound.getBound());
 
             printer.print(highBound.isInclusive() ? "]" : ")");
         } else if constexpr (version == ExplainVersion::V3) {
             ExplainPrinter lowBoundPrinter;
-            lowBoundPrinter.fieldName("inclusive")
-                .print(lowBound.isInclusive())
-                .fieldName("infinite")
-                .print(lowBound.isInfinite());
-            if (!lowBound.isInfinite()) {
+            lowBoundPrinter.fieldName("inclusive").print(lowBound.isInclusive());
+            {
                 ExplainPrinter boundPrinter = generate(lowBound.getBound());
                 lowBoundPrinter.fieldName("bound").print(boundPrinter);
             }
 
             ExplainPrinter highBoundPrinter;
-            highBoundPrinter.fieldName("inclusive")
-                .print(highBound.isInclusive())
-                .fieldName("infinite")
-                .print(highBound.isInfinite());
-            if (!highBound.isInfinite()) {
+            highBoundPrinter.fieldName("inclusive").print(highBound.isInclusive());
+            {
                 ExplainPrinter boundPrinter = generate(highBound.getBound());
                 highBoundPrinter.fieldName("bound").print(boundPrinter);
             }
@@ -1638,7 +1621,7 @@ public:
                 .separator(", ")
                 .fieldName("scanDefName")
                 .print(prop.getScanDefName());
-            printBooleanFlag(printer, "possiblyEqPredsOnly", prop.getPossiblyEqPredsOnly());
+            printBooleanFlag(printer, "eqPredsOnly", prop.getEqPredsOnly());
             printer.separator("]");
 
             if (!prop.getSatisfiedPartialIndexes().empty()) {
@@ -1685,8 +1668,10 @@ public:
             struct Comparator {
                 bool operator()(const properties::DistributionRequirement& d1,
                                 const properties::DistributionRequirement& d2) const {
-                    const auto& distr1 = d1.getDistributionAndProjections();
-                    const auto& distr2 = d2.getDistributionAndProjections();
+                    const properties::DistributionAndProjections& distr1 =
+                        d1.getDistributionAndProjections();
+                    const properties::DistributionAndProjections& distr2 =
+                        d2.getDistributionAndProjections();
 
                     if (distr1._type < distr2._type) {
                         return true;
@@ -2076,7 +2061,21 @@ public:
 
     ExplainPrinter transport(const PathTraverse& path, ExplainPrinter inResult) {
         ExplainPrinter printer("PathTraverse");
-        printer.separator(" []")
+        printer.separator(" [");
+
+        if constexpr (version < ExplainVersion::V3) {
+            if (path.getMaxDepth() == PathTraverse::kUnlimited) {
+                printer.print("inf");
+            } else {
+                printer.print(path.getMaxDepth());
+            }
+        } else if constexpr (version == ExplainVersion::V3) {
+            printer.fieldName("maxDepth", ExplainVersion::V3).print(path.getMaxDepth());
+        } else {
+            static_assert("Unknown version");
+        }
+
+        printer.separator("]")
             .setChildCount(1)
             .fieldName("input", ExplainVersion::V3)
             .print(inResult);

@@ -408,7 +408,7 @@ PlanState ScanStage::getNext() {
     }
 
     if (_recordIdAccessor) {
-        _recordId = nextRecord->id;
+        _recordId = std::move(nextRecord->id);
         _recordIdAccessor->reset(
             false, value::TypeTags::RecordId, value::bitcastFrom<RecordId*>(&_recordId));
     }
@@ -511,41 +511,41 @@ std::vector<DebugPrinter::Block> ScanStage::debugPrint() const {
     auto ret = PlanStage::debugPrint();
 
     if (_seekKeySlot) {
-        DebugPrinter::addIdentifier(ret, _seekKeySlot.get());
+        DebugPrinter::addIdentifier(ret, _seekKeySlot.value());
     }
 
     if (_recordSlot) {
-        DebugPrinter::addIdentifier(ret, _recordSlot.get());
+        DebugPrinter::addIdentifier(ret, _recordSlot.value());
     } else {
         DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
     }
 
     if (_recordIdSlot) {
-        DebugPrinter::addIdentifier(ret, _recordIdSlot.get());
+        DebugPrinter::addIdentifier(ret, _recordIdSlot.value());
     } else {
         DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
     }
 
     if (_snapshotIdSlot) {
-        DebugPrinter::addIdentifier(ret, _snapshotIdSlot.get());
+        DebugPrinter::addIdentifier(ret, _snapshotIdSlot.value());
     } else {
         DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
     }
 
     if (_indexIdSlot) {
-        DebugPrinter::addIdentifier(ret, _indexIdSlot.get());
+        DebugPrinter::addIdentifier(ret, _indexIdSlot.value());
     } else {
         DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
     }
 
     if (_indexKeySlot) {
-        DebugPrinter::addIdentifier(ret, _indexKeySlot.get());
+        DebugPrinter::addIdentifier(ret, _indexKeySlot.value());
     } else {
         DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
     }
 
     if (_indexKeyPatternSlot) {
-        DebugPrinter::addIdentifier(ret, _indexKeyPatternSlot.get());
+        DebugPrinter::addIdentifier(ret, _indexKeyPatternSlot.value());
     } else {
         DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
     }
@@ -833,15 +833,15 @@ void ParallelScanStage::open(bool reOpen) {
                 while (ranges--) {
                     auto nextRecord = randomCursor->next();
                     if (nextRecord) {
-                        rids.emplace(nextRecord->id);
+                        rids.emplace(std::move(nextRecord->id));
                     }
                 }
                 RecordId lastid{};
-                for (auto id : rids) {
-                    _state->ranges.emplace_back(Range{lastid, id});
-                    lastid = id;
+                for (auto& id : rids) {
+                    _state->ranges.emplace_back(Range{std::move(lastid), id});
+                    lastid = std::move(id);
                 }
-                _state->ranges.emplace_back(Range{lastid, RecordId{}});
+                _state->ranges.emplace_back(Range{std::move(lastid), RecordId{}});
             }
         }
     }
@@ -981,37 +981,37 @@ std::vector<DebugPrinter::Block> ParallelScanStage::debugPrint() const {
     auto ret = PlanStage::debugPrint();
 
     if (_recordSlot) {
-        DebugPrinter::addIdentifier(ret, _recordSlot.get());
+        DebugPrinter::addIdentifier(ret, _recordSlot.value());
     } else {
         DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
     }
 
     if (_recordIdSlot) {
-        DebugPrinter::addIdentifier(ret, _recordIdSlot.get());
+        DebugPrinter::addIdentifier(ret, _recordIdSlot.value());
     } else {
         DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
     }
 
     if (_snapshotIdSlot) {
-        DebugPrinter::addIdentifier(ret, _snapshotIdSlot.get());
+        DebugPrinter::addIdentifier(ret, _snapshotIdSlot.value());
     } else {
         DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
     }
 
     if (_indexIdSlot) {
-        DebugPrinter::addIdentifier(ret, _indexIdSlot.get());
+        DebugPrinter::addIdentifier(ret, _indexIdSlot.value());
     } else {
         DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
     }
 
     if (_indexKeySlot) {
-        DebugPrinter::addIdentifier(ret, _indexKeySlot.get());
+        DebugPrinter::addIdentifier(ret, _indexKeySlot.value());
     } else {
         DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
     }
 
     if (_indexKeyPatternSlot) {
-        DebugPrinter::addIdentifier(ret, _indexKeyPatternSlot.get());
+        DebugPrinter::addIdentifier(ret, _indexKeyPatternSlot.value());
     } else {
         DebugPrinter::addIdentifier(ret, DebugPrinter::kNoneKeyword);
     }

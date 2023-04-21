@@ -40,7 +40,7 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/logical_session_cache_noop.h"
-#include "mongo/db/op_observer_impl.h"
+#include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/pipeline/document_source_mock.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
@@ -215,7 +215,7 @@ public:
     void create(NamespaceString nss) {
         writeConflictRetry(_opCtx, "create", nss.ns(), [&] {
             AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(_opCtx->lockState());
-            AutoGetDb autoDb(_opCtx, nss.db(), LockMode::MODE_X);
+            AutoGetDb autoDb(_opCtx, nss.dbName(), LockMode::MODE_X);
             WriteUnitOfWork wunit(_opCtx);
             if (_opCtx->recoveryUnit()->getCommitTimestamp().isNull()) {
                 ASSERT_OK(_opCtx->recoveryUnit()->setTimestamp(Timestamp(1, 1)));

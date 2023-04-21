@@ -117,11 +117,11 @@ public:
         }
 
         /**
-         * Returns a Future that will be resolved when all work associated with this Instance has
-         * completed running.
+         * Returns a Future that will be resolved when the instance has been durably marked garbage
+         * collectable.
          */
-        SharedSemiFuture<void> getCompletionFuture() const {
-            return _completionPromise.getFuture();
+        SharedSemiFuture<void> getForgetMigrationDurableFuture() const {
+            return _forgetMigrationDurablePromise.getFuture();
         }
 
         /**
@@ -278,12 +278,6 @@ public:
          */
         CancellationToken _initAbortMigrationSource(const CancellationToken& token);
 
-        /*
-         * Returns false if the protocol is FCV incompatible. Also, resets the 'protocol' field in
-         * the _stateDoc to boost::none for FCV < 5.2.
-         */
-        bool _checkifProtocolRemainsFCVCompatible();
-
         ServiceContext* const _serviceContext;
         const TenantMigrationDonorService* const _donorService;
 
@@ -327,8 +321,8 @@ public:
         // Promise that is resolved when the donor receives the donorForgetMigration command.
         SharedPromise<void> _receiveDonorForgetMigrationPromise;
 
-        // Promise that is resolved when the chain of work kicked off by run() has completed.
-        SharedPromise<void> _completionPromise;
+        // Promise that is resolved when the instance has been durably marked garbage collectable.
+        SharedPromise<void> _forgetMigrationDurablePromise;
 
         // Promise that is resolved when the donor has majority-committed the write to commit or
         // abort.
@@ -342,10 +336,6 @@ public:
         // interrupting the instance, e.g. receiving donorAbortMigration. Initialized in
         // _initAbortMigrationSource().
         boost::optional<CancellationSource> _abortMigrationSource;
-
-        // Value is set at the beginning of run() method. Mainly used to determine if the 'protocol'
-        // field needs to be added to recipient migration commands and state document.
-        bool _isAtLeastFCV52AtStart = false;
     };
 
 private:

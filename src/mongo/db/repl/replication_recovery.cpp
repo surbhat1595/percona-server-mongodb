@@ -54,8 +54,8 @@
 #include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/db/storage/durable_history_pin.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
-#include "mongo/db/transaction_history_iterator.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/transaction_history_iterator.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/timer.h"
@@ -396,7 +396,7 @@ void ReplicationRecoveryImpl::recoverFromOplogUpTo(OperationContext* opCtx, Time
         fassert(31436, "No recovery timestamp, cannot recover from the oplog");
     }
 
-    startPoint = _adjustStartPointIfNecessary(opCtx, startPoint.get());
+    startPoint = _adjustStartPointIfNecessary(opCtx, startPoint.value());
 
     invariant(!endPoint.isNull());
 
@@ -806,7 +806,7 @@ void ReplicationRecoveryImpl::_truncateOplogTo(OperationContext* opCtx,
 
     // Fetch the oplog collection.
     const NamespaceString oplogNss(NamespaceString::kRsOplogNamespace);
-    AutoGetDb autoDb(opCtx, oplogNss.db(), MODE_IX);
+    AutoGetDb autoDb(opCtx, oplogNss.dbName(), MODE_IX);
     Lock::CollectionLock oplogCollectionLoc(opCtx, oplogNss, MODE_X);
     auto oplogCollection =
         CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, oplogNss);
@@ -832,14 +832,14 @@ void ReplicationRecoveryImpl::_truncateOplogTo(OperationContext* opCtx,
 
     // Parse the response.
     auto truncateAfterOpTime =
-        fassert(51766, repl::OpTime::parseFromOplogEntry(truncateAfterOplogEntryBSON.get()));
+        fassert(51766, repl::OpTime::parseFromOplogEntry(truncateAfterOplogEntryBSON.value()));
     auto truncateAfterOplogEntryTs = truncateAfterOpTime.getTimestamp();
     auto truncateAfterRecordId = RecordId(truncateAfterOplogEntryTs.asULL());
 
     invariant(truncateAfterRecordId <= RecordId(truncateAfterTimestamp.asULL()),
               str::stream() << "Should have found a oplog entry timestamp lte to "
                             << truncateAfterTimestamp.toString() << ", but instead found "
-                            << redact(truncateAfterOplogEntryBSON.get()) << " with timestamp "
+                            << redact(truncateAfterOplogEntryBSON.value()) << " with timestamp "
                             << Timestamp(truncateAfterRecordId.getLong()).toString());
 
     // Truncate the oplog AFTER the oplog entry found to be <= truncateAfterTimestamp.
@@ -903,9 +903,9 @@ void ReplicationRecoveryImpl::_truncateOplogIfNeededAndThenClearOplogTruncateAft
               "The oplog truncation point is equal to or earlier than the stable timestamp, so "
               "truncating after the stable timestamp instead",
               "truncatePoint"_attr = truncatePoint,
-              "stableTimestamp"_attr = (*stableTimestamp).get());
+              "stableTimestamp"_attr = (*stableTimestamp).value());
 
-        truncatePoint = (*stableTimestamp).get();
+        truncatePoint = (*stableTimestamp).value();
     }
 
     LOGV2(21557,
@@ -944,7 +944,7 @@ Timestamp ReplicationRecoveryImpl::_adjustStartPointIfNecessary(OperationContext
     }
 
     auto adjustmentOpTime =
-        fassert(5466602, OpTime::parseFromOplogEntry(adjustmentOplogEntryBSON.get()));
+        fassert(5466602, OpTime::parseFromOplogEntry(adjustmentOplogEntryBSON.value()));
     auto adjustmentTimestamp = adjustmentOpTime.getTimestamp();
 
     if (startPoint != adjustmentTimestamp) {

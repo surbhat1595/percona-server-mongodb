@@ -27,15 +27,40 @@
 #
 """Cost Model Calibrator entry point."""
 
+import dataclasses
 import os
+import csv
 import json
+from typing import Mapping, Sequence
+from cost_estimator import ExecutionStats, ModelParameters
 from data_generator import DataGenerator
 from database_instance import DatabaseInstance
 from config import Config
 import abt_calibrator
 import workload_execution
+from workload_execution import Query, QueryParameters
+import parameters_extractor
+from random_generator_config import distributions
 
 __all__ = []
+
+
+def save_to_csv(parameters: Mapping[str, Sequence[ModelParameters]], filepath: str) -> None:
+    """Save model input parameters to a csv file."""
+    abt_type_name = 'abt_type'
+    fieldnames = [
+        abt_type_name, *[f.name for f in dataclasses.fields(ExecutionStats)],
+        *[f.name for f in dataclasses.fields(QueryParameters)]
+    ]
+    with open(filepath, 'w', newline='') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        for abt_type, type_params_list in parameters.items():
+            for type_params in type_params_list:
+                fields = dataclasses.asdict(type_params.execution_stats) | dataclasses.asdict(
+                    type_params.query_params)
+                fields[abt_type_name] = abt_type
+                writer.writerow(fields)
 
 
 def main():
@@ -53,28 +78,34 @@ def main():
         # 2. Data generation (optional), generates random data and populates collections with it.
         generator = DataGenerator(database, config.data_generator)
         generator.populate_collections()
-        collection_names = list(generator.list_collection_names())
 
         # 3. Collecting data for calibration (optional).
         # It runs the pipelines and stores explains to the database.
-        pipelines = [
-            [{'$match': {'f_5': 7}}],
-            [{'$match': {'f_1': 5}}],
-            [{'$match': {'f_7': 4}}],
-            [{'$match': {'f_5': 7}}],
-            [{'$match': {'f_1': 5}}],
-            [{'$match': {'f_2': generator.gen_random_string()}}],
-            [{'$match': {'f_5': generator.gen_random_string()}}],
-        ]
-        workload_execution.execute(database, config.workload_execution, collection_names, pipelines)
+        requests = []
+        for val in distributions['string_choice'].get_values():
+            keys_length = len(val) + 2
+            for i in range(1, 5):
+                requests.append(
+                    Query(pipeline=[{'$match': {f'choice{i}': val}}],
+                          keys_length_in_bytes=keys_length))
+
+        workload_execution.execute(database, config.workload_execution, generator.collection_infos,
+                                   requests)
 
         # Calibration phase (optional).
         # Reads the explains stored on the previous step (this run and/or previous runs),
         # aparses the explains, nd calibrates the cost model for the ABT nodes.
-        models = abt_calibrator.calibrate(config.abt_calibrator, database, ['IndexScan', 'Seek'])
+        models = abt_calibrator.calibrate(
+            config.abt_calibrator, database,
+            ['IndexScan', 'Seek', 'PhysicalScan', 'ValueScan', 'CoScan', 'Scan'])
         for abt, model in models.items():
             print(abt)
             print(model)
+
+        parameters = parameters_extractor.extract_parameters(config.abt_calibrator, database, [])
+        save_to_csv(parameters, 'parameters.csv')
+
+    print("DONE!")
 
 
 if __name__ == '__main__':

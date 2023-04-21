@@ -37,8 +37,8 @@
 #include "mongo/db/catalog/database_holder_mock.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/op_observer_impl.h"
-#include "mongo/db/op_observer_registry.h"
+#include "mongo/db/op_observer/op_observer_impl.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/primary_only_service.h"
 #include "mongo/db/repl/primary_only_service_op_observer.h"
@@ -110,8 +110,7 @@ StatusWith<ShardSplitDonorDocument> getStateDocument(OperationContext* opCtx,
     }
 
     try {
-        return ShardSplitDonorDocument::parse(IDLParserErrorContext("shardSplitStateDocument"),
-                                              result);
+        return ShardSplitDonorDocument::parse(IDLParserContext("shardSplitStateDocument"), result);
     } catch (DBException& ex) {
         return ex.toStatus(str::stream()
                            << "Invalid BSON found for matching document with shard split id: "
@@ -186,8 +185,7 @@ sdam::TopologyDescriptionPtr makeRecipientTopologyDescription(const MockReplicaS
 
 }  // namespace
 
-std::ostringstream& operator<<(std::ostringstream& builder,
-                               const mongo::ShardSplitDonorStateEnum state) {
+std::ostream& operator<<(std::ostream& builder, mongo::ShardSplitDonorStateEnum state) {
     switch (state) {
         case mongo::ShardSplitDonorStateEnum::kUninitialized:
             builder << "kUninitialized";
@@ -351,7 +349,8 @@ public:
         // The database needs to be open before using shard split donor service.
         {
             auto opCtx = cc().makeOperationContext();
-            AutoGetDb autoDb(opCtx.get(), NamespaceString::kShardSplitDonorsNamespace.db(), MODE_X);
+            AutoGetDb autoDb(
+                opCtx.get(), NamespaceString::kShardSplitDonorsNamespace.dbName(), MODE_X);
             auto db = autoDb.ensureDbExists(opCtx.get());
             ASSERT_TRUE(db);
         }
@@ -841,9 +840,14 @@ TEST_F(ShardSplitDonorServiceTest, AbortDueToRecipientNodesValidation) {
     auto result = serviceInstance->decisionFuture().get();
 
     ASSERT_EQ(result.state, mongo::ShardSplitDonorStateEnum::kAborted);
+    ASSERT(result.abortReason);
+    ASSERT_EQ(result.abortReason->code(), ErrorCodes::BadValue);
+    ASSERT_TRUE(serviceInstance->isGarbageCollectable());
 
-    ASSERT_OK(serviceInstance->completionFuture().getNoThrow());
-    ASSERT_FALSE(serviceInstance->isGarbageCollectable());
+    auto statusWithDoc = getStateDocument(opCtx.get(), stateDocument.getId());
+    ASSERT_OK(statusWithDoc.getStatus());
+
+    ASSERT_EQ(statusWithDoc.getValue().getState(), ShardSplitDonorStateEnum::kAborted);
 }
 
 TEST(RecipientAcceptSplitListenerTest, FutureReady) {
@@ -1046,7 +1050,7 @@ TEST_F(ShardSplitRecipientCleanupTest, ShardSplitRecipientCleanup) {
         ASSERT_TRUE(hasActiveSplitForTenants(opCtx.get(), _tenantIds));
 
         ASSERT_TRUE(optionalDonor);
-        auto serviceInstance = optionalDonor.get();
+        auto serviceInstance = optionalDonor.value();
         ASSERT(serviceInstance.get());
 
         _pauseBeforeRecipientCleanupFp.reset();
@@ -1108,6 +1112,9 @@ TEST_F(ShardSplitAbortedStepUpTest, ShardSplitAbortedStepUp) {
     auto result = optionalDonor->get()->decisionFuture().get();
 
     ASSERT_EQ(result.state, mongo::ShardSplitDonorStateEnum::kAborted);
+    ASSERT_TRUE(!!result.abortReason);
+    ASSERT_EQ(result.abortReason->code(), ErrorCodes::InternalError);
+    ASSERT_EQ(result.abortReason->reason(), abortReason);
 }
 
 }  // namespace mongo

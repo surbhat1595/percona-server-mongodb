@@ -745,8 +745,7 @@ void ReplicationCoordinatorImpl::_startInitialSync(
                     onCompletion);
             };
 
-            if (repl::feature_flags::gFileCopyBasedInitialSync.isEnabledAndIgnoreFCV() &&
-                !fallbackToLogical) {
+            if (!fallbackToLogical) {
                 auto swInitialSyncer = createInitialSyncer(initialSyncMethod);
                 if (swInitialSyncer.getStatus().code() == ErrorCodes::NotImplemented &&
                     initialSyncMethod != "logical") {
@@ -1328,7 +1327,9 @@ void ReplicationCoordinatorImpl::signalDrainComplete(OperationContext* opCtx,
     _updateWriteAbilityFromTopologyCoordinator(lk, opCtx);
     _updateMemberStateFromTopologyCoordinator(lk);
 
-    LOGV2(21331, "Transition to primary complete; database writes are now permitted");
+    LOGV2(21331,
+          "Transition to primary complete; database writes are now permitted",
+          "term"_attr = _termShadow.load());
     _externalState->startNoopWriter(_getMyLastAppliedOpTime_inlock());
 }
 
@@ -2389,10 +2390,10 @@ std::shared_ptr<const HelloResponse> ReplicationCoordinatorImpl::awaitHelloRespo
                 "Waiting for a hello response from a topology change or until deadline: "
                 "{deadline}. Current TopologyVersion counter is {currentTopologyVersionCounter}",
                 "Waiting for a hello response from a topology change or until deadline",
-                "deadline"_attr = deadline.get(),
+                "deadline"_attr = deadline.value(),
                 "currentTopologyVersionCounter"_attr = topologyVersion.getCounter());
     auto statusWithHello =
-        futureGetNoThrowWithDeadline(opCtx, future, deadline.get(), opCtx->getTimeoutError());
+        futureGetNoThrowWithDeadline(opCtx, future, deadline.value(), opCtx->getTimeoutError());
     auto status = statusWithHello.getStatus();
 
     if (MONGO_unlikely(hangAfterWaitingForTopologyChangeTimesOut.shouldFail())) {
@@ -3130,7 +3131,7 @@ bool ReplicationCoordinatorImpl::isInPrimaryOrSecondaryState_UNSAFE() const {
 bool ReplicationCoordinatorImpl::shouldRelaxIndexConstraints(OperationContext* opCtx,
                                                              const NamespaceString& ns) {
     if (ReplSettings::shouldRecoverFromOplogAsStandalone() || !recoverToOplogTimestamp.empty() ||
-        tenantMigrationRecipientInfo(opCtx)) {
+        tenantMigrationInfo(opCtx)) {
         return true;
     }
     return !canAcceptWritesFor(opCtx, ns);
@@ -3212,7 +3213,7 @@ Status ReplicationCoordinatorImpl::processReplSetGetStatus(
                           "Failed to get last stable recovery timestamp due to {error}",
                           "error"_attr = "lock acquire timeout"_sd);
         }
-    } catch (const ExceptionForCat<ErrorCategory::Interruption>& ex) {
+    } catch (const ExceptionForCat<ErrorCategory::CancellationError>& ex) {
         LOGV2_WARNING(6100703,
                       "Failed to get last stable recovery timestamp due to {error}",
                       "error"_attr = redact(ex));
@@ -3795,7 +3796,7 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
                     ReadWriteConcernDefaults::get(opCtx->getServiceContext()).getDefault(opCtx);
                 const auto wcDefault = rwcDefaults.getDefaultWriteConcern();
                 if (wcDefault) {
-                    auto validateWCStatus = newConfig.validateWriteConcern(wcDefault.get());
+                    auto validateWCStatus = newConfig.validateWriteConcern(wcDefault.value());
                     if (!validateWCStatus.isOK()) {
                         return Status(ErrorCodes::NewReplicaSetConfigurationIncompatible,
                                       str::stream() << "May not remove custom write concern "
@@ -4986,16 +4987,16 @@ ReplicationCoordinatorImpl::_setCurrentRSConfig(WithLock lk,
     }
 
     // Wake up writeConcern waiters that are no longer satisfiable due to the rsConfig change.
-    _replicationWaiterList.setValueIf_inlock(
-        [this](const OpTime& opTime, const SharedWaiterHandle& waiter) {
-            invariant(waiter->writeConcern);
-            // This throws if a waiter's writeConcern is no longer satisfiable, in which case
-            // setValueIf_inlock will fulfill the waiter's promise with the error status.
-            uassertStatusOK(_checkIfWriteConcernCanBeSatisfied_inlock(waiter->writeConcern.get()));
-            // Return false meaning that the waiter is still satisfiable and thus can remain in the
-            // waiter list.
-            return false;
-        });
+    _replicationWaiterList.setValueIf_inlock([this](const OpTime& opTime,
+                                                    const SharedWaiterHandle& waiter) {
+        invariant(waiter->writeConcern);
+        // This throws if a waiter's writeConcern is no longer satisfiable, in which case
+        // setValueIf_inlock will fulfill the waiter's promise with the error status.
+        uassertStatusOK(_checkIfWriteConcernCanBeSatisfied_inlock(waiter->writeConcern.value()));
+        // Return false meaning that the waiter is still satisfiable and thus can remain in the
+        // waiter list.
+        return false;
+    });
 
     _cancelCatchupTakeover_inlock();
     _cancelPriorityTakeover_inlock();
@@ -5037,7 +5038,7 @@ void ReplicationCoordinatorImpl::_wakeReadyWaiters(WithLock lk, boost::optional<
     _replicationWaiterList.setValueIf_inlock(
         [this](const OpTime& opTime, const SharedWaiterHandle& waiter) {
             invariant(waiter->writeConcern);
-            return _doneWaitingForReplication_inlock(opTime, waiter->writeConcern.get());
+            return _doneWaitingForReplication_inlock(opTime, waiter->writeConcern.value());
         },
         opTime);
 }
@@ -5060,10 +5061,21 @@ Status ReplicationCoordinatorImpl::processReplSetUpdatePosition(const UpdatePosi
     }
     _updateStateAfterRemoteOpTimeUpdates(lock, maxRemoteOpTime);
 
-    if (gotValidUpdate && !_getMemberState_inlock().primary()) {
+    if (gotValidUpdate) {
+        // If we become primary after the unlock below, the forwardSecondaryProgress will do nothing
+        // (slightly expensively).  If we become secondary after the unlock below, BackgroundSync
+        // will take care of forwarding our progress by calling signalUpstreamUpdater() once we
+        // select a new sync source.  So it's OK to depend on the stale value of wasPrimary here.
+        bool wasPrimary = _getMemberState_inlock().primary();
         lock.unlock();
-        // Must do this outside _mutex
-        _externalState->forwardSecondaryProgress();
+        // maxRemoteOpTime is null here if we got valid updates but no downstream node had
+        // actually advanced any optime.
+        if (!maxRemoteOpTime.isNull())
+            _externalState->notifyOtherMemberDataChanged();
+        if (!wasPrimary) {
+            // Must do this outside _mutex
+            _externalState->forwardSecondaryProgress();
+        }
     }
     return status;
 }
@@ -5161,7 +5173,7 @@ ReadPreference ReplicationCoordinatorImpl::_getSyncSourceReadPreference(WithLock
         if (!initialSyncSourceReadPreference.empty()) {
             try {
                 readPreference =
-                    ReadPreference_parse(IDLParserErrorContext("initialSyncSourceReadPreference"),
+                    ReadPreference_parse(IDLParserContext("initialSyncSourceReadPreference"),
                                          initialSyncSourceReadPreference);
                 parsedSyncSourceFromInitialSync = true;
             } catch (const DBException& e) {
@@ -6229,7 +6241,7 @@ void ReplicationCoordinatorImpl::_validateDefaultWriteConcernOnShardStartup(With
         // flag is set as we record it during sharding initialization phase, as on restarting a
         // shard node for upgrading or any other reason, sharding initialization happens before
         // config initialization.
-        if (_wasCWWCSetOnConfigServerOnStartup && !_wasCWWCSetOnConfigServerOnStartup.get() &&
+        if (_wasCWWCSetOnConfigServerOnStartup && !_wasCWWCSetOnConfigServerOnStartup.value() &&
             !_rsConfig.isImplicitDefaultWriteConcernMajority()) {
             auto msg =
                 "Cannot start shard because the implicit default write concern on this shard is "

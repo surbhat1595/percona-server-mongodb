@@ -28,6 +28,7 @@
  */
 
 
+#include "mongo/db/pipeline/document_source_sequential_document_cache.h"
 #include <algorithm>
 #include <iterator>
 
@@ -132,7 +133,7 @@ bool checkMetadataSortReorder(
             return false;
         }
         if (sortKey.fieldPath->getFieldName(0) != metaFieldStr) {
-            if (lastpointTimeField && sortKey.fieldPath->fullPath() == lastpointTimeField.get()) {
+            if (lastpointTimeField && sortKey.fieldPath->fullPath() == lastpointTimeField.value()) {
                 // If we are checking the sort pattern for the lastpoint case, 'time' is allowed.
                 timeFound = true;
                 continue;
@@ -168,7 +169,7 @@ boost::intrusive_ptr<DocumentSourceSort> createMetadataSortForReorder(
     std::vector<SortPattern::SortPatternPart> updatedPattern;
 
     if (groupIdField) {
-        auto groupId = FieldPath(groupIdField.get());
+        auto groupId = FieldPath(groupIdField.value());
         SortPattern::SortPatternPart patternPart;
         patternPart.isAscending = !flipSort;
         patternPart.fieldPath = groupId;
@@ -179,16 +180,16 @@ boost::intrusive_ptr<DocumentSourceSort> createMetadataSortForReorder(
     for (const auto& entry : sortPattern) {
         updatedPattern.push_back(entry);
 
-        if (lastpointTimeField && entry.fieldPath->fullPath() == lastpointTimeField.get()) {
+        if (lastpointTimeField && entry.fieldPath->fullPath() == lastpointTimeField.value()) {
             updatedPattern.back().fieldPath =
                 FieldPath((entry.isAscending ? timeseries::kControlMinFieldNamePrefix
                                              : timeseries::kControlMaxFieldNamePrefix) +
-                          lastpointTimeField.get());
+                          lastpointTimeField.value());
             updatedPattern.push_back(SortPattern::SortPatternPart{
                 entry.isAscending,
                 FieldPath((entry.isAscending ? timeseries::kControlMaxFieldNamePrefix
                                              : timeseries::kControlMinFieldNamePrefix) +
-                          lastpointTimeField.get()),
+                          lastpointTimeField.value()),
                 nullptr});
         } else {
             auto updated = FieldPath(timeseries::kBucketMetaFieldName);
@@ -522,7 +523,7 @@ bool DocumentSourceInternalUnpackBucket::pushDownComputedMetaProjection(
         (nextTransform->getType() == TransformerInterface::TransformerType::kInclusionProjection ||
          nextTransform->getType() == TransformerInterface::TransformerType::kComputedProjection)) {
 
-        auto& metaName = _bucketUnpacker.bucketSpec().metaField().get();
+        auto& metaName = _bucketUnpacker.bucketSpec().metaField().value();
         auto [addFieldsSpec, deleteStage] =
             nextTransform->extractComputedProjections(metaName,
                                                       timeseries::kBucketMetaFieldName.toString(),
@@ -624,7 +625,7 @@ std::pair<BSONObj, bool> DocumentSourceInternalUnpackBucket::extractProjectForPu
         _bucketUnpacker.bucketSpec().metaField() && nextProject &&
         nextProject->getType() == TransformerInterface::TransformerType::kExclusionProjection) {
         return nextProject->extractProjectOnFieldAndRename(
-            _bucketUnpacker.bucketSpec().metaField().get(), timeseries::kBucketMetaFieldName);
+            _bucketUnpacker.bucketSpec().metaField().value(), timeseries::kBucketMetaFieldName);
     }
 
     return {BSONObj{}, false};
@@ -651,7 +652,7 @@ DocumentSourceInternalUnpackBucket::rewriteGroupByMinMax(Pipeline::SourceContain
 
     const auto& idPath = exprIdPath->getFieldPath();
     if (idPath.getPathLength() < 2 ||
-        idPath.getFieldName(1) != _bucketUnpacker.bucketSpec().metaField().get()) {
+        idPath.getFieldName(1) != _bucketUnpacker.bucketSpec().metaField().value()) {
         return {};
     }
 
@@ -737,7 +738,7 @@ DocumentSourceInternalUnpackBucket::rewriteGroupByMinMax(Pipeline::SourceContain
 bool DocumentSourceInternalUnpackBucket::haveComputedMetaField() const {
     return _bucketUnpacker.bucketSpec().metaField() &&
         _bucketUnpacker.bucketSpec().fieldIsComputed(
-            _bucketUnpacker.bucketSpec().metaField().get());
+            _bucketUnpacker.bucketSpec().metaField().value());
 }
 
 template <TopBottomSense sense, bool single>
@@ -893,7 +894,7 @@ bool DocumentSourceInternalUnpackBucket::optimizeLastpoint(Pipeline::SourceConta
         return false;
     }
 
-    auto metaField = maybeMetaField.get();
+    auto metaField = maybeMetaField.value();
     if (!checkMetadataSortReorder(sortStage->getSortKeyPattern(), metaField, timeField)) {
         return false;
     }
@@ -982,6 +983,15 @@ bool DocumentSourceInternalUnpackBucket::optimizeLastpoint(Pipeline::SourceConta
         tryInsertBucketLevelSortAndGroup(AccumulatorDocumentsNeeded::kLastDocument);
 }
 
+
+bool findSequentialDocumentCache(Pipeline::SourceContainer::iterator start,
+                                 Pipeline::SourceContainer::iterator end) {
+    while (start != end && !dynamic_cast<DocumentSourceSequentialDocumentCache*>(start->get())) {
+        start = std::next(start);
+    }
+    return start != end;
+}
+
 Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimizeAt(
     Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
     invariant(*itr == this);
@@ -998,7 +1008,7 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
     if (auto sortPtr = dynamic_cast<DocumentSourceSort*>(std::next(itr)->get())) {
         if (auto metaField = _bucketUnpacker.bucketSpec().metaField();
             metaField && !haveComputedMetaField) {
-            if (checkMetadataSortReorder(sortPtr->getSortKeyPattern(), metaField.get())) {
+            if (checkMetadataSortReorder(sortPtr->getSortKeyPattern(), metaField.value())) {
                 // We have a sort on metadata field following this stage. Reorder the two stages
                 // and return a pointer to the preceding stage.
                 auto sortForReorder = createMetadataSortForReorder(*sortPtr);
@@ -1075,8 +1085,19 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
             // the first stage, because it expects to use a special DocumentSouceGeoNearCursor plan.
             nextStage->optimizeAt(std::next(itr), container);
         }
+        auto cacheFound = findSequentialDocumentCache(itr, container->end());
+        if (cacheFound) {
+            // optimizeAt() is responsible for reordering stages, and optimize() is responsible for
+            // simplifying individual stages. $sequentialCache's optimizeAt() places the stage where
+            // it can cache as big a prefix of the pipeline as possible. To do so correctly, it
+            // needs to look at dependencies: a stage that depends on a let-variable cannot be
+            // cached. But optimize() can inline variables. Therefore, we want to avoid calling
+            // optimize() before $sequentialCache has a chance to run optimizeAt().
+            return Pipeline::optimizeAtEndOfPipeline(itr, container);
+        } else {
+            Pipeline::optimizeEndOfPipeline(itr, container);
+        }
 
-        Pipeline::optimizeEndOfPipeline(itr, container);
         if (std::next(itr) == container->end()) {
             return container->end();
         } else {
@@ -1117,9 +1138,7 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
     }
 
     // Attempt to optimize last-point type queries.
-    if (feature_flags::gfeatureFlagLastPointQuery.isEnabled(
-            serverGlobalParams.featureCompatibility) &&
-        !_triedLastpointRewrite && optimizeLastpoint(itr, container)) {
+    if (!_triedLastpointRewrite && optimizeLastpoint(itr, container)) {
         _triedLastpointRewrite = true;
         // If we are able to rewrite the aggregation, give the resulting pipeline a chance to
         // perform further optimizations.

@@ -29,7 +29,6 @@
 
 #include "mongo/platform/basic.h"
 
-#include <boost/optional/optional_io.hpp>
 #include <iostream>
 #include <string>
 
@@ -113,7 +112,7 @@ public:
             std::move(coll.second));
         CollectionCatalog::write(operationContext(), [&](CollectionCatalog& catalog) {
             catalog.registerCollection(
-                operationContext(), options.uuid.get(), std::move(collection));
+                operationContext(), options.uuid.value(), std::move(collection));
         });
 
         wuow.commit();
@@ -645,7 +644,7 @@ TEST_F(ImportCollectionTest, ImportCollection) {
               idxIdent);
 
     // Test that a collection UUID is generated for import.
-    ASSERT_NE(md->options.uuid.get(), importResult.uuid);
+    ASSERT_NE(md->options.uuid.value(), importResult.uuid);
     // Substitute in the generated UUID and check that the rest of fields in the catalog entry
     // match.
     md->options.uuid = importResult.uuid;
@@ -740,6 +739,28 @@ TEST_F(DurableCatalogTest, CheckTimeseriesBucketsMayHaveMixedSchemaDataFlagFCVLa
                           ->timeseriesBucketsMayHaveMixedSchemaData);
     }
 }
+
+TEST_F(DurableCatalogTest, CreateCollectionCatalogEntryHasCorrectTenantNamespace) {
+    gMultitenancySupport = true;
+
+    auto tenantId = TenantId(OID::gen());
+    const NamespaceString nss = NamespaceString(tenantId, "test.regular");
+    createCollection(nss, CollectionOptions());
+
+    auto collection = CollectionCatalog::get(operationContext())
+                          ->lookupCollectionByNamespace(operationContext(), nss);
+    RecordId catalogId = collection->getCatalogId();
+    ASSERT_EQ(getCatalog()->getEntry(catalogId).nss.tenantId(), nss.tenantId());
+    ASSERT_EQ(getCatalog()->getEntry(catalogId).nss, nss);
+
+    Lock::GlobalLock globalLock{operationContext(), MODE_IS};
+    ASSERT_EQ(getCatalog()->getMetaData(operationContext(), catalogId)->nss.tenantId(),
+              nss.tenantId());
+    ASSERT_EQ(getCatalog()->getMetaData(operationContext(), catalogId)->nss, nss);
+
+    gMultitenancySupport = false;
+}
+
 
 }  // namespace
 }  // namespace mongo

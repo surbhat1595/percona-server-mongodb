@@ -29,7 +29,7 @@
 
 #pragma once
 
-#include "mongo/db/op_observer_impl.h"
+#include "mongo/db/op_observer/op_observer_impl.h"
 
 namespace mongo {
 
@@ -37,6 +37,8 @@ class ShardingWriteRouter;
 
 class OpObserverShardingImpl : public OpObserverImpl {
 public:
+    OpObserverShardingImpl(std::unique_ptr<OplogWriter> oplogWriter);
+
     // True if the document being deleted belongs to a chunk which, while still in the shard,
     // is being migrated out. (Not to be confused with "fromMigrate", which tags operations
     // that are steps in performing the migration.)

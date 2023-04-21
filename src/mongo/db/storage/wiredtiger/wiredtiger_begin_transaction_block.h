@@ -58,11 +58,13 @@ public:
     // earlier.
     enum class RoundUpPreparedTimestamps { kNoRound, kRound };
 
-    WiredTigerBeginTxnBlock(
-        WT_SESSION* session,
-        PrepareConflictBehavior prepareConflictBehavior,
-        RoundUpPreparedTimestamps roundUpPreparedTimestamps,
-        RoundUpReadTimestamp roundUpReadTimestamp = RoundUpReadTimestamp::kNoRoundError);
+    enum class UntimestampedWriteAssertion { kSuppress, kEnforce };
+
+    WiredTigerBeginTxnBlock(WT_SESSION* session,
+                            PrepareConflictBehavior prepareConflictBehavior,
+                            RoundUpPreparedTimestamps roundUpPreparedTimestamps,
+                            RoundUpReadTimestamp roundUpReadTimestamp,
+                            UntimestampedWriteAssertion allowUntimestampedWrite);
     WiredTigerBeginTxnBlock(WT_SESSION* session, const char* config);
     ~WiredTigerBeginTxnBlock();
 

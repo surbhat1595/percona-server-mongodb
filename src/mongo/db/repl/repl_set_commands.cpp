@@ -45,7 +45,7 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/repl_set_heartbeat_args_v1.h"
@@ -152,14 +152,14 @@ public:
                         StorageInterface::get(getGlobalServiceContext())
                             ->getLastStableRecoveryTimestamp(getGlobalServiceContext());
                     if (ts) {
-                        result.append("lastStableRecoveryTimestamp", ts.get());
+                        result.append("lastStableRecoveryTimestamp", ts.value());
                     }
                 } else {
                     LOGV2_WARNING(6100700,
                                   "Failed to get last stable recovery timestamp due to {error}",
                                   "error"_attr = "lock acquire timeout"_sd);
                 }
-            } catch (const ExceptionForCat<ErrorCategory::Interruption>& ex) {
+            } catch (const ExceptionForCat<ErrorCategory::CancellationError>& ex) {
                 LOGV2_WARNING(6100701,
                               "Failed to get last stable recovery timestamp due to {error}",
                               "error"_attr = redact(ex));

@@ -47,7 +47,7 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/ops/write_ops_exec.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/repl/cloner_utils.h"
@@ -70,9 +70,9 @@
 #include "mongo/db/repl/tenant_migration_statistics.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/session_catalog_mongod.h"
-#include "mongo/db/session_txn_record_gen.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_import.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/session_txn_record_gen.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/vector_clock_mutable.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/logv2/log.h"
@@ -357,8 +357,8 @@ TenantMigrationRecipientService::Instance::Instance(
     : PrimaryOnlyService::TypedInstance<Instance>(),
       _serviceContext(serviceContext),
       _recipientService(recipientService),
-      _stateDoc(TenantMigrationRecipientDocument::parse(IDLParserErrorContext("recipientStateDoc"),
-                                                        stateDoc)),
+      _stateDoc(
+          TenantMigrationRecipientDocument::parse(IDLParserContext("recipientStateDoc"), stateDoc)),
       _tenantId(_stateDoc.getTenantId().toString()),
       _protocol(_stateDoc.getProtocol().value_or(MigrationProtocolEnum::kMultitenantMigrations)),
       _migrationUuid(_stateDoc.getId()),
@@ -460,8 +460,8 @@ boost::optional<BSONObj> TenantMigrationRecipientService::Instance::reportForCur
 
 void TenantMigrationRecipientService::Instance::checkIfOptionsConflict(
     const BSONObj& options) const {
-    auto stateDoc = TenantMigrationRecipientDocument::parse(
-        IDLParserErrorContext("recipientStateDoc"), options);
+    auto stateDoc =
+        TenantMigrationRecipientDocument::parse(IDLParserContext("recipientStateDoc"), options);
 
     invariant(stateDoc.getId() == _migrationUuid);
 
@@ -609,7 +609,7 @@ std::unique_ptr<DBClientConnection> TenantMigrationRecipientService::Instance::_
                                      0 /* socketTimeout */,
                                      nullptr /* uri */,
                                      nullptr /* apiParameters */,
-                                     _transientSSLParams ? &_transientSSLParams.get() : nullptr);
+                                     _transientSSLParams ? &_transientSSLParams.value() : nullptr);
     if (!swClientBase.isOK()) {
         LOGV2_ERROR(4880400,
                     "Failed to connect to migration donor",
@@ -731,7 +731,7 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::_createAndConnectCli
                        auto majoritySnapshotOpTime = _getDonorMajorityOpTime(client);
                        if (majoritySnapshotOpTime.getTimestamp() < startMigrationDonorTimestamp) {
                            stdx::lock_guard lk(_mutex);
-                           const auto now = getGlobalServiceContext()->getFastClockSource()->now();
+                           const auto now = _serviceContext->getFastClockSource()->now();
                            _excludeDonorHost(
                                lk,
                                serverAddress,
@@ -747,7 +747,7 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::_createAndConnectCli
                        }
                        if (startApplyingOpTime && majoritySnapshotOpTime < *startApplyingOpTime) {
                            stdx::lock_guard lk(_mutex);
-                           const auto now = getGlobalServiceContext()->getFastClockSource()->now();
+                           const auto now = _serviceContext->getFastClockSource()->now();
                            _excludeDonorHost(
                                lk,
                                serverAddress,
@@ -843,7 +843,7 @@ void TenantMigrationRecipientService::Instance::_excludeDonorHost(WithLock,
 
 std::vector<HostAndPort> TenantMigrationRecipientService::Instance::_getExcludedDonorHosts(
     WithLock lk) {
-    const auto now = getGlobalServiceContext()->getFastClockSource()->now();
+    const auto now = _serviceContext->getFastClockSource()->now();
 
     // Clean up any hosts that have had their exclusion duration expired.
     auto itr = std::remove_if(
@@ -890,7 +890,7 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::_initializeStateDoc(
         invariant(!_stateDoc.getExpireAt());
     }
     // Persist the state doc before starting the data sync.
-    _stateDoc.setStartAt(getGlobalServiceContext()->getFastClockSource()->now());
+    _stateDoc.setStartAt(_serviceContext->getFastClockSource()->now());
 
     return ExecutorFuture(**_scopedExecutor)
         .then([this, self = shared_from_this(), stateDoc = _stateDoc] {
@@ -1287,8 +1287,7 @@ TenantMigrationRecipientService::Instance::_makeCommittedTransactionsAggregation
 
 void TenantMigrationRecipientService::Instance::_processCommittedTransactionEntry(
     const BSONObj& entry) {
-    auto sessionTxnRecord =
-        SessionTxnRecord::parse(IDLParserErrorContext("SessionTxnRecord"), entry);
+    auto sessionTxnRecord = SessionTxnRecord::parse(IDLParserContext("SessionTxnRecord"), entry);
     auto sessionId = sessionTxnRecord.getSessionId();
     auto txnNumber = sessionTxnRecord.getTxnNum();
     auto optTxnRetryCounter = sessionTxnRecord.getTxnRetryCounter();
@@ -1299,11 +1298,10 @@ void TenantMigrationRecipientService::Instance::_processCommittedTransactionEntr
     auto uniqueOpCtx = cc().makeOperationContext();
     auto opCtx = uniqueOpCtx.get();
 
-    // If the tenantMigrationRecipientInfo is set on the opCtx, we will set the
+    // If the tenantMigrationInfo is set on the opCtx, we will set the
     // 'fromTenantMigration' field when writing oplog entries. That field is used to help recipient
     // secondaries determine if a no-op entry is related to a transaction entry.
-    tenantMigrationRecipientInfo(opCtx) =
-        boost::make_optional<TenantMigrationRecipientInfo>(getMigrationUUID());
+    tenantMigrationInfo(opCtx) = boost::make_optional<TenantMigrationInfo>(getMigrationUUID());
     opCtx->setLogicalSessionId(sessionId);
     opCtx->setTxnNumber(txnNumber);
     opCtx->setInMultiDocumentTransaction();
@@ -1547,7 +1545,7 @@ TenantMigrationRecipientService::Instance::_fetchRetryableWritesOplogBeforeStart
     {
         stdx::lock_guard lk(_mutex);
         invariant(_stateDoc.getStartFetchingDonorOpTime());
-        startFetchingTimestamp = _stateDoc.getStartFetchingDonorOpTime().get().getTimestamp();
+        startFetchingTimestamp = _stateDoc.getStartFetchingDonorOpTime().value().getTimestamp();
     }
 
     LOGV2_DEBUG(5535300,
@@ -1687,7 +1685,8 @@ void TenantMigrationRecipientService::Instance::_startOplogFetcher() {
         // If the oplog buffer already contains fetched documents, we must be resuming a
         // migration.
         if (auto topOfOplogBuffer = _donorOplogBuffer->lastObjectPushed(opCtx.get())) {
-            startFetchOpTime = uassertStatusOK(OpTime::parseFromOplogEntry(topOfOplogBuffer.get()));
+            startFetchOpTime =
+                uassertStatusOK(OpTime::parseFromOplogEntry(topOfOplogBuffer.value()));
             resumingFromOplogBuffer = true;
         }
     }
@@ -1700,7 +1699,7 @@ void TenantMigrationRecipientService::Instance::_startOplogFetcher() {
                     "tenantId"_attr = getTenantId(),
                     "donorMajorityOpTime"_attr = donorMajorityOpTime,
                     "startFetchOpTime"_attr = startFetchOpTime);
-        const auto now = getGlobalServiceContext()->getFastClockSource()->now();
+        const auto now = _serviceContext->getFastClockSource()->now();
 
         stdx::lock_guard lk(_mutex);
         _excludeDonorHost(lk,
@@ -1835,7 +1834,7 @@ void TenantMigrationRecipientService::Instance::_oplogFetcherCallback(Status opl
                         "error"_attr = oplogFetcherStatus);
 
             stdx::lock_guard lk(_mutex);
-            const auto now = getGlobalServiceContext()->getFastClockSource()->now();
+            const auto now = _serviceContext->getFastClockSource()->now();
             _excludeDonorHost(lk,
                               _client->getServerHostAndPort(),
                               now + Milliseconds(tenantMigrationExcludeDonorHostTimeoutMS));
@@ -2033,7 +2032,7 @@ TenantMigrationRecipientService::Instance::_waitForDataToBecomeConsistent() {
     }
 
     return _tenantOplogApplier->getNotificationForOpTime(
-        _stateDoc.getDataConsistentStopDonorOpTime().get());
+        _stateDoc.getDataConsistentStopDonorOpTime().value());
 }
 
 SemiFuture<void> TenantMigrationRecipientService::Instance::_persistConsistentState() {
@@ -2153,7 +2152,7 @@ void TenantMigrationRecipientService::Instance::onMemberImportedFiles(
     _membersWhoHaveImportedFiles.insert(host);
     // Not reconfig-safe, we must not do a reconfig concurrent with a migration.
     if (static_cast<int>(_membersWhoHaveImportedFiles.size()) ==
-        repl::ReplicationCoordinator::get(getGlobalServiceContext())
+        repl::ReplicationCoordinator::get(_serviceContext)
             ->getConfig()
             .getNumDataBearingMembers()) {
         LOGV2_INFO(6112809,
@@ -2182,7 +2181,7 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::_markStateDocAsGarba
     }
 
     _stateDoc.setState(TenantMigrationRecipientStateEnum::kDone);
-    _stateDoc.setExpireAt(getGlobalServiceContext()->getFastClockSource()->now() +
+    _stateDoc.setExpireAt(_serviceContext->getFastClockSource()->now() +
                           Milliseconds{repl::tenantMigrationGarbageCollectionDelayMS.load()});
 
     return ExecutorFuture(**_scopedExecutor)
@@ -2468,33 +2467,6 @@ void TenantMigrationRecipientService::Instance::_compareRecipientAndDonorFCV() c
     }
 }
 
-bool TenantMigrationRecipientService::Instance::_checkifProtocolRemainsFCVCompatible() {
-    stdx::lock_guard<Latch> lg(_mutex);
-
-    // Ensure that the on-disk protocol and cached value remains the same.
-    invariant(!_stateDoc.getProtocol() || _stateDoc.getProtocol().value() == getProtocol());
-
-    auto isAtLeastFCV52AtStart = serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
-        multiversion::FeatureCompatibilityVersion::kVersion_5_2);
-    if (isAtLeastFCV52AtStart) {
-        // When the instance is started using state doc < 5.2 FCV format, _stateDoc._protocol field
-        // won't be set. In that case, the cached value Instance::_protocol will be set to
-        // "kMultitenantMigrations".
-        return true;
-    }
-
-    if (getProtocol() == MigrationProtocolEnum::kShardMerge) {
-        LOGV2(5949504,
-              "Must abort tenant migration as 'Merge' protocol is not supported for FCV "
-              "below 5.2");
-        return false;
-    }
-    // For backward compatibility, ensure that the 'protocol' field is not set in the
-    // document.
-    _stateDoc.setProtocol(boost::none);
-    return true;
-}
-
 void TenantMigrationRecipientService::Instance::_startOplogApplier() {
     _stopOrHangOnFailPoint(&fpAfterFetchingCommittedTransactions);
 
@@ -2582,7 +2554,7 @@ void TenantMigrationRecipientService::Instance::_setup() {
         }();
 
         _sharedData = std::make_unique<TenantMigrationSharedData>(
-            getGlobalServiceContext()->getFastClockSource(), getMigrationUUID(), resumePhase);
+            _serviceContext->getFastClockSource(), getMigrationUUID(), resumePhase);
 
         _createOplogBuffer(lk, opCtx);
     }
@@ -2714,7 +2686,7 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
     // SetFeatureCompatibilityVersionCommand::_cancelTenantMigrations(), we might miss aborting this
     // tenant migration and FCV might have updated or downgraded at this point. So, need to ensure
     // that the protocol is still compatible with FCV.
-    if (isFCVUpgradingOrDowngrading() || !_checkifProtocolRemainsFCVCompatible()) {
+    if (isFCVUpgradingOrDowngrading()) {
         cancelWhenDurable = true;
     }
 

@@ -150,13 +150,17 @@ function assertRangeMatch(savedRange, paramRange) {
     check({[metaField]: 1}, {[metaField]: 10}, true);
 })();
 
-// Check shardingState commands will return collection info in bucket namespace.
+// Check shardingState commands returns the expected collection info about buckets & view nss.
 (function checkShardingStateCommand() {
     createTimeSeriesColl(
         {index: {[metaField]: 1, [timeField]: 1}, shardKey: {[metaField]: 1, [timeField]: 1}});
     const shardingStateRes = mongo.getPrimaryShard(dbName).adminCommand({shardingState: 1});
-    const shardingStateColls = Object.keys(shardingStateRes.versions);
-    assert(shardingStateColls.includes(bucketNss) && !shardingStateColls.includes(viewNss));
+    const shardingStateColls = shardingStateRes.versions;
+    const bucketNssIsSharded = (bucketNss in shardingStateColls &&
+                                timestampCmp(shardingStateColls[bucketNss], Timestamp(0, 0)) !== 0);
+    const viewNssIsSharded = (viewNss in shardingStateColls &&
+                              timestampCmp(shardingStateColls[viewNss], Timestamp(0, 0)) !== 0);
+    assert(bucketNssIsSharded && !viewNssIsSharded);
     dropTimeSeriesColl();
 })();
 
@@ -167,7 +171,10 @@ function assertRangeMatch(savedRange, paramRange) {
     assert.commandFailedWithCode(
         mongo.s0.adminCommand(
             {reshardCollection: viewNss, key: {[metaField]: 1, [controlTimeField]: 1}}),
-        ErrorCodes.NotImplemented);
+        [
+            ErrorCodes.NotImplemented,
+            ErrorCodes.NamespaceNotSharded /* TODO SERVER-67929 Remove this error code */
+        ]);
     assert.commandFailedWithCode(
         mongo.s0.adminCommand(
             {reshardCollection: bucketNss, key: {[metaField]: 1, [controlTimeField]: 1}}),
@@ -234,8 +241,10 @@ function assertRangeMatch(savedRange, paramRange) {
 // Can add control.min.time as the last shard key component on the timeseries collection.
 (function checkRefineCollectionShardKeyCommand() {
     createTimeSeriesColl({index: {[metaField]: 1, [timeField]: 1}, shardKey: {[metaField]: 1}});
-    assert.commandWorked(mongo.s0.adminCommand(
-        {refineCollectionShardKey: viewNss, key: {[metaField]: 1, [controlTimeField]: 1}}));
+    assert.commandWorkedOrFailedWithCode(
+        mongo.s0.adminCommand(
+            {refineCollectionShardKey: viewNss, key: {[metaField]: 1, [controlTimeField]: 1}}),
+        ErrorCodes.NamespaceNotSharded /* TODO SERVER-67929 Remove this error code */);
     assert.commandWorked(mongo.s0.adminCommand(
         {refineCollectionShardKey: bucketNss, key: {[metaField]: 1, [controlTimeField]: 1}}));
     const coll = mongo.s0.getDB(dbName)[collName];
@@ -278,8 +287,11 @@ function assertRangeMatch(savedRange, paramRange) {
     const newCollName = `${collName}New`;
     const newViewNss = `${dbName}.${newCollName}`;
     // Rename collection is not supported through view namespace.
-    assert.commandFailedWithCode(mongo.s.adminCommand({renameCollection: viewNss, to: newViewNss}),
-                                 ErrorCodes.IllegalOperation);
+    assert.commandFailedWithCode(
+        mongo.s.adminCommand({renameCollection: viewNss, to: newViewNss}), [
+            ErrorCodes.IllegalOperation,
+            ErrorCodes.NamespaceNotFound /* TODO SERVER-67929 Remove this error code */
+        ]);
     dropTimeSeriesColl();
 })();
 

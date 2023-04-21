@@ -934,6 +934,9 @@ public:
     void visit(const TwoDPtInAnnulusExpression* expr) final {
         MONGO_UNREACHABLE_TASSERT(6142133);
     }
+    void visit(const EncryptedBetweenMatchExpression* expr) final {
+        MONGO_UNREACHABLE_TASSERT(6762801);
+    }
 
 private:
     /**
@@ -1092,8 +1095,8 @@ void encodeKeyForAutoParameterizedMatchSBE(MatchExpression* matchExpr, BufBuilde
 
 std::string encodeSBE(const CanonicalQuery& cq) {
     tassert(6512900,
-            "using the SBE plan cache key encoding requires the SBE plan cache to be enabled",
-            feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV());
+            "using the SBE plan cache key encoding requires SBE to be fully enabled",
+            feature_flags::gFeatureFlagSbeFull.isEnabledAndIgnoreFCV());
     tassert(6142104,
             "attempting to encode SBE plan cache key for SBE-incompatible query",
             cq.isSbeCompatible());
@@ -1126,7 +1129,7 @@ std::string encodeSBE(const CanonicalQuery& cq) {
     return base64::encode(StringData(bufBuilder.buf(), bufBuilder.len()));
 }
 
-CanonicalQuery::IndexFilterKey encodeForIndexFilters(const CanonicalQuery& cq) {
+CanonicalQuery::PlanCacheCommandKey encodeForPlanCacheCommand(const CanonicalQuery& cq) {
     StringBuilder keyBuilder;
     encodeKeyForMatch(cq.root(), &keyBuilder);
     encodeKeyForSort(cq.getFindCommandRequest().getSort(), &keyBuilder);

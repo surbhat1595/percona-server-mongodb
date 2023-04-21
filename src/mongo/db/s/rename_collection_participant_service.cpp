@@ -155,7 +155,7 @@ RenameParticipantInstance::~RenameParticipantInstance() {
 
 bool RenameParticipantInstance::hasSameOptions(const BSONObj& participantDoc) {
     const auto otherDoc = RenameCollectionParticipantDocument::parse(
-        IDLParserErrorContext("RenameCollectionParticipantDocument"), participantDoc);
+        IDLParserContext("RenameCollectionParticipantDocument"), participantDoc);
 
     const auto& selfReq = _doc.getRenameCollectionRequest().toBSON();
     const auto& otherReq = otherDoc.getRenameCollectionRequest().toBSON();
@@ -169,7 +169,7 @@ boost::optional<BSONObj> RenameParticipantInstance::reportForCurrentOp(
 
     BSONObjBuilder cmdBob;
     if (const auto& optComment = _doc.getForwardableOpMetadata().getComment()) {
-        cmdBob.append(optComment.get().firstElement());
+        cmdBob.append(optComment.value().firstElement());
     }
     BSONObjBuilder bob;
     bob.append("type", "op");

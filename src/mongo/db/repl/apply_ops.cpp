@@ -46,13 +46,13 @@
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/matcher/matcher.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/collation/collation_spec.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session_catalog_mongod.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/util/fail_point.h"
@@ -131,7 +131,7 @@ Status _applyOps(OperationContext* opCtx,
 
             // Reject malformed or over-specified operations in an atomic applyOps.
             try {
-                ReplOperation::parse(IDLParserErrorContext("applyOps"), opObj);
+                ReplOperation::parse(IDLParserContext("applyOps"), opObj);
             } catch (...) {
                 uasserted(ErrorCodes::AtomicityFailure,
                           str::stream() << "cannot apply a malformed or over-specified operation "

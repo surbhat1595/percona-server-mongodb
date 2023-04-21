@@ -25,27 +25,6 @@ function tojsonMaybeTruncate(jsonObj) {
 }
 
 /**
- * Returns true if server version is 5.1 or above. Version 5.1 and above optimizes the change stream
- * pipeline.
- *
- * TODO SERVER-60736: remove this function and update all call-sites.
- */
-function isChangeStreamsOptimizationEnabled(db) {
-    return MongoRunner.compareBinVersions(db.getSiblingDB("admin").serverStatus().version, "5.1") !=
-        -1;
-}
-
-/**
- * Returns true if feature flag 'featureFlagChangeStreamPreAndPostImages' is enabled, false
- * otherwise.
- */
-function isChangeStreamPreAndPostImagesEnabled(db) {
-    const getParam = db.adminCommand({getParameter: 1, featureFlagChangeStreamPreAndPostImages: 1});
-    return getParam.hasOwnProperty("featureFlagChangeStreamPreAndPostImages") &&
-        getParam.featureFlagChangeStreamPreAndPostImages.value;
-}
-
-/**
  * Returns true if feature flag 'featureFlagChangeStreamsRewrite' is enabled, false otherwise.
  */
 function isChangeStreamsRewriteEnabled(db) {

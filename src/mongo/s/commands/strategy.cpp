@@ -67,6 +67,7 @@
 #include "mongo/db/views/resolved_view.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/logv2/log.h"
+#include "mongo/rpc/check_allowed_op_query_cmd.h"
 #include "mongo/rpc/factory.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/metadata/client_metadata.h"
@@ -74,7 +75,6 @@
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/op_msg_rpc_impls.h"
 #include "mongo/rpc/rewrite_state_change_errors.h"
-#include "mongo/rpc/warn_unsupported_wire_ops.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/cluster_commands_helpers.h"
@@ -116,17 +116,18 @@ MONGO_FAIL_POINT_DEFINE(allowSkippingAppendRequiredFieldsToResponse);
 
 Future<void> runCommandInvocation(std::shared_ptr<RequestExecutionContext> rec,
                                   std::shared_ptr<CommandInvocation> invocation) {
-    auto threadingModel = [client = rec->getOpCtx()->getClient()] {
+    bool useDedicatedThread = [&] {
+        auto client = rec->getOpCtx()->getClient();
         if (auto context = transport::ServiceExecutorContext::get(client); context) {
-            return context->getThreadingModel();
+            return context->useDedicatedThread();
         }
         tassert(5453902,
                 "Threading model may only be absent for internal and direct clients",
                 !client->hasRemote() || client->isInDirectClient());
-        return transport::ServiceExecutor::ThreadingModel::kDedicated;
+        return true;
     }();
     return CommandHelpers::runCommandInvocation(
-        std::move(rec), std::move(invocation), threadingModel);
+        std::move(rec), std::move(invocation), useDedicatedThread);
 }
 
 /**
@@ -355,7 +356,7 @@ void ExecCommandClient::_onCompletion() {
     if (!_invocation->isSafeForBorrowedThreads()) {
         // If the last command wasn't safe for a borrowed thread, then let's move
         // off of it.
-        seCtx->setThreadingModel(transport::ServiceExecutor::ThreadingModel::kDedicated);
+        seCtx->setUseDedicatedThread(true);
     }
 }
 
@@ -537,7 +538,7 @@ void ParseAndRunCommand::_parseCommand() {
     Client* client = opCtx->getClient();
     const auto session = client->session();
     if (session) {
-        if (!opCtx->isExhaust() || !_isHello.get()) {
+        if (!opCtx->isExhaust() || !_isHello.value()) {
             InExhaustHello::get(session.get())->setInExhaust(false, _commandName);
         }
     }
@@ -631,7 +632,7 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
     if (MONGO_unlikely(
             hangBeforeCheckingMongosShutdownInterrupt.shouldFail([&](const BSONObj& data) {
                 if (data.hasField("cmdName") && data.hasField("ns")) {
-                    std::string cmdNS = _parc->_ns.get();
+                    std::string cmdNS = _parc->_ns.value();
                     return ((data.getStringField("cmdName") == _parc->_commandName) &&
                             (data.getStringField("ns") == cmdNS));
                 }
@@ -649,7 +650,7 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
         return Status(ErrorCodes::SkipCommandExecution, status.reason());
     };
 
-    if (_parc->_isHello.get()) {
+    if (_parc->_isHello.value()) {
         // Preload generic ClientMetadata ahead of our first hello request. After the first
         // request, metaElement should always be empty.
         auto metaElem = request.body[kMetadataDocumentName];
@@ -811,7 +812,7 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
                 const auto readConcernSource = rwcDefaults.getDefaultReadConcernSource();
                 customDefaultReadConcernWasApplied =
                     (readConcernSource &&
-                     readConcernSource.get() == DefaultReadConcernSourceEnum::kGlobal);
+                     readConcernSource.value() == DefaultReadConcernSourceEnum::kGlobal);
 
                 applyDefaultReadConcern(*rcDefault);
             }

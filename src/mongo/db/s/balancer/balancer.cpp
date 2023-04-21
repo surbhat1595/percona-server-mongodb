@@ -119,7 +119,7 @@ public:
     BSONObj toBSON() const {
         BSONObjBuilder builder;
         builder.append("executionTimeMillis", _executionTimer.millis());
-        builder.append("errorOccurred", _errMsg.is_initialized());
+        builder.append("errorOccurred", _errMsg.has_value());
 
         if (_errMsg) {
             builder.append("errmsg", *_errMsg);
@@ -467,6 +467,7 @@ void Balancer::report(OperationContext* opCtx, BSONObjBuilder* builder) {
     builder->append("mode", BalancerSettingsType::kBalancerModes[mode]);
     builder->append("inBalancerRound", _inBalancerRound);
     builder->append("numBalancerRounds", _numBalancerRounds);
+    builder->append("term", repl::ReplicationCoordinator::get(opCtx)->getTerm());
 }
 
 void Balancer::_consumeActionStreamLoop() {
@@ -550,7 +551,7 @@ void Balancer::_consumeActionStreamLoop() {
 
         _newInfoOnStreamingActions.store(false);
         auto nextAction = selectedStream->getNextStreamingAction(opCtx.get());
-        if ((streamDrained = !nextAction.is_initialized())) {
+        if ((streamDrained = !nextAction.has_value())) {
             continue;
         }
 
@@ -893,7 +894,7 @@ void Balancer::_sleepFor(OperationContext* opCtx, Milliseconds waitTimeout) {
 bool Balancer::_checkOIDs(OperationContext* opCtx) {
     auto shardingContext = Grid::get(opCtx);
 
-    const auto all = shardingContext->shardRegistry()->getAllShardIdsNoReload();
+    const auto all = shardingContext->shardRegistry()->getAllShardIds(opCtx);
 
     // map of OID machine ID => shardId
     map<int, ShardId> oids;
@@ -907,7 +908,7 @@ bool Balancer::_checkOIDs(OperationContext* opCtx) {
         if (!shardStatus.isOK()) {
             continue;
         }
-        const auto s = shardStatus.getValue();
+        const auto s = std::move(shardStatus.getValue());
 
         auto result = uassertStatusOK(
             s->runCommandWithFixedRetryAttempts(opCtx,
@@ -1124,15 +1125,8 @@ void Balancer::abortCollectionDefragmentation(OperationContext* opCtx, const Nam
 
 SharedSemiFuture<void> Balancer::applyLegacyChunkSizeConstraintsOnClusterData(
     OperationContext* opCtx) {
-    // Remove the maxChunkSizeBytes from config.system.collections to make it compatible with
-    // the balancing strategy based on the number of collection chunks
     try {
-        ShardingCatalogManager::get(opCtx)->configureCollectionBalancing(
-            opCtx,
-            NamespaceString::kLogicalSessionsNamespace,
-            0,
-            boost::none /*defragmentCollection*/,
-            false /*enableAutoSplitter*/);
+        ShardingCatalogManager::get(opCtx)->applyLegacyConfigurationToSessionsCollection(opCtx);
     } catch (const ExceptionFor<ErrorCodes::NamespaceNotSharded>&) {
         // config.system.collections does not appear in config.collections; continue.
     }

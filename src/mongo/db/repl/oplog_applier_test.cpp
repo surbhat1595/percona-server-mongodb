@@ -369,6 +369,7 @@ public:
     void setUp() override {
         OplogApplierTest::setUp();
         auto* service = getServiceContext();
+        _origThreadName = *getThreadNameRef().get();
         Client::initThread("OplogApplierDelayTest", service, nullptr);
 
         _mockClock = std::make_shared<ClockSourceMock>();
@@ -387,6 +388,7 @@ public:
         _opCtxHolder = nullptr;
         Client::releaseCurrent();
         OplogApplierTest::tearDown();
+        setThreadName(_origThreadName);
     }
 
     OperationContext* opCtx() override {
@@ -412,6 +414,9 @@ protected:
     std::shared_ptr<ClockSourceMock> _mockClock;
     ServiceContext::UniqueOperationContext _opCtxHolder;
     AtomicWord<bool> _failWaits{false};
+
+private:
+    std::string _origThreadName;
 };
 
 TEST_F(OplogApplierDelayTest, GetNextApplierBatchReturnsEmptyBatchImmediately) {
@@ -502,12 +507,12 @@ TEST_F(OplogApplierDelayTest, GetNextApplierBatchInterrupted) {
             _mockClock->advance(Milliseconds(5));
         }
         ASSERT(waitForWait());
-        opCtx()->markKilled(ErrorCodes::Interrupted);
+        opCtx()->markKilled(ErrorCodes::InterruptedAtShutdown);
     });
     auto batch =
         unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits, Milliseconds(10)));
     ASSERT_EQ(2, batch.size());
-    ASSERT_EQ(ErrorCodes::Interrupted, opCtx()->checkForInterruptNoAssert());
+    ASSERT_EQ(ErrorCodes::InterruptedAtShutdown, opCtx()->checkForInterruptNoAssert());
     killWaits();
     insertThread.join();
 }

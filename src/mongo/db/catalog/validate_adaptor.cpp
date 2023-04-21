@@ -35,6 +35,7 @@
 #include <fmt/format.h>
 
 #include "mongo/bson/bsonobj.h"
+#include "mongo/bson/util/bsoncolumn.h"
 #include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/index_catalog.h"
@@ -54,7 +55,9 @@
 #include "mongo/db/storage/key_string.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/db/timeseries/flat_bson.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
+#include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/object_check.h"
 #include "mongo/util/fail_point.h"
@@ -80,6 +83,9 @@ static constexpr const char* kSchemaValidationFailedReason =
 static constexpr const char* kTimeseriesValidationInconsistencyReason =
     "Detected one or more documents in this collection incompatible with time-series "
     "specifications. For more info, see logs with log id 6698300.";
+static constexpr const char* kBSONValidationNonConformantReason =
+    "Detected one or more documents in this collection not conformant to BSON specifications. For "
+    "more info, see logs with log id 6825900";
 
 /**
  * Validate that for each record in a clustered RecordStore the record key (RecordId) matches the
@@ -136,16 +142,64 @@ void schemaValidationFailed(CollectionValidation::ValidateState* state,
         results->valid = false;
     }
 }
+
+int _getTimeseriesBucketVersion(const BSONObj& recordBson) {
+    return recordBson.getField(timeseries::kBucketControlFieldName)
+        .Obj()
+        .getField(timeseries::kBucketControlVersionFieldName)
+        .Number();
+}
+
+// Checks that 'control.count' matches the actual number of measurements in a version 2 document.
+Status _validateTimeseriesCount(const BSONObj& recordBson, StringData timeFieldName) {
+    if (_getTimeseriesBucketVersion(recordBson) == 1) {
+        return Status::OK();
+    }
+    size_t controlCount = recordBson.getField(timeseries::kBucketControlFieldName)
+                              .Obj()
+                              .getField(timeseries::kBucketControlCountFieldName)
+                              .Number();
+    BSONColumn col{
+        recordBson.getField(timeseries::kBucketDataFieldName).Obj().getField(timeFieldName)};
+    if (controlCount != col.size()) {
+        return Status(ErrorCodes::BadValue,
+                      fmt::format("The 'control.count' field ({}) does not match the actual number "
+                                  "of measurements in the document ({}).",
+                                  controlCount,
+                                  col.size()));
+    }
+    return Status::OK();
+}
+
+// Checks if the embedded timestamp in the bucket id field matches that in the 'control.min' field.
+Status _validateTimeSeriesIdTimestamp(const CollectionPtr& collection, const BSONObj& recordBson) {
+    // Compares both timestamps measured in seconds.
+    int64_t minTimestamp = recordBson.getField(timeseries::kBucketControlFieldName)
+                               .Obj()
+                               .getField(timeseries::kBucketControlMinFieldName)
+                               .Obj()
+                               .getField(collection->getTimeseriesOptions()->getTimeField())
+                               .timestamp()
+                               .asInt64() /
+        1000;
+    int64_t oidEmbeddedTimestamp =
+        recordBson.getField(timeseries::kBucketIdFieldName).OID().getTimestamp();
+    if (minTimestamp != oidEmbeddedTimestamp) {
+        return Status(
+            ErrorCodes::InvalidIdField,
+            fmt::format("Mismatch between the embedded timestamp {} in the time-series "
+                        "bucket '_id' field and the timestamp {} in 'control.min' field.",
+                        Date_t::fromMillisSinceEpoch(oidEmbeddedTimestamp * 1000).toString(),
+                        Date_t::fromMillisSinceEpoch(minTimestamp * 1000).toString()));
+    }
+    return Status::OK();
+}
+
 /**
- * Checks the value of the bucket's version and if it matches the types of the data fields.
+ * Checks the value of the bucket's version and if it matches the types of 'data' fields.
  */
-Status _validateTimeSeriesBucketRecord(const RecordId& recordId,
-                                       const BSONObj& recordBson,
-                                       ValidateResults* results) {
-    int controlVersion = recordBson.getField(timeseries::kBucketControlFieldName)
-                             .Obj()
-                             .getField(timeseries::kBucketControlVersionFieldName)
-                             .Number();
+Status _validateTimeseriesControlVersion(const BSONObj& recordBson) {
+    int controlVersion = _getTimeseriesBucketVersion(recordBson);
     if (controlVersion != 1 && controlVersion != 2) {
         return Status(
             ErrorCodes::BadValue,
@@ -153,7 +207,7 @@ Status _validateTimeSeriesBucketRecord(const RecordId& recordId,
                         controlVersion));
     }
     auto dataType = controlVersion == 1 ? BSONType::Object : BSONType::BinData;
-    // In addition to checking dataType, make sure that closed buckets have BinData Column subtype
+    // In addition to checking dataType, make sure that closed buckets have BinData Column subtype.
     auto isCorrectType = [&](BSONElement el) {
         if (controlVersion == 1) {
             return el.type() == BSONType::Object;
@@ -166,12 +220,127 @@ Status _validateTimeSeriesBucketRecord(const RecordId& recordId,
         BSONElement e = bi.next();
         if (!isCorrectType(e)) {
             return Status(ErrorCodes::TypeMismatch,
-                          fmt::format("Mismatch between TimeSeries schema version and data field "
+                          fmt::format("Mismatch between time-series schema version and data field "
                                       "type. Expected type {}, but got {}.",
                                       mongo::typeName(dataType),
                                       mongo::typeName(e.type())));
         }
     }
+    return Status::OK();
+}
+
+/**
+ * Checks the equivalence between the min and max fields in 'control' for a bucket and
+ * the corresponding value in 'data'.
+ */
+Status _validateTimeseriesMinMax(const BSONObj& recordBson, const CollectionPtr& coll) {
+    BSONObj data = recordBson.getField(timeseries::kBucketDataFieldName).Obj();
+    BSONObj control = recordBson.getField(timeseries::kBucketControlFieldName).Obj();
+    BSONObj controlMin = control.getField(timeseries::kBucketControlMinFieldName).Obj();
+    BSONObj controlMax = control.getField(timeseries::kBucketControlMaxFieldName).Obj();
+
+    auto dataFields = data.getFieldNames<std::set<std::string>>();
+    auto controlMinFields = controlMin.getFieldNames<std::set<std::string>>();
+    auto controlMaxFields = controlMax.getFieldNames<std::set<std::string>>();
+    int version = _getTimeseriesBucketVersion(recordBson);
+
+    // Checks that the number of 'control.min' and 'control.max' fields agrees with number of 'data'
+    // fields.
+    if (dataFields.size() != controlMinFields.size() ||
+        dataFields.size() != controlMaxFields.size()) {
+        return Status(
+            ErrorCodes::BadValue,
+            fmt::format(
+                "Mismatch between the number of time-series control fields and the number "
+                "of data fields. "
+                "Control had {} min fields and {} max fields, but observed data had {} fields.",
+                controlMinFields.size(),
+                controlMaxFields.size(),
+                dataFields.size()));
+    };
+
+    // Validates that the 'control.min' and 'control.max' field values agree with 'data' field
+    // values.
+    for (auto fieldName : dataFields) {
+        timeseries::MinMax minmax;
+        auto field = data.getField(fieldName);
+
+        if (version == 1) {
+            for (const BSONElement& el : field.Obj()) {
+                minmax.update(el.wrap(fieldName), boost::none, coll->getDefaultCollator());
+            }
+        } else {
+            BSONColumn col{field};
+            for (const BSONElement& el : col) {
+                if (!el.eoo()) {
+                    minmax.update(el.wrap(fieldName), boost::none, coll->getDefaultCollator());
+                }
+            }
+        }
+
+        auto controlFieldMin = controlMin.getField(fieldName);
+        auto controlFieldMax = controlMax.getField(fieldName);
+        auto min = minmax.min();
+        auto max = minmax.max();
+
+        // Checks whether the min and max values between 'control' and 'data' match, taking
+        // timestamp granularity into account.
+        auto checkMinAndMaxMatch = [&]() {
+            // Needed for granularity, which determines how the min timestamp is rounded down .
+            const auto options = coll->getTimeseriesOptions().value();
+            if (fieldName == options.getTimeField()) {
+                return controlFieldMin.Date() ==
+                    timeseries::roundTimestampToGranularity(min.getField(fieldName).Date(),
+                                                            options) &&
+                    controlFieldMax.Date() == max.getField(fieldName).Date();
+            } else {
+                return controlFieldMin.wrap().woCompare(min) == 0 &&
+                    controlFieldMax.wrap().woCompare(max) == 0;
+            }
+        };
+
+        if (!checkMinAndMaxMatch()) {
+            return Status(
+                ErrorCodes::BadValue,
+                fmt::format(
+                    "Mismatch between time-series control and observed min or max for field {}. "
+                    "Control had min {} and max {}, but observed data had min {} and max {}.",
+                    fieldName,
+                    controlFieldMin.toString(),
+                    controlFieldMax.toString(),
+                    min.toString(),
+                    max.toString()));
+        }
+    }
+
+    return Status::OK();
+}
+
+/**
+ * Validates the consistency of a time-series bucket.
+ */
+Status _validateTimeSeriesBucketRecord(const CollectionPtr& collection,
+                                       const BSONObj& recordBson,
+                                       ValidateResults* results) {
+
+    if (Status status = _validateTimeseriesControlVersion(recordBson); !status.isOK()) {
+        return status;
+    }
+
+    if (Status status = _validateTimeSeriesIdTimestamp(collection, recordBson); !status.isOK()) {
+        return status;
+    }
+
+    if (Status status = _validateTimeseriesMinMax(recordBson, collection); !status.isOK()) {
+        return status;
+    }
+
+    if (Status status = _validateTimeseriesCount(
+            recordBson, collection->getTimeseriesOptions()->getTimeField());
+        !status.isOK()) {
+        return status;
+    }
+
     return Status::OK();
 }
 
@@ -186,16 +355,42 @@ void _timeseriesValidationFailed(CollectionValidation::ValidateState* state,
 
     results->warnings.push_back(kTimeseriesValidationInconsistencyReason);
 }
+
+void _BSONSpecValidationFailed(CollectionValidation::ValidateState* state,
+                               ValidateResults* results) {
+    if (state->isBSONDataNonConformant()) {
+        // Only report the warning message once.
+        return;
+    }
+    state->setBSONDataNonConformant();
+
+    results->warnings.push_back(kBSONValidationNonConformantReason);
+}
 }  // namespace
 
 Status ValidateAdaptor::validateRecord(OperationContext* opCtx,
                                        const RecordId& recordId,
                                        const RecordData& record,
+                                       long long* nNonCompliantDocuments,
                                        size_t* dataSize,
                                        ValidateResults* results) {
-    const Status status = validateBSON(record.data(), record.size());
-    if (!status.isOK())
-        return status;
+    auto validateBSONMode = BSONValidateMode::kDefault;
+    if (serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+        feature_flags::gExtendValidateCommand.isEnabled(serverGlobalParams.featureCompatibility)) {
+        validateBSONMode = _validateState->getBSONValidateMode();
+    }
+    const Status status = validateBSON(record.data(), record.size(), validateBSONMode);
+    if (!status.isOK()) {
+        if (status.code() != ErrorCodes::NonConformantBSON) {
+            return status;
+        }
+        LOGV2_WARNING(6825900,
+                      "Document is not conformant to BSON specifications",
+                      "recordId"_attr = recordId,
+                      "reason"_attr = status);
+        (*nNonCompliantDocuments)++;
+        _BSONSpecValidationFailed(_validateState, results);
+    }
 
     BSONObj recordBson = record.toBson();
     *dataSize = recordBson.objsize();
@@ -330,7 +525,7 @@ Status ValidateAdaptor::validateRecord(OperationContext* opCtx,
             }
         }
     }
-    return status;
+    return Status::OK();
 }
 
 namespace {
@@ -626,7 +821,8 @@ void ValidateAdaptor::traverseRecordStore(OperationContext* opCtx,
         interruptIntervalNumBytes += dataSize;
         dataSizeTotal += dataSize;
         size_t validatedSize = 0;
-        Status status = validateRecord(opCtx, record->id, record->data, &validatedSize, results);
+        Status status = validateRecord(
+            opCtx, record->id, record->data, &nNonCompliantDocuments, &validatedSize, results);
 
         // RecordStores are required to return records in RecordId order.
         if (prevRecordId.isValid()) {
@@ -698,8 +894,7 @@ void ValidateAdaptor::traverseRecordStore(OperationContext* opCtx,
                        coll->getTimeseriesOptions()) {
                 // Checks for time-series collection consistency.
                 Status bucketStatus =
-                    _validateTimeSeriesBucketRecord(record->id, record->data.toBson(), results);
-
+                    _validateTimeSeriesBucketRecord(coll, record->data.toBson(), results);
                 // This log id should be kept in sync with the associated warning messages that are
                 // returned to the client.
                 if (!bucketStatus.isOK()) {

@@ -43,7 +43,7 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds_coordinator.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl_set_member_in_standalone_mode.h"
 #include "mongo/db/s/collection_sharding_state.h"
@@ -160,20 +160,20 @@ bool containsClusteredIndex(const CollectionPtr& collection, const IndexArgument
                               // creation, it should always be filled in by default on the
                               // collection object.
                               auto clusteredIndexName = clusteredIndexSpec.getName();
-                              invariant(clusteredIndexName.is_initialized());
+                              invariant(clusteredIndexName.has_value());
 
-                              return clusteredIndexName.get() == indexName;
+                              return clusteredIndexName.value() == indexName;
                           },
                           [&](const std::vector<std::string>& indexNames) -> bool {
                               // While the clusteredIndex's name is optional during user
                               // creation, it should always be filled in by default on the
                               // collection object.
                               auto clusteredIndexName = clusteredIndexSpec.getName();
-                              invariant(clusteredIndexName.is_initialized());
+                              invariant(clusteredIndexName.has_value());
 
                               return std::find(indexNames.begin(),
                                                indexNames.end(),
-                                               clusteredIndexName.get()) != indexNames.end();
+                                               clusteredIndexName.value()) != indexNames.end();
                           },
                           [&](const BSONObj& indexKey) -> bool {
                               return clusteredIndexSpec.getKey().woCompare(indexKey) == 0;
@@ -560,15 +560,6 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
         invariant((*collection)->getIndexCatalog()->numIndexesInProgress(opCtx) == 0);
     }
 
-    // TODO(SERVER-61481): Remove this block once kLastLTS is 6.0. As of 5.2, dropping an index
-    // while having a separate index build on the same collection is permitted.
-    if (serverGlobalParams.featureCompatibility.isLessThan(
-            multiversion::FeatureCompatibilityVersion::kVersion_5_2)) {
-        // The index catalog requires that no active index builders are running when dropping ready
-        // indexes.
-        IndexBuildsCoordinator::get(opCtx)->assertNoIndexBuildInProgForCollection(collectionUUID);
-    }
-
     writeConflictRetry(
         opCtx, "dropIndexes", dbAndUUID.toString(), [opCtx, &collection, &indexNames, &reply] {
             WriteUnitOfWork wunit(opCtx);
@@ -605,14 +596,6 @@ Status dropIndexesForApplyOps(OperationContext* opCtx,
                   "CMD: dropIndexes",
                   "namespace"_attr = nss,
                   "indexes"_attr = cmdObj[kIndexFieldName].toString(false));
-        }
-
-        // TODO(SERVER-61481): Remove this block once kLastLTS is 6.0. As of 5.2, dropping an index
-        // while having a separate index build on the same collection is permitted.
-        if (serverGlobalParams.featureCompatibility.isLessThan(
-                multiversion::FeatureCompatibilityVersion::kVersion_5_2)) {
-            IndexBuildsCoordinator::get(opCtx)->assertNoIndexBuildInProgForCollection(
-                collection->uuid());
         }
 
         auto swIndexNames = getIndexNames(opCtx, collection.getCollection(), parsed.getIndex());

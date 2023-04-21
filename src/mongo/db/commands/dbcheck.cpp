@@ -197,7 +197,8 @@ std::unique_ptr<DbCheckRun> fullDatabaseRun(OperationContext* opCtx,
     uassert(
         ErrorCodes::InvalidNamespace, "Cannot run dbCheck on local database", dbName != "local");
 
-    AutoGetDb agd(opCtx, StringData(dbName), MODE_IS);
+    // TODO SERVER-63353 Change to use dbName directly
+    AutoGetDb agd(opCtx, DatabaseName(boost::none, dbName), MODE_IS);
     uassert(ErrorCodes::NamespaceNotFound, "Database " + dbName + " not found", agd.getDb());
 
     const int64_t max = std::numeric_limits<int64_t>::max();
@@ -252,11 +253,11 @@ std::unique_ptr<DbCheckRun> getRun(OperationContext* opCtx,
     // If the dbCheck argument is a string, this is the per-collection form.
     if (toParse["dbCheck"].type() == BSONType::String) {
         return singleCollectionRun(
-            opCtx, dbName, DbCheckSingleInvocation::parse(IDLParserErrorContext(""), toParse));
+            opCtx, dbName, DbCheckSingleInvocation::parse(IDLParserContext(""), toParse));
     } else {
         // Otherwise, it's the database-wide form.
         return fullDatabaseRun(
-            opCtx, dbName, DbCheckAllInvocation::parse(IDLParserErrorContext(""), toParse));
+            opCtx, dbName, DbCheckAllInvocation::parse(IDLParserContext(""), toParse));
     }
 }
 

@@ -35,7 +35,7 @@
 #include "mongo/db/pipeline/change_stream_filter_helpers.h"
 #include "mongo/db/pipeline/change_stream_rewrite_helpers.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
-#include "mongo/db/transaction_history_iterator.h"
+#include "mongo/db/transaction/transaction_history_iterator.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -100,7 +100,7 @@ DocumentSourceChangeStreamUnwindTransaction::createFromBson(
             str::stream() << "the '" << kStageName << "' stage spec must be an object",
             elem.type() == BSONType::Object);
     auto parsedSpec = DocumentSourceChangeStreamUnwindTransactionSpec::parse(
-        IDLParserErrorContext("DocumentSourceChangeStreamUnwindTransactionSpec"), elem.Obj());
+        IDLParserContext("DocumentSourceChangeStreamUnwindTransactionSpec"), elem.Obj());
     return new DocumentSourceChangeStreamUnwindTransaction(parsedSpec.getFilter(), expCtx);
 }
 
@@ -209,8 +209,7 @@ DocumentSource::GetNextResult DocumentSourceChangeStreamUnwindTransaction::doGet
 
 bool DocumentSourceChangeStreamUnwindTransaction::_isTransactionOplogEntry(const Document& doc) {
     auto op = doc[repl::OplogEntry::kOpTypeFieldName];
-    auto opType =
-        repl::OpType_parse(IDLParserErrorContext("ChangeStreamEntry.op"), op.getStringData());
+    auto opType = repl::OpType_parse(IDLParserContext("ChangeStreamEntry.op"), op.getStringData());
     auto commandVal = doc["o"];
 
     if (opType != repl::OpTypeEnum::kCommand ||

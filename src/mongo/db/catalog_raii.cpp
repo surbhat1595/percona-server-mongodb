@@ -97,7 +97,7 @@ void verifyDbAndCollection(OperationContext* opCtx,
                                  "changes; please retry the operation. Snapshot timestamp is "
                               << mySnapshot.toString() << ". Collection minimum is "
                               << minSnapshot->toString(),
-                mySnapshot.isNull() || mySnapshot >= minSnapshot.get());
+                mySnapshot.isNull() || mySnapshot >= minSnapshot.value());
         }
     }
 }
@@ -107,14 +107,13 @@ void verifyDbAndCollection(OperationContext* opCtx,
  */
 struct ResourceIdNssComparator {
     bool operator()(const NamespaceString& lhs, const NamespaceString& rhs) const {
-        return ResourceId(RESOURCE_COLLECTION, lhs.ns()) <
-            ResourceId(RESOURCE_COLLECTION, rhs.ns());
+        return ResourceId(RESOURCE_COLLECTION, lhs) < ResourceId(RESOURCE_COLLECTION, rhs);
     }
 };
 
 /**
  * Fills the input 'collLocks' with CollectionLocks, acquiring locks on namespaces 'nsOrUUID' and
- * 'secondaryNssOrUUIDs' in ResourceId(RESOURCE_COLLECTION, nss.ns()) order.
+ * 'secondaryNssOrUUIDs' in ResourceId(RESOURCE_COLLECTION, nss) order.
  *
  * The namespaces will be resolved, the locks acquired, and then the namespaces will be checked for
  * changes in case there is a race with rename and a UUID no longer matches the locked namespace.
@@ -142,7 +141,7 @@ void acquireCollectionLocksInResourceIdOrder(
         verifyTemp.clear();
 
         // Create a single set with all the resolved namespaces sorted by ascending
-        // ResourceId(RESOURCE_COLLECTION, nss.ns()).
+        // ResourceId(RESOURCE_COLLECTION, nss).
         temp.insert(catalog->resolveNamespaceStringOrUUID(opCtx, nsOrUUID));
         for (const auto& secondaryNssOrUUID : secondaryNssOrUUIDs) {
             invariant(secondaryNssOrUUID.db() == nsOrUUID.db(),
@@ -152,7 +151,9 @@ void acquireCollectionLocksInResourceIdOrder(
             temp.insert(catalog->resolveNamespaceStringOrUUID(opCtx, secondaryNssOrUUID));
         }
 
-        // Acquire all of the locks in order.
+        // Acquire all of the locks in order. And clear the 'catalog' because the locks will access
+        // a fresher one internally.
+        catalog = nullptr;
         for (auto& nss : temp) {
             collLocks->emplace_back(opCtx, nss, modeColl, deadline);
         }
@@ -160,6 +161,10 @@ void acquireCollectionLocksInResourceIdOrder(
         // Check that the namespaces have NOT changed after acquiring locks. It's possible to race
         // with a rename collection when the given NamespaceStringOrUUID is a UUID, and consequently
         // fail to lock the correct namespace.
+        //
+        // The catalog reference must be refreshed to see the latest Collection data. Otherwise we
+        // won't see any concurrent DDL/catalog operations.
+        auto catalog = CollectionCatalog::get(opCtx);
         verifyTemp.insert(catalog->resolveNamespaceStringOrUUID(opCtx, nsOrUUID));
         for (const auto& secondaryNssOrUUID : secondaryNssOrUUIDs) {
             verifyTemp.insert(catalog->resolveNamespaceStringOrUUID(opCtx, secondaryNssOrUUID));
@@ -169,16 +174,17 @@ void acquireCollectionLocksInResourceIdOrder(
 
 }  // namespace
 
-// TODO SERVER-62923 Use DatabaseName obj to construct '_dbLock' and to pass to
-// DatabaseHolder::getDb().
-AutoGetDb::AutoGetDb(OperationContext* opCtx, StringData dbName, LockMode mode, Date_t deadline)
-    : _dbName(dbName), _dbLock(opCtx, DatabaseName(boost::none, dbName), mode, deadline), _db([&] {
-          const DatabaseName tenantDbName(boost::none, dbName);
+AutoGetDb::AutoGetDb(OperationContext* opCtx,
+                     const DatabaseName& dbName,
+                     LockMode mode,
+                     Date_t deadline)
+    : _dbName(dbName), _dbLock(opCtx, dbName, mode, deadline), _db([&] {
           auto databaseHolder = DatabaseHolder::get(opCtx);
-          return databaseHolder->getDb(opCtx, tenantDbName);
+          return databaseHolder->getDb(opCtx, dbName);
       }()) {
     // The 'primary' database must be version checked for sharding.
-    catalog_helper::assertMatchingDbVersion(opCtx, _dbName);
+    // TODO SERVER-63706 Pass dbName directly
+    catalog_helper::assertMatchingDbVersion(opCtx, _dbName.toStringWithTenantId());
 }
 
 Database* AutoGetDb::ensureDbExists(OperationContext* opCtx) {
@@ -187,10 +193,9 @@ Database* AutoGetDb::ensureDbExists(OperationContext* opCtx) {
     }
 
     auto databaseHolder = DatabaseHolder::get(opCtx);
-    const DatabaseName dbName(boost::none, _dbName);
-    _db = databaseHolder->openDb(opCtx, dbName, nullptr);
+    _db = databaseHolder->openDb(opCtx, _dbName, nullptr);
 
-    catalog_helper::assertMatchingDbVersion(opCtx, _dbName);
+    catalog_helper::assertMatchingDbVersion(opCtx, _dbName.toStringWithTenantId());
 
     return _db;
 }
@@ -206,7 +211,12 @@ AutoGetCollection::AutoGetCollection(
 
     // Acquire the global/RSTL and all the database locks (may or may not be multiple
     // databases).
-    _autoDb.emplace(opCtx, nsOrUUID.db(), isSharedLockMode(modeColl) ? MODE_IS : MODE_IX, deadline);
+
+    // TODO SERVER-67817 Use NamespaceStringOrUUID::db() instead.
+    _autoDb.emplace(opCtx,
+                    nsOrUUID.nss() ? nsOrUUID.nss()->dbName() : *nsOrUUID.dbName(),
+                    isSharedLockMode(modeColl) ? MODE_IS : MODE_IX,
+                    deadline);
 
     // Out of an abundance of caution, force operations to acquire new snapshots after
     // acquiring exclusive collection locks. Operations that hold MODE_X locks make an
@@ -244,14 +254,14 @@ AutoGetCollection::AutoGetCollection(
         auto secondaryResolvedNss =
             catalog->resolveNamespaceStringOrUUID(opCtx, secondaryNssOrUUID);
         auto secondaryColl = catalog->lookupCollectionByNamespace(opCtx, secondaryResolvedNss);
-        // TODO SERVER-64608 Use tenantID on NamespaceString to construct DatabaseName
-        const DatabaseName secondaryDbName(boost::none, secondaryNssOrUUID.db());
+        auto secondaryDbName = secondaryNssOrUUID.dbName() ? secondaryNssOrUUID.dbName()
+                                                           : secondaryNssOrUUID.nss()->dbName();
         verifyDbAndCollection(opCtx,
                               MODE_IS,
                               secondaryNssOrUUID,
                               secondaryResolvedNss,
                               secondaryColl,
-                              databaseHolder->getDb(opCtx, secondaryDbName));
+                              databaseHolder->getDb(opCtx, *secondaryDbName));
     }
 
     if (_coll) {
@@ -572,17 +582,19 @@ AutoGetChangeCollection::AutoGetChangeCollection(OperationContext* opCtx,
                                                  AutoGetChangeCollection::AccessMode mode,
                                                  boost::optional<TenantId> tenantId,
                                                  Date_t deadline) {
-    auto nss = NamespaceString::makeChangeCollectionNSS(tenantId);
-    if (mode == AccessMode::kWrite) {
+    if (mode == AccessMode::kWriteInOplogContext) {
         // The global lock must already be held.
         invariant(opCtx->lockState()->isWriteLocked());
-
-        // TODO SERVER-66715 avoid taking 'AutoGetCollection' and remove
-        // 'AllowLockAcquisitionOnTimestampedUnitOfWork'.
-        AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(opCtx->lockState());
-        _coll.emplace(
-            opCtx, nss, LockMode::MODE_IX, AutoGetCollectionViewMode::kViewsForbidden, deadline);
     }
+
+    // TODO SERVER-66715 avoid taking 'AutoGetCollection' and remove
+    // 'AllowLockAcquisitionOnTimestampedUnitOfWork'.
+    AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(opCtx->lockState());
+    _coll.emplace(opCtx,
+                  NamespaceString::makeChangeCollectionNSS(tenantId),
+                  LockMode::MODE_IX,
+                  AutoGetCollectionViewMode::kViewsForbidden,
+                  deadline);
 }
 
 const Collection* AutoGetChangeCollection::operator->() const {

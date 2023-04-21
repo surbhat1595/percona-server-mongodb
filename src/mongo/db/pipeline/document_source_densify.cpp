@@ -60,7 +60,7 @@ RangeStatement RangeStatement::parse(RangeSpec spec) {
                     "The step parameter in a range statement must be a whole number when "
                     "densifying a date range",
                     step.integral64Bit());
-            return optional<TimeUnit>(parseTimeUnit(unit.get()));
+            return optional<TimeUnit>(parseTimeUnit(unit.value()));
         } else {
             return optional<TimeUnit>(boost::none);
         }
@@ -124,19 +124,15 @@ RangeStatement RangeStatement::parse(RangeSpec spec) {
     return range;
 }
 
-REGISTER_DOCUMENT_SOURCE_WITH_MIN_VERSION(densify,
-                                          LiteParsedDocumentSourceDefault::parse,
-                                          document_source_densify::createFromBson,
-                                          AllowedWithApiStrict::kAlways,
-                                          multiversion::FeatureCompatibilityVersion::kVersion_5_1)
+REGISTER_DOCUMENT_SOURCE(densify,
+                         LiteParsedDocumentSourceDefault::parse,
+                         document_source_densify::createFromBson,
+                         AllowedWithApiStrict::kAlways);
 
-REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(_internalDensify,
-                                       LiteParsedDocumentSourceDefault::parse,
-                                       DocumentSourceInternalDensify::createFromBson,
-                                       AllowedWithApiStrict::kInternal,
-                                       AllowedWithClientType::kInternal,
-                                       multiversion::FeatureCompatibilityVersion::kVersion_5_1,
-                                       true);
+REGISTER_INTERNAL_DOCUMENT_SOURCE(_internalDensify,
+                                  LiteParsedDocumentSourceDefault::parse,
+                                  DocumentSourceInternalDensify::createFromBson,
+                                  true);
 
 namespace document_source_densify {
 
@@ -150,7 +146,7 @@ list<intrusive_ptr<DocumentSource>> createFromBsonInternal(
                           << typeName(elem.type()),
             elem.type() == BSONType::Object);
 
-    auto spec = DensifySpec::parse(IDLParserErrorContext(stageName), elem.embeddedObject());
+    auto spec = DensifySpec::parse(IDLParserContext(stageName), elem.embeddedObject());
     auto rangeStatement = RangeStatement::parse(spec.getRange());
 
     list<FieldPath> partitions;
@@ -296,7 +292,7 @@ Document DocumentSourceInternalDensify::DocGenerator::getNextDocument() {
         _state = GeneratorState::kDone;
         // If _finalDoc is boost::none we can't be in this state.
         tassert(5832800, "DocGenerator expected _finalDoc, found boost::none", _finalDoc);
-        return _finalDoc.get();
+        return _finalDoc.value();
     }
     // Assume all types have been checked at this point and we are in a valid state.
     DensifyValue valueToAdd = _min;

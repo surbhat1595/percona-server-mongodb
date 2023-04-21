@@ -118,7 +118,7 @@ public:
         CreateCommandReply typedRun(OperationContext* opCtx) final {
             auto cmd = request();
             auto dbName = cmd.getDbName();
-            cluster::createDatabase(opCtx, dbName);
+            cluster::createDatabase(opCtx, dbName.toStringWithTenantId());
 
             uassert(ErrorCodes::InvalidOptions,
                     "specify size:<n> when capped is true",
@@ -128,20 +128,34 @@ public:
                     !cmd.getTemp());
 
             // Manually forward the create collection command to the primary shard.
-            const auto dbInfo =
-                uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, dbName));
-            auto response = uassertStatusOK(
-                executeCommandAgainstDatabasePrimary(
-                    opCtx,
-                    dbName,
-                    dbInfo,
-                    applyReadWriteConcern(
-                        opCtx,
-                        this,
-                        CommandHelpers::filterCommandRequestForPassthrough(cmd.toBSON({}))),
-                    ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                    Shard::RetryPolicy::kIdempotent)
-                    .swResponse);
+            const auto dbInfo = uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(
+                opCtx, dbName.toStringWithTenantId()));
+            auto response = [&] {
+                auto cmdToSend = cmd.toBSON({});
+                cmdToSend = CommandHelpers::filterCommandRequestForPassthrough(cmd.toBSON({}));
+                cmdToSend = applyReadWriteConcern(opCtx, this, cmdToSend);
+                // If the DB primary resides on a shard, forward the create command applying the
+                // metadata that characterise an unsharded CRUD request according to the versioning
+                // protocol (the received DB version + an "UNSHARDED" shard version): this will
+                // guarantee that sharded DDL ops targeting the same namespace won't be executed in
+                // parallel.
+                // If the DB primary is hosted by the config server, apply the original metadata.
+                if (dbInfo->getPrimary() != ShardId::kConfigServerId) {
+                    cmdToSend = appendShardVersion(cmdToSend, ChunkVersion::UNSHARDED());
+                }
+                cmdToSend = appendDbVersionIfPresent(cmdToSend, dbInfo);
+
+                std::vector<AsyncRequestsSender::Request> arsRequests{
+                    AsyncRequestsSender::Request(dbInfo->getPrimary(), cmdToSend)};
+
+                auto arsResponses =
+                    gatherResponses(opCtx,
+                                    dbName.db(),
+                                    ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                                    Shard::RetryPolicy::kIdempotent,
+                                    arsRequests);
+                return uassertStatusOK(arsResponses.front().swResponse);
+            }();
 
             const auto createStatus = mongo::getStatusFromCommandResult(response.data);
             if (createStatus == ErrorCodes::NamespaceExists &&

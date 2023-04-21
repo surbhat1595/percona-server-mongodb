@@ -78,7 +78,7 @@ DocumentSourceListLocalSessions::DocumentSourceListLocalSessions(
         invariant(!_spec.getUsers() || _spec.getUsers()->empty());
         _ids = _cache->listIds();
     } else {
-        _ids = _cache->listIds(listSessionsUsersToDigests(_spec.getUsers().get()));
+        _ids = _cache->listIds(listSessionsUsersToDigests(_spec.getUsers().value()));
     }
 }
 
@@ -122,7 +122,7 @@ mongo::PrivilegeVector mongo::listSessionsRequiredPrivileges(const ListSessionsS
 
         const auto& myName =
             getUserNameForLoggedInUser(Client::getCurrent()->getOperationContext());
-        const auto& users = spec.getUsers().get();
+        const auto& users = spec.getUsers().value();
         return !std::all_of(
             users.cbegin(), users.cend(), [myName](const auto& name) { return myName == name; });
     })();
@@ -141,7 +141,7 @@ mongo::ListSessionsSpec mongo::listSessionsParseSpec(StringData stageName,
                           << typeName(spec.type()),
             spec.type() == BSONType::Object);
 
-    IDLParserErrorContext ctx(stageName);
+    IDLParserContext ctx(stageName);
     auto ret = ListSessionsSpec::parse(ctx, spec.Obj());
 
     uassert(ErrorCodes::UnsupportedFormat,

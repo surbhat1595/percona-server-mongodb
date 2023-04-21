@@ -28,6 +28,7 @@
  */
 #pragma once
 
+#include "mongo/db/repl/replica_set_aware_service.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
 #include "mongo/db/s/sharding_runtime_d_params_gen.h"
 #include "mongo/executor/network_interface_factory.h"
@@ -38,25 +39,13 @@
 
 namespace mongo {
 
-// TODO SERVER-67636 make RangeDeleterService a ReplicaSetAwareServiceShardsvr
-class RangeDeleterService {
+class RangeDeleterService : public ReplicaSetAwareServiceShardSvr<RangeDeleterService> {
 public:
-    RangeDeleterService() {
-        // TODO SERVER-67636 move executor's initialization at replica set aware service level
-        const std::string kExecName("RangeDeleterServiceExecutor");
-        auto net = executor::makeNetworkInterface(kExecName);
-        auto pool = std::make_unique<executor::NetworkInterfaceThreadPool>(net.get());
-        auto taskExecutor =
-            std::make_shared<executor::ThreadPoolTaskExecutor>(std::move(pool), std::move(net));
-        taskExecutor->startup();
-        _executor = std::move(taskExecutor);
-    }
+    RangeDeleterService() = default;
 
-    ~RangeDeleterService() {
-        // TODO SERVER-67636 move executor's shutdown at replica set aware service level
-        _executor->shutdown();
-        _executor->join();
-    }
+    static RangeDeleterService* get(ServiceContext* serviceContext);
+
+    static RangeDeleterService* get(OperationContext* opCtx);
 
 private:
     /*
@@ -69,7 +58,7 @@ private:
             : ChunkRange(task.getRange().getMin(), task.getRange().getMax()),
               _completion(completion) {}
 
-        SharedSemiFuture<void> getCompletionFuture() {
+        SharedSemiFuture<void> getCompletionFuture() const {
             return _completion;
         }
 
@@ -86,21 +75,41 @@ private:
      * sharded collection).
      */
     struct RANGES_COMPARATOR {
-        bool operator()(const ChunkRange& a, const ChunkRange& b) const {
-            return a.getMin().woCompare(b.getMin()) < 0;
+        bool operator()(const std::shared_ptr<ChunkRange>& a,
+                        const std::shared_ptr<ChunkRange>& b) const {
+            return a->getMin().woCompare(b->getMin()) < 0;
         }
     };
 
     // Keeping track of per-collection registered range deletion tasks
-    stdx::unordered_map<UUID, std::set<ChunkRange, RANGES_COMPARATOR>, UUID::Hash>
+    stdx::unordered_map<UUID, std::set<std::shared_ptr<ChunkRange>, RANGES_COMPARATOR>, UUID::Hash>
         _rangeDeletionTasks;
 
     // Mono-threaded executor processing range deletion tasks
     std::shared_ptr<executor::TaskExecutor> _executor;
 
+    enum State { kInitializing, kUp, kDown };
+
+    AtomicWord<State> _state{kDown};
+
+    /* Acquire mutex only if service is up (for "user" operation) */
+    [[nodiscard]] stdx::unique_lock<Latch> _acquireMutexFailIfServiceNotUp() {
+        stdx::unique_lock<Latch> lg(_mutex_DO_NOT_USE_DIRECTLY);
+        uassert(
+            ErrorCodes::NotYetInitialized, "Range deleter service not up", _state.load() == kUp);
+        return lg;
+    }
+
+    /* Unconditionally acquire mutex (for internal operations) */
+    [[nodiscard]] stdx::unique_lock<Latch> _acquireMutexUnconditionally() {
+        stdx::unique_lock<Latch> lg(_mutex_DO_NOT_USE_DIRECTLY);
+        return lg;
+    }
+
     // TODO SERVER-67642 implement fine-grained per-collection locking
-    // Protecting the access to all class members
-    Mutex _mutex = MONGO_MAKE_LATCH("RangeDeleterService::_mutex");
+    // Protecting the access to all class members (DO NOT USE DIRECTLY: rely on
+    // `_acquireMutexUnconditionally` and `_acquireMutexFailIfServiceNotUp`)
+    Mutex _mutex_DO_NOT_USE_DIRECTLY = MONGO_MAKE_LATCH("RangeDeleterService::_mutex");
 
 public:
     /*
@@ -122,6 +131,37 @@ public:
      * Returns the number of registered range deletion tasks for a collection
      */
     int getNumRangeDeletionTasksForCollection(const UUID& collectionUUID);
+
+    /*
+     * Returns a future marked as ready when all overlapping range deletion tasks complete.
+     *
+     * NB: in case an overlapping range deletion task is registered AFTER invoking this method,
+     * it will not be taken into account. Handling this scenario is responsibility of the caller.
+     * */
+    SharedSemiFuture<void> getOverlappingRangeDeletionsFuture(const UUID& collectionUUID,
+                                                              const ChunkRange& range);
+
+    /* ReplicaSetAwareServiceShardSvr implemented methods */
+    void onStepUpComplete(OperationContext* opCtx, long long term) override;
+    void onStepDown() override;
+
+    /*
+     * Returns the RangeDeleterService state with the following schema:
+     *     {collectionUUIDA: [{min: x, max: y}, {min: w, max: z}....], collectionUUIDB: ......}
+     */
+    BSONObj dumpState();
+
+private:
+    /* Asynchronously register range deletions on the service. To be called on on step-up */
+    void _recoverRangeDeletionsOnStepUp();
+
+    /* ReplicaSetAwareServiceShardSvr "empty implemented" methods */
+    void onStartup(OperationContext* opCtx) override final{};
+    void onInitialDataAvailable(OperationContext* opCtx,
+                                bool isMajorityDataAvailable) override final {}
+    void onShutdown() override final {}
+    void onStepUpBegin(OperationContext* opCtx, long long term) override final {}
+    void onBecomeArbiter() override final {}
 };
 
 }  // namespace mongo

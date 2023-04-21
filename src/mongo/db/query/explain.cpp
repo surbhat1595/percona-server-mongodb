@@ -97,7 +97,7 @@ void generatePlannerInfo(PlanExecutor* exec,
         const QuerySettings* querySettings =
             QuerySettingsDecoration::get(mainCollection->getSharedDecorations());
         if (exec->getCanonicalQuery()->isSbeCompatible() &&
-            feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV() &&
+            feature_flags::gFeatureFlagSbeFull.isEnabledAndIgnoreFCV() &&
             !exec->getCanonicalQuery()->getForceClassicEngine()) {
             const auto planCacheKeyInfo =
                 plan_cache_key_factory::make(*exec->getCanonicalQuery(), collections);
@@ -110,7 +110,7 @@ void generatePlannerInfo(PlanExecutor* exec,
             queryHash = planCacheKeyInfo.queryHash();
         }
         if (auto allowedIndicesFilter = querySettings->getAllowedIndicesFilter(
-                exec->getCanonicalQuery()->encodeKeyForIndexFilters())) {
+                exec->getCanonicalQuery()->encodeKeyForPlanCacheCommand())) {
             // Found an index filter set on the query shape.
             indexFilterSet = true;
         }
@@ -188,7 +188,18 @@ void generateSinglePlanExecutionInfo(const PlanExplainer::PlanStatsDetails& deta
     if (totalTimeMillis) {
         out->appendNumber("executionTimeMillis", *totalTimeMillis);
     } else {
-        out->appendNumber("executionTimeMillisEstimate", summary->executionTimeMillisEstimate);
+        if (summary->executionTime.precision == QueryExecTimerPrecision::kMicros) {
+            out->appendNumber(
+                "executionTimeMillisEstimate",
+                durationCount<Milliseconds>(summary->executionTime.executionTimeEstimate));
+            out->appendNumber(
+                "executionTimeMicros",
+                durationCount<Microseconds>(summary->executionTime.executionTimeEstimate));
+        } else if (summary->executionTime.precision == QueryExecTimerPrecision::kMillis) {
+            out->appendNumber(
+                "executionTimeMillisEstimate",
+                durationCount<Milliseconds>(summary->executionTime.executionTimeEstimate));
+        }
     }
 
     out->appendNumber("totalKeysExamined", static_cast<long long>(summary->totalKeysExamined));

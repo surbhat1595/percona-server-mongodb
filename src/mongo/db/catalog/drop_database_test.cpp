@@ -40,9 +40,9 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer.h"
-#include "mongo/db/op_observer_noop.h"
-#include "mongo/db/op_observer_registry.h"
+#include "mongo/db/op_observer/op_observer.h"
+#include "mongo/db/op_observer/op_observer_noop.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/oplog.h"
@@ -66,7 +66,7 @@ using namespace mongo;
  */
 class OpObserverMock : public OpObserverNoop {
 public:
-    void onDropDatabase(OperationContext* opCtx, const std::string& dbName) override;
+    void onDropDatabase(OperationContext* opCtx, const DatabaseName& dbName) override;
 
     using OpObserver::onDropCollection;
     repl::OpTime onDropCollection(OperationContext* opCtx,
@@ -82,11 +82,12 @@ public:
     const repl::OpTime dropOpTime = {Timestamp(Seconds(100), 1U), 1LL};
 };
 
-void OpObserverMock::onDropDatabase(OperationContext* opCtx, const std::string& dbName) {
+void OpObserverMock::onDropDatabase(OperationContext* opCtx, const DatabaseName& dbName) {
     ASSERT_TRUE(opCtx->lockState()->inAWriteUnitOfWork());
     OpObserverNoop::onDropDatabase(opCtx, dbName);
     // Do not update 'droppedDatabaseNames' if OpObserverNoop::onDropDatabase() throws.
-    droppedDatabaseNames.insert(dbName);
+    // TODO: SERVER-67549 to change droppedDatabaseNames to use DatabaseName
+    droppedDatabaseNames.insert(dbName.toStringWithTenantId());
 }
 
 repl::OpTime OpObserverMock::onDropCollection(OperationContext* opCtx,
@@ -182,7 +183,7 @@ void DropDatabaseTest::tearDown() {
  */
 void _createCollection(OperationContext* opCtx, const NamespaceString& nss) {
     writeConflictRetry(opCtx, "testDropCollection", nss.ns(), [=] {
-        AutoGetDb autoDb(opCtx, nss.db(), MODE_X);
+        AutoGetDb autoDb(opCtx, nss.dbName(), MODE_X);
         auto db = autoDb.ensureDbExists(opCtx);
         ASSERT_TRUE(db);
 
@@ -209,7 +210,7 @@ void _removeDatabaseFromCatalog(OperationContext* opCtx, StringData dbName) {
 }
 
 TEST_F(DropDatabaseTest, DropDatabaseReturnsNamespaceNotFoundIfDatabaseDoesNotExist) {
-    ASSERT_FALSE(AutoGetDb(_opCtx.get(), _nss.db(), MODE_X).getDb());
+    ASSERT_FALSE(AutoGetDb(_opCtx.get(), _nss.dbName(), MODE_X).getDb());
     ASSERT_EQUALS(ErrorCodes::NamespaceNotFound,
                   dropDatabaseForApplyOps(_opCtx.get(), _nss.db().toString()));
 }
@@ -237,12 +238,12 @@ void _testDropDatabase(OperationContext* opCtx,
 
     // Set OpObserverMock::db so that we can check Database::isDropPending() while dropping
     // collections.
-    auto db = AutoGetDb(opCtx, nss.db(), MODE_X).getDb();
+    auto db = AutoGetDb(opCtx, nss.dbName(), MODE_X).getDb();
     ASSERT_TRUE(db);
     opObserver->db = db;
 
     ASSERT_OK(dropDatabaseForApplyOps(opCtx, nss.db().toString()));
-    ASSERT_FALSE(AutoGetDb(opCtx, nss.db(), MODE_X).getDb());
+    ASSERT_FALSE(AutoGetDb(opCtx, nss.dbName(), MODE_X).getDb());
     opObserver->db = nullptr;
 
     ASSERT_EQUALS(1U, opObserver->droppedDatabaseNames.size());
@@ -313,7 +314,7 @@ TEST_F(DropDatabaseTest, DropDatabaseResetsDropPendingStateOnException) {
     _createCollection(_opCtx.get(), _nss);
 
     {
-        AutoGetDb autoDb(_opCtx.get(), _nss.db(), MODE_X);
+        AutoGetDb autoDb(_opCtx.get(), _nss.dbName(), MODE_X);
         auto db = autoDb.getDb();
         ASSERT_TRUE(db);
     }
@@ -324,7 +325,7 @@ TEST_F(DropDatabaseTest, DropDatabaseResetsDropPendingStateOnException) {
                                 "onDropCollection() failed");
 
     {
-        AutoGetDb autoDb(_opCtx.get(), _nss.db(), MODE_X);
+        AutoGetDb autoDb(_opCtx.get(), _nss.dbName(), MODE_X);
         auto db = autoDb.getDb();
         ASSERT_FALSE(db->isDropPending(_opCtx.get()));
     }
@@ -335,12 +336,12 @@ void _testDropDatabaseResetsDropPendingStateIfAwaitReplicationFails(OperationCon
                                                                     bool expectDbPresent) {
     _createCollection(opCtx, nss);
 
-    ASSERT_TRUE(AutoGetDb(opCtx, nss.db(), MODE_X).getDb());
+    ASSERT_TRUE(AutoGetDb(opCtx, nss.dbName(), MODE_X).getDb());
 
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed,
                   dropDatabaseForApplyOps(opCtx, nss.db().toString()));
 
-    AutoGetDb autoDb(opCtx, nss.db(), MODE_X);
+    AutoGetDb autoDb(opCtx, nss.dbName(), MODE_X);
     auto db = autoDb.getDb();
     if (expectDbPresent) {
         ASSERT_TRUE(db);
@@ -385,7 +386,7 @@ TEST_F(DropDatabaseTest,
 
     _createCollection(_opCtx.get(), _nss);
 
-    ASSERT_TRUE(AutoGetDb(_opCtx.get(), _nss.db(), MODE_X).getDb());
+    ASSERT_TRUE(AutoGetDb(_opCtx.get(), _nss.dbName(), MODE_X).getDb());
 
     auto status = dropDatabaseForApplyOps(_opCtx.get(), _nss.db().toString());
     ASSERT_EQUALS(ErrorCodes::NamespaceNotFound, status);
@@ -394,7 +395,7 @@ TEST_F(DropDatabaseTest,
                               << "Could not drop database " << _nss.db()
                               << " because it does not exist after dropping 1 collection(s)."));
 
-    ASSERT_FALSE(AutoGetDb(_opCtx.get(), _nss.db(), MODE_X).getDb());
+    ASSERT_FALSE(AutoGetDb(_opCtx.get(), _nss.dbName(), MODE_X).getDb());
 }
 
 TEST_F(DropDatabaseTest,
@@ -410,7 +411,7 @@ TEST_F(DropDatabaseTest,
 
     _createCollection(_opCtx.get(), _nss);
 
-    ASSERT_TRUE(AutoGetDb(_opCtx.get(), _nss.db(), MODE_X).getDb());
+    ASSERT_TRUE(AutoGetDb(_opCtx.get(), _nss.dbName(), MODE_X).getDb());
 
     auto status = dropDatabaseForApplyOps(_opCtx.get(), _nss.db().toString());
     ASSERT_EQUALS(ErrorCodes::PrimarySteppedDown, status);
@@ -420,7 +421,7 @@ TEST_F(DropDatabaseTest,
                                             << " while waiting for 1 pending collection drop(s)."));
 
     // Check drop-pending flag in Database after dropDatabase() fails.
-    AutoGetDb autoDb(_opCtx.get(), _nss.db(), MODE_X);
+    AutoGetDb autoDb(_opCtx.get(), _nss.dbName(), MODE_X);
     auto db = autoDb.getDb();
     ASSERT_TRUE(db);
     ASSERT_FALSE(db->isDropPending(_opCtx.get()));

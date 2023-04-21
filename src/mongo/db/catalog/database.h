@@ -29,9 +29,6 @@
 
 #pragma once
 
-#include <memory>
-#include <string>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
@@ -39,13 +36,12 @@
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/dbcommands_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/util/string_map.h"
 
 namespace mongo {
-
-class OperationContext;
 
 /**
  * Represents a logical database containing Collections.
@@ -99,7 +95,7 @@ public:
     virtual bool isDropPending(OperationContext* opCtx) const = 0;
 
     virtual void getStats(OperationContext* opCtx,
-                          BSONObjBuilder* output,
+                          DBStats* output,
                           bool includeFreeStorage,
                           double scale = 1) const = 0;
 
@@ -152,19 +148,6 @@ public:
                                     bool stayTemp) const = 0;
 
     virtual const NamespaceString& getSystemViewsName() const = 0;
-
-    /**
-     * Generates a collection namespace suitable for creating a temporary collection.
-     * The namespace is based on a model that replaces each percent sign in 'collectionNameModel' by
-     * a random character in the range [0-9A-Za-z].
-     * Returns FailedToParse if 'collectionNameModel' does not contain any percent signs.
-     * Returns NamespaceExists if we are unable to generate a collection name that does not conflict
-     * with an existing collection in this database.
-     *
-     * The database must be locked in MODE_IX when calling this function.
-     */
-    virtual StatusWith<NamespaceString> makeUniqueCollectionNamespace(
-        OperationContext* opCtx, StringData collectionNameModel) const = 0;
 
     /**
      * If we are in a replset, every replicated collection must have an _id index.  As we scan each

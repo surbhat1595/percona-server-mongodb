@@ -129,8 +129,7 @@ Status isSpecOKClusteredIndexCheck(const BSONObj& indexSpec,
     }
 
     auto name = indexSpec.getStringField("name");
-    bool namesMatch =
-        !collInfo.is_initialized() || collInfo->getIndexSpec().getName().get() == name;
+    bool namesMatch = !collInfo.has_value() || collInfo->getIndexSpec().getName().value() == name;
 
 
     if (!keysMatch && !namesMatch) {
@@ -248,7 +247,7 @@ Status IndexCatalogImpl::init(OperationContext* opCtx, Collection* collection) {
             // to non _id indexes to the recovery timestamp. The _id index is left visible. It's
             // assumed if the collection is visible, it's _id is valid to be used.
             if (recoveryTs && !entry->descriptor()->isIdIndex()) {
-                entry->setMinimumVisibleSnapshot(recoveryTs.get());
+                entry->setMinimumVisibleSnapshot(recoveryTs.value());
             }
         }
     }
@@ -419,13 +418,8 @@ StatusWith<BSONObj> IndexCatalogImpl::prepareSpecForCreate(
     auto validatedSpec = swValidatedAndFixed.getValue();
 
     // Check whether this is a TTL index being created on a capped collection.
-    // TODO SERVER-61545 The feature compatibility version check in this if statement can be removed
-    // once 6.0 is LTS.
     if (collection && collection->isCapped() &&
         validatedSpec.hasField(IndexDescriptor::kExpireAfterSecondsFieldName) &&
-        ((!serverGlobalParams.featureCompatibility.isVersionInitialized()) ||
-         serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
-             multiversion::FeatureCompatibilityVersion::kVersion_5_2)) &&
         MONGO_likely(!ignoreTTLIndexCappedCollectionCheck.shouldFail())) {
         return {ErrorCodes::CannotCreateIndex, "Cannot create TTL index on a capped collection"};
     }
@@ -770,12 +764,8 @@ Status validateColumnStoreSpec(const CollectionPtr& collection,
                 "collection"};
     }
 
-    // TODO SERVER-63123 support 'columnstoreProjection'.
-    for (auto&& notToBeSpecified : {"sparse"_sd,
-                                    "unique"_sd,
-                                    "expireAfterSeconds"_sd,
-                                    "partialFilterExpression"_sd,
-                                    "columnstoreProjection"_sd}) {
+    for (auto&& notToBeSpecified :
+         {"sparse"_sd, "unique"_sd, "expireAfterSeconds"_sd, "partialFilterExpression"_sd}) {
         if (spec.hasField(notToBeSpecified)) {
             return reportInvalidOption(notToBeSpecified, IndexNames::COLUMN);
         }
@@ -1297,7 +1287,7 @@ public:
     void commit(boost::optional<Timestamp> commitTime) final {
         if (commitTime) {
             HistoricalIdentTracker::get(_opCtx).recordDrop(
-                _entry->getIdent(), _nss, _uuid, commitTime.get());
+                _entry->getIdent(), _nss, _uuid, commitTime.value());
         }
 
         _entry->setDropped();
@@ -1347,17 +1337,13 @@ Status IndexCatalogImpl::dropIndexEntry(OperationContext* opCtx,
     }();
 
     invariant(released.get() == entry);
-    opCtx->recoveryUnit()->registerChange(
-        std::make_unique<IndexRemoveChange>(opCtx,
-                                            collection->ns(),
-                                            collection->uuid(),
-                                            std::move(released),
-                                            collection->getSharedDecorations()));
+    opCtx->recoveryUnit()->registerChange(std::make_unique<IndexRemoveChange>(
+        opCtx, collection->ns(), collection->uuid(), released, collection->getSharedDecorations()));
 
     CollectionQueryInfo::get(collection).rebuildIndexData(opCtx, collection);
     CollectionIndexUsageTrackerDecoration::get(collection->getSharedDecorations())
         .unregisterIndex(indexName);
-    _deleteIndexFromDisk(opCtx, collection, indexName, entry->getSharedIdent());
+    _deleteIndexFromDisk(opCtx, collection, indexName, released);
 
     return Status::OK();
 }
@@ -1371,13 +1357,20 @@ void IndexCatalogImpl::deleteIndexFromDisk(OperationContext* opCtx,
 void IndexCatalogImpl::_deleteIndexFromDisk(OperationContext* opCtx,
                                             Collection* collection,
                                             const string& indexName,
-                                            std::shared_ptr<Ident> ident) {
+                                            std::shared_ptr<IndexCatalogEntry> entry) {
     invariant(!findIndexByName(opCtx,
                                indexName,
                                IndexCatalog::InclusionPolicy::kReady |
                                    IndexCatalog::InclusionPolicy::kUnfinished |
                                    IndexCatalog::InclusionPolicy::kFrozen));
-    catalog::removeIndex(opCtx, indexName, collection, std::move(ident));
+
+    catalog::DataRemoval dataRemoval = catalog::DataRemoval::kTwoPhase;
+    if (!entry || (entry && !entry->getSharedIdent())) {
+        // getSharedIdent() returns a nullptr for unfinished index builds. These indexes can be
+        // removed immediately as they weren't ready for use yet.
+        dataRemoval = catalog::DataRemoval::kImmediate;
+    }
+    catalog::removeIndex(opCtx, indexName, collection, std::move(entry), dataRemoval);
 }
 
 void IndexCatalogImpl::setMultikeyPaths(OperationContext* const opCtx,
@@ -1491,6 +1484,11 @@ const IndexCatalogEntry* IndexCatalogImpl::getEntry(const IndexDescriptor* desc)
 
 std::shared_ptr<const IndexCatalogEntry> IndexCatalogImpl::getEntryShared(
     const IndexDescriptor* indexDescriptor) const {
+    return indexDescriptor->getEntry()->shared_from_this();
+}
+
+std::shared_ptr<IndexCatalogEntry> IndexCatalogImpl::getEntryShared(
+    const IndexDescriptor* indexDescriptor) {
     return indexDescriptor->getEntry()->shared_from_this();
 }
 

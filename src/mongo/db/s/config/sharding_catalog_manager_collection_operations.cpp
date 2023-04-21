@@ -59,7 +59,7 @@
 #include "mongo/db/s/sharding_logging.h"
 #include "mongo/db/s/sharding_util.h"
 #include "mongo/db/timeseries/timeseries_options.h"
-#include "mongo/db/transaction_api.h"
+#include "mongo/db/transaction/transaction_api.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/executor/network_interface.h"
 #include "mongo/executor/task_executor.h"
@@ -69,6 +69,7 @@
 #include "mongo/s/catalog/sharding_catalog_client_impl.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_tags.h"
+#include "mongo/s/chunk_constraints.h"
 #include "mongo/s/client/shard.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
@@ -487,11 +488,6 @@ void ShardingCatalogManager::configureCollectionBalancing(
 
     // Hold the FCV region to serialize with the setFeatureCompatibilityVersion command
     FixedFCVRegion fcvRegion(opCtx);
-    uassert(ErrorCodes::IllegalOperation,
-            "_configsvrConfigureCollectionBalancing can only be run when the cluster is in feature "
-            "compatibility versions greater or equal than 5.3.",
-            serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
-                multiversion::FeatureCompatibilityVersion::kVersion_5_3));
 
     uassert(ErrorCodes::InvalidOptions,
             "invalid configure collection balancing update",
@@ -499,8 +495,8 @@ void ShardingCatalogManager::configureCollectionBalancing(
 
     short updatedFields = 0;
     BSONObjBuilder updateCmd;
+    BSONObjBuilder setClauseBuilder;
     {
-        BSONObjBuilder setBuilder(updateCmd.subobjStart("$set"));
         if (chunkSizeMB && *chunkSizeMB != 0) {
             auto chunkSizeBytes = static_cast<int64_t>(*chunkSizeMB) * 1024 * 1024;
             bool withinRange = nss == NamespaceString::kLogicalSessionsNamespace
@@ -509,28 +505,35 @@ void ShardingCatalogManager::configureCollectionBalancing(
             uassert(ErrorCodes::InvalidOptions,
                     str::stream() << "Chunk size '" << *chunkSizeMB << "' out of range [1MB, 1GB]",
                     withinRange);
-            setBuilder.append(CollectionType::kMaxChunkSizeBytesFieldName, chunkSizeBytes);
+            setClauseBuilder.append(CollectionType::kMaxChunkSizeBytesFieldName, chunkSizeBytes);
             updatedFields++;
         }
         if (defragmentCollection) {
-            bool doDefragmentation = defragmentCollection.get();
+            bool doDefragmentation = defragmentCollection.value();
             if (doDefragmentation) {
-                setBuilder.append(CollectionType::kDefragmentCollectionFieldName,
-                                  doDefragmentation);
+                setClauseBuilder.append(CollectionType::kDefragmentCollectionFieldName,
+                                        doDefragmentation);
                 updatedFields++;
             } else {
                 Balancer::get(opCtx)->abortCollectionDefragmentation(opCtx, nss);
             }
         }
         if (enableAutoSplitter) {
-            bool doSplit = enableAutoSplitter.get();
-            setBuilder.append(CollectionType::kNoAutoSplitFieldName, !doSplit);
+            bool doSplit = enableAutoSplitter.value();
+            setClauseBuilder.append(CollectionType::kNoAutoSplitFieldName, !doSplit);
             updatedFields++;
         }
     }
     if (chunkSizeMB && *chunkSizeMB == 0) {
-        BSONObjBuilder unsetBuilder(updateCmd.subobjStart("$unset"));
-        unsetBuilder.append(CollectionType::kMaxChunkSizeBytesFieldName, 0);
+        // Logic to reset the 'maxChunkSizeBytes' field to its default value
+        if (nss == NamespaceString::kLogicalSessionsNamespace) {
+            setClauseBuilder.append(CollectionType::kMaxChunkSizeBytesFieldName,
+                                    logical_sessions::kMaxChunkSizeBytes);
+        } else {
+            BSONObjBuilder unsetClauseBuilder;
+            unsetClauseBuilder.append(CollectionType::kMaxChunkSizeBytesFieldName, 0);
+            updateCmd.append("$unset", unsetClauseBuilder.obj());
+        }
         updatedFields++;
     }
 
@@ -538,6 +541,7 @@ void ShardingCatalogManager::configureCollectionBalancing(
         return;
     }
 
+    updateCmd.append("$set", setClauseBuilder.obj());
     const auto update = updateCmd.obj();
     {
         // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk splits, merges, and
@@ -579,6 +583,51 @@ void ShardingCatalogManager::configureCollectionBalancing(
         opCtx,
         {std::make_move_iterator(shardsIds.begin()), std::make_move_iterator(shardsIds.end())},
         nss,
+        executor);
+
+    Balancer::get(opCtx)->notifyPersistedBalancerSettingsChanged(opCtx);
+}
+
+void ShardingCatalogManager::applyLegacyConfigurationToSessionsCollection(OperationContext* opCtx) {
+    auto updateStmt = BSON("$unset" << BSON(CollectionType::kMaxChunkSizeBytesFieldName << 0));
+    // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk splits, merges, and
+    // migrations
+    Lock::ExclusiveLock lk(opCtx, opCtx->lockState(), _kChunkOpLock);
+
+    withTransaction(opCtx,
+                    CollectionType::ConfigNS,
+                    [this, &updateStmt](OperationContext* opCtx, TxnNumber txnNumber) {
+                        const auto query = BSON(CollectionType::kNssFieldName
+                                                << NamespaceString::kLogicalSessionsNamespace.ns());
+                        const auto res = writeToConfigDocumentInTxn(
+                            opCtx,
+                            CollectionType::ConfigNS,
+                            BatchedCommandRequest::buildUpdateOp(CollectionType::ConfigNS,
+                                                                 query,
+                                                                 updateStmt,
+                                                                 false /* upsert */,
+                                                                 false /* multi */),
+                            txnNumber);
+                        const auto numDocsModified = UpdateOp::parseResponse(res).getN();
+                        uassert(ErrorCodes::NamespaceNotSharded,
+                                str::stream() << "Expected to match one doc for query " << query
+                                              << " but matched " << numDocsModified,
+                                numDocsModified == 1);
+
+                        bumpCollectionMinorVersionInTxn(
+                            opCtx, NamespaceString::kLogicalSessionsNamespace, txnNumber);
+                    });
+    const auto cm = uassertStatusOK(
+        Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithRefresh(
+            opCtx, NamespaceString::kLogicalSessionsNamespace));
+    std::set<ShardId> shardsIds;
+    cm.getAllShardIds(&shardsIds);
+
+    const auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+    sharding_util::tellShardsToRefreshCollection(
+        opCtx,
+        {std::make_move_iterator(shardsIds.begin()), std::make_move_iterator(shardsIds.end())},
+        NamespaceString::kLogicalSessionsNamespace,
         executor);
 
     Balancer::get(opCtx)->notifyPersistedBalancerSettingsChanged(opCtx);

@@ -46,7 +46,7 @@
 #include "mongo/db/s/migration_session_id.h"
 #include "mongo/db/s/session_catalog_migration.h"
 #include "mongo/db/session_catalog_mongod.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/redaction.h"
@@ -56,9 +56,10 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
-
 namespace mongo {
 namespace {
+
+MONGO_FAIL_POINT_DEFINE(interruptBeforeProcessingPrePostImageOriginatingOp);
 
 const auto kOplogField = "oplog";
 const WriteConcernOptions kMajorityWC(WriteConcernOptions::kMajority,
@@ -118,7 +119,7 @@ void setPrePostImageTs(const ProcessOplogResult& lastResult, repl::MutableOplogE
     // the appropriate no-op. This code on the destination patches up the CRUD operation oplog entry
     // to look like the classic format.
     if (entry->getNeedsRetryImage()) {
-        switch (entry->getNeedsRetryImage().get()) {
+        switch (entry->getNeedsRetryImage().value()) {
             case repl::RetryImageEnum::kPreImage:
                 entry->setPreImageOpTime({repl::OpTime()});
                 break;
@@ -493,10 +494,19 @@ void SessionCatalogMigrationDestination::_retrieveSessionStateFromSource(Service
                 lastOpTimeWaited = lastResult.oplogTime;
             }
         }
+
         for (BSONArrayIteratorSorted oplogIter(oplogArray); oplogIter.more();) {
+            auto oplogEntry = oplogIter.next().Obj();
+            interruptBeforeProcessingPrePostImageOriginatingOp.executeIf(
+                [&](const auto&) {
+                    uasserted(6749200,
+                              "Intentionally failing session migration before processing post/pre "
+                              "image originating update oplog entry");
+                },
+                [&](const auto&) { return !oplogEntry["needsRetryImage"].eoo(); });
             try {
-                lastResult = processSessionOplog(
-                    oplogIter.next().Obj(), lastResult, service, _cancellationToken);
+                lastResult =
+                    processSessionOplog(oplogEntry, lastResult, service, _cancellationToken);
             } catch (const ExceptionFor<ErrorCodes::TransactionTooOld>&) {
                 // This means that the server has a newer txnNumber than the oplog being
                 // migrated, so just skip it

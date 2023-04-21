@@ -199,6 +199,14 @@ SaslReply doSaslStep(OperationContext* opCtx,
     return reply;
 }
 
+void warnIfCompressed(OperationContext* opCtx) {
+    if (opCtx->isOpCompressed()) {
+        LOGV2_WARNING(6697500,
+                      "SASL commands should not be run over the OP_COMPRESSED message type. This "
+                      "invocation may have security implications.");
+    }
+}
+
 SaslReply doSaslStart(OperationContext* opCtx,
                       AuthenticationSession* session,
                       const SaslStartCommand& request) {
@@ -220,10 +228,11 @@ SaslReply doSaslStart(OperationContext* opCtx,
 SaslReply runSaslStart(OperationContext* opCtx,
                        AuthenticationSession* session,
                        const SaslStartCommand& request) {
+    warnIfCompressed(opCtx);
     opCtx->markKillOnClientDisconnect();
 
     // Note that while updateDatabase can throw, it should not be able to for saslStart.
-    session->updateDatabase(request.getDbName());
+    session->updateDatabase(request.getDbName().toStringWithTenantId());
     session->setMechanismName(request.getMechanism());
 
     return doSaslStart(opCtx, session, request);
@@ -250,6 +259,7 @@ SaslReply CmdSaslContinue::Invocation::typedRun(OperationContext* opCtx) {
 SaslReply runSaslContinue(OperationContext* opCtx,
                           AuthenticationSession* session,
                           const SaslContinueCommand& cmd) {
+    warnIfCompressed(opCtx);
     opCtx->markKillOnClientDisconnect();
 
     uassert(ErrorCodes::ProtocolError,
@@ -266,6 +276,7 @@ constexpr auto kDBFieldName = "db"_sd;
 void doSpeculativeSaslStart(OperationContext* opCtx,
                             const BSONObj& sourceObj,
                             BSONObjBuilder* result) try {
+    auth::warnIfCompressed(opCtx);
     // TypedCommands expect DB overrides in the "$db" field,
     // but saslStart coming from the Hello command has it in the "db" field.
     // Rewrite it for handling here.
@@ -287,8 +298,8 @@ void doSpeculativeSaslStart(OperationContext* opCtx,
 
     AuthenticationSession::doStep(
         opCtx, AuthenticationSession::StepType::kSpeculativeSaslStart, [&](auto session) {
-            auto request = auth::SaslStartCommand::parse(
-                IDLParserErrorContext("speculative saslStart"), cmdObj);
+            auto request =
+                auth::SaslStartCommand::parse(IDLParserContext("speculative saslStart"), cmdObj);
             auto reply = auth::runSaslStart(opCtx, session, request);
             result->append(auth::kSpeculativeAuthenticate, reply.toBSON());
         });

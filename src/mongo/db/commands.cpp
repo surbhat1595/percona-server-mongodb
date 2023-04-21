@@ -155,22 +155,17 @@ BSONObj CommandHelpers::runCommandDirectly(OperationContext* opCtx, const OpMsgR
     return replyBuilder.releaseBody();
 }
 
-Future<void> CommandHelpers::runCommandInvocation(
-    std::shared_ptr<RequestExecutionContext> rec,
-    std::shared_ptr<CommandInvocation> invocation,
-    transport::ServiceExecutor::ThreadingModel threadingModel) {
-    switch (threadingModel) {
-        case transport::ServiceExecutor::ThreadingModel::kBorrowed:
-            return runCommandInvocationAsync(std::move(rec), std::move(invocation));
-        case transport::ServiceExecutor::ThreadingModel::kDedicated:
-            return makeReadyFutureWith([opCtx = rec->getOpCtx(),
-                                        request = rec->getRequest(),
-                                        invocation = invocation.get(),
-                                        replyBuilder = rec->getReplyBuilder()] {
-                runCommandInvocation(opCtx, request, invocation, replyBuilder);
-            });
-    }
-    MONGO_UNREACHABLE;
+Future<void> CommandHelpers::runCommandInvocation(std::shared_ptr<RequestExecutionContext> rec,
+                                                  std::shared_ptr<CommandInvocation> invocation,
+                                                  bool useDedicatedThread) {
+    if (useDedicatedThread)
+        return makeReadyFutureWith([opCtx = rec->getOpCtx(),
+                                    request = rec->getRequest(),
+                                    invocation = invocation.get(),
+                                    replyBuilder = rec->getReplyBuilder()] {
+            runCommandInvocation(opCtx, request, invocation, replyBuilder);
+        });
+    return runCommandInvocationAsync(std::move(rec), std::move(invocation));
 }
 
 void CommandHelpers::runCommandInvocation(OperationContext* opCtx,
@@ -285,6 +280,11 @@ std::string CommandHelpers::parseNsFullyQualified(const BSONObj& cmdObj) {
 
 NamespaceString CommandHelpers::parseNsCollectionRequired(StringData dbname,
                                                           const BSONObj& cmdObj) {
+    return parseNsCollectionRequired({boost::none, dbname}, cmdObj);
+}
+
+NamespaceString CommandHelpers::parseNsCollectionRequired(const DatabaseName& dbName,
+                                                          const BSONObj& cmdObj) {
     // Accepts both BSON String and Symbol for collection name per SERVER-16260
     // TODO(kangas) remove Symbol support in MongoDB 3.0 after Ruby driver audit
     BSONElement first = cmdObj.firstElement();
@@ -297,20 +297,21 @@ NamespaceString CommandHelpers::parseNsCollectionRequired(StringData dbname,
     uassert(ErrorCodes::InvalidNamespace,
             str::stream() << "collection name has invalid type " << typeName(first.type()),
             first.canonicalType() == canonicalizeBSONType(mongo::String));
-    const NamespaceString nss(dbname, first.valueStringData());
+    const NamespaceString nss(dbName, first.valueStringData());
     uassert(ErrorCodes::InvalidNamespace,
             str::stream() << "Invalid namespace specified '" << nss.ns() << "'",
             nss.isValid());
     return nss;
 }
 
-NamespaceStringOrUUID CommandHelpers::parseNsOrUUID(StringData dbname, const BSONObj& cmdObj) {
+NamespaceStringOrUUID CommandHelpers::parseNsOrUUID(const DatabaseName& dbName,
+                                                    const BSONObj& cmdObj) {
     BSONElement first = cmdObj.firstElement();
     if (first.type() == BinData && first.binDataType() == BinDataType::newUUID) {
-        return {dbname.toString(), uassertStatusOK(UUID::parse(first))};
+        return {dbName, uassertStatusOK(UUID::parse(first))};
     } else {
         // Ensure collection identifier is not a Command
-        const NamespaceString nss(parseNsCollectionRequired(dbname, cmdObj));
+        const NamespaceString nss(parseNsCollectionRequired(dbName, cmdObj));
         uassert(ErrorCodes::InvalidNamespace,
                 str::stream() << "Invalid collection name specified '" << nss.ns(),
                 !(nss.ns().find('$') != std::string::npos && nss.ns() != "local.oplog.$main"));
@@ -319,10 +320,15 @@ NamespaceStringOrUUID CommandHelpers::parseNsOrUUID(StringData dbname, const BSO
 }
 
 std::string CommandHelpers::parseNsFromCommand(StringData dbname, const BSONObj& cmdObj) {
+    return parseNsFromCommand({boost::none, dbname}, cmdObj).ns();
+}
+
+NamespaceString CommandHelpers::parseNsFromCommand(const DatabaseName& dbName,
+                                                   const BSONObj& cmdObj) {
     BSONElement first = cmdObj.firstElement();
     if (first.type() != mongo::String)
-        return dbname.toString();
-    return str::stream() << dbname << '.' << cmdObj.firstElement().valueStringData();
+        return NamespaceString(dbName);
+    return NamespaceString(dbName, cmdObj.firstElement().valueStringData());
 }
 
 ResourcePattern CommandHelpers::resourcePatternForNamespace(const std::string& ns) {
@@ -352,8 +358,7 @@ bool CommandHelpers::appendCommandStatusNoThrow(BSONObjBuilder& result, const St
     // construct an invalid error reply.
     if (!status.isOK() && getTestCommandsEnabled()) {
         try {
-            ErrorReply::parse(IDLParserErrorContext("appendCommandStatusNoThrow"),
-                              result.asTempObj());
+            ErrorReply::parse(IDLParserContext("appendCommandStatusNoThrow"), result.asTempObj());
         } catch (const DBException&) {
             invariant(false,
                       "invalid error-response to a command constructed in "
@@ -905,7 +910,7 @@ private:
     }
 
     NamespaceString ns() const override {
-        return NamespaceString(_dbName.tenantId(), _command->parseNs(_dbName.toString(), cmdObj()));
+        return _command->parseNs(_dbName, cmdObj());
     }
 
     bool supportsWriteConcern() const override {

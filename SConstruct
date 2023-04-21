@@ -19,6 +19,7 @@ from glob import glob
 from pkg_resources import parse_version
 
 import SCons
+import SCons.Script
 
 # This must be first, even before EnsureSConsVersion, if
 # we are to avoid bulk loading all tools in the DefaultEnvironment.
@@ -55,8 +56,18 @@ print('scons: running with args {}'.format(scons_invocation))
 
 atexit.register(mongo.print_build_failures)
 
+# An extra instance of the SCons parser is used to manually validate options
+# flags. We use it detect some common misspellings/unknown options and
+# communicate with the user more effectively than just allowing Configure to
+# fail.
+# This is to work around issue #4187
+# (https://github.com/SCons/scons/issues/4187). Upon a future upgrade to SCons
+# that incorporates #4187, we should replace this solution with that.
+_parser = SCons.Script.SConsOptions.Parser("")
+
 
 def add_option(name, **kwargs):
+    _parser.add_option('--' + name, **{"default": None, **kwargs})
 
     if 'dest' not in kwargs:
         kwargs['dest'] = name
@@ -122,9 +133,9 @@ add_option(
     choices=list(BUILD_PROFILES.keys()),
     default='default',
     type='choice',
-    help='''Short hand for common build options. These profiles are well supported by SDP and are 
-    kept up to date. Unless you need something specific, it is recommended that you only build with 
-    these. san is the recommeneded profile since it exposes bugs before they are found in patch 
+    help='''Short hand for common build options. These profiles are well supported by SDP and are
+    kept up to date. Unless you need something specific, it is recommended that you only build with
+    these. san is the recommended profile since it exposes bugs before they are found in patch
     builds. Check out site_scons/mongo/build_profiles.py to see each profile.''',
 )
 
@@ -755,7 +766,7 @@ add_option(
     'build-metrics',
     metavar="FILE",
     const='build-metrics.json',
-    default='build-metrics.json',
+    default='',
     help='Enable tracking of build performance and output data as json.'
     ' Use "-" to output json to stdout, or supply a path to the desired'
     ' file to output to. If no argument is supplied, the default log'
@@ -1514,8 +1525,10 @@ if get_option('build-tools') == 'next':
 
 env = Environment(variables=env_vars, **envDict)
 del envDict
+env.AddMethod(lambda env, name, **kwargs: add_option(name, **kwargs), 'AddOption')
 
 if get_option('build-metrics'):
+    env['BUILD_METRICS_ARTIFACTS_DIR'] = '$BUILD_ROOT/$VARIANT_DIR'
     env.Tool('build_metrics')
     env.AddBuildMetricsMetaData('evg_id', env.get("BUILD_METRICS_EVG_TASK_ID", "UNKNOWN"))
     env.AddBuildMetricsMetaData('variant', env.get("BUILD_METRICS_EVG_BUILD_VARIANT", "UNKNOWN"))
@@ -1926,6 +1939,11 @@ if link_model == 'dynamic' and env.TargetOSIs(
             textwrap.dedent(f"""\
             Failed to detect macos version: {exc}
             """) + macos_version_message)
+
+# TODO: SERVER-68475
+# temp fix for BF-25986, should be removed when better solution is found
+if env.ToolchainIs('gcc') and not link_model == "dynamic":
+    env.Append(CCFLAGS=['-gsplit-dwarf'])
 
 # libunwind configuration.
 # In which the following globals are set and normalized to bool:
@@ -6056,6 +6074,27 @@ env.SConscript(
         'env',
     ],
 )
+
+# Critically, this approach is technically incorrect. While all MongoDB
+# SConscript files use our add_option wrapper, builtin tools can
+# access SCons's GetOption/AddOption methods directly, causing their options
+# to not be validated by this block.
+(_, leftover) = _parser.parse_args(sys.argv)
+# leftover contains unrecognized options, including environment variables,and
+# the argv[0]. If we only look at flags starting with --, and we skip the first
+# leftover value (argv[0]), anything that remains is an invalid option
+invalid_options = list(filter(lambda x: x.startswith("--"), leftover[1:]))
+if len(invalid_options) > 0:
+    # users frequently misspell "variables-files" (note two `s`s) as
+    # "variable-files" or "variables-file". Detect and help them out.
+    for opt in invalid_options:
+        bad_var_file_opts = ["--variable-file", "--variables-file", "--variable-files"]
+        if opt in bad_var_file_opts or any(
+            [opt.startswith(f"{bad_opt}=") for bad_opt in bad_var_file_opts]):
+            print(
+                f"WARNING: You supplied the invalid parameter '{opt}' to SCons. Did you mean --variables-files (both words plural)?"
+            )
+    fatal_error(None, f"ERROR: unknown options supplied to scons: {invalid_options}")
 
 # Declare the cache prune target
 cachePrune = env.Command(

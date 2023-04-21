@@ -82,6 +82,7 @@
 #include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/db/storage/control/storage_control.h"
 #include "mongo/db/storage/oplog_cap_maintainer_thread.h"
+#include "mongo/db/storage/storage_util.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/background.h"
@@ -120,7 +121,7 @@ StatusWith<int> StorageInterfaceImpl::getRollbackID(OperationContext* opCtx) {
             return rbidDoc.getStatus();
         }
 
-        auto rbid = RollbackID::parse(IDLParserErrorContext("RollbackID"), rbidDoc.getValue());
+        auto rbid = RollbackID::parse(IDLParserContext("RollbackID"), rbidDoc.getValue());
         invariant(rbid.get_id() == kRollbackIdDocumentId);
         return rbid.getRollbackId();
     } catch (const DBException&) {
@@ -241,7 +242,7 @@ StorageInterfaceImpl::createCollectionForBulkLoading(
         UnreplicatedWritesBlock uwb(opCtx.get());
 
         // Get locks and create the collection.
-        AutoGetDb autoDb(opCtx.get(), nss.db(), MODE_IX);
+        AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_IX);
         AutoGetCollection coll(opCtx.get(), nss, fixLockModeForSystemDotViewsChanges(nss, MODE_X));
         if (coll) {
             return Status(ErrorCodes::NamespaceExists,
@@ -342,8 +343,6 @@ Status insertDocumentsSingleBatch(OperationContext* opCtx,
     boost::optional<AutoGetOplog> autoOplog;
     const CollectionPtr* collection;
 
-    bool shouldWriteToChangeCollections = false;
-
     auto nss = nsOrUUID.nss();
     if (nss && nss->isOplog()) {
         // Simplify locking rules for oplog collection.
@@ -352,13 +351,10 @@ Status insertDocumentsSingleBatch(OperationContext* opCtx,
         if (!*collection) {
             return {ErrorCodes::NamespaceNotFound, "Oplog collection does not exist"};
         }
-
-        shouldWriteToChangeCollections =
-            ChangeStreamChangeCollectionManager::isChangeCollectionsModeActive();
     } else {
         autoColl.emplace(opCtx, nsOrUUID, MODE_IX);
         auto collectionResult = getCollection(
-            autoColl.get(), nsOrUUID, "The collection must exist before inserting documents.");
+            autoColl.value(), nsOrUUID, "The collection must exist before inserting documents.");
         if (!collectionResult.isOK()) {
             return collectionResult.getStatus();
         }
@@ -372,17 +368,6 @@ Status insertDocumentsSingleBatch(OperationContext* opCtx,
         return status;
     }
 
-    // Insert oplog entries to change collections if we are running in the serverless and the 'nss'
-    // is 'local.oplog.rs'.
-    if (shouldWriteToChangeCollections) {
-        auto& changeCollectionManager = ChangeStreamChangeCollectionManager::get(opCtx);
-        status = changeCollectionManager.insertDocumentsToChangeCollection(
-            opCtx, begin, end, nullOpDebug);
-        if (!status.isOK()) {
-            return status;
-        }
-    }
-
     wunit.commit();
 
     return Status::OK();
@@ -393,35 +378,10 @@ Status insertDocumentsSingleBatch(OperationContext* opCtx,
 Status StorageInterfaceImpl::insertDocuments(OperationContext* opCtx,
                                              const NamespaceStringOrUUID& nsOrUUID,
                                              const std::vector<InsertStatement>& docs) {
-    if (docs.size() > 1U) {
-        try {
-            if (insertDocumentsSingleBatch(opCtx, nsOrUUID, docs.cbegin(), docs.cend()).isOK()) {
-                return Status::OK();
-            }
-        } catch (...) {
-            // Ignore this failure and behave as-if we never tried to do the combined batch insert.
-            // The loop below will handle reporting any non-transient errors.
-        }
-    }
-
-    // Try to insert the batch one-at-a-time because the batch failed all-at-once inserting.
-    for (auto it = docs.cbegin(); it != docs.cend(); ++it) {
-        auto status = writeConflictRetry(
-            opCtx, "StorageInterfaceImpl::insertDocuments", nsOrUUID.toString(), [&] {
-                auto status = insertDocumentsSingleBatch(opCtx, nsOrUUID, it, it + 1);
-                if (!status.isOK()) {
-                    return status;
-                }
-
-                return Status::OK();
-            });
-
-        if (!status.isOK()) {
-            return status;
-        }
-    }
-
-    return Status::OK();
+    return storage_helpers::insertBatchAndHandleRetry(
+        opCtx, nsOrUUID, docs, [&](auto* opCtx, auto begin, auto end) {
+            return insertDocumentsSingleBatch(opCtx, nsOrUUID, begin, end);
+        });
 }
 
 Status StorageInterfaceImpl::dropReplicatedDatabases(OperationContext* opCtx) {
@@ -492,7 +452,7 @@ Status StorageInterfaceImpl::createCollection(OperationContext* opCtx,
                                               const bool createIdIndex,
                                               const BSONObj& idIndexSpec) {
     return writeConflictRetry(opCtx, "StorageInterfaceImpl::createCollection", nss.ns(), [&] {
-        AutoGetDb databaseWriteGuard(opCtx, nss.db(), MODE_IX);
+        AutoGetDb databaseWriteGuard(opCtx, nss.dbName(), MODE_IX);
         auto db = databaseWriteGuard.ensureDbExists(opCtx);
         invariant(db);
 
@@ -553,7 +513,7 @@ Status StorageInterfaceImpl::createIndexesOnEmptyCollection(
 
 Status StorageInterfaceImpl::dropCollection(OperationContext* opCtx, const NamespaceString& nss) {
     return writeConflictRetry(opCtx, "StorageInterfaceImpl::dropCollection", nss.ns(), [&] {
-        AutoGetDb autoDb(opCtx, nss.db(), MODE_IX);
+        AutoGetDb autoDb(opCtx, nss.dbName(), MODE_IX);
         Lock::CollectionLock collLock(opCtx, nss, MODE_X);
         if (!autoDb.getDb()) {
             // Database does not exist - nothing to do.
@@ -600,7 +560,7 @@ Status StorageInterfaceImpl::renameCollection(OperationContext* opCtx,
     }
 
     return writeConflictRetry(opCtx, "StorageInterfaceImpl::renameCollection", fromNS.ns(), [&] {
-        AutoGetDb autoDB(opCtx, fromNS.db(), MODE_X);
+        AutoGetDb autoDB(opCtx, fromNS.dbName(), MODE_X);
         if (!autoDB.getDb()) {
             return Status(ErrorCodes::NamespaceNotFound,
                           str::stream()
@@ -1468,7 +1428,7 @@ boost::optional<Timestamp> StorageInterfaceImpl::getRecoveryTimestamp(
 }
 
 Status StorageInterfaceImpl::isAdminDbValid(OperationContext* opCtx) {
-    AutoGetDb autoDB(opCtx, "admin", MODE_X);
+    AutoGetDb autoDB(opCtx, DatabaseName(boost::none, "admin"), MODE_X);
     auto adminDb = autoDB.getDb();
     if (!adminDb) {
         return Status::OK();

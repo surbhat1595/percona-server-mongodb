@@ -35,7 +35,7 @@
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/catalog/database_holder_impl.h"
 #include "mongo/db/catalog_raii.h"
-#include "mongo/db/op_observer_impl.h"
+#include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/s/balancer_stats_registry.h"
 #include "mongo/db/s/chunk_split_state_driver.h"
 #include "mongo/db/s/chunk_splitter.h"
@@ -268,8 +268,8 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
                 return;
             }
 
-            auto deletionTask = RangeDeletionTask::parse(
-                IDLParserErrorContext("ShardServerOpObserver"), insertedDoc);
+            auto deletionTask =
+                RangeDeletionTask::parse(IDLParserContext("ShardServerOpObserver"), insertedDoc);
 
             if (!deletionTask.getPending()) {
                 opCtx->recoveryUnit()->registerChange(
@@ -284,20 +284,22 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
         if (nss == NamespaceString::kCollectionCriticalSectionsNamespace &&
             !recoverable_critical_section_util::inRecoveryMode(opCtx)) {
             const auto collCSDoc = CollectionCriticalSectionDocument::parse(
-                IDLParserErrorContext("ShardServerOpObserver"), insertedDoc);
-            opCtx->recoveryUnit()->onCommit(
-                [opCtx,
-                 insertedNss = collCSDoc.getNss(),
-                 reason = collCSDoc.getReason().getOwned()](boost::optional<Timestamp>) {
-                    boost::optional<AutoGetCollection> lockCollectionIfNotPrimary;
-                    if (!isStandaloneOrPrimary(opCtx))
-                        lockCollectionIfNotPrimary.emplace(opCtx, insertedNss, MODE_IX);
+                IDLParserContext("ShardServerOpObserver"), insertedDoc);
+            opCtx->recoveryUnit()->onCommit([opCtx,
+                                             insertedNss = collCSDoc.getNss(),
+                                             reason = collCSDoc.getReason().getOwned()](
+                                                boost::optional<Timestamp>) {
+                boost::optional<AutoGetCollection> lockCollectionIfNotPrimary;
+                if (!isStandaloneOrPrimary(opCtx)) {
+                    lockCollectionIfNotPrimary.emplace(
+                        opCtx, insertedNss, MODE_IX, AutoGetCollectionViewMode::kViewsPermitted);
+                }
 
-                    UninterruptibleLockGuard noInterrupt(opCtx->lockState());
-                    auto* const csr = CollectionShardingRuntime::get(opCtx, insertedNss);
-                    auto csrLock = CollectionShardingRuntime ::CSRLock::lockExclusive(opCtx, csr);
-                    csr->enterCriticalSectionCatchUpPhase(csrLock, reason);
-                });
+                UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+                auto* const csr = CollectionShardingRuntime::get(opCtx, insertedNss);
+                auto csrLock = CollectionShardingRuntime ::CSRLock::lockExclusive(opCtx, csr);
+                csr->enterCriticalSectionCatchUpPhase(csrLock, reason);
+            });
         }
 
         if (metadata && metadata->isSharded()) {
@@ -383,6 +385,7 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
         // primary, blocking behind the critical section.
 
         // Extract which database was updated
+        // TODO SERVER-67789 Change to extract DatabaseName obj, and use when locking db below.
         std::string db;
         fassert(40478,
                 bsonExtractStringField(
@@ -395,7 +398,7 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
             // TODO SERVER-58223: evaluate whether this is safe or whether acquiring the lock can
             // block.
             AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(opCtx->lockState());
-            AutoGetDb autoDb(opCtx, db, MODE_X);
+            AutoGetDb autoDb(opCtx, DatabaseName(boost::none, db), MODE_X);
             DatabaseHolder::get(opCtx)->clearDbInfo(opCtx, DatabaseName(boost::none, db));
         }
     }
@@ -408,8 +411,8 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
             update_oplog_entry::isFieldRemovedByUpdate(args.updateArgs->update, "pending");
 
         if (pendingFieldRemovedStatus == update_oplog_entry::FieldRemovedStatus::kFieldRemoved) {
-            auto deletionTask = RangeDeletionTask::parse(
-                IDLParserErrorContext("ShardServerOpObserver"), args.updateArgs->updatedDoc);
+            auto deletionTask = RangeDeletionTask::parse(IDLParserContext("ShardServerOpObserver"),
+                                                         args.updateArgs->updatedDoc);
 
             if (deletionTask.getDonorShardId() != ShardingState::get(opCtx)->shardId()) {
                 // Range deletion tasks for moved away chunks are scheduled through the
@@ -423,14 +426,16 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
     if (args.nss == NamespaceString::kCollectionCriticalSectionsNamespace &&
         !recoverable_critical_section_util::inRecoveryMode(opCtx)) {
         const auto collCSDoc = CollectionCriticalSectionDocument::parse(
-            IDLParserErrorContext("ShardServerOpObserver"), args.updateArgs->updatedDoc);
+            IDLParserContext("ShardServerOpObserver"), args.updateArgs->updatedDoc);
 
         opCtx->recoveryUnit()->onCommit(
             [opCtx, updatedNss = collCSDoc.getNss(), reason = collCSDoc.getReason().getOwned()](
                 boost::optional<Timestamp>) {
                 boost::optional<AutoGetCollection> lockCollectionIfNotPrimary;
-                if (!isStandaloneOrPrimary(opCtx))
-                    lockCollectionIfNotPrimary.emplace(opCtx, updatedNss, MODE_IX);
+                if (!isStandaloneOrPrimary(opCtx)) {
+                    lockCollectionIfNotPrimary.emplace(
+                        opCtx, updatedNss, MODE_IX, AutoGetCollectionViewMode::kViewsPermitted);
+                }
 
                 UninterruptibleLockGuard noInterrupt(opCtx->lockState());
                 auto* const csr = CollectionShardingRuntime::get(opCtx, updatedNss);
@@ -484,6 +489,7 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
         }
 
         // Extract which database entry is being deleted from the _id field.
+        // TODO SERVER-67789 Change to extract DatabaseName obj, and use when locking db below.
         std::string deletedDatabase;
         fassert(50772,
                 bsonExtractStringField(
@@ -491,7 +497,7 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
 
         // TODO SERVER-58223: evaluate whether this is safe or whether acquiring the lock can block.
         AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(opCtx->lockState());
-        AutoGetDb autoDb(opCtx, deletedDatabase, MODE_X);
+        AutoGetDb autoDb(opCtx, DatabaseName(boost::none, deletedDatabase), MODE_X);
         DatabaseHolder::get(opCtx)->clearDbInfo(opCtx, DatabaseName(boost::none, deletedDatabase));
     }
 
@@ -516,14 +522,16 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
         !recoverable_critical_section_util::inRecoveryMode(opCtx)) {
         const auto& deletedDoc = documentId;
         const auto collCSDoc = CollectionCriticalSectionDocument::parse(
-            IDLParserErrorContext("ShardServerOpObserver"), deletedDoc);
+            IDLParserContext("ShardServerOpObserver"), deletedDoc);
 
         opCtx->recoveryUnit()->onCommit(
             [opCtx, deletedNss = collCSDoc.getNss(), reason = collCSDoc.getReason().getOwned()](
                 boost::optional<Timestamp>) {
                 boost::optional<AutoGetCollection> lockCollectionIfNotPrimary;
-                if (!isStandaloneOrPrimary(opCtx))
-                    lockCollectionIfNotPrimary.emplace(opCtx, deletedNss, MODE_IX);
+                if (!isStandaloneOrPrimary(opCtx)) {
+                    lockCollectionIfNotPrimary.emplace(
+                        opCtx, deletedNss, MODE_IX, AutoGetCollectionViewMode::kViewsPermitted);
+                }
 
                 UninterruptibleLockGuard noInterrupt(opCtx->lockState());
                 auto* const csr = CollectionShardingRuntime::get(opCtx, deletedNss);

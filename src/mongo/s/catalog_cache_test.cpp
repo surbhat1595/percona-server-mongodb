@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/optional/optional_io.hpp>
-
 #include "mongo/s/catalog/type_database_gen.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/catalog_cache_loader_mock.h"
@@ -323,7 +321,7 @@ TEST_F(CatalogCacheTest, TimeseriesFieldsAreProperlyPropagatedOnCC) {
         ASSERT_OK(swChunkManager.getStatus());
 
         const auto& chunkManager = swChunkManager.getValue();
-        ASSERT(chunkManager.getTimeseriesFields().is_initialized());
+        ASSERT(chunkManager.getTimeseriesFields().has_value());
         ASSERT(chunkManager.getTimeseriesFields()->getGranularity() ==
                BucketGranularityEnum::Seconds);
     }
@@ -348,7 +346,7 @@ TEST_F(CatalogCacheTest, TimeseriesFieldsAreProperlyPropagatedOnCC) {
         ASSERT_OK(swChunkManager.getStatus());
 
         const auto& chunkManager = swChunkManager.getValue();
-        ASSERT(chunkManager.getTimeseriesFields().is_initialized());
+        ASSERT(chunkManager.getTimeseriesFields().has_value());
         ASSERT(chunkManager.getTimeseriesFields()->getGranularity() ==
                BucketGranularityEnum::Hours);
     }

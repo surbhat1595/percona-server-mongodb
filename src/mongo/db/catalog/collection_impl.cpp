@@ -59,7 +59,7 @@
 #include "mongo/db/matcher/expression_always_boolean.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/matcher/implicit_validator.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/update_request.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
@@ -78,8 +78,9 @@
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
+#include "mongo/db/timeseries/timeseries_extended_range.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/ttl_collection_cache.h"
 #include "mongo/db/update/update_driver.h"
 
@@ -437,8 +438,8 @@ CollectionImpl::CollectionImpl(OperationContext* opCtx,
                                const CollectionOptions& options,
                                std::unique_ptr<RecordStore> recordStore)
     : _ns(nss),
-      _catalogId(catalogId),
-      _uuid(options.uuid.get()),
+      _catalogId(std::move(catalogId)),
+      _uuid(options.uuid.value()),
       _shared(std::make_shared<SharedState>(this, std::move(recordStore), options)),
       _indexCatalog(std::make_unique<IndexCatalogImpl>()) {}
 
@@ -447,7 +448,7 @@ CollectionImpl::CollectionImpl(OperationContext* opCtx,
                                RecordId catalogId,
                                std::shared_ptr<BSONCollectionCatalogEntry::MetaData> metadata,
                                std::unique_ptr<RecordStore> recordStore)
-    : CollectionImpl(opCtx, nss, catalogId, metadata->options, std::move(recordStore)) {
+    : CollectionImpl(opCtx, nss, std::move(catalogId), metadata->options, std::move(recordStore)) {
     _metadata = std::move(metadata);
 }
 
@@ -467,7 +468,8 @@ std::shared_ptr<Collection> CollectionImpl::FactoryImpl::make(
     RecordId catalogId,
     const CollectionOptions& options,
     std::unique_ptr<RecordStore> rs) const {
-    return std::make_shared<CollectionImpl>(opCtx, nss, catalogId, options, std::move(rs));
+    return std::make_shared<CollectionImpl>(
+        opCtx, nss, std::move(catalogId), options, std::move(rs));
 }
 
 std::shared_ptr<Collection> CollectionImpl::FactoryImpl::make(
@@ -477,7 +479,7 @@ std::shared_ptr<Collection> CollectionImpl::FactoryImpl::make(
     std::shared_ptr<BSONCollectionCatalogEntry::MetaData> metadata,
     std::unique_ptr<RecordStore> rs) const {
     return std::make_shared<CollectionImpl>(
-        opCtx, nss, catalogId, std::move(metadata), std::move(rs));
+        opCtx, nss, std::move(catalogId), std::move(metadata), std::move(rs));
 }
 
 std::shared_ptr<Collection> CollectionImpl::clone() const {
@@ -601,7 +603,7 @@ std::unique_ptr<SeekableRecordCursor> CollectionImpl::getCursor(OperationContext
 
 
 bool CollectionImpl::findDoc(OperationContext* opCtx,
-                             RecordId loc,
+                             const RecordId& loc,
                              Snapshotted<BSONObj>* out) const {
     RecordData rd;
     if (!_shared->_recordStore->findRecord(opCtx, loc, &rd))
@@ -993,7 +995,7 @@ Status CollectionImpl::_insertDocuments(OperationContext* opCtx,
         // increasing cluster key natively guarantee preservation of the insertion order, and don't
         // need serialisation. We allow concurrent inserts for clustered capped collections.
         Lock::ResourceLock heldUntilEndOfWUOW{
-            opCtx->lockState(), ResourceId(RESOURCE_METADATA, _ns.ns()), MODE_X};
+            opCtx->lockState(), ResourceId(RESOURCE_METADATA, _ns), MODE_X};
     }
 
     std::vector<Record> records;
@@ -1013,12 +1015,13 @@ Status CollectionImpl::_insertDocuments(OperationContext* opCtx,
 
         if (MONGO_unlikely(corruptDocumentOnInsert.shouldFail())) {
             // Insert a truncated record that is half the expected size of the source document.
-            records.emplace_back(Record{recordId, RecordData(doc.objdata(), doc.objsize() / 2)});
+            records.emplace_back(
+                Record{std::move(recordId), RecordData(doc.objdata(), doc.objsize() / 2)});
             timestamps.emplace_back(it->oplogSlot.getTimestamp());
             continue;
         }
 
-        records.emplace_back(Record{recordId, RecordData(doc.objdata(), doc.objsize())});
+        records.emplace_back(Record{std::move(recordId), RecordData(doc.objdata(), doc.objsize())});
         timestamps.emplace_back(it->oplogSlot.getTimestamp());
     }
 
@@ -1036,8 +1039,9 @@ Status CollectionImpl::_insertDocuments(OperationContext* opCtx,
             invariant(loc < RecordId::maxLong());
         }
 
-        BsonRecord bsonRecord = {loc, Timestamp(it->oplogSlot.getTimestamp()), &(it->doc)};
-        bsonRecords.push_back(bsonRecord);
+        BsonRecord bsonRecord = {
+            std::move(loc), Timestamp(it->oplogSlot.getTimestamp()), &(it->doc)};
+        bsonRecords.emplace_back(std::move(bsonRecord));
     }
 
     int64_t keysInserted = 0;
@@ -1057,8 +1061,7 @@ Status CollectionImpl::_insertDocuments(OperationContext* opCtx,
         }
     }
 
-    // TODO SERVER-66813 fix issue with batch deletion.
-    if (!ns().isChangeCollection()) {
+    if (!ns().isImplicitlyReplicated()) {
         opCtx->getServiceContext()->getOpObserver()->onInserts(
             opCtx, ns(), uuid(), begin, end, fromMigrate);
     }
@@ -1118,8 +1121,7 @@ void CollectionImpl::_cappedDeleteAsNeeded(OperationContext* opCtx,
         // '_cappedFirstRecord' until the outermost WriteUnitOfWork commits or aborts. Locking the
         // metadata resource exclusively on the collection gives us that guarantee as it uses
         // two-phase locking semantics.
-        invariant(opCtx->lockState()->getLockMode(ResourceId(RESOURCE_METADATA, _ns.ns())) ==
-                  MODE_X);
+        invariant(opCtx->lockState()->getLockMode(ResourceId(RESOURCE_METADATA, _ns)) == MODE_X);
     } else {
         // Capped deletes not performed under the capped lock need the '_cappedFirstRecordMutex'
         // mutex.
@@ -1208,7 +1210,7 @@ void CollectionImpl::_cappedDeleteAsNeeded(OperationContext* opCtx,
                                      &unusedKeysDeleted);
 
         // We're about to delete the record our cursor is positioned on, so advance the cursor.
-        RecordId toDelete = record->id;
+        RecordId toDelete = std::move(record->id);
         record = cursor->next();
 
         _shared->_recordStore->deleteRecord(opCtx, toDelete);
@@ -1219,22 +1221,23 @@ void CollectionImpl::_cappedDeleteAsNeeded(OperationContext* opCtx,
         if (!record) {
             _shared->_cappedFirstRecord = RecordId();
         } else {
-            _shared->_cappedFirstRecord = record->id;
+            _shared->_cappedFirstRecord = std::move(record->id);
         }
     } else {
         // Update the next record to be deleted. The next record must exist as we're using the same
         // snapshot the insert was performed on and we can't delete newly inserted records.
         invariant(record);
-        opCtx->recoveryUnit()->onCommit([this, recordId = record->id](boost::optional<Timestamp>) {
-            _shared->_cappedFirstRecord = recordId;
-        });
+        opCtx->recoveryUnit()->onCommit(
+            [this, recordId = std::move(record->id)](boost::optional<Timestamp>) {
+                _shared->_cappedFirstRecord = std::move(recordId);
+            });
     }
 
     wuow.commit();
 }
 
 void CollectionImpl::setMinimumVisibleSnapshot(Timestamp newMinimumVisibleSnapshot) {
-    if (!_minVisibleSnapshot || (newMinimumVisibleSnapshot > _minVisibleSnapshot.get())) {
+    if (!_minVisibleSnapshot || (newMinimumVisibleSnapshot > _minVisibleSnapshot.value())) {
         _minVisibleSnapshot = newMinimumVisibleSnapshot;
     }
 }
@@ -1271,7 +1274,7 @@ Status CollectionImpl::SharedState::aboutToDeleteCapped(OperationContext* opCtx,
 
 void CollectionImpl::deleteDocument(OperationContext* opCtx,
                                     StmtId stmtId,
-                                    RecordId loc,
+                                    const RecordId& loc,
                                     OpDebug* opDebug,
                                     bool fromMigrate,
                                     bool noWarn,
@@ -1285,7 +1288,7 @@ void CollectionImpl::deleteDocument(OperationContext* opCtx,
 void CollectionImpl::deleteDocument(OperationContext* opCtx,
                                     Snapshotted<BSONObj> doc,
                                     StmtId stmtId,
-                                    RecordId loc,
+                                    const RecordId& loc,
                                     OpDebug* opDebug,
                                     bool fromMigrate,
                                     bool noWarn,
@@ -1302,7 +1305,7 @@ void CollectionImpl::deleteDocument(OperationContext* opCtx,
         // '_cappedFirstRecord'.
         // See SERVER-21646.
         Lock::ResourceLock heldUntilEndOfWUOW{
-            opCtx->lockState(), ResourceId(RESOURCE_METADATA, _ns.ns()), MODE_X};
+            opCtx->lockState(), ResourceId(RESOURCE_METADATA, _ns), MODE_X};
     }
 
     std::vector<OplogSlot> oplogSlots;
@@ -1343,7 +1346,7 @@ void CollectionImpl::deleteDocument(OperationContext* opCtx,
                                  checkRecordId);
     _shared->_recordStore->deleteRecord(opCtx, loc);
     if (deletedDoc) {
-        deleteArgs.deletedDoc = &(deletedDoc.get());
+        deleteArgs.deletedDoc = &(deletedDoc.value());
     }
     getGlobalServiceContext()->getOpObserver()->onDelete(opCtx, ns(), uuid(), stmtId, deleteArgs);
 
@@ -1370,7 +1373,7 @@ bool compareSafeContentElem(const BSONObj& oldDoc, const BSONObj& newDoc) {
 }
 
 RecordId CollectionImpl::updateDocument(OperationContext* opCtx,
-                                        RecordId oldLocation,
+                                        const RecordId& oldLocation,
                                         const Snapshotted<BSONObj>& oldDoc,
                                         const BSONObj& newDoc,
                                         bool indexesAffected,
@@ -1414,7 +1417,7 @@ RecordId CollectionImpl::updateDocument(OperationContext* opCtx,
         // '_cappedFirstRecord'.
         // See SERVER-21646.
         Lock::ResourceLock heldUntilEndOfWUOW{
-            opCtx->lockState(), ResourceId(RESOURCE_METADATA, _ns.ns()), MODE_X};
+            opCtx->lockState(), ResourceId(RESOURCE_METADATA, _ns), MODE_X};
     }
 
     SnapshotId sid = opCtx->recoveryUnit()->getSnapshotId();
@@ -1422,25 +1425,6 @@ RecordId CollectionImpl::updateDocument(OperationContext* opCtx,
     BSONElement oldId = oldDoc.value()["_id"];
     if (!oldId.eoo() && SimpleBSONElementComparator::kInstance.evaluate(oldId != newDoc["_id"]))
         uasserted(13596, "in Collection::updateDocument _id mismatch");
-
-    // TODO(SERVER-62496): Remove this block once kLastLTS is 6.0. As of 5.3, changing the size of
-    // a document in a capped collection is permitted.
-    // The MMAPv1 storage engine implements capped collections in a way that does not allow records
-    // to grow beyond their original size. If MMAPv1 part of a replicaset with storage engines that
-    // do not have this limitation, replication could result in errors, so it is necessary to set a
-    // uniform rule here. Similarly, it is not sufficient to disallow growing records, because this
-    // happens when secondaries roll back an update shrunk a record. Exactly replicating legacy
-    // MMAPv1 behavior would require padding shrunk documents on all storage engines. Instead forbid
-    // all size changes.
-    const auto oldSize = oldDoc.value().objsize();
-    if (_shared->_isCapped && oldSize != newDoc.objsize() &&
-        (!serverGlobalParams.featureCompatibility.isVersionInitialized() ||
-         serverGlobalParams.featureCompatibility.isLessThan(
-             multiversion::FeatureCompatibilityVersion::kVersion_5_3))) {
-        uasserted(ErrorCodes::CannotGrowDocumentInCappedNamespace,
-                  str::stream() << "Cannot change the size of a document in a capped collection: "
-                                << oldSize << " != " << newDoc.objsize());
-    }
 
     // The preImageDoc may not be boost::none if this update was a retryable findAndModify or if
     // the update may have changed the shard key. For non-in-place updates we always set the
@@ -1514,7 +1498,7 @@ RecordId CollectionImpl::updateDocument(OperationContext* opCtx,
 
     getGlobalServiceContext()->getOpObserver()->onUpdate(opCtx, onUpdateArgs);
 
-    return {oldLocation};
+    return oldLocation;
 }
 
 bool CollectionImpl::updateWithDamagesSupported() const {
@@ -1526,7 +1510,7 @@ bool CollectionImpl::updateWithDamagesSupported() const {
 
 StatusWith<RecordData> CollectionImpl::updateDocumentWithDamages(
     OperationContext* opCtx,
-    RecordId loc,
+    const RecordId& loc,
     const Snapshotted<RecordData>& oldRec,
     const char* damageSource,
     const mutablebson::DamageVector& damages,
@@ -1621,8 +1605,28 @@ bool CollectionImpl::doesTimeseriesBucketsDocContainMixedSchemaData(
     return doesMinMaxHaveMixedSchemaData(minObj, maxObj);
 }
 
+bool CollectionImpl::getRequiresTimeseriesExtendedRangeSupport() const {
+    return _shared->_requiresTimeseriesExtendedRangeSupport.load();
+}
+
+void CollectionImpl::setRequiresTimeseriesExtendedRangeSupport(OperationContext* opCtx) const {
+    uassert(6679401, "This is not a time-series collection", _metadata->options.timeseries);
+
+    bool expected = false;
+    bool set = _shared->_requiresTimeseriesExtendedRangeSupport.compareAndSwap(&expected, true);
+    if (set && !timeseries::collectionHasTimeIndex(opCtx, *this)) {
+        LOGV2_WARNING(
+            6679402,
+            "Time-series collection contains dates outside the standard range. Some query "
+            "optimizations may be disabled. Please consider building an index on timeField to "
+            "re-enable them.",
+            "nss"_attr = ns().getTimeseriesViewNamespace(),
+            "timeField"_attr = _metadata->options.timeseries->getTimeField());
+    }
+}
+
 bool CollectionImpl::isClustered() const {
-    return getClusteredInfo().is_initialized();
+    return getClusteredInfo().has_value();
 }
 
 boost::optional<ClusteredCollectionInfo> CollectionImpl::getClusteredInfo() const {
@@ -1834,7 +1838,7 @@ Status CollectionImpl::truncate(OperationContext* opCtx) {
 }
 
 void CollectionImpl::cappedTruncateAfter(OperationContext* opCtx,
-                                         RecordId end,
+                                         const RecordId& end,
                                          bool inclusive) const {
     dassert(opCtx->lockState()->isCollectionLockedForMode(ns(), MODE_X));
     invariant(isCapped());
@@ -2038,7 +2042,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> CollectionImpl::makePlanExe
     const CollectionPtr& yieldableCollection,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
     ScanDirection scanDirection,
-    boost::optional<RecordId> resumeAfterRecordId) const {
+    const boost::optional<RecordId>& resumeAfterRecordId) const {
     auto isForward = scanDirection == ScanDirection::kForward;
     auto direction = isForward ? InternalPlanner::FORWARD : InternalPlanner::BACKWARD;
     return InternalPlanner::collectionScan(
@@ -2047,7 +2051,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> CollectionImpl::makePlanExe
 
 Status CollectionImpl::rename(OperationContext* opCtx, const NamespaceString& nss, bool stayTemp) {
     auto metadata = std::make_shared<BSONCollectionCatalogEntry::MetaData>(*_metadata);
-    metadata->ns = nss.ns();
+    metadata->nss = nss;
     if (!stayTemp)
         metadata->options.temp = false;
     Status status =
@@ -2075,10 +2079,6 @@ void CollectionImpl::indexBuildSuccess(OperationContext* opCtx, IndexCatalogEntr
     });
 
     _indexCatalog->indexBuildSuccess(opCtx, this, index);
-}
-
-void CollectionImpl::establishOplogCollectionForLogging(OperationContext* opCtx) const {
-    repl::establishOplogCollectionForLogging(opCtx, {this, CollectionPtr::NoYieldTag{}});
 }
 
 StatusWith<int> CollectionImpl::checkMetaDataForIndex(const std::string& indexName,
@@ -2156,7 +2156,7 @@ std::vector<std::string> CollectionImpl::repairInvalidIndexOptions(OperationCont
                 }
 
                 indexesWithInvalidOptions.push_back(std::string(index.nameStringData()));
-                index.spec = index_key_validate::repairIndexSpec(NamespaceString(md.ns), oldSpec);
+                index.spec = index_key_validate::repairIndexSpec(md.nss, oldSpec);
             }
         }
     });

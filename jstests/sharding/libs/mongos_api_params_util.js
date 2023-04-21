@@ -75,7 +75,7 @@ let MongosAPIParametersUtil = (function() {
 
     function awaitRemoveShard(shardName) {
         assert.commandWorked(st.startBalancer());
-        st.waitForBalancer(true, 60000);
+        st.awaitBalancerRound();
         assert.soon(() => {
             const res = st.s.adminCommand({removeShard: shardName});
             jsTestLog(`removeShard result: ${tojson(res)}`);
@@ -127,13 +127,12 @@ let MongosAPIParametersUtil = (function() {
                             Object.assign(cmd, context.apiParameters)));
                     }, txnOptions);
 
-                    context.lsid = session.getSessionId();
-                    context.txnNum = session.getTxnNumber_forTesting();
+                    context.session = session;
                 },
                 command: (context) => ({
                     abortTransaction: 1,
-                    lsid: context.lsid,
-                    txnNumber: context.txnNum,
+                    lsid: context.session.getSessionId(),
+                    txnNumber: context.session.getTxnNumber_forTesting(),
                     autocommit: false
                 })
             }
@@ -251,13 +250,12 @@ let MongosAPIParametersUtil = (function() {
                             Object.assign(cmd, context.apiParameters)));
                     }, txnOptions);
 
-                    context.lsid = session.getSessionId();
-                    context.txnNum = session.getTxnNumber_forTesting();
+                    context.session = session;
                 },
                 command: (context) => ({
                     commitTransaction: 1,
-                    lsid: context.lsid,
-                    txnNumber: context.txnNum,
+                    lsid: context.session.getSessionId(),
+                    txnNumber: context.session.getTxnNumber_forTesting(),
                     autocommit: false
                 })
             }

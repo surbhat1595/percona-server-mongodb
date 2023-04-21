@@ -148,8 +148,8 @@ void mergeChunks(OperationContext* opCtx,
 
     auto shardVersionReceived = [&]() -> boost::optional<ChunkVersion> {
         // Old versions might not have the shardVersion field
-        if (cmdResponse.response[ChunkVersion::kShardVersionField]) {
-            return ChunkVersion::parse(cmdResponse.response[ChunkVersion::kShardVersionField]);
+        if (cmdResponse.response[ChunkVersion::kChunkVersionField]) {
+            return ChunkVersion::parse(cmdResponse.response[ChunkVersion::kChunkVersionField]);
         }
         return boost::none;
     }();
@@ -178,8 +178,8 @@ public:
         return Status::OK();
     }
 
-    std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const override {
-        return CommandHelpers::parseNsFullyQualified(cmdObj);
+    NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
+        return NamespaceString(dbName.tenantId(), CommandHelpers::parseNsFullyQualified(cmdObj));
     }
 
     bool adminOnly() const override {
@@ -206,7 +206,7 @@ public:
                    BSONObjBuilder& result) override {
         uassertStatusOK(ShardingState::get(opCtx)->canAcceptShardedCommands());
 
-        const NamespaceString nss(parseNs(dbname, cmdObj));
+        const NamespaceString nss(parseNs({boost::none, dbname}, cmdObj));
 
         std::vector<BSONObj> bounds;
         if (!FieldParser::extract(cmdObj, boundsField, &bounds, &errmsg)) {

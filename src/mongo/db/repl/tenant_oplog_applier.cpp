@@ -40,7 +40,7 @@
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/repl/apply_ops.h"
 #include "mongo/db/repl/cloner_utils.h"
 #include "mongo/db/repl/insert_group.h"
@@ -52,7 +52,7 @@
 #include "mongo/db/repl/tenant_migration_recipient_service.h"
 #include "mongo/db/repl/tenant_oplog_batcher.h"
 #include "mongo/db/session_catalog_mongod.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/concurrency/thread_pool.h"
 
@@ -539,8 +539,7 @@ void TenantOplogApplier::_writeSessionNoOpsForRange(
     std::vector<TenantNoOpEntry>::const_iterator begin,
     std::vector<TenantNoOpEntry>::const_iterator end) {
     auto opCtx = cc().makeOperationContext();
-    tenantMigrationRecipientInfo(opCtx.get()) =
-        boost::make_optional<TenantMigrationRecipientInfo>(_migrationUuid);
+    tenantMigrationInfo(opCtx.get()) = boost::make_optional<TenantMigrationInfo>(_migrationUuid);
 
     // Since the client object persists across each noop write call and the same writer thread could
     // be reused to write noop entries with older optime, we need to clear the lastOp associated
@@ -874,8 +873,7 @@ void TenantOplogApplier::_writeNoOpsForRange(OpObserver* opObserver,
                                              std::vector<TenantNoOpEntry>::const_iterator begin,
                                              std::vector<TenantNoOpEntry>::const_iterator end) {
     auto opCtx = cc().makeOperationContext();
-    tenantMigrationRecipientInfo(opCtx.get()) =
-        boost::make_optional<TenantMigrationRecipientInfo>(_migrationUuid);
+    tenantMigrationInfo(opCtx.get()) = boost::make_optional<TenantMigrationInfo>(_migrationUuid);
 
     // Since the client object persists across each noop write call and the same writer thread could
     // be reused to write noop entries with older optime, we need to clear the lastOp associated
@@ -1055,8 +1053,7 @@ Status TenantOplogApplier::_applyOplogEntryOrGroupedInserts(
 Status TenantOplogApplier::_applyOplogBatchPerWorker(std::vector<const OplogEntry*>* ops) {
     auto opCtx = cc().makeOperationContext();
     opCtx->setEnforceConstraints(false);
-    tenantMigrationRecipientInfo(opCtx.get()) =
-        boost::make_optional<TenantMigrationRecipientInfo>(_migrationUuid);
+    tenantMigrationInfo(opCtx.get()) = boost::make_optional<TenantMigrationInfo>(_migrationUuid);
 
     // Set this to satisfy low-level locking invariants.
     opCtx->lockState()->setShouldConflictWithSecondaryBatchApplication(false);

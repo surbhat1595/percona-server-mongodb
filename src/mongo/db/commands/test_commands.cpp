@@ -43,7 +43,7 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/ops/insert.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/service_context.h"
@@ -262,7 +262,7 @@ public:
         const Timestamp requestedPinTs = cmdObj.firstElement().timestamp();
         const bool round = cmdObj["round"].booleanSafe();
 
-        AutoGetDb autoDb(opCtx, kDurableHistoryTestNss.db(), MODE_IX);
+        AutoGetDb autoDb(opCtx, kDurableHistoryTestNss.dbName(), MODE_IX);
         Lock::CollectionLock collLock(opCtx, kDurableHistoryTestNss, MODE_IX);
         if (!CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
                 opCtx,
@@ -314,7 +314,7 @@ boost::optional<Timestamp> TestingDurableHistoryPin::calculatePin(OperationConte
     Timestamp ret = Timestamp::max();
     auto cursor = autoColl->getCursor(opCtx);
     for (auto doc = cursor->next(); doc; doc = cursor->next()) {
-        const BSONObj obj = doc.get().data.toBson();
+        const BSONObj obj = doc.value().data.toBson();
         const Timestamp ts = obj["pinTs"].timestamp();
         ret = std::min(ret, ts);
     }

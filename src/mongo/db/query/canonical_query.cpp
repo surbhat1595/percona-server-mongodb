@@ -191,7 +191,9 @@ Status CanonicalQuery::init(OperationContext* opCtx,
     _findCommand = std::move(findCommand);
 
     _canHaveNoopMatchNodes = canHaveNoopMatchNodes;
-    _forceClassicEngine = internalQueryForceClassicEngine.load();
+    _forceClassicEngine = ServerParameterSet::getNodeParameterSet()
+                              ->get<QueryFrameworkControl>("internalQueryFrameworkControl")
+                              ->_data.get() == QueryFrameworkControlEnum::kForceClassicEngine;
 
     auto validStatus = isValid(root.get(), *_findCommand);
     if (!validStatus.isOK()) {
@@ -202,7 +204,7 @@ Status CanonicalQuery::init(OperationContext* opCtx,
 
     // If caching is disabled, do not perform any autoparameterization.
     if (!internalQueryDisablePlanCache.load() &&
-        feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV()) {
+        feature_flags::gFeatureFlagSbeFull.isEnabledAndIgnoreFCV()) {
         const bool hasNoTextNodes =
             !QueryPlannerCommon::hasNode(_root.get(), MatchExpression::TEXT);
         if (hasNoTextNodes) {
@@ -541,13 +543,13 @@ std::string CanonicalQuery::toStringShort() const {
 }
 
 CanonicalQuery::QueryShapeString CanonicalQuery::encodeKey() const {
-    return (feature_flags::gFeatureFlagSbePlanCache.isEnabledAndIgnoreFCV() &&
-            !_forceClassicEngine && _sbeCompatible)
+    return (feature_flags::gFeatureFlagSbeFull.isEnabledAndIgnoreFCV() && !_forceClassicEngine &&
+            _sbeCompatible)
         ? canonical_query_encoder::encodeSBE(*this)
         : canonical_query_encoder::encode(*this);
 }
 
-CanonicalQuery::QueryShapeString CanonicalQuery::encodeKeyForIndexFilters() const {
-    return canonical_query_encoder::encodeForIndexFilters(*this);
+CanonicalQuery::QueryShapeString CanonicalQuery::encodeKeyForPlanCacheCommand() const {
+    return canonical_query_encoder::encodeForPlanCacheCommand(*this);
 }
 }  // namespace mongo

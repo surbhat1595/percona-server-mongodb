@@ -131,8 +131,7 @@ TEST(LogicalRewriter, Memo) {
         "    |   |       projections: \n"
         "    |   |           ptest\n"
         "    |   |       indexingAvailability: \n"
-        "    |   |           [groupId: 0, scanProjection: ptest, scanDefName: test, "
-        "possiblyEqPredsOnly]\n"
+        "    |   |           [groupId: 0, scanProjection: ptest, scanDefName: test, eqPredsOnly]\n"
         "    |   |       collectionAvailability: \n"
         "    |   |           test\n"
         "    |   |       distributionAvailability: \n"
@@ -750,8 +749,9 @@ TEST(LogicalRewriter, FilterUnionReorderSingleProjection) {
 
     ABT filter = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "a", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)))),
+            make<PathGet>("a",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("pUnion")),
         std::move(unionNode));
     ABT rootNode = make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{"pUnion"}},
@@ -769,7 +769,7 @@ TEST(LogicalRewriter, FilterUnionReorderSingleProjection) {
         "|   EvalFilter []\n"
         "|   |   Variable [pUnion]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
         "Union []\n"
@@ -819,7 +819,7 @@ TEST(LogicalRewriter, FilterUnionReorderSingleProjection) {
         "|   |   EvalFilter []\n"
         "|   |   |   Variable [pUnion]\n"
         "|   |   PathGet [a]\n"
-        "|   |   PathTraverse []\n"
+        "|   |   PathTraverse [1]\n"
         "|   |   PathCompare [Eq]\n"
         "|   |   Const [1]\n"
         "|   Evaluation []\n"
@@ -836,7 +836,7 @@ TEST(LogicalRewriter, FilterUnionReorderSingleProjection) {
         "|   EvalFilter []\n"
         "|   |   Variable [pUnion]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
         "Evaluation []\n"
@@ -882,14 +882,16 @@ TEST(LogicalRewriter, MultipleFilterUnionReorder) {
     // Create two filters, one for each of the two common projections.
     ABT filterUnion1 = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "a", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)))),
+            make<PathGet>("a",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("pUnion1")),
         std::move(unionNode));
     ABT filterUnion2 = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "a", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)))),
+            make<PathGet>("a",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("pUnion2")),
         std::move(filterUnion1));
     ABT rootNode = make<RootNode>(
@@ -910,14 +912,14 @@ TEST(LogicalRewriter, MultipleFilterUnionReorder) {
         "|   EvalFilter []\n"
         "|   |   Variable [pUnion2]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [pUnion1]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
         "Union []\n"
@@ -985,7 +987,7 @@ TEST(LogicalRewriter, MultipleFilterUnionReorder) {
         "|   |   EvalFilter []\n"
         "|   |   |   Variable [pUnion2]\n"
         "|   |   PathGet [a]\n"
-        "|   |   PathTraverse []\n"
+        "|   |   PathTraverse [1]\n"
         "|   |   PathCompare [Eq]\n"
         "|   |   Const [1]\n"
         "|   Evaluation []\n"
@@ -998,7 +1000,7 @@ TEST(LogicalRewriter, MultipleFilterUnionReorder) {
         "|   |   EvalFilter []\n"
         "|   |   |   Variable [pUnion1]\n"
         "|   |   PathGet [a]\n"
-        "|   |   PathTraverse []\n"
+        "|   |   PathTraverse [1]\n"
         "|   |   PathCompare [Eq]\n"
         "|   |   Const [1]\n"
         "|   Evaluation []\n"
@@ -1015,7 +1017,7 @@ TEST(LogicalRewriter, MultipleFilterUnionReorder) {
         "|   EvalFilter []\n"
         "|   |   Variable [pUnion2]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
         "Evaluation []\n"
@@ -1028,7 +1030,7 @@ TEST(LogicalRewriter, MultipleFilterUnionReorder) {
         "|   EvalFilter []\n"
         "|   |   Variable [pUnion1]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
         "Evaluation []\n"
@@ -1056,8 +1058,9 @@ TEST(LogicalRewriter, FilterUnionUnionPushdown) {
 
     ABT filter = make<FilterNode>(
         make<EvalFilter>(
-            make<PathGet>(
-                "a", make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)))),
+            make<PathGet>("a",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)),
+                                             PathTraverse::kSingleLevel)),
             make<Variable>("ptest")),
         std::move(parentUnionNode));
     ABT rootNode = make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{"ptest"}},
@@ -1079,7 +1082,7 @@ TEST(LogicalRewriter, FilterUnionUnionPushdown) {
         "|   EvalFilter []\n"
         "|   |   Variable [ptest]\n"
         "|   PathGet [a]\n"
-        "|   PathTraverse []\n"
+        "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
         "Union []\n"
@@ -1118,7 +1121,7 @@ TEST(LogicalRewriter, FilterUnionUnionPushdown) {
         "|   |           Source []\n"
         "|   Sargable [Complete]\n"
         "|   |   |   |   |   requirementsMap: \n"
-        "|   |   |   |   |       refProjection: ptest, path: 'PathGet [a] PathTraverse [] "
+        "|   |   |   |   |       refProjection: ptest, path: 'PathGet [a] PathTraverse [1] "
         "PathIdentity []', intervals: {{{[Const [1], Const [1]]}}}\n"
         "|   |   |   |   candidateIndexes: \n"
         "|   |   |   BindBlock:\n"
@@ -1134,7 +1137,7 @@ TEST(LogicalRewriter, FilterUnionUnionPushdown) {
         "|   |           Source []\n"
         "|   Sargable [Complete]\n"
         "|   |   |   |   |   requirementsMap: \n"
-        "|   |   |   |   |       refProjection: ptest, path: 'PathGet [a] PathTraverse [] "
+        "|   |   |   |   |       refProjection: ptest, path: 'PathGet [a] PathTraverse [1] "
         "PathIdentity []', intervals: {{{[Const [1], Const [1]]}}}\n"
         "|   |   |   |   candidateIndexes: \n"
         "|   |   |   BindBlock:\n"
@@ -1146,7 +1149,8 @@ TEST(LogicalRewriter, FilterUnionUnionPushdown) {
         "|               Source []\n"
         "Sargable [Complete]\n"
         "|   |   |   |   requirementsMap: \n"
-        "|   |   |   |       refProjection: ptest, path: 'PathGet [a] PathTraverse [] PathIdentity "
+        "|   |   |   |       refProjection: ptest, path: 'PathGet [a] PathTraverse [1] "
+        "PathIdentity "
         "[]', intervals: {{{[Const [1], Const [1]]}}}\n"
         "|   |   |   candidateIndexes: \n"
         "|   |   BindBlock:\n"
@@ -1209,7 +1213,7 @@ TEST(LogicalRewriter, UnionPreservesCommonLogicalProps) {
         "    |   |           ptest1\n"
         "    |   |       indexingAvailability: \n"
         "    |   |           [groupId: 0, scanProjection: ptest1, scanDefName: test1, "
-        "possiblyEqPredsOnly]\n"
+        "eqPredsOnly]\n"
         "    |   |       collectionAvailability: \n"
         "    |   |           test1\n"
         "    |   |       distributionAvailability: \n"
@@ -1252,7 +1256,7 @@ TEST(LogicalRewriter, UnionPreservesCommonLogicalProps) {
         "    |           Sargable [Complete]\n"
         "    |           |   |   |   |   requirementsMap: \n"
         "    |           |   |   |   |       refProjection: ptest1, path: 'PathGet [a] "
-        "PathIdentity []', boundProjection: a, intervals: {{{(-inf, +inf)}}}\n"
+        "PathIdentity []', boundProjection: a, intervals: {{{[Const [minKey], Const [maxKey]]}}}\n"
         "    |           |   |   |   candidateIndexes: \n"
         "    |           |   |   BindBlock:\n"
         "    |           |   |       [a]\n"
@@ -1269,7 +1273,7 @@ TEST(LogicalRewriter, UnionPreservesCommonLogicalProps) {
         "    |   |           ptest2\n"
         "    |   |       indexingAvailability: \n"
         "    |   |           [groupId: 2, scanProjection: ptest2, scanDefName: test2, "
-        "possiblyEqPredsOnly]\n"
+        "eqPredsOnly]\n"
         "    |   |       collectionAvailability: \n"
         "    |   |           test2\n"
         "    |   |       distributionAvailability: \n"
@@ -1312,7 +1316,7 @@ TEST(LogicalRewriter, UnionPreservesCommonLogicalProps) {
         "    |           Sargable [Complete]\n"
         "    |           |   |   |   |   requirementsMap: \n"
         "    |           |   |   |   |       refProjection: ptest2, path: 'PathGet [a] "
-        "PathIdentity []', boundProjection: a, intervals: {{{(-inf, +inf)}}}\n"
+        "PathIdentity []', boundProjection: a, intervals: {{{[Const [minKey], Const [maxKey]]}}}\n"
         "    |           |   |   |   candidateIndexes: \n"
         "    |           |   |   BindBlock:\n"
         "    |           |   |       [a]\n"
@@ -1418,8 +1422,7 @@ TEST(LogicalRewriter, SargableCE) {
         "    |   |       projections: \n"
         "    |   |           ptest\n"
         "    |   |       indexingAvailability: \n"
-        "    |   |           [groupId: 0, scanProjection: ptest, scanDefName: test, "
-        "possiblyEqPredsOnly]\n"
+        "    |   |           [groupId: 0, scanProjection: ptest, scanDefName: test, eqPredsOnly]\n"
         "    |   |       collectionAvailability: \n"
         "    |   |           test\n"
         "    |   |       distributionAvailability: \n"
@@ -1435,17 +1438,16 @@ TEST(LogicalRewriter, SargableCE) {
         "    groupId: 1\n"
         "    |   |   Logical properties:\n"
         "    |   |       cardinalityEstimate: \n"
-        "    |   |           ce: 10\n"
+        "    |   |           ce: 5.62341\n"
         "    |   |           requirementCEs: \n"
         "    |   |               refProjection: ptest, path: 'PathGet [a] PathIdentity []', ce: "
-        "100\n"
+        "31.6228\n"
         "    |   |               refProjection: ptest, path: 'PathGet [b] PathIdentity []', ce: "
-        "100\n"
+        "31.6228\n"
         "    |   |       projections: \n"
         "    |   |           ptest\n"
         "    |   |       indexingAvailability: \n"
-        "    |   |           [groupId: 0, scanProjection: ptest, scanDefName: test, "
-        "possiblyEqPredsOnly]\n"
+        "    |   |           [groupId: 0, scanProjection: ptest, scanDefName: test, eqPredsOnly]\n"
         "    |   |       collectionAvailability: \n"
         "    |   |           test\n"
         "    |   |       distributionAvailability: \n"
@@ -1468,12 +1470,11 @@ TEST(LogicalRewriter, SargableCE) {
         "    groupId: 2\n"
         "    |   |   Logical properties:\n"
         "    |   |       cardinalityEstimate: \n"
-        "    |   |           ce: 10\n"
+        "    |   |           ce: 5.62341\n"
         "    |   |       projections: \n"
         "    |   |           ptest\n"
         "    |   |       indexingAvailability: \n"
-        "    |   |           [groupId: 0, scanProjection: ptest, scanDefName: test, "
-        "possiblyEqPredsOnly]\n"
+        "    |   |           [groupId: 0, scanProjection: ptest, scanDefName: test, eqPredsOnly]\n"
         "    |   |       collectionAvailability: \n"
         "    |   |           test\n"
         "    |   |       distributionAvailability: \n"
@@ -1489,6 +1490,42 @@ TEST(LogicalRewriter, SargableCE) {
         "    |           MemoLogicalDelegator [groupId: 1]\n"
         "    physicalNodes: \n",
         phaseManager.getMemo());
+}
+
+TEST(LogicalRewriter, RemoveNoopFilter) {
+    using namespace properties;
+    PrefixId prefixId;
+
+    ABT scanNode = make<ScanNode>("ptest", "test");
+
+    ABT filterANode = make<FilterNode>(
+        make<EvalFilter>(make<PathGet>("a", make<PathCompare>(Operations::Gte, Constant::minKey())),
+                         make<Variable>("ptest")),
+        std::move(scanNode));
+
+    ABT rootNode = make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{"ptest"}},
+                                  std::move(filterANode));
+
+    OptPhaseManager phaseManager({OptPhaseManager::OptPhase::MemoSubstitutionPhase},
+                                 prefixId,
+                                 {{{"test", {{}, {}}}}},
+                                 DebugInfo::kDefaultForTests);
+    ABT latest = std::move(rootNode);
+    ASSERT_TRUE(phaseManager.optimize(latest));
+
+    ASSERT_EXPLAIN_V2(
+        "Root []\n"
+        "|   |   projections: \n"
+        "|   |       ptest\n"
+        "|   RefBlock: \n"
+        "|       Variable [ptest]\n"
+        "Filter []\n"
+        "|   Const [true]\n"
+        "Scan [test]\n"
+        "    BindBlock:\n"
+        "        [ptest]\n"
+        "            Source []\n",
+        latest);
 }
 
 }  // namespace

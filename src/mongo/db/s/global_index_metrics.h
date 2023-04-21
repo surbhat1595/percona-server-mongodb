@@ -31,6 +31,7 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/s/global_index_metrics_field_name_provider.h"
 #include "mongo/db/s/sharding_data_transform_instance_metrics.h"
 #include "mongo/util/uuid.h"
 
@@ -46,6 +47,7 @@ public:
                        Date_t startTime,
                        ClockSource* clockSource,
                        ShardingDataTransformCumulativeMetrics* cumulativeMetrics);
+    ~GlobalIndexMetrics();
 
     static std::unique_ptr<GlobalIndexMetrics> makeInstance(UUID uuid,
                                                             NamespaceString nss,
@@ -58,6 +60,8 @@ public:
 
 private:
     std::string createOperationDescription() const noexcept override;
+
+    ShardingDataTransformInstanceMetrics::UniqueScopedObserver _scopedObserver;
 };
 
 }  // namespace mongo

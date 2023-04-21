@@ -71,7 +71,6 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/tenant_migration_conflict_info.h"
 #include "mongo/db/repl/tenant_migration_decoration.h"
-#include "mongo/db/retryable_writes_stats.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/sharding_state.h"
@@ -82,7 +81,8 @@
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_update_delete_util.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/retryable_writes_stats.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/update/document_diff_applier.h"
 #include "mongo/db/update/path_support.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
@@ -193,7 +193,7 @@ public:
             // here. No-op updates will not generate a new lastOp, so we still need the
             // guard to fire in that case. Operations on the local DB aren't replicated, so they
             // don't need to bump the lastOp.
-            replClientInfo().setLastOpToSystemLastOpTimeIgnoringInterrupt(_opCtx);
+            replClientInfo().setLastOpToSystemLastOpTimeIgnoringCtxCancelled(_opCtx);
             LOGV2_DEBUG(20888,
                         5,
                         "Set last op to system time: {timestamp}",
@@ -235,7 +235,7 @@ void assertCanWrite_inlock(OperationContext* opCtx, const NamespaceString& ns) {
 
 void makeCollection(OperationContext* opCtx, const NamespaceString& ns) {
     writeConflictRetry(opCtx, "implicit collection creation", ns.ns(), [&opCtx, &ns] {
-        AutoGetDb autoDb(opCtx, ns.db(), MODE_IX);
+        AutoGetDb autoDb(opCtx, ns.dbName(), MODE_IX);
         Lock::CollectionLock collLock(opCtx, ns, MODE_IX);
 
         assertCanWrite_inlock(opCtx, ns);
@@ -322,7 +322,7 @@ bool handleError(OperationContext* opCtx,
             auto migrationConflictInfo = ex.toStatus().extraInfo<TenantMigrationConflictInfo>();
             uassertStatusOK(
                 Status(NonRetryableTenantMigrationConflictInfo(
-                           migrationConflictInfo->getTenantId(),
+                           migrationConflictInfo->getMigrationId(),
                            migrationConflictInfo->getTenantMigrationAccessBlocker()),
                        "Multi update must block until this tenant migration commits or aborts"));
         }
@@ -373,7 +373,11 @@ void insertDocuments(OperationContext* opCtx,
     hangAndFailAfterDocumentInsertsReserveOpTimes.executeIf(
         [&](const BSONObj& data) {
             hangAndFailAfterDocumentInsertsReserveOpTimes.pauseWhileSet(opCtx);
-            uasserted(51269, "hangAndFailAfterDocumentInsertsReserveOpTimes fail point enabled");
+            const auto skipFail = data["skipFail"];
+            if (!skipFail || !skipFail.boolean()) {
+                uasserted(51269,
+                          "hangAndFailAfterDocumentInsertsReserveOpTimes fail point enabled");
+            }
         },
         [&](const BSONObj& data) {
             // Check if the failpoint specifies no collection or matches the existing one.
@@ -660,7 +664,7 @@ WriteResult performInserts(OperationContext* opCtx,
 
     // If we are performing inserts from tenant migrations, skip checking if the user is allowed to
     // write to the namespace.
-    if (!repl::tenantMigrationRecipientInfo(opCtx)) {
+    if (!repl::tenantMigrationInfo(opCtx)) {
         uassertStatusOK(userAllowedWriteNS(opCtx, wholeOp.getNamespace()));
     }
 
@@ -1426,7 +1430,7 @@ Status performAtomicTimeseriesWrites(
             doc_diff::applyDiff(original.value(),
                                 update.getU().getDiff(),
                                 &CollectionQueryInfo::get(*coll).getIndexKeys(opCtx),
-                                static_cast<bool>(repl::tenantMigrationRecipientInfo(opCtx)));
+                                static_cast<bool>(repl::tenantMigrationInfo(opCtx)));
 
         CollectionUpdateArgs args;
         if (const auto& stmtIds = op.getStmtIds()) {

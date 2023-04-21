@@ -254,6 +254,36 @@ var authCommandsLib = {
           ]
         },
         {
+          testname: "analyze",
+          command: {analyze: "x"},
+          setup: function(db) {
+              assert.commandWorked(db.x.insert({}));
+          },
+          teardown: function(db) {
+              db.x.drop();
+          },
+          testcases: [
+              {
+                runOnDb: firstDbName,
+                roles: roles_dbAdmin,
+                privileges: [{
+                    resource: {db: firstDbName, collection: "x"},
+                    actions: ["analyze"]
+                }],
+                expectFail: true
+              },
+              {
+                runOnDb: secondDbName,
+                roles: roles_dbAdminAny,
+                privileges: [{
+                    resource: {db: secondDbName, collection: "x"},
+                    actions: ["analyze"]
+                }],
+                expectFail: true
+              },
+          ]
+        },
+        {
           testname: "clusterAbortTransaction",
           command: {clusterAbortTransaction: 1},
           skipSharded: true,
@@ -3091,6 +3121,47 @@ var authCommandsLib = {
           ]
         },
         {
+          testname: "_configsvrCommitIndex",
+          command: {
+            _configsvrCommitIndex: "x.y",
+            keyPattern: {x: 1},
+            name: 'x_1',
+            options: {},
+            collectionUUID: UUID(),
+            collectionIndexUUID: UUID(),
+            lastmod: Timestamp(1, 0),
+          },
+          skipSharded: true,
+          expectFail: true,
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: {__system: 1},
+                privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                expectFail: true
+              },
+          ]
+        },
+        {
+          testname: "_configsvrDropIndexCatalogEntry",
+          command: {
+            _configsvrDropIndexCatalogEntry: "x.y",
+            name: 'x_1',
+            collectionUUID: UUID(),
+            lastmod: Timestamp(1, 0),
+          },
+          skipSharded: true,
+          expectFail: true,
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: {__system: 1},
+                privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                expectFail: true
+              },
+          ]
+        },
+        {
           testname: "create",
           command: {create: "x"},
           teardown: function(db) {
@@ -5770,7 +5841,7 @@ var authCommandsLib = {
           skipTest: (conn) => {
               const hello = assert.commandWorked(conn.getDB("admin").runCommand({hello: 1}));
               const isStandalone = hello.msg !== "isdbgrid" && !hello.hasOwnProperty('setName');
-              return !TestData.setParameters.featureFlagUserWriteBlocking || isStandalone;
+              return isStandalone;
 	  },
           testcases: [
               {

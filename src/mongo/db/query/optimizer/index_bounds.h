@@ -38,37 +38,35 @@ namespace mongo::optimizer {
 
 class BoundRequirement {
 public:
-    static BoundRequirement makeInfinite() {
-        return BoundRequirement(false, boost::none);
-    }
+    static BoundRequirement makeMinusInf();
+    static BoundRequirement makePlusInf();
 
-    BoundRequirement();
-    BoundRequirement(bool inclusive, boost::optional<ABT> bound);
+    BoundRequirement(bool inclusive, ABT bound);
 
     bool operator==(const BoundRequirement& other) const;
 
     bool isInclusive() const;
-    void setInclusive(bool value);
 
-    bool isInfinite() const;
+    bool isMinusInf() const;
+    bool isPlusInf() const;
+
     const ABT& getBound() const;
 
 private:
     bool _inclusive;
-
-    // If we do not have a bound ABT, the bound is considered infinite.
-    boost::optional<ABT> _bound;
+    ABT _bound;
 };
 
 class IntervalRequirement {
 public:
-    IntervalRequirement() = default;
+    IntervalRequirement();
     IntervalRequirement(BoundRequirement lowBound, BoundRequirement highBound);
 
     bool operator==(const IntervalRequirement& other) const;
 
     bool isFullyOpen() const;
     bool isEquality() const;
+    void reverse();
 
     const BoundRequirement& getLowBound() const;
     BoundRequirement& getLowBound();
@@ -120,14 +118,34 @@ private:
     IntervalReqExpr::Node _intervals;
 };
 
+/**
+ * This comparator can only compare paths with Get, Traverse, and Id.
+ */
+struct IndexPath3WComparator {
+    bool operator()(const ABT& path1, const ABT& path2) const;
+};
+
+using IndexPathSet = std::set<ABT, IndexPath3WComparator>;
+
 struct PartialSchemaKeyLessComparator {
     bool operator()(const PartialSchemaKey& k1, const PartialSchemaKey& k2) const;
 };
 
-// Map from referred (or input) projection name to list of requirements for that projection.
+/**
+ * Map from referred (or input) projection name to list of requirements for that projection.
+ * Only one instance of a path without Traverse elements (non-multikey) is allowed. By contrast
+ * several instances of paths with Traverse elements (multikey) are allowed. For example: Get "a"
+ * Get "b" Id is allowed just once while Get "a" Traverse Get "b" Id is allowed multiple times.
+ */
 using PartialSchemaRequirements =
-    std::map<PartialSchemaKey, PartialSchemaRequirement, PartialSchemaKeyLessComparator>;
+    std::multimap<PartialSchemaKey, PartialSchemaRequirement, PartialSchemaKeyLessComparator>;
 
+/**
+ * Used to track cardinality estimates per predicate inside a PartialSchemaRequirement.
+ * We currently have a single estimate per PartialSchemaKey for all matching entries in the primary
+ * map.
+ * TODO: SERVER-68092 Relax constraint described above.
+ */
 using PartialSchemaKeyCE = std::map<PartialSchemaKey, CEType, PartialSchemaKeyLessComparator>;
 using ResidualKeyMap = std::map<PartialSchemaKey, PartialSchemaKey, PartialSchemaKeyLessComparator>;
 

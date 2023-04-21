@@ -36,7 +36,7 @@
 #include "mongo/db/s/rename_collection_participant_service.h"
 #include "mongo/db/s/sharded_rename_collection_gen.h"
 #include "mongo/db/s/sharding_state.h"
-#include "mongo/db/transaction_participant.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/logv2/log.h"
 
@@ -193,8 +193,9 @@ public:
             if (optRenameCollectionParticipant) {
                 uassert(ErrorCodes::CommandFailed,
                         "Provided UUID does not match",
-                        optRenameCollectionParticipant.get()->sourceUUID() == req.getSourceUUID());
-                optRenameCollectionParticipant.get()->getUnblockCrudFuture().get(opCtx);
+                        optRenameCollectionParticipant.value()->sourceUUID() ==
+                            req.getSourceUUID());
+                optRenameCollectionParticipant.value()->getUnblockCrudFuture().get(opCtx);
             }
 
             // Since no write that generated a retryable write oplog entry with this sessionId

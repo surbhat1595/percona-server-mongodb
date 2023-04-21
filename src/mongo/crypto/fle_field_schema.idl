@@ -27,6 +27,8 @@
 
 global:
     cpp_namespace: "mongo"
+    cpp_includes:
+      - "mongo/crypto/fle_fields_util.h"
 
 imports:
     - "mongo/idl/basic_types.idl"
@@ -77,6 +79,7 @@ enums:
         values:
             kUnindexed: 1
             kEquality: 2
+            kRange: 3
 
     Fle2PlaceholderType:
         description: "The type of payload to generate from a placeholder"
@@ -115,6 +118,7 @@ structs:
         description: "Implements Encryption BinData (subtype 6) sub-subtype 0, the intent-to-encrypt
             mapping. Contains a value to encrypt and a description of how it should be encrypted."
         strict: true
+        cpp_validator_func: "validateIDLFLE2EncryptionPlaceholder"
         fields:
           t:
             description: "The type number, determines what payload to replace the placeholder with"
@@ -227,21 +231,21 @@ structs:
             description: "The version number"
             type: safeInt
             default: 1
-            unstable: true
+            stability: unstable
           deleteTokens:
             description: "A map of field paths to FLEDeletePayload"
             type: object_owned
             optional: true
-            unstable: true
+            stability: unstable
           schema:
             description: "A map of NamespaceString to EncryptedFieldConfig"
             type: object_owned
-            unstable: true
+            stability: unstable
           crudProcessed:
             description: "A boolean to indicate whether the CRUD layer has already processed this Queryable Encryption request. Used to prevent infinite recursion."
             type: bool
             optional: true
-            unstable: true
+            stability: unstable
 
     ecocDocument:
         description: "foo"
@@ -257,3 +261,20 @@ structs:
             description: "Encrypted value"
             type: bindata_generic
 
+    FLE2RangeSpec:
+        description: "Range specification that is encoded inside of a FLE2EncryptionPlaceholder."
+        strict: true
+        cpp_validator_func: "validateIDLFLE2RangeSpec"
+        fields:
+          min:
+            description: "The minimum value for an encrypted range query."
+            type: IDLAnyType
+          minIncluded:
+            description: "Indicates if the lower bound should be included in the range."
+            type: bool
+          max:
+            description: "The maximum value for an encrypted range query."
+            type: IDLAnyType
+          maxIncluded:
+            description: "Indicates if the upper bound should be included in the range."
+            type: bool

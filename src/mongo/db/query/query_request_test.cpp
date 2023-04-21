@@ -31,7 +31,6 @@
 
 #include <algorithm>
 #include <boost/optional.hpp>
-#include <boost/optional/optional_io.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/db/catalog/collection_catalog.h"
@@ -1535,6 +1534,26 @@ TEST(QueryRequestHelperTest, ValidateResponseWrongDataType) {
     ASSERT_THROWS_CODE(query_request_helper::validateCursorResponse(builder.asTempObj()),
                        DBException,
                        ErrorCodes::TypeMismatch);
+}
+
+TEST(QueryRequestHelperTest, ParsedCursorRemainsValidAfterBSONDestroyed) {
+    std::vector<BSONObj> batch = {BSON("_id" << 1), BSON("_id" << 2)};
+    CursorInitialReply cir;
+    {
+        BSONObj cursorObj =
+            BSON("cursor" << BSON("id" << CursorId(123) << "ns"
+                                       << "testdb.testcoll"
+                                       << "firstBatch"
+                                       << BSON_ARRAY(BSON("_id" << 1) << BSON("_id" << 2))));
+        cir = CursorInitialReply::parseOwned(
+            IDLParserContext("QueryRequestHelperTest::ParsedCursorRemainsValidAFterBSONDestroyed"),
+            std::move(cursorObj));
+        cursorObj = BSONObj();
+    }
+    ASSERT_EQ(cir.getCursor()->getFirstBatch().size(), batch.size());
+    for (std::vector<BSONObj>::size_type i = 0; i < batch.size(); ++i) {
+        ASSERT_BSONOBJ_EQ(batch[i], cir.getCursor()->getFirstBatch()[i]);
+    }
 }
 
 class QueryRequestTest : public ServiceContextTest {};

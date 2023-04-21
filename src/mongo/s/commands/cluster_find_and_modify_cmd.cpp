@@ -44,7 +44,7 @@
 #include "mongo/db/ops/write_ops_gen.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/storage/duplicate_key_error_info.h"
-#include "mongo/db/transaction_api.h"
+#include "mongo/db/transaction/transaction_api.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -119,7 +119,7 @@ boost::optional<BSONObj> getLet(const BSONObj& cmdObj) {
 
 boost::optional<LegacyRuntimeConstants> getLegacyRuntimeConstants(const BSONObj& cmdObj) {
     if (auto rcElem = cmdObj.getField("runtimeConstants"_sd); rcElem.type() == BSONType::Object) {
-        IDLParserErrorContext ctx("internalLegacyRuntimeConstants");
+        IDLParserContext ctx("internalLegacyRuntimeConstants");
         return LegacyRuntimeConstants::parse(ctx, rcElem.embeddedObject());
     }
     return boost::none;
@@ -144,7 +144,7 @@ BSONObj getShardKey(OperationContext* opCtx,
     return shardKey;
 }
 
-void handleWouldChangeOwningShardErrorRetryableWrite(
+void handleWouldChangeOwningShardErrorNonTransaction(
     OperationContext* opCtx,
     const ShardId& shardId,
     const NamespaceString& nss,
@@ -375,7 +375,7 @@ public:
         const BSONObj& cmdObj = [&]() {
             // Check whether the query portion needs to be rewritten for FLE.
             auto findAndModifyRequest = write_ops::FindAndModifyCommandRequest::parse(
-                IDLParserErrorContext("ClusterFindAndModify"), request.body);
+                IDLParserContext("ClusterFindAndModify"), request.body);
             if (shouldDoFLERewrite(findAndModifyRequest)) {
                 auto newRequest = processFLEFindAndModifyExplainMongos(opCtx, findAndModifyRequest);
                 return newRequest.first.toBSON(request.body);
@@ -519,7 +519,8 @@ private:
                             const NamespaceString& nss,
                             const BSONObj& cmdObj,
                             BSONObjBuilder* result) {
-        bool isRetryableWrite = opCtx->getTxnNumber() && !TransactionRouter::get(opCtx);
+        auto txnRouter = TransactionRouter::get(opCtx);
+        bool isRetryableWrite = opCtx->getTxnNumber() && !txnRouter;
 
         const auto response = [&] {
             std::vector<AsyncRequestsSender::Request> requests;
@@ -565,7 +566,7 @@ private:
             if (feature_flags::gFeatureFlagUpdateDocumentShardKeyUsingTransactionApi.isEnabled(
                     serverGlobalParams.featureCompatibility)) {
                 auto parsedRequest = write_ops::FindAndModifyCommandRequest::parse(
-                    IDLParserErrorContext("ClusterFindAndModify"), cmdObj);
+                    IDLParserContext("ClusterFindAndModify"), cmdObj);
                 // Strip write concern because this command will be sent as part of a
                 // transaction and the write concern has already been loaded onto the opCtx and
                 // will be picked up by the transaction API.
@@ -574,13 +575,15 @@ private:
                 // Strip runtime constants because they will be added again when this command is
                 // recursively sent through the service entry point.
                 parsedRequest.setLegacyRuntimeConstants(boost::none);
-                if (isRetryableWrite) {
-                    parsedRequest.setStmtId(0);
-                    handleWouldChangeOwningShardErrorRetryableWrite(
-                        opCtx, shardId, nss, parsedRequest, result);
-                } else {
+                if (txnRouter) {
                     handleWouldChangeOwningShardErrorTransaction(
                         opCtx, nss, responseStatus, parsedRequest, result);
+                } else {
+                    if (isRetryableWrite) {
+                        parsedRequest.setStmtId(0);
+                    }
+                    handleWouldChangeOwningShardErrorNonTransaction(
+                        opCtx, shardId, nss, parsedRequest, result);
                 }
             } else {
                 // TODO SERVER-67429: Remove this branch.

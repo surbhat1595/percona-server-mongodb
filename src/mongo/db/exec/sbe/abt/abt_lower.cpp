@@ -875,7 +875,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::lowerScanNode(
 
         sbe::ScanCallbacks callbacks({}, {}, {});
         if (useParallelScan) {
-            return sbe::makeS<sbe::ParallelScanStage>(nss.uuid().get(),
+            return sbe::makeS<sbe::ParallelScanStage>(nss.uuid().value(),
                                                       rootSlot,
                                                       ridSlot,
                                                       boost::none,
@@ -888,7 +888,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::lowerScanNode(
                                                       planNodeId,
                                                       callbacks);
         } else {
-            return sbe::makeS<sbe::ScanStage>(nss.uuid().get(),
+            return sbe::makeS<sbe::ScanStage>(nss.uuid().value(),
                                               rootSlot,
                                               ridSlot,
                                               boost::none,
@@ -946,17 +946,14 @@ std::unique_ptr<sbe::EExpression> SBENodeLowering::convertBoundsToExpr(
     bool fullyInfinite = true;
     for (const auto& entry : interval) {
         const BoundRequirement& entryBound = isLower ? entry.getLowBound() : entry.getHighBound();
-        const bool isInfinite = entryBound.isInfinite();
-        if (!isInfinite) {
+        if (!entryBound.isMinusInf() && !entryBound.isPlusInf()) {
             fullyInfinite = false;
             if (!entryBound.isInclusive()) {
                 inclusive = false;
             }
         }
 
-        ABT bound = isInfinite ? (isLower ? Constant::minKey() : Constant::maxKey())
-                               : entryBound.getBound();
-        auto boundExpr = exprLower.optimize(std::move(bound));
+        auto boundExpr = exprLower.optimize(entryBound.getBound());
         ksFnArgs.emplace_back(std::move(boundExpr));
     }
     if (fullyInfinite && !isLower) {
@@ -1017,7 +1014,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const IndexScanNode& n, co
     // Unused.
     boost::optional<sbe::value::SlotId> resultSlot;
 
-    return sbe::makeS<sbe::IndexScanStage>(nss.uuid().get(),
+    return sbe::makeS<sbe::IndexScanStage>(nss.uuid().value(),
                                            indexDefName,
                                            !indexSpec.isReverseOrder(),
                                            resultSlot,
@@ -1051,7 +1048,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const SeekNode& n,
 
     sbe::ScanCallbacks callbacks({}, {}, {});
     const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
-    return sbe::makeS<sbe::ScanStage>(nss.uuid().get(),
+    return sbe::makeS<sbe::ScanStage>(nss.uuid().value(),
                                       rootSlot,
                                       ridSlot,
                                       boost::none,

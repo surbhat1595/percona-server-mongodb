@@ -60,11 +60,22 @@ namespace {
 
 const Backoff kExponentialBackoff(Seconds(1), Milliseconds::max());
 
+bool isRetriableErrorForDDLCoordinator(const Status& status) {
+    return status.isA<ErrorCategory::CursorInvalidatedError>() ||
+        status.isA<ErrorCategory::ShutdownError>() || status.isA<ErrorCategory::RetriableError>() ||
+        status.isA<ErrorCategory::CancellationError>() ||
+        status.isA<ErrorCategory::ExceededTimeLimitError>() ||
+        status.isA<ErrorCategory::WriteConcernError>() ||
+        status == ErrorCodes::FailedToSatisfyReadPreference || status == ErrorCodes::Interrupted ||
+        status == ErrorCodes::LockBusy || status == ErrorCodes::CommandNotFound ||
+        status == ErrorCodes::ReadConcernMajorityNotAvailableYet;
 }
 
+}  // namespace
+
 ShardingDDLCoordinatorMetadata extractShardingDDLCoordinatorMetadata(const BSONObj& coorDoc) {
-    return ShardingDDLCoordinatorMetadata::parse(
-        IDLParserErrorContext("ShardingDDLCoordinatorMetadata"), coorDoc);
+    return ShardingDDLCoordinatorMetadata::parse(IDLParserContext("ShardingDDLCoordinatorMetadata"),
+                                                 coorDoc);
 }
 
 ShardingDDLCoordinator::ShardingDDLCoordinator(ShardingDDLCoordinatorService* service,
@@ -204,12 +215,20 @@ ExecutorFuture<void> ShardingDDLCoordinator::_acquireLockAsync(
                    return DistLockManager::kDefaultLockTimeout;
                }();
 
-               auto distLock = distLockManager->lockDirectLocally(opCtx, resource, lockTimeOut);
-               _scopedLocks.emplace(std::move(distLock));
+               auto distLock =
+                   distLockManager->lockDirectLocally(opCtx, resource, coorName, lockTimeOut);
 
                uassertStatusOK(distLockManager->lockDirect(opCtx, resource, coorName, lockTimeOut));
+               _scopedLocks.emplace(std::move(distLock));
            })
-        .until([this](Status status) {
+        .until([this, resource = resource.toString()](Status status) {
+            if (!status.isOK()) {
+                LOGV2_WARNING(6819300,
+                              "DDL lock acquisition attempt failed",
+                              "coordinatorId"_attr = _coordId,
+                              "resource"_attr = resource,
+                              "error"_attr = redact(status));
+            }
             // Sharding DDL operations are not rollbackable so in case we recovered a coordinator
             // from disk we need to ensure eventual completion of the DDL operation, so we must
             // retry until we manage to acquire the lock.
@@ -294,7 +313,7 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
         })
         .then([this, executor, token, anchor = shared_from_this()] {
             if (const auto bucketNss = metadata().getBucketNss()) {
-                return _acquireLockAsync(executor, token, bucketNss.get().ns());
+                return _acquireLockAsync(executor, token, bucketNss.value().ns());
             }
             return ExecutorFuture<void>(**executor);
         })
@@ -350,16 +369,7 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                     //  If the token is not cancelled we retry because it could have been generated
                     //  by a remote node.
                     if (!status.isOK() && !_completeOnError &&
-                        (_mustAlwaysMakeProgress() ||
-                         status.isA<ErrorCategory::CursorInvalidatedError>() ||
-                         status.isA<ErrorCategory::ShutdownError>() ||
-                         status.isA<ErrorCategory::RetriableError>() ||
-                         status.isA<ErrorCategory::CancellationError>() ||
-                         status.isA<ErrorCategory::ExceededTimeLimitError>() ||
-                         status.isA<ErrorCategory::WriteConcernError>() ||
-                         status == ErrorCodes::FailedToSatisfyReadPreference ||
-                         status == ErrorCodes::Interrupted || status == ErrorCodes::LockBusy ||
-                         status == ErrorCodes::CommandNotFound) &&
+                        (_mustAlwaysMakeProgress() || isRetriableErrorForDDLCoordinator(status)) &&
                         !token.isCanceled()) {
                         LOGV2_INFO(5656000,
                                    "Re-executing sharding DDL coordinator",

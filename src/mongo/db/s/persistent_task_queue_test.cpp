@@ -49,7 +49,7 @@ struct TestTask {
     TestTask(BSONObj bson)
         : key(bson.getField("key").String()), val(bson.getField("value").Int()) {}
 
-    static TestTask parse(IDLParserErrorContext, BSONObj bson) {
+    static TestTask parse(IDLParserContext, BSONObj bson) {
         return TestTask{bson};
     }
 
@@ -83,7 +83,7 @@ void killOps(ServiceContext* serviceCtx) {
 class PersistentTaskQueueTest : public ShardServerTestFixture {
     void setUp() override {
         ShardServerTestFixture::setUp();
-        AutoGetDb autoDb(operationContext(), kNss.db(), MODE_IX);
+        AutoGetDb autoDb(operationContext(), kNss.dbName(), MODE_IX);
         Lock::CollectionLock collLock(operationContext(), kNss, MODE_IX);
         CollectionShardingRuntime::get(operationContext(), kNss)
             ->setFilteringMetadata(operationContext(), CollectionMetadata());

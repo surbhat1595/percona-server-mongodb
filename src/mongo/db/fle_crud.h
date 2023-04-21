@@ -44,7 +44,7 @@
 #include "mongo/db/query/count_command_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/transaction_api.h"
+#include "mongo/db/transaction/transaction_api.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/s/write_ops/batch_write_exec.h"
 #include "mongo/s/write_ops/batched_command_response.h"
@@ -218,18 +218,12 @@ std::unique_ptr<Pipeline, PipelineDeleter> processFLEPipelineD(
  */
 template <typename T>
 bool shouldDoFLERewrite(const std::unique_ptr<T>& cmd) {
-    // TODO (SERVER-65077): Remove FCV check once 6.0 is released
-    return (!serverGlobalParams.featureCompatibility.isVersionInitialized() ||
-            gFeatureFlagFLE2.isEnabled(serverGlobalParams.featureCompatibility)) &&
-        cmd->getEncryptionInformation();
+    return cmd->getEncryptionInformation().has_value();
 }
 
 template <typename T>
 bool shouldDoFLERewrite(const T& cmd) {
-    // TODO (SERVER-65077): Remove FCV check once 6.0 is released
-    return (!serverGlobalParams.featureCompatibility.isVersionInitialized() ||
-            gFeatureFlagFLE2.isEnabled(serverGlobalParams.featureCompatibility)) &&
-        cmd.getEncryptionInformation();
+    return cmd.getEncryptionInformation().has_value();
 }
 
 /**
@@ -494,4 +488,8 @@ processFindAndModifyRequest<write_ops::FindAndModifyCommandRequest>(
 write_ops::UpdateCommandReply processUpdate(OperationContext* opCtx,
                                             const write_ops::UpdateCommandRequest& updateRequest,
                                             GetTxnCallback getTxns);
+
+void validateInsertUpdatePayloads(const std::vector<EncryptedField>& fields,
+                                  const std::vector<EDCServerPayloadInfo>& payload);
+
 }  // namespace mongo

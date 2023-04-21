@@ -138,16 +138,6 @@ env.Library(
 )
 
 env.Library(
-    target="load_balancer_feature_flag",
-    source=[
-        'load_balancer_feature_flag.idl',
-    ],
-    LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/idl/feature_flag',
-    ],
-)
-
-env.Library(
     target="load_balancer_support",
     source=[
         'load_balancer_support.cpp',
@@ -155,8 +145,6 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/server_options_core',
         '$BUILD_DIR/mongo/db/service_context',
-        '$BUILD_DIR/mongo/idl/feature_flag',
-        'load_balancer_feature_flag',
         'mongos_server_parameters',
     ],
 )
@@ -183,7 +171,6 @@ env.Library(
         'database_version.cpp',
         'database_version.idl',
         'mongod_and_mongos_server_parameters.idl',
-        'pm2423_feature_flags.idl',
         'request_types/abort_reshard_collection.idl',
         'request_types/add_shard_request_type.cpp',
         'request_types/get_stats_for_balancing.idl',
@@ -236,9 +223,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/query/query_request',
         '$BUILD_DIR/mongo/db/repl/optime',
         '$BUILD_DIR/mongo/db/server_options',
-        '$BUILD_DIR/mongo/idl/feature_flag',
         '$BUILD_DIR/mongo/idl/idl_parser',
-        "load_balancer_feature_flag",
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
@@ -274,7 +259,6 @@ env.Library(
         '$BUILD_DIR/mongo/transport/transport_layer_mock',
         '$BUILD_DIR/mongo/util/clock_source_mock',
         'catalog/sharding_catalog_client_impl',
-        'committed_optime_metadata_hook',
         'coreshard',
         'sharding_task_executor',
         'sharding_test_fixture_common',
@@ -341,17 +325,6 @@ env.Benchmark(
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/s/sharding_api_d',
         'sharding_routing_table',
-    ],
-)
-
-env.Library(
-    target='committed_optime_metadata_hook',
-    source=[
-        'committed_optime_metadata_hook.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/rpc/metadata',
-        'coreshard',
     ],
 )
 
@@ -492,7 +465,6 @@ env.Library(
         'commands/cluster_commands_common',
         'commands/sharded_cluster_commands',
         'commands/sharded_cluster_sharding_commands',
-        'committed_optime_metadata_hook',
         'coreshard',
         'is_mongos',
         'mongos_server_parameters',
@@ -545,7 +517,6 @@ env.Library(
         'client/sharding_client',
         'commands/cluster_commands',
         'commands/cluster_commands_common',
-        'committed_optime_metadata_hook',
         'load_balancer_support',
         'mongos_initializers',
         'mongos_topology_coordinator',
@@ -636,6 +607,7 @@ env.CppUnitTest(
         'mongos_core_options_stub.cpp',
         'mock_ns_targeter.cpp',
         'mongos_topology_coordinator_test.cpp',
+        'remote_command_shard_targeter_test.cpp',
         'request_types/add_shard_request_test.cpp',
         'request_types/add_shard_to_zone_request_test.cpp',
         'request_types/balance_chunk_request_test.cpp',

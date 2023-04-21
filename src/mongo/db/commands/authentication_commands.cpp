@@ -200,7 +200,8 @@ public:
             auto dbname = request().getDbName();
             auto* as = AuthorizationSession::get(opCtx->getClient());
 
-            as->logoutDatabase(opCtx->getClient(), dbname, "Logging out on user request");
+            as->logoutDatabase(
+                opCtx->getClient(), dbname.toStringWithTenantId(), "Logging out on user request");
             if (getTestCommandsEnabled() && (dbname == kAdminDB)) {
                 // Allows logging out as the internal user against the admin database, however
                 // this actually logs out of the local database as well. This is to
@@ -339,7 +340,8 @@ AuthenticateReply authCommand(OperationContext* opCtx,
     }
 
     auto& internalSecurityUser = (*internalSecurity.getUser())->getName();
-    if (getTestCommandsEnabled() && dbname == "admin" && user == internalSecurityUser.getUser()) {
+    if (getTestCommandsEnabled() && dbname.db() == "admin" &&
+        user == internalSecurityUser.getUser()) {
         // Allows authenticating as the internal user against the admin database.  This is to
         // support the auth passthrough test framework on mongos (since you can't use the local
         // database on a mongos, so you can't auth as the internal user without this).
@@ -444,8 +446,8 @@ void doSpeculativeAuthenticate(OperationContext* opCtx,
         cmd.append(AuthenticateCommand::kDbNameFieldName, kExternalDB);
     }
 
-    auto authCmdObj = AuthenticateCommand::parse(
-        IDLParserErrorContext("speculative X509 Authenticate"), cmd.obj());
+    auto authCmdObj =
+        AuthenticateCommand::parse(IDLParserContext("speculative X509 Authenticate"), cmd.obj());
 
     AuthenticationSession::doStep(
         opCtx, AuthenticationSession::StepType::kSpeculativeAuthenticate, [&](auto session) {

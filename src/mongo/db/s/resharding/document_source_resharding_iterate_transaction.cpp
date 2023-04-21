@@ -33,7 +33,7 @@
 #include "mongo/db/s/resharding/document_source_resharding_iterate_transaction.h"
 
 #include "mongo/db/commands/txn_cmds_gen.h"
-#include "mongo/db/transaction_history_iterator.h"
+#include "mongo/db/transaction/transaction_history_iterator.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -192,8 +192,7 @@ DocumentSource::GetNextResult DocumentSourceReshardingIterateTransaction::doGetN
 
 bool DocumentSourceReshardingIterateTransaction::_isTransactionOplogEntry(const Document& doc) {
     auto op = doc[repl::OplogEntry::kOpTypeFieldName];
-    auto opType =
-        repl::OpType_parse(IDLParserErrorContext("ReshardingEntry.op"), op.getStringData());
+    auto opType = repl::OpType_parse(IDLParserContext("ReshardingEntry.op"), op.getStringData());
     auto commandVal = doc["o"];
 
     if (opType != repl::OpTypeEnum::kCommand || doc["txnNumber"].missing() ||

@@ -97,7 +97,8 @@ static std::set<StringData> allowedFieldNames = {
     ListIndexesReplyItem::kUniqueFieldName,
     ListIndexesReplyItem::kVFieldName,
     ListIndexesReplyItem::kWeightsFieldName,
-    ListIndexesReplyItem::kWildcardProjectionFieldName};
+    ListIndexesReplyItem::kWildcardProjectionFieldName,
+    ListIndexesReplyItem::kColumnstoreProjectionFieldName};
 
 /**
  * Returns index specs, with resolved namespace, from the catalog for this listIndexes request.
@@ -229,7 +230,7 @@ public:
                 return NamespaceString(request().getDbName(), "");
             }
             invariant(nss.nss());
-            return nss.nss().get();
+            return nss.nss().value();
         }
 
         void doCheckAuthorization(OperationContext* opCtx) const final {
@@ -326,7 +327,7 @@ public:
 
                 try {
                     firstBatch.push_back(ListIndexesReplyItem::parse(
-                        IDLParserErrorContext("ListIndexesReplyItem"), nextDoc));
+                        IDLParserContext("ListIndexesReplyItem"), nextDoc));
                 } catch (const DBException& exc) {
                     LOGV2_ERROR(5254500,
                                 "Could not parse catalog entry while replying to listIndexes",

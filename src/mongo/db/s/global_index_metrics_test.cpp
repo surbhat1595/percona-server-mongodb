@@ -54,10 +54,9 @@ public:
                                                     role,
                                                     clockSource->now(),
                                                     clockSource,
-                                                    &_cumulativeMetrics);
+                                                    _cumulativeMetrics.get());
     }
 };
-
 
 TEST_F(GlobalIndexMetricsTest, ReportForCurrentOpShouldHaveGlobalIndexDescription) {
     std::vector<Role> roles{Role::kCoordinator, Role::kDonor, Role::kRecipient};
@@ -73,6 +72,5 @@ TEST_F(GlobalIndexMetricsTest, ReportForCurrentOpShouldHaveGlobalIndexDescriptio
                               instanceId.toString()));
     });
 }
-
 }  // namespace
 }  // namespace mongo

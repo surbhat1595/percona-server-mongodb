@@ -40,6 +40,7 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/sorter/sorter.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/db/yieldable.h"
 
@@ -219,6 +220,20 @@ public:
          * Persists on disk the keys that have been inserted using this BulkBuilder.
          */
         virtual IndexStateInfo persistDataForShutdown() = 0;
+
+    protected:
+        static void countNewBuildInStats();
+        static void countResumedBuildInStats();
+        static SorterFileStats* bulkBuilderFileStats();
+        static SorterTracker* bulkBuilderTracker();
+
+        /**
+         * Abandon the current snapshot and release then reacquire locks. Tests that target the
+         * behavior of bulk index builds that yield can use failpoints to stall this yield.
+         */
+        static void yield(OperationContext* opCtx,
+                          const Yieldable* yieldable,
+                          const NamespaceString& ns);
     };
 
     /**
@@ -373,8 +388,8 @@ public:
      * If any key generation errors are encountered and suppressed due to the provided GetKeysMode,
      * 'onSuppressedErrorFn' is called.
      */
-    using OnSuppressedErrorFn =
-        std::function<void(Status status, const BSONObj& obj, boost::optional<RecordId> loc)>;
+    using OnSuppressedErrorFn = std::function<void(
+        Status status, const BSONObj& obj, const boost::optional<RecordId>& loc)>;
     void getKeys(OperationContext* opCtx,
                  const CollectionPtr& collection,
                  SharedBufferFragmentBuilder& pooledBufferBuilder,
@@ -384,7 +399,7 @@ public:
                  KeyStringSet* keys,
                  KeyStringSet* multikeyMetadataKeys,
                  MultikeyPaths* multikeyPaths,
-                 boost::optional<RecordId> id,
+                 const boost::optional<RecordId>& id,
                  OnSuppressedErrorFn&& onSuppressedError = nullptr) const;
 
     /**
@@ -571,7 +586,7 @@ protected:
                            KeyStringSet* keys,
                            KeyStringSet* multikeyMetadataKeys,
                            MultikeyPaths* multikeyPaths,
-                           boost::optional<RecordId> id) const = 0;
+                           const boost::optional<RecordId>& id) const = 0;
 
     const IndexCatalogEntry* const _indexCatalogEntry;  // owned by IndexCatalog
     const IndexDescriptor* const _descriptor;

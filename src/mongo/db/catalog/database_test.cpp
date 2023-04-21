@@ -27,15 +27,11 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
-#include <boost/optional/optional_io.hpp>
-#include <memory>
-
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/index_build_block.h"
 #include "mongo/db/catalog/index_catalog.h"
+#include "mongo/db/catalog/unique_collection_name.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
@@ -43,9 +39,10 @@
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer.h"
-#include "mongo/db/op_observer_impl.h"
-#include "mongo/db/op_observer_registry.h"
+#include "mongo/db/op_observer/op_observer.h"
+#include "mongo/db/op_observer/op_observer_impl.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
+#include "mongo/db/op_observer/oplog_writer_mock.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/oplog.h"
@@ -99,7 +96,8 @@ void DatabaseTest::setUp() {
     // repl::logOp(). repl::logOp() will also store the oplog entry's optime in ReplClientInfo.
     OpObserverRegistry* opObserverRegistry =
         dynamic_cast<OpObserverRegistry*>(service->getOpObserver());
-    opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>());
+    opObserverRegistry->addObserver(
+        std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterMock>()));
 
     _nss = NamespaceString("test.foo");
 }
@@ -117,7 +115,7 @@ void DatabaseTest::tearDown() {
 
 TEST_F(DatabaseTest, SetDropPendingThrowsExceptionIfDatabaseIsAlreadyInADropPendingState) {
     writeConflictRetry(_opCtx.get(), "testSetDropPending", _nss.ns(), [this] {
-        AutoGetDb autoDb(_opCtx.get(), _nss.db(), MODE_X);
+        AutoGetDb autoDb(_opCtx.get(), _nss.dbName(), MODE_X);
         auto db = autoDb.ensureDbExists(_opCtx.get());
         ASSERT_TRUE(db);
 
@@ -140,7 +138,7 @@ TEST_F(DatabaseTest, SetDropPendingThrowsExceptionIfDatabaseIsAlreadyInADropPend
 TEST_F(DatabaseTest, CreateCollectionThrowsExceptionWhenDatabaseIsInADropPendingState) {
     writeConflictRetry(
         _opCtx.get(), "testÇreateCollectionWhenDatabaseIsInADropPendingState", _nss.ns(), [this] {
-            AutoGetDb autoDb(_opCtx.get(), _nss.db(), MODE_X);
+            AutoGetDb autoDb(_opCtx.get(), _nss.dbName(), MODE_X);
             auto db = autoDb.ensureDbExists(_opCtx.get());
             ASSERT_TRUE(db);
 
@@ -166,7 +164,7 @@ void _testDropCollection(OperationContext* opCtx,
     if (createCollectionBeforeDrop) {
         writeConflictRetry(opCtx, "testDropCollection", nss.ns(), [=] {
             WriteUnitOfWork wuow(opCtx);
-            AutoGetDb autoDb(opCtx, nss.db(), MODE_X);
+            AutoGetDb autoDb(opCtx, nss.dbName(), MODE_X);
             auto db = autoDb.ensureDbExists(opCtx);
             ASSERT_TRUE(db);
             ASSERT_TRUE(db->createCollection(opCtx, nss, collOpts));
@@ -175,7 +173,7 @@ void _testDropCollection(OperationContext* opCtx,
     }
 
     writeConflictRetry(opCtx, "testDropCollection", nss.ns(), [=] {
-        AutoGetDb autoDb(opCtx, nss.db(), MODE_X);
+        AutoGetDb autoDb(opCtx, nss.dbName(), MODE_X);
         auto db = autoDb.ensureDbExists(opCtx);
         ASSERT_TRUE(db);
 
@@ -216,7 +214,7 @@ TEST_F(DatabaseTest, DropCollectionRejectsProvidedDropOpTimeIfWritesAreReplicate
 
     auto opCtx = _opCtx.get();
     auto nss = _nss;
-    AutoGetDb autoDb(opCtx, nss.db(), MODE_X);
+    AutoGetDb autoDb(opCtx, nss.dbName(), MODE_X);
     auto db = autoDb.ensureDbExists(opCtx);
     writeConflictRetry(opCtx, "testDropOpTimeWithReplicated", nss.ns(), [&] {
         ASSERT_TRUE(db);
@@ -234,7 +232,7 @@ TEST_F(DatabaseTest, DropCollectionRejectsProvidedDropOpTimeIfWritesAreReplicate
 void _testDropCollectionThrowsExceptionIfThereAreIndexesInProgress(OperationContext* opCtx,
                                                                    const NamespaceString& nss) {
     writeConflictRetry(opCtx, "testDropCollectionWithIndexesInProgress", nss.ns(), [opCtx, nss] {
-        AutoGetDb autoDb(opCtx, nss.db(), MODE_X);
+        AutoGetDb autoDb(opCtx, nss.dbName(), MODE_X);
         auto db = autoDb.ensureDbExists(opCtx);
         ASSERT_TRUE(db);
 
@@ -292,7 +290,7 @@ TEST_F(DatabaseTest, RenameCollectionPreservesUuidOfSourceCollectionAndUpdatesUu
     auto toNss = NamespaceString(fromNss.getSisterNS("bar"));
     ASSERT_NOT_EQUALS(fromNss, toNss);
 
-    AutoGetDb autoDb(opCtx, fromNss.db(), MODE_X);
+    AutoGetDb autoDb(opCtx, fromNss.dbName(), MODE_X);
     auto db = autoDb.ensureDbExists(opCtx);
     ASSERT_TRUE(db);
 
@@ -334,18 +332,18 @@ TEST_F(DatabaseTest, RenameCollectionPreservesUuidOfSourceCollectionAndUpdatesUu
 TEST_F(DatabaseTest,
        MakeUniqueCollectionNamespaceReturnsFailedToParseIfModelDoesNotContainPercentSign) {
     writeConflictRetry(_opCtx.get(), "testMakeUniqueCollectionNamespace", _nss.ns(), [this] {
-        AutoGetDb autoDb(_opCtx.get(), _nss.db(), MODE_X);
+        AutoGetDb autoDb(_opCtx.get(), _nss.dbName(), MODE_X);
         auto db = autoDb.ensureDbExists(_opCtx.get());
         ASSERT_TRUE(db);
-        ASSERT_EQUALS(
-            ErrorCodes::FailedToParse,
-            db->makeUniqueCollectionNamespace(_opCtx.get(), "CollectionModelWithoutPercentSign"));
+        ASSERT_EQUALS(ErrorCodes::FailedToParse,
+                      makeUniqueCollectionName(
+                          _opCtx.get(), db->name(), "CollectionModelWithoutPercentSign"));
     });
 }
 
 TEST_F(DatabaseTest, MakeUniqueCollectionNamespaceReplacesPercentSignsWithRandomCharacters) {
     writeConflictRetry(_opCtx.get(), "testMakeUniqueCollectionNamespace", _nss.ns(), [this] {
-        AutoGetDb autoDb(_opCtx.get(), _nss.db(), MODE_X);
+        AutoGetDb autoDb(_opCtx.get(), _nss.dbName(), MODE_X);
         auto db = autoDb.ensureDbExists(_opCtx.get());
         ASSERT_TRUE(db);
 
@@ -353,7 +351,7 @@ TEST_F(DatabaseTest, MakeUniqueCollectionNamespaceReplacesPercentSignsWithRandom
         pcre::Regex re(_nss.db() + "\\.tmp[0-9A-Za-z][0-9A-Za-z][0-9A-Za-z][0-9A-Za-z]",
                        pcre::ANCHORED | pcre::ENDANCHORED);
 
-        auto nss1 = unittest::assertGet(db->makeUniqueCollectionNamespace(_opCtx.get(), model));
+        auto nss1 = unittest::assertGet(makeUniqueCollectionName(_opCtx.get(), db->name(), model));
         if (!re.matchView(nss1.ns())) {
             FAIL((StringBuilder() << "First generated namespace \"" << nss1.ns()
                                   << "\" does not match regular expression \"" << re.pattern()
@@ -370,7 +368,7 @@ TEST_F(DatabaseTest, MakeUniqueCollectionNamespaceReplacesPercentSignsWithRandom
             wuow.commit();
         }
 
-        auto nss2 = unittest::assertGet(db->makeUniqueCollectionNamespace(_opCtx.get(), model));
+        auto nss2 = unittest::assertGet(makeUniqueCollectionName(_opCtx.get(), db->name(), model));
         if (!re.matchView(nss2.ns())) {
             FAIL((StringBuilder() << "Second generated namespace \"" << nss2.ns()
                                   << "\" does not match regular expression \"" << re.pattern()
@@ -388,7 +386,7 @@ TEST_F(
     DatabaseTest,
     MakeUniqueCollectionNamespaceReturnsNamespaceExistsIfGeneratedNamesMatchExistingCollections) {
     writeConflictRetry(_opCtx.get(), "testMakeUniqueCollectionNamespace", _nss.ns(), [this] {
-        AutoGetDb autoDb(_opCtx.get(), _nss.db(), MODE_X);
+        AutoGetDb autoDb(_opCtx.get(), _nss.dbName(), MODE_X);
         auto db = autoDb.ensureDbExists(_opCtx.get());
         ASSERT_TRUE(db);
 
@@ -406,20 +404,20 @@ TEST_F(
             wuow.commit();
         }
 
-        // makeUniqueCollectionNamespace() returns NamespaceExists because it will not be able to
+        // makeUniqueCollectionName() returns NamespaceExists because it will not be able to
         // generate a namespace that will not collide with an existings collection.
         ASSERT_EQUALS(ErrorCodes::NamespaceExists,
-                      db->makeUniqueCollectionNamespace(_opCtx.get(), model));
+                      makeUniqueCollectionName(_opCtx.get(), db->name(), model));
     });
 }
 
 TEST_F(DatabaseTest, AutoGetDBSucceedsWithDeadlineNow) {
     NamespaceString nss("test", "coll");
     Lock::DBLock lock(_opCtx.get(), nss.dbName(), MODE_X);
-    ASSERT(_opCtx.get()->lockState()->isDbLockedForMode(nss.db(), MODE_X));
+    ASSERT(_opCtx.get()->lockState()->isDbLockedForMode(nss.dbName(), MODE_X));
     try {
-        AutoGetDb db(_opCtx.get(), nss.db(), MODE_X, Date_t::now());
-        ASSERT(_opCtx.get()->lockState()->isDbLockedForMode(nss.db(), MODE_X));
+        AutoGetDb db(_opCtx.get(), nss.dbName(), MODE_X, Date_t::now());
+        ASSERT(_opCtx.get()->lockState()->isDbLockedForMode(nss.dbName(), MODE_X));
     } catch (const ExceptionFor<ErrorCodes::LockTimeout>&) {
         FAIL("Should get the db within the timeout");
     }
@@ -428,10 +426,10 @@ TEST_F(DatabaseTest, AutoGetDBSucceedsWithDeadlineNow) {
 TEST_F(DatabaseTest, AutoGetDBSucceedsWithDeadlineMin) {
     NamespaceString nss("test", "coll");
     Lock::DBLock lock(_opCtx.get(), nss.dbName(), MODE_X);
-    ASSERT(_opCtx.get()->lockState()->isDbLockedForMode(nss.db(), MODE_X));
+    ASSERT(_opCtx.get()->lockState()->isDbLockedForMode(nss.dbName(), MODE_X));
     try {
-        AutoGetDb db(_opCtx.get(), nss.db(), MODE_X, Date_t());
-        ASSERT(_opCtx.get()->lockState()->isDbLockedForMode(nss.db(), MODE_X));
+        AutoGetDb db(_opCtx.get(), nss.dbName(), MODE_X, Date_t());
+        ASSERT(_opCtx.get()->lockState()->isDbLockedForMode(nss.dbName(), MODE_X));
     } catch (const ExceptionFor<ErrorCodes::LockTimeout>&) {
         FAIL("Should get the db within the timeout");
     }
@@ -440,7 +438,7 @@ TEST_F(DatabaseTest, AutoGetDBSucceedsWithDeadlineMin) {
 TEST_F(DatabaseTest, AutoGetCollectionForReadCommandSucceedsWithDeadlineNow) {
     NamespaceString nss("test", "coll");
     Lock::DBLock dbLock(_opCtx.get(), nss.dbName(), MODE_X);
-    ASSERT(_opCtx.get()->lockState()->isDbLockedForMode(nss.db(), MODE_X));
+    ASSERT(_opCtx.get()->lockState()->isDbLockedForMode(nss.dbName(), MODE_X));
     Lock::CollectionLock collLock(_opCtx.get(), nss, MODE_X);
     ASSERT(_opCtx.get()->lockState()->isCollectionLockedForMode(nss, MODE_X));
     try {
@@ -454,7 +452,7 @@ TEST_F(DatabaseTest, AutoGetCollectionForReadCommandSucceedsWithDeadlineNow) {
 TEST_F(DatabaseTest, AutoGetCollectionForReadCommandSucceedsWithDeadlineMin) {
     NamespaceString nss("test", "coll");
     Lock::DBLock dbLock(_opCtx.get(), nss.dbName(), MODE_X);
-    ASSERT(_opCtx.get()->lockState()->isDbLockedForMode(nss.db(), MODE_X));
+    ASSERT(_opCtx.get()->lockState()->isDbLockedForMode(nss.dbName(), MODE_X));
     Lock::CollectionLock collLock(_opCtx.get(), nss, MODE_X);
     ASSERT(_opCtx.get()->lockState()->isCollectionLockedForMode(nss, MODE_X));
     try {
@@ -470,7 +468,7 @@ TEST_F(DatabaseTest, CreateCollectionProhibitsReplicatedCollectionsWithoutIdInde
                        "testÇreateCollectionProhibitsReplicatedCollectionsWithoutIdIndex",
                        _nss.ns(),
                        [this] {
-                           AutoGetDb autoDb(_opCtx.get(), _nss.db(), MODE_X);
+                           AutoGetDb autoDb(_opCtx.get(), _nss.dbName(), MODE_X);
                            auto db = autoDb.ensureDbExists(_opCtx.get());
                            ASSERT_TRUE(db);
 

@@ -41,7 +41,7 @@
 #include "mongo/db/s/resharding/resharding_donor_oplog_iterator.h"
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/service_context_d_test_fixture.h"
-#include "mongo/db/transaction_history_iterator.h"
+#include "mongo/db/transaction/transaction_history_iterator.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/str.h"
 
@@ -257,7 +257,7 @@ bool validateOplogId(const Timestamp& clusterTime,
                      const mongo::Document& sourceDoc,
                      const repl::OplogEntry& oplogEntry) {
     auto oplogIdExpected = ReshardingDonorOplogId{clusterTime, sourceDoc["ts"].getTimestamp()};
-    auto oplogId = ReshardingDonorOplogId::parse(IDLParserErrorContext("ReshardingAggTest"),
+    auto oplogId = ReshardingDonorOplogId::parse(IDLParserContext("ReshardingAggTest"),
                                                  oplogEntry.get_id()->getDocument().toBson());
     return oplogIdExpected == oplogId;
 }
@@ -351,7 +351,7 @@ protected:
 
 
     ReshardingDonorOplogId getOplogId(const repl::MutableOplogEntry& oplog) {
-        return ReshardingDonorOplogId::parse(IDLParserErrorContext("ReshardingAggTest::getOplogId"),
+        return ReshardingDonorOplogId::parse(IDLParserContext("ReshardingAggTest::getOplogId"),
                                              oplog.get_id()->getDocument().toBson());
     }
 

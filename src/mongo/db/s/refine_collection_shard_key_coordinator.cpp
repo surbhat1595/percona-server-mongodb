@@ -34,7 +34,7 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/db_raii.h"
-#include "mongo/db/op_observer.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/s/dist_lock_manager.h"
 #include "mongo/db/s/shard_key_util.h"
 #include "mongo/db/s/sharding_ddl_util.h"
@@ -94,7 +94,7 @@ RefineCollectionShardKeyCoordinator::RefineCollectionShardKeyCoordinator(
 void RefineCollectionShardKeyCoordinator::checkIfOptionsConflict(const BSONObj& doc) const {
     // If we have two refine collections on the same namespace, then the arguments must be the same.
     const auto otherDoc = RefineCollectionShardKeyCoordinatorDocument::parse(
-        IDLParserErrorContext("RefineCollectionShardKeyCoordinatorDocument"), doc);
+        IDLParserContext("RefineCollectionShardKeyCoordinatorDocument"), doc);
 
     uassert(ErrorCodes::ConflictingOperationInProgress,
             "Another refine collection with different arguments is already running for the same "
@@ -136,7 +136,7 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
 
                 ConfigsvrRefineCollectionShardKey configsvrRefineCollShardKey(
                     nss(), _newShardKey.toBSON(), cm.getVersion().epoch());
-                configsvrRefineCollShardKey.setDbName(nss().db().toString());
+                configsvrRefineCollShardKey.setDbName(nss().dbName());
                 configsvrRefineCollShardKey.setEnforceUniquenessCheck(
                     _request.getEnforceUniquenessCheck());
                 auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();

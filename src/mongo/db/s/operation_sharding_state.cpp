@@ -56,19 +56,18 @@ bool OperationShardingState::isComingFromRouter(OperationContext* opCtx) {
 
 void OperationShardingState::setShardRole(OperationContext* opCtx,
                                           const NamespaceString& nss,
-                                          const boost::optional<ChunkVersion>& shardVersion,
+                                          const boost::optional<ShardVersion>& shardVersion,
                                           const boost::optional<DatabaseVersion>& databaseVersion) {
     auto& oss = OperationShardingState::get(opCtx);
 
     if (shardVersion) {
-        ShardVersion fullShardVersion(*shardVersion);
-        auto emplaceResult = oss._shardVersions.try_emplace(nss.ns(), fullShardVersion);
+        auto emplaceResult = oss._shardVersions.try_emplace(nss.ns(), *shardVersion);
         auto& tracker = emplaceResult.first->second;
         if (!emplaceResult.second) {
             uassert(640570,
                     str::stream() << "Illegal attempt to change the expected shard version for "
-                                  << nss << " from " << tracker.v << " to " << fullShardVersion,
-                    tracker.v == fullShardVersion);
+                                  << nss << " from " << tracker.v << " to " << *shardVersion,
+                    tracker.v == *shardVersion);
         }
         invariant(++tracker.recursion > 0);
     }
@@ -85,6 +84,22 @@ void OperationShardingState::setShardRole(OperationContext* opCtx,
         }
         invariant(++tracker.recursion > 0);
     }
+}
+
+void OperationShardingState::unsetShardRoleForLegacyDDLOperationsSentWithShardVersionIfNeeded(
+    OperationContext* opCtx, const NamespaceString& nss) {
+    auto& oss = OperationShardingState::get(opCtx);
+
+    auto it = oss._shardVersions.find(nss.ns());
+    if (it != oss._shardVersions.end()) {
+        auto& tracker = it->second;
+        tassert(6848500,
+                "DDL operation should not recursively use the shard role",
+                --tracker.recursion == 0);
+        if (tracker.recursion == 0)
+            oss._shardVersions.erase(it);
+    }
+    return;
 }
 
 boost::optional<ShardVersion> OperationShardingState::getShardVersion(const NamespaceString& nss) {
@@ -172,7 +187,7 @@ ScopedAllowImplicitCollectionCreate_UNSAFE::~ScopedAllowImplicitCollectionCreate
 
 ScopedSetShardRole::ScopedSetShardRole(OperationContext* opCtx,
                                        NamespaceString nss,
-                                       boost::optional<ChunkVersion> shardVersion,
+                                       boost::optional<ShardVersion> shardVersion,
                                        boost::optional<DatabaseVersion> databaseVersion)
     : _opCtx(opCtx),
       _nss(std::move(nss)),

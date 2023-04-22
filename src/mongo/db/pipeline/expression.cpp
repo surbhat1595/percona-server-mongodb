@@ -312,12 +312,6 @@ namespace {
  * value is seen or when long arithmetic would overflow.
  */
 class AddState {
-    long long longTotal = 0;
-    double doubleTotal = 0;
-    Decimal128 decimalTotal;
-    BSONType widestType = NumberInt;
-    bool isDate = false;
-
 public:
     /**
      * Update the internal state with another operand. It is up to the caller to validate that the
@@ -331,11 +325,19 @@ public:
         Value valToAdd;
         if (operand.getType() == Date) {
             uassert(16612, "only one date allowed in an $add expression", !isDate);
+            Value oldValue = getValue();
+            longTotal = 0;
+            addToDateValue(oldValue);
             isDate = true;
             valToAdd = Value(operand.getDate().toMillisSinceEpoch());
         } else {
             widestType = Value::getWidestNumeric(widestType, operand.getType());
             valToAdd = operand;
+        }
+
+        if (isDate) {
+            addToDateValue(valToAdd);
+            return;
         }
 
         // If this operation widens the return type, perform any necessary type conversions.
@@ -395,27 +397,9 @@ public:
     }
 
     Value getValue() const {
-        // If one of the operands was a date, then convert the result to a date.
+        // If one of the operands was a date, then return long value as Date.
         if (isDate) {
-            switch (widestType) {
-                case NumberInt:
-                case NumberLong:
-                    return Value(Date_t::fromMillisSinceEpoch(longTotal));
-                case NumberDouble:
-                    using limits = std::numeric_limits<long long>;
-                    uassert(ErrorCodes::Overflow,
-                            "date overflow in $add",
-                            // The upper bound is exclusive because it rounds up when it is cast to
-                            // a double.
-                            doubleTotal >= limits::min() &&
-                                doubleTotal < static_cast<double>(limits::max()));
-                    return Value(Date_t::fromMillisSinceEpoch(llround(doubleTotal)));
-                case NumberDecimal:
-                    // Decimal dates are not checked for overflow.
-                    return Value(Date_t::fromMillisSinceEpoch(decimalTotal.toLong()));
-                default:
-                    MONGO_UNREACHABLE;
-            }
+            return Value(Date_t::fromMillisSinceEpoch(longTotal));
         } else {
             switch (widestType) {
                 case NumberInt:
@@ -431,6 +415,46 @@ public:
             }
         }
     }
+
+private:
+    // Convert current value into date.
+    void addToDateValue(Value valToAdd) {
+        switch (valToAdd.getType()) {
+            case NumberInt:
+            case NumberLong:
+                if (overflow::add(longTotal, valToAdd.coerceToLong(), &longTotal)) {
+                    uasserted(ErrorCodes::Overflow, "date overflow in $add");
+                }
+                break;
+            case NumberDouble: {
+                using limits = std::numeric_limits<long long>;
+                double doubleToAdd = valToAdd.coerceToDouble();
+                uassert(ErrorCodes::Overflow,
+                        "date overflow in $add",
+                        // The upper bound is exclusive because it rounds up when it is cast to
+                        // a double.
+                        doubleToAdd >= static_cast<double>(limits::min()) &&
+                            doubleToAdd < static_cast<double>(limits::max()));
+
+                if (overflow::add(longTotal, llround(doubleToAdd), &longTotal)) {
+                    uasserted(ErrorCodes::Overflow, "date overflow in $add");
+                }
+                break;
+            }
+            case NumberDecimal:
+                // Decimal dates are not checked for overflow.
+                longTotal += valToAdd.coerceToDecimal().toLong();
+                break;
+            default:
+                MONGO_UNREACHABLE;
+        }
+    }
+
+    long long longTotal = 0;
+    double doubleTotal = 0;
+    Decimal128 decimalTotal;
+    BSONType widestType = NumberInt;
+    bool isDate = false;
 };
 
 Status checkAddOperandType(Value val) {
@@ -922,10 +946,6 @@ intrusive_ptr<Expression> ExpressionCoerceToBool::optimize() {
     return intrusive_ptr<Expression>(this);
 }
 
-void ExpressionCoerceToBool::_doAddDependencies(DepsTracker* deps) const {
-    pExpression->addDependencies(deps);
-}
-
 Value ExpressionCoerceToBool::evaluate(const Document& root, Variables* variables) const {
     Value pResult(pExpression->evaluate(root, variables));
     bool b = pResult.coerceToBool();
@@ -1177,10 +1197,6 @@ ExpressionConstant::ExpressionConstant(ExpressionContext* const expCtx, const Va
 intrusive_ptr<Expression> ExpressionConstant::optimize() {
     /* nothing to do */
     return intrusive_ptr<Expression>(this);
-}
-
-void ExpressionConstant::_doAddDependencies(DepsTracker* deps) const {
-    /* nothing to do */
 }
 
 Value ExpressionConstant::evaluate(const Document& root, Variables* variables) const {
@@ -1541,42 +1557,6 @@ Value ExpressionDateFromParts::evaluate(const Document& root, Variables* variabl
     MONGO_UNREACHABLE;
 }
 
-void ExpressionDateFromParts::_doAddDependencies(DepsTracker* deps) const {
-    if (_year) {
-        _year->addDependencies(deps);
-    }
-    if (_month) {
-        _month->addDependencies(deps);
-    }
-    if (_day) {
-        _day->addDependencies(deps);
-    }
-    if (_hour) {
-        _hour->addDependencies(deps);
-    }
-    if (_minute) {
-        _minute->addDependencies(deps);
-    }
-    if (_second) {
-        _second->addDependencies(deps);
-    }
-    if (_millisecond) {
-        _millisecond->addDependencies(deps);
-    }
-    if (_isoWeekYear) {
-        _isoWeekYear->addDependencies(deps);
-    }
-    if (_isoWeek) {
-        _isoWeek->addDependencies(deps);
-    }
-    if (_isoDayOfWeek) {
-        _isoDayOfWeek->addDependencies(deps);
-    }
-    if (_timeZone) {
-        _timeZone->addDependencies(deps);
-    }
-}
-
 /* ---------------------- ExpressionDateFromString --------------------- */
 
 REGISTER_STABLE_EXPRESSION(dateFromString, ExpressionDateFromString::parse);
@@ -1750,25 +1730,6 @@ Value ExpressionDateFromString::evaluate(const Document& root, Variables* variab
     }
 }
 
-void ExpressionDateFromString::_doAddDependencies(DepsTracker* deps) const {
-    _dateString->addDependencies(deps);
-    if (_timeZone) {
-        _timeZone->addDependencies(deps);
-    }
-
-    if (_format) {
-        _format->addDependencies(deps);
-    }
-
-    if (_onNull) {
-        _onNull->addDependencies(deps);
-    }
-
-    if (_onError) {
-        _onError->addDependencies(deps);
-    }
-}
-
 /* ---------------------- ExpressionDateToParts ----------------------- */
 
 REGISTER_STABLE_EXPRESSION(dateToParts, ExpressionDateToParts::parse);
@@ -1918,17 +1879,6 @@ Value ExpressionDateToParts::evaluate(const Document& root, Variables* variables
     }
 }
 
-void ExpressionDateToParts::_doAddDependencies(DepsTracker* deps) const {
-    _date->addDependencies(deps);
-    if (_timeZone) {
-        _timeZone->addDependencies(deps);
-    }
-    if (_iso8601) {
-        _iso8601->addDependencies(deps);
-    }
-}
-
-
 /* ---------------------- ExpressionDateToString ----------------------- */
 
 REGISTER_STABLE_EXPRESSION(dateToString, ExpressionDateToString::parse);
@@ -2067,21 +2017,6 @@ Value ExpressionDateToString::evaluate(const Document& root, Variables* variable
     }
 
     return Value(uassertStatusOK(timeZone->formatDate(kISOFormatString, date.coerceToDate())));
-}
-
-void ExpressionDateToString::_doAddDependencies(DepsTracker* deps) const {
-    _date->addDependencies(deps);
-    if (_timeZone) {
-        _timeZone->addDependencies(deps);
-    }
-
-    if (_onNull) {
-        _onNull->addDependencies(deps);
-    }
-
-    if (_format) {
-        _format->addDependencies(deps);
-    }
 }
 
 /* ----------------------- ExpressionDateDiff ---------------------------- */
@@ -2261,17 +2196,6 @@ Value ExpressionDateDiff::evaluate(const Document& root, Variables* variables) c
     return Value{dateDiff(startDate, endDate, unit, *timezone, startOfWeek)};
 }
 
-void ExpressionDateDiff::_doAddDependencies(DepsTracker* deps) const {
-    _startDate->addDependencies(deps);
-    _endDate->addDependencies(deps);
-    _unit->addDependencies(deps);
-    if (_timeZone) {
-        _timeZone->addDependencies(deps);
-    }
-    if (_startOfWeek) {
-        _startOfWeek->addDependencies(deps);
-    }
-}
 
 /* ----------------------- ExpressionDivide ---------------------------- */
 
@@ -2400,12 +2324,6 @@ intrusive_ptr<Expression> ExpressionObject::optimize() {
     return this;
 }
 
-void ExpressionObject::_doAddDependencies(DepsTracker* deps) const {
-    for (auto&& child : _children) {
-        child->addDependencies(deps);
-    }
-}
-
 Value ExpressionObject::evaluate(const Document& root, Variables* variables) const {
     MutableDocument outputDoc;
     for (auto&& pair : _expressions) {
@@ -2519,18 +2437,6 @@ bool ExpressionFieldPath::representsPath(const std::string& dottedPath) const {
         return false;
     }
     return _fieldPath.tail().fullPath() == dottedPath;
-}
-
-void ExpressionFieldPath::_doAddDependencies(DepsTracker* deps) const {
-    if (_variable == Variables::kRootId) {  // includes CURRENT when it is equivalent to ROOT.
-        if (_fieldPath.getPathLength() == 1) {
-            deps->needWholeDocument = true;  // need full doc if just "$$ROOT"
-        } else {
-            deps->fields.insert(_fieldPath.tail().fullPath());
-        }
-    } else {
-        deps->vars.insert(_variable);
-    }
 }
 
 Value ExpressionFieldPath::evaluatePathArray(size_t index, const Value& input) const {
@@ -2806,14 +2712,6 @@ Value ExpressionFilter::evaluate(const Document& root, Variables* variables) con
     return Value(std::move(output));
 }
 
-void ExpressionFilter::_doAddDependencies(DepsTracker* deps) const {
-    _input->addDependencies(deps);
-    _cond->addDependencies(deps);
-    if (_limit) {
-        (*_limit)->addDependencies(deps);
-    }
-}
-
 /* ------------------------- ExpressionFloor -------------------------- */
 
 StatusWith<Value> ExpressionFloor::apply(Value arg) {
@@ -2955,16 +2853,6 @@ Value ExpressionLet::evaluate(const Document& root, Variables* variables) const 
     return _subExpression->evaluate(root, variables);
 }
 
-void ExpressionLet::_doAddDependencies(DepsTracker* deps) const {
-    for (auto&& idToNameExp : _variables) {
-        // Add the external dependencies from the 'vars' statement.
-        idToNameExp.second.expression->addDependencies(deps);
-    }
-
-    // Add subexpression dependencies, which may contain a mix of local and external variable refs.
-    _subExpression->addDependencies(deps);
-}
-
 /* ------------------------- ExpressionMap ----------------------------- */
 
 REGISTER_STABLE_EXPRESSION(map, ExpressionMap::parse);
@@ -3069,11 +2957,6 @@ Value ExpressionMap::evaluate(const Document& root, Variables* variables) const 
     }
 
     return Value(std::move(output));
-}
-
-void ExpressionMap::_doAddDependencies(DepsTracker* deps) const {
-    _input->addDependencies(deps);
-    _each->addDependencies(deps);
 }
 
 Expression::ComputedPaths ExpressionMap::getComputedPaths(const std::string& exprFieldPath,
@@ -3229,17 +3112,6 @@ Value ExpressionMeta::evaluate(const Document& root, Variables* variables) const
             MONGO_UNREACHABLE;
     }
     MONGO_UNREACHABLE;
-}
-
-void ExpressionMeta::_doAddDependencies(DepsTracker* deps) const {
-    if (_metaType == MetaType::kSearchScore || _metaType == MetaType::kSearchHighlights ||
-        _metaType == MetaType::kSearchScoreDetails) {
-        // We do not add the dependencies for searchScore, searchHighlights, or searchScoreDetails
-        // because those values are not stored in the collection (or in mongod at all).
-        return;
-    }
-
-    deps->setNeedsMetadata(_metaType, true);
 }
 
 /* ----------------------- ExpressionMod ---------------------------- */
@@ -3894,23 +3766,8 @@ ExpressionInternalFLEEqual::ExpressionInternalFLEEqual(ExpressionContext* const 
                                                        int64_t contentionFactor,
                                                        ConstDataRange edcToken)
     : Expression(expCtx, {std::move(field)}),
-      _serverToken(PrfBlockfromCDR(serverToken)),
-      _edcToken(PrfBlockfromCDR(edcToken)),
-      _contentionFactor(contentionFactor) {
+      _evaluator(serverToken, contentionFactor, {edcToken}) {
     expCtx->sbeCompatible = false;
-
-    auto tokens =
-        EDCServerCollection::generateEDCTokens(ConstDataRange(_edcToken), _contentionFactor);
-
-    for (auto& token : tokens) {
-        _cachedEDCTokens.insert(std::move(token.data));
-    }
-}
-
-void ExpressionInternalFLEEqual::_doAddDependencies(DepsTracker* deps) const {
-    for (auto&& operand : _children) {
-        operand->addDependencies(deps);
-    }
 }
 
 REGISTER_STABLE_EXPRESSION(_internalFleEq, ExpressionInternalFLEEqual::parse);
@@ -3926,27 +3783,24 @@ intrusive_ptr<Expression> ExpressionInternalFLEEqual::parse(ExpressionContext* c
 
     auto serverTokenPair = fromEncryptedConstDataRange(fleEq.getServerEncryptionToken());
 
-    uassert(6672405,
+    uassert(6762901,
             "Invalid server token",
             serverTokenPair.first == EncryptedBinDataType::kFLE2TransientRaw &&
                 serverTokenPair.second.length() == sizeof(PrfBlock));
 
     auto edcTokenPair = fromEncryptedConstDataRange(fleEq.getEdcDerivedToken());
 
-    uassert(6672406,
+    uassert(6762902,
             "Invalid edc token",
             edcTokenPair.first == EncryptedBinDataType::kFLE2TransientRaw &&
                 edcTokenPair.second.length() == sizeof(PrfBlock));
 
 
     auto cf = fleEq.getMaxCounter();
-    uassert(6672408, "Contention factor must be between 0 and 10000", cf >= 0 && cf < 10000);
+    uassert(6762903, "Contention factor must be between 0 and 10000", cf >= 0 && cf < 10000);
 
-    return new ExpressionInternalFLEEqual(expCtx,
-                                          std::move(fieldExpr),
-                                          serverTokenPair.second,
-                                          fleEq.getMaxCounter(),
-                                          edcTokenPair.second);
+    return new ExpressionInternalFLEEqual(
+        expCtx, std::move(fieldExpr), serverTokenPair.second, cf, edcTokenPair.second);
 }
 
 Value toValue(const std::array<std::uint8_t, 32>& buf) {
@@ -3955,47 +3809,110 @@ Value toValue(const std::array<std::uint8_t, 32>& buf) {
 }
 
 Value ExpressionInternalFLEEqual::serialize(bool explain) const {
-    return Value(Document{{kInternalFleEq,
-                           Document{{"field", _children[0]->serialize(explain)},
-                                    {"edc", toValue(_edcToken)},
-                                    {"counter", Value(static_cast<long long>(_contentionFactor))},
-                                    {"server", toValue(_serverToken)}}}});
+    return Value(Document{
+        {kInternalFleEq,
+         Document{{"field", _children[0]->serialize(explain)},
+                  {"edc", toValue(_evaluator.edcTokens()[0])},
+                  {"counter", Value(static_cast<long long>(_evaluator.contentionFactor()))},
+                  {"server", toValue(_evaluator.serverToken())}}}});
 }
 
 Value ExpressionInternalFLEEqual::evaluate(const Document& root, Variables* variables) const {
-    // Inputs
-    // 1. Value for FLE2IndexedEqualityEncryptedValue field
-
-    Value fieldValue = _children[0]->evaluate(root, variables);
-
+    auto fieldValue = _children[0]->evaluate(root, variables);
     if (fieldValue.nullish()) {
         return Value(BSONNULL);
     }
-
-    if (fieldValue.getType() != BinData) {
-        return Value(false);
-    }
-
-    auto fieldValuePair = fromEncryptedBinData(fieldValue);
-
-    uassert(6672407,
-            "Invalid encrypted indexed field",
-            fieldValuePair.first == EncryptedBinDataType::kFLE2EqualityIndexedValue);
-
-    // Value matches if
-    // 1. Decrypt field is successful
-    // 2. EDC_u Token is in GenTokens(EDC Token, ContentionFactor)
-    //
-    auto swIndexed =
-        EDCServerCollection::decryptAndParse(ConstDataRange(_serverToken), fieldValuePair.second);
-    uassertStatusOK(swIndexed);
-    auto indexed = swIndexed.getValue();
-
-    return Value(_cachedEDCTokens.count(indexed.edc.data) == 1);
+    return Value(_evaluator.evaluate<FLE2IndexedEqualityEncryptedValue>(
+        fieldValue,
+        EncryptedBinDataType::kFLE2EqualityIndexedValue,
+        [](auto token, auto serverValue) {
+            return EDCServerCollection::decryptAndParse(token, serverValue);
+        }));
 }
 
 const char* ExpressionInternalFLEEqual::getOpName() const {
     return kInternalFleEq.rawData();
+}
+
+/* ----------------------- ExpressionInternalFLEBetween ---------------------------- */
+
+constexpr auto kInternalFleBetween = "$_internalFleBetween"_sd;
+
+ExpressionInternalFLEBetween::ExpressionInternalFLEBetween(ExpressionContext* const expCtx,
+                                                           boost::intrusive_ptr<Expression> field,
+                                                           ConstDataRange serverToken,
+                                                           int64_t contentionFactor,
+                                                           std::vector<ConstDataRange> edcTokens)
+    : Expression(expCtx, {std::move(field)}), _evaluator(serverToken, contentionFactor, edcTokens) {
+    expCtx->sbeCompatible = false;
+}
+
+REGISTER_STABLE_EXPRESSION(_internalFleBetween, ExpressionInternalFLEBetween::parse);
+
+intrusive_ptr<Expression> ExpressionInternalFLEBetween::parse(ExpressionContext* const expCtx,
+                                                              BSONElement expr,
+                                                              const VariablesParseState& vps) {
+    IDLParserContext ctx(kInternalFleBetween);
+    auto fleBetween = InternalFleBetweenStruct::parse(ctx, expr.Obj());
+
+    auto fieldExpr = Expression::parseOperand(expCtx, fleBetween.getField().getElement(), vps);
+
+    auto serverTokenPair = fromEncryptedConstDataRange(fleBetween.getServerEncryptionToken());
+
+    uassert(6762904,
+            "Invalid server token",
+            serverTokenPair.first == EncryptedBinDataType::kFLE2TransientRaw &&
+                serverTokenPair.second.length() == sizeof(PrfBlock));
+
+    std::vector<ConstDataRange> edcTokens;
+    for (auto& elem : fleBetween.getEdcDerivedTokens()) {
+        auto [first, second] = fromEncryptedConstDataRange(elem);
+        uassert(6762905,
+                "Invalid edc token",
+                first == EncryptedBinDataType::kFLE2TransientRaw &&
+                    second.length() == sizeof(PrfBlock));
+        edcTokens.push_back(second);
+    }
+
+    auto cf = fleBetween.getMaxCounter();
+    uassert(6762906, "Contention factor must be between 0 and 10000", cf >= 0 && cf < 10000);
+
+    return new ExpressionInternalFLEBetween(
+        expCtx, std::move(fieldExpr), serverTokenPair.second, cf, edcTokens);
+}
+
+Value ExpressionInternalFLEBetween::serialize(bool explain) const {
+    std::vector<Value> edcValues;
+    edcValues.reserve(_evaluator.edcTokens().size());
+    for (auto& token : _evaluator.edcTokens()) {
+        edcValues.push_back(toValue(PrfBlockfromCDR(token)));
+    }
+    return Value(Document{
+        {kInternalFleBetween,
+         Document{{"field", _children[0]->serialize(explain)},
+                  {"edc", Value(edcValues)},
+                  {"counter", Value(static_cast<long long>(_evaluator.contentionFactor()))},
+                  {"server", toValue(_evaluator.serverToken())}}}});
+}
+
+Value ExpressionInternalFLEBetween::evaluate(const Document& root, Variables* variables) const {
+    // TODO(SERVER-67627): Uncomment for runtime tag matching.
+    // auto fieldValue = _children[0]->evaluate(root, variables);
+    // if (fieldValue.nullish()) {
+    //     return Value(BSONNULL);
+    // }
+    // return Value(_evaluator.evaluate<FLE2IndexedRangeEncryptedValue>(
+    //     fieldValue,
+    //     EncryptedBinDataType::kFLE2RangeIndexedValue,
+    //     [](auto token, auto serverValue) {
+    //         return EDCServerCollection::decryptAndParseRange(token, serverValue);
+    //     }));
+    uasserted(ErrorCodes::InternalErrorNotSupported,
+              str::stream() << "$_internalFleBetween not supported.");
+}
+
+const char* ExpressionInternalFLEBetween::getOpName() const {
+    return kInternalFleBetween.rawData();
 }
 
 /* ------------------------ ExpressionNary ----------------------------- */
@@ -4118,12 +4035,6 @@ intrusive_ptr<Expression> ExpressionNary::optimize() {
         _children = std::move(optimizedOperands);
     }
     return this;
-}
-
-void ExpressionNary::_doAddDependencies(DepsTracker* deps) const {
-    for (auto&& operand : _children) {
-        operand->addDependencies(deps);
-    }
 }
 
 void ExpressionNary::addOperand(const intrusive_ptr<Expression>& pExpression) {
@@ -4595,12 +4506,6 @@ intrusive_ptr<Expression> ExpressionReduce::optimize() {
     return this;
 }
 
-void ExpressionReduce::_doAddDependencies(DepsTracker* deps) const {
-    _input->addDependencies(deps);
-    _initial->addDependencies(deps);
-    _in->addDependencies(deps);
-}
-
 Value ExpressionReduce::serialize(bool explain) const {
     return Value(Document{{"$reduce",
                            Document{{"input", _input->serialize(explain)},
@@ -4609,12 +4514,6 @@ Value ExpressionReduce::serialize(bool explain) const {
 }
 
 /* ------------------------ ExpressionReplaceBase ------------------------ */
-
-void ExpressionReplaceBase::_doAddDependencies(DepsTracker* deps) const {
-    _input->addDependencies(deps);
-    _find->addDependencies(deps);
-    _replacement->addDependencies(deps);
-}
 
 Value ExpressionReplaceBase::serialize(bool explain) const {
     return Value(Document{{getOpName(),
@@ -4902,10 +4801,6 @@ const char* ExpressionSortArray::getOpName() const {
 intrusive_ptr<Expression> ExpressionSortArray::optimize() {
     _input = _input->optimize();
     return this;
-}
-
-void ExpressionSortArray::_doAddDependencies(DepsTracker* deps) const {
-    _input->addDependencies(deps);
 }
 
 Value ExpressionSortArray::serialize(bool explain) const {
@@ -5797,17 +5692,6 @@ boost::intrusive_ptr<Expression> ExpressionSwitch::parse(ExpressionContext* cons
     return new ExpressionSwitch(expCtx, std::move(children), std::move(branches));
 }
 
-void ExpressionSwitch::_doAddDependencies(DepsTracker* deps) const {
-    for (auto&& branch : _branches) {
-        branch.first->addDependencies(deps);
-        branch.second->addDependencies(deps);
-    }
-
-    if (_default) {
-        _default->addDependencies(deps);
-    }
-}
-
 boost::intrusive_ptr<Expression> ExpressionSwitch::optimize() {
     if (_default) {
         _default = _default->optimize();
@@ -6118,13 +6002,6 @@ Value ExpressionTrim::serialize(bool explain) const {
                            {"chars", _characters ? _characters->serialize(explain) : Value()}}}});
 }
 
-void ExpressionTrim::_doAddDependencies(DepsTracker* deps) const {
-    _input->addDependencies(deps);
-    if (_characters) {
-        _characters->addDependencies(deps);
-    }
-}
-
 /* ------------------------- ExpressionRound and ExpressionTrunc -------------------------- */
 
 void assertFlagsValid(uint32_t flags,
@@ -6429,18 +6306,6 @@ Value ExpressionZip::serialize(bool explain) const {
     return Value(DOC("$zip" << DOC("inputs" << Value(serializedInput) << "defaults"
                                             << Value(serializedDefaults) << "useLongestLength"
                                             << serializedUseLongestLength)));
-}
-
-void ExpressionZip::_doAddDependencies(DepsTracker* deps) const {
-    std::for_each(
-        _inputs.begin(), _inputs.end(), [&deps](intrusive_ptr<Expression> inputExpression) -> void {
-            inputExpression->addDependencies(deps);
-        });
-    std::for_each(_defaults.begin(),
-                  _defaults.end(),
-                  [&deps](intrusive_ptr<Expression> defaultExpression) -> void {
-                      defaultExpression->addDependencies(deps);
-                  });
 }
 
 /* -------------------------- ExpressionConvert ------------------------------ */
@@ -7012,17 +6877,6 @@ Value ExpressionConvert::serialize(bool explain) const {
                                     {"onNull", _onNull ? _onNull->serialize(explain) : Value()}}}});
 }
 
-void ExpressionConvert::_doAddDependencies(DepsTracker* deps) const {
-    _input->addDependencies(deps);
-    _to->addDependencies(deps);
-    if (_onError) {
-        _onError->addDependencies(deps);
-    }
-    if (_onNull) {
-        _onNull->addDependencies(deps);
-    }
-}
-
 BSONType ExpressionConvert::computeTargetType(Value targetTypeName) const {
     BSONType targetType;
     if (targetTypeName.getType() == BSONType::String) {
@@ -7267,14 +7121,6 @@ void ExpressionRegex::_extractRegexAndOptions(RegexExecutionState* executionStat
                 executionState->options->find('\0', 0) == std::string::npos);
 }
 
-void ExpressionRegex::_doAddDependencies(DepsTracker* deps) const {
-    _input->addDependencies(deps);
-    _regex->addDependencies(deps);
-    if (_options) {
-        _options->addDependencies(deps);
-    }
-}
-
 boost::optional<std::pair<boost::optional<std::string>, std::string>>
 ExpressionRegex::getConstantPatternAndOptions() const {
     if (!ExpressionConstant::isNullOrConstant(_regex) ||
@@ -7471,10 +7317,6 @@ intrusive_ptr<Expression> ExpressionRandom::optimize() {
     return intrusive_ptr<Expression>(this);
 }
 
-void ExpressionRandom::_doAddDependencies(DepsTracker* deps) const {
-    deps->needRandomGenerator = true;
-}
-
 Value ExpressionRandom::serialize(const bool explain) const {
     return Value(DOC(getOpName() << Document()));
 }
@@ -7500,10 +7342,6 @@ Value ExpressionToHashedIndexKey::evaluate(const Document& root, Variables* vari
 
 Value ExpressionToHashedIndexKey::serialize(bool explain) const {
     return Value(DOC("$toHashedIndexKey" << _children[0]->serialize(explain)));
-}
-
-void ExpressionToHashedIndexKey::_doAddDependencies(DepsTracker* deps) const {
-    _children[0]->addDependencies(deps);
 }
 
 /* ------------------------- ExpressionDateArithmetics -------------------------- */
@@ -7550,15 +7388,6 @@ auto commonDateArithmeticsParse(ExpressionContext* const expCtx,
     return parsedArgs;
 }
 }  // namespace
-
-void ExpressionDateArithmetics::_doAddDependencies(DepsTracker* deps) const {
-    _startDate->addDependencies(deps);
-    _unit->addDependencies(deps);
-    _amount->addDependencies(deps);
-    if (_timeZone) {
-        _timeZone->addDependencies(deps);
-    }
-}
 
 boost::intrusive_ptr<Expression> ExpressionDateArithmetics::optimize() {
     _startDate = _startDate->optimize();
@@ -7905,19 +7734,6 @@ Value ExpressionDateTrunc::evaluate(const Document& root, Variables* variables) 
     return Value{truncateDate(date, unit, binSize, *timezone, startOfWeek)};
 }
 
-void ExpressionDateTrunc::_doAddDependencies(DepsTracker* deps) const {
-    _date->addDependencies(deps);
-    _unit->addDependencies(deps);
-    if (_binSize) {
-        _binSize->addDependencies(deps);
-    }
-    if (_timeZone) {
-        _timeZone->addDependencies(deps);
-    }
-    if (_startOfWeek) {
-        _startOfWeek->addDependencies(deps);
-    }
-}
 
 /* -------------------------- ExpressionGetField ------------------------------ */
 
@@ -8014,11 +7830,6 @@ Value ExpressionGetField::evaluate(const Document& root, Variables* variables) c
 
 intrusive_ptr<Expression> ExpressionGetField::optimize() {
     return intrusive_ptr<Expression>(this);
-}
-
-void ExpressionGetField::_doAddDependencies(DepsTracker* deps) const {
-    _input->addDependencies(deps);
-    _field->addDependencies(deps);
 }
 
 Value ExpressionGetField::serialize(const bool explain) const {
@@ -8133,12 +7944,6 @@ intrusive_ptr<Expression> ExpressionSetField::optimize() {
     return intrusive_ptr<Expression>(this);
 }
 
-void ExpressionSetField::_doAddDependencies(DepsTracker* deps) const {
-    _input->addDependencies(deps);
-    _field->addDependencies(deps);
-    _value->addDependencies(deps);
-}
-
 Value ExpressionSetField::serialize(const bool explain) const {
     return Value(Document{{"$setField"_sd,
                            Document{{"field"_sd, _field->serialize(explain)},
@@ -8183,6 +7988,14 @@ Value ExpressionTsIncrement::evaluate(const Document& root, Variables* variables
 }
 
 REGISTER_STABLE_EXPRESSION(tsIncrement, ExpressionTsIncrement::parse);
+
+/* ------------------------- ExpressionEncryptedBetween ----------------------------- */
+
+Value ExpressionEncryptedBetween::evaluate(const Document& root, Variables* variables) const {
+    uasserted(6882800, "$encryptedBetween does not have a runtime implementation.");
+}
+
+REGISTER_STABLE_EXPRESSION(encryptedBetween, ExpressionEncryptedBetween::parse);
 
 MONGO_INITIALIZER_GROUP(BeginExpressionRegistration, ("default"), ("EndExpressionRegistration"))
 MONGO_INITIALIZER_GROUP(EndExpressionRegistration, ("BeginExpressionRegistration"), ())

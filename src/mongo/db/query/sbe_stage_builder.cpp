@@ -58,6 +58,8 @@
 #include "mongo/db/fts/fts_query_impl.h"
 #include "mongo/db/fts/fts_spec.h"
 #include "mongo/db/index/fts_access_method.h"
+#include "mongo/db/matcher/expression_leaf.h"
+#include "mongo/db/matcher/match_expression_dependencies.h"
 #include "mongo/db/pipeline/abt/field_map_builder.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_visitor.h"
@@ -713,7 +715,87 @@ std::unique_ptr<sbe::EExpression> abtToExpr(optimizer::ABT& abt, optimizer::Slot
     optimizer::SBEExpressionLowering exprLower{env, slotMap};
     return exprLower.optimize(abt);
 }
+
+EvalExpr generatePerColumnFilterExpr(StageBuilderState& state,
+                                     const MatchExpression* me,
+                                     sbe::value::SlotId inputSlot) {
+    auto inputVar = sbe::EVariable{inputSlot};
+
+    switch (me->matchType()) {
+        // These are always safe since they will never match documents missing their field, or where
+        // the element is an object or array.
+        case MatchExpression::REGEX:
+            return generateRegexExpr(
+                state, checked_cast<const RegexMatchExpression*>(me), inputVar);
+        case MatchExpression::MOD:
+            return generateModExpr(state, checked_cast<const ModMatchExpression*>(me), inputVar);
+        case MatchExpression::BITS_ALL_SET:
+            return generateBitTestExpr(state,
+                                       checked_cast<const BitTestMatchExpression*>(me),
+                                       sbe::BitTestBehavior::AllSet,
+                                       inputVar);
+        case MatchExpression::BITS_ALL_CLEAR:
+            return generateBitTestExpr(state,
+                                       checked_cast<const BitTestMatchExpression*>(me),
+                                       sbe::BitTestBehavior::AllClear,
+                                       inputVar);
+        case MatchExpression::BITS_ANY_SET:
+            return generateBitTestExpr(state,
+                                       checked_cast<const BitTestMatchExpression*>(me),
+                                       sbe::BitTestBehavior::AnySet,
+                                       inputVar);
+        case MatchExpression::BITS_ANY_CLEAR:
+            return generateBitTestExpr(state,
+                                       checked_cast<const BitTestMatchExpression*>(me),
+                                       sbe::BitTestBehavior::AnyClear,
+                                       inputVar);
+        case MatchExpression::EXISTS: {
+            uasserted(6733601, "(TODO SERVER-68743) need expr translation to enable $exists");
+        }
+        case MatchExpression::LT:
+            return generateComparisonExpr(state,
+                                          checked_cast<const ComparisonMatchExpression*>(me),
+                                          sbe::EPrimBinary::less,
+                                          inputVar);
+        case MatchExpression::GT:
+            return generateComparisonExpr(state,
+                                          checked_cast<const ComparisonMatchExpression*>(me),
+                                          sbe::EPrimBinary::greater,
+                                          inputVar);
+        case MatchExpression::EQ:
+            return generateComparisonExpr(state,
+                                          checked_cast<const ComparisonMatchExpression*>(me),
+                                          sbe::EPrimBinary::eq,
+                                          inputVar);
+        case MatchExpression::LTE:
+            return generateComparisonExpr(state,
+                                          checked_cast<const ComparisonMatchExpression*>(me),
+                                          sbe::EPrimBinary::lessEq,
+                                          inputVar);
+        case MatchExpression::GTE:
+            return generateComparisonExpr(state,
+                                          checked_cast<const ComparisonMatchExpression*>(me),
+                                          sbe::EPrimBinary::greaterEq,
+                                          inputVar);
+        case MatchExpression::MATCH_IN: {
+            uasserted(6733602, "(TODO SERVER-68743) need expr translation to enable $in");
+        }
+        case MatchExpression::TYPE_OPERATOR: {
+            uasserted(6733603, "(TODO SERVER-68743) need expr translation to enable $type");
+        }
+        case MatchExpression::NOT: {
+            uasserted(6733604, "(TODO SERVER-68743) need expr translation to enable $not");
+        }
+
+        default:
+            uasserted(6733605,
+                      std::string("Expression ") + me->serialize().toString() +
+                          " should not be pushed down as a per-column filter");
+    }
+    return {};
+}
 }  // namespace
+
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildColumnScan(
     const QuerySolutionNode* root, const PlanStageReqs& reqs) {
     tassert(6312404,
@@ -725,8 +807,6 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             "Unexpected filter provided for column scan stage. Expected 'filtersByPath' or "
             "'postAssemblyFilter' to be used instead.",
             !csn->filter);
-
-    tassert(6610251, "Expected no filters by path", csn->filtersByPath.empty());
 
     PlanStageSlots outputs;
 
@@ -768,16 +848,58 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     auto abt = builder.generateABT();
     auto rowStoreExpr = abt ? abtToExpr(*abt, slotMap) : emptyExpr->clone();
 
-    std::unique_ptr<sbe::PlanStage> stage = std::make_unique<sbe::ColumnScanStage>(
-        getCurrentCollection(reqs)->uuid(),
-        csn->indexEntry.catalogName,
-        std::vector<std::string>{csn->allFields.begin(), csn->allFields.end()},
-        ridSlot,
-        reconstructedRecordSlot,
-        rowStoreSlot,
-        std::move(rowStoreExpr),
-        _yieldPolicy,
-        csn->nodeId());
+    // Get all the paths but make sure "_id" comes first (the order of paths given to the
+    // column_scan stage defines the order of fields in the reconstructed record).
+    std::vector<std::string> paths;
+    paths.reserve(csn->allFields.size());
+    if (csn->allFields.find("_id") != csn->allFields.end()) {
+        paths.push_back("_id");
+    }
+    for (const auto& path : csn->allFields) {
+        if (path != "_id") {
+            paths.push_back(path);
+        }
+    }
+
+    // Identify the filtered columns, if any, and create slots/expressions for them.
+    std::vector<sbe::ColumnScanStage::PathFilter> filteredPaths;
+    filteredPaths.reserve(csn->filtersByPath.size());
+    for (size_t i = 0; i < paths.size(); i++) {
+        auto itFilter = csn->filtersByPath.find(paths[i]);
+        if (itFilter != csn->filtersByPath.end()) {
+            auto filterInputSlot = _slotIdGenerator.generate();
+
+            auto expr = generatePerColumnFilterExpr(_state, itFilter->second.get(), filterInputSlot)
+                            .extractExpr();
+            filteredPaths.emplace_back(i, std::move(expr), filterInputSlot);
+        }
+    }
+
+    // Tag which of the paths should be included into the output.
+    DepsTracker residual;
+    if (csn->postAssemblyFilter) {
+        match_expression::addDependencies(csn->postAssemblyFilter.get(), &residual);
+    }
+    std::vector<bool> includeInOutput(paths.size(), false);
+    for (size_t i = 0; i < paths.size(); i++) {
+        if (csn->outputFields.find(paths[i]) != csn->outputFields.end() ||
+            residual.fields.find(paths[i]) != residual.fields.end()) {
+            includeInOutput[i] = true;
+        }
+    }
+
+    std::unique_ptr<sbe::PlanStage> stage =
+        std::make_unique<sbe::ColumnScanStage>(getCurrentCollection(reqs)->uuid(),
+                                               csn->indexEntry.identifier.catalogName,
+                                               std::move(paths),
+                                               std::move(includeInOutput),
+                                               ridSlot,
+                                               reconstructedRecordSlot,
+                                               rowStoreSlot,
+                                               std::move(rowStoreExpr),
+                                               std::move(filteredPaths),
+                                               _yieldPolicy,
+                                               csn->nodeId());
 
     // Generate post assembly filter.
     if (csn->postAssemblyFilter) {
@@ -793,6 +915,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                                csn->nodeId());
         stage = std::move(outputStage.stage);
     }
+
     return {std::move(stage), std::move(outputs)};
 }
 
@@ -1087,25 +1210,47 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     auto child = sn->children[0].get();
 
     const auto isCoveredQuery = reqs.getIndexKeyBitset().has_value();
+
+    // Decide whether to use IndexKeySlots when building the child:
+    // - If the query is covered, we must use IndexKeySlots.
+    // - If this is a SORT->IXSCAN and kResult wasn't requested, we prefer to use IndexKeySlots.
+    // - Otherwise, use the kResult slot.
+    bool useIndexKeySlots =
+        isCoveredQuery || (!reqs.has(kResult) && child->getType() == STAGE_IXSCAN);
+
+    auto parentIndexKeyBitset = reqs.getIndexKeyBitset().get_value_or({});
     BSONObj indexKeyPattern;
-    sbe::IndexKeysInclusionSet sortPatternKeyBitSet;
-    if (isCoveredQuery) {
-        // If query is covered, we need to request index key for each part of the sort pattern.
+    sbe::IndexKeysInclusionSet sortPatternKeyBitset;
+    StringMap<size_t> sortSlotPosMap;
+
+    if (useIndexKeySlots) {
+        // If we're using IndexKeySlots, set IndexKeyBitset to request each part of the index
+        // requested by the parent and to request each part of the sort pattern.
         auto indexScan = static_cast<const IndexScanNode*>(getLoneNodeByType(child, STAGE_IXSCAN));
-        tassert(5601701, "Expected index scan below sort for covered query", indexScan);
+        tassert(5601701, "Expected index scan below sort", indexScan);
         indexKeyPattern = indexScan->index.keyPattern;
 
-        StringDataSet sortPaths;
+        StringDataSet sortPathsSet;
         for (const auto& part : sortPattern) {
-            sortPaths.insert(part.fieldPath->fullPath());
+            sortPathsSet.insert(part.fieldPath->fullPath());
         }
 
-        std::vector<std::string> foundPaths;
-        std::tie(sortPatternKeyBitSet, foundPaths) =
-            makeIndexKeyInclusionSet(indexKeyPattern, sortPaths);
-        *childReqs.getIndexKeyBitset() |= sortPatternKeyBitSet;
+        // 'sortPatternKeyBitset' will contain a bit pattern indicating which parts of the index
+        // pattern are needed for sorting. 'sortPaths' will contain the field paths used in the
+        // sort pattern, ordered according to the index pattern.
+        std::vector<std::string> sortPaths;
+        std::tie(sortPatternKeyBitset, sortPaths) =
+            makeIndexKeyInclusionSet(indexKeyPattern, sortPathsSet);
+        childReqs.getIndexKeyBitset() = sortPatternKeyBitset | parentIndexKeyBitset;
+
+        // Build a map that maps each field path to its position in 'sortPaths'. This will help us
+        // later when we need to convert the output of makeIndexKeyOutputSlotsMatchingParentReqs()
+        // from the index pattern's order to sort pattern's order.
+        for (size_t i = 0; i < sortPaths.size(); ++i) {
+            sortSlotPosMap.emplace(std::move(sortPaths[i]), i);
+        }
     } else {
-        // If query is not covered, child is required to produce whole document for sorting.
+        // Otherwise, set kResult.
         childReqs.set(kResult);
     }
 
@@ -1133,43 +1278,90 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     }
 
     sbe::value::SlotVector orderBy;
-    orderBy.reserve(sortPattern.size());
 
     // Slots for sort stage to forward to parent stage. Values in these slots are not used during
     // sorting.
     auto forwardedSlots = sbe::makeSV();
 
-    // We do not support covered queries on array fields for multikey indexes. This means that if
-    // the query is covered, index keys cannot contain arrays. Since traversal logic and
-    // 'generateSortKey' call below is needed only for arrays, we can omit it for covered queries.
-    if (isCoveredQuery) {
+    if (useIndexKeySlots) {
+        // Handle the case where we are using IndexKeySlots.
         auto indexKeySlots = *outputs.extractIndexKeySlots();
 
         // Currently, 'indexKeySlots' contains slots for two kinds of index keys:
         //  1. Keys requested for sort pattern
-        //  2. Keys requested by parent
-        // We need to filter first category of slots into 'orderBy' vector, since sort stage will
-        // use them for sorting. Second category of slots goes into 'outputs' to be used by parent.
-        auto& parentIndexKeyBitset = *reqs.getIndexKeyBitset();
+        //  2. Keys requested by parent (if any)
+        // The first category of slots needs to go into the 'orderBy' vector. The second category
+        // of slots goes into 'outputs' to be used by the parent.
         auto& childIndexKeyBitset = *childReqs.getIndexKeyBitset();
 
-        orderBy = makeIndexKeyOutputSlotsMatchingParentReqs(
-            indexKeyPattern, sortPatternKeyBitSet, childIndexKeyBitset, indexKeySlots);
+        // The query planner does not support covered queries or SORT->IXSCAN plans on array fields
+        // for multikey indexes. Therefore we don't have to generate the parallel arrays check or
+        // the sort key traversal logic.
+        auto sortIndexKeySlots = makeIndexKeyOutputSlotsMatchingParentReqs(
+            indexKeyPattern, sortPatternKeyBitset, childIndexKeyBitset, indexKeySlots);
 
-        auto indexKeySlotsForParent = makeIndexKeyOutputSlotsMatchingParentReqs(
-            indexKeyPattern, parentIndexKeyBitset, childIndexKeyBitset, indexKeySlots);
-        outputs.setIndexKeySlots(std::move(indexKeySlotsForParent));
+        // 'sortIndexKeySlots' is ordered according to the index pattern, but 'orderBy' needs to
+        // be ordered according to the sort pattern. We use 'sortIndexKeySlots' to convert from
+        // the index pattern's order to the sort pattern's order.
+        orderBy.reserve(sortPattern.size());
+        for (const auto& part : sortPattern) {
+            auto it = sortSlotPosMap.find(part.fieldPath->fullPath());
+            tassert(6843200,
+                    str::stream() << "Did not find sort path '" << part.fieldPath->fullPath()
+                                  << "' in sort path map",
+                    it != sortSlotPosMap.end());
 
-        // In forwarded slots we need to include all slots requested by parent excluding slots from
-        // 'orderBy' vector.
-        auto forwardedIndexKeyBitset = parentIndexKeyBitset & (~sortPatternKeyBitSet);
-        forwardedSlots = makeIndexKeyOutputSlotsMatchingParentReqs(indexKeyPattern,
-                                                                   forwardedIndexKeyBitset,
-                                                                   childIndexKeyBitset,
-                                                                   std::move(indexKeySlots));
+            auto slotPos = it->second;
+            tassert(6843201,
+                    str::stream() << "Sort path map for '" << part.fieldPath->fullPath()
+                                  << "' returned an index '" << slotPos
+                                  << "' that is out of bounds",
+                    slotPos >= 0 && slotPos < sortIndexKeySlots.size());
+
+            orderBy.push_back(sortIndexKeySlots[slotPos]);
+        }
+
+        // If a collation is set, generate a ProjectStage that calls collComparisonKey() on each
+        // field in the sort pattern. The "comparison keys" returned by collComparisonKey() will
+        // be used in 'orderBy' instead of the fields' actual values.
+        if (collatorSlot) {
+            sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>> projectMap;
+            auto makeSortKey = [&](sbe::value::SlotId inputSlot) {
+                return makeFunction(
+                    "collComparisonKey"_sd, makeVariable(inputSlot), makeVariable(*collatorSlot));
+            };
+
+            for (size_t idx = 0; idx < orderBy.size(); ++idx) {
+                auto sortKeySlot{_slotIdGenerator.generate()};
+                projectMap.emplace(sortKeySlot, makeSortKey(orderBy[idx]));
+                orderBy[idx] = sortKeySlot;
+            }
+
+            inputStage = sbe::makeS<sbe::ProjectStage>(
+                std::move(inputStage), std::move(projectMap), root->nodeId());
+        }
+
+        if (parentIndexKeyBitset.any()) {
+            auto parentIndexKeySlots = makeIndexKeyOutputSlotsMatchingParentReqs(
+                indexKeyPattern, parentIndexKeyBitset, childIndexKeyBitset, indexKeySlots);
+
+            // The 'forwardedSlots' vector should include all slots requested by parent excluding
+            // any slots that appear in the 'orderBy' vector.
+            sbe::value::SlotSet orderBySlotsSet(orderBy.begin(), orderBy.end());
+            for (auto slot : parentIndexKeySlots) {
+                if (!orderBySlotsSet.count(slot)) {
+                    forwardedSlots.push_back(slot);
+                }
+            }
+
+            // Make sure to store all of the slots requested by the parent into 'outputs'.
+            outputs.setIndexKeySlots(std::move(parentIndexKeySlots));
+        }
     } else if (!hasPartsWithCommonPrefix) {
+        // Handle the case where we are using kResult and there are no common prefixes.
         sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>> projectMap;
 
+        orderBy.reserve(sortPattern.size());
         for (const auto& part : sortPattern) {
             // Get the top-level field for this sort part. If the field doesn't exist, according to
             // MQL's sorting semantics we should use Null.
@@ -1268,7 +1460,8 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             orderBy[idx] = sortKeySlot;
         }
     } else {
-        // Handle the case where two or more parts of the sort pattern have a common prefix.
+        // Handle the case where we are using kResult and two or more parts of the sort pattern
+        // have a common prefix.
         orderBy = _slotIdGenerator.generateMultiple(1);
         direction = {sbe::value::SortDirection::Ascending};
 
@@ -1279,6 +1472,8 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
         auto collatorSlot = _data.env->getSlotIfExists("collator"_sd);
 
+        // generateSortKey() will handle the parallel arrays check and sort key traversal for us,
+        // so we don't need to generate our own sort key traversal logic in the SBE plan.
         inputStage =
             sbe::makeProjectStage(std::move(inputStage),
                                   root->nodeId(),

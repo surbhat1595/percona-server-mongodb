@@ -38,6 +38,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/catalog/catalog_helpers',
+        '$BUILD_DIR/mongo/db/catalog/collection_crud',
         '$BUILD_DIR/mongo/db/catalog/collection_options',
         '$BUILD_DIR/mongo/db/catalog_raii',
         '$BUILD_DIR/mongo/db/concurrency/exception_util',
@@ -96,7 +97,7 @@ env.Library(
     source='parsed_update_array_filters.cpp',
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/db/matcher/expressions',
+        '$BUILD_DIR/mongo/db/query_expressions',
     ],
 )
 
@@ -120,7 +121,7 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/query_exec',
         '$BUILD_DIR/mongo/db/repl/mock_repl_coord_server_fixture',
         '$BUILD_DIR/mongo/db/repl/oplog_entry',
-        '$BUILD_DIR/mongo/db/session_catalog',
+        '$BUILD_DIR/mongo/db/session/session_catalog',
         '$BUILD_DIR/mongo/db/transaction/transaction',
         'write_ops',
         'write_ops_exec',

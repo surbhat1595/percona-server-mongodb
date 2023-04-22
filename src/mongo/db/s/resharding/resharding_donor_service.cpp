@@ -66,6 +66,7 @@
 
 namespace mongo {
 
+MONGO_FAIL_POINT_DEFINE(reshardingPauseDonorBeforeCatalogCacheRefresh);
 MONGO_FAIL_POINT_DEFINE(reshardingDonorFailsAfterTransitionToDonatingOplogEntries);
 MONGO_FAIL_POINT_DEFINE(removeDonorDocFailpoint);
 
@@ -203,7 +204,7 @@ std::shared_ptr<repl::PrimaryOnlyService::Instance> ReshardingDonorService::cons
     BSONObj initialState) {
     return std::make_shared<DonorStateMachine>(
         this,
-        ReshardingDonorDocument::parse({"DonorStateMachine"}, initialState),
+        ReshardingDonorDocument::parse(IDLParserContext{"DonorStateMachine"}, initialState),
         std::make_unique<ExternalStateImpl>(),
         _serviceContext);
 }
@@ -588,6 +589,8 @@ void ReshardingDonorService::DonorStateMachine::
     // with a SnapshotUnavailable error response.
     {
         auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
+        reshardingPauseDonorBeforeCatalogCacheRefresh.pauseWhileSet(opCtx.get());
+
         _externalState->refreshCatalogCache(opCtx.get(), _metadata.getTempReshardingNss());
         _externalState->waitForCollectionFlush(opCtx.get(), _metadata.getTempReshardingNss());
     }

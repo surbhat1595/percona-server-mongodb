@@ -158,26 +158,26 @@ inline Status validatePrivateKeyPEMPayload(const StringData& payload) {
 #endif
 }
 
-inline Status protocolTenantIdCompatibilityCheck(const MigrationProtocolEnum& protocol,
-                                                 const std::string& tenantId) noexcept {
+inline void protocolTenantIdCompatibilityCheck(const MigrationProtocolEnum& protocol,
+                                               const boost::optional<StringData>& tenantId) {
     switch (protocol) {
         case MigrationProtocolEnum::kShardMerge: {
-            // TODO SERVER-63454: Add a check to ensure tenantId is not provided for 'Merge'
-            // protocol.
+            uassert(ErrorCodes::InvalidOptions,
+                    str::stream() << "'tenantId' must be empty for protocol '"
+                                  << MigrationProtocol_serializer(protocol) << "'",
+                    !tenantId);
             break;
         }
         case MigrationProtocolEnum::kMultitenantMigrations: {
-            if (tenantId.empty()) {
-                return Status(ErrorCodes::InvalidOptions,
-                              str::stream() << "'tenantId' is required for protocol '"
-                                            << MigrationProtocol_serializer(protocol) << "'");
-            }
+            uassert(ErrorCodes::InvalidOptions,
+                    str::stream() << "'tenantId' is required for protocol '"
+                                  << MigrationProtocol_serializer(protocol) << "'",
+                    tenantId);
             break;
         }
         default:
             MONGO_UNREACHABLE;
     }
-    return Status::OK();
 }
 
 inline void protocolStorageOptionsCompatibilityCheck(OperationContext* opCtx,

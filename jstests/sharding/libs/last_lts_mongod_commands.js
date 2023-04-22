@@ -22,8 +22,11 @@ const commandsAddedToMongodSinceLastLTS = [
     "clusterGetMore",
     "clusterInsert",
     "clusterUpdate",
+    "getChangeStreamState",
     "getClusterParameter",
+    "listDatabasesForAllTenants",
     "rotateCertificates",
+    "setChangeStreamState",
     "setClusterParameter",
     "setUserWriteBlockMode",
 ];

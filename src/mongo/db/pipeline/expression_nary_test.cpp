@@ -38,9 +38,9 @@
 #include "mongo/db/json.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/pipeline/expression_dependencies.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/dbtests/dbtests.h"
-#include "mongo/unittest/unittest.h"
 
 namespace ExpressionTests {
 using boost::intrusive_ptr;
@@ -179,7 +179,7 @@ protected:
     void assertDependencies(const intrusive_ptr<Testable>& expr,
                             const BSONArray& expectedDependencies) {
         DepsTracker dependencies;
-        expr->addDependencies(&dependencies);
+        expression::addDependencies(expr.get(), &dependencies);
         BSONArrayBuilder dependenciesBson;
         for (OrderedPathSet::const_iterator i = dependencies.fields.begin();
              i != dependencies.fields.end();

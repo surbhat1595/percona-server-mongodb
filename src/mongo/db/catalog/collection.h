@@ -29,7 +29,6 @@
 
 #pragma once
 
-#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -38,37 +37,27 @@
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/mutable/damage_vector.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/catalog/collection_operation_source.h"
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/logical_session_id.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/storage/bson_collection_catalog_entry.h"
-#include "mongo/db/storage/capped_callback.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/db/yieldable.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/platform/mutex.h"
-#include "mongo/stdx/condition_variable.h"
 #include "mongo/util/decorable.h"
 
 namespace mongo {
 
-class CappedCallback;
 class CollectionPtr;
-class IndexCatalog;
-class IndexCatalogEntry;
-class MatchExpression;
-class OpDebug;
-class OperationContext;
-class RecordCursor;
 
 /**
  * Holds information update an update operation.
@@ -99,59 +88,6 @@ struct CollectionUpdateArgs {
 
     // Set if OpTimes were reserved for the update ahead of time.
     std::vector<OplogSlot> oplogSlots;
-};
-
-/**
- * Queries with the awaitData option use this notifier object to wait for more data to be
- * inserted into the capped collection.
- */
-class CappedInsertNotifier {
-public:
-    /**
-     * Wakes up all threads waiting.
-     */
-    void notifyAll() const;
-
-    /**
-     * Waits until 'deadline', or until notifyAll() is called to indicate that new
-     * data is available in the capped collection.
-     *
-     * NOTE: Waiting threads can be signaled by calling kill or notify* methods.
-     */
-    void waitUntil(uint64_t prevVersion, Date_t deadline) const;
-
-    /**
-     * Returns the version for use as an additional wake condition when used above.
-     */
-    uint64_t getVersion() const {
-        return _version;
-    }
-
-    /**
-     * Cancels the notifier if the collection is dropped/invalidated, and wakes all waiting.
-     */
-    void kill();
-
-    /**
-     * Returns true if no new insert notification will occur.
-     */
-    bool isDead();
-
-private:
-    // Signalled when a successful insert is made into a capped collection.
-    mutable stdx::condition_variable _notifier;
-
-    // Mutex used with '_notifier'. Protects access to '_version'.
-    mutable Mutex _mutex = MONGO_MAKE_LATCH("CappedInsertNotifier::_mutex");
-
-    // A counter, incremented on insertion of new data into the capped collection.
-    //
-    // The condition which '_cappedNewDataNotifier' is being notified of is an increment of this
-    // counter. Access to this counter is synchronized with '_mutex'.
-    mutable uint64_t _version = 0;
-
-    // True once the notifier is dead.
-    bool _dead = false;
 };
 
 /**
@@ -263,11 +199,6 @@ public:
         StatusWith<std::shared_ptr<MatchExpression>> filter = {nullptr};
     };
 
-    /**
-     * Callback function for callers of insertDocumentForBulkLoader().
-     */
-    using OnRecordInsertedFn = std::function<Status(const RecordId& loc)>;
-
     Collection() = default;
     virtual ~Collection() = default;
 
@@ -342,6 +273,13 @@ public:
     virtual std::pair<SchemaValidationResult, Status> checkValidation(
         OperationContext* opCtx, const BSONObj& document) const = 0;
 
+    /**
+     * Extension of `checkValidation` above which converts the tri-modal return value into either a
+     * successful or failed status, printing warning if necessary.
+     */
+    virtual Status checkValidationAndParseResult(OperationContext* opCtx,
+                                                 const BSONObj& document) const = 0;
+
     virtual bool requiresIdIndex() const = 0;
 
     virtual Snapshotted<BSONObj> docFor(OperationContext* opCtx, const RecordId& loc) const = 0;
@@ -395,50 +333,6 @@ public:
                                 StoreDeletedDoc storeDeletedDoc = StoreDeletedDoc::Off,
                                 CheckRecordId checkRecordId = CheckRecordId::Off) const = 0;
 
-    /*
-     * Inserts all documents inside one WUOW.
-     * Caller should ensure vector is appropriately sized for this.
-     * If any errors occur (including WCE), caller should retry documents individually.
-     *
-     * 'opDebug' Optional argument. When not null, will be used to record operation statistics.
-     */
-    virtual Status insertDocuments(OperationContext* opCtx,
-                                   std::vector<InsertStatement>::const_iterator begin,
-                                   std::vector<InsertStatement>::const_iterator end,
-                                   OpDebug* opDebug,
-                                   bool fromMigrate = false) const = 0;
-
-    /**
-     * this does NOT modify the doc before inserting
-     * i.e. will not add an _id field for documents that are missing it
-     *
-     * 'opDebug' Optional argument. When not null, will be used to record operation statistics.
-     */
-    virtual Status insertDocument(OperationContext* opCtx,
-                                  const InsertStatement& doc,
-                                  OpDebug* opDebug,
-                                  bool fromMigrate = false) const = 0;
-
-    /**
-     * Callers must ensure no document validation is performed for this collection when calling
-     * this method.
-     */
-    virtual Status insertDocumentsForOplog(OperationContext* opCtx,
-                                           std::vector<Record>* records,
-                                           const std::vector<Timestamp>& timestamps) const = 0;
-
-    /**
-     * Inserts a document into the record store for a bulk loader that manages the index building
-     * outside this Collection. The bulk loader is notified with the RecordId of the document
-     * inserted into the RecordStore.
-     *
-     * NOTE: It is up to caller to commit the indexes.
-     */
-    virtual Status insertDocumentForBulkLoader(
-        OperationContext* opCtx,
-        const BSONObj& doc,
-        const OnRecordInsertedFn& onRecordInserted) const = 0;
-
     /**
      * Updates the document @ oldLocation with newDoc.
      *
@@ -484,19 +378,6 @@ public:
      * on the collection.
      */
     virtual Status truncate(OperationContext* opCtx) = 0;
-
-    /**
-     * Truncate documents newer than the document at 'end' from the capped
-     * collection.  The collection cannot be completely emptied using this
-     * function.  An assertion will be thrown if that is attempted.
-     * @param inclusive - Truncate 'end' as well iff true
-     *
-     * The caller should hold a collection X lock and ensure there are no index builds in progress
-     * on the collection.
-     */
-    virtual void cappedTruncateAfter(OperationContext* opCtx,
-                                     const RecordId& end,
-                                     bool inclusive) const = 0;
 
     /**
      * Returns a non-ok Status if validator is not legal for this collection.
@@ -730,6 +611,26 @@ public:
     virtual void replaceMetadata(OperationContext* opCtx,
                                  std::shared_ptr<BSONCollectionCatalogEntry::MetaData> md) = 0;
 
+    /**
+     * Specifies whether writes to this collection should X-lock the metadata resource. It is only
+     * set for replicated, non-clustered capped collections. Such collections require writes to be
+     * serialized on the secondary in order to guarantee insertion order (SERVER-21483). This
+     * exclusive access to the metadata resource prevents the primary from executing with more
+     * concurrency than secondaries - thus helping secondaries keep up, and protects the
+     * 'cappedFirstRecord' value for the collection. See SERVER-21646.
+     *
+     * On the other hand, capped clustered collections with a monotonically increasing cluster key
+     * natively guarantee preservation of the insertion order, and don't need serialisation, so we
+     * allow concurrent inserts for clustered capped collections.
+     */
+    virtual bool needsCappedLock() const = 0;
+
+    /**
+     * Checks whether the collection is capped and if the current data size or number of records
+     * exceeds cappedMaxSize or cappedMaxDocs respectively.
+     */
+    virtual bool isCappedAndNeedsDelete(OperationContext* opCtx) const = 0;
+
     //
     // Stats
     //
@@ -738,28 +639,12 @@ public:
     virtual long long getCappedMaxDocs() const = 0;
     virtual long long getCappedMaxSize() const = 0;
 
-    /**
-     * Returns a pointer to a capped callback object.
-     * The storage engine interacts with capped collections through a CappedCallback interface.
-     */
-    virtual CappedCallback* getCappedCallback() = 0;
-    virtual const CappedCallback* getCappedCallback() const = 0;
-
-    /**
-     * Get a pointer to a capped insert notifier object. The caller can wait on this object
-     * until it is notified of a new insert into the capped collection.
-     *
-     * It is invalid to call this method unless the collection is capped.
-     */
-    virtual std::shared_ptr<CappedInsertNotifier> getCappedInsertNotifier() const = 0;
-
     virtual long long numRecords(OperationContext* opCtx) const = 0;
 
     /**
      * Return uncompressed collection data size in bytes
      */
     virtual long long dataSize(OperationContext* opCtx) const = 0;
-
 
     /**
      * Returns true if the collection does not contain any records.
@@ -787,6 +672,19 @@ public:
     virtual boost::optional<Timestamp> getMinimumVisibleSnapshot() const = 0;
 
     virtual void setMinimumVisibleSnapshot(Timestamp name) = 0;
+
+
+    /**
+     * Get the timestamp this Collection instance was most recently changed at.
+     * TODO SERVER-68270: Should currently not be used until min visible snapshot is removed
+     */
+    virtual boost::optional<Timestamp> getMinimumValidSnapshot() const = 0;
+
+    /**
+     * Sets the timestamp this Collection instance was most recently changed at.
+     * TODO SERVER-68270: Should currently not be used until min visible snapshot is removed
+     */
+    virtual void setMinimumValidSnapshot(Timestamp name) = 0;
 
     /**
      * Returns the time-series options for this buckets collection, or boost::none if not a
@@ -945,4 +843,5 @@ inline ValidationActionEnum validationActionOrDefault(
 inline ValidationLevelEnum validationLevelOrDefault(boost::optional<ValidationLevelEnum> level) {
     return level.value_or(ValidationLevelEnum::strict);
 }
+
 }  // namespace mongo

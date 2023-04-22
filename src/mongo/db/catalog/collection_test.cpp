@@ -27,16 +27,12 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
-#include <memory>
-
 #include "mongo/bson/oid.h"
 #include "mongo/db/catalog/capped_utils.h"
 #include "mongo/db/catalog/catalog_test_fixture.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_mock.h"
 #include "mongo/db/catalog/collection_validation.h"
+#include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/stdx/thread.h"
@@ -44,15 +40,14 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 
+namespace mongo {
+namespace {
+
 #define ASSERT_ID_EQ(EXPR, ID)                        \
     [](boost::optional<Record> record, RecordId id) { \
         ASSERT(record);                               \
         ASSERT_EQ(record->id, id);                    \
     }((EXPR), (ID));
-
-namespace {
-
-using namespace mongo;
 
 class CollectionTest : public CatalogTestFixture {
 protected:
@@ -80,7 +75,7 @@ TEST_F(CollectionTest, CappedNotifierKillAndIsDead) {
 
     AutoGetCollectionForRead acfr(operationContext(), nss);
     const CollectionPtr& col = acfr.getCollection();
-    auto notifier = col->getCappedInsertNotifier();
+    auto notifier = col->getRecordStore()->getCappedInsertNotifier();
     ASSERT_FALSE(notifier->isDead());
     notifier->kill();
     ASSERT(notifier->isDead());
@@ -92,7 +87,7 @@ TEST_F(CollectionTest, CappedNotifierTimeouts) {
 
     AutoGetCollectionForRead acfr(operationContext(), nss);
     const CollectionPtr& col = acfr.getCollection();
-    auto notifier = col->getCappedInsertNotifier();
+    auto notifier = col->getRecordStore()->getCappedInsertNotifier();
     ASSERT_EQ(notifier->getVersion(), 0u);
 
     auto before = Date_t::now();
@@ -108,7 +103,7 @@ TEST_F(CollectionTest, CappedNotifierWaitAfterNotifyIsImmediate) {
 
     AutoGetCollectionForRead acfr(operationContext(), nss);
     const CollectionPtr& col = acfr.getCollection();
-    auto notifier = col->getCappedInsertNotifier();
+    auto notifier = col->getRecordStore()->getCappedInsertNotifier();
 
     auto prevVersion = notifier->getVersion();
     notifier->notifyAll();
@@ -127,7 +122,7 @@ TEST_F(CollectionTest, CappedNotifierWaitUntilAsynchronousNotifyAll) {
 
     AutoGetCollectionForRead acfr(operationContext(), nss);
     const CollectionPtr& col = acfr.getCollection();
-    auto notifier = col->getCappedInsertNotifier();
+    auto notifier = col->getRecordStore()->getCappedInsertNotifier();
     auto prevVersion = notifier->getVersion();
     auto thisVersion = prevVersion + 1;
 
@@ -152,7 +147,7 @@ TEST_F(CollectionTest, CappedNotifierWaitUntilAsynchronousKill) {
 
     AutoGetCollectionForRead acfr(operationContext(), nss);
     const CollectionPtr& col = acfr.getCollection();
-    auto notifier = col->getCappedInsertNotifier();
+    auto notifier = col->getRecordStore()->getCappedInsertNotifier();
     auto prevVersion = notifier->getVersion();
 
     auto before = Date_t::now();
@@ -176,12 +171,12 @@ TEST_F(CollectionTest, HaveCappedWaiters) {
 
     AutoGetCollectionForRead acfr(operationContext(), nss);
     const CollectionPtr& col = acfr.getCollection();
-    ASSERT_FALSE(col->getCappedCallback()->haveCappedWaiters());
+    ASSERT(!col->getRecordStore()->haveCappedWaiters());
     {
-        auto notifier = col->getCappedInsertNotifier();
-        ASSERT(col->getCappedCallback()->haveCappedWaiters());
+        auto notifier = col->getRecordStore()->getCappedInsertNotifier();
+        ASSERT(col->getRecordStore()->haveCappedWaiters());
     }
-    ASSERT_FALSE(col->getCappedCallback()->haveCappedWaiters());
+    ASSERT(!col->getRecordStore()->haveCappedWaiters());
 }
 
 TEST_F(CollectionTest, NotifyCappedWaitersIfNeeded) {
@@ -190,11 +185,11 @@ TEST_F(CollectionTest, NotifyCappedWaitersIfNeeded) {
 
     AutoGetCollectionForRead acfr(operationContext(), nss);
     const CollectionPtr& col = acfr.getCollection();
-    col->getCappedCallback()->notifyCappedWaitersIfNeeded();
+    col->getRecordStore()->notifyCappedWaitersIfNeeded();
     {
-        auto notifier = col->getCappedInsertNotifier();
+        auto notifier = col->getRecordStore()->getCappedInsertNotifier();
         ASSERT_EQ(notifier->getVersion(), 0u);
-        col->getCappedCallback()->notifyCappedWaitersIfNeeded();
+        col->getRecordStore()->notifyCappedWaitersIfNeeded();
         ASSERT_EQ(notifier->getVersion(), 1u);
     }
 }
@@ -205,16 +200,16 @@ TEST_F(CollectionTest, AsynchronouslyNotifyCappedWaitersIfNeeded) {
 
     AutoGetCollectionForRead acfr(operationContext(), nss);
     const CollectionPtr& col = acfr.getCollection();
-    auto notifier = col->getCappedInsertNotifier();
+    auto notifier = col->getRecordStore()->getCappedInsertNotifier();
     auto prevVersion = notifier->getVersion();
     auto thisVersion = prevVersion + 1;
 
     auto before = Date_t::now();
     notifier->waitUntil(prevVersion, before + Milliseconds(25));
-    stdx::thread thread([before, prevVersion, &col] {
+    stdx::thread thread([before, prevVersion, notifier] {
         auto after = Date_t::now();
         ASSERT_GTE(after - before, Milliseconds(25));
-        col->getCappedCallback()->notifyCappedWaitersIfNeeded();
+        notifier->notifyAll();
     });
     notifier->waitUntil(prevVersion, before + Seconds(25));
     auto after = Date_t::now();
@@ -555,7 +550,8 @@ TEST_F(CatalogTestFixture, CappedDeleteRecord) {
 
     {
         WriteUnitOfWork wuow(operationContext());
-        ASSERT_OK(coll->insertDocument(operationContext(), InsertStatement(firstDoc), nullptr));
+        ASSERT_OK(collection_internal::insertDocument(
+            operationContext(), coll, InsertStatement(firstDoc), nullptr));
         wuow.commit();
     }
 
@@ -564,7 +560,8 @@ TEST_F(CatalogTestFixture, CappedDeleteRecord) {
     // Inserting the second document will remove the first one.
     {
         WriteUnitOfWork wuow(operationContext());
-        ASSERT_OK(coll->insertDocument(operationContext(), InsertStatement(secondDoc), nullptr));
+        ASSERT_OK(collection_internal::insertDocument(
+            operationContext(), coll, InsertStatement(secondDoc), nullptr));
         wuow.commit();
     }
 
@@ -599,7 +596,8 @@ TEST_F(CatalogTestFixture, CappedDeleteMultipleRecords) {
         WriteUnitOfWork wuow(operationContext());
         for (int i = 0; i < nToInsertFirst; i++) {
             BSONObj doc = BSON("_id" << i);
-            ASSERT_OK(coll->insertDocument(operationContext(), InsertStatement(doc), nullptr));
+            ASSERT_OK(collection_internal::insertDocument(
+                operationContext(), coll, InsertStatement(doc), nullptr));
         }
         wuow.commit();
     }
@@ -610,7 +608,8 @@ TEST_F(CatalogTestFixture, CappedDeleteMultipleRecords) {
         WriteUnitOfWork wuow(operationContext());
         for (int i = nToInsertFirst; i < nToInsertFirst + nToInsertSecond; i++) {
             BSONObj doc = BSON("_id" << i);
-            ASSERT_OK(coll->insertDocument(operationContext(), InsertStatement(doc), nullptr));
+            ASSERT_OK(collection_internal::insertDocument(
+                operationContext(), coll, InsertStatement(doc), nullptr));
         }
         wuow.commit();
     }
@@ -790,7 +789,8 @@ TEST_F(CollectionTest, CappedCursorRollover) {
         WriteUnitOfWork wuow(operationContext());
         for (int i = 0; i < numToInsertFirst; ++i) {
             const BSONObj doc = BSON("_id" << i);
-            ASSERT_OK(coll->insertDocument(operationContext(), InsertStatement(doc), nullptr));
+            ASSERT_OK(collection_internal::insertDocument(
+                operationContext(), coll, InsertStatement(doc), nullptr));
         }
         wuow.commit();
     }
@@ -808,7 +808,8 @@ TEST_F(CollectionTest, CappedCursorRollover) {
         WriteUnitOfWork wuow(operationContext());
         for (int i = numToInsertFirst; i < numToInsertFirst + 10; ++i) {
             const BSONObj doc = BSON("_id" << i);
-            ASSERT_OK(coll->insertDocument(operationContext(), InsertStatement(doc), nullptr));
+            ASSERT_OK(collection_internal::insertDocument(
+                operationContext(), coll, InsertStatement(doc), nullptr));
         }
         wuow.commit();
     }
@@ -855,3 +856,4 @@ TEST_F(CatalogTestFixture, CappedCursorYieldFirst) {
 }
 
 }  // namespace
+}  // namespace mongo

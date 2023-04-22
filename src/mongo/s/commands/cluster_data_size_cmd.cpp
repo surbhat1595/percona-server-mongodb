@@ -55,9 +55,7 @@ public:
         using InvocationBase::InvocationBase;
 
         NamespaceString ns() const final {
-            // TODO(SERVER-67516) Use request.getDbName() to get DatabaseName
-            const auto& nss = request().getCommandParameter();
-            return NamespaceString(request().getDollarTenant(), nss.db(), nss.coll());
+            return request().getCommandParameter();
         }
 
         bool supportsWriteConcern() const final {
@@ -104,7 +102,7 @@ public:
                 const auto& res = shardResponse.data;
                 uassertStatusOK(getStatusFromCommandResult(res));
 
-                auto parsedResponse = Reply::parse({"dataSize"}, res);
+                auto parsedResponse = Reply::parse(IDLParserContext{"dataSize"}, res);
                 size += parsedResponse.getSize();
                 numObjects += parsedResponse.getNumObjects();
                 millis += parsedResponse.getMillis();

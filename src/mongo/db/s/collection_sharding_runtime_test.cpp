@@ -88,8 +88,10 @@ TEST_F(CollectionShardingRuntimeTest,
     CollectionShardingRuntime csr(getServiceContext(), kTestNss, executor());
     ASSERT_FALSE(csr.getCollectionDescription(opCtx).isSharded());
     auto metadata = makeShardedMetadata(opCtx);
-    ScopedSetShardRole scopedSetShardRole{
-        opCtx, kTestNss, metadata.getShardVersion(), boost::none /* databaseVersion */};
+    ScopedSetShardRole scopedSetShardRole{opCtx,
+                                          kTestNss,
+                                          ShardVersion(metadata.getShardVersion()),
+                                          boost::none /* databaseVersion */};
     ASSERT_THROWS_CODE(csr.getCollectionDescription(opCtx), DBException, ErrorCodes::StaleConfig);
 }
 
@@ -107,8 +109,10 @@ TEST_F(CollectionShardingRuntimeTest,
     OperationContext* opCtx = operationContext();
     auto metadata = makeShardedMetadata(opCtx);
     csr.setFilteringMetadata(opCtx, metadata);
-    ScopedSetShardRole scopedSetShardRole{
-        opCtx, kTestNss, metadata.getShardVersion(), boost::none /* databaseVersion */};
+    ScopedSetShardRole scopedSetShardRole{opCtx,
+                                          kTestNss,
+                                          ShardVersion(metadata.getShardVersion()),
+                                          boost::none /* databaseVersion */};
     ASSERT_TRUE(csr.getCollectionDescription(opCtx).isSharded());
 }
 
@@ -171,8 +175,10 @@ TEST_F(CollectionShardingRuntimeTest,
     OperationContext* opCtx = operationContext();
     auto metadata = makeShardedMetadata(opCtx);
     csr.setFilteringMetadata(opCtx, metadata);
-    ScopedSetShardRole scopedSetShardRole{
-        opCtx, kTestNss, metadata.getShardVersion(), boost::none /* databaseVersion */};
+    ScopedSetShardRole scopedSetShardRole{opCtx,
+                                          kTestNss,
+                                          ShardVersion(metadata.getShardVersion()),
+                                          boost::none /* databaseVersion */};
     ASSERT_EQ(csr.getNumMetadataManagerChanges_forTest(), 1);
 
     // Set it again with a different metadata object (UUID is generated randomly in
@@ -200,7 +206,7 @@ TEST_F(CollectionShardingRuntimeTest, ReturnUnshardedMetadataInServerlessMode) {
     ScopedSetShardRole scopedSetShardRole1{
         opCtx,
         testNss,
-        ChunkVersion::UNSHARDED(), /* shardVersion */
+        ShardVersion::UNSHARDED(), /* shardVersion */
         boost::none                /* databaseVersion */
     };
 
@@ -215,8 +221,8 @@ TEST_F(CollectionShardingRuntimeTest, ReturnUnshardedMetadataInServerlessMode) {
     ScopedSetShardRole scopedSetShardRole2{
         opCtx,
         NamespaceString::kLogicalSessionsNamespace,
-        ChunkVersion({OID::gen(), Timestamp(1, 1)}, {1, 0}), /* shardVersion */
-        boost::none                                          /* databaseVersion */
+        ShardVersion(ChunkVersion({OID::gen(), Timestamp(1, 1)}, {1, 0})), /* shardVersion */
+        boost::none                                                        /* databaseVersion */
     };
 
     CollectionShardingRuntime csrLogicalSession(
@@ -357,7 +363,7 @@ public:
             OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
                 unsafeCreateCollection(operationContext());
             uassertStatusOK(createCollection(
-                operationContext(), kTestNss.db().toString(), BSON("create" << kTestNss.coll())));
+                operationContext(), kTestNss.dbName(), BSON("create" << kTestNss.coll())));
         }
 
         AutoGetCollection autoColl(operationContext(), kTestNss, MODE_IX);
@@ -532,6 +538,44 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
     auto status =
         CollectionShardingRuntime::waitForClean(opCtx, kTestNss, uuid(), range, Date_t::max());
 
+    ASSERT_OK(status);
+    ASSERT(cleanupComplete.isReady());
+}
+
+TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
+       WaitForCleanCorrectEvenAfterClearFollowedBySetFilteringMetadata) {
+    globalFailPointRegistry().find("suspendRangeDeletion")->setMode(FailPoint::alwaysOn);
+    ScopeGuard resetFailPoint(
+        [=] { globalFailPointRegistry().find("suspendRangeDeletion")->setMode(FailPoint::off); });
+
+    OperationContext* opCtx = operationContext();
+    auto metadata = makeShardedMetadata(opCtx, uuid());
+    csr().setFilteringMetadata(opCtx, metadata);
+    const ChunkRange range = ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY));
+    const auto task = insertRangeDeletionTask(opCtx, kTestNss, uuid(), range, 0);
+
+    // Schedule range deletion that will hang due to `suspendRangeDeletion` failpoint
+    auto cleanupComplete =
+        csr().cleanUpRange(range, task.getId(), CollectionShardingRuntime::CleanWhen::kNow);
+
+    // Clear and set again filtering metadata
+    csr().clearFilteringMetadata(opCtx);
+    csr().setFilteringMetadata(opCtx, metadata);
+
+    auto waitForCleanUp = [&](Date_t timeout) {
+        return CollectionShardingRuntime::waitForClean(opCtx, kTestNss, uuid(), range, timeout);
+    };
+
+    // Check that the hanging range deletion is still tracked even following a clear of the metadata
+    auto status = waitForCleanUp(Date_t::now() + Milliseconds(100));
+    ASSERT_NOT_OK(status);
+    ASSERT(!cleanupComplete.isReady());
+
+    globalFailPointRegistry().find("suspendRangeDeletion")->setMode(FailPoint::off);
+    resetFailPoint.dismiss();
+
+    // Check that the range deletion is not tracked anymore after it succeeds
+    status = waitForCleanUp(Date_t::max());
     ASSERT_OK(status);
     ASSERT(cleanupComplete.isReady());
 }

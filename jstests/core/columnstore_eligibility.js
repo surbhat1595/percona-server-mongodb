@@ -1,8 +1,8 @@
 /**
  * Tests the eligibility of certain queries to use a columnstore index.
  * @tags: [
- *   # TODO SERVER-66925 We could potentially need to resume an index build in the event of a
- *   # stepdown, which is not yet implemented.
+ *   # Refusing to run a test that issues an aggregation command with explain because it may return
+ *   # incomplete results if interrupted by a stepdown.
  *   does_not_support_stepdowns,
  *   # Cannot run aggregate with explain in a transaction.
  *   does_not_support_transactions,
@@ -74,7 +74,7 @@ assert(planHasStage(db, explain, "COLUMN_SCAN"), explain);
 
 // Scan the "a.b" column with a predicate. Dotted paths are supported even if there are arrays
 // encountered. See IS_SPARSE Encoding for more details.
-explain = coll.find({'a.b': 2}, {_id: 0, a: 1}).explain();
+explain = coll.find({'a.b': 2}, {_id: 0, 'a.b': 1}).explain();
 assert(planHasStage(db, explain, "COLUMN_SCAN"), explain);
 
 // 'aggregate' command is supported.

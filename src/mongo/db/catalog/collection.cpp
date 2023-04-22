@@ -27,47 +27,15 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/catalog/collection.h"
 
 #include <sstream>
 
+#include "mongo/logv2/log.h"
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
-
 namespace mongo {
-
-//
-// CappedInsertNotifier
-//
-
-void CappedInsertNotifier::notifyAll() const {
-    stdx::lock_guard<Latch> lk(_mutex);
-    ++_version;
-    _notifier.notify_all();
-}
-
-void CappedInsertNotifier::waitUntil(uint64_t prevVersion, Date_t deadline) const {
-    stdx::unique_lock<Latch> lk(_mutex);
-    while (!_dead && prevVersion == _version) {
-        if (stdx::cv_status::timeout == _notifier.wait_until(lk, deadline.toSystemTimePoint())) {
-            return;
-        }
-    }
-}
-
-void CappedInsertNotifier::kill() {
-    stdx::lock_guard<Latch> lk(_mutex);
-    _dead = true;
-    _notifier.notify_all();
-}
-
-bool CappedInsertNotifier::isDead() {
-    stdx::lock_guard<Latch> lk(_mutex);
-    return _dead;
-}
 
 CollectionPtr CollectionPtr::null;
 
@@ -114,7 +82,7 @@ const BSONObj& CollectionPtr::getShardKeyPattern() const {
 
 namespace {
 const auto getFactory = ServiceContext::declareDecoration<std::unique_ptr<Collection::Factory>>();
-}
+}  // namespace
 
 Collection::Factory* Collection::Factory::get(ServiceContext* service) {
     return getFactory(service).get();
@@ -122,11 +90,12 @@ Collection::Factory* Collection::Factory::get(ServiceContext* service) {
 
 Collection::Factory* Collection::Factory::get(OperationContext* opCtx) {
     return getFactory(opCtx->getServiceContext()).get();
-};
+}
 
 void Collection::Factory::set(ServiceContext* service,
                               std::unique_ptr<Collection::Factory> newFactory) {
     auto& factory = getFactory(service);
     factory = std::move(newFactory);
 }
+
 }  // namespace mongo

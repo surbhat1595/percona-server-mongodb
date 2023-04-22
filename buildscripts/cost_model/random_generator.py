@@ -296,6 +296,78 @@ class RandomDistribution:
         return list(chain.from_iterable(result))
 
 
+@dataclass
+class ArrayRandomDistribution(RandomDistribution):
+    """Produces random array sequence of the specified values with the specified distribution."""
+
+    lengths_distr: RandomDistribution
+    value_distr: RandomDistribution
+
+    def __init__(self, lengths_distr: RandomDistribution, value_distr: RandomDistribution):
+        self.lengths_distr = lengths_distr
+        self.value_distr = value_distr
+
+    def generate(self, size: int):
+        """Generate random array sequence of the given size."""
+        arrays = []
+        lengths = self.lengths_distr.generate(size)
+
+        for length in lengths:
+            if not isinstance(length, int):
+                raise ValueError("length must be an int for array generation")
+            values = self.value_distr.generate(length)
+            arrays.append(values)
+        return arrays
+
+
+@dataclass
+class DocumentRandomDistribution(RandomDistribution):
+    """Produces random document sequence of the specified values with the specified distribution."""
+
+    number_of_fields_distr: RandomDistribution
+    fields_distr: RandomDistribution
+    field_to_distribution: dict
+
+    def __init__(self, number_of_fields_distr: RandomDistribution, fields_distr: RandomDistribution,
+                 field_to_distribution: dict):
+        self.number_of_fields_distr = number_of_fields_distr
+        self.fields_distr = fields_distr
+        self.field_to_distribution = field_to_distribution
+
+        for field in self.get_fields():
+            if field not in self.field_to_distribution:
+                raise ValueError("Must provide a RandomDistribution for each field")
+
+    def generate(self, size: int):
+        """Generate random document sequence of the given size."""
+        docs = []
+        nums = self.number_of_fields_distr.generate(size)
+        field_to_values = {}
+
+        # Pre-generate values for each field with corresponding distribution.
+        # Note that not all values generated would be used because the number of fields of a document is randomly generated as well.
+        for field in self.get_fields():
+            field_to_values[field] = self.field_to_distribution[field].generate(size)
+
+        idx = 0
+        for idx, num in enumerate(nums):
+            doc = {}
+            if not isinstance(num, int):
+                raise ValueError("the number of fields must be an int for document generation")
+
+            field_names = self.fields_distr.generate(num)
+            for field in field_names:
+                doc[field] = field_to_values[field][idx]
+
+            docs.append(doc)
+
+        return docs
+
+    def get_fields(self):
+        """Return a list of field names used to generate a random document."""
+        return self.fields_distr.get_values()
+
+
 if __name__ == '__main__':
     from collections import Counter
 
@@ -303,13 +375,20 @@ if __name__ == '__main__':
         """Print distribution."""
         print(f'\n{title}\n')
         rs = distr.generate(size)
-        counter = Counter(rs)
-        for value in distr.get_values():
-            count = counter[value]
-            if isinstance(value, float):
-                print(f'{value:.2f}\t{count}\t{(count//10)*"*"}')
-            else:
-                print(f'{value}\t{count}\t{(count//10)*"*"}')
+        has_arrays = any(isinstance(elem, list) for elem in rs)
+        has_dict = any(isinstance(elem, dict) for elem in rs)
+
+        if not has_arrays and not has_dict:
+            counter = Counter(rs)
+            for value in distr.get_values():
+                count = counter[value]
+                if isinstance(value, float):
+                    print(f'{value:.2f}\t{count}\t{(count//10)*"*"}')
+                else:
+                    print(f'{value}\t{count}\t{(count//10)*"*"}')
+        else:
+            for elem in rs:
+                print(elem)
 
     choice = RandomDistribution.choice(values=['pooh', 'rabbit', 'piglet', 'Chris'],
                                        weights=[0.5, 0.1, 0.1, 0.3])
@@ -331,3 +410,30 @@ if __name__ == '__main__':
     mixed = RandomDistribution.mixed(children=[float_uniform, str_chisquare2, str_normal2],
                                      weight=[0.3, 0.5, 0.2])
     print_distr("Mixed", mixed, 20_000)
+
+    int_normal = RandomDistribution.normal(RangeGenerator(DataType.INTEGER, 2, 10))
+
+    arr_distr = ArrayRandomDistribution(int_normal, mixed)
+    print_distr("Mixed Arrays", arr_distr, 100)
+
+    mixed_with_arrays = RandomDistribution.mixed(children=[float_uniform, str_normal2, arr_distr],
+                                                 weight=[0.3, 0.2, 0.5])
+    nested_arr_distr = ArrayRandomDistribution(int_normal, mixed_with_arrays)
+
+    print_distr("Mixed Nested Arrays", nested_arr_distr, 100)
+
+    simple_doc_distr = DocumentRandomDistribution(
+        RandomDistribution.normal(RangeGenerator(DataType.INTEGER, 1, 2)),
+        RandomDistribution.uniform(["obj"]), {"obj": int_normal})
+
+    field_name_choice = RandomDistribution.uniform(['a', 'b', 'c', 'd', 'e', 'f'])
+
+    field_to_distr = {
+        'a': int_normal, 'b': str_normal, 'c': mixed, 'd': arr_distr, 'e': nested_arr_distr,
+        'f': simple_doc_distr
+    }
+    nested_doc_distr = DocumentRandomDistribution(
+        RandomDistribution.normal(RangeGenerator(DataType.INTEGER, 0, 7)), field_name_choice,
+        field_to_distr)
+
+    print_distr("Nested Document generation", nested_doc_distr, 100)

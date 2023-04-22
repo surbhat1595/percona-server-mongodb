@@ -50,7 +50,7 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/transaction_oplog_application.h"
 #include "mongo/db/server_recovery.h"
-#include "mongo/db/session.h"
+#include "mongo/db/session/session.h"
 #include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/db/storage/durable_history_pin.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
@@ -878,7 +878,8 @@ void ReplicationRecoveryImpl::_truncateOplogTo(OperationContext* opCtx,
                                                        truncateAfterOplogEntryTs);
         }
     }
-    oplogCollection->cappedTruncateAfter(opCtx, truncateAfterRecordId, /*inclusive*/ false);
+    oplogCollection->getRecordStore()->cappedTruncateAfter(
+        opCtx, truncateAfterRecordId, false /*inclusive*/, nullptr /* aboutToDelete callback */);
 
     LOGV2(21554,
           "Replication recovery oplog truncation finished in: {durationMillis}ms",

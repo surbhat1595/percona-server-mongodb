@@ -27,10 +27,6 @@
  *    it in the license file.
  */
 
-#include "mongo/db/ops/write_ops_parsers.h"
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 
 #include <algorithm>
@@ -43,13 +39,12 @@
 #include "mongo/db/internal_transactions_feature_flag_gen.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/write_ops.h"
+#include "mongo/db/ops/write_ops_parsers.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/s/balancer/type_migration.h"
 #include "mongo/db/s/config/index_on_config.h"
 #include "mongo/db/s/sharding_util.h"
-#include "mongo/db/s/type_lockpings.h"
-#include "mongo/db/s/type_locks.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/config_server_version.h"
@@ -57,6 +52,7 @@
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_config_version.h"
+#include "mongo/s/catalog/type_namespace_placement_gen.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/catalog/type_tags.h"
 #include "mongo/s/client/shard_registry.h"
@@ -69,7 +65,6 @@
 #include "mongo/util/log_and_backoff.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
-
 
 namespace mongo {
 namespace {
@@ -443,27 +438,6 @@ Status ShardingCatalogManager::_initConfigIndexes(OperationContext* opCtx) {
     }
 
     result = createIndexOnConfigCollection(
-        opCtx, LocksType::ConfigNS, BSON(LocksType::lockID() << 1), !unique);
-    if (!result.isOK()) {
-        return result.withContext("couldn't create lock id index on config db");
-    }
-
-    result =
-        createIndexOnConfigCollection(opCtx,
-                                      LocksType::ConfigNS,
-                                      BSON(LocksType::state() << 1 << LocksType::process() << 1),
-                                      !unique);
-    if (!result.isOK()) {
-        return result.withContext("couldn't create state and process id index on config db");
-    }
-
-    result = createIndexOnConfigCollection(
-        opCtx, LockpingsType::ConfigNS, BSON(LockpingsType::ping() << 1), !unique);
-    if (!result.isOK()) {
-        return result.withContext("couldn't create lockping ping time index on config db");
-    }
-
-    result = createIndexOnConfigCollection(
         opCtx, TagsType::ConfigNS, BSON(TagsType::ns() << 1 << TagsType::min() << 1), unique);
     if (!result.isOK()) {
         return result.withContext("couldn't create ns_1_min_1 index on config db");
@@ -478,6 +452,19 @@ Status ShardingCatalogManager::_initConfigIndexes(OperationContext* opCtx) {
     if (feature_flags::gGlobalIndexesShardingCatalog.isEnabled(
             serverGlobalParams.featureCompatibility)) {
         result = sharding_util::createGlobalIndexesIndexes(opCtx);
+        if (!result.isOK()) {
+            return result;
+        }
+    }
+
+    if (feature_flags::gHistoricalPlacementShardingCatalog.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        result = createIndexOnConfigCollection(
+            opCtx,
+            NamespaceString::kConfigsvrPlacementHistoryNamespace,
+            BSON(NamespacePlacementType::kNssFieldName
+                 << 1 << NamespacePlacementType::kTimestampFieldName << 1),
+            unique);
         if (!result.isOK()) {
             return result;
         }
@@ -738,10 +725,8 @@ void ShardingCatalogManager::withTransaction(
 
     size_t attempt = 1;
     while (true) {
-        // Some ErrorCategory::Interruption errors are also considered transient transaction
-        // errors. We don't attempt to enumerate them explicitly. Instead, we retry on all
-        // ErrorCategory::Interruption errors (e.g. LockTimeout) and detect whether asr.opCtx()
-        // was killed by explicitly checking if it has been interrupted.
+        // We retry on transient transaction errors like LockTimeout and detect whether
+        // asr.opCtx() was killed by explicitly checking if it has been interrupted.
         asr.opCtx()->checkForInterrupt();
         ++txnNumber;
 

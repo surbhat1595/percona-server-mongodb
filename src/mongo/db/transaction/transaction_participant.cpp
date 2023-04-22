@@ -27,16 +27,14 @@
  *    it in the license file.
  */
 
-
 #define LOGV2_FOR_TRANSACTION(ID, DLEVEL, MESSAGE, ...) \
     LOGV2_DEBUG_OPTIONS(ID, DLEVEL, {logv2::LogComponent::kTransaction}, MESSAGE, ##__VA_ARGS__)
-
-#include "mongo/platform/basic.h"
 
 #include "mongo/db/transaction/transaction_participant.h"
 
 #include <fmt/format.h>
 
+#include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/local_oplog_info.h"
@@ -53,7 +51,6 @@
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/internal_transactions_feature_flag_gen.h"
-#include "mongo/db/logical_session_id.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/ops/update.h"
 #include "mongo/db/ops/write_ops_retryability.h"
@@ -63,7 +60,8 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/s/sharding_write_router.h"
 #include "mongo/db/server_recovery.h"
-#include "mongo/db/session_catalog_mongod.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/stats/fill_locker_info.h"
 #include "mongo/db/storage/flow_control.h"
 #include "mongo/db/transaction/retryable_writes_stats.h"
@@ -80,7 +78,6 @@
 #include "mongo/util/net/socket_utils.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
-
 
 namespace mongo {
 using namespace fmt::literals;
@@ -421,7 +418,8 @@ void updateSessionEntry(OperationContext* opCtx,
 
     if (recordId.isNull()) {
         // Upsert case.
-        auto status = collection->insertDocument(opCtx, InsertStatement(updateMod), nullptr, false);
+        auto status = collection_internal::insertDocument(
+            opCtx, *collection, InsertStatement(updateMod), nullptr, false);
 
         if (status == ErrorCodes::DuplicateKey) {
             throwWriteConflictException(

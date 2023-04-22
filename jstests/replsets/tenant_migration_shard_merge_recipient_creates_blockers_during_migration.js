@@ -25,28 +25,38 @@ const existingRecipientTenantId = "existingRecipientTenantId";
 
 const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
 
+// Note: including this explicit early return here due to the fact that multiversion
+// suites will execute this test without featureFlagShardMerge enabled (despite the
+// presence of the featureFlagShardMerge tag above), which means the test will attempt
+// to run a multi-tenant migration and fail.
+if (!TenantMigrationUtil.isShardMergeEnabled(
+        tenantMigrationTest.getDonorPrimary().getDB("admin"))) {
+    tenantMigrationTest.stop();
+    jsTestLog("Skipping Shard Merge-specific test");
+    return;
+}
+
 function assertRecipientAccessBlockerPresentFor({tenantId, migrationId}) {
-    const {nodes: recipientNodes} = tenantMigrationTest.getRecipientRst();
+    const {nodes} = tenantMigrationTest.getRecipientRst();
 
     const {recipientAccessBlockers} =
-        TenantMigrationUtil.getTenantMigrationAccessBlockers({recipientNodes, tenantId});
+        TenantMigrationUtil.getTenantMigrationAccessBlockers({recipientNodes: nodes, tenantId});
 
     assert.eq(recipientAccessBlockers.length,
-              recipientNodes.length,
+              nodes.length,
               `recipient access blocker count for "${tenantId}"`);
 
-    recipientAccessBlockers.forEach(({migrationId: recipientAccessBlockerMigrationId}) => {
-        assert.eq(recipientAccessBlockerMigrationId,
-                  migrationId,
-                  `recipient access blocker for "${tenantId}"`);
+    recipientAccessBlockers.forEach(accessBlocker => {
+        assert.eq(
+            accessBlocker.migrationId, migrationId, `recipient access blocker for "${tenantId}"`);
     });
 }
 
 function assertRecipientAccessBlockerNotPresentFor({tenantId, migrationId}) {
-    const {nodes: recipientNodes} = tenantMigrationTest.getRecipientRst();
+    const {nodes} = tenantMigrationTest.getRecipientRst();
 
     const {recipientAccessBlockers} =
-        TenantMigrationUtil.getTenantMigrationAccessBlockers({recipientNodes, tenantId});
+        TenantMigrationUtil.getTenantMigrationAccessBlockers({recipientNodes: nodes, tenantId});
 
     assert.eq(
         recipientAccessBlockers.length, 0, `found recipient access blocker for "${tenantId}"`);
@@ -66,8 +76,6 @@ const waitInFailPoint = configureFailPoint(recipientPrimary, failpoint, {action:
 const migrationId = UUID();
 const migrationOpts = {
     migrationIdString: extractUUIDFromObject(migrationId),
-    // TODO (SERVER-63454): Remove tenantId.
-    tenantId,
 };
 
 assert.commandWorked(tenantMigrationTest.startMigration(migrationOpts));

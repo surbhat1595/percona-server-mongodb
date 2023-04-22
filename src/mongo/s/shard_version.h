@@ -28,7 +28,8 @@
  */
 #pragma once
 
-#include "mongo/s/chunk_version_gen.h"
+#include "mongo/s/chunk_version.h"
+#include "mongo/s/index_version.h"
 
 namespace mongo {
 
@@ -39,7 +40,7 @@ namespace mongo {
  * network requests and the shard versioning protocol.
  *
  */
-class ShardVersion : public ChunkVersion {
+class ShardVersion : public ChunkVersion, public CollectionIndexes {
 public:
     /**
      * The name for the shard version information field, which shard-aware commands should include
@@ -47,24 +48,27 @@ public:
      */
     static constexpr StringData kShardVersionField = "shardVersion"_sd;
 
-    ShardVersion(ChunkVersion chunkVersion) : ChunkVersion(chunkVersion) {}
+    ShardVersion(ChunkVersion chunkVersion, CollectionIndexes indexVersion);
 
-    ShardVersion() : ShardVersion(ChunkVersion()) {}
+    ShardVersion(ChunkVersion chunkVersion)
+        : CollectionGeneration(chunkVersion.epoch(), chunkVersion.getTimestamp()),
+          ChunkVersion(chunkVersion),
+          CollectionIndexes() {}
 
-    static ShardVersion parse(const BSONElement& element) {
-        auto parsedVersion =
-            ChunkVersion60Format::parse(IDLParserContext("ShardVersion"), element.Obj());
-        auto version = parsedVersion.getVersion();
-        return ShardVersion(ChunkVersion({parsedVersion.getEpoch(), parsedVersion.getTimestamp()},
-                                         {version.getSecs(), version.getInc()}));
+    ShardVersion() : ShardVersion(ChunkVersion(), CollectionIndexes()) {}
+
+    static ShardVersion IGNORED() {
+        return ShardVersion(ChunkVersion::IGNORED(), CollectionIndexes::IGNORED());
     }
 
-    void serialize(StringData field, BSONObjBuilder* builder) const {
-        ChunkVersion60Format version;
-        version.setGeneration({_epoch, _timestamp});
-        version.setPlacement(Timestamp(majorVersion(), minorVersion()));
-        builder->append(field, version.toBSON());
+    static ShardVersion UNSHARDED() {
+        return ShardVersion(ChunkVersion::UNSHARDED(), CollectionIndexes::UNSHARDED());
     }
+
+    static ShardVersion parse(const BSONElement& element);
+    void serialize(StringData field, BSONObjBuilder* builder) const;
+
+    std::string toString() const;
 };
 
 }  // namespace mongo

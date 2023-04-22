@@ -20,16 +20,12 @@ env.Library(
         'security_token.idl',
         'validated_tenancy_scope.cpp',
     ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/base',
-    ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/auth/auth',
-        '$BUILD_DIR/mongo/db/multitenancy_params',
+        '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/server_feature_flags',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/idl/feature_flag',
-        '$BUILD_DIR/mongo/idl/idl_parser',
     ],
 )
 
@@ -57,11 +53,10 @@ env.Library(
         'role_name_or_string.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/db/multitenancy_params',
         '$BUILD_DIR/mongo/db/service_context',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/server_base',
         'auth_options',
         'cluster_auth_mode',
         'sasl_options',
@@ -155,13 +150,12 @@ generateBuiltinRoles = env_for_builtin_roles.Command(
 env.Alias('generated-sources', generateBuiltinRoles)
 
 env.Library(
-    target="builtin_roles",
+    target='builtin_roles',
     source=[
         'builtin_roles.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/db/namespace_string',
+        '$BUILD_DIR/mongo/db/server_base',
         'auth',
         'auth_options',
         'authprivilege',
@@ -216,7 +210,6 @@ env.Library(
         'authorization_manager_impl_parameters.idl',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/base/secure_allocator',
         '$BUILD_DIR/mongo/bson/util/bson_extract',
         '$BUILD_DIR/mongo/db/common',
@@ -224,7 +217,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/global_settings',
         '$BUILD_DIR/mongo/db/ldap/ldapmanager',
         '$BUILD_DIR/mongo/db/ldap_options',
-        '$BUILD_DIR/mongo/db/namespace_string',
         '$BUILD_DIR/mongo/idl/feature_flag',
         '$BUILD_DIR/mongo/util/concurrency/thread_pool',
         '$BUILD_DIR/mongo/util/icu',
@@ -243,8 +235,8 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/api_parameters',
         '$BUILD_DIR/mongo/db/audit',  # audit:logLogout in AuthZSession.
+        '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/stats/counters',
-        '$BUILD_DIR/mongo/idl/server_parameter',
         '$BUILD_DIR/mongo/util/caching',
         'auth_types',
         'auth_umc',
@@ -257,11 +249,10 @@ env.Library(
         'authorization_checks.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/catalog/document_validation',
         '$BUILD_DIR/mongo/db/common',
-        '$BUILD_DIR/mongo/db/namespace_string',
         '$BUILD_DIR/mongo/db/pipeline/lite_parsed_document_source',
+        '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/update/update_driver',
         'auth',
         'authorization_manager_global',
@@ -272,7 +263,6 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/audit',
-        '$BUILD_DIR/mongo/idl/server_parameter',
     ],
 )
 
@@ -462,8 +452,8 @@ env.Library(
         'sasl_scram_server_conversation.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/base/secure_allocator',
+        '$BUILD_DIR/mongo/crypto/asymmetric_crypto',
         '$BUILD_DIR/mongo/crypto/rsa_public_key',
         '$BUILD_DIR/mongo/crypto/sha_block_${MONGO_CRYPTO}',
         '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
@@ -476,6 +466,8 @@ env.Library(
         'user',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/server_base',
+        '$BUILD_DIR/mongo/db/service_context',
         'cluster_auth_mode',
     ],
 )
@@ -525,7 +517,7 @@ env.Library(
         'authz_session_external_state_mock.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/matcher/expressions',
+        '$BUILD_DIR/mongo/db/query_expressions',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/db/update/update_driver',
         'auth',
@@ -556,7 +548,8 @@ env.Library(
         'user_cache_acquisition_stats.cpp',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/server_base',
+        '$BUILD_DIR/mongo/db/service_context',
         'auth',
     ],
 )

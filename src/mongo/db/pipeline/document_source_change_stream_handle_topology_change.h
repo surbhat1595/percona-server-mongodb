@@ -34,8 +34,8 @@
 #include "mongo/db/pipeline/change_stream_constants.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_change_stream.h"
+#include "mongo/db/shard_id.h"
 #include "mongo/s/query/document_source_merge_cursors.h"
-#include "mongo/s/shard_id.h"
 
 namespace mongo {
 
@@ -73,6 +73,8 @@ public:
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final {
         return DistributedPlanLogic{nullptr, this, change_stream_constants::kSortSpec};
     }
+
+    void addVariableRefs(std::set<Variables::Id>* refs) const final {}
 
 private:
     DocumentSourceChangeStreamHandleTopologyChange(const boost::intrusive_ptr<ExpressionContext>&);

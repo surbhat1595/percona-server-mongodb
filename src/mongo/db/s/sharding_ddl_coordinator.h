@@ -29,16 +29,16 @@
 
 #pragma once
 
-#include "mongo/db/internal_session_pool.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
-#include "mongo/db/s/dist_lock_manager.h"
+#include "mongo/db/s/ddl_lock_manager.h"
 #include "mongo/db/s/forwardable_operation_metadata.h"
 #include "mongo/db/s/sharding_ddl_coordinator_gen.h"
 #include "mongo/db/s/sharding_ddl_coordinator_service.h"
+#include "mongo/db/session/internal_session_pool.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/future.h"
@@ -170,7 +170,7 @@ private:
     SharedPromise<void> _constructionCompletionPromise;
     SharedPromise<void> _completionPromise;
 
-    std::stack<DistLockManager::ScopedLock> _scopedLocks;
+    std::stack<DDLLockManager::ScopedLock> _scopedLocks;
 };
 
 template <class StateDoc>
@@ -271,7 +271,7 @@ protected:
         };
     }
 
-    void _enterPhase(const Phase& newPhase) {
+    virtual void _enterPhase(const Phase& newPhase) {
         auto newDoc = [&] {
             stdx::lock_guard lk{_docMutex};
             return _doc;

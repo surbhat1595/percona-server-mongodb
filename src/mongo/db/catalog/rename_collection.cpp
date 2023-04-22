@@ -33,6 +33,7 @@
 #include "mongo/db/catalog/catalog_helper.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
+#include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog/drop_collection.h"
@@ -299,7 +300,7 @@ Status renameCollectionWithinDB(OperationContext* opCtx,
     invariant(source.db() == target.db());
     DisableDocumentValidation validationDisabler(opCtx);
 
-    AutoGetDb autoDb(opCtx, source.db(), MODE_IX);
+    AutoGetDb autoDb(opCtx, source.dbName(), MODE_IX);
 
     boost::optional<Lock::CollectionLock> sourceLock;
     boost::optional<Lock::CollectionLock> targetLock;
@@ -353,7 +354,7 @@ Status renameCollectionWithinDBForApplyOps(OperationContext* opCtx,
     invariant(source.db() == target.db());
     DisableDocumentValidation validationDisabler(opCtx);
 
-    AutoGetDb autoDb(opCtx, source.db(), MODE_X);
+    AutoGetDb autoDb(opCtx, source.dbName(), MODE_X);
 
     auto status = checkSourceAndTargetNamespaces(
         opCtx, source, target, options, /* targetExistsAllowed */ true);
@@ -698,15 +699,21 @@ Status renameBetweenDBs(OperationContext* opCtx,
                 }
 
                 OpDebug* const opDebug = nullptr;
-                auto status = autoTmpColl->insertDocuments(
-                    opCtx, stmts.begin(), stmts.end(), opDebug, false /* fromMigrate */);
+                auto status = collection_internal::insertDocuments(opCtx,
+                                                                   *autoTmpColl,
+                                                                   stmts.begin(),
+                                                                   stmts.end(),
+                                                                   opDebug,
+                                                                   false /* fromMigrate */);
                 if (!status.isOK()) {
                     return status;
                 }
 
                 // Used to make sure that a WCE can be handled by this logic without data loss.
                 if (MONGO_unlikely(writeConflictInRenameCollCopyToTmp.shouldFail())) {
-                    throwWriteConflictException();
+                    throwWriteConflictException(
+                        str::stream() << "Hit failpoint '"
+                                      << writeConflictInRenameCollCopyToTmp.getName() << "'.");
                 }
 
                 wunit.commit();

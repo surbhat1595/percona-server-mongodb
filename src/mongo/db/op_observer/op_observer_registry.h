@@ -122,14 +122,13 @@ public:
     }
 
     void onInserts(OperationContext* const opCtx,
-                   const NamespaceString& nss,
-                   const UUID& uuid,
+                   const CollectionPtr& coll,
                    std::vector<InsertStatement>::const_iterator begin,
                    std::vector<InsertStatement>::const_iterator end,
                    bool fromMigrate) override {
         ReservedTimes times{opCtx};
         for (auto& o : _observers)
-            o->onInserts(opCtx, nss, uuid, begin, end, fromMigrate);
+            o->onInserts(opCtx, coll, begin, end, fromMigrate);
     }
 
     void onUpdate(OperationContext* const opCtx, const OplogUpdateEntryArgs& args) override {

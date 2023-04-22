@@ -89,7 +89,8 @@ boost::optional<ClusteredCollectionInfo> parseClusteredInfo(const BSONElement& e
         return makeCanonicalClusteredInfoForLegacyFormat();
     }
 
-    auto indexSpec = ClusteredIndexSpec::parse({"ClusteredUtil::parseClusteredInfo"}, elem.Obj());
+    auto indexSpec = ClusteredIndexSpec::parse(
+        IDLParserContext{"ClusteredUtil::parseClusteredInfo"}, elem.Obj());
     ensureClusteredIndexName(indexSpec);
     return makeCanonicalClusteredInfo(std::move(indexSpec));
 }
@@ -102,7 +103,7 @@ boost::optional<ClusteredCollectionInfo> createClusteredInfoForNewCollection(
 
     auto filteredIndexSpec = indexSpec.removeField("clustered"_sd);
     auto clusteredIndexSpec = ClusteredIndexSpec::parse(
-        {"ClusteredUtil::createClusteredInfoForNewCollection"}, filteredIndexSpec);
+        IDLParserContext{"ClusteredUtil::createClusteredInfoForNewCollection"}, filteredIndexSpec);
     ensureClusteredIndexName(clusteredIndexSpec);
     return makeCanonicalClusteredInfo(std::move(clusteredIndexSpec));
 };
@@ -123,7 +124,7 @@ BSONObj formatClusterKeyForListIndexes(const ClusteredCollectionInfo& collInfo,
 }
 
 bool isClusteredOnId(const boost::optional<ClusteredCollectionInfo>& collInfo) {
-    return clustered_util::matchesClusterKey(BSON("_id" << 1), collInfo);
+    return matchesClusterKey(BSON("_id" << 1), collInfo);
 }
 
 bool matchesClusterKey(const BSONObj& keyPatternObj,

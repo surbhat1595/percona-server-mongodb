@@ -120,11 +120,11 @@ public:
         }
 
         /**
-         * Returns a Future that will be resolved when the work associated with this Instance has
-         * completed to indicate whether the migration is forgotten successfully.
+         * Returns a Future that will be resolved when the instance has been durably marked garbage
+         * collectable.
          */
-        SharedSemiFuture<void> getCompletionFuture() const {
-            return _taskCompletionPromise.getFuture();
+        SharedSemiFuture<void> getForgetMigrationDurableFuture() const {
+            return _forgetMigrationDurablePromise.getFuture();
         }
 
         /**
@@ -582,12 +582,6 @@ public:
         void _compareRecipientAndDonorFCV() const;
 
         /*
-         * Increments either 'totalSuccessfulMigrationsReceived' or 'totalFailedMigrationsReceived'
-         * in TenantMigrationStatistics by examining status and promises.
-         */
-        void _setMigrationStatsOnCompletion(Status completionStatus) const;
-
-        /*
          * Sets up internal state to begin migration.
          */
         void _setup();
@@ -679,9 +673,8 @@ public:
         // Promise that is resolved when the recipientForgetMigration command is received or on
         // stepDown/shutDown with errors.
         SharedPromise<void> _receivedRecipientForgetMigrationPromise;  // (W)
-        // Promise that is resolved when the chain of work kicked off by run() has completed to
-        // indicate whether the state doc is successfully marked as garbage collectable.
-        SharedPromise<void> _taskCompletionPromise;  // (W)
+        // Promise that is resolved when the instance has been durably marked garbage collectable
+        SharedPromise<void> _forgetMigrationDurablePromise;  // (W)
         // Waiters are notified when 'tenantOplogApplier' is valid on restart.
         stdx::condition_variable _restartOplogApplierCondVar;  // (M)
         // Waiters are notified when 'tenantOplogApplier' is ready to use.

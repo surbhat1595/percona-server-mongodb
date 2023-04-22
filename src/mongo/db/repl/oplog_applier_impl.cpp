@@ -27,11 +27,10 @@
  *    it in the license file.
  */
 
-
 #include "mongo/db/repl/oplog_applier_impl.h"
 
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
+#include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
@@ -39,11 +38,11 @@
 #include "mongo/db/change_stream_change_collection_manager.h"
 #include "mongo/db/client.h"
 #include "mongo/db/db_raii.h"
-#include "mongo/db/logical_session_id.h"
 #include "mongo/db/repl/apply_ops.h"
 #include "mongo/db/repl/oplog_applier_utils.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/transaction_oplog_application.h"
+#include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/stats/timer_stats.h"
 #include "mongo/db/storage/control/journal_flusher.h"
@@ -54,7 +53,6 @@
 #include "mongo/util/log_with_sampling.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
-
 
 namespace mongo {
 namespace repl {
@@ -142,8 +140,8 @@ Status _insertDocumentsToOplogAndChangeCollections(
             return {ErrorCodes::NamespaceNotFound, "Oplog collection does not exist"};
         }
 
-        auto status = oplogColl->insertDocuments(
-            opCtx, begin, end, nullptr /* OpDebug */, false /* fromMigrate */);
+        auto status = collection_internal::insertDocuments(
+            opCtx, oplogColl, begin, end, nullptr /* OpDebug */, false /* fromMigrate */);
         if (!status.isOK()) {
             return status;
         }

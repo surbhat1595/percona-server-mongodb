@@ -27,17 +27,14 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/repl/rollback_impl.h"
-#include "mongo/db/repl/rollback_impl_gen.h"
 
 #include <fmt/format.h>
 
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/database_holder.h"
+#include "mongo/db/catalog/drop_collection.h"
 #include "mongo/db/catalog/import_collection_oplog_entry_gen.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/concurrency/d_concurrency.h"
@@ -48,7 +45,6 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/index_builds_coordinator.h"
-#include "mongo/db/kill_sessions_local.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/apply_ops.h"
@@ -56,22 +52,23 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/repl/roll_back_local_operations.h"
+#include "mongo/db/repl/rollback_impl_gen.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/repl/transaction_oplog_application.h"
 #include "mongo/db/s/type_shard_identity.h"
 #include "mongo/db/server_recovery.h"
-#include "mongo/db/session_catalog_mongod.h"
+#include "mongo/db/session/kill_sessions_local.h"
+#include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/session/session_txn_record_gen.h"
 #include "mongo/db/storage/historical_ident_tracker.h"
 #include "mongo/db/storage/remove_saver.h"
-#include "mongo/db/transaction/session_txn_record_gen.h"
 #include "mongo/db/transaction/transaction_history_iterator.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/type_config_version.h"
 #include "mongo/util/scopeguard.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplicationRollback
-
 
 namespace mongo {
 namespace repl {
@@ -1368,11 +1365,9 @@ void RollbackImpl::_resetDropPendingState(OperationContext* opCtx) {
     storageEngine->clearDropPendingState();
 
     std::vector<DatabaseName> dbNames = storageEngine->listDatabases();
-    auto databaseHolder = DatabaseHolder::get(opCtx);
     for (const auto& dbName : dbNames) {
         Lock::DBLock dbLock(opCtx, dbName, MODE_X);
-        auto db = databaseHolder->openDb(opCtx, dbName);
-        db->checkForIdIndexesAndDropPendingCollections(opCtx);
+        checkForIdIndexesAndDropPendingCollections(opCtx, dbName);
     }
 }
 

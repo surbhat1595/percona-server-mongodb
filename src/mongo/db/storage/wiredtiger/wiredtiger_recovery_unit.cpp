@@ -132,7 +132,10 @@ BSONObj WiredTigerOperationStats::toBSON() {
     for (auto const& stat : _stats) {
         // Find the user consumable name for this statistic.
         auto statIt = _statNameMap.find(stat.first);
-        invariant(statIt != _statNameMap.end());
+
+        // Ignore the session statistic that is not reported for the slow operations.
+        if (statIt == _statNameMap.end())
+            continue;
 
         auto statName = statIt->second.first;
         Section subs = statIt->second.second;
@@ -424,7 +427,7 @@ void WiredTigerRecoveryUnit::_txnClose(bool commit) {
             LOGV2_ERROR(5703401,
                         "Found a violation of multi-timestamp constraint. Retrying operation to "
                         "collect extra debugging context for the involved writes.");
-            throwWriteConflictException();
+            throwWriteConflictException("Violation of multi-timestamp constraint.");
         }
         if (commit) {
             LOGV2_FATAL(

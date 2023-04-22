@@ -66,6 +66,7 @@ class ExpressionDayOfMonth;
 class ExpressionDayOfWeek;
 class ExpressionDayOfYear;
 class ExpressionDivide;
+class ExpressionEncryptedBetween;
 class ExpressionExp;
 class ExpressionFieldPath;
 class ExpressionFilter;
@@ -153,6 +154,7 @@ class ExpressionHyperbolicSine;
 class ExpressionInternalFindSlice;
 class ExpressionInternalFindPositional;
 class ExpressionInternalFindElemMatch;
+class ExpressionInternalFLEBetween;
 class ExpressionInternalFLEEqual;
 class ExpressionInternalJsEmit;
 class ExpressionFunction;
@@ -232,6 +234,7 @@ public:
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionDateToString>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionDateTrunc>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionDivide>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionEncryptedBetween>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionExp>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionFieldPath>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionFilter>) = 0;
@@ -246,6 +249,7 @@ public:
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionLn>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionLog>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionLog10>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionInternalFLEBetween>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionInternalFLEEqual>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionMap>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionMeta>) = 0;
@@ -378,7 +382,7 @@ using ExpressionConstVisitor = ExpressionVisitor<true>;
  *
  * struct FieldPathVisitor : public SelectiveConstExpressionVisitorBase {
  *     // To avoid overloaded-virtual warnings.
- *     using public SelectiveConstExpressionVisitorBase::visit;
+ *     using SelectiveConstExpressionVisitorBase::visit;
  *
  *     void visit(const ExpressionFieldPath* expr) final {
  *         // logic for what to do with an ExpressionFieldPath.
@@ -412,6 +416,7 @@ struct SelectiveConstExpressionVisitorBase : public ExpressionConstVisitor {
     void visit(const ExpressionDateToString*) override {}
     void visit(const ExpressionDateTrunc*) override {}
     void visit(const ExpressionDivide*) override {}
+    void visit(const ExpressionEncryptedBetween*) override {}
     void visit(const ExpressionExp*) override {}
     void visit(const ExpressionFieldPath*) override {}
     void visit(const ExpressionFilter*) override {}
@@ -426,6 +431,7 @@ struct SelectiveConstExpressionVisitorBase : public ExpressionConstVisitor {
     void visit(const ExpressionLn*) override {}
     void visit(const ExpressionLog*) override {}
     void visit(const ExpressionLog10*) override {}
+    void visit(const ExpressionInternalFLEBetween*) override {}
     void visit(const ExpressionInternalFLEEqual*) override {}
     void visit(const ExpressionMap*) override {}
     void visit(const ExpressionMeta*) override {}

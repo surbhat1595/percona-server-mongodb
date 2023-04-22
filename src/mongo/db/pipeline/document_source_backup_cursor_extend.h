@@ -96,6 +96,8 @@ public:
         return boost::none;
     }
 
+    void addVariableRefs(std::set<Variables::Id>* refs) const final {}
+
 protected:
     GetNextResult doGetNext() override;
     DocumentSourceBackupCursorExtend(const boost::intrusive_ptr<ExpressionContext>& expCtx,

@@ -54,22 +54,10 @@ feature_flags:
       default: true
       version: 6.1
 
-    featureFlagLocf:
-        description: "Feature flag for allowing $locf window function"
-        cpp_varname: gFeatureFlagLocf
-        default: true
-        version: 5.2
-
     featureFlagCommonQueryFramework:
       description: "Feature flag for allowing use of Cascades-based query optimizer"
       cpp_varname: gFeatureFlagCommonQueryFramework
       default: false
-
-    featureFlagSearchShardedFacets:
-      description: "Enable use of $$SEARCH_META on sharded collections"
-      cpp_varname: gFeatureFlagSearchShardedFacets
-      default: true
-      version: 6.0
 
     featureFlagBucketUnpackWithSort:
       description: "Enables a time-series optimization that allows for partially-blocking sort on time"
@@ -91,9 +79,4 @@ feature_flags:
       description: "Feature flag for enabling full SBE support. Enables SBE for a much larger class
       of queries, including NLJ $lookup plans. Also enables the SBE plan cache."
       cpp_varname: gFeatureFlagSbeFull
-      default: false
-
-    featureFlagTimeSeriesChangeStreams:
-      description: "Feature flag for $changeStream support for time series"
-      cpp_varname: gFeatureFlagTimeSeriesChangeStreams
       default: false

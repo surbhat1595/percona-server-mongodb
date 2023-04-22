@@ -59,7 +59,6 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds_coordinator.h"
-#include "mongo/db/kill_sessions_local.h"
 #include "mongo/db/mongod_options_storage_gen.h"
 #include "mongo/db/prepare_conflict_tracker.h"
 #include "mongo/db/read_write_concern_defaults.h"
@@ -89,7 +88,8 @@
 #include "mongo/db/repl/update_position_args.h"
 #include "mongo/db/repl/vote_requester.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/session_catalog.h"
+#include "mongo/db/session/kill_sessions_local.h"
+#include "mongo/db/session/session_catalog.h"
 #include "mongo/db/shutdown_in_progress_quiesce_info.h"
 #include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/db/storage/storage_options.h"
@@ -108,6 +108,7 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/stacktrace.h"
+#include "mongo/util/synchronized_value.h"
 #include "mongo/util/testing_proctor.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
@@ -159,9 +160,9 @@ MONGO_FAIL_POINT_DEFINE(throwBeforeRecoveringTenantMigrationAccessBlockers);
 // Number of times we tried to go live as a secondary.
 CounterMetric attemptsToBecomeSecondary("repl.apply.attemptsToBecomeSecondary");
 
-// Tracks the last state transition performed in this replca set.
-std::string& lastStateTransition =
-    makeServerStatusMetric<std::string>("repl.stateTransition.lastStateTransition");
+// Tracks the last state transition performed in this replica set.
+auto& lastStateTransition =
+    makeSynchronizedMetric<std::string>("repl.stateTransition.lastStateTransition");
 
 // Tracks the number of operations killed on state transition.
 CounterMetric userOpsKilled("repl.stateTransition.userOperationsKilled");
@@ -2210,7 +2211,7 @@ void ReplicationCoordinatorImpl::updateAndLogStateTransitionMetrics(
     userOpsRunning.increment(numOpsRunning);
 
     BSONObjBuilder bob;
-    bob.append("lastStateTransition", lastStateTransition);
+    bob.append("lastStateTransition", **lastStateTransition);
     bob.appendNumber("userOpsKilled", userOpsKilled.get());
     bob.appendNumber("userOpsRunning", userOpsRunning.get());
 

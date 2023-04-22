@@ -761,6 +761,10 @@ public:
                                                         BSONElement element,
                                                         uint64_t maxContentionFactor);
 
+    static FLE2FindRangePayload serializeFindRangePayload(FLEIndexKeyAndId indexKey,
+                                                          FLEUserKeyAndId userKey,
+                                                          const std::vector<std::string>& edges,
+                                                          uint64_t maxContentionFactor);
 
     /**
      * Generates a client-side payload that is sent to the server.
@@ -904,6 +908,7 @@ public:
  * Encrypt(ServerDataEncryptionLevel1Token, Struct(K_KeyId, v, count, d, s, c))
  *
  * struct {
+ *   uint64_t length;
  *   uint8_t[length] cipherText; // UserKeyId + Encrypt(K_KeyId, value),
  *   uint64_t counter;
  *   uint8_t[32] edc;  // EDCDerivedFromDataTokenAndContentionFactorToken
@@ -963,13 +968,73 @@ struct FLE2UnindexedEncryptedValue {
     static constexpr size_t assocDataSize = sizeof(uint8_t) + sizeof(UUID) + sizeof(uint8_t);
 };
 
+struct FLEEdgeToken {
+    EDCDerivedFromDataTokenAndContentionFactorToken edc;
+    ESCDerivedFromDataTokenAndContentionFactorToken esc;
+    ECCDerivedFromDataTokenAndContentionFactorToken ecc;
+};
+
+/**
+ * Class to read/write FLE2 Range Indexed Encrypted Values
+ *
+ * Fields are encrypted with the following:
+ *
+ * struct {
+ *   uint8_t fle_blob_subtype = 9;
+ *   uint8_t key_uuid[16];
+ *   uint8  original_bson_type;
+ *   ciphertext[ciphertext_length];
+ * }
+ *
+ * Encrypt(ServerDataEncryptionLevel1Token, Struct(K_KeyId, v, edgeCount, [count, d, s, c] x
+ *edgeCount ))
+ *
+ * struct {
+ *   uint64_t length;
+ *   uint8_t[length] cipherText; // UserKeyId + Encrypt(K_KeyId, value),
+ *   uint32_t edgeCount;
+ *   struct {
+ *      uint64_t counter;
+ *      uint8_t[32] edc;  // EDCDerivedFromDataTokenAndContentionFactorToken
+ *      uint8_t[32] esc;  // ESCDerivedFromDataTokenAndContentionFactorToken
+ *      uint8_t[32] ecc;  // ECCDerivedFromDataTokenAndContentionFactorToken
+ *   } edges[edgeCount];
+ *}
+ */
+struct FLE2IndexedRangeEncryptedValue {
+    FLE2IndexedRangeEncryptedValue(FLE2InsertUpdatePayload payload,
+                                   std::vector<uint64_t> countersParam);
+
+    FLE2IndexedRangeEncryptedValue(std::vector<FLEEdgeToken> tokens,
+                                   std::vector<uint64_t> countersParam,
+                                   BSONType typeParam,
+                                   UUID indexKeyIdParam,
+                                   std::vector<uint8_t> serializedServerValueParam);
+
+    static StatusWith<FLE2IndexedRangeEncryptedValue> decryptAndParse(
+        ServerDataEncryptionLevel1Token token, ConstDataRange serializedServerValue);
+
+    /**
+     * Read the key id from the payload.
+     */
+    static StatusWith<UUID> readKeyId(ConstDataRange serializedServerValue);
+
+    StatusWith<std::vector<uint8_t>> serialize(ServerDataEncryptionLevel1Token token);
+
+    std::vector<FLEEdgeToken> tokens;
+    std::vector<uint64_t> counters;
+    BSONType bsonType;
+    UUID indexKeyId;
+    std::vector<uint8_t> clientEncryptedValue;
+};
+
 
 struct EDCServerPayloadInfo {
     ESCDerivedFromDataTokenAndContentionFactorToken getESCToken() const;
 
     FLE2InsertUpdatePayload payload;
     std::string fieldPathName;
-    uint64_t count;
+    std::vector<uint64_t> counts;
 };
 
 struct EDCIndexedFields {
@@ -1027,6 +1092,9 @@ public:
     static StatusWith<FLE2IndexedEqualityEncryptedValue> decryptAndParse(
         ConstDataRange token, ConstDataRange serializedServerValue);
 
+    static StatusWith<FLE2IndexedRangeEncryptedValue> decryptAndParseRange(
+        ConstDataRange token, ConstDataRange serializedServerValue);
+
     /**
      * Generate a search tag
      *
@@ -1035,6 +1103,8 @@ public:
     static PrfBlock generateTag(EDCTwiceDerivedToken edcTwiceDerived, FLECounter count);
     static PrfBlock generateTag(const EDCServerPayloadInfo& payload);
     static PrfBlock generateTag(const FLE2IndexedEqualityEncryptedValue& indexedValue);
+    static PrfBlock generateTag(const FLEEdgeToken& token, FLECounter count);
+    static std::vector<PrfBlock> generateTags(const FLE2IndexedRangeEncryptedValue& indexedValue);
 
     /**
      * Generate all the EDC tokens
@@ -1190,6 +1260,110 @@ struct ParsedFindPayload {
     explicit ParsedFindPayload(ConstDataRange cdr);
 };
 
+
+/**
+ * FLE2 Range Utility functions
+ */
+
+/**
+ * Describe the encoding of an BSON int32
+ *
+ * NOTE: It is not a mistake that a int32 is encoded as uint32.
+ */
+struct OSTType_Int32 {
+    OSTType_Int32(uint32_t v, uint32_t minP, uint32_t maxP) : value(v), min(minP), max(maxP) {}
+
+    uint32_t value;
+    uint32_t min;
+    uint32_t max;
+};
+
+OSTType_Int32 getTypeInfo32(int32_t value,
+                            boost::optional<int32_t> min,
+                            boost::optional<int32_t> max);
+
+/**
+ * Describe the encoding of an BSON int64
+ *
+ * NOTE: It is not a mistake that a int64 is encoded as uint64.
+ */
+struct OSTType_Int64 {
+    OSTType_Int64(uint64_t v, uint64_t minP, uint64_t maxP) : value(v), min(minP), max(maxP) {}
+
+    uint64_t value;
+    uint64_t min;
+    uint64_t max;
+};
+
+OSTType_Int64 getTypeInfo64(int64_t value,
+                            boost::optional<int64_t> min,
+                            boost::optional<int64_t> max);
+
+
+/**
+ * Describe the encoding of an BSON double (i.e. IEEE 754 Binary64)
+ *
+ * NOTE: It is not a mistake that a double is encoded as uint64.
+ */
+struct OSTType_Double {
+    OSTType_Double(uint64_t v, uint64_t minP, uint64_t maxP) : value(v), min(minP), max(maxP) {}
+
+    uint64_t value;
+    uint64_t min;
+    uint64_t max;
+};
+
+OSTType_Double getTypeInfoDouble(double value,
+                                 boost::optional<double> min,
+                                 boost::optional<double> max);
+
+
+struct FLEFindEdgeTokenSet {
+    EDCDerivedFromDataToken edc;
+    ESCDerivedFromDataToken esc;
+    ECCDerivedFromDataToken ecc;
+};
+
+struct ParsedFindRangePayload {
+    std::vector<FLEFindEdgeTokenSet> edges;
+    ServerDataEncryptionLevel1Token serverToken;
+    std::int64_t maxCounter;
+
+    explicit ParsedFindRangePayload(BSONElement fleFindRangePayload);
+    explicit ParsedFindRangePayload(const Value& fleFindRangePayload);
+    explicit ParsedFindRangePayload(ConstDataRange cdr);
+};
+
+
+/**
+ * Edges calculator
+ */
+
+class Edges {
+public:
+    Edges(std::string leaf, int sparsity);
+    std::vector<StringData> get();
+
+private:
+    std::string _leaf;
+    int _sparsity;
+};
+
+std::unique_ptr<Edges> getEdgesInt32(int32_t value,
+                                     boost::optional<int32_t> min,
+                                     boost::optional<int32_t> max,
+                                     int sparsity);
+
+std::unique_ptr<Edges> getEdgesInt64(int64_t value,
+                                     boost::optional<int64_t> min,
+                                     boost::optional<int64_t> max,
+                                     int sparsity);
+
+std::unique_ptr<Edges> getEdgesDouble(double value,
+                                      boost::optional<double> min,
+                                      boost::optional<double> max,
+                                      int sparsity);
+
 /**
  * Utility functions manipulating buffers.
  */
@@ -1212,6 +1386,64 @@ BSONBinData toBSONBinData(const std::vector<uint8_t>& buf);
 
 std::pair<EncryptedBinDataType, ConstDataRange> fromEncryptedBinData(const Value& value);
 
+bool hasQueryType(const EncryptedField& field, QueryTypeEnum queryType);
 bool hasQueryType(const EncryptedFieldConfig& config, QueryTypeEnum queryType);
+
+class EncryptedPredicateEvaluator {
+public:
+    EncryptedPredicateEvaluator(ConstDataRange serverToken,
+                                int64_t contentionFactor,
+                                std::vector<ConstDataRange> edcTokens);
+
+    /**
+     * Evaluates an encrypted predicate (equality or range), as defined by a contention factor along
+     * with a list of edc tokens, over an encrypted value.
+     *
+     * Returns a boolean indicator.
+     */
+    template <typename T>
+    bool evaluate(
+        Value fieldValue,
+        EncryptedBinDataType indexedValueType,
+        std::function<StatusWith<T>(ConstDataRange, ConstDataRange)> decryptAndParse) const {
+
+        if (fieldValue.getType() != BinData) {
+            return false;
+        }
+
+        auto fieldValuePair = fromEncryptedBinData(fieldValue);
+
+        uassert(
+            6672400, "Invalid encrypted indexed field", fieldValuePair.first == indexedValueType);
+
+        // Value matches if
+        // 1. Decrypt field is successful
+        // 2. EDC_u Token is in GenTokens(EDC Token, ContentionFactor)
+        //
+        auto swIndexed = decryptAndParse(ConstDataRange(_serverToken), fieldValuePair.second);
+        uassertStatusOK(swIndexed);
+        auto indexed = swIndexed.getValue();
+
+        return _cachedEDCTokens.count(indexed.edc.data) == 1;
+    }
+
+    std::vector<PrfBlock> edcTokens() const {
+        return _edcTokens;
+    }
+
+    PrfBlock serverToken() const {
+        return _serverToken;
+    }
+
+    int64_t contentionFactor() const {
+        return _contentionFactor;
+    }
+
+private:
+    PrfBlock _serverToken;
+    std::vector<PrfBlock> _edcTokens;
+    int64_t _contentionFactor;
+    stdx::unordered_set<PrfBlock> _cachedEDCTokens;
+};
 
 }  // namespace mongo

@@ -69,9 +69,9 @@
 #include "mongo/db/repl/tenant_migration_state_machine_gen.h"
 #include "mongo/db/repl/tenant_migration_statistics.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
-#include "mongo/db/session_catalog_mongod.h"
+#include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/session/session_txn_record_gen.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_import.h"
-#include "mongo/db/transaction/session_txn_record_gen.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/vector_clock_mutable.h"
 #include "mongo/db/write_concern_options.h"
@@ -325,6 +325,11 @@ void TenantMigrationRecipientService::checkIfConflictsWithOtherInstances(
     const std::vector<const PrimaryOnlyService::Instance*>& existingInstances) {
     auto tenantId = initialStateDoc["tenantId"].valueStringData();
 
+    auto recipientStateDocument = TenantMigrationRecipientDocument::parse(
+        IDLParserContext("recipientStateDoc"), initialStateDoc);
+    auto protocol = recipientStateDocument.getProtocol().value_or(
+        MigrationProtocolEnum::kMultitenantMigrations);
+
     for (auto& instance : existingInstances) {
         auto existingTypedInstance =
             checked_cast<const TenantMigrationRecipientService::Instance*>(instance);
@@ -332,15 +337,24 @@ void TenantMigrationRecipientService::checkIfConflictsWithOtherInstances(
         auto isDone = existingState.getState() == TenantMigrationRecipientStateEnum::kDone &&
             existingState.getExpireAt();
 
+        if (isDone) {
+            continue;
+        }
+
         uassert(ErrorCodes::ConflictingOperationInProgress,
                 "an existing shard merge is in progress",
-                isDone ||
-                    (existingTypedInstance->getProtocol() != MigrationProtocolEnum::kShardMerge &&
-                     existingState.getProtocol() != MigrationProtocolEnum::kShardMerge));
+                existingTypedInstance->getProtocol() != MigrationProtocolEnum::kShardMerge);
+
+        uassert(ErrorCodes::ConflictingOperationInProgress,
+                str::stream() << "cannot start "
+                              << MigrationProtocol_serializer(MigrationProtocolEnum::kShardMerge)
+                              << " migration, tenant " << existingTypedInstance->getTenantId()
+                              << " is already migrating",
+                protocol != MigrationProtocolEnum::kShardMerge);
 
         uassert(ErrorCodes::ConflictingOperationInProgress,
                 str::stream() << "tenant " << tenantId << " is already migrating",
-                isDone || existingTypedInstance->getTenantId() != tenantId);
+                existingTypedInstance->getTenantId() != tenantId);
     }
 }
 
@@ -399,12 +413,14 @@ boost::optional<BSONObj> TenantMigrationRecipientService::Instance::reportForCur
     stdx::lock_guard lk(_mutex);
     bob.append("desc", "tenant recipient migration");
     _migrationUuid.appendToBuilder(&bob, "instanceID"_sd);
-    bob.append("tenantId", _stateDoc.getTenantId());
+    if (getProtocol() == MigrationProtocolEnum::kMultitenantMigrations) {
+        bob.append("tenantId", _stateDoc.getTenantId());
+    }
     bob.append("donorConnectionString", _stateDoc.getDonorConnectionString());
     bob.append("readPreference", _stateDoc.getReadPreference().toInnerBSON());
     bob.append("state", _stateDoc.getState());
     bob.append("dataSyncCompleted", _dataSyncCompletionPromise.getFuture().isReady());
-    bob.append("migrationCompleted", _taskCompletionPromise.getFuture().isReady());
+    bob.append("garbageCollectable", _forgetMigrationDurablePromise.getFuture().isReady());
     bob.append("numRestartsDueToDonorConnectionFailure",
                _stateDoc.getNumRestartsDueToDonorConnectionFailure());
     bob.append("numRestartsDueToRecipientFailure", _stateDoc.getNumRestartsDueToRecipientFailure());
@@ -2266,11 +2282,12 @@ void TenantMigrationRecipientService::Instance::_interrupt(Status status,
         _dataSyncCompletionPromise.setError(status);
 
         // The interrupt() is called before the instance is scheduled to run. If the state doc has
-        // already been marked garbage collectable, resolve the completion promise with OK.
+        // already been marked garbage collectable, resolve the forget migration durable promise
+        // with OK.
         if (_stateDoc.getExpireAt()) {
-            _taskCompletionPromise.emplaceValue();
+            _forgetMigrationDurablePromise.emplaceValue();
         } else {
-            _taskCompletionPromise.setError(status);
+            _forgetMigrationDurablePromise.setError(status);
         }
     }
 
@@ -2661,7 +2678,7 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
     LOGV2(4879607,
           "Starting tenant migration recipient instance: ",
           "migrationId"_attr = getMigrationUUID(),
-          "protocol"_attr = getProtocol(),
+          "protocol"_attr = MigrationProtocol_serializer(getProtocol()),
           "tenantId"_attr = getTenantId(),
           "connectionString"_attr = _donorConnectionString,
           "readPreference"_attr = _readPreference);
@@ -2928,7 +2945,6 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
             }
 
             _cleanupOnDataSyncCompletion(status);
-            _setMigrationStatsOnCompletion(status);
 
             // Handle recipientForgetMigration.
             stdx::lock_guard lk(_mutex);
@@ -2984,7 +3000,7 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
                       "migrationId"_attr = getMigrationUUID(),
                       "tenantId"_attr = getTenantId(),
                       "expireAt"_attr = *_stateDoc.getExpireAt());
-                setPromiseOkifNotReady(lk, _taskCompletionPromise);
+                setPromiseOkifNotReady(lk, _forgetMigrationDurablePromise);
             } else {
                 // We should only hit here on a stepDown/shutDown, or a 'conflicting migration'
                 // error.
@@ -2993,40 +3009,11 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
                       "migrationId"_attr = getMigrationUUID(),
                       "tenantId"_attr = getTenantId(),
                       "status"_attr = status);
-                setPromiseErrorifNotReady(lk, _taskCompletionPromise, status);
+                setPromiseErrorifNotReady(lk, _forgetMigrationDurablePromise, status);
             }
             _taskState.setState(TaskState::kDone);
         })
         .semi();
-}
-
-void TenantMigrationRecipientService::Instance::_setMigrationStatsOnCompletion(
-    Status completionStatus) const {
-    bool success = false;
-
-    if (completionStatus.code() == ErrorCodes::TenantMigrationForgotten) {
-        stdx::lock_guard lk(_mutex);
-        if (_stateDoc.getExpireAt()) {
-            // Avoid double counting tenant migration statistics after failover.
-            return;
-        }
-        // The migration committed if and only if it received recipientForgetMigration after it has
-        // applied data past the returnAfterReachingDonorTimestamp, saved in state doc as
-        // rejectReadsBeforeTimestamp.
-        if (_stateDoc.getRejectReadsBeforeTimestamp().has_value()) {
-            success = true;
-        }
-    } else if (ErrorCodes::isRetriableError(completionStatus)) {
-        // The migration was interrupted due to shutdown or stepdown, avoid incrementing the count
-        // for failed migrations since the migration will be resumed on stepup.
-        return;
-    }
-
-    if (success) {
-        TenantMigrationStatistics::get(_serviceContext)->incTotalSuccessfulMigrationsReceived();
-    } else {
-        TenantMigrationStatistics::get(_serviceContext)->incTotalFailedMigrationsReceived();
-    }
 }
 
 const UUID& TenantMigrationRecipientService::Instance::getMigrationUUID() const {

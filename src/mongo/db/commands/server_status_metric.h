@@ -29,11 +29,13 @@
 
 #pragma once
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
 
 #include "mongo/db/jsobj.h"
+#include "mongo/util/synchronized_value.h"
 
 namespace mongo {
 
@@ -41,7 +43,7 @@ class ServerStatusMetric {
 public:
     virtual ~ServerStatusMetric() = default;
 
-    std::string getMetricName() const {
+    const std::string& getMetricName() const {
         return _name;
     }
 
@@ -57,7 +59,7 @@ protected:
      * the serverStatus root otherwise it will live under the "counters"
      * namespace so foo.bar would be serverStatus().counters.foo.bar
      */
-    explicit ServerStatusMetric(const std::string& name);
+    explicit ServerStatusMetric(std::string name);
 
     const std::string _name;
     const std::string _leafName;
@@ -68,6 +70,7 @@ protected:
  * status metrics.
  * Its recommended usage is through the addMetricToTree helper function. Here is an
  * example of a ServerStatusMetricField holding a Counter64.
+ * Note that the metric is a reference.
  *
  * auto& metric =
  *      addMetricToTree(std::make_unique<ServerStatusMetricField<Counter64>>("path.to.counter"));
@@ -86,7 +89,7 @@ protected:
 template <typename T>
 class ServerStatusMetricField : public ServerStatusMetric {
 public:
-    explicit ServerStatusMetricField(const std::string& name) : ServerStatusMetric(name) {}
+    explicit ServerStatusMetricField(std::string name) : ServerStatusMetric(std::move(name)) {}
 
     void appendAtLeaf(BSONObjBuilder& b) const override {
         b.append(_leafName, _t);
@@ -96,7 +99,36 @@ public:
         return _t;
     }
 
+private:
     T _t;
+};
+
+/**
+ * A ServerStatusMetricField that is only reported when a predicate is satisfied.
+ *
+ * It's recommended to create these same way as ServerStatusMetricField, with the
+ * makeServerStatusMetric helper, but with the predicate as an additional
+ * function argument. Example:
+ *
+ *     auto predicate = [] { return gMyCounterFeatureFlag.isEnabledAndIgnoreFCV(); };
+ *     auto& counter = makeServerStatusMetric<Counter64>("path.to.counter", predicate);
+ *     ...
+ *     counter.increment();
+ */
+template <typename T>
+class ConditionalServerStatusMetricField : public ServerStatusMetricField<T> {
+public:
+    ConditionalServerStatusMetricField(std::string name, std::function<bool()> predicate)
+        : ServerStatusMetricField<T>{std::move(name)}, _predicate{std::move(predicate)} {}
+
+    void appendAtLeaf(BSONObjBuilder& b) const override {
+        if (_predicate && !_predicate())
+            return;
+        ServerStatusMetricField<T>::appendAtLeaf(b);
+    }
+
+private:
+    std::function<bool()> _predicate;
 };
 
 class MetricTree {
@@ -139,16 +171,24 @@ T& addMetricToTree(std::unique_ptr<T> metric, MetricTree* metricTree = globalMet
     return reference;
 }
 
-template <typename TYPE>
-TYPE& makeServerStatusMetric(std::string path) {
-    return addMetricToTree(std::make_unique<ServerStatusMetricField<TYPE>>(std::move(path)))
+template <typename T>
+T& makeServerStatusMetric(std::string path) {
+    return addMetricToTree(std::make_unique<ServerStatusMetricField<T>>(std::move(path))).value();
+}
+
+/** Make a metric that only appends itself when `predicate` is true. */
+template <typename T>
+T& makeServerStatusMetric(std::string path, std::function<bool()> predicate) {
+    return addMetricToTree(std::make_unique<ConditionalServerStatusMetricField<T>>(
+                               std::move(path), std::move(predicate)))
         .value();
 }
 
 class CounterMetric {
 public:
-    CounterMetric(std::string name)
-        : _counter{makeServerStatusMetric<Counter64>(std::move(name))} {}
+    CounterMetric(const std::string& name) : _counter{makeServerStatusMetric<Counter64>(name)} {}
+    CounterMetric(const std::string& name, std::function<bool()>&& predicate)
+        : _counter{makeServerStatusMetric<Counter64>(name, std::move(predicate))} {}
     CounterMetric(CounterMetric&) = delete;
     CounterMetric& operator=(CounterMetric&) = delete;
 
@@ -188,5 +228,42 @@ public:
 private:
     Counter64& _counter;
 };
+
+/**
+ * Leverage `synchronized_value<T>` to make a thread-safe `T` metric, for `T`
+ * that are not intrinsically thread-safe (e.g. string, int).
+ * T must be usable as an argument to `BSONObjBuilder::append`.
+ */
+template <typename T>
+class SynchronizedMetric : public ServerStatusMetric {
+public:
+    explicit SynchronizedMetric(std::string name) : ServerStatusMetric{std::move(name)} {}
+
+    void appendAtLeaf(BSONObjBuilder& b) const override {
+        b.append(_leafName, **_v);
+    }
+
+    synchronized_value<T>& value() {
+        return _v;
+    }
+
+private:
+    synchronized_value<T> _v;
+};
+
+/**
+ * Make a `synchronized_value<T>`-backed metric.
+ * Example (note the auto& reference):
+ *
+ *     auto& currSize = makeSynchronizedMetric<long long>("some.path.size");
+ *     currSize = message.size();
+ *
+ *     auto& currName = makeSynchronizedMetric<std::string>("some.path.name");
+ *     currName = message.size();
+ */
+template <typename T>
+synchronized_value<T>& makeSynchronizedMetric(std::string path) {
+    return addMetricToTree(std::make_unique<SynchronizedMetric<T>>(std::move(path))).value();
+}
 
 }  // namespace mongo

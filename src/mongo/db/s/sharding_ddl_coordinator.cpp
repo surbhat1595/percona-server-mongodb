@@ -34,17 +34,18 @@
 
 #include "mongo/db/catalog/catalog_helper.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/logical_session_id_helpers.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/s/global_user_write_block_state.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/sharding_ddl_coordinator_gen.h"
 #include "mongo/db/s/sharding_ddl_util.h"
+#include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/vector_clock_mutable.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/future_util.h"
 
@@ -198,7 +199,7 @@ ExecutorFuture<void> ShardingDDLCoordinator::_acquireLockAsync(
     return AsyncTry([this, resource = resource.toString()] {
                auto opCtxHolder = cc().makeOperationContext();
                auto* opCtx = opCtxHolder.get();
-               auto distLockManager = DistLockManager::get(opCtx);
+               auto ddlLockManager = DDLLockManager::get(opCtx);
 
                const auto coorName = DDLCoordinatorType_serializer(_coordId.getOperationType());
 
@@ -212,14 +213,10 @@ ExecutorFuture<void> ShardingDDLCoordinator::_acquireLockAsync(
                            return timeoutMillisecs;
                        }
                    }
-                   return DistLockManager::kDefaultLockTimeout;
+                   return DDLLockManager::kDefaultLockTimeout;
                }();
 
-               auto distLock =
-                   distLockManager->lockDirectLocally(opCtx, resource, coorName, lockTimeOut);
-
-               uassertStatusOK(distLockManager->lockDirect(opCtx, resource, coorName, lockTimeOut));
-               _scopedLocks.emplace(std::move(distLock));
+               _scopedLocks.emplace(ddlLockManager->lock(opCtx, resource, coorName, lockTimeOut));
            })
         .until([this, resource = resource.toString()](Status status) {
             if (!status.isOK()) {
@@ -300,13 +297,14 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
             return ExecutorFuture<void>(**executor);
         })
         .then([this, executor, token, anchor = shared_from_this()] {
-            if (
+            if (!_firstExecution ||
+                // The Feature flag is disabled
+                !feature_flags::gImplicitDDLTimeseriesNssTranslation.isEnabled(
+                    serverGlobalParams.featureCompatibility) ||
                 // this DDL operation operates on a DB
                 originalNss().coll().empty() ||
                 // this DDL operation operates directly on a bucket nss
-                originalNss().isTimeseriesBucketsCollection() ||
-                // The translation already happened
-                metadata().getBucketNss()) {
+                originalNss().isTimeseriesBucketsCollection()) {
                 return ExecutorFuture<void>(**executor);
             }
             return _translateTimeseriesNss(executor, token);
@@ -442,20 +440,8 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                 }
             }
 
-            if (!cleanup()) {
-                LOGV2(5950000,
-                      "Not releasing distributed locks because the node is stepping down or "
-                      "shutting down",
-                      "coordinatorId"_attr = _coordId,
-                      "status"_attr = status);
-            }
-
+            // Release all DDL locks
             while (!_scopedLocks.empty()) {
-                if (cleanup()) {
-                    // (SERVER-59500) Only release the remote locks in case of no stepdown/shutdown
-                    const auto& resource = _scopedLocks.top().getNs();
-                    DistLockManager::get(opCtx)->unlock(opCtx, resource);
-                }
                 _scopedLocks.pop();
             }
 

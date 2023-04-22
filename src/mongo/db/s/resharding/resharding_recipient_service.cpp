@@ -178,7 +178,7 @@ std::shared_ptr<repl::PrimaryOnlyService::Instance> ReshardingRecipientService::
     BSONObj initialState) {
     return std::make_shared<RecipientStateMachine>(
         this,
-        ReshardingRecipientDocument::parse({"RecipientStateMachine"}, initialState),
+        ReshardingRecipientDocument::parse(IDLParserContext{"RecipientStateMachine"}, initialState),
         std::make_unique<RecipientStateMachineExternalStateImpl>(),
         ReshardingDataReplication::make,
         _serviceContext);
@@ -616,6 +616,11 @@ std::unique_ptr<ReshardingDataReplicationInterface>
 ReshardingRecipientService::RecipientStateMachine::_makeDataReplication(OperationContext* opCtx,
                                                                         bool cloningDone) {
     invariant(_cloneTimestamp);
+
+    // We refresh the routing information for the source collection to ensure the
+    // ReshardingOplogApplier is making its decisions according to the chunk distribution after the
+    // sharding metadata was frozen.
+    _externalState->refreshCatalogCache(opCtx, _metadata.getSourceNss());
 
     auto myShardId = _externalState->myShardId(opCtx->getServiceContext());
     auto sourceChunkMgr =

@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include "mongo/db/s/cumulative_metrics_state_holder.h"
 #include "mongo/db/s/resharding/resharding_cumulative_metrics_field_name_provider.h"
 #include "mongo/db/s/sharding_data_transform_cumulative_metrics.h"
 
@@ -81,18 +82,11 @@ public:
                                    const ReshardingCumulativeMetricsFieldNameProvider* provider);
     static StringData fieldNameFor(RecipientStateEnum state,
                                    const ReshardingCumulativeMetricsFieldNameProvider* provider);
-
-    /**
-     * The before can be boost::none to represent the initial state transition and
-     * after can be boost::none to represent cases where it is no longer active.
-     */
     template <typename T>
     void onStateTransition(boost::optional<T> before, boost::optional<T> after);
-
     void onInsertApplied();
     void onUpdateApplied();
     void onDeleteApplied();
-
     void onOplogEntriesFetched(int64_t numEntries, Milliseconds elapsed);
     void onOplogEntriesApplied(int64_t numEntries);
     void onLocalInsertDuringOplogFetching(const Milliseconds& elapsedTime);
@@ -100,25 +94,8 @@ public:
     void onOplogLocalBatchApplied(Milliseconds elapsed);
 
 private:
-    using CoordinatorStateArray =
-        std::array<AtomicWord<int64_t>, static_cast<size_t>(CoordinatorStateEnum::kNumStates)>;
-    using DonorStateArray =
-        std::array<AtomicWord<int64_t>, static_cast<size_t>(DonorStateEnum::kNumStates)>;
-    using RecipientStateArray =
-        std::array<AtomicWord<int64_t>, static_cast<size_t>(RecipientStateEnum::kNumStates)>;
-
     template <typename T>
     const AtomicWord<int64_t>* getStateCounter(T state) const;
-    template <typename T>
-    AtomicWord<int64_t>* getMutableStateCounter(T state);
-
-    CoordinatorStateArray* getStateArrayFor(CoordinatorStateEnum state);
-    const CoordinatorStateArray* getStateArrayFor(CoordinatorStateEnum state) const;
-    DonorStateArray* getStateArrayFor(DonorStateEnum state);
-    const DonorStateArray* getStateArrayFor(DonorStateEnum state) const;
-    RecipientStateArray* getStateArrayFor(RecipientStateEnum state);
-    const RecipientStateArray* getStateArrayFor(RecipientStateEnum state) const;
-
     virtual void reportActive(BSONObjBuilder* bob) const;
     virtual void reportLatencies(BSONObjBuilder* bob) const;
     virtual void reportCurrentInSteps(BSONObjBuilder* bob) const;
@@ -140,45 +117,51 @@ private:
     AtomicWord<int64_t> _oplogBatchApplied{0};
     AtomicWord<int64_t> _oplogBatchAppliedMillis{0};
 
-    CoordinatorStateArray _coordinatorStateList;
-    DonorStateArray _donorStateList;
-    RecipientStateArray _recipientStateList;
+    CumulativeMetricsStateHolder<CoordinatorStateEnum,
+                                 static_cast<size_t>(CoordinatorStateEnum::kNumStates)>
+        _coordinatorStateList;
+    CumulativeMetricsStateHolder<DonorStateEnum, static_cast<size_t>(DonorStateEnum::kNumStates)>
+        _donorStateList;
+    CumulativeMetricsStateHolder<RecipientStateEnum,
+                                 static_cast<size_t>(RecipientStateEnum::kNumStates)>
+        _recipientStateList;
+
+    template <typename T>
+    auto getStateListForRole() const {
+        if constexpr (std::is_same<T, CoordinatorStateEnum>::value) {
+            return &_coordinatorStateList;
+        } else if constexpr (std::is_same<T, DonorStateEnum>::value) {
+            return &_donorStateList;
+        } else if constexpr (std::is_same<T, RecipientStateEnum>::value) {
+            return &_recipientStateList;
+        } else {
+            MONGO_UNREACHABLE;
+        }
+    }
+
+    template <typename T>
+    auto getMutableStateListForRole() {
+        if constexpr (std::is_same<T, CoordinatorStateEnum>::value) {
+            return &_coordinatorStateList;
+        } else if constexpr (std::is_same<T, DonorStateEnum>::value) {
+            return &_donorStateList;
+        } else if constexpr (std::is_same<T, RecipientStateEnum>::value) {
+            return &_recipientStateList;
+        } else {
+            MONGO_UNREACHABLE;
+        }
+    }
 };
 
 template <typename T>
 void ReshardingCumulativeMetrics::onStateTransition(boost::optional<T> before,
                                                     boost::optional<T> after) {
-    if (before) {
-        if (auto counter = getMutableStateCounter(*before)) {
-            counter->fetchAndSubtract(1);
-        }
-    }
-
-    if (after) {
-        if (auto counter = getMutableStateCounter(*after)) {
-            counter->fetchAndAdd(1);
-        }
-    }
+    getMutableStateListForRole<T>()->onStateTransition(before, after);
 }
+
 
 template <typename T>
 const AtomicWord<int64_t>* ReshardingCumulativeMetrics::getStateCounter(T state) const {
-    if (state == T::kUnused) {
-        return nullptr;
-    }
-
-    invariant(static_cast<size_t>(state) < static_cast<size_t>(T::kNumStates));
-    return &((*getStateArrayFor(state))[static_cast<size_t>(state)]);
+    return getStateListForRole<T>()->getStateCounter(state);
 }
-
-template <typename T>
-AtomicWord<int64_t>* ReshardingCumulativeMetrics::getMutableStateCounter(T state) {
-    if (state == T::kUnused) {
-        return nullptr;
-    }
-
-    invariant(static_cast<size_t>(state) < static_cast<size_t>(T::kNumStates));
-    return &((*getStateArrayFor(state))[static_cast<size_t>(state)]);
-}
-
 }  // namespace mongo

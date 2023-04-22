@@ -155,6 +155,9 @@ public:
 
     virtual Status initAsEmpty(OperationContext* opCtx);
 
+    virtual void printIndexEntryMetadata(OperationContext* opCtx,
+                                         const KeyString::Value& keyString) const;
+
     Status compact(OperationContext* opCtx) override;
 
     const std::string& uri() const {
@@ -230,8 +233,18 @@ protected:
      */
     KeyString::Version _handleVersionInfo(OperationContext* ctx,
                                           const std::string& uri,
+                                          StringData ident,
                                           const IndexDescriptor* desc,
                                           bool isLogged);
+
+    /*
+     * Attempts to repair the data format version in the index table metadata if there is a mismatch
+     * to the index type during startup.
+     */
+    void _repairDataFormatVersion(OperationContext* opCtx,
+                                  const std::string& uri,
+                                  StringData ident,
+                                  const IndexDescriptor* desc);
 
     RecordId _decodeRecordIdAtEnd(const void* buffer, size_t size);
 

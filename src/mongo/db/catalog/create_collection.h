@@ -27,16 +27,17 @@
  *    it in the license file.
  */
 
+#include <boost/optional.hpp>
 #include <string>
 
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/collection_catalog.h"
+#include "mongo/db/catalog/collection_options.h"
+#include "mongo/db/commands/create_gen.h"
 
 namespace mongo {
-class BSONObj;
+
 class OperationContext;
-class BSONElement;
 
 /**
  * Creates a collection as described in "cmdObj" on the database "dbName". Creates the collection's
@@ -44,17 +45,14 @@ class BSONElement;
  * default _id index.
  */
 Status createCollection(OperationContext* opCtx,
-                        const std::string& dbName,
+                        const DatabaseName& dbName,
                         const BSONObj& cmdObj,
                         const BSONObj& idIndex = BSONObj());
 
 /**
  * Creates a collection as parsed in 'cmd'.
  */
-Status createCollection(OperationContext* opCtx,
-                        const NamespaceString& ns,
-                        const CreateCommand& cmd);
-
+Status createCollection(OperationContext* opCtx, const CreateCommand& cmd);
 
 /**
  * Creates the collection or the view as described by 'options'.

@@ -31,12 +31,14 @@
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/s/range_deleter_service_op_observer.h"
 #include "mongo/logv2/log.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kShardingRangeDeleter
 
 namespace mongo {
-
+namespace {
 const auto rangeDeleterServiceDecorator = ServiceContext::declareDecoration<RangeDeleterService>();
+}
 
 RangeDeleterService* RangeDeleterService::get(ServiceContext* serviceContext) {
     return &rangeDeleterServiceDecorator(serviceContext);
@@ -47,6 +49,10 @@ RangeDeleterService* RangeDeleterService::get(OperationContext* opCtx) {
 }
 
 void RangeDeleterService::onStepUpComplete(OperationContext* opCtx, long long term) {
+    if (!feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCV()) {
+        return;
+    }
+
     auto lock = _acquireMutexUnconditionally();
     dassert(_state.load() == kDown, "Service expected to be down before stepping up");
 
@@ -78,11 +84,21 @@ void RangeDeleterService::onStepUpComplete(OperationContext* opCtx, long long te
 }
 
 void RangeDeleterService::_recoverRangeDeletionsOnStepUp() {
+
+    if (disableResumableRangeDeleter.load()) {
+        _state.store(kDown);
+        return;
+    }
+
     // TODO SERVER-68348 Asynchronously register tasks on the range deleter service on step-up
     _state.store(kUp);
 }
 
 void RangeDeleterService::onStepDown() {
+    if (!feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCV()) {
+        return;
+    }
+
     auto lock = _acquireMutexUnconditionally();
     dassert(_state.load() != kDown, "Service expected to be initializing/up before stepping down");
 
@@ -106,6 +122,14 @@ BSONObj RangeDeleterService::dumpState() {
 
 SharedSemiFuture<void> RangeDeleterService::registerTask(
     const RangeDeletionTask& rdt, SemiFuture<void>&& waitForActiveQueriesToComplete) {
+
+    if (disableResumableRangeDeleter.load()) {
+        return SemiFuture<void>::makeReady(
+                   Status(ErrorCodes::ResumableRangeDeleterDisabled,
+                          "Not submitting any range deletion task because the "
+                          "disableResumableRangeDeleter server parameter is set to true"))
+            .share();
+    }
 
     // Block the scheduling of the task while populating internal data structures
     SharedPromise<void> blockUntilRegistered;
@@ -195,6 +219,15 @@ int RangeDeleterService::getNumRangeDeletionTasksForCollection(const UUID& colle
 
 SharedSemiFuture<void> RangeDeleterService::getOverlappingRangeDeletionsFuture(
     const UUID& collectionUUID, const ChunkRange& range) {
+
+    if (disableResumableRangeDeleter.load()) {
+        return SemiFuture<void>::makeReady(
+                   Status(ErrorCodes::ResumableRangeDeleterDisabled,
+                          "Not submitting any range deletion task because the "
+                          "disableResumableRangeDeleter server parameter is set to true"))
+            .share();
+    }
+
     auto lock = _acquireMutexFailIfServiceNotUp();
 
     auto mapEntry = _rangeDeletionTasks.find(collectionUUID);
@@ -205,7 +238,7 @@ SharedSemiFuture<void> RangeDeleterService::getOverlappingRangeDeletionsFuture(
 
     std::vector<ExecutorFuture<void>> overlappingRangeDeletionsFutures;
 
-    auto rangeDeletions = mapEntry->second;
+    auto& rangeDeletions = mapEntry->second;
     const auto rangeSharedPtr = std::make_shared<ChunkRange>(range);
     auto forwardIt = rangeDeletions.lower_bound(rangeSharedPtr);
     if (forwardIt != rangeDeletions.begin()) {
@@ -224,4 +257,5 @@ SharedSemiFuture<void> RangeDeleterService::getOverlappingRangeDeletionsFuture(
     }
     return whenAllSucceed(std::move(overlappingRangeDeletionsFutures)).share();
 }
+
 }  // namespace mongo

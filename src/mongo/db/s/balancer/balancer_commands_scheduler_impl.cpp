@@ -27,25 +27,23 @@
  *    it in the license file.
  */
 
-
 #include "mongo/db/s/balancer/balancer_commands_scheduler_impl.h"
+
 #include "mongo/db/client.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/s/sharding_util.h"
+#include "mongo/db/shard_id.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/migration_secondary_throttle_options.h"
 #include "mongo/s/request_types/shardsvr_join_migrations_request_gen.h"
-#include "mongo/s/shard_id.h"
 #include "mongo/s/shard_key_pattern.h"
 #include "mongo/util/fail_point.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
-
 namespace mongo {
-
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(pauseSubmissionsFailPoint);
@@ -359,7 +357,7 @@ SemiFuture<DataSizeResponse> BalancerCommandsSchedulerImpl::requestDataSize(
     const NamespaceString& nss,
     const ShardId& shardId,
     const ChunkRange& chunkRange,
-    const ChunkVersion& version,
+    const ShardVersion& version,
     const KeyPattern& keyPattern,
     bool estimatedValue) {
     auto commandInfo = std::make_shared<DataSizeCommandInfo>(nss,
@@ -424,24 +422,23 @@ CommandSubmissionResult BalancerCommandsSchedulerImpl::_submit(
     OperationContext* opCtx, const CommandSubmissionParameters& params) {
     LOGV2_DEBUG(
         5847203, 2, "Balancer command request submitted for execution", "reqId"_attr = params.id);
-    bool distLockTaken = false;
 
     const auto shardWithStatus =
         Grid::get(opCtx)->shardRegistry()->getShard(opCtx, params.commandInfo->getTarget());
     if (!shardWithStatus.isOK()) {
-        return CommandSubmissionResult(params.id, distLockTaken, shardWithStatus.getStatus());
+        return CommandSubmissionResult(params.id, shardWithStatus.getStatus());
     }
 
     const auto shardHostWithStatus = shardWithStatus.getValue()->getTargeter()->findHost(
         opCtx, ReadPreferenceSetting{ReadPreference::PrimaryOnly});
     if (!shardHostWithStatus.isOK()) {
-        return CommandSubmissionResult(params.id, distLockTaken, shardHostWithStatus.getStatus());
+        return CommandSubmissionResult(params.id, shardHostWithStatus.getStatus());
     }
 
     if (params.commandInfo->requiresRecoveryOnCrash()) {
         auto writeStatus = persistRecoveryInfo(opCtx, *(params.commandInfo));
         if (!writeStatus.isOK()) {
-            return CommandSubmissionResult(params.id, distLockTaken, writeStatus);
+            return CommandSubmissionResult(params.id, writeStatus);
         }
     }
 
@@ -456,18 +453,9 @@ CommandSubmissionResult BalancerCommandsSchedulerImpl::_submit(
             _applyCommandResponse(requestId, args.response);
         };
 
-    if (params.commandInfo->requiresDistributedLock()) {
-        Status lockAcquisitionResponse =
-            _distributedLocks.acquireFor(opCtx, params.commandInfo->getNameSpace());
-        if (!lockAcquisitionResponse.isOK()) {
-            return CommandSubmissionResult(params.id, distLockTaken, lockAcquisitionResponse);
-        }
-        distLockTaken = true;
-    }
-
     auto swRemoteCommandHandle =
         (*_executor)->scheduleRemoteCommand(remoteCommand, onRemoteResponseReceived);
-    return CommandSubmissionResult(params.id, distLockTaken, swRemoteCommandHandle.getStatus());
+    return CommandSubmissionResult(params.id, swRemoteCommandHandle.getStatus());
 }
 
 void BalancerCommandsSchedulerImpl::_applySubmissionResult(
@@ -511,18 +499,14 @@ void BalancerCommandsSchedulerImpl::_applyCommandResponse(
 
 void BalancerCommandsSchedulerImpl::_performDeferredCleanup(
     OperationContext* opCtx,
-    const stdx::unordered_map<UUID, RequestData, UUID::Hash>& requestsHoldingResources,
-    bool includePersistedData) {
+    const stdx::unordered_map<UUID, RequestData, UUID::Hash>& requestsHoldingResources) {
     if (requestsHoldingResources.empty()) {
         return;
     }
 
     DBDirectClient dbClient(opCtx);
     for (const auto& [_, request] : requestsHoldingResources) {
-        if (request.holdsDistributedLock()) {
-            _distributedLocks.releaseFor(opCtx, request.getNamespace());
-        }
-        if (includePersistedData && request.requiresRecoveryCleanupOnCompletion()) {
+        if (request.requiresRecoveryCleanupOnCompletion()) {
             deletePersistedRecoveryInfo(dbClient, request.getCommandInfo());
         }
     }
@@ -584,8 +568,7 @@ void BalancerCommandsSchedulerImpl::_workerThread() {
         // 2.a Free any resource acquired by already completed/aborted requests.
         {
             auto opCtxHolder = cc().makeOperationContext();
-            _performDeferredCleanup(
-                opCtxHolder.get(), completedRequestsToCleanUp, true /*includePersistedData*/);
+            _performDeferredCleanup(opCtxHolder.get(), completedRequestsToCleanUp);
             completedRequestsToCleanUp.clear();
         }
 
@@ -616,18 +599,12 @@ void BalancerCommandsSchedulerImpl::_workerThread() {
     (*_executor)->shutdown();
     (*_executor)->join();
 
-    stdx::unordered_map<UUID, RequestData, UUID::Hash> cancelledRequests;
     {
         stdx::unique_lock<Latch> ul(_mutex);
-        cancelledRequests.swap(_requests);
         _requests.clear();
         _recentlyCompletedRequestIds.clear();
         _executor.reset();
     }
-    auto opCtxHolder = cc().makeOperationContext();
-    // Ensure that the clean up won't delete any request recovery document (the commands will be
-    // reissued once the scheduler is restarted)
-    _performDeferredCleanup(opCtxHolder.get(), cancelledRequests, false /*includePersistedData*/);
 }
 
 

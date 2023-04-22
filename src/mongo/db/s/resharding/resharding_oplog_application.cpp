@@ -27,15 +27,12 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/s/resharding/resharding_oplog_application.h"
 
+#include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/logical_session_cache.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/ops/delete.h"
 #include "mongo/db/ops/delete_request_gen.h"
@@ -46,14 +43,14 @@
 #include "mongo/db/repl/oplog_applier_utils.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
-#include "mongo/db/session_catalog_mongod.h"
+#include "mongo/db/session/logical_session_cache.h"
+#include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
-
 
 namespace mongo {
 namespace {
@@ -84,7 +81,7 @@ void runWithTransaction(OperationContext* opCtx,
     // to allow the collection metadata information to be recovered.
     ScopedSetShardRole scopedSetShardRole(asr.opCtx(),
                                           nss,
-                                          ChunkVersion::IGNORED() /* shardVersion */,
+                                          ShardVersion::IGNORED() /* shardVersion */,
                                           boost::none /* databaseVersion */);
 
     MongoDOperationContextSession ocs(asr.opCtx());
@@ -207,8 +204,12 @@ Status ReshardingOplogApplicationRules::applyOperation(OperationContext* opCtx,
 
             return Status::OK();
         } catch (const DBException& ex) {
-            if (ex.code() == ErrorCodes::WriteConflict || ex.code() == ErrorCodes::LockTimeout) {
-                throwWriteConflictException();
+            if (ex.code() == ErrorCodes::WriteConflict) {
+                throwWriteConflictException("Conflict when applying an oplog entry.");
+            }
+
+            if (ex.code() == ErrorCodes::LockTimeout) {
+                throwWriteConflictException("Timeout when applying an oplog entry.");
             }
 
             return ex.toStatus();
@@ -275,8 +276,11 @@ void ReshardingOplogApplicationRules::_applyInsert_inlock(OperationContext* opCt
     auto foundDoc = Helpers::findByIdAndNoopUpdate(opCtx, outputColl, idQuery, outputCollDoc);
 
     if (!foundDoc) {
-        uassertStatusOK(outputColl->insertDocument(
-            opCtx, InsertStatement(oField), nullptr /* nullOpDebug*/, false /* fromMigrate */));
+        uassertStatusOK(collection_internal::insertDocument(opCtx,
+                                                            outputColl,
+                                                            InsertStatement(oField),
+                                                            nullptr /* OpDebug */,
+                                                            false /* fromMigrate */));
 
         return;
     }
@@ -304,8 +308,8 @@ void ReshardingOplogApplicationRules::_applyInsert_inlock(OperationContext* opCt
 
     // The doc does not belong to '_donorShardId' under the original shard key, so apply rule #4
     // and insert the contents of 'op' to the stash collection.
-    uassertStatusOK(stashColl->insertDocument(
-        opCtx, InsertStatement(oField), nullptr /* nullOpDebug */, false /* fromMigrate */));
+    uassertStatusOK(collection_internal::insertDocument(
+        opCtx, stashColl, InsertStatement(oField), nullptr /* OpDebug */, false /* fromMigrate */));
 
     _applierMetrics->onWriteToStashCollections();
 }
@@ -536,8 +540,11 @@ void ReshardingOplogApplicationRules::_applyDelete_inlock(OperationContext* opCt
         // Insert the doc we just deleted from one of the stash collections into the output
         // collection.
         if (!doc.isEmpty()) {
-            uassertStatusOK(autoCollOutput->insertDocument(
-                opCtx, InsertStatement(doc), nullptr /* nullOpDebug */, false /* fromMigrate */));
+            uassertStatusOK(collection_internal::insertDocument(opCtx,
+                                                                *autoCollOutput,
+                                                                InsertStatement(doc),
+                                                                nullptr /* OpDebug */,
+                                                                false /* fromMigrate */));
         }
     });
 }

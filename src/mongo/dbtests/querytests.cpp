@@ -27,13 +27,12 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include <boost/optional.hpp>
 #include <iostream>
 
+#include "mongo/bson/bson_validate.h"
 #include "mongo/client/dbclient_cursor.h"
-#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/catalog/multi_index_block.h"
 #include "mongo/db/client.h"
 #include "mongo/db/clientcursor.h"
@@ -49,7 +48,6 @@
 #include "mongo/db/query/find.h"
 #include "mongo/db/service_context.h"
 #include "mongo/dbtests/dbtests.h"
-#include "mongo/unittest/unittest.h"
 #include "mongo/util/timer.h"
 
 namespace mongo {
@@ -62,7 +60,7 @@ void insertOplogDocument(OperationContext* opCtx, Timestamp ts, const char* ns) 
     InsertStatement stmt;
     stmt.doc = doc;
     stmt.oplogSlot = OplogSlot{ts, OplogSlot::kInitialTerm};
-    auto status = coll->insertDocument(opCtx, stmt, nullptr);
+    auto status = collection_internal::insertDocument(opCtx, *coll, stmt, nullptr);
     if (!status.isOK()) {
         std::cout << "Failed to insert oplog document: " << status.toString() << std::endl;
     }
@@ -158,10 +156,12 @@ protected:
             oid.init();
             b.appendOID("_id", &oid);
             b.appendElements(o);
-            _collection->insertDocument(&_opCtx, InsertStatement(b.obj()), nullOpDebug, false)
+            collection_internal::insertDocument(
+                &_opCtx, _collection, InsertStatement(b.obj()), nullOpDebug, false)
                 .transitional_ignore();
         } else {
-            _collection->insertDocument(&_opCtx, InsertStatement(o), nullOpDebug, false)
+            collection_internal::insertDocument(
+                &_opCtx, _collection, InsertStatement(o), nullOpDebug, false)
                 .transitional_ignore();
         }
         wunit.commit();
@@ -1205,7 +1205,7 @@ public:
         std::unique_ptr<DBClientCursor> cursor = _client.find(std::move(findRequest));
         while (cursor->more()) {
             BSONObj o = cursor->next();
-            verify(o.valid());
+            verify(validateBSON(o).isOK());
         }
     }
     void run() {

@@ -872,7 +872,7 @@ StatusWith<std::string> WiredTigerRecordStore::generateCreateString(
 WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
                                              OperationContext* ctx,
                                              Params params)
-    : RecordStore(params.nss.ns(), params.ident),
+    : RecordStore(params.nss.ns(), params.ident, params.isCapped),
       _uri(WiredTigerKVEngine::kTableUriPrefix + params.ident),
       _tableId(WiredTigerSession::genTableId()),
       _engineName(params.engineName),
@@ -885,8 +885,6 @@ WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
       _isChangeCollection(params.nss.isChangeCollection()),
       _forceUpdateWithFullDocument(params.forceUpdateWithFullDocument),
       _oplogMaxSize(params.oplogMaxSize),
-      _cappedCallback(params.cappedCallback),
-      _shuttingDown(false),
       _sizeStorer(params.sizeStorer),
       _tracksSizeAdjustments(params.tracksSizeAdjustments),
       _kvEngine(kvEngine) {
@@ -939,11 +937,6 @@ WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
 }
 
 WiredTigerRecordStore::~WiredTigerRecordStore() {
-    {
-        stdx::lock_guard<Latch> lk(_cappedCallbackMutex);
-        _shuttingDown = true;
-    }
-
     if (!isTemp()) {
         LOGV2_DEBUG(
             22395, 1, "~WiredTigerRecordStore for: {namespace}", logAttrs(NamespaceString(ns())));
@@ -1023,11 +1016,6 @@ const char* WiredTigerRecordStore::name() const {
 
 KeyFormat WiredTigerRecordStore::keyFormat() const {
     return _keyFormat;
-}
-
-bool WiredTigerRecordStore::inShutdown() const {
-    stdx::lock_guard<Latch> lk(_cappedCallbackMutex);
-    return _shuttingDown;
 }
 
 long long WiredTigerRecordStore::dataSize(OperationContext* opCtx) const {
@@ -1432,19 +1420,6 @@ bool WiredTigerRecordStore::isOpHidden_forTest(const RecordId& id) const {
         static_cast<std::uint64_t>(id.getLong());
 }
 
-bool WiredTigerRecordStore::haveCappedWaiters() {
-    stdx::lock_guard<Latch> cappedCallbackLock(_cappedCallbackMutex);
-    return _cappedCallback && _cappedCallback->haveCappedWaiters();
-}
-
-void WiredTigerRecordStore::notifyCappedWaitersIfNeeded() {
-    stdx::lock_guard<Latch> cappedCallbackLock(_cappedCallbackMutex);
-    // This wakes up cursors blocking for awaitData.
-    if (_cappedCallback) {
-        _cappedCallback->notifyCappedWaitersIfNeeded();
-    }
-}
-
 StatusWith<Timestamp> WiredTigerRecordStore::getLatestOplogTimestamp(
     OperationContext* opCtx) const {
     invariant(_isOplog);
@@ -1663,8 +1638,6 @@ StatusWith<RecordData> WiredTigerRecordStore::doUpdateWithDamages(
 
 void WiredTigerRecordStore::printRecordMetadata(OperationContext* opCtx,
                                                 const RecordId& recordId) const {
-    LOGV2(6120300, "Printing record metadata", "recordId"_attr = recordId);
-
     // Printing the record metadata requires a new session. We cannot open other cursors when there
     // are open history store cursors in the session.
     WiredTigerSession session(_kvEngine->getConnection());
@@ -1709,7 +1682,7 @@ void WiredTigerRecordStore::printRecordMetadata(OperationContext* opCtx,
                       cursor->session);
 
         RecordData recordData(static_cast<const char*>(value.data), value.size);
-        LOGV2(6120301,
+        LOGV2(6120300,
               "WiredTiger record metadata",
               "recordId"_attr = recordId,
               "startTxnId"_attr = startTxnId,
@@ -2053,9 +2026,11 @@ void WiredTigerRecordStore::setDataSize(long long dataSize) {
     _sizeStorer->flush(syncToDisk);
 }
 
-void WiredTigerRecordStore::doCappedTruncateAfter(OperationContext* opCtx,
-                                                  const RecordId& end,
-                                                  bool inclusive) {
+void WiredTigerRecordStore::doCappedTruncateAfter(
+    OperationContext* opCtx,
+    const RecordId& end,
+    bool inclusive,
+    const AboutToDeleteRecordCallback& aboutToDelete) {
     std::unique_ptr<SeekableRecordCursor> cursor = getCursor(opCtx, true);
 
     auto record = cursor->seekExact(end);
@@ -2083,13 +2058,13 @@ void WiredTigerRecordStore::doCappedTruncateAfter(OperationContext* opCtx,
         firstRemovedId = record->id;
     }
 
+    WriteUnitOfWork wuow(opCtx);
+
     // Compute the number and associated sizes of the records to delete.
     {
-        stdx::lock_guard<Latch> cappedCallbackLock(_cappedCallbackMutex);
         do {
-            if (_cappedCallback) {
-                uassertStatusOK(
-                    _cappedCallback->aboutToDeleteCapped(opCtx, record->id, record->data));
+            if (aboutToDelete) {
+                aboutToDelete(opCtx, record->id, record->data);
             }
             recordsRemoved++;
             bytesRemoved += record->data.size();
@@ -2098,7 +2073,6 @@ void WiredTigerRecordStore::doCappedTruncateAfter(OperationContext* opCtx,
 
     // Truncate the collection starting from the record located at 'firstRemovedId' to the end of
     // the collection.
-    WriteUnitOfWork wuow(opCtx);
 
     WiredTigerCursor startwrap(_uri, _tableId, true, opCtx);
     WT_CURSOR* start = startwrap.get();
@@ -2248,7 +2222,7 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::next() {
 
         // Force a retry of the operation from our last known position by acting as-if
         // we received a WT_ROLLBACK error.
-        throwWriteConflictException();
+        throwWriteConflictException("WTCursor::next -- next was not greater than last.");
     }
 
     WT_ITEM value;

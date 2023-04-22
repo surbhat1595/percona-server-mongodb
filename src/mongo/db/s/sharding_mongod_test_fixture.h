@@ -30,7 +30,6 @@
 #pragma once
 
 #include "mongo/db/repl/replication_coordinator_mock.h"
-#include "mongo/db/s/dist_lock_manager.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/s/sharding_test_fixture_common.h"
 
@@ -110,11 +109,6 @@ protected:
      * Base class returns a real implementation of ShardRegistry.
      */
     virtual std::unique_ptr<ShardRegistry> makeShardRegistry(ConnectionString configConnStr);
-
-    /**
-     * Allows tests to conditionally construct a DistLockManager
-     */
-    virtual std::unique_ptr<DistLockManager> makeDistLockManager();
 
     /**
      * Base class returns nullptr.

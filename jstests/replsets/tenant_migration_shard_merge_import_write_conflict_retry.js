@@ -8,7 +8,6 @@
  *   featureFlagShardMerge,
  *   incompatible_with_macos,
  *   incompatible_with_windows_tls,
- *   requires_fcv_52,
  *   requires_replication,
  *   requires_persistence,
  *   requires_wiredtiger,
@@ -66,10 +65,8 @@ configureFailPoint(
 jsTestLog("Run migration");
 // The old multitenant migrations won't copy myDatabase since it doesn't start with testTenantId,
 // but shard merge copies everything so we still expect myDatabase on the recipient, below.
-const kTenantId = "testTenantId";
 const migrationOpts = {
     migrationIdString: extractUUIDFromObject(migrationId),
-    tenantId: kTenantId,
 };
 TenantMigrationTest.assertCommitted(
     tenantMigrationTest.runMigration(migrationOpts, {enableDonorStartMigrationFsync: true}));

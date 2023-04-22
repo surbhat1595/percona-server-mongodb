@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/batched_write_context.h"
 #include "mongo/db/catalog/import_collection_oplog_entry_gen.h"
 #include "mongo/db/client.h"
@@ -61,7 +58,7 @@
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/repl/tenant_migration_access_blocker_registry.h"
 #include "mongo/db/service_context_d_test_fixture.h"
-#include "mongo/db/session_catalog_mongod.h"
+#include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction/transaction_participant_gen.h"
 #include "mongo/idl/server_parameter_test_util.h"
@@ -72,14 +69,11 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
-
 namespace mongo {
 namespace {
 
 using repl::OplogEntry;
 using unittest::assertGet;
-
-namespace {
 
 OplogEntry getInnerEntryFromApplyOpsOplogEntry(const OplogEntry& oplogEntry) {
     std::vector<repl::OplogEntry> innerEntries;
@@ -102,7 +96,7 @@ void beginRetryableWriteWithTxnNumber(
                                    {*opCtx->getTxnNumber()},
                                    boost::none /* autocommit */,
                                    boost::none /* startTransaction */);
-};
+}
 
 void beginNonRetryableTransactionWithTxnNumber(
     OperationContext* opCtx,
@@ -116,7 +110,7 @@ void beginNonRetryableTransactionWithTxnNumber(
     auto txnParticipant = TransactionParticipant::get(opCtx);
     txnParticipant.beginOrContinue(
         opCtx, {*opCtx->getTxnNumber()}, false /* autocommit */, true /* startTransaction */);
-};
+}
 
 void beginRetryableInternalTransactionWithTxnNumber(
     OperationContext* opCtx,
@@ -130,7 +124,7 @@ void beginRetryableInternalTransactionWithTxnNumber(
     auto txnParticipant = TransactionParticipant::get(opCtx);
     txnParticipant.beginOrContinue(
         opCtx, {*opCtx->getTxnNumber()}, false /* autocommit */, true /* startTransaction */);
-};
+}
 
 template <typename OpObserverType>
 void commitUnpreparedTransaction(OperationContext* opCtx, OpObserverType& opObserver) {
@@ -157,10 +151,10 @@ repl::OpTime reserveOpTimeInSideTransaction(OperationContext* opCtx) {
     return reserveOpTimesInSideTransaction(opCtx, 1)[0];
 }
 
-}  // namespace
-
 class OpObserverTest : public ServiceContextMongoDTest {
-public:
+protected:
+    explicit OpObserverTest(Options options = {}) : ServiceContextMongoDTest(std::move(options)) {}
+
     void setUp() override {
         // Set up mongod.
         ServiceContextMongoDTest::setUp();
@@ -182,6 +176,12 @@ public:
         MongoDSessionCatalog::onStepUp(opCtx.get());
 
         ReadWriteConcernDefaults::create(getServiceContext(), _lookupMock.getFetchDefaultsFn());
+
+        reset(opCtx.get(), nss, uuid);
+        reset(opCtx.get(), nss1, uuid1);
+        reset(opCtx.get(), nss2, uuid2);
+        reset(opCtx.get(), kNssUnderTenantId, kNssUnderTenantIdUUID);
+        reset(opCtx.get(), NamespaceString::kRsOplogNamespace);
     }
 
     void tearDown() override {
@@ -196,7 +196,7 @@ public:
             opCtx->recoveryUnit()->abandonSnapshot();
 
             WriteUnitOfWork wunit(opCtx);
-            AutoGetCollection collRaii(opCtx, nss, LockMode::MODE_X);
+            AutoGetCollection collRaii(opCtx, nss, MODE_X);
             if (collRaii) {
                 invariant(collRaii.getWritableCollection(opCtx)->truncate(opCtx).isOK());
             } else {
@@ -217,9 +217,6 @@ public:
         reset(opCtx, NamespaceString::kConfigImagesNamespace);
         reset(opCtx, NamespaceString::kChangeStreamPreImagesNamespace);
     }
-
-protected:
-    explicit OpObserverTest(Options options = {}) : ServiceContextMongoDTest(std::move(options)) {}
 
     // Assert that the oplog has the expected number of entries, and return them
     std::vector<BSONObj> getNOplogEntries(OperationContext* opCtx, int numExpected) {
@@ -272,8 +269,7 @@ protected:
 
     bool didWriteImageEntryToSideCollection(OperationContext* opCtx,
                                             const LogicalSessionId& sessionId) {
-        AutoGetCollection sideCollection(
-            opCtx, NamespaceString::kConfigImagesNamespace, LockMode::MODE_IS);
+        AutoGetCollection sideCollection(opCtx, NamespaceString::kConfigImagesNamespace, MODE_IS);
         const auto imageEntry = Helpers::findOneForTesting(
             opCtx, sideCollection.getCollection(), BSON("_id" << sessionId.toBSON()), false);
         return !imageEntry.isEmpty();
@@ -282,7 +278,7 @@ protected:
     bool didWriteDeletedDocToPreImagesCollection(OperationContext* opCtx,
                                                  const ChangeStreamPreImageId preImageId) {
         AutoGetCollection preImagesCollection(
-            opCtx, NamespaceString::kChangeStreamPreImagesNamespace, LockMode::MODE_IS);
+            opCtx, NamespaceString::kChangeStreamPreImagesNamespace, MODE_IS);
         const auto preImage = Helpers::findOneForTesting(
             opCtx, preImagesCollection.getCollection(), BSON("_id" << preImageId.toBSON()), false);
         return !preImage.isEmpty();
@@ -290,8 +286,7 @@ protected:
 
     repl::ImageEntry getImageEntryFromSideCollection(OperationContext* opCtx,
                                                      const LogicalSessionId& sessionId) {
-        AutoGetCollection sideCollection(
-            opCtx, NamespaceString::kConfigImagesNamespace, LockMode::MODE_IS);
+        AutoGetCollection sideCollection(opCtx, NamespaceString::kConfigImagesNamespace, MODE_IS);
         return repl::ImageEntry::parse(
             IDLParserContext("image entry"),
             Helpers::findOneForTesting(
@@ -300,7 +295,7 @@ protected:
 
     SessionTxnRecord getTxnRecord(OperationContext* opCtx, const LogicalSessionId& sessionId) {
         AutoGetCollection configTransactions(
-            opCtx, NamespaceString::kSessionTransactionsTableNamespace, LockMode::MODE_IS);
+            opCtx, NamespaceString::kSessionTransactionsTableNamespace, MODE_IS);
 
         return SessionTxnRecord::parse(
             IDLParserContext("txn record"),
@@ -318,13 +313,24 @@ protected:
                                                  const ChangeStreamPreImageId& preImageId,
                                                  BSONObj* container) {
         AutoGetCollection preImagesCollection(
-            opCtx, NamespaceString::kChangeStreamPreImagesNamespace, LockMode::MODE_IS);
+            opCtx, NamespaceString::kChangeStreamPreImagesNamespace, MODE_IS);
         *container = Helpers::findOneForTesting(opCtx,
                                                 preImagesCollection.getCollection(),
                                                 BSON("_id" << preImageId.toBSON()))
                          .getOwned();
         return ChangeStreamPreImage::parse(IDLParserContext("pre-image"), *container);
     }
+
+    const NamespaceString nss{TenantId(OID::gen()), "testDB", "testColl"};
+    const UUID uuid{UUID::gen()};
+    const NamespaceString nss1{TenantId(OID::gen()), "testDB1", "testColl1"};
+    const UUID uuid1{UUID::gen()};
+    const NamespaceString nss2{TenantId(OID::gen()), "testDB2", "testColl2"};
+    const UUID uuid2{UUID::gen()};
+
+    const std::string kTenantId = "tenantId";
+    const NamespaceString kNssUnderTenantId{boost::none, "tenantId_db", "testColl"};
+    const UUID kNssUnderTenantIdUUID{UUID::gen()};
 
     ReadWriteConcernDefaultsLookupMock _lookupMock;
 
@@ -624,8 +630,7 @@ TEST_F(OpObserverTest, OnDropCollectionInlcudesTenantId) {
 
     OplogEntry oplogEntry = assertGet(OplogEntry::parse(getSingleOplogEntry(opCtx.get())));
     ASSERT_EQUALS(tid, *oplogEntry.getTid());
-    // TODO: SERVER-67155 perform check against getCommandNS after oplogEntry.getNss() contains tid
-    ASSERT_EQUALS(NamespaceString(boost::none, nss.dbName().db(), "$cmd"), oplogEntry.getNss());
+    ASSERT_EQUALS(nss.getCommandNS(), oplogEntry.getNss());
 }
 
 TEST_F(OpObserverTest, OnRenameCollectionReturnsRenameOpTime) {
@@ -728,9 +733,7 @@ TEST_F(OpObserverTest, OnRenameCollectionIncludesTenantIdFeatureFlagOn) {
     // Ensure that renameCollection fields were properly added to oplog entry.
     ASSERT_EQUALS(uuid, unittest::assertGet(UUID::parse(oplogEntryObj["ui"])));
     ASSERT_EQUALS(tid, *oplogEntry.getTid());
-    // TODO: SERVER-67155 perform check against getCommandNS after oplogEntry.getNss() contains tid
-    ASSERT_EQUALS(NamespaceString(boost::none, sourceNss.dbName().db(), "$cmd"),
-                  oplogEntry.getNss());
+    ASSERT_EQUALS(sourceNss.getCommandNS(), oplogEntry.getNss());
 
     auto oExpected =
         BSON("renameCollection" << sourceNss.toString() << "to" << targetNss.toString()
@@ -868,30 +871,25 @@ TEST_F(OpObserverTest, ImportCollectionOplogEntryIncludesTenantId) {
 TEST_F(OpObserverTest, SingleStatementInsertTestIncludesTenantId) {
     RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
-    auto opCtx = cc().makeOperationContext();
-    const NamespaceString nss(TenantId(OID::gen()), "testDB", "testColl");
-    auto uuid = UUID::gen();
 
     std::vector<InsertStatement> insert;
     insert.emplace_back(BSON("_id" << 0 << "data"
                                    << "x"));
 
+    auto opCtx = cc().makeOperationContext();
     WriteUnitOfWork wuow(opCtx.get());
-    AutoGetCollection locks(opCtx.get(), nss, LockMode::MODE_IX);
+    AutoGetCollection autoColl(opCtx.get(), nss, MODE_IX);
 
     OpObserverRegistry opObserver;
     opObserver.addObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
-    opObserver.onInserts(opCtx.get(), nss, uuid, insert.begin(), insert.end(), false),
-        wuow.commit();
+    opObserver.onInserts(opCtx.get(), *autoColl, insert.begin(), insert.end(), false);
+    wuow.commit();
 
     auto oplogEntryObj = getSingleOplogEntry(opCtx.get());
     const repl::OplogEntry& entry = assertGet(repl::OplogEntry::parse(oplogEntryObj));
 
-    // TODO SERVER-67155 Check that (nss == entry.getNss()) and uncomment the
-    // line below once the OplogEntry deserializer passes "tid" to the NamespaceString
-    // constructor
-    ASSERT_EQ(NamespaceString(boost::none, nss.ns()), entry.getNss());
-    // ASSERT(nss.tenantId().has_value());
+    ASSERT_EQ(nss, entry.getNss());
+    ASSERT(nss.tenantId().has_value());
 
     ASSERT_EQ(*nss.tenantId(), *entry.getTid());
     ASSERT_EQ(uuid, *entry.getUuid());
@@ -900,9 +898,6 @@ TEST_F(OpObserverTest, SingleStatementInsertTestIncludesTenantId) {
 TEST_F(OpObserverTest, SingleStatementUpdateTestIncludesTenantId) {
     RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
-    auto opCtx = cc().makeOperationContext();
-    const NamespaceString nss(TenantId(OID::gen()), "testDB", "testColl");
-    auto uuid = UUID::gen();
 
     CollectionUpdateArgs updateArgs;
     updateArgs.updatedDoc = BSON("_id" << 0 << "data"
@@ -912,6 +907,7 @@ TEST_F(OpObserverTest, SingleStatementUpdateTestIncludesTenantId) {
     updateArgs.criteria = BSON("_id" << 0);
     OplogUpdateEntryArgs update(&updateArgs, nss, uuid);
 
+    auto opCtx = cc().makeOperationContext();
     WriteUnitOfWork wuow(opCtx.get());
     AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
 
@@ -925,22 +921,17 @@ TEST_F(OpObserverTest, SingleStatementUpdateTestIncludesTenantId) {
 
     ASSERT(nss.tenantId().has_value());
     ASSERT_EQ(*nss.tenantId(), *entry.getTid());
-    // TODO SERVER-67155 Check that (nss == entry.getNss()) once the OplogEntry deserializer passes
-    // "tid" to the NamespaceString constructor
-    ASSERT_EQ(NamespaceString(boost::none, nss.ns()), entry.getNss());
+    ASSERT_EQ(nss, entry.getNss());
     ASSERT_EQ(uuid, *entry.getUuid());
 }
 
 TEST_F(OpObserverTest, SingleStatementDeleteTestIncludesTenantId) {
     RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
-    auto opCtx = cc().makeOperationContext();
-    const NamespaceString nss(TenantId(OID::gen()), "testDB", "testColl");
-    auto uuid = UUID::gen();
 
-    OplogDeleteEntryArgs deleteEntryArgs;
+    auto opCtx = cc().makeOperationContext();
     WriteUnitOfWork wuow(opCtx.get());
-    AutoGetCollection locks(opCtx.get(), nss, LockMode::MODE_IX);
+    AutoGetCollection locks(opCtx.get(), nss, MODE_IX);
 
     OpObserverRegistry opObserver;
     opObserver.addObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
@@ -948,16 +939,15 @@ TEST_F(OpObserverTest, SingleStatementDeleteTestIncludesTenantId) {
     // of setting of `documentKey` on the delete for sharding purposes.
     // `OpObserverImpl::onDelete` asserts its existence.
     repl::documentKeyDecoration(opCtx.get()).emplace(BSON("_id" << 0), boost::none);
+    OplogDeleteEntryArgs deleteEntryArgs;
     opObserver.onDelete(opCtx.get(), nss, uuid, kUninitializedStmtId, deleteEntryArgs);
     wuow.commit();
 
     auto oplogEntryObj = getSingleOplogEntry(opCtx.get());
     const repl::OplogEntry& entry = assertGet(repl::OplogEntry::parse(oplogEntryObj));
 
-    // TODO SERVER-67155 Check that (nss == entry.getNss()) once the OplogEntry deserializer passes
-    // "tid" to the NamespaceString constructor
-    // ASSERT(nss.tenantId().has_value());
-    ASSERT_EQ(NamespaceString(boost::none, nss.ns()), entry.getNss());
+    ASSERT(nss.tenantId().has_value());
+    ASSERT_EQ(nss, entry.getNss());
     ASSERT_EQ(*nss.tenantId(), *entry.getTid());
     ASSERT_EQ(uuid, *entry.getUuid());
 }
@@ -1089,6 +1079,7 @@ class OpObserverTxnParticipantTest : public OpObserverTest {
 public:
     void setUp() override {
         OpObserverTest::setUp();
+
         _opCtx = cc().makeOperationContext();
         _opObserver.emplace(std::make_unique<OplogWriterImpl>());
         _times.emplace(opCtx());
@@ -1175,13 +1166,12 @@ private:
  */
 
 class OpObserverTransactionTest : public OpObserverTxnParticipantTest {
-public:
+protected:
     void setUp() override {
         OpObserverTxnParticipantTest::setUp();
         OpObserverTxnParticipantTest::setUpNonRetryableTransaction();
     }
 
-protected:
     void checkSessionAndTransactionFields(const BSONObj& oplogEntry) {
         ASSERT_BSONOBJ_EQ(session()->getSessionId().toBSON(), oplogEntry.getObjectField("lsid"));
         ASSERT_EQ(*opCtx()->getTxnNumber(), oplogEntry.getField("txnNumber").safeNumberLong());
@@ -1253,10 +1243,6 @@ protected:
 };
 
 TEST_F(OpObserverTransactionTest, TransactionalPrepareTest) {
-    const NamespaceString nss1(boost::none, "testDB", "testColl");
-    const NamespaceString nss2(boost::none, "testDB2", "testColl2");
-    auto uuid1 = UUID::gen();
-    auto uuid2 = UUID::gen();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
 
@@ -1270,7 +1256,7 @@ TEST_F(OpObserverTransactionTest, TransactionalPrepareTest) {
     inserts1.emplace_back(1,
                           BSON("_id" << 1 << "data"
                                      << "y"));
-    opObserver().onInserts(opCtx(), nss1, uuid1, inserts1.begin(), inserts1.end(), false);
+    opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
 
     CollectionUpdateArgs updateArgs2;
     updateArgs2.stmtIds = {1};
@@ -1334,8 +1320,6 @@ TEST_F(OpObserverTransactionTest, TransactionalPrepareTest) {
 }
 
 TEST_F(OpObserverTransactionTest, TransactionalPreparedCommitTest) {
-    const NamespaceString nss(boost::none, "testDB", "testColl");
-    const auto uuid = UUID::gen();
     const auto doc = BSON("_id" << 0 << "data"
                                 << "x");
     const auto docKey = BSON("_id" << 0);
@@ -1350,7 +1334,7 @@ TEST_F(OpObserverTransactionTest, TransactionalPreparedCommitTest) {
     Timestamp prepareTimestamp;
     {
         AutoGetCollection autoColl(opCtx(), nss, MODE_IX);
-        opObserver().onInserts(opCtx(), nss, uuid, insert.begin(), insert.end(), false);
+        opObserver().onInserts(opCtx(), *autoColl, insert.begin(), insert.end(), false);
 
         const auto prepareSlot = reserveOpTimeInSideTransaction(opCtx());
         txnParticipant.transitionToPreparedforTest(opCtx(), prepareSlot);
@@ -1403,8 +1387,6 @@ TEST_F(OpObserverTransactionTest, TransactionalPreparedCommitTest) {
 }
 
 TEST_F(OpObserverTransactionTest, TransactionalPreparedAbortTest) {
-    const NamespaceString nss(boost::none, "testDB", "testColl");
-    const auto uuid = UUID::gen();
     const auto doc = BSON("_id" << 0 << "data"
                                 << "x");
     const auto docKey = BSON("_id" << 0);
@@ -1418,7 +1400,7 @@ TEST_F(OpObserverTransactionTest, TransactionalPreparedAbortTest) {
     OplogSlot abortSlot;
     {
         AutoGetCollection autoColl(opCtx(), nss, MODE_IX);
-        opObserver().onInserts(opCtx(), nss, uuid, insert.begin(), insert.end(), false);
+        opObserver().onInserts(opCtx(), *autoColl, insert.begin(), insert.end(), false);
 
         const auto prepareSlot = reserveOpTimeInSideTransaction(opCtx());
         txnParticipant.transitionToPreparedforTest(opCtx(), prepareSlot);
@@ -1466,8 +1448,6 @@ TEST_F(OpObserverTransactionTest, TransactionalPreparedAbortTest) {
 }
 
 TEST_F(OpObserverTransactionTest, TransactionalUnpreparedAbortTest) {
-    const NamespaceString nss(boost::none, "testDB", "testColl");
-    const auto uuid = UUID::gen();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
 
@@ -1477,9 +1457,9 @@ TEST_F(OpObserverTransactionTest, TransactionalUnpreparedAbortTest) {
                                    << "x"));
 
     {
-        WriteUnitOfWork wuow(opCtx());
         AutoGetCollection autoColl(opCtx(), nss, MODE_IX);
-        opObserver().onInserts(opCtx(), nss, uuid, insert.begin(), insert.end(), false);
+        WriteUnitOfWork wuow(opCtx());
+        opObserver().onInserts(opCtx(), *autoColl, insert.begin(), insert.end(), false);
 
         txnParticipant.transitionToAbortedWithoutPrepareforTest(opCtx());
         opObserver().onTransactionAbort(opCtx(), boost::none);
@@ -1586,8 +1566,6 @@ TEST_F(OpObserverTransactionTest, AbortingPreparedTransactionWritesToTransaction
 }
 
 TEST_F(OpObserverTransactionTest, CommittingUnpreparedNonEmptyTransactionWritesToTransactionTable) {
-    const NamespaceString nss(boost::none, "testDB", "testColl");
-    const auto uuid = UUID::gen();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "prepareTransaction");
 
@@ -1598,7 +1576,7 @@ TEST_F(OpObserverTransactionTest, CommittingUnpreparedNonEmptyTransactionWritesT
 
     {
         AutoGetCollection autoColl(opCtx(), nss, MODE_IX);
-        opObserver().onInserts(opCtx(), nss, uuid, insert.begin(), insert.end(), false);
+        opObserver().onInserts(opCtx(), *autoColl, insert.begin(), insert.end(), false);
     }
 
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
@@ -1660,10 +1638,6 @@ TEST_F(OpObserverTransactionTest, CommittingPreparedTransactionWritesToTransacti
 }
 
 TEST_F(OpObserverTransactionTest, TransactionalInsertTest) {
-    const NamespaceString nss1(boost::none, "testDB", "testColl");
-    const NamespaceString nss2(boost::none, "testDB2", "testColl2");
-    auto uuid1 = UUID::gen();
-    auto uuid2 = UUID::gen();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
 
@@ -1681,11 +1655,11 @@ TEST_F(OpObserverTransactionTest, TransactionalInsertTest) {
     inserts2.emplace_back(1,
                           BSON("_id" << 3 << "data"
                                      << "w"));
-    WriteUnitOfWork wuow(opCtx());
     AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
     AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
-    opObserver().onInserts(opCtx(), nss1, uuid1, inserts1.begin(), inserts1.end(), false);
-    opObserver().onInserts(opCtx(), nss2, uuid2, inserts2.begin(), inserts2.end(), false);
+    WriteUnitOfWork wuow(opCtx());
+    opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
+    opObserver().onInserts(opCtx(), *autoColl2, inserts2.begin(), inserts2.end(), false);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
     opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
     auto oplogEntryObj = getSingleOplogEntry(opCtx());
@@ -1725,10 +1699,7 @@ TEST_F(OpObserverTransactionTest, TransactionalInsertTest) {
 TEST_F(OpObserverTransactionTest, TransactionalInsertTestIncludesTenantId) {
     RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
-    const NamespaceString nss1(TenantId(OID::gen()), "testDB", "testColl");
-    const NamespaceString nss2(TenantId(OID::gen()), "testDB2", "testColl2");
-    auto uuid1 = UUID::gen();
-    auto uuid2 = UUID::gen();
+
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
 
@@ -1746,11 +1717,12 @@ TEST_F(OpObserverTransactionTest, TransactionalInsertTestIncludesTenantId) {
     inserts2.emplace_back(1,
                           BSON("_id" << 3 << "data"
                                      << "w"));
-    WriteUnitOfWork wuow(opCtx());
+
     AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
     AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
-    opObserver().onInserts(opCtx(), nss1, uuid1, inserts1.begin(), inserts1.end(), false);
-    opObserver().onInserts(opCtx(), nss2, uuid2, inserts2.begin(), inserts2.end(), false);
+    WriteUnitOfWork wuow(opCtx());
+    opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
+    opObserver().onInserts(opCtx(), *autoColl2, inserts2.begin(), inserts2.end(), false);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
     opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
     auto oplogEntryObj = getSingleOplogEntry(opCtx());
@@ -1792,10 +1764,6 @@ TEST_F(OpObserverTransactionTest, TransactionalInsertTestIncludesTenantId) {
 }
 
 TEST_F(OpObserverTransactionTest, TransactionalUpdateTest) {
-    const NamespaceString nss1(boost::none, "testDB", "testColl");
-    const NamespaceString nss2(boost::none, "testDB2", "testColl2");
-    auto uuid1 = UUID::gen();
-    auto uuid2 = UUID::gen();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "update");
 
@@ -1848,10 +1816,7 @@ TEST_F(OpObserverTransactionTest, TransactionalUpdateTest) {
 TEST_F(OpObserverTransactionTest, TransactionalUpdateTestIncludesTenantId) {
     RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
-    const NamespaceString nss1(TenantId(OID::gen()), "testDB", "testColl");
-    const NamespaceString nss2(TenantId(OID::gen()), "testDB2", "testColl2");
-    auto uuid1 = UUID::gen();
-    auto uuid2 = UUID::gen();
+
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "update");
 
@@ -1904,11 +1869,6 @@ TEST_F(OpObserverTransactionTest, TransactionalUpdateTestIncludesTenantId) {
 }
 
 TEST_F(OpObserverTransactionTest, TransactionalDeleteTest) {
-    const NamespaceString nss1(boost::none, "testDB", "testColl");
-    const NamespaceString nss2(boost::none, "testDB2", "testColl2");
-    auto uuid1 = UUID::gen();
-    auto uuid2 = UUID::gen();
-
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "delete");
 
@@ -1948,10 +1908,6 @@ TEST_F(OpObserverTransactionTest, TransactionalDeleteTest) {
 TEST_F(OpObserverTransactionTest, TransactionalDeleteTestIncludesTenantId) {
     RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
-    const NamespaceString nss1(TenantId(OID::gen()), "testDB", "testColl");
-    const NamespaceString nss2(TenantId(OID::gen()), "testDB2", "testColl2");
-    auto uuid1 = UUID::gen();
-    auto uuid2 = UUID::gen();
 
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "delete");
@@ -1990,50 +1946,33 @@ TEST_F(OpObserverTransactionTest, TransactionalDeleteTestIncludesTenantId) {
     ASSERT_FALSE(oplogEntry.getBoolField("prepare"));
 }
 
-class OpObserverMultiEntryTransactionTest : public OpObserverTransactionTest {
-    void setUp() override {
-        _prevPackingLimit = gMaxNumberOfTransactionOperationsInSingleOplogEntry;
-        gMaxNumberOfTransactionOperationsInSingleOplogEntry = 1;
-        OpObserverTransactionTest::setUp();
-    }
+TEST_F(OpObserverTransactionTest,
+       OnUnpreparedTransactionCommitChecksIfTenantMigrationIsBlockingWrites) {
+    // Add a tenant migration access blocker on donor for blocking writes.
+    auto donorMtab = std::make_shared<TenantMigrationDonorAccessBlocker>(getServiceContext(), uuid);
+    TenantMigrationAccessBlockerRegistry::get(getServiceContext()).add(kTenantId, donorMtab);
 
-    void tearDown() override {
-        OpObserverTransactionTest::tearDown();
-        gMaxNumberOfTransactionOperationsInSingleOplogEntry = _prevPackingLimit;
-    }
-
-private:
-    int _prevPackingLimit;
-};
-
-TEST_F(OpObserverMultiEntryTransactionTest, TransactionSingleStatementTest) {
-    const NamespaceString nss(boost::none, "testDB", "testColl");
-    auto uuid = UUID::gen();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
-    std::vector<InsertStatement> inserts;
-    inserts.emplace_back(0, BSON("_id" << 0 << "a" << std::string(BSONObjMaxUserSize, 'a')));
 
-    WriteUnitOfWork wuow(opCtx());
-    AutoGetCollection autoColl1(opCtx(), nss, MODE_IX);
-    opObserver().onInserts(opCtx(), nss, uuid, inserts.begin(), inserts.end(), false);
+    std::vector<InsertStatement> insert;
+    insert.emplace_back(0,
+                        BSON("_id" << 0 << "data"
+                                   << "x"));
+
+    {
+        AutoGetCollection autoColl(opCtx(), kNssUnderTenantId, MODE_IX);
+        opObserver().onInserts(opCtx(), *autoColl, insert.begin(), insert.end(), false);
+    }
+
+    donorMtab->startBlockingWrites();
+
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
-    auto oplogEntryObj = getNOplogEntries(opCtx(), 1)[0];
-    checkSessionAndTransactionFields(oplogEntryObj);
-    auto oplogEntry = assertGet(OplogEntry::parse(oplogEntryObj));
-    ASSERT(!oplogEntry.shouldPrepare());
-    ASSERT_TRUE(oplogEntry.getPrevWriteOpTimeInTransaction());
-    ASSERT_EQ(repl::OpTime(), *oplogEntry.getPrevWriteOpTimeInTransaction());
+    ASSERT_THROWS_CODE(opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0),
+                       DBException,
+                       ErrorCodes::TenantMigrationConflict);
 
-    // The implicit commit oplog entry.
-    auto oExpected = BSON("applyOps" << BSON_ARRAY(BSON(
-                              "op"
-                              << "i"
-                              << "ns" << nss.toString() << "ui" << uuid << "o"
-                              << BSON("_id" << 0 << "a" << std::string(BSONObjMaxUserSize, 'a'))
-                              << "o2" << BSON("_id" << 0))));
-    ASSERT_BSONOBJ_EQ(oExpected, oplogEntry.getObject());
+    TenantMigrationAccessBlockerRegistry::get(getServiceContext()).shutDown();
 }
 
 /**
@@ -2284,7 +2223,6 @@ const bool kChangeStreamImagesEnabled = true;
 const bool kChangeStreamImagesDisabled = false;
 
 const auto kNotRetryable = RetryableFindAndModifyLocation::kNone;
-const auto kRecordInOplog = RetryableFindAndModifyLocation::kOplog;
 const auto kRecordInSideCollection = RetryableFindAndModifyLocation::kSideCollection;
 
 const std::vector<bool> kInMultiDocumentTransactionCases{false, true};
@@ -2322,8 +2260,6 @@ struct UpdateTestCase {
         switch (retryableOptions) {
             case kNotRetryable:
                 return "Not retryable";
-            case kRecordInOplog:
-                return "Images in oplog";
             case kRecordInSideCollection:
                 return "Images in side collection";
         }
@@ -2355,10 +2291,6 @@ protected:
             case kNotRetryable:
                 update->updateArgs->stmtIds = {kUninitializedStmtId};
                 break;
-            case kRecordInOplog:
-                update->retryableFindAndModifyLocation = RetryableFindAndModifyLocation::kOplog;
-                update->updateArgs->stmtIds = {1};
-                break;
             case kRecordInSideCollection:
                 update->retryableFindAndModifyLocation =
                     RetryableFindAndModifyLocation::kSideCollection;
@@ -2381,81 +2313,6 @@ protected:
             BSON("$set" << BSON("postImage" << true) << "$unset" << BSON("preImage" << 1));
         update->updateArgs->criteria = BSON("_id" << 0);
         update->updateArgs->storeDocOption = testCase.imageType;
-    }
-
-    void checkPreImageInOplogIfNeeded(
-        const UpdateTestCase& testCase,
-        const OplogUpdateEntryArgs& update,
-        const std::vector<BSONObj>& oplogs,
-        const OplogEntry& updateOplogEntry,
-        const boost::optional<OplogEntry>& applyOpsOplogEntry = boost::none) {
-        const bool checkPreImageInOplog = testCase.alwaysRecordPreImages ||
-            (testCase.imageType == StoreDocOption::PreImage &&
-             testCase.retryableOptions == kRecordInOplog);
-        if (checkPreImageInOplog) {
-            ASSERT(updateOplogEntry.getPreImageOpTime());
-            if (applyOpsOplogEntry) {
-                ASSERT_FALSE(applyOpsOplogEntry->getPreImageOpTime());
-            }
-
-            const Timestamp preImageOpTime = updateOplogEntry.getPreImageOpTime()->getTimestamp();
-            ASSERT_FALSE(preImageOpTime.isNull());
-            OplogEntry preImage = *findByTimestamp(oplogs, preImageOpTime);
-            ASSERT_BSONOBJ_EQ(update.updateArgs->preImageDoc.value(), preImage.getObject());
-            if (updateOplogEntry.getSessionId()) {
-                ASSERT_EQ(*updateOplogEntry.getSessionId(), *preImage.getSessionId());
-            }
-            if (updateOplogEntry.getTxnNumber()) {
-                ASSERT_EQ(*updateOplogEntry.getTxnNumber(), *preImage.getTxnNumber());
-            }
-            if (!updateOplogEntry.getStatementIds().empty()) {
-                const auto& updateOplogStmtIds = updateOplogEntry.getStatementIds();
-                const auto& preImageOplogStmtIds = preImage.getStatementIds();
-                ASSERT_EQ(updateOplogStmtIds.size(), preImageOplogStmtIds.size());
-                for (size_t i = 0; i < updateOplogStmtIds.size(); i++) {
-                    ASSERT_EQ(updateOplogStmtIds[i], preImageOplogStmtIds[i]);
-                }
-            }
-        } else {
-            ASSERT_FALSE(updateOplogEntry.getPreImageOpTime());
-        }
-    }
-
-    void checkPostImageInOplogIfNeeded(
-        const UpdateTestCase& testCase,
-        const OplogUpdateEntryArgs& update,
-        const std::vector<BSONObj>& oplogs,
-        const OplogEntry& updateOplogEntry,
-        const boost::optional<OplogEntry>& applyOpsOplogEntry = boost::none) {
-        const bool checkPostImageInOplog = testCase.imageType == StoreDocOption::PostImage &&
-            testCase.retryableOptions == kRecordInOplog;
-        if (checkPostImageInOplog) {
-            ASSERT(updateOplogEntry.getPostImageOpTime());
-            if (applyOpsOplogEntry) {
-                ASSERT_FALSE(applyOpsOplogEntry->getPostImageOpTime());
-            }
-
-            const Timestamp postImageOpTime = updateOplogEntry.getPostImageOpTime()->getTimestamp();
-            ASSERT_FALSE(postImageOpTime.isNull());
-            OplogEntry postImage = *findByTimestamp(oplogs, postImageOpTime);
-            ASSERT_BSONOBJ_EQ(update.updateArgs->updatedDoc, postImage.getObject());
-            if (updateOplogEntry.getSessionId()) {
-                ASSERT_EQ(*updateOplogEntry.getSessionId(), *postImage.getSessionId());
-            }
-            if (updateOplogEntry.getTxnNumber()) {
-                ASSERT_EQ(*updateOplogEntry.getTxnNumber(), *postImage.getTxnNumber());
-            }
-            if (!updateOplogEntry.getStatementIds().empty()) {
-                const auto& updateOplogStmtIds = updateOplogEntry.getStatementIds();
-                const auto& postImageOplogStmtIds = postImage.getStatementIds();
-                ASSERT_EQ(updateOplogStmtIds.size(), postImageOplogStmtIds.size());
-                for (size_t i = 0; i < updateOplogStmtIds.size(); i++) {
-                    ASSERT_EQ(updateOplogStmtIds[i], postImageOplogStmtIds[i]);
-                }
-            }
-        } else {
-            ASSERT_FALSE(updateOplogEntry.getPostImageOpTime());
-        }
     }
 
     void checkSideCollectionIfNeeded(
@@ -2526,30 +2383,22 @@ protected:
         // Regular updates.
         {kNonFaM, kDoNotRecordPreImages, kChangeStreamImagesDisabled, kNotRetryable, 1},
         {kNonFaM, kDoNotRecordPreImages, kChangeStreamImagesEnabled, kNotRetryable, 1},
-        {kNonFaM, kDoNotRecordPreImages, kChangeStreamImagesEnabled, kRecordInOplog, 1},
         {kNonFaM, kDoNotRecordPreImages, kChangeStreamImagesEnabled, kRecordInSideCollection, 1},
         {kNonFaM, kRecordPreImages, kChangeStreamImagesDisabled, kNotRetryable, 2},
-        {kNonFaM, kRecordPreImages, kChangeStreamImagesDisabled, kRecordInOplog, 2},
         {kNonFaM, kRecordPreImages, kChangeStreamImagesDisabled, kRecordInSideCollection, 2},
         // FindAndModify asking for a preImage.
         {kFaMPre, kDoNotRecordPreImages, kChangeStreamImagesDisabled, kNotRetryable, 1},
-        {kFaMPre, kDoNotRecordPreImages, kChangeStreamImagesDisabled, kRecordInOplog, 2},
         {kFaMPre, kDoNotRecordPreImages, kChangeStreamImagesDisabled, kRecordInSideCollection, 1},
         {kFaMPre, kDoNotRecordPreImages, kChangeStreamImagesEnabled, kNotRetryable, 1},
-        {kFaMPre, kDoNotRecordPreImages, kChangeStreamImagesEnabled, kRecordInOplog, 2},
         {kFaMPre, kDoNotRecordPreImages, kChangeStreamImagesEnabled, kRecordInSideCollection, 1},
         {kFaMPre, kRecordPreImages, kChangeStreamImagesDisabled, kNotRetryable, 2},
-        {kFaMPre, kRecordPreImages, kChangeStreamImagesDisabled, kRecordInOplog, 2},
         {kFaMPre, kRecordPreImages, kChangeStreamImagesDisabled, kRecordInSideCollection, 2},
         // FindAndModify asking for a postImage.
         {kFaMPost, kDoNotRecordPreImages, kChangeStreamImagesDisabled, kNotRetryable, 1},
-        {kFaMPost, kDoNotRecordPreImages, kChangeStreamImagesDisabled, kRecordInOplog, 2},
         {kFaMPost, kDoNotRecordPreImages, kChangeStreamImagesDisabled, kRecordInSideCollection, 1},
         {kFaMPost, kDoNotRecordPreImages, kChangeStreamImagesEnabled, kNotRetryable, 1},
-        {kFaMPost, kDoNotRecordPreImages, kChangeStreamImagesEnabled, kRecordInOplog, 2},
         {kFaMPost, kDoNotRecordPreImages, kChangeStreamImagesEnabled, kRecordInSideCollection, 1},
         {kFaMPost, kRecordPreImages, kChangeStreamImagesDisabled, kNotRetryable, 2},
-        {kFaMPost, kRecordPreImages, kChangeStreamImagesDisabled, kRecordInOplog, 3},
         {kFaMPost, kRecordPreImages, kChangeStreamImagesDisabled, kRecordInSideCollection, 2}};
 
     const NamespaceString _nss{boost::none, "test", "coll"};
@@ -2585,7 +2434,7 @@ TEST_F(OnUpdateOutputsTest, TestNonTransactionFundamentalOnUpdateOutputs) {
         initializeOplogUpdateEntryArgs(opCtx, testCase, &updateEntryArgs);
 
         WriteUnitOfWork wuow(opCtx);
-        AutoGetCollection locks(opCtx, _nss, LockMode::MODE_IX);
+        AutoGetCollection locks(opCtx, _nss, MODE_IX);
         opObserver.onUpdate(opCtx, updateEntryArgs);
         wuow.commit();
 
@@ -2594,8 +2443,6 @@ TEST_F(OnUpdateOutputsTest, TestNonTransactionFundamentalOnUpdateOutputs) {
         std::vector<BSONObj> oplogs = getNOplogEntries(opCtx, testCase.numOutputOplogs);
         // Entries are returned in ascending timestamp order.
         auto updateOplogEntry = assertGet(OplogEntry::parse(oplogs.back()));
-        checkPreImageInOplogIfNeeded(testCase, updateEntryArgs, oplogs, updateOplogEntry);
-        checkPostImageInOplogIfNeeded(testCase, updateEntryArgs, oplogs, updateOplogEntry);
         checkSideCollectionIfNeeded(opCtx, testCase, updateEntryArgs, oplogs, updateOplogEntry);
         checkChangeStreamImagesIfNeeded(opCtx, testCase, updateEntryArgs, updateOplogEntry);
     }
@@ -2632,7 +2479,7 @@ TEST_F(OnUpdateOutputsTest, TestFundamentalTransactionOnUpdateOutputs) {
         initializeOplogUpdateEntryArgs(opCtx, testCase, &updateEntryArgs);
 
         WriteUnitOfWork wuow(opCtx);
-        AutoGetCollection locks(opCtx, _nss, LockMode::MODE_IX);
+        AutoGetCollection locks(opCtx, _nss, MODE_IX);
         opObserver.onUpdate(opCtx, updateEntryArgs);
         commitUnpreparedTransaction<OpObserverRegistry>(opCtx, opObserver);
         wuow.commit();
@@ -2643,10 +2490,6 @@ TEST_F(OnUpdateOutputsTest, TestFundamentalTransactionOnUpdateOutputs) {
         // Entries are returned in ascending timestamp order.
         auto applyOpsOplogEntry = assertGet(OplogEntry::parse(oplogs.back()));
         auto updateOplogEntry = getInnerEntryFromApplyOpsOplogEntry(applyOpsOplogEntry);
-        checkPreImageInOplogIfNeeded(
-            testCase, updateEntryArgs, oplogs, updateOplogEntry, applyOpsOplogEntry);
-        checkPostImageInOplogIfNeeded(
-            testCase, updateEntryArgs, oplogs, updateOplogEntry, applyOpsOplogEntry);
         checkSideCollectionIfNeeded(
             opCtx, testCase, updateEntryArgs, oplogs, updateOplogEntry, applyOpsOplogEntry);
         checkChangeStreamImagesIfNeeded(opCtx, testCase, updateEntryArgs, updateOplogEntry);
@@ -2682,7 +2525,7 @@ TEST_F(OnUpdateOutputsTest,
     ON_BLOCK_EXIT([] { serverGlobalParams.clusterRole = ClusterRole::None; });
 
     WriteUnitOfWork wuow(opCtx);
-    AutoGetCollection locks(opCtx, _nss, LockMode::MODE_IX);
+    AutoGetCollection locks(opCtx, _nss, MODE_IX);
     ASSERT_THROWS_CODE(opObserver.onUpdate(opCtx, updateEntryArgs), DBException, 6462400);
 }
 
@@ -2696,9 +2539,6 @@ TEST_F(OpObserverTest, TestFundamentalOnInsertsOutputs) {
     // to strong encapsulation, we use the registry that managers the `ReservedTimes` on our behalf.
     OpObserverRegistry opObserver;
     opObserver.addObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
-
-    NamespaceString nss(boost::none, "test", "coll");
-    UUID uuid = UUID::gen();
 
     const bool isRetryableWrite = true;
     const bool isNotRetryableWrite = false;
@@ -2734,10 +2574,10 @@ TEST_F(OpObserverTest, TestFundamentalOnInsertsOutputs) {
         }
 
         // Phase 2: Call the code we're testing.
+        AutoGetCollection autoColl(opCtx, nss, MODE_IX);
         WriteUnitOfWork wuow(opCtx);
-        AutoGetCollection locks(opCtx, nss, LockMode::MODE_IX);
         const bool fromMigrate = false;
-        opObserver.onInserts(opCtx, nss, uuid, toInsert.begin(), toInsert.end(), fromMigrate);
+        opObserver.onInserts(opCtx, *autoColl, toInsert.begin(), toInsert.end(), fromMigrate);
         wuow.commit();
 
         // Phase 3: Analyze the results:
@@ -2800,8 +2640,6 @@ struct DeleteTestCase {
         switch (retryableOptions) {
             case kNotRetryable:
                 return "Not retryable";
-            case kRecordInOplog:
-                return "Images in oplog";
             case kRecordInSideCollection:
                 return "Images in side collection";
         }
@@ -2825,7 +2663,6 @@ protected:
     static const int maxDocsInBatch = 203669;
     const NamespaceString _nss{boost::none, "test", "coll"};
     const NamespaceString _nssWithTid{TenantId(OID::gen()), "test", "coll"};
-    const UUID _uuid = UUID::gen();
 };
 
 DEATH_TEST_REGEX_F(BatchedWriteOutputsTest,
@@ -2852,7 +2689,7 @@ DEATH_TEST_REGEX_F(BatchedWriteOutputsTest,
     WriteUnitOfWork wuow(opCtx, true /* groupOplogEntries */);
 
     auto& bwc = BatchedWriteContext::get(opCtx);
-    auto entry = repl::MutableOplogEntry::makeDeleteOperation(_nss, _uuid, BSON("_id" << 0));
+    auto entry = repl::MutableOplogEntry::makeDeleteOperation(_nss, UUID::gen(), BSON("_id" << 0));
     entry.setChangeStreamPreImageRecordingMode(
         repl::ReplOperation::ChangeStreamPreImageRecordingMode::kPreImagesCollection);
     bwc.addBatchedOperation(opCtx, entry);
@@ -2868,7 +2705,7 @@ DEATH_TEST_REGEX_F(BatchedWriteOutputsTest,
     WriteUnitOfWork wuow(opCtx, true /* groupOplogEntries */);
 
     auto& bwc = BatchedWriteContext::get(opCtx);
-    auto entry = repl::MutableOplogEntry::makeDeleteOperation(_nss, _uuid, BSON("_id" << 0));
+    auto entry = repl::MutableOplogEntry::makeDeleteOperation(_nss, UUID::gen(), BSON("_id" << 0));
     entry.setChangeStreamPreImageRecordingMode(
         repl::ReplOperation::ChangeStreamPreImageRecordingMode::kOplog);
     bwc.addBatchedOperation(opCtx, entry);
@@ -2883,7 +2720,7 @@ DEATH_TEST_REGEX_F(BatchedWriteOutputsTest,
     WriteUnitOfWork wuow(opCtx, true /* groupOplogEntries */);
 
     auto& bwc = BatchedWriteContext::get(opCtx);
-    auto entry = repl::MutableOplogEntry::makeDeleteOperation(_nss, _uuid, BSON("_id" << 0));
+    auto entry = repl::MutableOplogEntry::makeDeleteOperation(_nss, UUID::gen(), BSON("_id" << 0));
     bwc.addBatchedOperation(opCtx, entry);
 }
 
@@ -2897,7 +2734,7 @@ DEATH_TEST_REGEX_F(BatchedWriteOutputsTest,
     WriteUnitOfWork wuow(opCtx, true /* groupOplogEntries */);
 
     auto& bwc = BatchedWriteContext::get(opCtx);
-    auto entry = repl::MutableOplogEntry::makeDeleteOperation(_nss, _uuid, BSON("_id" << 0));
+    auto entry = repl::MutableOplogEntry::makeDeleteOperation(_nss, UUID::gen(), BSON("_id" << 0));
     bwc.addBatchedOperation(opCtx, entry);
 }
 
@@ -2916,6 +2753,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsGrouping) {
     // Setup.
     auto opCtxRaii = cc().makeOperationContext();
     OperationContext* opCtx = opCtxRaii.get();
+    reset(opCtx, _nss);
     reset(opCtx, NamespaceString::kRsOplogNamespace);
 
     // Run the test with WUOW's grouping 1 to 5 deletions.
@@ -2928,7 +2766,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsGrouping) {
         WriteUnitOfWork wuow(opCtx, true /* groupOplogEntries */);
         ASSERT(bwc.writesAreBatched());
 
-        AutoGetCollection locks(opCtx, _nss, LockMode::MODE_IX);
+        AutoGetCollection autoColl(opCtx, _nss, MODE_IX);
 
         for (size_t doc = 0; doc < docsToBeBatched; doc++) {
             // This test does not call `OpObserver::aboutToDelete`. That method has the side-effect
@@ -2938,7 +2776,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsGrouping) {
                                                        boost::none);
             const OplogDeleteEntryArgs args;
             opCtx->getServiceContext()->getOpObserver()->onDelete(
-                opCtx, _nss, _uuid, kUninitializedStmtId, args);
+                opCtx, autoColl->ns(), autoColl->uuid(), kUninitializedStmtId, args);
         }
 
         wuow.commit();
@@ -2974,6 +2812,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdate) {
     // Setup.
     auto opCtxRaii = cc().makeOperationContext();
     OperationContext* opCtx = opCtxRaii.get();
+    reset(opCtx, _nss);
     reset(opCtx, NamespaceString::kRsOplogNamespace);
 
     // Start a WUOW with groupOplogEntries=true. Verify that initialises the
@@ -2983,7 +2822,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdate) {
     WriteUnitOfWork wuow(opCtx, true /* groupOplogEntries */);
     ASSERT(bwc.writesAreBatched());
 
-    AutoGetCollection locks(opCtx, _nss, LockMode::MODE_IX);
+    AutoGetCollection autoColl(opCtx, _nss, MODE_IX);
 
     // (0) Insert
     {
@@ -2991,14 +2830,14 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdate) {
         insert.emplace_back(BSON("_id" << 0 << "data"
                                        << "x"));
         opCtx->getServiceContext()->getOpObserver()->onInserts(
-            opCtx, _nss, _uuid, insert.begin(), insert.end(), false);
+            opCtx, *autoColl, insert.begin(), insert.end(), false);
     }
     // (1) Delete
     {
         repl::documentKeyDecoration(opCtx).emplace(BSON("_id" << 1), boost::none);
         const OplogDeleteEntryArgs args;
         opCtx->getServiceContext()->getOpObserver()->onDelete(
-            opCtx, _nss, _uuid, kUninitializedStmtId, args);
+            opCtx, autoColl->ns(), autoColl->uuid(), kUninitializedStmtId, args);
     }
     // (2) Update
     {
@@ -3006,7 +2845,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdate) {
         collUpdateArgs.update = BSON("fieldToUpdate"
                                      << "valueToUpdate");
         collUpdateArgs.criteria = BSON("_id" << 2);
-        auto args = OplogUpdateEntryArgs(&collUpdateArgs, _nss, _uuid);
+        auto args = OplogUpdateEntryArgs(&collUpdateArgs, _nss, autoColl->uuid());
         opCtx->getServiceContext()->getOpObserver()->onUpdate(opCtx, args);
     }
 
@@ -3060,6 +2899,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdateIncludesTenantId) 
     // Setup.
     auto opCtxRaii = cc().makeOperationContext();
     OperationContext* opCtx = opCtxRaii.get();
+    reset(opCtx, _nssWithTid);
     reset(opCtx, NamespaceString::kRsOplogNamespace);
 
     // Start a WUOW with groupOplogEntries=true. Verify that initialises the
@@ -3069,7 +2909,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdateIncludesTenantId) 
     WriteUnitOfWork wuow(opCtx, true /* groupOplogEntries */);
     ASSERT(bwc.writesAreBatched());
 
-    AutoGetCollection locks(opCtx, NamespaceStringOrUUID(_nssWithTid), LockMode::MODE_IX);
+    AutoGetCollection autoColl(opCtx, _nssWithTid, MODE_IX);
 
     // (0) Insert
     {
@@ -3077,14 +2917,14 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdateIncludesTenantId) 
         insert.emplace_back(BSON("_id" << 0 << "data"
                                        << "x"));
         opCtx->getServiceContext()->getOpObserver()->onInserts(
-            opCtx, _nssWithTid, _uuid, insert.begin(), insert.end(), false);
+            opCtx, *autoColl, insert.begin(), insert.end(), false);
     }
     // (1) Delete
     {
         repl::documentKeyDecoration(opCtx).emplace(BSON("_id" << 1), boost::none);
         const OplogDeleteEntryArgs args;
         opCtx->getServiceContext()->getOpObserver()->onDelete(
-            opCtx, _nssWithTid, _uuid, kUninitializedStmtId, args);
+            opCtx, autoColl->ns(), autoColl->uuid(), kUninitializedStmtId, args);
     }
     // (2) Update
     {
@@ -3092,7 +2932,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdateIncludesTenantId) 
         collUpdateArgs.update = BSON("fieldToUpdate"
                                      << "valueToUpdate");
         collUpdateArgs.criteria = BSON("_id" << 2);
-        auto args = OplogUpdateEntryArgs(&collUpdateArgs, _nssWithTid, _uuid);
+        auto args = OplogUpdateEntryArgs(&collUpdateArgs, autoColl->ns(), autoColl->uuid());
         opCtx->getServiceContext()->getOpObserver()->onUpdate(opCtx, args);
     }
 
@@ -3116,12 +2956,8 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdateIncludesTenantId) 
         const auto innerEntry = innerEntries[0];
         ASSERT(innerEntry.getCommandType() == OplogEntry::CommandType::kNotCommand);
         ASSERT(innerEntry.getOpType() == repl::OpTypeEnum::kInsert);
-        // TODO SERVER-67155 Check that (innerEntry.getNss() == _nssWithTid) and uncomment the
-        // 2 lines below once the OplogEntry deserializer passes "tid" to the NamespaceString
-        // constructor
-        ASSERT(innerEntry.getNss() == NamespaceString(boost::none, _nssWithTid.ns()));
-        // ASSERT(innerEntry.getNss().tenantId().has_value());
-        // ASSERT(*innerEntry.getNss().tenantId() == *_nssWithTid.tenantId());
+
+        ASSERT_EQ(innerEntry.getNss(), _nssWithTid);
 
         ASSERT(innerEntry.getTid().has_value());
         ASSERT(*innerEntry.getTid() == *_nssWithTid.tenantId());
@@ -3134,12 +2970,8 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdateIncludesTenantId) 
         const auto innerEntry = innerEntries[1];
         ASSERT(innerEntry.getCommandType() == OplogEntry::CommandType::kNotCommand);
         ASSERT(innerEntry.getOpType() == repl::OpTypeEnum::kDelete);
-        // TODO SERVER-67155 Check that (innerEntry.getNss() == _nssWithTid) and uncomment the
-        // 2 lines below once the OplogEntry deserializer passes "tid" to the NamespaceString
-        // constructor
-        ASSERT(innerEntry.getNss() == NamespaceString(boost::none, _nssWithTid.ns()));
-        // ASSERT(innerEntry.getNss().tenantId().has_value());
-        // ASSERT(*innerEntry.getNss().tenantId() == *_nssWithTid.tenantId());
+
+        ASSERT_EQ(innerEntry.getNss(), _nssWithTid);
 
         ASSERT(innerEntry.getTid().has_value());
         ASSERT(*innerEntry.getTid() == *_nssWithTid.tenantId());
@@ -3150,12 +2982,8 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdateIncludesTenantId) 
         const auto innerEntry = innerEntries[2];
         ASSERT(innerEntry.getCommandType() == OplogEntry::CommandType::kNotCommand);
         ASSERT(innerEntry.getOpType() == repl::OpTypeEnum::kUpdate);
-        // TODO SERVER-67155 Check that (innerEntry.getNss() == _nssWithTid) and uncomment the
-        // 2 lines below once the OplogEntry deserializer passes "tid" to the NamespaceString
-        // constructor
-        ASSERT(innerEntry.getNss() == NamespaceString(boost::none, _nssWithTid.ns()));
-        // ASSERT(innerEntry.getNss().tenantId().has_value());
-        // ASSERT(*innerEntry.getNss().tenantId() == *_nssWithTid.tenantId());
+
+        ASSERT_EQ(innerEntry.getNss(), _nssWithTid);
 
         ASSERT(innerEntry.getTid().has_value());
         ASSERT(*innerEntry.getTid() == *_nssWithTid.tenantId());
@@ -3185,10 +3013,10 @@ TEST_F(BatchedWriteOutputsTest, testWUOWLarge) {
     // Setup.
     auto opCtxRaii = cc().makeOperationContext();
     OperationContext* opCtx = opCtxRaii.get();
+    reset(opCtx, _nss);
     reset(opCtx, NamespaceString::kRsOplogNamespace);
 
-    AutoGetCollection locks(opCtx, _nss, LockMode::MODE_IX);
-
+    AutoGetCollection autoColl(opCtx, _nss, MODE_IX);
     WriteUnitOfWork wuow(opCtx, true /* groupOplogEntries */);
 
     // Delete BatchedWriteOutputsTest::maxDocsInBatch documents in a single batch, which is the
@@ -3200,7 +3028,7 @@ TEST_F(BatchedWriteOutputsTest, testWUOWLarge) {
         repl::documentKeyDecoration(opCtx).emplace(BSON("_id" << docId), boost::none);
         const OplogDeleteEntryArgs args;
         opCtx->getServiceContext()->getOpObserver()->onDelete(
-            opCtx, _nss, _uuid, kUninitializedStmtId, args);
+            opCtx, autoColl->ns(), autoColl->uuid(), kUninitializedStmtId, args);
     }
     wuow.commit();
 
@@ -3232,10 +3060,10 @@ TEST_F(BatchedWriteOutputsTest, testWUOWTooLarge) {
     // Setup.
     auto opCtxRaii = cc().makeOperationContext();
     OperationContext* opCtx = opCtxRaii.get();
+    reset(opCtx, _nss);
     reset(opCtx, NamespaceString::kRsOplogNamespace);
 
-    AutoGetCollection locks(opCtx, _nss, LockMode::MODE_IX);
-
+    AutoGetCollection autoColl(opCtx, _nss, MODE_IX);
     WriteUnitOfWork wuow(opCtx, true /* groupOplogEntries */);
 
     // Attempt to delete more than BatchedWriteOutputsTest::maxDocsInBatch documents in a single
@@ -3247,7 +3075,7 @@ TEST_F(BatchedWriteOutputsTest, testWUOWTooLarge) {
         repl::documentKeyDecoration(opCtx).emplace(BSON("_id" << docId), boost::none);
         const OplogDeleteEntryArgs args;
         opCtx->getServiceContext()->getOpObserver()->onDelete(
-            opCtx, _nss, _uuid, kUninitializedStmtId, args);
+            opCtx, autoColl->ns(), autoColl->uuid(), kUninitializedStmtId, args);
     }
 
     ASSERT_THROWS_CODE(wuow.commit(), DBException, ErrorCodes::Error::TransactionTooLarge);
@@ -3440,9 +3268,6 @@ protected:
             case kNotRetryable:
                 deleteArgs->retryableFindAndModifyLocation = kNotRetryable;
                 break;
-            case kRecordInOplog:
-                deleteArgs->retryableFindAndModifyLocation = kRecordInOplog;
-                break;
             case kRecordInSideCollection:
                 deleteArgs->retryableFindAndModifyLocation = kRecordInSideCollection;
                 break;
@@ -3450,43 +3275,6 @@ protected:
         if (testCase.isRetryable() || testCase.alwaysRecordPreImages ||
             testCase.changeStreamImagesEnabled) {
             deleteArgs->deletedDoc = &_deletedDoc;
-        }
-    }
-
-    void checkPreImageInOplogIfNeeded(
-        const DeleteTestCase& testCase,
-        const OplogDeleteEntryArgs& deleteArgs,
-        const std::vector<BSONObj>& oplogs,
-        const OplogEntry& deleteOplogEntry,
-        const boost::optional<OplogEntry> applyOpsOplogEntry = boost::none) {
-        const bool checkPreImageInOplog = deleteArgs.preImageRecordingEnabledForCollection ||
-            deleteArgs.retryableFindAndModifyLocation == kRecordInOplog;
-        if (checkPreImageInOplog) {
-            ASSERT(deleteOplogEntry.getPreImageOpTime());
-            if (applyOpsOplogEntry) {
-                ASSERT_FALSE(applyOpsOplogEntry->getPreImageOpTime());
-            }
-
-            const Timestamp preImageOpTime = deleteOplogEntry.getPreImageOpTime()->getTimestamp();
-            ASSERT_FALSE(preImageOpTime.isNull());
-            OplogEntry preImage = *findByTimestamp(oplogs, preImageOpTime);
-            ASSERT_BSONOBJ_EQ(_deletedDoc, preImage.getObject());
-            if (deleteOplogEntry.getSessionId()) {
-                ASSERT_EQ(*deleteOplogEntry.getSessionId(), *preImage.getSessionId());
-            }
-            if (deleteOplogEntry.getTxnNumber()) {
-                ASSERT_EQ(*deleteOplogEntry.getTxnNumber(), *preImage.getTxnNumber());
-            }
-            if (!deleteOplogEntry.getStatementIds().empty()) {
-                const auto& deleteOplogStmtIds = deleteOplogEntry.getStatementIds();
-                const auto& preImageOplogStmtIds = preImage.getStatementIds();
-                ASSERT_EQ(deleteOplogStmtIds.size(), preImageOplogStmtIds.size());
-                for (size_t i = 0; i < deleteOplogStmtIds.size(); i++) {
-                    ASSERT_EQ(deleteOplogStmtIds[i], preImageOplogStmtIds[i]);
-                }
-            }
-        } else {
-            ASSERT_FALSE(deleteOplogEntry.getPreImageOpTime());
         }
     }
 
@@ -3544,13 +3332,10 @@ protected:
 
     std::vector<DeleteTestCase> _cases{
         {kDoNotRecordPreImages, kChangeStreamImagesDisabled, kNotRetryable, 1},
-        {kDoNotRecordPreImages, kChangeStreamImagesDisabled, kRecordInOplog, 2},
         {kDoNotRecordPreImages, kChangeStreamImagesDisabled, kRecordInSideCollection, 1},
         {kDoNotRecordPreImages, kChangeStreamImagesEnabled, kNotRetryable, 1},
-        {kDoNotRecordPreImages, kChangeStreamImagesEnabled, kRecordInOplog, 2},
         {kDoNotRecordPreImages, kChangeStreamImagesEnabled, kRecordInSideCollection, 1},
         {kRecordPreImages, kChangeStreamImagesDisabled, kNotRetryable, 2},
-        {kRecordPreImages, kChangeStreamImagesDisabled, kRecordInOplog, 2},
         {kRecordPreImages, kChangeStreamImagesDisabled, kRecordInSideCollection, 2}};
 
     const NamespaceString _nss{boost::none, "test", "coll"};
@@ -3587,7 +3372,7 @@ TEST_F(OnDeleteOutputsTest, TestNonTransactionFundamentalOnDeleteOutputs) {
         initializeOplogDeleteEntryArgs(opCtx, testCase, &deleteEntryArgs);
 
         WriteUnitOfWork wuow(opCtx);
-        AutoGetCollection locks(opCtx, _nss, LockMode::MODE_IX);
+        AutoGetCollection locks(opCtx, _nss, MODE_IX);
         // This test does not call `OpObserver::aboutToDelete`. That method has the side-effect
         // of setting of `documentKey` on the delete for sharding purposes.
         // `OpObserverImpl::onDelete` asserts its existence.
@@ -3601,7 +3386,6 @@ TEST_F(OnDeleteOutputsTest, TestNonTransactionFundamentalOnDeleteOutputs) {
         std::vector<BSONObj> oplogs = getNOplogEntries(opCtx, testCase.numOutputOplogs);
         // Entries are returned in ascending timestamp order.
         auto deleteOplogEntry = assertGet(OplogEntry::parse(oplogs.back()));
-        checkPreImageInOplogIfNeeded(testCase, deleteEntryArgs, oplogs, deleteOplogEntry);
         checkSideCollectionIfNeeded(opCtx, testCase, deleteEntryArgs, oplogs, deleteOplogEntry);
         checkChangeStreamImagesIfNeeded(opCtx, testCase, deleteEntryArgs, deleteOplogEntry);
     }
@@ -3638,7 +3422,7 @@ TEST_F(OnDeleteOutputsTest, TestTransactionFundamentalOnDeleteOutputs) {
         const auto stmtId = testCase.isRetryable() ? 1 : kUninitializedStmtId;
 
         WriteUnitOfWork wuow(opCtx);
-        AutoGetCollection locks(opCtx, _nss, LockMode::MODE_IX);
+        AutoGetCollection locks(opCtx, _nss, MODE_IX);
         // This test does not call `OpObserver::aboutToDelete`. That method has the side-effect
         // of setting of `documentKey` on the delete for sharding purposes.
         // `OpObserverImpl::onDelete` asserts its existence.
@@ -3653,8 +3437,6 @@ TEST_F(OnDeleteOutputsTest, TestTransactionFundamentalOnDeleteOutputs) {
         // Entries are returned in ascending timestamp order.
         auto applyOpsOplogEntry = assertGet(OplogEntry::parse(oplogs.back()));
         auto deleteOplogEntry = getInnerEntryFromApplyOpsOplogEntry(applyOpsOplogEntry);
-        checkPreImageInOplogIfNeeded(
-            testCase, deleteEntryArgs, oplogs, deleteOplogEntry, applyOpsOplogEntry);
         checkSideCollectionIfNeeded(
             opCtx, testCase, deleteEntryArgs, oplogs, deleteOplogEntry, applyOpsOplogEntry);
         checkChangeStreamImagesIfNeeded(opCtx, testCase, deleteEntryArgs, deleteOplogEntry);
@@ -3684,7 +3466,7 @@ TEST_F(OnDeleteOutputsTest,
     ON_BLOCK_EXIT([] { serverGlobalParams.clusterRole = ClusterRole::None; });
 
     WriteUnitOfWork wuow(opCtx);
-    AutoGetCollection locks(opCtx, _nss, LockMode::MODE_IX);
+    AutoGetCollection locks(opCtx, _nss, MODE_IX);
     // This test does not call `OpObserver::aboutToDelete`. That method has the side-effect
     // of setting of `documentKey` on the delete for sharding purposes.
     // `OpObserverImpl::onDelete` asserts its existence.
@@ -3694,11 +3476,51 @@ TEST_F(OnDeleteOutputsTest,
                        6462401);
 }
 
+class OpObserverMultiEntryTransactionTest : public OpObserverTransactionTest {
+    void setUp() override {
+        _prevPackingLimit = gMaxNumberOfTransactionOperationsInSingleOplogEntry;
+        gMaxNumberOfTransactionOperationsInSingleOplogEntry = 1;
+        OpObserverTransactionTest::setUp();
+    }
+
+    void tearDown() override {
+        OpObserverTransactionTest::tearDown();
+        gMaxNumberOfTransactionOperationsInSingleOplogEntry = _prevPackingLimit;
+    }
+
+private:
+    int _prevPackingLimit;
+};
+
+TEST_F(OpObserverMultiEntryTransactionTest, TransactionSingleStatementTest) {
+    auto txnParticipant = TransactionParticipant::get(opCtx());
+    txnParticipant.unstashTransactionResources(opCtx(), "insert");
+    std::vector<InsertStatement> inserts;
+    inserts.emplace_back(0, BSON("_id" << 0 << "a" << std::string(BSONObjMaxUserSize, 'a')));
+
+    AutoGetCollection autoColl(opCtx(), nss, MODE_IX);
+    WriteUnitOfWork wuow(opCtx());
+    opObserver().onInserts(opCtx(), *autoColl, inserts.begin(), inserts.end(), false);
+    auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
+    opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
+    auto oplogEntryObj = getNOplogEntries(opCtx(), 1)[0];
+    checkSessionAndTransactionFields(oplogEntryObj);
+    auto oplogEntry = assertGet(OplogEntry::parse(oplogEntryObj));
+    ASSERT(!oplogEntry.shouldPrepare());
+    ASSERT_TRUE(oplogEntry.getPrevWriteOpTimeInTransaction());
+    ASSERT_EQ(repl::OpTime(), *oplogEntry.getPrevWriteOpTimeInTransaction());
+
+    // The implicit commit oplog entry.
+    auto oExpected = BSON("applyOps" << BSON_ARRAY(BSON(
+                              "op"
+                              << "i"
+                              << "ns" << nss.toString() << "ui" << uuid << "o"
+                              << BSON("_id" << 0 << "a" << std::string(BSONObjMaxUserSize, 'a'))
+                              << "o2" << BSON("_id" << 0))));
+    ASSERT_BSONOBJ_EQ(oExpected, oplogEntry.getObject());
+}
+
 TEST_F(OpObserverMultiEntryTransactionTest, TransactionalInsertTest) {
-    const NamespaceString nss1(boost::none, "testDB", "testColl");
-    const NamespaceString nss2(boost::none, "testDB2", "testColl2");
-    auto uuid1 = UUID::gen();
-    auto uuid2 = UUID::gen();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
     std::vector<InsertStatement> inserts1;
@@ -3710,8 +3532,8 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalInsertTest) {
     WriteUnitOfWork wuow(opCtx());
     AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
     AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
-    opObserver().onInserts(opCtx(), nss1, uuid1, inserts1.begin(), inserts1.end(), false);
-    opObserver().onInserts(opCtx(), nss2, uuid2, inserts2.begin(), inserts2.end(), false);
+    opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
+    opObserver().onInserts(opCtx(), *autoColl2, inserts2.begin(), inserts2.end(), false);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
     opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
     auto oplogEntryObjs = getNOplogEntries(opCtx(), 4);
@@ -3763,10 +3585,6 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalInsertTest) {
 }
 
 TEST_F(OpObserverMultiEntryTransactionTest, TransactionalUpdateTest) {
-    const NamespaceString nss1(boost::none, "testDB", "testColl");
-    const NamespaceString nss2(boost::none, "testDB2", "testColl2");
-    auto uuid1 = UUID::gen();
-    auto uuid2 = UUID::gen();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "update");
 
@@ -3833,8 +3651,6 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalUpdateTest) {
 }
 
 TEST_F(OpObserverMultiEntryTransactionTest, TransactionPreImageTest) {
-    const NamespaceString nss1(boost::none, "testDB", "testColl");
-    auto uuid1 = UUID::gen();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "txntest");
 
@@ -3910,8 +3726,6 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionPreImageTest) {
 }
 
 TEST_F(OpObserverMultiEntryTransactionTest, PreparedTransactionPreImageTest) {
-    const NamespaceString nss1(boost::none, "testDB", "testColl");
-    auto uuid1 = UUID::gen();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "txntest");
 
@@ -3990,11 +3804,6 @@ TEST_F(OpObserverMultiEntryTransactionTest, PreparedTransactionPreImageTest) {
 }
 
 TEST_F(OpObserverMultiEntryTransactionTest, TransactionalDeleteTest) {
-    const NamespaceString nss1(boost::none, "testDB", "testColl");
-    const NamespaceString nss2(boost::none, "testDB2", "testColl2");
-    auto uuid1 = UUID::gen();
-    auto uuid2 = UUID::gen();
-
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "delete");
 
@@ -4047,10 +3856,6 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalDeleteTest) {
 }
 
 TEST_F(OpObserverMultiEntryTransactionTest, TransactionalInsertPrepareTest) {
-    const NamespaceString nss1(boost::none, "testDB", "testColl");
-    const NamespaceString nss2(boost::none, "testDB2", "testColl2");
-    auto uuid1 = UUID::gen();
-    auto uuid2 = UUID::gen();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
 
@@ -4064,8 +3869,8 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalInsertPrepareTest) {
     inserts2.emplace_back(0, BSON("_id" << 2));
     inserts2.emplace_back(1, BSON("_id" << 3));
 
-    opObserver().onInserts(opCtx(), nss1, uuid1, inserts1.begin(), inserts1.end(), false);
-    opObserver().onInserts(opCtx(), nss2, uuid2, inserts2.begin(), inserts2.end(), false);
+    opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
+    opObserver().onInserts(opCtx(), *autoColl2, inserts2.begin(), inserts2.end(), false);
 
     auto reservedSlots = reserveOpTimesInSideTransaction(opCtx(), 4);
     auto prepareOpTime = reservedSlots.back();
@@ -4126,10 +3931,6 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalInsertPrepareTest) {
 }
 
 TEST_F(OpObserverMultiEntryTransactionTest, TransactionalUpdatePrepareTest) {
-    const NamespaceString nss1(boost::none, "testDB", "testColl");
-    const NamespaceString nss2(boost::none, "testDB2", "testColl2");
-    auto uuid1 = UUID::gen();
-    auto uuid2 = UUID::gen();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "update");
 
@@ -4203,11 +4004,6 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalUpdatePrepareTest) {
 }
 
 TEST_F(OpObserverMultiEntryTransactionTest, TransactionalDeletePrepareTest) {
-    const NamespaceString nss1(boost::none, "testDB", "testColl");
-    const NamespaceString nss2(boost::none, "testDB2", "testColl2");
-    auto uuid1 = UUID::gen();
-    auto uuid2 = UUID::gen();
-
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "delete");
 
@@ -4267,8 +4063,6 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalDeletePrepareTest) {
 }
 
 TEST_F(OpObserverMultiEntryTransactionTest, CommitPreparedTest) {
-    const NamespaceString nss1(boost::none, "testDB", "testColl");
-    auto uuid1 = UUID::gen();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
 
@@ -4282,7 +4076,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, CommitPreparedTest) {
                           BSON("_id" << 1 << "data"
                                      << "y"));
 
-    opObserver().onInserts(opCtx(), nss1, uuid1, inserts1.begin(), inserts1.end(), false);
+    opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
 
     auto reservedSlots = reserveOpTimesInSideTransaction(opCtx(), 2);
     auto prepareOpTime = reservedSlots.back();
@@ -4348,8 +4142,6 @@ TEST_F(OpObserverMultiEntryTransactionTest, CommitPreparedTest) {
 }
 
 TEST_F(OpObserverMultiEntryTransactionTest, AbortPreparedTest) {
-    const NamespaceString nss1(boost::none, "testDB", "testColl");
-    auto uuid1 = UUID::gen();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
 
@@ -4360,7 +4152,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, AbortPreparedTest) {
                           BSON("_id" << 0 << "data"
                                      << "x"));
 
-    opObserver().onInserts(opCtx(), nss1, uuid1, inserts1.begin(), inserts1.end(), false);
+    opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
 
     auto reservedSlots = reserveOpTimesInSideTransaction(opCtx(), 1);
     auto prepareOpTime = reservedSlots.back();
@@ -4417,10 +4209,6 @@ TEST_F(OpObserverMultiEntryTransactionTest, AbortPreparedTest) {
 TEST_F(OpObserverMultiEntryTransactionTest, UnpreparedTransactionPackingTest) {
     gMaxNumberOfTransactionOperationsInSingleOplogEntry = std::numeric_limits<int>::max();
 
-    const NamespaceString nss1(boost::none, "testDB", "testColl");
-    const NamespaceString nss2(boost::none, "testDB2", "testColl2");
-    auto uuid1 = UUID::gen();
-    auto uuid2 = UUID::gen();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
     std::vector<InsertStatement> inserts1;
@@ -4432,8 +4220,8 @@ TEST_F(OpObserverMultiEntryTransactionTest, UnpreparedTransactionPackingTest) {
     WriteUnitOfWork wuow(opCtx());
     AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
     AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
-    opObserver().onInserts(opCtx(), nss1, uuid1, inserts1.begin(), inserts1.end(), false);
-    opObserver().onInserts(opCtx(), nss2, uuid2, inserts2.begin(), inserts2.end(), false);
+    opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
+    opObserver().onInserts(opCtx(), *autoColl2, inserts2.begin(), inserts2.end(), false);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
     opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
     auto oplogEntryObjs = getNOplogEntries(opCtx(), 1);
@@ -4472,10 +4260,6 @@ TEST_F(OpObserverMultiEntryTransactionTest, UnpreparedTransactionPackingTest) {
 TEST_F(OpObserverMultiEntryTransactionTest, PreparedTransactionPackingTest) {
     gMaxNumberOfTransactionOperationsInSingleOplogEntry = std::numeric_limits<int>::max();
 
-    const NamespaceString nss1(boost::none, "testDB", "testColl");
-    const NamespaceString nss2(boost::none, "testDB2", "testColl2");
-    auto uuid1 = UUID::gen();
-    auto uuid2 = UUID::gen();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
     std::vector<InsertStatement> inserts1;
@@ -4487,8 +4271,8 @@ TEST_F(OpObserverMultiEntryTransactionTest, PreparedTransactionPackingTest) {
 
     AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
     AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
-    opObserver().onInserts(opCtx(), nss1, uuid1, inserts1.begin(), inserts1.end(), false);
-    opObserver().onInserts(opCtx(), nss2, uuid2, inserts2.begin(), inserts2.end(), false);
+    opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
+    opObserver().onInserts(opCtx(), *autoColl2, inserts2.begin(), inserts2.end(), false);
 
     auto reservedSlots = reserveOpTimesInSideTransaction(opCtx(), 4);
     auto prepareOpTime = reservedSlots.back();
@@ -4532,8 +4316,6 @@ TEST_F(OpObserverMultiEntryTransactionTest, PreparedTransactionPackingTest) {
 
 TEST_F(OpObserverMultiEntryTransactionTest, CommitPreparedPackingTest) {
     gMaxNumberOfTransactionOperationsInSingleOplogEntry = std::numeric_limits<int>::max();
-    const NamespaceString nss1(boost::none, "testDB", "testColl");
-    auto uuid1 = UUID::gen();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
 
@@ -4547,7 +4329,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, CommitPreparedPackingTest) {
                           BSON("_id" << 1 << "data"
                                      << "y"));
 
-    opObserver().onInserts(opCtx(), nss1, uuid1, inserts1.begin(), inserts1.end(), false);
+    opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
 
     auto reservedSlots = reserveOpTimesInSideTransaction(opCtx(), 2);
     auto prepareOpTime = reservedSlots.back();
@@ -4626,9 +4408,6 @@ private:
 // operations that together are just big enough to exceed the size limit, which should result in a
 // two oplog entry transaction.
 TEST_F(OpObserverLargeTransactionTest, LargeTransactionCreatesMultipleOplogEntries) {
-    const NamespaceString nss(boost::none, "testDB", "testColl");
-    auto uuid = UUID::gen();
-
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
 
@@ -4716,9 +4495,6 @@ TEST_F(OpObserverTest, OnRollbackInvalidatesDefaultRWConcernCache) {
 
 TEST_F(OpObserverTest, OnInsertChecksIfTenantMigrationIsBlockingWrites) {
     auto opCtx = cc().makeOperationContext();
-    const std::string kTenantId = "tenantId";
-    const NamespaceString nss(boost::none, "tenantId_db", "testColl");
-    const auto uuid = UUID::gen();
 
     // Add a tenant migration access blocker on donor for blocking writes.
     auto donorMtab = std::make_shared<TenantMigrationDonorAccessBlocker>(getServiceContext(), uuid);
@@ -4730,45 +4506,13 @@ TEST_F(OpObserverTest, OnInsertChecksIfTenantMigrationIsBlockingWrites) {
                                    << "x"));
 
     {
-        AutoGetCollection autoColl(opCtx.get(), nss, MODE_IX);
+        AutoGetCollection autoColl(opCtx.get(), kNssUnderTenantId, MODE_IX);
         OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
         ASSERT_THROWS_CODE(
-            opObserver.onInserts(opCtx.get(), nss, uuid, insert.begin(), insert.end(), false),
+            opObserver.onInserts(opCtx.get(), *autoColl, insert.begin(), insert.end(), false),
             DBException,
             ErrorCodes::TenantMigrationConflict);
     }
-    TenantMigrationAccessBlockerRegistry::get(getServiceContext()).shutDown();
-}
-
-TEST_F(OpObserverTransactionTest,
-       OnUnpreparedTransactionCommitChecksIfTenantMigrationIsBlockingWrites) {
-    const std::string kTenantId = "tenantId";
-    const auto uuid = UUID::gen();
-
-    // Add a tenant migration access blocker on donor for blocking writes.
-    auto donorMtab = std::make_shared<TenantMigrationDonorAccessBlocker>(getServiceContext(), uuid);
-    TenantMigrationAccessBlockerRegistry::get(getServiceContext()).add(kTenantId, donorMtab);
-
-    const NamespaceString nss(boost::none, "tenantId_db", "testColl");
-    auto txnParticipant = TransactionParticipant::get(opCtx());
-    txnParticipant.unstashTransactionResources(opCtx(), "insert");
-
-    std::vector<InsertStatement> insert;
-    insert.emplace_back(0,
-                        BSON("_id" << 0 << "data"
-                                   << "x"));
-
-    {
-        AutoGetCollection autoColl(opCtx(), nss, MODE_IX);
-        opObserver().onInserts(opCtx(), nss, uuid, insert.begin(), insert.end(), false);
-    }
-
-    donorMtab->startBlockingWrites();
-
-    auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    ASSERT_THROWS_CODE(opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0),
-                       DBException,
-                       ErrorCodes::TenantMigrationConflict);
 
     TenantMigrationAccessBlockerRegistry::get(getServiceContext()).shutDown();
 }

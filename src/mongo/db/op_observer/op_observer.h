@@ -33,7 +33,6 @@
 
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/commit_quorum_options.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/repl/rollback.h"
@@ -54,9 +53,6 @@ enum class RetryableFindAndModifyLocation {
 
     // Store the pre-image in the side collection.
     kSideCollection,
-
-    // Store the pre-image in the oplog.
-    kOplog,
 };
 
 /**
@@ -166,8 +162,7 @@ public:
                                    bool fromMigrate) = 0;
 
     virtual void onInserts(OperationContext* opCtx,
-                           const NamespaceString& nss,
-                           const UUID& uuid,
+                           const CollectionPtr& coll,
                            std::vector<InsertStatement>::const_iterator begin,
                            std::vector<InsertStatement>::const_iterator end,
                            bool fromMigrate) = 0;

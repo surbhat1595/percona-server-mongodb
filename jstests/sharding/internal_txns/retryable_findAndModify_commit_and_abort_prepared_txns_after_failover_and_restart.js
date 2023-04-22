@@ -67,6 +67,12 @@ function runTest(st, stepDownShard0PrimaryFunc, testOpts = {
     const prepareTxnRes = assert.commandWorked(testDB.adminCommand(prepareCmdObj));
     commitCmdObj.commitTimestamp = prepareTxnRes.prepareTimestamp;
 
+    // It is possible that a secondary that steps up could use a stale majority-committed snapshot,
+    // so we want to wait until the prepareTransaction is visible in the majority-committed snapshot
+    // view for all nodes in the replica set. We do this because commitTransaction for a prepared
+    // transaction cannot be run before its prepare oplog entry has been majority committed
+    st.rs0.awaitLastOpCommitted();
+
     stepDownShard0PrimaryFunc();
 
     testDB = st.rs0.getPrimary().getDB(kDbName);
@@ -121,17 +127,6 @@ function runTest(st, stepDownShard0PrimaryFunc, testOpts = {
         abortTxnAfterFailover: true,
         enableFindAndModifyImageCollection: true
     });
-    // Test findAnModify with pre/post image when the image collection is disabled.
-    runTest(st, stepDownShard0PrimaryFunc, {
-        runFindAndModifyWithPreOrPostImage: true,
-        abortTxnAfterFailover: false,
-        enableFindAndModifyImageCollection: false
-    });
-    runTest(st, stepDownShard0PrimaryFunc, {
-        runFindAndModifyWithPreOrPostImage: true,
-        abortTxnAfterFailover: true,
-        enableFindAndModifyImageCollection: false
-    });
 
     st.stop();
 }
@@ -167,17 +162,6 @@ function runTest(st, stepDownShard0PrimaryFunc, testOpts = {
         runFindAndModifyWithPreOrPostImage: true,
         abortTxnAfterFailover: true,
         enableFindAndModifyImageCollection: true
-    });
-    // Test findAnModify with pre/post image when the image collection is disabled.
-    runTest(st, stepDownShard0PrimaryFunc, {
-        runFindAndModifyWithPreOrPostImage: true,
-        abortTxnAfterFailover: false,
-        enableFindAndModifyImageCollection: false
-    });
-    runTest(st, stepDownShard0PrimaryFunc, {
-        runFindAndModifyWithPreOrPostImage: true,
-        abortTxnAfterFailover: true,
-        enableFindAndModifyImageCollection: false
     });
 
     st.stop();
@@ -217,17 +201,6 @@ function runTest(st, stepDownShard0PrimaryFunc, testOpts = {
         runFindAndModifyWithPreOrPostImage: true,
         abortTxnAfterFailover: true,
         enableFindAndModifyImageCollection: true
-    });
-    // Test findAnModify with pre/post image when the image collection is disabled.
-    runTest(st, restartShard0Func, {
-        runFindAndModifyWithPreOrPostImage: true,
-        abortTxnAfterFailover: false,
-        enableFindAndModifyImageCollection: false
-    });
-    runTest(st, restartShard0Func, {
-        runFindAndModifyWithPreOrPostImage: true,
-        abortTxnAfterFailover: true,
-        enableFindAndModifyImageCollection: false
     });
 
     st.stop();

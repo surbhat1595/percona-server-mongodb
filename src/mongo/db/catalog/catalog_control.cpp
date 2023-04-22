@@ -34,6 +34,7 @@
 
 #include "mongo/db/catalog/catalog_control.h"
 
+#include "mongo/db/catalog/catalog_stats.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/database.h"
@@ -98,6 +99,20 @@ void reopenAllDatabasesAndReloadCollectionCatalog(OperationContext* opCtx,
                     catalogWriter.value()->lookupCollectionByUUIDForMetadataWrite(
                         opCtx, collection->uuid());
                 writableCollection->setMinimumVisibleSnapshot(minVisible);
+            }
+
+            if (auto it = previousCatalogState.minValidTimestampMap.find(collection->uuid());
+                it != previousCatalogState.minValidTimestampMap.end()) {
+                // After rolling back to a stable timestamp T, the minimum valid timestamp for each
+                // collection must be reset to (at least) its value at T. When the min valid
+                // timestamp is clamped to the stable timestamp we may end up with a pessimistic
+                // minimum valid timestamp set where the last DDL operation occured earlier. This is
+                // fine as this is just an optimization when to avoid reading the catalog from WT.
+                auto minValid = std::min(stableTimestamp, it->second);
+                auto writableCollection =
+                    catalogWriter.value()->lookupCollectionByUUIDForMetadataWrite(
+                        opCtx, collection->uuid());
+                writableCollection->setMinimumValidSnapshot(minValid);
             }
 
             if (collection->getTimeseriesOptions()) {
@@ -172,6 +187,19 @@ PreviousCatalogState closeCatalog(OperationContext* opCtx) {
                 previousCatalogState.minVisibleTimestampMap[coll->uuid()] = *minVisible;
             }
 
+            boost::optional<Timestamp> minValid = coll->getMinimumValidSnapshot();
+
+            // If there's a minimum valid, invariant there's also a UUID.
+            if (minValid) {
+                LOGV2_DEBUG(6825500,
+                            1,
+                            "closeCatalog: preserving min valid timestamp.",
+                            "ns"_attr = coll->ns(),
+                            "uuid"_attr = coll->uuid(),
+                            "minVisible"_attr = minValid);
+                previousCatalogState.minValidTimestampMap[coll->uuid()] = *minValid;
+            }
+
             if (coll->getTimeseriesOptions()) {
                 previousCatalogState.requiresTimestampExtendedRangeSupportMap[coll->uuid()] =
                     coll->getRequiresTimeseriesExtendedRangeSupport();
@@ -200,6 +228,10 @@ PreviousCatalogState closeCatalog(OperationContext* opCtx) {
     // Close the storage engine's catalog.
     LOGV2(20272, "closeCatalog: closing storage engine catalog");
     opCtx->getServiceContext()->getStorageEngine()->closeCatalog(opCtx);
+
+    // Reset the stats counter for extended range time-series collections. This is maintained
+    // outside the catalog itself.
+    catalog_stats::requiresTimeseriesExtendedRangeSupport.store(0);
 
     reopenOnFailure.dismiss();
     return previousCatalogState;

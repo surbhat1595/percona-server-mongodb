@@ -41,8 +41,8 @@
 #include "mongo/db/commands/txn_two_phase_commit_cmds_gen.h"
 #include "mongo/db/internal_transactions_feature_flag_gen.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/logical_session_id.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/transaction_validation.h"
 #include "mongo/db/txn_retry_counter_too_old_info.h"
 #include "mongo/db/vector_clock.h"
@@ -473,8 +473,8 @@ BSONObj TransactionRouter::Participant::attachTxnFieldsIfNeeded(
         newCmd.append(OperationSessionInfo::kTxnNumberFieldName,
                       sharedOptions.txnNumberAndRetryCounter.getTxnNumber());
     } else {
-        auto osi =
-            OperationSessionInfoFromClient::parse("OperationSessionInfo"_sd, newCmd.asTempObj());
+        auto osi = OperationSessionInfoFromClient::parse(IDLParserContext{"OperationSessionInfo"},
+                                                         newCmd.asTempObj());
         invariant(sharedOptions.txnNumberAndRetryCounter.getTxnNumber() == *osi.getTxnNumber());
     }
 
@@ -515,7 +515,7 @@ void TransactionRouter::Router::processParticipantResponse(OperationContext* opC
     }
 
     auto txnResponseMetadata =
-        TxnResponseMetadata::parse("processParticipantResponse"_sd, responseObj);
+        TxnResponseMetadata::parse(IDLParserContext{"processParticipantResponse"}, responseObj);
 
     if (txnResponseMetadata.getReadOnly()) {
         if (participant->readOnly == Participant::ReadOnly::kUnset) {
@@ -563,6 +563,23 @@ void TransactionRouter::Router::processParticipantResponse(OperationContext* opC
                         "txnRetryCounter"_attr = o().txnNumberAndRetryCounter.getTxnRetryCounter(),
                         "shardId"_attr = shardId);
             p().recoveryShardId = shardId;
+        }
+    }
+
+    const std::string extraParticipants = "additionalParticipants";
+    if (responseObj.hasField(extraParticipants)) {
+        BSONForEach(e, responseObj.getField(extraParticipants).Array()) {
+            mongo::ShardId addingparticipant = ShardId(
+                std::string(e.Obj().getField(StringData{"shardId"}).checkAndGetStringData()));
+            auto txnPart = _createParticipant(opCtx, addingparticipant);
+            _setReadOnlyForParticipant(
+                opCtx, addingparticipant, Participant::ReadOnly::kNotReadOnly);
+
+            if (!p().isRecoveringCommit) {
+                // Don't update participant stats during recovery since the participant list isn't
+                // known.
+                RouterTransactionsMetrics::get(opCtx)->incrementTotalContactedParticipants();
+            }
         }
     }
 }

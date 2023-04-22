@@ -39,20 +39,20 @@
 #include "mongo/db/cancelable_operation_context.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/logical_session_id.h"
 #include "mongo/db/ops/write_ops_retryability.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/s/migration_session_id.h"
 #include "mongo/db/s/session_catalog_migration.h"
-#include "mongo/db/session_catalog_mongod.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/shard_id.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/shard_id.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -503,7 +503,10 @@ void SessionCatalogMigrationDestination::_retrieveSessionStateFromSource(Service
                               "Intentionally failing session migration before processing post/pre "
                               "image originating update oplog entry");
                 },
-                [&](const auto&) { return !oplogEntry["needsRetryImage"].eoo(); });
+                [&](const auto&) {
+                    return !oplogEntry["needsRetryImage"].eoo() ||
+                        !oplogEntry["preImageOpTime"].eoo() || !oplogEntry["postImageOpTime"].eoo();
+                });
             try {
                 lastResult =
                     processSessionOplog(oplogEntry, lastResult, service, _cancellationToken);

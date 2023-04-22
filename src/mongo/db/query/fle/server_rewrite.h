@@ -49,7 +49,7 @@ namespace fle {
 /**
  * Low Selectivity rewrites use $expr which is not supported in all commands such as upserts.
  */
-enum class HighCardinalityModeAllowed {
+enum class EncryptedCollScanModeAllowed {
     kAllow,
     kDisallow,
 };
@@ -71,7 +71,7 @@ BSONObj rewriteQuery(OperationContext* opCtx,
                      const EncryptionInformation& info,
                      BSONObj filter,
                      GetTxnCallback getTransaction,
-                     HighCardinalityModeAllowed mode);
+                     EncryptedCollScanModeAllowed mode);
 
 /**
  * Process a find command with encryptionInformation in-place, rewriting the filter condition so
@@ -115,7 +115,7 @@ BSONObj rewriteEncryptedFilterInsideTxn(
     const EncryptedFieldConfig& efc,
     boost::intrusive_ptr<ExpressionContext> expCtx,
     BSONObj filter,
-    HighCardinalityModeAllowed mode = HighCardinalityModeAllowed::kDisallow);
+    EncryptedCollScanModeAllowed mode = EncryptedCollScanModeAllowed::kDisallow);
 
 /**
  * Class which handles rewriting filter MatchExpressions for FLE2. The functionality is encapsulated
@@ -127,7 +127,7 @@ BSONObj rewriteEncryptedFilterInsideTxn(
  */
 class FLEQueryRewriter {
 public:
-    enum class HighCardinalityMode {
+    enum class EncryptedCollScanMode {
         // Always use high cardinality filters, used by tests
         kForceAlways,
 
@@ -147,15 +147,15 @@ public:
     FLEQueryRewriter(boost::intrusive_ptr<ExpressionContext> expCtx,
                      const FLEStateCollectionReader& escReader,
                      const FLEStateCollectionReader& eccReader,
-                     HighCardinalityModeAllowed mode = HighCardinalityModeAllowed::kAllow)
+                     EncryptedCollScanModeAllowed mode = EncryptedCollScanModeAllowed::kAllow)
         : _expCtx(expCtx), _escReader(&escReader), _eccReader(&eccReader) {
 
-        if (internalQueryFLEAlwaysUseHighCardinalityMode.load()) {
-            _mode = HighCardinalityMode::kForceAlways;
+        if (internalQueryFLEAlwaysUseEncryptedCollScanMode.load()) {
+            _mode = EncryptedCollScanMode::kForceAlways;
         }
 
-        if (mode == HighCardinalityModeAllowed::kDisallow) {
-            _mode = HighCardinalityMode::kDisallow;
+        if (mode == EncryptedCollScanModeAllowed::kDisallow) {
+            _mode = EncryptedCollScanMode::kDisallow;
         }
 
         // This isn't the "real" query so we don't want to increment Expression
@@ -184,49 +184,49 @@ public:
     std::unique_ptr<Expression> rewriteExpression(Expression* expression);
 
     /**
-     * Determine whether a given BSONElement is in fact a FLE find payload.
-     * Sub-type 6, sub-sub-type 0x05.
+     * Determine whether a given BSONElement is in fact a FLE find payload by checking that it is
+     * the same type as the given EncryptedBinDataType. Sub-type 6, sub-sub-type determined by
+     * "type."
      */
-    virtual bool isFleFindPayload(const BSONElement& elt) const {
+    virtual bool isFleFindPayload(const BSONElement& elt, EncryptedBinDataType type) const {
         if (!elt.isBinData(BinDataType::Encrypt)) {
             return false;
         }
         int dataLen;
         auto data = elt.binData(dataLen);
-        return dataLen >= 1 &&
-            data[0] == static_cast<uint8_t>(EncryptedBinDataType::kFLE2FindEqualityPayload);
+        return dataLen >= 1 && data[0] == static_cast<uint8_t>(type);
     }
 
     /**
-     * Determine whether a given Value is in fact a FLE find payload.
-     * Sub-type 6, sub-sub-type 0x05.
+     * Determine whether a given Value is in fact a FLE find payload by checking that it is the same
+     * type as the given EncryptedBinDataType. Sub-type 6, sub-sub-type determined by "type."
      */
-    bool isFleFindPayload(const Value& v) const {
+    bool isFleFindPayload(const Value& v, EncryptedBinDataType type) const {
         if (v.getType() != BSONType::BinData) {
             return false;
         }
 
         auto binData = v.getBinData();
         return binData.type == BinDataType::Encrypt && binData.length >= 1 &&
-            static_cast<uint8_t>(EncryptedBinDataType::kFLE2FindEqualityPayload) ==
-            static_cast<const uint8_t*>(binData.data)[0];
+            static_cast<uint8_t>(type) == static_cast<const uint8_t*>(binData.data)[0];
     }
 
-    std::vector<Value> rewritePayloadAsTags(Value fleFindPayload) const;
+    std::vector<Value> rewriteEqualityPayloadAsTags(Value fleFindPayload) const;
+    std::vector<Value> rewriteRangePayloadAsTags(Value fleFindPayload) const;
 
     ExpressionContext* expCtx() {
         return _expCtx.get();
     }
 
-    bool isForceHighCardinality() const {
-        return _mode == HighCardinalityMode::kForceAlways;
+    bool isForceEncryptedCollScan() const {
+        return _mode == EncryptedCollScanMode::kForceAlways;
     }
 
-    void setForceHighCardinalityForTest() {
-        _mode = HighCardinalityMode::kForceAlways;
+    void setForceEncryptedCollScanForTest() {
+        _mode = EncryptedCollScanMode::kForceAlways;
     }
 
-    HighCardinalityMode getHighCardinalityMode() const {
+    EncryptedCollScanMode getEncryptedCollScanMode() const {
         return _mode;
     }
 
@@ -241,9 +241,12 @@ private:
      */
     std::unique_ptr<MatchExpression> _rewrite(MatchExpression* me);
 
-    virtual BSONObj rewritePayloadAsTags(BSONElement fleFindPayload) const;
+    virtual BSONObj rewriteEqualityPayloadAsTags(BSONElement fleFindPayload) const;
+
+    virtual BSONObj rewriteRangePayloadAsTags(BSONElement fleFindPayload) const;
     std::unique_ptr<MatchExpression> rewriteEq(const EqualityMatchExpression* expr);
     std::unique_ptr<MatchExpression> rewriteIn(const InMatchExpression* expr);
+    std::unique_ptr<MatchExpression> rewriteRange(const EncryptedBetweenMatchExpression* expr);
 
     boost::intrusive_ptr<ExpressionContext> _expCtx;
 
@@ -256,7 +259,7 @@ private:
     bool _rewroteLastExpression = false;
 
     // Controls how query rewriter rewrites the query
-    HighCardinalityMode _mode{HighCardinalityMode::kUseIfNeeded};
+    EncryptedCollScanMode _mode{EncryptedCollScanMode::kUseIfNeeded};
 };
 
 

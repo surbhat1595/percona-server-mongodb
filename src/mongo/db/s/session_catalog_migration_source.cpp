@@ -45,8 +45,8 @@
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/s/session_catalog_migration.h"
-#include "mongo/db/session.h"
-#include "mongo/db/transaction/session_txn_record_gen.h"
+#include "mongo/db/session/session.h"
+#include "mongo/db/session/session_txn_record_gen.h"
 #include "mongo/db/transaction/transaction_history_iterator.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/write_concern.h"
@@ -440,7 +440,8 @@ void SessionCatalogMigrationSource::_extractOplogEntriesForInternalTransactionFo
 
     for (const auto& innerOp : applyOpsInfo.getOperations()) {
         auto replOp = repl::ReplOperation::parse(
-            {"SessionOplogIterator::_extractOplogEntriesForInternalTransactionForRetryableWrite"},
+            IDLParserContext{"SessionOplogIterator::_"
+                             "extractOplogEntriesForInternalTransactionForRetryableWrite"},
             innerOp);
 
         if (replOp.getStatementIds().empty()) {

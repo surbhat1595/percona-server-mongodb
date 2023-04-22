@@ -41,8 +41,6 @@
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/s/config/config_server_test_fixture.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
-#include "mongo/db/s/type_lockpings.h"
-#include "mongo/db/s/type_locks.h"
 #include "mongo/s/catalog/config_server_version.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_chunk.h"
@@ -50,6 +48,7 @@
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/catalog/type_tags.h"
 #include "mongo/s/client/shard.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/util/scopeguard.h"
 
 namespace mongo {
@@ -283,18 +282,6 @@ TEST_F(ConfigInitializationTest, BuildsNecessaryIndexes) {
                  << "uuid_1_lastmod_1"
                  << "unique" << true)};
 
-    auto expectedLockpingsIndexes =
-        std::vector<BSONObj>{BSON("v" << 2 << "key" << BSON("_id" << 1) << "name"
-                                      << "_id_"),
-                             BSON("v" << 2 << "key" << BSON("ping" << 1) << "name"
-                                      << "ping_1")};
-    auto expectedLocksIndexes = std::vector<BSONObj>{
-        BSON("v" << 2 << "key" << BSON("_id" << 1) << "name"
-                 << "_id_"),
-        BSON("v" << 2 << "key" << BSON("ts" << 1) << "name"
-                 << "ts_1"),
-        BSON("v" << 2 << "key" << BSON("state" << 1 << "process" << 1) << "name"
-                 << "state_1_process_1")};
     auto expectedShardsIndexes = std::vector<BSONObj>{
         BSON("v" << 2 << "key" << BSON("_id" << 1) << "name"
                  << "_id_"),
@@ -311,18 +298,26 @@ TEST_F(ConfigInitializationTest, BuildsNecessaryIndexes) {
     auto foundChunksIndexes = assertGet(getIndexes(operationContext(), ChunkType::ConfigNS));
     assertBSONObjsSame(expectedChunksIndexes, foundChunksIndexes);
 
-    auto foundLockpingsIndexes = assertGet(getIndexes(operationContext(), LockpingsType::ConfigNS));
-    assertBSONObjsSame(expectedLockpingsIndexes, foundLockpingsIndexes);
-
-    auto foundLocksIndexes = assertGet(getIndexes(operationContext(), LocksType::ConfigNS));
-    assertBSONObjsSame(expectedLocksIndexes, foundLocksIndexes);
-
     auto foundShardsIndexes =
         assertGet(getIndexes(operationContext(), NamespaceString::kConfigsvrShardsNamespace));
     assertBSONObjsSame(expectedShardsIndexes, foundShardsIndexes);
 
     auto foundTagsIndexes = assertGet(getIndexes(operationContext(), TagsType::ConfigNS));
     assertBSONObjsSame(expectedTagsIndexes, foundTagsIndexes);
+
+    if (feature_flags::gHistoricalPlacementShardingCatalog.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        auto expectedPlacementHistoryIndexes =
+            std::vector<BSONObj>{BSON("v" << 2 << "key" << BSON("_id" << 1) << "name"
+                                          << "_id_"),
+                                 BSON("v" << 2 << "unique" << true << "key"
+                                          << BSON("nss" << 1 << "timestamp" << 1) << "name"
+                                          << "nss_1_timestamp_1")};
+
+        auto foundlacementHistoryIndexes = assertGet(
+            getIndexes(operationContext(), NamespaceString::kConfigsvrPlacementHistoryNamespace));
+        assertBSONObjsSame(expectedPlacementHistoryIndexes, foundlacementHistoryIndexes);
+    }
 }
 
 }  // unnamed namespace

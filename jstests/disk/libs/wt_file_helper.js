@@ -241,6 +241,19 @@ let truncateUriAndRestartMongod = function(uri, conn, mongodOptions) {
 };
 
 /**
+ * Stops the given mongod and runs the alter command to modify the index table's metadata.
+ */
+let alterIndexFormatVersion = function(uri, conn, formatVersion) {
+    MongoRunner.stopMongod(conn, null, {skipValidation: true});
+    runWiredTigerTool(
+        "-h",
+        conn.dbpath,
+        "alter",
+        "table:" + uri,
+        "app_metadata=(formatVersion=" + formatVersion + "),exclusive_refreshed=false");
+};
+
+/**
  * Stops the given mongod, dumps the table with the uri, modifies the content, and loads it back to
  * the table.
  */
@@ -306,4 +319,77 @@ let insertDocSymbolField = function(coll, uri, conn, numDocs) {
         }
     };
     rewriteTable(uri, conn, makeSymbolField);
+};
+
+/**
+ * Inserts array document with non-sequential indexes into the MongoDB server.
+ */
+let insertNonSequentialArrayIndexes = function(coll, uri, conn, numDocs) {
+    for (let i = 0; i < numDocs; ++i) {
+        coll.insert({arr: [1, 2, [1, [1, 2], 2], 3]});
+    }
+    let makeNonSequentialIndexes = function(lines) {
+        // The offset of the 0th index of the innermost array in the hex string dumped by wt tool.
+        const offsetToNestedIndex0 = 179;
+        // Each record takes two lines with a key and a value. We will only modify the values.
+        for (let i = wtHeaderLines; i < lines.length; i += 2) {
+            lines[i] = lines[i].substring(0, offsetToNestedIndex0) + "4" +
+                lines[i].substring(offsetToNestedIndex0 + 1);
+        }
+    };
+    rewriteTable(uri, conn, makeNonSequentialIndexes);
+};
+
+/**
+ * Inserts documents with invalid regex options into the MongoDB server.
+ */
+let insertInvalidRegex = function(coll, mongod, nDocuments) {
+    const regex = "a*.conn";
+    const options = 'gimsuy';
+
+    // First, insert valid expressions which will not be rejected by the JS interpreter.
+    for (let i = 0; i < nDocuments; i++) {
+        coll.insert({a: RegExp(regex, options)});
+    }
+
+    // Insert one valid expression and 4 invalid expressions.
+    let swapOptions = function(lines) {
+        const toInsert = ["imlsux", "imzsux", "xuslmi", "amlsux"];
+        const offsetToOptionStr = 64;
+        const toHexStr = function(str) {
+            return str.split('')
+                .map((a) => {
+                    return a.charCodeAt(0).toString(16);
+                })
+                .join('');
+        };
+
+        let modifiedOptions;
+        for (let i = wtHeaderLines; i < lines.length; i += 2) {
+            modifiedOptions = toHexStr(toInsert[((i - wtHeaderLines) / 2) % toInsert.length]);
+            lines[i] = lines[i].substring(0, offsetToOptionStr) + modifiedOptions +
+                lines[i].substring(offsetToOptionStr + modifiedOptions.length);
+        }
+    };
+    rewriteTable(getUriForColl(coll), mongod, swapOptions);
+};
+
+/**
+ * Inserts document with invalid UTF-8 string into the MongoDB server.
+ */
+let insertInvalidUTF8 = function(coll, uri, conn, numDocs) {
+    for (let i = 0; i < numDocs; ++i) {
+        coll.insert({validString: "\x70"});
+    }
+    let makeInvalidUTF8 = function(lines) {
+        // The offset of the first byte of the string, flips \x70 to \x80 (10000000) - invalid
+        // because single byte UTF-8 cannot have a leading 1.
+        const offsetToString = 76;
+        // Each record takes two lines with a key and a value. We will only modify the values.
+        for (let i = wtHeaderLines; i < lines.length; i += 2) {
+            lines[i] = lines[i].substring(0, offsetToString) + "8" +
+                lines[i].substring(offsetToString + 1);
+        }
+    };
+    rewriteTable(uri, conn, makeInvalidUTF8);
 };

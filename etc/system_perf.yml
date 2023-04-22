@@ -366,7 +366,10 @@ functions:
           set -o errexit
           set -o verbose
           source "${workdir}/compile_venv/bin/activate"
-          python ./buildscripts/scons.py ${compile_flags|} ${scons_cache_args|} install-core install-jstestshell MONGO_VERSION=${version} DESTDIR=$(pwd)/mongodb ${patch_compile_flags|}
+          # TODO: SERVER-68475
+          # remove this when a better solution is found
+          extra_args="SPLIT_DWARF_DWP_FILES=1"
+          python ./buildscripts/scons.py ${compile_flags|} ${scons_cache_args|} $extra_args install-core install-jstestshell MONGO_VERSION=${version} DESTDIR=$(pwd)/mongodb ${patch_compile_flags|}
           mkdir -p mongodb/jstests/hooks
           if [ -d jstests/hooks ]
           then
@@ -639,6 +642,13 @@ tasks:
       - func: f_run_dsi_workload
         vars:
           test_control: "ycsb-60GB"
+
+  - name: ycsb_60GB.long
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "ycsb-60GB.long"
 
   - name: industry_benchmarks_secondary_reads
     priority: 5
@@ -1143,6 +1153,7 @@ buildvariants:
       - name: smoke_test
       - name: industry_benchmarks
       - name: ycsb_60GB
+      - name: ycsb_60GB.long
       - name: crud_workloads
       - name: genny_canaries
       - name: cursor_manager
@@ -1175,8 +1186,20 @@ buildvariants:
       - "rhel70-perf-single"
     depends_on: *_compile_amazon2
     tasks:
-      - name: schedule_variant_auto_tasks
       - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
+      - name: industry_benchmarks
+      - name: ycsb_60GB
+      - name: ycsb_60GB.long
+      - name: crud_workloads
+      - name: bestbuy_agg
+      - name: bestbuy_agg_merge_different_db
+      - name: bestbuy_agg_merge_same_db
+      - name: bestbuy_agg_merge_wordcount
+      - name: bestbuy_query
+      - name: cursor_manager
+      - name: map_reduce_workloads
+      - name: tpcc
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
       - name: tpch_10_normalized
@@ -1202,6 +1225,7 @@ buildvariants:
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
       - name: ycsb_60GB
+      - name: ycsb_60GB.long
       - name: crud_workloads
       - name: bestbuy_agg
       - name: bestbuy_agg_merge_different_db
@@ -1272,6 +1296,7 @@ buildvariants:
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
       - name: ycsb_60GB
+      - name: ycsb_60GB.long
       - name: crud_workloads
       - name: mixed_workloads
       - name: misc_workloads
@@ -1432,6 +1457,7 @@ buildvariants:
       - name: industry_benchmarks
       - name: smoke_test
       - name: ycsb_60GB
+      - name: ycsb_60GB.long
 
   - name: linux-1-node-replSet-ese-gcm
     display_name: Linux 1-Node ReplSet ESE GCM
@@ -1453,6 +1479,7 @@ buildvariants:
       - name: industry_benchmarks
       - name: smoke_test
       - name: ycsb_60GB
+      - name: ycsb_60GB.long
 
   - name: linux-1-node-15gbwtcache
     display_name: Linux 1-Node ReplSet 15 GB WiredTiger Cache
@@ -1474,6 +1501,7 @@ buildvariants:
       - name: industry_benchmarks
       - name: smoke_test
       - name: ycsb_60GB
+      - name: ycsb_60GB.long
 
   - name: linux-3-node-1dayhistory-15gbwtcache
     display_name: Linux 3-Node ReplSet 1 Day History 15 GB WiredTiger Cache
@@ -1496,6 +1524,7 @@ buildvariants:
       - name: crud_workloads_majority
       - name: smoke_test
       - name: ycsb_60GB
+      - name: ycsb_60GB.long
 
   - name: linux-3-shard
     display_name: Linux 3-Shard Cluster
@@ -1686,6 +1715,7 @@ buildvariants:
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
       - name: ycsb_60GB
+      - name: ycsb_60GB.long
       - name: industry_benchmarks_secondary_reads
       - name: crud_workloads
       - name: crud_workloads_majority
@@ -1744,6 +1774,7 @@ buildvariants:
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
       - name: ycsb_60GB
+      - name: ycsb_60GB.long
       - name: industry_benchmarks_secondary_reads
       - name: crud_workloads
       - name: crud_workloads_majority
@@ -1800,6 +1831,7 @@ buildvariants:
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
       - name: ycsb_60GB
+      - name: ycsb_60GB.long
       - name: industry_benchmarks_secondary_reads
       - name: crud_workloads
       - name: crud_workloads_majority
@@ -1858,6 +1890,7 @@ buildvariants:
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
       - name: ycsb_60GB
+      - name: ycsb_60GB.long
       - name: industry_benchmarks_secondary_reads
       - name: crud_workloads
       - name: crud_workloads_majority
@@ -2103,6 +2136,7 @@ buildvariants:
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
       - name: ycsb_60GB
+      - name: ycsb_60GB.long
       - name: industry_benchmarks_secondary_reads
       - name: crud_workloads
       - name: crud_workloads_majority

@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-
 #include "mongo/db/repl/replication_coordinator_external_state_impl.h"
 
 #include <functional>
@@ -42,6 +41,7 @@
 #include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
+#include "mongo/db/catalog/drop_collection.h"
 #include "mongo/db/catalog/local_oplog_info.h"
 #include "mongo/db/change_stream_change_collection_manager.h"
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
@@ -57,7 +57,6 @@
 #include "mongo/db/free_mon/free_mon_mongod.h"
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/kill_sessions_local.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
@@ -81,7 +80,6 @@
 #include "mongo/db/s/chunk_splitter.h"
 #include "mongo/db/s/config/index_on_config.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
-#include "mongo/db/s/dist_lock_manager.h"
 #include "mongo/db/s/migration_util.h"
 #include "mongo/db/s/periodic_balancer_config_refresher.h"
 #include "mongo/db/s/periodic_sharded_index_consistency_checker.h"
@@ -93,7 +91,8 @@
 #include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/session_catalog_mongod.h"
+#include "mongo/db/session/kill_sessions_local.h"
+#include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/db/storage/flow_control.h"
 #include "mongo/db/storage/storage_engine.h"
@@ -124,7 +123,6 @@
 #include "mongo/util/time_support.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
-
 
 using namespace fmt::literals;
 
@@ -545,18 +543,10 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
         }
     });
 
-    // Create the pre-images collection if it doesn't exist yet.
-    ChangeStreamPreImagesCollectionManager::createPreImagesCollection(opCtx,
-                                                                      boost::none /* tenantId */);
-
-    // TODO: SERVER-66631 move the change collection creation logic from here to the PM-2502 hooks.
-    // The change collection will be created when the change stream is enabled.
-    if (ChangeStreamChangeCollectionManager::isChangeCollectionsModeActive()) {
-        auto status = ChangeStreamChangeCollectionManager::get(opCtx).createChangeCollection(
-            opCtx, boost::none);
-        if (!status.isOK()) {
-            fassert(6520900, status);
-        }
+    // Create the pre-images collection if it doesn't exist yet in the non-serverless environment.
+    if (!ChangeStreamChangeCollectionManager::isChangeCollectionsModeActive()) {
+        ChangeStreamPreImagesCollectionManager::createPreImagesCollection(
+            opCtx, boost::none /* tenantId */);
     }
 
     serverGlobalParams.validateFeaturesAsPrimary.store(true);
@@ -797,6 +787,16 @@ bool ReplicationCoordinatorExternalStateImpl::isSelf(const HostAndPort& host, Se
     return repl::isSelf(host, ctx);
 }
 
+bool ReplicationCoordinatorExternalStateImpl::isSelfFastPath(const HostAndPort& host) {
+    return repl::isSelfFastPath(host);
+}
+
+bool ReplicationCoordinatorExternalStateImpl::isSelfSlowPath(const HostAndPort& host,
+                                                             ServiceContext* ctx,
+                                                             Milliseconds timeout) {
+    return repl::isSelfSlowPath(host, ctx, timeout);
+}
+
 HostAndPort ReplicationCoordinatorExternalStateImpl::getClientHostAndPort(
     const OperationContext* opCtx) {
     return HostAndPort(opCtx->getClient()->clientAddress(true));
@@ -910,9 +910,6 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
             }
             fassert(40217, status);
         }
-
-        // Free any leftover locks from previous instantiations.
-        DistLockManager::get(opCtx)->unlockAll(opCtx);
 
         if (auto validator = LogicalTimeValidator::get(_service)) {
             validator->enableKeyGenerator(opCtx, true);
@@ -1079,17 +1076,16 @@ void ReplicationCoordinatorExternalStateImpl::_dropAllTempCollections(OperationC
     for (const auto& dbName : dbNames) {
         // The local db is special because it isn't replicated. It is cleared at startup even on
         // replica set members.
-        if (dbName.db() == "local")
+        if (dbName.db() == NamespaceString::kLocalDb)
             continue;
+
         LOGV2_DEBUG(21309,
                     2,
                     "Removing temporary collections from {db}",
                     "Removing temporary collections",
                     "db"_attr = dbName);
-        AutoGetDb autoDb(opCtx, dbName, MODE_IX);
-        invariant(autoDb.getDb(),
-                  str::stream() << "Unable to get reference to database " << dbName.db());
-        autoDb.getDb()->clearTmpCollections(opCtx);
+        Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
+        clearTempCollections(opCtx, dbName);
     }
 }
 

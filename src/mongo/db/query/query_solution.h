@@ -38,6 +38,7 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/pipeline/accumulation_statement.h"
+#include "mongo/db/pipeline/expression_dependencies.h"
 #include "mongo/db/query/classic_plan_cache.h"
 #include "mongo/db/query/index_bounds.h"
 #include "mongo/db/query/interval_evaluation_tree.h"
@@ -488,12 +489,12 @@ struct CollectionScanNode : public QuerySolutionNodeWithSortSet {
     // Should we make a tailable cursor?
     bool tailable;
 
-    // Should we keep track of the timestamp of the latest oplog entry we've seen? This information
-    // is needed to merge cursors from the oplog in order of operation time when reading the oplog
-    // across a sharded cluster.
+    // Should we keep track of the timestamp of the latest oplog or change collection entry we've
+    // seen? This information is needed to merge cursors from the oplog in order of operation time
+    // when reading the oplog across a sharded cluster.
     bool shouldTrackLatestOplogTimestamp = false;
 
-    // Assert that the specified timestamp has not fallen off the oplog.
+    // Assert that the specified timestamp has not fallen off the oplog or change collection.
     boost::optional<Timestamp> assertTsHasNotFallenOff = boost::none;
 
     int direction{1};
@@ -513,6 +514,7 @@ struct ColumnIndexScanNode : public QuerySolutionNode {
     ColumnIndexScanNode(ColumnIndexEntry,
                         OrderedPathSet outputFields,
                         OrderedPathSet matchFields,
+                        OrderedPathSet allFields,
                         StringMap<std::unique_ptr<MatchExpression>> filtersByPath,
                         std::unique_ptr<MatchExpression> postAssemblyFilter);
 
@@ -545,6 +547,7 @@ struct ColumnIndexScanNode : public QuerySolutionNode {
         return std::make_unique<ColumnIndexScanNode>(indexEntry,
                                                      outputFields,
                                                      matchFields,
+                                                     allFields,
                                                      std::move(clonedFiltersByPath),
                                                      postAssemblyFilter->shallowClone());
     }
@@ -1387,12 +1390,12 @@ struct GroupNode : public QuerySolutionNode {
           shouldProduceBson(shouldProduceBson) {
         // Use the DepsTracker to extract the fields that the 'groupByExpression' and accumulator
         // expressions depend on.
-        for (auto& groupByExprField : groupByExpression->getDependencies().fields) {
+        for (auto& groupByExprField : expression::getDependencies(groupByExpression.get()).fields) {
             requiredFields.insert(groupByExprField);
         }
         for (auto&& acc : accumulators) {
             auto argExpr = acc.expr.argument;
-            for (auto& argExprField : argExpr->getDependencies().fields) {
+            for (auto& argExprField : expression::getDependencies(argExpr.get()).fields) {
                 requiredFields.insert(argExprField);
             }
         }

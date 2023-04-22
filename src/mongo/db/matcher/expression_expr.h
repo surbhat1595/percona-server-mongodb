@@ -77,6 +77,8 @@ public:
 
     void serialize(BSONObjBuilder* out, bool includePath) const final;
 
+    bool isTriviallyTrue() const final;
+
     bool equivalent(const MatchExpression* other) const final;
 
     MatchCategory getCategory() const final {
@@ -130,12 +132,6 @@ private:
     ExpressionOptimizerFunc getOptimizer() const final;
 
     void _doSetCollator(const CollatorInterface* collator) final;
-
-    void _doAddDependencies(DepsTracker* deps) const final {
-        if (_expression) {
-            _expression->addDependencies(deps);
-        }
-    }
 
     boost::intrusive_ptr<ExpressionContext> _expCtx;
 

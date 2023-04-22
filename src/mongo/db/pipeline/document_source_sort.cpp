@@ -145,8 +145,10 @@ REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(
     _internalBoundedSort,
     LiteParsedDocumentSourceDefault::parse,
     DocumentSourceSort::parseBoundedSort,
-    AllowedWithApiStrict::kNeverInVersion1,
-    AllowedWithClientType::kAny,
+    ::mongo::getTestCommandsEnabled() ? AllowedWithApiStrict::kNeverInVersion1
+                                      : AllowedWithApiStrict::kInternal,
+    ::mongo::getTestCommandsEnabled() ? AllowedWithClientType::kAny
+                                      : AllowedWithClientType::kInternal,
     feature_flags::gFeatureFlagBucketUnpackWithSort,
     feature_flags::gFeatureFlagBucketUnpackWithSort.isEnabledAndIgnoreFCV());
 
@@ -398,6 +400,10 @@ DepsTracker::State DocumentSourceSort::getDependencies(DepsTracker* deps) const 
     }
 
     return DepsTracker::State::SEE_NEXT;
+}
+
+void DocumentSourceSort::addVariableRefs(std::set<Variables::Id>* refs) const {
+    // It's impossible for $sort or the find command's sort to refer to a variable.
 }
 
 intrusive_ptr<DocumentSource> DocumentSourceSort::createFromBson(

@@ -27,11 +27,7 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include <fmt/format.h>
-
 #include <memory>
 #include <string>
 
@@ -66,16 +62,13 @@
 #include "mongo/db/stats/top.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/rewrite_state_change_errors.h"
-#include "mongo/s/chunk_version.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/time_support.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
-
 namespace mongo {
-
 namespace {
 
 using namespace fmt::literals;
@@ -321,11 +314,14 @@ public:
         return true;
     }
 
+    bool allowedWithSecurityToken() const final {
+        return true;
+    }
     class Invocation final : public CommandInvocation {
     public:
         Invocation(Command* cmd, const OpMsgRequest& request)
             : CommandInvocation(cmd),
-              _cmd(GetMoreCommandRequest::parse({"getMore"}, request.body)) {
+              _cmd(GetMoreCommandRequest::parse(IDLParserContext{"getMore"}, request)) {
             NamespaceString nss(_cmd.getDbName(), _cmd.getCollection());
             uassert(ErrorCodes::InvalidNamespace,
                     str::stream() << "Invalid namespace for getMore: " << nss.ns(),
@@ -740,7 +736,7 @@ public:
             // Counted as a getMore, not as a command.
             globalOpCounters.gotGetMore();
             auto curOp = CurOp::get(opCtx);
-            NamespaceString nss(_cmd.getDbName(), _cmd.getCollection());
+            NamespaceString nss = ns();
             int64_t cursorId = _cmd.getCommandParameter();
             curOp->debug().cursorid = cursorId;
 
@@ -817,7 +813,8 @@ public:
 
         void validateResult(rpc::ReplyBuilderInterface* reply) {
             auto ret = reply->getBodyBuilder().asTempObj();
-            CursorGetMoreReply::parse({"CursorGetMoreReply"}, ret.removeField("ok"));
+            CursorGetMoreReply::parse(IDLParserContext{"CursorGetMoreReply"},
+                                      ret.removeField("ok"));
         }
 
         const GetMoreCommandRequest _cmd;

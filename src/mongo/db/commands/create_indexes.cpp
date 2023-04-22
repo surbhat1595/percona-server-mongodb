@@ -63,7 +63,7 @@
 #include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/sharding_state.h"
-#include "mongo/db/session_catalog_mongod.h"
+#include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/storage/two_phase_index_build_knobs_gen.h"
 #include "mongo/db/timeseries/catalog_helper.h"
 #include "mongo/db/timeseries/timeseries_commands_conversion_helper.h"
@@ -390,7 +390,7 @@ CreateIndexesReply runCreateIndexesOnNewCollection(
         OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE unsafeCreateCollection(
             opCtx);
         auto createStatus =
-            createCollection(opCtx, ns.db().toString(), builder.obj().getOwned(), idIndexSpec);
+            createCollection(opCtx, ns.dbName(), builder.obj().getOwned(), idIndexSpec);
 
         if (createStatus == ErrorCodes::NamespaceExists) {
             throwWriteConflictException(
@@ -428,7 +428,8 @@ CreateIndexesReply runCreateIndexesOnNewCollection(
     const int numIndexesAfter = IndexBuildsCoordinator::getNumIndexesTotal(opCtx, collection.get());
 
     if (MONGO_unlikely(createIndexesWriteConflict.shouldFail())) {
-        throwWriteConflictException();
+        throwWriteConflictException(str::stream() << "Hit failpoint '"
+                                                  << createIndexesWriteConflict.getName() << "'.");
     }
     wunit.commit();
 

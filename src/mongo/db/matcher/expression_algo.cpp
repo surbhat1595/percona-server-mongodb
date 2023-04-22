@@ -41,6 +41,7 @@
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/matcher/expression_tree.h"
 #include "mongo/db/matcher/expression_type.h"
+#include "mongo/db/matcher/match_expression_dependencies.h"
 #include "mongo/db/matcher/schema/expression_internal_schema_xor.h"
 #include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/query/collation/collation_index_key.h"
@@ -440,7 +441,7 @@ std::pair<unique_ptr<MatchExpression>, unique_ptr<MatchExpression>> splitMatchEx
 
 bool pathDependenciesAreExact(StringData key, const MatchExpression* expr) {
     DepsTracker columnDeps;
-    expr->addDependencies(&columnDeps);
+    match_expression::addDependencies(expr, &columnDeps);
     return !columnDeps.needWholeDocument && columnDeps.fields == OrderedPathSet{key.toString()};
 }
 
@@ -476,6 +477,11 @@ std::unique_ptr<MatchExpression> tryAddExpr(StringData path,
     if (FieldRef(path).hasNumericPathComponents())
         return me->shallowClone();
 
+    // (TODO SERVER-68743) addExpr will rightfully create AND for expressions on the same path, but
+    // we cannot translate AND into EExpressions yet.
+    if (out.find(path) != out.end())
+        return me->shallowClone();
+
     addExpr(path, me->shallowClone(), out);
     return nullptr;
 }
@@ -497,7 +503,12 @@ std::unique_ptr<MatchExpression> splitMatchExpressionForColumns(
         // One exception to the above: We can support EQ with empty objects and empty arrays since
         // those are more obviously correct. Maybe could also support LT and LTE, but those don't
         // seem as important so are left for future work.
-        if (elem.type() == BSONType::Array || elem.type() == BSONType::Object) {
+        auto type = elem.type();
+        if (type == BSONType::MinKey || type == BSONType::MaxKey) {
+            // MinKey and MaxKey have special semantics for comparison to objects.
+            return false;
+        }
+        if (type == BSONType::Array || type == BSONType::Object) {
             return isEQ && elem.Obj().isEmpty();
         }
 
@@ -512,11 +523,14 @@ std::unique_ptr<MatchExpression> splitMatchExpressionForColumns(
         case MatchExpression::BITS_ALL_SET:
         case MatchExpression::BITS_ALL_CLEAR:
         case MatchExpression::BITS_ANY_SET:
-        case MatchExpression::BITS_ANY_CLEAR:
-        case MatchExpression::EXISTS: {
+        case MatchExpression::BITS_ANY_CLEAR: {
             // Note: {$exists: false} is represented as {$not: {$exists: true}}.
             auto sub = checked_cast<const PathMatchExpression*>(me);
             return tryAddExpr(sub->path(), me, out);
+        }
+        case MatchExpression::EXISTS: {
+            // (TODO SERVER-68743) need expr translation to enable pushing down $exists
+            return me->shallowClone();
         }
 
         case MatchExpression::LT:
@@ -530,28 +544,14 @@ std::unique_ptr<MatchExpression> splitMatchExpressionForColumns(
             return tryAddExpr(sub->path(), me, out);
         }
 
-
         case MatchExpression::MATCH_IN: {
-            auto sub = checked_cast<const InMatchExpression*>(me);
-            // Note that $in treats regexes specially and stores them separately than the rest of
-            // the 'equalities'. We actually don't need to look at them here since any regex should
-            // be OK. A regex could only match a string, symbol, or other regex, any of which would
-            // be present in the columnar storage.
-            for (auto&& elem : sub->getEqualities()) {
-                if (!canCompareWith(elem, true))
-                    return me->shallowClone();
-            }
-            return tryAddExpr(sub->path(), me, out);
+            // (TODO SERVER-68743) need expr translation to enable pushing down $in
+            return me->shallowClone();
         }
 
         case MatchExpression::TYPE_OPERATOR: {
-            auto sub = checked_cast<const TypeMatchExpression*>(me);
-            tassert(6430600,
-                    "Not expecting to find EOO in a $type expression",
-                    !sub->typeSet().hasType(BSONType::EOO));
-            if (sub->typeSet().hasType(BSONType::Object) || sub->typeSet().hasType(BSONType::Array))
-                return me->shallowClone();
-            return tryAddExpr(sub->path(), me, out);
+            // (TODO SERVER-68743) need expr translation to enable pushing down $type
+            return me->shallowClone();
         }
 
         case MatchExpression::AND: {
@@ -570,34 +570,8 @@ std::unique_ptr<MatchExpression> splitMatchExpressionForColumns(
                 : std::make_unique<AndMatchExpression>(std::move(newChildren));
         }
 
-
         case MatchExpression::NOT: {
-            // {$ne: null} pattern is known to be important in cases like those in SERVER-27646 and
-            // SERVER-36465.
-            auto notExpr = checked_cast<const NotMatchExpression*>(me);
-            auto withinNot = notExpr->getChild(0);
-
-            // Oddly, we parse {$ne: null} to a NOT -> EQ, but we parse {$not: {$eq: null}} into a
-            // more complex NOT -> AND -> EQ. Let's support both.
-            auto tryAddNENull = [&](const MatchExpression* negatedPred) {
-                if (negatedPred->matchType() != MatchExpression::EQ) {
-                    return false;
-                }
-                auto eqPred = checked_cast<const EqualityMatchExpression*>(negatedPred);
-                if (eqPred->getData().isNull()) {
-                    return tryAddExpr(eqPred->path(), me, out) == nullptr;
-                }
-                return false;
-            };
-            if (tryAddNENull(withinNot)) {
-                // {$ne: null}. We had equality just under NOT.
-                return nullptr;
-            } else if (withinNot->matchType() == MatchExpression::AND &&
-                       withinNot->numChildren() == 1 && tryAddNENull(withinNot->getChild(0))) {
-                // {$not: {$eq: null}}: NOT -> AND -> EQ.
-                return nullptr;
-            }
-            // May be other cases, but left as future work.
+            // (TODO SERVER-68743) need expr translation to enable pushing down $not
             return me->shallowClone();
         }
 
@@ -823,6 +797,22 @@ bool containsDependency(const OrderedPathSet& testSet, const OrderedPathSet& pre
     return false;
 }
 
+bool containsOverlappingPaths(const OrderedPathSet& testSet) {
+    // We will take advantage of the fact that paths with common ancestors are ordered together in
+    // our ordering. Thus if there are any paths that contain a common ancestor, they will be right
+    // next to each other - unless there are multiple pairs, in which case at least one pair will be
+    // right next to each other.
+    if (testSet.empty()) {
+        return false;
+    }
+    for (auto it = std::next(testSet.begin()); it != testSet.end(); ++it) {
+        if (isPathPrefixOf(*std::prev(it), *it)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool areIndependent(const OrderedPathSet& pathSet1, const OrderedPathSet& pathSet2) {
     return !containsDependency(pathSet1, pathSet2) && !containsDependency(pathSet2, pathSet1);
 }
@@ -835,7 +825,7 @@ bool isIndependentOf(const MatchExpression& expr, const OrderedPathSet& pathSet)
     }
 
     auto depsTracker = DepsTracker{};
-    expr.addDependencies(&depsTracker);
+    match_expression::addDependencies(&expr, &depsTracker);
     // Match expressions that generate random numbers can't be safely split out and pushed down.
     if (depsTracker.needRandomGenerator || depsTracker.needWholeDocument) {
         return false;
@@ -859,7 +849,7 @@ bool isOnlyDependentOn(const MatchExpression& expr, const OrderedPathSet& pathSe
 
     // Now add the match expression's paths and see if the dependencies are the same.
     auto exprDepsTracker = DepsTracker{};
-    expr.addDependencies(&exprDepsTracker);
+    match_expression::addDependencies(&expr, &exprDepsTracker);
     // Match expressions that generate random numbers can't be safely split out and pushed down.
     if (exprDepsTracker.needRandomGenerator) {
         return false;

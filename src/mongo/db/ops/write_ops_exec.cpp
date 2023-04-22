@@ -39,6 +39,7 @@
 #include "mongo/db/catalog/collection_operation_source.h"
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
+#include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog_raii.h"
@@ -193,7 +194,7 @@ public:
             // here. No-op updates will not generate a new lastOp, so we still need the
             // guard to fire in that case. Operations on the local DB aren't replicated, so they
             // don't need to bump the lastOp.
-            replClientInfo().setLastOpToSystemLastOpTimeIgnoringCtxCancelled(_opCtx);
+            replClientInfo().setLastOpToSystemLastOpTimeIgnoringShutdownCtxCancelled(_opCtx);
             LOGV2_DEBUG(20888,
                         5,
                         "Set last op to system time: {timestamp}",
@@ -385,8 +386,8 @@ void insertDocuments(OperationContext* opCtx,
             return !collElem || collection->ns().ns() == collElem.str();
         });
 
-    uassertStatusOK(
-        collection->insertDocuments(opCtx, begin, end, &CurOp::get(opCtx)->debug(), fromMigrate));
+    uassertStatusOK(collection_internal::insertDocuments(
+        opCtx, collection, begin, end, &CurOp::get(opCtx)->debug(), fromMigrate));
     wuow.commit();
 }
 
@@ -1407,7 +1408,8 @@ Status performAtomicTimeseriesWrites(
     }
 
     if (!insertOps.empty()) {
-        auto status = coll->insertDocuments(opCtx, inserts.begin(), inserts.end(), &curOp->debug());
+        auto status = collection_internal::insertDocuments(
+            opCtx, *coll, inserts.begin(), inserts.end(), &curOp->debug());
         if (!status.isOK()) {
             return status;
         }

@@ -32,7 +32,9 @@
 #include "mongo/db/query/optimizer/index_bounds.h"
 #include "mongo/db/query/optimizer/metadata.h"
 #include "mongo/db/query/optimizer/reference_tracker.h"
+#include "mongo/db/query/optimizer/rewrites/const_eval.h"
 #include "mongo/db/query/optimizer/syntax/path.h"
+#include "mongo/db/query/optimizer/utils/ce_math.h"
 #include "mongo/db/query/optimizer/utils/interval_utils.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 
@@ -963,10 +965,11 @@ size_t decodeIndexKeyName(const std::string& fieldName) {
 }
 
 /**
- * Checks if one index path is a prefix of another. Considers only Get, Traverse, and Id.
+ * Fuses an index path and a query path to determine a residual path to apply over the index
+ * results. Checks if one index path is a prefix of another. Considers only Get, Traverse, and Id.
  * Return the suffix that doesn't match.
  */
-class PathSuffixExtactor {
+class IndexPathFusor {
 public:
     using ResultType = boost::optional<ABT::reference_type>;
 
@@ -1001,8 +1004,8 @@ public:
         uasserted(6624152, "Unexpected node type");
     }
 
-    static ResultType check(const ABT& node, const ABT& candidatePrefix) {
-        PathSuffixExtactor instance;
+    static ResultType fuse(const ABT& node, const ABT& candidatePrefix) {
+        IndexPathFusor instance;
         return candidatePrefix.visit(instance, node);
     }
 };
@@ -1011,9 +1014,23 @@ CandidateIndexMap computeCandidateIndexMap(PrefixId& prefixId,
                                            const ProjectionName& scanProjectionName,
                                            const PartialSchemaRequirements& reqMap,
                                            const ScanDefinition& scanDef,
+                                           const bool fastNullHandling,
                                            bool& hasEmptyInterval) {
     CandidateIndexMap result;
     hasEmptyInterval = false;
+
+    // Contains one instance for each unmatched key.
+    PartialSchemaKeySet unsatisfiedKeysInitial;
+    for (const auto& [key, req] : reqMap) {
+        unsatisfiedKeysInitial.insert(key);
+
+        if (!fastNullHandling && req.hasBoundProjectionName() &&
+            checkMaybeHasNull(req.getIntervals())) {
+            // We cannot use indexes to return values for fields if we have an interval with null
+            // bounds.
+            return {};
+        }
+    }
 
     for (const auto& [indexDefName, indexDef] : scanDef.getIndexDefs()) {
         FieldProjectionMap indexProjectionMap;
@@ -1023,12 +1040,7 @@ CandidateIndexMap computeCandidateIndexMap(PrefixId& prefixId,
         ResidualKeyMap residualKeyMap;
         opt::unordered_set<size_t> fieldsToCollate;
         size_t intervalPrefixSize = 0;
-
-        // Contains one instance for each unmatched key.
-        PartialSchemaKeySet unsatisfiedKeys;
-        for (const auto& [key, req] : reqMap) {
-            unsatisfiedKeys.insert(key);
-        }
+        PartialSchemaKeySet unsatisfiedKeys = unsatisfiedKeysInitial;
 
         // True if the paths from partial schema requirements form a strict prefix of the index
         // collation.
@@ -1036,7 +1048,6 @@ CandidateIndexMap computeCandidateIndexMap(PrefixId& prefixId,
         // If we formed bounds using at least one requirement (as opposed to having only residual
         // requirements).
         bool hasExactMatch = false;
-        bool indexSuitable = true;
 
         const IndexCollationSpec& indexCollationSpec = indexDef.getCollationSpec();
         for (size_t indexField = 0; indexField < indexCollationSpec.size(); indexField++) {
@@ -1099,11 +1110,11 @@ CandidateIndexMap computeCandidateIndexMap(PrefixId& prefixId,
             } else {
                 bool foundPathPrefix = false;
                 for (const auto& queryKey : unsatisfiedKeys) {
-                    const auto pathPrefixResult =
-                        PathSuffixExtactor::check(queryKey._path, indexCollationEntry._path);
-                    if (pathPrefixResult) {
+                    const auto fusedPath =
+                        IndexPathFusor::fuse(queryKey._path, indexCollationEntry._path);
+                    if (fusedPath) {
                         ProjectionName tempProj = prefixId.getNextId("evalTemp");
-                        PartialSchemaKey residualKey{tempProj, pathPrefixResult.get()};
+                        PartialSchemaKey residualKey{tempProj, fusedPath.get()};
 
                         {
                             auto range = reqMap.equal_range(queryKey);
@@ -1140,9 +1151,6 @@ CandidateIndexMap computeCandidateIndexMap(PrefixId& prefixId,
                 }
             }
         }
-        if (!indexSuitable) {
-            continue;
-        }
         if (!hasExactMatch) {
             continue;
         }
@@ -1163,6 +1171,60 @@ CandidateIndexMap computeCandidateIndexMap(PrefixId& prefixId,
     return result;
 }
 
+/**
+ * Transport that checks if we have a primitive interval which may contain null.
+ */
+class PartialSchemaReqMayContainNullTransport {
+public:
+    bool transport(const IntervalReqExpr::Atom& node) {
+        const auto& interval = node.getExpr();
+
+        if (const auto& lowBound = interval.getLowBound();
+            foldFn(make<BinaryOp>(lowBound.isInclusive() ? Operations::Gt : Operations::Gte,
+                                  lowBound.getBound(),
+                                  Constant::null())) == Constant::boolean(true)) {
+            // Lower bound is strictly larger than null, or equal to null but not inclusive.
+            return false;
+        }
+        if (const auto& highBound = interval.getHighBound();
+            foldFn(make<BinaryOp>(highBound.isInclusive() ? Operations::Lt : Operations::Lte,
+                                  highBound.getBound(),
+                                  Constant::null())) == Constant::boolean(true)) {
+            // Upper bound is strictly smaller than null, or equal to null but not inclusive.
+            return false;
+        }
+
+        return true;
+    }
+
+    bool transport(const IntervalReqExpr::Conjunction& node, std::vector<bool> childResults) {
+        return std::all_of(
+            childResults.cbegin(), childResults.cend(), [](const bool v) { return v; });
+    }
+
+    bool transport(const IntervalReqExpr::Disjunction& node, std::vector<bool> childResults) {
+        return std::any_of(
+            childResults.cbegin(), childResults.cend(), [](const bool v) { return v; });
+    }
+
+    bool check(const IntervalReqExpr::Node& intervals) {
+        return algebra::transport<false>(intervals, *this);
+    }
+
+private:
+    ABT foldFn(ABT expr) {
+        // Performs constant folding.
+        VariableEnvironment env = VariableEnvironment::build(expr);
+        ConstEval instance(env);
+        instance.optimize(expr);
+        return expr;
+    };
+};
+
+bool checkMaybeHasNull(const IntervalReqExpr::Node& intervals) {
+    return PartialSchemaReqMayContainNullTransport{}.check(intervals);
+}
+
 class PartialSchemaReqLowerTransport {
 public:
     PartialSchemaReqLowerTransport(const bool hasBoundProjName)
@@ -1176,9 +1238,6 @@ public:
         if (interval.isEquality()) {
             if (auto constPtr = lowBound.getBound().cast<Constant>()) {
                 if (constPtr->isNull()) {
-                    uassert(6624163,
-                            "Cannot lower null index bound with bound projection",
-                            !_hasBoundProjName);
                     return make<PathComposeA>(make<PathDefault>(Constant::boolean(true)),
                                               make<PathCompare>(Operations::Eq, Constant::null()));
                 }
@@ -1275,11 +1334,19 @@ void lowerPartialSchemaRequirements(const CEType baseCE,
                                     NodeCEMap& nodeCEMap) {
     sortResidualRequirements(requirements);
 
-    CEType residualCE = baseCE;
+    std::vector<SelectivityType> residualSelectivities;
     for (const auto& [residualKey, residualReq, ce] : requirements) {
-        if (scanGroupCE > 0.0) {
-            residualCE *= ce / scanGroupCE;
+        CEType residualCE = baseCE;
+        if (!residualSelectivities.empty()) {
+            // We are intentionally making a copy of the vector here, we are adding elements to it
+            // below.
+            residualCE *= ce::conjExponentialBackoff(residualSelectivities);
         }
+        if (scanGroupCE > 0.0) {
+            // Compute the selectivity after we assign CE, which is the "input" to the cost.
+            residualSelectivities.push_back(ce / scanGroupCE);
+        }
+
         lowerPartialSchemaRequirement(residualKey, residualReq, physNode, [&](const ABT& node) {
             nodeCEMap.emplace(node.cast<Node>(), residualCE);
         });

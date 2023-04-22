@@ -45,14 +45,15 @@ public:
      * If for some reason the asynchronous fetch operation cannot be dispatched (for example on
      * shutdown), throws a DBException.
      */
-    // TODO: SERVER-68459 implement statsCacheLoader
-    SemiFuture<CollectionStatistics> getStats(const NamespaceString& nss);
+    virtual SemiFuture<CollectionStatistics> getStats(OperationContext* opCtx,
+                                                      const NamespaceString& nss) = 0;
 
-    void setStatsReturnValueForTest(StatusWith<CollectionStatistics> swStats);
-    static const Status kInternalErrorStatus;
+    virtual void setStatsReturnValueForTest(StatusWith<CollectionStatistics> swStats){};
 
-private:
-    StatusWith<CollectionStatistics> _swStatsReturnValueForTest{kInternalErrorStatus};
+    virtual ~StatsCacheLoader() {}
+
+    static constexpr StringData kStatsDb = "system"_sd;
+    static constexpr StringData kStatsPrefix = "statistics"_sd;
 };
 
 }  // namespace mongo

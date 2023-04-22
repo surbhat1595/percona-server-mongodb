@@ -204,10 +204,9 @@ function TenantMigrationTest({
     this.waitForMigrationToComplete = function(
         migrationOpts, retryOnRetryableErrors = false, forgetMigration = false) {
         // Assert that the migration has already been started.
-        const tenantId = migrationOpts.tenantId;
-        assert(this.getDonorPrimary()
-                   .getCollection(TenantMigrationTest.kConfigDonorsNS)
-                   .findOne({tenantId}));
+        assert(this.getDonorPrimary().getCollection(TenantMigrationTest.kConfigDonorsNS).findOne({
+            _id: UUID(migrationOpts.migrationIdString)
+        }));
 
         const donorStartReply = this.runDonorStartMigration(
             migrationOpts, {waitForMigrationToComplete: true, retryOnRetryableErrors});
@@ -246,12 +245,12 @@ function TenantMigrationTest({
 
         const cmdObj = {
             donorStartMigration: 1,
-            tenantId,
             migrationId: UUID(migrationIdString),
+            tenantId,
             recipientConnectionString,
             readPreference,
             donorCertificateForRecipient,
-            recipientCertificateForDonor
+            recipientCertificateForDonor,
         };
 
         const stateRes = TenantMigrationUtil.runTenantMigrationCommand(cmdObj, this.getDonorRst(), {
@@ -440,7 +439,7 @@ function TenantMigrationTest({
             assert.soon(
                 () => {
                     result = this.isRecipientNodeInExpectedState(
-                        node, migrationId, tenantId, expectedState, expectedAccessState);
+                        {node, migrationId, tenantId, expectedState, expectedAccessState});
                     return result.value;
                 },
                 () => {
@@ -458,11 +457,16 @@ function TenantMigrationTest({
      * Asserts that the migration 'migrationId' and 'tenantId' is in the expected state on all the
      * given recipient nodes.
      */
-    this.assertRecipientNodesInExpectedState = function(
-        nodes, migrationId, tenantId, expectedState, expectedAccessState) {
+    this.assertRecipientNodesInExpectedState = function({
+        nodes,
+        migrationId,
+        tenantId,
+        expectedState,
+        expectedAccessState,
+    }) {
         nodes.forEach(node => {
             let result = this.isRecipientNodeInExpectedState(
-                node, migrationId, tenantId, expectedState, expectedAccessState);
+                {node, migrationId, tenantId, expectedState, expectedAccessState});
             assert(result.value, () => {
                 return "assertRecipientNodesInExpectedState failed: " +
                     buildErrorMsg(migrationId,
@@ -478,8 +482,13 @@ function TenantMigrationTest({
      * Returns true if the durable and in-memory state for the migration 'migrationId' and
      * 'tenantId' is in the expected state, and false otherwise.
      */
-    this.isRecipientNodeInExpectedState = function(
-        node, migrationId, tenantId, expectedState, expectedAccessState) {
+    this.isRecipientNodeInExpectedState = function({
+        node,
+        migrationId,
+        tenantId,
+        expectedState,
+        expectedAccessState,
+    }) {
         const configRecipientsColl =
             this.getRecipientPrimary().getCollection("config.tenantMigrationRecipients");
         const configDoc = configRecipientsColl.findOne({_id: migrationId});
@@ -560,44 +569,6 @@ function TenantMigrationTest({
      */
     this.getTenantMigrationStats = function(node) {
         return assert.commandWorked(node.adminCommand({serverStatus: 1})).tenantMigrations;
-    };
-
-    /**
-     * Awaits the condition when every stats counter reaches the specified count.
-     */
-    this.awaitTenantMigrationStatsCounts = function(node, {
-        currentMigrationsDonating = 0,
-        currentMigrationsReceiving = 0,
-        totalSuccessfulMigrationsDonated = 0,
-        totalSuccessfulMigrationsReceived = 0,
-        totalFailedMigrationsDonated = 0,
-        totalFailedMigrationsReceived = 0
-    }) {
-        const check = function(expectedVal, stats, fieldName) {
-            if (expectedVal == stats[fieldName]) {
-                return true;  // Condition reached, true means the counter reached the target.
-            }
-            assert.gt(expectedVal,
-                      stats[fieldName],
-                      `Stat ${fieldName} value ${stats[fieldName]} exceeded the target`);
-            return false;
-        };
-        let stats;
-        assert.soon(() => {
-            stats = this.getTenantMigrationStats(node);
-            if (check(currentMigrationsDonating, stats, "currentMigrationsDonating") &&
-                check(currentMigrationsReceiving, stats, "currentMigrationsReceiving") &&
-                check(
-                    totalSuccessfulMigrationsDonated, stats, "totalSuccessfulMigrationsDonated") &&
-                check(totalSuccessfulMigrationsReceived,
-                      stats,
-                      "totalSuccessfulMigrationsReceived") &&
-                check(totalFailedMigrationsDonated, stats, "totalFailedMigrationsDonated") &&
-                check(totalFailedMigrationsReceived, stats, "totalFailedMigrationsReceived")) {
-                return true;  // Done.
-            }
-            return false;
-        }, `Awaiting for tenant migration stats to reach target, got ${tojson(stats)}`);
     };
 
     /**

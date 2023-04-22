@@ -35,7 +35,9 @@
 #include "mongo/base/data_view.h"
 #include "mongo/bson/bson_depth.h"
 #include "mongo/bson/bsonelement.h"
+#include "mongo/bson/util/bsoncolumn.h"
 #include "mongo/logv2/log.h"
+#include "mongo/util/str_escape.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -86,16 +88,20 @@ constexpr ErrorCodes::Error NonConformantBSON = ErrorCodes::NonConformantBSON;
 
 class DefaultValidator {
 public:
-    void checkNonConformantElem(const char* ptr, uint8_t type) {}
-
-    void checkUTF8Char() {}
+    void checkNonConformantElem(const char* ptr, uint32_t offsetToValue, uint8_t type) {}
 
     void checkDuplicateFieldName() {}
+
+    void popLevel() {}
 };
 
 class ExtendedValidator {
 public:
-    void checkNonConformantElem(const char* ptr, uint8_t type) {
+    void checkNonConformantElem(const char* ptr, uint32_t offsetToValue, uint8_t type) {
+        // Checks the field name before the element, if inside array.
+        checkArrIndex(ptr);
+        // Increments the pointer to the actual element.
+        ptr += offsetToValue;
         switch (type) {
             case BSONType::Undefined:
             case BSONType::DBRef:
@@ -103,7 +109,19 @@ public:
             case BSONType::CodeWScope:
                 uasserted(NonConformantBSON, fmt::format("Use of deprecated BSON type {}", type));
                 break;
-            case BSONType::BinData:
+            case BSONType::Array:
+                addIndexLevel(true /* isArr */);
+                break;
+            case BSONType::Object:
+                addIndexLevel(false /* isArr */);
+                break;
+            case BSONType::RegEx: {
+                // Skips regular expression cstring.
+                const char* options = ptr + strlen(ptr) + 1;
+                _checkRegexOptions(options);
+                break;
+            }
+            case BSONType::BinData: {
                 uint8_t subtype =
                     ConstDataView(ptr + sizeof(uint32_t)).read<LittleEndian<uint8_t>>();
                 switch (subtype) {
@@ -124,31 +142,163 @@ public:
                             l == UUIDLength);
                         break;
                     }
-                    case BinDataType::MD5Type:
+                    case BinDataType::MD5Type: {
                         constexpr uint32_t md5Length = 16;
                         auto md5Size = ConstDataView(ptr).read<LittleEndian<uint32_t>>();
                         uassert(NonConformantBSON,
                                 fmt::format("MD5 must be 16 bytes, got {} instead.", md5Size),
                                 md5Size == md5Length);
                         break;
+                    }
                 }
+                break;
+            }
         }
     }
 
-    void checkUTF8Char() {}
-
     void checkDuplicateFieldName() {}
+
+    void popLevel() {
+        if (!indexCount.empty()) {
+            indexCount.pop_back();
+        }
+    }
+
+private:
+    struct Level {
+        DecimalCounter<uint32_t> counter;  // Counter used to check whether indexes are sequential.
+        bool isArr;                        // Indicates whether level is an array or other (object).
+    };
+
+    void addIndexLevel(bool isArr) {
+        if (isArr) {
+            indexCount.push_back(Level{DecimalCounter<uint32_t>(0), true /* isArr */});
+        } else {
+            indexCount.push_back(Level{DecimalCounter<uint32_t>(0), false /* isArr */});
+        }
+    }
+
+    bool inArr() {
+        return !indexCount.empty() && indexCount.back().isArr;
+    }
+
+    void checkArrIndex(const char* ptr) {
+        if (!inArr()) {
+            return;
+        }
+        // Checks the actual index, skipping the type byte.
+        auto actualIndex = StringData(ptr + sizeof(char));
+        uassert(NonConformantBSON,
+                fmt::format("Indices of BSON Array are invalid. Expected {}, but got {}.",
+                            indexCount.back().counter,
+                            actualIndex),
+                indexCount.back().counter == actualIndex);
+        ++indexCount.back().counter;
+    }
+
+    void _checkRegexOptions(const char* options) {
+        // Checks that the options are in ascending alphabetical order and that they're all valid.
+        std::string validRegexOptions("ilmsux");
+        for (const auto& option : std::string(options)) {
+            uassert(
+                NonConformantBSON,
+                fmt::format("Valid regex options are [ i, l, m, s, u, x], but found '{}' instead.",
+                            option),
+                validRegexOptions.find(option) != std::string::npos);
+            uassert(NonConformantBSON,
+                    fmt::format("Regex options should be in ascending alphabetical order. "
+                                "Found {} instead.",
+                                options),
+                    &option == options || option > *(&option - 1));
+        }
+    }
+
+protected:
+    // Behaves like a stack, used to validate array index count.
+    std::vector<Level> indexCount;
 };
 
 class FullValidator : private ExtendedValidator {
 public:
-    void checkNonConformantElem(const char* ptr, uint8_t type) {
-        ExtendedValidator::checkNonConformantElem(ptr, type);
+    void checkNonConformantElem(const char* ptr, uint32_t offsetToValue, uint8_t type) {
+        registerFieldName(ptr + 1);
+        ExtendedValidator::checkNonConformantElem(ptr, offsetToValue, type);
+        // Check the field name is UTF-8 encoded.
+        checkUTF8Char(ptr + 1);
+        switch (type) {
+            case BSONType::Array: {
+                objFrames.push_back({std::vector<std::string>(), false});
+                break;
+            }
+            case BSONType::Object: {
+                objFrames.push_back({std::vector<std::string>(), true});
+                break;
+            };
+            case BSONType::BinData: {
+                uint8_t subtype = ConstDataView(ptr + offsetToValue + sizeof(uint32_t))
+                                      .read<LittleEndian<uint8_t>>();
+                switch (subtype) {
+                    case BinDataType::Column: {
+                        // Check for exceptions when decompressing.
+                        // Calling size() decompresses the entire column.
+                        try {
+                            BSONColumn(BSONElement(ptr)).size();
+                        } catch (...) {
+                            uasserted(NonConformantBSON,
+                                      "Exception ocurred while decompressing a BSON column.");
+                        }
+                    }
+                }
+                break;
+            }
+            case BSONType::String: {
+                // Increment pointer to actual value and then four more to skip size.
+                checkUTF8Char(ptr + offsetToValue + 4);
+            }
+        }
     }
 
-    void checkUTF8Char() {}
+    void checkDuplicateFieldName() {
+        invariant(!objFrames.empty());
+        auto& curr = objFrames.back().first;
+        // If curr is not an object frame, it will always be empty, so no need to check.
+        if (curr.empty()) {
+            objFrames.pop_back();
+            return;
+        }
+        invariant(objFrames.back().second);
+        std::sort(curr.begin(), curr.end());
+        auto duplicate = std::adjacent_find(curr.begin(), curr.end());
+        uassert(NonConformantBSON,
+                fmt::format("A BSON document contains a duplicate field name : {}", *duplicate),
+                duplicate == curr.end());
+        objFrames.pop_back();
+    }
 
-    void checkDuplicateFieldName() {}
+    void popLevel() {
+        ExtendedValidator::popLevel();
+        checkDuplicateFieldName();
+    }
+
+private:
+    // A given frame is an object if and only if frame.second == true.
+    std::vector<std::pair<std::vector<std::string>, bool>> objFrames = {
+        {std::vector<std::string>(), true}};
+
+    void registerFieldName(std::string str) {
+        if (objFrames.back().second) {
+            objFrames.back().first.emplace_back(str);
+        };
+    }
+
+private:
+    void checkUTF8Char(const char* ptr) {
+        try {
+            str::checkInvalidUTF8(ptr);
+        } catch (const ExceptionFor<ErrorCodes::BadValue>&) {
+            uasserted(NonConformantBSON, "Found string that doesn't follow UTF-8 encoding.");
+        }
+    }
 };
 
 template <bool precise, typename BSONValidator>
@@ -238,7 +388,6 @@ private:
         uassert(ErrorCodes::Overflow,
                 "BSONObj exceeds maximum nested object depth",
                 ++_currFrame != _frames.end());
-
         auto obj = cursor.ptr;
         auto len = cursor.template read<int32_t>();
         uassert(ErrorCodes::InvalidBSON, "Nested BSON object has to be at least 5 bytes", len >= 5);
@@ -255,6 +404,7 @@ private:
         if (_currFrame == _frames.begin())
             return false;
         --_currFrame;
+        _validator.popLevel();
         return true;
     }
 
@@ -290,7 +440,7 @@ private:
     const char* _pushCodeWithScope(Cursor cursor) {
         cursor.ptr = _pushFrame(cursor);  // Push a dummy frame to check the CodeWScope size.
         cursor.skipString();              // Now skip the BSON UTF8 string containing the code.
-        _currElem = cursor.ptr - 1;       // Use the terminating NUL as adummy scope element.
+        _currElem = cursor.ptr - 1;       // Use the terminating NUL as a dummy scope element.
         return _pushFrame(cursor);
     }
 
@@ -336,7 +486,7 @@ private:
 
                 // Check if the data is compliant to other BSON specifications if the element is
                 // structurally correct.
-                _validator.checkNonConformantElem(_currElem + len + 1, type);
+                _validator.checkNonConformantElem(_currElem, len + 1, type);
 
                 if constexpr (precise) {
                     // See if the _id field was just validated. If so, set the global scope element.
@@ -350,6 +500,9 @@ private:
             uassert(InvalidBSON, "incorrect BSON length", ++cursor.ptr == _currFrame->end);
             _maybePopCodeWithScope(cursor);
         } while (_popFrame());  // Finished when there are no frames left.
+
+        // Check the top level field names.
+        _validator.checkDuplicateFieldName();
     }
 
     /**
@@ -407,5 +560,9 @@ Status validateBSON(const char* originalBuffer,
             .validate();
     else
         MONGO_UNREACHABLE;
+}
+
+Status validateBSON(const BSONObj& obj, BSONValidateMode mode) {
+    return validateBSON(obj.objdata(), obj.objsize(), mode);
 }
 }  // namespace mongo

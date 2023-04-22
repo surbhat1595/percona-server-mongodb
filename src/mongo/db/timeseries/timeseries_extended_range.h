@@ -43,11 +43,12 @@ namespace mongo::timeseries {
 bool dateOutsideStandardRange(Date_t date);
 
 /**
- * Determines whether any of the given measurements have timeField values that lie outside the
- * standard range.
+ * Determines whether any of the given buckets have control.min.timeField values that lie outside
+ * the standard range.
  */
-bool measurementsHaveDateOutsideStandardRange(const TimeseriesOptions& options,
-                                              const std::vector<BSONObj>& measurements);
+bool bucketsHaveDateOutsideStandardRange(const TimeseriesOptions& options,
+                                         std::vector<InsertStatement>::const_iterator first,
+                                         std::vector<InsertStatement>::const_iterator last);
 
 /**
  * Uses a heuristic to determine whether a given time-series collection may contain measurements
@@ -62,4 +63,5 @@ bool collectionMayRequireExtendedRangeSupport(OperationContext* opCtx,
  * is either control.min.<timeField> or control.max.<timeField>.
  */
 bool collectionHasTimeIndex(OperationContext* opCtx, const Collection& collection);
+
 }  // namespace mongo::timeseries

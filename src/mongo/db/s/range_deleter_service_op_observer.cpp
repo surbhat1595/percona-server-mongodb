@@ -28,31 +28,40 @@
  */
 
 #include "mongo/db/s/range_deleter_service_op_observer.h"
+
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/s/range_deleter_service.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 
 namespace mongo {
-
+namespace {
 // Small hack used to be able to retrieve the full removed document in the `onDelete` method
 const auto deletedDocumentDecoration = OperationContext::declareDecoration<BSONObj>();
+}  // namespace
 
 RangeDeleterServiceOpObserver::RangeDeleterServiceOpObserver() = default;
 RangeDeleterServiceOpObserver::~RangeDeleterServiceOpObserver() = default;
 
 void RangeDeleterServiceOpObserver::onInserts(OperationContext* opCtx,
-                                              const NamespaceString& nss,
-                                              const UUID& uuid,
+                                              const CollectionPtr& coll,
                                               std::vector<InsertStatement>::const_iterator begin,
                                               std::vector<InsertStatement>::const_iterator end,
                                               bool fromMigrate) {
-    if (nss == NamespaceString::kRangeDeletionNamespace) {
+    if (coll->ns() == NamespaceString::kRangeDeletionNamespace) {
         for (auto it = begin; it != end; ++it) {
             auto deletionTask = RangeDeletionTask::parse(
                 IDLParserContext("RangeDeleterServiceOpObserver"), it->doc);
             if (!deletionTask.getPending() || !*(deletionTask.getPending())) {
-                (void)RangeDeleterService::get(opCtx)->registerTask(deletionTask);
+                try {
+                    (void)RangeDeleterService::get(opCtx)->registerTask(deletionTask);
+                } catch (const DBException& ex) {
+                    dassert(ex.code() == ErrorCodes::NotYetInitialized,
+                            str::stream()
+                                << "No error different from `NotYetInitialized` is expected "
+                                   "to be propagated to the range deleter observer. Got error: "
+                                << ex.toStatus());
+                }
             }
         }
     }
@@ -76,7 +85,15 @@ void RangeDeleterServiceOpObserver::onUpdate(OperationContext* opCtx,
         if (pendingFieldIsRemoved || pendingFieldUpdatedToFalse) {
             auto deletionTask = RangeDeletionTask::parse(
                 IDLParserContext("RangeDeleterServiceOpObserver"), args.updateArgs->updatedDoc);
-            (void)RangeDeleterService::get(opCtx)->registerTask(deletionTask);
+            try {
+                (void)RangeDeleterService::get(opCtx)->registerTask(deletionTask);
+            } catch (const DBException& ex) {
+                dassert(ex.code() == ErrorCodes::NotYetInitialized,
+                        str::stream()
+                            << "No error different from `NotYetInitialized` is expected "
+                               "to be propagated to the range deleter observer. Got error: "
+                            << ex.toStatus());
+            }
         }
     }
 }
@@ -100,8 +117,15 @@ void RangeDeleterServiceOpObserver::onDelete(OperationContext* opCtx,
 
         auto deletionTask =
             RangeDeletionTask::parse(IDLParserContext("RangeDeleterServiceOpObserver"), deletedDoc);
-        RangeDeleterService::get(opCtx)->deregisterTask(deletionTask.getCollectionUuid(),
-                                                        deletionTask.getRange());
+        try {
+            RangeDeleterService::get(opCtx)->deregisterTask(deletionTask.getCollectionUuid(),
+                                                            deletionTask.getRange());
+        } catch (const DBException& ex) {
+            dassert(ex.code() == ErrorCodes::NotYetInitialized,
+                    str::stream() << "No error different from `NotYetInitialized` is expected "
+                                     "to be propagated to the range deleter observer. Got error: "
+                                  << ex.toStatus());
+        }
     }
 }
 

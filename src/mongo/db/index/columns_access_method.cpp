@@ -37,6 +37,7 @@
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/index/bulk_builder_common.h"
 #include "mongo/db/index/column_cell.h"
 #include "mongo/db/index/column_key_generator.h"
 #include "mongo/db/index/column_store_sorter.h"
@@ -70,7 +71,8 @@ ColumnStoreAccessMethod::ColumnStoreAccessMethod(IndexCatalogEntry* ice,
     }
 }
 
-class ColumnStoreAccessMethod::BulkBuilder final : public IndexAccessMethod::BulkBuilder {
+class ColumnStoreAccessMethod::BulkBuilder final
+    : public BulkBuilderCommon<ColumnStoreAccessMethod::BulkBuilder> {
 public:
     BulkBuilder(ColumnStoreAccessMethod* index, size_t maxMemoryUsageBytes, StringData dbName);
 
@@ -78,7 +80,6 @@ public:
                 size_t maxMemoryUsageBytes,
                 const IndexStateInfo& stateInfo,
                 StringData dbName);
-
 
     //
     // Generic APIs
@@ -99,14 +100,24 @@ public:
 
     int64_t getKeysInserted() const;
 
-    mongo::IndexStateInfo persistDataForShutdown() final;
+    IndexStateInfo persistDataForShutdown() final;
+    std::unique_ptr<ColumnStoreSorter::Iterator> finalizeSort();
 
-    Status commit(OperationContext* opCtx,
-                  const CollectionPtr& collection,
-                  bool dupsAllowed,
-                  int32_t yieldIterations,
-                  const KeyHandlerFn& onDuplicateKeyInserted,
-                  const RecordIdHandlerFn& onDuplicateRecord) final;
+    std::unique_ptr<ColumnStore::BulkBuilder> setUpBulkInserter(OperationContext* opCtx,
+                                                                bool dupsAllowed);
+    void debugEnsureSorted(const std::pair<ColumnStoreSorter::Key, ColumnStoreSorter::Value>& data);
+
+    bool duplicateCheck(OperationContext* opCtx,
+                        const std::pair<ColumnStoreSorter::Key, ColumnStoreSorter::Value>& data,
+                        bool dupsAllowed,
+                        const RecordIdHandlerFn& onDuplicateRecord);
+
+    void insertKey(std::unique_ptr<ColumnStore::BulkBuilder>& inserter,
+                   const std::pair<ColumnStoreSorter::Key, ColumnStoreSorter::Value>& data);
+
+    Status keyCommitted(const KeyHandlerFn& onDuplicateKeyInserted,
+                        const std::pair<ColumnStoreSorter::Key, ColumnStoreSorter::Value>& data,
+                        bool isDup);
 
 private:
     ColumnStoreAccessMethod* const _columnsAccess;
@@ -114,13 +125,16 @@ private:
     ColumnStoreSorter _sorter;
     BufBuilder _cellBuilder;
 
-    int64_t _keysInserted = 0;
+    boost::optional<std::pair<PathValue, RowId>> _previousPathAndRowId;
 };
 
 ColumnStoreAccessMethod::BulkBuilder::BulkBuilder(ColumnStoreAccessMethod* index,
                                                   size_t maxMemoryUsageBytes,
                                                   StringData dbName)
-    : _columnsAccess(index),
+    : BulkBuilderCommon(0,
+                        "Index Build: inserting keys from external sorter into columnstore index",
+                        index->_descriptor->indexName()),
+      _columnsAccess(index),
       _sorter(maxMemoryUsageBytes, dbName, bulkBuilderFileStats(), bulkBuilderTracker()) {
     countNewBuildInStats();
 }
@@ -129,11 +143,17 @@ ColumnStoreAccessMethod::BulkBuilder::BulkBuilder(ColumnStoreAccessMethod* index
                                                   size_t maxMemoryUsageBytes,
                                                   const IndexStateInfo& stateInfo,
                                                   StringData dbName)
-    : _columnsAccess(index),
-      _sorter(maxMemoryUsageBytes, dbName, bulkBuilderFileStats(), bulkBuilderTracker()) {
+    : BulkBuilderCommon(stateInfo.getNumKeys().value_or(0),
+                        "Index Build: inserting keys from external sorter into columnstore index",
+                        index->_descriptor->indexName()),
+      _columnsAccess(index),
+      _sorter(maxMemoryUsageBytes,
+              dbName,
+              bulkBuilderFileStats(),
+              stateInfo.getFileName()->toString(),
+              *stateInfo.getRanges(),
+              bulkBuilderTracker()) {
     countResumedBuildInStats();
-    // TODO SERVER-66925: Add this support.
-    tasserted(6548103, "No support for resuming interrupted columnstore index builds.");
 }
 
 Status ColumnStoreAccessMethod::BulkBuilder::insert(
@@ -145,11 +165,12 @@ Status ColumnStoreAccessMethod::BulkBuilder::insert(
     const InsertDeleteOptions& options,
     const std::function<void()>& saveCursorBeforeWrite,
     const std::function<void()>& restoreCursorAfterWrite) {
-    column_keygen::visitCellsForInsert(
+    _columnsAccess->_keyGen.visitCellsForInsert(
         obj, [&](PathView path, const column_keygen::UnencodedCellView& cell) {
             _cellBuilder.reset();
-            writeEncodedCell(cell, &_cellBuilder);
-            _sorter.add(path, rid, CellView(_cellBuilder.buf(), _cellBuilder.len()));
+            column_keygen::writeEncodedCell(cell, &_cellBuilder);
+            tassert(6762300, "RecordID cannot be a string for column store indexes", !rid.isStr());
+            _sorter.add(path, rid.getLong(), CellView(_cellBuilder.buf(), _cellBuilder.len()));
 
             ++_keysInserted;
         });
@@ -172,90 +193,70 @@ int64_t ColumnStoreAccessMethod::BulkBuilder::getKeysInserted() const {
     return _keysInserted;
 }
 
-mongo::IndexStateInfo ColumnStoreAccessMethod::BulkBuilder::persistDataForShutdown() {
-    uasserted(ErrorCodes::NotImplemented,
-              "ColumnStoreAccessMethod::BulkBuilder::persistDataForShutdown()");
+IndexStateInfo ColumnStoreAccessMethod::BulkBuilder::persistDataForShutdown() {
+    auto state = _sorter.persistDataForShutdown();
+
+    IndexStateInfo stateInfo;
+    stateInfo.setFileName(StringData(state.fileName));
+    stateInfo.setNumKeys(_keysInserted);
+    stateInfo.setRanges(std::move(state.ranges));
+
+    return stateInfo;
 }
 
-Status ColumnStoreAccessMethod::BulkBuilder::commit(OperationContext* opCtx,
-                                                    const CollectionPtr& collection,
-                                                    bool dupsAllowed,
-                                                    int32_t yieldIterations,
-                                                    const KeyHandlerFn& onDuplicateKeyInserted,
-                                                    const RecordIdHandlerFn& onDuplicateRecord) {
-    Timer timer;
+std::unique_ptr<ColumnStoreSorter::Iterator> ColumnStoreAccessMethod::BulkBuilder::finalizeSort() {
+    return std::unique_ptr<ColumnStoreSorter::Iterator>(_sorter.done());
+}
 
-    auto ns = _columnsAccess->_indexCatalogEntry->getNSSFromCatalog(opCtx);
+std::unique_ptr<ColumnStore::BulkBuilder> ColumnStoreAccessMethod::BulkBuilder::setUpBulkInserter(
+    OperationContext* opCtx, bool dupsAllowed) {
+    _ns = _columnsAccess->_indexCatalogEntry->getNSSFromCatalog(opCtx);
+    return _columnsAccess->_store->makeBulkBuilder(opCtx);
+}
 
-    static constexpr char message[] =
-        "Index Build: inserting keys from external sorter into columnstore index";
-    ProgressMeterHolder pm;
-    {
-        stdx::unique_lock<Client> lk(*opCtx->getClient());
-        pm.set(
-            CurOp::get(opCtx)->setProgress_inlock(message, _keysInserted, 3 /* secondsBetween */));
+void ColumnStoreAccessMethod::BulkBuilder::debugEnsureSorted(
+    const std::pair<ColumnStoreSorter::Key, ColumnStoreSorter::Value>& data) {
+    // In debug mode only, assert that keys are retrieved from the sorter in strictly
+    // increasing order.
+    const auto& key = data.first;
+    if (_previousPathAndRowId &&
+        !(ColumnStoreSorter::Key{_previousPathAndRowId->first, _previousPathAndRowId->second} <
+          key)) {
+        LOGV2_FATAL_NOTRACE(6548100,
+                            "Out-of-order result from sorter for column store bulk loader",
+                            "prevPathName"_attr = _previousPathAndRowId->first,
+                            "prevRecordId"_attr = _previousPathAndRowId->second,
+                            "nextPathName"_attr = key.path,
+                            "nextRecordId"_attr = key.rowId,
+                            "index"_attr = _indexName);
     }
+    // It is not safe to safe to directly store the 'key' object, because it includes a
+    // PathView, which may be invalid the next time we read it.
+    _previousPathAndRowId.emplace(key.path, key.rowId);
+}
 
-    auto builder = _columnsAccess->_store->makeBulkBuilder(opCtx);
+bool ColumnStoreAccessMethod::BulkBuilder::duplicateCheck(
+    OperationContext* opCtx,
+    const std::pair<ColumnStoreSorter::Key, ColumnStoreSorter::Value>& data,
+    bool dupsAllowed,
+    const RecordIdHandlerFn& onDuplicateRecord) {
+    // no duplicates in a columnstore index
+    return false;
+}
 
-    int64_t iterations = 0;
-    boost::optional<std::pair<PathValue, RecordId>> previousPathAndRecordId;
-    std::unique_ptr<ColumnStoreSorter::Iterator> it(_sorter.done());
-    while (it->more()) {
-        opCtx->checkForInterrupt();
+void ColumnStoreAccessMethod::BulkBuilder::insertKey(
+    std::unique_ptr<ColumnStore::BulkBuilder>& inserter,
+    const std::pair<ColumnStoreSorter::Key, ColumnStoreSorter::Value>& data) {
 
-        auto columnStoreKeyWithValue = it->next();
-        const auto& key = columnStoreKeyWithValue.first;
+    auto& [columnStoreKey, columnStoreValue] = data;
+    inserter->addCell(columnStoreKey.path, columnStoreKey.rowId, columnStoreValue.cell);
+}
 
-        // In debug mode only, assert that keys are retrieved from the sorter in strictly increasing
-        // order.
-        if (kDebugBuild) {
-            if (previousPathAndRecordId &&
-                !(ColumnStoreSorter::Key{previousPathAndRecordId->first,
-                                         previousPathAndRecordId->second} < key)) {
-                LOGV2_FATAL_NOTRACE(6548100,
-                                    "Out-of-order result from sorter for column store bulk loader",
-                                    "prevPathName"_attr = previousPathAndRecordId->first,
-                                    "prevRecordId"_attr = previousPathAndRecordId->second,
-                                    "nextPathName"_attr = key.path,
-                                    "nextRecordId"_attr = key.recordId,
-                                    "index"_attr = _columnsAccess->_descriptor->indexName());
-            }
-
-            // It is not safe to safe to directly store the 'key' object, because it includes a
-            // PathView, which may be invalid the next time we read it.
-            previousPathAndRecordId.emplace(key.path, key.recordId);
-        }
-
-        try {
-            writeConflictRetry(opCtx, "addingKey", ns.ns(), [&] {
-                WriteUnitOfWork wunit(opCtx);
-                auto& [columnStoreKey, columnStoreValue] = columnStoreKeyWithValue;
-                builder->addCell(
-                    columnStoreKey.path, columnStoreKey.recordId, columnStoreValue.cell);
-                wunit.commit();
-            });
-        } catch (DBException& e) {
-            return e.toStatus();
-        }
-
-        // Yield locks every 'yieldIterations' key insertions.
-        if (yieldIterations > 0 && (++iterations % yieldIterations == 0)) {
-            yield(opCtx, &collection, ns);
-        }
-
-        pm.hit();
-    }
-
-    pm.finished();
-
-    LOGV2(6548101,
-          "Index build: bulk sorter inserted {keysInserted} keys into index {index} on namespace "
-          "{namespace} in {duration} seconds",
-          "keysInserted"_attr = _keysInserted,
-          "index"_attr = _columnsAccess->_descriptor->indexName(),
-          logAttrs(ns),
-          "duration"_attr = Seconds(timer.seconds()));
+Status ColumnStoreAccessMethod::BulkBuilder::keyCommitted(
+    const KeyHandlerFn& onDuplicateKeyInserted,
+    const std::pair<ColumnStoreSorter::Key, ColumnStoreSorter::Value>& data,
+    bool isDup) {
+    // nothing to do for columnstore indexes
     return Status::OK();
 }
 
@@ -268,9 +269,9 @@ Status ColumnStoreAccessMethod::insert(OperationContext* opCtx,
     try {
         PooledFragmentBuilder buf(pooledBufferBuilder);
         auto cursor = _store->newWriteCursor(opCtx);
-        column_keygen::visitCellsForInsert(
+        _keyGen.visitCellsForInsert(
             bsonRecords,
-            [&](PathView path,
+            [&](StringData path,
                 const BsonRecord& rec,
                 const column_keygen::UnencodedCellView& cell) {
                 if (!rec.ts.isNull()) {
@@ -279,7 +280,8 @@ Status ColumnStoreAccessMethod::insert(OperationContext* opCtx,
 
                 buf.reset();
                 column_keygen::writeEncodedCell(cell, &buf);
-                cursor->insert(path, rec.id, CellView{buf.buf(), size_t(buf.len())});
+                invariant(!rec.id.isStr());
+                cursor->insert(path, rec.id.getLong(), CellView{buf.buf(), size_t(buf.len())});
 
                 inc(keysInsertedOut);
             });
@@ -299,8 +301,9 @@ void ColumnStoreAccessMethod::remove(OperationContext* opCtx,
                                      int64_t* keysDeletedOut,
                                      CheckRecordId checkRecordId) {
     auto cursor = _store->newWriteCursor(opCtx);
-    column_keygen::visitPathsForDelete(obj, [&](PathView path) {
-        cursor->remove(path, rid);
+    _keyGen.visitPathsForDelete(obj, [&](StringData path) {
+        tassert(6762301, "RecordID cannot be a string for column store indexes", !rid.isStr());
+        cursor->remove(path, rid.getLong());
         inc(keysDeletedOut);
     });
 }
@@ -316,14 +319,16 @@ Status ColumnStoreAccessMethod::update(OperationContext* opCtx,
                                        int64_t* keysDeletedOut) {
     PooledFragmentBuilder buf(pooledBufferBuilder);
     auto cursor = _store->newWriteCursor(opCtx);
-    column_keygen::visitDiffForUpdate(
+    _keyGen.visitDiffForUpdate(
         oldDoc,
         newDoc,
-        [&](column_keygen::DiffAction diffAction,
+        [&](column_keygen::ColumnKeyGenerator::DiffAction diffAction,
             StringData path,
             const column_keygen::UnencodedCellView* cell) {
-            if (diffAction == column_keygen::DiffAction::kDelete) {
-                cursor->remove(path, rid);
+            if (diffAction == column_keygen::ColumnKeyGenerator::DiffAction::kDelete) {
+                tassert(
+                    6762302, "RecordID cannot be a string for column store indexes", !rid.isStr());
+                cursor->remove(path, rid.getLong());
                 inc(keysDeletedOut);
                 return;
             }
@@ -334,10 +339,11 @@ Status ColumnStoreAccessMethod::update(OperationContext* opCtx,
             buf.reset();
             column_keygen::writeEncodedCell(*cell, &buf);
 
-            const auto method = diffAction == column_keygen::DiffAction::kInsert
+            const auto method = diffAction == column_keygen::ColumnKeyGenerator::DiffAction::kInsert
                 ? &ColumnStore::WriteCursor::insert
                 : &ColumnStore::WriteCursor::update;
-            (cursor.get()->*method)(path, rid, CellView{buf.buf(), size_t(buf.len())});
+            tassert(6762303, "RecordID cannot be a string for column store indexes", !rid.isStr());
+            (cursor.get()->*method)(path, rid.getLong(), CellView{buf.buf(), size_t(buf.len())});
 
             inc(keysInsertedOut);
         });
@@ -377,9 +383,8 @@ std::unique_ptr<IndexAccessMethod::BulkBuilder> ColumnStoreAccessMethod::initiat
     size_t maxMemoryUsageBytes,
     const boost::optional<IndexStateInfo>& stateInfo,
     StringData dbName) {
-    // TODO support resuming an index build.
-    invariant(!stateInfo);
-    return std::make_unique<BulkBuilder>(this, maxMemoryUsageBytes, dbName);
+    return stateInfo ? std::make_unique<BulkBuilder>(this, maxMemoryUsageBytes, *stateInfo, dbName)
+                     : std::make_unique<BulkBuilder>(this, maxMemoryUsageBytes, dbName);
 }
 
 Ident* ColumnStoreAccessMethod::getIdentPtr() const {

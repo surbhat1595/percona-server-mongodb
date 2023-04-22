@@ -69,8 +69,9 @@
 #include "mongo/db/s/sharding_write_router.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/session_catalog_mongod.h"
+#include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/timeseries/bucket_catalog.h"
+#include "mongo/db/timeseries/timeseries_extended_range.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction/transaction_participant_gen.h"
 #include "mongo/db/views/durable_view_catalog.h"
@@ -527,8 +528,7 @@ void OpObserverImpl::onAbortIndexBuild(OperationContext* opCtx,
 }
 
 void OpObserverImpl::onInserts(OperationContext* opCtx,
-                               const NamespaceString& nss,
-                               const UUID& uuid,
+                               const CollectionPtr& coll,
                                std::vector<InsertStatement>::const_iterator first,
                                std::vector<InsertStatement>::const_iterator last,
                                bool fromMigrate) {
@@ -536,7 +536,8 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
     const bool inMultiDocumentTransaction =
         txnParticipant && opCtx->writesAreReplicated() && txnParticipant.transactionIsOpen();
 
-    Date_t lastWriteDate;
+    const auto& nss = coll->ns();
+    const auto& uuid = coll->uuid();
 
     std::vector<repl::OpTime> opTimeList;
     repl::OpTime lastOpTime;
@@ -622,7 +623,7 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
         oplogEntryTemplate.setNss(nss);
         oplogEntryTemplate.setUuid(uuid);
         oplogEntryTemplate.setFromMigrateIfTrue(fromMigrate);
-        lastWriteDate = getWallClockTimeForOpLog(opCtx);
+        Date_t lastWriteDate = getWallClockTimeForOpLog(opCtx);
         oplogEntryTemplate.setWallClockTime(lastWriteDate);
 
         opTimeList = _oplogWriter->logInsertOps(
@@ -691,6 +692,25 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
                         validator->cacheExternalKey(externalKey);
                     }
                 });
+        }
+    } else if (nss.isTimeseriesBucketsCollection()) {
+        // Check if the bucket _id is sourced from a date outside the standard range. If our writes
+        // end up erroring out or getting rolled back, then this flag will stay set. This is okay
+        // though, as it only disables some query optimizations and won't result in any correctness
+        // issues if the flag is set when it doesn't need to be (as opposed to NOT being set when it
+        // DOES need to be -- that will cause correctness issues). Additionally, if the user tried
+        // to insert measurements with dates outside the standard range, chances are they will do so
+        // again, and we will have only set the flag a little early.
+        auto bucketsColl =
+            CollectionCatalog::get(opCtx)->lookupCollectionByNamespaceForRead(opCtx, nss);
+        auto timeSeriesOptions = bucketsColl->getTimeseriesOptions();
+        if (timeSeriesOptions.has_value()) {
+            if (auto currentSetting = bucketsColl->getRequiresTimeseriesExtendedRangeSupport();
+                !currentSetting &&
+                timeseries::bucketsHaveDateOutsideStandardRange(
+                    timeSeriesOptions.value(), first, last)) {
+                bucketsColl->setRequiresTimeseriesExtendedRangeSupport(opCtx);
+            }
         }
     }
 }
@@ -1009,8 +1029,7 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
         MutableOplogEntry oplogEntry;
         boost::optional<BSONObj> deletedDocForOplog = boost::none;
 
-        if (args.retryableFindAndModifyLocation == RetryableFindAndModifyLocation::kOplog ||
-            args.preImageRecordingEnabledForCollection) {
+        if (args.preImageRecordingEnabledForCollection) {
             tassert(5868702,
                     "Deleted document must be present for pre-image recording",
                     args.deletedDoc);
@@ -2381,9 +2400,10 @@ void OpObserverImpl::_onReplicationRollback(OperationContext* opCtx,
             timeseriesNamespaces.insert(ns.getTimeseriesViewNamespace());
         }
     }
-    BucketCatalog::get(opCtx).clear([&timeseriesNamespaces](const NamespaceString& bucketNs) {
-        return timeseriesNamespaces.contains(bucketNs);
-    });
+    BucketCatalog::get(opCtx).clear(
+        [timeseriesNamespaces = std::move(timeseriesNamespaces)](const NamespaceString& bucketNs) {
+            return timeseriesNamespaces.contains(bucketNs);
+        });
 }
 
 }  // namespace mongo

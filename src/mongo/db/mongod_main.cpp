@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/mongod_main.h"
 
 #include <boost/filesystem/operations.hpp>
@@ -53,15 +50,16 @@
 #include "mongo/db/auth/auth_op_observer.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/sasl_options.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_impl.h"
+#include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder_impl.h"
 #include "mongo/db/catalog/health_log.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_key_validate.h"
+#include "mongo/db/change_collection_expired_documents_remover.h"
 #include "mongo/db/change_stream_change_collection_manager.h"
 #include "mongo/db/change_stream_options_manager.h"
 #include "mongo/db/client.h"
@@ -96,11 +94,8 @@
 #include "mongo/db/keys_collection_client_direct.h"
 #include "mongo/db/keys_collection_client_sharded.h"
 #include "mongo/db/keys_collection_manager.h"
-#include "mongo/db/kill_sessions.h"
-#include "mongo/db/kill_sessions_local.h"
 #include "mongo/db/ldap/ldap_manager.h"
 #include "mongo/db/log_process_details.h"
-#include "mongo/db/logical_session_cache.h"
 #include "mongo/db/logical_session_cache_factory_mongod.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/mirror_maestro.h"
@@ -163,8 +158,12 @@
 #include "mongo/db/serverless/shard_split_donor_service.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_entry_point_mongod.h"
-#include "mongo/db/session_catalog.h"
-#include "mongo/db/session_killer.h"
+#include "mongo/db/session/kill_sessions.h"
+#include "mongo/db/session/kill_sessions_local.h"
+#include "mongo/db/session/logical_session_cache.h"
+#include "mongo/db/session/session_catalog.h"
+#include "mongo/db/session/session_killer.h"
+#include "mongo/db/set_change_stream_state_coordinator.h"
 #include "mongo/db/startup_recovery.h"
 #include "mongo/db/startup_warnings_mongod.h"
 #include "mongo/db/stats/counters.h"
@@ -299,8 +298,8 @@ void logStartup(OperationContext* opCtx) {
     }
     invariant(collection);
 
-    OpDebug* const nullOpDebug = nullptr;
-    uassertStatusOK(collection->insertDocument(opCtx, InsertStatement(o), nullOpDebug, false));
+    uassertStatusOK(collection_internal::insertDocument(
+        opCtx, collection, InsertStatement(o), nullptr /* OpDebug */, false));
     wunit.commit();
 }
 
@@ -353,6 +352,9 @@ void registerPrimaryOnlyServices(ServiceContext* serviceContext) {
             services.push_back(std::make_unique<ShardSplitDonorService>(serviceContext));
         }
     }
+
+    // TODO SERVER-65950 create 'SetChangeStreamStateCoordinatorService' only in the serverless.
+    services.push_back(std::make_unique<SetChangeStreamStateCoordinatorService>(serviceContext));
 
     for (auto& service : services) {
         registry->registerService(std::move(service));
@@ -811,13 +813,15 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         }
     }
 
-    // Start a background task to periodically remove expired pre-images from the 'system.preimages'
-    // collection if not in standalone mode.
+    // If not in standalone mode, start background tasks to:
+    //  * Periodically remove expired pre-images from the 'system.preimages'
+    //  * Periodically remove expired documents from change collections
     const auto isStandalone =
         repl::ReplicationCoordinator::get(serviceContext)->getReplicationMode() ==
         repl::ReplicationCoordinator::modeNone;
     if (!isStandalone) {
         startChangeStreamExpiredPreImagesRemover(serviceContext);
+        startChangeCollectionExpiredDocumentsRemover(serviceContext);
     }
 
     // Set up the logical session cache
@@ -1447,6 +1451,8 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
     LOGV2(6278511, "Shutting down the Change Stream Expired Pre-images Remover");
     shutdownChangeStreamExpiredPreImagesRemover(serviceContext);
 
+    shutdownChangeCollectionExpiredDocumentsRemover(serviceContext);
+
     // We should always be able to acquire the global lock at shutdown.
     // An OperationContext is not necessary to call lockGlobal() during shutdown, as it's only used
     // to check that lockGlobal() is not called after a transaction timestamp has been set.
@@ -1583,6 +1589,7 @@ int mongod_main(int argc, char* argv[]) {
     ReadWriteConcernDefaults::create(service, readWriteConcernDefaultsCacheLookupMongoD);
     ChangeStreamOptionsManager::create(service);
 
+    // TODO SERVER-65950 create 'ChangeStreamChangeCollectionManager' only in the serverless.
     ChangeStreamChangeCollectionManager::create(service);
 
 #if defined(_WIN32)

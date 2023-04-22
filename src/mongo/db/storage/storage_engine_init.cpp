@@ -201,7 +201,13 @@ StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx
         writeTransactions = writeTransactions == 0 ? DEFAULT_TICKETS_VALUE : writeTransactions;
 
         auto svcCtx = opCtx->getServiceContext();
-        if (feature_flags::gFeatureFlagExecutionControl.isEnabledAndIgnoreFCV()) {
+        if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations.isEnabledAndIgnoreFCV()) {
+            LOGV2_DEBUG(6902900, 1, "Using Priority Queue-based ticketing scheduler");
+            auto ticketHolder = std::make_unique<ReaderWriterTicketHolder>(
+                std::make_unique<PriorityTicketHolder>(readTransactions, svcCtx),
+                std::make_unique<PriorityTicketHolder>(writeTransactions, svcCtx));
+            TicketHolder::use(svcCtx, std::move(ticketHolder));
+        } else if (feature_flags::gFeatureFlagExecutionControl.isEnabledAndIgnoreFCV()) {
             LOGV2_DEBUG(5190400, 1, "Enabling new ticketing policies");
             switch (gTicketQueueingPolicy) {
                 case QueueingPolicyEnum::Semaphore: {

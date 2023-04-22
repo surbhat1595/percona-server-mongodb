@@ -34,11 +34,11 @@
 #include "mongo/config.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/error_labels.h"
-#include "mongo/db/logical_session_id_helpers.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
+#include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/transaction/transaction_api.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
@@ -214,7 +214,7 @@ private:
 namespace {
 
 LogicalSessionId getLsid(BSONObj obj) {
-    auto osi = OperationSessionInfo::parse("assertSessionIdMetadata"_sd, obj);
+    auto osi = OperationSessionInfo::parse(IDLParserContext{"assertSessionIdMetadata"}, obj);
     ASSERT(osi.getSessionId());
     return *osi.getSessionId();
 }
@@ -1935,7 +1935,7 @@ TEST_F(TxnAPITest, MaxTimeMSIsSetIfOperationContextHasDeadlineAndIgnoresDefaultR
 
 TEST_F(TxnAPITest, CannotBeUsedWithinShardedOperationsIfClientDoesNotSupportIt) {
     OperationShardingState::setShardRole(
-        opCtx(), NamespaceString("foo.bar"), ChunkVersion(), boost::none);
+        opCtx(), NamespaceString("foo.bar"), ShardVersion(), boost::none);
 
     ASSERT_THROWS_CODE(
         resetTxnWithRetries(), DBException, ErrorCodes::duplicateCodeForTest(6638800));
@@ -1943,7 +1943,7 @@ TEST_F(TxnAPITest, CannotBeUsedWithinShardedOperationsIfClientDoesNotSupportIt) 
 
 TEST_F(TxnAPITest, CanBeUsedWithinShardedOperationsIfClientSupportsIt) {
     OperationShardingState::setShardRole(
-        opCtx(), NamespaceString("foo.bar"), ChunkVersion(), boost::none);
+        opCtx(), NamespaceString("foo.bar"), ShardVersion(), boost::none);
 
     // Should not throw.
     resetTxnWithRetriesWithClient(std::make_unique<MockClusterOperationTransactionClient>());

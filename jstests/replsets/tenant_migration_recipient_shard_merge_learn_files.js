@@ -24,6 +24,16 @@ const tenantMigrationTest =
 
 const recipientPrimary = tenantMigrationTest.getRecipientPrimary();
 
+// Note: including this explicit early return here due to the fact that multiversion
+// suites will execute this test without featureFlagShardMerge enabled (despite the
+// presence of the featureFlagShardMerge tag above), which means the test will attempt
+// to run a multi-tenant migration and fail.
+if (!TenantMigrationUtil.isShardMergeEnabled(recipientPrimary.getDB("admin"))) {
+    tenantMigrationTest.stop();
+    jsTestLog("Skipping Shard Merge-specific test");
+    return;
+}
+
 jsTestLog(
     "Test that recipient state is correctly set to 'learned filenames' after creating the backup cursor");
 const tenantId = "testTenantId";
@@ -38,14 +48,9 @@ tenantMigrationTest.insertDonorDB(tenantDB, collName);
 const failpoint = "fpBeforeMarkingCloneSuccess";
 const waitInFailPoint = configureFailPoint(recipientPrimary, failpoint, {action: "hang"});
 
-// In order to prevent the copying of "testTenantId" databases via logical cloning from donor to
-// recipient, start migration on a tenant id which is non-existent on the donor.
 const migrationUuid = UUID();
-const kDummyTenantId = "nonExistentTenantId";
 const migrationOpts = {
     migrationIdString: extractUUIDFromObject(migrationUuid),
-    // TODO (SERVER-63454): Remove kDummyTenantId.
-    tenantId: kDummyTenantId,
     readPreference: {mode: 'primary'}
 };
 
@@ -55,12 +60,13 @@ assert.commandWorked(
 
 waitInFailPoint.wait();
 
-tenantMigrationTest.assertRecipientNodesInExpectedState(
-    tenantMigrationTest.getRecipientRst().nodes,
-    migrationUuid,
+tenantMigrationTest.assertRecipientNodesInExpectedState({
+    nodes: tenantMigrationTest.getRecipientRst().nodes,
+    migrationId: migrationUuid,
     tenantId,
-    TenantMigrationTest.RecipientState.kLearnedFilenames,
-    TenantMigrationTest.RecipientAccessState.kReject);
+    expectedState: TenantMigrationTest.RecipientState.kLearnedFilenames,
+    expectedAccessState: TenantMigrationTest.RecipientAccessState.kReject
+});
 
 waitInFailPoint.off();
 

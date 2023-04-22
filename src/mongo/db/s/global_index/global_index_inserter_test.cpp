@@ -31,12 +31,12 @@
 
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/logical_session_cache_noop.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/s/global_index/global_index_entry_gen.h"
 #include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
-#include "mongo/db/session_catalog_mongod.h"
+#include "mongo/db/session/logical_session_cache_noop.h"
+#include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/logv2/log.h"
@@ -207,16 +207,14 @@ TEST_F(GlobalIndexInserterTest, ClonerRetriesWhenItEncountersWCE) {
     ASSERT_TRUE(indexEntryDoc.isEmpty());
 }
 
-// TODO: SERVER-67820 Enable after bug is fixed.
-#if 0
 TEST_F(GlobalIndexInserterTest, ClonerThrowsIfIndexEntryAlreadyExists) {
-    GlobalIndexInserter cloner(ns(), indexName(), indexUUID(), getExecutor());
+    GlobalIndexInserter cloner(nss(), indexName(), indexUUID(), getExecutor());
 
     const auto indexKeyValues = BSON("x" << 34);
     const auto documentKey = BSON("_id" << 12 << "x" << 34);
 
     DBDirectClient client(operationContext());
-    write_ops::InsertCommandRequest globalIndexInsert(globalIndexNs());
+    write_ops::InsertCommandRequest globalIndexInsert(globalIndexNss());
     GlobalIndexEntry indexEntry(indexKeyValues, documentKey);
     globalIndexInsert.setDocuments({indexEntry.toBSON()});
     client.insert(globalIndexInsert);
@@ -225,7 +223,6 @@ TEST_F(GlobalIndexInserterTest, ClonerThrowsIfIndexEntryAlreadyExists) {
                        DBException,
                        ErrorCodes::DuplicateKey);
 }
-#endif
 
 }  // namespace
 }  // namespace global_index

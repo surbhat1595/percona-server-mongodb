@@ -39,7 +39,6 @@
 #include "mongo/rpc/unique_message.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/chunk_version.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
@@ -189,7 +188,7 @@ StatusWith<ShardDatabaseType> readShardDatabasesEntry(OperationContext* opCtx, S
         }
 
         BSONObj document = cursor->nextSafe();
-        return ShardDatabaseType::parse(IDLParserContext("ShardDatabaseType"), document);
+        return ShardDatabaseType(document);
     } catch (const DBException& ex) {
         return ex.toStatus(str::stream()
                            << "Failed to read the '" << dbName.toString() << "' entry locally from "

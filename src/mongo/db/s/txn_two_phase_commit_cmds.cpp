@@ -38,7 +38,7 @@
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
-#include "mongo/db/session_catalog_mongod.h"
+#include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -285,7 +285,7 @@ public:
                 // (in all cases except the one where this command aborts the local participant), so
                 // ensure waiting for the client's writeConcern of the decision.
                 repl::ReplClientInfo::forClient(opCtx->getClient())
-                    .setLastOpToSystemLastOpTimeIgnoringCtxCancelled(opCtx);
+                    .setLastOpToSystemLastOpTimeIgnoringShutdownCtxCancelled(opCtx);
             });
 
             if (coordinatorDecisionFuture) {

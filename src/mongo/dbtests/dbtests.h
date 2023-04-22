@@ -29,16 +29,11 @@
 
 #pragma once
 
-/**
- * Test suite generator headers.
- */
-
 #include "mongo/db/db_raii.h"
 #include "mongo/unittest/unittest.h"
 
 using namespace mongo;
 using namespace mongo::unittest;
-using std::shared_ptr;
 
 namespace mongo {
 

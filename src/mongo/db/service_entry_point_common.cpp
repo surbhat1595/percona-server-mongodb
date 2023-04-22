@@ -54,11 +54,8 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/error_labels.h"
 #include "mongo/db/initialize_api_parameters.h"
-#include "mongo/db/initialize_operation_session_info.h"
 #include "mongo/db/introspect.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/logical_session_id.h"
-#include "mongo/db/logical_session_id_helpers.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/not_primary_error_tracker.h"
 #include "mongo/db/ops/write_ops.h"
@@ -80,8 +77,12 @@
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/sharding_statistics.h"
 #include "mongo/db/s/transaction_coordinator_factory.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_entry_point_common.h"
-#include "mongo/db/session_catalog_mongod.h"
+#include "mongo/db/session/initialize_operation_session_info.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/session/logical_session_id_helpers.h"
+#include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/stats/api_version_metrics.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
@@ -128,6 +129,7 @@ MONGO_FAIL_POINT_DEFINE(hangBeforeSessionCheckOut);
 MONGO_FAIL_POINT_DEFINE(hangAfterSessionCheckOut);
 MONGO_FAIL_POINT_DEFINE(hangBeforeSettingTxnInterruptFlag);
 MONGO_FAIL_POINT_DEFINE(hangAfterCheckingWritabilityForMultiDocumentTransactions);
+MONGO_FAIL_POINT_DEFINE(includeAdditionalParticipantInResponse);
 
 // Tracks the number of times a legacy unacknowledged write failed due to
 // not primary error resulted in network disconnection.
@@ -524,6 +526,35 @@ void appendErrorLabelsAndTopologyVersion(OperationContext* opCtx,
     const auto topologyVersion = replCoord->getTopologyVersion();
     BSONObjBuilder topologyVersionBuilder(commandBodyFieldsBob->subobjStart("topologyVersion"));
     topologyVersion.serialize(&topologyVersionBuilder);
+}
+
+void appendAdditionalParticipants(OperationContext* opCtx,
+                                  BSONObjBuilder* commandBodyFieldsBob,
+                                  const std::string& commandName,
+                                  const std::string& ns) {
+    if (gFeatureFlagAdditionalParticipants.isEnabledAndIgnoreFCV()) {
+        std::vector<BSONElement> shardIdsFromFpData;
+        if (MONGO_unlikely(
+                includeAdditionalParticipantInResponse.shouldFail([&](const BSONObj& data) {
+                    if (data.hasField("cmdName") && data.hasField("ns") &&
+                        data.hasField("shardId")) {
+                        shardIdsFromFpData = data.getField("shardId").Array();
+                        return ((data.getStringField("cmdName") == commandName) &&
+                                (data.getStringField("ns").toString() == ns));
+                    }
+                    return false;
+                }))) {
+
+            std::vector<BSONObj> participantArray;
+            for (auto& element : shardIdsFromFpData) {
+                auto participant = BSON("shardId" << ShardId(element.valueStringData().toString()));
+                participantArray.emplace_back(participant);
+            }
+            auto additionalParticipants = BSON("additionalParticipants" << participantArray);
+
+            commandBodyFieldsBob->appendElements(additionalParticipants);
+        }
+    }
 }
 
 class RunCommandOpTimes {
@@ -1225,6 +1256,8 @@ void RunCommandImpl::_epilogue() {
                                             _isInternalClient(),
                                             _ecd->getLastOpBeforeRun(),
                                             _ecd->getLastOpAfterRun());
+        appendAdditionalParticipants(
+            opCtx, &body, command->getName(), _ecd->getInvocation()->ns().ns());
     }
 
     auto commandBodyBob = replyBuilder->getBodyBuilder();
@@ -1678,7 +1711,7 @@ void ExecCommandDatabase::_initiateCommand() {
             ? bucketNss
             : _invocation->ns();
 
-        boost::optional<ChunkVersion> shardVersion;
+        boost::optional<ShardVersion> shardVersion;
         if (auto shardVersionElem = request.body[ShardVersion::kShardVersionField]) {
             shardVersion = ShardVersion::parse(shardVersionElem);
         }
@@ -1794,17 +1827,10 @@ Future<void> ExecCommandDatabase::_commandExec() {
                 serverGlobalParams.clusterRole != ClusterRole::ConfigServer &&
                 !_refreshedCollection) {
                 if (auto sce = s.extraInfo<StaleConfigInfo>()) {
-                    if (sce->getCriticalSectionSignal()) {
-                        _execContext->behaviors->handleReshardingCriticalSectionMetrics(opCtx,
-                                                                                        *sce);
-                        // The shard is in a critical section, so we cannot retry locally
-                        OperationShardingState::waitForCriticalSectionToComplete(
-                            opCtx, *sce->getCriticalSectionSignal())
-                            .ignore();
-                        return s;
-                    }
+                    bool stableLocalVersion =
+                        !sce->getCriticalSectionSignal() && sce->getVersionWanted();
 
-                    if (sce->getVersionWanted() &&
+                    if (stableLocalVersion &&
                         ChunkVersion::isIgnoredVersion(sce->getVersionReceived())) {
                         // Shard is recovered, but the router didn't sent a shard version, therefore
                         // we just need to tell the router how much it needs to advance to
@@ -1812,16 +1838,22 @@ Future<void> ExecCommandDatabase::_commandExec() {
                         return s;
                     }
 
-                    if (sce->getVersionWanted() &&
+                    if (stableLocalVersion &&
                         sce->getVersionReceived().isOlderThan(*sce->getVersionWanted())) {
                         // Shard is recovered and the router is staler than the shard
                         return s;
                     }
 
+                    if (sce->getCriticalSectionSignal()) {
+                        _execContext->behaviors->handleReshardingCriticalSectionMetrics(opCtx,
+                                                                                        *sce);
+                    }
+
                     const auto refreshed = _execContext->behaviors->refreshCollection(opCtx, *sce);
                     if (refreshed) {
                         _refreshedCollection = true;
-                        if (!opCtx->isContinuingMultiDocumentTransaction()) {
+                        if (!opCtx->isContinuingMultiDocumentTransaction() &&
+                            !sce->getCriticalSectionSignal()) {
                             _resetLockerStateAfterShardingUpdate(opCtx);
                             return _commandExec();
                         }
@@ -1886,6 +1918,8 @@ void ExecCommandDatabase::_handleFailure(Status status) {
                                         _isInternalClient(),
                                         getLastOpBeforeRun(),
                                         getLastOpAfterRun());
+    appendAdditionalParticipants(
+        opCtx, &_extraFieldsBuilder, command->getName(), _execContext->nsString().ns());
 
     BSONObjBuilder metadataBob;
     behaviors.appendReplyMetadata(opCtx, request, &metadataBob);

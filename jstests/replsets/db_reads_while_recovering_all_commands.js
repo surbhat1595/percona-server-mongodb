@@ -225,6 +225,7 @@ const allCommands = {
     fsync: {skip: isNotAUserDataRead},
     fsyncUnlock: {skip: isNotAUserDataRead},
     getAuditConfig: {skip: isNotAUserDataRead},
+    getChangeStreamState: {skip: isNotAUserDataRead},
     getClusterParameter: {skip: isNotAUserDataRead},
     getCmdLineOpts: {skip: isNotAUserDataRead},
     getDatabaseVersion: {skip: isNotAUserDataRead},
@@ -268,6 +269,12 @@ const allCommands = {
     listCommands: {command: {listCommands: 1}},
     listDatabases: {
         command: {listDatabases: 1},
+        isAdminCommand: true,
+        expectFailure: true,
+        expectedErrorCode: ErrorCodes.NotPrimaryOrSecondary
+    },
+    listDatabasesForAllTenants: {
+        command: {listDatabasesForAllTenants: 1},
         isAdminCommand: true,
         expectFailure: true,
         expectedErrorCode: ErrorCodes.NotPrimaryOrSecondary
@@ -347,6 +354,7 @@ const allCommands = {
     setFreeMonitoring: {skip: isPrimaryOnly},
     setParameter: {skip: isNotAUserDataRead},
     setShardVersion: {skip: isNotAUserDataRead},
+    setChangeStreamState: {skip: isNotAUserDataRead},
     setClusterParameter: {skip: isNotAUserDataRead},
     setUserWriteBlockMode: {skip: isPrimaryOnly},
     shardingState: {skip: isNotAUserDataRead},

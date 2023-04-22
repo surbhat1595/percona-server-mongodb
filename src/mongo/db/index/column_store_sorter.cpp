@@ -29,9 +29,9 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kIndex
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/index/column_store_sorter.h"
+
+#include <boost/filesystem/operations.hpp>
 
 namespace mongo {
 struct ComparisonForPathAndRid {
@@ -39,7 +39,9 @@ struct ComparisonForPathAndRid {
                    const std::pair<ColumnStoreSorter::Key, ColumnStoreSorter::Value>& right) const {
         auto stringComparison = left.first.path.compare(right.first.path);
         return (stringComparison != 0) ? stringComparison
-                                       : left.first.recordId.compare(right.first.recordId);
+                                       : ((left.first.rowId == right.first.rowId)
+                                              ? 0
+                                              : (left.first.rowId > right.first.rowId ? 1 : -1));
     }
 };
 
@@ -47,20 +49,20 @@ bool ColumnStoreSorter::Key::operator<(const Key& other) const {
     if (auto cmp = path.compare(other.path); cmp != 0) {
         return cmp < 0;
     } else {
-        return recordId < other.recordId;
+        return rowId < other.rowId;
     }
 }
 
 void ColumnStoreSorter::Key::serializeForSorter(BufBuilder& buf) const {
     buf.appendStr(path);
-    recordId.serializeToken(buf);
+    buf.appendNum(rowId);
 }
 
 ColumnStoreSorter::Key ColumnStoreSorter::Key::deserializeForSorter(
     BufReader& buf, ColumnStoreSorter::Key::SorterDeserializeSettings) {
     // Note: unlike function call parameters, the order of evaluation for initializer
     // parameters is defined.
-    return {buf.readCStr(), RecordId::deserializeToken(buf)};
+    return {buf.readCStr(), buf.read<LittleEndian<int64_t>>()};
 }
 
 void ColumnStoreSorter::Value::serializeForSorter(BufBuilder& buf) const {
@@ -84,7 +86,39 @@ ColumnStoreSorter::ColumnStoreSorter(size_t maxMemoryUsageBytes,
       _maxMemoryUsageBytes(maxMemoryUsageBytes),
       _spillFile(std::make_shared<Sorter<Key, Value>::File>(pathForNewSpillFile(), _fileStats)) {}
 
-void ColumnStoreSorter::add(PathView path, const RecordId& recordId, CellView cellContents) {
+ColumnStoreSorter::ColumnStoreSorter(size_t maxMemoryUsageBytes,
+                                     StringData dbName,
+                                     SorterFileStats* stats,
+                                     StringData fileName,
+                                     const std::vector<SorterRange>& ranges,
+                                     SorterTracker* tracker)
+    : SorterBase(tracker),
+      _dbName(dbName.toString()),
+      _fileStats(stats),
+      _maxMemoryUsageBytes(maxMemoryUsageBytes),
+      _spillFile(std::make_shared<Sorter<Key, Value>::File>(
+          pathForResumeSpillFile(fileName.toString()), _fileStats)) {
+    uassert(6692500,
+            str::stream() << "Unexpected empty file: " << this->_spillFile->path().string(),
+            ranges.empty() || boost::filesystem::file_size(this->_spillFile->path()) != 0);
+
+    _spilledFileIterators.reserve(ranges.size());
+    std::transform(ranges.begin(),
+                   ranges.end(),
+                   std::back_inserter(_spilledFileIterators),
+                   [this](const SorterRange& range) {
+                       return SortedFileWriter<Key, Value>::createFileIteratorForResume(
+                           _spillFile,
+                           range.getStartOffset(),
+                           range.getEndOffset(),
+                           {},
+                           _dbName,
+                           range.getChecksum());
+                   });
+    this->_stats.setSpilledRanges(_spilledFileIterators.size());
+}
+
+void ColumnStoreSorter::add(PathView path, RowId rowId, CellView cellContents) {
     auto& cellListAtPath = _dataByPath[path];
     if (cellListAtPath.empty()) {
         // Track memory usage of this new path.
@@ -94,11 +128,10 @@ void ColumnStoreSorter::add(PathView path, const RecordId& recordId, CellView ce
     // The sorter assumes that RecordIds are added in sorted order.
     tassert(6548102,
             "Out-of-order record during columnar index build",
-            cellListAtPath.empty() || cellListAtPath.back().first < recordId);
+            cellListAtPath.empty() || cellListAtPath.back().first < rowId);
 
-    cellListAtPath.emplace_back(recordId, CellValue(cellContents.rawData(), cellContents.size()));
-    _memUsed += cellListAtPath.back().first.memUsage() + sizeof(CellValue) +
-        cellListAtPath.back().second.size();
+    cellListAtPath.emplace_back(rowId, CellValue(cellContents.rawData(), cellContents.size()));
+    _memUsed += sizeof(RowId) + sizeof(CellValue) + cellListAtPath.back().second.size();
     if (_memUsed > _maxMemoryUsageBytes) {
         spill();
     }
@@ -119,6 +152,10 @@ std::string ColumnStoreSorter::pathForNewSpillFile() {
     static const uint64_t randomSuffix = static_cast<uint64_t>(SecureRandom().nextInt64());
     return str::stream() << tempDir() << "/ext-sort-column-store-index."
                          << fileNameCounter.fetchAndAdd(1) << "-" << randomSuffix;
+}
+
+std::string ColumnStoreSorter::pathForResumeSpillFile(std::string fileName) {
+    return str::stream() << tempDir() << "/" << fileName;
 }
 
 void ColumnStoreSorter::spill() {
@@ -147,7 +184,7 @@ void ColumnStoreSorter::spill() {
 
         size_t cellVectorSize = std::accumulate(
             cellVector.begin(), cellVector.end(), 0, [& path = path](size_t sum, auto& ridAndCell) {
-                return sum + path.size() + ridAndCell.first.memUsage() + ridAndCell.second.size();
+                return sum + path.size() + sizeof(RowId) + ridAndCell.second.size();
             });
 
         // Add (path, rid, cell) records to the spill file so that the first cell in each contiguous
@@ -185,7 +222,7 @@ void ColumnStoreSorter::spill() {
         }
         for (auto& ridAndCell : cellVector) {
             const auto& cell = ridAndCell.second;
-            currentChunkSize += path.size() + ridAndCell.first.memUsage() + cell.size();
+            currentChunkSize += path.size() + sizeof(RowId) + cell.size();
             writer.addAlreadySorted(Key{path, ridAndCell.first},
                                     Value{CellView{cell.c_str(), cell.size()}});
 
@@ -213,8 +250,24 @@ ColumnStoreSorter::Iterator* ColumnStoreSorter::done() {
     }
 
     spill();
+
     return SortIteratorInterface<Key, Value>::merge(
         _spilledFileIterators, makeSortOptions(_dbName, _fileStats), ComparisonForPathAndRid());
+}
+
+Sorter<ColumnStoreSorter::Key, ColumnStoreSorter::Value>::PersistedState
+ColumnStoreSorter::persistDataForShutdown() {
+    spill();
+    this->_spillFile->keep();
+
+    std::vector<SorterRange> ranges;
+    ranges.reserve(_spilledFileIterators.size());
+    std::transform(_spilledFileIterators.begin(),
+                   _spilledFileIterators.end(),
+                   std::back_inserter(ranges),
+                   [](const auto it) { return it->getRange(); });
+
+    return {_spillFile->path().filename().string(), ranges};
 }
 
 /**

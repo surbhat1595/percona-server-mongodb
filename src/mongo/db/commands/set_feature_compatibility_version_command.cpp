@@ -76,10 +76,10 @@
 #include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/serverless/shard_split_donor_service.h"
-#include "mongo/db/session_catalog.h"
+#include "mongo/db/session/session_catalog.h"
+#include "mongo/db/session/session_txn_record_gen.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
-#include "mongo/db/transaction/session_txn_record_gen.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/idl/cluster_server_parameter_gen.h"
 #include "mongo/logv2/log.h"
@@ -103,11 +103,14 @@ namespace {
 
 using GenericFCV = multiversion::GenericFCV;
 
+MONGO_FAIL_POINT_DEFINE(failBeforeTransitioning);
 MONGO_FAIL_POINT_DEFINE(failUpgrading);
 MONGO_FAIL_POINT_DEFINE(hangWhileUpgrading);
+MONGO_FAIL_POINT_DEFINE(failBeforeSendingShardsToDowngrading);
 MONGO_FAIL_POINT_DEFINE(failDowngrading);
 MONGO_FAIL_POINT_DEFINE(hangWhileDowngrading);
 MONGO_FAIL_POINT_DEFINE(hangBeforeUpdatingFcvDoc);
+MONGO_FAIL_POINT_DEFINE(failBeforeUpdatingFcvDoc);
 
 /**
  * Ensures that only one instance of setFeatureCompatibilityVersion can run at a given time.
@@ -170,6 +173,27 @@ void abortAllReshardCollection(OperationContext* opCtx) {
             "reshardCollection was not properly cleaned up after attempted abort for these ns: "
             "[{}]. This is sign that the resharding operation was interrupted but not "
             "aborted."_format(nsListStr));
+    }
+}
+
+// TODO SERVER-68551: Remove once 7.0 becomes last-lts
+void dropDistLockCollections(OperationContext* opCtx) {
+    LOGV2(6589100, "Dropping deprecated distributed locks collections");
+    static const std::vector<NamespaceString> collectionsToDrop{
+        NamespaceString::kLockpingsNamespace, NamespaceString::kDistLocksNamepsace};
+
+    for (const auto& nss : collectionsToDrop) {
+        DropReply dropReply;
+        const auto dropStatus =
+            dropCollection(opCtx,
+                           nss,
+                           &dropReply,
+                           DropCollectionSystemCollectionMode::kAllowSystemCollectionDrops);
+        if (dropStatus != ErrorCodes::NamespaceNotFound) {
+            uassertStatusOKWithContext(
+                dropStatus,
+                str::stream() << "Failed to drop deprecated distributed locks collection " << nss);
+        }
     }
 }
 
@@ -239,7 +263,7 @@ public:
     }
 
     bool run(OperationContext* opCtx,
-             const std::string& dbname,
+             const DatabaseName&,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
         // Always wait for at least majority writeConcern to ensure all writes involved in the
@@ -293,37 +317,7 @@ public:
             return true;
         }
 
-        boost::optional<Timestamp> changeTimestamp;
-        if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
-            // The Config Server creates a new ID (i.e., timestamp) when it receives an upgrade or
-            // downgrade request. Alternatively, the request refers to a previously aborted
-            // operation for which the local FCV document must contain the ID to be reused.
-            if (!serverGlobalParams.featureCompatibility.isUpgradingOrDowngrading()) {
-                const auto now = VectorClock::get(opCtx)->getTime();
-                changeTimestamp = now.clusterTime().asTimestamp();
-            } else {
-                auto fcvObj =
-                    FeatureCompatibilityVersion::findFeatureCompatibilityVersionDocument(opCtx);
-                auto fcvDoc = FeatureCompatibilityVersionDocument::parse(
-                    IDLParserContext("featureCompatibilityVersionDocument"), fcvObj.value());
-                changeTimestamp = fcvDoc.getChangeTimestamp();
-                uassert(5722800,
-                        "The 'changeTimestamp' field is missing in the FCV document persisted by "
-                        "the Config Server. This may indicate that this document has been "
-                        "explicitly amended causing an internal data inconsistency.",
-                        changeTimestamp);
-            }
-        } else if (serverGlobalParams.clusterRole == ClusterRole::ShardServer &&
-                   request.getPhase()) {
-            // Shards receive the timestamp from the Config Server's request.
-            changeTimestamp = request.getChangeTimestamp();
-            uassert(5563500,
-                    "The 'changeTimestamp' field is missing even though the node is running as a "
-                    "shard. This may indicate that the 'setFeatureCompatibilityVersion' command "
-                    "was invoked directly against the shard or that the config server has not been "
-                    "upgraded to at least version 5.0.",
-                    changeTimestamp);
-        }
+        const boost::optional<Timestamp> changeTimestamp = getChangeTimestamp(opCtx, request);
 
         FeatureCompatibilityVersion::validateSetFeatureCompatibilityVersionRequest(
             opCtx, request, actualVersion);
@@ -340,6 +334,10 @@ public:
                 // 'kUpgrading' or 'kDowngrading' state, respectively.
                 const auto fcvChangeRegion(
                     FeatureCompatibilityVersion::enterFCVChangeRegion(opCtx));
+
+                uassert(ErrorCodes::Error(6744303),
+                        "Failing upgrade due to 'failBeforeTransitioning' failpoint set",
+                        !failBeforeTransitioning.shouldFail());
 
                 FeatureCompatibilityVersion::updateFeatureCompatibilityVersionDocument(
                     opCtx,
@@ -380,6 +378,16 @@ public:
         invariant(serverGlobalParams.featureCompatibility.isUpgradingOrDowngrading());
         invariant(!request.getPhase() || request.getPhase() == SetFCVPhaseEnum::kComplete);
 
+        // If we are downgrading to a version that doesn't support implicit translation of
+        // Timeseries collection in sharding DDL Coordinators we need to drain all ongoing
+        // coordinators
+        if (serverGlobalParams.clusterRole == ClusterRole::ShardServer &&
+            !feature_flags::gImplicitDDLTimeseriesNssTranslation.isEnabledOnVersion(
+                requestedVersion)) {
+            ShardingDDLCoordinatorService::getService(opCtx)->waitForOngoingCoordinatorsToFinish(
+                opCtx);
+        }
+
         if (requestedVersion > actualVersion) {
             _runUpgrade(opCtx, request, changeTimestamp);
         } else {
@@ -390,6 +398,10 @@ public:
             // Complete transition by updating the local FCV document to the fully upgraded or
             // downgraded requestedVersion.
             const auto fcvChangeRegion(FeatureCompatibilityVersion::enterFCVChangeRegion(opCtx));
+
+            uassert(ErrorCodes::Error(6794601),
+                    "Failing downgrade due to 'failBeforeUpdatingFcvDoc' failpoint set",
+                    !failBeforeUpdatingFcvDoc.shouldFail());
 
             hangBeforeUpdatingFcvDoc.pauseWhileSet();
 
@@ -406,6 +418,55 @@ public:
     }
 
 private:
+    // This helper function is for any actions that should be done before taking the FCV full
+    // transition lock in S mode. It is required that the code in this helper function is idempotent
+    // and could be done after _runDowngrade even if it failed at any point in the middle of
+    // _userCollectionsDowngradeCleanup or _internalServerDowngradeCleanup.
+    void _prepareForUpgrade(OperationContext* opCtx) {
+        if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+            return;
+        } else if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+            return;
+        } else {
+            _cancelServerlessMigrations(opCtx);
+        }
+    }
+
+    // This helper function is for any user collections uasserts, creations, or deletions that need
+    // to happen during the upgrade. It is required that the code in this helper function is
+    // idempotent and could be done after _runDowngrade even if it failed at any point in the middle
+    // of _userCollectionsDowngradeCleanup or _internalServerDowngradeCleanup.
+    void _userCollectionsUpgradeUassertsAndUpdates() {
+        return;
+    }
+
+    // This helper function is for updating metadata to make sure the new features in the
+    // upgraded version work for sharded and non-sharded clusters. It is required that the code
+    // in this helper function is idempotent and could be done after _runDowngrade even if it
+    // failed at any point in the middle of _userCollectionsDowngradeCleanup or
+    // _internalServerDowngradeCleanup.
+    void _completeUpgrade(OperationContext* opCtx,
+                          const multiversion::FeatureCompatibilityVersion requestedVersion) {
+        if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+            _createGlobalIndexesIndexes(opCtx, requestedVersion);
+        } else if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+            _createGlobalIndexesIndexes(opCtx, requestedVersion);
+        } else {
+            return;
+        }
+    }
+
+    void _createGlobalIndexesIndexes(
+        OperationContext* opCtx, const multiversion::FeatureCompatibilityVersion requestedVersion) {
+        // TODO SERVER-67392: Remove once FCV 7.0 becomes last-lts.
+        if (feature_flags::gGlobalIndexesShardingCatalog.isEnabledOnVersion(requestedVersion)) {
+            uassertStatusOK(sharding_util::createGlobalIndexesIndexes(opCtx));
+            if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+                uassertStatusOK(sharding_util::createShardCollectionCatalogIndexes(opCtx));
+            }
+        }
+    }
+
     void _runUpgrade(OperationContext* opCtx,
                      const SetFeatureCompatibilityVersion& request,
                      boost::optional<Timestamp> changeTimestamp) {
@@ -413,16 +474,14 @@ private:
 
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
             // Tell the shards to enter phase-1 of setFCV
-            auto requestPhase1 = request;
-            requestPhase1.setFromConfigServer(true);
-            requestPhase1.setPhase(SetFCVPhaseEnum::kStart);
-            requestPhase1.setChangeTimestamp(changeTimestamp);
-            uassertStatusOK(
-                ShardingCatalogManager::get(opCtx)->setFeatureCompatibilityVersionOnShards(
-                    opCtx, CommandHelpers::appendMajorityWriteConcern(requestPhase1.toBSON({}))));
+            _sendSetFCVRequestToShards(opCtx, request, changeTimestamp, SetFCVPhaseEnum::kStart);
         }
 
-        _cancelServerlessMigrations(opCtx);
+        // This helper function is for any actions that should be done before taking the FCV full
+        // transition lock in S mode. It is required that the code in this helper function is
+        // idempotent and could be done after _runDowngrade even if it failed at any point in the
+        // middle of _userCollectionsDowngradeCleanup or _internalServerDowngradeCleanup.
+        _prepareForUpgrade(opCtx);
 
         {
             // Take the FCV full transition lock in S mode to create a barrier for operations taking
@@ -436,33 +495,39 @@ private:
                 opCtx, opCtx->lockState(), resourceIdFeatureCompatibilityVersion, MODE_S);
         }
 
+        // This helper function is for any user collections uasserts, creations, or deletions that
+        // need to happen during the upgrade. It is required that the code in this helper function
+        // is idempotent and could be done after _runDowngrade even if it failed at any point in the
+        // middle of _userCollectionsDowngradeCleanup or _internalServerDowngradeCleanup.
+        if (serverGlobalParams.clusterRole == ClusterRole::ShardServer ||
+            serverGlobalParams.clusterRole == ClusterRole::None) {
+            _userCollectionsUpgradeUassertsAndUpdates();
+        }
+
         uassert(ErrorCodes::Error(549180),
                 "Failing upgrade due to 'failUpgrading' failpoint set",
                 !failUpgrading.shouldFail());
 
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+
             // Always abort the reshardCollection regardless of version to ensure that it will run
             // on a consistent version from start to finish. This will ensure that it will be able
             // to apply the oplog entries correctly.
             abortAllReshardCollection(opCtx);
 
+            // TODO SERVER-68551: Remove once 7.0 becomes last-lts
+            dropDistLockCollections(opCtx);
+
             // Tell the shards to enter phase-2 of setFCV (fully upgraded)
-            auto requestPhase2 = request;
-            requestPhase2.setFromConfigServer(true);
-            requestPhase2.setPhase(SetFCVPhaseEnum::kComplete);
-            requestPhase2.setChangeTimestamp(changeTimestamp);
-            uassertStatusOK(
-                ShardingCatalogManager::get(opCtx)->setFeatureCompatibilityVersionOnShards(
-                    opCtx, CommandHelpers::appendMajorityWriteConcern(requestPhase2.toBSON({}))));
+            _sendSetFCVRequestToShards(opCtx, request, changeTimestamp, SetFCVPhaseEnum::kComplete);
         }
 
-        // TODO SERVER-67392: Remove once FCV 7.0 becomes last-lts.
-        if (feature_flags::gGlobalIndexesShardingCatalog.isEnabledOnVersion(requestedVersion)) {
-            uassertStatusOK(sharding_util::createGlobalIndexesIndexes(opCtx));
-            if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
-                uassertStatusOK(sharding_util::createShardCollectionCatalogIndexes(opCtx));
-            }
-        }
+        // This helper function is for updating metadata to make sure the new features in the
+        // upgraded version work for sharded and non-sharded clusters. It is required that the code
+        // in this helper function is idempotent and could be done after _runDowngrade even if it
+        // failed at any point in the middle of _userCollectionsDowngradeCleanup or
+        // _internalServerDowngradeCleanup.
+        _completeUpgrade(opCtx, requestedVersion);
 
         hangWhileUpgrading.pauseWhileSet(opCtx);
     }
@@ -499,6 +564,10 @@ private:
     // that the user has to run setFCV again. The code added/modified in this helper function should
     // not leave the server in an inconsistent state if the actions in this function failed part way
     // through.
+    // This helper function can only fail with some transient error that can be retried (like
+    // InterruptedDueToReplStateChange) or ErrorCode::CannotDowngrade. The uasserts added to this
+    // helper function can only have the CannotDowngrade error code indicating that the user must
+    // manually clean up some user data in order to retry the FCV downgrade.
     void _uassertUserDataAndSettingsReadyForDowngrade(
         OperationContext* opCtx, const multiversion::FeatureCompatibilityVersion requestedVersion) {
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
@@ -583,6 +652,13 @@ private:
     // cleanup. The code in this helper function is required to be idempotent in case the node
     // crashes or downgrade fails in a way that the user has to run setFCV again. It also cannot
     // fail for a non-retryable reason since at this point user data has already been cleaned up.
+    // This helper function can only fail with some transient error that can be retried (like
+    // InterruptedDueToReplStateChange), ManualInterventionRequired, or fasserts. For any
+    // non-retryable error in this helper function, it should error either with an uassert with
+    // ManualInterventionRequired as the error code (indicating a server bug but that all the data
+    // is consistent on disk and for reads/writes) or with an fassert (indicating a server bug and
+    // that the data is corrupted). ManualInterventionRequired and fasserts are errors that are not
+    // expected to occur in practice, but if they did, they would turn into a Support case.
     void _internalServerDowngradeCleanup(
         OperationContext* opCtx, const multiversion::FeatureCompatibilityVersion requestedVersion) {
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
@@ -666,6 +742,9 @@ private:
         boost::optional<SharedSemiFuture<void>> chunkResizeAsyncTask;
 
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+            uassert(ErrorCodes::Error(6794600),
+                    "Failing downgrade due to 'failBeforeSendingShardsToDowngrading' failpoint set",
+                    !failBeforeSendingShardsToDowngrading.shouldFail());
             // Tell the shards to enter phase-1 of setFCV
             _sendSetFCVRequestToShards(opCtx, request, changeTimestamp, SetFCVPhaseEnum::kStart);
         }
@@ -702,14 +781,26 @@ private:
         // in a way that the user has to run setFCV again. The code added/modified in this helper
         // function should not leave the server in an inconsistent state if the actions in this
         // function failed part way through.
+        // This helper function can only fail with some transient error that can be retried (like
+        // InterruptedDueToReplStateChange) or ErrorCode::CannotDowngrade. The uasserts added to
+        // this helper function can only have the CannotDowngrade error code indicating that the
+        // user must manually clean up some user data in order to retry the FCV downgrade.
         _uassertUserDataAndSettingsReadyForDowngrade(opCtx, requestedVersion);
 
         // This helper function is for any internal server downgrade cleanup, such as dropping
-        // collections or aborting. These cleanup will happen after user collection downgrade
+        // collections or aborting. This cleanup will happen after user collection downgrade
         // cleanup. The code in this helper function is required to be idempotent in case the node
         // crashes or downgrade fails in a way that the user has to run setFCV again. It also cannot
         // fail for a non-retryable reason since at this point user data has already been cleaned
         // up.
+        // This helper function can only fail with some transient error that can be retried
+        // (like InterruptedDueToReplStateChange), ManualInterventionRequired, or fasserts. For any
+        // non-retryable error in this helper function, it should error either with an uassert with
+        // ManualInterventionRequired as the error code (indicating a server bug but that all the
+        // data is consistent on disk and for reads/writes) or with an fassert (indicating a server
+        // bug and that the data is corrupted). ManualInterventionRequired and fasserts are errors
+        // that are not expected to occur in practice, but if they did, they would turn into a
+        // Support case.
         _internalServerDowngradeCleanup(opCtx, requestedVersion);
 
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
@@ -772,6 +863,33 @@ private:
                 splitDonorService->abortAllSplits(opCtx);
             }
         }
+    }
+
+    /**
+     * For sharded cluster servers:
+     *  Generate a new changeTimestamp if change fcv is called on config server,
+     *  otherwise retrieve changeTimestamp from the Config Server request.
+     */
+    boost::optional<Timestamp> getChangeTimestamp(mongo::OperationContext* opCtx,
+                                                  mongo::SetFeatureCompatibilityVersion request) {
+        boost::optional<Timestamp> changeTimestamp;
+        if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+            // The Config Server always creates a new ID (i.e., timestamp) when it receives an
+            // upgrade or downgrade request.
+            const auto now = VectorClock::get(opCtx)->getTime();
+            changeTimestamp = now.clusterTime().asTimestamp();
+        } else if (serverGlobalParams.clusterRole == ClusterRole::ShardServer &&
+                   request.getPhase()) {
+            // Shards receive the timestamp from the Config Server's request.
+            changeTimestamp = request.getChangeTimestamp();
+            uassert(5563500,
+                    "The 'changeTimestamp' field is missing even though the node is running as a "
+                    "shard. This may indicate that the 'setFeatureCompatibilityVersion' command "
+                    "was invoked directly against the shard or that the config server has not been "
+                    "upgraded to at least version 5.0.",
+                    changeTimestamp);
+        }
+        return changeTimestamp;
     }
 
 } setFeatureCompatibilityVersionCommand;

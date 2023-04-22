@@ -40,7 +40,7 @@
 #include "mongo/db/repl/apply_ops.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/repl/timestamp_block.h"
-#include "mongo/db/session_catalog_mongod.h"
+#include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/transaction/transaction_history_iterator.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/logv2/log.h"
@@ -489,7 +489,8 @@ Status _applyPrepareTransaction(OperationContext* opCtx,
         }
 
         if (status == ErrorCodes::WriteConflict) {
-            throwWriteConflictException();
+            throwWriteConflictException(
+                "Conflict encountered when applying a prepare transaction.");
         }
         fassert(31137, status);
 

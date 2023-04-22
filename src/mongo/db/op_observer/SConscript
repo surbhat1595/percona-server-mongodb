@@ -52,9 +52,9 @@ env.Library(
 )
 
 env.Library(
-    target="op_observer_impl",
+    target='op_observer_impl',
     source=[
-        "op_observer_impl.cpp",
+        'op_observer_impl.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/change_stream_pre_images_collection_manager',
@@ -79,8 +79,9 @@ env.Library(
         '$BUILD_DIR/mongo/db/repl/tenant_migration_access_blocker',
         '$BUILD_DIR/mongo/db/s/sharding_api_d',
         '$BUILD_DIR/mongo/db/server_feature_flags',
-        '$BUILD_DIR/mongo/db/session_catalog',
+        '$BUILD_DIR/mongo/db/session/session_catalog',
         '$BUILD_DIR/mongo/db/timeseries/bucket_catalog',
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_extended_range',
         '$BUILD_DIR/mongo/db/transaction/transaction',
         '$BUILD_DIR/mongo/db/views/views_mongod',
         '$BUILD_DIR/mongo/s/coreshard',
@@ -98,7 +99,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/commands/mongod_fcv',
-        '$BUILD_DIR/mongo/db/kill_sessions_local',
+        '$BUILD_DIR/mongo/db/session/kill_sessions_local',
         '$BUILD_DIR/mongo/executor/egress_tag_closer_manager',
         'op_observer',
         'op_observer_util',

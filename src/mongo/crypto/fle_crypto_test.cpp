@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#include "mongo/db/operation_context.h"
 #include "mongo/platform/basic.h"
 
 #include "mongo/crypto/fle_crypto.h"
@@ -51,9 +50,12 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/config.h"
+#include "mongo/crypto/fle_field_schema_gen.h"
 #include "mongo/crypto/symmetric_crypto.h"
 #include "mongo/db/matcher/schema/encrypt_schema_gen.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/idl/idl_parser.h"
+#include "mongo/logv2/log.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/rpc/object_check.h"
 #include "mongo/unittest/bson_test_util.h"
@@ -62,6 +64,7 @@
 #include "mongo/util/hex.h"
 #include "mongo/util/time_support.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo {
 
@@ -696,7 +699,7 @@ enum class Operation { kFind, kInsert };
 std::vector<char> generatePlaceholder(
     BSONElement value,
     Operation operation,
-    mongo::Fle2AlgorithmInt algorithm = mongo::Fle2AlgorithmInt::kEquality,
+    mongo::Fle2AlgorithmInt algorithm = Fle2AlgorithmInt::kEquality,
     boost::optional<UUID> key = boost::none,
     uint64_t contention = 0) {
     FLE2EncryptionPlaceholder ep;
@@ -710,8 +713,36 @@ std::vector<char> generatePlaceholder(
     ep.setAlgorithm(algorithm);
     ep.setUserKeyId(userKeyId);
     ep.setIndexKeyId(key.value_or(indexKeyId));
-    ep.setValue(value);
+
+    FLE2RangeInsertSpec insertSpec;
+    // Set a default lower and upper bound
+    auto lowerDoc = BSON("lb" << 0);
+    insertSpec.setLowerBound(lowerDoc.firstElement());
+    auto upperDoc = BSON("ub" << 1234567890123456789LL);
+
+    insertSpec.setUpperBound(upperDoc.firstElement());
+    insertSpec.setValue(value);
+    auto specDoc = BSON("s" << insertSpec.toBSON());
+
+    FLE2RangeSpec findSpec;
+    findSpec.setMin(lowerDoc.firstElement());
+    findSpec.setMinIncluded(true);
+    findSpec.setMax(upperDoc.firstElement());
+    findSpec.setMaxIncluded(true);
+    auto findDoc = BSON("s" << findSpec.toBSON());
+
+    if (algorithm == Fle2AlgorithmInt::kRange) {
+        if (operation == Operation::kFind) {
+            ep.setValue(IDLAnyType(findDoc.firstElement()));
+        } else if (operation == Operation::kInsert) {
+            ep.setValue(IDLAnyType(specDoc.firstElement()));
+        }
+        ep.setSparsity(0);
+    } else {
+        ep.setValue(value);
+    }
     ep.setMaxContentionCounter(contention);
+
 
     BSONObj obj = ep.toBSON();
 
@@ -735,7 +766,13 @@ BSONObj encryptDocument(BSONObj obj,
     auto serverPayload = EDCServerCollection::getEncryptedFieldInfo(result);
 
     for (auto& payload : serverPayload) {
-        payload.count = 1;
+        if (payload.payload.getEdgeTokenSet().has_value()) {
+            for (size_t i = 0; i < payload.payload.getEdgeTokenSet()->size(); i++) {
+                payload.counts.push_back(1);
+            }
+        }
+
+        payload.counts.push_back(1);
     }
 
     // Finalize document for insert
@@ -744,16 +781,20 @@ BSONObj encryptDocument(BSONObj obj,
     return finalDoc;
 }
 
-void assertPayload(BSONElement elem, Operation operation) {
+void assertPayload(BSONElement elem, EncryptedBinDataType type) {
     int len;
     const char* data(elem.binData(len));
     ConstDataRange cdr(data, len);
 
     const auto& [encryptedType, subCdr] = fromEncryptedConstDataRange(cdr);
+    ASSERT_TRUE(encryptedType == type);
+}
+
+void assertPayload(BSONElement elem, Operation operation) {
     if (operation == Operation::kFind) {
-        ASSERT_TRUE(encryptedType == EncryptedBinDataType::kFLE2FindEqualityPayload);
+        assertPayload(elem, EncryptedBinDataType::kFLE2FindEqualityPayload);
     } else if (operation == Operation::kInsert) {
-        ASSERT_TRUE(encryptedType == EncryptedBinDataType::kFLE2EqualityIndexedValue);
+        assertPayload(elem, EncryptedBinDataType::kFLE2EqualityIndexedValue);
     } else {
         FAIL("Not implemented.");
     }
@@ -780,12 +821,6 @@ void roundTripTest(BSONObj doc, BSONType type, Operation opType, Fle2AlgorithmIn
     ASSERT_EQ(finalDoc["encrypted"].type(), BinData);
     ASSERT_TRUE(finalDoc["encrypted"].isBinData(BinDataType::Encrypt));
 
-    // TODO : when query enables server side work for Find, remove this
-    // if statement.
-    if (opType == Operation::kFind && algorithm == Fle2AlgorithmInt::kEquality) {
-        assertPayload(finalDoc["encrypted"], opType);
-        return;
-    }
 
     // Decrypt document
     auto decryptedDoc = FLEClientCrypto::decryptDocument(finalDoc, &keyVault);
@@ -793,7 +828,14 @@ void roundTripTest(BSONObj doc, BSONType type, Operation opType, Fle2AlgorithmIn
     // Remove this so the round-trip is clean
     decryptedDoc = decryptedDoc.removeField(kSafeContent);
 
-    ASSERT_BSONOBJ_EQ(inputDoc, decryptedDoc);
+    if (opType == Operation::kFind) {
+        assertPayload(finalDoc["encrypted"],
+                      algorithm == Fle2AlgorithmInt::kEquality
+                          ? EncryptedBinDataType::kFLE2FindEqualityPayload
+                          : EncryptedBinDataType::kFLE2FindRangePayload);
+    } else {
+        ASSERT_BSONOBJ_EQ(inputDoc, decryptedDoc);
+    }
 }
 
 void roundTripTest(BSONObj doc, BSONType type, Operation opType) {
@@ -908,12 +950,15 @@ TEST(FLE_EDC, Allowed_Types) {
     for (const auto& opType : opTypes) {
         for (const auto& [obj, objType] : universallyAllowedObjects) {
             roundTripTest(obj, objType, opType, Fle2AlgorithmInt::kEquality);
-            roundTripTest(obj, objType, opType, Fle2AlgorithmInt::kUnindexed);
-        }
-        for (const auto& [obj, objType] : unindexedAllowedObjects) {
-            roundTripTest(obj, objType, opType, Fle2AlgorithmInt::kUnindexed);
+            if (opType == Operation::kInsert) {
+                roundTripTest(obj, objType, opType, Fle2AlgorithmInt::kUnindexed);
+            }
         }
     };
+
+    for (const auto& [obj, objType] : unindexedAllowedObjects) {
+        roundTripTest(obj, objType, Operation::kInsert, Fle2AlgorithmInt::kUnindexed);
+    }
 
     for (const auto& [obj1, _] : universallyAllowedObjects) {
         for (const auto& [obj2, _] : universallyAllowedObjects) {
@@ -923,6 +968,25 @@ TEST(FLE_EDC, Allowed_Types) {
             roundTripMultiencrypted(obj1, obj2, Operation::kFind, Operation::kFind);
         }
     }
+}
+
+TEST(FLE_EDC, Range_Allowed_Types) {
+
+    const std::vector<std::pair<BSONObj, BSONType>> rangeAllowedObjects{
+        {BSON("sample" << 123.456), NumberDouble},
+        {BSON("sample" << Decimal128()), NumberDecimal},
+        {BSON("sample" << 123456), NumberInt},
+        {BSON("sample" << 12345678901234567LL), NumberLong},
+        {BSON("sample" << Date_t::fromMillisSinceEpoch(12345)), Date},
+    };
+
+    std::vector<Operation> opTypes{Operation::kInsert, Operation::kFind};
+
+    for (const auto& opType : opTypes) {
+        for (const auto& [obj, objType] : rangeAllowedObjects) {
+            roundTripTest(obj, objType, opType, Fle2AlgorithmInt::kRange);
+        }
+    };
 }
 
 void illegalBSONType(BSONObj doc, BSONType type, Fle2AlgorithmInt algorithm, int expectCode) {
@@ -971,6 +1035,46 @@ TEST(FLE_EDC, Disallowed_Types) {
     illegalBSONType(BSON("sample" << MAXKEY), MaxKey, Fle2AlgorithmInt::kUnindexed);
 }
 
+void illegalRangeBSONType(BSONObj doc, BSONType type) {
+    illegalBSONType(doc, type, Fle2AlgorithmInt::kRange, ErrorCodes::TypeMismatch);
+}
+
+TEST(FLE_EDC, Range_Disallowed_Types) {
+
+    const std::vector<std::pair<BSONObj, BSONType>> disallowedObjects{
+        {BSON("sample"
+              << "value123"),
+         String},
+        {BSON("sample" << BSONBinData(
+                  testValue.data(), testValue.size(), BinDataType::BinDataGeneral)),
+         BinData},
+        {BSON("sample" << OID()), jstOID},
+        {BSON("sample" << false), Bool},
+        {BSON("sample" << true), Bool},
+        {BSON("sample" << BSONRegEx("value1", "value2")), RegEx},
+        {BSON("sample" << Timestamp()), bsonTimestamp},
+        {BSON("sample" << BSONCode("value")), Code},
+        {BSON("sample" << BSON("nested"
+                               << "value")),
+         Object},
+        {BSON("sample" << BSON_ARRAY(1 << 23)), Array},
+        {BSON("sample" << BSONDBRef("value1", OID())), DBRef},
+        {BSON("sample" << BSONSymbol("value")), Symbol},
+        {BSON("sample" << BSONCodeWScope("value",
+                                         BSON("code"
+                                              << "something"))),
+         CodeWScope},
+        {BSON("sample" << MINKEY), MinKey},
+        {BSON("sample" << MAXKEY), MaxKey},
+    };
+
+    for (const auto& typePair : disallowedObjects) {
+        illegalRangeBSONType(typePair.first, typePair.second);
+    }
+
+    illegalBSONType(BSON("sample" << BSONNULL), jstNULL, Fle2AlgorithmInt::kRange, 40414);
+    illegalBSONType(BSON("sample" << BSONUndefined), Undefined, Fle2AlgorithmInt::kRange, 40414);
+}
 
 BSONObj transformBSON(
     const BSONObj& object,
@@ -1097,7 +1201,6 @@ TEST(FLE_EDC, Disallowed_Types_FLE2InsertUpdatePayload) {
     disallowedEqualityPayloadType(static_cast<BSONType>(fakeBSONType));
 }
 
-
 TEST(FLE_EDC, ServerSide_Payloads) {
     TestKeyVault keyVault;
 
@@ -1161,6 +1264,94 @@ TEST(FLE_EDC, ServerSide_Payloads) {
     ASSERT_EQ(sp.esc, serverPayload.esc);
     ASSERT_EQ(sp.ecc, serverPayload.ecc);
     ASSERT_EQ(sp.count, serverPayload.count);
+    ASSERT(sp.clientEncryptedValue == serverPayload.clientEncryptedValue);
+    ASSERT_EQ(serverPayload.clientEncryptedValue.size(), value.length());
+    ASSERT(std::equal(serverPayload.clientEncryptedValue.begin(),
+                      serverPayload.clientEncryptedValue.end(),
+                      value.data<uint8_t>()));
+}
+
+TEST(FLE_EDC, ServerSide_Range_Payloads) {
+    TestKeyVault keyVault;
+
+    auto doc = BSON("sample" << 3);
+    auto element = doc.firstElement();
+
+    auto value = ConstDataRange(element.value(), element.value() + element.valuesize());
+
+    auto collectionToken = FLELevel1TokenGenerator::generateCollectionsLevel1Token(getIndexKey());
+    auto serverEncryptToken =
+        FLELevel1TokenGenerator::generateServerDataEncryptionLevel1Token(getIndexKey());
+    auto edcToken = FLECollectionTokenGenerator::generateEDCToken(collectionToken);
+    auto escToken = FLECollectionTokenGenerator::generateESCToken(collectionToken);
+    auto eccToken = FLECollectionTokenGenerator::generateECCToken(collectionToken);
+    auto ecocToken = FLECollectionTokenGenerator::generateECOCToken(collectionToken);
+
+    FLECounter counter = 0;
+
+
+    EDCDerivedFromDataToken edcDatakey =
+        FLEDerivedFromDataTokenGenerator::generateEDCDerivedFromDataToken(edcToken, value);
+    ESCDerivedFromDataToken escDatakey =
+        FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken, value);
+    ECCDerivedFromDataToken eccDatakey =
+        FLEDerivedFromDataTokenGenerator::generateECCDerivedFromDataToken(eccToken, value);
+
+
+    ESCDerivedFromDataTokenAndContentionFactorToken escDataCounterkey =
+        FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
+            generateESCDerivedFromDataTokenAndContentionFactorToken(escDatakey, counter);
+    ECCDerivedFromDataTokenAndContentionFactorToken eccDataCounterkey =
+        FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
+            generateECCDerivedFromDataTokenAndContentionFactorToken(eccDatakey, counter);
+
+    FLE2InsertUpdatePayload iupayload;
+
+
+    iupayload.setEdcDerivedToken(edcDatakey.toCDR());
+    iupayload.setEscDerivedToken(escDatakey.toCDR());
+    iupayload.setEccDerivedToken(eccDatakey.toCDR());
+    iupayload.setServerEncryptionToken(serverEncryptToken.toCDR());
+
+    auto swEncryptedTokens =
+        EncryptedStateCollectionTokens(escDataCounterkey, eccDataCounterkey).serialize(ecocToken);
+    uassertStatusOK(swEncryptedTokens);
+    iupayload.setEncryptedTokens(swEncryptedTokens.getValue());
+    iupayload.setValue(value);
+    iupayload.setType(element.type());
+
+    std::vector<EdgeTokenSet> tokens;
+    EdgeTokenSet ets;
+    ets.setEdcDerivedToken(edcDatakey.toCDR());
+    ets.setEscDerivedToken(escDatakey.toCDR());
+    ets.setEccDerivedToken(eccDatakey.toCDR());
+    ets.setEncryptedTokens(swEncryptedTokens.getValue());
+
+    tokens.push_back(ets);
+    tokens.push_back(ets);
+
+    iupayload.setEdgeTokenSet(tokens);
+
+    FLE2IndexedRangeEncryptedValue serverPayload(iupayload, {123456, 123456, 123456});
+
+    auto swBuf = serverPayload.serialize(serverEncryptToken);
+    ASSERT_OK(swBuf.getStatus());
+
+    auto swServerPayload =
+        FLE2IndexedRangeEncryptedValue::decryptAndParse(serverEncryptToken, swBuf.getValue());
+
+    ASSERT_OK(swServerPayload.getStatus());
+    auto sp = swServerPayload.getValue();
+    ASSERT_EQ(sp.tokens.size(), 3);
+    for (size_t i = 0; i < sp.tokens.size(); i++) {
+        auto ets = sp.tokens[i];
+        auto rhs = serverPayload.tokens[i];
+        ASSERT_EQ(ets.edc, rhs.edc);
+        ASSERT_EQ(ets.esc, rhs.esc);
+        ASSERT_EQ(ets.ecc, rhs.ecc);
+        ASSERT_EQ(sp.counters[i], serverPayload.counters[i]);
+    }
+
     ASSERT(sp.clientEncryptedValue == serverPayload.clientEncryptedValue);
     ASSERT_EQ(serverPayload.clientEncryptedValue.size(), value.length());
     ASSERT(std::equal(serverPayload.clientEncryptedValue.begin(),
@@ -1715,7 +1906,13 @@ BSONObj encryptUpdateDocument(BSONObj obj, FLEKeyVault* keyVault) {
     auto serverPayload = EDCServerCollection::getEncryptedFieldInfo(result);
 
     for (auto& payload : serverPayload) {
-        payload.count = 1;
+        if (payload.payload.getEdgeTokenSet().has_value()) {
+            for (size_t i = 0; i < payload.payload.getEdgeTokenSet()->size(); i++) {
+                payload.counts.push_back(1);
+            }
+        }
+
+        payload.counts.push_back(1);
     }
 
     return EDCServerCollection::finalizeForUpdate(result, serverPayload);
@@ -1971,5 +2168,299 @@ TEST(EDCServerCollectionTest, GenerateEDCTokens) {
     ASSERT_EQ(EDCServerCollection::generateEDCTokens(edcDatakey, 3).size(), 4);
 }
 
+TEST(RangeTest, Int32_NoBounds) {
+#define ASSERT_EI(x, y) ASSERT_EQ(getTypeInfo32((x), boost::none, boost::none).value, (y));
+
+    ASSERT_EI(2147483647, 4294967295);
+
+    ASSERT_EI(1, 2147483649);
+    ASSERT_EI(0, 2147483648);
+    ASSERT_EI(-1, 2147483647);
+    ASSERT_EI(-2, 2147483646);
+    ASSERT_EI(-2147483647, 1);
+
+    // min int32_t, no equivalent in positive part of integer
+    ASSERT_EI(-2147483648, 0);
+
+#undef ASSERT_EI
+}
+
+bool operator==(const OSTType_Int32& lhs, const OSTType_Int32& rhs) {
+    return std::tie(lhs.value, lhs.min, lhs.max) == std::tie(rhs.value, rhs.min, rhs.max);
+}
+
+std::basic_ostream<char>& operator<<(std::basic_ostream<char>& os, const OSTType_Int32& lhs) {
+    return os << "(" << lhs.value << ", " << lhs.min << ", " << lhs.max << ")";
+}
+
+TEST(RangeTest, Int32_Bounds) {
+#define ASSERT_EIB(x, y, z, e)                   \
+    {                                            \
+        auto _ti = getTypeInfo32((x), (y), (z)); \
+        ASSERT_EQ(_ti, (e));                     \
+    }
+
+    ASSERT_EIB(1, 1, 3, OSTType_Int32(0, 0, 2));
+    ASSERT_EIB(0, 0, 1, OSTType_Int32(0, 0, 1));
+    ASSERT_EIB(-1, -1, 0, OSTType_Int32(0, 0, 1));
+    ASSERT_EIB(-2, -2, 0, OSTType_Int32(0, 0, 2));
+
+    // min int32_t, no equivalent in positive part of integer
+    ASSERT_EIB(-2147483647, -2147483648, 1, OSTType_Int32(1, 0, 2147483649));
+    ASSERT_EIB(-2147483648, -2147483648, 0, OSTType_Int32(0, 0, 2147483648));
+    ASSERT_EIB(0, -2147483648, 1, OSTType_Int32(2147483648, 0, 2147483649));
+    ASSERT_EIB(1, -2147483648, 2, OSTType_Int32(2147483649, 0, 2147483650));
+
+    ASSERT_EIB(2147483647, -2147483647, 2147483647, OSTType_Int32(4294967294, 0, 4294967294));
+    ASSERT_EIB(2147483647, -2147483648, 2147483647, OSTType_Int32(4294967295, 0, 4294967295));
+
+    ASSERT_EIB(15, 10, 26, OSTType_Int32(5, 0, 16));
+
+    ASSERT_EIB(15, -10, 55, OSTType_Int32(25, 0, 65));
+
+#undef ASSERT_EIB
+}
+
+TEST(RangeTest, Int32_Errors) {
+    ASSERT_THROWS_CODE(getTypeInfo32(1, boost::none, 2), AssertionException, 6775001);
+    ASSERT_THROWS_CODE(getTypeInfo32(1, 0, boost::none), AssertionException, 6775001);
+    ASSERT_THROWS_CODE(getTypeInfo32(1, 2, 1), AssertionException, 6775002);
+
+    ASSERT_THROWS_CODE(getTypeInfo32(1, 2, 3), AssertionException, 6775003);
+    ASSERT_THROWS_CODE(getTypeInfo32(4, 2, 3), AssertionException, 6775003);
+
+    ASSERT_THROWS_CODE(getTypeInfo32(4, -2147483648, -2147483648), AssertionException, 6775002);
+}
+
+
+TEST(RangeTest, Int64_NoBounds) {
+#define ASSERT_EI(x, y) ASSERT_EQ(getTypeInfo64((x), boost::none, boost::none).value, (y));
+
+    ASSERT_EI(9223372036854775807LL, 18446744073709551615ULL);
+
+    ASSERT_EI(1, 9223372036854775809ULL);
+    ASSERT_EI(0, 9223372036854775808ULL);
+    ASSERT_EI(-1, 9223372036854775807ULL);
+    ASSERT_EI(-2, 9223372036854775806ULL);
+    ASSERT_EI(-9223372036854775807LL, 1);
+
+    // min Int64_t, no equivalent in positive part of integer
+    ASSERT_EI(LLONG_MIN, 0);
+
+#undef ASSERT_EI
+}
+
+bool operator==(const OSTType_Int64& lhs, const OSTType_Int64& rhs) {
+    return std::tie(lhs.value, lhs.min, lhs.max) == std::tie(rhs.value, rhs.min, rhs.max);
+}
+
+std::basic_ostream<char>& operator<<(std::basic_ostream<char>& os, const OSTType_Int64& lhs) {
+    return os << "(" << lhs.value << ", " << lhs.min << ", " << lhs.max << ")";
+}
+
+
+TEST(RangeTest, Int64_Bounds) {
+#define ASSERT_EIB(x, y, z, e)                   \
+    {                                            \
+        auto _ti = getTypeInfo64((x), (y), (z)); \
+        ASSERT_EQ(_ti, (e));                     \
+    }
+
+    ASSERT_EIB(1, 1, 2, OSTType_Int64(0, 0, 1));
+    ASSERT_EIB(0, 0, 1, OSTType_Int64(0, 0, 1))
+    ASSERT_EIB(-1, -1, 0, OSTType_Int64(0, 0, 1))
+    ASSERT_EIB(-2, -2, 0, OSTType_Int64(0, 0, 2))
+
+    // min Int64_t, no equivalent in positive part of integer
+    ASSERT_EIB(-9223372036854775807LL, LLONG_MIN, 1, OSTType_Int64(1, 0, 9223372036854775809ULL));
+    ASSERT_EIB(LLONG_MIN, LLONG_MIN, 0, OSTType_Int64(0, 0, 9223372036854775808ULL));
+    ASSERT_EIB(0, LLONG_MIN, 37, OSTType_Int64(9223372036854775808ULL, 0, 9223372036854775845ULL));
+    ASSERT_EIB(1, LLONG_MIN, 42, OSTType_Int64(9223372036854775809ULL, 0, 9223372036854775850ULL));
+
+    ASSERT_EIB(9223372036854775807,
+               -9223372036854775807,
+               9223372036854775807,
+               OSTType_Int64(18446744073709551614ULL, 0, 18446744073709551614ULL));
+    ASSERT_EIB(9223372036854775807,
+               LLONG_MIN,
+               9223372036854775807,
+               OSTType_Int64(18446744073709551615ULL, 0, 18446744073709551615ULL));
+
+    ASSERT_EIB(15, 10, 26, OSTType_Int64(5, 0, 16));
+
+    ASSERT_EIB(15, -10, 55, OSTType_Int64(25, 0, 65));
+
+#undef ASSERT_EIB
+}
+
+TEST(RangeTest, Int64_Errors) {
+    ASSERT_THROWS_CODE(getTypeInfo64(1, boost::none, 2), AssertionException, 6775004);
+    ASSERT_THROWS_CODE(getTypeInfo64(1, 0, boost::none), AssertionException, 6775004);
+    ASSERT_THROWS_CODE(getTypeInfo64(1, 2, 1), AssertionException, 6775005);
+
+    ASSERT_THROWS_CODE(getTypeInfo64(1, 2, 3), AssertionException, 6775006);
+    ASSERT_THROWS_CODE(getTypeInfo64(4, 2, 3), AssertionException, 6775006);
+
+    ASSERT_THROWS_CODE(getTypeInfo64(4, LLONG_MIN, LLONG_MIN), AssertionException, 6775005);
+}
+
+
+TEST(RangeTest, Double_Bounds) {
+#define ASSERT_EIB(x, z) ASSERT_EQ(getTypeInfoDouble((x), -1E100, 1E100).value, (z));
+
+    // Larger numbers map to larger uint64
+    ASSERT_EIB(-1, 4607182418800017408ULL);
+    ASSERT_EIB(1, 13830554455654793216ULL);
+    ASSERT_EIB(22, 13850257704024539136ULL);
+    ASSERT_EIB(333, 13867937850999177216ULL);
+
+    // Larger exponents map to larger uint64
+    ASSERT_EIB(33E56, 14690973652625833878ULL);
+    ASSERT_EIB(22E57, 14703137697061005818ULL);
+    ASSERT_EIB(11E58, 14713688953586463292ULL);
+
+    // Smaller exponents map to smaller uint64
+    ASSERT_EIB(1E-6, 13740701229962882445ULL);
+    ASSERT_EIB(1E-7, 13725520251343122248ULL);
+    ASSERT_EIB(1E-8, 13710498295186492474ULL);
+    ASSERT_EIB(1E-56, 12992711961033031890ULL);
+    ASSERT_EIB(1E-57, 12977434315086142017ULL);
+    ASSERT_EIB(1E-58, 12962510038552207822ULL);
+
+    // Smaller negative exponents map to smaller uint64
+    ASSERT_EIB(-1E-6, 4517329193108106637);
+    ASSERT_EIB(-1E-7, 4502148214488346440);
+    ASSERT_EIB(-1E-8, 4487126258331716666);
+    ASSERT_EIB(-1E-56, 3769339924178256082);
+    ASSERT_EIB(-1E-57, 3754062278231366209);
+    ASSERT_EIB(-1E-58, 3739138001697432014);
+
+    // Larger exponents map to larger uint64
+    ASSERT_EIB(-33E56, 5467601615771058070);
+    ASSERT_EIB(-22E57, 5479765660206230010);
+    ASSERT_EIB(-11E58, 5490316916731687484);
+
+#undef ASSERT_EIB
+}
+
+
+TEST(RangeTest, Double_Errors) {
+    ASSERT_THROWS_CODE(getTypeInfoDouble(1, boost::none, 2), AssertionException, 6775007);
+    ASSERT_THROWS_CODE(getTypeInfoDouble(1, 0, boost::none), AssertionException, 6775007);
+    ASSERT_THROWS_CODE(getTypeInfoDouble(1, 2, 1), AssertionException, 6775009);
+
+
+    ASSERT_THROWS_CODE(getTypeInfoDouble(1, 2, 3), AssertionException, 6775010);
+    ASSERT_THROWS_CODE(getTypeInfoDouble(4, 2, 3), AssertionException, 6775010);
+
+
+    ASSERT_THROWS_CODE(getTypeInfoDouble(std::numeric_limits<double>::infinity(), 1, 2),
+                       AssertionException,
+                       6775008);
+    ASSERT_THROWS_CODE(getTypeInfoDouble(std::numeric_limits<double>::quiet_NaN(), 1, 2),
+                       AssertionException,
+                       6775008);
+    ASSERT_THROWS_CODE(getTypeInfoDouble(std::numeric_limits<double>::signaling_NaN(), 1, 2),
+                       AssertionException,
+                       6775008);
+}
+
+// Edge calculator
+
+template <typename T>
+struct EdgeCalcTestVector {
+    std::function<std::unique_ptr<Edges>(T, boost::optional<T>, boost::optional<T>, int)> getEdgesT;
+    T value;
+    boost::optional<T> min, max;
+    int sparsity;
+    stdx::unordered_set<std::string> expectedEdges;
+
+    bool validate() const {
+        auto edgeCalc = getEdgesT(value, min, max, sparsity);
+        auto edges = edgeCalc->get();
+        for (const std::string& ee : expectedEdges) {
+            if (!std::any_of(edges.begin(), edges.end(), [ee](auto edge) { return edge == ee; })) {
+                LOGV2_ERROR(6775120,
+                            "Expected edge not found",
+                            "expected-edge"_attr = ee,
+                            "value"_attr = value,
+                            "min"_attr = min,
+                            "max"_attr = max,
+                            "sparsity"_attr = sparsity,
+                            "edges"_attr = edges,
+                            "expected-edges"_attr = expectedEdges);
+                return false;
+            }
+        }
+
+        for (const StringData& edgeSd : edges) {
+            std::string edge = edgeSd.toString();
+            if (std::all_of(expectedEdges.begin(), expectedEdges.end(), [edge](auto ee) {
+                    return edge != ee;
+                })) {
+                LOGV2_ERROR(6775121,
+                            "An edge was found that is not expected",
+                            "edge"_attr = edge,
+                            "value"_attr = value,
+                            "min"_attr = min,
+                            "max"_attr = max,
+                            "sparsity"_attr = sparsity,
+                            "edges"_attr = edges,
+                            "expected-edges"_attr = expectedEdges);
+                return false;
+            }
+        }
+
+        if (edges.size() != expectedEdges.size()) {
+            LOGV2_ERROR(6775122,
+                        "Unexpected number of elements in edges. Check for duplicates",
+                        "value"_attr = value,
+                        "min"_attr = min,
+                        "max"_attr = max,
+                        "sparsity"_attr = sparsity,
+                        "edges"_attr = edges,
+                        "expected-edges"_attr = expectedEdges);
+            return false;
+        }
+
+        return true;
+    }
+};
+
+TEST(EdgeCalcTest, Int32_TestVectors) {
+    std::vector<EdgeCalcTestVector<int32_t>> testVectors = {
+#include "test_vectors/edges_int32.cstruct"
+    };
+    for (const auto& testVector : testVectors) {
+        ASSERT_TRUE(testVector.validate());
+    }
+}
+
+TEST(EdgeCalcTest, Int64_TestVectors) {
+    std::vector<EdgeCalcTestVector<int64_t>> testVectors = {
+#include "test_vectors/edges_int64.cstruct"
+    };
+    for (const auto& testVector : testVectors) {
+        ASSERT_TRUE(testVector.validate());
+    }
+}
+
+TEST(EdgeCalcTest, Double_TestVectors) {
+    std::vector<EdgeCalcTestVector<double>> testVectors = {
+#include "test_vectors/edges_double.cstruct"
+    };
+    for (const auto& testVector : testVectors) {
+        ASSERT_TRUE(testVector.validate());
+    }
+}
+
+TEST(EdgeCalcTest, SparsityConstraints) {
+    ASSERT_THROWS_CODE(getEdgesInt32(1, 0, 8, 0), AssertionException, 6775101);
+    ASSERT_THROWS_CODE(getEdgesInt32(1, 0, 8, -1), AssertionException, 6775101);
+    ASSERT_THROWS_CODE(getEdgesInt64(1, 0, 8, 0), AssertionException, 6775101);
+    ASSERT_THROWS_CODE(getEdgesInt64(1, 0, 8, -1), AssertionException, 6775101);
+    ASSERT_THROWS_CODE(getEdgesDouble(1.0, 0.0, 8.0, 0), AssertionException, 6775101);
+    ASSERT_THROWS_CODE(getEdgesDouble(1.0, 0.0, 8.0, -1), AssertionException, 6775101);
+}
 
 }  // namespace mongo

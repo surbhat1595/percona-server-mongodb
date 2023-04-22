@@ -49,7 +49,7 @@ class ScopedSetShardRole {
 public:
     ScopedSetShardRole(OperationContext* opCtx,
                        NamespaceString nss,
-                       boost::optional<ChunkVersion> shardVersion,
+                       boost::optional<ShardVersion> shardVersion,
                        boost::optional<DatabaseVersion> databaseVersion);
     ~ScopedSetShardRole();
 
@@ -58,7 +58,7 @@ private:
 
     NamespaceString _nss;
 
-    boost::optional<ChunkVersion> _shardVersion;
+    boost::optional<ShardVersion> _shardVersion;
     boost::optional<DatabaseVersion> _databaseVersion;
 };
 
@@ -113,8 +113,16 @@ public:
      */
     static void setShardRole(OperationContext* opCtx,
                              const NamespaceString& nss,
-                             const boost::optional<ChunkVersion>& shardVersion,
+                             const boost::optional<ShardVersion>& shardVersion,
                              const boost::optional<DatabaseVersion>& dbVersion);
+
+    /**
+     * Used to clear the shard role from the opCtx for ddl operations which are not required to send
+     * the index version (ex. split, merge). These operations will do their own metadata checks
+     * rather than us the collection sharding runtime checks.
+     */
+    static void unsetShardRoleForLegacyDDLOperationsSentWithShardVersionIfNeeded(
+        OperationContext* opCtx, const NamespaceString& nss);
 
     /**
      * Returns the shard version (i.e. maximum chunk version) of a namespace being used by the

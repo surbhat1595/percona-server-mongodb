@@ -27,27 +27,18 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/catalog/collection_impl.h"
 
-#include "mongo/base/counter.h"
-#include "mongo/base/init.h"
 #include "mongo/bson/ordering.h"
 #include "mongo/bson/simple_bsonelement_comparator.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/crypto/fle_crypto.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/collection_options.h"
+#include "mongo/db/catalog/catalog_stats.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog/index_catalog_impl.h"
-#include "mongo/db/catalog/index_consistency.h"
 #include "mongo/db/catalog/index_key_validate.h"
 #include "mongo/db/catalog/local_oplog_info.h"
 #include "mongo/db/catalog/uncommitted_multikey.h"
-#include "mongo/db/clientcursor.h"
-#include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/curop.h"
@@ -61,94 +52,32 @@
 #include "mongo/db/matcher/implicit_validator.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/ops/update_request.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/collection_query_info.h"
 #include "mongo/db/query/internal_plans.h"
-#include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/oplog.h"
-#include "mongo/db/repl/repl_server_parameters_gen.h"
-#include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/server_options.h"
-#include "mongo/db/server_recovery.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/durable_catalog.h"
-#include "mongo/db/storage/key_string.h"
-#include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_extended_range.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/ttl_collection_cache.h"
-#include "mongo/db/update/update_driver.h"
-
-#include "mongo/db/auth/user_document_parser.h"  // XXX-ANDY
 #include "mongo/logv2/log.h"
-#include "mongo/rpc/object_check.h"
 #include "mongo/util/fail_point.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
-
 namespace mongo {
-
 namespace {
-//  This fail point injects insertion failures for all collections unless a collection name is
-//  provided in the optional data object during configuration:
-//  data: {
-//      collectionNS: <fully-qualified collection namespace>,
-//  }
-MONGO_FAIL_POINT_DEFINE(failCollectionInserts);
-
-// Used to pause after inserting collection data and calling the opObservers.  Inserts to
-// replicated collections that are not part of a multi-statement transaction will have generated
-// their OpTime and oplog entry. Supports parameters to limit pause by namespace and by _id
-// of first data item in an insert (must be of type string):
-//  data: {
-//      collectionNS: <fully-qualified collection namespace>,
-//      first_id: <string>
-//  }
-MONGO_FAIL_POINT_DEFINE(hangAfterCollectionInserts);
-
-// This fail point throws a WriteConflictException after a successful call to insertRecords.
-MONGO_FAIL_POINT_DEFINE(failAfterBulkLoadDocInsert);
 
 // This fail point allows collections to be given malformed validator. A malformed validator
 // will not (and cannot) be enforced but it will be persisted.
 MONGO_FAIL_POINT_DEFINE(allowSettingMalformedCollectionValidators);
 
-// This fail point introduces corruption to documents during insert.
-MONGO_FAIL_POINT_DEFINE(corruptDocumentOnInsert);
-
 MONGO_FAIL_POINT_DEFINE(skipCappedDeletes);
-
-/**
- * Checks the 'failCollectionInserts' fail point at the beginning of an insert operation to see if
- * the insert should fail. Returns Status::OK if The function should proceed with the insertion.
- * Otherwise, the function should fail and return early with the error Status.
- */
-Status checkFailCollectionInsertsFailPoint(const NamespaceString& ns, const BSONObj& firstDoc) {
-    Status s = Status::OK();
-    failCollectionInserts.executeIf(
-        [&](const BSONObj& data) {
-            const std::string msg = str::stream()
-                << "Failpoint (failCollectionInserts) has been enabled (" << data
-                << "), so rejecting insert (first doc): " << firstDoc;
-            LOGV2(20287,
-                  "Failpoint (failCollectionInserts) has been enabled, so rejecting insert",
-                  "data"_attr = data,
-                  "document"_attr = firstDoc);
-            s = {ErrorCodes::FailPointEnabled, msg};
-        },
-        [&](const BSONObj& data) {
-            // If the failpoint specifies no collection or matches the existing one, fail.
-            const auto collElem = data["collectionNS"];
-            return !collElem || ns.ns() == collElem.str();
-        });
-    return s;
-}
 
 // Uses the collator factory to convert the BSON representation of a collator to a
 // CollatorInterface. Returns null if the BSONObj is empty. We expect the stored collation to be
@@ -296,15 +225,6 @@ bool isRetryableWrite(OperationContext* opCtx) {
         (!opCtx->inMultiDocumentTransaction() || txnParticipant.transactionIsOpen());
 }
 
-bool shouldStoreImageInSideCollection(OperationContext* opCtx) {
-    // Check if we're in a retryable write that should save the image to `config.image_collection`.
-    // This is the only time `storeFindAndModifyImagesInSideCollection` may be queried for this
-    // transaction.
-    return isRetryableWrite(opCtx) &&
-        repl::feature_flags::gFeatureFlagRetryableFindAndModify.isEnabledAndIgnoreFCV() &&
-        repl::gStoreFindAndModifyImagesInSideCollection.load();
-}
-
 std::vector<OplogSlot> reserveOplogSlotsForRetryableFindAndModify(OperationContext* opCtx,
                                                                   const int numSlots) {
     invariant(isRetryableWrite(opCtx));
@@ -323,30 +243,6 @@ std::vector<OplogSlot> reserveOplogSlotsForRetryableFindAndModify(OperationConte
     uassertStatusOK(opCtx->recoveryUnit()->setTimestamp(slots.back().getTimestamp()));
     return slots;
 }
-
-
-class CappedDeleteSideTxn {
-public:
-    CappedDeleteSideTxn(OperationContext* opCtx) : _opCtx(opCtx) {
-        _originalRecoveryUnit = _opCtx->releaseRecoveryUnit().release();
-        invariant(_originalRecoveryUnit);
-        _originalRecoveryUnitState = _opCtx->setRecoveryUnit(
-            std::unique_ptr<RecoveryUnit>(
-                _opCtx->getServiceContext()->getStorageEngine()->newRecoveryUnit()),
-            WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
-    }
-
-    ~CappedDeleteSideTxn() {
-        _opCtx->releaseRecoveryUnit();
-        _opCtx->setRecoveryUnit(std::unique_ptr<RecoveryUnit>(_originalRecoveryUnit),
-                                _originalRecoveryUnitState);
-    }
-
-private:
-    OperationContext* const _opCtx;
-    RecoveryUnit* _originalRecoveryUnit;
-    WriteUnitOfWork::RecoveryUnitState _originalRecoveryUnitState;
-};
 
 bool indexTypeSupportsPathLevelMultikeyTracking(StringData accessMethod) {
     return accessMethod == IndexNames::BTREE || accessMethod == IndexNames::GEO_2DSPHERE;
@@ -390,46 +286,20 @@ bool doesMinMaxHaveMixedSchemaData(const BSONObj& min, const BSONObj& max) {
 CollectionImpl::SharedState::SharedState(CollectionImpl* collection,
                                          std::unique_ptr<RecordStore> recordStore,
                                          const CollectionOptions& options)
-    : _collectionLatest(collection),
-      _recordStore(std::move(recordStore)),
-      _cappedNotifier(_recordStore && options.capped ? std::make_shared<CappedInsertNotifier>()
-                                                     : nullptr),
+    : _recordStore(std::move(recordStore)),
       // Capped collections must preserve insertion order, so we serialize writes. One exception are
       // clustered capped collections because they only guarantee insertion order when cluster keys
       // are inserted in monotonically-increasing order.
-      _needCappedLock(options.capped && collection->ns().isReplicated() && !options.clusteredIndex),
-      _isCapped(options.capped) {
-    if (_cappedNotifier) {
-        _recordStore->setCappedCallback(this);
-    }
-}
+      _isCapped(options.capped),
+      _needCappedLock(_isCapped && collection->ns().isReplicated() && !options.clusteredIndex) {}
+
 CollectionImpl::SharedState::~SharedState() {
-    if (_cappedNotifier) {
-        _recordStore->setCappedCallback(nullptr);
-        _cappedNotifier->kill();
+    // The record store will be null when the collection is instantiated as part of the repair path.
+    // The repair path intentionally doesn't create a record store because it directly accesses the
+    // underlying storage engine.
+    if (_recordStore && _recordStore->getCappedInsertNotifier()) {
+        _recordStore->getCappedInsertNotifier()->kill();
     }
-}
-
-void CollectionImpl::SharedState::instanceCreated(CollectionImpl* collection) {
-    _collectionPrev = _collectionLatest;
-    _collectionLatest = collection;
-}
-void CollectionImpl::SharedState::instanceDeleted(CollectionImpl* collection) {
-    // We have three possible cases to handle in this function, we know that these are the only
-    // possible cases as we can only have 1 clone at a time for a specific collection as we are
-    // holding a MODE_X lock when cloning for a DDL operation.
-    // 1. Previous (second newest) known CollectionImpl got deleted. That means that a clone has
-    //    been committed into the catalog and what was in there got deleted.
-    // 2. Latest known CollectionImpl got deleted. This means that a clone that was created by the
-    //    catalog never got committed into it and is deleted in a rollback handler. We need to set
-    //    what was previous to latest in this case.
-    // 3. An older CollectionImpl that was kept alive by a read operation got deleted, nothing to do
-    //    as we're not tracking these pointers (not needed for CappedCallback)
-    if (collection == _collectionPrev)
-        _collectionPrev = nullptr;
-
-    if (collection == _collectionLatest)
-        _collectionLatest = _collectionPrev;
 }
 
 CollectionImpl::CollectionImpl(OperationContext* opCtx,
@@ -452,9 +322,7 @@ CollectionImpl::CollectionImpl(OperationContext* opCtx,
     _metadata = std::move(metadata);
 }
 
-CollectionImpl::~CollectionImpl() {
-    _shared->instanceDeleted(this);
-}
+CollectionImpl::~CollectionImpl() = default;
 
 void CollectionImpl::onDeregisterFromCatalog(OperationContext* opCtx) {
     if (ns().isOplog()) {
@@ -484,7 +352,6 @@ std::shared_ptr<Collection> CollectionImpl::FactoryImpl::make(
 
 std::shared_ptr<Collection> CollectionImpl::clone() const {
     auto cloned = std::make_shared<CollectionImpl>(*this);
-    cloned->_shared->instanceCreated(cloned.get());
     // We are per definition committed if we get cloned
     cloned->_cachedCommitted = true;
     return cloned;
@@ -631,7 +498,7 @@ Status CollectionImpl::checkValidatorAPIVersionCompatability(OperationContext* o
     return Status::OK();
 }
 
-std::pair<CollectionImpl::SchemaValidationResult, Status> CollectionImpl::checkValidation(
+std::pair<Collection::SchemaValidationResult, Status> CollectionImpl::checkValidation(
     OperationContext* opCtx, const BSONObj& document) const {
     if (!_validator.isOK()) {
         return {SchemaValidationResult::kError, _validator.getStatus()};
@@ -679,16 +546,15 @@ std::pair<CollectionImpl::SchemaValidationResult, Status> CollectionImpl::checkV
     return {SchemaValidationResult::kError, status};
 }
 
-Status CollectionImpl::_checkValidationAndParseResult(OperationContext* opCtx,
-                                                      const BSONObj& document) const {
-    std::pair<CollectionImpl::SchemaValidationResult, Status> result =
-        checkValidation(opCtx, document);
+Status CollectionImpl::checkValidationAndParseResult(OperationContext* opCtx,
+                                                     const BSONObj& document) const {
+    std::pair<SchemaValidationResult, Status> result = checkValidation(opCtx, document);
 
-    if (result.first == CollectionImpl::SchemaValidationResult::kPass) {
+    if (result.first == SchemaValidationResult::kPass) {
         return Status::OK();
     }
 
-    if (result.first == CollectionImpl::SchemaValidationResult::kWarn) {
+    if (result.first == SchemaValidationResult::kWarn) {
         LOGV2_WARNING(
             20294,
             "Document would fail validation",
@@ -798,280 +664,11 @@ Collection::Validator CollectionImpl::parseValidator(
     return Collection::Validator{validator, std::move(expCtx), std::move(combinedMatchExpr)};
 }
 
-Status CollectionImpl::insertDocumentsForOplog(OperationContext* opCtx,
-                                               std::vector<Record>* records,
-                                               const std::vector<Timestamp>& timestamps) const {
-    dassert(opCtx->lockState()->isWriteLocked());
-
-    // Since this is only for the OpLog, we can assume these for simplicity.
-    invariant(_validator.isOK());
-    invariant(_validator.filter.getValue() == nullptr);
-    invariant(!_indexCatalog->haveAnyIndexes());
-
-    Status status = _shared->_recordStore->insertRecords(opCtx, records, timestamps);
-    if (!status.isOK())
-        return status;
-
-    _cappedDeleteAsNeeded(opCtx, records->begin()->id);
-
-    // We do not need to notify capped waiters, as we have not yet updated oplog visibility, so
-    // these inserts will not be visible.  When visibility updates, it will notify capped
-    // waiters.
-    return status;
+bool CollectionImpl::needsCappedLock() const {
+    return _shared->_needCappedLock;
 }
 
-Status CollectionImpl::insertDocuments(OperationContext* opCtx,
-                                       const std::vector<InsertStatement>::const_iterator begin,
-                                       const std::vector<InsertStatement>::const_iterator end,
-                                       OpDebug* opDebug,
-                                       bool fromMigrate) const {
-
-    auto status = checkFailCollectionInsertsFailPoint(_ns, (begin != end ? begin->doc : BSONObj()));
-    if (!status.isOK()) {
-        return status;
-    }
-
-    // Should really be done in the collection object at creation and updated on index create.
-    const bool hasIdIndex = _indexCatalog->findIdIndex(opCtx);
-
-    for (auto it = begin; it != end; it++) {
-        if (hasIdIndex && it->doc["_id"].eoo()) {
-            return Status(ErrorCodes::InternalError,
-                          str::stream()
-                              << "Collection::insertDocument got document without _id for ns:"
-                              << _ns.toString());
-        }
-
-        auto status = _checkValidationAndParseResult(opCtx, it->doc);
-        if (!status.isOK()) {
-            return status;
-        }
-
-        auto& validationSettings = DocumentValidationSettings::get(opCtx);
-
-        if (getCollectionOptions().encryptedFieldConfig &&
-            !validationSettings.isSchemaValidationDisabled() &&
-            !validationSettings.isSafeContentValidationDisabled() &&
-            it->doc.hasField(kSafeContent)) {
-            return Status(ErrorCodes::BadValue,
-                          str::stream()
-                              << "Cannot insert a document with field name " << kSafeContent);
-        }
-    }
-
-    const SnapshotId sid = opCtx->recoveryUnit()->getSnapshotId();
-
-    status = _insertDocuments(opCtx, begin, end, opDebug, fromMigrate);
-    if (!status.isOK()) {
-        return status;
-    }
-    invariant(sid == opCtx->recoveryUnit()->getSnapshotId());
-
-    opCtx->recoveryUnit()->onCommit(
-        [this](boost::optional<Timestamp>) { _shared->notifyCappedWaitersIfNeeded(); });
-
-    hangAfterCollectionInserts.executeIf(
-        [&](const BSONObj& data) {
-            const auto& firstIdElem = data["first_id"];
-            std::string whenFirst;
-            if (firstIdElem) {
-                whenFirst += " when first _id is ";
-                whenFirst += firstIdElem.str();
-            }
-            LOGV2(20289,
-                  "hangAfterCollectionInserts fail point enabled. Blocking "
-                  "until fail point is disabled.",
-                  "ns"_attr = _ns,
-                  "whenFirst"_attr = whenFirst);
-            hangAfterCollectionInserts.pauseWhileSet(opCtx);
-        },
-        [&](const BSONObj& data) {
-            const auto& collElem = data["collectionNS"];
-            const auto& firstIdElem = data["first_id"];
-            // If the failpoint specifies no collection or matches the existing one, hang.
-            return (!collElem || _ns.ns() == collElem.str()) &&
-                (!firstIdElem ||
-                 (begin != end && firstIdElem.type() == mongo::String &&
-                  begin->doc["_id"].str() == firstIdElem.str()));
-        });
-
-    return Status::OK();
-}
-
-Status CollectionImpl::insertDocument(OperationContext* opCtx,
-                                      const InsertStatement& docToInsert,
-                                      OpDebug* opDebug,
-                                      bool fromMigrate) const {
-    std::vector<InsertStatement> docs;
-    docs.push_back(docToInsert);
-    return insertDocuments(opCtx, docs.begin(), docs.end(), opDebug, fromMigrate);
-}
-
-Status CollectionImpl::insertDocumentForBulkLoader(
-    OperationContext* opCtx, const BSONObj& doc, const OnRecordInsertedFn& onRecordInserted) const {
-
-    auto status = checkFailCollectionInsertsFailPoint(_ns, doc);
-    if (!status.isOK()) {
-        return status;
-    }
-
-    status = _checkValidationAndParseResult(opCtx, doc);
-    if (!status.isOK()) {
-        return status;
-    }
-
-    dassert(opCtx->lockState()->isCollectionLockedForMode(ns(), MODE_IX));
-
-    RecordId recordId;
-    if (isClustered()) {
-        invariant(_shared->_recordStore->keyFormat() == KeyFormat::String);
-        recordId = uassertStatusOK(record_id_helpers::keyForDoc(
-            doc, getClusteredInfo()->getIndexSpec(), getDefaultCollator()));
-    }
-
-    // Using timestamp 0 for these inserts, which are non-oplog so we don't have an appropriate
-    // timestamp to use.
-    StatusWith<RecordId> loc = _shared->_recordStore->insertRecord(
-        opCtx, recordId, doc.objdata(), doc.objsize(), Timestamp());
-
-    if (!loc.isOK())
-        return loc.getStatus();
-
-    status = onRecordInserted(loc.getValue());
-
-    if (MONGO_unlikely(failAfterBulkLoadDocInsert.shouldFail())) {
-        LOGV2(20290,
-              "Failpoint failAfterBulkLoadDocInsert enabled. Throwing "
-              "WriteConflictException",
-              logAttrs(_ns));
-        throwWriteConflictException();
-    }
-
-    std::vector<InsertStatement> inserts;
-    OplogSlot slot;
-    // Fetch a new optime now, if necessary.
-    auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-    if (!replCoord->isOplogDisabledFor(opCtx, _ns)) {
-        // Populate 'slot' with a new optime.
-        slot = repl::getNextOpTime(opCtx);
-    }
-    inserts.emplace_back(kUninitializedStmtId, doc, slot);
-
-    opCtx->getServiceContext()->getOpObserver()->onInserts(
-        opCtx, ns(), uuid(), inserts.begin(), inserts.end(), false);
-
-    _cappedDeleteAsNeeded(opCtx, loc.getValue());
-
-    opCtx->recoveryUnit()->onCommit(
-        [this](boost::optional<Timestamp>) { _shared->notifyCappedWaitersIfNeeded(); });
-
-    return loc.getStatus();
-}
-
-Status CollectionImpl::_insertDocuments(OperationContext* opCtx,
-                                        const std::vector<InsertStatement>::const_iterator begin,
-                                        const std::vector<InsertStatement>::const_iterator end,
-                                        OpDebug* opDebug,
-                                        bool fromMigrate) const {
-    dassert(opCtx->lockState()->isCollectionLockedForMode(ns(), MODE_IX));
-
-    const size_t count = std::distance(begin, end);
-    if (isCapped() && _indexCatalog->haveAnyIndexes() && count > 1) {
-        // We require that inserts to indexed capped collections be done one-at-a-time to avoid the
-        // possibility that a later document causes an earlier document to be deleted before it can
-        // be indexed.
-        // TODO SERVER-21512 It would be better to handle this here by just doing single inserts.
-        return {ErrorCodes::OperationCannotBeBatched,
-                "Can't batch inserts into indexed capped collections"};
-    }
-
-    if (_shared->_needCappedLock) {
-        // X-lock the metadata resource for this replicated, non-clustered capped collection until
-        // the end of the WUOW. Non-clustered capped collections require writes to be serialized on
-        // the secondary in order to guarantee insertion order (SERVER-21483); this exclusive access
-        // to the metadata resource prevents the primary from executing with more concurrency than
-        // secondaries - thus helping secondaries keep up - and protects '_cappedFirstRecord'. See
-        // SERVER-21646. On the other hand, capped clustered collections with a monotonically
-        // increasing cluster key natively guarantee preservation of the insertion order, and don't
-        // need serialisation. We allow concurrent inserts for clustered capped collections.
-        Lock::ResourceLock heldUntilEndOfWUOW{
-            opCtx->lockState(), ResourceId(RESOURCE_METADATA, _ns), MODE_X};
-    }
-
-    std::vector<Record> records;
-    records.reserve(count);
-    std::vector<Timestamp> timestamps;
-    timestamps.reserve(count);
-
-    for (auto it = begin; it != end; it++) {
-        const auto& doc = it->doc;
-
-        RecordId recordId;
-        if (isClustered()) {
-            invariant(_shared->_recordStore->keyFormat() == KeyFormat::String);
-            recordId = uassertStatusOK(record_id_helpers::keyForDoc(
-                doc, getClusteredInfo()->getIndexSpec(), getDefaultCollator()));
-        }
-
-        if (MONGO_unlikely(corruptDocumentOnInsert.shouldFail())) {
-            // Insert a truncated record that is half the expected size of the source document.
-            records.emplace_back(
-                Record{std::move(recordId), RecordData(doc.objdata(), doc.objsize() / 2)});
-            timestamps.emplace_back(it->oplogSlot.getTimestamp());
-            continue;
-        }
-
-        records.emplace_back(Record{std::move(recordId), RecordData(doc.objdata(), doc.objsize())});
-        timestamps.emplace_back(it->oplogSlot.getTimestamp());
-    }
-
-    Status status = _shared->_recordStore->insertRecords(opCtx, &records, timestamps);
-    if (!status.isOK())
-        return status;
-
-    std::vector<BsonRecord> bsonRecords;
-    bsonRecords.reserve(count);
-    int recordIndex = 0;
-    for (auto it = begin; it != end; it++) {
-        RecordId loc = records[recordIndex++].id;
-        if (_shared->_recordStore->keyFormat() == KeyFormat::Long) {
-            invariant(RecordId::minLong() < loc);
-            invariant(loc < RecordId::maxLong());
-        }
-
-        BsonRecord bsonRecord = {
-            std::move(loc), Timestamp(it->oplogSlot.getTimestamp()), &(it->doc)};
-        bsonRecords.emplace_back(std::move(bsonRecord));
-    }
-
-    int64_t keysInserted = 0;
-    status = _indexCatalog->indexRecords(
-        opCtx, {this, CollectionPtr::NoYieldTag{}}, bsonRecords, &keysInserted);
-    if (!status.isOK()) {
-        return status;
-    }
-
-    if (opDebug) {
-        opDebug->additiveMetrics.incrementKeysInserted(keysInserted);
-        // 'opDebug' may be deleted at rollback time in case of multi-document transaction.
-        if (!opCtx->inMultiDocumentTransaction()) {
-            opCtx->recoveryUnit()->onRollback([opDebug, keysInserted]() {
-                opDebug->additiveMetrics.incrementKeysInserted(-keysInserted);
-            });
-        }
-    }
-
-    if (!ns().isImplicitlyReplicated()) {
-        opCtx->getServiceContext()->getOpObserver()->onInserts(
-            opCtx, ns(), uuid(), begin, end, fromMigrate);
-    }
-
-    _cappedDeleteAsNeeded(opCtx, records.begin()->id);
-
-    return Status::OK();
-}
-
-bool CollectionImpl::_cappedAndNeedDelete(OperationContext* opCtx) const {
+bool CollectionImpl::isCappedAndNeedsDelete(OperationContext* opCtx) const {
     if (MONGO_unlikely(skipCappedDeletes.shouldFail())) {
         return false;
     }
@@ -1085,155 +682,21 @@ bool CollectionImpl::_cappedAndNeedDelete(OperationContext* opCtx) const {
         return false;
     }
 
-    if (ns().isOplog() && _shared->_recordStore->selfManagedOplogTruncation()) {
+    if (ns().isOplog() && getRecordStore()->selfManagedOplogTruncation()) {
         // Storage engines can choose to manage oplog truncation internally.
         return false;
     }
 
-    if (dataSize(opCtx) > _shared->_collectionLatest->getCollectionOptions().cappedSize) {
+    if (dataSize(opCtx) > getCollectionOptions().cappedSize) {
         return true;
     }
 
-    const auto cappedMaxDocs = _shared->_collectionLatest->getCollectionOptions().cappedMaxDocs;
+    const auto cappedMaxDocs = getCollectionOptions().cappedMaxDocs;
     if ((cappedMaxDocs != 0) && (numRecords(opCtx) > cappedMaxDocs)) {
         return true;
     }
 
     return false;
-}
-
-void CollectionImpl::_cappedDeleteAsNeeded(OperationContext* opCtx,
-                                           const RecordId& justInserted) const {
-    if (!_cappedAndNeedDelete(opCtx)) {
-        return;
-    }
-
-    if (!opCtx->isEnforcingConstraints()) {
-        // Secondaries only delete from capped collections via oplog application when there are
-        // explicit delete oplog entries.
-        return;
-    }
-
-    stdx::unique_lock<Latch> cappedFirstRecordMutex(_shared->_cappedFirstRecordMutex,
-                                                    stdx::defer_lock);
-    if (_shared->_needCappedLock) {
-        // As capped deletes can be part of a larger WriteUnitOfWork, we need a way to protect
-        // '_cappedFirstRecord' until the outermost WriteUnitOfWork commits or aborts. Locking the
-        // metadata resource exclusively on the collection gives us that guarantee as it uses
-        // two-phase locking semantics.
-        invariant(opCtx->lockState()->getLockMode(ResourceId(RESOURCE_METADATA, _ns)) == MODE_X);
-    } else {
-        // Capped deletes not performed under the capped lock need the '_cappedFirstRecordMutex'
-        // mutex.
-        cappedFirstRecordMutex.lock();
-    }
-
-    boost::optional<CappedDeleteSideTxn> cappedDeleteSideTxn;
-    if (!_shared->_needCappedLock) {
-        // Any capped deletes not performed under the capped lock need to commit the innermost
-        // WriteUnitOfWork while '_cappedFirstRecordMutex' is locked.
-        cappedDeleteSideTxn.emplace(opCtx);
-    }
-    const long long currentDataSize = dataSize(opCtx);
-    const long long currentNumRecords = numRecords(opCtx);
-
-    const auto cappedMaxSize = _shared->_collectionLatest->getCollectionOptions().cappedSize;
-    const long long sizeOverCap =
-        (currentDataSize > cappedMaxSize) ? currentDataSize - cappedMaxSize : 0;
-
-    const auto cappedMaxDocs = _shared->_collectionLatest->getCollectionOptions().cappedMaxDocs;
-    const long long docsOverCap = (cappedMaxDocs != 0 && currentNumRecords > cappedMaxDocs)
-        ? currentNumRecords - cappedMaxDocs
-        : 0;
-
-    long long sizeSaved = 0;
-    long long docsRemoved = 0;
-
-    WriteUnitOfWork wuow(opCtx);
-
-    boost::optional<Record> record;
-    auto cursor = getCursor(opCtx, /*forward=*/true);
-
-    // If the next RecordId to be deleted is known, navigate to it using seekNear(). Using a cursor
-    // and advancing it to the first element by calling next() will be slow for capped collections
-    // on particular storage engines, such as WiredTiger. In WiredTiger, there may be many
-    // tombstones (invisible deleted records) to traverse at the beginning of the table.
-    if (!_shared->_cappedFirstRecord.isNull()) {
-        // Use seekNear instead of seekExact. If this node steps down and a new primary starts
-        // deleting capped documents then this node's cached record will become stale. If this node
-        // steps up again afterwards, then the cached record will be an already deleted document.
-        record = cursor->seekNear(_shared->_cappedFirstRecord);
-    } else {
-        record = cursor->next();
-    }
-
-    while (sizeSaved < sizeOverCap || docsRemoved < docsOverCap) {
-        if (!record) {
-            break;
-        }
-
-        if (record->id == justInserted) {
-            // We're prohibited from deleting what was just inserted.
-            break;
-        }
-
-        docsRemoved++;
-        sizeSaved += record->data.size();
-
-        BSONObj doc = record->data.toBson();
-        if (ns().isReplicated()) {
-            OpObserver* opObserver = opCtx->getServiceContext()->getOpObserver();
-            opObserver->aboutToDelete(opCtx, ns(), uuid(), doc);
-
-            OplogDeleteEntryArgs args;
-            // Explicitly setting values despite them being the defaults.
-            args.deletedDoc = nullptr;
-            args.fromMigrate = false;
-
-            // If collection has change stream pre-/post-images enabled, pass the 'deletedDoc' for
-            // writing it in the pre-images collection.
-            if (isChangeStreamPreAndPostImagesEnabled()) {
-                args.deletedDoc = &doc;
-                args.changeStreamPreAndPostImagesEnabledForCollection = true;
-            }
-
-            // Reserves an optime for the deletion and sets the timestamp for future writes.
-            opObserver->onDelete(opCtx, ns(), uuid(), kUninitializedStmtId, args);
-        }
-
-        int64_t unusedKeysDeleted = 0;
-        _indexCatalog->unindexRecord(opCtx,
-                                     CollectionPtr(this, CollectionPtr::NoYieldTag{}),
-                                     doc,
-                                     record->id,
-                                     /*logIfError=*/false,
-                                     &unusedKeysDeleted);
-
-        // We're about to delete the record our cursor is positioned on, so advance the cursor.
-        RecordId toDelete = std::move(record->id);
-        record = cursor->next();
-
-        _shared->_recordStore->deleteRecord(opCtx, toDelete);
-    }
-
-    if (cappedDeleteSideTxn) {
-        // Save the RecordId of the next record to be deleted, if it exists.
-        if (!record) {
-            _shared->_cappedFirstRecord = RecordId();
-        } else {
-            _shared->_cappedFirstRecord = std::move(record->id);
-        }
-    } else {
-        // Update the next record to be deleted. The next record must exist as we're using the same
-        // snapshot the insert was performed on and we can't delete newly inserted records.
-        invariant(record);
-        opCtx->recoveryUnit()->onCommit(
-            [this, recordId = std::move(record->id)](boost::optional<Timestamp>) {
-                _shared->_cappedFirstRecord = std::move(recordId);
-            });
-    }
-
-    wuow.commit();
 }
 
 void CollectionImpl::setMinimumVisibleSnapshot(Timestamp newMinimumVisibleSnapshot) {
@@ -1242,34 +705,10 @@ void CollectionImpl::setMinimumVisibleSnapshot(Timestamp newMinimumVisibleSnapsh
     }
 }
 
-bool CollectionImpl::SharedState::haveCappedWaiters() const {
-    // Waiters keep a shared_ptr to '_cappedNotifier', so there are waiters if this CollectionImpl's
-    // shared_ptr is not unique (use_count > 1).
-    return _cappedNotifier.use_count() > 1;
-}
-
-void CollectionImpl::SharedState::notifyCappedWaitersIfNeeded() const {
-    // If there is a notifier object and another thread is waiting on it, then we notify
-    // waiters of this document insert.
-    if (haveCappedWaiters())
-        _cappedNotifier->notifyAll();
-}
-
-Status CollectionImpl::SharedState::aboutToDeleteCapped(OperationContext* opCtx,
-                                                        const RecordId& loc,
-                                                        RecordData data) {
-    BSONObj doc = data.releaseToBson();
-    int64_t* const nullKeysDeleted = nullptr;
-    _collectionLatest->getIndexCatalog()->unindexRecord(
-        opCtx, _collectionLatest, doc, loc, false, nullKeysDeleted);
-
-    // We are not capturing and reporting to OpDebug the 'keysDeleted' by unindexRecord(). It is
-    // questionable whether reporting will add diagnostic value to users and may instead be
-    // confusing as it depends on our internal capped collection document removal strategy.
-    // We can consider adding either keysDeleted or a new metric reporting document removal if
-    // justified by user demand.
-
-    return Status::OK();
+void CollectionImpl::setMinimumValidSnapshot(Timestamp newMinimumValidSnapshot) {
+    if (!_minValidSnapshot || (newMinimumValidSnapshot > _minValidSnapshot.value())) {
+        _minValidSnapshot = newMinimumValidSnapshot;
+    }
 }
 
 void CollectionImpl::deleteDocument(OperationContext* opCtx,
@@ -1299,11 +738,7 @@ void CollectionImpl::deleteDocument(OperationContext* opCtx,
                   "Cannot remove from a capped collection in a multi-document transaction");
     }
 
-    if (_shared->_needCappedLock) {
-        // X-lock the metadata resource for this capped collection until the end of the WUOW. This
-        // prevents the primary from executing with more concurrency than secondaries and protects
-        // '_cappedFirstRecord'.
-        // See SERVER-21646.
+    if (needsCappedLock()) {
         Lock::ResourceLock heldUntilEndOfWUOW{
             opCtx->lockState(), ResourceId(RESOURCE_METADATA, _ns), MODE_X};
     }
@@ -1312,13 +747,8 @@ void CollectionImpl::deleteDocument(OperationContext* opCtx,
     auto retryableFindAndModifyLocation = RetryableFindAndModifyLocation::kNone;
     if (storeDeletedDoc == Collection::StoreDeletedDoc::On && !getRecordPreImages() &&
         isRetryableWrite(opCtx)) {
-        const bool storeImageInSideCollection = shouldStoreImageInSideCollection(opCtx);
-        retryableFindAndModifyLocation =
-            (storeImageInSideCollection ? RetryableFindAndModifyLocation::kSideCollection
-                                        : RetryableFindAndModifyLocation::kOplog);
-        if (storeImageInSideCollection) {
-            oplogSlots = reserveOplogSlotsForRetryableFindAndModify(opCtx, 2);
-        }
+        retryableFindAndModifyLocation = RetryableFindAndModifyLocation::kSideCollection;
+        oplogSlots = reserveOplogSlotsForRetryableFindAndModify(opCtx, 2);
     }
     OplogDeleteEntryArgs deleteArgs{nullptr /* deletedDoc */,
                                     fromMigrate,
@@ -1327,7 +757,7 @@ void CollectionImpl::deleteDocument(OperationContext* opCtx,
                                     retryableFindAndModifyLocation,
                                     oplogSlots};
 
-    getGlobalServiceContext()->getOpObserver()->aboutToDelete(opCtx, ns(), uuid(), doc.value());
+    opCtx->getServiceContext()->getOpObserver()->aboutToDelete(opCtx, ns(), uuid(), doc.value());
 
     boost::optional<BSONObj> deletedDoc;
     const bool isRecordingPreImageForRetryableWrite =
@@ -1348,7 +778,8 @@ void CollectionImpl::deleteDocument(OperationContext* opCtx,
     if (deletedDoc) {
         deleteArgs.deletedDoc = &(deletedDoc.value());
     }
-    getGlobalServiceContext()->getOpObserver()->onDelete(opCtx, ns(), uuid(), stmtId, deleteArgs);
+
+    opCtx->getServiceContext()->getOpObserver()->onDelete(opCtx, ns(), uuid(), stmtId, deleteArgs);
 
     if (opDebug) {
         opDebug->additiveMetrics.incrementKeysDeleted(keysDeleted);
@@ -1380,14 +811,14 @@ RecordId CollectionImpl::updateDocument(OperationContext* opCtx,
                                         OpDebug* opDebug,
                                         CollectionUpdateArgs* args) const {
     {
-        auto status = _checkValidationAndParseResult(opCtx, newDoc);
+        auto status = checkValidationAndParseResult(opCtx, newDoc);
         if (!status.isOK()) {
             if (validationLevelOrDefault(_metadata->options.validationLevel) ==
                 ValidationLevelEnum::strict) {
                 uassertStatusOK(status);
             }
             // moderate means we have to check the old doc
-            auto oldDocStatus = _checkValidationAndParseResult(opCtx, oldDoc.value());
+            auto oldDocStatus = checkValidationAndParseResult(opCtx, oldDoc.value());
             if (oldDocStatus.isOK()) {
                 // transitioning from good -> bad is not ok
                 uassertStatusOK(status);
@@ -1411,11 +842,7 @@ RecordId CollectionImpl::updateDocument(OperationContext* opCtx,
     invariant(oldDoc.snapshotId() == opCtx->recoveryUnit()->getSnapshotId());
     invariant(newDoc.isOwned());
 
-    if (_shared->_needCappedLock) {
-        // X-lock the metadata resource for this capped collection until the end of the WUOW. This
-        // prevents the primary from executing with more concurrency than secondaries and protects
-        // '_cappedFirstRecord'.
-        // See SERVER-21646.
+    if (needsCappedLock()) {
         Lock::ResourceLock heldUntilEndOfWUOW{
             opCtx->lockState(), ResourceId(RESOURCE_METADATA, _ns), MODE_X};
     }
@@ -1439,25 +866,21 @@ RecordId CollectionImpl::updateDocument(OperationContext* opCtx,
     OplogUpdateEntryArgs onUpdateArgs(args, ns(), _uuid);
     const bool setNeedsRetryImageOplogField =
         args->storeDocOption != CollectionUpdateArgs::StoreDocOption::None;
-    if (args->oplogSlots.empty() && setNeedsRetryImageOplogField) {
-        const bool storeImageInSideCollection = shouldStoreImageInSideCollection(opCtx);
+    if (args->oplogSlots.empty() && setNeedsRetryImageOplogField && isRetryableWrite(opCtx)) {
         onUpdateArgs.retryableFindAndModifyLocation =
-            (storeImageInSideCollection ? RetryableFindAndModifyLocation::kSideCollection
-                                        : RetryableFindAndModifyLocation::kOplog);
-        if (storeImageInSideCollection) {
-            // If the update is part of a retryable write and we expect to be storing the pre- or
-            // post-image in a side collection, then we must reserve oplog slots in advance. We
-            // expect to use the reserved oplog slots as follows, where TS is the greatest
-            // timestamp of 'oplogSlots':
-            // TS - 2: If 'getRecordPreImages()' is true, we reserve an extra oplog slot in case we
-            //         must account for storing a pre-image in the oplog and an eventual synthetic
-            //         no-op image oplog used by tenant migrations/resharding.
-            // TS - 1: Tenant migrations and resharding will forge no-op image oplog entries and set
-            //         the entry timestamps to TS - 1.
-            // TS:     The timestamp given to the update oplog entry.
-            const auto numSlotsToReserve = getRecordPreImages() ? 3 : 2;
-            args->oplogSlots = reserveOplogSlotsForRetryableFindAndModify(opCtx, numSlotsToReserve);
-        }
+            RetryableFindAndModifyLocation::kSideCollection;
+        // If the update is part of a retryable write and we expect to be storing the pre- or
+        // post-image in a side collection, then we must reserve oplog slots in advance. We
+        // expect to use the reserved oplog slots as follows, where TS is the greatest
+        // timestamp of 'oplogSlots':
+        // TS - 2: If 'getRecordPreImages()' is true, we reserve an extra oplog slot in case we
+        //         must account for storing a pre-image in the oplog and an eventual synthetic
+        //         no-op image oplog used by tenant migrations/resharding.
+        // TS - 1: Tenant migrations and resharding will forge no-op image oplog entries and set
+        //         the entry timestamps to TS - 1.
+        // TS:     The timestamp given to the update oplog entry.
+        const auto numSlotsToReserve = getRecordPreImages() ? 3 : 2;
+        args->oplogSlots = reserveOplogSlotsForRetryableFindAndModify(opCtx, numSlotsToReserve);
     } else {
         // Retryable findAndModify commands should not reserve oplog slots before entering this
         // function since tenant migrations and resharding rely on always being able to set
@@ -1496,7 +919,7 @@ RecordId CollectionImpl::updateDocument(OperationContext* opCtx,
     invariant(sid == opCtx->recoveryUnit()->getSnapshotId());
     args->updatedDoc = newDoc;
 
-    getGlobalServiceContext()->getOpObserver()->onUpdate(opCtx, onUpdateArgs);
+    opCtx->getServiceContext()->getOpObserver()->onUpdate(opCtx, onUpdateArgs);
 
     return oldLocation;
 }
@@ -1528,25 +951,21 @@ StatusWith<RecordData> CollectionImpl::updateDocumentWithDamages(
     OplogUpdateEntryArgs onUpdateArgs(args, ns(), _uuid);
     const bool setNeedsRetryImageOplogField =
         args->storeDocOption != CollectionUpdateArgs::StoreDocOption::None;
-    if (args->oplogSlots.empty() && setNeedsRetryImageOplogField) {
-        const bool storeImageInSideCollection = shouldStoreImageInSideCollection(opCtx);
+    if (args->oplogSlots.empty() && setNeedsRetryImageOplogField && isRetryableWrite(opCtx)) {
         onUpdateArgs.retryableFindAndModifyLocation =
-            (storeImageInSideCollection ? RetryableFindAndModifyLocation::kSideCollection
-                                        : RetryableFindAndModifyLocation::kOplog);
-        if (storeImageInSideCollection) {
-            // If the update is part of a retryable write and we expect to be storing the pre- or
-            // post-image in a side collection, then we must reserve oplog slots in advance. We
-            // expect to use the reserved oplog slots as follows, where TS is the greatest
-            // timestamp of 'oplogSlots':
-            // TS - 2: If 'getRecordPreImages()' is true, we reserve an extra oplog slot in case we
-            //         must account for storing a pre-image in the oplog and an eventual synthetic
-            //         no-op image oplog used by tenant migrations/resharding.
-            // TS - 1: Tenant migrations and resharding will forge no-op image oplog entries and set
-            //         the entry timestamps to TS - 1.
-            // TS:     The timestamp given to the update oplog entry.
-            const auto numSlotsToReserve = getRecordPreImages() ? 3 : 2;
-            args->oplogSlots = reserveOplogSlotsForRetryableFindAndModify(opCtx, numSlotsToReserve);
-        }
+            RetryableFindAndModifyLocation::kSideCollection;
+        // If the update is part of a retryable write and we expect to be storing the pre- or
+        // post-image in a side collection, then we must reserve oplog slots in advance. We
+        // expect to use the reserved oplog slots as follows, where TS is the greatest
+        // timestamp of 'oplogSlots':
+        // TS - 2: If 'getRecordPreImages()' is true, we reserve an extra oplog slot in case we
+        //         must account for storing a pre-image in the oplog and an eventual synthetic
+        //         no-op image oplog used by tenant migrations/resharding.
+        // TS - 1: Tenant migrations and resharding will forge no-op image oplog entries and set
+        //         the entry timestamps to TS - 1.
+        // TS:     The timestamp given to the update oplog entry.
+        const auto numSlotsToReserve = getRecordPreImages() ? 3 : 2;
+        args->oplogSlots = reserveOplogSlotsForRetryableFindAndModify(opCtx, numSlotsToReserve);
     } else {
         // Retryable findAndModify commands should not reserve oplog slots before entering this
         // function since tenant migrations and resharding rely on always being able to set
@@ -1563,7 +982,7 @@ StatusWith<RecordData> CollectionImpl::updateDocumentWithDamages(
         args->changeStreamPreAndPostImagesEnabledForCollection =
             isChangeStreamPreAndPostImagesEnabled();
 
-        getGlobalServiceContext()->getOpObserver()->onUpdate(opCtx, onUpdateArgs);
+        opCtx->getServiceContext()->getOpObserver()->onUpdate(opCtx, onUpdateArgs);
     }
     return newRecStatus;
 }
@@ -1614,14 +1033,17 @@ void CollectionImpl::setRequiresTimeseriesExtendedRangeSupport(OperationContext*
 
     bool expected = false;
     bool set = _shared->_requiresTimeseriesExtendedRangeSupport.compareAndSwap(&expected, true);
-    if (set && !timeseries::collectionHasTimeIndex(opCtx, *this)) {
-        LOGV2_WARNING(
-            6679402,
-            "Time-series collection contains dates outside the standard range. Some query "
-            "optimizations may be disabled. Please consider building an index on timeField to "
-            "re-enable them.",
-            "nss"_attr = ns().getTimeseriesViewNamespace(),
-            "timeField"_attr = _metadata->options.timeseries->getTimeField());
+    if (set) {
+        catalog_stats::requiresTimeseriesExtendedRangeSupport.fetchAndAdd(1);
+        if (!timeseries::collectionHasTimeIndex(opCtx, *this)) {
+            LOGV2_WARNING(
+                6679402,
+                "Time-series collection contains dates outside the standard range. Some query "
+                "optimizations may be disabled. Please consider building an index on timeField to "
+                "re-enable them.",
+                "nss"_attr = ns().getTimeseriesViewNamespace(),
+                "timeField"_attr = _metadata->options.timeseries->getTimeField());
+        }
     }
 }
 
@@ -1710,19 +1132,6 @@ long long CollectionImpl::getCappedMaxDocs() const {
 
 long long CollectionImpl::getCappedMaxSize() const {
     return _metadata->options.cappedSize;
-}
-
-CappedCallback* CollectionImpl::getCappedCallback() {
-    return _shared.get();
-}
-
-const CappedCallback* CollectionImpl::getCappedCallback() const {
-    return _shared.get();
-}
-
-std::shared_ptr<CappedInsertNotifier> CollectionImpl::getCappedInsertNotifier() const {
-    invariant(isCapped());
-    return _shared->_cappedNotifier;
 }
 
 long long CollectionImpl::numRecords(OperationContext* opCtx) const {
@@ -1835,16 +1244,6 @@ Status CollectionImpl::truncate(OperationContext* opCtx) {
     }
 
     return Status::OK();
-}
-
-void CollectionImpl::cappedTruncateAfter(OperationContext* opCtx,
-                                         const RecordId& end,
-                                         bool inclusive) const {
-    dassert(opCtx->lockState()->isCollectionLockedForMode(ns(), MODE_X));
-    invariant(isCapped());
-    invariant(_indexCatalog->numIndexesInProgress(opCtx) == 0);
-
-    _shared->_recordStore->cappedTruncateAfter(opCtx, end, inclusive);
 }
 
 void CollectionImpl::setValidator(OperationContext* opCtx, Validator validator) {
@@ -2531,6 +1930,5 @@ void CollectionImpl::_writeMetadata(OperationContext* opCtx, Func func) {
     DurableCatalog::get(opCtx)->putMetaData(opCtx, getCatalogId(), *metadata);
     _metadata = std::move(metadata);
 }
-
 
 }  // namespace mongo

@@ -32,8 +32,8 @@
 #include "mongo/base/init.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/test_commands_enabled.h"
-#include "mongo/db/logical_session_cache.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/session/logical_session_cache.h"
 
 namespace mongo {
 namespace {
@@ -66,7 +66,7 @@ public:
     }
 
     bool run(OperationContext* opCtx,
-             const std::string& db,
+             const DatabaseName&,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
         const auto cache = LogicalSessionCache::get(opCtx);

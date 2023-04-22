@@ -497,6 +497,7 @@ void processFieldsForInsert(FLEQueryInterface* queryImpl,
         auto tagToken = FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedTagToken(escToken);
         auto valueToken =
             FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedValueToken(escToken);
+        payload.counts.clear();
 
         int position = 1;
         int count = 1;
@@ -533,7 +534,7 @@ void processFieldsForInsert(FLEQueryInterface* queryImpl,
             }
         }
 
-        payload.count = count;
+        payload.counts.push_back(count);
 
         auto escInsertReply = uassertStatusOK(queryImpl->insertDocument(
             nssEsc,
@@ -840,6 +841,23 @@ write_ops::DeleteCommandReply processDelete(FLEQueryInterface* queryImpl,
     return deleteReply;
 }
 
+bool hasIndexedFieldsInSchema(const std::vector<EncryptedField>& fields) {
+    for (const auto& field : fields) {
+        if (field.getQueries().has_value()) {
+            const auto& queries = field.getQueries().get();
+            if (stdx::holds_alternative<std::vector<mongo::QueryTypeConfig>>(queries)) {
+                const auto& vec = stdx::get<0>(queries);
+                if (!vec.empty()) {
+                    return true;
+                }
+            } else {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 /**
  * Update is the most complicated FLE operation.
  * It is basically an insert followed by a delete, sort of.
@@ -874,16 +892,16 @@ write_ops::UpdateCommandReply processUpdate(FLEQueryInterface* queryImpl,
     std::vector<EDCServerPayloadInfo> serverPayload;
     auto newUpdateOpEntry = updateRequest.getUpdates()[0];
 
-    auto highCardinalityModeAllowed = newUpdateOpEntry.getUpsert()
-        ? fle::HighCardinalityModeAllowed::kDisallow
-        : fle::HighCardinalityModeAllowed::kAllow;
+    auto encryptedCollScanModeAllowed = newUpdateOpEntry.getUpsert()
+        ? fle::EncryptedCollScanModeAllowed::kDisallow
+        : fle::EncryptedCollScanModeAllowed::kAllow;
 
     newUpdateOpEntry.setQ(fle::rewriteEncryptedFilterInsideTxn(queryImpl,
                                                                updateRequest.getDbName(),
                                                                efc,
                                                                expCtx,
                                                                newUpdateOpEntry.getQ(),
-                                                               highCardinalityModeAllowed));
+                                                               encryptedCollScanModeAllowed));
 
     if (updateModification.type() == write_ops::UpdateModification::Type::kModifier) {
         auto updateModifier = updateModification.getUpdateModifier();
@@ -949,8 +967,11 @@ write_ops::UpdateCommandReply processUpdate(FLEQueryInterface* queryImpl,
     // Fail if we could not find the new document
     uassert(6371505, "Could not find pre-image document by _id", !newDocument.isEmpty());
 
-    // Check the user did not remove/destroy the __safeContent__ array
-    FLEClientCrypto::validateTagsArray(newDocument);
+    if (hasIndexedFieldsInSchema(efc.getFields())) {
+        // Check the user did not remove/destroy the __safeContent__ array. If there are no
+        // indexed fields, then there will not be a safeContent array in the document.
+        FLEClientCrypto::validateTagsArray(newDocument);
+    }
 
     // Step 5 ----
     auto originalFields = EDCServerCollection::getEncryptedIndexedFields(originalDocument);
@@ -1060,16 +1081,16 @@ std::unique_ptr<BatchedCommandRequest> processFLEBatchExplain(
                                            deleteRequest.getEncryptionInformation().value(),
                                            newDeleteOp.getQ(),
                                            &getTransactionWithRetriesForMongoS,
-                                           fle::HighCardinalityModeAllowed::kAllow));
+                                           fle::EncryptedCollScanModeAllowed::kAllow));
         deleteRequest.setDeletes({newDeleteOp});
         deleteRequest.getWriteCommandRequestBase().setEncryptionInformation(boost::none);
         return std::make_unique<BatchedCommandRequest>(deleteRequest);
     } else if (request.getBatchType() == BatchedCommandRequest::BatchType_Update) {
         auto updateRequest = request.getUpdateRequest();
         auto newUpdateOp = updateRequest.getUpdates()[0];
-        auto highCardinalityModeAllowed = newUpdateOp.getUpsert()
-            ? fle::HighCardinalityModeAllowed::kDisallow
-            : fle::HighCardinalityModeAllowed::kAllow;
+        auto encryptedCollScanModeAllowed = newUpdateOp.getUpsert()
+            ? fle::EncryptedCollScanModeAllowed::kDisallow
+            : fle::EncryptedCollScanModeAllowed::kAllow;
 
         newUpdateOp.setQ(fle::rewriteQuery(opCtx,
                                            getExpCtx(newUpdateOp),
@@ -1077,7 +1098,7 @@ std::unique_ptr<BatchedCommandRequest> processFLEBatchExplain(
                                            updateRequest.getEncryptionInformation().value(),
                                            newUpdateOp.getQ(),
                                            &getTransactionWithRetriesForMongoS,
-                                           highCardinalityModeAllowed));
+                                           encryptedCollScanModeAllowed));
         updateRequest.setUpdates({newUpdateOp});
         updateRequest.getWriteCommandRequestBase().setEncryptionInformation(boost::none);
         return std::make_unique<BatchedCommandRequest>(updateRequest);
@@ -1105,9 +1126,9 @@ write_ops::FindAndModifyCommandReply processFindAndModify(
 
     // Step 0 ----
     // Rewrite filter
-    auto highCardinalityModeAllowed = findAndModifyRequest.getUpsert().value_or(false)
-        ? fle::HighCardinalityModeAllowed::kDisallow
-        : fle::HighCardinalityModeAllowed::kAllow;
+    auto encryptedCollScanModeAllowed = findAndModifyRequest.getUpsert().value_or(false)
+        ? fle::EncryptedCollScanModeAllowed::kDisallow
+        : fle::EncryptedCollScanModeAllowed::kAllow;
 
     newFindAndModifyRequest.setQuery(
         fle::rewriteEncryptedFilterInsideTxn(queryImpl,
@@ -1115,7 +1136,7 @@ write_ops::FindAndModifyCommandReply processFindAndModify(
                                              efc,
                                              expCtx,
                                              findAndModifyRequest.getQuery(),
-                                             highCardinalityModeAllowed));
+                                             encryptedCollScanModeAllowed));
 
     // Make sure not to inherit the command's writeConcern, this should be set at the transaction
     // level.
@@ -1194,8 +1215,11 @@ write_ops::FindAndModifyCommandReply processFindAndModify(
         // Fail if we could not find the new document
         uassert(6371404, "Could not find pre-image document by _id", !newDocument.isEmpty());
 
-        // Check the user did not remove/destroy the __safeContent__ array
-        FLEClientCrypto::validateTagsArray(newDocument);
+        if (hasIndexedFieldsInSchema(efc.getFields())) {
+            // Check the user did not remove/destroy the __safeContent__ array. If there are no
+            // indexed fields, then there will not be a safeContent array in the document.
+            FLEClientCrypto::validateTagsArray(newDocument);
+        }
 
         newFields = EDCServerCollection::getEncryptedIndexedFields(newDocument);
     }
@@ -1242,9 +1266,9 @@ write_ops::FindAndModifyCommandRequest processFindAndModifyExplain(
     auto efc = EncryptionInformationHelpers::getAndValidateSchema(edcNss, ei);
 
     auto newFindAndModifyRequest = findAndModifyRequest;
-    auto highCardinalityModeAllowed = findAndModifyRequest.getUpsert().value_or(false)
-        ? fle::HighCardinalityModeAllowed::kDisallow
-        : fle::HighCardinalityModeAllowed::kAllow;
+    auto encryptedCollScanModeAllowed = findAndModifyRequest.getUpsert().value_or(false)
+        ? fle::EncryptedCollScanModeAllowed::kDisallow
+        : fle::EncryptedCollScanModeAllowed::kAllow;
 
     newFindAndModifyRequest.setQuery(
         fle::rewriteEncryptedFilterInsideTxn(queryImpl,
@@ -1252,7 +1276,7 @@ write_ops::FindAndModifyCommandRequest processFindAndModifyExplain(
                                              efc,
                                              expCtx,
                                              findAndModifyRequest.getQuery(),
-                                             highCardinalityModeAllowed));
+                                             encryptedCollScanModeAllowed));
 
     newFindAndModifyRequest.setEncryptionInformation(boost::none);
     return newFindAndModifyRequest;

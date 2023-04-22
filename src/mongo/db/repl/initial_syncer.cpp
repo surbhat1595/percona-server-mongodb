@@ -63,7 +63,7 @@
 #include "mongo/db/repl/sync_source_selector.h"
 #include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/repl/transaction_oplog_application.h"
-#include "mongo/db/transaction/session_txn_record_gen.h"
+#include "mongo/db/session/session_txn_record_gen.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/logv2/log.h"
@@ -434,8 +434,8 @@ void InitialSyncer::_appendInitialSyncProgressMinimal_inlock(BSONObjBuilder* bob
         const auto approxTotalDataSize = allDbClonerStats.dataSize;
         bob->appendNumber("approxTotalDataSize", approxTotalDataSize);
         long long approxTotalBytesCopied = 0;
-        for (auto dbClonerStats : allDbClonerStats.databaseStats) {
-            for (auto collClonerStats : dbClonerStats.collectionStats) {
+        for (auto&& dbClonerStats : allDbClonerStats.databaseStats) {
+            for (auto&& collClonerStats : dbClonerStats.collectionStats) {
                 approxTotalBytesCopied += collClonerStats.approxBytesCopied;
             }
         }

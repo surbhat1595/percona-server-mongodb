@@ -27,11 +27,6 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
-#include <climits>
-
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/config.h"
 #include "mongo/db/exec/document_value/document.h"
@@ -54,7 +49,7 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
-
+namespace mongo {
 namespace ExpressionTests {
 
 using boost::intrusive_ptr;
@@ -658,7 +653,7 @@ public:
         intrusive_ptr<Expression> nested = ExpressionFieldPath::deprecatedCreate(&expCtx, "a.b");
         intrusive_ptr<Expression> expression = ExpressionCoerceToBool::create(&expCtx, nested);
         DepsTracker dependencies;
-        expression->addDependencies(&dependencies);
+        expression::addDependencies(expression.get(), &dependencies);
         ASSERT_EQUALS(1U, dependencies.fields.size());
         ASSERT_EQUALS(1U, dependencies.fields.count("a.b"));
         ASSERT_EQUALS(false, dependencies.needWholeDocument);
@@ -756,7 +751,7 @@ public:
         auto expCtx = ExpressionContextForTest{};
         intrusive_ptr<Expression> expression = ExpressionConstant::create(&expCtx, Value(5));
         DepsTracker dependencies;
-        expression->addDependencies(&dependencies);
+        expression::addDependencies(expression.get(), &dependencies);
         ASSERT_EQUALS(0U, dependencies.fields.size());
         ASSERT_EQUALS(false, dependencies.needWholeDocument);
         ASSERT_EQUALS(false, dependencies.getNeedsAnyMetadata());
@@ -3249,7 +3244,7 @@ TEST(ExpressionRegexTest, InvalidUTF8InRegex) {
 
 }  // namespace ExpressionRegexTest
 
-class All : public OldStyleSuiteSpecification {
+class All : public unittest::OldStyleSuiteSpecification {
 public:
     All() : OldStyleSuiteSpecification("expression") {}
 
@@ -3339,7 +3334,7 @@ public:
     }
 };
 
-OldStyleSuiteInitializer<All> myAll;
+unittest::OldStyleSuiteInitializer<All> myAll;
 
 namespace NowAndClusterTime {
 TEST(NowAndClusterTime, BasicTest) {
@@ -3499,7 +3494,7 @@ TEST(ExpressionToHashedIndexKeyTest, DoesAddInputDependencies) {
     auto expression = Expression::parseExpression(&expCtx, obj, expCtx.variablesParseState);
 
     DepsTracker deps;
-    expression->addDependencies(&deps);
+    expression::addDependencies(expression.get(), &deps);
     ASSERT_EQ(deps.fields.count("someValue"), 1u);
     ASSERT_EQ(deps.fields.size(), 1u);
 }
@@ -4167,4 +4162,126 @@ TEST(ExpressionFLETest, TestBinData_RoundTrip) {
     ASSERT_BSONOBJ_EQ(value.getDocument().toBson(), roundTripExpr);
 }
 
+TEST(ExpressionEncryptedBetweenTest, ParseRoundTrip) {
+    auto input = fromjson(R"({$encryptedBetween: [
+        "age",
+        {$binary: {
+            "base64": "ZW5jcnlwdGVkIHBheWxvYWQ=",
+            "subType": "6"
+        }}]})");
+    auto expCtx = ExpressionContextForTest();
+    auto vps = expCtx.variablesParseState;
+    auto expr = ExpressionEncryptedBetween::parse(&expCtx, input.firstElement(), vps);
+    auto serializedExpr = expr->serialize(false);
+    auto expectedExpr = fromjson(R"({$encryptedBetween: [
+        {$const: "age"},
+        { $const: 
+            {$binary: {
+                "base64": "ZW5jcnlwdGVkIHBheWxvYWQ=",
+                "subType": "6"
+            }}
+        }
+    ]})");
+    ASSERT_BSONOBJ_EQ(expectedExpr, serializedExpr.getDocument().toBson());
+}
+
+TEST(ExpressionEncryptedBetweenTest, EvaluateFails) {
+    ASSERT_THROWS_CODE(
+        evaluateExpression("$encryptedBetween", {"fieldpath"_sd, 1}), AssertionException, 6882800);
+}
+
+TEST(ExpressionFLETest, ParseAndSerializeBetween) {
+    auto expCtx = ExpressionContextForTest();
+    auto vps = expCtx.variablesParseState;
+
+    auto expr = fromjson(R"({$_internalFleBetween: {
+    field: {
+        "$binary": {
+            "base64":
+            "BxI0VngSNJh2EjQSNFZ4kBIQ0JE8aMUFkPk5sSTVqfdNNfjqUfQQ1Uoj0BBcthrWoe9wyU3cN6zmWaQBPJ97t0ZPbecnMsU736yXre6cBO4Zdt/wThtY+v5+7vFgNnWpgRP0e+vam6QPmLvbBrO0LdsvAPTGW4yqwnzCIXCoEg7QPGfbfAXKPDTNenBfRlawiblmTOhO/6ljKotWsMp22q/rpHrn9IEIeJmecwuuPIJ7EA+XYQ3hOKVccYf2ogoK73+8xD/Vul83Qvr84Q8afc4QUMVs8A==",
+                "subType": "6"
+        }
+    },
+    server: {
+        "$binary": {
+            "base64": "COuac/eRLYakKX6B0vZ1r3QodOQFfjqJD+xlGiPu4/Ps",
+            "subType": "6"
+        }
+    },
+    counter: {
+        "$numberLong": "3"
+    },
+    edc: [{
+        "$binary": {
+            "base64": "CEWSmQID7SfwyAUI3ZkSFkATKryDQfnxXEOGad5d4Rsg",
+            "subType": "6"
+        }
+    }]   } })");
+
+    auto exprFle = ExpressionInternalFLEBetween::parse(&expCtx, expr.firstElement(), vps);
+    auto value = exprFle->serialize(false);
+
+    auto roundTripExpr = fromjson(R"({$_internalFleBetween: {
+    field: {
+        "$const" : { "$binary": {
+            "base64":
+            "BxI0VngSNJh2EjQSNFZ4kBIQ0JE8aMUFkPk5sSTVqfdNNfjqUfQQ1Uoj0BBcthrWoe9wyU3cN6zmWaQBPJ97t0ZPbecnMsU736yXre6cBO4Zdt/wThtY+v5+7vFgNnWpgRP0e+vam6QPmLvbBrO0LdsvAPTGW4yqwnzCIXCoEg7QPGfbfAXKPDTNenBfRlawiblmTOhO/6ljKotWsMp22q/rpHrn9IEIeJmecwuuPIJ7EA+XYQ3hOKVccYf2ogoK73+8xD/Vul83Qvr84Q8afc4QUMVs8A==",
+                "subType": "6"
+        }}
+    },
+    edc: [{
+        "$binary": {
+            "base64": "CEWSmQID7SfwyAUI3ZkSFkATKryDQfnxXEOGad5d4Rsg",
+            "subType": "6"
+        }
+    }],
+    counter: {
+        "$numberLong": "3"
+    },
+    server: {
+        "$binary": {
+            "base64": "COuac/eRLYakKX6B0vZ1r3QodOQFfjqJD+xlGiPu4/Ps",
+            "subType": "6"
+        }
+    }
+        } })");
+    ASSERT_BSONOBJ_EQ(value.getDocument().toBson(), roundTripExpr);
+}
+
+TEST(ExpressionFLETest, EvalBetween) {
+    auto expCtx = ExpressionContextForTest();
+    auto vps = expCtx.variablesParseState;
+
+    auto expr = fromjson(R"({$_internalFleBetween: {
+    field: {
+        "$binary": {
+            "base64":
+            "BxI0VngSNJh2EjQSNFZ4kBIQ0JE8aMUFkPk5sSTVqfdNNfjqUfQQ1Uoj0BBcthrWoe9wyU3cN6zmWaQBPJ97t0ZPbecnMsU736yXre6cBO4Zdt/wThtY+v5+7vFgNnWpgRP0e+vam6QPmLvbBrO0LdsvAPTGW4yqwnzCIXCoEg7QPGfbfAXKPDTNenBfRlawiblmTOhO/6ljKotWsMp22q/rpHrn9IEIeJmecwuuPIJ7EA+XYQ3hOKVccYf2ogoK73+8xD/Vul83Qvr84Q8afc4QUMVs8A==",
+                "subType": "6"
+        }
+    },
+    server: {
+        "$binary": {
+            "base64": "COuac/eRLYakKX6B0vZ1r3QodOQFfjqJD+xlGiPu4/Ps",
+            "subType": "6"
+        }
+    },
+    counter: {
+        "$numberLong": "3"
+    },
+    edc: [{
+        "$binary": {
+            "base64": "CEWSmQID7SfwyAUI3ZkSFkATKryDQfnxXEOGad5d4Rsg",
+            "subType": "6"
+        }
+    }]   } })");
+
+    auto exprFle = ExpressionInternalFLEBetween::parse(&expCtx, expr.firstElement(), vps);
+    // TODO(SERVER-67627): Remove assertion when runtime tag matching is implemented.
+    ASSERT_THROWS_CODE(exprFle->evaluate({}, &expCtx.variables),
+                       AssertionException,
+                       ErrorCodes::InternalErrorNotSupported);
+}
+
 }  // namespace ExpressionTests
+}  // namespace mongo

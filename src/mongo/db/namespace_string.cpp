@@ -179,6 +179,15 @@ const NamespaceString NamespaceString::kShardIndexCatalogNamespace(NamespaceStri
 const NamespaceString NamespaceString::kShardCollectionCatalogNamespace(NamespaceString::kConfigDb,
                                                                         "shard.collections");
 
+const NamespaceString NamespaceString::kConfigsvrPlacementHistoryNamespace(
+    NamespaceString::kConfigDb, "placementHistory");
+
+const NamespaceString NamespaceString::kLockpingsNamespace(NamespaceString::kConfigDb, "lockpings");
+const NamespaceString NamespaceString::kDistLocksNamepsace(NamespaceString::kConfigDb, "locks");
+
+const NamespaceString NamespaceString::kSetChangeStreamStateCoordinatorNamespace(
+    NamespaceString::kConfigDb, "change_stream_coordinator");
+
 NamespaceString NamespaceString::parseFromStringExpectTenantIdInMultitenancyMode(StringData ns) {
     if (!gMultitenancySupport) {
         return NamespaceString(ns, boost::none);
@@ -299,6 +308,12 @@ bool NamespaceString::mustBeAppliedInOwnOplogBatch() const {
         _ns == kTenantMigrationDonorsNamespace.ns() ||
         _ns == kTenantMigrationRecipientsNamespace.ns() || _ns == kShardSplitDonorsNamespace.ns() ||
         _ns == kConfigsvrShardsNamespace.ns();
+}
+
+NamespaceString NamespaceString::makeClusterParametersNSS(
+    const boost::optional<TenantId>& tenantId) {
+    return tenantId ? NamespaceString(tenantId, kConfigDb, "clusterParameters")
+                    : kClusterParametersNamespace;
 }
 
 NamespaceString NamespaceString::makeListCollectionsNSS(const DatabaseName& dbName) {

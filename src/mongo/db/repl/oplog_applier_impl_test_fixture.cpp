@@ -27,10 +27,9 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/repl/oplog_applier_impl_test_fixture.h"
 
+#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/curop.h"
@@ -53,8 +52,7 @@ namespace mongo {
 namespace repl {
 
 void OplogApplierImplOpObserver::onInserts(OperationContext* opCtx,
-                                           const NamespaceString& nss,
-                                           const UUID& uuid,
+                                           const CollectionPtr& coll,
                                            std::vector<InsertStatement>::const_iterator begin,
                                            std::vector<InsertStatement>::const_iterator end,
                                            bool fromMigrate) {
@@ -66,7 +64,7 @@ void OplogApplierImplOpObserver::onInserts(OperationContext* opCtx,
         const InsertStatement& insertStatement = *it;
         docs.push_back(insertStatement.doc.getOwned());
     }
-    onInsertsFn(opCtx, nss, docs);
+    onInsertsFn(opCtx, coll->ns(), docs);
 }
 
 void OplogApplierImplOpObserver::onDelete(OperationContext* opCtx,

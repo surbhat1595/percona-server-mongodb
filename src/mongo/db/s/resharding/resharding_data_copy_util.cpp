@@ -27,10 +27,9 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
 
+#include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/catalog/rename_collection.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/exception_util.h"
@@ -44,9 +43,9 @@
 #include "mongo/db/s/resharding/resharding_txn_cloner_progress_gen.h"
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/s/session_catalog_migration.h"
-#include "mongo/db/session_catalog_mongod.h"
+#include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/session/session_txn_record_gen.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction/session_txn_record_gen.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/util/scopeguard.h"
@@ -244,7 +243,8 @@ int insertBatch(OperationContext* opCtx,
             numBytes += insert->doc.objsize();
         }
 
-        uassertStatusOK(outputColl->insertDocuments(opCtx, batch.begin(), batch.end(), nullptr));
+        uassertStatusOK(collection_internal::insertDocuments(
+            opCtx, *outputColl, batch.begin(), batch.end(), nullptr));
         wuow.commit();
 
         return numBytes;

@@ -46,9 +46,9 @@
 #include "mongo/db/query/find_command_gen.h"
 #include "mongo/db/query/fle/server_rewrite.h"
 #include "mongo/db/repl/repl_client_info.h"
-#include "mongo/db/session.h"
-#include "mongo/db/session_catalog.h"
-#include "mongo/db/session_catalog_mongod.h"
+#include "mongo/db/session/session.h"
+#include "mongo/db/session/session_catalog.h"
+#include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/transaction/transaction_api.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction/transaction_participant_resource_yielder.h"
@@ -274,7 +274,7 @@ BSONObj processFLEWriteExplainD(OperationContext* opCtx,
                              info,
                              query,
                              &getTransactionWithRetriesForMongoD,
-                             fle::HighCardinalityModeAllowed::kAllow);
+                             fle::EncryptedCollScanModeAllowed::kAllow);
 }
 
 std::pair<write_ops::FindAndModifyCommandRequest, OpMsgRequest>

@@ -68,6 +68,9 @@
 #include "mongo/util/text.h"
 #include "mongo/util/version.h"
 
+#include "mongo/unittest/golden_test_base.h"
+#include "mongo/unittest/test_info.h"
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 
@@ -526,14 +529,22 @@ BSONObj numberDecimalsAlmostEqual(const BSONObj& input, void*) {
     auto ten = Decimal128(10);
     auto exponent = a.toAbs().logarithm(ten).round();
 
-    // Return early if arguments are not the same order of magnitude.
-    if (exponent != b.toAbs().logarithm(ten).round()) {
-        return BSON("" << false);
-    }
+    // Early exit for zero, infinity and NaN cases.
+    if ((a.isZero() && b.isZero()) || (a.isNaN() && b.isNaN()) ||
+        (a.isInfinite() && b.isInfinite() && (a.isNegative() == b.isNegative()))) {
+        return BSON("" << true /* isErrorAcceptable */);
+    } else if (!a.isZero() && !b.isZero()) {
+        // Return early if arguments are not the same order of magnitude.
+        if (exponent != b.toAbs().logarithm(ten).round()) {
+            return BSON("" << false);
+        }
 
-    // Put the whole number behind the decimal point.
-    a = a.divide(ten.power(exponent));
-    b = b.divide(ten.power(exponent));
+        // Put the whole number behind the decimal point.
+        if (!exponent.isZero()) {
+            a = a.divide(ten.power(exponent));
+            b = b.divide(ten.power(exponent));
+        }
+    }
 
     auto places = third.numberDecimal();
     auto isErrorAcceptable = a.subtract(b)
@@ -542,6 +553,109 @@ BSONObj numberDecimalsAlmostEqual(const BSONObj& input, void*) {
                                  .round(Decimal128::kRoundTowardZero) == Decimal128(0);
 
     return BSON("" << isErrorAcceptable);
+}
+
+
+class GoldenTestContextShell : public unittest::GoldenTestContextBase {
+public:
+    explicit GoldenTestContextShell(const unittest::GoldenTestConfig* config,
+                                    boost::filesystem::path testPath,
+                                    bool validateOnClose)
+        : GoldenTestContextBase(config, testPath, validateOnClose, [this](auto const&... args) {
+              return onError(args...);
+          }) {}
+
+    // Disable move/copy because onError captures 'this' address.
+    GoldenTestContextShell(GoldenTestContextShell&&) = delete;
+
+
+protected:
+    void onError(const std::string& message,
+                 const std::string& actualStr,
+                 const boost::optional<std::string>& expectedStr) {
+        throw GoldenTestContextShellFailure{
+            message, getActualOutputPath().string(), getExpectedOutputPath().string()};
+    }
+};
+
+std::string GoldenTestContextShellFailure::toString() const {
+    return "Test output verification failed: {}, "
+           "actual output file: {}, "
+           "expected output file: {}"
+           ""_format(message, actualOutputFile, expectedOutputFile);
+}
+
+void GoldenTestContextShellFailure::diff() const {
+    auto cmd = unittest::GoldenTestEnvironment::getInstance()->diffCmd(expectedOutputFile,
+                                                                       actualOutputFile);
+    int status = std::system(cmd.c_str());
+    // Ignore return code: 'diff' returns non-zero when files differ, which we expect.
+    (void)status;
+}
+
+unittest::GoldenTestConfig goldenTestConfig{"jstests/expected_output"};
+boost::optional<GoldenTestContextShell> goldenTestContext;
+
+void closeGoldenTestContext() {
+    if (goldenTestContext) {
+        goldenTestContext->verifyOutput();
+        goldenTestContext = boost::none;
+    }
+}
+
+BSONObj _openGoldenData(const BSONObj& input, void*) {
+    uassert(6741513,
+            str::stream() << "_openGoldenData expects 2 arguments: 'testPath' and 'config'.",
+            input.nFields() == 2);
+
+    BSONObjIterator i(input);
+    auto testPathArg = i.next();
+    auto configArg = i.next();
+    invariant(i.next().eoo());
+
+    uassert(6741512,
+            "_openGoldenData 'testPath' must be a string",
+            testPathArg.type() == BSONType::String);
+    auto testPath = testPathArg.valueStringData();
+
+    uassert(6741511,
+            "_openGoldenData 'config' must be an object",
+            configArg.type() == BSONType::Object);
+    auto config = configArg.Obj();
+    goldenTestConfig = unittest::GoldenTestConfig::parseFromBson(config);
+
+    goldenTestContext.emplace(&goldenTestConfig, testPath.toString(), true /*validateOnClose*/);
+
+    return {};
+}
+BSONObj _writeGoldenData(const BSONObj& input, void*) {
+    uassert(6741510,
+            str::stream() << "_writeGoldenData expects 1 argument: 'content'. got: " << input,
+            input.nFields() == 1);
+
+    BSONObjIterator i(input);
+    auto contentArg = i.next();
+    invariant(i.next().eoo());
+
+    uassert(6741509,
+            "_writeGoldenData 'content' must be a string",
+            contentArg.type() == BSONType::String);
+    auto content = contentArg.valueStringData();
+
+    uassert(6741508, "_writeGoldenData() requires _openGoldenData() first", goldenTestContext);
+    auto& os = goldenTestContext->outStream();
+    os << content;
+
+    return {};
+}
+BSONObj _closeGoldenData(const BSONObj& input, void*) {
+    uassert(6741507,
+            str::stream() << "_closeGoldenData expects 0 arguments. got: " << input,
+            input.nFields() == 0);
+
+    closeGoldenTestContext();
+
+    return {};
 }
 
 void installShellUtils(Scope& scope) {
@@ -560,6 +674,9 @@ void installShellUtils(Scope& scope) {
     scope.injectNative("isInteractive", isInteractive);
     scope.injectNative("numberDecimalsEqual", numberDecimalsEqual);
     scope.injectNative("numberDecimalsAlmostEqual", numberDecimalsAlmostEqual);
+    scope.injectNative("_openGoldenData", _openGoldenData);
+    scope.injectNative("_writeGoldenData", _writeGoldenData);
+    scope.injectNative("_closeGoldenData", _closeGoldenData);
 
     installShellUtilsLauncher(scope);
     installShellUtilsExtended(scope);

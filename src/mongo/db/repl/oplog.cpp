@@ -27,14 +27,10 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/repl/oplog.h"
 
-#include <fmt/format.h>
-
 #include <deque>
+#include <fmt/format.h>
 #include <memory>
 #include <set>
 #include <vector>
@@ -44,10 +40,11 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/privilege.h"
+#include "mongo/db/catalog/capped_collection_maintenance.h"
 #include "mongo/db/catalog/capped_utils.h"
 #include "mongo/db/catalog/coll_mod.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
+#include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
@@ -111,7 +108,6 @@
 #include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
-
 
 namespace mongo {
 
@@ -184,6 +180,25 @@ StringData getInvalidatingReason(const OplogApplication::Mode mode, const bool i
     }
 
     return ""_sd;
+}
+
+Status insertDocumentsForOplog(OperationContext* opCtx,
+                               const CollectionPtr& oplogCollection,
+                               std::vector<Record>* records,
+                               const std::vector<Timestamp>& timestamps) {
+    invariant(opCtx->lockState()->isWriteLocked());
+
+    Status status = oplogCollection->getRecordStore()->insertRecords(opCtx, records, timestamps);
+    if (!status.isOK())
+        return status;
+
+    collection_internal::cappedDeleteUntilBelowConfiguredMaximum(
+        opCtx, oplogCollection, records->begin()->id);
+
+    // We do not need to notify capped waiters, as we have not yet updated oplog visibility, so
+    // these inserts will not be visible.  When visibility updates, it will notify capped
+    // waiters.
+    return Status::OK();
 }
 
 }  // namespace
@@ -305,7 +320,9 @@ void writeToImageCollection(OperationContext* opCtx,
     } catch (const ExceptionFor<ErrorCodes::DuplicateKey>&) {
         // We can get a duplicate key when two upserts race on inserting a document.
         *upsertConfigImage = false;
-        throwWriteConflictException();
+        // This write conflict is always retried internally and never exposed to the user.
+        throwWriteConflictException(
+            "DuplicateKey error when inserting a document into the pre-images collection.");
     }
 }
 
@@ -363,7 +380,7 @@ void _logOpsInner(OperationContext* opCtx,
         tenant_migration_access_blocker::checkIfCanWriteOrThrow(opCtx, nss.db(), timestamps.back());
     }
 
-    Status result = oplogCollection->insertDocumentsForOplog(opCtx, records, timestamps);
+    Status result = insertDocumentsForOplog(opCtx, oplogCollection, records, timestamps);
     if (!result.isOK()) {
         LOGV2_FATAL(17322,
                     "write to oplog failed: {error}",
@@ -1313,11 +1330,12 @@ Status applyOperation_inlock(OperationContext* opCtx,
                 }
 
                 OpDebug* const nullOpDebug = nullptr;
-                Status status = collection->insertDocuments(opCtx,
-                                                            insertObjs.begin(),
-                                                            insertObjs.end(),
-                                                            nullOpDebug,
-                                                            false /* fromMigrate */);
+                Status status = collection_internal::insertDocuments(opCtx,
+                                                                     collection,
+                                                                     insertObjs.begin(),
+                                                                     insertObjs.end(),
+                                                                     nullOpDebug,
+                                                                     false /* fromMigrate */);
                 if (!status.isOK()) {
                     return status;
                 }
@@ -1398,8 +1416,8 @@ Status applyOperation_inlock(OperationContext* opCtx,
                     }
 
                     OpDebug* const nullOpDebug = nullptr;
-                    Status status = collection->insertDocument(
-                        opCtx, insertStmt, nullOpDebug, false /* fromMigrate */);
+                    Status status = collection_internal::insertDocument(
+                        opCtx, collection, insertStmt, nullOpDebug, false /* fromMigrate */);
 
                     if (status.isOK()) {
                         wuow.commit();
@@ -1934,7 +1952,9 @@ Status applyCommand_inlock(OperationContext* opCtx,
             case ErrorCodes::WriteConflict: {
                 // Need to throw this up to a higher level where it will be caught and the
                 // operation retried.
-                throwWriteConflictException();
+                throwWriteConflictException(str::stream()
+                                            << "WriteConflict caught during oplog application."
+                                            << " Original error: " << status.reason());
             }
             case ErrorCodes::BackgroundOperationInProgressForDatabase: {
                 invariant(mode == OplogApplication::Mode::kInitialSync);
@@ -2054,7 +2074,7 @@ void establishOplogCollectionForLogging(OperationContext* opCtx, const Collectio
 void signalOplogWaiters() {
     const auto& oplog = LocalOplogInfo::get(getGlobalServiceContext())->getCollection();
     if (oplog) {
-        oplog->getCappedCallback()->notifyCappedWaitersIfNeeded();
+        oplog->getRecordStore()->getCappedInsertNotifier()->notifyAll();
     }
 }
 

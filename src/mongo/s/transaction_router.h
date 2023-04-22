@@ -33,14 +33,14 @@
 
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
-#include "mongo/db/logical_session_id.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/read_concern_args.h"
-#include "mongo/db/session_catalog.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/session/session_catalog.h"
+#include "mongo/db/shard_id.h"
 #include "mongo/db/stats/single_transaction_stats.h"
 #include "mongo/s/async_requests_sender.h"
 #include "mongo/s/client/shard.h"
-#include "mongo/s/shard_id.h"
 #include "mongo/util/string_map.h"
 
 namespace mongo {

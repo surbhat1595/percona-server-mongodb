@@ -27,17 +27,12 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
-#include <cstdint>
-
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/mutable/algorithm.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
+#include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog/drop_database.h"
@@ -82,8 +77,8 @@
 #include "mongo/db/s/collection_sharding_state_factory_shard.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_d_test_fixture.h"
-#include "mongo/db/session.h"
-#include "mongo/db/session_catalog_mongod.h"
+#include "mongo/db/session/session.h"
+#include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/storage/snapshot_manager.h"
 #include "mongo/db/storage/storage_engine_impl.h"
 #include "mongo/db/transaction/transaction_participant.h"
@@ -100,7 +95,6 @@
 #include "mongo/util/stacktrace.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
-
 
 namespace mongo {
 namespace {
@@ -372,7 +366,8 @@ public:
         // Insert some documents.
         OpDebug* const nullOpDebug = nullptr;
         const bool fromMigrate = false;
-        ASSERT_OK(coll->insertDocument(_opCtx, stmt, nullOpDebug, fromMigrate));
+        ASSERT_OK(
+            collection_internal::insertDocument(_opCtx, coll, stmt, nullOpDebug, fromMigrate));
     }
 
     void createIndex(CollectionWriter& coll, std::string indexName, const BSONObj& indexKey) {
@@ -1455,7 +1450,7 @@ TEST_F(StorageTimestampTest, SecondarySetWildcardIndexMultikeyOnInsert) {
     // WUOW.
     ASSERT_OK(createCollection(
         _opCtx,
-        nss.db().toString(),
+        nss.dbName(),
         BSON("create" << nss.coll() << "capped" << true << "size" << 1 * 1024 * 1024)));
     auto uuid = [&]() {
         AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_IX);
@@ -2141,7 +2136,7 @@ TEST_F(StorageTimestampTest, TimestampMultiIndexBuilds) {
         _opCtx, NamespaceString::kIndexBuildEntryNamespace));
     ASSERT_OK(
         createCollection(_opCtx,
-                         NamespaceString::kIndexBuildEntryNamespace.db().toString(),
+                         NamespaceString::kIndexBuildEntryNamespace.dbName(),
                          BSON("create" << NamespaceString::kIndexBuildEntryNamespace.coll())));
 
     NamespaceString nss("unittests.timestampMultiIndexBuilds");
@@ -2359,7 +2354,7 @@ TEST_F(StorageTimestampTest, TimestampAbortIndexBuild) {
         _opCtx, NamespaceString::kIndexBuildEntryNamespace));
     ASSERT_OK(
         createCollection(_opCtx,
-                         NamespaceString::kIndexBuildEntryNamespace.db().toString(),
+                         NamespaceString::kIndexBuildEntryNamespace.dbName(),
                          BSON("create" << NamespaceString::kIndexBuildEntryNamespace.coll())));
 
     NamespaceString nss("unittests.timestampAbortIndexBuild");
@@ -2524,7 +2519,8 @@ TEST_F(StorageTimestampTest, TimestampIndexDropsWildcard) {
         OneOffRead oor(_opCtx, beforeDropTs.addTicks(i + 1).asTimestamp());
 
         auto ident = getDroppedIndexIdent(durableCatalog, origIdents);
-        indexIdents.erase(std::remove(indexIdents.begin(), indexIdents.end(), ident));
+        indexIdents.erase(std::remove(indexIdents.begin(), indexIdents.end(), ident),
+                          indexIdents.end());
 
         origIdents = durableCatalog->getAllIdents(_opCtx);
     }
@@ -2594,7 +2590,8 @@ TEST_F(StorageTimestampTest, TimestampIndexDropsListed) {
         OneOffRead oor(_opCtx, beforeDropTs.addTicks(i + 1).asTimestamp());
 
         auto ident = getDroppedIndexIdent(durableCatalog, origIdents);
-        indexIdents.erase(std::remove(indexIdents.begin(), indexIdents.end(), ident));
+        indexIdents.erase(std::remove(indexIdents.begin(), indexIdents.end(), ident),
+                          indexIdents.end());
 
         origIdents = durableCatalog->getAllIdents(_opCtx);
     }
@@ -2762,8 +2759,9 @@ TEST_F(StorageTimestampTest, IndexBuildsResolveErrorsDuringStateChangeToPrimary)
         LOGV2(22507, "attempting to insert {badDoc3}", "badDoc3"_attr = badDoc3);
         WriteUnitOfWork wuow(_opCtx);
         ASSERT_THROWS_CODE(
-            collection->insertDocument(
+            collection_internal::insertDocument(
                 _opCtx,
+                collection.get(),
                 InsertStatement(badDoc3, indexInit.addTicks(1).asTimestamp(), _presentTerm),
                 /* opDebug */ nullptr,
                 /* noWarn */ false),
@@ -3030,7 +3028,7 @@ TEST_F(StorageTimestampTest, ViewCreationSeparateTransaction) {
     const NamespaceString systemViewsNss("unittests.system.views");
 
     ASSERT_OK(createCollection(_opCtx,
-                               viewNss.db().toString(),
+                               viewNss.dbName(),
                                BSON("create" << viewNss.coll() << "pipeline" << BSONArray()
                                              << "viewOn" << backingCollNss.coll())));
 
@@ -3074,7 +3072,7 @@ TEST_F(StorageTimestampTest, CreateCollectionWithSystemIndex) {
 
     { ASSERT_FALSE(AutoGetCollectionForReadCommand(_opCtx, nss).getCollection()); }
 
-    ASSERT_OK(createCollection(_opCtx, nss.db().toString(), BSON("create" << nss.coll())));
+    ASSERT_OK(createCollection(_opCtx, nss.dbName(), BSON("create" << nss.coll())));
 
     RecordId catalogId;
     {
@@ -3147,7 +3145,7 @@ TEST_F(StorageTimestampTest, MultipleTimestampsForMultikeyWrites) {
         _opCtx, NamespaceString::kIndexBuildEntryNamespace));
     ASSERT_OK(
         createCollection(_opCtx,
-                         NamespaceString::kIndexBuildEntryNamespace.db().toString(),
+                         NamespaceString::kIndexBuildEntryNamespace.dbName(),
                          BSON("create" << NamespaceString::kIndexBuildEntryNamespace.coll())));
 
     NamespaceString nss("unittests.timestampVectoredInsertMultikey");
@@ -3194,8 +3192,12 @@ TEST_F(StorageTimestampTest, MultipleTimestampsForMultikeyWrites) {
                                     _presentTerm);
 
         WriteUnitOfWork wuow(_opCtx);
-        ASSERT_OK(autoColl.getCollection()->insertDocuments(
-            _opCtx, vectoredInsert.begin(), vectoredInsert.end(), nullptr, false));
+        ASSERT_OK(collection_internal::insertDocuments(_opCtx,
+                                                       autoColl.getCollection(),
+                                                       vectoredInsert.begin(),
+                                                       vectoredInsert.end(),
+                                                       nullptr,
+                                                       false));
         wuow.commit();
     }
 

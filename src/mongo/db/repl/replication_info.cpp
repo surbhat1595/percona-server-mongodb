@@ -45,7 +45,6 @@
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/logical_session_id.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/not_primary_error_tracker.h"
 #include "mongo/db/ops/write_ops.h"
@@ -60,6 +59,7 @@
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/s/global_user_write_block_state.h"
+#include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/network_interface.h"
@@ -549,11 +549,11 @@ public:
         auto ret = result->asTempObj();
         if (ret[ErrorReply::kErrmsgFieldName].eoo()) {
             // Nominal success case, parse the object as-is.
-            HelloCommandReply::parse({"hello.reply"}, ret);
+            HelloCommandReply::parse(IDLParserContext{"hello.reply"}, ret);
         } else {
             // Something went wrong, still try to parse, but accept a few ignorable fields.
             StringDataSet ignorable({ErrorReply::kCodeFieldName, ErrorReply::kErrmsgFieldName});
-            HelloCommandReply::parse({"hello.reply"}, ret.removeFields(ignorable));
+            HelloCommandReply::parse(IDLParserContext{"hello.reply"}, ret.removeFields(ignorable));
         }
     }
 

@@ -114,7 +114,9 @@ public:
         : _opCtx(opCtx), _task(std::move(task)) {}
 
     void commit(boost::optional<Timestamp>) override {
-        migrationutil::submitRangeDeletionTask(_opCtx, _task).getAsync([](auto) {});
+        if (!feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCV()) {
+            migrationutil::submitRangeDeletionTask(_opCtx, _task).getAsync([](auto) {});
+        }
     }
 
     void rollback() override {}
@@ -229,11 +231,11 @@ ShardServerOpObserver::ShardServerOpObserver() = default;
 ShardServerOpObserver::~ShardServerOpObserver() = default;
 
 void ShardServerOpObserver::onInserts(OperationContext* opCtx,
-                                      const NamespaceString& nss,
-                                      const UUID& uuid,
+                                      const CollectionPtr& coll,
                                       std::vector<InsertStatement>::const_iterator begin,
                                       std::vector<InsertStatement>::const_iterator end,
                                       bool fromMigrate) {
+    const auto& nss = coll->ns();
     const auto metadata = CollectionShardingRuntime::get(opCtx, nss)->getCurrentMetadataIfKnown();
 
     for (auto it = begin; it != end; ++it) {

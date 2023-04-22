@@ -27,6 +27,7 @@
  *    it in the license file.
  */
 
+#include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/dbdirectclient.h"
@@ -40,14 +41,14 @@
 #include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/sharding_write_router.h"
-#include "mongo/db/session_catalog_mongod.h"
+#include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/shard_id.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/s/catalog/sharding_catalog_client_mock.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/catalog_cache_loader_mock.h"
 #include "mongo/s/database_version.h"
 #include "mongo/s/shard_cannot_refresh_due_to_locks_held_exception.h"
-#include "mongo/s/shard_id.h"
 #include "mongo/unittest/unittest.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
@@ -175,7 +176,7 @@ protected:
         NamespaceString tempNss;
         UUID sourceUuid;
         ShardId destShard;
-        ChunkVersion version;
+        ShardVersion version;
         DatabaseVersion dbVersion{UUID::gen(), Timestamp(1, 1)};
     };
 
@@ -187,15 +188,15 @@ protected:
 
         OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE unsafeCreateCollection(
             opCtx);
-        Status status = createCollection(
-            operationContext(), kNss.db().toString(), BSON("create" << kNss.coll()));
+        Status status =
+            createCollection(operationContext(), kNss.dbName(), BSON("create" << kNss.coll()));
         if (status != ErrorCodes::NamespaceExists) {
             uassertStatusOK(status);
         }
 
         ReshardingEnv env(CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, kNss).value());
         env.destShard = kShardList[1].getName();
-        env.version = ChunkVersion({OID::gen(), Timestamp(1, 1)}, {1, 0});
+        env.version = ShardVersion(ChunkVersion({OID::gen(), Timestamp(1, 1)}, {1, 0}));
         env.tempNss =
             NamespaceString(kNss.db(),
                             fmt::format("{}{}",
@@ -203,7 +204,7 @@ protected:
                                         env.sourceUuid.toString()));
 
         uassertStatusOK(createCollection(
-            operationContext(), env.tempNss.db().toString(), BSON("create" << env.tempNss.coll())));
+            operationContext(), env.tempNss.dbName(), BSON("create" << env.tempNss.coll())));
 
         TypeCollectionReshardingFields reshardingFields;
         reshardingFields.setReshardingUUID(UUID::gen());
@@ -250,7 +251,7 @@ protected:
                   const ReshardingEnv& env) {
         AutoGetCollection coll(opCtx, nss, MODE_IX);
         WriteUnitOfWork wuow(opCtx);
-        ASSERT_OK(coll->insertDocument(opCtx, InsertStatement(doc), nullptr));
+        ASSERT_OK(collection_internal::insertDocument(opCtx, *coll, InsertStatement(doc), nullptr));
         wuow.commit();
     }
 
@@ -390,7 +391,7 @@ TEST_F(DestinedRecipientTest, TestOpObserverSetsDestinedRecipientOnMultiUpdates)
 
     auto env = setupReshardingEnv(opCtx, true);
 
-    OperationShardingState::setShardRole(opCtx, kNss, ChunkVersion::IGNORED(), env.dbVersion);
+    OperationShardingState::setShardRole(opCtx, kNss, ShardVersion::IGNORED(), env.dbVersion);
     client.update(kNss.ns(),
                   BSON("x" << 0),
                   BSON("$set" << BSON("z" << 5)),

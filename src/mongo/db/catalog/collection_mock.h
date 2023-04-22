@@ -106,6 +106,11 @@ public:
         MONGO_UNREACHABLE;
     }
 
+    virtual Status checkValidationAndParseResult(OperationContext* opCtx,
+                                                 const BSONObj& document) const {
+        MONGO_UNREACHABLE;
+    }
+
     bool requiresIdIndex() const {
         MONGO_UNREACHABLE;
     }
@@ -143,33 +148,6 @@ public:
         bool noWarn = false,
         Collection::StoreDeletedDoc storeDeletedDoc = Collection::StoreDeletedDoc::Off,
         CheckRecordId checkRecordId = CheckRecordId::Off) const {
-        MONGO_UNREACHABLE;
-    }
-
-    Status insertDocuments(OperationContext* opCtx,
-                           std::vector<InsertStatement>::const_iterator begin,
-                           std::vector<InsertStatement>::const_iterator end,
-                           OpDebug* opDebug,
-                           bool fromMigrate) const {
-        MONGO_UNREACHABLE;
-    }
-
-    Status insertDocument(OperationContext* opCtx,
-                          const InsertStatement& doc,
-                          OpDebug* opDebug,
-                          bool fromMigrate) const {
-        MONGO_UNREACHABLE;
-    }
-
-    Status insertDocumentsForOplog(OperationContext* opCtx,
-                                   std::vector<Record>* records,
-                                   const std::vector<Timestamp>& timestamps) const {
-        MONGO_UNREACHABLE;
-    }
-
-    Status insertDocumentForBulkLoader(OperationContext* opCtx,
-                                       const BSONObj& doc,
-                                       const OnRecordInsertedFn& onRecordInserted) const {
         MONGO_UNREACHABLE;
     }
 
@@ -314,17 +292,6 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    CappedCallback* getCappedCallback() {
-        MONGO_UNREACHABLE;
-    }
-    const CappedCallback* getCappedCallback() const {
-        MONGO_UNREACHABLE;
-    }
-
-    std::shared_ptr<CappedInsertNotifier> getCappedInsertNotifier() const {
-        MONGO_UNREACHABLE;
-    }
-
     long long numRecords(OperationContext* opCtx) const {
         MONGO_UNREACHABLE;
     }
@@ -355,6 +322,14 @@ public:
 
     void setMinimumVisibleSnapshot(Timestamp name) {
         MONGO_UNREACHABLE;
+    }
+
+    boost::optional<Timestamp> getMinimumValidSnapshot() const {
+        MONGO_UNREACHABLE;
+    }
+
+    void setMinimumValidSnapshot(Timestamp name) override {
+        // no-op, called by unittests
     }
 
     boost::optional<TimeseriesOptions> getTimeseriesOptions() const {
@@ -501,6 +476,14 @@ public:
 
     void replaceMetadata(OperationContext* opCtx,
                          std::shared_ptr<BSONCollectionCatalogEntry::MetaData> md) {
+        MONGO_UNREACHABLE;
+    }
+
+    bool needsCappedLock() const {
+        MONGO_UNREACHABLE;
+    }
+
+    bool isCappedAndNeedsDelete(OperationContext* opCtx) const {
         MONGO_UNREACHABLE;
     }
 

@@ -5,6 +5,8 @@
  * @tags: [
  *   incompatible_with_macos,
  *   incompatible_with_windows_tls,
+ *   # Some tenant migration statistics field names were changed in 6.1.
+ *   requires_fcv_61,
  *   requires_majority_read_concern,
  *   requires_persistence,
  *   serverless,
@@ -48,7 +50,7 @@ function testDonorForgetMigrationAfterMigrationCompletes(
     });
 
     assert.soon(() => 0 === donorPrimary.getCollection(TenantMigrationTest.kConfigDonorsNS).count({
-        tenantId: tenantId
+        _id: migrationId,
     }));
     assert.soon(() => 0 ===
                     donorPrimary.adminCommand({serverStatus: 1})
@@ -66,7 +68,7 @@ function testDonorForgetMigrationAfterMigrationCompletes(
 
     assert.soon(() => 0 ===
                     recipientPrimary.getCollection(TenantMigrationTest.kConfigRecipientsNS).count({
-                        tenantId: tenantId
+                        _id: migrationId,
                     }));
     assert.soon(() => 0 ===
                     recipientPrimary.adminCommand({serverStatus: 1})
@@ -116,19 +118,15 @@ let configDonorsColl = donorPrimary.getCollection(TenantMigrationTest.kConfigDon
 function testStats(node, {
     currentMigrationsDonating = 0,
     currentMigrationsReceiving = 0,
-    totalSuccessfulMigrationsDonated = 0,
-    totalSuccessfulMigrationsReceived = 0,
-    totalFailedMigrationsDonated = 0,
-    totalFailedMigrationsReceived = 0
+    totalMigrationDonationsCommitted = 0,
+    totalMigrationDonationsAborted = 0,
 }) {
     const stats = tenantMigrationTest.getTenantMigrationStats(node);
     jsTestLog(stats);
     assert.eq(currentMigrationsDonating, stats.currentMigrationsDonating);
     assert.eq(currentMigrationsReceiving, stats.currentMigrationsReceiving);
-    assert.eq(totalSuccessfulMigrationsDonated, stats.totalSuccessfulMigrationsDonated);
-    assert.eq(totalSuccessfulMigrationsReceived, stats.totalSuccessfulMigrationsReceived);
-    assert.eq(totalFailedMigrationsDonated, stats.totalFailedMigrationsDonated);
-    assert.eq(totalFailedMigrationsReceived, stats.totalFailedMigrationsReceived);
+    assert.eq(totalMigrationDonationsCommitted, stats.totalMigrationDonationsCommitted);
+    assert.eq(totalMigrationDonationsAborted, stats.totalMigrationDonationsAborted);
 }
 
 (() => {
@@ -151,11 +149,10 @@ function testStats(node, {
     assert.eq(mtab.donor.state, TenantMigrationTest.DonorAccessState.kBlockWritesAndReads);
     assert(mtab.donor.blockTimestamp);
 
-    let donorDoc = configDonorsColl.findOne({tenantId: kTenantId});
+    let donorDoc = configDonorsColl.findOne({_id: migrationId});
     let blockOplogEntry =
         donorPrimary.getDB("local")
-            .oplog.rs
-            .find({ns: TenantMigrationTest.kConfigDonorsNS, op: "u", "o.tenantId": kTenantId})
+            .oplog.rs.find({ns: TenantMigrationTest.kConfigDonorsNS, op: "u", "o._id": migrationId})
             .sort({"$natural": -1})
             .limit(1)
             .next();
@@ -175,7 +172,7 @@ function testStats(node, {
     TenantMigrationTest.assertCommitted(
         tenantMigrationTest.waitForMigrationToComplete(migrationOpts));
 
-    donorDoc = configDonorsColl.findOne({tenantId: kTenantId});
+    donorDoc = configDonorsColl.findOne({_id: migrationId});
     let commitOplogEntry = donorPrimary.getDB("local").oplog.rs.findOne(
         {ns: TenantMigrationTest.kConfigDonorsNS, op: "u", o: donorDoc});
     assert.eq(donorDoc.state, TenantMigrationTest.DonorState.kCommitted);
@@ -196,8 +193,7 @@ function testStats(node, {
 
     testDonorForgetMigrationAfterMigrationCompletes(donorRst, recipientRst, migrationId, kTenantId);
 
-    testStats(donorPrimary, {totalSuccessfulMigrationsDonated: 1});
-    testStats(recipientPrimary, {totalSuccessfulMigrationsReceived: 1});
+    testStats(donorPrimary, {totalMigrationDonationsCommitted: 1});
 })();
 
 (() => {
@@ -218,7 +214,7 @@ function testStats(node, {
         tenantMigrationTest.runMigration(migrationOpts, {automaticForgetMigration: false}));
     abortRecipientFp.off();
 
-    const donorDoc = configDonorsColl.findOne({tenantId: kTenantId});
+    const donorDoc = configDonorsColl.findOne({_id: migrationId});
     const abortOplogEntry = donorPrimary.getDB("local").oplog.rs.findOne(
         {ns: TenantMigrationTest.kConfigDonorsNS, op: "u", o: donorDoc});
     assert.eq(donorDoc.state, TenantMigrationTest.DonorState.kAborted);
@@ -242,9 +238,8 @@ function testStats(node, {
 
     testDonorForgetMigrationAfterMigrationCompletes(donorRst, recipientRst, migrationId, kTenantId);
 
-    testStats(donorPrimary, {totalSuccessfulMigrationsDonated: 1, totalFailedMigrationsDonated: 1});
-    testStats(recipientPrimary,
-              {totalSuccessfulMigrationsReceived: 1, totalFailedMigrationsReceived: 1});
+    testStats(donorPrimary,
+              {totalMigrationDonationsCommitted: 1, totalMigrationDonationsAborted: 1});
 })();
 
 (() => {
@@ -261,7 +256,7 @@ function testStats(node, {
         tenantMigrationTest.runMigration(migrationOpts, {automaticForgetMigration: false}));
     abortDonorFp.off();
 
-    const donorDoc = configDonorsColl.findOne({tenantId: kTenantId});
+    const donorDoc = configDonorsColl.findOne({_id: migrationId});
     const abortOplogEntry = donorPrimary.getDB("local").oplog.rs.findOne(
         {ns: TenantMigrationTest.kConfigDonorsNS, op: "u", o: donorDoc});
     assert.eq(donorDoc.state, TenantMigrationTest.DonorState.kAborted);
@@ -284,10 +279,8 @@ function testStats(node, {
 
     testDonorForgetMigrationAfterMigrationCompletes(donorRst, recipientRst, migrationId, kTenantId);
 
-    testStats(donorPrimary, {totalSuccessfulMigrationsDonated: 1, totalFailedMigrationsDonated: 2});
-    // The recipient had a chance to synchronize data and from its side the migration succeeded.
-    testStats(recipientPrimary,
-              {totalSuccessfulMigrationsReceived: 2, totalFailedMigrationsReceived: 1});
+    testStats(donorPrimary,
+              {totalMigrationDonationsCommitted: 1, totalMigrationDonationsAborted: 2});
 })();
 
 // Drop the TTL index to make sure that the migration state is still available when the

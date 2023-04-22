@@ -29,8 +29,8 @@
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/db/catalog/collection_options.h"
+#include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/catalog_raii.h"
-#include "mongo/db/logical_session_cache_noop.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/op_observer/oplog_writer_impl.h"
 #include "mongo/db/persistent_task_store.h"
@@ -47,7 +47,8 @@
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/service_context_d_test_fixture.h"
-#include "mongo/db/session_catalog_mongod.h"
+#include "mongo/db/session/logical_session_cache_noop.h"
+#include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/chunk_manager.h"
@@ -240,7 +241,7 @@ public:
 
                           for (const auto& innerOp : applyOpsInfo.getOperations()) {
                               operations.emplace_back(repl::DurableReplOperation::parse(
-                                  {"findApplyOpsNewerThan"}, innerOp));
+                                  IDLParserContext{"findApplyOpsNewerThan"}, innerOp));
                           }
 
                           result.emplace_back(
@@ -711,9 +712,10 @@ TEST_F(ReshardingOplogCrudApplicationTest, DeleteOpAtomicallyMovesFromOtherStash
             AutoGetCollection otherStashColl(opCtx.get(), otherStashNss(), MODE_IX);
             WriteUnitOfWork wuow(opCtx.get());
             ASSERT_OK(
-                otherStashColl->insertDocument(opCtx.get(),
-                                               InsertStatement{BSON("_id" << 0 << sk() << -3)},
-                                               nullptr /* opDebug */));
+                collection_internal::insertDocument(opCtx.get(),
+                                                    *otherStashColl,
+                                                    InsertStatement{BSON("_id" << 0 << sk() << -3)},
+                                                    nullptr /* opDebug */));
             wuow.commit();
         }
 

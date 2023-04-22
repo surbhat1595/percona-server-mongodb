@@ -393,7 +393,7 @@ protected:
 
     ShardSplitDonorDocument defaultStateDocument() const {
         return ShardSplitDonorDocument::parse(
-            {"donor.document"},
+            IDLParserContext{"donor.document"},
             BSON("_id" << _uuid << "tenantIds" << _tenantIds << "recipientTagName"
                        << _recipientTagName << "recipientSetName" << _recipientSetName));
     }
@@ -437,6 +437,9 @@ protected:
 
     std::unique_ptr<FailPointEnableBlock> _skipAcceptanceFP =
         std::make_unique<FailPointEnableBlock>("skipShardSplitWaitForSplitAcceptance");
+
+    std::unique_ptr<FailPointEnableBlock> _skipGarbageTimeoutFP =
+        std::make_unique<FailPointEnableBlock>("skipShardSplitGarbageCollectionTimeout");
 
 
     // for mocking split acceptance

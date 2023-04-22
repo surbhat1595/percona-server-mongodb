@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
@@ -43,12 +42,10 @@
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/start_chunk_clone_request.h"
 #include "mongo/logv2/log.h"
-#include "mongo/s/chunk_version.h"
 #include "mongo/s/request_types/migration_secondary_throttle_options.h"
 #include "mongo/util/assert_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
-
 
 namespace mongo {
 namespace {
@@ -193,7 +190,7 @@ public:
     }
 
     bool run(OperationContext* opCtx,
-             const std::string& dbname,
+             const DatabaseName&,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
         bool waitForSteadyOrDone = cmdObj["waitForSteadyOrDone"].boolean();
@@ -238,7 +235,7 @@ public:
     }
 
     bool run(OperationContext* opCtx,
-             const std::string& dbname,
+             const DatabaseName& dbname,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
         auto const sessionId = uassertStatusOK(MigrationSessionId::extractFromBSON(cmdObj));
@@ -292,7 +289,7 @@ public:
     }
 
     bool run(OperationContext* opCtx,
-             const std::string&,
+             const DatabaseName&,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
         auto const mdm = MigrationDestinationManager::get(opCtx);
@@ -350,7 +347,7 @@ public:
     }
 
     bool run(OperationContext* opCtx,
-             const std::string& dbname,
+             const DatabaseName&,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
         opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();

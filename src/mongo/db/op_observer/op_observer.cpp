@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/op_observer/op_observer.h"
 
 #include "mongo/db/operation_context.h"

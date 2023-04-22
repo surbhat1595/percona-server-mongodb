@@ -28,6 +28,7 @@
  */
 
 
+#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/platform/basic.h"
 
 #include <boost/optional.hpp>
@@ -39,11 +40,13 @@
 #include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/exec/bucket_unpacker.h"
+#include "mongo/db/exec/projection_executor_utils.h"
 #include "mongo/db/index/wildcard_key_generator.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/matcher/expression_geo.h"
 #include "mongo/db/matcher/expression_text.h"
+#include "mongo/db/matcher/match_expression_dependencies.h"
 #include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
@@ -156,7 +159,6 @@ bool hintMatchesNameOrPattern(const BSONObj& hintObj,
         firstHintElt.type() == BSONType::String) {
         // An index name is provided by the hint.
         return indexName == firstHintElt.valueStringData();
-        ;
     }
 
     // An index spec is provided by the hint.
@@ -189,10 +191,8 @@ bool hintMatchesClusterKey(const boost::optional<ClusteredCollectionInfo>& clust
  */
 bool hintMatchesColumnStoreIndex(const BSONObj& hintObj, const ColumnIndexEntry& columnStoreIndex) {
     // TODO SERVER-68400: Should be possible to have some other keypattern.
-    return hintMatchesNameOrPattern(hintObj,
-                                    columnStoreIndex.catalogName,
-                                    BSON("$**"
-                                         << "columnstore"));
+    return hintMatchesNameOrPattern(
+        hintObj, columnStoreIndex.identifier.catalogName, columnStoreIndex.keyPattern);
 }
 
 /**
@@ -202,7 +202,7 @@ bool hintMatchesColumnStoreIndex(const BSONObj& hintObj, const ColumnIndexEntry&
 std::pair<DepsTracker, DepsTracker> computeDeps(const QueryPlannerParams& params,
                                                 const CanonicalQuery& query) {
     DepsTracker filterDeps;
-    query.root()->addDependencies(&filterDeps);
+    match_expression::addDependencies(query.root(), &filterDeps);
     DepsTracker outputDeps;
     if (!query.getProj() || query.getProj()->requiresDocument()) {
         outputDeps.needWholeDocument = true;
@@ -223,7 +223,8 @@ std::pair<DepsTracker, DepsTracker> computeDeps(const QueryPlannerParams& params
     return {std::move(filterDeps), std::move(outputDeps)};
 }
 
-Status columnScanIsPossibleStatus(const CanonicalQuery& query, const QueryPlannerParams& params) {
+Status computeColumnScanIsPossibleStatus(const CanonicalQuery& query,
+                                         const QueryPlannerParams& params) {
     if (params.columnStoreIndexes.empty()) {
         return {ErrorCodes::InvalidOptions, "No columnstore indexes available"};
     }
@@ -241,7 +242,7 @@ Status columnScanIsPossibleStatus(const CanonicalQuery& query, const QueryPlanne
 }
 
 bool columnScanIsPossible(const CanonicalQuery& query, const QueryPlannerParams& params) {
-    return columnScanIsPossibleStatus(query, params).isOK();
+    return computeColumnScanIsPossibleStatus(query, params).isOK();
 }
 
 std::unique_ptr<QuerySolution> makeColumnScanPlan(
@@ -250,17 +251,18 @@ std::unique_ptr<QuerySolution> makeColumnScanPlan(
     const ColumnIndexEntry& columnStoreIndex,
     DepsTracker filterDeps,
     DepsTracker outputDeps,
+    OrderedPathSet allFieldsReferenced,
     StringMap<std::unique_ptr<MatchExpression>> filterSplitByColumn,
     std::unique_ptr<MatchExpression> residualPredicate) {
     dassert(columnScanIsPossible(query, params));
 
-    // TODO SERVER-67140: Check if the columnar index actually provides the fields we need.
     return QueryPlannerAnalysis::analyzeDataAccess(
         query,
         params,
         std::make_unique<ColumnIndexScanNode>(columnStoreIndex,
                                               std::move(outputDeps.fields),
                                               std::move(filterDeps.fields),
+                                              std::move(allFieldsReferenced),
                                               std::move(filterSplitByColumn),
                                               std::move(residualPredicate)));
 }
@@ -269,68 +271,114 @@ std::unique_ptr<QuerySolution> makeColumnScanPlan(
  * A helper function which applies a heuristic to determine if a COLUMN_SCAN plan would examine few
  * enough fields to be considered faster than a COLLSCAN.
  */
-Status checkFieldLimits(const OrderedPathSet& filterDeps,
-                        const OrderedPathSet& outputDeps,
-                        const StringMap<std::unique_ptr<MatchExpression>>& filterSplitByColumn) {
+Status checkColumnScanFieldLimits(
+    size_t nReferencedFields,
+    const StringMap<std::unique_ptr<MatchExpression>>& filterSplitByColumn) {
 
-    const int nReferencedFields =
-        static_cast<int>(set_util::setUnion(filterDeps, outputDeps).size());
     const int maxNumFields = filterSplitByColumn.size() > 0
         ? internalQueryMaxNumberOfFieldsToChooseFilteredColumnScan.load()
         : internalQueryMaxNumberOfFieldsToChooseUnfilteredColumnScan.load();
-    if (nReferencedFields > maxNumFields) {
+    if (static_cast<int>(nReferencedFields) > maxNumFields) {
         return Status{ErrorCodes::Error{6430508},
                       str::stream() << "referenced too many fields. nReferenced="
                                     << nReferencedFields << ", limit=" << maxNumFields};
     }
     return Status::OK();
 }
+
+bool checkProjectionCoversQuery(OrderedPathSet& fields, const ColumnIndexEntry& columnStoreIndex) {
+    const auto projectedFields = projection_executor_utils::applyProjectionToFields(
+        columnStoreIndex.indexPathProjection->exec(), fields);
+    // If the number of fields is equal to the number of fields preserved, then the projection
+    // covers the query.
+    return projectedFields.size() == fields.size();
+}
+
 /**
- * Attempts to build a plan using a columnstore index. Returns a non-OK status if it can't build
- * one
- * - with the code and message indicating the problem - or a QuerySolution if it can.
+ * A helper function that returns the number of column store indexes that cover the query,
+ * as well as an arbitary, valid column store index for the column scan.
+ */
+std::pair<int, const ColumnIndexEntry*> getValidColumnIndex(
+    OrderedPathSet& fields, const std::vector<ColumnIndexEntry>& columnStoreIndexes) {
+    const ColumnIndexEntry* chosenIndex;
+    int numValid = 0;
+    for (const auto& columnStoreIndex : columnStoreIndexes) {
+        if (checkProjectionCoversQuery(fields, columnStoreIndex)) {
+            chosenIndex = numValid == 0 ? &columnStoreIndex : chosenIndex;
+            ++numValid;
+        }
+    }
+    return {numValid, chosenIndex};
+}
+
+/**
+ * Attempts to build a plan using a column store index. Returns a non-OK status if it can't build
+ * one with the code and message indicating the problem - or a QuerySolution if it can.
  */
 StatusWith<std::unique_ptr<QuerySolution>> tryToBuildColumnScan(
     const QueryPlannerParams& params,
     const CanonicalQuery& query,
     const boost::optional<ColumnIndexEntry>& hintedIndex = boost::none) {
-    if (auto status = columnScanIsPossibleStatus(query, params); !status.isOK()) {
+    if (auto status = computeColumnScanIsPossibleStatus(query, params); !status.isOK()) {
         return status;
     }
 
     invariant(params.columnStoreIndexes.size() >= 1);
-    const auto& columnStoreIndex = hintedIndex.value_or(params.columnStoreIndexes.front());
-    if (!hintedIndex && params.columnStoreIndexes.size() > 1) {
-        // TODO SERVER-67140 only warnn if there is more than one index that is actually eligible
-        // for use.
+
+    auto [filterDeps, outputDeps] = computeDeps(params, query);
+    auto allFieldsReferenced = set_util::setUnion(filterDeps.fields, outputDeps.fields);
+    if (filterDeps.needWholeDocument || outputDeps.needWholeDocument) {
+        // TODO SERVER-66284 Would like to enable a plan when hinted, even if we need the whole
+        // document. Something like COLUMN_SCAN -> FETCH.
+        return {ErrorCodes::Error{6298501},
+                "cannot use column store index because the query requires seeing the entire "
+                "document"};
+    } else if (!hintedIndex && expression::containsOverlappingPaths(allFieldsReferenced)) {
+        // The query needs a path and a parent or ancestor path. For example, the query needs to
+        // access both "a" and "a.b". This is a heuristic, but generally we would not expect this to
+        // benefit from the column store index. This kind of dependency pattern is probably an
+        // indication that the parent/ancestor path will be an object or array of objects, which
+        // will require us to fall back to the rowstore and remove any benefit of using the index.
+        return {ErrorCodes::Error{6726400},
+                str::stream() << "cannot use columnstore index because the query requires paths "
+                                 "which are a prefix of each other: "
+                              << set_util::setToString(allFieldsReferenced)};
+    }
+
+    // Ensures that hinted index is eligible for the column scan.
+    if (hintedIndex && !checkProjectionCoversQuery(allFieldsReferenced, *hintedIndex)) {
+        return {ErrorCodes::Error{6714002},
+                "the hinted column store index cannot be used because it does not cover the query"};
+    }
+
+    // Check that union of the dependency fields can be successfully projected by at least one
+    // column store index.
+    auto [numValid, selectedColumnStoreIndex] =
+        getValidColumnIndex(allFieldsReferenced, params.columnStoreIndexes);
+
+    // If not columnar index can support the projection, we will not use column scan.
+    if (numValid == 0) {
+        return {ErrorCodes::Error{6714001},
+                "cannot use column store index because there exists no column store index for this "
+                "collection that covers the query"};
+    }
+    invariant(selectedColumnStoreIndex);
+
+    if (!hintedIndex && numValid > 1) {
         LOGV2_DEBUG(6298500,
                     2,
                     "Multiple column store indexes present. Selecting the first "
                     "one arbitrarily",
-                    "indexName"_attr = columnStoreIndex.catalogName);
+                    "indexName"_attr = selectedColumnStoreIndex->identifier.catalogName);
     }
 
-    auto [filterDeps, outputDeps] = computeDeps(params, query);
-    if (filterDeps.needWholeDocument || outputDeps.needWholeDocument) {
-        // We only want to use the columnar index if we can avoid fetching the whole document.
-        // TODO SERVER-66284 Would like to enable a plan when hinted, even if we need the whole
-        // document. Something like COLUMN_SCAN -> FETCH.
-        return {ErrorCodes::Error{6298501},
-                "cannot use columnstore index because the query requires seeing the entire "
-                "document"};
-    }
-
-    // TODO SERVER-67140: Check if the columnar index actually provides the fields we need.
+    const auto& columnStoreIndex = hintedIndex.value_or(*selectedColumnStoreIndex);
     std::unique_ptr<MatchExpression> residualPredicate;
     StringMap<std::unique_ptr<MatchExpression>> filterSplitByColumn;
-    if (params.options & QueryPlannerParams::GENERATE_PER_COLUMN_FILTERS) {
-        std::tie(filterSplitByColumn, residualPredicate) =
-            expression::splitMatchExpressionForColumns(query.root());
-    } else {
-        residualPredicate = query.root()->shallowClone();
-    }
+    std::tie(filterSplitByColumn, residualPredicate) =
+        expression::splitMatchExpressionForColumns(query.root());
     auto fieldLimitStatus =
-        checkFieldLimits(filterDeps.fields, outputDeps.fields, filterSplitByColumn);
+        checkColumnScanFieldLimits(allFieldsReferenced.size(), filterSplitByColumn);
 
     if (fieldLimitStatus.isOK() || hintedIndex) {
         // We have a hint, or few enough dependencies that we suspect a column scan is still
@@ -340,6 +388,7 @@ StatusWith<std::unique_ptr<QuerySolution>> tryToBuildColumnScan(
                                   columnStoreIndex,
                                   std::move(filterDeps),
                                   std::move(outputDeps),
+                                  std::move(allFieldsReferenced),
                                   std::move(filterSplitByColumn),
                                   std::move(residualPredicate));
     }
@@ -1448,8 +1497,12 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     // Check whether we're eligible to use the columnar index, assuming no other indexes can be
     // used.
     if (out.empty()) {
-        if (auto statusWithSoln = tryToBuildColumnScan(params, query); statusWithSoln.isOK()) {
+        auto statusWithSoln = tryToBuildColumnScan(params, query);
+        if (statusWithSoln.isOK()) {
             out.emplace_back(std::move(statusWithSoln.getValue()));
+        } else {
+            LOGV2_DEBUG(
+                6726401, 4, "Not using a column scan", "reason"_attr = statusWithSoln.getStatus());
         }
     }
 

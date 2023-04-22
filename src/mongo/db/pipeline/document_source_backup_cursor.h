@@ -96,6 +96,8 @@ public:
         return boost::none;
     }
 
+    void addVariableRefs(std::set<Variables::Id>* refs) const final {}
+
 protected:
     GetNextResult doGetNext() override;
     DocumentSourceBackupCursor(StorageEngine::BackupOptions&& options,

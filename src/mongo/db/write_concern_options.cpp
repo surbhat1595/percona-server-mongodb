@@ -27,24 +27,18 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include <type_traits>
 
 #include "mongo/db/write_concern_options.h"
-#include "mongo/db/write_concern_options_gen.h"
 
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/util/bson_extract.h"
-#include "mongo/db/field_parser.h"
 #include "mongo/db/repl/repl_set_config.h"
+#include "mongo/db/write_concern_options_gen.h"
 #include "mongo/util/str.h"
 
 namespace mongo {
-
-using std::string;
-
 namespace {
 
 /**
@@ -107,7 +101,7 @@ StatusWith<WriteConcernOptions> WriteConcernOptions::parse(const BSONObj& obj) t
         return Status(ErrorCodes::FailedToParse, "write concern object cannot be empty");
     }
 
-    auto writeConcernIdl = WriteConcernIdl::parse({"WriteConcernOptions"}, obj);
+    auto writeConcernIdl = WriteConcernIdl::parse(IDLParserContext{"WriteConcernOptions"}, obj);
     auto parsedW = writeConcernIdl.getWriteConcernW();
 
     WriteConcernOptions writeConcern;
@@ -153,9 +147,11 @@ WriteConcernOptions WriteConcernOptions::deserializerForIDL(const BSONObj& obj) 
 }
 
 StatusWith<WriteConcernOptions> WriteConcernOptions::extractWCFromCommand(const BSONObj& cmdObj) {
-    // Return the default write concern if no write concern is provided. We check for the existence
-    // of the write concern field up front in order to avoid the expense of constructing an error
-    // status in bsonExtractTypedField() below.
+    // If no write concern is provided from the command, return the default write concern
+    // ({w: 1, wtimeout: 0}). If the default write concern is returned, it will be overriden in
+    // extractWriteConcern by the cluster-wide write concern or the implicit default write concern.
+    // We check for the existence of the write concern field up front in order to avoid the expense
+    // of constructing an error status in bsonExtractTypedField() below.
     if (!cmdObj.hasField(kWriteConcernField)) {
         return WriteConcernOptions();
     }

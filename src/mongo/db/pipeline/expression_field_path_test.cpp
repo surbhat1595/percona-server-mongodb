@@ -36,8 +36,8 @@
 #include "mongo/db/json.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/pipeline/expression_dependencies.h"
 #include "mongo/dbtests/dbtests.h"
-#include "mongo/unittest/unittest.h"
 
 namespace mongo {
 namespace ExpressionTests {
@@ -208,7 +208,7 @@ public:
         intrusive_ptr<Expression> expression =
             ExpressionFieldPath::deprecatedCreate(&expCtx, "a.b");
         DepsTracker dependencies;
-        expression->addDependencies(&dependencies);
+        expression::addDependencies(expression.get(), &dependencies);
         ASSERT_EQUALS(1U, dependencies.fields.size());
         ASSERT_EQUALS(1U, dependencies.fields.count("a.b"));
         ASSERT_EQUALS(false, dependencies.needWholeDocument);

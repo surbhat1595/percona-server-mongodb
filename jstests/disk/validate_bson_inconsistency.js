@@ -31,9 +31,20 @@ resetDbpath(dbpath);
     mongod = startMongodOnExistingPath(dbpath);
     db = mongod.getDB(baseName);
     testColl = db[collName];
+    testColl.insert({a: 1, b: 2, c: {b: 3}, d: {a: [2, 3, 4], b: {a: 2}}});
+    testColl.insert({a: 1, b: 1});
 
+    // Warnings should be triggered iff checkBSONConsistency is set to true.
     let res = assert.commandWorked(testColl.validate());
     assert(res.valid, tojson(res));
+    assert.eq(res.nNonCompliantDocuments, 0);
+    assert.eq(res.warnings.length, 0);
+
+    res = assert.commandWorked(testColl.validate({checkBSONConsistency: true}));
+    assert(res.valid, tojson(res));
+    assert.eq(res.nNonCompliantDocuments, numDocs);
+    assert.eq(res.warnings.length, 1);
+
     MongoRunner.stopMongod(mongod, null, {skipValidation: true});
 })();
 
@@ -63,6 +74,35 @@ resetDbpath(dbpath);
     assert(res.valid, tojson(res));
     assert.eq(res.nNonCompliantDocuments, 2);
     assert.eq(res.warnings.length, 1);
+    MongoRunner.stopMongod(mongod, null, {skipValidation: true});
+})();
+
+(function validateDocumentsInvalidRegexOptions() {
+    let mongod = startMongodOnExistingPath(dbpath);
+    let db = mongod.getDB(baseName);
+
+    const collName = collNamePrefix + count++;
+    db.getCollection(collName).drop();
+    assert.commandWorked(db.createCollection(collName));
+    let coll = db[collName];
+
+    jsTestLog(
+        "Checks that issues are found when we validate regex expressions with invalid options.");
+    insertInvalidRegex(coll, mongod, 5);
+    mongod = startMongodOnExistingPath(dbpath);
+    db = mongod.getDB(baseName);
+    coll = db[collName];
+
+    let res = coll.validate({checkBSONConsistency: false});
+    assert(res.valid, tojson(res));
+    assert.eq(res.nNonCompliantDocuments, 5);
+    assert.eq(res.warnings.length, 1);
+
+    res = coll.validate({checkBSONConsistency: true});
+    assert(res.valid, tojson(res));
+    assert.eq(res.nNonCompliantDocuments, 5);
+    assert.eq(res.warnings.length, 1);
+
     MongoRunner.stopMongod(mongod, null, {skipValidation: true});
 })();
 
@@ -145,6 +185,95 @@ resetDbpath(dbpath);
     res = assert.commandWorked(testColl.validate({checkBSONConsistency: true}));
     assert(res.valid, tojson(res));
     assert.eq(res.nNonCompliantDocuments, 7);
+    assert.eq(res.warnings.length, 1);
+
+    MongoRunner.stopMongod(mongod, null, {skipValidation: true});
+})();
+
+(function validateDocumentsCorruptedBinDataColumn() {
+    jsTestLog("Validate documents with corrupted or misformed BinData Columns.");
+
+    let mongod = startMongodOnExistingPath(dbpath);
+    let db = mongod.getDB(baseName);
+    const collName = collNamePrefix + count++;
+    db.createCollection(collName);
+    let testColl = db[collName];
+
+    // Inserts a rubbish (random string) BSON Column.
+    testColl.insert({a: BinData(7, "O2FkZmdqYWtsamhnJ2xhamhkZzthaCdmZGphZ2hkYQ==")});
+    // Inserts one valid BSON Column to check that it doesn't cause a false positive.
+    testColl.insert(
+        {a: BinData(7, "AQAAAAAAAAAAQJN/AAAAAAAAAAIAAAAAAAAABwAAAAAAAAAOAAAAAAAAAAA=")});
+
+    // Calling validate without 'checkBSONConsistency' should not return any warnings.
+    let res = assert.commandWorked(testColl.validate());
+    assert(res.valid, tojson(res));
+    assert.eq(res.warnings.length, 0);
+    assert.eq(res.nNonCompliantDocuments, 0);
+
+    res = assert.commandWorked(testColl.validate({checkBSONConsistency: true}));
+    assert(res.valid, tojson(res));
+    assert.eq(res.warnings.length, 1);
+    assert.eq(res.nNonCompliantDocuments, 1);
+
+    MongoRunner.stopMongod(mongod, null, {skipValidation: true});
+})();
+
+(function validateDocumentsNonSequentialArrayIndexes() {
+    jsTestLog("Validate documents with array indices that are not sequential");
+
+    let mongod = startMongodOnExistingPath(dbpath);
+    let db = mongod.getDB(baseName);
+    const collName = collNamePrefix + count++;
+    db.createCollection(collName);
+    let testColl = db[collName];
+
+    let uri = getUriForColl(testColl);
+    const numDocs = 10;
+    insertNonSequentialArrayIndexes(testColl, uri, mongod, numDocs);
+
+    mongod = startMongodOnExistingPath(dbpath);
+    db = mongod.getDB(baseName);
+    testColl = db[collName];
+
+    res = assert.commandWorked(testColl.validate());
+    assert(res.valid, tojson(res));
+    assert.eq(res.nNonCompliantDocuments, 10);
+    assert.eq(res.warnings.length, 1);
+
+    res = assert.commandWorked(testColl.validate({checkBSONConsistency: true}));
+    assert(res.valid, tojson(res));
+    assert.eq(res.nNonCompliantDocuments, 10);
+    assert.eq(res.warnings.length, 1);
+
+    MongoRunner.stopMongod(mongod, null, {skipValidation: true});
+})();
+
+(function validateDocumentsInvalidUTF8() {
+    jsTestLog("Validate documents with invalid UTF-8 strings");
+
+    let mongod = startMongodOnExistingPath(dbpath);
+    let db = mongod.getDB(baseName);
+    const collName = collNamePrefix + count++;
+    db.createCollection(collName);
+    let testColl = db[collName];
+
+    let uri = getUriForColl(testColl);
+    const numDocs = 10;
+    insertInvalidUTF8(testColl, uri, mongod, numDocs);
+
+    mongod = startMongodOnExistingPath(dbpath);
+    db = mongod.getDB(baseName);
+    testColl = db[collName];
+
+    res = assert.commandWorked(testColl.validate());
+    assert(res.valid, tojson(res));
+    assert.eq(res.nNonCompliantDocuments, 0);
+    assert.eq(res.warnings.length, 0);
+
+    res = assert.commandWorked(testColl.validate({checkBSONConsistency: true}));
+    assert(res.valid, tojson(res));
+    assert.eq(res.nNonCompliantDocuments, 10);
     assert.eq(res.warnings.length, 1);
 
     MongoRunner.stopMongod(mongod, null, {skipValidation: true});

@@ -2797,7 +2797,9 @@ Status WiredTigerKVEngine::importRecordStore(OperationContext* opCtx,
               "Failpoint WTWriteConflictExceptionForImportCollection enabled. Throwing "
               "WriteConflictException",
               "ident"_attr = ident);
-        throwWriteConflictException();
+        throwWriteConflictException(
+            str::stream() << "Hit failpoint '"
+                          << WTWriteConflictExceptionForImportCollection.getName() << "'.");
     }
 
     std::string config = uassertStatusOK(
@@ -2923,7 +2925,6 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::getRecordStore(OperationContext
     params.overwrite = options.clusteredIndex ? false : true;
     params.isEphemeral = _ephemeral;
     params.isLogged = isLogged;
-    params.cappedCallback = nullptr;
     params.sizeStorer = _sizeStorer.get();
     params.tracksSizeAdjustments = true;
     params.forceUpdateWithFullDocument = options.timeseries != boost::none;
@@ -3006,7 +3007,9 @@ Status WiredTigerKVEngine::importSortedDataInterface(OperationContext* opCtx,
               "Failpoint WTWriteConflictExceptionForImportIndex enabled. Throwing "
               "WriteConflictException",
               "ident"_attr = ident);
-        throwWriteConflictException();
+        throwWriteConflictException(str::stream()
+                                    << "Hit failpoint '"
+                                    << WTWriteConflictExceptionForImportIndex.getName() << "'.");
     }
 
     std::string config = uassertStatusOK(
@@ -3119,7 +3122,6 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::makeTemporaryRecordStore(Operat
     params.overwrite = true;
     params.isEphemeral = _ephemeral;
     params.isLogged = isLogged;
-    params.cappedCallback = nullptr;
     // Temporary collections do not need to persist size information to the size storer.
     params.sizeStorer = nullptr;
     // Temporary collections do not need to reconcile collection size/counts.

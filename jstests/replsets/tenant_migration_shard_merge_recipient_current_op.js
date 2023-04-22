@@ -10,7 +10,6 @@
  *   incompatible_with_windows_tls,
  *   requires_majority_read_concern,
  *   requires_persistence,
- *   requires_fcv_61,
  *   serverless,
  * ]
  */
@@ -26,6 +25,17 @@ load("jstests/replsets/libs/tenant_migration_util.js");
 
 const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
 
+// Note: including this explicit early return here due to the fact that multiversion
+// suites will execute this test without featureFlagShardMerge enabled (despite the
+// presence of the featureFlagShardMerge tag above), which means the test will attempt
+// to run a multi-tenant migration and fail.
+if (!TenantMigrationUtil.isShardMergeEnabled(
+        tenantMigrationTest.getDonorPrimary().getDB("admin"))) {
+    tenantMigrationTest.stop();
+    jsTestLog("Skipping Shard Merge-specific test");
+    return;
+}
+
 const kMigrationId = UUID();
 const kTenantId = 'testTenantId';
 const kReadPreference = {
@@ -33,7 +43,6 @@ const kReadPreference = {
 };
 const migrationOpts = {
     migrationIdString: extractUUIDFromObject(kMigrationId),
-    tenantId: kTenantId,
     readPreference: kReadPreference
 };
 
@@ -60,7 +69,6 @@ function checkStandardFieldsOK(res) {
     // We don't test failovers in this test so we don't expect these counters to be incremented.
     assert.eq(res.inprog[0].numRestartsDueToDonorConnectionFailure, 0, res);
     assert.eq(res.inprog[0].numRestartsDueToRecipientFailure, 0, res);
-    assert.eq(bsonWoCompare(res.inprog[0].tenantId, kTenantId), 0, res);
 }
 
 // Check currentOp fields' expected value once the recipient is in state "consistent" or later.
@@ -101,8 +109,7 @@ const fpAfterDataConsistent = configureFailPoint(
 const fpAfterForgetMigration = configureFailPoint(
     recipientPrimary, "fpAfterReceivingRecipientForgetMigration", {action: "hang"});
 
-jsTestLog("Starting tenant migration with migrationId: " + kMigrationId +
-          ", tenantId: " + kTenantId);
+jsTestLog(`Starting tenant migration with migrationId: ${kMigrationId}`);
 assert.commandWorked(
     tenantMigrationTest.startMigration(migrationOpts, {enableDonorStartMigrationFsync: true}));
 
@@ -119,7 +126,7 @@ const fpBeforePersistingRejectReadsBeforeTimestamp = configureFailPoint(
     checkStandardFieldsOK(res);
     let currOp = res.inprog[0];
     assert.eq(currOp.state, TenantMigrationTest.RecipientStateEnum.kStarted, res);
-    assert.eq(currOp.migrationCompleted, false, res);
+    assert.eq(currOp.garbageCollectable, false, res);
     assert.eq(currOp.dataSyncCompleted, false, res);
     assert(!currOp.hasOwnProperty("startFetchingDonorOpTime"), res);
     assert(!currOp.hasOwnProperty("startApplyingDonorOpTime"), res);
@@ -145,7 +152,7 @@ const fpBeforePersistingRejectReadsBeforeTimestamp = configureFailPoint(
 
     assert.eq(currOp.state, TenantMigrationTest.RecipientStateEnum.kLearnedFilenames, res);
 
-    assert.eq(currOp.migrationCompleted, false, res);
+    assert.eq(currOp.garbageCollectable, false, res);
     assert.eq(currOp.dataSyncCompleted, false, res);
     assert(!currOp.hasOwnProperty("expireAt"), res);
     assert(!currOp.hasOwnProperty("cloneFinishedRecipientOpTime"), res);
@@ -174,7 +181,7 @@ const fpBeforePersistingRejectReadsBeforeTimestamp = configureFailPoint(
     let currOp = res.inprog[0];
     // State should have changed.
     assert.eq(currOp.state, TenantMigrationTest.RecipientStateEnum.kConsistent, res);
-    assert.eq(currOp.migrationCompleted, false, res);
+    assert.eq(currOp.garbageCollectable, false, res);
     assert.eq(currOp.dataSyncCompleted, false, res);
     assert(!currOp.hasOwnProperty("expireAt"), res);
 
@@ -188,7 +195,7 @@ const fpBeforePersistingRejectReadsBeforeTimestamp = configureFailPoint(
     currOp = res.inprog[0];
     // State should have changed.
     assert.eq(currOp.state, TenantMigrationTest.RecipientStateEnum.kConsistent, res);
-    assert.eq(currOp.migrationCompleted, false, res);
+    assert.eq(currOp.garbageCollectable, false, res);
     assert.eq(currOp.dataSyncCompleted, false, res);
     assert(!currOp.hasOwnProperty("expireAt"), res);
     // The oplog applier should have applied at least the noop resume token.
@@ -217,7 +224,7 @@ forgetMigrationThread.start();
     checkPostConsistentFieldsOK(res);
     let currOp = res.inprog[0];
     assert.eq(currOp.state, TenantMigrationTest.RecipientStateEnum.kConsistent, res);
-    assert.eq(currOp.migrationCompleted, false, res);
+    assert.eq(currOp.garbageCollectable, false, res);
     // dataSyncCompleted should have changed.
     assert.eq(currOp.dataSyncCompleted, true, res);
     assert(!currOp.hasOwnProperty("expireAt"), res);
@@ -233,7 +240,7 @@ forgetMigrationThread.start();
     assert.eq(currOp.dataSyncCompleted, true, res);
     // State, completion status and expireAt should have changed.
     assert.eq(currOp.state, TenantMigrationTest.RecipientStateEnum.kDone, res);
-    assert.eq(currOp.migrationCompleted, true, res);
+    assert.eq(currOp.garbageCollectable, true, res);
     assert(currOp.hasOwnProperty("expireAt") && currOp.expireAt instanceof Date, res);
 }
 

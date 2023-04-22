@@ -32,12 +32,12 @@
 
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/commands/feature_compatibility_version_parser.h"
-#include "mongo/db/kill_sessions_local.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer_util.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/session/kill_sessions_local.h"
 #include "mongo/executor/egress_tag_closer_manager.h"
 #include "mongo/logv2/log.h"
 #include "mongo/transport/service_entry_point.h"
@@ -148,12 +148,11 @@ void FcvOpObserver::_onInsertOrUpdate(OperationContext* opCtx, const BSONObj& do
 }
 
 void FcvOpObserver::onInserts(OperationContext* opCtx,
-                              const NamespaceString& nss,
-                              const UUID& uuid,
+                              const CollectionPtr& coll,
                               std::vector<InsertStatement>::const_iterator first,
                               std::vector<InsertStatement>::const_iterator last,
                               bool fromMigrate) {
-    if (nss.isServerConfigurationCollection()) {
+    if (coll->ns().isServerConfigurationCollection()) {
         for (auto it = first; it != last; it++) {
             _onInsertOrUpdate(opCtx, it->doc);
         }

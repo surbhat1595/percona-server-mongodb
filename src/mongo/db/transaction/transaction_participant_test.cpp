@@ -27,10 +27,7 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
-#include <memory>
-
+#include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/db_raii.h"
@@ -45,8 +42,8 @@
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/repl/storage_interface_mock.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/session_catalog.h"
-#include "mongo/db/session_catalog_mongod.h"
+#include "mongo/db/session/session_catalog.h"
+#include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/stats/fill_locker_info.h"
 #include "mongo/db/transaction/server_transactions_metrics.h"
 #include "mongo/db/transaction/transaction_participant.h"
@@ -404,7 +401,8 @@ void insertTxnRecord(OperationContext* opCtx, unsigned i, DurableTxnStateEnum st
     auto coll = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
     ASSERT(coll);
     OpDebug* const nullOpDebug = nullptr;
-    ASSERT_OK(coll->insertDocument(opCtx, InsertStatement(record.toBSON()), nullOpDebug, false));
+    ASSERT_OK(collection_internal::insertDocument(
+        opCtx, coll, InsertStatement(record.toBSON()), nullOpDebug, false));
     wuow.commit();
 }
 }  // namespace

@@ -31,33 +31,61 @@
 
 #include "boost/optional/optional.hpp"
 
+#include "mongo/client/dbclient_connection.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/replica_set_aware_service.h"
+#include "mongo/db/repl/tenant_migration_shared_data.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/producer_consumer_queue.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/uuid.h"
 
 namespace mongo::repl {
-// Runs on tenant migration recipient primary and secondaries. Copies and imports donor files.
+// Runs on tenant migration recipient primary and secondaries. Copies and imports donor files and
+// then informs the primary that it has finished by running recipientVoteImportedFiles.
 class TenantFileImporterService : public ReplicaSetAwareService<TenantFileImporterService> {
 public:
     static constexpr StringData kTenantFileImporterServiceName = "TenantFileImporterService"_sd;
     static TenantFileImporterService* get(ServiceContext* serviceContext);
     TenantFileImporterService() = default;
-    void startMigration(const UUID& migrationId, const StringData& donorConnectionString);
+
+    /**
+     * Begins the process of copying and importing files for a given migration.
+     */
+    void startMigration(const UUID& migrationId);
+
+    /**
+     * Called for each file to be copied for a given migration.
+     */
     void learnedFilename(const UUID& migrationId, const BSONObj& metadataDoc);
+
+    /**
+     * Called after all files have been copied for a given migration.
+     */
     void learnedAllFilenames(const UUID& migrationId);
+
+    /**
+     * Interrupts an in-progress migration with the provided migration id.
+     */
     void interrupt(const UUID& migrationId);
+
+    /**
+     * Causes any in-progress migration be interrupted.
+     */
     void interruptAll();
 
 private:
     void onInitialDataAvailable(OperationContext*, bool) final {}
 
     void onShutdown() final {
-        stdx::unique_lock<Latch> lk(_mutex);
-        _interrupt(lk);
-        _reset(lk);
+        {
+            stdx::lock_guard lk(_mutex);
+            // Prevents a new migration from starting up during or after shutdown.
+            _isShuttingDown = true;
+        }
+        interruptAll();
+        _reset();
     }
 
     void onStartup(OperationContext*) final {}
@@ -70,18 +98,25 @@ private:
 
     void onBecomeArbiter() final {}
 
-    void _handleEvents(OperationContext* opCtx);
+    /**
+     * A worker function that waits for ImporterEvents and handles cloning and importing files.
+     */
+    void _handleEvents(const UUID& migrationId);
 
-    void _voteImportedFiles(OperationContext* opCtx);
+    /**
+     * Called to inform the primary that we have finished copying and importing all files.
+     */
+    void _voteImportedFiles(OperationContext* opCtx, const UUID& migrationId);
 
+    /**
+     * Called internally by interrupt and interruptAll to interrupt a running file import operation.
+     */
     void _interrupt(WithLock);
 
-    void _reset(WithLock);
-
-    std::unique_ptr<stdx::thread> _thread;
-    boost::optional<UUID> _migrationId;
-    std::string _donorConnectionString;
-    Mutex _mutex = MONGO_MAKE_LATCH("TenantFileImporterService::_mutex");
+    /**
+     * Waits for all async work to be finished and then resets internal state.
+     */
+    void _reset();
 
     // Explicit State enum ordering defined here because we rely on comparison
     // operators for state checking in various TenantFileImporterService methods.
@@ -110,8 +145,6 @@ private:
         return StringData();
     }
 
-    State _state;
-
     struct ImporterEvent {
         enum class Type { kNone, kLearnedFileName, kLearnedAllFilenames };
         Type type;
@@ -125,7 +158,43 @@ private:
     using Queue =
         MultiProducerSingleConsumerQueue<ImporterEvent,
                                          producer_consumer_queue_detail::DefaultCostFunction>;
+    Mutex _mutex = MONGO_MAKE_LATCH("TenantFileImporterService::_mutex");
 
-    std::shared_ptr<Queue> _eventQueue;
+    // All member variables are labeled with one of the following codes indicating the
+    // synchronization rules for accessing them.
+    //
+    // (R)  Read-only in concurrent operation; no synchronization required.
+    // (S)  Self-synchronizing; access according to class's own rules.
+    // (M)  Reads and writes guarded by _mutex.
+    // (W)  Synchronization required only for writes.
+    // (I)  Independently synchronized, see member variable comment.
+
+    // Set to true when the shutdown procedure is initiated.
+    bool _isShuttingDown = false;  // (M)
+
+    OperationContext* _opCtx;  // (M)
+
+    // The worker thread that processes ImporterEvents.
+    std::unique_ptr<stdx::thread> _workerThread;  // (M)
+
+    // The UUID of the current running migration.
+    boost::optional<UUID> _migrationId;  // (M)
+
+    // The state of the current running migration.
+    State _state;  // (M)
+
+    // The DBClientConnection to the donor used for cloning files.
+    std::shared_ptr<DBClientConnection>
+        _donorConnection;  // (I) pointer set under mutex, copied by callers.
+
+    // The ThreadPool used for cloning files.
+    std::shared_ptr<ThreadPool> _writerPool;  // (I) pointer set under mutex, copied by callers.
+
+    // The TenantMigrationSharedData used for cloning files.
+    std::shared_ptr<TenantMigrationSharedData>
+        _sharedData;  // (I) pointer set under mutex, copied by callers.
+
+    // The Queue used for processing ImporterEvents.
+    std::shared_ptr<Queue> _eventQueue;  // (I) pointer set under mutex, copied by callers.
 };
 }  // namespace mongo::repl

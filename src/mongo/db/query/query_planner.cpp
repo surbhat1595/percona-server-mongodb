@@ -300,7 +300,7 @@ bool checkProjectionCoversQuery(OrderedPathSet& fields, const ColumnIndexEntry& 
  */
 std::pair<int, const ColumnIndexEntry*> getValidColumnIndex(
     OrderedPathSet& fields, const std::vector<ColumnIndexEntry>& columnStoreIndexes) {
-    const ColumnIndexEntry* chosenIndex;
+    const ColumnIndexEntry* chosenIndex = nullptr;
     int numValid = 0;
     for (const auto& columnStoreIndex : columnStoreIndexes) {
         if (checkProjectionCoversQuery(fields, columnStoreIndex)) {
@@ -685,7 +685,7 @@ StatusWith<std::unique_ptr<PlanCacheIndexTree>> QueryPlanner::cacheDataFromTagge
 
             std::unique_ptr<IndexEntry> indexEntry =
                 std::make_unique<IndexEntry>(relevantIndices[itag->index]);
-            indexTree->entry.reset(indexEntry.release());
+            indexTree->entry = std::move(indexEntry);
             indexTree->index_pos = itag->pos;
             indexTree->canCombineBounds = itag->canCombineBounds;
         }

@@ -223,6 +223,31 @@ var authCommandsLib = {
           ]
         },
         {
+          testname: "_clusterQueryWithoutShardKey",
+          command: {_clusterQueryWithoutShardKey: 1, writeCmd: {}, stmtId: NumberInt(1)},
+          skipUnlessSharded: true,
+          skipTest: (conn) => {
+              return !TestData.setParameters.featureFlagUpdateOneWithoutShardKey;
+          },
+          testcases: [
+              {
+                  runOnDb: adminDbName,
+                  roles: {__system: 1},
+                  privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+              },
+              {
+                  runOnDb: firstDbName,
+                  roles: {__system: 1},
+                  privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+              },
+              {
+                  runOnDb: secondDbName,
+                  roles: {__system: 1},
+                  privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+              }
+          ]
+        },
+        {
           testname: "_configsvrAbortReshardCollection",
           command: {_configsvrAbortReshardCollection: "test.x"},
           skipSharded: true,
@@ -378,34 +403,6 @@ var authCommandsLib = {
                 roles: {__system: 1},
                 runOnDb: firstDbName,
               }
-          ]
-        },
-        {
-          testname: "applyOps_precondition",
-          command: {
-              applyOps: [{"op": "n", "ns": "", "o": {}}],
-              preCondition: [{ns: firstDbName + ".x", q: {x: 5}, res: []}]
-          },
-          skipSharded: true,
-          setup: function(db) {
-              assert.writeOK(db.getSiblingDB(firstDbName).x.save({}));
-          },
-          teardown: function(db) {
-              db.getSiblingDB(firstDbName).x.drop();
-          },
-          testcases: [
-              {
-                runOnDb: adminDbName,
-                privileges: [
-                    {resource: {db: firstDbName, collection: "x"}, actions: ["find"]},
-                    {
-                      resource: {cluster: true},
-                      actions: ["appendOplogNote"],
-                      removeWhenTestingAuthzFailure: false
-                    },
-                    {resource: {cluster: true}, actions: ["applyOps"]},
-                ],
-              },
           ]
         },
         {
@@ -2751,6 +2748,54 @@ var authCommandsLib = {
           ]
         },
         {
+          testname: "_shardsvrCreateGlobalIndex",
+          command: {_shardsvrCreateGlobalIndex: UUID()},
+          skipSharded: true,
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: {__system: 1},
+                privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                expectFail: true
+              },
+              {runOnDb: firstDbName, roles: {}},
+              {runOnDb: secondDbName, roles: {}}
+          ]
+        },
+        {
+          testname: "_shardsvrDropGlobalIndex",
+          command: {_shardsvrDropGlobalIndex: UUID()},
+          skipSharded: true,
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: {__system: 1},
+                privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                expectFail: true
+              },
+              {runOnDb: firstDbName, roles: {}},
+              {runOnDb: secondDbName, roles: {}}
+          ]
+        },
+        {
+          testname: "_shardsvrInsertGlobalIndexKey",
+          command: {_shardsvrInsertGlobalIndexKey: UUID(), key: {a: 1}, docKey: {shk: 1, _id: 1}},
+          skipSharded: true,
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: {__system: 1},
+                privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                expectFail: true
+              },
+              {runOnDb: firstDbName,
+                roles: {__system: 1},
+                privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                expectFail: true
+              },
+          ]
+        },
+        {
           testname: "commitTxn",
           command: {commitTransaction: 1},
           // TODO (SERVER-53497): Enable auth testing for abortTransaction and commitTransaction.
@@ -3083,7 +3128,7 @@ var authCommandsLib = {
                       t: new Timestamp(1655722668, 22),
                       v: new Timestamp(1, 0)
                   },
-                  min: {_id: MinKey}, 
+                  min: {_id: MinKey},
                   max: {_id: -4611686018427387902}
               },
               fromShardCollectionVersion: {
@@ -5781,7 +5826,7 @@ var authCommandsLib = {
               }
           ]
         },
-        { 
+        {
           testname: "setClusterParameter",
           command: {setClusterParameter: {testIntClusterParameter: {intData: 17}}},
           skipTest: (conn) => {

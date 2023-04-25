@@ -281,6 +281,15 @@ Status ServiceEntryPointImpl::start() {
     return Status::OK();
 }
 
+void ServiceEntryPointImpl::configureServiceExecutorContext(ServiceContext::UniqueClient& client,
+                                                            bool isPrivilegedSession) {
+    auto seCtx = std::make_unique<transport::ServiceExecutorContext>();
+    seCtx->setUseDedicatedThread(transport::gInitialUseDedicatedThread);
+    seCtx->setCanUseReserved(isPrivilegedSession);
+    stdx::lock_guard lk(*client);
+    transport::ServiceExecutorContext::set(&*client, std::move(seCtx));
+}
+
 void ServiceEntryPointImpl::startSession(transport::SessionHandle session) {
     invariant(session);
     // Setup the restriction environment on the Session, if the Session has local/remote Sockaddrs
@@ -295,7 +304,7 @@ void ServiceEntryPointImpl::startSession(transport::SessionHandle session) {
     auto client = _svcCtx->makeClient("conn{}"_format(session->id()), session);
     auto clientPtr = client.get();
 
-    Sessions::iterator iter;
+    std::shared_ptr<transport::SessionWorkflow> workflow;
     {
         auto sync = _sessions->sync();
         if (sync.size() >= _maxSessions && !isPrivilegedSession) {
@@ -311,17 +320,10 @@ void ServiceEntryPointImpl::startSession(transport::SessionHandle session) {
             return;
         }
 
-        // Imbue the new Client with a ServiceExecutorContext.
-        {
-            auto seCtx = std::make_unique<transport::ServiceExecutorContext>();
-            seCtx->setUseDedicatedThread(transport::gInitialUseDedicatedThread);
-            seCtx->setCanUseReserved(isPrivilegedSession);
-            stdx::lock_guard lk(*client);
-            transport::ServiceExecutorContext::set(&*client, std::move(seCtx));
-        }
+        configureServiceExecutorContext(client, isPrivilegedSession);
 
-        auto workflow = transport::SessionWorkflow::make(std::move(client));
-        iter = sync.insert(std::move(workflow));
+        workflow = transport::SessionWorkflow::make(std::move(client));
+        auto iter = sync.insert(workflow);
         if (!quiet()) {
             LOGV2(22943,
                   "Connection accepted",
@@ -331,7 +333,7 @@ void ServiceEntryPointImpl::startSession(transport::SessionHandle session) {
     }
 
     onClientConnect(clientPtr);
-    iter->second.workflow->start();
+    workflow->start();
 }
 
 void ServiceEntryPointImpl::onClientDisconnect(Client* client) {

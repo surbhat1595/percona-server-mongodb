@@ -35,6 +35,7 @@
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_txn_record_gen.h"
 #include "mongo/db/session/sessions_collection_mock.h"
+#include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/util/clock_source_mock.h"
 
 namespace mongo {
@@ -84,9 +85,12 @@ TEST_F(MongoDSessionCatalogTest, ReapSomeExpiredSomeNot) {
     _collectionMock->add(LogicalSessionRecord(makeLogicalSessionIdForTest(), clock()->now()));
     _collectionMock->add(LogicalSessionRecord(makeLogicalSessionIdForTest(), clock()->now()));
 
-    ASSERT_EQ(2,
-              MongoDSessionCatalog::reapSessionsOlderThan(
-                  _opCtx, *_collection, clock()->now() - Minutes{30}));
+    auto mongoDSessionCatalog =
+        MongoDSessionCatalog(std::make_unique<MongoDSessionCatalogTransactionInterfaceImpl>());
+    auto numReaped = mongoDSessionCatalog.reapSessionsOlderThan(
+        _opCtx, *_collection, clock()->now() - Minutes{30});
+
+    ASSERT_EQ(2, numReaped);
 }
 
 }  // namespace

@@ -32,10 +32,12 @@
 
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/user_name.h"
+#include "mongo/db/catalog/coll_mod.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/index_catalog.h"
+#include "mongo/db/catalog/index_key_validate.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/fsync_locked.h"
 #include "mongo/db/commands/server_status_metric.h"
@@ -46,6 +48,7 @@
 #include "mongo/db/ops/insert.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/record_id_helpers.h"
+#include "mongo/db/repl/replica_set_aware_service.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/tenant_migration_access_blocker_registry.h"
 #include "mongo/db/s/operation_sharding_state.h"
@@ -143,7 +146,7 @@ const IndexDescriptor* getValidTTLIndex(OperationContext* opCtx,
                                         const BSONObj& spec,
                                         std::string indexName) {
     if (!spec.hasField(IndexDescriptor::kExpireAfterSecondsFieldName)) {
-        ttlCollectionCache->deregisterTTLInfo(collection->uuid(), indexName);
+        ttlCollectionCache->deregisterTTLIndexByName(collection->uuid(), indexName);
         return nullptr;
     }
 
@@ -174,15 +177,53 @@ const IndexDescriptor* getValidTTLIndex(OperationContext* opCtx,
     }
 
     BSONElement secondsExpireElt = spec[IndexDescriptor::kExpireAfterSecondsFieldName];
-    if (!secondsExpireElt.isNumber()) {
-        LOGV2_ERROR(22542,
-                    "TTL indexes require the expire field to be numeric, skipping TTL job",
-                    "field"_attr = IndexDescriptor::kExpireAfterSecondsFieldName,
-                    "type"_attr = typeName(secondsExpireElt.type()),
-                    "index"_attr = spec);
+    if (!secondsExpireElt.isNumber() || secondsExpireElt.isNaN()) {
+        LOGV2_ERROR(
+            22542,
+            "TTL indexes require the expire field to be numeric and not a NaN, skipping TTL job",
+            "ns"_attr = collection->ns(),
+            "uuid"_attr = collection->uuid(),
+            "field"_attr = IndexDescriptor::kExpireAfterSecondsFieldName,
+            "type"_attr = typeName(secondsExpireElt.type()),
+            "index"_attr = spec);
         return nullptr;
     }
     return desc;
+}
+
+/**
+ * Runs on primaries and secondaries. Forwards replica set events to the TTLMonitor.
+ */
+class TTLMonitorService : public ReplicaSetAwareService<TTLMonitorService> {
+public:
+    static TTLMonitorService* get(ServiceContext* serviceContext);
+    TTLMonitorService() = default;
+
+private:
+    void onStartup(OperationContext* opCtx) override {}
+    void onInitialDataAvailable(OperationContext* opCtx, bool isMajorityDataAvailable) override {}
+    void onShutdown() override {}
+    void onStepUpBegin(OperationContext* opCtx, long long term) override {}
+    void onStepUpComplete(OperationContext* opCtx, long long term) override {
+        auto ttlMonitor = TTLMonitor::get(opCtx->getServiceContext());
+        if (!ttlMonitor) {
+            // Some test fixtures might not install the TTLMonitor.
+            return;
+        }
+        ttlMonitor->onStepUp(opCtx);
+    }
+    void onStepDown() override {}
+    void onBecomeArbiter() override {}
+};
+
+const auto _ttlMonitorService = ServiceContext::declareDecoration<TTLMonitorService>();
+
+const ReplicaSetAwareServiceRegistry::Registerer<TTLMonitorService> _ttlMonitorServiceRegisterer(
+    "TTLMonitorService");
+
+// static
+TTLMonitorService* TTLMonitorService::get(ServiceContext* serviceContext) {
+    return &_ttlMonitorService(serviceContext);
 }
 
 }  // namespace
@@ -257,10 +298,10 @@ void TTLMonitor::run() {
             _doTTLPass();
         } catch (const WriteConflictException&) {
             LOGV2_DEBUG(22531, 1, "got WriteConflictException");
-        } catch (const ExceptionForCat<ErrorCategory::Interruption>& interruption) {
+        } catch (const DBException& ex) {
             LOGV2_WARNING(22537,
                           "TTLMonitor was interrupted, waiting before doing another pass",
-                          "interruption"_attr = interruption,
+                          "interruption"_attr = ex,
                           "wait"_attr = Milliseconds(Seconds(ttlMonitorSleepSecs.load())));
         }
     }
@@ -354,7 +395,11 @@ bool TTLMonitor::_doTTLIndexDelete(OperationContext* opCtx,
     // The collection was dropped.
     auto nss = collectionCatalog->lookupNSSByUUID(opCtx, uuid);
     if (!nss) {
-        ttlCollectionCache->deregisterTTLInfo(uuid, info);
+        if (info.isClustered()) {
+            ttlCollectionCache->deregisterTTLClusteredIndex(uuid);
+        } else {
+            ttlCollectionCache->deregisterTTLIndexByName(uuid, info.getIndexName());
+        }
         return false;
     }
 
@@ -407,21 +452,12 @@ bool TTLMonitor::_doTTLIndexDelete(OperationContext* opCtx,
         ResourceConsumption::ScopedMetricsCollector scopedMetrics(opCtx, nss->db().toString());
 
         const auto& collection = coll.getCollection();
-        return stdx::visit(OverloadedVisitor{[&](const TTLCollectionCache::ClusteredId&) {
-                                                 return _deleteExpiredWithCollscan(
-                                                     opCtx, ttlCollectionCache, collection);
-                                             },
-                                             [&](const TTLCollectionCache::IndexName& indexName) {
-                                                 return _deleteExpiredWithIndex(opCtx,
-                                                                                ttlCollectionCache,
-                                                                                collection,
-                                                                                indexName);
-                                             }},
-                           info);
-    } catch (const ExceptionForCat<ErrorCategory::Interruption>&) {
-        // The exception is relevant to the entire TTL monitoring process, not just the specific TTL
-        // index. Let the exception escape so it can be addressed at the higher monitoring layer.
-        throw;
+        if (info.isClustered()) {
+            return _deleteExpiredWithCollscan(opCtx, ttlCollectionCache, collection);
+        } else {
+            return _deleteExpiredWithIndex(
+                opCtx, ttlCollectionCache, collection, info.getIndexName());
+        }
     } catch (const ExceptionForCat<ErrorCategory::StaleShardVersionError>& ex) {
         // The TTL index tried to delete some information from a sharded collection
         // through a direct operation against the shard but the filtering metadata was
@@ -457,6 +493,13 @@ bool TTLMonitor::_doTTLIndexDelete(OperationContext* opCtx,
                       "error"_attr = ex);
         return false;
     } catch (const DBException& ex) {
+        if (opCtx->isKillPending()) {
+            // The exception is relevant to the entire TTL monitoring process, not just the specific
+            // TTL index. Let the exception escape so it can be addressed at the higher monitoring
+            // layer.
+            throw;
+        }
+
         LOGV2_ERROR(
             5400703, "Error running TTL job on collection", logAttrs(*nss), "error"_attr = ex);
         return false;
@@ -468,7 +511,7 @@ bool TTLMonitor::_deleteExpiredWithIndex(OperationContext* opCtx,
                                          const CollectionPtr& collection,
                                          std::string indexName) {
     if (!collection->isIndexPresent(indexName)) {
-        ttlCollectionCache->deregisterTTLInfo(collection->uuid(), indexName);
+        ttlCollectionCache->deregisterTTLIndexByName(collection->uuid(), indexName);
         return false;
     }
 
@@ -572,8 +615,7 @@ bool TTLMonitor::_deleteExpiredWithCollscan(OperationContext* opCtx,
 
     auto expireAfterSeconds = collOptions.expireAfterSeconds;
     if (!expireAfterSeconds) {
-        ttlCollectionCache->deregisterTTLInfo(collection->uuid(),
-                                              TTLCollectionCache::ClusteredId{});
+        ttlCollectionCache->deregisterTTLClusteredIndex(collection->uuid());
         return false;
     }
 
@@ -647,6 +689,82 @@ void shutdownTTLMonitor(ServiceContext* serviceContext) {
     // initialized.
     if (ttlMonitor) {
         ttlMonitor->shutdown();
+    }
+}
+
+void TTLMonitor::onStepUp(OperationContext* opCtx) {
+    auto&& ttlCollectionCache = TTLCollectionCache::get(opCtx->getServiceContext());
+    auto ttlInfos = ttlCollectionCache.getTTLInfos();
+    for (const auto& [uuid, infos] : ttlInfos) {
+        auto collectionCatalog = CollectionCatalog::get(opCtx);
+        if (collectionCatalog->isCollectionAwaitingVisibility(uuid)) {
+            continue;
+        }
+
+        // The collection was dropped.
+        auto nss = collectionCatalog->lookupNSSByUUID(opCtx, uuid);
+        if (!nss) {
+            continue;
+        }
+
+        if (nss->isTemporaryReshardingCollection() || nss->isDropPendingNamespace()) {
+            continue;
+        }
+
+        try {
+            uassertStatusOK(userAllowedWriteNS(opCtx, *nss));
+
+            for (const auto& info : infos) {
+                // Skip clustered indexes with TTL. This includes time-series collections.
+                if (info.isClustered()) {
+                    continue;
+                }
+                if (!info.isExpireAfterSecondsNaN()) {
+                    continue;
+                }
+
+                auto indexName = info.getIndexName();
+                LOGV2(6847700,
+                      "Running collMod to fix TTL index with NaN 'expireAfterSeconds'.",
+                      "ns"_attr = *nss,
+                      "uuid"_attr = uuid,
+                      "name"_attr = indexName,
+                      "expireAfterSecondsNew"_attr =
+                          index_key_validate::kExpireAfterSecondsForInactiveTTLIndex);
+
+                // Compose collMod command to amend 'expireAfterSeconds' to same value that
+                // would be used by listIndexes() to convert the NaN value in the catalog.
+                CollModIndex collModIndex;
+                collModIndex.setName(StringData{indexName});
+                collModIndex.setExpireAfterSeconds(mongo::durationCount<Seconds>(
+                    index_key_validate::kExpireAfterSecondsForInactiveTTLIndex));
+                CollMod collModCmd{*nss};
+                collModCmd.getCollModRequest().setIndex(collModIndex);
+
+                // processCollModCommand() will acquire MODE_X access to the collection.
+                BSONObjBuilder builder;
+                uassertStatusOK(
+                    processCollModCommand(opCtx, {nss->db(), uuid}, collModCmd, &builder));
+                auto result = builder.obj();
+                LOGV2(6847701,
+                      "Successfully fixed TTL index with NaN 'expireAfterSeconds' using collMod",
+                      "ns"_attr = *nss,
+                      "uuid"_attr = uuid,
+                      "name"_attr = indexName,
+                      "result"_attr = result);
+            }
+        } catch (const ExceptionForCat<ErrorCategory::Interruption>&) {
+            // The exception is relevant to the entire TTL monitoring process, not just the specific
+            // TTL index. Let the exception escape so it can be addressed at the higher monitoring
+            // layer.
+            throw;
+        } catch (const DBException& ex) {
+            LOGV2_ERROR(6835901,
+                        "Error checking TTL job on collection during step up",
+                        logAttrs(*nss),
+                        "error"_attr = ex);
+            continue;
+        }
     }
 }
 

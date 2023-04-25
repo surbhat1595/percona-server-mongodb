@@ -31,6 +31,8 @@
 
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/query/optimizer/cascades/memo.h"
+#include "mongo/db/query/optimizer/cascades/rewriter_rules.h"
+#include "mongo/db/query/optimizer/defs.h"
 #include "mongo/db/query/optimizer/node.h"
 #include "mongo/util/assert_util.h"
 
@@ -41,7 +43,7 @@ BSONObj ABTPrinter::explainBSON() const {
         _abtTree, true /*displayProperties*/, nullptr /*Memo*/, _nodeToPropsMap);
 }
 
-enum class ExplainVersion { V1, V2, V3, Vmax };
+enum class ExplainVersion { V1, V2, V2Compact, V3, Vmax };
 
 bool constexpr operator<(const ExplainVersion v1, const ExplainVersion v2) {
     return static_cast<int>(v1) < static_cast<int>(v2);
@@ -70,6 +72,18 @@ struct CommandStruct {
 
 using CommandVector = std::vector<CommandStruct>;
 
+/**
+ * Helper class for building indented, multiline strings.
+ *
+ * The main operations it supports are:
+ *   - Print a single value, of any type that supports '<<' to std::ostream.
+ *   - Indent/unindent, and add newlines.
+ *   - Print another ExplainPrinterImpl, preserving its 2D layout.
+ *
+ * Being able to print another whole printer makes it easy to build these 2D strings
+ * bottom-up, without passing around a std::ostream. It also allows displaying
+ * child elements in a different order than they were visited.
+ */
 template <const ExplainVersion version = kDefaultExplainVersion>
 class ExplainPrinterImpl {
 public:
@@ -79,6 +93,7 @@ public:
           _osDirty(false),
           _indentCount(0),
           _childrenRemaining(0),
+          _inlineNextChild(false),
           _cmdInsertPos(-1) {}
 
     ~ExplainPrinterImpl() {
@@ -99,6 +114,7 @@ public:
           _osDirty(other._osDirty),
           _indentCount(other._indentCount),
           _childrenRemaining(other._childrenRemaining),
+          _inlineNextChild(other._inlineNextChild),
           _cmdInsertPos(other._cmdInsertPos) {}
 
     template <class T>
@@ -138,12 +154,20 @@ public:
     }
 
     ExplainPrinterImpl& setChildCount(const size_t childCount) {
-        if (version > ExplainVersion::V1) {
+        if (version == ExplainVersion::V1) {
+            return *this;
+        }
+
+        if (version == ExplainVersion::V2Compact && childCount == 1) {
+            _inlineNextChild = true;
             _childrenRemaining = childCount;
-            indent("");
-            for (int i = 0; i < _childrenRemaining - 1; i++) {
-                indent("|");
-            }
+            return *this;
+        }
+
+        _childrenRemaining = childCount;
+        indent("");
+        for (int i = 0; i < _childrenRemaining - 1; i++) {
+            indent("|");
         }
         return *this;
     }
@@ -203,6 +227,10 @@ public:
         return os.str();
     }
 
+    /**
+     * Ends the current line, if there is one. Repeated calls do not create
+     * blank lines.
+     */
     void newLine() {
         if (!_osDirty) {
             return;
@@ -249,8 +277,25 @@ private:
                     _os << element._str;
                 }
             }
+        } else if (_inlineNextChild) {
+            _inlineNextChild = false;
+            // Print 'other' without starting a new line.
+            // Embed its first line into our current one, and keep the rest of its commands.
+            bool first = true;
+            for (const CommandStruct& element : other.getCommands()) {
+                if (first && element._type == CommandType::AddLine) {
+                    _os << singleLevelSpacer << element._str;
+                } else {
+                    newLine();
+                    _cmd.push_back(element);
+                }
+                first = false;
+            }
         } else {
             newLine();
+            // If 'hadChildrenRemaining' then 'other' represents a child of 'this', which means
+            // there was a prior call to setChildCount() that added indentation for it.
+            // If '! hadChildrenRemaining' then create indentation for it now.
             if (!hadChildrenRemaining) {
                 indent();
             }
@@ -279,11 +324,22 @@ private:
         _cmd.emplace_back(CommandType::Unindent, "");
     }
 
+    // Holds completed lines, and indent/unIndent commands.
+    // When '_cmdInsertPos' is nonnegative, some of these lines and commands belong
+    // after the currently-being-built line.
     CommandVector _cmd;
+    // Holds the incomplete line currently being built. Once complete this will become the last
+    // line, unless '_cmdInsertPos' is nonnegative.
     std::ostringstream _os;
+    // True means we have an incomplete line in '_os'.
+    // Once the line is completed with newLine(), this flag is false until
+    // we begin building a new one with print().
     bool _osDirty;
     int _indentCount;
     int _childrenRemaining;
+    bool _inlineNextChild;
+    // When nonnegative, indicates the insertion point where completed lines
+    // should be added to '_cmd'. -1 means completed lines will be added at the end.
     int _cmdInsertPos;
 };
 
@@ -559,7 +615,7 @@ public:
         } else if constexpr (version == ExplainVersion::V3) {
             printer.fieldName(name).print(flag);
         } else {
-            static_assert("Unknown version");
+            MONGO_UNREACHABLE;
         }
     }
 
@@ -602,7 +658,7 @@ public:
             } else if constexpr (version == ExplainVersion::V3) {
                 printer.separator(" ").fieldName(name).print(child);
             } else {
-                static_assert("Unknown version");
+                MONGO_UNREACHABLE;
             }
         }
 
@@ -638,7 +694,7 @@ public:
             }
             printer.fieldName("fieldProjectionMap").print(local);
         } else {
-            static_assert("Unknown version");
+            MONGO_UNREACHABLE;
         }
     }
 
@@ -675,9 +731,14 @@ public:
     ExplainPrinter transport(const ValueScanNode& node, ExplainPrinter bindResult) {
         ExplainPrinter valuePrinter = generate(node.getValueArray());
 
+        // Specifically not printing optional logical properties here. They can be displayed with
+        // the properties explain.
         ExplainPrinter printer("ValueScan");
         maybePrintProps(printer, node);
-        printer.separator(" [")
+        printer.separator(" [");
+        printBooleanFlag(printer, "hasRID", node.getHasRID());
+        printer.fieldName("hasRID")
+            .print(node.getHasRID())
             .fieldName("arraySize")
             .print(node.getArraySize())
             .separator("]")
@@ -735,7 +796,7 @@ public:
                 .fieldName("highBound")
                 .print(highBoundPrinter);
         } else {
-            static_assert("Version not implemented");
+            MONGO_UNREACHABLE;
         }
     }
 
@@ -750,7 +811,7 @@ public:
         return intervalPrinter.print(intervalExpr);
     }
 
-    void printInterval(ExplainPrinter& printer, const MultiKeyIntervalRequirement& interval) {
+    void printInterval(ExplainPrinter& printer, const CompoundIntervalRequirement& interval) {
         if constexpr (version < ExplainVersion::V3) {
             bool first = true;
             for (const auto& entry : interval) {
@@ -770,7 +831,7 @@ public:
             }
             printer.print(printers);
         } else {
-            static_assert("Version not implemented");
+            MONGO_UNREACHABLE;
         }
     }
 
@@ -817,7 +878,7 @@ public:
                 printer.print(childResults);
                 return printer;
             } else {
-                static_assert("Version not implemented");
+                MONGO_UNREACHABLE;
             }
         }
 
@@ -1005,17 +1066,48 @@ public:
         parent.fieldName("requirementsMap").print(printers);
     }
 
+    void printResidualRequirements(ExplainPrinter& parent,
+                                   const ResidualRequirements& residualReqs) {
+        std::vector<ExplainPrinter> printers;
+        for (const auto& [key, req, entryIndex] : residualReqs) {
+            ExplainPrinter local;
+
+            local.fieldName("refProjection").print(key._projectionName).separator(", ");
+            ExplainPrinter pathPrinter = generate(key._path);
+            local.fieldName("path").separator("'").printSingleLevel(pathPrinter).separator("', ");
+
+            if (req.hasBoundProjectionName()) {
+                local.fieldName("boundProjection")
+                    .print(req.getBoundProjectionName())
+                    .separator(", ");
+            }
+
+            local.fieldName("intervals");
+            {
+                ExplainPrinter intervals = printIntervalExpr(req.getIntervals());
+                local.printSingleLevel(intervals, "" /*singleLevelSpacer*/);
+            }
+            local.separator(", ").fieldName("entryIndex").print(entryIndex);
+
+            printers.push_back(std::move(local));
+        }
+
+        parent.fieldName("residualReqs").print(printers);
+    }
+
     ExplainPrinter transport(const SargableNode& node,
                              ExplainPrinter childResult,
                              ExplainPrinter bindResult,
                              ExplainPrinter refsResult) {
+        const auto& scanParams = node.getScanParams();
+
         ExplainPrinter printer("Sargable");
         maybePrintProps(printer, node);
         printer.separator(" [")
             .fieldName("target", ExplainVersion::V3)
             .print(IndexReqTargetEnum::toString[static_cast<int>(node.getTarget())])
             .separator("]")
-            .setChildCount(5);
+            .setChildCount(scanParams ? 6 : 5);
 
         if constexpr (version < ExplainVersion::V3) {
             ExplainPrinter local;
@@ -1024,119 +1116,109 @@ public:
         } else if constexpr (version == ExplainVersion::V3) {
             printPartialSchemaReqMap(printer, node.getReqMap());
         } else {
-            static_assert("Unknown version");
+            MONGO_UNREACHABLE;
         }
 
-        std::vector<ExplainPrinter> candidateIndexesPrinters;
-        size_t candidateIndex = 0;
-        for (const auto& [indexDefName, candidateIndexEntry] : node.getCandidateIndexMap()) {
-            candidateIndex++;
-            ExplainPrinter local;
-            local.fieldName("candidateId")
-                .print(candidateIndex)
-                .separator(", ")
-                .fieldName("indexDefName", ExplainVersion::V3)
-                .print(indexDefName)
-                .separator(", ");
+        {
+            std::vector<ExplainPrinter> candidateIndexesPrinters;
+            for (size_t index = 0; index < node.getCandidateIndexes().size(); index++) {
+                const CandidateIndexEntry& candidateIndexEntry =
+                    node.getCandidateIndexes().at(index);
 
-            local.separator("{");
-            printFieldProjectionMap(local, candidateIndexEntry._fieldProjectionMap);
-            local.separator("}, {");
+                ExplainPrinter local;
+                local.fieldName("candidateId")
+                    .print(index + 1)
+                    .separator(", ")
+                    .fieldName("indexDefName", ExplainVersion::V3)
+                    .print(candidateIndexEntry._indexDefName)
+                    .separator(", ");
 
-            {
-                std::set<size_t> orderedFields;
-                for (const size_t fieldId : candidateIndexEntry._fieldsToCollate) {
-                    orderedFields.insert(fieldId);
-                }
+                local.separator("{");
+                printFieldProjectionMap(local, candidateIndexEntry._fieldProjectionMap);
+                local.separator("}, {");
 
-                if constexpr (version < ExplainVersion::V3) {
-                    bool first = true;
-                    for (const size_t fieldId : orderedFields) {
-                        if (first) {
-                            first = false;
-                        } else {
-                            local.print(", ");
+                {
+                    std::set<size_t> orderedFields;
+                    for (const size_t fieldId : candidateIndexEntry._fieldsToCollate) {
+                        orderedFields.insert(fieldId);
+                    }
+
+                    if constexpr (version < ExplainVersion::V3) {
+                        bool first = true;
+                        for (const size_t fieldId : orderedFields) {
+                            if (first) {
+                                first = false;
+                            } else {
+                                local.print(", ");
+                            }
+                            local.print(fieldId);
                         }
-                        local.print(fieldId);
+                    } else if constexpr (version == ExplainVersion::V3) {
+                        std::vector<ExplainPrinter> printers;
+                        for (const size_t fieldId : orderedFields) {
+                            ExplainPrinter local1;
+                            local1.print(fieldId);
+                            printers.push_back(std::move(local1));
+                        }
+                        local.fieldName("fieldsToCollate").print(printers);
+                    } else {
+                        MONGO_UNREACHABLE;
                     }
-                } else if constexpr (version == ExplainVersion::V3) {
-                    std::vector<ExplainPrinter> printers;
-                    for (const size_t fieldId : orderedFields) {
-                        ExplainPrinter local1;
-                        local1.print(fieldId);
-                        printers.push_back(std::move(local1));
-                    }
-                    local.fieldName("fieldsToCollate").print(printers);
-                } else {
-                    static_assert("Unknown version");
                 }
-            }
 
-            local.separator("}, ").fieldName("intervals", ExplainVersion::V3);
-            {
-                IntervalPrinter<MultiKeyIntervalReqExpr> intervalPrinter(*this);
-                ExplainPrinter intervals = intervalPrinter.print(candidateIndexEntry._intervals);
-                local.printSingleLevel(intervals, "" /*singleLevelSpacer*/);
-            }
+                local.separator("}, ").fieldName("intervals", ExplainVersion::V3);
+                {
+                    IntervalPrinter<CompoundIntervalReqExpr> intervalPrinter(*this);
+                    ExplainPrinter intervals =
+                        intervalPrinter.print(candidateIndexEntry._intervals);
+                    local.printSingleLevel(intervals, "" /*singleLevelSpacer*/);
+                }
 
-            if (!candidateIndexEntry._residualRequirements.empty()) {
+                if (const auto& residualReqs = candidateIndexEntry._residualRequirements;
+                    !residualReqs.empty()) {
+                    if constexpr (version < ExplainVersion::V3) {
+                        ExplainPrinter residualReqMapPrinter;
+                        printResidualRequirements(residualReqMapPrinter, residualReqs);
+                        local.print(residualReqMapPrinter);
+                    } else if (version == ExplainVersion::V3) {
+                        printResidualRequirements(local, residualReqs);
+                    } else {
+                        MONGO_UNREACHABLE;
+                    }
+                }
+
+                candidateIndexesPrinters.push_back(std::move(local));
+            }
+            ExplainPrinter candidateIndexesPrinter;
+            candidateIndexesPrinter.fieldName("candidateIndexes").print(candidateIndexesPrinters);
+            printer.printAppend(candidateIndexesPrinter);
+        }
+
+        if (scanParams) {
+            ExplainPrinter local;
+            local.separator("{");
+            printFieldProjectionMap(local, scanParams->_fieldProjectionMap);
+            local.separator("}");
+
+            if (const auto& residualReqs = scanParams->_residualRequirements;
+                !residualReqs.empty()) {
                 if constexpr (version < ExplainVersion::V3) {
                     ExplainPrinter residualReqMapPrinter;
-                    printPartialSchemaReqMap(residualReqMapPrinter,
-                                             candidateIndexEntry._residualRequirements);
+                    printResidualRequirements(residualReqMapPrinter, residualReqs);
                     local.print(residualReqMapPrinter);
                 } else if (version == ExplainVersion::V3) {
-                    printPartialSchemaReqMap(local, candidateIndexEntry._residualRequirements);
+                    printResidualRequirements(local, residualReqs);
                 } else {
-                    static_assert("Unknown version");
+                    MONGO_UNREACHABLE;
                 }
             }
 
-            if (!candidateIndexEntry._residualKeyMap.empty()) {
-                std::vector<ExplainPrinter> residualKeyMapPrinters;
-                for (const auto& [queryKey, residualKey] : candidateIndexEntry._residualKeyMap) {
-                    ExplainPrinter local1;
-
-                    ExplainPrinter pathPrinter = generate(queryKey._path);
-                    local1.fieldName("queryRefProjection")
-                        .print(queryKey._projectionName)
-                        .separator(", ")
-                        .fieldName("queryPath")
-                        .separator("'")
-                        .printSingleLevel(pathPrinter)
-                        .separator("', ")
-                        .fieldName("residualRefProjection")
-                        .print(residualKey._projectionName)
-                        .separator(", ");
-
-                    ExplainPrinter pathPrinter1 = generate(residualKey._path);
-                    local1.fieldName("residualPath")
-                        .separator("'")
-                        .printSingleLevel(pathPrinter1)
-                        .separator("'");
-
-                    residualKeyMapPrinters.push_back(std::move(local1));
-                }
-
-                local.fieldName("residualKeyMap").print(residualKeyMapPrinters);
-
-                std::vector<ExplainPrinter> projNamePrinters;
-                for (const ProjectionName& projName :
-                     candidateIndexEntry._residualRequirementsTempProjections) {
-                    ExplainPrinter local1;
-                    local1.print(projName);
-                    projNamePrinters.push_back(std::move(local1));
-                }
-                local.fieldName("tempProjections").print(projNamePrinters);
-            }
-
-            candidateIndexesPrinters.push_back(std::move(local));
+            ExplainPrinter scanParamsPrinter;
+            scanParamsPrinter.fieldName("scanParams").print(local);
+            printer.printAppend(scanParamsPrinter);
         }
-        ExplainPrinter candidateIndexesPrinter;
-        candidateIndexesPrinter.fieldName("candidateIndexes").print(candidateIndexesPrinters);
 
-        printer.printAppend(candidateIndexesPrinter)
-            .fieldName("bindings", ExplainVersion::V3)
+        printer.fieldName("bindings", ExplainVersion::V3)
             .print(bindResult)
             .fieldName("references", ExplainVersion::V3)
             .print(refsResult)
@@ -1206,7 +1288,7 @@ public:
             }
             printer.fieldName("correlatedProjections").print(printers);
         } else {
-            static_assert("Version not implemented");
+            MONGO_UNREACHABLE;
         }
 
         printer.separator("]")
@@ -1243,7 +1325,7 @@ public:
             }
             printer.print(printers);
         } else {
-            static_assert("Version not implemented");
+            MONGO_UNREACHABLE;
         }
     }
 
@@ -1301,7 +1383,7 @@ public:
             }
             collationPrinter.print(printers);
         } else {
-            static_assert("Version not implemented");
+            MONGO_UNREACHABLE;
         }
 
         printer.setChildCount(4)
@@ -1583,9 +1665,10 @@ public:
             cePrinter.fieldName("ce").print(prop.getEstimate());
             fieldPrinters.push_back(std::move(cePrinter));
 
-            if (!prop.getPartialSchemaKeyCEMap().empty()) {
+            if (const auto& partialSchemaKeyCE = prop.getPartialSchemaKeyCE();
+                !partialSchemaKeyCE.empty()) {
                 std::vector<ExplainPrinter> reqPrinters;
-                for (const auto& [key, ce] : prop.getPartialSchemaKeyCEMap()) {
+                for (const auto& [key, ce] : partialSchemaKeyCE) {
                     ExplainGeneratorTransporter<version> gen;
                     ExplainPrinter pathPrinter = gen.generate(key._path);
 
@@ -2027,7 +2110,7 @@ public:
             }
             printer.fieldName("projections").print(printers);
         } else {
-            static_assert("Unknown version");
+            MONGO_UNREACHABLE;
         }
     }
 
@@ -2072,7 +2155,7 @@ public:
         } else if constexpr (version == ExplainVersion::V3) {
             printer.fieldName("maxDepth", ExplainVersion::V3).print(path.getMaxDepth());
         } else {
-            static_assert("Unknown version");
+            MONGO_UNREACHABLE;
         }
 
         printer.separator("]")
@@ -2181,7 +2264,11 @@ public:
                 const ABTVector& logicalNodes = group._logicalNodes.getVector();
                 for (size_t i = 0; i < logicalNodes.size(); i++) {
                     ExplainPrinter local;
-                    local.fieldName("logicalNodeId").print(i);
+                    local.fieldName("logicalNodeId").print(i).separator(", ");
+                    const auto rule = group._rules.at(i);
+                    local.fieldName("rule").print(
+                        cascades::LogicalRewriterTypeEnum::toString[static_cast<int>(rule)]);
+
                     ExplainPrinter nodePrinter = generate(logicalNodes.at(i));
                     local.fieldName("node", ExplainVersion::V3).print(nodePrinter);
 
@@ -2206,6 +2293,12 @@ public:
                         local.print(physOptResult->_costLimit.toString());
                     } else {
                         local.print(physOptResult->_costLimit.getCost());
+                    }
+
+                    if (physOptResult->_nodeInfo) {
+                        const cascades::PhysicalRewriteType rule = physOptResult->_nodeInfo->_rule;
+                        local.separator(", ").fieldName("rule").print(
+                            cascades::PhysicalRewriterTypeEnum::toString[static_cast<int>(rule)]);
                     }
 
                     ExplainPrinter propPrinter =
@@ -2268,6 +2361,14 @@ std::string ExplainGenerator::explainV2(const ABT& node,
                                         const cascades::Memo* memo,
                                         const NodeToGroupPropsMap& nodeMap) {
     ExplainGeneratorTransporter<ExplainVersion::V2> gen(displayProperties, memo, nodeMap);
+    return gen.generate(node).str();
+}
+
+std::string ExplainGenerator::explainV2Compact(const ABT& node,
+                                               const bool displayProperties,
+                                               const cascades::Memo* memo,
+                                               const NodeToGroupPropsMap& nodeMap) {
+    ExplainGeneratorTransporter<ExplainVersion::V2Compact> gen(displayProperties, memo, nodeMap);
     return gen.generate(node).str();
 }
 

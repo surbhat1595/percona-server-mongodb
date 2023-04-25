@@ -93,14 +93,10 @@ bool hasNode(const MatchExpression* root, MatchExpression::MatchType type) {
 
 // TODO SERVER-49852: Currently SBE cannot handle match expressions with numeric path
 // components due to some of the complexity around how arrays are handled.
-//
-// TODO SERVER-59757: We also currently fall back to classic engine when encountering match
-// expressions on empty field names due to complexity in how an empty string currently has
-// multiple special meanings & which we do not wish to emulate in SBE.
 void disableSBEForUnsupportedExpressions(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                          const MatchExpression* node) {
     auto fieldRef = node->fieldRef();
-    if (fieldRef && (fieldRef->empty() || fieldRef->hasNumericPathComponents())) {
+    if (fieldRef && fieldRef->hasNumericPathComponents()) {
         expCtx->sbeCompatible = false;
         return;
     }

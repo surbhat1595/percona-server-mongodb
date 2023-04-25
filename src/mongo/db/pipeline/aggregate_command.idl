@@ -37,7 +37,7 @@ imports:
     - "mongo/crypto/fle_field_schema.idl"
     - "mongo/db/auth/action_type.idl"
     - "mongo/db/auth/access_checks.idl"
-    - "mongo/idl/basic_types.idl"
+    - "mongo/db/basic_types.idl"
     - "mongo/db/pipeline/exchange_spec.idl"
     - "mongo/db/pipeline/legacy_runtime_constants.idl"
     - "mongo/db/query/hint.idl"
@@ -156,6 +156,14 @@ commands:
                 - privilege: # $backupCursorExtend, backupCursor
                     resource_pattern: cluster
                     action_type: fsync
+                - privilege: # $_internalAllCollectionStats
+                     agg_stage: _internalAllCollectionStats
+                     resource_pattern: cluster
+                     action_type: allCollectionStats
+                - privilege: # $shardedDataDistribution
+                     agg_stage: shardedDataDistribution
+                     resource_pattern: cluster
+                     action_type: shardedDataDistribution
         # Note that the 'CursorInitialReply' is not the only response that an aggregate command
         # could return. With 'explain' or 'exchange', the response would not include the fields in
         # 'CursorInitialReply'. But using 'explain' or 'exchange' is unstable, but otherwise the
@@ -266,7 +274,7 @@ commands:
                 description: "Internal parameter to signal whether v2 resume tokens should be generated."
                 type: optionalBool
                 cpp_name: generateV2ResumeTokens
-                stability: stable
+                stability: internal
             encryptionInformation:
                 description: "Encryption Information schema and other tokens for CRUD commands"
                 type: EncryptionInformation

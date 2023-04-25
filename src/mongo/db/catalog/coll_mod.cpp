@@ -27,13 +27,9 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/catalog/coll_mod.h"
 
 #include <boost/optional.hpp>
-#include <memory>
 
 #include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/catalog/coll_mod_index.h"
@@ -67,30 +63,25 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
-
 namespace mongo {
-
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(hangAfterDatabaseLock);
 MONGO_FAIL_POINT_DEFINE(hangAfterCollModIndexUniqueFullIndexScan);
 MONGO_FAIL_POINT_DEFINE(hangAfterCollModIndexUniqueReleaseIXLock);
 
-void assertMovePrimaryInProgress(OperationContext* opCtx, NamespaceString const& nss) {
-    auto dss = DatabaseShardingState::get(opCtx, nss.db().toString());
-    if (!dss) {
-        return;
-    }
-
-    auto dssLock = DatabaseShardingState::DSSLock::lockShared(opCtx, dss);
+void assertNoMovePrimaryInProgress(OperationContext* opCtx, NamespaceString const& nss) {
     try {
-        const auto collDesc =
-            CollectionShardingState::get(opCtx, nss)->getCollectionDescription(opCtx);
-        if (!collDesc.isSharded()) {
-            auto mpsm = dss->getMovePrimarySourceManager(dssLock);
+        auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
+            opCtx, nss.dbName(), DSSAcquisitionMode::kShared);
 
-            if (mpsm) {
-                LOGV2(4945200, "assertMovePrimaryInProgress", "namespace"_attr = nss.toString());
+        auto css = CollectionShardingState::get(opCtx, nss);
+        auto collDesc = css->getCollectionDescription(opCtx);
+        collDesc.throwIfReshardingInProgress(nss);
+
+        if (!collDesc.isSharded()) {
+            if (scopedDss->isMovePrimaryInProgress()) {
+                LOGV2(4945200, "assertNoMovePrimaryInProgress", "namespace"_attr = nss.toString());
 
                 uasserted(ErrorCodes::MovePrimaryInProgress,
                           "movePrimary is in progress for namespace " + nss.toString());
@@ -111,7 +102,6 @@ struct ParsedCollModRequest {
     boost::optional<Collection::Validator> collValidator;
     boost::optional<ValidationActionEnum> collValidationAction;
     boost::optional<ValidationLevelEnum> collValidationLevel;
-    bool recordPreImages = false;
     boost::optional<ChangeStreamPreAndPostImagesOptions> changeStreamPreAndPostImagesOptions;
     int numModifications = 0;
     bool dryRun = false;
@@ -246,7 +236,8 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(Operati
                         "TTL indexes are not supported for capped collections."};
             }
             if (auto status = index_key_validate::validateExpireAfterSeconds(
-                    *cmdIndex.getExpireAfterSeconds());
+                    *cmdIndex.getExpireAfterSeconds(),
+                    index_key_validate::ValidateExpireAfterSecondsMode::kSecondaryTTLIndex);
                 !status.isOK()) {
                 return {ErrorCodes::InvalidOptions, status.reason()};
             }
@@ -476,18 +467,6 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(Operati
         oplogEntryBuilder.append(CollMod::kViewOnFieldName, *viewOn);
     }
 
-    if (const auto& recordPreImages = cmr.getRecordPreImages()) {
-        if (isView) {
-            return getNotSupportedOnViewError(CollMod::kRecordPreImagesFieldName);
-        }
-        if (isTimeseries) {
-            return getNotSupportedOnTimeseriesError(CollMod::kRecordPreImagesFieldName);
-        }
-        parsed.numModifications++;
-        parsed.recordPreImages = *recordPreImages;
-        oplogEntryBuilder.append(CollMod::kRecordPreImagesFieldName, *recordPreImages);
-    }
-
     if (auto& changeStreamPreAndPostImages = cmr.getChangeStreamPreAndPostImages()) {
         if (isView) {
             return getNotSupportedOnViewError(CollMod::kChangeStreamPreAndPostImagesFieldName);
@@ -530,7 +509,9 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(Operati
                 },
                 [&oplogEntryBuilder](std::int64_t value) {
                     oplogEntryBuilder.append(CollMod::kExpireAfterSecondsFieldName, value);
-                    return index_key_validate::validateExpireAfterSeconds(value);
+                    return index_key_validate::validateExpireAfterSeconds(
+                        value,
+                        index_key_validate::ValidateExpireAfterSecondsMode::kClusteredTTLIndex);
                 },
             },
             *expireAfterSeconds);
@@ -593,7 +574,8 @@ void _setClusteredExpireAfterSeconds(
                 if (!oldExpireAfterSeconds) {
                     auto ttlCache = &TTLCollectionCache::get(opCtx->getServiceContext());
                     opCtx->recoveryUnit()->onCommit([ttlCache, uuid = coll->uuid()](auto _) {
-                        ttlCache->registerTTLInfo(uuid, TTLCollectionCache::ClusteredId());
+                        ttlCache->registerTTLInfo(
+                            uuid, TTLCollectionCache::Info{TTLCollectionCache::ClusteredId{}});
                     });
                 }
 
@@ -742,13 +724,9 @@ Status _collModInternal(OperationContext* opCtx,
     // This can kill all cursors so don't allow running it while a background operation is in
     // progress.
     if (coll) {
-        assertMovePrimaryInProgress(opCtx, nss);
+        assertNoMovePrimaryInProgress(opCtx, nss);
         IndexBuildsCoordinator::get(opCtx)->assertNoIndexBuildInProgForCollection(coll->uuid());
-        CollectionShardingState::get(opCtx, nss)
-            ->getCollectionDescription(opCtx)
-            .throwIfReshardingInProgress(nss);
     }
-
 
     // If db/collection/view does not exist, short circuit and return.
     if (!db || (!coll && !view)) {
@@ -832,17 +810,6 @@ Status _collModInternal(OperationContext* opCtx,
 
         const CollectionOptions& oldCollOptions = coll->getCollectionOptions();
 
-        // If 'changeStreamPreAndPostImagesOptions' are enabled, 'recordPreImages' must be set
-        // to false. If 'recordPreImages' is set to true, 'changeStreamPreAndPostImagesOptions'
-        // must be disabled.
-        if (cmrNew.changeStreamPreAndPostImagesOptions &&
-            cmrNew.changeStreamPreAndPostImagesOptions->getEnabled()) {
-            cmrNew.recordPreImages = false;
-        }
-
-        if (cmrNew.recordPreImages) {
-            cmrNew.changeStreamPreAndPostImagesOptions = ChangeStreamPreAndPostImagesOptions(false);
-        }
         if (cmrNew.cappedSize || cmrNew.cappedMax) {
             // If the current capped collection size exceeds the newly set limits, future document
             // inserts will prompt document deletion.
@@ -875,10 +842,6 @@ Status _collModInternal(OperationContext* opCtx,
             uassertStatusOKWithContext(coll.getWritableCollection(opCtx)->setValidationLevel(
                                            opCtx, *cmrNew.collValidationLevel),
                                        "Failed to set validationLevel");
-        }
-
-        if (cmrNew.recordPreImages != oldCollOptions.recordPreImages) {
-            coll.getWritableCollection(opCtx)->setRecordPreImages(opCtx, cmrNew.recordPreImages);
         }
 
         if (cmrNew.changeStreamPreAndPostImagesOptions.has_value() &&

@@ -36,6 +36,8 @@ Copyright (C) 2019-present Percona and/or its affiliates. All rights reserved.
 #include <vector>
 
 #include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/db/tenant_id.h"
 #include "mongo/util/synchronized_value.h"
 
 namespace mongo {
@@ -67,7 +69,7 @@ struct LDAPGlobalParams {
     bool ldapValidateLDAPServerConfig = true;
 
     std::string getServersStr() const;
-    void setServersStr(const std::string&);
+    void setServersStr(StringData);
     std::string logString() const;
     std::string ldapURIList() const;
 };
@@ -76,5 +78,9 @@ Status validateLDAPBindMethod(const std::string&);
 Status validateLDAPTransportSecurity(const std::string&);
 Status validateLDAPUserToDNMapping(const std::string&);
 Status validateLDAPAuthzQueryTemplate(const std::string&);
+
+Status validateLDAPUserToDNMappingServerParam(const std::string&, const boost::optional<TenantId>&);
+Status validateLDAPAuthzQueryTemplateServerParam(const std::string&,
+                                                 const boost::optional<TenantId>&);
 
 }  // namespace mongo

@@ -101,6 +101,9 @@ private:
     virtual void _release(AdmissionContext* admCtx) noexcept = 0;
 };
 
+/**
+ * A ticketholder which manages both aggregate and policy specific queueing statistics.
+ */
 class TicketHolderWithQueueingStats : public TicketHolder {
     friend class ReaderWriterTicketHolder;
 
@@ -138,7 +141,7 @@ public:
                                                Date_t until,
                                                TicketHolder::WaitMode waitMode) override;
 
-    Status resize(int newSize);
+    void resize(int newSize) noexcept;
 
     virtual int available() const = 0;
 
@@ -150,13 +153,28 @@ public:
         return _outof.loadRelaxed();
     }
 
-    virtual int queued() const {
-        auto removed = _totalRemovedQueue.loadRelaxed();
-        auto added = _totalAddedQueue.loadRelaxed();
-        return std::max(static_cast<int>(added - removed), 0);
-    }
+    /**
+     * Returns the total number of operations queued - regardles of queueing policy.
+     */
+    virtual int queued() const = 0;
 
     void appendStats(BSONObjBuilder& b) const override;
+
+    /**
+     * Statistics for queueing mechanisms in the TicketHolder implementations. The term "Queue" is a
+     * loose abstraction for the way in which operations are queued when there are no available
+     * tickets.
+     */
+    struct QueueStats {
+        AtomicWord<std::int64_t> totalAddedQueue{0};
+        AtomicWord<std::int64_t> totalRemovedQueue{0};
+        AtomicWord<std::int64_t> totalFinishedProcessing{0};
+        AtomicWord<std::int64_t> totalNewAdmissions{0};
+        AtomicWord<std::int64_t> totalTimeProcessingMicros{0};
+        AtomicWord<std::int64_t> totalStartedProcessing{0};
+        AtomicWord<std::int64_t> totalCanceled{0};
+        AtomicWord<std::int64_t> totalTimeQueuedMicros{0};
+    };
 
 private:
     virtual boost::optional<Ticket> _tryAcquireImpl(AdmissionContext* admCtx) = 0;
@@ -172,13 +190,13 @@ private:
 
     virtual void _releaseQueue(AdmissionContext* admCtx) noexcept = 0;
 
-    AtomicWord<std::int64_t> _totalAddedQueue{0};
-    AtomicWord<std::int64_t> _totalRemovedQueue{0};
-    AtomicWord<std::int64_t> _totalFinishedProcessing{0};
-    AtomicWord<std::int64_t> _totalNewAdmissions{0};
-    AtomicWord<std::int64_t> _totalTimeProcessingMicros{0};
-    AtomicWord<std::int64_t> _totalStartedProcessing{0};
-    AtomicWord<std::int64_t> _totalCanceled{0};
+    virtual void _resize(int newSize, int oldSize) noexcept = 0;
+
+    /**
+     * Fetches the queueing statistics corresponding to the 'admCtx'. All statistics that are queue
+     * specific should be updated through the resulting 'QueueStats'.
+     */
+    virtual QueueStats& _getQueueStatsToUse(const AdmissionContext* admCtx) noexcept = 0;
 
     Mutex _resizeMutex = MONGO_MAKE_LATCH(HierarchicalAcquisitionLevel(2),
                                           "TicketHolderWithQueueingStats::_resizeMutex");
@@ -229,13 +247,12 @@ public:
 
     void appendStats(BSONObjBuilder& b) const override final;
 
-    Status resizeReaders(int newSize);
-    Status resizeWriters(int newSize);
+    void resizeReaders(int newSize);
+    void resizeWriters(int newSize);
 
 private:
     void _release(AdmissionContext* admCtx) noexcept override final;
 
-private:
     std::unique_ptr<TicketHolderWithQueueingStats> _reader;
     std::unique_ptr<TicketHolderWithQueueingStats> _writer;
 };
@@ -247,6 +264,12 @@ public:
 
     int available() const override final;
 
+    int queued() const override final {
+        auto removed = _semaphoreStats.totalRemovedQueue.loadRelaxed();
+        auto added = _semaphoreStats.totalAddedQueue.loadRelaxed();
+        return std::max(static_cast<int>(added - removed), 0);
+    };
+
 private:
     boost::optional<Ticket> _waitForTicketUntilImpl(OperationContext* opCtx,
                                                     AdmissionContext* admCtx,
@@ -258,6 +281,11 @@ private:
 
     void _appendImplStats(BSONObjBuilder& b) const override final;
 
+    void _resize(int newSize, int oldSize) noexcept override final;
+
+    QueueStats& _getQueueStatsToUse(const AdmissionContext* admCtx) noexcept override final {
+        return _semaphoreStats;
+    }
 #if defined(__linux__)
     mutable sem_t _sem;
 
@@ -269,54 +297,7 @@ private:
         MONGO_MAKE_LATCH(HierarchicalAcquisitionLevel(0), "SemaphoreTicketHolder::_mutex");
     stdx::condition_variable _newTicket;
 #endif
-
-    // Implementation statistics.
-    AtomicWord<std::int64_t> _totalTimeQueuedMicros{0};
-};
-
-/**
- * A ticketholder implementation that uses a queue for pending operations.
- * Any change to the implementation should be paired with a change to the _ticketholder.tla_ file in
- * order to formally verify that the changes won't lead to a deadlock.
- */
-class FifoTicketHolder final : public TicketHolderWithQueueingStats {
-public:
-    explicit FifoTicketHolder(int numTickets, ServiceContext* serviceContext);
-    ~FifoTicketHolder() override final;
-
-    int available() const override final;
-
-    int queued() const override final;
-
-private:
-    boost::optional<Ticket> _waitForTicketUntilImpl(OperationContext* opCtx,
-                                                    AdmissionContext* admCtx,
-                                                    Date_t until,
-                                                    WaitMode waitMode) override final;
-
-    boost::optional<Ticket> _tryAcquireImpl(AdmissionContext* admCtx) override final;
-
-    void _appendImplStats(BSONObjBuilder& b) const override final;
-
-    void _releaseQueue(AdmissionContext* admCtx) noexcept override final;
-
-    // Implementation statistics.
-    AtomicWord<std::int64_t> _totalTimeQueuedMicros{0};
-
-    enum class WaitingState { Waiting, Cancelled, Assigned };
-    struct WaitingElement {
-        stdx::condition_variable signaler;
-        Mutex modificationMutex = MONGO_MAKE_LATCH(
-            HierarchicalAcquisitionLevel(0), "FifoTicketHolder::WaitingElement::modificationMutex");
-        WaitingState state;
-    };
-    std::queue<std::shared_ptr<WaitingElement>> _queue;
-    // _queueMutex protects all modifications made to either the _queue, or the statistics of the
-    // queue.
-    Mutex _queueMutex =
-        MONGO_MAKE_LATCH(HierarchicalAcquisitionLevel(1), "FifoTicketHolder::_queueMutex");
-    AtomicWord<int> _enqueuedElements;
-    AtomicWord<int> _ticketsAvailable;
+    QueueStats _semaphoreStats;
 };
 
 /**
@@ -325,6 +306,16 @@ private:
  * Releasers will wake up a waiter from a group chosen according to some logic.
  */
 class SchedulingTicketHolder : public TicketHolderWithQueueingStats {
+    // Using a shared_mutex is fine here because usual considerations for avoiding them do not apply
+    // in this case:
+    //   * Operations are short and do not block while holding the lock (i.e. they only do CPU-bound
+    //   work)
+    //   * Writer starvation is not possible as there are a finite number of operations to be
+    //   performed in the reader case. Once all tickets get released no other thread can take the
+    //   shared lock.
+    //
+    // The alternative of using ResourceMutex is not appropriate as the class serves as a
+    // concurrency primitive and is performance sensitive.
     using QueueMutex = std::shared_mutex;                    // NOLINT
     using ReleaserLockGuard = std::shared_lock<QueueMutex>;  // NOLINT
     using EnqueuerLockGuard = std::unique_lock<QueueMutex>;  // NOLINT
@@ -340,12 +331,26 @@ protected:
 
         bool attemptToDequeue();
 
-        bool enqueue(Interruptible* interruptible,
+        bool enqueue(OperationContext* interruptible,
                      EnqueuerLockGuard& queueLock,
-                     const Date_t& until);
+                     const Date_t& until,
+                     WaitMode waitMode);
 
         int queuedElems() const {
             return _queuedThreads;
+        }
+
+        /**
+         * Returns a reference to the Queue statistics that allows callers to update the statistics.
+         */
+        QueueStats& getStatsToUse() {
+            return _stats;
+        }
+        /**
+         * Returns a read-only reference to the Queue statistics.
+         */
+        const QueueStats& getStats() const {
+            return _stats;
         }
 
     private:
@@ -353,8 +358,9 @@ protected:
 
         int _queuedThreads{0};
         AtomicWord<int> _threadsToBeWoken{0};
-        stdx::condition_variable _queue;
+        stdx::condition_variable _cv;
         SchedulingTicketHolder* _holder;
+        QueueStats _stats;
     };
 
     std::vector<Queue> _queues;
@@ -381,7 +387,9 @@ private:
 
     void _releaseQueue(AdmissionContext* admCtx) noexcept override final;
 
-    void _appendImplStats(BSONObjBuilder& b) const override final{};
+    void _resize(int newSize, int oldSize) noexcept override final;
+
+    QueueStats& _getQueueStatsToUse(const AdmissionContext* admCtx) noexcept override = 0;
 
     /**
      * Wakes up a waiting thread (if it exists) in order for it to attempt to obtain a ticket.
@@ -389,39 +397,25 @@ private:
      * woken between all the queues. In other words, attemptToDequeue on each non-empty Queue must
      * be called until either it returns true at least once or has been called on all queues.
      *
+     * Care must be taken to ensure that only CPU-bound work is performed here and it doesn't block.
+     *
      * When called the following invariants will be held:
      * - The number of items in each queue will not change during the execution
      * - No other thread will proceed to wait during the execution of the method
      */
     virtual void _dequeueWaitingThread() = 0;
 
+    void _appendImplStats(BSONObjBuilder& b) const override = 0;
+
     /**
      * Selects the queue to use for the current thread given the provided arguments.
      */
-    virtual Queue& _getQueueToUse(OperationContext* opCtx, const AdmissionContext* admCtx) = 0;
+    virtual Queue& _getQueueToUse(const AdmissionContext* admCtx) noexcept = 0;
 
     QueueMutex _queueMutex;
     AtomicWord<int> _ticketsAvailable;
     AtomicWord<int> _enqueuedElements;
     ServiceContext* _serviceContext;
-};
-
-class StochasticTicketHolder final : public SchedulingTicketHolder {
-public:
-    explicit StochasticTicketHolder(int numTickets,
-                                    int readerWeight,
-                                    int writerWeight,
-                                    ServiceContext* serviceContext);
-
-private:
-    enum class QueueType : unsigned int { ReaderQueue = 0, WriterQueue = 1 };
-
-    void _dequeueWaitingThread() override final;
-
-    Queue& _getQueueToUse(OperationContext* opCtx, const AdmissionContext* admCtx) override final;
-
-    std::uint32_t _readerWeight;
-    std::uint32_t _totalWeight;
 };
 
 class PriorityTicketHolder final : public SchedulingTicketHolder {
@@ -436,8 +430,12 @@ private:
     };
 
     void _dequeueWaitingThread() override final;
+    QueueStats& _getQueueStatsToUse(const AdmissionContext* admCtx) noexcept override final;
 
-    Queue& _getQueueToUse(OperationContext* opCtx, const AdmissionContext* admCtx) override final;
+    void _appendImplStats(BSONObjBuilder& b) const override final;
+    void _appendPriorityStats(BSONObjBuilder& b, const QueueStats& stats) const;
+
+    Queue& _getQueueToUse(const AdmissionContext* admCtx) noexcept override final;
 };
 
 /**
@@ -449,7 +447,6 @@ class Ticket {
     friend class ReaderWriterTicketHolder;
     friend class TicketHolderWithQueueingStats;
     friend class SemaphoreTicketHolder;
-    friend class FifoTicketHolder;
     friend class SchedulingTicketHolder;
 
 public:

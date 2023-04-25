@@ -31,8 +31,9 @@
 
 #include "mongo/db/query/optimizer/cascades/enforcers.h"
 #include "mongo/db/query/optimizer/cascades/implementers.h"
+#include "mongo/db/query/optimizer/cascades/rewriter_rules.h"
 #include "mongo/db/query/optimizer/explain.h"
-#include "mongo/db/query/optimizer/utils/memo_utils.h"
+#include "mongo/db/query/optimizer/utils/rewriter_utils.h"
 
 namespace mongo::optimizer::cascades {
 
@@ -105,14 +106,18 @@ private:
 };
 
 PhysicalRewriter::PhysicalRewriter(Memo& memo,
+                                   const GroupIdType rootGroupId,
                                    const QueryHints& hints,
                                    const RIDProjectionsMap& ridProjections,
                                    const CostingInterface& costDerivation,
+                                   const PathToIntervalFn& pathToInterval,
                                    std::unique_ptr<LogicalRewriter>& logicalRewriter)
     : _memo(memo),
+      _rootGroupId(rootGroupId),
       _costDerivation(costDerivation),
       _hints(hints),
       _ridProjections(ridProjections),
+      _pathToInterval(pathToInterval),
       _logicalRewriter(logicalRewriter) {}
 
 static void printCandidateInfo(const ABT& node,
@@ -137,6 +142,7 @@ static void printCandidateInfo(const ABT& node,
 void PhysicalRewriter::costAndRetainBestNode(ABT node,
                                              ChildPropsType childProps,
                                              NodeCEMap nodeCEMap,
+                                             const PhysicalRewriteType rule,
                                              const GroupIdType groupId,
                                              PrefixId& prefixId,
                                              PhysOptimizationResult& bestResult) {
@@ -163,8 +169,11 @@ void PhysicalRewriter::costAndRetainBestNode(ABT node,
         printCandidateInfo(node, groupId, nodeCost, childProps, bestResult);
     }
 
+    tassert(6678300,
+            "Retaining node with uninitialized rewrite rule",
+            rule != cascades::PhysicalRewriteType::Uninitialized);
     PhysNodeInfo candidateNodeInfo{
-        unwrapConstFilter(std::move(node)), cost, nodeCost, nodeCostAndCE._ce};
+        unwrapConstFilter(std::move(node)), cost, nodeCost, nodeCostAndCE._ce, rule};
     const bool keepRejectedPlans = _hints._keepRejectedPlans;
     if (improvement) {
         if (keepRejectedPlans && bestResult._nodeInfo) {
@@ -332,7 +341,7 @@ PhysicalRewriter::OptimizeGroupResult PhysicalRewriter::optimizeGroup(const Grou
         : physicalNodes.addOptimizationResult(physProps, costLimit);
 
     // Enforcement rewrites run just once, and are independent of the logical nodes.
-    if (hasProperty<ProjectionRequirement>(bestResult._physProps)) {
+    if (groupId != _rootGroupId) {
         // Verify properties can be enforced and add enforcers if necessary.
         addEnforcers(groupId,
                      _memo.getMetadata(),
@@ -353,8 +362,14 @@ PhysicalRewriter::OptimizeGroupResult PhysicalRewriter::optimizeGroup(const Grou
 
         // Add rewrites to convert logical into physical nodes. Only add rewrites for newly added
         // logical nodes.
-        addImplementers(
-            _memo, _hints, _ridProjections, prefixId, bestResult, logicalProps, logicalNodes);
+        addImplementers(_memo,
+                        _hints,
+                        _ridProjections,
+                        prefixId,
+                        bestResult,
+                        logicalProps,
+                        logicalNodes,
+                        _pathToInterval);
 
         // Perform physical rewrites, use branch-and-bound.
         while (!bestResult._queue.empty()) {
@@ -371,6 +386,7 @@ PhysicalRewriter::OptimizeGroupResult PhysicalRewriter::optimizeGroup(const Grou
             costAndRetainBestNode(std::move(rewrite._node),
                                   std::move(rewrite._childProps),
                                   std::move(nodeCEMap),
+                                  rewrite._rule,
                                   groupId,
                                   prefixId,
                                   bestResult);

@@ -255,6 +255,7 @@ PlanStage::StageState BatchedDeleteStage::_deleteBatch(WorkingSetID* out) {
 
     std::set<WorkingSetID> recordsToSkip;
     unsigned int docsDeleted = 0;
+    unsigned int bytesDeleted = 0;
     unsigned int bufferOffset = 0;
     long long timeInBatch = 0;
 
@@ -264,7 +265,8 @@ PlanStage::StageState BatchedDeleteStage::_deleteBatch(WorkingSetID* out) {
             "BatchedDeleteStage::_deleteBatch",
             collection()->ns().ns(),
             [&] {
-                timeInBatch = _commitBatch(out, &recordsToSkip, &docsDeleted, &bufferOffset);
+                timeInBatch =
+                    _commitBatch(out, &recordsToSkip, &docsDeleted, &bytesDeleted, &bufferOffset);
                 return PlanStage::NEED_TIME;
             },
             [&] {
@@ -276,8 +278,8 @@ PlanStage::StageState BatchedDeleteStage::_deleteBatch(WorkingSetID* out) {
             return ret;
         }
     } catch (const ExceptionFor<ErrorCodes::StaleConfig>& ex) {
-        if (ex->getVersionReceived() == ChunkVersion::IGNORED() && ex->getCriticalSectionSignal()) {
-            // If ChunkVersion is IGNORED and we encountered a critical section, then yield, wait
+        if (ex->getVersionReceived() == ShardVersion::IGNORED() && ex->getCriticalSectionSignal()) {
+            // If ShardVersion is IGNORED and we encountered a critical section, then yield, wait
             // for critical section to finish and then we'll resume the write from the point we had
             // left. We do this to prevent large multi-writes from repeatedly failing due to
             // StaleConfig and exhausting the mongos retry attempts.
@@ -292,6 +294,7 @@ PlanStage::StageState BatchedDeleteStage::_deleteBatch(WorkingSetID* out) {
     incrementSSSMetricNoOverflow(batchedDeletesSSS.batches, 1);
     incrementSSSMetricNoOverflow(batchedDeletesSSS.timeInBatchMillis, timeInBatch);
     _specificStats.docsDeleted += docsDeleted;
+    _specificStats.bytesDeleted += bytesDeleted;
 
     if (bufferOffset < _stagedDeletesBuffer.size()) {
         // targetBatchTimeMS was met. Remove staged deletes that have been evaluated
@@ -312,6 +315,7 @@ PlanStage::StageState BatchedDeleteStage::_deleteBatch(WorkingSetID* out) {
 long long BatchedDeleteStage::_commitBatch(WorkingSetID* out,
                                            std::set<WorkingSetID>* recordsToSkip,
                                            unsigned int* docsDeleted,
+                                           unsigned int* bytesDeleted,
                                            unsigned int* bufferOffset) {
     // Estimate the size of the oplog entry that would result from committing the batch,
     // to ensure we emit an oplog entry that's within the 16MB BSON limit.
@@ -395,6 +399,7 @@ long long BatchedDeleteStage::_commitBatch(WorkingSetID* out,
                                                  : Collection::StoreDeletedDoc::Off);
 
                 (*docsDeleted)++;
+                (*bytesDeleted) += bsonObjDoc.objsize();
 
                 batchedDeleteStageSleepAfterNDocuments.executeIf(
                     [&](const BSONObj& data) {

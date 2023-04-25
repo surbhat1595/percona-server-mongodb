@@ -58,8 +58,8 @@
 #include "mongo/db/s/move_timing_helper.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
-#include "mongo/db/s/recoverable_critical_section_service.h"
 #include "mongo/db/s/shard_filtering_metadata_refresh.h"
+#include "mongo/db/s/sharding_recovery_service.h"
 #include "mongo/db/s/sharding_runtime_d_params_gen.h"
 #include "mongo/db/s/sharding_statistics.h"
 #include "mongo/db/s/start_chunk_clone_request.h"
@@ -111,7 +111,8 @@ BSONObj makeLocalReadConcernWithAfterClusterTime(Timestamp afterClusterTime) {
 }
 
 void checkOutSessionAndVerifyTxnState(OperationContext* opCtx) {
-    MongoDOperationContextSession::checkOut(opCtx);
+    auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
+    mongoDSessionCatalog->checkOutUnscopedSession(opCtx);
     TransactionParticipant::get(opCtx).beginOrContinue(opCtx,
                                                        {*opCtx->getTxnNumber()},
                                                        boost::none /* autocommit */,
@@ -127,7 +128,9 @@ constexpr bool returnsVoid() {
 // throwing, will reacquire the session and verify it is still valid to proceed with the migration.
 template <typename Callable, std::enable_if_t<!returnsVoid<Callable>(), int> = 0>
 auto runWithoutSession(OperationContext* opCtx, Callable&& callable) {
-    MongoDOperationContextSession::checkIn(opCtx, OperationContextSession::CheckInReason::kYield);
+    auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
+    mongoDSessionCatalog->checkInUnscopedSession(opCtx,
+                                                 OperationContextSession::CheckInReason::kYield);
 
     auto retVal = callable();
 
@@ -141,7 +144,9 @@ auto runWithoutSession(OperationContext* opCtx, Callable&& callable) {
 // Same as runWithoutSession above but takes a void function.
 template <typename Callable, std::enable_if_t<returnsVoid<Callable>(), int> = 0>
 void runWithoutSession(OperationContext* opCtx, Callable&& callable) {
-    MongoDOperationContextSession::checkIn(opCtx, OperationContextSession::CheckInReason::kYield);
+    auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
+    mongoDSessionCatalog->checkInUnscopedSession(opCtx,
+                                                 OperationContextSession::CheckInReason::kYield);
 
     callable();
 
@@ -781,7 +786,9 @@ MigrationDestinationManager::IndexesAndIdIndex MigrationDestinationManager::getC
     auto cmd = nssOrUUID.nss() ? BSON("listIndexes" << nssOrUUID.nss()->coll())
                                : BSON("listIndexes" << *nssOrUUID.uuid());
     if (cm) {
-        cmd = appendShardVersion(cmd, cm->getVersion(fromShardId));
+        ChunkVersion placementVersion = cm->getVersion(fromShardId);
+        cmd = appendShardVersion(
+            cmd, ShardVersion(placementVersion, CollectionIndexes(placementVersion, boost::none)));
     }
     if (afterClusterTime) {
         cmd = cmd.addFields(makeLocalReadConcernWithAfterClusterTime(*afterClusterTime));
@@ -1083,7 +1090,8 @@ void MigrationDestinationManager::_migrateThread(CancellationToken cancellationT
             opCtx->setLogicalSessionId(_lsid);
             opCtx->setTxnNumber(_txnNumber);
 
-            MongoDOperationContextSession sessionTxnState(opCtx);
+            auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
+            auto sessionTxnState = mongoDSessionCatalog->checkOutSession(opCtx);
 
             auto txnParticipant = TransactionParticipant::get(opCtx);
             txnParticipant.beginOrContinue(opCtx,
@@ -1372,7 +1380,7 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
                     }
 
                     migrationutil::persistUpdatedNumOrphans(
-                        opCtx, _migrationId.value(), *_collectionUuid, batchNumCloned);
+                        opCtx, *_collectionUuid, ChunkRange(_min, _max), batchNumCloned);
 
                     {
                         stdx::lock_guard<Latch> statsLock(_mutex);
@@ -1636,9 +1644,8 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
             // Enter critical section. Ensure it has been majority commited before _recvChunkCommit
             // returns success to the donor, so that if the recipient steps down, the critical
             // section is kept taken while the donor commits the migration.
-            RecoverableCriticalSectionService::get(opCtx)
-                ->acquireRecoverableCriticalSectionBlockWrites(
-                    opCtx, _nss, critSecReason, ShardingCatalogClient::kMajorityWriteConcern);
+            ShardingRecoveryService::get(opCtx)->acquireRecoverableCriticalSectionBlockWrites(
+                opCtx, _nss, critSecReason, ShardingCatalogClient::kMajorityWriteConcern);
 
             LOGV2(5899114, "Entered migration recipient critical section", logAttrs(_nss));
             timeInCriticalSection.emplace();
@@ -1670,7 +1677,7 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
             cc().makeOperationContext(), outerOpCtx->getCancellationToken(), executor);
         auto opCtx = newOpCtxPtr.get();
 
-        RecoverableCriticalSectionService::get(opCtx)->acquireRecoverableCriticalSectionBlockWrites(
+        ShardingRecoveryService::get(opCtx)->acquireRecoverableCriticalSectionBlockWrites(
             opCtx,
             _nss,
             criticalSectionReason(*_sessionId),
@@ -1821,7 +1828,7 @@ bool MigrationDestinationManager::_applyMigrateOp(OperationContext* opCtx, const
 
     if (changeInOrphans != 0) {
         migrationutil::persistUpdatedNumOrphans(
-            opCtx, _migrationId.value(), *_collectionUuid, changeInOrphans);
+            opCtx, *_collectionUuid, ChunkRange(_min, _max), changeInOrphans);
     }
     return didAnything;
 }
@@ -1894,7 +1901,7 @@ void MigrationDestinationManager::awaitCriticalSectionReleaseSignalAndCompleteMi
     LOGV2_DEBUG(5899110, 3, "Exiting critical section");
     const auto critSecReason = criticalSectionReason(*_sessionId);
 
-    RecoverableCriticalSectionService::get(opCtx)->releaseRecoverableCriticalSection(
+    ShardingRecoveryService::get(opCtx)->releaseRecoverableCriticalSection(
         opCtx, _nss, critSecReason, ShardingCatalogClient::kMajorityWriteConcern);
 
     const auto timeInCriticalSectionMs = timeInCriticalSection.millis();

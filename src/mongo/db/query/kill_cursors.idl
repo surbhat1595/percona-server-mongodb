@@ -34,7 +34,7 @@ global:
 imports:
     - "mongo/db/auth/access_checks.idl"
     - "mongo/db/auth/action_type.idl"
-    - "mongo/idl/basic_types.idl"
+    - "mongo/db/basic_types.idl"
 
 types:
     cursorId:
@@ -47,6 +47,7 @@ structs:
     KillCursorsCommandReply:
         description: 'Response from killCursors command'
         strict: false
+        is_command_reply: true
         fields:
             cursorsKilled:
                 description: 'Cursors successfully killed'

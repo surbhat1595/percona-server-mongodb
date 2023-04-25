@@ -281,6 +281,7 @@ NamespaceString TenantMigrationRecipientService::getStateDocumentsNS() const {
 ThreadPool::Limits TenantMigrationRecipientService::getThreadPoolLimits() const {
     ThreadPool::Limits limits;
     limits.maxThreads = maxTenantMigrationRecipientThreadPoolSize;
+    limits.minThreads = minTenantMigrationRecipientThreadPoolSize;
     return limits;
 }
 
@@ -912,8 +913,8 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::_initializeStateDoc(
         .then([this, self = shared_from_this(), stateDoc = _stateDoc] {
             auto opCtx = cc().makeOperationContext();
             {
-                Lock::ExclusiveLock stateDocInsertLock(
-                    opCtx.get(), opCtx->lockState(), _recipientService->_stateDocInsertMutex);
+                Lock::ExclusiveLock stateDocInsertLock(opCtx.get(),
+                                                       _recipientService->_stateDocInsertMutex);
                 uassertStatusOK(
                     tenantMigrationRecipientEntryHelpers::insertStateDoc(opCtx.get(), stateDoc));
             }
@@ -1012,6 +1013,8 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::_openBackupCursor(
         return aggRequest.toBSON(BSONObj());
     }();
 
+    auto startMigrationDonorTimestamp = _stateDoc.getStartMigrationDonorTimestamp();
+
     auto fetchStatus = std::make_shared<boost::optional<Status>>();
     auto uniqueMetadataInfo = std::make_unique<boost::optional<shard_merge_utils::MetadataInfo>>();
     auto fetcherCallback =
@@ -1020,7 +1023,8 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::_openBackupCursor(
             self = shared_from_this(),
             fetchStatus,
             metadataInfoPtr = uniqueMetadataInfo.get(),
-            token
+            token,
+            startMigrationDonorTimestamp
         ](const Fetcher::QueryResponseStatus& dataStatus,
           Fetcher::NextAction* nextAction,
           BSONObjBuilder* getMoreBob) noexcept {
@@ -1044,6 +1048,14 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::_openBackupCursor(
                                "backupCursorId"_attr = data.cursorId,
                                "backupCursorCheckpointTimestamp"_attr = checkpointTimestamp);
 
+                    // This ensures that the recipient won’t receive any 2 phase index build donor
+                    // oplog entries during the migration. We also have a check in the tenant oplog
+                    // applier to detect such oplog entries. Adding a check here helps us to detect
+                    // the problem earlier.
+                    uassert(6929900,
+                            "backupCursorCheckpointTimestamp should be greater than or equal to "
+                            "startMigrationDonorTimestamp",
+                            checkpointTimestamp >= startMigrationDonorTimestamp);
                     {
                         stdx::lock_guard lk(_mutex);
                         stdx::lock_guard<TenantMigrationSharedData> sharedDatalk(*_sharedData);
@@ -1321,7 +1333,8 @@ void TenantMigrationRecipientService::Instance::_processCommittedTransactionEntr
     opCtx->setLogicalSessionId(sessionId);
     opCtx->setTxnNumber(txnNumber);
     opCtx->setInMultiDocumentTransaction();
-    MongoDOperationContextSession ocs(opCtx);
+    auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
+    auto ocs = mongoDSessionCatalog->checkOutSession(opCtx);
 
     LOGV2_DEBUG(5351301,
                 1,

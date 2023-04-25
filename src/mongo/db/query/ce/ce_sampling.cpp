@@ -29,8 +29,8 @@
 
 #include "mongo/db/query/ce/ce_sampling.h"
 
-#include "mongo/db/commands/cqf/cqf_command_utils.h"
 #include "mongo/db/exec/sbe/abt/abt_lower.h"
+#include "mongo/db/query/cqf_command_utils.h"
 #include "mongo/db/query/optimizer/cascades/ce_heuristic.h"
 #include "mongo/db/query/optimizer/explain.h"
 #include "mongo/db/query/optimizer/utils/abt_hash.h"
@@ -147,7 +147,7 @@ public:
         for (const auto& [key, req] : node.getReqMap()) {
             if (!isIntervalReqFullyOpenDNF(req.getIntervals())) {
                 ABT lowered = extracted;
-                lowerPartialSchemaRequirement(key, req, lowered);
+                lowerPartialSchemaRequirement(key, req, lowered, _phaseManager.getPathToInterval());
                 uassert(6624243, "Expected a filter node", lowered.is<FilterNode>());
                 result = estimateFilterCE(memo, logicalProps, n, std::move(lowered), result);
             }
@@ -227,15 +227,18 @@ private:
 
         auto env = VariableEnvironment::build(abtTree);
         SlotVarMap slotMap;
+        boost::optional<sbe::value::SlotId> ridSlot;
         sbe::value::SlotIdGenerator ids;
         SBENodeLowering g{env,
                           slotMap,
+                          ridSlot,
                           ids,
                           _phaseManager.getMetadata(),
                           _phaseManager.getNodeToGroupPropsMap(),
                           _phaseManager.getRIDProjections(),
                           true /*randomScan*/};
         auto sbePlan = g.optimize(abtTree);
+        tassert(6624261, "Unexpected rid slot", !ridSlot);
 
         // TODO: return errors instead of exceptions?
         uassert(6624244, "Lowering failed", sbePlan != nullptr);

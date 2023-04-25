@@ -348,12 +348,7 @@ WiredTigerSession* WiredTigerRecoveryUnit::getSession() {
 
 WiredTigerSession* WiredTigerRecoveryUnit::getSessionNoTxn() {
     _ensureSession();
-    WiredTigerSession* session = _session.get();
-
-    // Handling queued drops can be slow, which is not desired for internal operations like FTDC
-    // sampling. Disable handling of queued drops for such sessions.
-    session->dropQueuedIdentsAtSessionEndAllowed(false);
-    return session;
+    return _session.get();
 }
 
 void WiredTigerRecoveryUnit::doAbandonSnapshot() {
@@ -375,21 +370,6 @@ void WiredTigerRecoveryUnit::preallocateSnapshotForOplogRead() {
     // Indicate that we are an oplog reader before opening the snapshot
     setIsOplogReader();
     preallocateSnapshot();
-}
-
-void WiredTigerRecoveryUnit::refreshSnapshot() {
-    // Currently, this code only works for kNoOverlap or kNoTimestamp.
-    invariant(_timestampReadSource == ReadSource::kNoOverlap ||
-              _timestampReadSource == ReadSource::kNoTimestamp);
-    invariant(_isActive());
-    invariant(!_inUnitOfWork());
-    invariant(!_noEvictionAfterRollback);
-    invariant(_abandonSnapshotMode == AbandonSnapshotMode::kAbort);
-
-    auto session = _session->getSession();
-    invariantWTOK(session->reset_snapshot(session), session);
-    LOGV2_DEBUG(
-        6235000, 3, "WT refreshed snapshot", "snapshotId"_attr = getSnapshotId().toNumber());
 }
 
 void WiredTigerRecoveryUnit::_txnClose(bool commit) {
@@ -545,6 +525,7 @@ boost::optional<Timestamp> WiredTigerRecoveryUnit::getPointInTimeReadTimestamp(
     // read timestamps.
     switch (_timestampReadSource) {
         case ReadSource::kNoTimestamp:
+        case ReadSource::kCheckpoint:
             return boost::none;
         case ReadSource::kProvided:
             // The read timestamp is set by the user and does not require a transaction to be open.
@@ -587,6 +568,7 @@ boost::optional<Timestamp> WiredTigerRecoveryUnit::getPointInTimeReadTimestamp(
         // The follow ReadSources returned values in the first switch block.
         case ReadSource::kNoTimestamp:
         case ReadSource::kProvided:
+        case ReadSource::kCheckpoint:
             MONGO_UNREACHABLE;
     }
     MONGO_UNREACHABLE;
@@ -610,6 +592,15 @@ void WiredTigerRecoveryUnit::_txnOpen() {
             if (_isOplogReader) {
                 _oplogVisibleTs = static_cast<std::int64_t>(_oplogManager->getOplogReadTimestamp());
             }
+            WiredTigerBeginTxnBlock(session,
+                                    _prepareConflictBehavior,
+                                    _roundUpPreparedTimestamps,
+                                    RoundUpReadTimestamp::kNoRoundError,
+                                    _untimestampedWriteAssertion)
+                .done();
+            break;
+        }
+        case ReadSource::kCheckpoint: {
             WiredTigerBeginTxnBlock(session,
                                     _prepareConflictBehavior,
                                     _roundUpPreparedTimestamps,

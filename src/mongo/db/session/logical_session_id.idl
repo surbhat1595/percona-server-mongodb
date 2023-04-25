@@ -36,7 +36,7 @@ global:
     - "mongo/util/uuid.h"
 
 imports:
-  - "mongo/idl/basic_types.idl"
+  - "mongo/db/basic_types.idl"
   - "mongo/crypto/sha256_block.idl"
 
 types:
@@ -77,12 +77,12 @@ structs:
         description: "Used for internal sessions only."
         type: TxnNumber
         optional: true
-        stability: stable
+        stability: unstable
       txnUUID:
         description: "Used for internal sessions only."
         type: uuid
         optional: true
-        stability: stable
+        stability: unstable
 
   LogicalSessionIdToClient:
     description: "A struct representing a LogicalSessionId to external clients"

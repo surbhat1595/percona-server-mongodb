@@ -252,23 +252,24 @@ class RecordIdPrinter(object):
         if rid_format == 0:
             return "null RecordId"
         elif rid_format == 1:
-            hex_bytes = [int(self.val['_buffer'][i]) for i in range(8)]
-            raw_bytes = bytes(hex_bytes)
-            return "RecordId long: %s" % struct.unpack('l', raw_bytes)[0]
+            long_id = int(self.val['_data']['longId']['id'])
+            return "RecordId long: %d" % (long_id)
         elif rid_format == 2:
-            str_len = int(self.val["_buffer"][0])
-            raw_bytes = [int(self.val['_buffer'][i]) for i in range(1, str_len + 1)]
+            inline_str = self.val['_data']['inlineStr']
+            str_len = int(inline_str['size'])
+            str_array = inline_str['dataArr']
+            # Reading the std::array elements
+            raw_bytes = [int(str_array['_M_elems'][i]) for i in range(0, str_len)]
             hex_bytes = [hex(b & 0xFF)[2:].zfill(2) for b in raw_bytes]
             return "RecordId small string %d hex bytes: %s" % (str_len, str("".join(hex_bytes)))
         elif rid_format == 3:
-            holder_ptr = self.val["_sharedBuffer"]["_buffer"]["_holder"]["px"]
-            holder = holder_ptr.dereference()
-            str_len = int(holder["_capacity"])
-            # Start of data is immediately after pointer for holder
-            start_ptr = (holder_ptr + 1).dereference().cast(gdb.lookup_type("char")).address
-            raw_bytes = [int(start_ptr[i]) for i in range(1, str_len + 1)]
+            heap_str = self.val['_data']['heapStr']
+            str_len = int(heap_str["size"])
+            str_ptr = heap_str['stringPtr']
+            raw_bytes = [int(str_ptr[i]) for i in range(0, str_len)]
             hex_bytes = [hex(b & 0xFF)[2:].zfill(2) for b in raw_bytes]
-            return "RecordId big string %d hex bytes @ %s: %s" % (str_len, holder_ptr + 1,
+            void_ptr = str_ptr.cast(gdb.lookup_type('void').pointer())
+            return "RecordId big string %d hex bytes @ %s: %s" % (str_len, void_ptr,
                                                                   str("".join(hex_bytes)))
         else:
             return "unknown RecordId format: %d" % rid_format
@@ -794,7 +795,7 @@ class SbeCodeFragmentPrinter(object):
 
             # Some instructions have extra arguments, embedded into the ops stream.
             args = ''
-            if op_name in ['pushLocalVal', 'pushMoveLocalVal', 'pushLocalLambda', 'traversePConst']:
+            if op_name in ['pushLocalVal', 'pushMoveLocalVal', 'pushLocalLambda']:
                 args = 'arg: ' + str(read_as_integer(cur_op, int_size))
                 cur_op += int_size
             elif op_name in ['jmp', 'jmpTrue', 'jmpNothing']:
@@ -828,7 +829,7 @@ class SbeCodeFragmentPrinter(object):
             elif op_name in ['fillEmptyConst']:
                 args = 'Instruction::Constants: ' + str(read_as_integer(cur_op, uint8_size))
                 cur_op += uint8_size
-            elif op_name in ['traverseFConst']:
+            elif op_name in ['traverseFConst', 'traversePConst']:
                 const_enum = read_as_integer(cur_op, uint8_size)
                 cur_op += uint8_size
                 args = \
@@ -945,27 +946,98 @@ class MemoPrinter(OptimizerTypePrinter):
 def register_abt_printers(pp):
     """Registers a number of pretty printers related to the CQF optimizer."""
 
+    # IntervalRequirement printer.
+    pp.add("Interval", "mongo::optimizer::IntervalRequirement", False, IntervalPrinter)
+
+    # Memo printer.
+    pp.add("Memo", "mongo::optimizer::cascades::Memo", False, MemoPrinter)
+
+    # PartialSchemaRequirements printer.
+    schema_req_type = """std::multimap<mongo::optimizer::PartialSchemaKey,
+                        mongo::optimizer::PartialSchemaRequirement,
+                        mongo::optimizer::PartialSchemaKeyLessComparator,
+                        std::allocator<std::pair<mongo::optimizer::PartialSchemaKey const,
+                            mongo::optimizer::PartialSchemaRequirement>
+                        > >"""
+    pp.add("PartialSchemaRequirements", schema_req_type, False, PartialSchemaReqMapPrinter)
+
+    # Attempt to dynamically load the ABT type since it has a templated type set that is bound to
+    # change. This may fail on certain builds, such as those with dynamically linked libraries, so
+    # we catch the lookup error and fallback to registering the static type name which may be
+    # stale.
     try:
         # ABT printer.
         abt_type = gdb.lookup_type("mongo::optimizer::ABT").strip_typedefs()
         pp.add('ABT', abt_type.name, False, ABTPrinter)
 
-        abt_ref_type = gdb.lookup_type(abt_type.name + "::Reference").strip_typedefs()
+        abt_ref_type = abt_type.name + "::Reference"
         # We can re-use the same printer since an ABT is contructable from an ABT::Reference.
-        pp.add('ABT::Reference', abt_ref_type.name, False, ABTPrinter)
+        pp.add('ABT::Reference', abt_ref_type, False, ABTPrinter)
+    except gdb.error:
+        # ABT printer.
+        abt_type_set = ["Blackhole",
+                               "Constant",
+                               "Variable",
+                               "UnaryOp",
+                               "BinaryOp",
+                               "If",
+                               "Let",
+                               "LambdaAbstraction",
+                               "LambdaApplication",
+                               "FunctionCall",
+                               "EvalPath",
+                               "EvalFilter",
+                               "Source",
+                               "PathConstant",
+                               "PathLambda",
+                               "PathIdentity",
+                               "PathDefault",
+                               "PathCompare",
+                               "PathDrop",
+                               "PathKeep",
+                               "PathObj",
+                               "PathArr",
+                               "PathTraverse",
+                               "PathField",
+                               "PathGet",
+                               "PathComposeM",
+                               "PathComposeA",
+                               "ScanNode",
+                               "PhysicalScanNode",
+                               "ValueScanNode",
+                               "CoScanNode",
+                               "IndexScanNode",
+                               "SeekNode",
+                               "MemoLogicalDelegatorNode",
+                               "MemoPhysicalDelegatorNode",
+                               "FilterNode",
+                               "EvaluationNode",
+                               "SargableNode",
+                               "RIDIntersectNode",
+                               "BinaryJoinNode",
+                               "HashJoinNode",
+                               "MergeJoinNode",
+                               "UnionNode",
+                               "GroupByNode",
+                               "UnwindNode",
+                               "UniqueNode",
+                               "CollationNode",
+                               "LimitSkipNode",
+                               "ExchangeNode",
+                               "RootNode",
+                               "References",
+                               "ExpressionBinder"]
+        abt_type = "mongo::optimizer::algebra::PolyValue<"
+        for type_name in abt_type_set:
+            abt_type += "mongo::optimizer::" + type_name
+            if type_name != "ExpressionBinder":
+                abt_type += ", "
+        abt_type += ">"
+        pp.add('ABT', abt_type, False, ABTPrinter)
 
-        # IntervalRequirement printer.
-        pp.add("Interval", "mongo::optimizer::IntervalRequirement", False, IntervalPrinter)
-
-        # PartialSchemaRequirements printer.
-        schema_req_type = gdb.lookup_type(
-            "mongo::optimizer::PartialSchemaRequirements").strip_typedefs()
-        pp.add("PartialSchemaRequirements", schema_req_type.name, False, PartialSchemaReqMapPrinter)
-
-        # Memo printer.
-        pp.add("Memo", "mongo::optimizer::cascades::Memo", False, MemoPrinter)
-    except gdb.error as gdberr:
-        print("Failed to add one or more ABT pretty printers, skipping: " + str(gdberr))
+        abt_ref_type = abt_type + "::Reference"
+        # We can re-use the same printer since an ABT is contructable from an ABT::Reference.
+        pp.add('ABT::Reference', abt_ref_type, False, ABTPrinter)
 
 
 def build_pretty_printer():

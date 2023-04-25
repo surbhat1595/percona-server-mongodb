@@ -38,16 +38,17 @@ from cost_estimator import ModelParameters, ExecutionStats
 import execution_tree
 import physical_tree
 
-__all__ = ['extract_parameters']
+__all__ = ['extract_parameters', 'extract_execution_stats']
 
 
-def extract_parameters(config: AbtCalibratorConfig, database: DatabaseInstance,
-                       abt_types: Sequence[str]) -> Mapping[str, Sequence[ModelParameters]]:
+async def extract_parameters(config: AbtCalibratorConfig, database: DatabaseInstance,
+                             abt_types: Sequence[str]) -> Mapping[str, Sequence[ModelParameters]]:
     """Read measurements from database and extract cost model parameters for the given ABT types."""
 
     stats = defaultdict(list)
 
-    for result in database.get_all_documents(config.input_collection_name):
+    docs = await database.get_all_documents(config.input_collection_name)
+    for result in docs:
         explain = json.loads(result['explain'])
         query_parameters = QueryParameters.from_json(result['query_parameters'])
         res = parse_explain(explain, abt_types)
@@ -111,13 +112,25 @@ def get_excution_stats(root: execution_tree.Node, node_id: int) -> ExecutionStat
 def parse_explain(explain: Mapping[str, any], abt_types: Sequence[str]):
     """Extract ExecutionStats from the given explain for the given ABT types."""
 
-    result: Mapping[str, ExecutionStats] = {}
-    et = execution_tree.build_execution_tree(explain['executionStats'])
-    pt = physical_tree.build(explain['queryPlanner']['winningPlan']['optimizerPlan'])
+    try:
+        et = execution_tree.build_execution_tree(explain['executionStats'])
+        pt = physical_tree.build(explain['queryPlanner']['winningPlan']['optimizerPlan'])
+    except Exception as exception:
+        print(f'*** Failed to parse explain with the followinf error: {exception}')
+        print(explain)
+        raise exception
+
+    return extract_execution_stats(et, pt, abt_types)
+
+
+def extract_execution_stats(et: execution_tree.Node, pt: physical_tree.Node,
+                            abt_types: Sequence[str]) -> Mapping[str, ExecutionStats]:
+    """Extract ExecutionStats from the given SBE and ABT trees for the given ABT types."""
 
     if len(abt_types) == 0:
         abt_types = get_abt_types(pt)
 
+    result: Mapping[str, ExecutionStats] = {}
     for abt_type in abt_types:
         abt_node = find_abt_node_by_type(pt, abt_type)
         if abt_node is not None:

@@ -1,7 +1,7 @@
 /**
  * Tests that the validate command detects various types of BSON inconsistencies.
  *
- * @tags: [featureFlagExtendValidateCommand]
+ * @tags: [requires_fcv_62]
  */
 
 (function() {
@@ -34,13 +34,13 @@ resetDbpath(dbpath);
     testColl.insert({a: 1, b: 2, c: {b: 3}, d: {a: [2, 3, 4], b: {a: 2}}});
     testColl.insert({a: 1, b: 1});
 
-    // Warnings should be triggered iff checkBSONConsistency is set to true.
+    // Warnings should be triggered iff checkBSONConformance is set to true.
     let res = assert.commandWorked(testColl.validate());
     assert(res.valid, tojson(res));
     assert.eq(res.nNonCompliantDocuments, 0);
     assert.eq(res.warnings.length, 0);
 
-    res = assert.commandWorked(testColl.validate({checkBSONConsistency: true}));
+    res = assert.commandWorked(testColl.validate({checkBSONConformance: true}));
     assert(res.valid, tojson(res));
     assert.eq(res.nNonCompliantDocuments, numDocs);
     assert.eq(res.warnings.length, 1);
@@ -65,12 +65,12 @@ resetDbpath(dbpath);
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
     });
 
-    let res = coll.validate({checkBSONConsistency: true});
+    let res = coll.validate({checkBSONConformance: true});
     assert(res.valid, tojson(res));
     assert.eq(res.nNonCompliantDocuments, 2);
     assert.eq(res.warnings.length, 1);
 
-    res = coll.validate({checkBSONConsistency: false});
+    res = coll.validate({checkBSONConformance: false});
     assert(res.valid, tojson(res));
     assert.eq(res.nNonCompliantDocuments, 2);
     assert.eq(res.warnings.length, 1);
@@ -93,12 +93,12 @@ resetDbpath(dbpath);
     db = mongod.getDB(baseName);
     coll = db[collName];
 
-    let res = coll.validate({checkBSONConsistency: false});
+    let res = coll.validate({checkBSONConformance: false});
     assert(res.valid, tojson(res));
     assert.eq(res.nNonCompliantDocuments, 5);
     assert.eq(res.warnings.length, 1);
 
-    res = coll.validate({checkBSONConsistency: true});
+    res = coll.validate({checkBSONConformance: true});
     assert(res.valid, tojson(res));
     assert.eq(res.nNonCompliantDocuments, 5);
     assert.eq(res.warnings.length, 1);
@@ -137,7 +137,7 @@ resetDbpath(dbpath);
     // Tests that calling validate, with BSONConsistencyCheck true, on a collection with an
     // improperly sized md5 returns a warning.
     assert.commandWorked(testColl.insert({"md5ImproperBSONConsistencyCheck": improperMD5}));
-    res = assert.commandWorked(testColl.validate({checkBSONConsistency: true}));
+    res = assert.commandWorked(testColl.validate({checkBSONConformance: true}));
     assert(res.valid, tojson(res));
     assert.eq(res.nNonCompliantDocuments, 2);
 
@@ -182,7 +182,7 @@ resetDbpath(dbpath);
     assert.eq(res.nNonCompliantDocuments, 7);
     assert.eq(res.warnings.length, 1);
 
-    res = assert.commandWorked(testColl.validate({checkBSONConsistency: true}));
+    res = assert.commandWorked(testColl.validate({checkBSONConformance: true}));
     assert(res.valid, tojson(res));
     assert.eq(res.nNonCompliantDocuments, 7);
     assert.eq(res.warnings.length, 1);
@@ -205,13 +205,13 @@ resetDbpath(dbpath);
     testColl.insert(
         {a: BinData(7, "AQAAAAAAAAAAQJN/AAAAAAAAAAIAAAAAAAAABwAAAAAAAAAOAAAAAAAAAAA=")});
 
-    // Calling validate without 'checkBSONConsistency' should not return any warnings.
+    // Calling validate without 'checkBSONConformance' should not return any warnings.
     let res = assert.commandWorked(testColl.validate());
     assert(res.valid, tojson(res));
     assert.eq(res.warnings.length, 0);
     assert.eq(res.nNonCompliantDocuments, 0);
 
-    res = assert.commandWorked(testColl.validate({checkBSONConsistency: true}));
+    res = assert.commandWorked(testColl.validate({checkBSONConformance: true}));
     assert(res.valid, tojson(res));
     assert.eq(res.warnings.length, 1);
     assert.eq(res.nNonCompliantDocuments, 1);
@@ -241,7 +241,7 @@ resetDbpath(dbpath);
     assert.eq(res.nNonCompliantDocuments, 10);
     assert.eq(res.warnings.length, 1);
 
-    res = assert.commandWorked(testColl.validate({checkBSONConsistency: true}));
+    res = assert.commandWorked(testColl.validate({checkBSONConformance: true}));
     assert(res.valid, tojson(res));
     assert.eq(res.nNonCompliantDocuments, 10);
     assert.eq(res.warnings.length, 1);
@@ -271,9 +271,51 @@ resetDbpath(dbpath);
     assert.eq(res.nNonCompliantDocuments, 0);
     assert.eq(res.warnings.length, 0);
 
-    res = assert.commandWorked(testColl.validate({checkBSONConsistency: true}));
+    res = assert.commandWorked(testColl.validate({checkBSONConformance: true}));
     assert(res.valid, tojson(res));
     assert.eq(res.nNonCompliantDocuments, 10);
+    assert.eq(res.warnings.length, 1);
+
+    MongoRunner.stopMongod(mongod, null, {skipValidation: true});
+})();
+
+(function validateDocumentsInvalidEncryptedBSONValue() {
+    jsTestLog("Validate documents with invalid Encrypted BSON Value");
+
+    let mongod = startMongodOnExistingPath(dbpath);
+    let db = mongod.getDB(baseName);
+    const collName = collNamePrefix + count++;
+
+    db.createCollection(collName);
+    let testColl = db[collName];
+    // A valid Encrypted BSON document with the type byte, 16-byte key uuid, original BSON type
+    // byte, and an empty cipher text.
+    const properFLE = HexData(6, "060102030405060708091011121314151610");
+    // Invalid Encrypted BSON Value subtype 3.
+    const improperFLE1 = HexData(6, "030102030405060708091011121314151610");
+    // Invalid original BSON type MinKey.
+    const improperFLE2 = HexData(6, "0601020304050607080910111213141516ff");
+    // Empty Encrypted BSON Value.
+    const improperFLE3 = HexData(6, "");
+    // Short Encrypted BSON Value.
+    const improperFLE4 = HexData(6, "0601");
+
+    assert.commandWorked(testColl.insertMany([
+        {"fle": properFLE},
+        {"fle": improperFLE1},
+        {"fle": improperFLE2},
+        {"fle": improperFLE3},
+        {"fle": improperFLE4},
+    ]));
+
+    let res = assert.commandWorked(testColl.validate());
+    assert(res.valid, tojson(res));
+    assert.eq(res.nNonCompliantDocuments, 4);
+    assert.eq(res.warnings.length, 1);
+
+    res = assert.commandWorked(testColl.validate({checkBSONConformance: true}));
+    assert(res.valid, tojson(res));
+    assert.eq(res.nNonCompliantDocuments, 4);
     assert.eq(res.warnings.length, 1);
 
     MongoRunner.stopMongod(mongod, null, {skipValidation: true});

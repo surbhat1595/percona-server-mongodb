@@ -37,6 +37,7 @@
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/change_stream_change_collection_manager.h"
 #include "mongo/db/client.h"
+#include "mongo/db/commands/fsync.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/repl/apply_ops.h"
 #include "mongo/db/repl/oplog_applier_utils.h"
@@ -501,7 +502,7 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
 
     // Stop all readers until we're done. This also prevents doc-locking engines from deleting old
     // entries from the oplog until we finish writing.
-    Lock::ParallelBatchWriterMode pbwm(opCtx->lockState());
+    Lock::ParallelBatchWriterMode pbwm(opCtx);
 
     invariant(_replCoord);
     if (_replCoord->getApplierState() == ReplicationCoordinator::ApplierState::Stopped) {

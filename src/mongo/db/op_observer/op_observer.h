@@ -78,7 +78,6 @@ struct OplogDeleteEntryArgs {
     // "fromMigrate" indicates whether the delete was induced by a chunk migration, and so
     // should be ignored by the user as an internal maintenance operation and not a real delete.
     bool fromMigrate = false;
-    bool preImageRecordingEnabledForCollection = false;
     bool changeStreamPreAndPostImagesEnabledForCollection = false;
 
     // Specifies the pre-image recording option for retryable "findAndModify" commands.
@@ -123,6 +122,14 @@ public:
 
     virtual ~OpObserver() = default;
 
+    virtual void onCreateGlobalIndex(OperationContext* opCtx,
+                                     const NamespaceString& globalIndexNss,
+                                     const UUID& globalIndexUUID) = 0;
+
+    virtual void onDropGlobalIndex(OperationContext* opCtx,
+                                   const NamespaceString& globalIndexNss,
+                                   const UUID& globalIndexUUID) = 0;
+
     virtual void onCreateIndex(OperationContext* opCtx,
                                const NamespaceString& nss,
                                const UUID& uuid,
@@ -166,6 +173,13 @@ public:
                            std::vector<InsertStatement>::const_iterator begin,
                            std::vector<InsertStatement>::const_iterator end,
                            bool fromMigrate) = 0;
+
+    virtual void onInsertGlobalIndexKey(OperationContext* opCtx,
+                                        const NamespaceString& globalIndexNss,
+                                        const UUID& globalIndexUuid,
+                                        const BSONObj& key,
+                                        const BSONObj& docKey) = 0;
+
     virtual void onUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& args) = 0;
     virtual void aboutToDelete(OperationContext* opCtx,
                                const NamespaceString& nss,
@@ -431,20 +445,16 @@ public:
     virtual void onBatchedWriteAbort(OperationContext* opCtx) = 0;
 
     /**
-     * Contains "applyOps" oplog entries and oplog slots to be used for writing pre- and post- image
-     * oplog entries for a transaction. "applyOps" entries are not actual "applyOps" entries to be
-     * written to the oplog, but comprise certain parts of those entries - BSON serialized
-     * operations, and the assigned oplog slot. The operations in field 'ApplyOpsEntry::operations'
-     * should be considered opaque outside the OpObserver.
+     * Contains "applyOps" oplog entries for a transaction. "applyOps" entries are not actual
+     * "applyOps" entries to be written to the oplog, but comprise certain parts of those entries -
+     * BSON serialized operations, and the assigned oplog slot. The operations in field
+     * 'ApplyOpsEntry::operations' should be considered opaque outside the OpObserver.
      */
     struct ApplyOpsOplogSlotAndOperationAssignment {
         struct ApplyOpsEntry {
             OplogSlot oplogSlot;
             std::vector<BSONObj> operations;
         };
-
-        // Oplog slots to be used for writing pre- and post- image oplog entries.
-        std::vector<OplogSlot> prePostImageOplogEntryOplogSlots;
 
         // Representation of "applyOps" oplog entries.
         std::vector<ApplyOpsEntry> applyOpsEntries;

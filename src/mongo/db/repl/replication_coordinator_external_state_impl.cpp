@@ -130,15 +130,11 @@ namespace mongo {
 namespace repl {
 namespace {
 
-const char localDbName[] = "local";
+const char kLocalDbName[] = "local";
 // TODO SERVER-62491 Use SystemTenantId
-const auto configDatabaseName = DatabaseName(boost::none, localDbName);
-const auto lastVoteDatabaseName = localDbName;
-const char meCollectionName[] = "local.me";
-const auto meDatabaseName = localDbName;
-const char tsFieldName[] = "ts";
+const DatabaseName kConfigDatabaseName{boost::none, kLocalDbName};
 
-const NamespaceString configCollectionNS{"local", "system.replset"};
+const NamespaceString kConfigCollectionNS{kLocalDbName, "system.replset"};
 
 MONGO_FAIL_POINT_DEFINE(dropPendingCollectionReaperHang);
 
@@ -430,7 +426,7 @@ Status ReplicationCoordinatorExternalStateImpl::initializeReplSetStorage(Operati
                                {
                                    // Writes to 'local.system.replset' must be untimestamped.
                                    WriteUnitOfWork wuow(opCtx);
-                                   Helpers::putSingleton(opCtx, configCollectionNS, config);
+                                   Helpers::putSingleton(opCtx, kConfigCollectionNS, config);
                                    wuow.commit();
                                }
                                {
@@ -470,7 +466,8 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
     invariant(opCtx->lockState()->isRSTLExclusive());
     invariant(!opCtx->shouldParticipateInFlowControl());
 
-    MongoDSessionCatalog::onStepUp(opCtx);
+    auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
+    mongoDSessionCatalog->onStepUp(opCtx);
 
     invariant(
         _replicationProcess->getConsistencyMarkers()->getOplogTruncateAfterPoint(opCtx).isNull());
@@ -562,13 +559,13 @@ StatusWith<BSONObj> ReplicationCoordinatorExternalStateImpl::loadLocalConfigDocu
     OperationContext* opCtx) {
     try {
         return writeConflictRetry(
-            opCtx, "load replica set config", configCollectionNS.ns(), [opCtx] {
+            opCtx, "load replica set config", kConfigCollectionNS.ns(), [opCtx] {
                 BSONObj config;
-                if (!Helpers::getSingleton(opCtx, configCollectionNS, config)) {
+                if (!Helpers::getSingleton(opCtx, kConfigCollectionNS, config)) {
                     return StatusWith<BSONObj>(
                         ErrorCodes::NoMatchingDocument,
                         "Did not find replica set configuration document in {}"_format(
-                            configCollectionNS.toString()));
+                            kConfigCollectionNS.toString()));
                 }
                 return StatusWith<BSONObj>(config);
             });
@@ -581,12 +578,12 @@ Status ReplicationCoordinatorExternalStateImpl::storeLocalConfigDocument(Operati
                                                                          const BSONObj& config,
                                                                          bool writeOplog) {
     try {
-        writeConflictRetry(opCtx, "save replica set config", configCollectionNS.ns(), [&] {
+        writeConflictRetry(opCtx, "save replica set config", kConfigCollectionNS.ns(), [&] {
             {
                 // Writes to 'local.system.replset' must be untimestamped.
                 WriteUnitOfWork wuow(opCtx);
-                Lock::DBLock dbWriteLock(opCtx, configDatabaseName, MODE_X);
-                Helpers::putSingleton(opCtx, configCollectionNS, config);
+                Lock::DBLock dbWriteLock(opCtx, kConfigDatabaseName, MODE_X);
+                Helpers::putSingleton(opCtx, kConfigCollectionNS, config);
                 wuow.commit();
             }
 
@@ -612,11 +609,11 @@ Status ReplicationCoordinatorExternalStateImpl::storeLocalConfigDocument(Operati
 
 Status ReplicationCoordinatorExternalStateImpl::replaceLocalConfigDocument(
     OperationContext* opCtx, const BSONObj& config) try {
-    writeConflictRetry(opCtx, "replace replica set config", configCollectionNS.ns(), [&] {
+    writeConflictRetry(opCtx, "replace replica set config", kConfigCollectionNS.ns(), [&] {
         WriteUnitOfWork wuow(opCtx);
-        Lock::DBLock dbWriteLock(opCtx, configDatabaseName, MODE_X);
-        Helpers::emptyCollection(opCtx, configCollectionNS);
-        Helpers::putSingleton(opCtx, configCollectionNS, config);
+        Lock::DBLock dbWriteLock(opCtx, kConfigDatabaseName, MODE_X);
+        Helpers::emptyCollection(opCtx, kConfigCollectionNS);
+        Helpers::putSingleton(opCtx, kConfigCollectionNS, config);
         wuow.commit();
     });
     return Status::OK();

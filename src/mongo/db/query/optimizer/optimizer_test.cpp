@@ -498,6 +498,23 @@ TEST(Optimizer, Union) {
         rootNode);
 }
 
+TEST(Optimizer, UnionReferences) {
+    ABT scanNode1 = make<ScanNode>("ptest1", "test1");
+    ABT projNode1 = make<EvaluationNode>("A", Constant::int64(3), std::move(scanNode1));
+    ABT scanNode2 = make<ScanNode>("ptest2", "test2");
+    ABT projNode2 = make<EvaluationNode>("B", Constant::int64(4), std::move(scanNode2));
+
+    ABT unionNode =
+        make<UnionNode>(ProjectionNameVector{"ptest3", "C"}, makeSeq(projNode1, projNode2));
+    ABTVector unionNodeReferences =
+        unionNode.cast<UnionNode>()->get<1>().cast<References>()->nodes();
+    ABTVector expectedUnionNodeReferences = {make<Variable>("ptest3"),
+                                             make<Variable>("C"),
+                                             make<Variable>("ptest3"),
+                                             make<Variable>("C")};
+    ASSERT(unionNodeReferences == expectedUnionNodeReferences);
+}
+
 TEST(Optimizer, Unwind) {
     ABT scanNode = make<ScanNode>("p1", "test");
     ABT evalNode = make<EvaluationNode>(
@@ -697,6 +714,36 @@ TEST(Properties, Basic) {
         ASSERT_EQ(0, ls3.getSkip());
     }
 }
+
+TEST(Explain, ExplainV2Compact) {
+    ABT pathNode =
+        make<PathGet>("a",
+                      make<PathTraverse>(
+                          make<PathComposeM>(
+                              make<PathCompare>(Operations::Gte,
+                                                make<UnaryOp>(Operations::Neg, Constant::int64(2))),
+                              make<PathCompare>(Operations::Lt, Constant::int64(7))),
+                          1));
+    ABT scanNode = make<ScanNode>("x1", "test");
+    ABT evalNode = make<EvaluationNode>(
+        "x2", make<EvalPath>(pathNode, make<Variable>("a")), std::move(scanNode));
+
+    ASSERT_EXPLAIN_V2Compact(
+        "Evaluation []\n"
+        "|   BindBlock:\n"
+        "|       [x2]\n"
+        "|           EvalPath []\n"
+        "|           |   Variable [a]\n"
+        "|           PathGet [a] PathTraverse [1] PathComposeM []\n"
+        "|           |   PathCompare [Lt] Const [7]\n"
+        "|           PathCompare [Gte] UnaryOp [Neg] Const [2]\n"
+        "Scan [test]\n"
+        "    BindBlock:\n"
+        "        [x1]\n"
+        "            Source []\n",
+        evalNode);
+}
+
 
 }  // namespace
 }  // namespace mongo::optimizer

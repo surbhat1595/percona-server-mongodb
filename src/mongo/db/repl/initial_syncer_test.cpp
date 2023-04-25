@@ -637,7 +637,6 @@ OplogEntry makeOplogEntry(int t,
                       << "a_1");
     }
     return {DurableOplogEntry(OpTime(Timestamp(t, 1), 1),  // optime
-                              boost::none,                 // hash
                               opType,                      // op type
                               NamespaceString("a.a"),      // namespace
                               boost::none,                 // uuid
@@ -2050,6 +2049,7 @@ TEST_F(
         "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
+    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
 
     // Start the real work.
     ASSERT_OK(initialSyncer->startup(opCtx.get(), initialSyncMaxAttempts));
@@ -2092,6 +2092,8 @@ TEST_F(InitialSyncerTest,
         "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
+    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
+
     {
         executor::NetworkInterfaceMock::InNetworkGuard guard(net);
 
@@ -2200,6 +2202,7 @@ TEST_F(InitialSyncerTest,
         "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
+    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
 
     auto initialSyncer = &getInitialSyncer();
     auto opCtx = makeOpCtx();
@@ -2271,6 +2274,7 @@ TEST_F(
         "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
+    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
 
     auto initialSyncer = &getInitialSyncer();
     auto opCtx = makeOpCtx();
@@ -2582,6 +2586,7 @@ TEST_F(InitialSyncerTest, InitialSyncerRetriesLastOplogEntryFetcherNetworkError)
         "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
+    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
 
     auto initialSyncer = &getInitialSyncer();
     auto opCtx = makeOpCtx();
@@ -3226,6 +3231,8 @@ TEST_F(InitialSyncerTest, InitialSyncerHandlesNetworkErrorsFromRollbackCheckerAf
         "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
+    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
+
     auto initialSyncer = &getInitialSyncer();
     auto opCtx = makeOpCtx();
 
@@ -3540,6 +3547,7 @@ TEST_F(InitialSyncerTest, LastOpTimeShouldBeSetEvenIfNoOperationsAreAppliedAfter
         "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
+    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
 
     auto initialSyncer = &getInitialSyncer();
     auto opCtx = makeOpCtx();
@@ -4205,6 +4213,7 @@ TEST_F(InitialSyncerTest,
         "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
+    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
 
     doSuccessfulInitialSyncWithOneBatch();
 }
@@ -4220,6 +4229,7 @@ TEST_F(InitialSyncerTest,
         "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
+    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
 
     auto initialSyncer = &getInitialSyncer();
     auto opCtx = makeOpCtx();
@@ -4402,7 +4412,7 @@ TEST_F(InitialSyncerTest, TestRemainingInitialSyncEstimatedMillisMetric) {
     auto opCtx = makeOpCtx();
     ASSERT_OK(ServerParameterSet::getNodeParameterSet()
                   ->get("collectionClonerBatchSize")
-                  ->setFromString("1"));
+                  ->setFromString("1", boost::none));
 
     _syncSourceSelector->setChooseNewSyncSourceResult_forTest(HostAndPort("localhost", 27017));
 
@@ -4510,6 +4520,10 @@ TEST_F(InitialSyncerTest, TestRemainingInitialSyncEstimatedMillisMetric) {
     // Wait for the server to have reached the end of cloning collection 'a.a'. The size of this
     // collection is expected to equal 'dbSize'.
     hangDuringCloningFailPoint->waitForTimesEntered(timesEntered + 1);
+    {
+        executor::NetworkInterfaceMock::InNetworkGuard guard(net);
+        net->runUntil(Date_t::now() + Seconds(1));
+    }
     auto progress = initialSyncer->getInitialSyncProgress();
     LOGV2(5301701, "Progress in middle of cloning", "progress"_attr = progress);
     {
@@ -4549,6 +4563,7 @@ TEST_F(InitialSyncerTest, GetInitialSyncProgressReturnsCorrectProgress) {
         "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
+    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
 
     // Skip clearing initial sync progress so that we can check initialSyncStatus fields after
     // initial sync is complete.
@@ -4558,7 +4573,7 @@ TEST_F(InitialSyncerTest, GetInitialSyncProgressReturnsCorrectProgress) {
     auto opCtx = makeOpCtx();
     ASSERT_OK(ServerParameterSet::getNodeParameterSet()
                   ->get("collectionClonerBatchSize")
-                  ->setFromString("1"));
+                  ->setFromString("1", boost::none));
 
     _syncSourceSelector->setChooseNewSyncSourceResult_forTest(HostAndPort("localhost", 27017));
     ASSERT_OK(initialSyncer->startup(opCtx.get(), 2U));
@@ -4605,7 +4620,7 @@ TEST_F(InitialSyncerTest, GetInitialSyncProgressReturnsCorrectProgress) {
         ASSERT_FALSE(progress.hasField("InitialSyncEnd"));
         ASSERT_EQUALS(progress.getIntField("failedInitialSyncAttempts"), 0) << progress;
         ASSERT_EQUALS(progress.getIntField("maxFailedInitialSyncAttempts"), 2) << progress;
-        ASSERT_EQUALS(progress["totalInitialSyncElapsedMillis"].type(), NumberLong) << progress;
+        ASSERT_EQUALS(progress["totalInitialSyncElapsedMillis"].type(), NumberInt) << progress;
         ASSERT_EQUALS(progress.getIntField("approxTotalDataSize"), 0) << progress;
         ASSERT_EQUALS(progress.getIntField("approxTotalBytesCopied"), 0) << progress;
         ASSERT_EQUALS(progress["initialSyncStart"].type(), Date) << progress;
@@ -4673,7 +4688,7 @@ TEST_F(InitialSyncerTest, GetInitialSyncProgressReturnsCorrectProgress) {
         ASSERT_FALSE(progress.hasField("InitialSyncEnd"));
         ASSERT_EQUALS(progress.getIntField("failedInitialSyncAttempts"), 1) << progress;
         ASSERT_EQUALS(progress.getIntField("maxFailedInitialSyncAttempts"), 2) << progress;
-        ASSERT_EQUALS(progress["totalInitialSyncElapsedMillis"].type(), NumberLong) << progress;
+        ASSERT_EQUALS(progress["totalInitialSyncElapsedMillis"].type(), NumberInt) << progress;
         ASSERT_EQUALS(progress.getIntField("approxTotalDataSize"), 0) << progress;
         ASSERT_EQUALS(progress.getIntField("approxTotalBytesCopied"), 0) << progress;
         ASSERT_EQUALS(progress["initialSyncStart"].type(), Date) << progress;
@@ -4775,7 +4790,7 @@ TEST_F(InitialSyncerTest, GetInitialSyncProgressReturnsCorrectProgress) {
     ASSERT_EQUALS(progress.nFields(), 14) << progress;
     ASSERT_EQUALS(progress.getIntField("failedInitialSyncAttempts"), 1) << progress;
     ASSERT_EQUALS(progress.getIntField("maxFailedInitialSyncAttempts"), 2) << progress;
-    ASSERT_EQUALS(progress["totalInitialSyncElapsedMillis"].type(), NumberLong) << progress;
+    ASSERT_EQUALS(progress["totalInitialSyncElapsedMillis"].type(), NumberInt) << progress;
     ASSERT_EQUALS(progress.getIntField("approxTotalDataSize"), 10) << progress;
     ASSERT_EQUALS(progress.getIntField("approxTotalBytesCopied"), 10) << progress;
     ASSERT_EQUALS(progress["initialSyncOplogStart"].timestamp(), Timestamp(1, 1)) << progress;
@@ -4918,6 +4933,7 @@ TEST_F(InitialSyncerTest, GetInitialSyncProgressReturnsCorrectProgressForNetwork
         "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
+    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
 
     // Skip clearing initial sync progress so that we can check initialSyncStatus fields after
     // initial sync is complete.

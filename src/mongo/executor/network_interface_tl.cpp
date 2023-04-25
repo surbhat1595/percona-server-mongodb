@@ -102,6 +102,30 @@ bool catchingInvoke(F&& f, EH&& eh, StringData hint) {
     }
 }
 
+/**
+ * We ignore a subset of errors that may occur while running hedged operations (e.g., maxTimeMS
+ * expiration), as the operation may safely succeed despite their failure. For example, a network
+ * timeout error indicates the remote host experienced a timeout while running a remote-command as
+ * part of executing the hedged operation. This is by no means an indication that the operation has
+ * failed, as other hedged operations may still succeed.
+ * TODO SERVER-68704 will include other error categories that are safe to ignore.
+ */
+bool skipHedgeResult(const Status& status) {
+    return status == ErrorCodes::MaxTimeMSExpired || status == ErrorCodes::StaleDbVersion ||
+        ErrorCodes::isNetworkTimeoutError(status) || ErrorCodes::isStaleShardVersionError(status);
+}
+
+template <typename IA, typename IB, typename F>
+int compareTransformed(IA a1, IA a2, IB b1, IB b2, F&& f) {
+    for (;; ++a1, ++b1)
+        if (a1 == a2)
+            return b1 == b2 ? 0 : -1;
+        else if (b1 == b2)
+            return 1;
+        else if (int r = f(*a1) - f(*b1))
+            return r;
+}
+
 }  // namespace
 
 /**
@@ -140,6 +164,7 @@ public:
      * Increment the count of commands sent over the network
      */
     void recordSent() {
+        stdx::lock_guard lk(_mutex);
         ++_data.sent;
     }
 
@@ -558,15 +583,12 @@ Status NetworkInterfaceTL::startCommand(const TaskExecutor::CallbackHandle& cbHa
 
     bool targetHostsInAlphabeticalOrder =
         MONGO_unlikely(networkInterfaceSendRequestsToTargetHostsInAlphabeticalOrder.shouldFail(
-            [request](const BSONObj&) { return request.options.isHedgeEnabled; }));
+            [&](const BSONObj&) { return request.options.isHedgeEnabled; }));
 
     if (targetHostsInAlphabeticalOrder) {
-        // Sort the target hosts by host names.
-        std::sort(request.target.begin(),
-                  request.target.end(),
-                  [](const HostAndPort& target1, const HostAndPort& target2) {
-                      return target1.toString() < target2.toString();
-                  });
+        std::sort(request.target.begin(), request.target.end(), [](auto&& a, auto&& b) {
+            return detail::orderByLowerHostThenPort(a, b);
+        });
     }
 
     if ((request.target.size() > 1) && !request.options.isHedgeEnabled &&
@@ -927,20 +949,14 @@ void NetworkInterfaceTL::RequestState::resolve(Future<RemoteCommandResponse> fut
             returnConnection(status);
 
             const auto commandStatus = getStatusFromCommandResult(response.data);
-            if (isHedge) {
-                // Ignore maxTimeMS expiration or any sharding "retargeting needed" error category
-                // for hedged reads without triggering the finish line.
-                if (commandStatus == ErrorCodes::MaxTimeMSExpired ||
-                    commandStatus == ErrorCodes::StaleDbVersion ||
-                    ErrorCodes::isStaleShardVersionError(commandStatus)) {
-                    LOGV2_DEBUG(4660701,
-                                2,
-                                "Hedged request returned status",
-                                "requestId"_attr = request->id,
-                                "target"_attr = request->target,
-                                "status"_attr = commandStatus);
-                    return;
-                }
+            if (isHedge && skipHedgeResult(commandStatus)) {
+                LOGV2_DEBUG(4660701,
+                            2,
+                            "Hedged request returned status",
+                            "requestId"_attr = request->id,
+                            "target"_attr = request->target,
+                            "status"_attr = commandStatus);
+                return;
             }
 
             if (!cmdState->finishLine.arriveStrongly()) {
@@ -1379,5 +1395,17 @@ void NetworkInterfaceTL::dropConnections(const HostAndPort& hostAndPort) {
     _pool->dropConnections(hostAndPort);
 }
 
+namespace detail {
+
+bool orderByLowerHostThenPort(const HostAndPort& a, const HostAndPort& b) {
+    const auto& ah = a.host();
+    const auto& bh = b.host();
+    if (int r = compareTransformed(
+            ah.begin(), ah.end(), bh.begin(), bh.end(), [](auto&& c) { return ctype::toLower(c); }))
+        return r < 0;
+    return a.port() < b.port();
+}
+
+}  // namespace detail
 }  // namespace executor
 }  // namespace mongo

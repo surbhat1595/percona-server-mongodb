@@ -30,9 +30,11 @@
 #include "mongo/crypto/fle_crypto.h"
 
 #include <algorithm>
+#include <boost/multiprecision/cpp_int.hpp>
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <iomanip>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -67,9 +69,10 @@
 #include "mongo/crypto/fle_fields_util.h"
 #include "mongo/crypto/sha256_block.h"
 #include "mongo/crypto/symmetric_key.h"
+#include "mongo/db/basic_types_gen.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/idl/basic_types.h"
 #include "mongo/idl/idl_parser.h"
+#include "mongo/platform/decimal128.h"
 #include "mongo/platform/random.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
@@ -133,6 +136,9 @@ constexpr auto kDollarIn = "$in";
 constexpr auto kEncryptedFields = "encryptedFields";
 
 constexpr size_t kHmacKeyOffset = 64;
+
+constexpr boost::multiprecision::uint128_t k1(1);
+constexpr boost::multiprecision::int128_t k10(10);
 
 #ifdef FLE2_DEBUG_STATE_COLLECTIONS
 constexpr auto kDebugId = "_debug_id";
@@ -694,34 +700,75 @@ FLE2InsertUpdatePayload EDCClientPayload::serializeInsertUpdatePayload(FLEIndexK
 
 std::vector<std::string> getMinCover(const FLE2RangeSpec& spec, uint8_t sparsity) {
     std::vector<std::string> edges;
-    // TODO SERVER-68600
+    // TODO SERVER-69013
     return edges;
 }
 
-// Note: Does not return the leaf node
-std::vector<std::string> getEdges(BSONElement element,
-                                  BSONElement lowerBound,
-                                  BSONElement upperBound,
-                                  uint8_t sparsity) {
-    // TODO - SERVER-67751
-    return {"1", "01", "001"};
+std::unique_ptr<Edges> getEdges(BSONElement element,
+                                BSONElement lowerBound,
+                                BSONElement upperBound,
+                                int sparsity) {
+    switch (element.type()) {
+        case BSONType::NumberInt:
+            uassert(
+                6775501, "lower bound must be integer", lowerBound.type() == BSONType::NumberInt);
+            uassert(
+                6775502, "upper bound must be integer", upperBound.type() == BSONType::NumberInt);
+            return getEdgesInt32(element.Int(), lowerBound.Int(), upperBound.Int(), sparsity);
+
+        case BSONType::NumberLong:
+            uassert(
+                6775503, "lower bound must be long int", lowerBound.type() == BSONType::NumberLong);
+            uassert(
+                6775504, "upper bound must be long int", upperBound.type() == BSONType::NumberLong);
+            return getEdgesInt64(element.Long(), lowerBound.Long(), upperBound.Long(), sparsity);
+
+        case BSONType::Date:
+            uassert(6775505, "lower bound must be date", lowerBound.type() == BSONType::Date);
+            uassert(6775506, "upper bound must be date", upperBound.type() == BSONType::Date);
+            return getEdgesInt64(element.Date().asInt64(),
+                                 lowerBound.Date().asInt64(),
+                                 upperBound.Date().asInt64(),
+                                 sparsity);
+
+        case BSONType::NumberDouble:
+            uassert(
+                6775507, "lower bound must be double", lowerBound.type() == BSONType::NumberDouble);
+            uassert(
+                6775508, "upper bound must be double", upperBound.type() == BSONType::NumberDouble);
+            return getEdgesDouble(
+                element.Double(), lowerBound.Double(), upperBound.Double(), sparsity);
+
+        case BSONType::NumberDecimal:
+            uassert(6775509,
+                    "lower bound must be decimal",
+                    lowerBound.type() == BSONType::NumberDecimal);
+            uassert(6775510,
+                    "upper bound must be decimal",
+                    upperBound.type() == BSONType::NumberDecimal);
+            uasserted(ErrorCodes::BadValue, "decimal not supported atm");
+
+        default:
+            uassert(6775500, "must use supported FLE2 range type", false);
+    }
 }
 
 std::vector<EdgeTokenSet> getEdgeTokenSet(BSONElement element,
                                           BSONElement lowerBound,
                                           BSONElement upperBound,
-                                          uint8_t sparsity,
+                                          int sparsity,
                                           uint64_t contentionFactor,
                                           const EDCToken& edcToken,
                                           const ESCToken& escToken,
                                           const ECCToken& eccToken,
                                           const ECOCToken& ecocToken) {
-    auto edges = getEdges(element, lowerBound, upperBound, sparsity);
+    const auto edges = getEdges(element, lowerBound, upperBound, sparsity);
+    const auto edgesList = edges->get();
 
     std::vector<EdgeTokenSet> tokens;
 
-    for (const auto& edge : edges) {
-        ConstDataRange cdr(edge.data(), edge.size());
+    for (const auto& edge : edgesList) {
+        ConstDataRange cdr(edge.rawData(), edge.size());
 
         EDCDerivedFromDataToken edcDatakey =
             FLEDerivedFromDataTokenGenerator::generateEDCDerivedFromDataToken(edcToken, cdr);
@@ -1190,7 +1237,6 @@ void convertServerPayload(ConstDataRange cdr,
                           ConstVectorIteratorPair<EDCServerPayloadInfo>& it,
                           BSONObjBuilder* builder,
                           StringData fieldPath) {
-
     auto [encryptedTypeBinding, subCdr] = fromEncryptedConstDataRange(cdr);
     if (encryptedTypeBinding == EncryptedBinDataType::kFLE2FindEqualityPayload ||
         encryptedTypeBinding == EncryptedBinDataType::kFLE2FindRangePayload) {
@@ -1203,11 +1249,11 @@ void convertServerPayload(ConstDataRange cdr,
         }
 
         uassert(6373505, "Unexpected end of iterator", it.it != it.end);
-        auto payload = *(it.it);
+        const auto payload = it.it;
 
         // TODO - validate field is actually indexed in the schema?
-        if (payload.payload.getEdgeTokenSet().has_value()) {
-            FLE2IndexedRangeEncryptedValue sp(payload.payload, payload.counts);
+        if (payload->payload.getEdgeTokenSet().has_value()) {
+            FLE2IndexedRangeEncryptedValue sp(payload->payload, payload->counts);
 
             uassert(6775311,
                     str::stream() << "Type '" << typeName(sp.bsonType)
@@ -1216,7 +1262,7 @@ void convertServerPayload(ConstDataRange cdr,
 
             auto swEncrypted =
                 sp.serialize(FLETokenFromCDR<FLETokenType::ServerDataEncryptionLevel1Token>(
-                    payload.payload.getServerEncryptionToken()));
+                    payload->payload.getServerEncryptionToken()));
             uassertStatusOK(swEncrypted);
             toEncryptedBinData(fieldPath,
                                EncryptedBinDataType::kFLE2RangeIndexedValue,
@@ -1228,28 +1274,28 @@ void convertServerPayload(ConstDataRange cdr,
                 pTags->push_back({tag});
             }
 
-            return;
+        } else {
+            dassert(payload->counts.size() == 1);
+
+            FLE2IndexedEqualityEncryptedValue sp(payload->payload, payload->counts[0]);
+
+            uassert(6373506,
+                    str::stream() << "Type '" << typeName(sp.bsonType)
+                                  << "' is not a valid type for Queryable Encryption Equality",
+                    isFLE2EqualityIndexedSupportedType(sp.bsonType));
+
+            auto swEncrypted =
+                sp.serialize(FLETokenFromCDR<FLETokenType::ServerDataEncryptionLevel1Token>(
+                    payload->payload.getServerEncryptionToken()));
+            uassertStatusOK(swEncrypted);
+            toEncryptedBinData(fieldPath,
+                               EncryptedBinDataType::kFLE2EqualityIndexedValue,
+                               ConstDataRange(swEncrypted.getValue()),
+                               builder);
+
+            pTags->push_back({EDCServerCollection::generateTag(*payload)});
         }
 
-        dassert(payload.counts.size() == 1);
-
-        FLE2IndexedEqualityEncryptedValue sp(payload.payload, payload.counts[0]);
-
-        uassert(6373506,
-                str::stream() << "Type '" << typeName(sp.bsonType)
-                              << "' is not a valid type for Queryable Encryption Equality",
-                isFLE2EqualityIndexedSupportedType(sp.bsonType));
-
-        auto swEncrypted =
-            sp.serialize(FLETokenFromCDR<FLETokenType::ServerDataEncryptionLevel1Token>(
-                payload.payload.getServerEncryptionToken()));
-        uassertStatusOK(swEncrypted);
-        toEncryptedBinData(fieldPath,
-                           EncryptedBinDataType::kFLE2EqualityIndexedValue,
-                           ConstDataRange(swEncrypted.getValue()),
-                           builder);
-
-        pTags->push_back({EDCServerCollection::generateTag(payload)});
     } else if (encryptedTypeBinding == EncryptedBinDataType::kFLE2UnindexedEncryptedValue) {
         builder->appendBinData(fieldPath, cdr.length(), BinDataType::Encrypt, cdr.data());
         return;
@@ -1312,7 +1358,8 @@ void collectIndexedFields(std::vector<EDCIndexedFields>* pFields,
                           ConstDataRange cdr,
                           StringData fieldPath) {
     auto [encryptedTypeBinding, subCdr] = fromEncryptedConstDataRange(cdr);
-    if (encryptedTypeBinding != EncryptedBinDataType::kFLE2EqualityIndexedValue) {
+    if (encryptedTypeBinding != EncryptedBinDataType::kFLE2EqualityIndexedValue &&
+        encryptedTypeBinding != EncryptedBinDataType::kFLE2RangeIndexedValue) {
         return;
     }
 
@@ -1393,6 +1440,43 @@ T decryptAndParseIndexedValue(ConstDataRange cdr, FLEKeyVault* keyVault) {
         FLELevel1TokenGenerator::generateServerDataEncryptionLevel1Token(indexKey.key);
 
     return uassertStatusOK(T::decryptAndParse(serverDataToken, cdr));
+}
+
+/**
+ * Return the first bit set in a integer. 1 indexed.
+ */
+template <typename T>
+int getFirstBitSet(T v) {
+    return 64 - countLeadingZeros64(v);
+}
+
+template <>
+int getFirstBitSet<boost::multiprecision::uint128_t>(const boost::multiprecision::uint128_t v) {
+    return boost::multiprecision::msb(v) + 1;
+}
+
+template <typename T>
+std::string toBinaryString(T v) {
+    static_assert(std::numeric_limits<T>::is_integer);
+    static_assert(!std::numeric_limits<T>::is_signed);
+
+    auto length = std::numeric_limits<T>::digits;
+    std::string str(length, '0');
+
+    const T kOne(1);
+
+    for (size_t i = length; i > 0; i--) {
+        T mask = kOne << (i - 1);
+        if (v & mask) {
+            str[length - i] = '1';
+        }
+    }
+
+    return str;
+}
+
+boost::multiprecision::int128_t exp10(int x) {
+    return pow(k10, x);
 }
 
 }  // namespace
@@ -2353,29 +2437,21 @@ std::pair<BSONType, std::vector<uint8_t>> FLE2UnindexedEncryptedValue::deseriali
 }
 
 std::vector<FLEEdgeToken> toFLEEdgeTokenSet(const FLE2InsertUpdatePayload& payload) {
+    const auto ets = payload.getEdgeTokenSet().get();
     std::vector<FLEEdgeToken> tokens;
-    tokens.reserve(payload.getEdgeTokenSet().get().size() + 1);
+    tokens.reserve(ets.size());
 
-    FLEEdgeToken leaf;
-    leaf.edc = FLETokenFromCDR<FLETokenType::EDCDerivedFromDataTokenAndContentionFactorToken>(
-        payload.getEdcDerivedToken());
-    leaf.esc = FLETokenFromCDR<FLETokenType::ESCDerivedFromDataTokenAndContentionFactorToken>(
-        payload.getEscDerivedToken());
-    leaf.ecc = FLETokenFromCDR<FLETokenType::ECCDerivedFromDataTokenAndContentionFactorToken>(
-        payload.getEccDerivedToken());
-    tokens.push_back(leaf);
-
-    for (const auto& ets : payload.getEdgeTokenSet().get()) {
+    for (const auto& et : ets) {
         FLEEdgeToken edgeToken;
         edgeToken.edc =
             FLETokenFromCDR<FLETokenType::EDCDerivedFromDataTokenAndContentionFactorToken>(
-                ets.getEdcDerivedToken());
+                et.getEdcDerivedToken());
         edgeToken.esc =
             FLETokenFromCDR<FLETokenType::ESCDerivedFromDataTokenAndContentionFactorToken>(
-                ets.getEscDerivedToken());
+                et.getEscDerivedToken());
         edgeToken.ecc =
             FLETokenFromCDR<FLETokenType::ECCDerivedFromDataTokenAndContentionFactorToken>(
-                ets.getEccDerivedToken());
+                et.getEccDerivedToken());
 
         tokens.push_back(edgeToken);
     }
@@ -2571,9 +2647,9 @@ StatusWith<std::vector<uint8_t>> FLE2IndexedRangeEncryptedValue::serialize(
 }
 
 
-ESCDerivedFromDataTokenAndContentionFactorToken EDCServerPayloadInfo::getESCToken() const {
-    return FLETokenFromCDR<FLETokenType::ESCDerivedFromDataTokenAndContentionFactorToken>(
-        payload.getEscDerivedToken());
+ESCDerivedFromDataTokenAndContentionFactorToken EDCServerPayloadInfo::getESCToken(
+    ConstDataRange cdr) {
+    return FLETokenFromCDR<FLETokenType::ESCDerivedFromDataTokenAndContentionFactorToken>(cdr);
 }
 
 void EDCServerCollection::validateEncryptedFieldInfo(BSONObj& obj,
@@ -2852,13 +2928,24 @@ BSONObj EDCServerCollection::generateUpdateToRemoveTags(
                 str::stream() << "Field'" << field.fieldPathName
                               << "' in not a supported encrypted type: "
                               << EncryptedBinDataType_serializer(localEncryptedTypeBinding),
-                encryptedTypeBinding == EncryptedBinDataType::kFLE2EqualityIndexedValue);
+                encryptedTypeBinding == EncryptedBinDataType::kFLE2EqualityIndexedValue ||
+                    encryptedTypeBinding == EncryptedBinDataType::kFLE2RangeIndexedValue);
 
-        auto ieev = uassertStatusOK(FLE2IndexedEqualityEncryptedValue::decryptAndParse(
-            token.second.serverEncryptionToken, subCdr));
-        auto tag = EDCServerCollection::generateTag(ieev);
+        if (encryptedTypeBinding == EncryptedBinDataType::kFLE2RangeIndexedValue) {
+            auto range = uassertStatusOK(FLE2IndexedRangeEncryptedValue::decryptAndParse(
+                token.second.serverEncryptionToken, subCdr));
 
-        tags.push_back({tag});
+            for (size_t i = 0; i < range.counters.size(); i++) {
+                auto tag = EDCServerCollection::generateTag(range.tokens[i], range.counters[i]);
+                tags.push_back({tag});
+            }
+        } else {
+            auto ieev = uassertStatusOK(FLE2IndexedEqualityEncryptedValue::decryptAndParse(
+                token.second.serverEncryptionToken, subCdr));
+            auto tag = EDCServerCollection::generateTag(ieev);
+
+            tags.push_back({tag});
+        }
     }
 
     // Build { $pull : {__safeContent__ : {$in : [tag..] } } }
@@ -3304,12 +3391,111 @@ OSTType_Double getTypeInfoDouble(double value,
     // Therefore, since the order of bytes on each platform is consistent with itself, the
     // conversion below converts a double into correct 64-bit integer that produces the same
     // behavior across plaforms.
+    bool is_neg = value < 0;
+
     value *= -1;
     char* buf = reinterpret_cast<char*>(&value);
     uint64_t uv = DataView(buf).read<uint64_t>();
 
+    if (is_neg) {
+        dassert(uv < std::numeric_limits<uint64_t>::max());
+        uv = (1ULL << 63) - uv;
+    }
+
     return {uv, 0, std::numeric_limits<uint64_t>::max()};
 }
+
+// For full algorithm see SERVER-68542
+OSTType_Decimal128 getTypeInfoDecimal128(Decimal128 value,
+                                         boost::optional<Decimal128> min,
+                                         boost::optional<Decimal128> max) {
+    uassert(6854201,
+            "Must specify both a lower and upper bound or no bounds.",
+            min.has_value() == max.has_value());
+
+    uassert(6854202,
+            "Infinity and Nan Decimal128 values are not supported.",
+            !value.isInfinite() && !value.isNaN());
+
+    if (min.has_value()) {
+        uassert(6854203,
+                "The minimum value must be less than the maximum value",
+                min.value() < max.value());
+
+        uassert(6854204,
+                "Value must be greater than or equal to the minimum value and less than or equal "
+                "to the maximum value",
+                value >= min.value() && value <= max.value());
+    }
+
+    bool isNegative = value.isNegative();
+    int32_t scale = value.getBiasedExponent() - Decimal128::kExponentBias;
+    int64_t highCoefficent = value.getCoefficientHigh();
+    int64_t lowCoefficient = value.getCoefficientLow();
+
+// use int128_t where possible on gcc/clang
+#ifdef __SIZEOF_INT128__
+    __int128 cMax1 = 0x1ed09bead87c0;
+    cMax1 <<= 64;
+    cMax1 |= 0x378d8e63ffffffff;
+    const boost::multiprecision::uint128_t cMax(cMax1);
+    if (kDebugBuild) {
+        const boost::multiprecision::uint128_t cMaxStr("9999999999999999999999999999999999");
+        dassert(cMaxStr == cMax);
+    }
+#else
+    boost::multiprecision::uint128_t cMax("9999999999999999999999999999999999");
+#endif
+    const int64_t eMin = -6176;
+
+    boost::multiprecision::int128_t unscaledValue(highCoefficent);
+    unscaledValue <<= 64;
+    unscaledValue += lowCoefficient;
+
+    int64_t rho = 0;
+    auto stepValue = unscaledValue;
+
+    bool flag = true;
+    if (unscaledValue == 0) {
+        flag = false;
+    }
+
+    while (flag != false) {
+        if (stepValue > cMax) {
+            flag = false;
+            rho = rho - 1;
+            stepValue /= k10;
+        } else {
+            rho = rho + 1;
+            stepValue *= k10;
+        }
+    }
+
+    boost::multiprecision::uint128_t mapping = 0;
+    auto part2 = k1 << 127;
+
+    if (unscaledValue == 0) {
+        mapping = part2;
+    } else if (rho <= scale - eMin) {
+        auto part1 = stepValue + (cMax * (scale - eMin - rho));
+        if (isNegative) {
+            part1 = -part1;
+        }
+
+        mapping = static_cast<boost::multiprecision::uint128_t>(part1 + part2);
+
+    } else {
+        auto part1 = exp10(scale - eMin) * unscaledValue;
+        if (isNegative) {
+            part1 = -part1;
+        }
+
+        mapping = static_cast<boost::multiprecision::uint128_t>(part1 + part2);
+    }
+
+    return {mapping, 0, std::numeric_limits<boost::multiprecision::uint128_t>::max()};
+}
+
 
 EncryptedPredicateEvaluator::EncryptedPredicateEvaluator(ConstDataRange serverToken,
                                                          int64_t contentionFactor,
@@ -3352,15 +3538,15 @@ std::vector<StringData> Edges::get() {
 
 template <typename T>
 std::unique_ptr<Edges> getEdgesT(T value, T min, T max, int sparsity) {
-    static_assert(std::is_unsigned<T>::value);
+    static_assert(!std::numeric_limits<T>::is_signed);
     static_assert(std::numeric_limits<T>::is_integer);
 
     constexpr size_t bits = std::numeric_limits<T>::digits;
 
     dassert(0 == min);
 
-    size_t maxlen = 64 - countLeadingZeros64(max);
-    std::string valueBin = std::bitset<bits>(value).to_string();
+    size_t maxlen = getFirstBitSet(max);
+    std::string valueBin = toBinaryString(value);
     std::string valueBinTrimmed = valueBin.substr(bits - maxlen, maxlen);
     return std::make_unique<Edges>(valueBinTrimmed, sparsity);
 }
@@ -3387,6 +3573,155 @@ std::unique_ptr<Edges> getEdgesDouble(double value,
                                       int sparsity) {
     auto aost = getTypeInfoDouble(value, min, max);
     return getEdgesT(aost.value, aost.min, aost.max, sparsity);
+}
+
+std::unique_ptr<Edges> getEdgesDecimal128(Decimal128 value,
+                                          boost::optional<Decimal128> min,
+                                          boost::optional<Decimal128> max,
+                                          int sparsity) {
+    auto aost = getTypeInfoDecimal128(value, min, max);
+    return getEdgesT(aost.value, aost.min, aost.max, sparsity);
+}
+
+
+template <typename T>
+class MinCoverGenerator {
+public:
+    static std::vector<std::string> minCover(T rangeMin, T rangeMax, T max, int sparsity) {
+        MinCoverGenerator<T> mcg(rangeMin, rangeMax, max, sparsity);
+        std::vector<std::string> c;
+        mcg.minCoverRec(c, 0, mcg._maxlen);
+        return c;
+    }
+
+private:
+    MinCoverGenerator(T rangeMin, T rangeMax, T max, int sparsity)
+        : _rangeMin(rangeMin),
+          _rangeMax(rangeMax),
+          _sparsity(sparsity),
+          _maxlen(getFirstBitSet(max)) {
+        static_assert(!std::numeric_limits<T>::is_signed);
+        static_assert(std::numeric_limits<T>::is_integer);
+        uassert(6860001, "Min must be less than max for range search", rangeMin <= rangeMax);
+        dassert(rangeMin >= 0 && rangeMax <= max);
+    }
+
+    // Generate and apply a mask to an integer, filling masked bits with 1;
+    // bits from 0 to bits-1 will be set to 1. Other bits are left as-is.
+    // for example: applyMask(0b00000000, 4) = 0b00001111
+    static T applyMask(T value, int maskedBits) {
+        constexpr T ones = ~static_cast<T>(0);
+
+        invariant(maskedBits <= std::numeric_limits<T>::digits);
+        invariant(maskedBits >= 0);
+
+        if (maskedBits == 0) {
+            return value;
+        }
+
+        const T mask = ones >> (std::numeric_limits<T>::digits - maskedBits);
+        return value | mask;
+    }
+
+    // Some levels are discarded when sparsity does not divide current level
+    // Discarded levels are replaced by the set of edges on the next level
+    // Return true if level is stored
+    bool isLevelStored(int maskedBits) {
+        int level = _maxlen - maskedBits;
+        return 0 == maskedBits || 0 == (level % _sparsity);
+    }
+
+    std::string toString(T start, int maskedBits) {
+        constexpr size_t bits = std::numeric_limits<T>::digits;
+        dassert(maskedBits <= _maxlen);
+        if (maskedBits == _maxlen) {
+            return "root";
+        }
+        std::string valueBin = toBinaryString(start >> maskedBits);
+        return valueBin.substr(bits - _maxlen + maskedBits, _maxlen - maskedBits);
+    }
+
+    // Generate a minCover recursively for the minimum set of edges covered
+    // by [_rangeMin, _rangeMax]. Edges on a level discarded due to sparsity are
+    // replaced with the edges from next level
+    void minCoverRec(std::vector<std::string>& c, T blockStart, int maskedBits) {
+        const T blockEnd = applyMask(blockStart, maskedBits);
+
+        if (blockEnd < _rangeMin || blockStart > _rangeMax) {
+            return;
+        }
+
+        if (blockStart >= _rangeMin && blockEnd <= _rangeMax && isLevelStored(maskedBits)) {
+            c.push_back(toString(blockStart, maskedBits));
+            return;
+        }
+
+        invariant(maskedBits > 0);
+
+        const int newBits = maskedBits - 1;
+        minCoverRec(c, blockStart, newBits);
+        minCoverRec(c, blockStart | (static_cast<T>(1) << newBits), newBits);
+    }
+
+private:
+    T _rangeMin;
+    T _rangeMax;
+    int _sparsity;
+    int _maxlen;
+};
+
+template <typename T>
+std::vector<std::string> minCover(T rangeMin, T rangeMax, T min, T max, int sparsity) {
+    dassert(0 == min);
+    return MinCoverGenerator<T>::minCover(rangeMin, rangeMax, max, sparsity);
+}
+
+std::vector<std::string> minCoverInt32(int32_t rangeMin,
+                                       int32_t rangeMax,
+                                       boost::optional<int32_t> min,
+                                       boost::optional<int32_t> max,
+                                       int sparsity) {
+    auto a = getTypeInfo32(rangeMin, min, max);
+    auto b = getTypeInfo32(rangeMax, min, max);
+    dassert(a.min == b.min);
+    dassert(a.max == b.max);
+    return minCover(a.value, b.value, a.min, a.max, sparsity);
+}
+
+std::vector<std::string> minCoverInt64(int64_t rangeMin,
+                                       int64_t rangeMax,
+                                       boost::optional<int64_t> min,
+                                       boost::optional<int64_t> max,
+                                       int sparsity) {
+    auto a = getTypeInfo64(rangeMin, min, max);
+    auto b = getTypeInfo64(rangeMax, min, max);
+    dassert(a.min == b.min);
+    dassert(a.max == b.max);
+    return minCover(a.value, b.value, a.min, a.max, sparsity);
+}
+
+std::vector<std::string> minCoverDouble(double rangeMin,
+                                        double rangeMax,
+                                        boost::optional<double> min,
+                                        boost::optional<double> max,
+                                        int sparsity) {
+    auto a = getTypeInfoDouble(rangeMin, min, max);
+    auto b = getTypeInfoDouble(rangeMax, min, max);
+    dassert(a.min == b.min);
+    dassert(a.max == b.max);
+    return minCover(a.value, b.value, a.min, a.max, sparsity);
+}
+
+std::vector<std::string> minCoverDecimal128(Decimal128 rangeMin,
+                                            Decimal128 rangeMax,
+                                            boost::optional<Decimal128> min,
+                                            boost::optional<Decimal128> max,
+                                            int sparsity) {
+    auto a = getTypeInfoDecimal128(rangeMin, min, max);
+    auto b = getTypeInfoDecimal128(rangeMax, min, max);
+    dassert(a.min == b.min);
+    dassert(a.max == b.max);
+    return minCover(a.value, b.value, a.min, a.max, sparsity);
 }
 
 }  // namespace mongo

@@ -46,6 +46,8 @@
 #include "mongo/db/repl/replication_recovery_mock.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
+#include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/db/vector_clock_mutable.h"
 
 namespace mongo {
@@ -159,6 +161,11 @@ void OplogApplierImplTest::setUp() {
 
     StorageInterface::set(serviceContext, std::make_unique<StorageInterfaceImpl>());
 
+    MongoDSessionCatalog::set(
+        serviceContext,
+        std::make_unique<MongoDSessionCatalog>(
+            std::make_unique<MongoDSessionCatalogTransactionInterfaceImpl>()));
+
     DropPendingCollectionReaper::set(
         serviceContext, std::make_unique<DropPendingCollectionReaper>(getStorageInterface()));
     repl::createOplog(_opCtx.get());
@@ -211,17 +218,17 @@ Status OplogApplierImplTest::_applyOplogEntryOrGroupedInsertsWrapper(
 }
 
 void OplogApplierImplTest::_testApplyOplogEntryOrGroupedInsertsCrudOperation(
-    ErrorCodes::Error expectedError, const OplogEntry& op, bool expectedApplyOpCalled) {
+    ErrorCodes::Error expectedError,
+    const OplogEntry& op,
+    const NamespaceString& targetNss,
+    bool expectedApplyOpCalled) {
     bool applyOpCalled = false;
 
-    auto checkOpCtx = [](OperationContext* opCtx) {
+    auto checkOpCtx = [&targetNss](OperationContext* opCtx) {
         ASSERT_TRUE(opCtx);
-        ASSERT_TRUE(
-            opCtx->lockState()->isDbLockedForMode(DatabaseName(boost::none, "test"), MODE_IX));
-        ASSERT_FALSE(
-            opCtx->lockState()->isDbLockedForMode(DatabaseName(boost::none, "test"), MODE_X));
-        ASSERT_TRUE(
-            opCtx->lockState()->isCollectionLockedForMode(NamespaceString("test.t"), MODE_IX));
+        ASSERT_TRUE(opCtx->lockState()->isDbLockedForMode(targetNss.dbName(), MODE_IX));
+        ASSERT_FALSE(opCtx->lockState()->isDbLockedForMode(targetNss.dbName(), MODE_X));
+        ASSERT_TRUE(opCtx->lockState()->isCollectionLockedForMode(targetNss, MODE_IX));
         ASSERT_FALSE(opCtx->writesAreReplicated());
         ASSERT_TRUE(DocumentValidationSettings::get(opCtx).isSchemaValidationDisabled());
     };
@@ -230,7 +237,7 @@ void OplogApplierImplTest::_testApplyOplogEntryOrGroupedInsertsCrudOperation(
         [&](OperationContext* opCtx, const NamespaceString& nss, const std::vector<BSONObj>& docs) {
             applyOpCalled = true;
             checkOpCtx(opCtx);
-            ASSERT_EQUALS(NamespaceString("test.t"), nss);
+            ASSERT_EQUALS(targetNss, nss);
             ASSERT_EQUALS(1U, docs.size());
             // For upserts we don't know the intended value of the document.
             if (op.getOpType() == repl::OpTypeEnum::kInsert) {
@@ -246,7 +253,7 @@ void OplogApplierImplTest::_testApplyOplogEntryOrGroupedInsertsCrudOperation(
                                   const OplogDeleteEntryArgs& args) {
         applyOpCalled = true;
         checkOpCtx(opCtx);
-        ASSERT_EQUALS(NamespaceString("test.t"), nss);
+        ASSERT_EQUALS(targetNss, nss);
         ASSERT(args.deletedDoc);
         ASSERT_BSONOBJ_EQ(op.getObject(), *(args.deletedDoc));
         return Status::OK();
@@ -255,7 +262,7 @@ void OplogApplierImplTest::_testApplyOplogEntryOrGroupedInsertsCrudOperation(
     _opObserver->onUpdateFn = [&](OperationContext* opCtx, const OplogUpdateEntryArgs& args) {
         applyOpCalled = true;
         checkOpCtx(opCtx);
-        ASSERT_EQUALS(NamespaceString("test.t"), args.nss);
+        ASSERT_EQUALS(targetNss, args.nss);
         return Status::OK();
     };
 
@@ -416,7 +423,6 @@ OplogEntry makeOplogEntry(OpTime opTime,
                           boost::optional<BSONObj> o2,
                           boost::optional<bool> fromMigrate) {
     return {DurableOplogEntry(opTime,                     // optime
-                              boost::none,                // hash
                               opType,                     // opType
                               std::move(nss),             // namespace
                               uuid,                       // uuid
@@ -448,9 +454,9 @@ CollectionOptions createOplogCollectionOptions() {
     return options;
 }
 
-CollectionOptions createRecordPreImageCollectionOptions() {
+CollectionOptions createRecordChangeStreamPreAndPostImagesCollectionOptions() {
     CollectionOptions options;
-    options.recordPreImages = true;
+    options.changeStreamPreAndPostImagesOptions.setEnabled(true);
     return options;
 }
 

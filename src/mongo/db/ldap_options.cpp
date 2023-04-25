@@ -57,12 +57,10 @@ std::string LDAPGlobalParams::getServersStr() const {
     return ldap_servers;
 }
 
-void LDAPGlobalParams::setServersStr(const std::string& ldap_servers) {
+void LDAPGlobalParams::setServersStr(StringData ldap_servers) {
     auto guard = *ldapServers;
-    boost::split(*guard,
-                 ldap_servers,
-                 [](char c) { return c == ','; },
-                 boost::token_compress_on);
+    boost::split(
+        *guard, ldap_servers.toString(), [](char c) { return c == ','; }, boost::token_compress_on);
 }
 
 std::string LDAPGlobalParams::logString() const {
@@ -94,11 +92,15 @@ std::string LDAPGlobalParams::ldapURIList() const {
 }
 
 
-void LDAPServersParameter::append(OperationContext *, BSONObjBuilder& b, const std::string& name) {
-    b.append(name, ldapGlobalParams.getServersStr());
+void LDAPServersParameter::append(OperationContext*,
+                                  BSONObjBuilder* b,
+                                  StringData name,
+                                  const boost::optional<TenantId>&) {
+    b->append(name, ldapGlobalParams.getServersStr());
 }
 
-Status LDAPServersParameter::setFromString(const std::string& newValueString) {
+Status LDAPServersParameter::setFromString(StringData newValueString,
+                                           const boost::optional<TenantId>&) {
     ldapGlobalParams.setServersStr(newValueString);
     return Status::OK();
 }
@@ -167,6 +169,11 @@ Status validateLDAPUserToDNMapping(const std::string& mapping) {
     return Status::OK();
 }
 
+Status validateLDAPUserToDNMappingServerParam(const std::string& mapping,
+                                              [[maybe_unused]] const boost::optional<TenantId>&) {
+    return validateLDAPUserToDNMapping(mapping);
+}
+
 Status validateLDAPAuthzQueryTemplate(const std::string& templ) {
     // validate placeholders in template
     // only {USER} and {PROVIDED_USER} are supported
@@ -200,6 +207,11 @@ Status validateLDAPAuthzQueryTemplate(const std::string& templ) {
     }
 
     return Status::OK();
+}
+
+Status validateLDAPAuthzQueryTemplateServerParam(const std::string& templ,
+                                                 const boost::optional<TenantId>&) {
+    return validateLDAPAuthzQueryTemplate(templ);
 }
 
 }  // namespace mongo

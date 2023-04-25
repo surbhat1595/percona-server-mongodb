@@ -8,15 +8,6 @@ set -o verbose
 
 rm -rf ${install_directory}
 
-# Use hardlinks to reduce the disk space impact of installing
-# all of the binaries and associated debug info.
-
-# The expansion here is a workaround to let us set a different install-action
-# for tasks that don't support the one we set here. A better plan would be
-# to support install-action for Ninja builds directly.
-# TODO: https://jira.mongodb.org/browse/SERVER-48203
-extra_args="--install-action=${task_install_action}"
-
 # By default, limit link jobs to one quarter of our overall -j
 # concurrency unless locally overridden. We do this because in
 # static link environments, the memory consumption of each
@@ -58,9 +49,7 @@ else
   extra_args="$extra_args --release"
 fi
 
-# TODO: SERVER-68475
-# remove this when a better solution is found
-extra_args="$extra_args SPLIT_DWARF_DWP_FILES=1"
+extra_args="$extra_args SPLIT_DWARF=0"
 
 if [ "${generating_for_ninja}" = "true" ] && [ "Windows_NT" = "$OS" ]; then
   vcvars="$(vswhere -latest -property installationPath | tr '\\' '/' | dos2unix.exe)/VC/Auxiliary/Build/"

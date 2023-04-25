@@ -37,9 +37,6 @@
 
 namespace mongo::optimizer {
 
-ABT wrapConstFilter(ABT node);
-ABT unwrapConstFilter(ABT node);
-
 template <class ToAddType, class ToRemoveType>
 static void addRemoveProjectionsToProperties(properties::PhysProps& properties,
                                              const ToAddType& toAdd,

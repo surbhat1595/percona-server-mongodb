@@ -50,6 +50,7 @@
 #include "mongo/db/storage/durable_history_pin.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/unittest/death_test.h"
@@ -204,7 +205,13 @@ private:
             ASSERT_OK(_storageInterface->createCollection(
                 getOperationContext(), testNs, generateOptionsWithUuid()));
 
-            MongoDSessionCatalog::onStepUp(_opCtx.get());
+            MongoDSessionCatalog::set(
+                _opCtx->getServiceContext(),
+                std::make_unique<MongoDSessionCatalog>(
+                    std::make_unique<MongoDSessionCatalogTransactionInterfaceImpl>()));
+
+            auto mongoDSessionCatalog = MongoDSessionCatalog::get(_opCtx.get());
+            mongoDSessionCatalog->onStepUp(_opCtx.get());
         }
 
         auto observerRegistry = checked_cast<OpObserverRegistry*>(service->getOpObserver());
@@ -249,7 +256,6 @@ repl::OplogEntry _makeOplogEntry(repl::OpTime opTime,
                                  Date_t wallTime = Date_t()) {
     return {
         repl::DurableOplogEntry(opTime,                           // optime
-                                boost::none,                      // hash
                                 opType,                           // opType
                                 testNs,                           // namespace
                                 boost::none,                      // uuid
@@ -1337,8 +1343,9 @@ TEST_F(ReplicationRecoveryTest, RecoverFromOplogUpToReconstructsPreparedTransact
     const auto sessionId = makeLogicalSessionIdForTest();
     opCtx->setLogicalSessionId(sessionId);
 
+    auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
     {
-        MongoDOperationContextSession ocs(opCtx);
+        auto ocs = mongoDSessionCatalog->checkOutSession(opCtx);
 
         OperationSessionInfo sessionInfo;
         sessionInfo.setSessionId(sessionId);
@@ -1361,7 +1368,7 @@ TEST_F(ReplicationRecoveryTest, RecoverFromOplogUpToReconstructsPreparedTransact
     recovery.recoverFromOplogUpTo(opCtx, Timestamp(3, 3));
 
     {
-        MongoDOperationContextSession ocs(opCtx);
+        auto ocs = mongoDSessionCatalog->checkOutSession(opCtx);
 
         auto txnParticipant = TransactionParticipant::get(opCtx);
         ASSERT_EQ(txnParticipant.getPrepareOpTime().getTimestamp(), Timestamp(3, 3));
@@ -1381,8 +1388,9 @@ TEST_F(ReplicationRecoveryTest,
     const auto sessionId = makeLogicalSessionIdForTest();
     opCtx->setLogicalSessionId(sessionId);
 
+    auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
     {
-        MongoDOperationContextSession ocs(opCtx);
+        auto ocs = mongoDSessionCatalog->checkOutSession(opCtx);
 
         OperationSessionInfo sessionInfo;
         sessionInfo.setSessionId(sessionId);
@@ -1419,7 +1427,7 @@ TEST_F(ReplicationRecoveryTest,
         countTextFormatLogLinesContaining("No stored oplog entries to apply for recovery between"));
 
     {
-        MongoDOperationContextSession ocs(opCtx);
+        auto ocs = mongoDSessionCatalog->checkOutSession(opCtx);
 
         auto txnParticipant = TransactionParticipant::get(opCtx);
         ASSERT_EQ(txnParticipant.getPrepareOpTime().getTimestamp(), Timestamp(1, 1));

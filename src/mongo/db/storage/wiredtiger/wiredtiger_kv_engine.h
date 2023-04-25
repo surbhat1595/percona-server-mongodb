@@ -39,7 +39,6 @@
 
 #include "mongo/bson/ordering.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/encryption/master_key_provider.h"
 #include "mongo/db/storage/backup_block.h"
 #include "mongo/db/storage/durable_catalog.h"
@@ -123,6 +122,13 @@ public:
     void setSortedDataInterfaceExtraOptions(const std::string& options);
 
     bool supportsDirectoryPerDB() const override;
+
+    /**
+     * WiredTiger supports checkpoints when it isn't running in memory.
+     */
+    bool supportsCheckpoints() const override {
+        return !isEphemeral();
+    }
 
     void checkpoint() override;
 
@@ -305,10 +311,6 @@ public:
     WT_CONNECTION* getConnection() {
         return _conn;
     }
-    void dropSomeQueuedIdents();
-    std::list<WiredTigerCachedCursor> filterCursorsWithQueuedDrops(
-        std::list<WiredTigerCachedCursor>* cache);
-    bool haveDropsQueued() const;
 
     void syncSizeInfo(bool sync) const;
 
@@ -388,6 +390,21 @@ public:
 
     ClockSource* getClockSource() const {
         return _clockSource;
+    }
+
+    void addIndividuallyCheckpointedIndex(const std::string& ident) override {
+        stdx::lock_guard lk(_checkpointedIndexesMutex);
+        _checkpointedIndexes.insert(ident);
+    }
+
+    void clearIndividuallyCheckpointedIndexes() override {
+        stdx::lock_guard lk(_checkpointedIndexesMutex);
+        _checkpointedIndexes.clear();
+    }
+
+    bool isInIndividuallyCheckpointedIndexes(const std::string& ident) const override {
+        stdx::lock_guard lk(_checkpointedIndexesMutex);
+        return _checkpointedIndexes.find(ident) != _checkpointedIndexes.end();
     }
 
     StatusWith<Timestamp> pinOldestTimestamp(OperationContext* opCtx,
@@ -527,11 +544,6 @@ private:
     std::string _rsOptions;
     std::string _indexOptions;
 
-    mutable Mutex _identToDropMutex = MONGO_MAKE_LATCH("WiredTigerKVEngine::_identToDropMutex");
-    std::list<IdentToDrop> _identToDrop;
-
-    mutable AtomicWord<long long> _previousCheckedDropsQueued;
-
     std::unique_ptr<WiredTigerSession> _backupSession;
     WiredTigerBackup _wtBackup;
 
@@ -547,6 +559,15 @@ private:
     // Timestamp of data at startup. Used internally to advise checkpointing and recovery to a
     // timestamp. Provided by replication layer because WT does not persist timestamps.
     AtomicWord<std::uint64_t> _initialDataTimestamp;
+
+    // Required for accessing '_checkpointedIndexes'.
+    mutable Mutex _checkpointedIndexesMutex =
+        MONGO_MAKE_LATCH("WiredTigerKVEngine::_checkpointedIndexesMutex");
+
+    // A set of indexes that were individually checkpoint'ed and are not consistent with the rest
+    // of the checkpoint's PIT view of the storage data. This set is reset when a storage-wide WT
+    // checkpoint is taken that makes the PIT view consistent again.
+    StringSet _checkpointedIndexes;
 
     AtomicWord<std::uint64_t> _oplogNeededForCrashRecovery;
 

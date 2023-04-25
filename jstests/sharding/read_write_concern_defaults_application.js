@@ -32,7 +32,6 @@
 "use strict";
 
 load('jstests/libs/profiler.js');
-load("jstests/libs/logv2_helpers.js");
 load('jstests/sharding/libs/last_lts_mongod_commands.js');
 
 // TODO SERVER-50144 Remove this and allow orphan checking.
@@ -79,6 +78,7 @@ let validateTestCase = function(test) {
 let testCases = {
     _addShard: {skip: "internal command"},
     _cloneCollectionOptionsFromPrimaryShard: {skip: "internal command"},
+    _clusterQueryWithoutShardKey: {skip: "internal command"},
     _configsvrAbortReshardCollection: {skip: "internal command"},
     _configsvrAddShard: {skip: "internal command"},
     _configsvrAddShardToZone: {skip: "internal command"},
@@ -100,13 +100,7 @@ let testCases = {
     },  // TODO SERVER-62374: remove this once 5.3 becomes last continuos release
     _configsvrConfigureCollectionBalancing: {skip: "internal command"},
     _configsvrCreateDatabase: {skip: "internal command"},
-    _configsvrDropCollection:
-        {skip: "internal command"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
-    _configsvrDropDatabase:
-        {skip: "internal command"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrDropIndexCatalogEntry: {skip: "internal command"},
-    _configsvrEnableSharding:
-        {skip: "internal command"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrEnsureChunkVersionIsGreaterThan: {skip: "internal command"},
     _configsvrMoveChunk: {skip: "internal command"},
     _configsvrMovePrimary: {skip: "internal command"},  // Can be removed once 6.0 is last LTS
@@ -124,8 +118,6 @@ let testCases = {
     _configsvrSetAllowMigrations: {skip: "internal command"},
     _configsvrSetClusterParameter: {skip: "internal command"},
     _configsvrSetUserWriteBlockMode: {skip: "internal command"},
-    _configsvrShardCollection:
-        {skip: "internal command"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrUpdateZoneKeyRange: {skip: "internal command"},
     _flushDatabaseCacheUpdates: {skip: "internal command"},
     _flushDatabaseCacheUpdatesWithWriteConcern: {skip: "internal command"},
@@ -154,6 +146,8 @@ let testCases = {
     _shardsvrCompactStructuredEncryptionData: {skip: "internal command"},
     _shardsvrCreateCollection: {skip: "internal command"},
     _shardsvrCreateCollectionParticipant: {skip: "internal command"},
+    _shardsvrCreateGlobalIndex: {skip: "internal command"},
+    _shardsvrDropGlobalIndex: {skip: "internal command"},
     _shardsvrDropCollection: {skip: "internal command"},
     _shardsvrDropCollectionIfUUIDNotMatching: {skip: "internal command"},
     _shardsvrDropCollectionParticipant: {skip: "internal command"},
@@ -163,6 +157,7 @@ let testCases = {
     _shardsvrDropDatabase: {skip: "internal command"},
     _shardsvrDropDatabaseParticipant: {skip: "internal command"},
     _shardsvrGetStatsForBalancing: {skip: "internal command"},
+    _shardsvrInsertGlobalIndexKey: {skip: "internal command"},
     _shardsvrJoinMigrations: {skip: "internal command"},
     _shardsvrMovePrimary: {skip: "internal command"},
     _shardsvrMoveRange: {
@@ -181,8 +176,6 @@ let testCases = {
     _shardsvrCollMod: {skip: "internal command"},
     _shardsvrCollModParticipant: {skip: "internal command"},
     _shardsvrParticipantBlock: {skip: "internal command"},
-    _shardsvrShardCollection:
-        {skip: "internal command"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _transferMods: {skip: "internal command"},
     _vectorClockPersist: {skip: "internal command"},
     abortReshardCollection: {skip: "does not accept read or write concern"},
@@ -223,6 +216,7 @@ let testCases = {
         checkWriteConcern: true,
     },
     analyze: {skip: "TODO SERVER-67772"},
+    analyzeShardKey: {skip: "does not accept read or write concern"},
     appendOplogNote: {
         command: {appendOplogNote: 1, data: {foo: 1}},
         checkReadConcern: false,
@@ -306,6 +300,7 @@ let testCases = {
     },  // TODO SERVER-62374: remove this once 5.3 becomes last continuos release
     configureCollectionBalancing: {skip: "does not accept read or write concern"},
     configureFailPoint: {skip: "does not accept read or write concern"},
+    configureQueryAnalyzer: {skip: "does not accept read or write concern"},
     connPoolStats: {skip: "does not accept read or write concern"},
     connPoolSync: {skip: "internal command"},
     connectionStatus: {skip: "does not accept read or write concern"},
@@ -614,7 +609,6 @@ let testCases = {
         checkReadConcern: false,
         checkWriteConcern: true,
     },
-    repairDatabase: {skip: "does not accept read or write concern"},
     repairShardedCollectionChunksHistory: {skip: "does not accept read or write concern"},
     replSetAbortPrimaryCatchUp: {skip: "does not accept read or write concern"},
     replSetFreeze: {skip: "does not accept read or write concern"},
@@ -810,27 +804,14 @@ let setDefaultRWConcernActualTestCase = {
 //     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 function createLogLineRegularExpressionForTestCase(test, cmdName, targetId, explicitRWC) {
     let expectedProvenance = explicitRWC ? "clientSupplied" : "customDefault";
-    if (isJsonLogNoConn()) {
-        let pattern = `"command":{"${cmdName}"`;
-        pattern += `.*"comment":"${targetId}"`;
-        if (test.checkReadConcern) {
-            pattern += `.*"readConcern":{"level":"majority","provenance":"${expectedProvenance}"}`;
-        }
-        if (test.checkWriteConcern) {
-            pattern += `.*"writeConcern":{"w":"majority","wtimeout":1234567,"provenance":"${
-                expectedProvenance}"}`;
-        }
-        return new RegExp(pattern);
-    }
-
-    let pattern = `command: ${cmdName} `;
-    pattern += `.* comment: "${targetId}"`;
+    let pattern = `"command":{"${cmdName}"`;
+    pattern += `.*"comment":"${targetId}"`;
     if (test.checkReadConcern) {
-        pattern += `.* readConcern:{ level: "majority", provenance: "${expectedProvenance}" }`;
+        pattern += `.*"readConcern":{"level":"majority","provenance":"${expectedProvenance}"}`;
     }
     if (test.checkWriteConcern) {
-        pattern += `.* writeConcern:{ w: "majority", wtimeout: 1234567, provenance: "${
-            expectedProvenance}" }`;
+        pattern += `.*"writeConcern":{"w":"majority","wtimeout":1234567,"provenance":"${
+            expectedProvenance}"}`;
     }
     return new RegExp(pattern);
 }

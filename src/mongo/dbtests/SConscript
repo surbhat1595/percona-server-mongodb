@@ -9,25 +9,12 @@ Import("inmemory")
 env = env.Clone()
 
 env.Library(
-    target="framework_options",
-    source=[
-        "framework_options.cpp",
-        "framework_options.idl",
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/db/server_options_core',
-        '$BUILD_DIR/mongo/db/storage/flow_control_parameters',
-        '$BUILD_DIR/mongo/db/storage/storage_options',
-        '$BUILD_DIR/mongo/unittest/unittest',
-        '$BUILD_DIR/mongo/util/options_parser/options_parser_init',
-    ],
-)
-
-env.Library(
     target='testframework',
     source=[
-        'framework.cpp',
         'framework_options_init.cpp',
+        'framework_options.cpp',
+        'framework_options.idl',
+        'framework.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/catalog/catalog_impl',
@@ -37,14 +24,18 @@ env.Library(
         '$BUILD_DIR/mongo/db/index/index_access_methods',
         '$BUILD_DIR/mongo/db/index_builds_coordinator_mongod',
         '$BUILD_DIR/mongo/db/op_observer/op_observer',
+        '$BUILD_DIR/mongo/db/server_base',
+        '$BUILD_DIR/mongo/db/server_options_core',
         '$BUILD_DIR/mongo/db/service_context_d',
+        '$BUILD_DIR/mongo/db/storage/flow_control_parameters',
         '$BUILD_DIR/mongo/db/storage/storage_control',
+        '$BUILD_DIR/mongo/db/storage/storage_options',
         '$BUILD_DIR/mongo/scripting/scripting_common',
         '$BUILD_DIR/mongo/unittest/unittest',
-        'framework_options',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/s/sharding_runtime_d',
+        '$BUILD_DIR/mongo/util/options_parser/options_parser_init',
     ],
 )
 
@@ -146,7 +137,6 @@ env.Program(
         "$BUILD_DIR/mongo/db/catalog/collection_validation",
         "$BUILD_DIR/mongo/db/catalog/index_key_validate",
         "$BUILD_DIR/mongo/db/catalog/multi_index_block",
-        "$BUILD_DIR/mongo/db/catalog_raii",
         "$BUILD_DIR/mongo/db/commands/mongod",
         "$BUILD_DIR/mongo/db/commands/test_commands_enabled",
         "$BUILD_DIR/mongo/db/concurrency/deferred_writer",
@@ -174,6 +164,7 @@ env.Program(
         "$BUILD_DIR/mongo/db/repl/storage_interface_impl",
         "$BUILD_DIR/mongo/db/server_options_core",
         "$BUILD_DIR/mongo/db/session/sessions_collection_standalone",
+        "$BUILD_DIR/mongo/db/shard_role",
         "$BUILD_DIR/mongo/db/storage/durable_catalog_impl",
         "$BUILD_DIR/mongo/db/storage/inmemory/storage_inmemory" if inmemory else [],
         "$BUILD_DIR/mongo/db/storage/storage_engine_impl",

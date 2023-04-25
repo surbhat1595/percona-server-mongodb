@@ -54,7 +54,6 @@
 #include "mongo/db/catalog/collection_impl.h"
 #include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/catalog/create_collection.h"
-#include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder_impl.h"
 #include "mongo/db/catalog/health_log.h"
 #include "mongo/db/catalog/index_catalog.h"
@@ -162,6 +161,7 @@
 #include "mongo/db/session/kill_sessions_local.h"
 #include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/session_catalog.h"
+#include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_killer.h"
 #include "mongo/db/set_change_stream_state_coordinator.h"
 #include "mongo/db/startup_recovery.h"
@@ -181,6 +181,7 @@
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/system_index.h"
 #include "mongo/db/transaction/internal_transactions_reap_service.h"
+#include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/ttl.h"
 #include "mongo/db/vector_clock_metadata_hook.h"
@@ -696,6 +697,8 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         replCoord->startup(startupOpCtx.get(), lastShutdownState);
     }
 
+    initializeCommandHooks(serviceContext);
+
     if (!storageGlobalParams.queryableBackupMode) {
 
         if (storageEngine->supportsCappedCollections()) {
@@ -835,8 +838,6 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     }
 
     LogicalSessionCache::set(serviceContext, makeLogicalSessionCacheD(kind));
-
-    initializeCommandHooks(serviceContext);
 
     // MessageServer::run will return when exit code closes its socket and we don't need the
     // operation context anymore
@@ -1134,6 +1135,11 @@ void setUpReplication(ServiceContext* serviceContext) {
             serviceContext, makeReplicaSetNodeExecutor(serviceContext));
 
     repl::ReplicationCoordinator::set(serviceContext, std::move(replCoord));
+
+    MongoDSessionCatalog::set(
+        serviceContext,
+        std::make_unique<MongoDSessionCatalog>(
+            std::make_unique<MongoDSessionCatalogTransactionInterfaceImpl>()));
 
     IndexBuildsCoordinator::set(serviceContext, std::make_unique<IndexBuildsCoordinatorMongod>());
 

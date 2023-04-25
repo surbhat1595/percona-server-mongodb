@@ -156,8 +156,7 @@ void ReplicaSetNodeProcessInterface::createCollection(OperationContext* opCtx,
     if (_canWriteLocally(opCtx, dbNs)) {
         return NonShardServerProcessInterface::createCollection(opCtx, dbName, cmdObj);
     }
-    // TODO SERVER-67519 change CommandHelpers::parseNsCollectionRequired to take in DatabaseName
-    auto ns = CommandHelpers::parseNsCollectionRequired(dbName.toStringWithTenantId(), cmdObj);
+    auto ns = CommandHelpers::parseNsCollectionRequired(dbName, cmdObj);
     uassertStatusOK(_executeCommandOnPrimary(opCtx, ns, cmdObj));
 }
 
@@ -251,7 +250,7 @@ void ReplicaSetNodeProcessInterface::_attachGenericCommandArgs(OperationContext*
 
 bool ReplicaSetNodeProcessInterface::_canWriteLocally(OperationContext* opCtx,
                                                       const NamespaceString& ns) const {
-    Lock::ResourceLock rstl(opCtx->lockState(), resourceIdReplicationStateTransitionLock, MODE_IX);
+    Lock::ResourceLock rstl(opCtx, resourceIdReplicationStateTransitionLock, MODE_IX);
     return repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, ns);
 }
 

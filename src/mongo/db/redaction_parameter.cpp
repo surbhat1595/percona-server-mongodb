@@ -38,9 +38,10 @@ namespace mongo {
 // Allow --redactClientLogData access via setParameter/getParameter
 
 void RedactClientLogDataParameter::append(OperationContext* txn,
-                                   BSONObjBuilder& b,
-                                   const std::string& name) {
-    b.append(name, logv2::shouldRedactLogs());
+                                          BSONObjBuilder* b,
+                                          StringData name,
+                                          const boost::optional<TenantId>&) {
+    b->append(name, logv2::shouldRedactLogs());
 }
 
 namespace {
@@ -52,17 +53,19 @@ Status _set(bool v) {
 
 }
 
-Status RedactClientLogDataParameter::set(const BSONElement& newValueElement) {
+Status RedactClientLogDataParameter::set(const BSONElement& newValueElement,
+                                         const boost::optional<TenantId>&) {
     if (!newValueElement.isBoolean()) {
         return Status(ErrorCodes::BadValue, str::stream() << name() << " has to be a boolean");
     }
     return _set(newValueElement.boolean());
 }
 
-Status RedactClientLogDataParameter::setFromString(const std::string& newValueString) {
-    if (newValueString == "true" || newValueString == "1")
+Status RedactClientLogDataParameter::setFromString(StringData newValueString,
+                                                   const boost::optional<TenantId>&) {
+    if (newValueString == "true"_sd || newValueString == "1"_sd)
         return _set(true);
-    if (newValueString == "false" || newValueString == "0")
+    if (newValueString == "false"_sd || newValueString == "0"_sd)
         return _set(false);
     return Status(ErrorCodes::BadValue, "can't convert string to bool");
 }

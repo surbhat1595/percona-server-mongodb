@@ -63,6 +63,7 @@
 #include "mongo/db/repl/sync_source_selector.h"
 #include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/repl/transaction_oplog_application.h"
+#include "mongo/db/serverless/serverless_operation_lock_registry.h"
 #include "mongo/db/session/session_txn_record_gen.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/thread_pool_task_executor.h"
@@ -550,6 +551,7 @@ void InitialSyncer::_setUp_inlock(OperationContext* opCtx, std::uint32_t initial
     _stats.initialSyncStart = _exec->now();
     _stats.maxFailedInitialSyncAttempts = initialSyncMaxAttempts;
     _stats.failedInitialSyncAttempts = 0;
+    _stats.exec = std::weak_ptr<executor::TaskExecutor>(_exec);
 
     _allowedOutageDuration = Seconds(initialSyncTransientErrorRetryPeriodSeconds.load());
 }
@@ -576,6 +578,7 @@ void InitialSyncer::_tearDown_inlock(OperationContext* opCtx,
     _storage->oplogDiskLocRegister(opCtx, initialDataTimestamp, orderedCommit);
 
     tenant_migration_access_blocker::recoverTenantMigrationAccessBlockers(opCtx);
+    ServerlessOperationLockRegistry::recoverLocks(opCtx);
     reconstructPreparedTransactions(opCtx, repl::OplogApplication::Mode::kInitialSync);
 
     _replicationProcess->getConsistencyMarkers()->setInitialSyncIdIfNotSet(opCtx);
@@ -2190,9 +2193,10 @@ void InitialSyncer::Stats::append(BSONObjBuilder* builder) const {
     builder->appendNumber("maxFailedInitialSyncAttempts",
                           static_cast<long long>(maxFailedInitialSyncAttempts));
 
+    auto e = exec.lock();
     if (initialSyncStart != Date_t()) {
         builder->appendDate("initialSyncStart", initialSyncStart);
-        auto elapsedDurationEnd = Date_t::now();
+        auto elapsedDurationEnd = e ? e->now() : Date_t::now();
         if (initialSyncEnd != Date_t()) {
             builder->appendDate("initialSyncEnd", initialSyncEnd);
             elapsedDurationEnd = initialSyncEnd;

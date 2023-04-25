@@ -29,6 +29,8 @@
 
 #include "mongo/db/query/optimizer/cascades/implementers.h"
 
+#include "mongo/db/query/optimizer/cascades/rewriter_rules.h"
+#include "mongo/db/query/optimizer/props.h"
 #include "mongo/db/query/optimizer/utils/ce_math.h"
 #include "mongo/db/query/optimizer/utils/memo_utils.h"
 
@@ -138,15 +140,20 @@ public:
                 make<LimitSkipNode>(LimitSkipRequirement{1, 0}, std::move(physicalSeek));
             nodeCEMap.emplace(limitSkip.cast<Node>(), 1.0);
 
-            optimizeChildrenNoAssert(
-                _queue, kDefaultPriority, std::move(limitSkip), {}, std::move(nodeCEMap));
+            optimizeChildrenNoAssert(_queue,
+                                     kDefaultPriority,
+                                     PhysicalRewriteType::Seek,
+                                     std::move(limitSkip),
+                                     {},
+                                     std::move(nodeCEMap));
         } else {
             if (needsRID) {
                 fieldProjectionMap._ridProjection = ridProjName;
             }
             ABT physicalScan = make<PhysicalScanNode>(
                 std::move(fieldProjectionMap), node.getScanDefName(), canUseParallelScan);
-            optimizeChild<PhysicalScanNode>(_queue, kDefaultPriority, std::move(physicalScan));
+            optimizeChild<PhysicalScanNode, PhysicalRewriteType::PhysicalScan>(
+                _queue, kDefaultPriority, std::move(physicalScan));
         }
     }
 
@@ -160,11 +167,23 @@ public:
             return;
         }
 
-        NodeCEMap nodeCEMap;
-        ABT physNode = make<CoScanNode>();
         const auto& requiredProjections =
             getPropertyConst<ProjectionRequirement>(_physProps).getProjections();
 
+        ProjectionName ridProjName;
+        bool needsRID = false;
+        if (hasProperty<IndexingAvailability>(_logicalProps)) {
+            ridProjName = _ridProjections.at(
+                getPropertyConst<IndexingAvailability>(_logicalProps).getScanDefName());
+            needsRID = requiredProjections.find(ridProjName).second;
+        }
+        if (needsRID && !node.getHasRID()) {
+            // We cannot provide RID.
+            return;
+        }
+
+        NodeCEMap nodeCEMap;
+        ABT physNode = make<CoScanNode>();
         if (node.getArraySize() == 0) {
             nodeCEMap.emplace(physNode.cast<Node>(), 0.0);
 
@@ -172,9 +191,16 @@ public:
                 make<LimitSkipNode>(properties::LimitSkipRequirement{0, 0}, std::move(physNode));
             nodeCEMap.emplace(physNode.cast<Node>(), 0.0);
 
-            for (const ProjectionName& projectionName : requiredProjections.getVector()) {
-                physNode =
-                    make<EvaluationNode>(projectionName, Constant::nothing(), std::move(physNode));
+            for (const ProjectionName& boundProjName : node.binder().names()) {
+                if (requiredProjections.find(boundProjName).second) {
+                    physNode = make<EvaluationNode>(
+                        boundProjName, Constant::nothing(), std::move(physNode));
+                    nodeCEMap.emplace(physNode.cast<Node>(), 0.0);
+                }
+            }
+            if (needsRID) {
+                physNode = make<EvaluationNode>(
+                    std::move(ridProjName), Constant::nothing(), std::move(physNode));
                 nodeCEMap.emplace(physNode.cast<Node>(), 0.0);
             }
         } else {
@@ -195,29 +221,41 @@ public:
                                         _prefixId.getNextId("valueScanPid"),
                                         false /*retainNonArrays*/,
                                         std::move(physNode));
-            nodeCEMap.emplace(physNode.cast<Node>(), node.getArraySize());
+            nodeCEMap.emplace(physNode.cast<Node>(), 1.0);
 
-            /**
-             * Iterate over the bound projections here as opposed to the required projections, since
-             * the array elements are ordered accordingly.
-             */
+            const auto getElementFn = [&valueScanProj](const size_t index) {
+                return make<FunctionCall>(
+                    "getElement", makeSeq(make<Variable>(valueScanProj), Constant::int32(index)));
+            };
+
+            // Iterate over the bound projections here as opposed to the required projections, since
+            // the array elements are ordered accordingly. Skip over the first element (this is the
+            // row id).
             const ProjectionNameVector& boundProjNames = node.binder().names();
             for (size_t i = 0; i < boundProjNames.size(); i++) {
                 const ProjectionName& boundProjName = boundProjNames.at(i);
                 if (requiredProjections.find(boundProjName).second) {
-                    physNode = make<EvaluationNode>(
-                        boundProjName,
-                        make<FunctionCall>(
-                            "getElement",
-                            makeSeq(make<Variable>(valueScanProj), Constant::int32(i))),
-                        std::move(physNode));
+                    physNode = make<EvaluationNode>(boundProjName,
+                                                    getElementFn(i + (node.getHasRID() ? 1 : 0)),
+                                                    std::move(physNode));
                     nodeCEMap.emplace(physNode.cast<Node>(), node.getArraySize());
                 }
             }
+
+            if (needsRID) {
+                // Obtain row id from first element of the array.
+                physNode = make<EvaluationNode>(
+                    std::move(ridProjName), getElementFn(0), std::move(physNode));
+                nodeCEMap.emplace(physNode.cast<Node>(), node.getArraySize());
+            }
         }
 
-        optimizeChildrenNoAssert(
-            _queue, kDefaultPriority, std::move(physNode), {}, std::move(nodeCEMap));
+        optimizeChildrenNoAssert(_queue,
+                                 kDefaultPriority,
+                                 PhysicalRewriteType::ValueScan,
+                                 std::move(physNode),
+                                 {},
+                                 std::move(nodeCEMap));
     }
 
     void operator()(const ABT& /*n*/, const MemoLogicalDelegatorNode& /*node*/) {
@@ -244,7 +282,7 @@ public:
         getProperty<DistributionRequirement>(newProps).setDisableExchanges(true);
 
         ABT physicalFilter = n;
-        optimizeChild<FilterNode>(
+        optimizeChild<FilterNode, PhysicalRewriteType::Filter>(
             _queue, kDefaultPriority, std::move(physicalFilter), std::move(newProps));
     }
 
@@ -285,7 +323,7 @@ public:
             }
 
             ABT physicalEval = n;
-            optimizeChild<EvaluationNode>(
+            optimizeChild<EvaluationNode, PhysicalRewriteType::RenameProjection>(
                 _queue, kDefaultPriority, std::move(physicalEval), std::move(newProps));
             return;
         }
@@ -302,7 +340,8 @@ public:
         if (!propertyAffectsProjection<ProjectionRequirement>(_physProps, projectionName)) {
             // We do not require the projection. Do not place a physical evaluation node and
             // continue optimizing the child.
-            optimizeUnderNewProperties(_queue, kDefaultPriority, node.getChild(), _physProps);
+            optimizeUnderNewProperties<PhysicalRewriteType::EvaluationPassthrough>(
+                _queue, kDefaultPriority, node.getChild(), _physProps);
             return;
         }
 
@@ -322,7 +361,7 @@ public:
         getProperty<DistributionRequirement>(newProps).setDisableExchanges(true);
 
         ABT physicalEval = n;
-        optimizeChild<EvaluationNode>(
+        optimizeChild<EvaluationNode, PhysicalRewriteType::Evaluation>(
             _queue, kDefaultPriority, std::move(physicalEval), std::move(newProps));
     }
 
@@ -348,7 +387,7 @@ public:
         // via a physical scan even in the absence of indexes.
 
         const IndexingRequirement& requirements = getPropertyConst<IndexingRequirement>(_physProps);
-        const CandidateIndexMap& candidateIndexMap = node.getCandidateIndexMap();
+        const CandidateIndexes& candidateIndexes = node.getCandidateIndexes();
         const IndexReqTarget indexReqTarget = requirements.getIndexReqTarget();
         switch (indexReqTarget) {
             case IndexReqTarget::Complete:
@@ -358,7 +397,7 @@ public:
                 break;
 
             case IndexReqTarget::Index:
-                if (candidateIndexMap.empty()) {
+                if (candidateIndexes.empty()) {
                     return;
                 }
                 [[fallthrough]];
@@ -372,10 +411,6 @@ public:
             default:
                 MONGO_UNREACHABLE;
         }
-        const auto& satisfiedPartialIndexes =
-            getPropertyConst<IndexingAvailability>(
-                _memo.getGroup(requirements.getSatisfiedPartialIndexesGroupId())._logicalProperties)
-                .getSatisfiedPartialIndexes();
 
         const auto& requiredProjections =
             getPropertyConst<ProjectionRequirement>(_physProps).getProjections();
@@ -398,10 +433,6 @@ public:
         }
 
         for (const auto& [key, req] : reqMap) {
-            if (key.emptyPath()) {
-                // We cannot satisfy without a field.
-                return;
-            }
             if (key._projectionName != scanProjectionName) {
                 // We can only satisfy partial schema requirements using our root projection.
                 return;
@@ -434,7 +465,7 @@ public:
 
         const auto& ceProperty = getPropertyConst<CardinalityEstimate>(_logicalProps);
         const CEType currentGroupCE = ceProperty.getEstimate();
-        const PartialSchemaKeyCE& partialSchemaKeyCEMap = ceProperty.getPartialSchemaKeyCEMap();
+        const PartialSchemaKeyCE& partialSchemaKeyCE = ceProperty.getPartialSchemaKeyCE();
 
         if (indexReqTarget == IndexReqTarget::Index) {
             ProjectionCollationSpec requiredCollation;
@@ -443,10 +474,18 @@ public:
                     getPropertyConst<CollationRequirement>(_physProps).getCollationSpec();
             }
 
+            const auto& satisfiedPartialIndexes =
+                getPropertyConst<IndexingAvailability>(
+                    _memo.getGroup(requirements.getSatisfiedPartialIndexesGroupId())
+                        ._logicalProperties)
+                    .getSatisfiedPartialIndexes();
+
             // Consider all candidate indexes, and check if they satisfy the collation and
             // distribution requirements.
-            for (const auto& [indexDefName, candidateIndexEntry] : candidateIndexMap) {
+            for (const auto& candidateIndexEntry : node.getCandidateIndexes()) {
+                const auto& indexDefName = candidateIndexEntry._indexDefName;
                 const auto& indexDef = scanDef.getIndexDefs().at(indexDefName);
+
                 if (!indexDef.getPartialReqMap().empty() &&
                     (_hints._disableIndexes == DisableIndexOptions::DisablePartialOnly ||
                      satisfiedPartialIndexes.count(indexDefName) == 0)) {
@@ -481,45 +520,35 @@ public:
                         availableDirections._forward || availableDirections._backward);
 
                 auto indexProjectionMap = candidateIndexEntry._fieldProjectionMap;
-                {
-                    // Remove unused projections from the field projection map.
-                    auto& fieldProjMap = indexProjectionMap._fieldProjections;
-                    for (auto it = fieldProjMap.begin(); it != fieldProjMap.end();) {
-                        const ProjectionName& projName = it->second;
-                        if (!requiredProjections.find(projName).second &&
-                            candidateIndexEntry._residualRequirementsTempProjections.count(
-                                projName) == 0) {
-                            fieldProjMap.erase(it++);
-                        } else {
-                            it++;
-                        }
-                    }
-                }
+                auto residualReqs = candidateIndexEntry._residualRequirements;
+                removeRedundantResidualPredicates(
+                    requiredProjections, residualReqs, indexProjectionMap);
 
                 CEType indexCE = currentGroupCE;
-                ResidualRequirements residualRequirements;
-                if (!candidateIndexEntry._residualRequirements.empty()) {
+                ResidualRequirementsWithCE residualReqsWithCE;
+                std::vector<SelectivityType> indexPredSels;
+                if (!residualReqs.empty()) {
                     PartialSchemaKeySet residualQueryKeySet;
-                    for (const auto& [residualKey, residualReq] :
-                         candidateIndexEntry._residualRequirements) {
-                        const auto& queryKey = candidateIndexEntry._residualKeyMap.at(residualKey);
-                        residualQueryKeySet.emplace(queryKey);
-                        const CEType ce = partialSchemaKeyCEMap.at(queryKey);
-                        residualRequirements.emplace_back(residualKey, residualReq, ce);
+                    for (const auto& [residualKey, residualReq, entryIndex] : residualReqs) {
+                        auto entryIt = reqMap.cbegin();
+                        std::advance(entryIt, entryIndex);
+                        residualQueryKeySet.emplace(entryIt->first);
+                        residualReqsWithCE.emplace_back(
+                            residualKey, residualReq, partialSchemaKeyCE.at(entryIndex).second);
                     }
 
                     if (scanGroupCE > 0.0) {
-                        std::vector<SelectivityType> indexPredSelectivities;
+                        size_t entryIndex = 0;
                         for (const auto& [key, req] : reqMap) {
                             if (residualQueryKeySet.count(key) == 0) {
-                                const CEType ce = partialSchemaKeyCEMap.at(key);
-                                indexPredSelectivities.push_back(ce / scanGroupCE);
+                                indexPredSels.push_back(partialSchemaKeyCE.at(entryIndex).second /
+                                                        scanGroupCE);
                             }
+                            entryIndex++;
                         }
 
-                        if (!indexPredSelectivities.empty()) {
-                            indexCE = scanGroupCE *
-                                ce::conjExponentialBackoff(std::move(indexPredSelectivities));
+                        if (!indexPredSels.empty()) {
+                            indexCE = scanGroupCE * ce::conjExponentialBackoff(indexPredSels);
                         }
                     }
                 }
@@ -529,9 +558,9 @@ public:
                 NodeCEMap nodeCEMap;
 
                 // TODO: consider pre-computing as part of the candidateIndexes structure.
-                const auto singularInterval = MultiKeyIntervalReqExpr::getSingularDNF(intervals);
+                const auto singularInterval = CompoundIntervalReqExpr::getSingularDNF(intervals);
                 const bool needsUniqueStage =
-                    (!singularInterval || !areMultiKeyIntervalsEqualities(*singularInterval)) &&
+                    (!singularInterval || !areCompoundIntervalsEqualities(*singularInterval)) &&
                     indexDef.isMultiKey() && requirements.getDedupRID();
 
                 indexProjectionMap._ridProjection =
@@ -557,8 +586,12 @@ public:
                                               nodeCEMap);
                 }
 
-                lowerPartialSchemaRequirements(
-                    indexCE, scanGroupCE, residualRequirements, physNode, nodeCEMap);
+                lowerPartialSchemaRequirements(scanGroupCE,
+                                               std::move(indexPredSels),
+                                               residualReqsWithCE,
+                                               physNode,
+                                               _pathToInterval,
+                                               nodeCEMap);
 
                 if (needsUniqueStage) {
                     // Insert unique stage if we need to, after the residual requirements.
@@ -567,10 +600,17 @@ public:
                     nodeCEMap.emplace(physNode.cast<Node>(), currentGroupCE);
                 }
 
-                optimizeChildrenNoAssert(
-                    _queue, kDefaultPriority, std::move(physNode), {}, std::move(nodeCEMap));
+                optimizeChildrenNoAssert(_queue,
+                                         kDefaultPriority,
+                                         PhysicalRewriteType::SargableToIndex,
+                                         std::move(physNode),
+                                         {},
+                                         std::move(nodeCEMap));
             }
         } else {
+            const auto& scanParams = node.getScanParams();
+            tassert(6624102, "Empty scan params", scanParams);
+
             bool canUseParallelScan = false;
             if (!distributionsCompatible(indexReqTarget,
                                          scanDef.getDistributionAndPaths(),
@@ -581,21 +621,14 @@ public:
                 return;
             }
 
-            FieldProjectionMap fieldProjectionMap;
+            FieldProjectionMap fieldProjectionMap = scanParams->_fieldProjectionMap;
+            ResidualRequirements residualReqs = scanParams->_residualRequirements;
+            removeRedundantResidualPredicates(
+                requiredProjections, residualReqs, fieldProjectionMap);
+
             if (indexReqTarget == IndexReqTarget::Complete && needsRID) {
                 fieldProjectionMap._ridProjection = ridProjName;
             }
-
-            ProjectionRenames projectionRenames;
-            ResidualRequirements residualRequirements;
-            computePhysicalScanParams(_prefixId,
-                                      reqMap,
-                                      partialSchemaKeyCEMap,
-                                      requiredProjections,
-                                      residualRequirements,
-                                      projectionRenames,
-                                      fieldProjectionMap,
-                                      requiresRootProjection);
             if (requiresRootProjection) {
                 fieldProjectionMap._rootProjection = scanProjectionName;
             }
@@ -604,6 +637,7 @@ public:
             ABT physNode = make<Blackhole>();
             CEType baseCE = 0.0;
 
+            PhysicalRewriteType rule = PhysicalRewriteType::Uninitialized;
             if (indexReqTarget == IndexReqTarget::Complete) {
                 baseCE = scanGroupCE;
 
@@ -611,6 +645,7 @@ public:
                 physNode = make<PhysicalScanNode>(
                     std::move(fieldProjectionMap), scanDefName, canUseParallelScan);
                 nodeCEMap.emplace(physNode.cast<Node>(), baseCE);
+                rule = PhysicalRewriteType::SargableToPhysicalScan;
             } else {
                 baseCE = 1.0;
 
@@ -620,16 +655,23 @@ public:
 
                 physNode = make<LimitSkipNode>(LimitSkipRequirement{1, 0}, std::move(physNode));
                 nodeCEMap.emplace(physNode.cast<Node>(), baseCE);
+                rule = PhysicalRewriteType::SargableToSeek;
             }
 
-            applyProjectionRenames(std::move(projectionRenames), physNode, [&](const ABT& node) {
-                nodeCEMap.emplace(node.cast<Node>(), baseCE);
-            });
+            ResidualRequirementsWithCE residualReqsWithCE;
+            for (const auto& [residualKey, residualReq, entryIndex] : residualReqs) {
+                residualReqsWithCE.emplace_back(
+                    residualKey, residualReq, partialSchemaKeyCE.at(entryIndex).second);
+            }
 
-            lowerPartialSchemaRequirements(
-                baseCE, scanGroupCE, residualRequirements, physNode, nodeCEMap);
+            lowerPartialSchemaRequirements(baseCE,
+                                           {} /*indexPredSels*/,
+                                           residualReqsWithCE,
+                                           physNode,
+                                           _pathToInterval,
+                                           nodeCEMap);
             optimizeChildrenNoAssert(
-                _queue, kDefaultPriority, std::move(physNode), {}, std::move(nodeCEMap));
+                _queue, kDefaultPriority, rule, std::move(physNode), {}, std::move(nodeCEMap));
         }
     }
 
@@ -770,23 +812,34 @@ public:
                                                      RepetitionEstimate{estimatedRepetitions});
         }
 
-        const auto& optimizeFn = std::bind(&ImplementationVisitor::optimizeRIDIntersect,
-                                           this,
-                                           isIndex,
-                                           dedupRID,
-                                           indexingAvailability.getEqPredsOnly(),
-                                           std::cref(ridProjName),
-                                           std::cref(collationLeftRightSplit),
-                                           std::cref(collationRightLeftSplit),
-                                           intersectedCE,
-                                           leftCE,
-                                           rightCE,
-                                           std::cref(leftPhysProps),
-                                           std::cref(rightPhysProps),
-                                           std::cref(node.getLeftChild()),
-                                           std::cref(node.getRightChild()));
+        const auto& optimizeFn = [this,
+                                  isIndex,
+                                  dedupRID,
+                                  &indexingAvailability,
+                                  &ridProjName,
+                                  &collationLeftRightSplit,
+                                  &collationRightLeftSplit,
+                                  intersectedCE,
+                                  leftCE,
+                                  rightCE,
+                                  &leftPhysProps,
+                                  &rightPhysProps,
+                                  &node] {
+            optimizeRIDIntersect(isIndex,
+                                 dedupRID,
+                                 indexingAvailability.getEqPredsOnly(),
+                                 ridProjName,
+                                 collationLeftRightSplit,
+                                 collationRightLeftSplit,
+                                 intersectedCE,
+                                 leftCE,
+                                 rightCE,
+                                 leftPhysProps,
+                                 rightPhysProps,
+                                 node.getLeftChild(),
+                                 node.getRightChild());
+        };
 
-        // Always optimize under same distributions on left and on right.
         optimizeFn();
 
         if (isIndex) {
@@ -910,7 +963,7 @@ public:
         ABT physicalJoin = n;
         BinaryJoinNode& newNode = *physicalJoin.cast<BinaryJoinNode>();
 
-        optimizeChildren<BinaryJoinNode>(
+        optimizeChildren<BinaryJoinNode, PhysicalRewriteType::NLJ>(
             _queue,
             kDefaultPriority,
             std::move(physicalJoin),
@@ -941,7 +994,7 @@ public:
             childProps.emplace_back(&child, std::move(newProps));
         }
 
-        optimizeChildren<UnionNode>(
+        optimizeChildren<UnionNode, PhysicalRewriteType::Union>(
             _queue, kDefaultPriority, std::move(physicalUnion), std::move(childProps));
     }
 
@@ -1051,7 +1104,7 @@ public:
                                                 std::move(aggregationProjections),
                                                 node.getType(),
                                                 node.getChild());
-        optimizeChild<GroupByNode>(
+        optimizeChild<GroupByNode, PhysicalRewriteType::HashGroup>(
             _queue, kDefaultPriority, std::move(physicalGroupBy), std::move(newProps));
     }
 
@@ -1084,7 +1137,7 @@ public:
         getProperty<DistributionRequirement>(newProps).setDisableExchanges(false);
 
         ABT physicalUnwind = n;
-        optimizeChild<UnwindNode>(
+        optimizeChild<UnwindNode, PhysicalRewriteType::Unwind>(
             _queue, kDefaultPriority, std::move(physicalUnwind), std::move(newProps));
     }
 
@@ -1097,7 +1150,9 @@ public:
             return;
         }
 
-        optimizeSimplePropertyNode<CollationNode, CollationRequirement>(node);
+        optimizeSimplePropertyNode<CollationNode,
+                                   CollationRequirement,
+                                   PhysicalRewriteType::Collation>(node);
     }
 
     void operator()(const ABT& /*n*/, const LimitSkipNode& node) {
@@ -1122,29 +1177,35 @@ public:
         setPropertyOverwrite<LimitSkipRequirement>(newProps, std::move(newProp));
         getProperty<DistributionRequirement>(newProps).setDisableExchanges(false);
 
-        optimizeUnderNewProperties(_queue, kDefaultPriority, node.getChild(), std::move(newProps));
+        optimizeUnderNewProperties<PhysicalRewriteType::LimitSkip>(
+            _queue, kDefaultPriority, node.getChild(), std::move(newProps));
     }
 
     void operator()(const ABT& /*n*/, const ExchangeNode& node) {
-        optimizeSimplePropertyNode<ExchangeNode, DistributionRequirement>(node);
+        optimizeSimplePropertyNode<ExchangeNode,
+                                   DistributionRequirement,
+                                   PhysicalRewriteType::Exchange>(node);
     }
 
     void operator()(const ABT& n, const RootNode& node) {
         PhysProps newProps = _physProps;
 
+        ABT rootNode = make<Blackhole>();
         if (hasProperty<ProjectionRequirement>(newProps)) {
             auto& projections = getProperty<ProjectionRequirement>(newProps).getProjections();
             for (const auto& projName : node.getProperty().getProjections().getVector()) {
                 projections.emplace_back(projName);
             }
+            rootNode = make<RootNode>(projections, n.cast<RootNode>()->getChild());
         } else {
             setPropertyOverwrite<ProjectionRequirement>(newProps, node.getProperty());
+            rootNode = n;
         }
 
         getProperty<DistributionRequirement>(newProps).setDisableExchanges(false);
 
-        ABT rootNode = n;
-        optimizeChild<RootNode>(_queue, kDefaultPriority, std::move(rootNode), std::move(newProps));
+        optimizeChild<RootNode, PhysicalRewriteType::Root>(
+            _queue, kDefaultPriority, std::move(rootNode), std::move(newProps));
     }
 
     template <typename T>
@@ -1158,24 +1219,27 @@ public:
                           PrefixId& prefixId,
                           PhysRewriteQueue& queue,
                           const PhysProps& physProps,
-                          const LogicalProps& logicalProps)
+                          const LogicalProps& logicalProps,
+                          const PathToIntervalFn& pathToInterval)
         : _memo(memo),
           _hints(hints),
           _ridProjections(ridProjections),
           _prefixId(prefixId),
           _queue(queue),
           _physProps(physProps),
-          _logicalProps(logicalProps) {}
+          _logicalProps(logicalProps),
+          _pathToInterval(pathToInterval) {}
 
 private:
-    template <class NodeType, class PropType>
+    template <class NodeType, class PropType, PhysicalRewriteType rule>
     void optimizeSimplePropertyNode(const NodeType& node) {
         const PropType& nodeProp = node.getProperty();
         PhysProps newProps = _physProps;
         setPropertyOverwrite<PropType>(newProps, nodeProp);
 
         getProperty<DistributionRequirement>(newProps).setDisableExchanges(false);
-        optimizeUnderNewProperties(_queue, kDefaultPriority, node.getChild(), std::move(newProps));
+        optimizeUnderNewProperties<rule>(
+            _queue, kDefaultPriority, node.getChild(), std::move(newProps));
     }
 
     struct IndexAvailableDirections {
@@ -1453,6 +1517,7 @@ private:
                                                           childProps);
                 optimizeChildrenNoAssert(_queue,
                                          kDefaultPriority,
+                                         PhysicalRewriteType::RIDIntersectMergeJoin,
                                          std::move(physNode),
                                          std::move(childProps),
                                          std::move(nodeCEMap));
@@ -1488,6 +1553,7 @@ private:
                                                              childProps);
                     optimizeChildrenNoAssert(_queue,
                                              kDefaultPriority,
+                                             PhysicalRewriteType::RIDIntersectHashJoin,
                                              std::move(physNode),
                                              std::move(childProps),
                                              std::move(nodeCEMap));
@@ -1522,6 +1588,7 @@ private:
                                                             childProps);
                     optimizeChildrenNoAssert(_queue,
                                              kDefaultPriority,
+                                             PhysicalRewriteType::RIDIntersectGroupBy,
                                              std::move(physNode),
                                              std::move(childProps),
                                              std::move(nodeCEMap));
@@ -1539,15 +1606,16 @@ private:
             setCollationForRIDIntersect(
                 collationLeftRightSplit, leftPhysPropsLocal, rightPhysPropsLocal);
 
-            optimizeChildren<BinaryJoinNode>(_queue,
-                                             kDefaultPriority,
-                                             std::move(physicalJoin),
-                                             std::move(leftPhysPropsLocal),
-                                             std::move(rightPhysPropsLocal));
+            optimizeChildren<BinaryJoinNode, PhysicalRewriteType::RIDIntersectNLJ>(
+                _queue,
+                kDefaultPriority,
+                std::move(physicalJoin),
+                std::move(leftPhysPropsLocal),
+                std::move(rightPhysPropsLocal));
         }
     }
 
-    // We don't own any of those;
+    // We don't own any of those:
     const Memo& _memo;
     const QueryHints& _hints;
     const RIDProjectionsMap& _ridProjections;
@@ -1555,6 +1623,7 @@ private:
     PhysRewriteQueue& _queue;
     const PhysProps& _physProps;
     const LogicalProps& _logicalProps;
+    const PathToIntervalFn& _pathToInterval;
 };
 
 void addImplementers(const Memo& memo,
@@ -1563,14 +1632,16 @@ void addImplementers(const Memo& memo,
                      PrefixId& prefixId,
                      PhysOptimizationResult& bestResult,
                      const properties::LogicalProps& logicalProps,
-                     const OrderPreservingABTSet& logicalNodes) {
+                     const OrderPreservingABTSet& logicalNodes,
+                     const PathToIntervalFn& pathToInterval) {
     ImplementationVisitor visitor(memo,
                                   hints,
                                   ridProjections,
                                   prefixId,
                                   bestResult._queue,
                                   bestResult._physProps,
-                                  logicalProps);
+                                  logicalProps,
+                                  pathToInterval);
     while (bestResult._lastImplementedNodePos < logicalNodes.size()) {
         logicalNodes.at(bestResult._lastImplementedNodePos++).visit(visitor);
     }

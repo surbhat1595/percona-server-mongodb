@@ -27,9 +27,10 @@
  *    it in the license file.
  */
 
-
 #include "mongo/db/index_builds_coordinator.h"
 
+#include <boost/filesystem/operations.hpp>
+#include <boost/iterator/transform_iterator.hpp>
 #include <fmt/format.h>
 
 #include "mongo/db/catalog/clustered_collection_util.h"
@@ -39,7 +40,6 @@
 #include "mongo/db/catalog/index_build_entry_gen.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
@@ -67,11 +67,7 @@
 #include "mongo/util/scoped_counter.h"
 #include "mongo/util/str.h"
 
-#include <boost/filesystem/operations.hpp>
-#include <boost/iterator/transform_iterator.hpp>
-
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
-
 
 namespace mongo {
 
@@ -192,8 +188,9 @@ void removeIndexBuildEntryAfterCommitOrAbort(OperationContext* opCtx,
     }
 
     if (replCoord->getSettings().shouldRecoverFromOplogAsStandalone()) {
-        // TODO SERVER-60753: Remove this mixed-mode write.
-        opCtx->recoveryUnit()->allowUntimestampedWrite();
+        // Writes to the 'config.system.indexBuilds' collection are replicated and the index entry
+        // will be removed when the delete oplog entry is replayed at a later time.
+        return;
     }
 
     auto status = indexbuildentryhelpers::removeIndexBuildEntry(
@@ -632,9 +629,8 @@ Status IndexBuildsCoordinator::_startIndexBuildForRecovery(OperationContext* opC
             collection.getWritableCollection(opCtx)->init(opCtx);
         }
 
-        auto dbName = nss.db().toString();
         auto replIndexBuildState = std::make_shared<ReplIndexBuildState>(
-            buildUUID, collection->uuid(), dbName, specs, protocol);
+            buildUUID, collection->uuid(), nss.dbName().toStringWithTenantId(), specs, protocol);
 
         Status status = activeIndexBuilds.registerIndexBuild(replIndexBuildState);
         if (!status.isOK()) {
@@ -659,7 +655,7 @@ Status IndexBuildsCoordinator::_startIndexBuildForRecovery(OperationContext* opC
 }
 
 Status IndexBuildsCoordinator::_setUpResumeIndexBuild(OperationContext* opCtx,
-                                                      std::string dbName,
+                                                      const DatabaseName& dbName,
                                                       const UUID& collectionUUID,
                                                       const std::vector<BSONObj>& specs,
                                                       const UUID& buildUUID,
@@ -670,9 +666,7 @@ Status IndexBuildsCoordinator::_setUpResumeIndexBuild(OperationContext* opCtx,
         return {ErrorCodes::FailPointEnabled, "failSetUpResumeIndexBuild fail point is enabled"};
     }
 
-    // TODO SERVER-67439 Use dbName directly
-    DatabaseName databaseName(boost::none, dbName);
-    Lock::DBLock dbLock(opCtx, databaseName, MODE_IX);
+    Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
     Lock::CollectionLock collLock(opCtx, nssOrUuid, MODE_X);
 
     CollectionWriter collection(opCtx, resumeInfo.getCollectionUUID());
@@ -720,7 +714,7 @@ Status IndexBuildsCoordinator::_setUpResumeIndexBuild(OperationContext* opCtx,
 
     auto protocol = IndexBuildProtocol::kTwoPhase;
     auto replIndexBuildState = std::make_shared<ReplIndexBuildState>(
-        buildUUID, collection->uuid(), dbName, specs, protocol);
+        buildUUID, collection->uuid(), dbName.toStringWithTenantId(), specs, protocol);
 
     Status status = activeIndexBuilds.registerIndexBuild(replIndexBuildState);
     if (!status.isOK()) {
@@ -776,15 +770,17 @@ std::vector<UUID> IndexBuildsCoordinator::abortCollectionIndexBuilds(
 }
 
 void IndexBuildsCoordinator::abortDatabaseIndexBuilds(OperationContext* opCtx,
-                                                      StringData db,
+                                                      const DatabaseName& dbName,
                                                       const std::string& reason) {
     LOGV2(4612302,
           "About to abort all index builders running for collections in the given database",
-          "database"_attr = db,
+          "database"_attr = dbName,
           "reason"_attr = reason);
 
     auto builds = [&]() -> std::vector<std::shared_ptr<ReplIndexBuildState>> {
-        auto indexBuildFilter = [=](const auto& replState) { return db == replState.dbName; };
+        auto indexBuildFilter = [=](const auto& replState) {
+            return dbName.toStringWithTenantId() == replState.dbName;
+        };
         return activeIndexBuilds.filterIndexBuilds(indexBuildFilter);
     }();
     for (auto replState : builds) {
@@ -794,7 +790,7 @@ void IndexBuildsCoordinator::abortDatabaseIndexBuilds(OperationContext* opCtx,
             LOGV2(5010502,
                   "Index build: failed to abort index build for database drop",
                   "buildUUID"_attr = replState->buildUUID,
-                  "database"_attr = db,
+                  "database"_attr = dbName,
                   "collectionUUID"_attr = replState->collectionUUID);
         }
     }
@@ -967,7 +963,7 @@ void IndexBuildsCoordinator::applyStartIndexBuild(OperationContext* opCtx,
     uassertStatusOK(
         indexBuildsCoord
             ->startIndexBuild(opCtx,
-                              nss.db().toString(),
+                              nss.dbName(),
                               collUUID,
                               oplogEntry.indexSpecs,
                               oplogEntry.buildUUID,
@@ -1580,7 +1576,7 @@ void IndexBuildsCoordinator::restartIndexBuildsForRecovery(
             // This spawns a new thread and returns immediately. These index builds will resume and
             // wait for a commit or abort to be replicated.
             [[maybe_unused]] auto fut = uassertStatusOK(resumeIndexBuild(
-                opCtx, nss->db().toString(), collUUID, indexSpecs, buildUUID, resumeInfo));
+                opCtx, nss->dbName(), collUUID, indexSpecs, buildUUID, resumeInfo));
             successfullyResumed.insert(buildUUID);
         } catch (const DBException& e) {
             LOGV2(4841701,
@@ -1642,7 +1638,7 @@ void IndexBuildsCoordinator::restartIndexBuildsForRecovery(
         // This spawns a new thread and returns immediately. These index builds will start and wait
         // for a commit or abort to be replicated.
         [[maybe_unused]] auto fut = uassertStatusOK(startIndexBuild(opCtx,
-                                                                    nss->db().toString(),
+                                                                    nss->dbName(),
                                                                     build.collUUID,
                                                                     build.indexSpecs,
                                                                     buildUUID,
@@ -1655,8 +1651,10 @@ bool IndexBuildsCoordinator::noIndexBuildInProgress() const {
     return activeIndexBuilds.getActiveIndexBuilds() == 0;
 }
 
-int IndexBuildsCoordinator::numInProgForDb(StringData db) const {
-    auto indexBuildFilter = [db](const auto& replState) { return db == replState.dbName; };
+int IndexBuildsCoordinator::numInProgForDb(const DatabaseName& dbName) const {
+    auto indexBuildFilter = [dbName](const auto& replState) {
+        return dbName.toStringWithTenantId() == replState.dbName;
+    };
     auto dbIndexBuilds = activeIndexBuilds.filterIndexBuilds(indexBuildFilter);
     return int(dbIndexBuilds.size());
 }
@@ -1676,8 +1674,8 @@ bool IndexBuildsCoordinator::inProgForCollection(const UUID& collectionUUID) con
     return !indexBuilds.empty();
 }
 
-bool IndexBuildsCoordinator::inProgForDb(StringData db) const {
-    return numInProgForDb(db) > 0;
+bool IndexBuildsCoordinator::inProgForDb(const DatabaseName& dbName) const {
+    return numInProgForDb(dbName) > 0;
 }
 
 void IndexBuildsCoordinator::assertNoIndexBuildInProgress() const {
@@ -1703,10 +1701,10 @@ void IndexBuildsCoordinator::assertNoIndexBuildInProgForCollection(
             indexBuilds.empty());
 }
 
-void IndexBuildsCoordinator::assertNoBgOpInProgForDb(StringData db) const {
+void IndexBuildsCoordinator::assertNoBgOpInProgForDb(const DatabaseName& dbName) const {
     boost::optional<UUID> firstIndexBuildUUID;
     auto indexBuilds = activeIndexBuilds.filterIndexBuilds([&](const auto& replState) {
-        auto isIndexBuildForCollection = (db == replState.dbName);
+        auto isIndexBuildForCollection = (dbName.toStringWithTenantId() == replState.dbName);
         if (isIndexBuildForCollection && !firstIndexBuildUUID) {
             firstIndexBuildUUID = replState.buildUUID;
         };
@@ -1716,7 +1714,7 @@ void IndexBuildsCoordinator::assertNoBgOpInProgForDb(StringData db) const {
     uassert(ErrorCodes::BackgroundOperationInProgressForDatabase,
             fmt::format("cannot perform operation: an index build is currently running for "
                         "database {}. Found index build: {}",
-                        db,
+                        dbName.toString(),
                         firstIndexBuildUUID->toString()),
             indexBuilds.empty());
 }
@@ -1732,8 +1730,9 @@ void IndexBuildsCoordinator::awaitNoIndexBuildInProgressForCollection(OperationC
     activeIndexBuilds.awaitNoIndexBuildInProgressForCollection(opCtx, collectionUUID);
 }
 
-void IndexBuildsCoordinator::awaitNoBgOpInProgForDb(OperationContext* opCtx, StringData db) {
-    activeIndexBuilds.awaitNoBgOpInProgForDb(opCtx, db);
+void IndexBuildsCoordinator::awaitNoBgOpInProgForDb(OperationContext* opCtx,
+                                                    const DatabaseName& dbName) {
+    activeIndexBuilds.awaitNoBgOpInProgForDb(opCtx, dbName);
 }
 
 void IndexBuildsCoordinator::waitUntilAnIndexBuildFinishes(OperationContext* opCtx) {
@@ -1882,11 +1881,11 @@ void IndexBuildsCoordinator::updateCurOpOpDescription(OperationContext* opCtx,
 
 Status IndexBuildsCoordinator::_setUpIndexBuildForTwoPhaseRecovery(
     OperationContext* opCtx,
-    StringData dbName,
+    const DatabaseName& dbName,
     const UUID& collectionUUID,
     const std::vector<BSONObj>& specs,
     const UUID& buildUUID) {
-    NamespaceStringOrUUID nssOrUuid{dbName.toString(), collectionUUID};
+    NamespaceStringOrUUID nssOrUuid{dbName, collectionUUID};
 
     if (opCtx->recoveryUnit()->isActive()) {
         // This function is shared by multiple callers. Some of which have opened a transaction to
@@ -1897,9 +1896,7 @@ Status IndexBuildsCoordinator::_setUpIndexBuildForTwoPhaseRecovery(
     // Don't use the AutoGet helpers because they require an open database, which may not be the
     // case when an index builds is restarted during recovery.
 
-    // TODO SERVER-67439 Use dbName directly
-    DatabaseName databaseName(boost::none, dbName);
-    Lock::DBLock dbLock(opCtx, databaseName, MODE_IX);
+    Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
     Lock::CollectionLock collLock(opCtx, nssOrUuid, MODE_X);
     auto collection = CollectionCatalog::get(opCtx)->lookupCollectionByUUID(opCtx, collectionUUID);
     invariant(collection);
@@ -1910,14 +1907,14 @@ Status IndexBuildsCoordinator::_setUpIndexBuildForTwoPhaseRecovery(
 
 StatusWith<boost::optional<SharedSemiFuture<ReplIndexBuildState::IndexCatalogStats>>>
 IndexBuildsCoordinator::_filterSpecsAndRegisterBuild(OperationContext* opCtx,
-                                                     StringData dbName,
+                                                     const DatabaseName& dbName,
                                                      const UUID& collectionUUID,
                                                      const std::vector<BSONObj>& specs,
                                                      const UUID& buildUUID,
                                                      IndexBuildProtocol protocol) {
 
     // AutoGetCollection throws an exception if it is unable to look up the collection by UUID.
-    NamespaceStringOrUUID nssOrUuid{dbName.toString(), collectionUUID};
+    NamespaceStringOrUUID nssOrUuid{dbName, collectionUUID};
     AutoGetCollection autoColl(opCtx, nssOrUuid, MODE_X);
     CollectionWriter collection(opCtx, autoColl);
 
@@ -1981,7 +1978,7 @@ IndexBuildsCoordinator::_filterSpecsAndRegisterBuild(OperationContext* opCtx,
     }
 
     auto replIndexBuildState = std::make_shared<ReplIndexBuildState>(
-        buildUUID, collectionUUID, dbName.toString(), filteredSpecs, protocol);
+        buildUUID, collectionUUID, dbName.toStringWithTenantId(), filteredSpecs, protocol);
     replIndexBuildState->stats.numIndexesBefore = getNumIndexesTotal(opCtx, collection.get());
 
     auto status = activeIndexBuilds.registerIndexBuild(replIndexBuildState);
@@ -2395,9 +2392,10 @@ void IndexBuildsCoordinator::_runIndexBuildInner(
                     "error"_attr = status);
         fassertFailedNoTrace(5642402);
     }
-    invariant(status.isA<ErrorCategory::Interruption>() ||
-                  status.isA<ErrorCategory::ShutdownError>() ||
-                  status.code() == ErrorCodes::CannotCreateIndex,
+    // TODO (SERVER-69264): Remove ErrorCodes::CannotCreateIndex.
+    // TODO (SERVER-69496): Remove ErrorCodes::InterruptedAtShutdown.
+    invariant(opCtx->isKillPending() || status.code() == ErrorCodes::CannotCreateIndex ||
+                  status.code() == ErrorCodes::InterruptedAtShutdown,
               str::stream() << "Unexpected error code during index build cleanup: " << status);
     if (IndexBuildProtocol::kSinglePhase == replState->protocol) {
         _cleanUpSinglePhaseAfterFailure(opCtx, collection, replState, indexBuildOptions, status);

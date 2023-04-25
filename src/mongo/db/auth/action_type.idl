@@ -36,7 +36,7 @@ global:
     cpp_namespace: "mongo"
 
 imports:
-    - "mongo/idl/basic_types.idl"
+    - "mongo/db/basic_types.idl"
 
 enums:
     ActionType:
@@ -45,6 +45,7 @@ enums:
         values:
            addShard :  "addShard"
            advanceClusterTime :  "advanceClusterTime"
+           allCollectionStats: "allCollectionStats"
            analyze :  "analyze"
            anyAction :  "anyAction"         # Special ActionType that represents *all* actions
            appendOplogNote :  "appendOplogNote"
@@ -169,6 +170,7 @@ enums:
            setParameter :  "setParameter"
            setUserWriteBlockMode: "setUserWriteBlockMode"
            shardCollection :  "shardCollection"  # ID only
+           shardedDataDistribution : "shardedDataDistribution"
            shardingState :  "shardingState"
            shutdown :  "shutdown"
            splitChunk :  "splitChunk"
@@ -212,6 +214,7 @@ enums:
                 value: "cluster"
                 extra_data:
                     serverlessActionTypes:
+                        - applyOps
                         - killAnyCursor
                         - killAnySession
                         - killCursors
@@ -224,10 +227,12 @@ enums:
                 value: "collection"
                 extra_data:
                     serverlessActionTypes: &actionsValidOnCollection
+                        - analyze
                         - bypassDocumentValidation
                         - changeStream
                         - collMod
                         - collStats
+                        - compact
                         - compactStructuredEncryptionData
                         - convertToCapped
                         - createCollection
@@ -237,6 +242,7 @@ enums:
                         - dbStats
                         - dropCollection
                         - dropIndex
+                        - enableProfiler
                         - exportCollection
                         - find
                         - importCollection
@@ -245,11 +251,14 @@ enums:
                         - killCursors
                         - listCollections
                         - listIndexes
+                        - planCacheIndexFilter
                         - planCacheRead
+                        - planCacheWrite
                         - reIndex
                         - remove
                         - renameCollection
                         - renameCollectionSameDB
+                        - storageDetails
                         - update
                         - validate
 
@@ -262,10 +271,12 @@ enums:
                         # Actions common to collection patterns.
                         # YAML doesn't support extending list aliases.
                         # Make changes above, then copy here.
+                        - analyze
                         - bypassDocumentValidation
                         - changeStream
                         - collMod
                         - collStats
+                        - compact
                         - compactStructuredEncryptionData
                         - convertToCapped
                         - createCollection
@@ -275,6 +286,7 @@ enums:
                         - dbStats
                         - dropCollection
                         - dropIndex
+                        - enableProfiler
                         - exportCollection
                         - find
                         - importCollection
@@ -283,11 +295,14 @@ enums:
                         - killCursors
                         - listCollections
                         - listIndexes
+                        - planCacheIndexFilter
                         - planCacheRead
+                        - planCacheWrite
                         - reIndex
                         - remove
                         - renameCollection
                         - renameCollectionSameDB
+                        - storageDetails
                         - update
                         - validate
 
@@ -323,28 +338,63 @@ enums:
                 description: Matches a collection named "<db>.system.buckets.<collection>"
                 value: "system_buckets"
                 extra_data:
-                    serverlessActionTypes: *actionsValidOnCollection
+                    serverlessActionTypes: &actionsValidOnSystemBuckets
+                        - analyze
+                        - bypassDocumentValidation
+                        - changeStream
+                        - collMod
+                        - collStats
+                        - compact
+                        - compactStructuredEncryptionData
+                        - convertToCapped
+                        - createCollection
+                        - createIndex
+                        - dbCheck
+                        - dbHash
+                        - dbStats
+                        - dropCollection
+                        - dropDatabase
+                        - dropIndex
+                        - enableProfiler
+                        - exportCollection
+                        - find
+                        - importCollection
+                        - insert
+                        - killAnyCursor
+                        - killCursors
+                        - listCollections
+                        - listIndexes
+                        - planCacheIndexFilter
+                        - planCacheRead
+                        - planCacheWrite
+                        - reIndex
+                        - remove
+                        - renameCollection
+                        - renameCollectionSameDB
+                        - storageDetails
+                        - update
+                        - validate
 
             # resource: { db: '', system_buckets: 'exact' }
             kMatchSystemBucketInAnyDBResource:
                 description: Matches a collection named "system.buckets.<collection>" in any db
                 value: "system_buckets_in_any_db"
                 extra_data:
-                    serverlessActionTypes: *actionsValidOnCollection
+                    serverlessActionTypes: *actionsValidOnSystemBuckets
 
             # resource: { db: 'exact', system_buckets: '' }
             kMatchAnySystemBucketInDBResource:
                 description: Matches any collection with a prefix of "system.buckets." in a specific db
                 value: "any_system_buckets_in_db"
                 extra_data:
-                    serverlessActionTypes: *actionsValidOnCollection
+                    serverlessActionTypes: *actionsValidOnSystemBuckets
 
             # resource: { db: '', system_buckets: '' }
             kMatchAnySystemBucketResource:
                 description: Matches any collection with a prefix of "system.buckets." in any db
                 value: "any_system_buckets"
                 extra_data:
-                    serverlessActionTypes: *actionsValidOnCollection
+                    serverlessActionTypes: *actionsValidOnSystemBuckets
 
 structs:
       MatchTypeExtraData:

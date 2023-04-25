@@ -28,9 +28,9 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/session/session_catalog_mongod.h"
+
+#include <memory>
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/db/catalog_raii.h"
@@ -49,9 +49,9 @@
 #include "mongo/db/session/sessions_collection.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/logv2/log.h"
-#include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/util/concurrency/thread_pool.h"
+#include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTransaction
@@ -59,6 +59,12 @@
 
 namespace mongo {
 namespace {
+
+MONGO_FAIL_POINT_DEFINE(hangDuringStepUpPrepareRestoreLocks);
+MONGO_FAIL_POINT_DEFINE(hangDuringStepUpAbortInProgressTransactions);
+
+const auto getMongoDSessionCatalog =
+    ServiceContext::declareDecoration<std::unique_ptr<MongoDSessionCatalog>>();
 
 struct SessionTasksExecutor {
     SessionTasksExecutor()
@@ -92,12 +98,14 @@ auto getThreadPool(OperationContext* opCtx) {
  * set of kill tokens.
  */
 void killSessionTokens(OperationContext* opCtx,
+                       MongoDSessionCatalogTransactionInterface* ti,
                        std::vector<SessionCatalog::KillToken> sessionKillTokens) {
     if (sessionKillTokens.empty())
         return;
 
     getThreadPool(opCtx)->schedule(
         [service = opCtx->getServiceContext(),
+         ti,
          sessionKillTokens = std::move(sessionKillTokens)](auto status) mutable {
             invariant(status);
 
@@ -108,8 +116,7 @@ void killSessionTokens(OperationContext* opCtx,
 
             for (auto& sessionKillToken : sessionKillTokens) {
                 auto session = catalog->checkOutSessionForKill(opCtx, std::move(sessionKillToken));
-                auto participant = TransactionParticipant::get(session);
-                participant.invalidate(opCtx);
+                ti->invalidateSessionToKill(opCtx, session);
             }
         });
 }
@@ -132,7 +139,10 @@ void disallowDirectWritesUnderSession(OperationContext* opCtx) {
  * not removed because they were in use.
  */
 LogicalSessionIdSet removeExpiredTransactionSessionsNotInUseFromMemory(
-    OperationContext* opCtx, SessionsCollection& sessionsCollection, Date_t possiblyExpired) {
+    OperationContext* opCtx,
+    MongoDSessionCatalogTransactionInterface* ti,
+    SessionsCollection& sessionsCollection,
+    Date_t possiblyExpired) {
     const auto catalog = SessionCatalog::get(opCtx);
 
     // Find the possibly expired logical session ids in the in-memory catalog.
@@ -162,55 +172,8 @@ LogicalSessionIdSet removeExpiredTransactionSessionsNotInUseFromMemory(
         TxnNumber parentSessionActiveTxnNumber;
         const auto transactionSessionIdsNotReaped = catalog->scanSessionsForReap(
             expiredLogicalSessionId,
-            [&](ObservableSession& parentSession) {
-                const auto transactionSessionId = parentSession.getSessionId();
-                const auto txnParticipant = TransactionParticipant::get(parentSession);
-                const auto txnRouter = TransactionRouter::get(parentSession);
-
-                parentSessionActiveTxnNumber =
-                    txnParticipant.getActiveTxnNumberAndRetryCounter().getTxnNumber();
-                if (txnParticipant.canBeReaped() && txnRouter.canBeReaped()) {
-                    LOGV2_DEBUG(6753702,
-                                5,
-                                "Marking parent transaction session for reap",
-                                "lsid"_attr = transactionSessionId);
-                    // This is an external session so it can be reaped if and only if all of its
-                    // internal sessions can be reaped.
-                    parentSession.markForReap(ObservableSession::ReapMode::kNonExclusive);
-                }
-            },
-            [&](ObservableSession& childSession) {
-                const auto transactionSessionId = childSession.getSessionId();
-                const auto txnParticipant = TransactionParticipant::get(childSession);
-                const auto txnRouter = TransactionRouter::get(childSession);
-
-                if (txnParticipant.canBeReaped() && txnRouter.canBeReaped()) {
-                    if (isInternalSessionForNonRetryableWrite(transactionSessionId)) {
-                        LOGV2_DEBUG(6753703,
-                                    5,
-                                    "Marking child transaction session for reap",
-                                    "lsid"_attr = transactionSessionId);
-                        // This is an internal session for a non-retryable write so it can be reaped
-                        // independently of the external session that write ran in.
-                        childSession.markForReap(ObservableSession::ReapMode::kExclusive);
-                    } else if (isInternalSessionForRetryableWrite(transactionSessionId)) {
-                        LOGV2_DEBUG(6753704,
-                                    5,
-                                    "Marking child transaction session for reap",
-                                    "lsid"_attr = transactionSessionId);
-                        // This is an internal session for a retryable write so it must be reaped
-                        // atomically with the external session and internal sessions for that
-                        // retryable write, unless the write is no longer active (i.e. there is
-                        // already a retryable write or transaction with a higher txnNumber).
-                        childSession.markForReap(*transactionSessionId.getTxnNumber() <
-                                                         parentSessionActiveTxnNumber
-                                                     ? ObservableSession::ReapMode::kExclusive
-                                                     : ObservableSession::ReapMode::kNonExclusive);
-                    } else {
-                        MONGO_UNREACHABLE;
-                    }
-                }
-            });
+            ti->makeParentSessionWorkerFnForReap(&parentSessionActiveTxnNumber),
+            ti->makeChildSessionWorkerFnForReap(parentSessionActiveTxnNumber));
         expiredTransactionSessionIdsStillInUse.insert(transactionSessionIdsNotReaped.begin(),
                                                       transactionSessionIdsNotReaped.end());
     }
@@ -445,7 +408,9 @@ void createRetryableFindAndModifyTable(OperationContext* opCtx) {
 }
 
 
-void abortInProgressTransactions(OperationContext* opCtx) {
+void abortInProgressTransactions(OperationContext* opCtx,
+                                 MongoDSessionCatalog* mongoDSessionCatalog,
+                                 MongoDSessionCatalogTransactionInterface* ti) {
     DBDirectClient client(opCtx);
     FindCommandRequest findRequest{NamespaceString::kSessionTransactionsTableNamespace};
     findRequest.setFilter(BSON(SessionTxnRecord::kStateFieldName
@@ -458,24 +423,51 @@ void abortInProgressTransactions(OperationContext* opCtx) {
     while (cursor->more()) {
         auto txnRecord = SessionTxnRecord::parse(IDLParserContext("abort-in-progress-transactions"),
                                                  cursor->next());
-        opCtx->setLogicalSessionId(txnRecord.getSessionId());
+
+        // Synchronize with killOps to make this unkillable.
+        {
+            stdx::unique_lock<Client> lk(*opCtx->getClient());
+            opCtx->setKillOpsExempt();
+            opCtx->setLogicalSessionId(txnRecord.getSessionId());
+        }
         opCtx->setTxnNumber(txnRecord.getTxnNum());
         opCtx->setInMultiDocumentTransaction();
-        MongoDOperationContextSessionWithoutRefresh ocs(opCtx);
-        auto txnParticipant = TransactionParticipant::get(opCtx);
-        LOGV2_DEBUG(21978,
-                    3,
-                    "Aborting transaction sessionId: {sessionId} txnNumber {txnNumber}",
-                    "Aborting transaction",
-                    "sessionId"_attr = txnRecord.getSessionId().toBSON(),
-                    "txnNumber"_attr = txnRecord.getTxnNum());
-        txnParticipant.abortTransaction(opCtx);
-        opCtx->resetMultiDocumentTransactionState();
+
+        hangDuringStepUpAbortInProgressTransactions.pauseWhileSet();
+        auto ocs = mongoDSessionCatalog->checkOutSessionWithoutRefresh(opCtx);
+        ti->abortTransaction(opCtx, txnRecord);
     }
 }
+
+void _checkInUnscopedSession(OperationContext* opCtx,
+                             OperationContextSession::CheckInReason reason) {
+    OperationContextSession::checkIn(opCtx, reason);
+}
+
+void _checkOutUnscopedSession(OperationContext* opCtx,
+                              MongoDSessionCatalogTransactionInterface* ti) {
+    OperationContextSession::checkOut(opCtx);
+    ti->refreshTransactionFromStorageIfNeeded(opCtx);
+}
+
 }  // namespace
 
 const std::string MongoDSessionCatalog::kConfigTxnsPartialIndexName = "parent_lsid";
+
+MongoDSessionCatalog* MongoDSessionCatalog::get(OperationContext* opCtx) {
+    return get(opCtx->getServiceContext());
+}
+
+MongoDSessionCatalog* MongoDSessionCatalog::get(ServiceContext* service) {
+    const auto& sessionCatalog = getMongoDSessionCatalog(service);
+    invariant(sessionCatalog);
+    return sessionCatalog.get();
+}
+
+void MongoDSessionCatalog::set(ServiceContext* service,
+                               std::unique_ptr<MongoDSessionCatalog> sessionCatalog) {
+    getMongoDSessionCatalog(service) = std::move(sessionCatalog);
+}
 
 BSONObj MongoDSessionCatalog::getConfigTxnPartialIndexSpec() {
     NewIndexSpec index;
@@ -489,6 +481,10 @@ BSONObj MongoDSessionCatalog::getConfigTxnPartialIndexSpec() {
     index.setPartialFilterExpression(BSON("parentLsid" << BSON("$exists" << true)));
     return index.toBSON();
 }
+
+MongoDSessionCatalog::MongoDSessionCatalog(
+    std::unique_ptr<MongoDSessionCatalogTransactionInterface> ti)
+    : _ti(std::move(ti)) {}
 
 void MongoDSessionCatalog::onStepUp(OperationContext* opCtx) {
     // Invalidate sessions that could have a retryable write on it, so that we can refresh from disk
@@ -505,24 +501,9 @@ void MongoDSessionCatalog::onStepUp(OperationContext* opCtx) {
 
     SessionKiller::Matcher matcher(
         KillAllSessionsByPatternSet{makeKillAllSessionsByPattern(opCtx)});
-    catalog->scanSessions(matcher, [&](const ObservableSession& session) {
-        const auto txnParticipant = TransactionParticipant::get(session);
-        if (!txnParticipant.transactionIsOpen()) {
-            sessionKillTokens.emplace_back(session.kill());
-        }
-
-        if (txnParticipant.transactionIsPrepared()) {
-            const auto txnNumberAndRetryCounter =
-                txnParticipant.getActiveTxnNumberAndRetryCounter();
-
-            OperationSessionInfo sessionInfo;
-            sessionInfo.setSessionId(session.getSessionId());
-            sessionInfo.setTxnNumber(txnNumberAndRetryCounter.getTxnNumber());
-            sessionInfo.setTxnRetryCounter(txnNumberAndRetryCounter.getTxnRetryCounter());
-            sessionsToReacquireLocks.emplace_back(sessionInfo);
-        }
-    });
-    killSessionTokens(opCtx, std::move(sessionKillTokens));
+    catalog->scanSessions(
+        matcher, _ti->makeSessionWorkerFnForStepUp(&sessionKillTokens, &sessionsToReacquireLocks));
+    killSessionTokens(opCtx, _ti.get(), std::move(sessionKillTokens));
 
     {
         // Create a new opCtx because we need an empty locker to refresh the locks.
@@ -530,10 +511,18 @@ void MongoDSessionCatalog::onStepUp(OperationContext* opCtx) {
         AlternativeClientRegion acr(newClient);
         for (const auto& sessionInfo : sessionsToReacquireLocks) {
             auto newOpCtx = cc().makeOperationContext();
-            newOpCtx->setLogicalSessionId(*sessionInfo.getSessionId());
+
+            // Synchronize with killOps to make this unkillable.
+            {
+                stdx::unique_lock<Client> lk(*newOpCtx->getClient());
+                newOpCtx->setKillOpsExempt();
+                newOpCtx->setLogicalSessionId(*sessionInfo.getSessionId());
+            }
             newOpCtx->setTxnNumber(*sessionInfo.getTxnNumber());
             newOpCtx->setTxnRetryCounter(*sessionInfo.getTxnRetryCounter());
             newOpCtx->setInMultiDocumentTransaction();
+
+            hangDuringStepUpPrepareRestoreLocks.pauseWhileSet();
 
             // Use MongoDOperationContextSessionWithoutRefresh to check out the session because:
             // - The in-memory state for this session has been kept in sync with the on-disk state
@@ -546,21 +535,12 @@ void MongoDSessionCatalog::onStepUp(OperationContext* opCtx) {
             //   expected to cause a deadlock since this 'newOpCtx' will need to acquire the global
             //   lock in the IS mode prior to reading the config.transactions collection but it
             //   cannot do that while the RSTL lock is being held by 'opCtx'.
-            MongoDOperationContextSessionWithoutRefresh ocs(newOpCtx.get());
-            auto txnParticipant = TransactionParticipant::get(newOpCtx.get());
-            LOGV2_DEBUG(21979,
-                        3,
-                        "Restoring locks of prepared transaction. SessionId: {sessionId} "
-                        "TxnNumberAndRetryCounter: {txnNumberAndRetryCounter}",
-                        "Restoring locks of prepared transaction",
-                        "sessionId"_attr = sessionInfo.getSessionId()->getId(),
-                        "txnNumberAndRetryCounter"_attr =
-                            txnParticipant.getActiveTxnNumberAndRetryCounter());
-            txnParticipant.refreshLocksForPreparedTransaction(newOpCtx.get(), false);
+            auto ocs = checkOutSessionWithoutRefresh(newOpCtx.get());
+            _ti->refreshLocksForPreparedTransaction(newOpCtx.get(), sessionInfo);
         }
     }
 
-    abortInProgressTransactions(opCtx);
+    abortInProgressTransactions(opCtx, this, _ti.get());
 
     createTransactionTable(opCtx);
     if (repl::feature_flags::gFeatureFlagRetryableFindAndModify.isEnabledAndIgnoreFCV()) {
@@ -585,8 +565,9 @@ void MongoDSessionCatalog::observeDirectWriteToConfigTransactions(OperationConte
     class KillSessionTokenOnCommit : public RecoveryUnit::Change {
     public:
         KillSessionTokenOnCommit(OperationContext* opCtx,
+                                 MongoDSessionCatalogTransactionInterface* ti,
                                  SessionCatalog::KillToken sessionKillToken)
-            : _opCtx(opCtx), _sessionKillToken(std::move(sessionKillToken)) {}
+            : _opCtx(opCtx), _ti(ti), _sessionKillToken(std::move(sessionKillToken)) {}
 
         void commit(boost::optional<Timestamp>) override {
             rollback();
@@ -595,11 +576,12 @@ void MongoDSessionCatalog::observeDirectWriteToConfigTransactions(OperationConte
         void rollback() override {
             std::vector<SessionCatalog::KillToken> sessionKillTokenVec;
             sessionKillTokenVec.emplace_back(std::move(_sessionKillToken));
-            killSessionTokens(_opCtx, std::move(sessionKillTokenVec));
+            killSessionTokens(_opCtx, _ti, std::move(sessionKillTokenVec));
         }
 
     private:
         OperationContext* _opCtx;
+        MongoDSessionCatalogTransactionInterface* _ti;
         SessionCatalog::KillToken _sessionKillToken;
     };
 
@@ -607,16 +589,15 @@ void MongoDSessionCatalog::observeDirectWriteToConfigTransactions(OperationConte
 
     const auto lsid =
         LogicalSessionId::parse(IDLParserContext("lsid"), singleSessionDoc["_id"].Obj());
-    catalog->scanSession(lsid, [&](const ObservableSession& session) {
-        const auto participant = TransactionParticipant::get(session);
+    catalog->scanSession(lsid, [&, ti = _ti.get()](const ObservableSession& session) {
         uassert(ErrorCodes::PreparedTransactionInProgress,
                 str::stream() << "Cannot modify the entry for session "
                               << session.getSessionId().getId()
                               << " because it is in the prepared state",
-                !participant.transactionIsPrepared());
+                !ti->isTransactionPrepared(session));
 
         opCtx->recoveryUnit()->registerChange(
-            std::make_unique<KillSessionTokenOnCommit>(opCtx, session.kill()));
+            std::make_unique<KillSessionTokenOnCommit>(opCtx, ti, session.kill()));
     });
 }
 
@@ -633,7 +614,7 @@ void MongoDSessionCatalog::invalidateAllSessions(OperationContext* opCtx) {
         sessionKillTokens.emplace_back(session.kill());
     });
 
-    killSessionTokens(opCtx, std::move(sessionKillTokens));
+    killSessionTokens(opCtx, _ti.get(), std::move(sessionKillTokens));
 }
 
 int MongoDSessionCatalog::reapSessionsOlderThan(OperationContext* opCtx,
@@ -641,7 +622,7 @@ int MongoDSessionCatalog::reapSessionsOlderThan(OperationContext* opCtx,
                                                 Date_t possiblyExpired) {
     const auto expiredTransactionSessionIdsStillInUse =
         removeExpiredTransactionSessionsNotInUseFromMemory(
-            opCtx, sessionsCollection, possiblyExpired);
+            opCtx, _ti.get(), sessionsCollection, possiblyExpired);
 
     // The "unsafe" check for primary below is a best-effort attempt to ensure that the on-disk
     // state reaping code doesn't run if the node is secondary and cause log spam. It is a work
@@ -671,53 +652,71 @@ int MongoDSessionCatalog::removeSessionsTransactionRecords(
     return numReaped;
 }
 
-MongoDOperationContextSession::MongoDOperationContextSession(OperationContext* opCtx)
-    : _operationContextSession(opCtx) {
+std::unique_ptr<MongoDSessionCatalog::Session> MongoDSessionCatalog::checkOutSession(
+    OperationContext* opCtx) {
+    return std::make_unique<MongoDOperationContextSession>(opCtx, _ti.get());
+}
+
+std::unique_ptr<MongoDSessionCatalog::Session> MongoDSessionCatalog::checkOutSessionWithoutRefresh(
+    OperationContext* opCtx) {
+    return std::make_unique<MongoDOperationContextSessionWithoutRefresh>(opCtx, _ti.get());
+}
+
+std::unique_ptr<MongoDSessionCatalog::Session>
+MongoDSessionCatalog::checkOutSessionWithoutOplogRead(OperationContext* opCtx) {
+    return std::make_unique<MongoDOperationContextSessionWithoutOplogRead>(opCtx, _ti.get());
+}
+
+void MongoDSessionCatalog::checkInUnscopedSession(OperationContext* opCtx,
+                                                  OperationContextSession::CheckInReason reason) {
+    _checkInUnscopedSession(opCtx, reason);
+}
+
+void MongoDSessionCatalog::checkOutUnscopedSession(OperationContext* opCtx) {
+    _checkOutUnscopedSession(opCtx, _ti.get());
+}
+
+MongoDOperationContextSession::MongoDOperationContextSession(
+    OperationContext* opCtx, MongoDSessionCatalogTransactionInterface* ti)
+    : _operationContextSession(opCtx), _ti(ti) {
     invariant(!opCtx->getClient()->isInDirectClient());
 
-    auto txnParticipant = TransactionParticipant::get(opCtx);
-    txnParticipant.refreshFromStorageIfNeeded(opCtx);
+    _ti->refreshTransactionFromStorageIfNeeded(opCtx);
 }
 
 MongoDOperationContextSession::~MongoDOperationContextSession() = default;
 
 void MongoDOperationContextSession::checkIn(OperationContext* opCtx,
                                             OperationContextSession::CheckInReason reason) {
-    OperationContextSession::checkIn(opCtx, reason);
+    _checkInUnscopedSession(opCtx, reason);
 }
 
 void MongoDOperationContextSession::checkOut(OperationContext* opCtx) {
-    OperationContextSession::checkOut(opCtx);
-    auto txnParticipant = TransactionParticipant::get(opCtx);
-    txnParticipant.refreshFromStorageIfNeeded(opCtx);
+    _checkOutUnscopedSession(opCtx, _ti);
 }
 
 MongoDOperationContextSessionWithoutRefresh::MongoDOperationContextSessionWithoutRefresh(
-    OperationContext* opCtx)
-    : _operationContextSession(opCtx), _opCtx(opCtx) {
+    OperationContext* opCtx, MongoDSessionCatalogTransactionInterface* ti)
+    : _operationContextSession(opCtx), _opCtx(opCtx), _ti(ti) {
     invariant(!opCtx->getClient()->isInDirectClient());
     const auto clientTxnNumber = *opCtx->getTxnNumber();
     const auto clientTxnRetryCounter = *opCtx->getTxnRetryCounter();
 
-    auto txnParticipant = TransactionParticipant::get(opCtx);
-    txnParticipant.beginOrContinueTransactionUnconditionally(
-        opCtx, {clientTxnNumber, clientTxnRetryCounter});
+    _ti->beginOrContinueTransactionUnconditionally(opCtx, {clientTxnNumber, clientTxnRetryCounter});
 }
 
 MongoDOperationContextSessionWithoutRefresh::~MongoDOperationContextSessionWithoutRefresh() {
-    const auto txnParticipant = TransactionParticipant::get(_opCtx);
     // A session on secondaries should never be checked back in with a TransactionParticipant that
     // isn't prepared, aborted, or committed.
-    invariant(!txnParticipant.transactionIsInProgress());
+    invariant(!_ti->isTransactionInProgress(_opCtx));
 }
 
 MongoDOperationContextSessionWithoutOplogRead::MongoDOperationContextSessionWithoutOplogRead(
-    OperationContext* opCtx)
+    OperationContext* opCtx, MongoDSessionCatalogTransactionInterface* ti)
     : _operationContextSession(opCtx), _opCtx(opCtx) {
     invariant(!opCtx->getClient()->isInDirectClient());
 
-    auto txnParticipant = TransactionParticipant::get(opCtx);
-    txnParticipant.refreshFromStorageIfNeededNoOplogEntryFetch(opCtx);
+    ti->refreshTransactionFromStorageIfNeededNoOplogEntryFetch(opCtx);
 }
 
 MongoDOperationContextSessionWithoutOplogRead::~MongoDOperationContextSessionWithoutOplogRead() =

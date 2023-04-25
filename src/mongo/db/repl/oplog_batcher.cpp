@@ -300,7 +300,7 @@ void OplogBatcher::_run(StorageInterface* storageInterface) {
             // We do not want to serialize the OplogBatcher with oplog application, nor
             // do we want to take a WiredTiger read ticket.
             ShouldNotConflictWithSecondaryBatchApplicationBlock noConflict(opCtx->lockState());
-            opCtx->lockState()->skipAcquireTicket();
+            opCtx->lockState()->setAdmissionPriority(AdmissionContext::Priority::kImmediate);
 
             // During storage change operations, we may shut down storage under a global lock
             // and wait for any storage-using opCtxs to exit.  This results in a deadlock with
@@ -360,7 +360,9 @@ void OplogBatcher::_run(StorageInterface* storageInterface) {
             // Draining state guarantees the producer has already been fully stopped and no more
             // operations will be pushed in to the oplog buffer until the applier state changes.
             auto isDraining =
-                replCoord->getApplierState() == ReplicationCoordinator::ApplierState::Draining;
+                replCoord->getApplierState() == ReplicationCoordinator::ApplierState::Draining ||
+                replCoord->getApplierState() ==
+                    ReplicationCoordinator::ApplierState::DrainingForShardSplit;
 
             // Check the oplog buffer after the applier state to ensure the producer is stopped.
             if (isDraining && _oplogBuffer->isEmpty()) {

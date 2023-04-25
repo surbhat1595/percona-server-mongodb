@@ -53,9 +53,11 @@ public:
     };
 
     PhysicalRewriter(Memo& memo,
+                     GroupIdType rootGroupid,
                      const QueryHints& hints,
                      const RIDProjectionsMap& ridProjections,
                      const CostingInterface& costDerivation,
+                     const PathToIntervalFn& pathToInterval,
                      std::unique_ptr<LogicalRewriter>& logicalRewriter);
 
     /**
@@ -72,6 +74,7 @@ private:
     void costAndRetainBestNode(ABT node,
                                ChildPropsType childProps,
                                NodeCEMap nodeCEMap,
+                               PhysicalRewriteType rule,
                                GroupIdType groupId,
                                PrefixId& prefixId,
                                PhysOptimizationResult& bestResult);
@@ -83,9 +86,11 @@ private:
 
     // We don't own any of this.
     Memo& _memo;
+    const GroupIdType _rootGroupId;
     const CostingInterface& _costDerivation;
     const QueryHints& _hints;
     const RIDProjectionsMap& _ridProjections;
+    const PathToIntervalFn& _pathToInterval;
     // If set, we'll perform logical rewrites as part of OptimizeGroup().
     std::unique_ptr<LogicalRewriter>& _logicalRewriter;
 };

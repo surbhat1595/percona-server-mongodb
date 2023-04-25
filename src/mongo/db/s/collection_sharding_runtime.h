@@ -30,7 +30,6 @@
 #pragma once
 
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/metadata_manager.h"
@@ -113,18 +112,25 @@ public:
      * Marks the collection's filtering metadata as UNKNOWN, meaning that all attempts to check for
      * shard version match will fail with StaleConfig errors in order to trigger an update.
      *
+     * Interrupts any ongoing shard metadata refresh.
+     *
      * It is safe to call this method with only an intent lock on the collection (as opposed to
-     * setFilteringMetadata which requires exclusive), however note that clearing a collection's
-     * filtering metadata will interrupt all in-progress orphan cleanups in which case orphaned data
-     * will remain behind on disk.
+     * setFilteringMetadata which requires exclusive).
      */
     void clearFilteringMetadata(OperationContext* opCtx);
+
+    /**
+     * Calls to clearFilteringMetadata + clears the _metadataManager object.
+     */
+    void clearFilteringMetadataForDroppedCollection(OperationContext* opCtx);
 
     /**
      * Methods to control the collection's critical section. Methods listed below must be called
      * with both the collection lock and CSRLock held in exclusive mode.
      *
      * In these methods, the CSRLock ensures concurrent access to the critical section.
+     *
+     * Entering into the Critical Section interrupts any ongoing filtering metadata refresh.
      */
     void enterCriticalSectionCatchUpPhase(const CSRLock&, const BSONObj& reason);
     void enterCriticalSectionCommitPhase(const CSRLock&, const BSONObj& reason);
@@ -167,9 +173,7 @@ public:
      * succeeds, waitForClean can be called to ensure no other deletions are pending for the range.
      */
     enum CleanWhen { kNow, kDelayed };
-    SharedSemiFuture<void> cleanUpRange(ChunkRange const& range,
-                                        const UUID& migrationId,
-                                        CleanWhen when);
+    SharedSemiFuture<void> cleanUpRange(ChunkRange const& range, CleanWhen when);
 
     /**
      * Waits for all ranges deletion tasks with UUID 'collectionUuid' overlapping range
@@ -215,6 +219,16 @@ public:
      */
     void resetShardVersionRecoverRefreshFuture(const CSRLock&);
 
+    /**
+     * Sets an index version under a lock.
+     */
+    void setIndexVersion(OperationContext* opCtx, const boost::optional<Timestamp>& indexVersion);
+
+    /**
+     * Gets an index version under a lock.
+     */
+    boost::optional<Timestamp> getIndexVersion(OperationContext* opCtx);
+
 private:
     friend CSRLock;
 
@@ -247,6 +261,11 @@ private:
         OperationContext* opCtx,
         const boost::optional<mongo::LogicalTime>& atClusterTime,
         bool supportNonVersionedOperations = false);
+
+    /**
+     * Auxiliary function used to implement the different flavours of clearFilteringMetadata.
+     */
+    void _clearFilteringMetadata(OperationContext* opCtx, bool clearFilteringMetadata);
 
     // The service context under which this instance runs
     ServiceContext* const _serviceContext;
@@ -301,6 +320,10 @@ private:
     // Tracks ongoing shard version recover/refresh. Eventually set to the semifuture to wait on and
     // a CancellationSource to cancel it
     boost::optional<ShardVersionRecoverOrRefresh> _shardVersionInRecoverOrRefresh;
+
+    // Contains the latest index version of the collection. This is used to indicate the creation or
+    // drop of a global index.
+    boost::optional<Timestamp> _indexVersion;
 };
 
 /**

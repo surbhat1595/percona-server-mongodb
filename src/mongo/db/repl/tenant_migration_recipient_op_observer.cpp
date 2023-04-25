@@ -41,6 +41,7 @@
 #include "mongo/db/repl/tenant_migration_shard_merge_util.h"
 #include "mongo/db/repl/tenant_migration_state_machine_gen.h"
 #include "mongo/db/repl/tenant_migration_util.h"
+#include "mongo/db/serverless/serverless_operation_lock_registry.h"
 #include "mongo/logv2/log.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
@@ -104,8 +105,7 @@ void handleShardMergeStateChange(OperationContext* opCtx,
         case TenantMigrationRecipientStateEnum::kUninitialized:
             break;
         case TenantMigrationRecipientStateEnum::kStarted:
-            fileImporter->startMigration(recipientStateDoc.getId(),
-                                         recipientStateDoc.getDonorConnectionString());
+            fileImporter->startMigration(recipientStateDoc.getId());
             break;
         case TenantMigrationRecipientStateEnum::kLearnedFilenames:
             fileImporter->learnedAllFilenames(recipientStateDoc.getId());
@@ -180,6 +180,18 @@ void TenantMigrationRecipientOpObserver::onInserts(
     std::vector<InsertStatement>::const_iterator first,
     std::vector<InsertStatement>::const_iterator last,
     bool fromMigrate) {
+    if (coll->ns() == NamespaceString::kTenantMigrationRecipientsNamespace &&
+        !tenant_migration_access_blocker::inRecoveryMode(opCtx)) {
+        for (auto it = first; it != last; it++) {
+            auto recipientStateDoc = TenantMigrationRecipientDocument::parse(
+                IDLParserContext("recipientStateDoc"), it->doc);
+            if (!recipientStateDoc.getExpireAt()) {
+                ServerlessOperationLockRegistry::get(opCtx->getServiceContext())
+                    .acquireLock(ServerlessOperationLockRegistry::LockType::kTenantRecipient,
+                                 recipientStateDoc.getId());
+            }
+        }
+    }
 
     if (!shard_merge_utils::isDonatedFilesCollection(coll->ns())) {
         return;
@@ -204,6 +216,10 @@ void TenantMigrationRecipientOpObserver::onUpdate(OperationContext* opCtx,
             if (recipientStateDoc.getExpireAt()) {
                 repl::TenantFileImporterService::get(opCtx->getServiceContext())
                     ->interrupt(recipientStateDoc.getId());
+
+                ServerlessOperationLockRegistry::get(opCtx->getServiceContext())
+                    .releaseLock(ServerlessOperationLockRegistry::LockType::kTenantRecipient,
+                                 recipientStateDoc.getId());
 
                 std::vector<std::string> tenantIdsToRemove;
                 auto cleanUpBlockerIfGarbage =
@@ -313,6 +329,9 @@ repl::OpTime TenantMigrationRecipientOpObserver::onDropCollection(
             repl::TenantFileImporterService::get(opCtx->getServiceContext())->interruptAll();
             TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext())
                 .removeAll(TenantMigrationAccessBlocker::BlockerType::kRecipient);
+
+            ServerlessOperationLockRegistry::get(opCtx->getServiceContext())
+                .onDropStateCollection(ServerlessOperationLockRegistry::LockType::kTenantRecipient);
         });
     }
     return {};

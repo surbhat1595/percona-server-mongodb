@@ -30,17 +30,16 @@
 import dataclasses
 import os
 import csv
-import json
+import asyncio
 from typing import Mapping, Sequence
 from cost_estimator import ExecutionStats, ModelParameters
 from data_generator import DataGenerator
 from database_instance import DatabaseInstance
-from config import Config
 import abt_calibrator
 import workload_execution
 from workload_execution import Query, QueryParameters
 import parameters_extractor
-from random_generator_config import distributions
+from calibration_settings import distributions, main_config
 
 __all__ = []
 
@@ -63,21 +62,18 @@ def save_to_csv(parameters: Mapping[str, Sequence[ModelParameters]], filepath: s
                 writer.writerow(fields)
 
 
-def main():
+async def main():
     """Entry point function."""
     script_directory = os.path.abspath(os.path.dirname(__file__))
     os.chdir(script_directory)
 
-    with open("config.json") as config_file:
-        config = Config.create(json.load(config_file))
-
     # 1. Database Instance provides connectivity to a MongoDB instance, it loads data optionally
     # from the dump on creating and stores data optionally to the dump on closing.
-    with DatabaseInstance(config.database) as database:
+    with DatabaseInstance(main_config.database) as database:
 
         # 2. Data generation (optional), generates random data and populates collections with it.
-        generator = DataGenerator(database, config.data_generator)
-        generator.populate_collections()
+        generator = DataGenerator(database, main_config.data_generator)
+        await generator.populate_collections()
 
         # 3. Collecting data for calibration (optional).
         # It runs the pipelines and stores explains to the database.
@@ -89,24 +85,26 @@ def main():
                     Query(pipeline=[{'$match': {f'choice{i}': val}}],
                           keys_length_in_bytes=keys_length))
 
-        workload_execution.execute(database, config.workload_execution, generator.collection_infos,
-                                   requests)
+        await workload_execution.execute(database, main_config.workload_execution,
+                                         generator.collection_infos, requests)
 
         # Calibration phase (optional).
         # Reads the explains stored on the previous step (this run and/or previous runs),
         # aparses the explains, nd calibrates the cost model for the ABT nodes.
-        models = abt_calibrator.calibrate(
-            config.abt_calibrator, database,
+        models = await abt_calibrator.calibrate(
+            main_config.abt_calibrator, database,
             ['IndexScan', 'Seek', 'PhysicalScan', 'ValueScan', 'CoScan', 'Scan'])
         for abt, model in models.items():
             print(abt)
             print(model)
 
-        parameters = parameters_extractor.extract_parameters(config.abt_calibrator, database, [])
+        parameters = await parameters_extractor.extract_parameters(main_config.abt_calibrator,
+                                                                   database, [])
         save_to_csv(parameters, 'parameters.csv')
 
     print("DONE!")
 
 
 if __name__ == '__main__':
-    main()
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())

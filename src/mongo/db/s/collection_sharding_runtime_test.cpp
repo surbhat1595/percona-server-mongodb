@@ -45,6 +45,8 @@
 #include "mongo/s/catalog_cache_loader_mock.h"
 #include "mongo/util/fail_point.h"
 
+#include "mongo/db/s/sharding_index_catalog_util.h"
+
 namespace mongo {
 namespace {
 
@@ -88,10 +90,12 @@ TEST_F(CollectionShardingRuntimeTest,
     CollectionShardingRuntime csr(getServiceContext(), kTestNss, executor());
     ASSERT_FALSE(csr.getCollectionDescription(opCtx).isSharded());
     auto metadata = makeShardedMetadata(opCtx);
-    ScopedSetShardRole scopedSetShardRole{opCtx,
-                                          kTestNss,
-                                          ShardVersion(metadata.getShardVersion()),
-                                          boost::none /* databaseVersion */};
+    ScopedSetShardRole scopedSetShardRole{
+        opCtx,
+        kTestNss,
+        ShardVersion(metadata.getShardVersion(),
+                     CollectionIndexes(metadata.getShardVersion(), boost::none)),
+        boost::none /* databaseVersion */};
     ASSERT_THROWS_CODE(csr.getCollectionDescription(opCtx), DBException, ErrorCodes::StaleConfig);
 }
 
@@ -109,10 +113,12 @@ TEST_F(CollectionShardingRuntimeTest,
     OperationContext* opCtx = operationContext();
     auto metadata = makeShardedMetadata(opCtx);
     csr.setFilteringMetadata(opCtx, metadata);
-    ScopedSetShardRole scopedSetShardRole{opCtx,
-                                          kTestNss,
-                                          ShardVersion(metadata.getShardVersion()),
-                                          boost::none /* databaseVersion */};
+    ScopedSetShardRole scopedSetShardRole{
+        opCtx,
+        kTestNss,
+        ShardVersion(metadata.getShardVersion(),
+                     CollectionIndexes(metadata.getShardVersion(), boost::none)),
+        boost::none /* databaseVersion */};
     ASSERT_TRUE(csr.getCollectionDescription(opCtx).isSharded());
 }
 
@@ -175,10 +181,12 @@ TEST_F(CollectionShardingRuntimeTest,
     OperationContext* opCtx = operationContext();
     auto metadata = makeShardedMetadata(opCtx);
     csr.setFilteringMetadata(opCtx, metadata);
-    ScopedSetShardRole scopedSetShardRole{opCtx,
-                                          kTestNss,
-                                          ShardVersion(metadata.getShardVersion()),
-                                          boost::none /* databaseVersion */};
+    ScopedSetShardRole scopedSetShardRole{
+        opCtx,
+        kTestNss,
+        ShardVersion(metadata.getShardVersion(),
+                     CollectionIndexes(metadata.getShardVersion(), boost::none)),
+        boost::none /* databaseVersion */};
     ASSERT_EQ(csr.getNumMetadataManagerChanges_forTest(), 1);
 
     // Set it again with a different metadata object (UUID is generated randomly in
@@ -218,11 +226,13 @@ TEST_F(CollectionShardingRuntimeTest, ReturnUnshardedMetadataInServerlessMode) {
     ASSERT_FALSE(csr.getCollectionDescription(opCtx).isSharded());
 
     // Enable sharding state and set shard version on the OSS for logical session nss.
+    CollectionGeneration gen{OID::gen(), Timestamp(1, 1)};
     ScopedSetShardRole scopedSetShardRole2{
         opCtx,
         NamespaceString::kLogicalSessionsNamespace,
-        ShardVersion(ChunkVersion({OID::gen(), Timestamp(1, 1)}, {1, 0})), /* shardVersion */
-        boost::none                                                        /* databaseVersion */
+        ShardVersion(ChunkVersion(gen, {1, 0}),
+                     CollectionIndexes(gen, boost::none)), /* shardVersion */
+        boost::none                                        /* databaseVersion */
     };
 
     CollectionShardingRuntime csrLogicalSession(
@@ -477,8 +487,7 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
     const ChunkRange range = ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY));
     const auto task = insertRangeDeletionTask(opCtx, kTestNss, uuid(), range, 0);
 
-    auto cleanupComplete =
-        csr().cleanUpRange(range, task.getId(), CollectionShardingRuntime::CleanWhen::kNow);
+    auto cleanupComplete = csr().cleanUpRange(range, CollectionShardingRuntime::CleanWhen::kNow);
 
     opCtx->setDeadlineAfterNowBy(Milliseconds(100), ErrorCodes::MaxTimeMSExpired);
     auto status =
@@ -503,10 +512,10 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
     const auto task2 = insertRangeDeletionTask(opCtx, kTestNss, uuid(), range2, 0);
 
     auto cleanupCompleteFirst =
-        csr().cleanUpRange(range1, task1.getId(), CollectionShardingRuntime::CleanWhen::kNow);
+        csr().cleanUpRange(range1, CollectionShardingRuntime::CleanWhen::kNow);
 
     auto cleanupCompleteSecond =
-        csr().cleanUpRange(range2, task2.getId(), CollectionShardingRuntime::CleanWhen::kNow);
+        csr().cleanUpRange(range2, CollectionShardingRuntime::CleanWhen::kNow);
 
     auto status = CollectionShardingRuntime::waitForClean(
         opCtx,
@@ -532,14 +541,42 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
     const ChunkRange range = ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY));
     const auto task = insertRangeDeletionTask(opCtx, kTestNss, uuid(), range, 0);
 
-    auto cleanupComplete =
-        csr().cleanUpRange(range, task.getId(), CollectionShardingRuntime::CleanWhen::kNow);
+    auto cleanupComplete = csr().cleanUpRange(range, CollectionShardingRuntime::CleanWhen::kNow);
 
     auto status =
         CollectionShardingRuntime::waitForClean(opCtx, kTestNss, uuid(), range, Date_t::max());
 
     ASSERT_OK(status);
     ASSERT(cleanupComplete.isReady());
+}
+
+TEST_F(CollectionShardingRuntimeWithRangeDeleterTest, IncreaseIndexVersionAsParticipant) {
+    OperationContext* opCtx = operationContext();
+    Timestamp indexVersion(1, 0);
+
+    // Simulate the commit of the index by writing in the config.shard.collections collection.
+    write_ops::UpdateCommandRequest updateCollectionOp(
+        NamespaceString::kShardCollectionCatalogNamespace);
+    updateCollectionOp.setUpdates({[&] {
+        write_ops::UpdateOpEntry entry;
+        entry.setQ(BSON(CollectionType::kNssFieldName << kTestNss.toString()
+                                                      << CollectionType::kUuidFieldName << uuid()));
+        entry.setU(write_ops::UpdateModification::parseFromClassicUpdate(
+            BSON("$set" << BSON(CollectionType::kIndexVersionFieldName << indexVersion))));
+        entry.setUpsert(true);
+        entry.setMulti(false);
+        return entry;
+    }()});
+    updateCollectionOp.setWriteCommandRequestBase([] {
+        write_ops::WriteCommandRequestBase wcb;
+        wcb.setStmtId(1);
+        return wcb;
+    }());
+
+    DBDirectClient client(opCtx);
+    write_ops::checkWriteErrors(client.update(updateCollectionOp));
+
+    ASSERT_EQ(indexVersion, csr().getIndexVersion(opCtx).value());
 }
 
 TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
@@ -555,8 +592,7 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
     const auto task = insertRangeDeletionTask(opCtx, kTestNss, uuid(), range, 0);
 
     // Schedule range deletion that will hang due to `suspendRangeDeletion` failpoint
-    auto cleanupComplete =
-        csr().cleanUpRange(range, task.getId(), CollectionShardingRuntime::CleanWhen::kNow);
+    auto cleanupComplete = csr().cleanUpRange(range, CollectionShardingRuntime::CleanWhen::kNow);
 
     // Clear and set again filtering metadata
     csr().clearFilteringMetadata(opCtx);

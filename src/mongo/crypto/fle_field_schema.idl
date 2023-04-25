@@ -31,7 +31,7 @@ global:
       - "mongo/crypto/fle_fields_util.h"
 
 imports:
-    - "mongo/idl/basic_types.idl"
+    - "mongo/db/basic_types.idl"
     - "mongo/crypto/encryption_fields.idl"
 
 enums:
@@ -166,7 +166,7 @@ structs:
             type: int
             cpp_name: sparsity
             optional: true
-            validator: { gte: 0, lte: 3 }
+            validator: { gte: 1, lte: 4 }
 
     EdgeTokenSet:
         description: "Payload of an indexed field to insert or update"
@@ -330,7 +330,7 @@ structs:
             stability: unstable
 
     ecocDocument:
-        description: "foo"
+        description: "This represents a document stored in an encrypted compaction collection."
         strict: true
         fields:
           _id:

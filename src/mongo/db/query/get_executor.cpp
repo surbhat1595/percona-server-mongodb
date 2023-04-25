@@ -71,6 +71,8 @@
 #include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collection_query_info.h"
+#include "mongo/db/query/cqf_command_utils.h"
+#include "mongo/db/query/cqf_get_executor.h"
 #include "mongo/db/query/explain.h"
 #include "mongo/db/query/index_bounds_builder.h"
 #include "mongo/db/query/internal_plans.h"
@@ -103,7 +105,6 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/storage_options.h"
-#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/util/str.h"
@@ -1332,9 +1333,7 @@ std::unique_ptr<PlanYieldPolicySBE> makeSbeYieldPolicy(
                                                 internalQueryExecYieldIterations.load(),
                                                 Milliseconds{internalQueryExecYieldPeriodMS.load()},
                                                 yieldable,
-                                                std::make_unique<YieldPolicyCallbacksImpl>(nss),
-                                                // Use the new yielding behavior if it is enabled.
-                                                gYieldingSupportForSBE);
+                                                std::make_unique<YieldPolicyCallbacksImpl>(nss));
 }
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExecutor(
@@ -1436,6 +1435,13 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
     const auto& mainColl = collections.getMainCollection();
     canonicalQuery->setSbeCompatible(
         sbe::isQuerySbeCompatible(&mainColl, canonicalQuery.get(), plannerParams.options));
+
+    if (isEligibleForBonsai(*canonicalQuery, opCtx, mainColl)) {
+        return getSBEExecutorViaCascadesOptimizer(mainColl,
+                                                  std::move(canonicalQuery),
+                                                  plannerParams.options &
+                                                      QueryPlannerParams::PRESERVE_RECORD_ID);
+    }
 
     // Use SBE if 'canonicalQuery' is SBE compatible.
     if (!canonicalQuery->getForceClassicEngine() && canonicalQuery->isSbeCompatible()) {

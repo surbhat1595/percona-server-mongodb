@@ -78,9 +78,6 @@ public:
 
         // The pre-image is recorded in the change stream pre-images collection.
         kPreImagesCollection,
-
-        // The pre-image is recorded in the oplog as a separate entry.
-        kOplog,
     };
 
     static ReplOperation parse(const IDLParserContext& ctxt, const BSONObj& bsonObject) {
@@ -138,15 +135,6 @@ public:
     }
 
     /**
-     * Returns true if the change stream pre-image is recorded in a dedicated oplog entry for this
-     * operation.
-     */
-    bool isChangeStreamPreImageRecordedInOplog() const {
-        return ReplOperation::ChangeStreamPreImageRecordingMode::kOplog ==
-            getChangeStreamPreImageRecordingMode();
-    }
-
-    /**
      * Returns true if the change stream pre-image is recorded in the change stream pre-images
      * collection for this operation.
      */
@@ -201,8 +189,8 @@ public:
      * entirely.
      */
     void setTid(boost::optional<mongo::TenantId> value) & {
-        // TODO SERVER-62114 Change to check for upgraded FCV rather than feature flag
-        if (gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))
+        if (serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+            gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))
             DurableReplOperation::setTid(value);
     }
 
@@ -243,6 +231,10 @@ public:
     static ReplOperation makeDeleteOperation(const NamespaceString& nss,
                                              UUID uuid,
                                              const BSONObj& docToDelete);
+    static ReplOperation makeInsertGlobalIndexKeyOperation(const NamespaceString& indexNss,
+                                                           UUID indexUuid,
+                                                           const BSONObj& key,
+                                                           const BSONObj& docKey);
 
     static ReplOperation makeCreateCommand(NamespaceString nss,
                                            const mongo::CollectionOptions& options,
@@ -287,8 +279,8 @@ public:
     }
 
     void setTid(boost::optional<mongo::TenantId> value) & {
-        // TODO SERVER-62114 Change to check for upgraded FCV rather than feature flag
-        if (gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))
+        if (serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+            gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))
             getDurableReplOperation().setTid(std::move(value));
     }
 
@@ -437,6 +429,7 @@ public:
     using MutableOplogEntry::makeCreateCommand;
     using MutableOplogEntry::makeCreateIndexesCommand;
     using MutableOplogEntry::makeDeleteOperation;
+    using MutableOplogEntry::makeInsertGlobalIndexKeyOperation;
     using MutableOplogEntry::makeInsertOperation;
     using MutableOplogEntry::makeUpdateOperation;
 
@@ -458,6 +451,9 @@ public:
         kCommitTransaction,
         kAbortTransaction,
         kImportCollection,
+        kCreateGlobalIndex,
+        kDropGlobalIndex,
+        kInsertGlobalIndexKey,
     };
 
     // Get the in-memory size in bytes of a ReplOperation.
@@ -466,7 +462,6 @@ public:
     static StatusWith<DurableOplogEntry> parse(const BSONObj& object);
 
     DurableOplogEntry(OpTime opTime,
-                      boost::optional<int64_t> hash,
                       OpTypeEnum opType,
                       const NamespaceString& nss,
                       const boost::optional<UUID>& uuid,

@@ -394,7 +394,7 @@ rolls-back writes when it goes out of scope and its destructor is called before 
 The WriteUnitOfWork has a [`groupOplogEntries` option](https://github.com/mongodb/mongo/blob/fa32d665bd63de7a9d246fa99df5e30840a931de/src/mongo/db/storage/write_unit_of_work.h#L67)
 to replicate multiple writes transactionally. This option uses the [`BatchedWriteContext` class](https://github.com/mongodb/mongo/blob/9ab71f9b2fac1e384529fafaf2a819ce61834228/src/mongo/db/batched_write_context.h#L46)
 to stage writes and to generate a single applyOps entry at commit, similar to what multi-document
-transactions do via the [`TransactionParticipant` class](https://github.com/mongodb/mongo/blob/9ab71f9b2fac1e384529fafaf2a819ce61834228/src/mongo/db/transaction_participant.h#L82).
+transactions do via the [`TransactionParticipant` class](https://github.com/mongodb/mongo/blob/219990f17695b0ea4695f827a42a18e012b1e9cf/src/mongo/db/transaction/transaction_participant.h#L82).
 Unlike a multi-document transaction, the applyOps entry lacks the `lsId` and the `txnNumber`
 fields. Callers must ensure that the WriteUnitOfWork does not generate more than 16MB of oplog,
 otherwise the operation will fail with `TransactionTooLarge` code.
@@ -785,7 +785,7 @@ side writes. When a quorum is reached, the current primary, under a collection X
 all index constraints. If there are errors, it will replicate an `abortIndexBuild` oplog entry. If
 the index build is successful, it will replicate a `commitIndexBuild` oplog entry.
 
-Secondaries that were not included in the commit quorum and recieve a `commitIndexBuild` oplog entry
+Secondaries that were not included in the commit quorum and receive a `commitIndexBuild` oplog entry
 will block replication until their index build is complete.
 
 The `commitQuorum` for a running index build may be changed by the user via the
@@ -1341,6 +1341,9 @@ Additionally, users can specify that they'd like to perform a `full` validation.
   as part of the storage interface.
 * These hooks enable storage engines to perform internal data structure checks that MongoDB would
   otherwise not be able to perform.
+* More comprehensive and time-consuming checks will run to detect more types of non-conformant BSON
+  documents with duplicate field names, invalid UTF-8 characters, and non-decompressible BSON
+  Columns.
 * Full validations are not compatible with background validation.
 
 [Public docs on how to run validation and interpret the results.](https://docs.mongodb.com/manual/reference/command/validate/)
@@ -1353,7 +1356,7 @@ Additionally, users can specify that they'd like to perform a `full` validation.
 * Index entries are in increasing order if the sort order is ascending.
 * Index entries are in decreasing order if the sort order is descending.
 * Unique indexes do not have duplicate keys.
-* Documents in the collection are valid `BSON`.
+* Documents in the collection are valid and conformant `BSON`.
 * Fast count matches the number of records in the `RecordStore`.
   + For foreground validation only.
 * The number of _id index entries always matches the number of records in the `RecordStore`.
@@ -1363,6 +1366,7 @@ Additionally, users can specify that they'd like to perform a `full` validation.
 * The number of index entries for each index is not less than the number of records in the record
   store.
   + Not checked for sparse and partial indexes.
+* Time-series bucket collections are valid.
 
 ## Validation Procedure
 * Instantiates the objects used throughout the validation procedure.
@@ -1376,7 +1380,9 @@ Additionally, users can specify that they'd like to perform a `full` validation.
       reporting.
     + [ValidateAdaptor](https://github.com/mongodb/mongo/blob/r4.5.0/src/mongo/db/catalog/validate_adaptor.h)
       used to traverse the record store and indexes. Validates that the records seen are valid
-      `BSON` and not corrupted.
+      `BSON` conformant to most [BSON specifications](https://bsonspec.org/spec.html). In `full`
+      and `checkBSONConformant` validation modes, all `BSON` checks, including the time-consuming
+      ones, will be enabled.
 * If a `full` validation was requested, we run the storage engines validation hooks at this point to
   allow a more thorough check to be performed.
 * Validates the [collection’s in-memory](https://github.com/mongodb/mongo/blob/r4.5.0/src/mongo/db/catalog/collection.h)
@@ -1385,11 +1391,8 @@ Additionally, users can specify that they'd like to perform a `full` validation.
   between the two.
 * [Initializes all the cursors](https://github.com/mongodb/mongo/blob/07765dda62d4709cddc9506ea378c0d711791b57/src/mongo/db/catalog/validate_state.cpp#L144-L205)
   on the `RecordStore` and `SortedDataInterface` of each index in the `ValidateState` object.
-    + We choose a read timestamp (`ReadSource`) based on the validation mode and node configuration:
-      |                |  Standalone  | Replica Set  |
-      | -------------- | :----------: | ------------ |
-      | **Foreground** | kNoTimestamp | kNoTimestamp |
-      | **Background** | kNoTimestamp | kNoOverlap   |
+    + We choose a read timestamp (`ReadSource`) based on the validation mode: `kNoTimestamp`
+    for foreground validation and `kCheckpoint` for background validation.
 * Traverses the `RecordStore` using the `ValidateAdaptor` object.
     + [Validates each record and adds the document's index key set to the IndexConsistency object](https://github.com/mongodb/mongo/blob/r4.5.0/src/mongo/db/catalog/validate_adaptor.cpp#L61-L140)
       for consistency checks at later stages.

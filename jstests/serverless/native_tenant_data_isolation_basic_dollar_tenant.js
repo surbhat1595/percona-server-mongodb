@@ -49,7 +49,7 @@ const testColl = testDb.getCollection(kCollName);
     assert.eq(0, collsWithDiffTenant.cursor.firstBatch.length);
 }
 
-// Test insert, find, getMore, and explain commands.
+// Test insert, agg, find, getMore, and explain commands.
 {
     const kTenantDocs = [{w: 0}, {x: 1}, {y: 2}, {z: 3}];
     const kOtherTenantDocs = [{i: 1}, {j: 2}, {k: 3}];
@@ -88,6 +88,26 @@ const testColl = testDb.getCollection(kCollName);
             {getMore: cmdRes2.cursor.id, collection: kCollName, '$tenant': kOtherTenant}),
         ErrorCodes.Unauthorized);
 
+    // Test that aggregate only finds a tenant's own document.
+    const aggRes = assert.commandWorked(testDb.runCommand({
+        aggregate: kCollName,
+        pipeline: [{$match: {w: 0}}, {$project: {_id: 0}}],
+        cursor: {},
+        '$tenant': kTenant
+    }));
+    assert.eq(1, aggRes.cursor.firstBatch.length, tojson(aggRes.cursor.firstBatch));
+    assert.eq(kTenantDocs[0], aggRes.cursor.firstBatch[0]);
+
+    const aggRes2 = assert.commandWorked(testDb.runCommand({
+        aggregate: kCollName,
+        pipeline: [{$match: {i: 1}}, {$project: {_id: 0}}],
+        cursor: {},
+        '$tenant': kOtherTenant
+    }));
+    assert.eq(1, aggRes2.cursor.firstBatch.length, tojson(aggRes2.cursor.firstBatch));
+    assert.eq(kOtherTenantDocs[0], aggRes2.cursor.firstBatch[0]);
+
+    // Test that explain works correctly.
     const kTenantExplainRes = assert.commandWorked(testDb.runCommand(
         {explain: {find: kCollName}, verbosity: 'executionStats', '$tenant': kTenant}));
     assert.eq(
@@ -167,18 +187,28 @@ const testColl = testDb.getCollection(kCollName);
         adminDb.runCommand(
             {renameCollection: toName, to: fromName, dropTarget: true, '$tenant': kOtherTenant}),
         ErrorCodes.NamespaceNotFound);
+}
 
-    // Reset the collection name so other test cases can still access this collection with kCollName
+// Test the dropDatabase command.
+{
+    // Another tenant shouldn't be able to drop the database.
+    assert.commandWorked(testDb.runCommand({dropDatabase: 1, '$tenant': kOtherTenant}));
+    const collsAfterDropByOtherTenant = assert.commandWorked(
+        testDb.runCommand({listCollections: 1, nameOnly: true, '$tenant': kTenant}));
+    assert.eq(3,
+              collsAfterDropByOtherTenant.cursor.firstBatch.length,
+              tojson(collsAfterDropByOtherTenant.cursor.firstBatch));
+
+    // Now, drop the database using the original tenantId.
+    assert.commandWorked(testDb.runCommand({dropDatabase: 1, '$tenant': kTenant}));
+    const collsAfterDrop = assert.commandWorked(
+        testDb.runCommand({listCollections: 1, nameOnly: true, '$tenant': kTenant}));
+    assert.eq(0, collsAfterDrop.cursor.firstBatch.length, tojson(collsAfterDrop.cursor.firstBatch));
+
+    // Reset the collection so other test cases can still access this collection with kCollName
     // after this test.
-    assert.commandWorked(adminDb.runCommand(
-        {renameCollection: toName, to: fromName, dropTarget: true, '$tenant': kTenant}));
-    const fad2 = assert.commandWorked(testDb.runCommand({
-        findAndModify: kCollName,
-        query: {a: 11},
-        update: {$set: {a: 1, b: 1}},
-        '$tenant': kTenant
-    }));
-    assert.eq({_id: 0, a: 11, b: 1}, fad2.value);
+    assert.commandWorked(testDb.runCommand(
+        {insert: kCollName, documents: [{_id: 0, a: 1, b: 1}], '$tenant': kTenant}));
 }
 
 MongoRunner.stopMongod(mongod);

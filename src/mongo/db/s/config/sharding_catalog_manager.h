@@ -393,6 +393,15 @@ public:
                                 StringData dbName,
                                 const boost::optional<ShardId>& optPrimaryShard);
 
+    /**
+     * Updates the metadata in config.databases collection with the new primary shard for the given
+     * database. This also advances the database's lastmod.
+     */
+    void commitMovePrimary(OperationContext* opCtx,
+                           const DatabaseName& dbName,
+                           const DatabaseVersion& expectedDbVersion,
+                           const ShardId& toShard);
+
     //
     // Collection Operations
     //
@@ -454,15 +463,12 @@ public:
      * nullptr, a name will be automatically generated; if not nullptr, it cannot
      *         contain the empty string.
      * 'shardConnectionString' is the complete connection string of the shard being added.
-     * 'maxSize' is the optional space quota in bytes. Zero means there's no limitation to space
-     * usage.
      *
      * On success returns the name of the newly added shard.
      */
     StatusWith<std::string> addShard(OperationContext* opCtx,
                                      const std::string* shardProposedName,
-                                     const ConnectionString& shardConnectionString,
-                                     long long maxSize);
+                                     const ConnectionString& shardConnectionString);
 
     /**
      * Tries to remove a shard. To completely remove a shard from a sharded cluster,
@@ -558,8 +564,7 @@ private:
     StatusWith<boost::optional<ShardType>> _checkIfShardExists(
         OperationContext* opCtx,
         const ConnectionString& propsedShardConnectionString,
-        const std::string* shardProposedName,
-        long long maxSize);
+        const std::string* shardProposedName);
 
     /**
      * Validates that the specified endpoint can serve as a shard server. In particular, this

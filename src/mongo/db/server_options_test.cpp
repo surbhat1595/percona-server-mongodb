@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/config.h"
 
 #if defined(MONGO_CONFIG_HAVE_HEADER_UNISTD_H)
@@ -54,7 +51,6 @@
 #include "mongo/db/server_options_helpers.h"
 #include "mongo/db/server_options_nongeneral_gen.h"
 #include "mongo/db/server_options_server_helpers.h"
-#include "mongo/idl/server_parameter.h"
 #include "mongo/unittest/log_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/errno_util.h"
@@ -64,7 +60,6 @@
 #include "mongo/util/scopeguard.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
-
 
 namespace mongo {
 namespace {
@@ -872,11 +867,14 @@ public:
         TestServerParameter(StringData name, ServerParameterType spt, int x)
             : ServerParameter(name, spt), val{x} {}
 
-        void append(OperationContext*, BSONObjBuilder& bob, const std::string& name) final {
-            bob.append(name, val);
+        void append(OperationContext*,
+                    BSONObjBuilder* bob,
+                    StringData name,
+                    const boost::optional<TenantId>&) final {
+            bob->append(name, val);
         }
 
-        Status setFromString(const std::string& str) final {
+        Status setFromString(StringData str, const boost::optional<TenantId>&) final {
             int value;
             Status status = NumberParser{}(str, &value);
             if (!status.isOK())

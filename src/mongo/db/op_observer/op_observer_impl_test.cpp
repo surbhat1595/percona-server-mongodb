@@ -59,6 +59,7 @@
 #include "mongo/db/repl/tenant_migration_access_blocker_registry.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction/transaction_participant_gen.h"
 #include "mongo/idl/server_parameter_test_util.h"
@@ -86,11 +87,12 @@ OplogEntry getInnerEntryFromApplyOpsOplogEntry(const OplogEntry& oplogEntry) {
 void beginRetryableWriteWithTxnNumber(
     OperationContext* opCtx,
     TxnNumber txnNumber,
-    std::unique_ptr<MongoDOperationContextSession>& contextSession) {
+    std::unique_ptr<MongoDSessionCatalog::Session>& contextSession) {
     opCtx->setLogicalSessionId(makeLogicalSessionIdForTest());
     opCtx->setTxnNumber(txnNumber);
 
-    contextSession = std::make_unique<MongoDOperationContextSession>(opCtx);
+    auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
+    contextSession = mongoDSessionCatalog->checkOutSession(opCtx);
     auto txnParticipant = TransactionParticipant::get(opCtx);
     txnParticipant.beginOrContinue(opCtx,
                                    {*opCtx->getTxnNumber()},
@@ -101,12 +103,13 @@ void beginRetryableWriteWithTxnNumber(
 void beginNonRetryableTransactionWithTxnNumber(
     OperationContext* opCtx,
     TxnNumber txnNumber,
-    std::unique_ptr<MongoDOperationContextSession>& contextSession) {
+    std::unique_ptr<MongoDSessionCatalog::Session>& contextSession) {
     opCtx->setLogicalSessionId(makeLogicalSessionIdForTest());
     opCtx->setTxnNumber(txnNumber);
     opCtx->setInMultiDocumentTransaction();
 
-    contextSession = std::make_unique<MongoDOperationContextSession>(opCtx);
+    auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
+    contextSession = mongoDSessionCatalog->checkOutSession(opCtx);
     auto txnParticipant = TransactionParticipant::get(opCtx);
     txnParticipant.beginOrContinue(
         opCtx, {*opCtx->getTxnNumber()}, false /* autocommit */, true /* startTransaction */);
@@ -115,12 +118,13 @@ void beginNonRetryableTransactionWithTxnNumber(
 void beginRetryableInternalTransactionWithTxnNumber(
     OperationContext* opCtx,
     TxnNumber txnNumber,
-    std::unique_ptr<MongoDOperationContextSession>& contextSession) {
+    std::unique_ptr<MongoDSessionCatalog::Session>& contextSession) {
     opCtx->setLogicalSessionId(makeLogicalSessionIdWithTxnNumberAndUUIDForTest());
     opCtx->setTxnNumber(txnNumber);
     opCtx->setInMultiDocumentTransaction();
 
-    contextSession = std::make_unique<MongoDOperationContextSession>(opCtx);
+    auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
+    contextSession = mongoDSessionCatalog->checkOutSession(opCtx);
     auto txnParticipant = TransactionParticipant::get(opCtx);
     txnParticipant.beginOrContinue(
         opCtx, {*opCtx->getTxnNumber()}, false /* autocommit */, true /* startTransaction */);
@@ -131,7 +135,7 @@ void commitUnpreparedTransaction(OperationContext* opCtx, OpObserverType& opObse
     auto txnParticipant = TransactionParticipant::get(opCtx);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx);
     opObserver.onUnpreparedTransactionCommit(
-        opCtx, &txnOps, txnParticipant.getNumberOfPrePostImagesToWriteForTest());
+        opCtx, txnOps, txnParticipant.getNumberOfPrePostImagesToWriteForTest());
 }
 
 std::vector<repl::OpTime> reserveOpTimesInSideTransaction(OperationContext* opCtx, size_t count) {
@@ -173,7 +177,13 @@ protected:
         // Ensure that we are primary.
         auto replCoord = repl::ReplicationCoordinator::get(opCtx.get());
         ASSERT_OK(replCoord->setFollowerMode(repl::MemberState::RS_PRIMARY));
-        MongoDSessionCatalog::onStepUp(opCtx.get());
+
+        MongoDSessionCatalog::set(
+            opCtx->getServiceContext(),
+            std::make_unique<MongoDSessionCatalog>(
+                std::make_unique<MongoDSessionCatalogTransactionInterfaceImpl>()));
+        auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx.get());
+        mongoDSessionCatalog->onStepUp(opCtx.get());
 
         ReadWriteConcernDefaults::create(getServiceContext(), _lookupMock.getFetchDefaultsFn());
 
@@ -999,10 +1009,11 @@ TEST_F(OpObserverSessionCatalogRollbackTest,
     const TxnNumber txnNum = 0;
     const StmtId stmtId = 1000;
 
+    auto mongoDSessionCatalog = MongoDSessionCatalog::get(getServiceContext());
     {
         auto opCtx = cc().makeOperationContext();
         opCtx->setLogicalSessionId(sessionId);
-        MongoDOperationContextSession ocs(opCtx.get());
+        auto ocs = mongoDSessionCatalog->checkOutSession(opCtx.get());
         auto txnParticipant = TransactionParticipant::get(opCtx.get());
         txnParticipant.refreshFromStorageIfNeeded(opCtx.get());
 
@@ -1026,7 +1037,7 @@ TEST_F(OpObserverSessionCatalogRollbackTest,
     {
         auto opCtx = cc().makeOperationContext();
         opCtx->setLogicalSessionId(sessionId);
-        MongoDOperationContextSession ocs(opCtx.get());
+        auto ocs = mongoDSessionCatalog->checkOutSession(opCtx.get());
         auto txnParticipant = TransactionParticipant::get(opCtx.get());
         ASSERT(txnParticipant.checkStatementExecutedNoOplogEntryFetch(opCtx.get(), stmtId));
     }
@@ -1135,11 +1146,11 @@ protected:
         auto txnOps = txnParticipant().retrieveCompletedTransactionOperations(opCtx());
         auto currentTime = Date_t::now();
         auto applyOpsAssignment = opObserver().preTransactionPrepare(
-            opCtx(), reservedSlots, numberOfPrePostImagesToWrite, currentTime, &txnOps);
+            opCtx(), reservedSlots, numberOfPrePostImagesToWrite, currentTime, txnOps);
         opCtx()->recoveryUnit()->setPrepareTimestamp(prepareOpTime.getTimestamp());
         opObserver().onTransactionPrepare(opCtx(),
                                           reservedSlots,
-                                          &txnOps,
+                                          txnOps,
                                           applyOpsAssignment.get(),
                                           numberOfPrePostImagesToWrite,
                                           currentTime);
@@ -1157,7 +1168,7 @@ private:
     boost::optional<ExposeOpObserverTimes::ReservedTimes> _times;
     boost::optional<TransactionParticipant::Participant> _txnParticipant;
 
-    std::unique_ptr<MongoDOperationContextSession> _sessionCheckout;
+    std::unique_ptr<MongoDSessionCatalog::Session> _sessionCheckout;
     TxnNumber _txnNum = 0;
 };
 
@@ -1354,7 +1365,7 @@ TEST_F(OpObserverTransactionTest, TransactionalPreparedCommitTest) {
             opCtx(),
             commitSlot,
             prepareTimestamp,
-            txnParticipant.retrieveCompletedTransactionOperations(opCtx()));
+            *txnParticipant.retrieveCompletedTransactionOperations(opCtx()));
     }
     repl::OplogInterfaceLocal oplogInterface(opCtx());
     auto oplogIter = oplogInterface.makeIterator();
@@ -1580,7 +1591,7 @@ TEST_F(OpObserverTransactionTest, CommittingUnpreparedNonEmptyTransactionWritesT
     }
 
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
+    opObserver().onUnpreparedTransactionCommit(opCtx(), txnOps, 0);
     opCtx()->getWriteUnitOfWork()->commit();
 
     assertTxnRecord(txnNum(), {}, DurableTxnStateEnum::kCommitted);
@@ -1592,7 +1603,7 @@ TEST_F(OpObserverTransactionTest,
     txnParticipant.unstashTransactionResources(opCtx(), "prepareTransaction");
 
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
+    opObserver().onUnpreparedTransactionCommit(opCtx(), txnOps, 0);
 
     txnParticipant.stashTransactionResources(opCtx());
 
@@ -1632,7 +1643,7 @@ TEST_F(OpObserverTransactionTest, CommittingPreparedTransactionWritesToTransacti
             opCtx(),
             commitSlot,
             prepareOpTime.getTimestamp(),
-            txnParticipant.retrieveCompletedTransactionOperations(opCtx()));
+            *txnParticipant.retrieveCompletedTransactionOperations(opCtx()));
     }
     assertTxnRecord(txnNum(), commitOpTime, DurableTxnStateEnum::kCommitted);
 }
@@ -1661,7 +1672,7 @@ TEST_F(OpObserverTransactionTest, TransactionalInsertTest) {
     opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
     opObserver().onInserts(opCtx(), *autoColl2, inserts2.begin(), inserts2.end(), false);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
+    opObserver().onUnpreparedTransactionCommit(opCtx(), txnOps, 0);
     auto oplogEntryObj = getSingleOplogEntry(opCtx());
     checkCommonFields(oplogEntryObj);
     OplogEntry oplogEntry = assertGet(OplogEntry::parse(oplogEntryObj));
@@ -1723,12 +1734,16 @@ TEST_F(OpObserverTransactionTest, TransactionalInsertTestIncludesTenantId) {
     WriteUnitOfWork wuow(opCtx());
     opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
     opObserver().onInserts(opCtx(), *autoColl2, inserts2.begin(), inserts2.end(), false);
+
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
+    opObserver().onUnpreparedTransactionCommit(opCtx(), txnOps, 0);
+
     auto oplogEntryObj = getSingleOplogEntry(opCtx());
     checkCommonFields(oplogEntryObj);
     OplogEntry oplogEntry = assertGet(OplogEntry::parse(oplogEntryObj));
     auto o = oplogEntry.getObject();
+
+    // TODO SERVER-69288: disallow more than one tenant on a single transaction
     auto oExpected =
         BSON("applyOps" << BSON_ARRAY(BSON("op"
                                            << "i"
@@ -1759,6 +1774,9 @@ TEST_F(OpObserverTransactionTest, TransactionalInsertTestIncludesTenantId) {
                                                             << "w")
                                               << "o2" << BSON("_id" << 3))));
     ASSERT_BSONOBJ_EQ(oExpected, o);
+
+    // This test assumes that the top level tenantId matches the tenantId in the first entry
+    ASSERT_EQ(oplogEntry.getTid(), nss1.tenantId());
     ASSERT(!oplogEntry.shouldPrepare());
     ASSERT_FALSE(oplogEntryObj.hasField("prepare"));
 }
@@ -1791,7 +1809,7 @@ TEST_F(OpObserverTransactionTest, TransactionalUpdateTest) {
     opObserver().onUpdate(opCtx(), update1);
     opObserver().onUpdate(opCtx(), update2);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
+    opObserver().onUnpreparedTransactionCommit(opCtx(), txnOps, 0);
     auto oplogEntry = getSingleOplogEntry(opCtx());
     checkCommonFields(oplogEntry);
     auto o = oplogEntry.getObjectField("o");
@@ -1843,11 +1861,16 @@ TEST_F(OpObserverTransactionTest, TransactionalUpdateTestIncludesTenantId) {
     AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
     opObserver().onUpdate(opCtx(), update1);
     opObserver().onUpdate(opCtx(), update2);
+
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
-    auto oplogEntry = getSingleOplogEntry(opCtx());
-    checkCommonFields(oplogEntry);
-    auto o = oplogEntry.getObjectField("o");
+    opObserver().onUnpreparedTransactionCommit(opCtx(), txnOps, 0);
+
+    auto oplogEntryObj = getSingleOplogEntry(opCtx());
+    checkCommonFields(oplogEntryObj);
+    OplogEntry oplogEntry = assertGet(OplogEntry::parse(oplogEntryObj));
+    auto o = oplogEntry.getObject();
+
+    // TODO SERVER-69288: disallow more than one tenant on a single transaction
     auto oExpected =
         BSON("applyOps" << BSON_ARRAY(BSON("op"
                                            << "u"
@@ -1864,8 +1887,11 @@ TEST_F(OpObserverTransactionTest, TransactionalUpdateTestIncludesTenantId) {
                                                                      << "y"))
                                               << "o2" << BSON("_id" << 1))));
     ASSERT_BSONOBJ_EQ(oExpected, o);
-    ASSERT_FALSE(oplogEntry.hasField("prepare"));
-    ASSERT_FALSE(oplogEntry.getBoolField("prepare"));
+
+    // This test assumes that the top level tenantId matches the tenantId in the first entry
+    ASSERT_EQ(oplogEntry.getTid(), nss1.tenantId());
+    ASSERT_FALSE(oplogEntryObj.hasField("prepare"));
+    ASSERT_FALSE(oplogEntryObj.getBoolField("prepare"));
 }
 
 TEST_F(OpObserverTransactionTest, TransactionalDeleteTest) {
@@ -1888,7 +1914,7 @@ TEST_F(OpObserverTransactionTest, TransactionalDeleteTest) {
                                           << "y"));
     opObserver().onDelete(opCtx(), nss2, uuid2, 0, {});
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
+    opObserver().onUnpreparedTransactionCommit(opCtx(), txnOps, 0);
     auto oplogEntry = getSingleOplogEntry(opCtx());
     checkCommonFields(oplogEntry);
     auto o = oplogEntry.getObjectField("o");
@@ -1927,11 +1953,16 @@ TEST_F(OpObserverTransactionTest, TransactionalDeleteTestIncludesTenantId) {
                                BSON("_id" << 1 << "data"
                                           << "y"));
     opObserver().onDelete(opCtx(), nss2, uuid2, 0, {});
+
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
-    auto oplogEntry = getSingleOplogEntry(opCtx());
-    checkCommonFields(oplogEntry);
-    auto o = oplogEntry.getObjectField("o");
+    opObserver().onUnpreparedTransactionCommit(opCtx(), txnOps, 0);
+
+    auto oplogEntryObj = getSingleOplogEntry(opCtx());
+    checkCommonFields(oplogEntryObj);
+    OplogEntry oplogEntry = assertGet(OplogEntry::parse(oplogEntryObj));
+    auto o = oplogEntry.getObject();
+
+    // TODO SERVER-69288: disallow more than one tenant on a single transaction
     auto oExpected = BSON("applyOps" << BSON_ARRAY(
                               BSON("op"
                                    << "d"
@@ -1942,8 +1973,11 @@ TEST_F(OpObserverTransactionTest, TransactionalDeleteTestIncludesTenantId) {
                                       << "tid" << nss2.tenantId().value() << "ns" << nss2.toString()
                                       << "ui" << uuid2 << "o" << BSON("_id" << 1))));
     ASSERT_BSONOBJ_EQ(oExpected, o);
-    ASSERT_FALSE(oplogEntry.hasField("prepare"));
-    ASSERT_FALSE(oplogEntry.getBoolField("prepare"));
+
+    // This test assumes that the top level tenantId matches the tenantId in the first entry
+    ASSERT_EQ(oplogEntry.getTid(), nss1.tenantId());
+    ASSERT_FALSE(oplogEntryObj.hasField("prepare"));
+    ASSERT_FALSE(oplogEntryObj.getBoolField("prepare"));
 }
 
 TEST_F(OpObserverTransactionTest,
@@ -1968,7 +2002,7 @@ TEST_F(OpObserverTransactionTest,
     donorMtab->startBlockingWrites();
 
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    ASSERT_THROWS_CODE(opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0),
+    ASSERT_THROWS_CODE(opObserver().onUnpreparedTransactionCommit(opCtx(), txnOps, 0),
                        DBException,
                        ErrorCodes::TenantMigrationConflict);
 
@@ -2216,9 +2250,6 @@ const auto kNonFaM = StoreDocOption::None;
 const auto kFaMPre = StoreDocOption::PreImage;
 const auto kFaMPost = StoreDocOption::PostImage;
 
-const bool kRecordPreImages = true;
-const bool kDoNotRecordPreImages = false;
-
 const bool kChangeStreamImagesEnabled = true;
 const bool kChangeStreamImagesDisabled = false;
 
@@ -2230,7 +2261,6 @@ const std::vector<bool> kInMultiDocumentTransactionCases{false, true};
 
 struct UpdateTestCase {
     StoreDocOption imageType;
-    bool alwaysRecordPreImages;
     bool changeStreamImagesEnabled;
     RetryableFindAndModifyLocation retryableOptions;
 
@@ -2273,7 +2303,6 @@ protected:
         LOGV2(5739902,
               "UpdateTestCase",
               "ImageType"_attr = testCase.getImageTypeStr(),
-              "PreImageRecording"_attr = testCase.alwaysRecordPreImages,
               "ChangeStreamPreAndPostImagesEnabled"_attr = testCase.changeStreamImagesEnabled,
               "RetryableFindAndModifyLocation"_attr =
                   testCase.getRetryableFindAndModifyLocationStr(),
@@ -2283,7 +2312,6 @@ protected:
     void initializeOplogUpdateEntryArgs(OperationContext* opCtx,
                                         const UpdateTestCase& testCase,
                                         OplogUpdateEntryArgs* update) {
-        update->updateArgs->preImageRecordingEnabledForCollection = testCase.alwaysRecordPreImages;
         update->updateArgs->changeStreamPreAndPostImagesEnabledForCollection =
             testCase.changeStreamImagesEnabled;
 
@@ -2304,8 +2332,7 @@ protected:
                 break;
         }
         update->updateArgs->preImageDoc = boost::none;
-        if (testCase.imageType == StoreDocOption::PreImage || testCase.alwaysRecordPreImages ||
-            testCase.changeStreamImagesEnabled) {
+        if (testCase.imageType == StoreDocOption::PreImage || testCase.changeStreamImagesEnabled) {
             update->updateArgs->preImageDoc = BSON("_id" << 0 << "preImage" << true);
         }
         update->updateArgs->updatedDoc = BSON("_id" << 0 << "postImage" << true);
@@ -2324,13 +2351,6 @@ protected:
         const boost::optional<OplogEntry>& applyOpsOplogEntry = boost::none) {
         bool checkSideCollection =
             testCase.isFindAndModify() && testCase.retryableOptions == kRecordInSideCollection;
-        if (checkSideCollection && testCase.alwaysRecordPreImages &&
-            testCase.imageType == StoreDocOption::PreImage) {
-            // When `alwaysRecordPreImages` is enabled for a collection, we always store an
-            // image in the oplog. To avoid unnecessary writes, we won't also store an image
-            // in the side collection.
-            checkSideCollection = false;
-        }
         if (checkSideCollection) {
             repl::ImageEntry imageEntry =
                 getImageEntryFromSideCollection(opCtx, *updateOplogEntry.getSessionId());
@@ -2381,25 +2401,19 @@ protected:
 
     std::vector<UpdateTestCase> _cases = {
         // Regular updates.
-        {kNonFaM, kDoNotRecordPreImages, kChangeStreamImagesDisabled, kNotRetryable, 1},
-        {kNonFaM, kDoNotRecordPreImages, kChangeStreamImagesEnabled, kNotRetryable, 1},
-        {kNonFaM, kDoNotRecordPreImages, kChangeStreamImagesEnabled, kRecordInSideCollection, 1},
-        {kNonFaM, kRecordPreImages, kChangeStreamImagesDisabled, kNotRetryable, 2},
-        {kNonFaM, kRecordPreImages, kChangeStreamImagesDisabled, kRecordInSideCollection, 2},
+        {kNonFaM, kChangeStreamImagesDisabled, kNotRetryable, 1},
+        {kNonFaM, kChangeStreamImagesEnabled, kNotRetryable, 1},
+        {kNonFaM, kChangeStreamImagesEnabled, kRecordInSideCollection, 1},
         // FindAndModify asking for a preImage.
-        {kFaMPre, kDoNotRecordPreImages, kChangeStreamImagesDisabled, kNotRetryable, 1},
-        {kFaMPre, kDoNotRecordPreImages, kChangeStreamImagesDisabled, kRecordInSideCollection, 1},
-        {kFaMPre, kDoNotRecordPreImages, kChangeStreamImagesEnabled, kNotRetryable, 1},
-        {kFaMPre, kDoNotRecordPreImages, kChangeStreamImagesEnabled, kRecordInSideCollection, 1},
-        {kFaMPre, kRecordPreImages, kChangeStreamImagesDisabled, kNotRetryable, 2},
-        {kFaMPre, kRecordPreImages, kChangeStreamImagesDisabled, kRecordInSideCollection, 2},
+        {kFaMPre, kChangeStreamImagesDisabled, kNotRetryable, 1},
+        {kFaMPre, kChangeStreamImagesDisabled, kRecordInSideCollection, 1},
+        {kFaMPre, kChangeStreamImagesEnabled, kNotRetryable, 1},
+        {kFaMPre, kChangeStreamImagesEnabled, kRecordInSideCollection, 1},
         // FindAndModify asking for a postImage.
-        {kFaMPost, kDoNotRecordPreImages, kChangeStreamImagesDisabled, kNotRetryable, 1},
-        {kFaMPost, kDoNotRecordPreImages, kChangeStreamImagesDisabled, kRecordInSideCollection, 1},
-        {kFaMPost, kDoNotRecordPreImages, kChangeStreamImagesEnabled, kNotRetryable, 1},
-        {kFaMPost, kDoNotRecordPreImages, kChangeStreamImagesEnabled, kRecordInSideCollection, 1},
-        {kFaMPost, kRecordPreImages, kChangeStreamImagesDisabled, kNotRetryable, 2},
-        {kFaMPost, kRecordPreImages, kChangeStreamImagesDisabled, kRecordInSideCollection, 2}};
+        {kFaMPost, kChangeStreamImagesDisabled, kNotRetryable, 1},
+        {kFaMPost, kChangeStreamImagesDisabled, kRecordInSideCollection, 1},
+        {kFaMPost, kChangeStreamImagesEnabled, kNotRetryable, 1},
+        {kFaMPost, kChangeStreamImagesEnabled, kRecordInSideCollection, 1}};
 
     const NamespaceString _nss{boost::none, "test", "coll"};
     const UUID _uuid = UUID::gen();
@@ -2423,7 +2437,7 @@ TEST_F(OnUpdateOutputsTest, TestNonTransactionFundamentalOnUpdateOutputs) {
         // Phase 1: Clearing any state and setting up fixtures/the update call.
         resetOplogAndTransactions(opCtx);
 
-        std::unique_ptr<MongoDOperationContextSession> contextSession;
+        std::unique_ptr<MongoDSessionCatalog::Session> contextSession;
         if (testCase.isRetryable()) {
             beginRetryableWriteWithTxnNumber(opCtx, testIdx, contextSession);
         }
@@ -2466,7 +2480,7 @@ TEST_F(OnUpdateOutputsTest, TestFundamentalTransactionOnUpdateOutputs) {
         // Phase 1: Clearing any state and setting up fixtures/the update call.
         resetOplogAndTransactions(opCtx);
 
-        std::unique_ptr<MongoDOperationContextSession> contextSession;
+        std::unique_ptr<MongoDSessionCatalog::Session> contextSession;
         if (testCase.isRetryable()) {
             beginRetryableInternalTransactionWithTxnNumber(opCtx, testIdx, contextSession);
         } else {
@@ -2494,39 +2508,6 @@ TEST_F(OnUpdateOutputsTest, TestFundamentalTransactionOnUpdateOutputs) {
             opCtx, testCase, updateEntryArgs, oplogs, updateOplogEntry, applyOpsOplogEntry);
         checkChangeStreamImagesIfNeeded(opCtx, testCase, updateEntryArgs, updateOplogEntry);
     }
-}
-
-TEST_F(OnUpdateOutputsTest,
-       RetryableInternalTransactionUpdateWithPreImageRecordingEnabledOnShardServerThrows) {
-    // Create a registry that only registers the Impl. It can be challenging to call methods on
-    // the Impl directly. It falls into cases where `ReservedTimes` is expected to be
-    // instantiated. Due to strong encapsulation, we use the registry that managers the
-    // `ReservedTimes` on our behalf.
-    OpObserverRegistry opObserver;
-    opObserver.addObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
-
-    auto opCtxRaii = cc().makeOperationContext();
-    OperationContext* opCtx = opCtxRaii.get();
-
-    resetOplogAndTransactions(opCtx);
-
-    std::unique_ptr<MongoDOperationContextSession> contextSession;
-    beginRetryableInternalTransactionWithTxnNumber(opCtx, 0, contextSession);
-
-    CollectionUpdateArgs updateArgs;
-    updateArgs.preImageRecordingEnabledForCollection = true;
-    updateArgs.preImageDoc = BSON("_id" << 0 << "preImage" << true);
-    updateArgs.updatedDoc = BSON("_id" << 0 << "postImage" << true);
-    updateArgs.update =
-        BSON("$set" << BSON("postImage" << true) << "$unset" << BSON("preImage" << 1));
-    updateArgs.criteria = BSON("_id" << 0);
-    OplogUpdateEntryArgs updateEntryArgs(&updateArgs, _nss, _uuid);
-    serverGlobalParams.clusterRole = ClusterRole::ShardServer;
-    ON_BLOCK_EXIT([] { serverGlobalParams.clusterRole = ClusterRole::None; });
-
-    WriteUnitOfWork wuow(opCtx);
-    AutoGetCollection locks(opCtx, _nss, MODE_IX);
-    ASSERT_THROWS_CODE(opObserver.onUpdate(opCtx, updateEntryArgs), DBException, 6462400);
 }
 
 struct InsertTestCase {
@@ -2568,7 +2549,7 @@ TEST_F(OpObserverTest, TestFundamentalOnInsertsOutputs) {
             toInsert.emplace_back(stmtId, BSON("_id" << stmtIdx));
         }
 
-        std::unique_ptr<MongoDOperationContextSession> contextSession;
+        std::unique_ptr<MongoDSessionCatalog::Session> contextSession;
         if (testCase.isRetryableWrite) {
             beginRetryableWriteWithTxnNumber(opCtx, testIdx, contextSession);
         }
@@ -2626,7 +2607,6 @@ TEST_F(OpObserverTest, TestFundamentalOnInsertsOutputs) {
 }
 
 struct DeleteTestCase {
-    bool alwaysRecordPreImages;
     bool changeStreamImagesEnabled;
     RetryableFindAndModifyLocation retryableOptions;
 
@@ -2692,22 +2672,6 @@ DEATH_TEST_REGEX_F(BatchedWriteOutputsTest,
     auto entry = repl::MutableOplogEntry::makeDeleteOperation(_nss, UUID::gen(), BSON("_id" << 0));
     entry.setChangeStreamPreImageRecordingMode(
         repl::ReplOperation::ChangeStreamPreImageRecordingMode::kPreImagesCollection);
-    bwc.addBatchedOperation(opCtx, entry);
-}
-
-DEATH_TEST_REGEX_F(BatchedWriteOutputsTest,
-                   TestDoesNotSupportPreImagesInOplog,
-                   "Invariant "
-                   "failure.*getChangeStreamPreImageRecordingMode.*repl::ReplOperation::"
-                   "ChangeStreamPreImageRecordingMode::kOff") {
-    auto opCtxRaii = cc().makeOperationContext();
-    OperationContext* opCtx = opCtxRaii.get();
-    WriteUnitOfWork wuow(opCtx, true /* groupOplogEntries */);
-
-    auto& bwc = BatchedWriteContext::get(opCtx);
-    auto entry = repl::MutableOplogEntry::makeDeleteOperation(_nss, UUID::gen(), BSON("_id" << 0));
-    entry.setChangeStreamPreImageRecordingMode(
-        repl::ReplOperation::ChangeStreamPreImageRecordingMode::kOplog);
     bwc.addBatchedOperation(opCtx, entry);
 }
 
@@ -3250,7 +3214,6 @@ protected:
     void logTestCase(const DeleteTestCase& testCase) {
         LOGV2(5739905,
               "DeleteTestCase",
-              "PreImageRecording"_attr = testCase.alwaysRecordPreImages,
               "ChangeStreamPreAndPostImagesEnabled"_attr = testCase.changeStreamImagesEnabled,
               "RetryableFindAndModifyLocation"_attr =
                   testCase.getRetryableFindAndModifyLocationStr(),
@@ -3260,7 +3223,6 @@ protected:
     void initializeOplogDeleteEntryArgs(OperationContext* opCtx,
                                         const DeleteTestCase& testCase,
                                         OplogDeleteEntryArgs* deleteArgs) {
-        deleteArgs->preImageRecordingEnabledForCollection = testCase.alwaysRecordPreImages;
         deleteArgs->changeStreamPreAndPostImagesEnabledForCollection =
             testCase.changeStreamImagesEnabled;
 
@@ -3272,8 +3234,7 @@ protected:
                 deleteArgs->retryableFindAndModifyLocation = kRecordInSideCollection;
                 break;
         }
-        if (testCase.isRetryable() || testCase.alwaysRecordPreImages ||
-            testCase.changeStreamImagesEnabled) {
+        if (testCase.isRetryable() || testCase.changeStreamImagesEnabled) {
             deleteArgs->deletedDoc = &_deletedDoc;
         }
     }
@@ -3286,8 +3247,7 @@ protected:
         const OplogEntry& deleteOplogEntry,
         const boost::optional<OplogEntry> applyOpsOplogEntry = boost::none) {
         bool didWriteInSideCollection =
-            deleteArgs.retryableFindAndModifyLocation == kRecordInSideCollection &&
-            !deleteArgs.preImageRecordingEnabledForCollection;
+            deleteArgs.retryableFindAndModifyLocation == kRecordInSideCollection;
         if (didWriteInSideCollection) {
             repl::ImageEntry imageEntry =
                 getImageEntryFromSideCollection(opCtx, *deleteOplogEntry.getSessionId());
@@ -3330,13 +3290,10 @@ protected:
         }
     }
 
-    std::vector<DeleteTestCase> _cases{
-        {kDoNotRecordPreImages, kChangeStreamImagesDisabled, kNotRetryable, 1},
-        {kDoNotRecordPreImages, kChangeStreamImagesDisabled, kRecordInSideCollection, 1},
-        {kDoNotRecordPreImages, kChangeStreamImagesEnabled, kNotRetryable, 1},
-        {kDoNotRecordPreImages, kChangeStreamImagesEnabled, kRecordInSideCollection, 1},
-        {kRecordPreImages, kChangeStreamImagesDisabled, kNotRetryable, 2},
-        {kRecordPreImages, kChangeStreamImagesDisabled, kRecordInSideCollection, 2}};
+    std::vector<DeleteTestCase> _cases{{kChangeStreamImagesDisabled, kNotRetryable, 1},
+                                       {kChangeStreamImagesDisabled, kRecordInSideCollection, 1},
+                                       {kChangeStreamImagesEnabled, kNotRetryable, 1},
+                                       {kChangeStreamImagesEnabled, kRecordInSideCollection, 1}};
 
     const NamespaceString _nss{boost::none, "test", "coll"};
     const UUID _uuid = UUID::gen();
@@ -3362,7 +3319,7 @@ TEST_F(OnDeleteOutputsTest, TestNonTransactionFundamentalOnDeleteOutputs) {
         // Phase 1: Clearing any state and setting up fixtures/the delete call.
         resetOplogAndTransactions(opCtx);
 
-        std::unique_ptr<MongoDOperationContextSession> contextSession;
+        std::unique_ptr<MongoDSessionCatalog::Session> contextSession;
         if (testCase.isRetryable()) {
             beginRetryableWriteWithTxnNumber(opCtx, testIdx, contextSession);
         }
@@ -3409,7 +3366,7 @@ TEST_F(OnDeleteOutputsTest, TestTransactionFundamentalOnDeleteOutputs) {
         // Phase 1: Clearing any state and setting up fixtures/the delete call.
         resetOplogAndTransactions(opCtx);
 
-        std::unique_ptr<MongoDOperationContextSession> contextSession;
+        std::unique_ptr<MongoDSessionCatalog::Session> contextSession;
         if (testCase.isRetryable()) {
             beginRetryableInternalTransactionWithTxnNumber(opCtx, testIdx, contextSession);
         } else {
@@ -3443,39 +3400,6 @@ TEST_F(OnDeleteOutputsTest, TestTransactionFundamentalOnDeleteOutputs) {
     }
 }
 
-TEST_F(OnDeleteOutputsTest,
-       RetryableInternalTransactionDeleteWithPreImageRecordingEnabledOnShardServerThrows) {
-    // Create a registry that only registers the Impl. It can be challenging to call methods on
-    // the Impl directly. It falls into cases where `ReservedTimes` is expected to be
-    // instantiated. Due to strong encapsulation, we use the registry that managers the
-    // `ReservedTimes` on our behalf.
-    OpObserverRegistry opObserver;
-    opObserver.addObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
-
-    auto opCtxRaii = cc().makeOperationContext();
-    OperationContext* opCtx = opCtxRaii.get();
-
-    resetOplogAndTransactions(opCtx);
-
-    std::unique_ptr<MongoDOperationContextSession> contextSession;
-    beginRetryableInternalTransactionWithTxnNumber(opCtx, 0, contextSession);
-
-    OplogDeleteEntryArgs deleteEntryArgs;
-    deleteEntryArgs.preImageRecordingEnabledForCollection = true;
-    serverGlobalParams.clusterRole = ClusterRole::ShardServer;
-    ON_BLOCK_EXIT([] { serverGlobalParams.clusterRole = ClusterRole::None; });
-
-    WriteUnitOfWork wuow(opCtx);
-    AutoGetCollection locks(opCtx, _nss, MODE_IX);
-    // This test does not call `OpObserver::aboutToDelete`. That method has the side-effect
-    // of setting of `documentKey` on the delete for sharding purposes.
-    // `OpObserverImpl::onDelete` asserts its existence.
-    repl::documentKeyDecoration(opCtx).emplace(_deletedDoc["_id"].wrap(), boost::none);
-    ASSERT_THROWS_CODE(opObserver.onDelete(opCtx, _nss, _uuid, 1 /* stmtId */, deleteEntryArgs),
-                       DBException,
-                       6462401);
-}
-
 class OpObserverMultiEntryTransactionTest : public OpObserverTransactionTest {
     void setUp() override {
         _prevPackingLimit = gMaxNumberOfTransactionOperationsInSingleOplogEntry;
@@ -3502,7 +3426,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionSingleStatementTest) {
     WriteUnitOfWork wuow(opCtx());
     opObserver().onInserts(opCtx(), *autoColl, inserts.begin(), inserts.end(), false);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
+    opObserver().onUnpreparedTransactionCommit(opCtx(), txnOps, 0);
     auto oplogEntryObj = getNOplogEntries(opCtx(), 1)[0];
     checkSessionAndTransactionFields(oplogEntryObj);
     auto oplogEntry = assertGet(OplogEntry::parse(oplogEntryObj));
@@ -3535,7 +3459,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalInsertTest) {
     opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
     opObserver().onInserts(opCtx(), *autoColl2, inserts2.begin(), inserts2.end(), false);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
+    opObserver().onUnpreparedTransactionCommit(opCtx(), txnOps, 0);
     auto oplogEntryObjs = getNOplogEntries(opCtx(), 4);
     std::vector<OplogEntry> oplogEntries;
     mongo::repl::OpTime expectedPrevWriteOpTime;
@@ -3612,7 +3536,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalUpdateTest) {
     opObserver().onUpdate(opCtx(), update1);
     opObserver().onUpdate(opCtx(), update2);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
+    opObserver().onUnpreparedTransactionCommit(opCtx(), txnOps, 0);
     auto oplogEntryObjs = getNOplogEntries(opCtx(), 2);
     std::vector<OplogEntry> oplogEntries;
     mongo::repl::OpTime expectedPrevWriteOpTime;
@@ -3650,159 +3574,6 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalUpdateTest) {
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntries[1].getObject());
 }
 
-TEST_F(OpObserverMultiEntryTransactionTest, TransactionPreImageTest) {
-    auto txnParticipant = TransactionParticipant::get(opCtx());
-    txnParticipant.unstashTransactionResources(opCtx(), "txntest");
-
-    CollectionUpdateArgs updateArgs1;
-    const auto updateSpec = BSON("$set" << BSON("data"
-                                                << "x"));
-    const auto updatePreImage = BSON("_id" << 0 << "data"
-                                           << "y");
-    const auto updatePostImage = BSON("_id" << 0 << "data"
-                                            << "x");
-    const auto updateFilter = BSON("_id" << 0);
-
-    updateArgs1.stmtIds = {0};
-    updateArgs1.updatedDoc = updatePostImage;
-    updateArgs1.update = updateSpec;
-    updateArgs1.preImageDoc = updatePreImage;
-    updateArgs1.preImageRecordingEnabledForCollection = true;
-    updateArgs1.criteria = updateFilter;
-    OplogUpdateEntryArgs update1(&updateArgs1, nss1, uuid1);
-
-    WriteUnitOfWork wuow(opCtx());
-    AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
-    opObserver().onUpdate(opCtx(), update1);
-
-    const auto deletedDoc = BSON("_id" << 1 << "data"
-                                       << "z");
-    OplogDeleteEntryArgs args;
-    args.deletedDoc = &deletedDoc;
-    args.preImageRecordingEnabledForCollection = true;
-    opObserver().aboutToDelete(opCtx(), nss1, uuid1, deletedDoc);
-    opObserver().onDelete(opCtx(), nss1, uuid1, 0, args);
-
-    auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 2);
-
-    auto oplogEntryObjs = getNOplogEntries(opCtx(), 4);
-    std::vector<OplogEntry> oplogEntries;
-    mongo::repl::OpTime expectedPrevWriteOpTime;
-    for (const auto& oplogEntryObj : oplogEntryObjs) {
-        oplogEntries.push_back(assertGet(OplogEntry::parse(oplogEntryObj)));
-        const auto& oplogEntry = oplogEntries.back();
-        if (oplogEntry.getOpType() == repl::OpTypeEnum::kNoop) {
-            continue;
-        }
-        checkSessionAndTransactionFields(oplogEntryObj);
-        ASSERT(!oplogEntry.shouldPrepare());
-        ASSERT_TRUE(oplogEntry.getPrevWriteOpTimeInTransaction());
-        ASSERT_EQ(expectedPrevWriteOpTime, *oplogEntry.getPrevWriteOpTimeInTransaction());
-        ASSERT_LT(expectedPrevWriteOpTime.getTimestamp(), oplogEntry.getTimestamp());
-        expectedPrevWriteOpTime = repl::OpTime{oplogEntry.getTimestamp(), *oplogEntry.getTerm()};
-    }
-
-    ASSERT(oplogEntries[0].getOpType() == repl::OpTypeEnum::kNoop);
-    ASSERT_BSONOBJ_EQ(updatePreImage, oplogEntries[0].getObject());
-    ASSERT(oplogEntries[1].getOpType() == repl::OpTypeEnum::kNoop);
-    ASSERT_BSONOBJ_EQ(deletedDoc, oplogEntries[1].getObject());
-    ASSERT_BSONOBJ_EQ(BSON("applyOps"
-                           << BSON_ARRAY(BSON("op"
-                                              << "u"
-                                              << "ns" << nss1.toString() << "ui" << uuid1 << "o"
-                                              << updateSpec << "o2" << BSON("_id" << 0)
-                                              << "preImageOpTime" << oplogEntries[0].getOpTime()))
-                           << "partialTxn" << true),
-                      oplogEntries[2].getObject());
-    ASSERT_BSONOBJ_EQ(BSON("applyOps"
-                           << BSON_ARRAY(BSON("op"
-                                              << "d"
-                                              << "ns" << nss1.toString() << "ui" << uuid1 << "o"
-                                              << BSON("_id" << 1) << "preImageOpTime"
-                                              << oplogEntries[1].getOpTime()))
-                           << "count" << 2),
-                      oplogEntries[3].getObject());
-}
-
-TEST_F(OpObserverMultiEntryTransactionTest, PreparedTransactionPreImageTest) {
-    auto txnParticipant = TransactionParticipant::get(opCtx());
-    txnParticipant.unstashTransactionResources(opCtx(), "txntest");
-
-    CollectionUpdateArgs updateArgs1;
-    const auto updateSpec = BSON("$set" << BSON("data"
-                                                << "x"));
-    const auto updatePreImage = BSON("_id" << 0 << "data"
-                                           << "y");
-    const auto updatePostImage = BSON("_id" << 0 << "data"
-                                            << "x");
-    const auto updateFilter = BSON("_id" << 0);
-
-    updateArgs1.stmtIds = {0};
-    updateArgs1.updatedDoc = updatePostImage;
-    updateArgs1.update = updateSpec;
-    updateArgs1.preImageDoc = updatePreImage;
-    updateArgs1.preImageRecordingEnabledForCollection = true;
-    updateArgs1.criteria = updateFilter;
-    OplogUpdateEntryArgs update1(&updateArgs1, nss1, uuid1);
-
-    AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
-    opObserver().onUpdate(opCtx(), update1);
-
-    const auto deletedDoc = BSON("_id" << 1 << "data"
-                                       << "z");
-    OplogDeleteEntryArgs args;
-    args.deletedDoc = &deletedDoc;
-    args.preImageRecordingEnabledForCollection = true;
-    opObserver().aboutToDelete(opCtx(), nss1, uuid1, deletedDoc);
-    opObserver().onDelete(opCtx(), nss1, uuid1, 0, args);
-
-    auto reservedSlots = reserveOpTimesInSideTransaction(opCtx(), 4);
-    auto prepareOpTime = reservedSlots.back();
-    txnParticipant.transitionToPreparedforTest(opCtx(), prepareOpTime);
-    prepareTransaction(reservedSlots, prepareOpTime, 2);
-
-    txnParticipant.stashTransactionResources(opCtx());
-    auto oplogEntryObjs = getNOplogEntries(opCtx(), 4);
-    std::vector<OplogEntry> oplogEntries;
-    mongo::repl::OpTime expectedPrevWriteOpTime;
-    for (const auto& oplogEntryObj : oplogEntryObjs) {
-        oplogEntries.push_back(assertGet(OplogEntry::parse(oplogEntryObj)));
-        const auto& oplogEntry = oplogEntries.back();
-        if (oplogEntry.getOpType() == repl::OpTypeEnum::kNoop) {
-            continue;
-        }
-        checkSessionAndTransactionFields(oplogEntryObj);
-        ASSERT_TRUE(oplogEntry.getPrevWriteOpTimeInTransaction());
-        ASSERT_EQ(expectedPrevWriteOpTime, *oplogEntry.getPrevWriteOpTimeInTransaction());
-        ASSERT_LT(expectedPrevWriteOpTime.getTimestamp(), oplogEntry.getTimestamp());
-        expectedPrevWriteOpTime = repl::OpTime{oplogEntry.getTimestamp(), *oplogEntry.getTerm()};
-    }
-
-    ASSERT(oplogEntries[0].getOpType() == repl::OpTypeEnum::kNoop);
-    ASSERT_BSONOBJ_EQ(updatePreImage, oplogEntries[0].getObject());
-    ASSERT(oplogEntries[1].getOpType() == repl::OpTypeEnum::kNoop);
-    ASSERT_BSONOBJ_EQ(deletedDoc, oplogEntries[1].getObject());
-    ASSERT_BSONOBJ_EQ(BSON("applyOps"
-                           << BSON_ARRAY(BSON("op"
-                                              << "u"
-                                              << "ns" << nss1.toString() << "ui" << uuid1 << "o"
-                                              << updateSpec << "o2" << BSON("_id" << 0)
-                                              << "preImageOpTime" << oplogEntries[0].getOpTime()))
-                           << "partialTxn" << true),
-                      oplogEntries[2].getObject());
-    ASSERT_BSONOBJ_EQ(BSON("applyOps"
-                           << BSON_ARRAY(BSON("op"
-                                              << "d"
-                                              << "ns" << nss1.toString() << "ui" << uuid1 << "o"
-                                              << BSON("_id" << 1) << "preImageOpTime"
-                                              << oplogEntries[1].getOpTime()))
-                           << "prepare" << true << "count" << 2),
-                      oplogEntries[3].getObject());
-
-    txnParticipant.unstashTransactionResources(opCtx(), "abortTransaction");
-}
-
 TEST_F(OpObserverMultiEntryTransactionTest, TransactionalDeleteTest) {
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "delete");
@@ -3823,7 +3594,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalDeleteTest) {
                                           << "y"));
     opObserver().onDelete(opCtx(), nss2, uuid2, 0, {});
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
+    opObserver().onUnpreparedTransactionCommit(opCtx(), txnOps, 0);
     auto oplogEntryObjs = getNOplogEntries(opCtx(), 2);
     std::vector<OplogEntry> oplogEntries;
     mongo::repl::OpTime expectedPrevWriteOpTime;
@@ -4124,7 +3895,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, CommitPreparedTest) {
             opCtx(),
             commitSlot,
             commitTimestamp,
-            txnParticipant.retrieveCompletedTransactionOperations(opCtx()));
+            *txnParticipant.retrieveCompletedTransactionOperations(opCtx()));
     }
     oplogEntryObjs = getNOplogEntries(opCtx(), 3);
     const auto commitOplogObj = oplogEntryObjs.back();
@@ -4223,7 +3994,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, UnpreparedTransactionPackingTest) {
     opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
     opObserver().onInserts(opCtx(), *autoColl2, inserts2.begin(), inserts2.end(), false);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
+    opObserver().onUnpreparedTransactionCommit(opCtx(), txnOps, 0);
     auto oplogEntryObjs = getNOplogEntries(opCtx(), 1);
     std::vector<OplogEntry> oplogEntries;
     mongo::repl::OpTime expectedPrevWriteOpTime;
@@ -4372,7 +4143,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, CommitPreparedPackingTest) {
         opCtx(),
         commitSlot,
         commitTimestamp,
-        txnParticipant.retrieveCompletedTransactionOperations(opCtx()));
+        *txnParticipant.retrieveCompletedTransactionOperations(opCtx()));
 
     oplogEntryObjs = getNOplogEntries(opCtx(), 2);
     const auto commitOplogObj = oplogEntryObjs.back();
@@ -4431,7 +4202,7 @@ TEST_F(OpObserverLargeTransactionTest, LargeTransactionCreatesMultipleOplogEntri
     txnParticipant.addTransactionOperation(opCtx(), operation1);
     txnParticipant.addTransactionOperation(opCtx(), operation2);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    opObserver().onUnpreparedTransactionCommit(opCtx(), &txnOps, 0);
+    opObserver().onUnpreparedTransactionCommit(opCtx(), txnOps, 0);
     auto oplogEntryObjs = getNOplogEntries(opCtx(), 2);
     std::vector<OplogEntry> oplogEntries;
     mongo::repl::OpTime expectedPrevWriteOpTime;

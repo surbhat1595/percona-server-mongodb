@@ -46,7 +46,6 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/config.h"
 #include "mongo/db/server_options.h"
-#include "mongo/idl/server_parameter.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/logv2/log_component_settings.h"
@@ -272,12 +271,12 @@ StatusWith<BSONObj> applySetParameterOptions(const std::map<std::string, std::st
             return Status(ErrorCodes::BadValue,
                           "Cannot use --setParameter to set \"{}\" at startup"_format(name));
         BSONObjBuilder sub(summaryBuilder.subobjStart(name));
-        sp->append(nullptr, sub, "default");
-        Status status = sp->setFromString(value);
+        sp->append(nullptr, &sub, "default", boost::none);
+        Status status = sp->setFromString(value, boost::none);
         if (!status.isOK())
             return Status(ErrorCodes::BadValue,
                           "Bad value for parameter \"{}\": {}"_format(name, status.reason()));
-        sp->append(nullptr, sub, "value");
+        sp->append(nullptr, &sub, "value", boost::none);
     }
     return summaryBuilder.obj();
 }

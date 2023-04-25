@@ -36,6 +36,7 @@
 
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/exec/sbe/abt/abt_lower.h"
+#include "mongo/db/exec/sbe/match_path.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
 #include "mongo/db/exec/sbe/stages/column_scan.h"
 #include "mongo/db/exec/sbe/stages/filter.h"
@@ -913,7 +914,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                                {std::move(stage), std::move(relevantSlots)},
                                                reconstructedRecordSlot,
                                                csn->nodeId());
-        stage = std::move(outputStage.stage);
+        stage = outputStage.extractStage(csn->nodeId());
     }
 
     return {std::move(stage), std::move(outputs)};
@@ -989,7 +990,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                                {std::move(stage), std::move(relevantSlots)},
                                                outputs.get(kResult),
                                                root->nodeId());
-        stage = std::move(outputStage.stage);
+        stage = outputStage.extractStage(root->nodeId());
     }
 
     return {std::move(stage), std::move(outputs)};
@@ -1785,7 +1786,7 @@ SlotBasedStageBuilder::buildProjectionDefault(const QuerySolutionNode* root,
         size_t i = 0;
         sbe::IndexKeysInclusionSet patternBitSet;
         for (const auto& element : indexKeyPattern) {
-            FieldRef fieldRef{element.fieldNameStringData()};
+            sbe::MatchPath fieldRef{element.fieldNameStringData()};
             // Projection field paths are always leaf nodes. In other words, projection like
             // {a: 1, 'a.b': 1} would produce a path collision error.
             if (auto node = patternRoot->findLeafNode(fieldRef); node) {
@@ -1838,7 +1839,7 @@ SlotBasedStageBuilder::buildProjectionDefault(const QuerySolutionNode* root,
                                outputs.get(kResult),
                                root->nodeId());
 
-        resultStage = std::move(stage.stage);
+        resultStage = stage.extractStage(root->nodeId());
     }
 
     outputs.set(kResult, resultSlot);
@@ -1894,7 +1895,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                                {std::move(stage), std::move(relevantSlots)},
                                                outputs.get(kResult),
                                                root->nodeId());
-        stage = std::move(outputStage.stage);
+        stage = outputStage.extractStage(root->nodeId());
     }
 
     return {std::move(stage), std::move(outputs)};
@@ -2290,11 +2291,12 @@ EvalStage optimizeFieldPaths(StageBuilderState& state,
         if (!state.preGeneratedExprs.contains(fieldPathStr)) {
             auto [curEvalExpr, curEvalStage] = generateExpression(
                 state, fieldExpr, std::move(retEvalStage), optionalRootSlot, nodeId);
-            auto optionalFieldPathSlot = curEvalExpr.getSlot();
-            tassert(
-                6089300, "Must have a valid slot for "_format(fieldPathStr), optionalFieldPathSlot);
-            state.preGeneratedExprs.emplace(fieldPathStr, std::move(curEvalExpr));
-            retEvalStage = std::move(curEvalStage);
+
+            auto [slot, stage] = projectEvalExpr(
+                std::move(curEvalExpr), std::move(curEvalStage), nodeId, state.slotIdGenerator);
+
+            state.preGeneratedExprs.emplace(fieldPathStr, slot);
+            retEvalStage = std::move(stage);
         }
     });
 
@@ -2344,20 +2346,12 @@ std::tuple<sbe::value::SlotVector, EvalStage, std::unique_ptr<sbe::EExpression>>
                                        nodeId,
                                        slotIdGenerator);
 
-            if (auto optionalSlot = groupByEvalExpr.getSlot(); optionalSlot.has_value()) {
-                slots.push_back(*optionalSlot);
-                retEvalStage = std::move(groupByEvalStage);
-            } else {
-                // A projection stage is not generated from 'generateExpression'. So, generates one
-                // and binds the slot to the field name.
-                auto [slot, tempEvalStage] = projectEvalExpr(groupByEvalExpr.extractExpr(),
-                                                             std::move(groupByEvalStage),
-                                                             nodeId,
-                                                             slotIdGenerator);
-                slots.push_back(slot);
-                groupByEvalExpr = makeVariable(slot);
-                retEvalStage = std::move(tempEvalStage);
-            }
+            auto [slot, stage] = projectEvalExpr(
+                std::move(groupByEvalExpr), std::move(groupByEvalStage), nodeId, slotIdGenerator);
+
+            slots.push_back(slot);
+            groupByEvalExpr = slot;
+            retEvalStage = std::move(stage);
 
             exprs.emplace_back(makeConstant(fieldName));
             exprs.emplace_back(groupByEvalExpr.extractExpr());
@@ -2446,7 +2440,7 @@ std::tuple<std::vector<std::string>, sbe::value::SlotVector, EvalStage> generate
     PlanNodeId nodeId,
     sbe::value::SlotIdGenerator* slotIdGenerator) {
     sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>> prjSlotToExprMap;
-    sbe::value::SlotVector groupOutSlots{groupEvalStage.outSlots};
+    sbe::value::SlotVector groupOutSlots{groupEvalStage.getOutSlots()};
     // To passthrough the output slots of accumulators with trivial finalizers, we need to find
     // their slot ids. We can do this by sorting 'groupEvalStage.outSlots' because the slot ids
     // correspond to the order in which the accumulators were translated (that is, the order in
@@ -2614,7 +2608,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         5851603,
         "Group stage's output slots must include deduped slots for group-by keys and slots for all "
         "accumulators",
-        groupEvalStage.outSlots.size() ==
+        groupEvalStage.getOutSlots().size() ==
             std::accumulate(aggSlotsVec.begin(),
                             aggSlotsVec.end(),
                             dedupedGroupBySlots.size(),
@@ -2623,7 +2617,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             "Group stage's output slots must contain the deduped groupBySlots at the front",
             std::equal(dedupedGroupBySlots.begin(),
                        dedupedGroupBySlots.end(),
-                       groupEvalStage.outSlots.begin()));
+                       groupEvalStage.getOutSlots().begin()));
 
     // Builds the final stage(s) over the collected accumulators.
     auto [fieldNames, finalSlots, groupFinalEvalStage] =
@@ -2655,7 +2649,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         // This mkbson stage combines 'finalSlots' into a bsonObject result slot which has
         // 'fieldNames' fields.
         if (groupNode->shouldProduceBson) {
-            outStage = sbe::makeS<sbe::MakeBsonObjStage>(std::move(groupFinalEvalStage.stage),
+            outStage = sbe::makeS<sbe::MakeBsonObjStage>(groupFinalEvalStage.extractStage(nodeId),
                                                          outputs.get(kResult),  // objSlot
                                                          boost::none,           // rootSlot
                                                          boost::none,           // fieldBehavior
@@ -2666,7 +2660,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                                          false,                  // returnOldObject
                                                          nodeId);
         } else {
-            outStage = sbe::makeS<sbe::MakeObjStage>(std::move(groupFinalEvalStage.stage),
+            outStage = sbe::makeS<sbe::MakeObjStage>(groupFinalEvalStage.extractStage(nodeId),
                                                      outputs.get(kResult),        // objSlot
                                                      boost::none,                 // rootSlot
                                                      boost::none,                 // fieldBehavior
@@ -2682,7 +2676,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             outputs.set("CURRENT." + fieldNames[i], finalSlots[i]);
         };
 
-        outStage = std::move(groupFinalEvalStage.stage);
+        outStage = groupFinalEvalStage.extractStage(nodeId);
     }
 
     return {std::move(outStage), std::move(outputs)};
@@ -2962,7 +2956,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     std::unique_ptr<sbe::EExpression> bindShardKeyPart;
 
     for (auto&& keyPatternElem : shardKeyPattern) {
-        auto fieldRef = FieldRef{keyPatternElem.fieldNameStringData()};
+        auto fieldRef = sbe::MatchPath{keyPatternElem.fieldNameStringData()};
         fieldSlots.push_back(_slotIdGenerator.generate());
         projectFields.push_back(fieldRef.dottedField().toString());
 

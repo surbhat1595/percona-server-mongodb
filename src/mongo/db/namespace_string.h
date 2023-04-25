@@ -67,6 +67,9 @@ public:
     // Namespace for the local database
     static constexpr StringData kLocalDb = "local"_sd;
 
+    // Namespace for the system database
+    static constexpr StringData kSystemDb = "system"_sd;
+
     // Namespace for the sharding config database
     static constexpr StringData kConfigDb = "config"_sd;
 
@@ -102,6 +105,10 @@ public:
 
     // Prefix for time-series buckets collection.
     static constexpr StringData kTimeseriesBucketsCollectionPrefix = "system.buckets."_sd;
+
+    // Prefix for global index container collections. These collections belong to the system
+    // database.
+    static constexpr StringData kGlobalIndexCollectionPrefix = "globalIndexes."_sd;
 
     // Namespace for storing configuration data, which needs to be replicated if the server is
     // running as a replica set. Documents in this collection should represent some configuration
@@ -230,6 +237,9 @@ public:
     // Namespace used for storing the list of shards on the CSRS.
     static const NamespaceString kConfigsvrShardsNamespace;
 
+    // Namespace used for storing the list of sharded collections on the CSRS.
+    static const NamespaceString kConfigsvrCollectionsNamespace;
+
     // Namespace used for storing the index catalog on the CSRS.
     static const NamespaceString kConfigsvrIndexCatalogNamespace;
 
@@ -250,6 +260,9 @@ public:
 
     // Namespace used to store the state document of 'SetChangeStreamStateCoordinator'.
     static const NamespaceString kSetChangeStreamStateCoordinatorNamespace;
+
+    // Namespace used for storing global index cloner state documents.
+    static const NamespaceString kGlobalIndexClonerNamespace;
 
     /**
      * Constructs an empty NamespaceString.
@@ -349,6 +362,11 @@ public:
      * namespace is "<dbName>.$cmd.listCollections".
      */
     static NamespaceString makeListCollectionsNSS(const DatabaseName& dbName);
+
+    /**
+     * Constructs a NamespaceString for the specified global index.
+     */
+    static NamespaceString makeGlobalIndexNSS(const UUID& uuid);
 
     /**
      * Constructs the cluster parameters NamespaceString for the specified tenant. The format for

@@ -30,12 +30,13 @@ global:
     cpp_namespace: "mongo"
 
 imports:
-    - "mongo/idl/basic_types.idl"
+    - "mongo/db/basic_types.idl"
 
 structs:
     AuthenticateReply:
         description: "Response for MONGODB-X509 authenticate command"
         strict: true
+        is_command_reply: true
         fields:
             dbname:
                 description: "Name of the database the user is authenticating to"

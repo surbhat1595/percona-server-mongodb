@@ -37,6 +37,7 @@
 #include "mongo/db/session/session_txn_record_gen.h"
 #include "mongo/db/transaction/internal_transactions_reap_service.h"
 #include "mongo/db/transaction/internal_transactions_reap_service_gen.h"
+#include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 
 namespace mongo {
 namespace {
@@ -60,7 +61,13 @@ protected:
 
         auto replCoord = repl::ReplicationCoordinator::get(opCtx);
         ASSERT_OK(replCoord->setFollowerMode(repl::MemberState::RS_PRIMARY));
-        MongoDSessionCatalog::onStepUp(opCtx);
+
+        MongoDSessionCatalog::set(
+            service,
+            std::make_unique<MongoDSessionCatalog>(
+                std::make_unique<MongoDSessionCatalogTransactionInterfaceImpl>()));
+        auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
+        mongoDSessionCatalog->onStepUp(opCtx);
 
         // Lower the reap threshold for faster tests.
         _originalInternalSessionsReapThreshold = internalSessionsReapThreshold.load();

@@ -46,6 +46,7 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/transaction/server_transactions_metrics.h"
+#include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/stdx/future.h"
@@ -70,7 +71,6 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
                                 boost::optional<repl::OpTime> prevWriteOpTimeInTransaction) {
     return {repl::DurableOplogEntry(
         opTime,                        // optime
-        0,                             // hash
         opType,                        // opType
         kNss,                          // namespace
         boost::none,                   // uuid
@@ -186,7 +186,12 @@ protected:
         MockReplCoordServerFixture::setUp();
         const auto service = opCtx()->getServiceContext();
         repl::StorageInterface::set(service, std::make_unique<repl::StorageInterfaceImpl>());
-        MongoDSessionCatalog::onStepUp(opCtx());
+        MongoDSessionCatalog::set(
+            service,
+            std::make_unique<MongoDSessionCatalog>(
+                std::make_unique<MongoDSessionCatalogTransactionInterfaceImpl>()));
+        auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx());
+        mongoDSessionCatalog->onStepUp(opCtx());
 
         const auto opObserverRegistry = dynamic_cast<OpObserverRegistry*>(service->getOpObserver());
         opObserverRegistry->addObserver(std::make_unique<OpObserverMock>());

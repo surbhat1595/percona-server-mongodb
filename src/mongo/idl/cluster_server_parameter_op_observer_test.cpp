@@ -45,6 +45,8 @@ const std::vector<NamespaceString> kIgnoredNamespaces = {
     NamespaceString("local"_sd, "clusterParameters"_sd),
     NamespaceString("test"_sd, "foo"_sd)};
 
+typedef ClusterParameterWithStorage<ClusterServerParameterTest> ClusterTestParameter;
+
 class ClusterServerParameterOpObserverTest : public ClusterServerParameterTestBase {
 public:
     void setUp() override {
@@ -128,17 +130,16 @@ public:
     // Asserts that the parameter state does not change for this action.
     template <typename F>
     void assertIgnored(const NamespaceString& nss, F fn) {
-        auto* sp = ServerParameterSet::getClusterParameterSet()
-                       ->get<IDLServerParameterWithStorage<ServerParameterType::kClusterWide,
-                                                           ClusterServerParameterTest>>(kCSPTest);
+        auto* sp =
+            ServerParameterSet::getClusterParameterSet()->get<ClusterTestParameter>(kCSPTest);
         ASSERT(sp != nullptr);
 
-        const auto initialCPTime = sp->getClusterParameterTime();
-        ClusterServerParameterTest initialCspTest = sp->getValue();
+        const auto initialCPTime = sp->getClusterParameterTime(boost::none);
+        ClusterServerParameterTest initialCspTest = sp->getValue(boost::none);
         fn(nss);
-        ClusterServerParameterTest finalCspTest = sp->getValue();
+        ClusterServerParameterTest finalCspTest = sp->getValue(boost::none);
 
-        ASSERT_EQ(sp->getClusterParameterTime(), initialCPTime);
+        ASSERT_EQ(sp->getClusterParameterTime(boost::none), initialCPTime);
         ASSERT_EQ(finalCspTest.getIntValue(), initialCspTest.getIntValue());
         ASSERT_EQ(finalCspTest.getStrValue(), initialCspTest.getStrValue());
     }
@@ -151,12 +152,11 @@ public:
         upsert(doc);
         doInserts(NamespaceString::kClusterParametersNamespace, {doc});
 
-        auto* sp = ServerParameterSet::getClusterParameterSet()
-                       ->get<IDLServerParameterWithStorage<ServerParameterType::kClusterWide,
-                                                           ClusterServerParameterTest>>(kCSPTest);
+        auto* sp =
+            ServerParameterSet::getClusterParameterSet()->get<ClusterTestParameter>(kCSPTest);
         ASSERT(sp != nullptr);
 
-        ClusterServerParameterTest cspTest = sp->getValue();
+        ClusterServerParameterTest cspTest = sp->getValue(boost::none);
         ASSERT_EQ(cspTest.getIntValue(), kInitialIntValue);
         ASSERT_EQ(cspTest.getStrValue(), kInitialStrValue);
 
@@ -183,23 +183,21 @@ protected:
 };
 
 TEST_F(ClusterServerParameterOpObserverTest, OnInsertRecord) {
-    auto* sp = ServerParameterSet::getClusterParameterSet()
-                   ->get<IDLServerParameterWithStorage<ServerParameterType::kClusterWide,
-                                                       ClusterServerParameterTest>>(kCSPTest);
+    auto* sp = ServerParameterSet::getClusterParameterSet()->get<ClusterTestParameter>(kCSPTest);
     ASSERT(sp != nullptr);
 
     // Single record insert.
-    const auto initialLogicalTime = sp->getClusterParameterTime();
+    const auto initialLogicalTime = sp->getClusterParameterTime(boost::none);
     const auto singleLogicalTime = initialLogicalTime.addTicks(1);
-    const auto singleIntValue = sp->getValue().getIntValue() + 1;
+    const auto singleIntValue = sp->getValue(boost::none).getIntValue() + 1;
     const auto singleStrValue = "OnInsertRecord.single";
 
     ASSERT_LT(initialLogicalTime, singleLogicalTime);
     doInserts(NamespaceString::kClusterParametersNamespace,
               {makeClusterParametersDoc(singleLogicalTime, singleIntValue, singleStrValue)});
 
-    ClusterServerParameterTest cspTest = sp->getValue();
-    ASSERT_EQ(sp->getClusterParameterTime(), singleLogicalTime);
+    ClusterServerParameterTest cspTest = sp->getValue(boost::none);
+    ASSERT_EQ(sp->getClusterParameterTime(boost::none), singleLogicalTime);
     ASSERT_EQ(cspTest.getIntValue(), singleIntValue);
     ASSERT_EQ(cspTest.getStrValue(), singleStrValue);
 
@@ -216,8 +214,8 @@ TEST_F(ClusterServerParameterOpObserverTest, OnInsertRecord) {
                   BSON(ClusterServerParameter::k_idFieldName << "alsoIgnored"),
               });
 
-    cspTest = sp->getValue();
-    ASSERT_EQ(sp->getClusterParameterTime(), multiLogicalTime);
+    cspTest = sp->getValue(boost::none);
+    ASSERT_EQ(sp->getClusterParameterTime(boost::none), multiLogicalTime);
     ASSERT_EQ(cspTest.getIntValue(), multiIntValue);
     ASSERT_EQ(cspTest.getStrValue(), multiStrValue);
 
@@ -251,23 +249,21 @@ TEST_F(ClusterServerParameterOpObserverTest, OnInsertRecord) {
 
 TEST_F(ClusterServerParameterOpObserverTest, OnUpdateRecord) {
     initializeState();
-    auto* sp = ServerParameterSet::getClusterParameterSet()
-                   ->get<IDLServerParameterWithStorage<ServerParameterType::kClusterWide,
-                                                       ClusterServerParameterTest>>(kCSPTest);
+    auto* sp = ServerParameterSet::getClusterParameterSet()->get<ClusterTestParameter>(kCSPTest);
     ASSERT(sp != nullptr);
 
     // Single record update.
-    const auto initialLogicalTime = sp->getClusterParameterTime();
+    const auto initialLogicalTime = sp->getClusterParameterTime(boost::none);
     const auto singleLogicalTime = initialLogicalTime.addTicks(1);
-    const auto singleIntValue = sp->getValue().getIntValue() + 1;
+    const auto singleIntValue = sp->getValue(boost::none).getIntValue() + 1;
     const auto singleStrValue = "OnUpdateRecord.single";
     ASSERT_LT(initialLogicalTime, singleLogicalTime);
 
     doUpdate(NamespaceString::kClusterParametersNamespace,
              makeClusterParametersDoc(singleLogicalTime, singleIntValue, singleStrValue));
 
-    ClusterServerParameterTest cspTest = sp->getValue();
-    ASSERT_EQ(sp->getClusterParameterTime(), singleLogicalTime);
+    ClusterServerParameterTest cspTest = sp->getValue(boost::none);
+    ASSERT_EQ(sp->getClusterParameterTime(boost::none), singleLogicalTime);
     ASSERT_EQ(cspTest.getIntValue(), singleIntValue);
     ASSERT_EQ(cspTest.getStrValue(), singleStrValue);
 
@@ -283,9 +279,7 @@ TEST_F(ClusterServerParameterOpObserverTest, OnUpdateRecord) {
 }
 
 TEST_F(ClusterServerParameterOpObserverTest, onDeleteRecord) {
-    auto* sp = ServerParameterSet::getClusterParameterSet()
-                   ->get<IDLServerParameterWithStorage<ServerParameterType::kClusterWide,
-                                                       ClusterServerParameterTest>>(kCSPTest);
+    auto* sp = ServerParameterSet::getClusterParameterSet()->get<ClusterTestParameter>(kCSPTest);
     ASSERT(sp != nullptr);
 
     const auto initialDoc = initializeState();
@@ -301,7 +295,7 @@ TEST_F(ClusterServerParameterOpObserverTest, onDeleteRecord) {
 
     // Reset configuration to defaults when we claim to have deleted the doc.
     doDelete(NamespaceString::kClusterParametersNamespace, initialDoc);
-    ClusterServerParameterTest cspTest = sp->getValue();
+    ClusterServerParameterTest cspTest = sp->getValue(boost::none);
     ASSERT_EQ(cspTest.getIntValue(), kDefaultIntValue);
     ASSERT_EQ(cspTest.getStrValue(), kDefaultStrValue);
 
@@ -309,7 +303,7 @@ TEST_F(ClusterServerParameterOpObserverTest, onDeleteRecord) {
     // Restore configured state, and delete without including deleteDoc reference.
     initializeState();
     doDelete(NamespaceString::kClusterParametersNamespace, initialDoc, false);
-    cspTest = sp->getValue();
+    cspTest = sp->getValue(boost::none);
     ASSERT_EQ(cspTest.getIntValue(), kDefaultIntValue);
     ASSERT_EQ(cspTest.getStrValue(), kDefaultStrValue);
 }
@@ -328,12 +322,10 @@ TEST_F(ClusterServerParameterOpObserverTest, onDropDatabase) {
     // Actually drop the config DB.
     doDropDatabase(kConfigDB);
 
-    auto* sp = ServerParameterSet::getClusterParameterSet()
-                   ->get<IDLServerParameterWithStorage<ServerParameterType::kClusterWide,
-                                                       ClusterServerParameterTest>>(kCSPTest);
+    auto* sp = ServerParameterSet::getClusterParameterSet()->get<ClusterTestParameter>(kCSPTest);
     ASSERT(sp != nullptr);
 
-    ClusterServerParameterTest cspTest = sp->getValue();
+    ClusterServerParameterTest cspTest = sp->getValue(boost::none);
     ASSERT_EQ(cspTest.getIntValue(), kDefaultIntValue);
     ASSERT_EQ(cspTest.getStrValue(), kDefaultStrValue);
 }
@@ -346,9 +338,7 @@ TEST_F(ClusterServerParameterOpObserverTest, onRenameCollection) {
     assertIgnoredOtherNamespaces([&](const auto& nss) { doRenameCollection(nss, kTestFoo); });
     assertIgnoredOtherNamespaces([&](const auto& nss) { doRenameCollection(kTestFoo, nss); });
 
-    auto* sp = ServerParameterSet::getClusterParameterSet()
-                   ->get<IDLServerParameterWithStorage<ServerParameterType::kClusterWide,
-                                                       ClusterServerParameterTest>>(kCSPTest);
+    auto* sp = ServerParameterSet::getClusterParameterSet()->get<ClusterTestParameter>(kCSPTest);
     ASSERT(sp != nullptr);
 
     // These renames "work" despite not mutating durable state
@@ -356,13 +346,13 @@ TEST_F(ClusterServerParameterOpObserverTest, onRenameCollection) {
 
     // Rename away (and reset to default)
     doRenameCollection(NamespaceString::kClusterParametersNamespace, kTestFoo);
-    ClusterServerParameterTest cspTest = sp->getValue();
+    ClusterServerParameterTest cspTest = sp->getValue(boost::none);
     ASSERT_EQ(cspTest.getIntValue(), kDefaultIntValue);
     ASSERT_EQ(cspTest.getStrValue(), kDefaultStrValue);
 
     // Rename in (and restore to initialized state)
     doRenameCollection(kTestFoo, NamespaceString::kClusterParametersNamespace);
-    cspTest = sp->getValue();
+    cspTest = sp->getValue(boost::none);
     ASSERT_EQ(cspTest.getIntValue(), kInitialIntValue);
     ASSERT_EQ(cspTest.getStrValue(), kInitialStrValue);
 }
@@ -374,9 +364,7 @@ TEST_F(ClusterServerParameterOpObserverTest, onImportCollection) {
     // Import ignorable collections.
     assertIgnoredOtherNamespaces([&](const auto& nss) { doImportCollection(nss); });
 
-    auto* sp = ServerParameterSet::getClusterParameterSet()
-                   ->get<IDLServerParameterWithStorage<ServerParameterType::kClusterWide,
-                                                       ClusterServerParameterTest>>(kCSPTest);
+    auto* sp = ServerParameterSet::getClusterParameterSet()->get<ClusterTestParameter>(kCSPTest);
     ASSERT(sp != nullptr);
 
     // Import the collection (rescan).
@@ -384,7 +372,7 @@ TEST_F(ClusterServerParameterOpObserverTest, onImportCollection) {
         makeClusterParametersDoc(LogicalTime(Timestamp(time(nullptr))), 333, "onImportCollection");
     upsert(doc);
     doImportCollection(NamespaceString::kClusterParametersNamespace);
-    ClusterServerParameterTest cspTest = sp->getValue();
+    ClusterServerParameterTest cspTest = sp->getValue(boost::none);
     ASSERT_EQ(cspTest.getIntValue(), 333);
     ASSERT_EQ(cspTest.getStrValue(), "onImportCollection");
 }
@@ -396,22 +384,20 @@ TEST_F(ClusterServerParameterOpObserverTest, onReplicationRollback) {
     // Import ignorable collections.
     assertIgnoredOtherNamespaces([&](const auto& nss) { doImportCollection(nss); });
 
-    auto* sp = ServerParameterSet::getClusterParameterSet()
-                   ->get<IDLServerParameterWithStorage<ServerParameterType::kClusterWide,
-                                                       ClusterServerParameterTest>>(kCSPTest);
+    auto* sp = ServerParameterSet::getClusterParameterSet()->get<ClusterTestParameter>(kCSPTest);
     ASSERT(sp != nullptr);
 
     // Trigger rollback of ignorable namespaces.
     doReplicationRollback(kIgnoredNamespaces);
 
-    ClusterServerParameterTest cspTest = sp->getValue();
+    ClusterServerParameterTest cspTest = sp->getValue(boost::none);
     ASSERT_EQ(cspTest.getIntValue(), kInitialIntValue);
     ASSERT_EQ(cspTest.getStrValue(), kInitialStrValue);
 
     // Trigger rollback of relevant namespace.
     remove();
     doReplicationRollback({NamespaceString::kClusterParametersNamespace});
-    cspTest = sp->getValue();
+    cspTest = sp->getValue(boost::none);
     ASSERT_EQ(cspTest.getIntValue(), kDefaultIntValue);
     ASSERT_EQ(cspTest.getStrValue(), kDefaultStrValue);
 
@@ -419,7 +405,7 @@ TEST_F(ClusterServerParameterOpObserverTest, onReplicationRollback) {
     auto doc = makeClusterParametersDoc(
         LogicalTime(Timestamp(time(nullptr))), 444, "onReplicationRollback");
     upsert(doc);
-    cspTest = sp->getValue();
+    cspTest = sp->getValue(boost::none);
     doReplicationRollback({NamespaceString::kClusterParametersNamespace});
     ASSERT_EQ(cspTest.getIntValue(), kDefaultIntValue);
     ASSERT_EQ(cspTest.getStrValue(), kDefaultStrValue);

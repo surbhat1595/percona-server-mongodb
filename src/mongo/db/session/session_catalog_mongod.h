@@ -30,13 +30,31 @@
 #pragma once
 
 #include "mongo/db/session/session_catalog.h"
+#include "mongo/db/session/session_catalog_mongod_transaction_interface.h"
 
 namespace mongo {
 
 class SessionsCollection;
 
 class MongoDSessionCatalog {
+    MongoDSessionCatalog(const MongoDSessionCatalog&) = delete;
+    MongoDSessionCatalog& operator=(const MongoDSessionCatalog&) = delete;
+
 public:
+    class CheckoutTag {};
+
+    /**
+     * Retrieves the mongod session transaction table associated with the service or operation
+     * context.
+     */
+    static MongoDSessionCatalog* get(OperationContext* opCtx);
+    static MongoDSessionCatalog* get(ServiceContext* service);
+
+    /**
+     * Sets the mongod session transaction table associated with the service or operation context.
+     */
+    static void set(ServiceContext* service, std::unique_ptr<MongoDSessionCatalog> sessionCatalog);
+
     static const std::string kConfigTxnsPartialIndexName;
 
     // The max batch size is chosen so that a single batch won't exceed the 16MB BSON object size
@@ -49,12 +67,14 @@ public:
      */
     static BSONObj getConfigTxnPartialIndexSpec();
 
+    explicit MongoDSessionCatalog(std::unique_ptr<MongoDSessionCatalogTransactionInterface> ti);
+
     /**
      * Invoked when the node enters the primary state. Ensures that the transactions collection is
      * created. Throws on severe exceptions due to which it is not safe to continue the step-up
      * process.
      */
-    static void onStepUp(OperationContext* opCtx);
+    void onStepUp(OperationContext* opCtx);
 
     /**
      * Fetches the UUID of the transaction table, or an empty optional if the collection does not
@@ -62,21 +82,20 @@ public:
      *
      * Required for rollback via refetch.
      */
-    static boost::optional<UUID> getTransactionTableUUID(OperationContext* opCtx);
+    boost::optional<UUID> getTransactionTableUUID(OperationContext* opCtx);
 
     /**
      * Callback to be invoked in response to insert/update/delete of 'config.transactions' in order
      * to notify the session catalog that the on-disk contents are out of sync with the in-memory
      * state. The 'singleSessionDoc' must contain the _id of the session which was updated.
      */
-    static void observeDirectWriteToConfigTransactions(OperationContext* opCtx,
-                                                       BSONObj singleSessionDoc);
+    void observeDirectWriteToConfigTransactions(OperationContext* opCtx, BSONObj singleSessionDoc);
 
     /**
      * Callback to be invoked when the contents of 'config.transactions' are out of sync with that
      * in the in-memory catalog, such as when rollback happens or drop of 'config.transactions'.
      */
-    static void invalidateAllSessions(OperationContext* opCtx);
+    void invalidateAllSessions(OperationContext* opCtx);
 
     /**
      * Locates session entries from the in-memory catalog and in 'config.transactions' which have
@@ -84,15 +103,87 @@ public:
      *
      * Returns the number of sessions, which were reaped from the persisted store on disk.
      */
-    static int reapSessionsOlderThan(OperationContext* opCtx,
-                                     SessionsCollection& sessionsCollection,
-                                     Date_t possiblyExpired);
+    int reapSessionsOlderThan(OperationContext* opCtx,
+                              SessionsCollection& sessionsCollection,
+                              Date_t possiblyExpired);
 
     /**
      * Deletes the given session ids from config.transactions and config.image_collection.
      */
-    static int removeSessionsTransactionRecords(OperationContext* opCtx,
-                                                const std::vector<LogicalSessionId>& lsidsToRemove);
+    int removeSessionsTransactionRecords(OperationContext* opCtx,
+                                         const std::vector<LogicalSessionId>& lsidsToRemove);
+
+    /**
+     * Functions to check out a session. Returns a scoped object that checks in the session on
+     * destruction.
+     */
+    class Session {
+        Session(const Session&) = delete;
+        Session& operator=(const Session&) = delete;
+
+    public:
+        Session() = default;
+        virtual ~Session() = default;
+
+        /**
+         * This method allows a checked-out session to be temporarily or permanently checked
+         * back in, in order to allow other operations to use it.
+         *
+         * Applies to Session objects returned by checkOutSession() only.
+         *
+         * May only be called if the session has actually been checked out previously.
+         */
+        virtual void checkIn(OperationContext* opCtx,
+                             OperationContextSession::CheckInReason reason) = 0;
+
+        /**
+         * Applies to Session objects returned by checkOutSession() only.
+         *
+         * May only be called if the session is not checked out already.
+         */
+        virtual void checkOut(OperationContext* opCtx) = 0;
+    };
+
+    /**
+     * Checks out the session specified in the passed operation context and stores it
+     * for later access by the command. The session is installed when this method returns
+     * and is removed at when the returned Session object goes out of scope.
+     */
+    std::unique_ptr<Session> checkOutSession(OperationContext* opCtx);
+
+    /**
+     * Similar to checkOutSession(), but marks the TransactionParticipant as valid without
+     * refreshing from disk and starts a new transaction unconditionally.
+     *
+     * Returns a scoped Session object that does not support checkIn() or checkOut().
+     *
+     * NOTE: Only used by the replication oplog application logic on secondaries in order to replay
+     * prepared transactions.
+     */
+    std::unique_ptr<Session> checkOutSessionWithoutRefresh(OperationContext* opCtx);
+
+    /**
+     * Similar to checkOutSession(), but marks the TransactionParticipant as valid without
+     * loading the retryable write oplog history.  If the last operation was a multi-document
+     * transaction, is equivalent to MongoDOperationContextSession.
+     *
+     * Returns a scoped Session object that does not support checkIn() or checkOut().
+     *
+     * NOTE: Should only be used when reading the oplog history is not possible.
+     */
+    std::unique_ptr<Session> checkOutSessionWithoutOplogRead(OperationContext* opCtx);
+
+    /**
+     * These are lower-level functions for checking in or out sessions without a scoped Session
+     * object (see checkOutSession*() functions above).
+     * Used to implement checkIn()/checkOut() in MongoDOperationContextSession.
+     */
+    void checkInUnscopedSession(OperationContext* opCtx,
+                                OperationContextSession::CheckInReason reason);
+    void checkOutUnscopedSession(OperationContext* opCtx);
+
+private:
+    std::unique_ptr<MongoDSessionCatalogTransactionInterface> _ti;
 };
 
 /**
@@ -100,9 +191,13 @@ public:
  * it for later access by the command. The session is installed at construction time and is removed
  * at destruction.
  */
-class MongoDOperationContextSession {
+class MongoDOperationContextSession : public MongoDSessionCatalog::Session {
+    MongoDOperationContextSession(const MongoDOperationContextSession&) = delete;
+    MongoDOperationContextSession& operator=(const MongoDOperationContextSession&) = delete;
+
 public:
-    MongoDOperationContextSession(OperationContext* opCtx);
+    MongoDOperationContextSession(OperationContext* opCtx,
+                                  MongoDSessionCatalogTransactionInterface* ti);
     ~MongoDOperationContextSession();
 
     /**
@@ -111,15 +206,16 @@ public:
      *
      * May only be called if the session has actually been checked out previously.
      */
-    static void checkIn(OperationContext* opCtx, OperationContextSession::CheckInReason reason);
+    void checkIn(OperationContext* opCtx, OperationContextSession::CheckInReason reason) override;
 
     /**
      * May only be called if the session is not checked out already.
      */
-    static void checkOut(OperationContext* opCtx);
+    void checkOut(OperationContext* opCtx) override;
 
 private:
     OperationContextSession _operationContextSession;
+    MongoDSessionCatalogTransactionInterface* _ti;
 };
 
 /**
@@ -129,14 +225,29 @@ private:
  * NOTE: Only used by the replication oplog application logic on secondaries in order to replay
  * prepared transactions.
  */
-class MongoDOperationContextSessionWithoutRefresh {
+class MongoDOperationContextSessionWithoutRefresh : public MongoDSessionCatalog::Session {
+    MongoDOperationContextSessionWithoutRefresh(
+        const MongoDOperationContextSessionWithoutRefresh&) = delete;
+    MongoDOperationContextSessionWithoutRefresh& operator=(
+        const MongoDOperationContextSessionWithoutRefresh&) = delete;
+
 public:
-    MongoDOperationContextSessionWithoutRefresh(OperationContext* opCtx);
+    MongoDOperationContextSessionWithoutRefresh(OperationContext* opCtx,
+                                                MongoDSessionCatalogTransactionInterface* ti);
     ~MongoDOperationContextSessionWithoutRefresh();
+
+    void checkIn(OperationContext* opCtx, OperationContextSession::CheckInReason reason) override {
+        MONGO_UNREACHABLE;
+    }
+
+    void checkOut(OperationContext* opCtx) override {
+        MONGO_UNREACHABLE;
+    }
 
 private:
     OperationContextSession _operationContextSession;
     OperationContext* const _opCtx;
+    MongoDSessionCatalogTransactionInterface* _ti;
 };
 
 /**
@@ -146,10 +257,24 @@ private:
  *
  * NOTE: Should only be used when reading the oplog history is not possible.
  */
-class MongoDOperationContextSessionWithoutOplogRead {
+class MongoDOperationContextSessionWithoutOplogRead : public MongoDSessionCatalog::Session {
+    MongoDOperationContextSessionWithoutOplogRead(
+        const MongoDOperationContextSessionWithoutOplogRead&) = delete;
+    MongoDOperationContextSessionWithoutOplogRead& operator=(
+        const MongoDOperationContextSessionWithoutOplogRead&) = delete;
+
 public:
-    MongoDOperationContextSessionWithoutOplogRead(OperationContext* opCtx);
+    MongoDOperationContextSessionWithoutOplogRead(OperationContext* opCtx,
+                                                  MongoDSessionCatalogTransactionInterface* ti);
     ~MongoDOperationContextSessionWithoutOplogRead();
+
+    void checkIn(OperationContext* opCtx, OperationContextSession::CheckInReason reason) override {
+        MONGO_UNREACHABLE;
+    }
+
+    void checkOut(OperationContext* opCtx) override {
+        MONGO_UNREACHABLE;
+    }
 
 private:
     OperationContextSession _operationContextSession;

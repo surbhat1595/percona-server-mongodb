@@ -81,6 +81,7 @@ let viewsCommandTests = {
     _addShard: {skip: isAnInternalCommand},
     _cloneCatalogData: {skip: isAnInternalCommand},
     _cloneCollectionOptionsFromPrimaryShard: {skip: isAnInternalCommand},
+    _clusterQueryWithoutShardKey: {skip: isAnInternalCommand},
     _configsvrAbortReshardCollection: {skip: isAnInternalCommand},
     _configsvrAddShard: {skip: isAnInternalCommand},
     _configsvrAddShardToZone: {skip: isAnInternalCommand},
@@ -103,13 +104,7 @@ let viewsCommandTests = {
     },  // TODO SERVER-62374: remove this once 5.3 becomes last continuos release
     _configsvrConfigureCollectionBalancing: {skip: isAnInternalCommand},
     _configsvrCreateDatabase: {skip: isAnInternalCommand},
-    _configsvrDropCollection:
-        {skip: isAnInternalCommand},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
-    _configsvrDropDatabase:
-        {skip: isAnInternalCommand},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrDropIndexCatalogEntry: {skip: isAnInternalCommand},
-    _configsvrEnableSharding:
-        {skip: isAnInternalCommand},  // TODO (SERVER-58843): Remove once 6.0 becomes last LTS
     _configsvrEnsureChunkVersionIsGreaterThan: {skip: isAnInternalCommand},
     _configsvrMoveChunk: {skip: isAnInternalCommand},  // Can be removed once 6.0 is last LTS
     _configsvrMovePrimary: {skip: isAnInternalCommand},
@@ -127,8 +122,6 @@ let viewsCommandTests = {
     _configsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _configsvrSetClusterParameter: {skip: isAnInternalCommand},
     _configsvrSetUserWriteBlockMode: {skip: isAnInternalCommand},
-    _configsvrShardCollection:
-        {skip: isAnInternalCommand},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrUpdateZoneKeyRange: {skip: isAnInternalCommand},
     _flushDatabaseCacheUpdates: {skip: isUnrelated},
     _flushDatabaseCacheUpdatesWithWriteConcern: {skip: isUnrelated},
@@ -157,12 +150,15 @@ let viewsCommandTests = {
     _shardsvrDropCollectionParticipant: {skip: isAnInternalCommand},
     _shardsvrDropIndexCatalogEntryParticipant: {skip: isAnInternalCommand},
     _shardsvrDropIndexes: {skip: isAnInternalCommand},
+    _shardsvrInsertGlobalIndexKey: {skip: isAnInternalCommand},
     _shardsvrCleanupReshardCollection: {skip: isAnInternalCommand},
     _shardsvrRegisterIndex: {skip: isAnInternalCommand},
     _shardsvrCommitIndexParticipant: {skip: isAnInternalCommand},
     _shardsvrCommitReshardCollection: {skip: isAnInternalCommand},
     _shardsvrCreateCollection: {skip: isAnInternalCommand},
     _shardsvrCreateCollectionParticipant: {skip: isAnInternalCommand},
+    _shardsvrCreateGlobalIndex: {skip: isAnInternalCommand},
+    _shardsvrDropGlobalIndex: {skip: isAnInternalCommand},
     _shardsvrDropDatabase: {skip: isAnInternalCommand},
     _shardsvrDropDatabaseParticipant: {skip: isAnInternalCommand},
     _shardsvrGetStatsForBalancing: {skip: isAnInternalCommand},
@@ -184,8 +180,6 @@ let viewsCommandTests = {
     _shardsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _shardsvrSetClusterParameter: {skip: isAnInternalCommand},
     _shardsvrSetUserWriteBlockMode: {skip: isAnInternalCommand},
-    _shardsvrShardCollection:
-        {skip: isAnInternalCommand},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _shardsvrCollMod: {skip: isAnInternalCommand},
     _shardsvrCollModParticipant: {skip: isAnInternalCommand},
     _shardsvrParticipantBlock: {skip: isAnInternalCommand},
@@ -198,6 +192,12 @@ let viewsCommandTests = {
     addShardToZone: {skip: isUnrelated},
     aggregate: {command: {aggregate: "view", pipeline: [{$match: {}}], cursor: {}}},
     analyze: {skip: isUnrelated},
+    analyzeShardKey: {
+        command: {analyzeShardKey: "test.view", key: {skey: 1}},
+        skipStandalone: true,
+        expectFailure: true,
+        isAdminCommand: true,
+    },
     appendOplogNote: {skip: isUnrelated},
     applyOps: {
         command: {applyOps: [{op: "i", o: {_id: 1}, ns: "test.view"}]},
@@ -267,6 +267,12 @@ let viewsCommandTests = {
         skip: isUnrelated
     },  // TODO SERVER-62374: remove this once 5.3 becomes last continuos release
     configureCollectionBalancing: {skip: isUnrelated},
+    configureQueryAnalyzer: {
+        command: {configureQueryAnalyzer: "test.view", mode: "full", sampleRate: 1},
+        skipStandalone: true,
+        expectFailure: true,
+        isAdminCommand: true,
+    },
     connPoolStats: {skip: isUnrelated},
     connPoolSync: {skip: isUnrelated},
     connectionStatus: {skip: isUnrelated},
@@ -550,7 +556,6 @@ let viewsCommandTests = {
             skipSharded: true,
         }
     ],
-    repairDatabase: {skip: isUnrelated},
     repairShardedCollectionChunksHistory: {
         command: {repairShardedCollectionChunksHistory: "test.view"},
         skipStandalone: true,

@@ -35,6 +35,7 @@
 #include <utility>
 
 #include "mongo/db/exec/sbe/expressions/expression.h"
+#include "mongo/db/exec/sbe/match_path.h"
 #include "mongo/db/exec/sbe/stages/filter.h"
 #include "mongo/db/exec/sbe/stages/makeobj.h"
 #include "mongo/db/exec/sbe/stages/project.h"
@@ -192,11 +193,6 @@ std::unique_ptr<sbe::PlanStage> makeLimitCoScanTree(PlanNodeId planNodeId, long 
 EvalStage makeLimitCoScanStage(PlanNodeId planNodeId, long long limit = 1);
 
 /**
- * If 'stage.stage' is 'nullptr', return limit-1/coscan tree. Otherwise, return stage.
- */
-EvalStage stageOrLimitCoScan(EvalStage stage, PlanNodeId planNodeId, long long limit = 1);
-
-/**
  * Check if expression returns Nothing and return boolean false if so. Otherwise, return the
  * expression.
  */
@@ -320,7 +316,7 @@ std::unique_ptr<sbe::EExpression> makeNewObjFunction(FieldPair field, Ts... fiel
  *       if (isArray (l2.0), NOTHING, fillEmpty (l2.0, null)))
  */
 std::unique_ptr<sbe::EExpression> generateShardKeyBinding(
-    const FieldRef& keyPatternField,
+    const sbe::MatchPath& keyPatternField,
     sbe::value::FrameIdGenerator& frameIdGenerator,
     std::unique_ptr<sbe::EExpression> inputExpr,
     int level);
@@ -340,11 +336,9 @@ template <bool IsConst, bool IsEof = false>
 EvalStage makeFilter(EvalStage stage,
                      std::unique_ptr<sbe::EExpression> filter,
                      PlanNodeId planNodeId) {
-    stage = stageOrLimitCoScan(std::move(stage), planNodeId);
-
     return {sbe::makeS<sbe::FilterStage<IsConst, IsEof>>(
-                std::move(stage.stage), std::move(filter), planNodeId),
-            std::move(stage.outSlots)};
+                stage.extractStage(planNodeId), std::move(filter), planNodeId),
+            stage.extractOutSlots()};
 }
 
 EvalStage makeProject(EvalStage stage,
@@ -980,7 +974,7 @@ struct IndexKeyPatternTreeNode {
      * nullptr for field path "a". On the other hand, this method will return corresponding node for
      * field path "a.b".
      */
-    IndexKeyPatternTreeNode* findLeafNode(const FieldRef& fieldRef, size_t currentIndex = 0) {
+    IndexKeyPatternTreeNode* findLeafNode(const sbe::MatchPath& fieldRef, size_t currentIndex = 0) {
         if (currentIndex == fieldRef.numParts()) {
             if (children.empty()) {
                 return this;

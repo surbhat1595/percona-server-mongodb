@@ -31,8 +31,8 @@
 
 #include <queue>
 
-#include "mongo/db/query/optimizer/cascades/logical_rewriter_rules.h"
 #include "mongo/db/query/optimizer/cascades/memo.h"
+#include "mongo/db/query/optimizer/cascades/rewriter_rules.h"
 #include "mongo/db/query/optimizer/utils/utils.h"
 
 namespace mongo::optimizer::cascades {
@@ -62,6 +62,7 @@ public:
                     PrefixId& prefixId,
                     RewriteSet rewriteSet,
                     const QueryHints& hints,
+                    const PathToIntervalFn& pathToInterval,
                     bool useHeuristicCE);
 
     LogicalRewriter() = delete;
@@ -71,6 +72,7 @@ public:
     GroupIdType addRootNode(const ABT& node);
     std::pair<GroupIdType, NodeIdSet> addNode(const ABT& node,
                                               GroupIdType targetGroupId,
+                                              LogicalRewriteType rule,
                                               bool addExistingNodeWithNewChild);
     void clearGroup(GroupIdType groupId);
 
@@ -90,21 +92,21 @@ public:
     static const RewriteSet& getSubstitutionSet();
 
 private:
-    using RewriteFn =
-        std::function<void(LogicalRewriter* rewriter, const MemoLogicalNodeId nodeId)>;
+    using RewriteFn = std::function<void(
+        LogicalRewriter* rewriter, const MemoLogicalNodeId nodeId, const LogicalRewriteType rule)>;
     using RewriteFnMap = opt::unordered_map<LogicalRewriteType, RewriteFn>;
 
     /**
      * Attempts to perform a reordering rewrite specified by the R template argument.
      */
     template <class AboveType, class BelowType, template <class, class> class R>
-    void bindAboveBelow(MemoLogicalNodeId nodeMemoId);
+    void bindAboveBelow(MemoLogicalNodeId nodeMemoId, LogicalRewriteType rule);
 
     /**
      * Attempts to perform a simple rewrite specified by the R template argument.
      */
     template <class Type, template <class> class R>
-    void bindSingleNode(MemoLogicalNodeId nodeMemoId);
+    void bindSingleNode(MemoLogicalNodeId nodeMemoId, LogicalRewriteType rule);
 
     void registerRewrite(LogicalRewriteType rewriteType, RewriteFn fn);
     void initializeRewrites();
@@ -122,6 +124,7 @@ private:
     Memo& _memo;
     PrefixId& _prefixId;
     const QueryHints& _hints;
+    const PathToIntervalFn& _pathToInterval;
 
     RewriteFnMap _rewriteMap;
 

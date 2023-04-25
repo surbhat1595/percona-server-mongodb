@@ -32,7 +32,7 @@ global:
     cpp_namespace: "mongo::feature_flags"
 
 imports:
-    - "mongo/idl/basic_types.idl"
+    - "mongo/db/basic_types.idl"
 
 feature_flags:
     featureFlagAlwaysCreateConfigTransactionsPartialIndexOnStepUp:
@@ -47,5 +47,5 @@ feature_flags:
 
     featureFlagUpdateOneWithoutShardKey:
         description: Feature flag to enable updateOne, deleteOne, and findAndModify without a shard key or _id equality in their filter against a sharded collection.
-        cpp_varname: gfeatureFlagUpdateOneWithoutShardKey
+        cpp_varname: gFeatureFlagUpdateOneWithoutShardKey
         default: false

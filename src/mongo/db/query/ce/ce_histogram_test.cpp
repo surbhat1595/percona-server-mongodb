@@ -29,7 +29,9 @@
 
 #include "mongo/db/query/ce/ce_histogram.h"
 #include "mongo/db/query/ce/ce_test_utils.h"
+#include "mongo/db/query/ce/collection_statistics_mock.h"
 #include "mongo/db/query/ce/histogram_estimation.h"
+#include "mongo/db/query/optimizer/utils/unit_test_utils.h"
 #include "mongo/db/query/sbe_stage_builder_helpers.h"
 #include "mongo/unittest/unittest.h"
 
@@ -39,18 +41,23 @@ namespace {
 using namespace optimizer;
 using namespace cascades;
 
+std::string collName("test");
+
 class CEHistogramTester : public CETester {
 public:
-    CEHistogramTester(std::string collName, double numRecords, const CollectionStatistics& stats)
+    CEHistogramTester(std::string collName,
+                      double numRecords,
+                      std::shared_ptr<CollectionStatistics> stats)
         : CETester(collName, numRecords), _stats{stats} {}
 
 protected:
     std::unique_ptr<CEInterface> getCETransport() const override {
+        // making a copy of CollecitonStatistics to override
         return std::make_unique<CEHistogramTransport>(_stats);
     }
 
 private:
-    const CollectionStatistics& _stats;
+    std::shared_ptr<CollectionStatistics> _stats;
 };
 
 struct TestBucket {
@@ -63,7 +70,7 @@ struct TestBucket {
 std::unique_ptr<ArrayHistogram> getHistogramFromData(std::vector<TestBucket> testBuckets) {
     sbe::value::Array bounds;
     std::vector<Bucket> buckets;
-    std::map<sbe::value::TypeTags, size_t> typeCounts;
+    TypeCounts typeCounts;
 
     int cumulativeFreq = 0;
     int cumulativeNDV = 0;
@@ -95,19 +102,18 @@ std::unique_ptr<ArrayHistogram> getHistogramFromData(std::vector<TestBucket> tes
 }
 
 TEST(CEHistogramTest, AssertSmallMaxDiffHistogramEstimatesAtomicPredicates) {
-    const auto collName = "test";
     const auto collCardinality = 8;
 
-    CollectionStatistics collStats(collCardinality);
+    std::shared_ptr<CollectionStatistics> collStats(new CollectionStatisticsMock(collCardinality));
 
     // Construct a histogram with two buckets: one for 3 ints equal to 1, another for 5 strings
     // equal to "ing".
     const std::string& str = "ing";
-    collStats.addHistogram("a",
-                           getHistogramFromData({
-                               {Value(1), 3 /* frequency */},
-                               {Value(str), 5 /* frequency */},
-                           }));
+    collStats->addHistogram("a",
+                            getHistogramFromData({
+                                {Value(1), 3 /* frequency */},
+                                {Value(str), 5 /* frequency */},
+                            }));
 
     CEHistogramTester t(collName, collCardinality, collStats);
 
@@ -154,25 +160,24 @@ TEST(CEHistogramTest, AssertSmallMaxDiffHistogramEstimatesAtomicPredicates) {
 }
 
 TEST(CEHistogramTest, AssertSmallHistogramEstimatesComplexPredicates) {
-    const auto collName = "test";
     const auto collCardinality = 9;
 
-    CollectionStatistics collStats(collCardinality);
+    std::shared_ptr<CollectionStatistics> collStats(new CollectionStatisticsMock(collCardinality));
 
     // Construct a histogram with three int buckets for field 'a'.
-    collStats.addHistogram("a",
-                           getHistogramFromData({
-                               {Value(1), 3 /* frequency */},
-                               {Value(2), 5 /* frequency */},
-                               {Value(3), 1 /* frequency */},
-                           }));
+    collStats->addHistogram("a",
+                            getHistogramFromData({
+                                {Value(1), 3 /* frequency */},
+                                {Value(2), 5 /* frequency */},
+                                {Value(3), 1 /* frequency */},
+                            }));
 
     // Construct a histogram with two int buckets for field 'b'.
-    collStats.addHistogram("b",
-                           getHistogramFromData({
-                               {Value(22), 3 /* frequency */},
-                               {Value(33), 6 /* frequency */},
-                           }));
+    collStats->addHistogram("b",
+                            getHistogramFromData({
+                                {Value(22), 3 /* frequency */},
+                                {Value(33), 6 /* frequency */},
+                            }));
 
     CEHistogramTester t(collName, collCardinality, collStats);
 
@@ -206,11 +211,10 @@ TEST(CEHistogramTest, AssertSmallHistogramEstimatesComplexPredicates) {
 }
 
 TEST(CEHistogramTest, SanityTestEmptyHistogram) {
-    const auto collName = "test";
     const auto collCardinality = 0;
 
-    CollectionStatistics collStats(collCardinality);
-    collStats.addHistogram("empty", std::make_unique<ArrayHistogram>());
+    std::shared_ptr<CollectionStatistics> collStats(new CollectionStatisticsMock(collCardinality));
+    collStats->addHistogram("empty", std::make_unique<ArrayHistogram>());
     CEHistogramTester t(collName, collCardinality, collStats);
 
     ASSERT_MATCH_CE(t, "{empty: {$eq: 1.0}}", 0.0);
@@ -220,17 +224,16 @@ TEST(CEHistogramTest, SanityTestEmptyHistogram) {
 }
 
 TEST(CEHistogramTest, AssertOneBucketOneIntHistogram) {
-    const auto collName = "test";
     const auto collCardinality = 50;
 
-    CollectionStatistics collStats(collCardinality);
+    std::shared_ptr<CollectionStatistics> collStats(new CollectionStatisticsMock(collCardinality));
 
     // Create a histogram with a single bucket that contains exactly one int (42) with a frequency
     // of 50 (equal to the collection cardinality).
-    collStats.addHistogram("soloInt",
-                           getHistogramFromData({
-                               {Value(42), collCardinality /* frequency */},
-                           }));
+    collStats->addHistogram("soloInt",
+                            getHistogramFromData({
+                                {Value(42), collCardinality /* frequency */},
+                            }));
 
     CEHistogramTester t(collName, collCardinality, collStats);
 
@@ -279,12 +282,11 @@ TEST(CEHistogramTest, AssertOneBucketOneIntHistogram) {
 }
 
 TEST(CEHistogramTest, AssertOneBoundIntRangeHistogram) {
-    const auto collName = "test";
     const auto collCardinality = 51;
 
-    CollectionStatistics collStats(collCardinality);
+    std::shared_ptr<CollectionStatistics> collStats(new CollectionStatisticsMock(collCardinality));
 
-    collStats.addHistogram(
+    collStats->addHistogram(
         "intRange",
         getHistogramFromData({
             {Value(10), 5 /* frequency */},
@@ -306,24 +308,18 @@ TEST(CEHistogramTest, AssertOneBoundIntRangeHistogram) {
     ASSERT_MATCH_CE(t, "{intRange: {$eq: 20}}", 1.0);
     ASSERT_MATCH_CE(t, "{intRange: {$gte: 20}}", 1.0);
     ASSERT_MATCH_CE(t, "{intRange: {$gt: 10}}", 46.0);
-    ASSERT_MATCH_CE(t, "{intRange: {$gte: 15}}", 23.5);
+    ASSERT_MATCH_CE(t, "{intRange: {$gte: 15}}", 28.5);
     ASSERT_MATCH_CE(t, "{intRange: {$gt: 15}}", 23.5);
-    ASSERT_MATCH_CE(t, "{intRange: {$gte: 11}, intRange: {$lte: 20}}", 23.5);
-    ASSERT_MATCH_CE(t, "{intRange: {$gt: 11}, intRange: {$lte: 20}}", 23.5);
-    ASSERT_MATCH_CE(t, "{intRange: {$gte: 11}, intRange: {$lt: 20}}", 23.27);
-    ASSERT_MATCH_CE(t, "{intRange: {$gt: 11}, intRange: {$lt: 20}}", 23.27);
-    ASSERT_MATCH_CE(t, "{intRange: {$gt: 12}, intRange: {$lt: 15}}", 17.25);
-    ASSERT_MATCH_CE(t, "{intRange: {$gte: 12}, intRange: {$lt: 15}}", 17.25);
-    ASSERT_MATCH_CE(t, "{intRange: {$gt: 12}, intRange: {$lte: 15}}", 17.25);
-    ASSERT_MATCH_CE(t, "{intRange: {$gte: 12}, intRange: {$lte: 15}}", 17.25);
+    ASSERT_MATCH_CE(t, "{intRange: {$gte: 11}, intRange: {$lte: 20}}", 46.5);
+    ASSERT_MATCH_CE(t, "{intRange: {$gt: 11}, intRange: {$lte: 20}}", 41.5);
 
     // Test ranges that partially overlap with the entire histogram.
-    ASSERT_MATCH_CE(t, "{intRange: {$lt: 11}}", 27.5);
-    ASSERT_MATCH_CE(t, "{intRange: {$lt: 15}}", 27.5);
+    ASSERT_MATCH_CE(t, "{intRange: {$lt: 11}}", 4.5);
+    ASSERT_MATCH_CE(t, "{intRange: {$lt: 15}}", 22.5);
     ASSERT_MATCH_CE(t, "{intRange: {$lte: 15}}", 27.5);
     ASSERT_MATCH_CE(t, "{intRange: {$gte: 8}, intRange: {$lte: 15}}", 27.5);
     ASSERT_MATCH_CE(t, "{intRange: {$gt: 8}, intRange: {$lte: 15}}", 27.5);
-    ASSERT_MATCH_CE(t, "{intRange: {$gt: 8}, intRange: {$lt: 15}}", 27.5);
+    ASSERT_MATCH_CE(t, "{intRange: {$gt: 8}, intRange: {$lt: 15}}", 22.5);
     ASSERT_MATCH_CE(t, "{intRange: {$gte: 8}, intRange: {$lte: 15}}", 27.5);
 
     // Test ranges that include all values in the histogram.
@@ -341,7 +337,6 @@ TEST(CEHistogramTest, AssertOneBoundIntRangeHistogram) {
     ASSERT_MATCH_CE(t, "{intRange: {$eq: 10.5}}", 5.0);
     ASSERT_MATCH_CE(t, "{intRange: {$eq: 12.5}}", 5.0);
     ASSERT_MATCH_CE(t, "{intRange: {$eq: 19.36}}", 5.0);
-    ASSERT_MATCH_CE(t, "{intRange: {$lt: 19}, intRange: {$gt: 11}}", 17.26);
 
     // Test ranges that don't overlap with the histogram.
     ASSERT_MATCH_CE(t, "{intRange: {$lt: 10}}", 0.0);
@@ -360,6 +355,56 @@ TEST(CEHistogramTest, AssertOneBoundIntRangeHistogram) {
     ASSERT_MATCH_CE(t, "{intRange: {$gt: 0}, intRange: {$lt: 5}}", 0.0);
     ASSERT_MATCH_CE(t, "{intRange: {$gte: 0}, intRange: {$lt: 5}}", 0.0);
     ASSERT_MATCH_CE(t, "{intRange: {$gt: 0}, intRange: {$lte: 5}}", 0.0);
+
+    // Because we don't specify any indexes here, these intervals do not go through simplification.
+    // This means that instead of having one key in the requirements map of the generated sargable
+    // node corresponding to the path "intRange", we have two keys and two ranges, both
+    // corresponding to the same path. As a consequence, we combine the estimates for the intervals
+    // using exponential backoff, which results in an overestimate.
+    ASSERT_MATCH_CE(t, "{intRange: {$gte: 11}, intRange: {$lt: 20}}", 46.04);
+    ASSERT_MATCH_CE(t, "{intRange: {$gt: 11}, intRange: {$lt: 20}}", 41.09);
+    ASSERT_MATCH_CE(t, "{intRange: {$gt: 12}, intRange: {$lt: 15}}", 19.16);
+    ASSERT_MATCH_CE(t, "{intRange: {$gte: 12}, intRange: {$lt: 15}}", 20.42);
+    ASSERT_MATCH_CE(t, "{intRange: {$gt: 12}, intRange: {$lte: 15}}", 23.42);
+    ASSERT_MATCH_CE(t, "{intRange: {$gte: 12}, intRange: {$lte: 15}}", 24.96);
+    ASSERT_MATCH_CE(t, "{intRange: {$lt: 19}, intRange: {$gt: 11}}", 36.53);
+
+    // When we specify that there is a non-multikey index on 'intRange', we expect to see interval
+    // simplification occurring, which should provide a better estimate for the following ranges.
+    t.setIndexes(
+        {{"intRangeIndex",
+          makeIndexDefinition("intRange", CollationOp::Ascending, /* isMultiKey */ false)}});
+    ASSERT_MATCH_CE(t, "{intRange: {$gte: 11}, intRange: {$lt: 20}}", 45.5);
+    ASSERT_MATCH_CE(t, "{intRange: {$gt: 11}, intRange: {$lt: 20}}", 40.5);
+    ASSERT_MATCH_CE(t, "{intRange: {$gt: 12}, intRange: {$lt: 15}}", 8.5);
+    ASSERT_MATCH_CE(t, "{intRange: {$gte: 12}, intRange: {$lt: 15}}", 13.5);
+    ASSERT_MATCH_CE(t, "{intRange: {$gt: 12}, intRange: {$lte: 15}}", 13.5);
+    ASSERT_MATCH_CE(t, "{intRange: {$gte: 12}, intRange: {$lte: 15}}", 18.5);
+    ASSERT_MATCH_CE(t, "{intRange: {$lt: 19}, intRange: {$gt: 11}}", 31.0);
+}
+
+TEST(CEHistogramTest, TestHistogramOnNestedPaths) {
+    const auto collCardinality = 50;
+
+    std::shared_ptr<CollectionStatistics> collStats(new CollectionStatisticsMock(collCardinality));
+
+    // Create a histogram with a single bucket that contains exactly one int (42) with a frequency
+    // of 50 (equal to the collection cardinality).
+    collStats->addHistogram("path",
+                            getHistogramFromData({
+                                {Value(42), collCardinality /* frequency */},
+                            }));
+    collStats->addHistogram("a.histogram.path",
+                            getHistogramFromData({
+                                {Value(42), collCardinality /* frequency */},
+                            }));
+
+    CEHistogramTester t(collName, collCardinality, collStats);
+
+    ASSERT_MATCH_CE(t, "{\"not.a.histogram.path\": {$eq: 42}}", 7.071 /* heuristic */);
+    ASSERT_MATCH_CE(t, "{\"a.histogram.path\": {$eq: 42}}", collCardinality);
+    ASSERT_MATCH_CE(
+        t, "{\"a.histogram.path.with.no.histogram\": {$eq: 42}}", 7.071 /* heuristic */);
 }
 
 }  // namespace

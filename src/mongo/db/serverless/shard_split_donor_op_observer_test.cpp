@@ -34,6 +34,7 @@
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/storage_interface_mock.h"
 #include "mongo/db/repl/tenant_migration_access_blocker_util.h"
+#include "mongo/db/serverless/serverless_operation_lock_registry.h"
 #include "mongo/db/serverless/shard_split_donor_op_observer.h"
 #include "mongo/db/serverless/shard_split_state_machine_gen.h"
 #include "mongo/db/serverless/shard_split_test_utils.h"
@@ -295,7 +296,7 @@ TEST_F(ShardSplitDonorOpObserverTest, UpdateBlockingDocumentPrimary) {
 
     auto stateDocument = defaultStateDocument();
     stateDocument.setState(ShardSplitDonorStateEnum::kBlocking);
-    stateDocument.setBlockTimestamp(Timestamp(1, 1));
+    stateDocument.setBlockOpTime(repl::OpTime(Timestamp(1, 1), 1));
 
     auto mtabVerifier = [opCtx = _opCtx.get()](std::shared_ptr<TenantMigrationAccessBlocker> mtab) {
         ASSERT_TRUE(mtab);
@@ -321,7 +322,7 @@ TEST_F(ShardSplitDonorOpObserverTest, UpdateBlockingDocumentSecondary) {
 
     auto stateDocument = defaultStateDocument();
     stateDocument.setState(ShardSplitDonorStateEnum::kBlocking);
-    stateDocument.setBlockTimestamp(Timestamp(1, 1));
+    stateDocument.setBlockOpTime(repl::OpTime(Timestamp(1, 1), 1));
 
     auto mtabVerifier = [opCtx = _opCtx.get()](std::shared_ptr<TenantMigrationAccessBlocker> mtab) {
         ASSERT_TRUE(mtab);
@@ -369,7 +370,7 @@ TEST_F(ShardSplitDonorOpObserverTest, TransitionToCommit) {
 
     auto stateDocument = defaultStateDocument();
     stateDocument.setState(ShardSplitDonorStateEnum::kCommitted);
-    stateDocument.setBlockTimestamp(Timestamp(1, 2));
+    stateDocument.setBlockOpTime(repl::OpTime(Timestamp(1, 2), 1));
     stateDocument.setCommitOrAbortOpTime(commitOpTime);
 
     auto blockers = createBlockersAndStartBlockingWrites(_tenantIds, _opCtx.get());
@@ -400,7 +401,7 @@ TEST_F(ShardSplitDonorOpObserverTest, TransitionToAbort) {
 
     auto stateDocument = defaultStateDocument();
     stateDocument.setState(ShardSplitDonorStateEnum::kAborted);
-    stateDocument.setBlockTimestamp(Timestamp(1, 2));
+    stateDocument.setBlockOpTime(repl::OpTime(Timestamp(1, 2), 1));
     stateDocument.setCommitOrAbortOpTime(abortOpTime);
     stateDocument.setAbortReason(bob.obj());
 
@@ -431,7 +432,7 @@ TEST_F(ShardSplitDonorOpObserverTest, SetExpireAtForAbortedRemoveBlockers) {
 
     auto stateDocument = defaultStateDocument();
     stateDocument.setState(ShardSplitDonorStateEnum::kAborted);
-    stateDocument.setBlockTimestamp(Timestamp(1, 2));
+    stateDocument.setBlockOpTime(repl::OpTime(Timestamp(1, 2), 1));
     stateDocument.setCommitOrAbortOpTime(abortOpTime);
     stateDocument.setAbortReason(bob.obj());
     stateDocument.setExpireAt(mongo::Date_t::fromMillisSinceEpoch(1000));
@@ -446,7 +447,13 @@ TEST_F(ShardSplitDonorOpObserverTest, SetExpireAtForAbortedRemoveBlockers) {
         ASSERT_FALSE(mtab);
     };
 
+    ServerlessOperationLockRegistry::get(_opCtx->getServiceContext())
+        .acquireLock(ServerlessOperationLockRegistry::LockType::kShardSplit, _uuid);
+
     runUpdateTestCase(stateDocument, _tenantIds, mtabVerifier);
+
+    ASSERT_FALSE(ServerlessOperationLockRegistry::get(_opCtx->getServiceContext())
+                     .getActiveOperationType_forTest());
 }
 
 TEST_F(ShardSplitDonorOpObserverTest, DeleteAbortedDocumentDoesNotRemoveBlockers) {
@@ -460,7 +467,7 @@ TEST_F(ShardSplitDonorOpObserverTest, DeleteAbortedDocumentDoesNotRemoveBlockers
 
     auto stateDocument = defaultStateDocument();
     stateDocument.setState(ShardSplitDonorStateEnum::kAborted);
-    stateDocument.setBlockTimestamp(Timestamp(1, 2));
+    stateDocument.setBlockOpTime(repl::OpTime(Timestamp(1, 2), 1));
     stateDocument.setCommitOrAbortOpTime(abortOpTime);
     stateDocument.setAbortReason(bob.obj());
     stateDocument.setExpireAt(mongo::Date_t::fromMillisSinceEpoch(1000));
@@ -502,7 +509,7 @@ TEST_F(ShardSplitDonorOpObserverTest, DeleteCommittedDocumentRemovesBlockers) {
 
     auto stateDocument = defaultStateDocument();
     stateDocument.setState(ShardSplitDonorStateEnum::kCommitted);
-    stateDocument.setBlockTimestamp(Timestamp(1, 2));
+    stateDocument.setBlockOpTime(repl::OpTime(Timestamp(1, 2), 1));
     stateDocument.setCommitOrAbortOpTime(commitOpTime);
     stateDocument.setExpireAt(mongo::Date_t::fromMillisSinceEpoch(1000));
 

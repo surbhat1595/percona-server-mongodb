@@ -58,6 +58,22 @@ public:
         _observers.push_back(std::move(observer));
     }
 
+    void onCreateGlobalIndex(OperationContext* opCtx,
+                             const NamespaceString& globalIndexNss,
+                             const UUID& globalIndexUUID) final {
+        ReservedTimes times{opCtx};
+        for (auto& o : _observers)
+            o->onCreateGlobalIndex(opCtx, globalIndexNss, globalIndexUUID);
+    };
+
+    void onDropGlobalIndex(OperationContext* opCtx,
+                           const NamespaceString& globalIndexNss,
+                           const UUID& globalIndexUUID) final {
+        ReservedTimes times{opCtx};
+        for (auto& o : _observers)
+            o->onDropGlobalIndex(opCtx, globalIndexNss, globalIndexUUID);
+    };
+
     void onCreateIndex(OperationContext* const opCtx,
                        const NamespaceString& nss,
                        const UUID& uuid,
@@ -129,6 +145,17 @@ public:
         ReservedTimes times{opCtx};
         for (auto& o : _observers)
             o->onInserts(opCtx, coll, begin, end, fromMigrate);
+    }
+
+    void onInsertGlobalIndexKey(OperationContext* opCtx,
+                                const NamespaceString& globalIndexNss,
+                                const UUID& globalIndexUuid,
+                                const BSONObj& key,
+                                const BSONObj& docKey) override {
+
+        ReservedTimes times{opCtx};
+        for (auto& o : _observers)
+            o->onInsertGlobalIndexKey(opCtx, globalIndexNss, globalIndexUuid, key, docKey);
     }
 
     void onUpdate(OperationContext* const opCtx, const OplogUpdateEntryArgs& args) override {

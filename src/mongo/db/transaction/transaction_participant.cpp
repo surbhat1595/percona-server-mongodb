@@ -1402,7 +1402,7 @@ void TransactionParticipant::Participant::_releaseTransactionResourcesToOpCtx(
     }
 
     if (acquireTicket == AcquireTicket::kSkip) {
-        stashLocker->skipAcquireTicket();
+        stashLocker->setAdmissionPriority(AdmissionContext::Priority::kImmediate);
     }
 
     tempTxnResourceStash->release(opCtx);
@@ -1597,7 +1597,7 @@ Timestamp TransactionParticipant::Participant::prepareTransaction(
         }
     });
 
-    auto& completedTransactionOperations = retrieveCompletedTransactionOperations(opCtx);
+    auto* completedTransactionOperations = retrieveCompletedTransactionOperations(opCtx);
 
     // Ensure that no transaction operations were done against temporary collections.
     // Transactions should not operate on temporary collections because they are for internal use
@@ -1606,7 +1606,7 @@ Timestamp TransactionParticipant::Participant::prepareTransaction(
     // Create a set of collection UUIDs through which to iterate, so that we do not recheck the same
     // collection multiple times: it is a costly check.
     stdx::unordered_set<UUID, UUID::Hash> transactionOperationUuids;
-    for (const auto& transactionOp : completedTransactionOperations) {
+    for (const auto& transactionOp : *completedTransactionOperations) {
         if (transactionOp.getOpType() == repl::OpTypeEnum::kNoop) {
             // No-ops can't modify data, so there's no need to check if they involved a temporary
             // collection.
@@ -1644,7 +1644,7 @@ Timestamp TransactionParticipant::Participant::prepareTransaction(
     } else {
         // Even if the prepared transaction contained no statements, we always reserve at least
         // 1 oplog slot for the prepare oplog entry.
-        auto numSlotsToReserve = retrieveCompletedTransactionOperations(opCtx).size();
+        auto numSlotsToReserve = retrieveCompletedTransactionOperations(opCtx)->size();
         numSlotsToReserve += p().numberOfPrePostImagesToWrite;
         oplogSlotReserver.emplace(opCtx, std::max(1, static_cast<int>(numSlotsToReserve)));
         invariant(oplogSlotReserver->getSlots().size() >= 1);
@@ -1676,14 +1676,14 @@ Timestamp TransactionParticipant::Participant::prepareTransaction(
                                           reservedSlots,
                                           p().numberOfPrePostImagesToWrite,
                                           wallClockTime,
-                                          &completedTransactionOperations);
+                                          completedTransactionOperations);
 
     opCtx->recoveryUnit()->setPrepareTimestamp(prepareOplogSlot.getTimestamp());
     opCtx->getWriteUnitOfWork()->prepare();
     p().needToWriteAbortEntry = true;
     opObserver->onTransactionPrepare(opCtx,
                                      reservedSlots,
-                                     &completedTransactionOperations,
+                                     completedTransactionOperations,
                                      applyOpsOplogSlotAndOperationAssignment.get(),
                                      p().numberOfPrePostImagesToWrite,
                                      wallClockTime);
@@ -1759,8 +1759,7 @@ void TransactionParticipant::Participant::addTransactionOperation(
         repl::DurableOplogEntry::getDurableReplOperationSize(operation);
     if (!operation.getPreImage().isEmpty()) {
         p().transactionOperationBytes += operation.getPreImage().objsize();
-        if (operation.isChangeStreamPreImageRecordedInOplog() ||
-            operation.isPreImageRecordedForRetryableInternalTransaction()) {
+        if (operation.isPreImageRecordedForRetryableInternalTransaction()) {
             ++p().numberOfPrePostImagesToWrite;
         }
     }
@@ -1777,7 +1776,7 @@ void TransactionParticipant::Participant::addTransactionOperation(
             p().transactionOperationBytes <= static_cast<size_t>(transactionSizeLimitBytes));
 }
 
-std::vector<repl::ReplOperation>&
+std::vector<repl::ReplOperation>*
 TransactionParticipant::Participant::retrieveCompletedTransactionOperations(
     OperationContext* opCtx) {
 
@@ -1786,7 +1785,7 @@ TransactionParticipant::Participant::retrieveCompletedTransactionOperations(
     invariant(o().txnState.isInSet(TransactionState::kInProgress | TransactionState::kPrepared),
               str::stream() << "Current state: " << o().txnState);
 
-    return p().transactionOperations;
+    return &(p().transactionOperations);
 }
 
 TxnResponseMetadata TransactionParticipant::Participant::getResponseMetadata() {
@@ -1812,11 +1811,11 @@ void TransactionParticipant::Participant::commitUnpreparedTransaction(OperationC
             "commitTransaction must provide commitTimestamp to prepared transaction.",
             !o().txnState.isPrepared());
 
-    auto txnOps = retrieveCompletedTransactionOperations(opCtx);
+    auto* txnOps = retrieveCompletedTransactionOperations(opCtx);
     auto opObserver = opCtx->getServiceContext()->getOpObserver();
     invariant(opObserver);
 
-    opObserver->onUnpreparedTransactionCommit(opCtx, &txnOps, p().numberOfPrePostImagesToWrite);
+    opObserver->onUnpreparedTransactionCommit(opCtx, txnOps, p().numberOfPrePostImagesToWrite);
 
     // Read-only transactions with all read concerns must wait for any data they read to be majority
     // committed. For local read concern this is to match majority read concern. For both local and
@@ -1826,7 +1825,7 @@ void TransactionParticipant::Participant::commitUnpreparedTransaction(OperationC
     //
     // TODO (SERVER-41165): Snapshot read concern should wait on the read timestamp instead.
     auto wc = opCtx->getWriteConcern();
-    auto needsNoopWrite = txnOps.empty() && !opCtx->getWriteConcern().usedDefaultConstructedWC;
+    auto needsNoopWrite = txnOps->empty() && !opCtx->getWriteConcern().usedDefaultConstructedWC;
 
     const size_t operationCount = p().transactionOperations.size();
     const size_t oplogOperationBytes = p().transactionOperationBytes;
@@ -1952,8 +1951,10 @@ void TransactionParticipant::Participant::commitPreparedTransaction(
         invariant(opObserver);
 
         // Once the transaction is committed, the oplog entry must be written.
-        opObserver->onPreparedTransactionCommit(
-            opCtx, commitOplogSlot, commitTimestamp, retrieveCompletedTransactionOperations(opCtx));
+        opObserver->onPreparedTransactionCommit(opCtx,
+                                                commitOplogSlot,
+                                                commitTimestamp,
+                                                *retrieveCompletedTransactionOperations(opCtx));
 
         const size_t operationCount = p().transactionOperations.size();
         const size_t oplogOperationBytes = p().transactionOperationBytes;
@@ -3129,6 +3130,7 @@ void TransactionParticipant::Participant::_resetTransactionStateAndUnlock(
     p().transactionOperationBytes = 0;
     p().transactionOperations.clear();
     p().transactionStmtIds.clear();
+    p().numberOfPrePostImagesToWrite = 0;
     o(*lk).prepareOpTime = repl::OpTime();
     o(*lk).recoveryPrepareOpTime = repl::OpTime();
     p().autoCommit = boost::none;

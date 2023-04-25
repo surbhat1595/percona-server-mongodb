@@ -291,7 +291,7 @@ public:
         opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
 
         // Only allow one instance of setFeatureCompatibilityVersion to run at a time.
-        Lock::ExclusiveLock setFCVCommandLock(opCtx->lockState(), commandMutex);
+        Lock::ExclusiveLock setFCVCommandLock(opCtx, commandMutex);
 
         auto request = SetFeatureCompatibilityVersion::parse(
             IDLParserContext("setFeatureCompatibilityVersion"), cmdObj);
@@ -317,6 +317,20 @@ public:
             return true;
         }
 
+        const auto upgradeOrDowngrade = requestedVersion > actualVersion ? "upgrade" : "downgrade";
+        const auto server_type = serverGlobalParams.clusterRole == ClusterRole::ConfigServer
+            ? "config server"
+            : (request.getPhase() ? "shard server" : "replica set/standalone");
+
+        if (!request.getPhase() || request.getPhase() == SetFCVPhaseEnum::kStart) {
+            LOGV2(6744300,
+                  "setFeatureCompatibilityVersion command called",
+                  "upgradeOrDowngrade"_attr = upgradeOrDowngrade,
+                  "serverType"_attr = server_type,
+                  "fromVersion"_attr = actualVersion,
+                  "toVersion"_attr = requestedVersion);
+        }
+
         const boost::optional<Timestamp> changeTimestamp = getChangeTimestamp(opCtx, request);
 
         FeatureCompatibilityVersion::validateSetFeatureCompatibilityVersionRequest(
@@ -336,7 +350,8 @@ public:
                     FeatureCompatibilityVersion::enterFCVChangeRegion(opCtx));
 
                 uassert(ErrorCodes::Error(6744303),
-                        "Failing upgrade due to 'failBeforeTransitioning' failpoint set",
+                        "Failing setFeatureCompatibilityVersion before reaching the FCV "
+                        "transitional stage due to 'failBeforeTransitioning' failpoint set",
                         !failBeforeTransitioning.shouldFail());
 
                 FeatureCompatibilityVersion::updateFeatureCompatibilityVersionDocument(
@@ -346,6 +361,13 @@ public:
                     isFromConfigServer,
                     changeTimestamp,
                     true /* setTargetVersion */);
+
+                LOGV2(6744301,
+                      "setFeatureCompatibilityVersion has set the FCV to the transitional state",
+                      "upgradeOrDowngrade"_attr = upgradeOrDowngrade,
+                      "serverType"_attr = server_type,
+                      "fromVersion"_attr = actualVersion,
+                      "toVersion"_attr = requestedVersion);
             }
 
             if (request.getPhase() == SetFCVPhaseEnum::kStart) {
@@ -413,6 +435,13 @@ public:
                 changeTimestamp,
                 false /* setTargetVersion */);
         }
+
+        LOGV2(6744302,
+              "setFeatureCompatibilityVersion succeeded",
+              "upgradeOrDowngrade"_attr = upgradeOrDowngrade,
+              "serverType"_attr = server_type,
+              "fromVersion"_attr = actualVersion,
+              "toVersion"_attr = requestedVersion);
 
         return true;
     }
@@ -491,8 +520,7 @@ private:
             //     upgrading to the latest FCV and act accordingly.
             //   - The global IX/X locked operation began prior to the FCV change, is acting on that
             //     assumption and will finish before upgrade procedures begin right after this.
-            Lock::ResourceLock lk(
-                opCtx, opCtx->lockState(), resourceIdFeatureCompatibilityVersion, MODE_S);
+            Lock::ResourceLock lk(opCtx, resourceIdFeatureCompatibilityVersion, MODE_S);
         }
 
         // This helper function is for any user collections uasserts, creations, or deletions that
@@ -626,22 +654,45 @@ private:
                         return collection->getTimeseriesOptions() != boost::none;
                     });
             }
+        }
 
-            // Block downgrade for collections with encrypted fields
-            // TODO SERVER-67760: Remove once FCV 7.0 becomes last-lts.
-            for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
-                Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
-                catalog::forEachCollectionFromDb(
-                    opCtx, dbName, MODE_X, [&](const CollectionPtr& collection) {
-                        auto& efc = collection->getCollectionOptions().encryptedFieldConfig;
+        // Block downgrade for collections with encrypted fields
+        // TODO SERVER-67760: Remove once FCV 7.0 becomes last-lts.
+        for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
+            Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
+            catalog::forEachCollectionFromDb(
+                opCtx, dbName, MODE_X, [&](const CollectionPtr& collection) {
+                    auto& efc = collection->getCollectionOptions().encryptedFieldConfig;
 
-                        uassert(
-                            ErrorCodes::CannotDowngrade,
+                    uassert(ErrorCodes::CannotDowngrade,
                             str::stream()
                                 << "Cannot downgrade the cluster as collection " << collection->ns()
                                 << " has 'encryptedFields' with range indexes",
                             !(efc.has_value() && hasQueryType(efc.get(), QueryTypeEnum::Range)));
+                    return true;
+                });
+        }
+
+        if (!feature_flags::gfeatureFlagCappedCollectionsRelaxedSize.isEnabled(
+                serverGlobalParams.featureCompatibility)) {
+            for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
+                Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
+                catalog::forEachCollectionFromDb(
+                    opCtx,
+                    dbName,
+                    MODE_S,
+                    [&](const CollectionPtr& collection) {
+                        uasserted(
+                            ErrorCodes::CannotDowngrade,
+                            str::stream()
+                                << "Cannot downgrade the cluster when there are capped "
+                                   "collection with a size that is non multiple of 256 bytes. "
+                                   "Drop or resize the following collection: '"
+                                << collection->ns() << "'");
                         return true;
+                    },
+                    [&](const CollectionPtr& collection) {
+                        return collection->isCapped() && collection->getCappedMaxSize() % 256 != 0;
                     });
             }
         }
@@ -738,7 +789,7 @@ private:
                        const SetFeatureCompatibilityVersion& request,
                        boost::optional<Timestamp> changeTimestamp) {
         const auto requestedVersion = request.getCommandParameter();
-        // TODO  SERVER-65332 remove logic bound to this future object When kLastLTS is 6.0
+        // TODO  SERVER-65332 remove logic bound to this future object when v7.0 branches out
         boost::optional<SharedSemiFuture<void>> chunkResizeAsyncTask;
 
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
@@ -753,7 +804,10 @@ private:
         // should go in this function.
         _prepareForDowngrade(opCtx);
 
-        if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+        if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&
+            requestedVersion == GenericFCV::kLastLTS) {
+            // As data size aware balancing is supported starting from v6.1, chunks resizing is
+            // required only when downgrading to v6.0
             chunkResizeAsyncTask =
                 Balancer::get(opCtx)->applyLegacyChunkSizeConstraintsOnClusterData(opCtx);
         }
@@ -766,8 +820,7 @@ private:
             //     upgrading to the latest FCV and act accordingly.
             //   - The global IX/X locked operation began prior to the FCV change, is acting on that
             //     assumption and will finish before upgrade procedures begin right after this.
-            Lock::ResourceLock lk(
-                opCtx, opCtx->lockState(), resourceIdFeatureCompatibilityVersion, MODE_S);
+            Lock::ResourceLock lk(opCtx, resourceIdFeatureCompatibilityVersion, MODE_S);
         }
 
         uassert(ErrorCodes::Error(549181),
@@ -807,16 +860,18 @@ private:
             // Tell the shards to enter phase-2 of setFCV (fully downgraded)
             _sendSetFCVRequestToShards(opCtx, request, changeTimestamp, SetFCVPhaseEnum::kComplete);
 
-            // chunkResizeAsyncTask is only used by config servers as part of internal server
-            // downgrade cleanup. Waiting for the task to complete is put at the end of
-            // _runDowngrade instead of inside _internalServerDowngradeCleanup because the task
-            // might take a long time to complete.
-            invariant(chunkResizeAsyncTask.has_value());
-            LOGV2(6417108, "Waiting for cluster chunks resize process to complete.");
-            uassertStatusOKWithContext(
-                chunkResizeAsyncTask->getNoThrow(opCtx),
-                "Failed to enforce chunk size constraint during FCV downgrade");
-            LOGV2(6417109, "Cluster chunks resize process completed.");
+            if (requestedVersion == GenericFCV::kLastLTS) {
+                // chunkResizeAsyncTask is only used by config servers as part of internal server
+                // downgrade cleanup. Waiting for the task to complete is put at the end of
+                // _runDowngrade instead of inside _internalServerDowngradeCleanup because the task
+                // might take a long time to complete.
+                invariant(chunkResizeAsyncTask.has_value());
+                LOGV2(6417108, "Waiting for cluster chunks resize process to complete.");
+                uassertStatusOKWithContext(
+                    chunkResizeAsyncTask->getNoThrow(opCtx),
+                    "Failed to enforce chunk size constraint during FCV downgrade");
+                LOGV2(6417109, "Cluster chunks resize process completed.");
+            }
         }
 
         hangWhileDowngrading.pauseWhileSet(opCtx);

@@ -36,7 +36,6 @@
 
 #include "mongo/base/status.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/repl/delayable_timeout_callback.h"
 #include "mongo/db/repl/initial_syncer.h"
@@ -1360,7 +1359,9 @@ private:
     void _scheduleHeartbeatReconfig(WithLock lk, const ReplSetConfig& newConfig);
 
     /**
-     * Determines if the provided config is a split config, and validates it for installation.
+     * Accepts a ReplSetConfig and resolves it either to itself, or the embedded shard split
+     * recipient config if it's present and self is a shard split recipient. Returns a tuple of the
+     * resolved config and a boolean indicating whether a recipient config was found.
      */
     std::tuple<StatusWith<ReplSetConfig>, bool> _resolveConfigToApply(const ReplSetConfig& config);
 
@@ -1368,7 +1369,8 @@ private:
      * Method to write a configuration transmitted via heartbeat message to stable storage.
      */
     void _heartbeatReconfigStore(const executor::TaskExecutor::CallbackArgs& cbd,
-                                 const ReplSetConfig& newConfig);
+                                 const ReplSetConfig& newConfig,
+                                 bool isSplitRecipientConfig = false);
 
     /**
      * Conclusion actions of a heartbeat-triggered reconfiguration.
@@ -1376,7 +1378,7 @@ private:
     void _heartbeatReconfigFinish(const executor::TaskExecutor::CallbackArgs& cbData,
                                   const ReplSetConfig& newConfig,
                                   StatusWith<int> myIndex,
-                                  bool isRecipientConfig);
+                                  bool isSplitRecipientConfig);
 
     /**
      * Calculates the time (in millis) left in quiesce mode and converts the value to int64.
@@ -1563,6 +1565,12 @@ private:
      * Finish catch-up mode and start drain mode.
      */
     void _enterDrainMode_inlock();
+
+    /**
+     * Enter drain mode which does not result in a primary stepup. Returns a future which becomes
+     * ready when the oplog buffers have completed draining.
+     */
+    Future<void> _drainForShardSplit();
 
     /**
      * Waits for the config state to leave kConfigStartingUp, which indicates that start() has
@@ -1844,6 +1852,9 @@ private:
     // Construct used to synchronize default write concern changes with config write concern
     // changes.
     WriteConcernTagChangesImpl _writeConcernTagChanges;
+
+    // An optional promise created when entering drain mode for shard split.
+    boost::optional<Promise<void>> _finishedDrainingPromise;  // (M)
 };
 
 }  // namespace repl

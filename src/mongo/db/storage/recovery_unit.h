@@ -425,11 +425,6 @@ public:
     }
 
     /**
-     * Refreshes a read transaction by resetting the snapshot in use
-     */
-    virtual void refreshSnapshot() {}
-
-    /**
      * The ReadSource indicates which external or provided timestamp to read from for future
      * transactions.
      */
@@ -458,7 +453,11 @@ public:
         /**
          * Read from the timestamp provided to setTimestampReadSource.
          */
-        kProvided
+        kProvided,
+        /**
+         * Read from the latest checkpoint.
+         */
+        kCheckpoint
     };
 
     static std::string toString(ReadSource rs) {
@@ -475,6 +474,8 @@ public:
                 return "kAllDurableSnapshot";
             case ReadSource::kProvided:
                 return "kProvided";
+            case ReadSource::kCheckpoint:
+                return "kCheckpoint";
         }
         MONGO_UNREACHABLE;
     }

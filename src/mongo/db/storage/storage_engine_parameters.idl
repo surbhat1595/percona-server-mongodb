@@ -33,14 +33,6 @@ global:
 
 server_parameters:
 
-  # The wiredTigerQueueingPolicy specifies which policy to use and is essentially
-  # the same as the values of the enum QueueingPolicy
-  storageEngineQueueingPolicy:
-    description: "Storage Engine queueing policy to use"
-    set_at: [ startup ]
-    cpp_class:
-      name: TicketQueueingPolicy
-
   storageEngineConcurrentWriteTransactions:
     description: "Storage Engine Concurrent Write Transactions"
     set_at: [ startup, runtime ]
@@ -52,7 +44,7 @@ server_parameters:
     # Default value being 0 means we're allowing the underlying storage engines to use their default values.
     default: 0
     validator:
-      gt: 0
+      gte: 5
 
   storageEngineConcurrentReadTransactions:
     description: "Storage Engine Concurrent Read Transactions"
@@ -65,7 +57,7 @@ server_parameters:
     # Default value being 0 means we're allowing the underlying storage engines to use their default values.
     default: 0
     validator:
-      gt: 0
+      gte: 5
 
 feature_flags:
   featureFlagEnableExecutionControl:
@@ -76,12 +68,3 @@ feature_flags:
     description: Enables the deprioritization of low priority operations
     cpp_varname: feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations
     default: false
-
-enums:
-  QueueingPolicy:
-    description: Queueing policy to use for obtaining tickets
-    type: string
-    values:
-      Semaphore: semaphore
-      FifoQueue: fifoQueue
-      SchedulingQueue: schedulingQueue

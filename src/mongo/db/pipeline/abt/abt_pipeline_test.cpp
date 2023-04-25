@@ -29,8 +29,8 @@
 
 #include <boost/intrusive_ptr.hpp>
 
-#include "mongo/db/pipeline/aggregate_command_gen.h"
-#include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/abt/utils.h"
+#include "mongo/db/query/optimizer/cascades/cost_derivation.h"
 #include "mongo/db/query/optimizer/explain.h"
 #include "mongo/db/query/optimizer/opt_phase_manager.h"
 #include "mongo/db/query/optimizer/utils/unit_test_utils.h"
@@ -84,7 +84,6 @@ TEST(ABTTranslate, MatchWithInSingletonList) {
         "            Source []\n",
         singletonListIn);
 }
-
 
 TEST(ABTTranslate, MatchWithInList) {
     // A $match with $in and a list of equalities becomes a comparison to an EqMember list.
@@ -213,13 +212,19 @@ TEST(ABTTranslate, MatchWithOrConvertedToIn) {
         "|   RefBlock: \n"
         "|       Variable [scan_0]\n"
         "Sargable [Complete]\n"
-        "|   |   |   |   requirementsMap: \n"
-        "|   |   |   |       refProjection: scan_0, path: 'PathGet [a] PathTraverse [1] "
-        "PathIdentity []', intervals: {{{[Const [1], Const [1]]}} U {{[Const [2], Const [2]]}} U "
-        "{{[Const [3], Const [3]]}}}\n"
-        "|   |   |   candidateIndexes: \n"
-        "|   |   |       candidateId: 1, index1, {}, {0}, {{{[Const [1], Const [1]]}} U {{[Const "
-        "[2], Const [2]]}} U {{[Const [3], Const [3]]}}}\n"
+        "|   |   |   |   |   requirementsMap: \n"
+        "|   |   |   |   |       refProjection: scan_0, path: 'PathGet [a] PathTraverse [1] "
+        "PathIdentity []', intervals: {{{[Const [3], Const [3]]}} U {{[Const [1], Const [1]]}} U "
+        "{{[Const [2], Const [2]]}}}\n"
+        "|   |   |   |   candidateIndexes: \n"
+        "|   |   |   |       candidateId: 1, index1, {}, {0}, {{{[Const [3], Const [3]]}} U "
+        "{{[Const [1], Const [1]]}} U {{[Const [2], Const [2]]}}}\n"
+        "|   |   |   scanParams: \n"
+        "|   |   |       {'a': evalTemp_0}\n"
+        "|   |   |           residualReqs: \n"
+        "|   |   |               refProjection: evalTemp_0, path: 'PathTraverse [1] PathIdentity "
+        "[]', intervals: {{{[Const [3], Const [3]]}} U {{[Const [1], Const [1]]}} U {{[Const [2], "
+        "Const [2]]}}}, entryIndex: 0\n"
         "|   |   BindBlock:\n"
         "|   RefBlock: \n"
         "|       Variable [scan_0]\n"
@@ -613,17 +618,17 @@ TEST(ABTTranslate, MatchBasic) {
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [scan_0]\n"
-        "|   PathGet [b]\n"
-        "|   PathTraverse [1]\n"
-        "|   PathCompare [Eq]\n"
-        "|   Const [2]\n"
-        "Filter []\n"
-        "|   EvalFilter []\n"
-        "|   |   Variable [scan_0]\n"
         "|   PathGet [a]\n"
         "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [scan_0]\n"
+        "|   PathGet [b]\n"
+        "|   PathTraverse [1]\n"
+        "|   PathCompare [Eq]\n"
+        "|   Const [2]\n"
         "Scan [collection]\n"
         "    BindBlock:\n"
         "        [scan_0]\n"
@@ -648,21 +653,21 @@ TEST(ABTTranslate, MatchBasic) {
         "|       Variable [scan_0]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
-        "|   |   Variable [evalTemp_1]\n"
+        "|   |   Variable [evalTemp_3]\n"
         "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [2]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
-        "|   |   Variable [evalTemp_0]\n"
+        "|   |   Variable [evalTemp_2]\n"
         "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
-        "PhysicalScan [{'<root>': scan_0, 'a': evalTemp_0, 'b': evalTemp_1}, collection]\n"
+        "PhysicalScan [{'<root>': scan_0, 'a': evalTemp_2, 'b': evalTemp_3}, collection]\n"
         "    BindBlock:\n"
-        "        [evalTemp_0]\n"
+        "        [evalTemp_2]\n"
         "            Source []\n"
-        "        [evalTemp_1]\n"
+        "        [evalTemp_3]\n"
         "            Source []\n"
         "        [scan_0]\n"
         "            Source []\n",
@@ -789,17 +794,17 @@ TEST(ABTTranslate, MatchProject) {
         "|   EvalFilter []\n"
         "|   |   Variable [combinedProjection_0]\n"
         "|   PathComposeA []\n"
-        "|   |   PathGet [s]\n"
+        "|   |   PathGet [c]\n"
         "|   |   PathTraverse [1]\n"
-        "|   |   PathComposeM []\n"
-        "|   |   |   PathCompare [Lt]\n"
-        "|   |   |   Const [\"\"]\n"
-        "|   |   PathCompare [Gte]\n"
-        "|   |   Const [10]\n"
-        "|   PathGet [c]\n"
+        "|   |   PathCompare [Eq]\n"
+        "|   |   Const [2]\n"
+        "|   PathGet [s]\n"
         "|   PathTraverse [1]\n"
-        "|   PathCompare [Eq]\n"
-        "|   Const [2]\n"
+        "|   PathComposeM []\n"
+        "|   |   PathCompare [Lt]\n"
+        "|   |   Const [\"\"]\n"
+        "|   PathCompare [Gte]\n"
+        "|   Const [10]\n"
         "Evaluation []\n"
         "|   BindBlock:\n"
         "|       [combinedProjection_0]\n"
@@ -1807,20 +1812,20 @@ TEST(ABTTranslate, RangeIndex) {
         "|   PathGet [a]\n"
         "|   PathTraverse [1]\n"
         "|   PathComposeM []\n"
-        "|   |   PathCompare [Gte]\n"
-        "|   |   Const [nan]\n"
-        "|   PathCompare [Lt]\n"
-        "|   Const [90]\n"
+        "|   |   PathCompare [Lt]\n"
+        "|   |   Const [\"\"]\n"
+        "|   PathCompare [Gt]\n"
+        "|   Const [70]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [scan_0]\n"
         "|   PathGet [a]\n"
         "|   PathTraverse [1]\n"
         "|   PathComposeM []\n"
-        "|   |   PathCompare [Lt]\n"
-        "|   |   Const [\"\"]\n"
-        "|   PathCompare [Gt]\n"
-        "|   Const [70]\n"
+        "|   |   PathCompare [Gte]\n"
+        "|   |   Const [nan]\n"
+        "|   PathCompare [Lt]\n"
+        "|   Const [90]\n"
         "Scan [collection]\n"
         "    BindBlock:\n"
         "        [scan_0]\n"
@@ -1881,7 +1886,7 @@ TEST(ABTTranslate, RangeIndex) {
         "|   |       [sideId_0]\n"
         "|   |           Const [1]\n"
         "|   IndexScan [{'<rid>': rid_0}, scanDefName: collection, indexDefName: index1, interval: "
-        "{[Const [nan], Const [90])}]\n"
+        "{(Const [70], Const [\"\"])}]\n"
         "|       BindBlock:\n"
         "|           [rid_0]\n"
         "|               Source []\n"
@@ -1890,7 +1895,7 @@ TEST(ABTTranslate, RangeIndex) {
         "|       [sideId_0]\n"
         "|           Const [0]\n"
         "IndexScan [{'<rid>': rid_0}, scanDefName: collection, indexDefName: index1, interval: "
-        "{(Const [70], Const [\"\"])}]\n"
+        "{[Const [nan], Const [90])}]\n"
         "    BindBlock:\n"
         "        [rid_0]\n"
         "            Source []\n",
@@ -1921,14 +1926,14 @@ TEST(ABTTranslate, Index1) {
             "Filter []\n"
             "|   EvalFilter []\n"
             "|   |   Variable [scan_0]\n"
-            "|   PathGet [b]\n"
+            "|   PathGet [a]\n"
             "|   PathTraverse [1]\n"
             "|   PathCompare [Eq]\n"
             "|   Const [2]\n"
             "Filter []\n"
             "|   EvalFilter []\n"
             "|   |   Variable [scan_0]\n"
-            "|   PathGet [a]\n"
+            "|   PathGet [b]\n"
             "|   PathTraverse [1]\n"
             "|   PathCompare [Eq]\n"
             "|   Const [2]\n"
@@ -1993,14 +1998,14 @@ TEST(ABTTranslate, Index1) {
             "Filter []\n"
             "|   EvalFilter []\n"
             "|   |   Variable [scan_0]\n"
-            "|   PathGet [b]\n"
+            "|   PathGet [a]\n"
             "|   PathTraverse [1]\n"
             "|   PathCompare [Eq]\n"
             "|   Const [2]\n"
             "Filter []\n"
             "|   EvalFilter []\n"
             "|   |   Variable [scan_0]\n"
-            "|   PathGet [a]\n"
+            "|   PathGet [b]\n"
             "|   PathTraverse [1]\n"
             "|   PathCompare [Eq]\n"
             "|   Const [2]\n"
@@ -2032,7 +2037,7 @@ TEST(ABTTranslate, Index1) {
             "|   |   Const [true]\n"
             "|   Filter []\n"
             "|   |   EvalFilter []\n"
-            "|   |   |   Variable [evalTemp_2]\n"
+            "|   |   |   Variable [evalTemp_4]\n"
             "|   |   PathTraverse [1]\n"
             "|   |   PathCompare [Eq]\n"
             "|   |   Const [2]\n"
@@ -2040,9 +2045,9 @@ TEST(ABTTranslate, Index1) {
             "|   |   limitSkip:\n"
             "|   |       limit: 1\n"
             "|   |       skip: 0\n"
-            "|   Seek [ridProjection: rid_0, {'<root>': scan_0, 'b': evalTemp_2}, collection]\n"
+            "|   Seek [ridProjection: rid_0, {'<root>': scan_0, 'b': evalTemp_4}, collection]\n"
             "|   |   BindBlock:\n"
-            "|   |       [evalTemp_2]\n"
+            "|   |       [evalTemp_4]\n"
             "|   |           Source []\n"
             "|   |       [scan_0]\n"
             "|   |           Source []\n"
@@ -2341,7 +2346,8 @@ TEST(ABTTranslate, PartialIndex) {
                           make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int32(2)),
                                              PathTraverse::kSingleLevel)),
             make<Variable>(scanProjName)),
-        true /*isFilterContext*/);
+        true /*isFilterContext*/,
+        {} /*pathToInterval*/);
     ASSERT_TRUE(conversionResult.has_value());
     ASSERT_FALSE(conversionResult->_retainPredicate);
 
@@ -2378,14 +2384,14 @@ TEST(ABTTranslate, PartialIndex) {
         "|   |   |   BinaryOp [Eq]\n"
         "|   |   |   |   Const [2]\n"
         "|   |   |   Variable [valCmp_0]\n"
-        "|   |   Variable [evalTemp_2]\n"
+        "|   |   Variable [evalTemp_4]\n"
         "|   LimitSkip []\n"
         "|   |   limitSkip:\n"
         "|   |       limit: 1\n"
         "|   |       skip: 0\n"
-        "|   Seek [ridProjection: rid_0, {'<root>': scan_0, 'b': evalTemp_2}, collection]\n"
+        "|   Seek [ridProjection: rid_0, {'<root>': scan_0, 'b': evalTemp_4}, collection]\n"
         "|   |   BindBlock:\n"
-        "|   |       [evalTemp_2]\n"
+        "|   |       [evalTemp_4]\n"
         "|   |           Source []\n"
         "|   |       [scan_0]\n"
         "|   |           Source []\n"
@@ -2411,7 +2417,8 @@ TEST(ABTTranslate, PartialIndexNegative) {
                           make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int32(2)),
                                              PathTraverse::kSingleLevel)),
             make<Variable>(scanProjName)),
-        true /*isFilterContext*/);
+        true /*isFilterContext*/,
+        {} /*pathToInterval*/);
     ASSERT_TRUE(conversionResult.has_value());
     ASSERT_FALSE(conversionResult->_retainPredicate);
 
@@ -2446,7 +2453,7 @@ TEST(ABTTranslate, PartialIndexNegative) {
         "|   |   BinaryOp [Eq]\n"
         "|   |   |   Const [3]\n"
         "|   |   Variable [valCmp_1]\n"
-        "|   Variable [evalTemp_1]\n"
+        "|   Variable [evalTemp_3]\n"
         "Filter []\n"
         "|   FunctionCall [traverseF]\n"
         "|   |   |   Const [false]\n"
@@ -2454,12 +2461,12 @@ TEST(ABTTranslate, PartialIndexNegative) {
         "|   |   BinaryOp [Eq]\n"
         "|   |   |   Const [3]\n"
         "|   |   Variable [valCmp_0]\n"
-        "|   Variable [evalTemp_0]\n"
-        "PhysicalScan [{'<root>': scan_0, 'a': evalTemp_0, 'b': evalTemp_1}, collection]\n"
+        "|   Variable [evalTemp_2]\n"
+        "PhysicalScan [{'<root>': scan_0, 'a': evalTemp_2, 'b': evalTemp_3}, collection]\n"
         "    BindBlock:\n"
-        "        [evalTemp_0]\n"
+        "        [evalTemp_2]\n"
         "            Source []\n"
-        "        [evalTemp_1]\n"
+        "        [evalTemp_3]\n"
         "            Source []\n"
         "        [scan_0]\n"
         "            Source []\n",
@@ -2608,6 +2615,67 @@ TEST(ABTTranslate, NotEquals) {
         "        [scan_0]\n"
         "            Source []\n",
         translated);
+}
+
+TEST(ABTTranslate, DoubleElemMatch) {
+    PrefixId prefixId;
+    Metadata metadata = {{{"test", {{}, {}}}}};
+
+    ABT translated = translatePipeline(
+        metadata,
+        "[{$match: {a: {$elemMatch: {$gte: 5, $lte: 6}}, b: {$elemMatch: {$gte: 1, $lte: 3}}}}]",
+        "test",
+        prefixId);
+
+    OptPhaseManager phaseManager({OptPhaseManager::OptPhase::MemoSubstitutionPhase},
+                                 prefixId,
+                                 false /*requireRID*/,
+                                 metadata,
+                                 std::make_unique<HeuristicCE>(),
+                                 std::make_unique<DefaultCosting>(),
+                                 defaultConvertPathToInterval,
+                                 DebugInfo::kDefaultForTests);
+
+    ABT optimized = translated;
+    ASSERT_TRUE(phaseManager.optimize(optimized));
+
+    // Demonstrate we get a single Sargable node which encodes both predicates.
+    ASSERT_EXPLAIN_V2(
+        "Root []\n"
+        "|   |   projections: \n"
+        "|   |       scan_0\n"
+        "|   RefBlock: \n"
+        "|       Variable [scan_0]\n"
+        "Sargable [Complete]\n"
+        "|   |   |   |   |   requirementsMap: \n"
+        "|   |   |   |   |       refProjection: scan_0, path: 'PathGet [a] PathIdentity []', "
+        "intervals: {{{[Const [[]], Const [BinData(0, )])}}}\n"
+        "|   |   |   |   |       refProjection: scan_0, path: 'PathGet [a] PathTraverse [1] "
+        "PathIdentity []', intervals: {{{[Const [5], Const [6]]}}}\n"
+        "|   |   |   |   |       refProjection: scan_0, path: 'PathGet [b] PathIdentity []', "
+        "intervals: {{{[Const [[]], Const [BinData(0, )])}}}\n"
+        "|   |   |   |   |       refProjection: scan_0, path: 'PathGet [b] PathTraverse [1] "
+        "PathIdentity []', intervals: {{{[Const [1], Const [3]]}}}\n"
+        "|   |   |   |   candidateIndexes: \n"
+        "|   |   |   scanParams: \n"
+        "|   |   |       {'a': evalTemp_7, 'b': evalTemp_8}\n"
+        "|   |   |           residualReqs: \n"
+        "|   |   |               refProjection: evalTemp_7, path: 'PathIdentity []', intervals: "
+        "{{{[Const [[]], Const [BinData(0, )])}}}, entryIndex: 0\n"
+        "|   |   |               refProjection: evalTemp_7, path: 'PathTraverse [1] PathIdentity "
+        "[]', intervals: {{{[Const [5], Const [6]]}}}, entryIndex: 1\n"
+        "|   |   |               refProjection: evalTemp_8, path: 'PathIdentity []', intervals: "
+        "{{{[Const [[]], Const [BinData(0, )])}}}, entryIndex: 2\n"
+        "|   |   |               refProjection: evalTemp_8, path: 'PathTraverse [1] PathIdentity "
+        "[]', intervals: {{{[Const [1], Const [3]]}}}, entryIndex: 3\n"
+        "|   |   BindBlock:\n"
+        "|   RefBlock: \n"
+        "|       Variable [scan_0]\n"
+        "Scan [test]\n"
+        "    BindBlock:\n"
+        "        [scan_0]\n"
+        "            Source []\n",
+        optimized);
 }
 
 }  // namespace

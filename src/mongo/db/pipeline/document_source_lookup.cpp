@@ -34,6 +34,7 @@
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression_algo.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/pipeline/document_path_support.h"
 #include "mongo/db/pipeline/document_source_documents.h"
@@ -115,7 +116,8 @@ NamespaceString parseLookupFromAndResolveNamespace(const BSONElement& elem,
         str::stream() << "$lookup with syntax {from: {db:<>, coll:<>},..} is not supported for db: "
                       << nss.db() << " and coll: " << nss.coll(),
         nss.isConfigDotCacheDotChunks() || nss == NamespaceString::kRsOplogNamespace ||
-            nss == NamespaceString::kTenantMigrationOplogView);
+            nss == NamespaceString::kTenantMigrationOplogView ||
+            nss == NamespaceString::kConfigsvrCollectionsNamespace);
     return nss;
 }
 
@@ -377,6 +379,11 @@ StageConstraints DocumentSourceLookUp::constraints(Pipeline::SplitState pipeStat
         // This stage will only be on the shards pipeline if $lookup on sharded foreign collections
         // is allowed.
         hostRequirement = HostTypeRequirement::kAnyShard;
+    } else if (_fromNs == NamespaceString::kConfigsvrCollectionsNamespace) {
+        // This is an unsharded collection, but the primary shard would be the config server, and
+        // the config servers are not prepared to take queries. Instead, we'll merge on any of the
+        // other shards.
+        hostRequirement = HostTypeRequirement::kAnyShard;
     } else {
         // If the pipeline is unsplit or this stage is on the merging part of the pipeline,
         // when $lookup on sharded foreign collections is allowed, the foreign collection is
@@ -441,7 +448,7 @@ DocumentSource::GetNextResult DocumentSourceLookUp::doGetNext() {
         // throw a custom exception.
         if (auto staleInfo = ex.extraInfo<StaleConfigInfo>(); staleInfo &&
             staleInfo->getVersionWanted() &&
-            staleInfo->getVersionWanted() != ChunkVersion::UNSHARDED()) {
+            staleInfo->getVersionWanted() != ShardVersion::UNSHARDED()) {
             uassert(3904800,
                     "Cannot run $lookup with a sharded foreign collection in a transaction",
                     foreignShardedLookupAllowed());
@@ -467,6 +474,10 @@ DocumentSource::GetNextResult DocumentSourceLookUp::doGetNext() {
     }
 
     accumulatePipelinePlanSummaryStats(*pipeline, _stats.planSummaryStats);
+
+    // Check if pipeline uses disk.
+    _stats.planSummaryStats.usedDisk = _stats.planSummaryStats.usedDisk || pipeline->usedDisk();
+
     MutableDocument output(std::move(inputDoc));
     output.setNestedField(_as, Value(std::move(results)));
     return output.freeze();

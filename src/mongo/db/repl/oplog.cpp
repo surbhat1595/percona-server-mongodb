@@ -60,12 +60,12 @@
 #include "mongo/db/client.h"
 #include "mongo/db/coll_mod_gen.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/feature_compatibility_version_parser.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/write_stage_common.h"
+#include "mongo/db/global_index.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds_coordinator.h"
@@ -137,7 +137,7 @@ void abortIndexBuilds(OperationContext* opCtx,
                       const std::string& reason) {
     auto indexBuildsCoordinator = IndexBuildsCoordinator::get(opCtx);
     if (commandType == OplogEntry::CommandType::kDropDatabase) {
-        indexBuildsCoordinator->abortDatabaseIndexBuilds(opCtx, nss.db(), reason);
+        indexBuildsCoordinator->abortDatabaseIndexBuilds(opCtx, nss.dbName(), reason);
     } else if (commandType == OplogEntry::CommandType::kDrop ||
                commandType == OplogEntry::CommandType::kDropIndexes ||
                commandType == OplogEntry::CommandType::kCollMod ||
@@ -337,6 +337,7 @@ void writeToImageCollection(OperationContext* opCtx,
     "d" delete
     "c" db cmd
     "n" no op
+    "xi" insert global index key
 */
 
 
@@ -621,12 +622,6 @@ void appendOplogEntryChainInfo(OperationContext* opCtx,
                                const std::vector<StmtId>& stmtIds) {
     invariant(!stmtIds.empty());
 
-    // We sometimes have a pre-image no-op entry even for normal non-retryable writes
-    // if recordPreImages is enabled on the collection.
-    if (!oplogLink->preImageOpTime.isNull()) {
-        oplogEntry->setPreImageOpTime(oplogLink->preImageOpTime);
-    }
-
     // Not a retryable write.
     if (stmtIds.front() == kUninitializedStmtId) {
         // If the statement id is uninitialized, it must be the only one. There cannot also be
@@ -644,9 +639,6 @@ void appendOplogEntryChainInfo(OperationContext* opCtx,
         oplogLink->prevOpTime = txnParticipant.getLastWriteOpTime();
     }
     oplogEntry->setPrevWriteOpTimeInTransaction(oplogLink->prevOpTime);
-    if (!oplogLink->postImageOpTime.isNull()) {
-        oplogEntry->setPostImageOpTime(oplogLink->postImageOpTime);
-    }
 }
 
 namespace {
@@ -991,7 +983,7 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
     {"dbCheck", {dbCheckOplogCommand, {}}},
     {"dropDatabase",
      {[](OperationContext* opCtx, const OplogEntry& entry, OplogApplication::Mode mode) -> Status {
-          return dropDatabaseForApplyOps(opCtx, entry.getNss().db().toString());
+          return dropDatabaseForApplyOps(opCtx, entry.getNss().dbName());
       },
       {ErrorCodes::NamespaceNotFound}}},
     {"drop",
@@ -1103,6 +1095,18 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
     {"abortTransaction",
      {[](OperationContext* opCtx, const OplogEntry& entry, OplogApplication::Mode mode) -> Status {
          return applyAbortTransaction(opCtx, entry, mode);
+     }}},
+    {"createGlobalIndex",
+     {[](OperationContext* opCtx, const OplogEntry& entry, OplogApplication::Mode mode) -> Status {
+         const auto& globalIndexUUID = entry.getUuid().get();
+         global_index::createContainer(opCtx, globalIndexUUID);
+         return Status::OK();
+     }}},
+    {"dropGlobalIndex",
+     {[](OperationContext* opCtx, const OplogEntry& entry, OplogApplication::Mode mode) -> Status {
+         const auto& globalIndexUUID = entry.getUuid().get();
+         global_index::dropContainer(opCtx, globalIndexUUID);
+         return Status::OK();
      }}},
 };
 
@@ -1586,8 +1590,12 @@ Status applyOperation_inlock(OperationContext* opCtx,
                     // document.
                     invariant(op.getObject2());
                     auto&& documentId = *op.getObject2();
-                    auto documentFound = Helpers::findById(
-                        opCtx, collection->ns().ns(), documentId, changeStreamPreImage);
+
+                    // TODO SERVER-69541 pass in NamespaceString object instead
+                    auto documentFound = Helpers::findById(opCtx,
+                                                           collection->ns().toStringWithTenantId(),
+                                                           documentId,
+                                                           changeStreamPreImage);
                     invariant(documentFound);
                 }
 
@@ -1816,6 +1824,15 @@ Status applyOperation_inlock(OperationContext* opCtx,
             if (incrementOpsAppliedStats) {
                 incrementOpsAppliedStats();
             }
+            break;
+        }
+        case OpTypeEnum::kInsertGlobalIndexKey: {
+            invariant(op.getUuid());
+
+            global_index::insertKey(opCtx,
+                                    *op.getUuid(),
+                                    op.getObject().getObjectField("key"),
+                                    op.getObject().getObjectField("docKey"));
             break;
         }
         default: {

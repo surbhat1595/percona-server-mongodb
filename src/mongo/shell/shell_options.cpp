@@ -67,6 +67,7 @@ const std::set<std::string> kSetShellParameterAllowlist = {
     "awsEC2InstanceMetadataUrl",
     "awsECSInstanceMetadataUrl",
     "disabledSecureAllocatorDomains",
+    "featureFlagFLE2Range",
     "newLineAfterPasswordPromptForTest",
     "ocspClientHttpTimeoutSecs",
     "ocspEnabled",
@@ -322,7 +323,7 @@ Status storeMongoShellOptions(const moe::Environment& params,
                         str::stream()
                             << "Cannot use --setShellParameter to set '" << name << "' at startup"};
             }
-            auto status = param->setFromString(it.second);
+            auto status = param->setFromString(it.second, boost::none);
             if (!status.isOK()) {
                 return {ErrorCodes::BadValue,
                         str::stream()

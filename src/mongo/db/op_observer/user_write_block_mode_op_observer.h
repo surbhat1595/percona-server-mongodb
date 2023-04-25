@@ -55,6 +55,12 @@ public:
                    std::vector<InsertStatement>::const_iterator last,
                    bool fromMigrate) final;
 
+    void onInsertGlobalIndexKey(OperationContext* opCtx,
+                                const NamespaceString& globalIndexNss,
+                                const UUID& globalIndexUuid,
+                                const BSONObj& key,
+                                const BSONObj& docKey) final{};
+
     void onUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& args) final;
 
     void onDelete(OperationContext* opCtx,
@@ -147,6 +153,15 @@ public:
                        const BSONObj& doc) final;
 
     // Noop operations (don't perform any check).
+
+    // Unchecked because global indexes are created from internal commands.
+    void onCreateGlobalIndex(OperationContext* opCtx,
+                             const NamespaceString& globalIndexNss,
+                             const UUID& globalIndexUUID) final{};
+
+    void onDropGlobalIndex(OperationContext* opCtx,
+                           const NamespaceString& globalIndexNss,
+                           const UUID& globalIndexUUID) final{};
 
     // Index builds committing can be left unchecked since we kill any active index builds before
     // enabling write blocking. This means any index build which gets to the commit phase while

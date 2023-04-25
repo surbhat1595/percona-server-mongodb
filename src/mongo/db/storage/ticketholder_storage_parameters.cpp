@@ -41,7 +41,7 @@ Status TickerHolderStorageParams::updateConcurrentWriteTransactions(
         if (auto svcCtx = client->getServiceContext()) {
             if (auto ticketHolder =
                     dynamic_cast<ReaderWriterTicketHolder*>(TicketHolder::get(svcCtx))) {
-                return ticketHolder->resizeWriters(newWriteTransactions);
+                ticketHolder->resizeWriters(newWriteTransactions);
             } else {
                 LOGV2_WARNING(
                     6754202,
@@ -60,7 +60,7 @@ Status TickerHolderStorageParams::updateConcurrentReadTransactions(const int& ne
         if (auto svcCtx = client->getServiceContext()) {
             if (auto ticketHolder =
                     dynamic_cast<ReaderWriterTicketHolder*>(TicketHolder::get(svcCtx))) {
-                return ticketHolder->resizeReaders(newReadTransactions);
+                ticketHolder->resizeReaders(newReadTransactions);
             } else {
                 LOGV2_WARNING(
                     6754201,
@@ -68,26 +68,6 @@ Status TickerHolderStorageParams::updateConcurrentReadTransactions(const int& ne
                 return Status(
                     ErrorCodes::IllegalOperation,
                     "Attempting to update read tickets on an incompatible queueing policy");
-            }
-        }
-    }
-    return Status::OK();
-}
-
-Status TickerHolderStorageParams::updateConcurrentTotalTransactions(
-    const int& newTotalTransactions) {
-    if (auto client = Client::getCurrent()) {
-        if (auto svcCtx = client->getServiceContext()) {
-            if (auto ticketHolder =
-                    dynamic_cast<TicketHolderWithQueueingStats*>(TicketHolder::get(svcCtx))) {
-                return ticketHolder->resize(newTotalTransactions);
-            } else {
-                LOGV2_WARNING(
-                    6859001,
-                    "Attempting to update total tickets on an incompatible queueing policy");
-                return Status(
-                    ErrorCodes::IllegalOperation,
-                    "Attempting to update total tickets on an incompatible queueing policy");
             }
         }
     }

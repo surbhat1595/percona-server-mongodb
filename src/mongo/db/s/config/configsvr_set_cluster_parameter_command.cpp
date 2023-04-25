@@ -72,13 +72,21 @@ public:
 
                 SetClusterParameterInvocation invocation{std::move(sps), dbService};
 
-                invocation.normalizeParameter(
-                    opCtx, cmdParamObj, boost::none, serverParameter, parameterName);
+                invocation.normalizeParameter(opCtx,
+                                              cmdParamObj,
+                                              boost::none,
+                                              serverParameter,
+                                              parameterName,
+                                              request().getDbName().tenantId());
+
+                auto tenantId = request().getDbName().tenantId();
 
                 SetClusterParameterCoordinatorDocument coordinatorDoc;
-                coordinatorDoc.setConfigsvrCoordinatorMetadata(
-                    {ConfigsvrCoordinatorTypeEnum::kSetClusterParameter});
+                ConfigsvrCoordinatorId cid(ConfigsvrCoordinatorTypeEnum::kSetClusterParameter);
+                cid.setSubId(StringData(tenantId ? tenantId->toString() : ""));
+                coordinatorDoc.setConfigsvrCoordinatorMetadata({cid});
                 coordinatorDoc.setParameter(request().getCommandParameter());
+                coordinatorDoc.setTenantId(tenantId);
 
                 const auto service = ConfigsvrCoordinatorService::getService(opCtx);
                 const auto instance = service->getOrCreateService(opCtx, coordinatorDoc.toBSON());

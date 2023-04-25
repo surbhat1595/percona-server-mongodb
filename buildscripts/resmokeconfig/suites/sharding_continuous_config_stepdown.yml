@@ -85,6 +85,7 @@ selector:
   - jstests/sharding/sharding_rs1.js
   - jstests/sharding/move_primary_fails_without_database_version.js
   # Calls the config server primary directly (not through mongos)
+  - jstests/sharding/analyze_shard_key/configure_query_analyzer_basic.js
   - jstests/sharding/configsvr_metadata_commands_require_majority_write_concern.js
   - jstests/sharding/min_optime_recovery_on_successful_move_chunk_commit.js
   - jstests/sharding/read_after_optime.js
@@ -200,6 +201,8 @@ selector:
   # Runs commands directly on the config server primary and is not robust to the primary changing.
   - jstests/sharding/read_write_concern_defaults_commands_api.js
   - jstests/sharding/read_write_concern_defaults_propagation.js
+  - jstests/sharding/live_shard_startup_recovery_config_server.js
+  - jstests/sharding/live_shard_logical_initial_sync_config_server.js
 
   # On stepdown there is not gurantee that changelog entries have been inserted [SERVER-45655]
   - jstests/sharding/refine_collection_shard_key_changelog.js

@@ -34,7 +34,7 @@ global:
 imports:
     - "mongo/db/auth/access_checks.idl"
     - "mongo/db/auth/action_type.idl"
-    - "mongo/idl/basic_types.idl"
+    - "mongo/db/basic_types.idl"
 
 structs:
     ListCollectionsReplyInfo:
@@ -93,6 +93,7 @@ structs:
 
     ListCollectionsReply:
         description: "The listCollection command's reply."
+        is_command_reply: true
         fields:
             cursor:
                 type: ListCollectionsReplyCursor

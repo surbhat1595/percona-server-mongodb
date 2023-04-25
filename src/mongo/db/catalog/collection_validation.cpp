@@ -526,7 +526,8 @@ Status validate(OperationContext* opCtx,
             return Status::OK();
         }
 
-        // Validate in-memory catalog information with persisted info.
+        // Validate in-memory catalog information with persisted info prior to setting the read
+        // source to kCheckpoint otherwise we'd use a checkpointed MDB catalog file.
         _validateCatalogEntry(opCtx, &validateState, results);
 
         if (validateState.isMetadataValidation()) {
@@ -624,14 +625,27 @@ Status validate(OperationContext* opCtx,
                       "corruption found",
                       logAttrs(validateState.nss()),
                       logAttrs(validateState.uuid()));
+    } catch (ExceptionFor<ErrorCodes::CursorNotFound>&) {
+        invariant(validateState.isBackground());
+        string warning = str::stream()
+            << "Collection validation with {background: true} validates"
+            << " the latest checkpoint (data in a snapshot written to disk in a consistent"
+            << " way across all data files). During this validation, some tables have not yet been"
+            << " checkpointed.";
+        results->warnings.push_back(warning);
+
+        // Nothing to validate, so it must be valid.
+        results->valid = true;
+        return Status::OK();
     } catch (const DBException& e) {
-        if (ErrorCodes::isInterruption(e.code())) {
+        if (opCtx->isKillPending() || e.code() == ErrorCodes::Interrupted) {
             LOGV2_OPTIONS(5160301,
                           {LogComponent::kIndex},
                           "Validation interrupted",
-                          "namespace"_attr = validateState.nss());
+                          logAttrs(validateState.nss()));
             return e.toStatus();
         }
+
         string err = str::stream() << "exception during collection validation: " << e.toString();
         results->errors.push_back(err);
         results->valid = false;

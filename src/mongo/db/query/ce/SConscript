@@ -10,7 +10,7 @@ env.Library(
         'array_histogram.cpp',
         'ce_histogram.cpp',
         'ce_sampling.cpp',
-        'collection_statistics.cpp',
+        'collection_statistics_impl.cpp',
         'histogram_estimation.cpp',
         'scalar_histogram.cpp',
         'stats_cache.cpp',
@@ -20,6 +20,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/dbdirectclient',
         '$BUILD_DIR/mongo/db/exec/sbe/query_sbe_abt',
         '$BUILD_DIR/mongo/db/query/optimizer/optimizer',
+        'stats_serialization',
     ],
 )
 
@@ -38,10 +39,35 @@ env.Library(
     ],
 )
 
+env.Library(
+    target="stats_serialization",
+    source=[
+        'stats.idl',
+        'stats_serialization_utils.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/exec/sbe/query_sbe_values',
+        '$BUILD_DIR/mongo/db/server_base',
+        '$BUILD_DIR/mongo/db/service_context',
+    ],
+)
+
 env.CppUnitTest(
     target="ce_histogram_test",
     source=[
         "ce_histogram_test.cpp",
+        "collection_statistics_mock.cpp",
+    ],
+    LIBDEPS=[
+        'ce_test_utils',
+    ],
+)
+
+env.CppUnitTest(
+    target="ce_interpolation_test",
+    source=[
+        "ce_interpolation_test.cpp",
     ],
     LIBDEPS=[
         'ce_test_utils',
@@ -68,8 +94,6 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/auth/authmocks',
         '$BUILD_DIR/mongo/db/catalog/collection_crud',
         '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
-        '$BUILD_DIR/mongo/db/concurrency/lock_manager',
-        '$BUILD_DIR/mongo/db/db_raii',
         '$BUILD_DIR/mongo/db/index_builds_coordinator_mongod',
         '$BUILD_DIR/mongo/db/multitenancy',
         '$BUILD_DIR/mongo/db/op_observer/op_observer',
@@ -87,6 +111,7 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/db/service_context_d_test_fixture',
         '$BUILD_DIR/mongo/db/service_context_test_fixture',
+        '$BUILD_DIR/mongo/db/shard_role',
         '$BUILD_DIR/mongo/db/storage/wiredtiger/storage_wiredtiger',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         '$BUILD_DIR/mongo/unittest/unittest',
@@ -94,6 +119,7 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/util/fail_point',
         '$BUILD_DIR/mongo/util/pcre_wrapper',
         'query_ce',
+        'stats_serialization',
     ],
 )
 env.CppUnitTest(
@@ -107,5 +133,18 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/service_context',
         'ce_test_utils',
         'query_ce',
+    ],
+)
+env.CppUnitTest(
+    target="stats_path_test",
+    source=[
+        "stats_path_test.cpp",
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/service_context',
+        'ce_test_utils',
+        'query_ce',
+        'stats_serialization',
     ],
 )

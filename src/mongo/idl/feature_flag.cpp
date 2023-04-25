@@ -29,8 +29,6 @@
 
 #include "mongo/idl/feature_flag.h"
 
-#include "mongo/db/commands/feature_compatibility_version_parser.h"
-#include "mongo/idl/server_parameter.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/version/releases.h"
 
@@ -92,12 +90,13 @@ FeatureFlagServerParameter::FeatureFlagServerParameter(StringData name, FeatureF
     : ServerParameter(name, ServerParameterType::kStartupOnly), _storage(storage) {}
 
 void FeatureFlagServerParameter::append(OperationContext* opCtx,
-                                        BSONObjBuilder& b,
-                                        const std::string& name) {
+                                        BSONObjBuilder* b,
+                                        StringData name,
+                                        const boost::optional<TenantId>&) {
     bool enabled = _storage.isEnabledAndIgnoreFCV();
 
     {
-        auto sub = BSONObjBuilder(b.subobjStart(name));
+        auto sub = BSONObjBuilder(b->subobjStart(name));
         sub.append("value"_sd, enabled);
 
         if (enabled) {
@@ -109,13 +108,15 @@ void FeatureFlagServerParameter::append(OperationContext* opCtx,
 }
 
 void FeatureFlagServerParameter::appendSupportingRoundtrip(OperationContext* opCtx,
-                                                           BSONObjBuilder& b,
-                                                           const std::string& name) {
+                                                           BSONObjBuilder* b,
+                                                           StringData name,
+                                                           const boost::optional<TenantId>&) {
     bool enabled = _storage.isEnabledAndIgnoreFCV();
-    b.append(name, enabled);
+    b->append(name, enabled);
 }
 
-Status FeatureFlagServerParameter::set(const BSONElement& newValueElement) {
+Status FeatureFlagServerParameter::set(const BSONElement& newValueElement,
+                                       const boost::optional<TenantId>&) {
     bool newValue;
 
     if (auto status = newValueElement.tryCoerce(&newValue); !status.isOK()) {
@@ -128,7 +129,7 @@ Status FeatureFlagServerParameter::set(const BSONElement& newValueElement) {
     return Status::OK();
 }
 
-Status FeatureFlagServerParameter::setFromString(const std::string& str) {
+Status FeatureFlagServerParameter::setFromString(StringData str, const boost::optional<TenantId>&) {
     auto swNewValue = idl_server_parameter_detail::coerceFromString<bool>(str);
     if (!swNewValue.isOK()) {
         return swNewValue.getStatus();

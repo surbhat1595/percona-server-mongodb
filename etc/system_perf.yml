@@ -101,8 +101,7 @@ modules:
   - name: tsbs
     repo: git@github.com:gregorynoma/tsbs.git
     prefix: ${workdir}/src
-    branch: master
-    ref: 027f4b2d83267ae69d2740855654b4a7cac72498
+    branch: production
   - name: mongo-perf
     repo: git@github.com:mongodb/mongo-perf.git
     prefix: ${workdir}/src
@@ -366,10 +365,7 @@ functions:
           set -o errexit
           set -o verbose
           source "${workdir}/compile_venv/bin/activate"
-          # TODO: SERVER-68475
-          # remove this when a better solution is found
-          extra_args="SPLIT_DWARF_DWP_FILES=1"
-          python ./buildscripts/scons.py ${compile_flags|} ${scons_cache_args|} $extra_args install-core install-jstestshell MONGO_VERSION=${version} DESTDIR=$(pwd)/mongodb ${patch_compile_flags|}
+          python ./buildscripts/scons.py ${compile_flags|} ${scons_cache_args|} $extra_args install-core install-jstestshell SPLIT_DWARF=0 MONGO_VERSION=${version} DESTDIR=$(pwd)/mongodb ${patch_compile_flags|}
           mkdir -p mongodb/jstests/hooks
           if [ -d jstests/hooks ]
           then
@@ -601,6 +597,13 @@ tasks:
         vars:
           test_control: "tsbs_query"
 
+  - name: tsbs_query_finance
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "tsbs_query_finance"
+
   - name: tsbs_query_sharded
     priority: 5
     commands:
@@ -608,12 +611,26 @@ tasks:
         vars:
           test_control: "tsbs_query_sharded"
 
+  - name: tsbs_query_finance_sharded
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "tsbs_query_finance_sharded"
+
   - name: tsbs_query_sharded_balancer
     priority: 5
     commands:
       - func: f_run_dsi_workload
         vars:
           test_control: "tsbs_query_sharded_balancer"
+
+  - name: tsbs_query_finance_sharded_balancer
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "tsbs_query_finance_sharded_balancer"
 
   - name: tsbs_query_manual_bucketing
     priority: 5
@@ -1240,12 +1257,64 @@ buildvariants:
       - name: tpch_10_normalized
       - name: tpch_10_denormalized
 
+  - name: linux-standalone-sbe
+    display_name: Linux Standalone (SBE)
+    cron: "0 0 * * 4" # 00:00 on Thursday
+    modules: *modules
+    expansions:
+      mongodb_setup: standalone-sbe
+      infrastructure_provisioning: single
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+    run_on:
+      - "rhel70-perf-single"
+    depends_on: *_compile_amazon2
+    tasks: *classic_engine_tasks
+
   - name: linux-1-node-replSet-classic-query-engine
     display_name: Linux 1-Node ReplSet (Classic Query Engine)
     cron: "0 0 * * 4" # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-classic-query-engine
+      infrastructure_provisioning: single
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+    run_on:
+      - "rhel70-perf-single"
+    depends_on: *_compile_amazon2
+    tasks: &classic_engine_1nodereplset_tasks
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
+      - name: linkbench
+      - name: linkbench2
+
+  - name: linux-1-node-replSet-sbe
+    display_name: Linux 1-Node ReplSet (SBE)
+    cron: "0 0 * * 4" # 00:00 on Thursday
+    modules: *modules
+    expansions:
+      mongodb_setup: single-replica-sbe
+      infrastructure_provisioning: single
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+    run_on:
+      - "rhel70-perf-single"
+    depends_on: *_compile_amazon2
+    tasks: *classic_engine_1nodereplset_tasks
+
+  - name: linux-1-node-replSet-all-feature-flags
+    display_name: Linux 1-Node ReplSet (all feature flags)
+    cron: "0 0 * * 4" # 00:00 on Thursday
+    modules: *modules
+    expansions:
+      mongodb_setup: single-replica-all-feature-flags
       infrastructure_provisioning: single
       platform: linux
       project_dir: *project_dir
@@ -1317,6 +1386,7 @@ buildvariants:
       - name: linkbench2
       - name: tsbs_load
       - name: tsbs_query
+      - name: tsbs_query_finance
       - name: tsbs_query_manual_bucketing
       - name: tpcc
       - name: tpch_1_normalized
@@ -1557,7 +1627,9 @@ buildvariants:
       - name: change_streams_listen_throughput
       - name: change_streams_multi_mongos
       - name: tsbs_query_sharded
+      - name: tsbs_query_finance_sharded
       - name: tsbs_query_sharded_balancer
+      - name: tsbs_query_finance_sharded_balancer
 
   - name: linux-shard-lite-audit
     display_name: Linux Shard Lite Cluster Audit
@@ -1616,7 +1688,9 @@ buildvariants:
       - name: retryable_writes_workloads
       - name: smoke_test
       - name: tsbs_query_sharded
+      - name: tsbs_query_finance_sharded
       - name: tsbs_query_sharded_balancer
+      - name: tsbs_query_finance_sharded_balancer
 
   - name: linux-shard-lite-cwrwc
     display_name: Linux Shard Lite Cluster CWRWC
@@ -1677,6 +1751,10 @@ buildvariants:
       - name: schedule_variant_auto_tasks
       - name: change_streams_preimage_throughput
       - name: change_streams_preimage_latency
+      - name: tsbs_query_sharded
+      - name: tsbs_query_finance_sharded
+      - name: tsbs_query_sharded_balancer
+      - name: tsbs_query_finance_sharded_balancer
 
   - name: linux-shard-single
     display_name: Linux Shard Single
@@ -1750,6 +1828,7 @@ buildvariants:
       - name: linkbench2
       - name: tsbs_load
       - name: tsbs_query
+      - name: tsbs_query_finance
       - name: tsbs_query_manual_bucketing
       - name: sb_large_scale
       - name: sb_timeseries
@@ -1805,10 +1884,10 @@ buildvariants:
       # - name: tpch_10_denormalized
       - name: linkbench
       - name: linkbench2
-      # Time-series collections are available since v5.0.
-      # - name: tsbs_load
-      # - name: tsbs_query
-      # - name: tsbs_query_manual_bucketing
+      - name: tsbs_load
+      - name: tsbs_query
+      - name: tsbs_query_finance
+      - name: tsbs_query_manual_bucketing
       - name: sb_large_scale
       - name: sb_timeseries
 
@@ -1862,10 +1941,10 @@ buildvariants:
       # - name: tpch_10_denormalized
       - name: linkbench
       - name: linkbench2
-      # Time-series collections are available since v5.0.
-      # - name: tsbs_load
-      # - name: tsbs_query
-      # - name: tsbs_query_manual_bucketing
+      - name: tsbs_load
+      - name: tsbs_query
+      - name: tsbs_query_finance
+      - name: tsbs_query_manual_bucketing
       - name: sb_large_scale
       - name: sb_timeseries
 
@@ -1923,10 +2002,10 @@ buildvariants:
       # - name: tpch_10_denormalized
       - name: linkbench
       - name: linkbench2
-      # Time-series collections are available since v5.0.
-      # - name: tsbs_load
-      # - name: tsbs_query
-      # - name: tsbs_query_manual_bucketing
+      - name: tsbs_load
+      - name: tsbs_query
+      - name: tsbs_query_finance
+      - name: tsbs_query_manual_bucketing
       - name: sb_large_scale
       - name: sb_timeseries
 

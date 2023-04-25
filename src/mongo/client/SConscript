@@ -172,7 +172,6 @@ clientDriverEnv.Library(
     target='clientdriver_minimal',
     source=[
         'client_api_version_parameters.idl',
-        'client_deprecated.cpp',
         'dbclient_base.cpp',
         'dbclient_cursor.cpp',
         'index_spec.cpp',
@@ -247,7 +246,7 @@ env.Library(
         'replica_set_monitor_server_parameters.idl',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/idl/server_parameter',
+        '$BUILD_DIR/mongo/db/server_base',
     ],
 )
 

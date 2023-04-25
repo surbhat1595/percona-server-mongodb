@@ -88,6 +88,7 @@
 #include "mongo/db/repl/update_position_args.h"
 #include "mongo/db/repl/vote_requester.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/serverless/serverless_operation_lock_registry.h"
 #include "mongo/db/session/kill_sessions_local.h"
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/shutdown_in_progress_quiesce_info.h"
@@ -534,6 +535,7 @@ bool ReplicationCoordinatorImpl::_startLoadLocalConfig(
     }
 
     tenant_migration_access_blocker::recoverTenantMigrationAccessBlockers(opCtx);
+    ServerlessOperationLockRegistry::recoverLocks(opCtx);
     LOGV2(4280506, "Reconstructing prepared transactions");
     reconstructPreparedTransactions(opCtx, OplogApplication::Mode::kRecovering);
 
@@ -1059,7 +1061,6 @@ void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx) {
         _initialSyncer.swap(initialSyncerCopy);
     }
 
-
     // joining the replication executor is blocking so it must be run outside of the mutex
     if (initialSyncerCopy) {
         LOGV2_DEBUG(
@@ -1074,6 +1075,17 @@ void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx) {
         initialSyncerCopy->join();
         initialSyncerCopy.reset();
     }
+
+    {
+        stdx::unique_lock<Latch> lk(_mutex);
+        if (_finishedDrainingPromise) {
+            _finishedDrainingPromise->setError(
+                {ErrorCodes::InterruptedAtShutdown,
+                 "Cancelling wait for drain mode to complete due to shutdown"});
+            _finishedDrainingPromise = boost::none;
+        }
+    }
+
     _externalState->shutdown(opCtx);
     _replExecutor->shutdown();
     _replExecutor->join();
@@ -1192,6 +1204,23 @@ ReplicationCoordinator::ApplierState ReplicationCoordinatorImpl::getApplierState
 
 void ReplicationCoordinatorImpl::signalDrainComplete(OperationContext* opCtx,
                                                      long long termWhenBufferIsEmpty) noexcept {
+    {
+        stdx::unique_lock<Latch> lk(_mutex);
+        if (_applierState == ReplicationCoordinator::ApplierState::DrainingForShardSplit) {
+            _applierState = ApplierState::Stopped;
+            auto memberState = _getMemberState_inlock();
+            invariant(memberState.secondary() || memberState.startup());
+            _externalState->onDrainComplete(opCtx);
+
+            if (_finishedDrainingPromise) {
+                _finishedDrainingPromise->emplaceValue();
+                _finishedDrainingPromise = boost::none;
+            }
+
+            return;
+        }
+    }
+
     // This logic is a little complicated in order to avoid acquiring the RSTL in mode X
     // unnecessarily.  This is important because the applier may call signalDrainComplete()
     // whenever it wants, not only when the ReplicationCoordinator is expecting it.
@@ -3150,7 +3179,6 @@ int ReplicationCoordinatorImpl::getMyId() const {
 
 HostAndPort ReplicationCoordinatorImpl::getMyHostAndPort() const {
     stdx::unique_lock<Latch> lk(_mutex);
-
     if (_selfIndex == -1) {
         return HostAndPort();
     }
@@ -3200,7 +3228,7 @@ Status ReplicationCoordinatorImpl::processReplSetGetStatus(
         // application.
         ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(
             opCtx->lockState());
-        opCtx->lockState()->skipAcquireTicket();
+        opCtx->lockState()->setAdmissionPriority(AdmissionContext::Priority::kImmediate);
         // We need to hold the lock so that we don't run when storage is being shutdown.
         Lock::GlobalLock lk(opCtx,
                             MODE_IS,
@@ -3841,8 +3869,31 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
 
     // Make sure we can find ourselves in the config. If the config contents have not changed, then
     // we bypass the check for finding ourselves in the config, since we know it should already be
-    // satisfied.
-    if (!sameConfigContents(oldConfig, newConfig)) {
+    // satisfied. There is also one further optimization here: if we have a valid _selfIndex, we can
+    // do a quick and cheap pass first to see if host and port exist in the new config. This is safe
+    // as we are not allowed to have the same HostAndPort in the config twice. Matching HostandPort
+    // implies matching isSelf, and it is actually preferrable to avoid checking the latter as it is
+    // succeptible to transient DNS errors.
+    auto quickIndex =
+        _selfIndex >= 0 ? findOwnHostInConfigQuick(newConfig, getMyHostAndPort()) : -1;
+    if (quickIndex >= 0) {
+        if (!force) {
+            auto electableStatus = checkElectable(newConfig, quickIndex);
+            if (!electableStatus.isOK()) {
+                LOGV2_ERROR(6475002,
+                            "Not electable in new config and force=false, rejecting",
+                            "error"_attr = electableStatus,
+                            "newConfig"_attr = newConfigObj);
+                return electableStatus;
+            }
+        }
+        LOGV2(6475000,
+              "Was able to quickly find new index in config. Skipping full checks.",
+              "index"_attr = quickIndex,
+              "force"_attr = force);
+        myIndex = quickIndex;
+    } else {
+        // Either our HostAndPort changed in the config or we didn't have a _selfIndex.
         if (skipSafetyChecks) {
             LOGV2_ERROR(5986700,
                         "Configuration changed substantially in a config change that should have "
@@ -4842,6 +4893,16 @@ boost::optional<Timestamp> ReplicationCoordinatorImpl::getRecoveryTimestamp() {
 void ReplicationCoordinatorImpl::_enterDrainMode_inlock() {
     _applierState = ApplierState::Draining;
     _externalState->stopProducer();
+}
+
+Future<void> ReplicationCoordinatorImpl::_drainForShardSplit() {
+    stdx::lock_guard<Latch> lk(_mutex);
+    invariant(!_finishedDrainingPromise.has_value());
+    auto [promise, future] = makePromiseFuture<void>();
+    _finishedDrainingPromise = std::move(promise);
+    _applierState = ApplierState::DrainingForShardSplit;
+    _externalState->stopProducer();
+    return std::move(future);
 }
 
 ReplicationCoordinatorImpl::PostMemberStateUpdateAction

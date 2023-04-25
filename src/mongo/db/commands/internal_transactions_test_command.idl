@@ -30,12 +30,13 @@ global:
   cpp_namespace: "mongo"
 
 imports:
-  - "mongo/idl/basic_types.idl"
+  - "mongo/db/basic_types.idl"
 
 structs:
   TestInternalTransactionsCommandReply:
     description: "Response for internal transaction command."
     strict: false
+    is_command_reply: true
     fields:
       responses:
         description: "List of responses to commands in the transaction."

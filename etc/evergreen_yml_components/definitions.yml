@@ -300,6 +300,7 @@ variables:
   - enterprise-ubuntu1804-arm64
   - enterprise-ubuntu2004-arm64
   - enterprise-ubuntu2004-64
+  - enterprise-ubuntu2204-64
   - enterprise-windows
   - enterprise-windows-debug-unoptimized
   - enterprise-windows-inmem
@@ -323,6 +324,7 @@ variables:
   - enterprise-amazon2-arm64
   - enterprise-ubuntu1804-64
   - enterprise-ubuntu2004-64
+  - enterprise-ubuntu2204-64
   - enterprise-windows
   - enterprise-windows-required
 
@@ -357,6 +359,7 @@ variables:
   - ubuntu1804-arm64
   - ubuntu2004-arm64
   - ubuntu2004
+  - ubuntu2204
   - enterprise-ubuntu1804-64
   - enterprise-ubuntu1804-arm64
   - enterprise-ubuntu2004-arm64
@@ -1039,6 +1042,8 @@ functions:
   - *f_expansions_write
   - *kill_processes
   - *cleanup_environment
+  - *get_version_expansions
+  - *apply_version_expansions
   - *fetch_venv
   - *adjust_venv
   - *f_expansions_write
@@ -1178,6 +1183,15 @@ functions:
       binary: bash
       args:
       - "src/evergreen/scons_compile.sh"
+
+  "ninja compile":
+  - *f_expansions_write
+  - command: subprocess.exec
+    type: test
+    params:
+      binary: bash
+      args:
+      - "./src/evergreen/ninja_compile.sh"
 
   "generate version expansions": &generate_version_expansions
     command: subprocess.exec
@@ -2027,6 +2041,87 @@ functions:
     params:
       file_location: ${report_file|src/report.json}
 
+  "print top N metrics":
+    - command: subprocess.exec
+      params:
+        binary: bash
+        add_expansions_to_env: true
+        args:
+        - "src/evergreen/run_python_script.sh"
+        - "site_scons/site_tools/build_metrics/top_n_metrics.py"
+        - "--input=build_metrics.json"
+        - "--output=top_15_metrics.txt"
+        - "--num=15"
+
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/top_15_metrics.txt
+        remote_file: ${project}/${build_variant}/${revision}/${build_id}-${task_name}-${execution}-top_15_metrics.txt
+        bucket: mciuploads
+        permissions: public-read
+        content_type: text/plain
+        display_name: Top 15 Metrics
+
+  "attach build metrics":
+    - command: archive.targz_pack
+      params:
+        target: build-metrics.tgz
+        source_dir: src
+        include:
+        - "./build_metrics.json"
+        - "./populate_cache.json"
+        - "./pull_cache.json"
+
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: build-metrics.tgz
+        remote_file: ${project}/${build_variant}/${revision}/${build_id}-${task_name}-${execution}-build-metrics.tgz
+        bucket: mciuploads
+        permissions: public-read
+        content_type: application/gzip
+        display_name: Metrics JSON
+
+    - command: subprocess.exec
+      params:
+        binary: bash
+        add_expansions_to_env: true
+        args:
+        - "src/evergreen/run_python_script.sh"
+        - "evergreen/build_metric_cedar_report.py"
+        - "--build-metrics=build_metrics.json"
+        - "--cache-push-metrics=populate_cache.json"
+        - "--cache-pull-metrics=pull_cache.json"
+
+    - command: archive.targz_pack
+      params:
+        target: build_metrics_cedar_report.tgz
+        source_dir: src
+        include:
+        - "./build_metrics_cedar_report.json"
+
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: build_metrics_cedar_report.tgz
+        remote_file: ${project}/${build_variant}/${revision}/${build_id}-${task_name}-${execution}-build_metrics_cedar_report.tgz
+        bucket: mciuploads
+        permissions: public-read
+        content_type: application/gzip
+        display_name: Cedar Report JSON
+
+    - command: perf.send
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        bucket: mciuploads
+        prefix: ${task_id}_${execution}
+        file: src/build_metrics_cedar_report.json
+
   "attach artifacts":
     command: attach.artifacts
     params:
@@ -2298,16 +2393,88 @@ tasks:
     vars:
       generating_for_ninja: true
       separate_debug: off
-      task_install_action:
-        default
       task_compile_flags: >-
         --ninja
   - *f_expansions_write
-  - command: subprocess.exec
-    params:
-      binary: bash
-      args:
-      - "./src/evergreen/ninja_compile.sh"
+  - func: "ninja compile"
+    vars:
+      ninja_file: "build.ninja"
+
+- name: compile_ninja_default_profile
+  tags: []
+  depends_on:
+  - name: version_expansions_gen
+    variant: generate-tasks-for-version
+  commands:
+  - func: "scons compile"
+    vars:
+      generating_for_ninja: true
+      separate_debug: off
+      task_compile_flags: >-
+        --build-profile=default
+        --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+        --ninja
+  - *f_expansions_write
+  - func: "ninja compile"
+    vars:
+      ninja_file: "build.ninja"
+
+- name: compile_ninja_opt_profile
+  tags: []
+  depends_on:
+  - name: version_expansions_gen
+    variant: generate-tasks-for-version
+  commands:
+  - func: "scons compile"
+    vars:
+      generating_for_ninja: true
+      separate_debug: off
+      task_compile_flags: >-
+        --build-profile=opt
+        CCACHE=
+        ICECC=
+  - *f_expansions_write
+  - func: "ninja compile"
+    vars:
+      ninja_file: "opt.ninja"
+
+- name: compile_ninja_fast_profile
+  tags: []
+  depends_on:
+  - name: version_expansions_gen
+    variant: generate-tasks-for-version
+  commands:
+  - func: "scons compile"
+    vars:
+      generating_for_ninja: true
+      separate_debug: off
+      task_compile_flags: >-
+        --build-profile=fast
+        CCACHE=
+        ICECC=
+  - *f_expansions_write
+  - func: "ninja compile"
+    vars:
+      ninja_file: "fast.ninja"
+
+- name: compile_ninja_san_profile
+  tags: []
+  depends_on:
+  - name: version_expansions_gen
+    variant: generate-tasks-for-version
+  commands:
+  - func: "scons compile"
+    vars:
+      generating_for_ninja: true
+      separate_debug: off
+      task_compile_flags: >-
+        --build-profile=san
+        CCACHE=
+        ICECC=
+  - *f_expansions_write
+  - func: "ninja compile"
+    vars:
+      ninja_file: "san.ninja"
 
 - name: compile_ninja_next
   tags: []
@@ -2319,17 +2486,13 @@ tasks:
     vars:
       generating_for_ninja: true
       separate_debug: off
-      task_install_action:
-        default
       task_compile_flags: >-
         --build-tools=next
         --ninja
   - *f_expansions_write
-  - command: subprocess.exec
-    params:
-      binary: bash
-      args:
-      - "./src/evergreen/ninja_compile.sh"
+  - func: "ninja compile"
+    vars:
+      ninja_file: "build.ninja"
 
 - name: compile_build_tools_next
   tags: []
@@ -2465,6 +2628,43 @@ tasks:
     vars:
       targets: install-unittests install-unittests-debug
       compiling_for_test: true
+
+- name: build_metrics_tasks_gen
+  depends_on:
+  - name: version_expansions_gen
+    variant: generate-tasks-for-version
+  commands:
+
+  - command: subprocess.exec
+    params:
+      binary: bash
+      add_expansions_to_env: true
+      args:
+      - "src/evergreen/run_python_script.sh"
+      - "buildscripts/evergreen_gen_build_metrics_tasks.py"
+
+  - command: archive.targz_pack
+    params:
+      target: build_metrics_task_gen.tgz
+      source_dir: "src"
+      include:
+      - "build_metrics_task_gen.json"
+
+  - command: s3.put
+    params:
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: build_metrics_task_gen.tgz
+      remote_file: ${project}/${build_variant}/${revision}/build-metrics/${task_name}-${build_id}.tgz
+      bucket: mciuploads
+      permissions: public-read
+      content_type: application/gzip
+      display_name: Build Metrics Task Gen JSON
+
+  - command: generate.tasks
+    params:
+      files:
+      - src/build_metrics_task_gen.json
 
 ## A copy of the compile_unittests task for the recorded unittest taskgroup ##
 - <<: *compile_unittests
@@ -2968,8 +3168,6 @@ tasks:
     vars:
       targets: archive-mongo-crypt-shlib-test
       compiling_for_test: true
-      task_install_action:
-        default
       task_compile_flags: >-
         --allocator=system
         --enable-free-mon=off
@@ -6586,6 +6784,7 @@ tasks:
   commands:
   - command: manifest.load
   - func: "git get project and add git tag"
+  - func: "get and apply version expansions"
   - func: "f_expansions_write"
   - func: "kill processes"
   - func: "cleanup environment"
@@ -7488,6 +7687,26 @@ task_groups:
       display_name: build.ninja
 
 - <<: *compile_task_group_template
+  name: compile_ninja_default_profile_TG
+  tasks:
+  - compile_ninja_default_profile
+
+- <<: *compile_task_group_template
+  name: compile_ninja_opt_profile_TG
+  tasks:
+  - compile_ninja_opt_profile
+
+- <<: *compile_task_group_template
+  name: compile_ninja_san_profile_TG
+  tasks:
+  - compile_ninja_san_profile
+
+- <<: *compile_task_group_template
+  name: compile_ninja_fast_profile_TG
+  tasks:
+  - compile_ninja_fast_profile
+
+- <<: *compile_task_group_template
   name: server_discovery_and_monitoring_json_test_TG
   tasks:
   - server_discovery_and_monitoring_json_test
@@ -7617,6 +7836,11 @@ task_groups:
   - compile_dbtest
   - run_dbtest
   - archive_dbtest
+
+- <<: *compile_task_group_template
+  name: build_metrics_gen_TG
+  tasks:
+  - build_metrics_tasks_gen
 
 - name: clang_tidy_TG
   setup_group_can_fail_task: true

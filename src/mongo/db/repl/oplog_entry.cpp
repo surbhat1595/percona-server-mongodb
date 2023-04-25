@@ -50,7 +50,6 @@ namespace {
  * Returns a document representing an oplog entry with the given fields.
  */
 BSONObj makeOplogEntryDoc(OpTime opTime,
-                          const boost::optional<int64_t> hash,
                           OpTypeEnum opType,
                           const NamespaceString& nss,
                           const boost::optional<UUID>& uuid,
@@ -77,16 +76,12 @@ BSONObj makeOplogEntryDoc(OpTime opTime,
     builder.append(OplogEntryBase::kTermFieldName, opTime.getTerm());
     builder.append(OplogEntryBase::kVersionFieldName, version);
     builder.append(OplogEntryBase::kOpTypeFieldName, OpType_serializer(opType));
-    // TODO SERVER-62114 Change to check for upgraded FCV rather than feature flag
-    if (nss.tenantId() &&
+    if (nss.tenantId() && serverGlobalParams.featureCompatibility.isVersionInitialized() &&
         gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility)) {
         nss.tenantId()->serializeToBSON(OplogEntryBase::kTidFieldName, &builder);
     }
     builder.append(OplogEntryBase::kNssFieldName, nss.toString());
     builder.append(OplogEntryBase::kWallClockTimeFieldName, wallClockTime);
-    if (hash) {
-        builder.append(OplogEntryBase::kHashFieldName, hash.value());
-    }
     if (uuid) {
         uuid->appendToBuilder(&builder, OplogEntryBase::kUuidFieldName);
     }
@@ -168,6 +163,12 @@ DurableOplogEntry::CommandType parseCommandType(const BSONObj& objectField) {
         return DurableOplogEntry::CommandType::kAbortTransaction;
     } else if (commandString == "importCollection") {
         return DurableOplogEntry::CommandType::kImportCollection;
+    } else if (commandString == "createGlobalIndex") {
+        return DurableOplogEntry::CommandType::kCreateGlobalIndex;
+    } else if (commandString == "dropGlobalIndex") {
+        return DurableOplogEntry::CommandType::kDropGlobalIndex;
+    } else if (commandString == "xi") {
+        return DurableOplogEntry::CommandType::kInsertGlobalIndexKey;
     } else {
         uasserted(ErrorCodes::BadValue,
                   str::stream() << "Unknown oplog entry command type: " << commandString
@@ -278,6 +279,18 @@ ReplOperation MutableOplogEntry::makeDeleteOperation(const NamespaceString& nss,
     return op;
 }
 
+ReplOperation MutableOplogEntry::makeInsertGlobalIndexKeyOperation(const NamespaceString& indexNss,
+                                                                   const UUID indexUuid,
+                                                                   const BSONObj& key,
+                                                                   const BSONObj& docKey) {
+    ReplOperation op;
+    op.setOpType(OpTypeEnum::kInsertGlobalIndexKey);
+    op.setNss(indexNss.getCommandNS());
+    op.setUuid(indexUuid);
+    op.setObject(BSON("key" << key << "docKey" << docKey));
+    return op;
+}
+
 StatusWith<MutableOplogEntry> MutableOplogEntry::parse(const BSONObj& object) {
     boost::optional<TenantId> tid;
     if (object.hasElement("tid"))
@@ -340,7 +353,6 @@ DurableOplogEntry::DurableOplogEntry(BSONObj rawInput) : _raw(std::move(rawInput
 }
 
 DurableOplogEntry::DurableOplogEntry(OpTime opTime,
-                                     const boost::optional<int64_t> hash,
                                      OpTypeEnum opType,
                                      const NamespaceString& nss,
                                      const boost::optional<UUID>& uuid,
@@ -359,7 +371,6 @@ DurableOplogEntry::DurableOplogEntry(OpTime opTime,
                                      const boost::optional<Value>& idField,
                                      const boost::optional<repl::RetryImageEnum>& needsRetryImage)
     : DurableOplogEntry(makeOplogEntryDoc(opTime,
-                                          hash,
                                           opType,
                                           nss,
                                           uuid,
@@ -388,6 +399,7 @@ bool DurableOplogEntry::isCrudOpType(OpTypeEnum opType) {
         case OpTypeEnum::kInsert:
         case OpTypeEnum::kDelete:
         case OpTypeEnum::kUpdate:
+        case OpTypeEnum::kInsertGlobalIndexKey:
             return true;
         case OpTypeEnum::kCommand:
         case OpTypeEnum::kNoop:
@@ -409,6 +421,7 @@ bool DurableOplogEntry::isUpdateOrDelete() const {
         case OpTypeEnum::kInsert:
         case OpTypeEnum::kCommand:
         case OpTypeEnum::kNoop:
+        case OpTypeEnum::kInsertGlobalIndexKey:
             return false;
     }
     MONGO_UNREACHABLE;

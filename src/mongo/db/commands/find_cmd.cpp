@@ -36,7 +36,6 @@
 #include "mongo/db/client.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/cqf/cqf_command_utils.h"
 #include "mongo/db/commands/run_aggregate.h"
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/cursor_manager.h"
@@ -48,6 +47,8 @@
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
+#include "mongo/db/query/cqf_command_utils.h"
+#include "mongo/db/query/cqf_get_executor.h"
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/explain.h"
 #include "mongo/db/query/find.h"
@@ -141,10 +142,6 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
         findCommand.getLet(),                    // let
         CurOp::get(opCtx)->dbProfileLevel() > 0  // mayDbProfile
     );
-    if (opCtx->readOnly()) {
-        // Disallow disk use if in read-only mode.
-        expCtx->allowDiskUse = false;
-    }
     expCtx->tempDir = storageGlobalParams.dbpath + "/_tmp";
     expCtx->startExpressionCounters();
 
@@ -294,6 +291,15 @@ public:
                         AutoGetCollectionViewMode::kViewsPermitted);
             const auto nss = ctx->getNss();
 
+            // Going forward this operation must never ignore interrupt signals while waiting for
+            // lock acquisition. This InterruptibleLockGuard will ensure that waiting for lock
+            // re-acquisition after yielding will not ignore interrupt signals. This is necessary to
+            // avoid deadlocking with replication rollback, which at the storage layer waits for all
+            // cursors to be closed under the global MODE_X lock, after having sent interrupt
+            // signals to read operations. This operation must never hold open storage cursors while
+            // ignoring interrupt.
+            InterruptibleLockGuard interruptibleLockAcquisition(opCtx->lockState());
+
             // Parse the command BSON to a FindCommandRequest.
             auto findCommand = parseCmdObjectToFindCommandRequest(opCtx, nss, _request.body);
 
@@ -309,9 +315,9 @@ public:
                                              extensionsCallback,
                                              MatchExpressionParser::kAllowAllSpecialFeatures));
 
-            // If we are running a query against a view, or if we are trying to test the new
-            // optimizer, redirect this query through the aggregation system.
-            if (ctx->getView() || isEligibleForBonsai(*cq, opCtx, ctx->getCollection())) {
+            // If we are running a query against a view redirect this query through the aggregation
+            // system.
+            if (ctx->getView()) {
                 // Relinquish locks. The aggregation command will re-acquire them.
                 ctx.reset();
 
@@ -428,7 +434,7 @@ public:
                 // on ticket acquisition can cause complicated deadlocks. Primaries may depend on
                 // data reaching secondaries in order to proceed; and secondaries may get stalled
                 // replicating because of an inability to acquire a read ticket.
-                opCtx->lockState()->skipAcquireTicket();
+                opCtx->lockState()->setAdmissionPriority(AdmissionContext::Priority::kImmediate);
             }
 
             // If this read represents a reverse oplog scan, we want to bypass oplog visibility
@@ -469,6 +475,15 @@ public:
                         CommandHelpers::parseNsOrUUID(_dbName, _request.body),
                         AutoGetCollectionViewMode::kViewsPermitted);
             const auto& nss = ctx->getNss();
+
+            // Going forward this operation must never ignore interrupt signals while waiting for
+            // lock acquisition. This InterruptibleLockGuard will ensure that waiting for lock
+            // re-acquisition after yielding will not ignore interrupt signals. This is necessary to
+            // avoid deadlocking with replication rollback, which at the storage layer waits for all
+            // cursors to be closed under the global MODE_X lock, after having sent interrupt
+            // signals to read operations. This operation must never hold open storage cursors while
+            // ignoring interrupt.
+            InterruptibleLockGuard interruptibleLockAcquisition(opCtx->lockState());
 
             uassert(ErrorCodes::NamespaceNotFound,
                     str::stream() << "UUID " << findCommand->getNamespaceOrUUID().uuid().value()
@@ -514,9 +529,9 @@ public:
                                              extensionsCallback,
                                              MatchExpressionParser::kAllowAllSpecialFeatures));
 
-            // If we are running a query against a view, or if we are trying to test the new
-            // optimizer, redirect this query through the aggregation system.
-            if (ctx->getView() || isEligibleForBonsai(*cq, opCtx, ctx->getCollection())) {
+            // If we are running a query against a view redirect this query through the aggregation
+            // system.
+            if (ctx->getView()) {
                 // Relinquish locks. The aggregation command will re-acquire them.
                 ctx.reset();
 
@@ -566,9 +581,7 @@ public:
 
             // If the executor supports it, find operations will maintain the storage engine state
             // across commands.
-            if (gMaintainValidCursorsAcrossReadCommands && !opCtx->inMultiDocumentTransaction() &&
-                repl::ReadConcernArgs::get(opCtx).getLevel() !=
-                    repl::ReadConcernLevel::kSnapshotReadConcern) {
+            if (gMaintainValidCursorsAcrossReadCommands && !opCtx->inMultiDocumentTransaction()) {
                 exec->enableSaveRecoveryUnitAcrossCommandsIfSupported();
             }
 

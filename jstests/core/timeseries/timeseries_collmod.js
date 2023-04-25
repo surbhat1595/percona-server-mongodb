@@ -2,11 +2,12 @@
  * This tests which collMod options are allowed on a time-series collection.
  *
  * @tags: [
- *  # Cannot implicitly shard accessed collections because of collection existing when none
- *  # expected.
- *  assumes_no_implicit_collection_creation_after_drop,
- *  requires_non_retryable_commands,
- *  requires_fcv_51,
+ *   # Behavior clarified in binVersion 6.1
+ *   requires_fcv_61,
+ *   # collMod is not retryable
+ *   requires_non_retryable_commands,
+ *   # We need a timeseries collection.
+ *   requires_timeseries,
  * ]
  */
 
@@ -44,10 +45,6 @@ assert.commandFailedWithCode(db.runCommand({"collMod": collName, "validationActi
 
 // Tries to modify the view for a time-series collection.
 assert.commandFailedWithCode(db.runCommand({"collMod": collName, "viewOn": "foo", "pipeline": []}),
-                             ErrorCodes.InvalidOptions);
-
-// Tries to set 'recordPreImages' for a time-series collection.
-assert.commandFailedWithCode(db.runCommand({"collMod": collName, "recordPreImages": true}),
                              ErrorCodes.InvalidOptions);
 
 // Successfully sets 'expireAfterSeconds' for a time-series collection.

@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from evergreen import EvergreenApi, RetryingEvergreenApi
 
 from buildscripts.ciconfig.evergreen import (EvergreenProjectConfig, parse_evergreen_file)
-from buildscripts.task_generation.resmoke_proxy import ResmokeProxyService
+from buildscripts.resmoke_proxy.resmoke_proxy import ResmokeProxyService
 from buildscripts.timeouts.timeout_service import (TimeoutParams, TimeoutService, TimeoutSettings)
 from buildscripts.util.cmdutils import enable_logging
 from buildscripts.util.taskname import determine_task_base_name
@@ -162,6 +162,9 @@ def output_timeout(exec_timeout: timedelta, idle_timeout: Optional[timedelta],
     :param idle_timeout: Idle timeout to output.
     :param output_file: Location of output file to write.
     """
+    # the math library is triggering this error in this function for some
+    # reason
+    # pylint: disable=c-extension-no-member
     output = {
         "exec_timeout_secs": math.ceil(exec_timeout.total_seconds()),
     }

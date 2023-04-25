@@ -40,15 +40,15 @@ using namespace mongo::ce;
 
 class StatsCacheLoaderMock : public StatsCacheLoader {
 public:
-    SemiFuture<CollectionStatistics> getStats(OperationContext* opCtx,
-                                              const NamespaceString& nss) override;
+    SemiFuture<StatsCacheVal> getStats(OperationContext* opCtx,
+                                       const StatsPathString& statsPath) override;
 
-    void setStatsReturnValueForTest(StatusWith<CollectionStatistics> swStats) override;
+    void setStatsReturnValueForTest(StatusWith<StatsCacheVal> swStats);
 
     static const Status kInternalErrorStatus;
 
 private:
-    StatusWith<CollectionStatistics> _swStatsReturnValueForTest{kInternalErrorStatus};
+    StatusWith<StatsCacheVal> _swStatsReturnValueForTest{kInternalErrorStatus};
 };
 
 }  // namespace mongo

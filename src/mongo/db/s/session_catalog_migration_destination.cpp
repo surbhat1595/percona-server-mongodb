@@ -257,7 +257,10 @@ ProcessOplogResult processSessionOplog(const BSONObj& oplogBSON,
     auto opCtx = uniqueOpCtx.get();
     opCtx->setLogicalSessionId(result.sessionId);
     opCtx->setTxnNumber(result.txnNum);
-    MongoDOperationContextSession ocs(opCtx);
+
+    auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
+    auto ocs = mongoDSessionCatalog->checkOutSession(opCtx);
+
     auto txnParticipant = TransactionParticipant::get(opCtx);
 
     try {
@@ -299,6 +302,9 @@ ProcessOplogResult processSessionOplog(const BSONObj& oplogBSON,
     oplogEntry.setFromMigrate(true);
     // Reset OpTime so logOp() can assign a new one.
     oplogEntry.setOpTime(OplogSlot());
+
+    // We should not be writing this field so make sure it is always "none".
+    oplogEntry.setHash(boost::none);
 
     writeConflictRetry(
         opCtx,

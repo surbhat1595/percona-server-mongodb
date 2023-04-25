@@ -110,12 +110,6 @@ ScopedCollectionFilter CollectionShardingRuntime::getOwnershipFilter(
         // No operations should be calling getOwnershipFilter without a shard version
         invariant(optReceivedShardVersion,
                   "getOwnershipFilter called by operation that doesn't specify shard version");
-        uassert(6279300,
-                "Request was received without an attached index version. This could indicate that "
-                "this request was sent by a router of an older version",
-                !feature_flags::gGlobalIndexesShardingCatalog.isEnabled(
-                    serverGlobalParams.featureCompatibility) ||
-                    optReceivedShardVersion->indexVersion());
     }
 
     auto metadata =
@@ -148,16 +142,9 @@ ScopedCollectionDescription CollectionShardingRuntime::getCollectionDescription(
 
     auto optMetadata = _getCurrentMetadataIfKnown(boost::none);
     const auto receivedShardVersion{oss.getShardVersion(_nss)};
-    uassert(6279301,
-            "Request was received without an attached index version. This could indicate that this "
-            "request was sent by a router of an older version",
-            !feature_flags::gGlobalIndexesShardingCatalog.isEnabled(
-                serverGlobalParams.featureCompatibility) ||
-                !receivedShardVersion || receivedShardVersion->indexVersion());
     uassert(
         StaleConfigInfo(_nss,
-                        receivedShardVersion ? (ChunkVersion)*receivedShardVersion
-                                             : ChunkVersion::IGNORED(),
+                        receivedShardVersion ? *receivedShardVersion : ShardVersion::IGNORED(),
                         boost::none /* wantedVersion */,
                         ShardingState::get(_serviceContext)->shardId()),
         str::stream() << "sharding status of collection " << _nss.ns()
@@ -182,6 +169,10 @@ void CollectionShardingRuntime::checkShardVersionOrThrow(OperationContext* opCtx
 void CollectionShardingRuntime::enterCriticalSectionCatchUpPhase(const CSRLock&,
                                                                  const BSONObj& reason) {
     _critSec.enterCriticalSectionCatchUpPhase(reason);
+
+    if (_shardVersionInRecoverOrRefresh) {
+        _shardVersionInRecoverOrRefresh->cancellationSource.cancel();
+    }
 }
 
 void CollectionShardingRuntime::enterCriticalSectionCommitPhase(const CSRLock&,
@@ -243,7 +234,8 @@ void CollectionShardingRuntime::setFilteringMetadata_withLock(OperationContext* 
     }
 }
 
-void CollectionShardingRuntime::clearFilteringMetadata(OperationContext* opCtx) {
+void CollectionShardingRuntime::_clearFilteringMetadata(OperationContext* opCtx,
+                                                        bool clearMetadataManager) {
     const auto csrLock = CSRLock::lockExclusive(opCtx, this);
     if (_shardVersionInRecoverOrRefresh) {
         _shardVersionInRecoverOrRefresh->cancellationSource.cancel();
@@ -255,17 +247,28 @@ void CollectionShardingRuntime::clearFilteringMetadata(OperationContext* opCtx) 
                     1,
                     "Clearing metadata for collection {namespace}",
                     "Clearing collection metadata",
-                    "namespace"_attr = _nss);
+                    "namespace"_attr = _nss,
+                    "clearMetadataManager"_attr = clearMetadataManager);
         _metadataType = MetadataType::kUnknown;
+        if (clearMetadataManager)
+            _metadataManager.reset();
     }
 }
 
+void CollectionShardingRuntime::clearFilteringMetadata(OperationContext* opCtx) {
+    _clearFilteringMetadata(opCtx, /* clearMetadataManager */ false);
+}
+
+void CollectionShardingRuntime::clearFilteringMetadataForDroppedCollection(
+    OperationContext* opCtx) {
+    _clearFilteringMetadata(opCtx, /* clearMetadataManager */ true);
+}
+
 SharedSemiFuture<void> CollectionShardingRuntime::cleanUpRange(ChunkRange const& range,
-                                                               const UUID& migrationId,
                                                                CleanWhen when) {
     stdx::lock_guard lk(_metadataManagerLock);
     invariant(_metadataType == MetadataType::kSharded);
-    return _metadataManager->cleanUpRange(range, migrationId, when == kDelayed);
+    return _metadataManager->cleanUpRange(range, when == kDelayed);
 }
 
 Status CollectionShardingRuntime::waitForClean(OperationContext* opCtx,
@@ -367,14 +370,7 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
 
     // Assume that the received shard version was IGNORED if the current operation wasn't versioned
     const auto& receivedShardVersion =
-        optReceivedShardVersion ? (ChunkVersion)*optReceivedShardVersion : ChunkVersion::IGNORED();
-    uassert(6279302,
-            "Request was received without an attached index version. This could indicate that this "
-            "request was sent by a router of an older version",
-            !feature_flags::gGlobalIndexesShardingCatalog.isEnabled(
-                serverGlobalParams.featureCompatibility) ||
-                receivedShardVersion == ChunkVersion::IGNORED() ||
-                optReceivedShardVersion->indexVersion());
+        optReceivedShardVersion ? *optReceivedShardVersion : ShardVersion::IGNORED();
 
     auto csrLock = CSRLock::lockShared(opCtx, this);
 
@@ -407,10 +403,13 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
 
     const auto& currentMetadata = optCurrentMetadata->get();
 
-    auto wantedShardVersion = currentMetadata.getShardVersion();
+    const auto wantedPlacementVersion = currentMetadata.getShardVersion();
+    const auto wantedShardVersion = ShardVersion(
+        wantedPlacementVersion, CollectionIndexes(wantedPlacementVersion, boost::none));
+    const ChunkVersion receivedPlacementVersion = receivedShardVersion;
 
     if (wantedShardVersion.isWriteCompatibleWith(receivedShardVersion) ||
-        ChunkVersion::isIgnoredVersion(receivedShardVersion))
+        receivedShardVersion == ShardVersion::IGNORED())
         return optCurrentMetadata;
 
     StaleConfigInfo sci(
@@ -420,13 +419,13 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
             str::stream() << "timestamp mismatch detected for " << _nss.ns(),
             wantedShardVersion.isSameCollection(receivedShardVersion));
 
-    if (!wantedShardVersion.isSet() && receivedShardVersion.isSet()) {
+    if (!wantedPlacementVersion.isSet() && receivedPlacementVersion.isSet()) {
         uasserted(std::move(sci),
                   str::stream() << "this shard no longer contains chunks for " << _nss.ns() << ", "
                                 << "the collection may have been dropped");
     }
 
-    if (wantedShardVersion.isSet() && !receivedShardVersion.isSet()) {
+    if (wantedPlacementVersion.isSet() && !receivedPlacementVersion.isSet()) {
         uasserted(std::move(sci),
                   str::stream() << "this shard contains chunks for " << _nss.ns() << ", "
                                 << "but the client expects unsharded collection");
@@ -475,6 +474,17 @@ CollectionShardingRuntime::getShardVersionRecoverRefreshFuture(OperationContext*
 void CollectionShardingRuntime::resetShardVersionRecoverRefreshFuture(const CSRLock&) {
     invariant(_shardVersionInRecoverOrRefresh);
     _shardVersionInRecoverOrRefresh = boost::none;
+}
+
+void CollectionShardingRuntime::setIndexVersion(OperationContext* opCtx,
+                                                const boost::optional<Timestamp>& indexVersion) {
+    auto csrLock = CSRLock::lockExclusive(opCtx, this);
+    _indexVersion = indexVersion;
+}
+
+boost::optional<Timestamp> CollectionShardingRuntime::getIndexVersion(OperationContext* opCtx) {
+    auto csrLock = CSRLock::lockShared(opCtx, this);
+    return _indexVersion;
 }
 
 CollectionCriticalSection::CollectionCriticalSection(OperationContext* opCtx,

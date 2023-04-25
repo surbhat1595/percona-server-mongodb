@@ -27,21 +27,16 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include <utility>
 
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/process_interface/stub_mongo_process_interface.h"
-#include "mongo/db/query/collation/collation_spec.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/util/intrusive_counter.h"
 
 namespace mongo {
-
-using boost::intrusive_ptr;
 
 ExpressionContext::ResolvedNamespace::ResolvedNamespace(NamespaceString ns,
                                                         std::vector<BSONObj> pipeline,
@@ -54,12 +49,13 @@ ExpressionContext::ExpressionContext(OperationContext* opCtx,
                                      std::shared_ptr<MongoProcessInterface> processInterface,
                                      StringMap<ResolvedNamespace> resolvedNamespaces,
                                      boost::optional<UUID> collUUID,
-                                     bool mayDbProfile)
+                                     bool mayDbProfile,
+                                     bool allowDiskUseByDefault)
     : ExpressionContext(opCtx,
                         request.getExplain(),
                         request.getFromMongos(),
                         request.getNeedsMerge(),
-                        request.getAllowDiskUse(),
+                        request.getAllowDiskUse().value_or(allowDiskUseByDefault),
                         request.getBypassDocumentValidation().value_or(false),
                         request.getIsMapReduceCommand(),
                         request.getNamespace(),
@@ -76,6 +72,7 @@ ExpressionContext::ExpressionContext(OperationContext* opCtx,
         // 'jsHeapLimitMB' limit.
         jsHeapLimitMB = boost::none;
     }
+    forPerShardCursor = request.getPassthroughToShard().has_value();
 }
 
 ExpressionContext::ExpressionContext(
@@ -97,7 +94,8 @@ ExpressionContext::ExpressionContext(
     : explain(explain),
       fromMongos(fromMongos),
       needsMerge(needsMerge),
-      allowDiskUse(allowDiskUse),
+      allowDiskUse(allowDiskUse &&
+                   !(opCtx && opCtx->readOnly())),  // Disallow disk use if in read-only mode.
       bypassDocumentValidation(bypassDocumentValidation),
       ns(ns),
       uuid(std::move(collUUID)),
@@ -182,7 +180,7 @@ std::unique_ptr<ExpressionContext::CollatorStash> ExpressionContext::temporarily
     return std::unique_ptr<CollatorStash>(new CollatorStash(this, std::move(newCollator)));
 }
 
-intrusive_ptr<ExpressionContext> ExpressionContext::copyWith(
+boost::intrusive_ptr<ExpressionContext> ExpressionContext::copyWith(
     NamespaceString ns,
     boost::optional<UUID> uuid,
     boost::optional<std::unique_ptr<CollatorInterface>> updatedCollator) const {

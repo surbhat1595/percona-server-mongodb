@@ -40,6 +40,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
+#include "mongo/db/pipeline/document_source_lookup.h"
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/document_source_union_with.h"
 #include "mongo/db/repl/optime.h"
@@ -292,6 +293,108 @@ AggregateCommandRequest makeCollectionAndChunksAggregation(OperationContext* opC
     auto pipeline = Pipeline::create(std::move(stages), expCtx);
     auto serializedPipeline = pipeline->serializeToBson();
     return AggregateCommandRequest(CollectionType::ConfigNS, std::move(serializedPipeline));
+}
+
+AggregateCommandRequest makeCollectionAndIndexesAggregation(OperationContext* opCtx,
+                                                            const NamespaceString& nss) {
+    auto expCtx = make_intrusive<ExpressionContext>(opCtx, nullptr, CollectionType::ConfigNS);
+    StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespaces;
+    resolvedNamespaces[CollectionType::ConfigNS.coll()] = {CollectionType::ConfigNS,
+                                                           std::vector<BSONObj>()};
+    resolvedNamespaces[NamespaceString::kConfigsvrIndexCatalogNamespace.coll()] = {
+        NamespaceString::kConfigsvrIndexCatalogNamespace, std::vector<BSONObj>()};
+    expCtx->setResolvedNamespaces(resolvedNamespaces);
+
+    using Doc = Document;
+    using Arr = std::vector<Value>;
+
+    Pipeline::SourceContainer stages;
+
+    // 1. Match config.collections entries with {_id: nss}. This stage will produce, at most, one
+    // config.collections document.
+    // {
+    //     $match: {
+    //         _id: <nss>
+    //     }
+    // }
+    stages.emplace_back(DocumentSourceMatch::create(
+        Doc{{CollectionType::kNssFieldName, nss.toString()}}.toBson(), expCtx));
+
+    // 2. Retrieve config.csrs.indexes entries with the same uuid as the one from the
+    // config.collections document.
+    //
+    // The $lookup stage gets the config.csrs.indexes documents and puts them in a field called
+    // "indexes" in the document produced during stage 1.
+    //
+    // {
+    //      $lookup: {
+    //          from: "csrs.indexes",
+    //          as: "indexes",
+    //          localField: "uuid",
+    //          foreignField: "collectionUUID"
+    //      }
+    // }
+    const Doc lookupPipeline{{"from", NamespaceString::kConfigsvrIndexCatalogNamespace.coll()},
+                             {"as", "indexes"_sd},
+                             {"localField", CollectionType::kUuidFieldName},
+                             {"foreignField", IndexCatalogType::kCollectionUUIDFieldName}};
+
+    stages.emplace_back(DocumentSourceLookUp::createFromBson(
+        Doc{{"$lookup", lookupPipeline}}.toBson().firstElement(), expCtx));
+
+    auto pipeline = Pipeline::create(std::move(stages), expCtx);
+    auto serializedPipeline = pipeline->serializeToBson();
+    return AggregateCommandRequest(CollectionType::ConfigNS, std::move(serializedPipeline));
+}
+
+std::vector<BSONObj> runCatalogAggregation(OperationContext* opCtx,
+                                           AggregateCommandRequest& aggRequest,
+                                           const repl::ReadConcernArgs& readConcern,
+                                           const Milliseconds& maxTimeout) {
+    aggRequest.setReadConcern(readConcern.toBSONInner());
+    aggRequest.setWriteConcern(WriteConcernOptions());
+
+    const auto readPref = [&]() -> ReadPreferenceSetting {
+        if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+            return {};
+        }
+
+        const auto vcTime = VectorClock::get(opCtx)->getTime();
+        ReadPreferenceSetting readPref{kConfigReadSelector};
+        readPref.minClusterTime = vcTime.configTime().asTimestamp();
+        return readPref;
+    }();
+
+    aggRequest.setUnwrappedReadPref(readPref.toContainingBSON());
+
+    if (serverGlobalParams.clusterRole != ClusterRole::ConfigServer) {
+        const Milliseconds maxTimeMS = std::min(opCtx->getRemainingMaxTimeMillis(), maxTimeout);
+        aggRequest.setMaxTimeMS(durationCount<Milliseconds>(maxTimeMS));
+    }
+
+    // Run the aggregation
+    std::vector<BSONObj> aggResult;
+    auto callback = [&aggResult](const std::vector<BSONObj>& batch,
+                                 const boost::optional<BSONObj>& postBatchResumeToken) {
+        aggResult.insert(aggResult.end(),
+                         std::make_move_iterator(batch.begin()),
+                         std::make_move_iterator(batch.end()));
+        return true;
+    };
+
+    const auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
+    for (int retry = 1; retry <= kMaxWriteRetry; retry++) {
+        const Status status = configShard->runAggregation(opCtx, aggRequest, callback);
+        if (retry < kMaxWriteRetry &&
+            configShard->isRetriableError(status.code(), Shard::RetryPolicy::kIdempotent)) {
+            aggResult.clear();
+            continue;
+        }
+        uassertStatusOK(status);
+        break;
+    }
+
+    return aggResult;
 }
 
 }  // namespace
@@ -624,49 +727,9 @@ std::pair<CollectionType, std::vector<ChunkType>> ShardingCatalogClientImpl::get
     const ChunkVersion& sinceVersion,
     const repl::ReadConcernArgs& readConcern) {
     auto aggRequest = makeCollectionAndChunksAggregation(opCtx, nss, sinceVersion);
-    aggRequest.setReadConcern(readConcern.toBSONInner());
-    aggRequest.setWriteConcern(WriteConcernOptions());
 
-    const auto readPref = [&]() -> ReadPreferenceSetting {
-        if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
-            return {};
-        }
-
-        const auto vcTime = VectorClock::get(opCtx)->getTime();
-        ReadPreferenceSetting readPref{kConfigReadSelector};
-        readPref.minClusterTime = vcTime.configTime().asTimestamp();
-        return readPref;
-    }();
-
-    aggRequest.setUnwrappedReadPref(readPref.toContainingBSON());
-
-    if (serverGlobalParams.clusterRole != ClusterRole::ConfigServer) {
-        const Milliseconds maxTimeMS = std::min(opCtx->getRemainingMaxTimeMillis(),
-                                                Milliseconds(gFindChunksOnConfigTimeoutMS.load()));
-        aggRequest.setMaxTimeMS(durationCount<Milliseconds>(maxTimeMS));
-    }
-
-    // Run the aggregation
-    std::vector<BSONObj> aggResult;
-    auto callback = [&aggResult](const std::vector<BSONObj>& batch,
-                                 const boost::optional<BSONObj>& postBatchResumeToken) {
-        aggResult.insert(aggResult.end(),
-                         std::make_move_iterator(batch.begin()),
-                         std::make_move_iterator(batch.end()));
-        return true;
-    };
-
-    const auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
-    for (int retry = 1; retry <= kMaxWriteRetry; retry++) {
-        const Status status = configShard->runAggregation(opCtx, aggRequest, callback);
-        if (retry < kMaxWriteRetry &&
-            configShard->isRetriableError(status.code(), Shard::RetryPolicy::kIdempotent)) {
-            aggResult.clear();
-            continue;
-        }
-        uassertStatusOK(status);
-        break;
-    }
+    std::vector<BSONObj> aggResult = runCatalogAggregation(
+        opCtx, aggRequest, readConcern, Milliseconds(gFindChunksOnConfigTimeoutMS.load()));
 
     uassert(ErrorCodes::NamespaceNotFound,
             str::stream() << "Collection " << nss.ns() << " not found",
@@ -715,6 +778,37 @@ std::pair<CollectionType, std::vector<ChunkType>> ShardingCatalogClientImpl::get
 
     return {std::move(*coll), std::move(chunks)};
 };
+
+std::pair<CollectionType, std::vector<IndexCatalogType>>
+ShardingCatalogClientImpl::getCollectionAndGlobalIndexes(OperationContext* opCtx,
+                                                         const NamespaceString& nss,
+                                                         const repl::ReadConcernArgs& readConcern) {
+    auto aggRequest = makeCollectionAndIndexesAggregation(opCtx, nss);
+
+    std::vector<BSONObj> aggResult =
+        runCatalogAggregation(opCtx, aggRequest, readConcern, Shard::kDefaultConfigCommandTimeout);
+
+    uassert(ErrorCodes::NamespaceNotFound,
+            str::stream() << "Collection " << nss.ns() << " not found",
+            !aggResult.empty());
+
+    uassert(6958800,
+            str::stream() << "More than one collection for ns " << nss.ns() << " found",
+            aggResult.size() == 1);
+
+    boost::optional<CollectionType> coll;
+    std::vector<IndexCatalogType> indexes;
+
+    auto elem = aggResult[0];
+    coll.emplace(elem);
+    const auto indexList = elem.getField("indexes");
+    for (const auto index : indexList.Array()) {
+        indexes.emplace_back(
+            IndexCatalogType::parse(IDLParserContext("IndexCatalogType"), index.Obj()));
+    }
+
+    return {std::move(*coll), std::move(indexes)};
+}
 
 StatusWith<std::vector<TagsType>> ShardingCatalogClientImpl::getTagsForCollection(
     OperationContext* opCtx, const NamespaceString& nss) {

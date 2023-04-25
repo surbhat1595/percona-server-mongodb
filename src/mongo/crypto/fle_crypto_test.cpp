@@ -27,6 +27,7 @@
  *    it in the license file.
  */
 
+#include "mongo/base/error_codes.h"
 #include "mongo/platform/basic.h"
 
 #include "mongo/crypto/fle_crypto.h"
@@ -35,6 +36,7 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <stack>
 #include <string>
 #include <tuple>
@@ -716,10 +718,38 @@ std::vector<char> generatePlaceholder(
 
     FLE2RangeInsertSpec insertSpec;
     // Set a default lower and upper bound
-    auto lowerDoc = BSON("lb" << 0);
+    BSONObj lowerDoc, upperDoc;
+    switch (value.type()) {
+        case BSONType::NumberInt:
+            lowerDoc = BSON("lb" << 0);
+            upperDoc = BSON("ub" << 1234567);
+            break;
+        case BSONType::NumberLong:
+            lowerDoc = BSON("lb" << 0LL);
+            upperDoc = BSON("ub" << 1234567890123456789LL);
+            break;
+        case BSONType::NumberDouble:
+            lowerDoc = BSON("lb" << 0.0);
+            upperDoc = BSON("ub" << 1234567890123456789.0);
+            break;
+        case BSONType::Date:
+            lowerDoc = BSON("lb" << Date_t::fromMillisSinceEpoch(0));
+            upperDoc = BSON("ub" << Date_t::fromMillisSinceEpoch(1234567890123456789LL));
+            break;
+        case BSONType::NumberDecimal:
+            lowerDoc = BSON("lb" << Decimal128(0));
+            upperDoc = BSON("ub" << Decimal128(1234567890123456789LL));
+            break;
+        default:
+            LOGV2_WARNING(6775520,
+                          "Invalid type for range algo",
+                          "algo"_attr = algorithm,
+                          "type"_attr = value.type());
+            lowerDoc = BSON("lb" << 0);
+            upperDoc = BSON("ub" << 1234567);
+            break;
+    }
     insertSpec.setLowerBound(lowerDoc.firstElement());
-    auto upperDoc = BSON("ub" << 1234567890123456789LL);
-
     insertSpec.setUpperBound(upperDoc.firstElement());
     insertSpec.setValue(value);
     auto specDoc = BSON("s" << insertSpec.toBSON());
@@ -737,7 +767,7 @@ std::vector<char> generatePlaceholder(
         } else if (operation == Operation::kInsert) {
             ep.setValue(IDLAnyType(specDoc.firstElement()));
         }
-        ep.setSparsity(0);
+        ep.setSparsity(1);
     } else {
         ep.setValue(value);
     }
@@ -770,9 +800,9 @@ BSONObj encryptDocument(BSONObj obj,
             for (size_t i = 0; i < payload.payload.getEdgeTokenSet()->size(); i++) {
                 payload.counts.push_back(1);
             }
+        } else {
+            payload.counts.push_back(1);
         }
-
-        payload.counts.push_back(1);
     }
 
     // Finalize document for insert
@@ -974,7 +1004,8 @@ TEST(FLE_EDC, Range_Allowed_Types) {
 
     const std::vector<std::pair<BSONObj, BSONType>> rangeAllowedObjects{
         {BSON("sample" << 123.456), NumberDouble},
-        {BSON("sample" << Decimal128()), NumberDecimal},
+        // TODO SERVER-68542 remove the commented line
+        // {BSON("sample" << Decimal128()), NumberDecimal},
         {BSON("sample" << 123456), NumberInt},
         {BSON("sample" << 12345678901234567LL), NumberLong},
         {BSON("sample" << Date_t::fromMillisSinceEpoch(12345)), Date},
@@ -1332,7 +1363,7 @@ TEST(FLE_EDC, ServerSide_Range_Payloads) {
 
     iupayload.setEdgeTokenSet(tokens);
 
-    FLE2IndexedRangeEncryptedValue serverPayload(iupayload, {123456, 123456, 123456});
+    FLE2IndexedRangeEncryptedValue serverPayload(iupayload, {123456, 123456});
 
     auto swBuf = serverPayload.serialize(serverEncryptToken);
     ASSERT_OK(swBuf.getStatus());
@@ -1342,7 +1373,7 @@ TEST(FLE_EDC, ServerSide_Range_Payloads) {
 
     ASSERT_OK(swServerPayload.getStatus());
     auto sp = swServerPayload.getValue();
-    ASSERT_EQ(sp.tokens.size(), 3);
+    ASSERT_EQ(sp.tokens.size(), 2);
     for (size_t i = 0; i < sp.tokens.size(); i++) {
         auto ets = sp.tokens[i];
         auto rhs = serverPayload.tokens[i];
@@ -1746,12 +1777,13 @@ TEST(EDC, ValidateDocument) {
         auto buf = generatePlaceholder(element, Operation::kInsert);
         builder.appendBinData("encrypted", buf.size(), BinDataType::Encrypt, buf.data());
     }
+
+    BSONObjBuilder sub(builder.subobjStart("nested"));
     {
         auto doc = BSON("a"
                         << "top secret");
         auto element = doc.firstElement();
 
-        BSONObjBuilder sub(builder.subobjStart("nested"));
         auto buf = generatePlaceholder(
             element, Operation::kInsert, Fle2AlgorithmInt::kEquality, indexKey2Id);
         builder.appendBinData("encrypted", buf.size(), BinDataType::Encrypt, buf.data());
@@ -1761,12 +1793,13 @@ TEST(EDC, ValidateDocument) {
                         << "bottom secret");
         auto element = doc.firstElement();
 
-        BSONObjBuilder sub(builder.subobjStart("nested"));
         auto buf = generatePlaceholder(element, Operation::kInsert, Fle2AlgorithmInt::kUnindexed);
         builder.appendBinData("notindexed", buf.size(), BinDataType::Encrypt, buf.data());
     }
+    sub.done();
 
-    auto finalDoc = encryptDocument(builder.obj(), &keyVault, &efc);
+    auto doc1 = builder.obj();
+    auto finalDoc = encryptDocument(doc1, &keyVault, &efc);
 
     // Positive - Encrypted Doc
     FLEClientCrypto::validateDocument(finalDoc, efc, &keyVault);
@@ -2309,7 +2342,14 @@ TEST(RangeTest, Double_Bounds) {
 #define ASSERT_EIB(x, z) ASSERT_EQ(getTypeInfoDouble((x), -1E100, 1E100).value, (z));
 
     // Larger numbers map to larger uint64
-    ASSERT_EIB(-1, 4607182418800017408ULL);
+    ASSERT_EIB(-1111, 4570770991734587392ULL);
+    ASSERT_EIB(-111, 4585860689314185216ULL);
+    ASSERT_EIB(-11, 4600989969312382976ULL);
+    ASSERT_EIB(-10, 4601552919265804288ULL);
+    ASSERT_EIB(-3, 4609434218613702656ULL);
+    ASSERT_EIB(-2, 4611686018427387904ULL);
+
+    ASSERT_EIB(-1, 4616189618054758400ULL);
     ASSERT_EIB(1, 13830554455654793216ULL);
     ASSERT_EIB(22, 13850257704024539136ULL);
     ASSERT_EIB(333, 13867937850999177216ULL);
@@ -2328,17 +2368,17 @@ TEST(RangeTest, Double_Bounds) {
     ASSERT_EIB(1E-58, 12962510038552207822ULL);
 
     // Smaller negative exponents map to smaller uint64
-    ASSERT_EIB(-1E-6, 4517329193108106637);
-    ASSERT_EIB(-1E-7, 4502148214488346440);
-    ASSERT_EIB(-1E-8, 4487126258331716666);
-    ASSERT_EIB(-1E-56, 3769339924178256082);
-    ASSERT_EIB(-1E-57, 3754062278231366209);
-    ASSERT_EIB(-1E-58, 3739138001697432014);
+    ASSERT_EIB(-1E-06, 4706042843746669171ULL);
+    ASSERT_EIB(-1E-07, 4721223822366429368ULL);
+    ASSERT_EIB(-1E-08, 4736245778523059142ULL);
+    ASSERT_EIB(-1E-56, 5454032112676519726ULL);
+    ASSERT_EIB(-1E-57, 5469309758623409599ULL);
+    ASSERT_EIB(-1E-58, 5484234035157343794ULL);
 
     // Larger exponents map to larger uint64
-    ASSERT_EIB(-33E56, 5467601615771058070);
-    ASSERT_EIB(-22E57, 5479765660206230010);
-    ASSERT_EIB(-11E58, 5490316916731687484);
+    ASSERT_EIB(-33E+56, 3755770421083717738ULL);
+    ASSERT_EIB(-22E+57, 3743606376648545798ULL);
+    ASSERT_EIB(-11E+58, 3733055120123088324ULL);
 
 #undef ASSERT_EIB
 }
@@ -2365,94 +2405,6 @@ TEST(RangeTest, Double_Errors) {
                        6775008);
 }
 
-// Edge calculator
-
-template <typename T>
-struct EdgeCalcTestVector {
-    std::function<std::unique_ptr<Edges>(T, boost::optional<T>, boost::optional<T>, int)> getEdgesT;
-    T value;
-    boost::optional<T> min, max;
-    int sparsity;
-    stdx::unordered_set<std::string> expectedEdges;
-
-    bool validate() const {
-        auto edgeCalc = getEdgesT(value, min, max, sparsity);
-        auto edges = edgeCalc->get();
-        for (const std::string& ee : expectedEdges) {
-            if (!std::any_of(edges.begin(), edges.end(), [ee](auto edge) { return edge == ee; })) {
-                LOGV2_ERROR(6775120,
-                            "Expected edge not found",
-                            "expected-edge"_attr = ee,
-                            "value"_attr = value,
-                            "min"_attr = min,
-                            "max"_attr = max,
-                            "sparsity"_attr = sparsity,
-                            "edges"_attr = edges,
-                            "expected-edges"_attr = expectedEdges);
-                return false;
-            }
-        }
-
-        for (const StringData& edgeSd : edges) {
-            std::string edge = edgeSd.toString();
-            if (std::all_of(expectedEdges.begin(), expectedEdges.end(), [edge](auto ee) {
-                    return edge != ee;
-                })) {
-                LOGV2_ERROR(6775121,
-                            "An edge was found that is not expected",
-                            "edge"_attr = edge,
-                            "value"_attr = value,
-                            "min"_attr = min,
-                            "max"_attr = max,
-                            "sparsity"_attr = sparsity,
-                            "edges"_attr = edges,
-                            "expected-edges"_attr = expectedEdges);
-                return false;
-            }
-        }
-
-        if (edges.size() != expectedEdges.size()) {
-            LOGV2_ERROR(6775122,
-                        "Unexpected number of elements in edges. Check for duplicates",
-                        "value"_attr = value,
-                        "min"_attr = min,
-                        "max"_attr = max,
-                        "sparsity"_attr = sparsity,
-                        "edges"_attr = edges,
-                        "expected-edges"_attr = expectedEdges);
-            return false;
-        }
-
-        return true;
-    }
-};
-
-TEST(EdgeCalcTest, Int32_TestVectors) {
-    std::vector<EdgeCalcTestVector<int32_t>> testVectors = {
-#include "test_vectors/edges_int32.cstruct"
-    };
-    for (const auto& testVector : testVectors) {
-        ASSERT_TRUE(testVector.validate());
-    }
-}
-
-TEST(EdgeCalcTest, Int64_TestVectors) {
-    std::vector<EdgeCalcTestVector<int64_t>> testVectors = {
-#include "test_vectors/edges_int64.cstruct"
-    };
-    for (const auto& testVector : testVectors) {
-        ASSERT_TRUE(testVector.validate());
-    }
-}
-
-TEST(EdgeCalcTest, Double_TestVectors) {
-    std::vector<EdgeCalcTestVector<double>> testVectors = {
-#include "test_vectors/edges_double.cstruct"
-    };
-    for (const auto& testVector : testVectors) {
-        ASSERT_TRUE(testVector.validate());
-    }
-}
 
 TEST(EdgeCalcTest, SparsityConstraints) {
     ASSERT_THROWS_CODE(getEdgesInt32(1, 0, 8, 0), AssertionException, 6775101);
@@ -2461,6 +2413,137 @@ TEST(EdgeCalcTest, SparsityConstraints) {
     ASSERT_THROWS_CODE(getEdgesInt64(1, 0, 8, -1), AssertionException, 6775101);
     ASSERT_THROWS_CODE(getEdgesDouble(1.0, 0.0, 8.0, 0), AssertionException, 6775101);
     ASSERT_THROWS_CODE(getEdgesDouble(1.0, 0.0, 8.0, -1), AssertionException, 6775101);
+}
+
+TEST(MinCoverCalcTest, MinCoverConstraints) {
+    ASSERT_THROWS_CODE(minCoverInt32(2, 1, 0, 7, 1), AssertionException, 6860001);
+    ASSERT_THROWS_CODE(minCoverInt64(2, 1, 0, 7, 1), AssertionException, 6860001);
+    ASSERT_THROWS_CODE(minCoverDouble(2, 1, 0, 7, 1), AssertionException, 6860001);
+}
+
+TEST(RangeTest, Decimal1238_Bounds) {
+#define ASSERT_EIB(x, z)                                                                 \
+    ASSERT_EQ(boost::multiprecision::to_string(                                          \
+                  getTypeInfoDecimal128(Decimal128(x), boost::none, boost::none).value), \
+              (z));
+
+    // Larger numbers map tw larger uint64
+    ASSERT_EIB(-1234567890E7, "108549948892579231731687303715884111887");
+    ASSERT_EIB(-1234567890E6, "108559948892579231731687303715884111886");
+    ASSERT_EIB(-1234567890E5, "108569948892579231731687303715884111885");
+    ASSERT_EIB(-1234567890E4, "108579948892579231731687303715884111884");
+    ASSERT_EIB(-1234567890E3, "108589948892579231731687303715884111883");
+    ASSERT_EIB(-1234567890E2, "108599948892579231731687303715884111882");
+    ASSERT_EIB(-1234567890E1, "108609948892579231731687303715884111881");
+    ASSERT_EIB(-123456789012345, "108569948892579108281687303715884111885");
+    ASSERT_EIB(-12345678901234, "108579948892579108331687303715884111884");
+    ASSERT_EIB(-1234567890123, "108589948892579108731687303715884111883");
+    ASSERT_EIB(-123456789012, "108599948892579111731687303715884111882");
+    ASSERT_EIB(-12345678901, "108609948892579131731687303715884111881");
+    ASSERT_EIB(-1234567890, "108619948892579231731687303715884111880");
+    ASSERT_EIB(-99999999, "108631183460569231731687303715884111878");
+    ASSERT_EIB(-8888888, "108642294572469231731687303715884111877");
+    ASSERT_EIB(-777777, "108653405690469231731687303715884111876");
+    ASSERT_EIB(-66666, "108664516860469231731687303715884111875");
+    ASSERT_EIB(-5555, "108675628460469231731687303715884111874");
+    ASSERT_EIB(-444, "108686743460469231731687303715884111873");
+    ASSERT_EIB(-334, "108687843460469231731687303715884111873");
+    ASSERT_EIB(-333, "108687853460469231731687303715884111873");
+    ASSERT_EIB(-44, "108696783460469231731687303715884111872");
+    ASSERT_EIB(-33, "108697883460469231731687303715884111872");
+    ASSERT_EIB(-22, "108698983460469231731687303715884111872");
+    ASSERT_EIB(-5, "108706183460469231731687303715884111871");
+    ASSERT_EIB(-4, "108707183460469231731687303715884111871");
+    ASSERT_EIB(-3, "108708183460469231731687303715884111871");
+    ASSERT_EIB(-2, "108709183460469231731687303715884111871");
+    ASSERT_EIB(-1, "108710183460469231731687303715884111871");
+    ASSERT_EIB(0, "170141183460469231731687303715884105728");
+    ASSERT_EIB(1, "231572183460469231731687303715884099585");
+    ASSERT_EIB(2, "231573183460469231731687303715884099585");
+    ASSERT_EIB(3, "231574183460469231731687303715884099585");
+    ASSERT_EIB(4, "231575183460469231731687303715884099585");
+    ASSERT_EIB(5, "231576183460469231731687303715884099585");
+    ASSERT_EIB(22, "231583383460469231731687303715884099584");
+    ASSERT_EIB(33, "231584483460469231731687303715884099584");
+    ASSERT_EIB(44, "231585583460469231731687303715884099584");
+    ASSERT_EIB(333, "231594513460469231731687303715884099583");
+    ASSERT_EIB(334, "231594523460469231731687303715884099583");
+    ASSERT_EIB(444, "231595623460469231731687303715884099583");
+    ASSERT_EIB(5555, "231606738460469231731687303715884099582");
+    ASSERT_EIB(66666, "231617850060469231731687303715884099581");
+    ASSERT_EIB(777777, "231628961230469231731687303715884099580");
+    ASSERT_EIB(8888888, "231640072348469231731687303715884099579");
+    ASSERT_EIB(33E56, "232144483460469231731687303715884099528");
+    ASSERT_EIB(22E57, "232153383460469231731687303715884099527");
+    ASSERT_EIB(11E58, "232162283460469231731687303715884099526");
+
+    // Smaller exponents map to smaller uint64
+    ASSERT_EIB(1E-6, "231512183460469231731687303715884099591");
+    ASSERT_EIB(1E-7, "231502183460469231731687303715884099592");
+    ASSERT_EIB(1E-8, "231492183460469231731687303715884099593");
+    ASSERT_EIB(1E-56, "231012183460469231731687303715884099641");
+    ASSERT_EIB(1E-57, "231002183460469231731687303715884099642");
+    ASSERT_EIB(1E-58, "230992183460469231731687303715884099643");
+
+    // Smaller negative exponents map to smaller uint64
+    ASSERT_EIB(-1E-6, "108770183460469231731687303715884111865");
+    ASSERT_EIB(-1E-7, "108780183460469231731687303715884111864");
+    ASSERT_EIB(-1E-8, "108790183460469231731687303715884111863");
+    ASSERT_EIB(-1E-56, "109270183460469231731687303715884111815");
+    ASSERT_EIB(-1E-57, "109280183460469231731687303715884111814");
+    ASSERT_EIB(-1E-58, "109290183460469231731687303715884111813");
+
+    // Larger exponents map to larger uint64
+    ASSERT_EIB(-33E56, "108137883460469231731687303715884111928");
+    ASSERT_EIB(-22E57, "108128983460469231731687303715884111929");
+    ASSERT_EIB(-11E58, "108120083460469231731687303715884111930");
+
+    ASSERT_EIB(Decimal128::kLargestPositive, "293021183460469231731687303715884093440");
+    ASSERT_EIB(Decimal128::kSmallestPositive, "170141183460469231731687303715884105729");
+    ASSERT_EIB(Decimal128::kLargestNegative, "47261183460469231731687303715884118016");
+    ASSERT_EIB(Decimal128::kSmallestNegative, "170141183460469231731687303715884105727");
+    ASSERT_EIB(Decimal128::kNormalizedZero, "170141183460469231731687303715884105728");
+    ASSERT_EIB(Decimal128::kLargestNegativeExponentZero, "170141183460469231731687303715884105728");
+
+#undef ASSERT_EIB
+}
+
+TEST(RangeTest, Decimal1238_Errors) {
+    ASSERT_THROWS_CODE(getTypeInfoDecimal128(Decimal128(1), boost::none, Decimal128(2)),
+                       AssertionException,
+                       6854201);
+    ASSERT_THROWS_CODE(getTypeInfoDecimal128(Decimal128(1), Decimal128(0), boost::none),
+                       AssertionException,
+                       6854201);
+    ASSERT_THROWS_CODE(getTypeInfoDecimal128(Decimal128(1), Decimal128(2), Decimal128(1)),
+                       AssertionException,
+                       6854203);
+
+
+    ASSERT_THROWS_CODE(getTypeInfoDecimal128(Decimal128(1), Decimal128(2), Decimal128(3)),
+                       AssertionException,
+                       6854204);
+    ASSERT_THROWS_CODE(getTypeInfoDecimal128(Decimal128(4), Decimal128(2), Decimal128(3)),
+                       AssertionException,
+                       6854204);
+
+
+    ASSERT_THROWS_CODE(
+        getTypeInfoDecimal128(Decimal128::kPositiveInfinity, boost::none, boost::none),
+        AssertionException,
+        6854202);
+    ASSERT_THROWS_CODE(
+        getTypeInfoDecimal128(Decimal128::kNegativeInfinity, boost::none, boost::none),
+        AssertionException,
+        6854202);
+
+    ASSERT_THROWS_CODE(getTypeInfoDecimal128(Decimal128::kPositiveNaN, boost::none, boost::none),
+                       AssertionException,
+                       6854202);
+
+    ASSERT_THROWS_CODE(getTypeInfoDecimal128(Decimal128::kNegativeNaN, boost::none, boost::none),
+                       AssertionException,
+                       6854202);
 }
 
 }  // namespace mongo

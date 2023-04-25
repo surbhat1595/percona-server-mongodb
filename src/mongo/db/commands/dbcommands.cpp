@@ -123,6 +123,9 @@ public:
     bool collectsResourceConsumptionMetrics() const final {
         return true;
     }
+    bool allowedWithSecurityToken() const final {
+        return true;
+    }
     class Invocation final : public InvocationBaseGen {
     public:
         using InvocationBaseGen::InvocationBaseGen;
@@ -161,8 +164,7 @@ public:
                 uasserted(5255100, "Have to pass 1 as 'drop' parameter");
             }
 
-            // TODO SERVER-67549: pass the DatabaseName object directly.
-            Status status = dropDatabase(opCtx, dbName.toStringWithTenantId());
+            Status status = dropDatabase(opCtx, dbName);
             if (status != ErrorCodes::NamespaceNotFound) {
                 uassertStatusOK(status);
             }
@@ -170,43 +172,6 @@ public:
         }
     };
 } cmdDropDatabase;
-
-class CmdRepairDatabase final : public TypedCommand<CmdRepairDatabase> {
-public:
-    using Request = RepairDatabaseCommand;
-
-    class Invocation final : public InvocationBase {
-    public:
-        using InvocationBase::InvocationBase;
-
-        bool supportsWriteConcern() const final {
-            return false;
-        }
-
-        NamespaceString ns() const final {
-            return NamespaceString(request().getDbName());
-        }
-
-        void doCheckAuthorization(OperationContext* opCtx) const final {}
-
-        void typedRun(OperationContext*) {
-            uasserted(ErrorCodes::CommandNotFound, Request::kCommandDescription);
-        }
-    };
-
-    std::string help() const final {
-        return Request::kCommandDescription.toString();
-    }
-
-    AllowedOnSecondary secondaryAllowed(ServiceContext*) const final {
-        return AllowedOnSecondary::kAlways;
-    }
-
-    bool maintenanceMode() const final {
-        return false;
-    }
-
-} cmdRepairDatabase;
 
 /* drop collection */
 class CmdDrop : public DropCmdVersion1Gen<CmdDrop> {
@@ -465,7 +430,7 @@ public:
     Status checkAuthForOperation(OperationContext* opCtx,
                                  const std::string& dbname,
                                  const BSONObj& cmdObj) const final {
-        const auto nss = CommandHelpers::parseNsCollectionRequired(dbname, cmdObj);
+        const auto nss = CommandHelpers::parseNsCollectionRequired({boost::none, dbname}, cmdObj);
         auto as = AuthorizationSession::get(opCtx->getClient());
         if (!as->isAuthorizedForActionsOnResource(ResourcePattern::forExactNamespace(nss),
                                                   ActionType::collStats)) {
@@ -567,15 +532,6 @@ public:
             ErrorCodes::InvalidNamespace,
             "collMod on a time-series collection's underlying buckets collection is not supported.",
             !cmd->getNamespace().isTimeseriesBucketsCollection());
-
-        const auto isChangeStreamPreAndPostImagesEnabled =
-            (cmd->getChangeStreamPreAndPostImages() &&
-             cmd->getChangeStreamPreAndPostImages()->getEnabled());
-        const auto isRecordPreImagesEnabled = cmd->getRecordPreImages().get_value_or(false);
-        uassert(ErrorCodes::InvalidOptions,
-                "'recordPreImages' and 'changeStreamPreAndPostImages.enabled' can not be set "
-                "to true simultaneously",
-                !(isChangeStreamPreAndPostImagesEnabled && isRecordPreImagesEnabled));
 
         // Updating granularity on sharded time-series collections is not allowed.
         if (Grid::get(opCtx)->catalogClient() && cmd->getTimeseries() &&

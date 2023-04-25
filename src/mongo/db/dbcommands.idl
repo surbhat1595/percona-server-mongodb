@@ -31,12 +31,13 @@ global:
 imports:
     - "mongo/db/catalog/collection_options.idl"
     - "mongo/db/pipeline/storage_stats_spec.idl"
-    - "mongo/idl/basic_types.idl"
+    - "mongo/db/basic_types.idl"
 
 structs:
     DataSizeReply:
         description: Reply from the dataSize command.
         strict: false
+        is_command_reply: true
         fields:
             size:
                 description: Total, possibly estimated size of data.
@@ -59,6 +60,7 @@ structs:
     DBStats:
         description: 'Reply from {dbStats: 1, scale: 1} command. Size fields are reduced by scale field.'
         strict: false
+        is_command_reply: true
         fields:
             db:
                 description: Name of database being examined.
@@ -212,14 +214,3 @@ commands:
                 description: Include additional stats about allocated but unused space.
                 type: safeBool
                 default: false
-
-    repairDatabase:
-        description: |-
-            This command has been removed. If you would like to compact your data, use the 'compact' command.
-            If you would like to rebuild indexes, use the 'reIndex' command.
-            If you need to recover data, please see the documentation for repairing your database offline:
-            http://dochub.mongodb.org/core/repair
-        command_name: repairDatabase
-        cpp_name: RepairDatabaseCommand
-        api_version: ''
-        namespace: ignored

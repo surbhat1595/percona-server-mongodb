@@ -13,12 +13,8 @@ function checkCascadesOptimizerEnabled(theDB) {
  * Given the result of an explain command, returns whether the bonsai optimizer was used.
  */
 function usedBonsaiOptimizer(explain) {
-    if (explain.hasOwnProperty("queryPlanner") &&
-        !explain.queryPlanner.winningPlan.hasOwnProperty("optimizerPlan")) {
-        // Find command explain which means new optimizer was not used.
-        // TODO SERVER-62407 this assumption may no longer hold true if the translation to ABT
-        // happens directly from a find command.
-        return false;
+    if (!isAggregationPlan(explain)) {
+        return explain.queryPlanner.winningPlan.hasOwnProperty("optimizerPlan");
     }
 
     const plannerOutput = getAggPlanStage(explain, "$cursor");
@@ -79,4 +75,45 @@ function getPlanSkeleton(node) {
                                       .filter(key => keepKeys.includes(key))
                                       .map(key => [key, getPlanSkeleton(node[key])]));
     }
+}
+
+function navigateToPath(doc, path) {
+    let result;
+    let field;
+
+    try {
+        result = doc;
+        for (field of path.split(".")) {
+            assert(result.hasOwnProperty(field));
+            result = result[field];
+        }
+        return result;
+    } catch (e) {
+        jsTestLog("Error navigating to path '" + path + "'");
+        jsTestLog("Missing field: " + field);
+        printjson(result);
+        throw e;
+    }
+}
+
+function navigateToPlanPath(doc, path) {
+    return navigateToPath(doc, "queryPlanner.winningPlan.optimizerPlan." + path);
+}
+
+function assertValueOnPathFn(value, doc, path, fn) {
+    try {
+        assert.eq(value, fn(doc, path));
+    } catch (e) {
+        jsTestLog("Assertion error.");
+        printjson(doc);
+        throw e;
+    }
+}
+
+function assertValueOnPath(value, doc, path) {
+    assertValueOnPathFn(value, doc, path, navigateToPath);
+}
+
+function assertValueOnPlanPath(value, doc, path) {
+    assertValueOnPathFn(value, doc, path, navigateToPlanPath);
 }

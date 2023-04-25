@@ -206,14 +206,17 @@ std::vector<RemoteCursor> establishShardCursors(OperationContext* opCtx,
         // The collection is sharded. Use the routing table to decide which shards to target
         // based on the query and collation, and build versioned requests for them.
         for (const auto& shardId : shardIds) {
-            auto versionedCmdObj = appendShardVersion(cmdObj, cm->getVersion(shardId));
+            ChunkVersion placementVersion = cm->getVersion(shardId);
+            auto versionedCmdObj = appendShardVersion(
+                cmdObj,
+                ShardVersion(placementVersion, CollectionIndexes(placementVersion, boost::none)));
             requests.emplace_back(shardId, std::move(versionedCmdObj));
         }
     } else {
         // The collection is unsharded. Target only the primary shard for the database.
         // Don't append shard version info when contacting the config servers.
         const auto cmdObjWithShardVersion = cm->dbPrimary() != ShardId::kConfigServerId
-            ? appendShardVersion(cmdObj, ChunkVersion::UNSHARDED())
+            ? appendShardVersion(cmdObj, ShardVersion::UNSHARDED())
             : cmdObj;
         requests.emplace_back(cm->dbPrimary(),
                               appendDbVersionIfPresent(cmdObjWithShardVersion, cm->dbVersion()));
@@ -809,14 +812,16 @@ std::unique_ptr<Pipeline, PipelineDeleter> runPipelineDirectlyOnSingleShard(
 
     auto versionedCmdObj = [&] {
         if (cm.isSharded()) {
-            return appendShardVersion(aggregation_request_helper::serializeToCommandObj(request),
-                                      cm.getVersion(shardId));
+            ChunkVersion placementVersion = cm.getVersion(shardId);
+            return appendShardVersion(
+                aggregation_request_helper::serializeToCommandObj(request),
+                ShardVersion(placementVersion, CollectionIndexes(placementVersion, boost::none)));
         } else {
             // The collection is unsharded. Don't append shard version info when contacting the
             // config servers.
             const auto cmdObjWithShardVersion = (shardId != ShardId::kConfigServerId)
                 ? appendShardVersion(aggregation_request_helper::serializeToCommandObj(request),
-                                     ChunkVersion::UNSHARDED())
+                                     ShardVersion::UNSHARDED())
                 : aggregation_request_helper::serializeToCommandObj(request);
             return appendDbVersionIfPresent(std::move(cmdObjWithShardVersion), cm.dbVersion());
         }
@@ -1557,11 +1562,14 @@ std::unique_ptr<Pipeline, PipelineDeleter> attachCursorToPipeline(
         [&](OperationContext* opCtx, const ChunkManager& cm) {
             auto pipelineToTarget = pipeline->clone();
 
-            if (!cm.isSharded()) {
+            if (!cm.isSharded() && expCtx->ns != NamespaceString::kConfigsvrCollectionsNamespace) {
                 // If the collection is unsharded and we are on the primary, we should be able to
                 // do a local read. The primary may be moved right after the primary shard check,
                 // but the local read path will do a db version check before it establishes a cursor
                 // to catch this case and ensure we fail to read locally.
+                // There is the case where we are in config.collections (collection unsharded) and
+                // we want to broadcast to all shards. In this case we don't want to do a local read
+                // and we must target the config servers.
                 try {
                     auto expectUnshardedCollection(
                         expCtx->mongoProcessInterface->expectUnshardedCollectionInScope(

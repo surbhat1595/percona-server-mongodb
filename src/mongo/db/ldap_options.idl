@@ -63,7 +63,7 @@ server_parameters:
         cpp_varname: "ldapGlobalParams.ldapUserToDNMapping"
         default: "[{match: \"(.+)\", substitution: \"{0}\"}]"
         validator:
-            callback: validateLDAPUserToDNMapping
+            callback: validateLDAPUserToDNMappingServerParam
     ldapUseConnectionPool:
         description: ""
         set_at: startup

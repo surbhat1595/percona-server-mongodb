@@ -171,28 +171,6 @@ Status validateIsNotInDbs(const NamespaceString& ns,
     return Status::OK();
 }
 
-// Validates that the option is not used on admin or local db as well as not being used on shards
-// or config servers.
-Status validateRecordPreImagesOptionIsPermitted(const NamespaceString& ns) {
-    const auto validationStatus = validateIsNotInDbs(
-        ns, {NamespaceString::kAdminDb, NamespaceString::kLocalDb}, "recordPreImages");
-    if (validationStatus != Status::OK()) {
-        return validationStatus;
-    }
-
-    if (serverGlobalParams.clusterRole != ClusterRole::None) {
-        return {
-            ErrorCodes::InvalidOptions,
-            str::stream()
-                << "namespace " << ns.ns()
-                << " has the recordPreImages option set, this is not supported on a "
-                   "sharded cluster. Consider restarting without --shardsvr and --configsvr and "
-                   "disabling recordPreImages via collMod"};
-    }
-
-    return Status::OK();
-}
-
 // Validates that the option is not used on admin, local or config db as well as not being used on
 // config servers.
 Status validateChangeStreamPreAndPostImagesOptionIsPermitted(const NamespaceString& ns) {
@@ -225,8 +203,7 @@ bool isRetryableWrite(OperationContext* opCtx) {
         (!opCtx->inMultiDocumentTransaction() || txnParticipant.transactionIsOpen());
 }
 
-std::vector<OplogSlot> reserveOplogSlotsForRetryableFindAndModify(OperationContext* opCtx,
-                                                                  const int numSlots) {
+std::vector<OplogSlot> reserveOplogSlotsForRetryableFindAndModify(OperationContext* opCtx) {
     invariant(isRetryableWrite(opCtx));
 
     // For retryable findAndModify running in a multi-document transaction, we will reserve the
@@ -239,7 +216,7 @@ std::vector<OplogSlot> reserveOplogSlotsForRetryableFindAndModify(OperationConte
     // used as the oplog timestamp. Tenant migrations and resharding will forge no-op image oplog
     // entries and set the timestamp for these synthetic entries to be TS - 1.
     auto oplogInfo = LocalOplogInfo::get(opCtx);
-    auto slots = oplogInfo->getNextOpTimes(opCtx, numSlots);
+    auto slots = oplogInfo->getNextOpTimes(opCtx, 2);
     uassertStatusOK(opCtx->recoveryUnit()->setTimestamp(slots.back().getTimestamp()));
     return slots;
 }
@@ -366,10 +343,107 @@ void CollectionImpl::init(OperationContext* opCtx) {
     const auto& collectionOptions = _metadata->options;
 
     _shared->_collator = parseCollation(opCtx, _ns, collectionOptions.collation);
+
+    _initCommon(opCtx);
+
+    if (collectionOptions.clusteredIndex) {
+        if (collectionOptions.expireAfterSeconds) {
+            // If this collection has been newly created, we need to register with the TTL cache at
+            // commit time, otherwise it is startup and we can register immediately.
+            auto svcCtx = opCtx->getClient()->getServiceContext();
+            auto uuid = *collectionOptions.uuid;
+            if (opCtx->lockState()->inAWriteUnitOfWork()) {
+                opCtx->recoveryUnit()->onCommit([svcCtx, uuid](auto ts) {
+                    TTLCollectionCache::get(svcCtx).registerTTLInfo(
+                        uuid, TTLCollectionCache::Info{TTLCollectionCache::ClusteredId{}});
+                });
+            } else {
+                TTLCollectionCache::get(svcCtx).registerTTLInfo(
+                    uuid, TTLCollectionCache::Info{TTLCollectionCache::ClusteredId{}});
+            }
+        }
+    }
+
+    uassertStatusOK(getIndexCatalog()->init(opCtx, this));
+    _initialized = true;
+}
+
+void CollectionImpl::initFromExisting(OperationContext* opCtx,
+                                      std::shared_ptr<Collection> collection,
+                                      Timestamp readTimestamp) {
+    LOGV2_DEBUG(
+        6825402, 1, "Initializing collection using shared state", logAttrs(collection->ns()));
+
+    // We are per definition committed if we initialize from an existing collection.
+    _cachedCommitted = true;
+
+    // Use the shared state from the existing collection.
+    _shared = static_cast<CollectionImpl*>(collection.get())->_shared;
+
+    // When initializing a collection from an earlier point-in-time, we don't know when the last DDL
+    // operation took place at that point-in-time. We conservatively set the minimum valid snapshot
+    // to the read point-in-time.
+    _minVisibleSnapshot = readTimestamp;
+    _minValidSnapshot = readTimestamp;
+
+    _initCommon(opCtx);
+
+    // Determine which indexes from the existing collection can be shared with this newly
+    // initialized collection. The remaining indexes will be initialized by the IndexCatalog.
+    IndexCatalogEntryContainer preexistingIndexes;
+    for (const auto& index : _metadata->indexes) {
+        // First check the index catalog of the existing collection for the index entry.
+        std::shared_ptr<IndexCatalogEntry> entry = [&]() -> std::shared_ptr<IndexCatalogEntry> {
+            auto desc =
+                collection->getIndexCatalog()->findIndexByName(opCtx, index.nameStringData());
+            if (!desc)
+                return nullptr;
+
+            auto entry = collection->getIndexCatalog()->getEntryShared(desc);
+            if (!entry->getMinimumVisibleSnapshot())
+                // Index is valid in all snapshots.
+                return entry;
+            return readTimestamp < *entry->getMinimumVisibleSnapshot() ? nullptr : entry;
+        }();
+
+        if (entry) {
+            preexistingIndexes.add(std::move(entry));
+            continue;
+        }
+
+        // Next check the CollectionCatalog for a compatible drop pending index.
+        entry = [&]() -> std::shared_ptr<IndexCatalogEntry> {
+            const std::string ident = DurableCatalog::get(opCtx)->getIndexIdent(
+                opCtx, _catalogId, index.nameStringData());
+            auto entry = CollectionCatalog::get(opCtx)->findDropPendingIndex(ident);
+            if (!entry)
+                return nullptr;
+
+            if (!entry->getMinimumVisibleSnapshot())
+                // Index is valid in all snapshots.
+                return entry;
+            return readTimestamp < *entry->getMinimumVisibleSnapshot() ? nullptr : entry;
+        }();
+
+        if (entry) {
+            preexistingIndexes.add(std::move(entry));
+            continue;
+        }
+    }
+
+    uassertStatusOK(
+        getIndexCatalog()->initFromExisting(opCtx, this, preexistingIndexes, readTimestamp));
+    _initialized = true;
+}
+
+void CollectionImpl::_initCommon(OperationContext* opCtx) {
+    invariant(!_initialized);
+
+    const auto& collectionOptions = _metadata->options;
     auto validatorDoc = collectionOptions.validator.getOwned();
 
     // Enforce that the validator can be used on this namespace.
-    uassertStatusOK(checkValidatorCanBeUsedOnNs(validatorDoc, ns(), _uuid));
+    uassertStatusOK(checkValidatorCanBeUsedOnNs(validatorDoc, _ns, _uuid));
 
     // Make sure validationAction and validationLevel are allowed on this collection
     uassertStatusOK(checkValidationOptionsCanBeUsed(
@@ -377,10 +451,6 @@ void CollectionImpl::init(OperationContext* opCtx) {
 
     // Make sure to copy the action and level before parsing MatchExpression, since certain features
     // are not supported with certain combinations of action and level.
-    if (collectionOptions.recordPreImages) {
-        uassertStatusOK(validateRecordPreImagesOptionIsPermitted(_ns));
-    }
-
     if (collectionOptions.changeStreamPreAndPostImagesOptions.getEnabled()) {
         uassertStatusOK(validateChangeStreamPreAndPostImagesOptionIsPermitted(_ns));
     }
@@ -399,27 +469,6 @@ void CollectionImpl::init(OperationContext* opCtx) {
                               logAttrs(_ns),
                               "validatorStatus"_attr = _validator.getStatus());
     }
-
-    if (collectionOptions.clusteredIndex) {
-        if (collectionOptions.expireAfterSeconds) {
-            // If this collection has been newly created, we need to register with the TTL cache at
-            // commit time, otherwise it is startup and we can register immediately.
-            auto svcCtx = opCtx->getClient()->getServiceContext();
-            auto uuid = *collectionOptions.uuid;
-            if (opCtx->lockState()->inAWriteUnitOfWork()) {
-                opCtx->recoveryUnit()->onCommit([svcCtx, uuid](auto ts) {
-                    TTLCollectionCache::get(svcCtx).registerTTLInfo(
-                        uuid, TTLCollectionCache::ClusteredId{});
-                });
-            } else {
-                TTLCollectionCache::get(svcCtx).registerTTLInfo(uuid,
-                                                                TTLCollectionCache::ClusteredId{});
-            }
-        }
-    }
-
-    getIndexCatalog()->init(opCtx, this).transitional_ignore();
-    _initialized = true;
 }
 
 bool CollectionImpl::isInitialized() const {
@@ -739,20 +788,17 @@ void CollectionImpl::deleteDocument(OperationContext* opCtx,
     }
 
     if (needsCappedLock()) {
-        Lock::ResourceLock heldUntilEndOfWUOW{
-            opCtx->lockState(), ResourceId(RESOURCE_METADATA, _ns), MODE_X};
+        Lock::ResourceLock heldUntilEndOfWUOW{opCtx, ResourceId(RESOURCE_METADATA, _ns), MODE_X};
     }
 
     std::vector<OplogSlot> oplogSlots;
     auto retryableFindAndModifyLocation = RetryableFindAndModifyLocation::kNone;
-    if (storeDeletedDoc == Collection::StoreDeletedDoc::On && !getRecordPreImages() &&
-        isRetryableWrite(opCtx)) {
+    if (storeDeletedDoc == Collection::StoreDeletedDoc::On && isRetryableWrite(opCtx)) {
         retryableFindAndModifyLocation = RetryableFindAndModifyLocation::kSideCollection;
-        oplogSlots = reserveOplogSlotsForRetryableFindAndModify(opCtx, 2);
+        oplogSlots = reserveOplogSlotsForRetryableFindAndModify(opCtx);
     }
     OplogDeleteEntryArgs deleteArgs{nullptr /* deletedDoc */,
                                     fromMigrate,
-                                    getRecordPreImages(),
                                     isChangeStreamPreAndPostImagesEnabled(),
                                     retryableFindAndModifyLocation,
                                     oplogSlots};
@@ -762,8 +808,7 @@ void CollectionImpl::deleteDocument(OperationContext* opCtx,
     boost::optional<BSONObj> deletedDoc;
     const bool isRecordingPreImageForRetryableWrite =
         retryableFindAndModifyLocation != RetryableFindAndModifyLocation::kNone;
-    if (isRecordingPreImageForRetryableWrite || getRecordPreImages() ||
-        isChangeStreamPreAndPostImagesEnabled()) {
+    if (isRecordingPreImageForRetryableWrite || isChangeStreamPreAndPostImagesEnabled()) {
         deletedDoc.emplace(doc.value().getOwned());
     }
     int64_t keysDeleted = 0;
@@ -843,8 +888,7 @@ RecordId CollectionImpl::updateDocument(OperationContext* opCtx,
     invariant(newDoc.isOwned());
 
     if (needsCappedLock()) {
-        Lock::ResourceLock heldUntilEndOfWUOW{
-            opCtx->lockState(), ResourceId(RESOURCE_METADATA, _ns), MODE_X};
+        Lock::ResourceLock heldUntilEndOfWUOW{opCtx, ResourceId(RESOURCE_METADATA, _ns), MODE_X};
     }
 
     SnapshotId sid = opCtx->recoveryUnit()->getSnapshotId();
@@ -859,7 +903,6 @@ RecordId CollectionImpl::updateDocument(OperationContext* opCtx,
     if (!args->preImageDoc) {
         args->preImageDoc = oldDoc.value().getOwned();
     }
-    args->preImageRecordingEnabledForCollection = getRecordPreImages();
     args->changeStreamPreAndPostImagesEnabledForCollection =
         isChangeStreamPreAndPostImagesEnabled();
 
@@ -873,14 +916,10 @@ RecordId CollectionImpl::updateDocument(OperationContext* opCtx,
         // post-image in a side collection, then we must reserve oplog slots in advance. We
         // expect to use the reserved oplog slots as follows, where TS is the greatest
         // timestamp of 'oplogSlots':
-        // TS - 2: If 'getRecordPreImages()' is true, we reserve an extra oplog slot in case we
-        //         must account for storing a pre-image in the oplog and an eventual synthetic
-        //         no-op image oplog used by tenant migrations/resharding.
         // TS - 1: Tenant migrations and resharding will forge no-op image oplog entries and set
         //         the entry timestamps to TS - 1.
         // TS:     The timestamp given to the update oplog entry.
-        const auto numSlotsToReserve = getRecordPreImages() ? 3 : 2;
-        args->oplogSlots = reserveOplogSlotsForRetryableFindAndModify(opCtx, numSlotsToReserve);
+        args->oplogSlots = reserveOplogSlotsForRetryableFindAndModify(opCtx);
     } else {
         // Retryable findAndModify commands should not reserve oplog slots before entering this
         // function since tenant migrations and resharding rely on always being able to set
@@ -945,7 +984,7 @@ StatusWith<RecordData> CollectionImpl::updateDocumentWithDamages(
     // For in-place updates we need to grab an owned copy of the pre-image doc if pre-image
     // recording is enabled and we haven't already set the pre-image due to this update being
     // a retryable findAndModify or a possible update to the shard key.
-    if (!args->preImageDoc && (getRecordPreImages() || isChangeStreamPreAndPostImagesEnabled())) {
+    if (!args->preImageDoc && isChangeStreamPreAndPostImagesEnabled()) {
         args->preImageDoc = oldRec.value().toBson().getOwned();
     }
     OplogUpdateEntryArgs onUpdateArgs(args, ns(), _uuid);
@@ -958,14 +997,10 @@ StatusWith<RecordData> CollectionImpl::updateDocumentWithDamages(
         // post-image in a side collection, then we must reserve oplog slots in advance. We
         // expect to use the reserved oplog slots as follows, where TS is the greatest
         // timestamp of 'oplogSlots':
-        // TS - 2: If 'getRecordPreImages()' is true, we reserve an extra oplog slot in case we
-        //         must account for storing a pre-image in the oplog and an eventual synthetic
-        //         no-op image oplog used by tenant migrations/resharding.
         // TS - 1: Tenant migrations and resharding will forge no-op image oplog entries and set
         //         the entry timestamps to TS - 1.
         // TS:     The timestamp given to the update oplog entry.
-        const auto numSlotsToReserve = getRecordPreImages() ? 3 : 2;
-        args->oplogSlots = reserveOplogSlotsForRetryableFindAndModify(opCtx, numSlotsToReserve);
+        args->oplogSlots = reserveOplogSlotsForRetryableFindAndModify(opCtx);
     } else {
         // Retryable findAndModify commands should not reserve oplog slots before entering this
         // function since tenant migrations and resharding rely on always being able to set
@@ -978,7 +1013,6 @@ StatusWith<RecordData> CollectionImpl::updateDocumentWithDamages(
 
     if (newRecStatus.isOK()) {
         args->updatedDoc = newRecStatus.getValue().toBson();
-        args->preImageRecordingEnabledForCollection = getRecordPreImages();
         args->changeStreamPreAndPostImagesEnabledForCollection =
             isChangeStreamPreAndPostImagesEnabled();
 
@@ -1092,19 +1126,6 @@ Status CollectionImpl::updateCappedSize(OperationContext* opCtx,
         }
     });
     return Status::OK();
-}
-
-bool CollectionImpl::getRecordPreImages() const {
-    return _metadata->options.recordPreImages;
-}
-
-void CollectionImpl::setRecordPreImages(OperationContext* opCtx, bool val) {
-    if (val) {
-        uassertStatusOK(validateRecordPreImagesOptionIsPermitted(_ns));
-    }
-
-    _writeMetadata(
-        opCtx, [&](BSONCollectionCatalogEntry::MetaData& md) { md.options.recordPreImages = val; });
 }
 
 bool CollectionImpl::isChangeStreamPreAndPostImagesEnabled() const {

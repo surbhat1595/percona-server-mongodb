@@ -37,6 +37,7 @@
 #include "mongo/db/concurrency/lock_stats.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/util/concurrency/admission_context.h"
 
 namespace mongo {
 
@@ -51,6 +52,7 @@ class Locker {
     Locker& operator=(const Locker&) = delete;
 
     friend class UninterruptibleLockGuard;
+    friend class InterruptibleLockGuard;
 
 public:
     virtual ~Locker() {}
@@ -508,22 +510,19 @@ public:
     }
 
     /**
-     * This will opt in or out of the ticket mechanism. This should be used sparingly for special
-     * purpose threads, such as FTDC and committing or aborting prepared transactions.
+     * This will set the admission priority for the ticket mechanism.
      */
-    void skipAcquireTicket() {
-        // Should not hold or wait for the ticket.
+    void setAdmissionPriority(AdmissionContext::Priority priority) {
         invariant(isNoop() || getClientState() == Locker::ClientState::kInactive);
-        _shouldAcquireTicket = false;
+        _admCtx.setPriority(priority);
     }
-    void setAcquireTicket() {
-        // Should hold or wait for the ticket.
-        invariant(isNoop() || getClientState() == Locker::ClientState::kInactive);
-        _shouldAcquireTicket = true;
+
+    AdmissionContext::Priority getAcquisitionPriority() {
+        return _admCtx.getPriority();
     }
 
     bool shouldAcquireTicket() const {
-        return _shouldAcquireTicket;
+        return _admCtx.getPriority() != AdmissionContext::Priority::kImmediate;
     }
 
     /**
@@ -566,16 +565,25 @@ protected:
     int _uninterruptibleLocksRequested = 0;
 
     /**
+     * The number of callers that are guarding against uninterruptible lock requests. An int,
+     * instead of a boolean, to support multiple simultaneous requests. When > 0, ensures that
+     * _uninterruptibleLocksRequested above is _not_ used.
+     */
+    int _keepInterruptibleRequests = 0;
+
+    /**
      * The number of LockRequests to unlock at the end of this WUOW. This is used for locks
      * participating in two-phase locking.
      */
     unsigned _numResourcesToUnlockAtEndUnitOfWork = 0;
 
+    // Keeps state and statistics related to admission control.
+    AdmissionContext _admCtx;
+
 private:
     bool _shouldConflictWithSecondaryBatchApplication = true;
     bool _shouldConflictWithSetFeatureCompatibilityVersion = true;
     bool _shouldAllowLockAcquisitionOnTimestampedUnitOfWork = false;
-    bool _shouldAcquireTicket = true;
     std::string _debugInfo;  // Extra info about this locker for debugging purpose
 };
 
@@ -598,6 +606,7 @@ public:
      */
     explicit UninterruptibleLockGuard(Locker* locker) : _locker(locker) {
         invariant(_locker);
+        invariant(_locker->_keepInterruptibleRequests == 0);
         invariant(_locker->_uninterruptibleLocksRequested >= 0);
         invariant(_locker->_uninterruptibleLocksRequested < std::numeric_limits<int>::max());
         _locker->_uninterruptibleLocksRequested += 1;
@@ -606,6 +615,38 @@ public:
     ~UninterruptibleLockGuard() {
         invariant(_locker->_uninterruptibleLocksRequested > 0);
         _locker->_uninterruptibleLocksRequested -= 1;
+    }
+
+private:
+    Locker* const _locker;
+};
+
+/**
+ * This RAII type ensures that there are no uninterruptible lock acquisitions while in scope. If an
+ * UninterruptibleLockGuard is held at a higher level, or taken at a lower level, an invariant will
+ * occur. This protects against UninterruptibleLockGuard uses on code paths that must be
+ * interruptible. Safe to nest InterruptibleLockGuard instances.
+ */
+class InterruptibleLockGuard {
+    InterruptibleLockGuard(const InterruptibleLockGuard& other) = delete;
+    InterruptibleLockGuard(InterruptibleLockGuard&& other) = delete;
+
+public:
+    /*
+     * Accepts a Locker, and increments the Locker's _keepInterruptibleRequests counter. Decrements
+     * the counter when destroyed.
+     */
+    explicit InterruptibleLockGuard(Locker* locker) : _locker(locker) {
+        invariant(_locker);
+        invariant(_locker->_uninterruptibleLocksRequested == 0);
+        invariant(_locker->_keepInterruptibleRequests >= 0);
+        invariant(_locker->_keepInterruptibleRequests < std::numeric_limits<int>::max());
+        _locker->_keepInterruptibleRequests += 1;
+    }
+
+    ~InterruptibleLockGuard() {
+        invariant(_locker->_keepInterruptibleRequests > 0);
+        _locker->_keepInterruptibleRequests -= 1;
     }
 
 private:

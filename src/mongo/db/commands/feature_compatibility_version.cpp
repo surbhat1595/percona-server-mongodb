@@ -106,7 +106,7 @@ public:
                          std::make_tuple(GenericFCV::kLastContinuous,
                                          GenericFCV::kUpgradingFromLastContinuousToLatest,
                                          GenericFCV::kLatest)}) {
-            for (auto isFromConfigServer : std::vector{false, true}) {
+            for (auto&& isFromConfigServer : {false, true}) {
                 // Start or complete upgrading to latest. If this release's lastContinuous ==
                 // lastLTS then the second loop iteration just overwrites the first.
                 _transitions[{from, to, isFromConfigServer}] = upgrading;
@@ -131,7 +131,7 @@ public:
                                          GenericFCV::kLastContinuous),
                          std::make_tuple(GenericFCV::kDowngradingFromLatestToLastLTS,
                                          GenericFCV::kLastLTS)}) {
-            for (auto isFromConfigServer : std::vector{false, true}) {
+            for (auto&& isFromConfigServer : {false, true}) {
                 // Start or complete downgrade from latest.  If this release's lastContinuous ==
                 // lastLTS then the second loop iteration just overwrites the first.
                 _transitions[{GenericFCV::kLatest, to, isFromConfigServer}] = downgrading;
@@ -149,7 +149,7 @@ public:
      */
     void featureFlaggedAddNewTransitionState() {
         if (repl::feature_flags::gDowngradingToUpgrading.isEnabledAndIgnoreFCV()) {
-            for (auto isFromConfigServer : std::vector{false, true}) {
+            for (auto&& isFromConfigServer : {false, true}) {
                 _transitions[{GenericFCV::kDowngradingFromLatestToLastLTS,
                               GenericFCV::kLatest,
                               isFromConfigServer}] = GenericFCV::kUpgradingFromLastLTSToLatest;
@@ -528,7 +528,7 @@ void FeatureCompatibilityVersion::fassertInitializedAfterStartup(OperationContex
 
 Lock::ExclusiveLock FeatureCompatibilityVersion::enterFCVChangeRegion(OperationContext* opCtx) {
     invariant(!opCtx->lockState()->isLocked());
-    return Lock::ExclusiveLock(opCtx->lockState(), fcvDocumentLock);
+    return Lock::ExclusiveLock(opCtx, fcvDocumentLock);
 }
 
 void FeatureCompatibilityVersion::advanceLastFCVUpdateTimestamp(Timestamp fcvUpdateTimestamp) {
@@ -545,13 +545,14 @@ void FeatureCompatibilityVersion::clearLastFCVUpdateTimestamp() {
 
 
 void FeatureCompatibilityVersionParameter::append(OperationContext* opCtx,
-                                                  BSONObjBuilder& b,
-                                                  const std::string& name) {
+                                                  BSONObjBuilder* b,
+                                                  StringData name,
+                                                  const boost::optional<TenantId>&) {
     uassert(ErrorCodes::UnknownFeatureCompatibilityVersion,
             str::stream() << name << " is not yet known.",
             serverGlobalParams.featureCompatibility.isVersionInitialized());
 
-    BSONObjBuilder featureCompatibilityVersionBuilder(b.subobjStart(name));
+    BSONObjBuilder featureCompatibilityVersionBuilder(b->subobjStart(name));
     auto version = serverGlobalParams.featureCompatibility.getVersion();
     FeatureCompatibilityVersionDocument fcvDoc = fcvTransitions.getFCVDocument(version);
     featureCompatibilityVersionBuilder.appendElements(fcvDoc.toBSON().removeField("_id"));
@@ -582,7 +583,8 @@ void FeatureCompatibilityVersionParameter::append(OperationContext* opCtx,
     }
 }
 
-Status FeatureCompatibilityVersionParameter::setFromString(const std::string&) {
+Status FeatureCompatibilityVersionParameter::setFromString(StringData,
+                                                           const boost::optional<TenantId>&) {
     return {ErrorCodes::IllegalOperation,
             str::stream() << name() << " cannot be set via setParameter. See "
                           << feature_compatibility_version_documentation::kCompatibilityLink
@@ -593,7 +595,7 @@ FixedFCVRegion::FixedFCVRegion(OperationContext* opCtx)
     : _lk([&] {
           invariant(!opCtx->lockState()->isLocked());
           invariant(!opCtx->lockState()->isRSTLLocked());
-          return Lock::SharedLock(opCtx->lockState(), fcvDocumentLock);
+          return Lock::SharedLock(opCtx, fcvDocumentLock);
       }()) {}
 
 FixedFCVRegion::~FixedFCVRegion() = default;

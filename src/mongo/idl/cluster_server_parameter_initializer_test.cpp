@@ -31,10 +31,10 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/storage_interface_mock.h"
+#include "mongo/db/server_parameter.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/idl/cluster_server_parameter_initializer.h"
 #include "mongo/idl/cluster_server_parameter_test_util.h"
-#include "mongo/idl/server_parameter.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 
@@ -43,6 +43,8 @@
 namespace mongo {
 namespace {
 using namespace cluster_server_parameter_test_util;
+
+typedef ClusterParameterWithStorage<ClusterServerParameterTest> ClusterTestParameter;
 
 class ClusterServerParameterInitializerTest : public ClusterServerParameterTestBase {
 public:
@@ -89,44 +91,36 @@ protected:
 TEST_F(ClusterServerParameterInitializerTest, OnInitialSync) {
     // Retrieve the in-memory test cluster server parameter and ensure it's set to the default
     // value.
-    auto* sp = ServerParameterSet::getClusterParameterSet()
-                   ->get<IDLServerParameterWithStorage<ServerParameterType::kClusterWide,
-                                                       ClusterServerParameterTest>>(kCSPTest);
+    auto* sp = ServerParameterSet::getClusterParameterSet()->get<ClusterTestParameter>(kCSPTest);
     ASSERT(sp != nullptr);
-    ClusterServerParameterTest cspTest = sp->getValue();
+    ClusterServerParameterTest cspTest = sp->getValue(boost::none);
     ASSERT_EQ(cspTest.getIntValue(), kDefaultIntValue);
     ASSERT_EQ(cspTest.getStrValue(), kDefaultStrValue);
 
     // Indicate that data is available at the end of initial sync and check that the in-memory data
     // is updated.
     doInitialSync();
-    sp = ServerParameterSet::getClusterParameterSet()
-             ->get<IDLServerParameterWithStorage<ServerParameterType::kClusterWide,
-                                                 ClusterServerParameterTest>>(kCSPTest);
+    sp = ServerParameterSet::getClusterParameterSet()->get<ClusterTestParameter>(kCSPTest);
     ASSERT(sp != nullptr);
-    cspTest = sp->getValue();
+    cspTest = sp->getValue(boost::none);
     ASSERT_EQ(cspTest.getIntValue(), kInitialIntValue);
     ASSERT_EQ(cspTest.getStrValue(), kInitialStrValue);
 }
 
 TEST_F(ClusterServerParameterInitializerTest, OnStartupRecovery) {
     // Retrieve the test cluster server parameter and ensure it's set to the default value.
-    auto* sp = ServerParameterSet::getClusterParameterSet()
-                   ->get<IDLServerParameterWithStorage<ServerParameterType::kClusterWide,
-                                                       ClusterServerParameterTest>>(kCSPTest);
+    auto* sp = ServerParameterSet::getClusterParameterSet()->get<ClusterTestParameter>(kCSPTest);
     ASSERT(sp != nullptr);
-    ClusterServerParameterTest cspTest = sp->getValue();
+    ClusterServerParameterTest cspTest = sp->getValue(boost::none);
     ASSERT_EQ(cspTest.getIntValue(), kDefaultIntValue);
     ASSERT_EQ(cspTest.getStrValue(), kDefaultStrValue);
 
     // Indicate that data is available at the end of startup recovery and check that the in-memory
     // data is updated.
     doStartupRecovery();
-    sp = ServerParameterSet::getClusterParameterSet()
-             ->get<IDLServerParameterWithStorage<ServerParameterType::kClusterWide,
-                                                 ClusterServerParameterTest>>(kCSPTest);
+    sp = ServerParameterSet::getClusterParameterSet()->get<ClusterTestParameter>(kCSPTest);
     ASSERT(sp != nullptr);
-    cspTest = sp->getValue();
+    cspTest = sp->getValue(boost::none);
     ASSERT_EQ(cspTest.getIntValue(), kInitialIntValue);
     ASSERT_EQ(cspTest.getStrValue(), kInitialStrValue);
 }

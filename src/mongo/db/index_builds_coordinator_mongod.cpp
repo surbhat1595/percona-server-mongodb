@@ -126,7 +126,7 @@ void IndexBuildsCoordinatorMongod::shutdown(OperationContext* opCtx) {
 
 StatusWith<SharedSemiFuture<ReplIndexBuildState::IndexCatalogStats>>
 IndexBuildsCoordinatorMongod::startIndexBuild(OperationContext* opCtx,
-                                              std::string dbName,
+                                              const DatabaseName& dbName,
                                               const UUID& collectionUUID,
                                               const std::vector<BSONObj>& specs,
                                               const UUID& buildUUID,
@@ -138,7 +138,7 @@ IndexBuildsCoordinatorMongod::startIndexBuild(OperationContext* opCtx,
 
 StatusWith<SharedSemiFuture<ReplIndexBuildState::IndexCatalogStats>>
 IndexBuildsCoordinatorMongod::resumeIndexBuild(OperationContext* opCtx,
-                                               std::string dbName,
+                                               const DatabaseName& dbName,
                                                const UUID& collectionUUID,
                                                const std::vector<BSONObj>& specs,
                                                const UUID& buildUUID,
@@ -157,7 +157,7 @@ IndexBuildsCoordinatorMongod::resumeIndexBuild(OperationContext* opCtx,
 
 StatusWith<SharedSemiFuture<ReplIndexBuildState::IndexCatalogStats>>
 IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
-                                               std::string dbName,
+                                               const DatabaseName& dbName,
                                                const UUID& collectionUUID,
                                                const std::vector<BSONObj>& specs,
                                                const UUID& buildUUID,
@@ -197,7 +197,8 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
             // The checks here catch empty index builds and also allow us to stop index
             // builds before waiting for throttling. It may race with the abort at the start
             // of migration so we do check again later.
-            uassertStatusOK(tenant_migration_access_blocker::checkIfCanBuildIndex(opCtx, dbName));
+            uassertStatusOK(tenant_migration_access_blocker::checkIfCanBuildIndex(
+                opCtx, dbName.toStringWithTenantId()));
             uassertStatusOK(writeBlockState->checkIfIndexBuildAllowedToStart(opCtx, nss));
 
             stdx::unique_lock<Latch> lk(_throttlingMutex);
@@ -271,8 +272,8 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
         }
 
         if (opCtx->getClient()->isFromUserConnection()) {
-            auto migrationStatus =
-                tenant_migration_access_blocker::checkIfCanBuildIndex(opCtx, dbName);
+            auto migrationStatus = tenant_migration_access_blocker::checkIfCanBuildIndex(
+                opCtx, dbName.toStringWithTenantId());
             if (!migrationStatus.isOK()) {
                 LOGV2(4886200,
                       "Aborted index build before start due to tenant migration",
@@ -343,7 +344,7 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
         startPromise = std::move(startPromise),
         startTimestamp,
         shardVersion = oss.getShardVersion(nss),
-        dbVersion = oss.getDbVersion(dbName),
+        dbVersion = oss.getDbVersion(dbName.toStringWithTenantId()),
         resumeInfo,
         impersonatedClientAttrs = std::move(impersonatedClientAttrs),
         forwardableOpMetadata = std::move(forwardableOpMetadata)
@@ -390,9 +391,9 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
         // Start collecting metrics for the index build. The metrics for this operation will only be
         // aggregated globally if the node commits or aborts while it is primary.
         auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx.get());
-        if (ResourceConsumption::shouldCollectMetricsForDatabase(dbName) &&
+        if (ResourceConsumption::shouldCollectMetricsForDatabase(dbName.toStringWithTenantId()) &&
             ResourceConsumption::isMetricsCollectionEnabled()) {
-            metricsCollector.beginScopedCollecting(opCtx.get(), dbName);
+            metricsCollector.beginScopedCollecting(opCtx.get(), dbName.toStringWithTenantId());
         }
 
         // Index builds should never take the PBWM lock, even on a primary. This allows the
@@ -457,7 +458,7 @@ Status IndexBuildsCoordinatorMongod::voteCommitIndexBuild(OperationContext* opCt
         // commit quorum is disabled, do not record their entry into the commit ready nodes.
         // If we fail to retrieve the persisted commit quorum, the index build might be in the
         // middle of tearing down.
-        Lock::SharedLock commitQuorumLk(opCtx->lockState(), replState->commitQuorumLock.value());
+        Lock::SharedLock commitQuorumLk(opCtx, *replState->commitQuorumLock);
         auto commitQuorum =
             uassertStatusOK(indexbuildentryhelpers::getCommitQuorum(opCtx, buildUUID));
         if (commitQuorum.numNodes == CommitQuorumOptions::kDisabled) {
@@ -499,7 +500,7 @@ void IndexBuildsCoordinatorMongod::_signalIfCommitQuorumIsSatisfied(
 
     // Acquire the commitQuorumLk in shared mode to make sure commit quorum value did not change
     // after reading it from config.system.indexBuilds collection.
-    Lock::SharedLock commitQuorumLk(opCtx->lockState(), replState->commitQuorumLock.value());
+    Lock::SharedLock commitQuorumLk(opCtx, *replState->commitQuorumLock);
 
     // Read the index builds entry from config.system.indexBuilds collection.
     auto swIndexBuildEntry =
@@ -546,7 +547,7 @@ bool IndexBuildsCoordinatorMongod::_signalIfCommitQuorumNotEnabled(
 
     // Acquire the commitQuorumLk in shared mode to make sure commit quorum value did not change
     // after reading it from config.system.indexBuilds collection.
-    Lock::SharedLock commitQuorumLk(opCtx->lockState(), replState->commitQuorumLock.value());
+    Lock::SharedLock commitQuorumLk(opCtx, *replState->commitQuorumLock);
 
     // Read the commit quorum value from config.system.indexBuilds collection.
     auto commitQuorum = uassertStatusOKWithContext(
@@ -874,7 +875,7 @@ Status IndexBuildsCoordinatorMongod::setCommitQuorum(OperationContext* opCtx,
     // About to update the commit quorum value on-disk. So, take the lock in exclusive mode to
     // prevent readers from reading the commit quorum value and making decision on commit quorum
     // satisfied with the stale read commit quorum value.
-    Lock::ExclusiveLock commitQuorumLk(opCtx->lockState(), replState->commitQuorumLock.value());
+    Lock::ExclusiveLock commitQuorumLk(opCtx, *replState->commitQuorumLock);
     {
         if (auto action = replState->getNextActionNoWait()) {
             return Status(ErrorCodes::CommandFailed,

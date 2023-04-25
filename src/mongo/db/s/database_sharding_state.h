@@ -30,14 +30,15 @@
 #pragma once
 
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/s/sharding_migration_critical_section.h"
-#include "mongo/db/s/sharding_state_lock.h"
 #include "mongo/s/catalog/type_database_gen.h"
 
 namespace mongo {
 
 class MovePrimarySourceManager;
-class OperationContext;
+
+enum class DSSAcquisitionMode { kShared, kExclusive };
 
 /**
  * Synchronizes access to this shard server's cached database version for Database.
@@ -47,61 +48,79 @@ class DatabaseShardingState {
     DatabaseShardingState& operator=(const DatabaseShardingState&) = delete;
 
 public:
-    /**
-     * A ShardingStateLock is used on DatabaseShardingState operations in order to ensure
-     * synchronization across operations.
-     */
-    using DSSLock = ShardingStateLock<DatabaseShardingState>;
-
-    DatabaseShardingState(StringData dbName);
+    DatabaseShardingState(const DatabaseName& dbName);
     ~DatabaseShardingState() = default;
 
     /**
-     * Obtains the sharding state for the specified database. If it does not exist, it will be
-     * created and will remain in memory until the database is dropped.
-     *
-     * Must be called with some lock held on the database being looked up and the returned
-     * pointer must not be stored.
+     * Obtains the sharding state for the specified database along with a resource lock protecting
+     * it from modifications, which will be held until the object goes out of scope.
      */
-    static DatabaseShardingState* get(OperationContext* opCtx, StringData dbName);
+    class ScopedDatabaseShardingState {
+    public:
+        ScopedDatabaseShardingState(ScopedDatabaseShardingState&&);
+
+        ~ScopedDatabaseShardingState();
+
+        DatabaseShardingState* operator->() const {
+            return _dss;
+        }
+        DatabaseShardingState& operator*() const {
+            return *_dss;
+        }
+
+    private:
+        friend class DatabaseShardingState;
+
+        ScopedDatabaseShardingState(OperationContext* opCtx,
+                                    const DatabaseName& dbName,
+                                    LockMode mode);
+
+        Lock::ResourceLock _lock;
+        DatabaseShardingState* _dss;
+    };
+    static ScopedDatabaseShardingState assertDbLockedAndAcquire(OperationContext* opCtx,
+                                                                const DatabaseName& dbName,
+                                                                DSSAcquisitionMode mode);
+    static ScopedDatabaseShardingState acquire(OperationContext* opCtx,
+                                               const DatabaseName& dbName,
+                                               DSSAcquisitionMode mode);
 
     /**
-     * Obtain a pointer to the DatabaseShardingState that remains safe to access without holding
-     * a database lock. Should be called instead of the regular get() if no database lock is held.
-     * The returned DatabaseShardingState instance should not be modified!
+     * Returns the name of the database related to the current sharding state.
      */
-    static std::shared_ptr<DatabaseShardingState> getSharedForLockFreeReads(OperationContext* opCtx,
-                                                                            StringData dbName);
+    const DatabaseName& getDbName() const {
+        return _dbName;
+    }
 
     /**
      * Methods to control the databases's critical section. Must be called with the database X lock
      * held.
      */
-    void enterCriticalSectionCatchUpPhase(OperationContext* opCtx, DSSLock&, const BSONObj& reason);
-    void enterCriticalSectionCommitPhase(OperationContext* opCtx, DSSLock&, const BSONObj& reason);
+    void enterCriticalSectionCatchUpPhase(OperationContext* opCtx, const BSONObj& reason);
+    void enterCriticalSectionCommitPhase(OperationContext* opCtx, const BSONObj& reason);
     void exitCriticalSection(OperationContext* opCtx, const BSONObj& reason);
 
-    auto getCriticalSectionSignal(ShardingMigrationCriticalSection::Operation op, DSSLock&) const {
+    auto getCriticalSectionSignal(ShardingMigrationCriticalSection::Operation op) const {
         return _critSec.getSignal(op);
     }
 
-    auto getCriticalSectionReason(DSSLock&) const {
+    auto getCriticalSectionReason() const {
         return _critSec.getReason() ? _critSec.getReason()->toString() : "Unknown";
     }
 
     /**
      * Returns the active movePrimary source manager, if one is available.
      */
-    MovePrimarySourceManager* getMovePrimarySourceManager(DSSLock&);
+    bool isMovePrimaryInProgress() const {
+        return _sourceMgr;
+    }
 
     /**
      * Attaches a movePrimary source manager to this database's sharding state. Must be called with
      * the database lock in X mode. May not be called if there is a movePrimary source manager
      * already installed. Must be followed by a call to clearMovePrimarySourceManager.
      */
-    void setMovePrimarySourceManager(OperationContext* opCtx,
-                                     MovePrimarySourceManager* sourceMgr,
-                                     DSSLock&);
+    void setMovePrimarySourceManager(OperationContext* opCtx, MovePrimarySourceManager* sourceMgr);
 
     /**
      * Removes a movePrimary source manager from this database's sharding state. Must be called with
@@ -110,14 +129,45 @@ public:
      */
     void clearMovePrimarySourceManager(OperationContext* opCtx);
 
+    /**
+     * Sets the database metadata refresh future for other threads to wait on it.
+     */
+    void setDbMetadataRefreshFuture(SharedSemiFuture<void> future,
+                                    CancellationSource cancellationSource);
+
+    /**
+     * If there is an ongoing database metadata refresh, returns the future to wait on it, otherwise
+     * `boost::none`.
+     */
+    boost::optional<SharedSemiFuture<void>> getDbMetadataRefreshFuture() const;
+
+    /**
+     * Resets the database metadata refresh future to `boost::none`.
+     */
+    void resetDbMetadataRefreshFuture();
+
+    /**
+     * Cancel any ongoing database metadata refresh.
+     */
+    void cancelDbMetadataRefresh();
+
 private:
-    friend DSSLock;
+    struct DbMetadataRefresh {
+        DbMetadataRefresh(SharedSemiFuture<void> future, CancellationSource cancellationSource)
+            : future(std::move(future)), cancellationSource(std::move(cancellationSource)){};
+
+        // Tracks the ongoing database metadata refresh.
+        SharedSemiFuture<void> future;
+
+        // Cancellation source to cancel the ongoing database metadata refresh.
+        CancellationSource cancellationSource;
+    };
 
     // Object-wide ResourceMutex to protect changes to the DatabaseShardingState or objects held
     // within.
     Lock::ResourceMutex _stateChangeMutex{"DatabaseShardingState"};
 
-    const std::string _dbName;
+    const DatabaseName _dbName;
 
     // Modifying the state below requires holding the DBLock in X mode; holding the DBLock in any
     // mode is acceptable for reading it. (Note: accessing this class at all requires holding the
@@ -131,6 +181,10 @@ private:
     //
     // NOTE: The source manager is not owned by this class.
     MovePrimarySourceManager* _sourceMgr{nullptr};
+
+    // Tracks the ongoing database metadata refresh. Possibly keeps a future for other threads to
+    // wait on it, and a cancellation source to cancel the ongoing database metadata refresh.
+    boost::optional<DbMetadataRefresh> _dbMetadataRefresh;
 };
 
 }  // namespace mongo

@@ -41,8 +41,6 @@
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/change_stream_change_collection_manager.h"
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
-#include "mongo/db/commands/cqf/cqf_aggregate.h"
-#include "mongo/db/commands/cqf/cqf_command_utils.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/cursor_manager.h"
 #include "mongo/db/db_raii.h"
@@ -66,6 +64,8 @@
 #include "mongo/db/pipeline/search_helper.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collection_query_info.h"
+#include "mongo/db/query/cqf_command_utils.h"
+#include "mongo/db/query/cqf_get_executor.h"
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/query/get_executor.h"
@@ -443,15 +443,10 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
                               MongoProcessInterface::create(opCtx),
                               uassertStatusOK(resolveInvolvedNamespaces(opCtx, request)),
                               uuid,
-                              CurOp::get(opCtx)->dbProfileLevel() > 0);
+                              CurOp::get(opCtx)->dbProfileLevel() > 0,
+                              allowDiskUseByDefault.load());
     expCtx->tempDir = storageGlobalParams.dbpath + "/_tmp";
     expCtx->collationMatchesDefault = collationMatchesDefault;
-    expCtx->forPerShardCursor = request.getPassthroughToShard().has_value();
-    expCtx->allowDiskUse = request.getAllowDiskUse().value_or(allowDiskUseByDefault.load());
-    if (opCtx->readOnly()) {
-        // Disallow disk use if in read-only mode.
-        expCtx->allowDiskUse = false;
-    }
 
     // If the request explicitly specified NOT to use v2 resume tokens for change streams, set this
     // on the expCtx. This can happen if a the request originated from 6.0 mongos, or in test mode.
@@ -705,6 +700,14 @@ Status runAggregate(OperationContext* opCtx,
     boost::optional<AutoGetCollectionForReadCommandMaybeLockFree> ctx;
     MultipleCollectionAccessor collections;
 
+    // Going forward this operation must never ignore interrupt signals while waiting for lock
+    // acquisition. This InterruptibleLockGuard will ensure that waiting for lock re-acquisition
+    // after yielding will not ignore interrupt signals. This is necessary to avoid deadlocking with
+    // replication rollback, which at the storage layer waits for all cursors to be closed under the
+    // global MODE_X lock, after having sent interrupt signals to read operations. This operation
+    // must never hold open storage cursors while ignoring interrupt.
+    InterruptibleLockGuard interruptibleLockAcquisition(opCtx->lockState());
+
     auto initContext = [&](AutoGetCollectionViewMode m) -> void {
         ctx.emplace(opCtx,
                     nss,
@@ -762,6 +765,12 @@ Status runAggregate(OperationContext* opCtx,
 
                 nss = NamespaceString::makeChangeCollectionNSS(origNss.tenantId());
             }
+
+            // Assert that a change stream on the config server is always opened on the oplog.
+            tassert(6763400,
+                    str::stream() << "Change stream was unexpectedly opened on the namespace: "
+                                  << nss << " in the config server",
+                    serverGlobalParams.clusterRole != ClusterRole::ConfigServer || nss.isOplog());
 
             // If the 'assertChangeStreamNssCollection' failpoint is active then ensure that we are
             // opening the change stream on the correct namespace.
@@ -970,8 +979,12 @@ Status runAggregate(OperationContext* opCtx,
                     !request.getExchange().has_value());
 
             auto timeBegin = Date_t::now();
-            execs.emplace_back(getSBEExecutorViaCascadesOptimizer(
-                opCtx, expCtx, nss, collections.getMainCollection(), request.getHint(), *pipeline));
+            execs.emplace_back(getSBEExecutorViaCascadesOptimizer(opCtx,
+                                                                  expCtx,
+                                                                  nss,
+                                                                  collections.getMainCollection(),
+                                                                  request.getHint(),
+                                                                  std::move(pipeline)));
             auto elapsed =
                 (Date_t::now().toMillisSinceEpoch() - timeBegin.toMillisSinceEpoch()) / 1000.0;
             OPTIMIZER_DEBUG_LOG(

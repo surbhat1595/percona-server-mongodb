@@ -200,6 +200,7 @@ protected:
 
     void _testApplyOplogEntryOrGroupedInsertsCrudOperation(ErrorCodes::Error expectedError,
                                                            const OplogEntry& op,
+                                                           const NamespaceString& targetNss,
                                                            bool expectedApplyOpCalled);
 
     Status _applyOplogEntryOrGroupedInsertsWrapper(OperationContext* opCtx,
@@ -298,10 +299,10 @@ OplogEntry makeOplogEntry(OpTypeEnum opType, NamespaceString nss, boost::optiona
  */
 CollectionOptions createOplogCollectionOptions();
 
-/*
- * Creates collection options for recording pre-images for testing deletes.
+/**
+ * Creates collection options for recording change stream pre-images for testing deletes.
  */
-CollectionOptions createRecordPreImageCollectionOptions();
+CollectionOptions createRecordChangeStreamPreAndPostImagesCollectionOptions();
 
 /**
  * Create test collection.

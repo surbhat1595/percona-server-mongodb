@@ -28,10 +28,10 @@
  */
 
 
-#include "mongo/db/fle_crud.h"
-
+#include <algorithm>
 #include <memory>
 
+#include "mongo/base/data_range.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -41,6 +41,7 @@
 #include "mongo/crypto/fle_crypto.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/fle_crud.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_time_tracker.h"
 #include "mongo/db/ops/write_ops_gen.h"
@@ -493,70 +494,148 @@ void processFieldsForInsert(FLEQueryInterface* queryImpl,
 
     for (auto& payload : serverPayload) {
 
-        auto escToken = payload.getESCToken();
-        auto tagToken = FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedTagToken(escToken);
-        auto valueToken =
-            FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedValueToken(escToken);
-        payload.counts.clear();
+        const auto insertTokens = [&](ConstDataRange encryptedTokens,
+                                      ConstDataRange escDerivedToken) {
+            int position = 1;
+            int count = 1;
 
-        int position = 1;
-        int count = 1;
-        auto alpha = ESCCollection::emuBinary(reader, tagToken, valueToken);
+            auto escToken = EDCServerPayloadInfo::getESCToken(escDerivedToken);
+            auto tagToken =
+                FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedTagToken(escToken);
+            auto valueToken =
+                FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedValueToken(escToken);
 
-        if (alpha.has_value() && alpha.value() == 0) {
-            position = 1;
-            count = 1;
-        } else if (!alpha.has_value()) {
-            auto block = ESCCollection::generateId(tagToken, boost::none);
+            auto alpha = ESCCollection::emuBinary(reader, tagToken, valueToken);
 
-            auto r_esc = reader.getById(block);
-            uassert(6371203, "ESC document not found", !r_esc.isEmpty());
+            if (alpha.has_value() && alpha.value() == 0) {
+                position = 1;
+                count = 1;
+            } else if (!alpha.has_value()) {
+                auto block = ESCCollection::generateId(tagToken, boost::none);
 
-            auto escNullDoc =
-                uassertStatusOK(ESCCollection::decryptNullDocument(valueToken, r_esc));
+                auto r_esc = reader.getById(block);
+                uassert(6371203, "ESC document not found", !r_esc.isEmpty());
 
-            position = escNullDoc.position + 2;
-            count = escNullDoc.count + 1;
-        } else {
-            auto block = ESCCollection::generateId(tagToken, alpha);
+                auto escNullDoc =
+                    uassertStatusOK(ESCCollection::decryptNullDocument(valueToken, r_esc));
 
-            auto r_esc = reader.getById(block);
-            uassert(6371204, "ESC document not found", !r_esc.isEmpty());
+                position = escNullDoc.position + 2;
+                count = escNullDoc.count + 1;
+            } else {
+                auto block = ESCCollection::generateId(tagToken, alpha);
 
-            auto escDoc = uassertStatusOK(ESCCollection::decryptDocument(valueToken, r_esc));
+                auto r_esc = reader.getById(block);
+                uassert(6371204, "ESC document not found", !r_esc.isEmpty());
 
-            position = alpha.value() + 1;
-            count = escDoc.count + 1;
+                auto escDoc = uassertStatusOK(ESCCollection::decryptDocument(valueToken, r_esc));
 
-            if (escDoc.compactionPlaceholder) {
-                uassertStatusOK(Status(ErrorCodes::FLECompactionPlaceholder,
-                                       "Found ESC contention placeholder"));
+                position = alpha.value() + 1;
+                count = escDoc.count + 1;
+
+                if (escDoc.compactionPlaceholder) {
+                    uassertStatusOK(Status(ErrorCodes::FLECompactionPlaceholder,
+                                           "Found ESC contention placeholder"));
+                }
             }
+
+            payload.counts.push_back(count);
+
+            auto escInsertReply = uassertStatusOK(queryImpl->insertDocument(
+                nssEsc,
+                ESCCollection::generateInsertDocument(tagToken, valueToken, position, count),
+                pStmtId,
+                true));
+            checkWriteErrors(escInsertReply);
+
+
+            NamespaceString nssEcoc(edcNss.db(), efc.getEcocCollection().value());
+
+            // TODO - should we make this a batch of ECOC updates?
+            auto ecocInsertReply = uassertStatusOK(queryImpl->insertDocument(
+                nssEcoc,
+                ECOCCollection::generateDocument(payload.fieldPathName, encryptedTokens),
+                pStmtId,
+                false,
+                bypassDocumentValidation));
+            checkWriteErrors(ecocInsertReply);
+        };
+
+        payload.counts.clear();
+        const bool isRangePayload = payload.payload.getEdgeTokenSet().has_value();
+        if (isRangePayload) {
+            const auto ets = payload.payload.getEdgeTokenSet().get();
+            for (size_t i = 0; i < ets.size(); ++i) {
+                insertTokens(ets[i].getEncryptedTokens(), ets[i].getEscDerivedToken());
+            }
+        } else {
+            insertTokens(payload.payload.getEncryptedTokens(),
+                         payload.payload.getEscDerivedToken());
         }
-
-        payload.counts.push_back(count);
-
-        auto escInsertReply = uassertStatusOK(queryImpl->insertDocument(
-            nssEsc,
-            ESCCollection::generateInsertDocument(tagToken, valueToken, position, count),
-            pStmtId,
-            true));
-        checkWriteErrors(escInsertReply);
-
-
-        NamespaceString nssEcoc(edcNss.db(), efc.getEcocCollection().value());
-
-        // TODO - should we make this a batch of ECOC updates?
-        auto ecocInsertReply = uassertStatusOK(queryImpl->insertDocument(
-            nssEcoc,
-            ECOCCollection::generateDocument(payload.fieldPathName,
-                                             payload.payload.getEncryptedTokens()),
-            pStmtId,
-            false,
-            bypassDocumentValidation));
-        checkWriteErrors(ecocInsertReply);
     }
 }
+
+void processRemovedFieldsHelper(FLEQueryInterface* queryImpl,
+                                const EncryptedFieldConfig& efc,
+                                const ESCDerivedFromDataTokenAndContentionFactorToken& esc,
+                                const ECCDerivedFromDataTokenAndContentionFactorToken& ecc,
+                                uint64_t count,
+                                const EDCIndexedFields& deletedField,
+                                const FLEDeleteToken& deleteToken,
+                                const TxnCollectionReader& reader,
+                                const NamespaceString& eccNss,
+                                const NamespaceString& edcNss,
+                                int32_t* pStmtId) {
+    auto tagToken = FLETwiceDerivedTokenGenerator::generateECCTwiceDerivedTagToken(ecc);
+    auto valueToken = FLETwiceDerivedTokenGenerator::generateECCTwiceDerivedValueToken(ecc);
+
+    auto alpha = ECCCollection::emuBinary(reader, tagToken, valueToken);
+
+    uint64_t index = 0;
+    if (alpha.has_value() && alpha.value() == 0) {
+        index = 1;
+    } else if (!alpha.has_value()) {
+        auto block = ECCCollection::generateId(tagToken, boost::none);
+
+        auto r_ecc = reader.getById(block);
+        uassert(6371306, "ECC null document not found", !r_ecc.isEmpty());
+
+        auto eccNullDoc = uassertStatusOK(ECCCollection::decryptNullDocument(valueToken, r_ecc));
+        index = eccNullDoc.position + 2;
+    } else {
+        auto block = ECCCollection::generateId(tagToken, alpha);
+
+        auto r_ecc = reader.getById(block);
+        uassert(6371307, "ECC document not found", !r_ecc.isEmpty());
+
+        auto eccDoc = uassertStatusOK(ECCCollection::decryptDocument(valueToken, r_ecc));
+
+        if (eccDoc.valueType == ECCValueType::kCompactionPlaceholder) {
+            uassertStatusOK(
+                Status(ErrorCodes::FLECompactionPlaceholder, "Found contention placeholder"));
+        }
+
+        index = alpha.value() + 1;
+    }
+
+    auto eccInsertReply = uassertStatusOK(queryImpl->insertDocument(
+        eccNss,
+        ECCCollection::generateDocument(tagToken, valueToken, index, count),
+        pStmtId,
+        true));
+    checkWriteErrors(eccInsertReply);
+
+    NamespaceString nssEcoc(edcNss.db(), efc.getEcocCollection().value());
+
+    // TODO - make this a batch of ECOC updates?
+    EncryptedStateCollectionTokens tokens(esc, ecc);
+    auto encryptedTokens = uassertStatusOK(tokens.serialize(deleteToken.ecocToken));
+    auto ecocInsertReply = uassertStatusOK(queryImpl->insertDocument(
+        nssEcoc,
+        ECOCCollection::generateDocument(deletedField.fieldPathName, encryptedTokens),
+        pStmtId,
+        false));
+    checkWriteErrors(ecocInsertReply);
+};
 
 void processRemovedFields(FLEQueryInterface* queryImpl,
                           const NamespaceString& edcNss,
@@ -565,13 +644,11 @@ void processRemovedFields(FLEQueryInterface* queryImpl,
                           const std::vector<EDCIndexedFields>& deletedFields,
                           int32_t* pStmtId) {
 
-    NamespaceString nssEcc(edcNss.db(), efc.getEccCollection().value());
+    NamespaceString eccNss(edcNss.db(), efc.getEccCollection().value());
 
+    auto docCount = queryImpl->countDocuments(eccNss);
 
-    auto docCount = queryImpl->countDocuments(nssEcc);
-
-    TxnCollectionReader reader(docCount, queryImpl, nssEcc);
-
+    TxnCollectionReader reader(docCount, queryImpl, eccNss);
 
     for (const auto& deletedField : deletedFields) {
         // TODO - verify each indexed fields is listed in EncryptionInformation for the
@@ -589,65 +666,45 @@ void processRemovedFields(FLEQueryInterface* queryImpl,
 
         // TODO - add support other types
         uassert(6371305,
-                "Ony support deleting equality indexed fields",
-                encryptedTypeBinding == EncryptedBinDataType::kFLE2EqualityIndexedValue);
+                "Ony support deleting equality indexed fields or range indexed fields",
+                encryptedTypeBinding == EncryptedBinDataType::kFLE2EqualityIndexedValue ||
+                    encryptedTypeBinding == EncryptedBinDataType::kFLE2RangeIndexedValue);
 
-        auto plainTextField = uassertStatusOK(FLE2IndexedEqualityEncryptedValue::decryptAndParse(
-            deleteToken.serverEncryptionToken, subCdr));
-
-        auto tagToken =
-            FLETwiceDerivedTokenGenerator::generateECCTwiceDerivedTagToken(plainTextField.ecc);
-        auto valueToken =
-            FLETwiceDerivedTokenGenerator::generateECCTwiceDerivedValueToken(plainTextField.ecc);
-
-        auto alpha = ECCCollection::emuBinary(reader, tagToken, valueToken);
-
-        uint64_t index = 0;
-        if (alpha.has_value() && alpha.value() == 0) {
-            index = 1;
-        } else if (!alpha.has_value()) {
-            auto block = ECCCollection::generateId(tagToken, boost::none);
-
-            auto r_ecc = reader.getById(block);
-            uassert(6371306, "ECC null document not found", !r_ecc.isEmpty());
-
-            auto eccNullDoc =
-                uassertStatusOK(ECCCollection::decryptNullDocument(valueToken, r_ecc));
-            index = eccNullDoc.position + 2;
+        if (encryptedTypeBinding == EncryptedBinDataType::kFLE2EqualityIndexedValue) {
+            auto plainTextField =
+                uassertStatusOK(FLE2IndexedEqualityEncryptedValue::decryptAndParse(
+                    deleteToken.serverEncryptionToken, subCdr));
+            processRemovedFieldsHelper(queryImpl,
+                                       efc,
+                                       plainTextField.esc,
+                                       plainTextField.ecc,
+                                       plainTextField.count,
+                                       deletedField,
+                                       deleteToken,
+                                       reader,
+                                       eccNss,
+                                       edcNss,
+                                       pStmtId);
         } else {
-            auto block = ECCCollection::generateId(tagToken, alpha);
+            auto plainTextField = uassertStatusOK(FLE2IndexedRangeEncryptedValue::decryptAndParse(
+                deleteToken.serverEncryptionToken, subCdr));
 
-            auto r_ecc = reader.getById(block);
-            uassert(6371307, "ECC document not found", !r_ecc.isEmpty());
-
-            auto eccDoc = uassertStatusOK(ECCCollection::decryptDocument(valueToken, r_ecc));
-
-            if (eccDoc.valueType == ECCValueType::kCompactionPlaceholder) {
-                uassertStatusOK(
-                    Status(ErrorCodes::FLECompactionPlaceholder, "Found contention placeholder"));
+            for (size_t i = 0; i < plainTextField.counters.size(); i++) {
+                const auto& edgeTokenSet = plainTextField.tokens[i];
+                const auto& count = plainTextField.counters[i];
+                processRemovedFieldsHelper(queryImpl,
+                                           efc,
+                                           edgeTokenSet.esc,
+                                           edgeTokenSet.ecc,
+                                           count,
+                                           deletedField,
+                                           deleteToken,
+                                           reader,
+                                           eccNss,
+                                           edcNss,
+                                           pStmtId);
             }
-
-            index = alpha.value() + 1;
         }
-
-        auto eccInsertReply = uassertStatusOK(queryImpl->insertDocument(
-            nssEcc,
-            ECCCollection::generateDocument(tagToken, valueToken, index, plainTextField.count),
-            pStmtId,
-            true));
-        checkWriteErrors(eccInsertReply);
-
-        NamespaceString nssEcoc(edcNss.db(), efc.getEcocCollection().value());
-
-        // TODO - make this a batch of ECOC updates?
-        EncryptedStateCollectionTokens tokens(plainTextField.esc, plainTextField.ecc);
-        auto encryptedTokens = uassertStatusOK(tokens.serialize(deleteToken.ecocToken));
-        auto ecocInsertReply = uassertStatusOK(queryImpl->insertDocument(
-            nssEcoc,
-            ECOCCollection::generateDocument(deletedField.fieldPathName, encryptedTokens),
-            pStmtId,
-            false));
-        checkWriteErrors(ecocInsertReply);
     }
 }
 

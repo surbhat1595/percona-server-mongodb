@@ -44,7 +44,7 @@ server_parameters:
         set_at: runtime
         cpp_varname: "ldapGlobalParams.ldapQueryTemplate"
         validator:
-            callback: validateLDAPAuthzQueryTemplate
+            callback: validateLDAPAuthzQueryTemplateServerParam
 
 configs:
     'security.ldap.authz.queryTemplate':

@@ -58,6 +58,7 @@
 #include "mongo/db/repl/transaction_oplog_application.h"
 #include "mongo/db/s/type_shard_identity.h"
 #include "mongo/db/server_recovery.h"
+#include "mongo/db/serverless/serverless_operation_lock_registry.h"
 #include "mongo/db/session/kill_sessions_local.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_txn_record_gen.h"
@@ -368,7 +369,7 @@ void RollbackImpl::_stopAndWaitForIndexBuilds(OperationContext* opCtx) {
     std::vector<DatabaseName> dbNames(dbs.begin(), dbs.end());
     LOGV2(21595, "Waiting for all background operations to complete before starting rollback");
     for (auto dbName : dbNames) {
-        auto numInProg = IndexBuildsCoordinator::get(opCtx)->numInProgForDb(dbName.toString());
+        auto numInProg = IndexBuildsCoordinator::get(opCtx)->numInProgForDb(dbName);
         if (numInProg > 0) {
             LOGV2_DEBUG(21596,
                         1,
@@ -377,7 +378,7 @@ void RollbackImpl::_stopAndWaitForIndexBuilds(OperationContext* opCtx) {
                         "Waiting for background operations to complete",
                         "numBackgroundOperationsInProgress"_attr = numInProg,
                         "db"_attr = dbName);
-            IndexBuildsCoordinator::get(opCtx)->awaitNoBgOpInProgForDb(opCtx, dbName.toString());
+            IndexBuildsCoordinator::get(opCtx)->awaitNoBgOpInProgForDb(opCtx, dbName);
         }
     }
 
@@ -431,6 +432,8 @@ StatusWith<std::set<NamespaceString>> RollbackImpl::_namespacesForOp(const Oplog
                     << "' during rollback.";
                 return Status(ErrorCodes::UnrecoverableRollbackError, message);
             }
+            case OplogEntry::CommandType::kCreateGlobalIndex:
+            case OplogEntry::CommandType::kDropGlobalIndex:
             case OplogEntry::CommandType::kCreate:
             case OplogEntry::CommandType::kDrop:
             case OplogEntry::CommandType::kImportCollection:
@@ -443,7 +446,7 @@ StatusWith<std::set<NamespaceString>> RollbackImpl::_namespacesForOp(const Oplog
                 // For all other command types, we should be able to parse the collection name from
                 // the first command argument.
                 try {
-                    auto cmdNss = CommandHelpers::parseNsCollectionRequired(opNss.db(), obj);
+                    auto cmdNss = CommandHelpers::parseNsCollectionRequired(opNss.dbName(), obj);
                     namespaces.insert(cmdNss);
                 } catch (const DBException& ex) {
                     return ex.toStatus();
@@ -577,7 +580,8 @@ void RollbackImpl::_runPhaseFromAbortToReconstructPreparedTxns(
     // We invalidate sessions before we recover so that we avoid invalidating sessions that had
     // just recovered prepared transactions.
     if (!_observerInfo.rollbackSessionIds.empty()) {
-        MongoDSessionCatalog::invalidateAllSessions(opCtx);
+        auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
+        mongoDSessionCatalog->invalidateAllSessions(opCtx);
     }
 
     // Recover to the stable timestamp.
@@ -648,6 +652,7 @@ void RollbackImpl::_runPhaseFromAbortToReconstructPreparedTxns(
     _correctRecordStoreCounts(opCtx);
 
     tenant_migration_access_blocker::recoverTenantMigrationAccessBlockers(opCtx);
+    ServerlessOperationLockRegistry::recoverLocks(opCtx);
 
     // Reconstruct prepared transactions after counts have been adjusted. Since prepared
     // transactions were aborted (i.e. the in-memory counts were rolled-back) before computing
@@ -993,8 +998,8 @@ Status RollbackImpl::_processRollbackOp(OperationContext* opCtx, const OplogEntr
                 PendingDropInfo info;
                 info.count = *countResult;
                 const auto& opNss = oplogEntry.getNss();
-                info.nss =
-                    CommandHelpers::parseNsCollectionRequired(opNss.db(), oplogEntry.getObject());
+                info.nss = CommandHelpers::parseNsCollectionRequired(opNss.dbName(),
+                                                                     oplogEntry.getObject());
                 _pendingDrops[uuid] = info;
                 _newCounts[uuid] = info.count;
             } else {

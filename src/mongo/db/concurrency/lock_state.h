@@ -36,7 +36,6 @@
 #include "mongo/db/concurrency/locker.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/concurrency/spin_lock.h"
 #include "mongo/util/concurrency/ticketholder.h"
 
@@ -377,9 +376,6 @@ private:
     // A structure for accumulating time spent getting flow control tickets.
     FlowControlTicketholder::CurOp _flowControlStats;
 
-    // Keeps state and statistics related to admission control.
-    AdmissionContext _admCtx;
-
     // The global ticketholders of the service context.
     TicketHolder* _ticketHolder;
 
@@ -424,32 +420,32 @@ public:
 };
 
 /**
- * RAII-style class to opt out of the ticket acquisition mechanism when acquiring a global lock.
- *
- * Operations that acquire the global lock but do not use any storage engine resources are eligible
- * to skip ticket acquisition. Otherwise, a ticket acquisition is required to prevent throughput
- * from suffering under high load.
+ * RAII-style class to set the priority for the ticket acquisition mechanism when acquiring a global
+ * lock.
  */
-class SkipTicketAcquisitionForLock {
+class SetTicketAquisitionPriorityForLock {
 public:
-    SkipTicketAcquisitionForLock(const SkipTicketAcquisitionForLock&) = delete;
-    SkipTicketAcquisitionForLock& operator=(const SkipTicketAcquisitionForLock&) = delete;
-    explicit SkipTicketAcquisitionForLock(OperationContext* opCtx)
-        : _opCtx(opCtx), _shouldAcquireTicket(_opCtx->lockState()->shouldAcquireTicket()) {
-        if (_shouldAcquireTicket) {
-            _opCtx->lockState()->skipAcquireTicket();
-        }
+    SetTicketAquisitionPriorityForLock(const SetTicketAquisitionPriorityForLock&) = delete;
+    SetTicketAquisitionPriorityForLock& operator=(const SetTicketAquisitionPriorityForLock&) =
+        delete;
+    explicit SetTicketAquisitionPriorityForLock(OperationContext* opCtx,
+                                                AdmissionContext::Priority priority)
+        : _opCtx(opCtx), _originalPriority(opCtx->lockState()->getAcquisitionPriority()) {
+        uassert(ErrorCodes::IllegalOperation,
+                "It is illegal for an operation to demote a high priority to a lower priority "
+                "operation",
+                _originalPriority != AdmissionContext::Priority::kImmediate ||
+                    priority == AdmissionContext::Priority::kImmediate);
+        _opCtx->lockState()->setAdmissionPriority(priority);
     }
 
-    ~SkipTicketAcquisitionForLock() {
-        if (_shouldAcquireTicket) {
-            _opCtx->lockState()->setAcquireTicket();
-        }
+    ~SetTicketAquisitionPriorityForLock() {
+        _opCtx->lockState()->setAdmissionPriority(_originalPriority);
     }
 
 private:
     OperationContext* _opCtx;
-    const bool _shouldAcquireTicket;
+    AdmissionContext::Priority _originalPriority;
 };
 
 /**

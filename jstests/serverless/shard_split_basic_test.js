@@ -22,9 +22,7 @@ test.donor.awaitSecondaryNodes();
 const donorPrimary = test.getDonorPrimary();
 const operation = test.createSplitOperation(tenantIds);
 assert.commandWorked(operation.commit());
-
 assertMigrationState(donorPrimary, operation.migrationId, "committed");
-
 operation.forget();
 
 const status = donorPrimary.adminCommand({serverStatus: 1});

@@ -32,11 +32,10 @@ global:
   cpp_namespace: "mongo"
   cpp_includes:
     - "mongo/db/namespace_string.h"
-    - "mongo/idl/basic_types.h"
     - "mongo/db/query/cursor_idl_validator.h"
 
 imports:
-    - "mongo/idl/basic_types.idl"
+    - "mongo/db/basic_types.idl"
 
 enums:
     CursorType:
@@ -120,6 +119,7 @@ structs:
     CursorInitialReply:
         description: "A struct representing a initial cursor reply."
         cpp_validator_func: "validateIDLParsedCursorResponse"
+        is_command_reply: true
         fields:
             cursor:
                 description: "A response cursor object."
@@ -156,6 +156,7 @@ structs:
 
     CursorGetMoreReply:
         description: "A struct representing a getMore cursor reply."
+        is_command_reply: true
         fields:
             cursor:
                 description: "A response cursor object."

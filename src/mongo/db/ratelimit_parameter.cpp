@@ -39,9 +39,10 @@ namespace mongo {
 // Allow rateLimit access via setParameter/getParameter
 
 void RateLimitParameter::append(OperationContext* txn,
-                                   BSONObjBuilder& b,
-                                   const std::string& name) {
-    b.append(name, serverGlobalParams.rateLimit);
+                                BSONObjBuilder* b,
+                                StringData name,
+                                const boost::optional<TenantId>&) {
+    b->append(name, serverGlobalParams.rateLimit);
 }
 
 namespace {
@@ -65,14 +66,16 @@ Status _set(int rateLimit) {
 
 }
 
-Status RateLimitParameter::set(const BSONElement& newValueElement) {
+Status RateLimitParameter::set(const BSONElement& newValueElement,
+                               const boost::optional<TenantId>&) {
     if (!newValueElement.isNumber()) {
         return Status(ErrorCodes::BadValue, str::stream() << name() << " has to be a number");
     }
     return _set(newValueElement.numberInt());
 }
 
-Status RateLimitParameter::setFromString(const std::string& newValueString) {
+Status RateLimitParameter::setFromString(StringData newValueString,
+                                         const boost::optional<TenantId>&) {
     int num = 0;
     Status status = NumberParser{}(newValueString, &num);
     if (!status.isOK()) return status;

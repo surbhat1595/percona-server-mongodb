@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/catalog/index_catalog_impl.h"
 
 #include <vector>
@@ -48,6 +46,7 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/fts/fts_spec.h"
+#include "mongo/db/global_settings.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/s2_access_method.h"
@@ -59,7 +58,6 @@
 #include "mongo/db/multi_key_path_tracker.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/delete.h"
-#include "mongo/db/query/collation/collation_spec.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collection_index_usage_tracker_decoration.h"
 #include "mongo/db/query/collection_query_info.h"
@@ -187,6 +185,20 @@ std::unique_ptr<IndexCatalog> IndexCatalogImpl::clone() const {
 }
 
 Status IndexCatalogImpl::init(OperationContext* opCtx, Collection* collection) {
+    return _init(opCtx, collection, /*preexistingIndexes=*/{}, /*readTimestamp=*/boost::none);
+};
+
+Status IndexCatalogImpl::initFromExisting(OperationContext* opCtx,
+                                          Collection* collection,
+                                          const IndexCatalogEntryContainer& preexistingIndexes,
+                                          boost::optional<Timestamp> readTimestamp) {
+    return _init(opCtx, collection, preexistingIndexes, readTimestamp);
+};
+
+Status IndexCatalogImpl::_init(OperationContext* opCtx,
+                               Collection* collection,
+                               const IndexCatalogEntryContainer& preexistingIndexes,
+                               boost::optional<Timestamp> readTimestamp) {
     vector<string> indexNames;
     collection->getAllIndexes(&indexNames);
     const bool replSetMemberInStandaloneMode =
@@ -203,7 +215,47 @@ Status IndexCatalogImpl::init(OperationContext* opCtx, Collection* collection) {
         BSONObj spec = collection->getIndexSpec(indexName).getOwned();
         BSONObj keyPattern = spec.getObjectField("key");
 
+        if (readTimestamp) {
+            auto preexistingIt = std::find_if(
+                preexistingIndexes.begin(),
+                preexistingIndexes.end(),
+                [&](const std::shared_ptr<IndexCatalogEntry>& preexistingEntry) {
+                    return spec.woCompare(preexistingEntry->descriptor()->infoObj()) == 0;
+                });
+            if (preexistingIt != preexistingIndexes.end()) {
+                std::shared_ptr<IndexCatalogEntry> existingEntry = *preexistingIt;
+                LOGV2_DEBUG(6825404,
+                            1,
+                            "Adding preexisting index entry",
+                            logAttrs(collection->ns()),
+                            "index"_attr = existingEntry->descriptor()->infoObj());
+
+                if (existingEntry->isReady(opCtx)) {
+                    _readyIndexes.add(std::move(existingEntry));
+                } else if (existingEntry->isFrozen()) {
+                    _frozenIndexes.add(std::move(existingEntry));
+                } else {
+                    _buildingIndexes.add(std::move(existingEntry));
+                }
+                continue;
+            }
+        }
+
         auto descriptor = std::make_unique<IndexDescriptor>(_getAccessMethodName(keyPattern), spec);
+
+        // TTL indexes with NaN 'expireAfterSeconds' cause problems in multiversion settings.
+        if (spec.hasField(IndexDescriptor::kExpireAfterSecondsFieldName)) {
+            if (spec[IndexDescriptor::kExpireAfterSecondsFieldName].isNaN()) {
+                LOGV2_OPTIONS(6852200,
+                              {logv2::LogTag::kStartupWarnings},
+                              "Found an existing TTL index with NaN 'expireAfterSeconds' in the "
+                              "catalog.",
+                              "ns"_attr = collection->ns(),
+                              "uuid"_attr = collection->uuid(),
+                              "index"_attr = indexName,
+                              "spec"_attr = spec);
+            }
+        }
 
         // TTL indexes are not compatible with capped collections.
         // Note that TTL deletion is supported on capped clustered collections via bounded
@@ -211,7 +263,10 @@ Status IndexCatalogImpl::init(OperationContext* opCtx, Collection* collection) {
         if (spec.hasField(IndexDescriptor::kExpireAfterSecondsFieldName) &&
             !collection->isCapped()) {
             TTLCollectionCache::get(opCtx->getServiceContext())
-                .registerTTLInfo(collection->uuid(), indexName);
+                .registerTTLInfo(
+                    collection->uuid(),
+                    TTLCollectionCache::Info{
+                        indexName, spec[IndexDescriptor::kExpireAfterSecondsFieldName].isNaN()});
         }
 
         bool ready = collection->isIndexReady(indexName);
@@ -243,16 +298,27 @@ Status IndexCatalogImpl::init(OperationContext* opCtx, Collection* collection) {
                 createIndexEntry(opCtx, collection, std::move(descriptor), flags);
             fassert(17340, entry->isReady(opCtx));
 
-            // When initializing indexes from disk, we conservatively set the minimumVisibleSnapshot
-            // to non _id indexes to the recovery timestamp. The _id index is left visible. It's
-            // assumed if the collection is visible, it's _id is valid to be used.
-            if (recoveryTs && !entry->descriptor()->isIdIndex()) {
+            if (readTimestamp) {
+                // When initializing indexes from an earlier point-in-time, we conservatively set
+                // the minimum valid snapshot to the read point-in-time as we don't know when the
+                // last DDL operation took place at that point-in-time.
+                entry->setMinimumVisibleSnapshot(*readTimestamp);
+            } else if (recoveryTs && !entry->descriptor()->isIdIndex()) {
+                // When initializing indexes from disk, we conservatively set the
+                // minimumVisibleSnapshot to non _id indexes to the recovery timestamp. The _id
+                // index is left visible. It's assumed if the collection is visible, it's _id is
+                // valid to be used.
                 entry->setMinimumVisibleSnapshot(recoveryTs.value());
             }
         }
     }
 
-    CollectionQueryInfo::get(collection).init(opCtx, collection);
+    if (!readTimestamp) {
+        // Only do this when we're not initializing an earlier collection from the shared state of
+        // an existing collection.
+        CollectionQueryInfo::get(collection).init(opCtx, collection);
+    }
+
     return Status::OK();
 }
 
@@ -335,15 +401,21 @@ Status IndexCatalogImpl::_isNonIDIndexAndNotAllowedToBuild(OperationContext* opC
                                                            const BSONObj& spec) const {
     const BSONObj key = spec.getObjectField("key");
     invariant(!key.isEmpty());
-    if (!IndexDescriptor::isIdIndexPattern(key)) {
-        // Check whether the replica set member's config has {buildIndexes:false} set, which means
-        // we are not allowed to build non-_id indexes on this server.
-        if (!repl::ReplicationCoordinator::get(opCtx)->buildsIndexes()) {
-            // We return an IndexAlreadyExists error so that the caller can catch it and silently
-            // skip building it.
-            return Status(ErrorCodes::IndexAlreadyExists,
-                          "this replica set member's 'buildIndexes' setting is set to false");
-        }
+    if (IndexDescriptor::isIdIndexPattern(key)) {
+        return Status::OK();
+    }
+
+    if (!getGlobalReplSettings().usingReplSets()) {
+        return Status::OK();
+    }
+
+    // Check whether the replica set member's config has {buildIndexes:false} set, which means
+    // we are not allowed to build non-_id indexes on this server.
+    if (!repl::ReplicationCoordinator::get(opCtx)->buildsIndexes()) {
+        // We return an IndexAlreadyExists error so that the caller can catch it and silently
+        // skip building it.
+        return Status(ErrorCodes::IndexAlreadyExists,
+                      "this replica set member's 'buildIndexes' setting is set to false");
     }
 
     return Status::OK();

@@ -37,9 +37,12 @@
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands/tenant_migration_recipient_cmds_gen.h"
 #include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/repl/oplog_applier.h"
+#include "mongo/db/repl/replication_auth.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/repl/tenant_migration_shard_merge_util.h"
+#include "mongo/db/repl/tenant_migration_shared_data.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_import.h"
 #include "mongo/executor/network_interface_factory.h"
@@ -63,7 +66,18 @@ const auto _TenantFileImporterService =
 const ReplicaSetAwareServiceRegistry::Registerer<TenantFileImporterService>
     _TenantFileImporterServiceRegisterer("TenantFileImporterService");
 
-void importCopiedFiles(OperationContext* opCtx, UUID& migrationId) {
+/**
+ * Makes a connection to the provided 'source'.
+ */
+Status connect(const HostAndPort& source, DBClientConnection* client) {
+    Status status = client->connect(source, "TenantFileImporterService", boost::none);
+    if (!status.isOK())
+        return status;
+    return replAuthenticate(client).withContext(str::stream()
+                                                << "Failed to authenticate to " << source);
+}
+
+void importCopiedFiles(OperationContext* opCtx, const UUID& migrationId) {
     auto tempWTDirectory = fileClonerTempDir(migrationId);
     uassert(6113315,
             str::stream() << "Missing file cloner's temporary dbpath directory: "
@@ -110,26 +124,36 @@ TenantFileImporterService* TenantFileImporterService::get(ServiceContext* servic
     return &_TenantFileImporterService(serviceContext);
 }
 
-void TenantFileImporterService::startMigration(const UUID& migrationId,
-                                               const StringData& donorConnectionString) {
+void TenantFileImporterService::startMigration(const UUID& migrationId) {
+    _reset();
+
     stdx::lock_guard lk(_mutex);
-    if (migrationId == _migrationId && _state >= State::kStarted && _state < State::kInterrupted) {
+    if (_isShuttingDown || _state != State::kUninitialized) {
+        LOGV2_DEBUG(6690701,
+                    1,
+                    "TenantFileImporterService cannot start a new migration, an existing migration "
+                    "is active or we are shutting down",
+                    "state"_attr = stateToString(_state),
+                    "migrationId"_attr = _migrationId ? _migrationId->toString() : "(empty)");
         return;
     }
 
-    _reset(lk);
+    // When state is kUninitialized, we expect _migrationId to be empty.
+    invariant(!_migrationId, str::stream() << "migrationId: " << _migrationId->toString());
+
     _migrationId = migrationId;
-    _donorConnectionString = donorConnectionString.toString();
     _eventQueue = std::make_shared<Queue>();
     _state = State::kStarted;
 
-    _thread = std::make_unique<stdx::thread>([this, migrationId] {
+    _workerThread = std::make_unique<stdx::thread>([this, migrationId] {
         Client::initThread("TenantFileImporterService");
-        LOGV2_INFO(6378904,
-                   "TenantFileImporterService starting worker thread",
-                   "migrationId"_attr = migrationId.toString());
-        auto opCtx = cc().makeOperationContext();
-        _handleEvents(opCtx.get());
+        try {
+            _handleEvents(migrationId);
+        } catch (const DBException& err) {
+            LOGV2_ERROR(6615001,
+                        "TenantFileImporterService::_handleEvents encountered an error",
+                        "error"_attr = err.toString());
+        }
     });
 }
 
@@ -198,29 +222,72 @@ void TenantFileImporterService::interruptAll() {
     _interrupt(lk);
 }
 
-void TenantFileImporterService::_handleEvents(OperationContext* opCtx) {
-    using eventType = ImporterEvent::Type;
+void TenantFileImporterService::_handleEvents(const UUID& migrationId) {
+    auto opCtx = cc().makeOperationContext();
 
-    boost::optional<UUID> migrationId;
+    ON_BLOCK_EXIT([this, opId = opCtx->getOpID()] {
+        stdx::lock_guard lk(_mutex);
+        if (_opCtx && _opCtx->getOpID() == opId) {
+            _opCtx = nullptr;
+        }
+    });
 
-    std::shared_ptr<Queue> eventQueueRef;
+    {
+        stdx::lock_guard lk(_mutex);
+        uassert(ErrorCodes::Interrupted,
+                str::stream() << "TenantFileImporterService was interrupted for migrationId=\""
+                              << _migrationId << "\"",
+                migrationId == _migrationId && _state != State::kInterrupted);
+        _opCtx = opCtx.get();
+    }
+
+    LOGV2_INFO(6378904,
+               "TenantFileImporterService starting worker thread",
+               "migrationId"_attr = migrationId.toString());
+
+    std::shared_ptr<Queue> eventQueue;
     {
         stdx::lock_guard lk(_mutex);
         invariant(_eventQueue);
-        eventQueueRef = _eventQueue;
-        migrationId = _migrationId;
+        eventQueue = _eventQueue;
     }
 
-    ImporterEvent event{eventType::kNone, UUID::gen()};
+    std::shared_ptr<DBClientConnection> donorConnection;
+    std::shared_ptr<ThreadPool> writerPool;
+    std::shared_ptr<TenantMigrationSharedData> sharedData;
+
+    auto setUpImporterResourcesIfNeeded = [&](const BSONObj& metadataDoc) {
+        // Return early if we have already set up the donor connection.
+        if (donorConnection) {
+            return;
+        }
+
+        auto conn = std::make_shared<DBClientConnection>(true /* autoReconnect */);
+        auto donor = HostAndPort::parseThrowing(metadataDoc[kDonorFieldName].str());
+        uassertStatusOK(connect(donor, conn.get()));
+
+        stdx::lock_guard lk(_mutex);
+        uassert(ErrorCodes::Interrupted,
+                str::stream() << "TenantFileImporterService was interrupted for migrationId=\""
+                              << _migrationId << "\"",
+                migrationId == _migrationId && _state != State::kInterrupted);
+
+        _donorConnection = std::move(conn);
+        _writerPool =
+            makeReplWriterPool(tenantApplierThreadCount, "TenantFileImporterServiceWriter"_sd);
+        _sharedData = std::make_shared<TenantMigrationSharedData>(
+            getGlobalServiceContext()->getFastClockSource(), _migrationId.get());
+
+        donorConnection = _donorConnection;
+        writerPool = _writerPool;
+        sharedData = _sharedData;
+    };
+
+    using eventType = ImporterEvent::Type;
     while (true) {
         opCtx->checkForInterrupt();
 
-        try {
-            event = eventQueueRef->pop(opCtx);
-        } catch (const ExceptionFor<ErrorCodes::ProducerConsumerQueueEndClosed>& err) {
-            LOGV2_WARNING(6378900, "Event queue was interrupted", "error"_attr = err);
-            break;
-        }
+        auto event = eventQueue->pop(opCtx.get());
 
         // Out-of-order events for a different migration are not permitted.
         invariant(event.migrationId == migrationId);
@@ -228,29 +295,33 @@ void TenantFileImporterService::_handleEvents(OperationContext* opCtx) {
         switch (event.type) {
             case eventType::kNone:
                 continue;
-            case eventType::kLearnedFileName:
-                cloneFile(opCtx, event.metadataDoc);
+            case eventType::kLearnedFileName: {
+                // we won't have valid donor metadata until the first
+                // 'TenantFileImporterService::learnedFilename' call, so we need to set up the
+                // connection for the first kLearnedFileName event.
+                setUpImporterResourcesIfNeeded(event.metadataDoc);
+
+                cloneFile(opCtx.get(),
+                          donorConnection.get(),
+                          writerPool.get(),
+                          sharedData.get(),
+                          event.metadataDoc);
                 continue;
+            }
             case eventType::kLearnedAllFilenames:
-                importCopiedFiles(opCtx, event.migrationId);
-                _voteImportedFiles(opCtx);
+                importCopiedFiles(opCtx.get(), migrationId);
+                _voteImportedFiles(opCtx.get(), migrationId);
                 break;
         }
         break;
     }
 }
 
-void TenantFileImporterService::_voteImportedFiles(OperationContext* opCtx) {
-    boost::optional<UUID> migrationId;
-    {
-        stdx::lock_guard lk(_mutex);
-        migrationId = _migrationId;
-    }
-    invariant(migrationId);
-
+void TenantFileImporterService::_voteImportedFiles(OperationContext* opCtx,
+                                                   const UUID& migrationId) {
     auto replCoord = ReplicationCoordinator::get(getGlobalServiceContext());
 
-    RecipientVoteImportedFiles cmd(*migrationId, replCoord->getMyHostAndPort(), true /* success */);
+    RecipientVoteImportedFiles cmd(migrationId, replCoord->getMyHostAndPort(), true /* success */);
 
     auto voteResponse = replCoord->runCmdOnPrimaryAndAwaitResponse(
         opCtx,
@@ -273,40 +344,70 @@ void TenantFileImporterService::_interrupt(WithLock) {
         return;
     }
 
-    // TODO SERVER-66150: interrupt the tenant file cloner by closing the dbClientConnnection via
-    // shutdownAndDisallowReconnect() and shutting down the writer pool.
+    if (_donorConnection) {
+        _donorConnection->shutdownAndDisallowReconnect();
+    }
+
+    if (_writerPool) {
+        _writerPool->shutdown();
+    }
+
+    if (_sharedData) {
+        stdx::lock_guard<TenantMigrationSharedData> sharedDatalk(*_sharedData);
+        // Prevent the TenantFileCloner from getting retried on retryable errors.
+        _sharedData->setStatusIfOK(
+            sharedDatalk, Status{ErrorCodes::CallbackCanceled, "TenantFileCloner canceled"});
+    }
+
     if (_eventQueue) {
         _eventQueue->closeConsumerEnd();
     }
 
-    {
-        // TODO SERVER-66907: Uncomment op ctx interrupt logic.
-        // OperationContext* ptr = _opCtx.get();
-        // stdx::lock_guard<Client> lk(*ptr->getClient());
-        // _opCtx->markKilled(ErrorCodes::Interrupted);
+    if (_opCtx) {
+        stdx::lock_guard<Client> lk(*_opCtx->getClient());
+        _opCtx->markKilled(ErrorCodes::Interrupted);
     }
 
     _state = State::kInterrupted;
 }
 
-void TenantFileImporterService::_reset(WithLock) {
-    if (_migrationId) {
+void TenantFileImporterService::_reset() {
+    std::unique_ptr<stdx::thread> workerThread = nullptr;
+    std::shared_ptr<ThreadPool> writerPool = nullptr;
+    {
+        stdx::lock_guard lk(_mutex);
+        if (!_migrationId) {
+            invariant(_state == State::kUninitialized,
+                      str::stream() << "current state: " << stateToString(_state));
+            return;
+        }
+
+        if (_state != State::kInterrupted) {
+            LOGV2_DEBUG(6690700,
+                        1,
+                        "TenantFileImporterService cannot be reset until the current migration has "
+                        "been interrupted",
+                        "migrationId"_attr = _migrationId->toString());
+            return;
+        }
+
+        _state = State::kUninitialized;
+
         LOGV2_INFO(6378905,
                    "TenantFileImporterService resetting migration",
                    "migrationId"_attr = _migrationId->toString());
         _migrationId.reset();
+
+        std::swap(workerThread, _workerThread);
+        std::swap(writerPool, _writerPool);
     }
 
-    if (_thread && _thread->joinable()) {
-        _thread->join();
-        _thread.reset();
+    if (workerThread && workerThread->joinable()) {
+        workerThread->join();
     }
 
-    if (_eventQueue) {
-        _eventQueue.reset();
+    if (writerPool) {
+        writerPool->join();
     }
-
-    // TODO SERVER-66907: how should we be resetting _opCtx?
-    _state = State::kUninitialized;
 }
 }  // namespace mongo::repl

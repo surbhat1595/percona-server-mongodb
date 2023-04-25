@@ -46,6 +46,7 @@
 #include "mongo/db/repl/apply_ops_command_info.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
+#include "mongo/db/server_options.h"
 #include "mongo/logv2/log.h"
 
 namespace mongo {
@@ -57,6 +58,15 @@ MONGO_FAIL_POINT_DEFINE(forceEnableChangeCollectionsMode);
 namespace {
 const auto getChangeCollectionManager =
     ServiceContext::declareDecoration<boost::optional<ChangeStreamChangeCollectionManager>>();
+
+/**
+ * Returns the list of all tenant ids in the replica set.
+ * TODO SERVER-61822 Provide the real implementation after 'listDatabasesForAllTenants' is
+ * available.
+ */
+std::vector<boost::optional<TenantId>> getAllTenants() {
+    return {boost::none};
+}
 
 /**
  * Creates a Document object from the supplied oplog entry, performs necessary modifications to it
@@ -144,6 +154,14 @@ private:
                     if (auto dropFieldElem = objectFieldElem["drop"_sd]) {
                         return dropFieldElem.String() != NamespaceString::kChangeCollectionName;
                     }
+
+                    // Do not write the change collection's own 'create' oplog entry. This is
+                    // because the secondaries will not be able to capture this oplog entry and as
+                    // such, will result in inconsistent state of the change collection in the
+                    // primary and the secondary.
+                    if (auto createFieldElem = objectFieldElem["create"_sd]) {
+                        return createFieldElem.String() != NamespaceString::kChangeCollectionName;
+                    }
                 }
             }
 
@@ -185,6 +203,14 @@ private:
 
 }  // namespace
 
+BSONObj ChangeStreamChangeCollectionManager::PurgingJobStats::toBSON() const {
+    return BSON("totalPass" << totalPass.load() << "docsDeleted" << docsDeleted.load()
+                            << "bytesDeleted" << bytesDeleted.load() << "scannedCollections"
+                            << scannedCollections.load() << "maxStartWallTimeMillis"
+                            << maxStartWallTimeMillis.load() << "timeElapsedMillis"
+                            << timeElapsedMillis.load());
+}
+
 ChangeStreamChangeCollectionManager& ChangeStreamChangeCollectionManager::get(
     ServiceContext* service) {
     return *getChangeCollectionManager(service);
@@ -200,6 +226,11 @@ void ChangeStreamChangeCollectionManager::create(ServiceContext* service) {
 }
 
 bool ChangeStreamChangeCollectionManager::isChangeCollectionsModeActive() {
+    // A change collection must not be enabled on the config server.
+    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+        return false;
+    }
+
     // If the force fail point is enabled then declare the change collection mode as active.
     if (MONGO_unlikely(forceEnableChangeCollectionsMode.shouldFail())) {
         return true;
@@ -332,8 +363,8 @@ Status ChangeStreamChangeCollectionManager::insertDocumentsToChangeCollection(
     return changeCollectionsWriter.write(opCtx, opDebug);
 }
 
-boost::optional<RecordIdBound>
-ChangeStreamChangeCollectionManager::getChangeCollectionMaxExpiredRecordId(
+boost::optional<ChangeCollectionPurgingJobMetadata>
+ChangeStreamChangeCollectionManager::getChangeCollectionPurgingJobMetadata(
     OperationContext* opCtx, const CollectionPtr* changeCollection, const Date_t& expirationTime) {
     const auto isExpired = [&](const BSONObj& changeDoc) {
         const BSONElement& wallElem = changeDoc["wall"];
@@ -348,6 +379,7 @@ ChangeStreamChangeCollectionManager::getChangeCollectionMaxExpiredRecordId(
     BSONObj currChangeDoc;
     RecordId currRecordId;
 
+    boost::optional<long long> firstDocWallTime;
     boost::optional<RecordId> prevRecordId;
     boost::optional<RecordId> prevPrevRecordId;
 
@@ -358,17 +390,29 @@ ChangeStreamChangeCollectionManager::getChangeCollectionMaxExpiredRecordId(
     while (true) {
         auto getNextState = scanExecutor->getNext(&currChangeDoc, &currRecordId);
         switch (getNextState) {
-            case PlanExecutor::IS_EOF:
+            case PlanExecutor::IS_EOF: {
                 // Either the collection is empty (case in which return boost::none), or all the
                 // documents have expired. The remover job should never delete the last entry of a
                 // change collection, so return the recordId of the document previous to the last
                 // one.
-                return prevPrevRecordId ? RecordIdBound(prevPrevRecordId.get())
-                                        : boost::optional<RecordIdBound>();
+                if (!prevPrevRecordId) {
+                    return boost::none;
+                }
+
+                return {{*firstDocWallTime, RecordIdBound(*prevPrevRecordId)}};
+            }
             case PlanExecutor::ADVANCED: {
+                if (!prevRecordId.has_value()) {
+                    firstDocWallTime =
+                        boost::make_optional(currChangeDoc["wall"].Date().toMillisSinceEpoch());
+                }
+
                 if (!isExpired(currChangeDoc)) {
-                    return prevRecordId ? RecordIdBound(prevRecordId.get())
-                                        : boost::optional<RecordIdBound>();
+                    if (!prevRecordId) {
+                        return boost::none;
+                    }
+
+                    return {{*firstDocWallTime, RecordIdBound(*prevRecordId)}};
                 }
             }
         }
@@ -381,28 +425,9 @@ ChangeStreamChangeCollectionManager::getChangeCollectionMaxExpiredRecordId(
 }
 
 size_t ChangeStreamChangeCollectionManager::removeExpiredChangeCollectionsDocuments(
-    OperationContext* opCtx, boost::optional<TenantId> tenantId, const Date_t& expirationTime) {
-    // Acquire intent-exclusive lock on the change collection. Early exit if the collection
-    // doesn't exist.
-    const auto changeCollection =
-        AutoGetChangeCollection{opCtx, AutoGetChangeCollection::AccessMode::kWrite, tenantId};
-
-    // Early exit if collection does not exist, or if running on a secondary (requires
-    // opCtx->lockState()->isRSTLLocked()).
-    if (!changeCollection ||
-        !repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesForDatabase(
-            opCtx, NamespaceString::kConfigDb)) {
-        return 0;
-    }
-
-    const auto maxRecordIdBound =
-        getChangeCollectionMaxExpiredRecordId(opCtx, &*changeCollection, expirationTime);
-
-    // Early exit if there are no expired documents to be removed.
-    if (!maxRecordIdBound.has_value()) {
-        return 0;
-    }
-
+    OperationContext* opCtx,
+    const CollectionPtr* changeCollection,
+    const RecordIdBound& maxRecordIdBound) {
     auto params = std::make_unique<DeleteStageParams>();
     params->isMulti = true;
 
@@ -419,7 +444,15 @@ size_t ChangeStreamChangeCollectionManager::removeExpiredChangeCollectionsDocume
         std::move(batchedDeleteParams));
 
     try {
-        return deleteExecutor->executeDelete();
+        (void)deleteExecutor->executeDelete();
+        auto batchedDeleteStats = deleteExecutor->getBatchedDeleteStats();
+        auto& changeCollectionManager = ChangeStreamChangeCollectionManager::get(opCtx);
+        changeCollectionManager.getPurgingJobStats().docsDeleted.fetchAndAddRelaxed(
+            batchedDeleteStats.docsDeleted);
+        changeCollectionManager.getPurgingJobStats().bytesDeleted.fetchAndAddRelaxed(
+            batchedDeleteStats.bytesDeleted);
+
+        return batchedDeleteStats.docsDeleted;
     } catch (const ExceptionFor<ErrorCodes::QueryPlanKilled>&) {
         // It is expected that a collection drop can kill a query plan while deleting an old
         // document, so ignore this error.

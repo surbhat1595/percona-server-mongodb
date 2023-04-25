@@ -58,7 +58,6 @@ OplogEntry createOplogEntryForTransactionTableUpdate(repl::OpTime opTime,
                                                      const BSONObj& o2Field,
                                                      Date_t wallClockTime) {
     return {repl::DurableOplogEntry(opTime,
-                                    boost::none,  // hash
                                     repl::OpTypeEnum::kUpdate,
                                     NamespaceString::kSessionTransactionsTableNamespace,
                                     boost::none,  // uuid
@@ -255,6 +254,7 @@ std::vector<OplogEntry> SessionUpdateTracker::_flush(const OplogEntry& entry) {
     switch (entry.getOpType()) {
         case OpTypeEnum::kInsert:
         case OpTypeEnum::kNoop:
+        case OpTypeEnum::kInsertGlobalIndexKey:
             // Session table is keyed by session id, so nothing to do here because
             // it would have triggered a unique index violation in the primary if
             // it was trying to insert with the same session id with existing ones.

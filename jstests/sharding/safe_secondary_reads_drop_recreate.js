@@ -43,6 +43,7 @@ let validateTestCase = function(test) {
 let testCases = {
     _addShard: {skip: "primary only"},
     _shardsvrCloneCatalogData: {skip: "primary only"},
+    _clusterQueryWithoutShardKey: {skip: "internal command"},
     _configsvrAddShard: {skip: "primary only"},
     _configsvrAddShardToZone: {skip: "primary only"},
     _configsvrBalancerCollectionStatus: {skip: "primary only"},
@@ -54,25 +55,15 @@ let testCases = {
     _configsvrCommitChunkMigration: {skip: "primary only"},
     _configsvrCommitChunkSplit: {skip: "primary only"},
     _configsvrCommitIndex: {skip: "primary only"},
-    _configsvrCommitMovePrimary:
-        {skip: "primary only"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrConfigureAutoSplit: {
         skip: "primary only"
     },  // TODO SERVER-62374: remove this once 5.3 becomes last continuos release
     _configsvrConfigureCollectionBalancing: {skip: "primary only"},
-    _configsvrDropCollection:
-        {skip: "primary only"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
-    _configsvrDropDatabase:
-        {skip: "primary only"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrDropIndexCatalogEntry: {skip: "primary only"},
     _configsvrMoveChunk: {skip: "primary only"},
-    _configsvrMovePrimary:
-        {skip: "primary only"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrMoveRange: {skip: "primary only"},
     _configsvrRemoveShardFromZone: {skip: "primary only"},
     _configsvrReshardCollection: {skip: "primary only"},
-    _configsvrShardCollection:
-        {skip: "primary only"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrUpdateZoneKeyRange: {skip: "primary only"},
     _flushReshardingStateChange: {skip: "does not return user data"},
     _flushRoutingTableCacheUpdates: {skip: "does not return user data"},
@@ -109,6 +100,7 @@ let testCases = {
         behavior: "versioned"
     },
     analyze: {skip: "primary only"},
+    analyzeShardKey: {skip: "does not return user data"},
     appendOplogNote: {skip: "primary only"},
     applyOps: {skip: "primary only"},
     authSchemaUpgrade: {skip: "primary only"},
@@ -145,6 +137,7 @@ let testCases = {
     },  // TODO SERVER-62374: remove this once 5.3 becomes last continuos release
     configureCollectionBalancing: {skip: "does not return user data"},
     configureFailPoint: {skip: "does not return user data"},
+    configureQueryAnalyzer: {skip: "does not return user data"},
     connPoolStats: {skip: "does not return user data"},
     connPoolSync: {skip: "does not return user data"},
     connectionStatus: {skip: "does not return user data"},

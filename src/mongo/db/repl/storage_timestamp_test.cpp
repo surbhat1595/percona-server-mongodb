@@ -81,6 +81,7 @@
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/storage/snapshot_manager.h"
 #include "mongo/db/storage/storage_engine_impl.h"
+#include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction/transaction_participant_gen.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
@@ -288,6 +289,11 @@ public:
         repl::ReplicationProcess::set(
             cc().getServiceContext(),
             std::unique_ptr<repl::ReplicationProcess>(replicationProcess));
+
+        MongoDSessionCatalog::set(
+            _opCtx->getServiceContext(),
+            std::make_unique<MongoDSessionCatalog>(
+                std::make_unique<MongoDSessionCatalogTransactionInterfaceImpl>()));
 
         _consistencyMarkers =
             repl::ReplicationProcess::get(cc().getServiceContext())->getConsistencyMarkers();
@@ -1694,7 +1700,8 @@ TEST_F(StorageTimestampTest, PrimarySetsMultikeyInsideMultiDocumentTransaction) 
     auto service = _opCtx->getServiceContext();
     auto sessionCatalog = SessionCatalog::get(service);
     sessionCatalog->reset_forTest();
-    MongoDSessionCatalog::onStepUp(_opCtx);
+    auto mongoDSessionCatalog = MongoDSessionCatalog::get(_opCtx);
+    mongoDSessionCatalog->onStepUp(_opCtx);
 
     NamespaceString nss("unittests.PrimarySetsMultikeyInsideMultiDocumentTransaction");
     create(nss);
@@ -1731,7 +1738,7 @@ TEST_F(StorageTimestampTest, PrimarySetsMultikeyInsideMultiDocumentTransaction) 
     _opCtx->setInMultiDocumentTransaction();
 
     // Check out the session.
-    MongoDOperationContextSession ocs(_opCtx);
+    auto ocs = mongoDSessionCatalog->checkOutSession(_opCtx);
 
     auto txnParticipant = TransactionParticipant::get(_opCtx);
     ASSERT(txnParticipant);
@@ -1929,11 +1936,11 @@ public:
 
         const Timestamp dropTime = _clock->tickClusterTime(1).asTimestamp();
         if (simulatePrimary) {
-            ASSERT_OK(dropDatabaseForApplyOps(_opCtx, nss.db().toString()));
+            ASSERT_OK(dropDatabaseForApplyOps(_opCtx, nss.dbName()));
         } else {
             repl::UnreplicatedWritesBlock uwb(_opCtx);
             TimestampBlock ts(_opCtx, dropTime);
-            ASSERT_OK(dropDatabaseForApplyOps(_opCtx, nss.db().toString()));
+            ASSERT_OK(dropDatabaseForApplyOps(_opCtx, nss.dbName()));
         }
 
         // Assert that the idents do not exist.
@@ -3223,7 +3230,8 @@ public:
         auto service = _opCtx->getServiceContext();
         auto sessionCatalog = SessionCatalog::get(service);
         sessionCatalog->reset_forTest();
-        MongoDSessionCatalog::onStepUp(_opCtx);
+        auto mongoDSessionCatalog = MongoDSessionCatalog::get(_opCtx);
+        mongoDSessionCatalog->onStepUp(_opCtx);
 
         create(nss);
         UUID ui = UUID::gen();
@@ -3249,7 +3257,7 @@ public:
         const auto txnNumber = 10;
         _opCtx->setTxnNumber(txnNumber);
 
-        ocs.emplace(_opCtx);
+        ocs = mongoDSessionCatalog->checkOutSession(_opCtx);
 
         {
             AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_IX);
@@ -3278,7 +3286,7 @@ protected:
     Timestamp beforeOplogTs;
     Timestamp oplogTs;
 
-    boost::optional<MongoDOperationContextSession> ocs;
+    std::unique_ptr<MongoDSessionCatalog::Session> ocs;
 };
 
 TEST_F(RetryableFindAndModifyTest, RetryableFindAndModifyUpdate) {
@@ -3427,7 +3435,8 @@ public:
         auto service = _opCtx->getServiceContext();
         auto sessionCatalog = SessionCatalog::get(service);
         sessionCatalog->reset_forTest();
-        MongoDSessionCatalog::onStepUp(_opCtx);
+        auto mongoDSessionCatalog = MongoDSessionCatalog::get(_opCtx);
+        mongoDSessionCatalog->onStepUp(_opCtx);
 
         create(nss);
         UUID ui = UUID::gen();
@@ -3452,7 +3461,7 @@ public:
         _opCtx->setTxnNumber(26);
         _opCtx->setInMultiDocumentTransaction();
 
-        ocs.emplace(_opCtx);
+        ocs = mongoDSessionCatalog->checkOutSession(_opCtx);
 
         auto txnParticipant = TransactionParticipant::get(_opCtx);
         ASSERT(txnParticipant);
@@ -3514,7 +3523,7 @@ protected:
     Timestamp beforeTxnTs;
     Timestamp commitEntryTs;
 
-    boost::optional<MongoDOperationContextSession> ocs;
+    std::unique_ptr<MongoDSessionCatalog::Session> ocs;
 };
 
 TEST_F(MultiDocumentTransactionTest, MultiDocumentTransaction) {

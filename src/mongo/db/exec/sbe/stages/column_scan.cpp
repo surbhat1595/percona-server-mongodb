@@ -26,29 +26,14 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/exec/sbe/stages/column_scan.h"
 
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
-#include "mongo/db/exec/sbe/values/column_store_encoder.h"
-#include "mongo/db/exec/sbe/values/columnar.h"
 #include "mongo/db/index/columns_access_method.h"
 
 namespace mongo {
 namespace sbe {
-namespace {
-TranslatedCell translateCell(PathView path, const SplitCellView& splitCellView) {
-    value::ColumnStoreEncoder encoder{};
-    SplitCellView::Cursor<value::ColumnStoreEncoder> cellCursor =
-        splitCellView.subcellValuesGenerator<value::ColumnStoreEncoder>(std::move(encoder));
-    return TranslatedCell{splitCellView.arrInfo, path, std::move(cellCursor)};
-}
-
-
-}  // namespace
-
 ColumnScanStage::ColumnScanStage(UUID collectionUuid,
                                  StringData columnIndexName,
                                  std::vector<std::string> paths,
@@ -307,6 +292,12 @@ void ColumnScanStage::open(bool reOpen) {
     _open = true;
 }
 
+TranslatedCell ColumnScanStage::translateCell(PathView path, const SplitCellView& splitCellView) {
+    SplitCellView::Cursor<value::ColumnStoreEncoder> cellCursor =
+        splitCellView.subcellValuesGenerator<value::ColumnStoreEncoder>(&_encoder);
+    return TranslatedCell{splitCellView.arrInfo, path, std::move(cellCursor)};
+}
+
 void ColumnScanStage::readParentsIntoObj(StringData path,
                                          value::Object* outObj,
                                          StringDataSet* pathsReadSetOut) {
@@ -378,14 +369,15 @@ bool ColumnScanStage::checkFilter(CellView cell, size_t filterIndex, const PathV
         // for other locations in this function when the predicate is evaluated immediately after
         // setting the slot.
         auto [tag, val] = translatedCell.nextValue();
-        auto [tagCopy, valCopy] = sbe::value::copyValue(tag, val);
-        _filterInputAccessors[filterIndex].reset(true /*owned*/, tagCopy, valCopy);
+        _filterInputAccessors[filterIndex].reset(tag, val);
         return _bytecode.runPredicate(_filterExprsCode[filterIndex].get());
     } else {
         ArrInfoReader arrInfoReader{translatedCell.arrInfo};
         int depth = 0;
-        // (TODO SERVER-68792) Would using a non-heap allocated structure here improve perf?
-        std::stack<bool> inArray;
+
+        // Avoid allocating memory for this stack except in the rare case of deeply nested
+        // documents.
+        std::stack<bool, absl::InlinedVector<bool, 64>> inArray;
         while (arrInfoReader.moreExplicitComponents()) {
             switch (arrInfoReader.takeNextChar()) {
                 case '{': {
@@ -417,9 +409,7 @@ bool ColumnScanStage::checkFilter(CellView cell, size_t filterIndex, const PathV
                     for (size_t i = 0; i < repeats + 1; i++) {
                         auto [tag, val] = translatedCell.nextValue();
                         if (depth == 0) {
-                            auto [tagCopy, valCopy] = sbe::value::copyValue(tag, val);
-                            _filterInputAccessors[filterIndex].reset(
-                                true /*owned*/, tagCopy, valCopy);
+                            _filterInputAccessors[filterIndex].reset(tag, val);
                             if (_bytecode.runPredicate(_filterExprsCode[filterIndex].get())) {
                                 return true;
                             }
@@ -455,8 +445,7 @@ bool ColumnScanStage::checkFilter(CellView cell, size_t filterIndex, const PathV
             // the value iterator if the values are too deep.
             while (translatedCell.moreValues()) {
                 auto [tag, val] = translatedCell.nextValue();
-                auto [tagCopy, valCopy] = sbe::value::copyValue(tag, val);
-                _filterInputAccessors[filterIndex].reset(true /*owned*/, tagCopy, valCopy);
+                _filterInputAccessors[filterIndex].reset(tag, val);
                 if (_bytecode.runPredicate(_filterExprsCode[filterIndex].get())) {
                     return true;
                 }

@@ -170,6 +170,9 @@ const NamespaceString NamespaceString::kClusterParametersNamespace(NamespaceStri
 const NamespaceString NamespaceString::kConfigsvrShardsNamespace(NamespaceString::kConfigDb,
                                                                  "shards");
 
+const NamespaceString NamespaceString::kConfigsvrCollectionsNamespace(NamespaceString::kConfigDb,
+                                                                      "collections");
+
 const NamespaceString NamespaceString::kConfigsvrIndexCatalogNamespace(NamespaceString::kConfigDb,
                                                                        "csrs.indexes");
 
@@ -187,6 +190,9 @@ const NamespaceString NamespaceString::kDistLocksNamepsace(NamespaceString::kCon
 
 const NamespaceString NamespaceString::kSetChangeStreamStateCoordinatorNamespace(
     NamespaceString::kConfigDb, "change_stream_coordinator");
+
+const NamespaceString NamespaceString::kGlobalIndexClonerNamespace(
+    NamespaceString::kConfigDb, "localGlobalIndexOperations.cloner");
 
 NamespaceString NamespaceString::parseFromStringExpectTenantIdInMultitenancyMode(StringData ns) {
     if (!gMultitenancySupport) {
@@ -334,6 +340,12 @@ NamespaceString NamespaceString::makeChangeCollectionNSS(
     const boost::optional<TenantId>& tenantId) {
     // TODO: SERVER-65950 create namespace for a particular tenant.
     return NamespaceString{NamespaceString::kConfigDb, NamespaceString::kChangeCollectionName};
+}
+
+NamespaceString NamespaceString::makeGlobalIndexNSS(const UUID& id) {
+    return NamespaceString(
+        kSystemDb,
+        fmt::format("{}{}", NamespaceString::kGlobalIndexCollectionPrefix, id.toString()));
 }
 
 NamespaceString NamespaceString::makePreImageCollectionNSS(

@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/s/migration_util.h"
 
 #include <fmt/format.h>
@@ -42,14 +39,12 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/active_migrations_registry.h"
-#include "mongo/db/s/collection_metadata.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/migration_coordinator.h"
 #include "mongo/db/s/migration_destination_manager.h"
@@ -59,7 +54,6 @@
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/sharding_statistics.h"
 #include "mongo/db/session/logical_session_cache.h"
-#include "mongo/db/vector_clock.h"
 #include "mongo/db/vector_clock_mutable.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/executor/network_interface_factory.h"
@@ -76,7 +70,6 @@
 #include "mongo/util/future_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kShardingMigration
-
 
 namespace mongo {
 namespace migrationutil {
@@ -112,7 +105,6 @@ const Backoff kExponentialBackoff(Seconds(10), Milliseconds::max());
 const WriteConcernOptions kMajorityWriteConcern(WriteConcernOptions::kMajority,
                                                 WriteConcernOptions::SyncMode::UNSET,
                                                 WriteConcernOptions::kNoTimeout);
-
 
 class MigrationUtilExecutor {
 public:
@@ -272,6 +264,49 @@ void refreshFilteringMetadataUntilSuccess(OperationContext* opCtx, const Namespa
         });
 }
 
+void ensureChunkVersionIsGreaterThan(OperationContext* opCtx,
+                                     const NamespaceString& nss,
+                                     const UUID& collUUID,
+                                     const ChunkRange& range,
+                                     const ChunkVersion& preMigrationChunkVersion) {
+    ConfigsvrEnsureChunkVersionIsGreaterThan ensureChunkVersionIsGreaterThanRequest;
+    ensureChunkVersionIsGreaterThanRequest.setDbName(NamespaceString::kAdminDb);
+    ensureChunkVersionIsGreaterThanRequest.setMinKey(range.getMin());
+    ensureChunkVersionIsGreaterThanRequest.setMaxKey(range.getMax());
+    ensureChunkVersionIsGreaterThanRequest.setVersion(preMigrationChunkVersion);
+    ensureChunkVersionIsGreaterThanRequest.setNss(nss);
+    ensureChunkVersionIsGreaterThanRequest.setCollectionUUID(collUUID);
+    const auto ensureChunkVersionIsGreaterThanRequestBSON =
+        ensureChunkVersionIsGreaterThanRequest.toBSON({});
+
+    hangInEnsureChunkVersionIsGreaterThanInterruptible.pauseWhileSet(opCtx);
+
+    const auto ensureChunkVersionIsGreaterThanResponse =
+        Grid::get(opCtx)->shardRegistry()->getConfigShard()->runCommandWithFixedRetryAttempts(
+            opCtx,
+            ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+            "admin",
+            CommandHelpers::appendMajorityWriteConcern(ensureChunkVersionIsGreaterThanRequestBSON),
+            Shard::RetryPolicy::kIdempotent);
+    const auto ensureChunkVersionIsGreaterThanStatus =
+        Shard::CommandResponse::getEffectiveStatus(ensureChunkVersionIsGreaterThanResponse);
+
+    uassertStatusOK(ensureChunkVersionIsGreaterThanStatus);
+
+    if (hangInEnsureChunkVersionIsGreaterThanThenSimulateErrorUninterruptible.shouldFail()) {
+        hangInEnsureChunkVersionIsGreaterThanThenSimulateErrorUninterruptible.pauseWhileSet();
+        uasserted(ErrorCodes::InternalError,
+                  "simulate an error response for _configsvrEnsureChunkVersionIsGreaterThan");
+    }
+}
+
+BSONObj getQueryFilterForRangeDeletionTask(const UUID& collectionUuid, const ChunkRange& range) {
+    return BSON(RangeDeletionTask::kCollectionUuidFieldName
+                << collectionUuid << RangeDeletionTask::kRangeFieldName + "." + ChunkRange::kMinKey
+                << range.getMin() << RangeDeletionTask::kRangeFieldName + "." + ChunkRange::kMaxKey
+                << range.getMax());
+}
+
 
 }  // namespace
 
@@ -391,18 +426,16 @@ ExecutorFuture<void> cleanUpRange(ServiceContext* serviceContext,
                                    deletionTaskUuidMatchesFilteringMetadataUuid(
                                        opCtx, optCollDescr, deletionTask));
 
-                           LOGV2(22026,
+                           LOGV2(6955500,
                                  "Submitting range deletion task",
-                                 "deletionTask"_attr = redact(deletionTask.toBSON()),
-                                 "migrationId"_attr = deletionTask.getId());
+                                 "deletionTask"_attr = redact(deletionTask.toBSON()));
 
                            const auto whenToClean =
                                deletionTask.getWhenToClean() == CleanWhenEnum::kNow
                                ? CollectionShardingRuntime::kNow
                                : CollectionShardingRuntime::kDelayed;
 
-                           return csr->cleanUpRange(
-                               deletionTask.getRange(), deletionTask.getId(), whenToClean);
+                           return csr->cleanUpRange(deletionTask.getRange(), whenToClean);
                        }
                    }
 
@@ -479,8 +512,10 @@ ExecutorFuture<void> submitRangeDeletionTask(OperationContext* opCtx,
                   "migrationId"_attr = deletionTask.getId());
 
             if (status == ErrorCodes::RangeDeletionAbandonedBecauseCollectionWithUUIDDoesNotExist) {
-                deleteRangeDeletionTaskLocally(
-                    opCtx, deletionTask.getId(), ShardingCatalogClient::kLocalWriteConcern);
+                deleteRangeDeletionTaskLocally(opCtx,
+                                               deletionTask.getCollectionUuid(),
+                                               deletionTask.getRange(),
+                                               ShardingCatalogClient::kLocalWriteConcern);
             }
 
             // Note, we use onError and make it return its input status, because ExecutorFuture does
@@ -588,10 +623,10 @@ void persistRangeDeletionTaskLocally(OperationContext* opCtx,
 }
 
 void persistUpdatedNumOrphans(OperationContext* opCtx,
-                              const UUID& migrationId,
                               const UUID& collectionUuid,
+                              const ChunkRange& range,
                               long long changeInOrphans) {
-    BSONObj query = BSON("_id" << migrationId);
+    const auto query = getQueryFilterForRangeDeletionTask(collectionUuid, range);
     try {
         PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
         ScopedRangeDeleterLock rangeDeleterLock(opCtx, collectionUuid);
@@ -758,10 +793,11 @@ void persistAbortDecision(OperationContext* opCtx,
 
 void deleteRangeDeletionTaskOnRecipient(OperationContext* opCtx,
                                         const ShardId& recipientId,
-                                        const UUID& migrationId) {
+                                        const UUID& collectionUuid,
+                                        const ChunkRange& range) {
+    const auto queryFilter = getQueryFilterForRangeDeletionTask(collectionUuid, range);
     write_ops::DeleteCommandRequest deleteOp(NamespaceString::kRangeDeletionNamespace);
-    write_ops::DeleteOpEntry query(BSON(RangeDeletionTask::kIdFieldName << migrationId),
-                                   false /*multi*/);
+    write_ops::DeleteOpEntry query(queryFilter, false /*multi*/);
     deleteOp.setDeletes({query});
 
     hangInDeleteRangeDeletionOnRecipientInterruptible.pauseWhileSet(opCtx);
@@ -780,10 +816,12 @@ void deleteRangeDeletionTaskOnRecipient(OperationContext* opCtx,
 }
 
 void deleteRangeDeletionTaskLocally(OperationContext* opCtx,
-                                    const UUID& deletionTaskId,
+                                    const UUID& collectionUuid,
+                                    const ChunkRange& range,
                                     const WriteConcernOptions& writeConcern) {
     PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
-    store.remove(opCtx, BSON(RangeDeletionTask::kIdFieldName << deletionTaskId), writeConcern);
+    const auto query = getQueryFilterForRangeDeletionTask(collectionUuid, range);
+    store.remove(opCtx, query, writeConcern);
 
     if (hangInDeleteRangeDeletionLocallyThenSimulateErrorUninterruptible.shouldFail()) {
         hangInDeleteRangeDeletionLocallyThenSimulateErrorUninterruptible.pauseWhileSet(opCtx);
@@ -794,9 +832,10 @@ void deleteRangeDeletionTaskLocally(OperationContext* opCtx,
 
 void markAsReadyRangeDeletionTaskOnRecipient(OperationContext* opCtx,
                                              const ShardId& recipientId,
-                                             const UUID& migrationId) {
+                                             const UUID& collectionUuid,
+                                             const ChunkRange& range) {
     write_ops::UpdateCommandRequest updateOp(NamespaceString::kRangeDeletionNamespace);
-    auto queryFilter = BSON(RangeDeletionTask::kIdFieldName << migrationId);
+    const auto queryFilter = getQueryFilterForRangeDeletionTask(collectionUuid, range);
     auto updateModification =
         write_ops::UpdateModification(write_ops::UpdateModification::parseFromClassicUpdate(
             BSON("$unset" << BSON(RangeDeletionTask::kPendingFieldName << ""))));
@@ -817,7 +856,8 @@ void markAsReadyRangeDeletionTaskOnRecipient(OperationContext* opCtx,
                 LOGV2_DEBUG(4620232,
                             1,
                             "Failed to mark range deletion task on recipient shard as ready",
-                            "migrationId"_attr = migrationId,
+                            "collectionUuid"_attr = collectionUuid,
+                            "range"_attr = range,
                             "error"_attr = exShardNotFound);
                 return;
             }
@@ -860,9 +900,15 @@ void advanceTransactionOnRecipient(OperationContext* opCtx,
     }
 }
 
-void markAsReadyRangeDeletionTaskLocally(OperationContext* opCtx, const UUID& migrationId) {
+void markAsReadyRangeDeletionTaskLocally(OperationContext* opCtx,
+                                         const UUID& collectionUuid,
+                                         const ChunkRange& range) {
     PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
-    auto query = BSON(RangeDeletionTask::kIdFieldName << migrationId);
+    const auto query =
+        BSON(RangeDeletionTask::kCollectionUuidFieldName
+             << collectionUuid << RangeDeletionTask::kRangeFieldName + "." + ChunkRange::kMinKey
+             << range.getMin() << RangeDeletionTask::kRangeFieldName + "." + ChunkRange::kMaxKey
+             << range.getMax());
     auto update = BSON("$unset" << BSON(RangeDeletionTask::kPendingFieldName << ""));
 
     hangInReadyRangeDeletionLocallyInterruptible.pauseWhileSet(opCtx);
@@ -877,55 +923,6 @@ void markAsReadyRangeDeletionTaskLocally(OperationContext* opCtx, const UUID& mi
         hangInReadyRangeDeletionLocallyThenSimulateErrorUninterruptible.pauseWhileSet(opCtx);
         uasserted(ErrorCodes::InternalError,
                   "simulate an error response when initiating range deletion locally");
-    }
-}
-
-void deleteMigrationCoordinatorDocumentLocally(OperationContext* opCtx, const UUID& migrationId) {
-    // Before deleting the migration coordinator document, ensure that in the case of a crash, the
-    // node will start-up from at least the configTime, which it obtained as part of recovery of the
-    // shardVersion, which will ensure that it will see at least the same shardVersion.
-    VectorClockMutable::get(opCtx)->waitForDurableConfigTime().get(opCtx);
-
-    PersistentTaskStore<MigrationCoordinatorDocument> store(
-        NamespaceString::kMigrationCoordinatorsNamespace);
-    store.remove(opCtx,
-                 BSON(MigrationCoordinatorDocument::kIdFieldName << migrationId),
-                 WriteConcernOptions{1, WriteConcernOptions::SyncMode::UNSET, Seconds(0)});
-}
-
-void ensureChunkVersionIsGreaterThan(OperationContext* opCtx,
-                                     const NamespaceString& nss,
-                                     const UUID& collUUID,
-                                     const ChunkRange& range,
-                                     const ChunkVersion& preMigrationChunkVersion) {
-    ConfigsvrEnsureChunkVersionIsGreaterThan ensureChunkVersionIsGreaterThanRequest;
-    ensureChunkVersionIsGreaterThanRequest.setDbName(NamespaceString::kAdminDb);
-    ensureChunkVersionIsGreaterThanRequest.setMinKey(range.getMin());
-    ensureChunkVersionIsGreaterThanRequest.setMaxKey(range.getMax());
-    ensureChunkVersionIsGreaterThanRequest.setVersion(preMigrationChunkVersion);
-    ensureChunkVersionIsGreaterThanRequest.setNss(nss);
-    ensureChunkVersionIsGreaterThanRequest.setCollectionUUID(collUUID);
-    const auto ensureChunkVersionIsGreaterThanRequestBSON =
-        ensureChunkVersionIsGreaterThanRequest.toBSON({});
-
-    hangInEnsureChunkVersionIsGreaterThanInterruptible.pauseWhileSet(opCtx);
-
-    const auto ensureChunkVersionIsGreaterThanResponse =
-        Grid::get(opCtx)->shardRegistry()->getConfigShard()->runCommandWithFixedRetryAttempts(
-            opCtx,
-            ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-            "admin",
-            CommandHelpers::appendMajorityWriteConcern(ensureChunkVersionIsGreaterThanRequestBSON),
-            Shard::RetryPolicy::kIdempotent);
-    const auto ensureChunkVersionIsGreaterThanStatus =
-        Shard::CommandResponse::getEffectiveStatus(ensureChunkVersionIsGreaterThanResponse);
-
-    uassertStatusOK(ensureChunkVersionIsGreaterThanStatus);
-
-    if (hangInEnsureChunkVersionIsGreaterThanThenSimulateErrorUninterruptible.shouldFail()) {
-        hangInEnsureChunkVersionIsGreaterThanThenSimulateErrorUninterruptible.pauseWhileSet();
-        uasserted(ErrorCodes::InternalError,
-                  "simulate an error response for _configsvrEnsureChunkVersionIsGreaterThan");
     }
 }
 
@@ -1018,7 +1015,7 @@ void recoverMigrationCoordinations(OperationContext* opCtx,
                 hangInRefreshFilteringMetadataUntilSuccessThenSimulateErrorUninterruptible
                     .pauseWhileSet();
                 uasserted(ErrorCodes::InternalError,
-                          "simulate an error response for forceShardFilteringMetadataRefresh");
+                          "simulate an error response for forceGetCurrentMetadata");
             }
 
             auto setFilteringMetadata = [&opCtx, &currentMetadata, &doc, &cancellationToken]() {
@@ -1058,8 +1055,9 @@ void recoverMigrationCoordinations(OperationContext* opCtx,
                           "coordinatorDocumentUUID"_attr = doc.getCollectionUuid());
                 }
 
-                deleteRangeDeletionTaskOnRecipient(opCtx, doc.getRecipientShardId(), doc.getId());
-                deleteRangeDeletionTaskLocally(opCtx, doc.getId());
+                deleteRangeDeletionTaskOnRecipient(
+                    opCtx, doc.getRecipientShardId(), doc.getCollectionUuid(), doc.getRange());
+                deleteRangeDeletionTaskLocally(opCtx, doc.getCollectionUuid(), doc.getRange());
                 coordinator.forgetMigration(opCtx);
                 setFilteringMetadata();
                 return true;

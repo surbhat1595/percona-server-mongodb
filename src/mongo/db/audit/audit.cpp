@@ -982,17 +982,12 @@ namespace audit {
         _auditEvent(client, "enableSharding", params);
     }
 
-    void logAddShard(Client* client,
-                     StringData name,
-                     const std::string& servers,
-                     long long maxsize) {
+    void logAddShard(Client* client, StringData name, const std::string& servers) {
         if (!_auditLog) {
             return;
         }
 
-        const BSONObj params= BSON("shard" << name <<
-                                   "connectionString" << servers <<
-                                   "maxSize" << maxsize);
+        const BSONObj params = BSON("shard" << name << "connectionString" << servers);
         _auditEvent(client, "addShard", params);
     }
 

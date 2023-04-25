@@ -83,7 +83,6 @@ struct CollectionUpdateArgs {
     OperationSource source = OperationSource::kStandard;
 
     StoreDocOption storeDocOption = StoreDocOption::None;
-    bool preImageRecordingEnabledForCollection = false;
     bool changeStreamPreAndPostImagesEnabledForCollection = false;
 
     // Set if OpTimes were reserved for the update ahead of time.
@@ -217,6 +216,14 @@ public:
     virtual SharedCollectionDecorations* getSharedDecorations() const = 0;
 
     virtual void init(OperationContext* opCtx) {}
+
+    /**
+     * Initializes a collection representative at the provided read timestamp using the shared state
+     * from an already existing, later collection.
+     */
+    virtual void initFromExisting(OperationContext* opCtx,
+                                  std::shared_ptr<Collection> collection,
+                                  Timestamp readTimestamp) {}
 
     virtual bool isCommitted() const {
         return true;
@@ -408,9 +415,6 @@ public:
                                    boost::optional<ValidationActionEnum> newAction) = 0;
 
     virtual Status checkValidatorAPIVersionCompatability(OperationContext* opCtx) const = 0;
-
-    virtual bool getRecordPreImages() const = 0;
-    virtual void setRecordPreImages(OperationContext* opCtx, bool val) = 0;
 
     virtual bool isChangeStreamPreAndPostImagesEnabled() const = 0;
     virtual void setChangeStreamPreAndPostImages(OperationContext* opCtx,

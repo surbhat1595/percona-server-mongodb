@@ -41,7 +41,6 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/json.h"
 #include "mongo/db/prepare_conflict_tracker.h"
 #include "mongo/db/profile_filter.h"
@@ -60,11 +59,7 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
-
 namespace mongo {
-
-using std::string;
-
 namespace {
 
 auto& oplogGetMoreStats = makeServerStatusMetric<TimerStats>("repl.network.oplogGetMoresProcessed");
@@ -455,26 +450,14 @@ bool CurOp::completeAndLogOperation(OperationContext* opCtx,
                 Lock::GlobalLock lk(opCtx,
                                     MODE_IS,
                                     Date_t::now() + Milliseconds(500),
-                                    Lock::InterruptBehavior::kLeaveUnlocked);
-                if (lk.isLocked()) {
-                    _debug.storageStats = opCtx->recoveryUnit()->getOperationStatistics();
-                } else {
-                    LOGV2_WARNING_OPTIONS(
-                        20525,
-                        {component},
-                        "Failed to gather storage statistics for {opId} due to {reason}",
-                        "Failed to gather storage statistics for slow operation",
-                        "opId"_attr = opCtx->getOpID(),
-                        "error"_attr = "lock acquire timeout"_sd);
-                }
-            } catch (const ExceptionForCat<ErrorCategory::Interruption>& ex) {
-                LOGV2_WARNING_OPTIONS(
-                    20526,
-                    {component},
-                    "Failed to gather storage statistics for {opId} due to {reason}",
-                    "Failed to gather storage statistics for slow operation",
-                    "opId"_attr = opCtx->getOpID(),
-                    "error"_attr = redact(ex));
+                                    Lock::InterruptBehavior::kThrow);
+                _debug.storageStats = opCtx->recoveryUnit()->getOperationStatistics();
+            } catch (const DBException& ex) {
+                LOGV2_WARNING_OPTIONS(20526,
+                                      {component},
+                                      "Failed to gather storage statistics for slow operation",
+                                      "opId"_attr = opCtx->getOpID(),
+                                      "error"_attr = redact(ex));
             }
         }
 
@@ -1668,7 +1651,7 @@ void OpDebug::AdditiveMetrics::incrementPrepareReadConflicts(long long n) {
     prepareReadConflicts.fetchAndAdd(n);
 }
 
-string OpDebug::AdditiveMetrics::report() const {
+std::string OpDebug::AdditiveMetrics::report() const {
     StringBuilder s;
 
     OPDEBUG_TOSTRING_HELP_OPTIONAL("keysExamined", keysExamined);

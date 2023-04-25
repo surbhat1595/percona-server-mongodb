@@ -82,9 +82,7 @@ public:
 
         audit::logAddShard(Client::getCurrent(),
                            parsedRequest.hasName() ? parsedRequest.getName() : "",
-                           parsedRequest.getConnString().toString(),
-                           parsedRequest.hasMaxSize() ? parsedRequest.getMaxSize()
-                                                      : 0 /*kMaxSizeMBDefault*/);
+                           parsedRequest.getConnString().toString());
 
         auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
 

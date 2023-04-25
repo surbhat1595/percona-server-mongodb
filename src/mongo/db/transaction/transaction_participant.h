@@ -37,7 +37,6 @@
 #include "mongo/db/catalog/uncommitted_multikey.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/multi_key_path_tracker.h"
 #include "mongo/db/ops/update_request.h"
 #include "mongo/db/repl/oplog.h"
@@ -60,8 +59,6 @@
 #include "mongo/util/str.h"
 
 namespace mongo {
-
-class OperationContext;
 
 /**
  * Reason a transaction was terminated.
@@ -620,7 +617,7 @@ public:
          * to the transaction.  It is legal to call this method only when the transaction state is
          * in progress or committed.
          */
-        std::vector<repl::ReplOperation>& retrieveCompletedTransactionOperations(
+        std::vector<repl::ReplOperation>* retrieveCompletedTransactionOperations(
             OperationContext* opCtx);
 
         /**

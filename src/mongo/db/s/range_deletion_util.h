@@ -31,7 +31,6 @@
 #include <boost/optional.hpp>
 #include <list>
 
-#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
 #include "mongo/executor/task_executor.h"
@@ -61,7 +60,6 @@ SharedSemiFuture<void> removeDocumentsInRange(
     const UUID& collectionUuid,
     const BSONObj& keyPattern,
     const ChunkRange& range,
-    const UUID& migrationId,
     Seconds delayForActiveQueriesOnSecondariesToComplete);
 
 /**
@@ -72,8 +70,7 @@ Status deleteRangeInBatches(OperationContext* opCtx,
                             const DatabaseName& dbName,
                             const UUID& collectionUuid,
                             const BSONObj& keyPattern,
-                            const ChunkRange& range,
-                            const UUID& migrationId);
+                            const ChunkRange& range);
 
 /**
  * - Retrieves source collection's persistent range deletion tasks from `config.rangeDeletions`

@@ -89,15 +89,18 @@ private:
 
 class SBENodeLowering {
 public:
+    // TODO: SERVER-69540. Consider avoiding a mutable slotMap argument here.
     SBENodeLowering(const VariableEnvironment& env,
                     SlotVarMap& slotMap,
+                    boost::optional<sbe::value::SlotId>& ridSlot,
                     sbe::value::SlotIdGenerator& ids,
                     const Metadata& metadata,
                     const NodeToGroupPropsMap& nodeToGroupPropsMap,
                     const RIDProjectionsMap& ridProjections,
-                    const bool randomScan = false)
+                    const bool randomScan)
         : _env(env),
           _slotMap(slotMap),
+          _ridSlot(ridSlot),
           _slotIdGenerator(ids),
           _metadata(metadata),
           _nodeToGroupPropsMap(nodeToGroupPropsMap),
@@ -107,7 +110,7 @@ public:
     // The default noop transport.
     template <typename T, typename... Ts>
     std::unique_ptr<sbe::PlanStage> walk(const T&, Ts&&...) {
-        if constexpr (std::is_base_of_v<LogicalNode, T>) {
+        if constexpr (std::is_base_of_v<ExclusivelyLogicalNode, T>) {
             uasserted(6624238, "A physical plan should not contain exclusively logical nodes.");
         }
         return nullptr;
@@ -185,12 +188,13 @@ private:
         const sbe::value::SlotVector& toExclude = {});
 
     std::unique_ptr<sbe::EExpression> convertBoundsToExpr(
-        bool isLower, const IndexDefinition& indexDef, const MultiKeyIntervalRequirement& interval);
+        bool isLower, const IndexDefinition& indexDef, const CompoundIntervalRequirement& interval);
 
     std::unique_ptr<sbe::PlanStage> generateInternal(const ABT& n);
 
     const VariableEnvironment& _env;
     SlotVarMap& _slotMap;
+    boost::optional<sbe::value::SlotId>& _ridSlot;
     sbe::value::SlotIdGenerator& _slotIdGenerator;
 
     const Metadata& _metadata;

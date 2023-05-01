@@ -75,13 +75,14 @@ public:
         ConnectSSLMode sslMode,
         const ReactorHandle& reactor,
         Milliseconds timeout,
-        ConnectionMetrics* connectionMetrics,
+        std::shared_ptr<ConnectionMetrics> connectionMetrics,
         std::shared_ptr<const SSLConnectionContext> transientSSLContext = nullptr) override;
 
     Status start() override;
     void shutdown() override;
     Status setup() override;
-    void appendStats(BSONObjBuilder* bob) const override;
+    void appendStatsForServerStatus(BSONObjBuilder* bob) const override;
+    void appendStatsForFTDC(BSONObjBuilder& bob) const override;
 
     ReactorHandle getReactor(WhichReactor which) override;
 

@@ -559,7 +559,7 @@ public:
         // Verify that '_output' produces an array and pass each element to 'process'.
         auto output = _output->evaluate(root, variables);
         uassert(5788200, "Input must be an array", output.isArray());
-        for (auto item : output.getArray()) {
+        for (const auto& item : output.getArray()) {
             accum.process(item, false);
         }
         return accum.getValue(false);
@@ -3258,9 +3258,7 @@ public:
     static StatusWith<Value> apply(Value lhs, Value rhs);
 
     explicit ExpressionSubtract(ExpressionContext* const expCtx)
-        : ExpressionFixedArity<ExpressionSubtract, 2>(expCtx) {
-        expCtx->sbeCompatible = false;
-    }
+        : ExpressionFixedArity<ExpressionSubtract, 2>(expCtx) {}
     ExpressionSubtract(ExpressionContext* const expCtx, ExpressionVector&& children)
         : ExpressionFixedArity<ExpressionSubtract, 2>(expCtx, std::move(children)) {}
 
@@ -4278,14 +4276,14 @@ public:
     }
 };
 
-class ExpressionEncryptedBetween : public ExpressionFixedArity<ExpressionEncryptedBetween, 2> {
+class ExpressionBetween : public ExpressionFixedArity<ExpressionBetween, 2> {
 public:
-    static constexpr const char* const opName = "$encryptedBetween";
-    explicit ExpressionEncryptedBetween(ExpressionContext* const expCtx)
-        : ExpressionFixedArity<ExpressionEncryptedBetween, 2>(expCtx) {}
+    static constexpr const char* const opName = "$between";
+    explicit ExpressionBetween(ExpressionContext* const expCtx)
+        : ExpressionFixedArity<ExpressionBetween, 2>(expCtx) {}
 
-    ExpressionEncryptedBetween(ExpressionContext* const expCtx, ExpressionVector&& children)
-        : ExpressionFixedArity<ExpressionEncryptedBetween, 2>(expCtx, std::move(children)) {}
+    ExpressionBetween(ExpressionContext* const expCtx, ExpressionVector&& children)
+        : ExpressionFixedArity<ExpressionBetween, 2>(expCtx, std::move(children)) {}
 
     Value evaluate(const Document& root, Variables* variables) const final;
 

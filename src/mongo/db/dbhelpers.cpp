@@ -119,14 +119,13 @@ RecordId Helpers::findOne(OperationContext* opCtx,
 
     massertStatusOK(statusWithCQ.getStatus());
     unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
+    cq->setForceGenerateRecordId(true);
 
-    auto exec = uassertStatusOK(
-        getExecutor(opCtx,
-                    &collection,
-                    std::move(cq),
-                    nullptr /* extractAndAttachPipelineStages */,
-                    PlanYieldPolicy::YieldPolicy::NO_YIELD,
-                    QueryPlannerParams::DEFAULT | QueryPlannerParams::PRESERVE_RECORD_ID));
+    auto exec = uassertStatusOK(getExecutor(opCtx,
+                                            &collection,
+                                            std::move(cq),
+                                            nullptr /* extractAndAttachPipelineStages */,
+                                            PlanYieldPolicy::YieldPolicy::NO_YIELD));
 
     PlanExecutor::ExecState state;
     BSONObj obj;
@@ -138,13 +137,12 @@ RecordId Helpers::findOne(OperationContext* opCtx,
 }
 
 bool Helpers::findById(OperationContext* opCtx,
-                       StringData ns,
+                       const NamespaceString& nss,
                        BSONObj query,
                        BSONObj& result,
                        bool* nsFound,
                        bool* indexFound) {
     // TODO ForRead?
-    NamespaceString nss{ns};
     CollectionPtr collection =
         CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
     if (!collection) {

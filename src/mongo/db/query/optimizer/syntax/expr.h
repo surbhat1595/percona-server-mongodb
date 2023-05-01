@@ -49,6 +49,8 @@ class Constant final : public Operator<0>, public ExpressionSyntaxSort {
 public:
     Constant(sbe::value::TypeTags tag, sbe::value::Value val);
 
+    static ABT createFromCopy(sbe::value::TypeTags tag, sbe::value::Value val);
+
     static ABT str(std::string str);
 
     static ABT int32(int32_t valueInt32);
@@ -130,7 +132,9 @@ class Variable final : public Operator<0>, public ExpressionSyntaxSort {
     std::string _name;
 
 public:
-    Variable(std::string inName) : _name(std::move(inName)) {}
+    Variable(std::string inName) : _name(std::move(inName)) {
+        tassert(6684503, "Empty variable name", !_name.empty());
+    }
 
     bool operator==(const Variable& other) const {
         return _name == other._name;
@@ -150,7 +154,7 @@ class UnaryOp final : public Operator<1>, public ExpressionSyntaxSort {
 
 public:
     UnaryOp(Operations inOp, ABT inExpr) : Base(std::move(inExpr)), _op(inOp) {
-        tassert(6684501, "Binary op expected", isUnaryOp(_op));
+        tassert(6684501, "Unary op expected", isUnaryOp(_op));
         assertExprSort(getChild());
     }
 

@@ -41,6 +41,7 @@
 #include "mongo/db/s/chunk_splitter.h"
 #include "mongo/db/s/collection_critical_section_document_gen.h"
 #include "mongo/db/s/database_sharding_state.h"
+#include "mongo/db/s/global_index_ddl_util.h"
 #include "mongo/db/s/migration_source_manager.h"
 #include "mongo/db/s/migration_util.h"
 #include "mongo/db/s/operation_sharding_state.h"
@@ -83,30 +84,27 @@ bool isStandaloneOrPrimary(OperationContext* opCtx) {
  */
 class CollectionVersionLogOpHandler final : public RecoveryUnit::Change {
 public:
-    CollectionVersionLogOpHandler(OperationContext* opCtx,
-                                  const NamespaceString& nss,
-                                  bool droppingCollection)
-        : _opCtx(opCtx), _nss(nss), _droppingCollection(droppingCollection) {}
+    CollectionVersionLogOpHandler(const NamespaceString& nss, bool droppingCollection)
+        : _nss(nss), _droppingCollection(droppingCollection) {}
 
-    void commit(boost::optional<Timestamp>) override {
-        invariant(_opCtx->lockState()->isCollectionLockedForMode(_nss, MODE_IX));
+    void commit(OperationContext* opCtx, boost::optional<Timestamp>) override {
+        invariant(opCtx->lockState()->isCollectionLockedForMode(_nss, MODE_IX));
 
-        CatalogCacheLoader::get(_opCtx).notifyOfCollectionVersionUpdate(_nss);
+        CatalogCacheLoader::get(opCtx).notifyOfCollectionVersionUpdate(_nss);
 
         // Force subsequent uses of the namespace to refresh the filtering metadata so they can
         // synchronize with any work happening on the primary (e.g., migration critical section).
-        UninterruptibleLockGuard noInterrupt(_opCtx->lockState());
+        UninterruptibleLockGuard noInterrupt(opCtx->lockState());
         if (_droppingCollection)
-            CollectionShardingRuntime::get(_opCtx, _nss)
-                ->clearFilteringMetadataForDroppedCollection(_opCtx);
+            CollectionShardingRuntime::get(opCtx, _nss)
+                ->clearFilteringMetadataForDroppedCollection(opCtx);
         else
-            CollectionShardingRuntime::get(_opCtx, _nss)->clearFilteringMetadata(_opCtx);
+            CollectionShardingRuntime::get(opCtx, _nss)->clearFilteringMetadata(opCtx);
     }
 
-    void rollback() override {}
+    void rollback(OperationContext* opCtx) override {}
 
 private:
-    OperationContext* _opCtx;
     const NamespaceString _nss;
     const bool _droppingCollection;
 };
@@ -120,13 +118,13 @@ public:
     SubmitRangeDeletionHandler(OperationContext* opCtx, RangeDeletionTask task)
         : _opCtx(opCtx), _task(std::move(task)) {}
 
-    void commit(boost::optional<Timestamp>) override {
+    void commit(OperationContext* opCtx, boost::optional<Timestamp>) override {
         if (!feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCV()) {
             migrationutil::submitRangeDeletionTask(_opCtx, _task).getAsync([](auto) {});
         }
     }
 
-    void rollback() override {}
+    void rollback(OperationContext* opCtx) override {}
 
 private:
     OperationContext* _opCtx;
@@ -162,8 +160,8 @@ void onConfigDeleteInvalidateCachedCollectionMetadataAndNotify(OperationContext*
     AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(opCtx->lockState());
     AutoGetCollection autoColl(opCtx, deletedNss, MODE_IX);
 
-    opCtx->recoveryUnit()->registerChange(std::make_unique<CollectionVersionLogOpHandler>(
-        opCtx, deletedNss, /* droppingCollection */ true));
+    opCtx->recoveryUnit()->registerChange(
+        std::make_unique<CollectionVersionLogOpHandler>(deletedNss, /* droppingCollection */ true));
 }
 
 /**
@@ -294,37 +292,26 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
             !recoverable_critical_section_util::inRecoveryMode(opCtx)) {
             const auto collCSDoc = CollectionCriticalSectionDocument::parse(
                 IDLParserContext("ShardServerOpObserver"), insertedDoc);
-            opCtx->recoveryUnit()->onCommit([opCtx,
-                                             insertedNss = collCSDoc.getNss(),
-                                             reason = collCSDoc.getReason().getOwned()](
-                                                boost::optional<Timestamp>) {
-                boost::optional<AutoGetCollection> lockCollectionIfNotPrimary;
-                if (!isStandaloneOrPrimary(opCtx)) {
-                    lockCollectionIfNotPrimary.emplace(
-                        opCtx, insertedNss, MODE_IX, AutoGetCollectionViewMode::kViewsPermitted);
-                }
-
-                UninterruptibleLockGuard noInterrupt(opCtx->lockState());
-                auto* const csr = CollectionShardingRuntime::get(opCtx, insertedNss);
-                auto csrLock = CollectionShardingRuntime ::CSRLock::lockExclusive(opCtx, csr);
-                csr->enterCriticalSectionCatchUpPhase(csrLock, reason);
-            });
-        }
-
-        if (nss == NamespaceString::kShardCollectionCatalogNamespace &&
-            !recoverable_critical_section_util::inRecoveryMode(opCtx) &&
-            insertedDoc.hasElement(CollectionType::kIndexVersionFieldName)) {
-            auto indexVersion = insertedDoc[CollectionType::kIndexVersionFieldName].timestamp();
-            auto baseCollectionNss =
-                NamespaceString(insertedDoc[CollectionType::kNssFieldName].str());
             opCtx->recoveryUnit()->onCommit(
-                [opCtx, baseCollectionNss, indexVersion](boost::optional<Timestamp>) {
-                    AutoGetCollection autoColl(opCtx, baseCollectionNss, MODE_IS);
-                    CollectionShardingRuntime::get(opCtx, baseCollectionNss)
-                        ->setIndexVersion(opCtx, indexVersion);
+                [opCtx,
+                 insertedNss = collCSDoc.getNss(),
+                 reason = collCSDoc.getReason().getOwned()](boost::optional<Timestamp>) {
+                    boost::optional<AutoGetCollection> lockCollectionIfNotPrimary;
+                    if (!isStandaloneOrPrimary(opCtx)) {
+                        lockCollectionIfNotPrimary.emplace(
+                            opCtx,
+                            insertedNss,
+                            MODE_IX,
+                            AutoGetCollection::Options{}.viewMode(
+                                auto_get_collection::ViewMode::kViewsPermitted));
+                    }
+
+                    UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+                    auto* const csr = CollectionShardingRuntime::get(opCtx, insertedNss);
+                    auto csrLock = CollectionShardingRuntime ::CSRLock::lockExclusive(opCtx, csr);
+                    csr->enterCriticalSectionCatchUpPhase(csrLock, reason);
                 });
         }
-
         if (metadata && metadata->isSharded()) {
             incrementChunkOnInsertOrUpdate(opCtx,
                                            nss,
@@ -383,7 +370,7 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
         AutoGetCollection autoColl(opCtx, updatedNss, MODE_IX);
         if (refreshingFieldNewVal.isBoolean() && !refreshingFieldNewVal.boolean()) {
             opCtx->recoveryUnit()->registerChange(std::make_unique<CollectionVersionLogOpHandler>(
-                opCtx, updatedNss, /* droppingCollection */ false));
+                updatedNss, /* droppingCollection */ false));
         }
 
         if (enterCriticalSectionFieldNewVal.ok()) {
@@ -464,7 +451,11 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
                 boost::optional<AutoGetCollection> lockCollectionIfNotPrimary;
                 if (!isStandaloneOrPrimary(opCtx)) {
                     lockCollectionIfNotPrimary.emplace(
-                        opCtx, updatedNss, MODE_IX, AutoGetCollectionViewMode::kViewsPermitted);
+                        opCtx,
+                        updatedNss,
+                        MODE_IX,
+                        AutoGetCollection::Options{}.viewMode(
+                            auto_get_collection::ViewMode::kViewsPermitted));
                 }
 
                 UninterruptibleLockGuard noInterrupt(opCtx->lockState());
@@ -473,20 +464,6 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
                 csr->enterCriticalSectionCommitPhase(csrLock, reason);
             });
     }
-
-    if (args.nss == NamespaceString::kShardCollectionCatalogNamespace &&
-        !recoverable_critical_section_util::inRecoveryMode(opCtx) &&
-        args.updateArgs->updatedDoc.hasElement(CollectionType::kIndexVersionFieldName)) {
-        auto indexVersion =
-            args.updateArgs->updatedDoc[CollectionType::kIndexVersionFieldName].timestamp();
-        auto nss =
-            NamespaceString(args.updateArgs->updatedDoc[CollectionType::kNssFieldName].str());
-        opCtx->recoveryUnit()->onCommit([opCtx, nss, indexVersion](boost::optional<Timestamp>) {
-            AutoGetCollection autoColl(opCtx, nss, MODE_IS);
-            CollectionShardingRuntime::get(opCtx, nss)->setIndexVersion(opCtx, indexVersion);
-        });
-    }
-
     auto* const csr = CollectionShardingRuntime::get(opCtx, args.nss);
     const auto metadata = csr->getCurrentMetadataIfKnown();
     if (metadata && metadata->isSharded()) {
@@ -511,6 +488,32 @@ void ShardServerOpObserver::aboutToDelete(OperationContext* opCtx,
         // Extract the _id field from the document. If it does not have an _id, use the
         // document itself as the _id.
         documentIdDecoration(opCtx) = doc["_id"] ? doc["_id"].wrap() : doc;
+    }
+}
+
+void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
+    OperationContext* opCtx, const NamespaceString& nss, const UUID& uuid, BSONObj indexDoc) {
+    LOGV2_DEBUG(
+        6712303,
+        1,
+        "Updating sharding in-memory state onModifyShardedCollectionGlobalIndexCatalogEntry",
+        "indexDoc"_attr = indexDoc);
+    if (indexDoc["op"].str() == "i") {
+        auto indexEntry = IndexCatalogType::parse(
+            IDLParserContext("onModifyShardedCollectionGlobalIndexCatalogEntry"),
+            indexDoc["entry"].Obj());
+        auto indexVersion = indexDoc["entry"][IndexCatalogType::kLastmodFieldName].timestamp();
+        opCtx->recoveryUnit()->onCommit([opCtx, nss, indexVersion, indexEntry](auto _) {
+            AutoGetCollection autoColl(opCtx, nss, MODE_IX);
+            CollectionShardingRuntime::get(opCtx, nss)->addIndex(opCtx, indexEntry, indexVersion);
+        });
+    } else {
+        auto indexName = indexDoc["entry"][IndexCatalogType::kNameFieldName].str();
+        auto indexVersion = indexDoc["entry"][IndexCatalogType::kLastmodFieldName].timestamp();
+        opCtx->recoveryUnit()->onCommit([opCtx, nss, indexName, indexVersion](auto _) {
+            AutoGetCollection autoColl(opCtx, nss, MODE_IX);
+            CollectionShardingRuntime::get(opCtx, nss)->removeIndex(opCtx, indexName, indexVersion);
+        });
     }
 }
 
@@ -580,7 +583,11 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
                 boost::optional<AutoGetCollection> lockCollectionIfNotPrimary;
                 if (!isStandaloneOrPrimary(opCtx)) {
                     lockCollectionIfNotPrimary.emplace(
-                        opCtx, deletedNss, MODE_IX, AutoGetCollectionViewMode::kViewsPermitted);
+                        opCtx,
+                        deletedNss,
+                        MODE_IX,
+                        AutoGetCollection::Options{}.viewMode(
+                            auto_get_collection::ViewMode::kViewsPermitted));
                 }
 
                 UninterruptibleLockGuard noInterrupt(opCtx->lockState());

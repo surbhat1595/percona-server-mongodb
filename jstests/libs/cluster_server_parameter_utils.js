@@ -2,108 +2,119 @@
  * Util functions used by cluster server parameter tests.
  *
  * When adding new cluster server parameter, do the following:
- * 1. If it's test-only, add its name to the end of testOnlyClusterParameterNames. Otherwise, add it
- *    it to the end of nonTestClusterParameterNames.
- * 2. Add the clusterParameter document that's expected as default to the end of
- * testOnlyClusterParametersDefault if it's test-only. Otherwise, add it to the end of
- * nonTestClusterParametersDefault.
- * 3. Add the clusterParameter document that setClusterParameter is expected to insert after its
- *    first invocation to the end of testOnlyClusterParametersInsert if it's test-only. Otherwise,
- *    add it to the end of nonTestClusterParametersInsert.
- * 4. Add the clusterParameter document that setClusterParameter is expected to update to after its
- *    second invocation to the end of testOnlyClusterParametersUpdate if it's test-only. Otherwise,
- *    add it to the end of nonTestClusterParametersUpdate.
- *
+ *   If it's test-only, add its definition to kTestOnlyClusterParameters.
+ *   Otherwise, add to kNonTestOnlyClusterParameters.
+ * The keyname will be the name of the cluster-wide server parameter,
+ * it's value will be an object with at least three keys named:
+ *   * 'default': Properties to expect on an unset CWSP
+ *   * 'insert': Values to set on the CWSP on first write
+ *   * 'update': Values to set on the CWSP on second write
+ * A fourth property 'featureFlag' may also be set if the
+ *   parameter depends on a featureFlag.
+ * Use the name of the featureFlag if it is required in
+ *   order to consider the parameter.
+ * Prefix the name with a bang '!' if it is only considered
+ *   when the featureFlag is disabled.
  */
 
-const testOnlyClusterParameterNames = [
-    "testStrClusterParameter",
-    "testIntClusterParameter",
-    "testBoolClusterParameter",
-];
-const nonTestClusterParameterNames = ["changeStreamOptions", "changeStreams"];
-const clusterParameterNames = testOnlyClusterParameterNames.concat(nonTestClusterParameterNames);
+load("jstests/libs/feature_flag_util.js");
 
-const testOnlyClusterParametersDefault = [
-    {
-        _id: "testStrClusterParameter",
-        strData: "off",
+const kNonTestOnlyClusterParameters = {
+    changeStreamOptions: {
+        default: {preAndPostImages: {expireAfterSeconds: 'off'}},
+        insert: {preAndPostImages: {expireAfterSeconds: 30}},
+        update: {preAndPostImages: {expireAfterSeconds: 'off'}},
+        featureFlag: '!ServerlessChangeStreams',
     },
-    {
-        _id: "testIntClusterParameter",
-        intData: 16,
+    changeStreams: {
+        default: {expireAfterSeconds: NumberLong(3600)},
+        insert: {expireAfterSeconds: 30},
+        update: {expireAfterSeconds: 10},
+        featureFlag: 'ServerlessChangeStreams',
+        setParameters: {'multitenancySupport': true},
+        serverless: true,
     },
-    {
-        _id: "testBoolClusterParameter",
-        boolData: false,
-    },
-];
-const nonTestClusterParametersDefault = [
-    {
-        _id: "changeStreamOptions",
-        preAndPostImages: {
-            expireAfterSeconds: "off",
-        },
-    },
-    {_id: "changeStreams", expireAfterSeconds: NumberLong(3600)}
-];
-const clusterParametersDefault =
-    testOnlyClusterParametersDefault.concat(nonTestClusterParametersDefault);
+};
 
-const testOnlyClusterParametersInsert = [
-    {
-        _id: "testStrClusterParameter",
-        strData: "on",
+const kTestOnlyClusterParameters = {
+    cwspTestNeedsFeatureFlagClusterWideToaster: {
+        default: {intData: 16},
+        insert: {intData: 17},
+        update: {intData: 18},
+        featureFlag: 'ClusterWideToaster',
     },
-    {
-        _id: "testIntClusterParameter",
-        intData: 17,
+    testStrClusterParameter: {
+        default: {strData: 'off'},
+        insert: {strData: 'on'},
+        update: {strData: 'sleep'},
     },
-    {
-        _id: "testBoolClusterParameter",
-        boolData: true,
+    testIntClusterParameter: {
+        default: {intData: 16},
+        insert: {intData: 17},
+        update: {intData: 18},
     },
-];
-const nonTestClusterParametersInsert = [
-    {
-        _id: "changeStreamOptions",
-        preAndPostImages: {
-            expireAfterSeconds: 30,
-        },
+    testBoolClusterParameter: {
+        default: {boolData: false},
+        insert: {boolData: true},
+        update: {boolData: false},
     },
-    {
-        _id: "changeStreams",
-        expireAfterSeconds: 30,
+};
+
+const kAllClusterParameters =
+    Object.assign({}, kNonTestOnlyClusterParameters, kTestOnlyClusterParameters);
+const kAllClusterParameterNames = Object.keys(kAllClusterParameters);
+const kAllClusterParameterDefaults = kAllClusterParameterNames.map(
+    (name) => Object.assign({_id: name}, kAllClusterParameters[name].default));
+const kAllClusterParameterInserts = kAllClusterParameterNames.map(
+    (name) => Object.assign({_id: name}, kAllClusterParameters[name].insert));
+const kAllClusterParameterUpdates = kAllClusterParameterNames.map(
+    (name) => Object.assign({_id: name}, kAllClusterParameters[name].update));
+
+const kNonTestOnlyClusterParameterDefaults =
+    Object.keys(kNonTestOnlyClusterParameters)
+        .map((name) => Object.assign({_id: name}, kAllClusterParameters[name].default));
+
+function considerParameter(paramName, conn) {
+    // { featureFlag: 'name' } indicates that the CWSP should only be considered with the FF
+    // enabled. { featureFlag: '!name' } indicates that the CWSP should only be considered with the
+    // FF disabled.
+    function validateFeatureFlag(cp) {
+        if (cp.featureFlag) {
+            const considerWhenFFEnabled = cp.featureFlag[0] !== '!';
+            const ff = cp.featureFlag.substr(considerWhenFFEnabled ? 0 : 1);
+            return FeatureFlagUtil.isEnabled(conn, ff) === considerWhenFFEnabled;
+        }
+        return true;
     }
-];
-const clusterParametersInsert =
-    testOnlyClusterParametersInsert.concat(nonTestClusterParametersInsert);
 
-const testOnlyClusterParametersUpdate = [
-    {
-        _id: "testStrClusterParameter",
-        strData: "sleep",
-    },
-    {
-        _id: "testIntClusterParameter",
-        intData: 18,
-    },
-    {
-        _id: "testBoolClusterParameter",
-        boolData: false,
-    },
-];
-const nonTestClusterParametersUpdate = [
-    {
-        _id: "changeStreamOptions",
-        preAndPostImages: {
-            expireAfterSeconds: "off",
-        },
-    },
-    {_id: "changeStreams", expireAfterSeconds: NumberLong(10)}
-];
-const clusterParametersUpdate =
-    testOnlyClusterParametersUpdate.concat(nonTestClusterParametersUpdate);
+    // A dictionary of 'setParameters' that should be validated while considering the current CWSP.
+    function validateSetParameter(cp) {
+        if (cp.setParameters) {
+            for ([param, value] of Object.entries(cp.setParameters)) {
+                const resp = conn.getDB("admin").runCommand({getParameter: 1, param: 1});
+                const hasParam = resp.hasOwnProperty(param) && resp[param] === value;
+                if (!hasParam) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    // Check if the current CWSP should be run in the serverless.
+    function validateServerless(cp) {
+        if (cp.hasOwnProperty("serverless")) {
+            const resp =
+                assert.commandWorked(conn.getDB("admin").adminCommand({getCmdLineOpts: 1}));
+            return cp.serverless === resp.parsed && resp.parsed.replication &&
+                resp.parsed.replication.serverless;
+        }
+        return true;
+    }
+
+    const cp = kAllClusterParameters[paramName] || {};
+    return validateFeatureFlag(cp) && validateSetParameter(cp) && validateServerless(cp);
+}
 
 // Set the log level for get/setClusterParameter logging to appear.
 function setupNode(conn) {
@@ -131,6 +142,9 @@ function setupSharded(st) {
 // Upserts config.clusterParameters document with w:majority via setClusterParameter.
 function runSetClusterParameter(conn, update) {
     const paramName = update._id;
+    if (!considerParameter(paramName, conn)) {
+        return;
+    }
     let updateCopy = Object.assign({}, update);
     delete updateCopy._id;
     delete updateCopy.clusterParameterTime;
@@ -146,34 +160,42 @@ function runSetClusterParameter(conn, update) {
 // on whether the expected values were returned.
 function runGetClusterParameterNode(conn, getClusterParameterArgs, expectedClusterParameters) {
     const adminDB = conn.getDB('admin');
+
+    // Filter out parameters that we don't care about.
+    if (Array.isArray(getClusterParameterArgs)) {
+        getClusterParameterArgs =
+            getClusterParameterArgs.filter((name) => considerParameter(name, conn));
+    } else if ((typeof getClusterParameterArgs === 'string') &&
+               !considerParameter(getClusterParameterArgs, conn)) {
+        return true;
+    }
+
     const actualClusterParameters =
         assert.commandWorked(adminDB.runCommand({getClusterParameter: getClusterParameterArgs}))
             .clusterParameters;
 
-    // Sort the returned clusterParameters and the expected clusterParameters by _id.
-    actualClusterParameters.sort((a, b) => a._id.localeCompare(b._id));
-    expectedClusterParameters.sort((a, b) => a._id.localeCompare(b._id));
-    for (let i = 0; i < expectedClusterParameters.length; i++) {
-        const expectedClusterParameter = expectedClusterParameters[i];
-        const actualClusterParameter = actualClusterParameters[i];
+    // Reindex actual based on name, and remove irrelevant field.
+    let actual = {};
+    actualClusterParameters.forEach(function(acp) {
+        actual[acp._id] = acp;
+        delete actual[acp._id].clusterParameterTime;
+    });
 
-        // Sort both expectedClusterParameter and actualClusterParameter into alphabetical order
-        // by key.
-        const sortedExpectedClusterParameter =
-            Object.keys(expectedClusterParameter).sort().reduce(function(sorted, key) {
-                sorted[key] = expectedClusterParameter[key];
-                return sorted;
-            }, {});
-        const sortedActualClusterParameter =
-            Object.keys(actualClusterParameter).sort().reduce(function(sorted, key) {
-                if (key !== 'clusterParameterTime') {
-                    sorted[key] = actualClusterParameter[key];
-                }
-                return sorted;
-            }, {});
-        if (bsonWoCompare(sortedExpectedClusterParameter, sortedActualClusterParameter) !== 0) {
-            print('expected: ' + tojson(sortedExpectedClusterParameter) +
-                  '\nactual: ' + tojson(sortedActualClusterParameter));
+    for (let i = 0; i < expectedClusterParameters.length; i++) {
+        if (!considerParameter(expectedClusterParameters[i]._id, conn)) {
+            continue;
+        }
+
+        const id = expectedClusterParameters[i]._id;
+        if (actual[id] === undefined) {
+            jsTest.log('Expected to retreive ' + id + ' but it was not returned');
+            return false;
+        }
+
+        if (bsonWoCompare(expectedClusterParameters[i], actual[id]) !== 0) {
+            jsTest.log('Server parameter mismatch on node: ' + conn.host + '\n' +
+                       'Expected: ' + tojson(expectedClusterParameters[i]) + '\n' +
+                       'Actual: ' + tojson(actual[id]));
             return false;
         }
     }
@@ -219,53 +241,56 @@ function testValidClusterParameterCommands(conn) {
     if (conn instanceof ReplSetTest) {
         // Run getClusterParameter in list format and '*' and ensure it returns all default values
         // on all nodes in the replica set.
-        runGetClusterParameterReplicaSet(conn, clusterParameterNames, clusterParametersDefault);
-        runGetClusterParameterReplicaSet(conn, '*', clusterParametersDefault);
+        runGetClusterParameterReplicaSet(
+            conn, kAllClusterParameterNames, kAllClusterParameterDefaults);
+        runGetClusterParameterReplicaSet(conn, '*', kAllClusterParameterDefaults);
 
         // For each parameter, run setClusterParameter and verify that getClusterParameter
         // returns the updated value on all nodes in the replica set.
-        for (let i = 0; i < clusterParameterNames.length; i++) {
-            runSetClusterParameter(conn.getPrimary(), clusterParametersInsert[i]);
+        for (let i = 0; i < kAllClusterParameterNames.length; i++) {
+            runSetClusterParameter(conn.getPrimary(), kAllClusterParameterInserts[i]);
             runGetClusterParameterReplicaSet(
-                conn, clusterParameterNames[i], [clusterParametersInsert[i]]);
+                conn, kAllClusterParameterNames[i], [kAllClusterParameterInserts[i]]);
         }
 
         // Do the above again to verify that document updates are also handled properly.
-        for (let i = 0; i < clusterParameterNames.length; i++) {
-            runSetClusterParameter(conn.getPrimary(), clusterParametersUpdate[i]);
+        for (let i = 0; i < kAllClusterParameterNames.length; i++) {
+            runSetClusterParameter(conn.getPrimary(), kAllClusterParameterUpdates[i]);
             runGetClusterParameterReplicaSet(
-                conn, clusterParameterNames[i], [clusterParametersUpdate[i]]);
+                conn, kAllClusterParameterNames[i], [kAllClusterParameterUpdates[i]]);
         }
 
         // Finally, run getClusterParameter in list format and '*' and ensure that they now all
         // return updated values.
-        runGetClusterParameterReplicaSet(conn, clusterParameterNames, clusterParametersUpdate);
-        runGetClusterParameterReplicaSet(conn, '*', clusterParametersUpdate);
+        runGetClusterParameterReplicaSet(
+            conn, kAllClusterParameterNames, kAllClusterParameterUpdates);
+        runGetClusterParameterReplicaSet(conn, '*', kAllClusterParameterUpdates);
     } else {
         // Run getClusterParameter in list format and '*' and ensure it returns all default values
         // on all nodes in the sharded cluster.
-        runGetClusterParameterSharded(conn, clusterParameterNames, clusterParametersDefault);
-        runGetClusterParameterSharded(conn, '*', clusterParametersDefault);
+        runGetClusterParameterSharded(
+            conn, kAllClusterParameterNames, kAllClusterParameterDefaults);
+        runGetClusterParameterSharded(conn, '*', kAllClusterParameterDefaults);
 
         // For each parameter, simulate setClusterParameter and verify that getClusterParameter
         // returns the updated value on all nodes in the sharded cluster.
-        for (let i = 0; i < clusterParameterNames.length; i++) {
-            runSetClusterParameter(conn.s0, clusterParametersInsert[i]);
+        for (let i = 0; i < kAllClusterParameterNames.length; i++) {
+            runSetClusterParameter(conn.s0, kAllClusterParameterInserts[i]);
             runGetClusterParameterSharded(
-                conn, clusterParameterNames[i], [clusterParametersInsert[i]]);
+                conn, kAllClusterParameterNames[i], [kAllClusterParameterInserts[i]]);
         }
 
         // Do the above again to verify that document updates are also handled properly.
-        for (let i = 0; i < clusterParameterNames.length; i++) {
-            runSetClusterParameter(conn.s0, clusterParametersUpdate[i]);
+        for (let i = 0; i < kAllClusterParameterNames.length; i++) {
+            runSetClusterParameter(conn.s0, kAllClusterParameterUpdates[i]);
             runGetClusterParameterSharded(
-                conn, clusterParameterNames[i], [clusterParametersUpdate[i]]);
+                conn, kAllClusterParameterNames[i], [kAllClusterParameterUpdates[i]]);
         }
 
         // Finally, run getClusterParameter in list format and '*' and ensure that they now all
         // return updated values.
-        runGetClusterParameterSharded(conn, clusterParameterNames, clusterParametersUpdate);
-        runGetClusterParameterSharded(conn, '*', clusterParametersUpdate);
+        runGetClusterParameterSharded(conn, kAllClusterParameterNames, kAllClusterParameterUpdates);
+        runGetClusterParameterSharded(conn, '*', kAllClusterParameterUpdates);
     }
 }
 
@@ -300,13 +325,13 @@ function testDisabledClusterParameters(conn) {
 
         // Assert that getClusterParameter: '*' succeeds but only returns enabled cluster
         // parameters.
-        runGetClusterParameterReplicaSet(conn, '*', nonTestClusterParametersDefault);
+        runGetClusterParameterReplicaSet(conn, '*', kNonTestOnlyClusterParameterDefaults);
     } else {
         // Assert that explicitly setting a disabled cluster server parameter fails.
         const adminDB = conn.s0.getDB('admin');
         assert.commandFailedWithCode(
             adminDB.runCommand({setClusterParameter: {testIntClusterParameter: {intData: 5}}}),
-            ErrorCodes.BadValue);
+            ErrorCodes.IllegalOperation);
 
         // Assert that explicitly getting a disabled cluster server parameter fails on mongos.
         testExplicitDisabledGetClusterParameter(conn.s0);
@@ -329,7 +354,7 @@ function testDisabledClusterParameters(conn) {
 
         // Assert that getClusterParameter: '*' succeeds but only returns enabled cluster
         // parameters.
-        runGetClusterParameterSharded(conn, '*', nonTestClusterParametersDefault);
+        runGetClusterParameterSharded(conn, '*', kNonTestOnlyClusterParameterDefaults);
     }
 }
 

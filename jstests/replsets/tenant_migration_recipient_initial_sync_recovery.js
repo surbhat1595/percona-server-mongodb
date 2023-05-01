@@ -104,7 +104,7 @@ const activeServerlessLock = getServerlessOperationLock(initialSyncNode);
 if (recipientDoc && !recipientDoc.expireAt) {
     assert.eq(activeServerlessLock, ServerlessLockType.TenantMigrationRecipient);
 } else {
-    assert.eq(activeServerlessLock, null);
+    assert.eq(activeServerlessLock, ServerlessLockType.None);
 }
 
 restartServerReplication(initialSyncNode);

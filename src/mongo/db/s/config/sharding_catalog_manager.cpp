@@ -36,7 +36,6 @@
 #include "mongo/db/auth/authorization_session_impl.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/error_labels.h"
-#include "mongo/db/internal_transactions_feature_flag_gen.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/ops/write_ops_parsers.h"
@@ -463,7 +462,7 @@ Status ShardingCatalogManager::_initConfigIndexes(OperationContext* opCtx) {
             opCtx,
             NamespaceString::kConfigsvrPlacementHistoryNamespace,
             BSON(NamespacePlacementType::kNssFieldName
-                 << 1 << NamespacePlacementType::kTimestampFieldName << 1),
+                 << 1 << NamespacePlacementType::kTimestampFieldName << -1),
             unique);
         if (!result.isOK()) {
             return result;

@@ -37,6 +37,8 @@
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/stages/spool.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
+#include "mongo/db/exec/sbe/values/arith_common.h"
+#include "mongo/db/exec/sbe/vm/datetime.h"
 #include "mongo/util/str.h"
 
 namespace mongo {
@@ -239,6 +241,7 @@ std::vector<DebugPrinter::Block> EPrimBinary::debugPrint() const {
 
     invariant(!hasCollatorArg || isComparisonOp(_op));
 
+    ret.emplace_back("(`");
     DebugPrinter::addBlocks(ret, _nodes[0]->debugPrint());
 
     switch (_op) {
@@ -292,6 +295,7 @@ std::vector<DebugPrinter::Block> EPrimBinary::debugPrint() const {
     }
 
     DebugPrinter::addBlocks(ret, _nodes[1]->debugPrint());
+    ret.emplace_back("`)");
 
     return ret;
 }
@@ -335,7 +339,9 @@ std::vector<DebugPrinter::Block> EPrimUnary::debugPrint() const {
             MONGO_UNREACHABLE;
     }
 
+    ret.emplace_back("`(`");
     DebugPrinter::addBlocks(ret, _nodes[0]->debugPrint());
+    ret.emplace_back("`)");
 
     return ret;
 }
@@ -514,7 +520,7 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
     {"tsSecond", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::tsSecond, false}},
     {"tsIncrement", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::tsIncrement, false}},
     {"typeMatch", BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::typeMatch, false}},
-};
+    {"dateTrunc", BuiltinFn{[](size_t n) { return n == 6; }, vm::Builtin::dateTrunc, false}}};
 
 /**
  * The code generation function.
@@ -599,6 +605,54 @@ vm::CodeFragment EFunction::compileDirect(CompileCtx& ctx) const {
                       str::stream() << "function call: " << _name << " has wrong arity: " << arity);
         }
         vm::CodeFragment code;
+
+        // Optimize well known set of functions with constant arguments and generate their
+        // specialized variants.
+        if (_name == "typeMatch" && _nodes[1]->as<EConstant>()) {
+            auto [tag, val] = _nodes[1]->as<EConstant>()->getConstant();
+            if (tag == value::TypeTags::NumberInt64) {
+                auto mask = value::bitcastTo<int64_t>(val);
+                uassert(6996901,
+                        "Second argument to typeMatch() must be a 32-bit integer constant",
+                        mask >> 32 == 0 || mask >> 32 == -1);
+                code.append(_nodes[0]->compileDirect(ctx));
+                code.appendTypeMatch(mask);
+
+                return code;
+            }
+        } else if (_name == "dateTrunc" && _nodes[2]->as<EConstant>() &&
+                   _nodes[3]->as<EConstant>() && _nodes[4]->as<EConstant>() &&
+                   _nodes[5]->as<EConstant>()) {
+            // The validation for the arguments has been omitted here because the constants
+            // have already been validated in the stage builder.
+            auto [timezoneDBTag, timezoneDBVal] =
+                ctx.getRuntimeEnvAccessor(_nodes[0]->as<EVariable>()->getSlotId())
+                    ->getViewOfValue();
+            auto timezoneDB = value::getTimeZoneDBView(timezoneDBVal);
+
+            auto [unitTag, unitVal] = _nodes[2]->as<EConstant>()->getConstant();
+            auto unitString = value::getStringView(unitTag, unitVal);
+            auto unit = parseTimeUnit(unitString);
+
+            auto [binSizeTag, binSizeValue] = _nodes[3]->as<EConstant>()->getConstant();
+            auto [binSizeLongOwn, binSizeLongTag, binSizeLongValue] =
+                genericNumConvert(binSizeTag, binSizeValue, value::TypeTags::NumberInt64);
+            auto binSize = value::bitcastTo<int64_t>(binSizeLongValue);
+
+            auto [timezoneTag, timezoneVal] = _nodes[4]->as<EConstant>()->getConstant();
+            auto timezone = vm::getTimezone(timezoneTag, timezoneVal, timezoneDB);
+
+            DayOfWeek startOfWeek{kStartOfWeekDefault};
+            if (unit == TimeUnit::week) {
+                auto [startOfWeekTag, startOfWeekVal] = _nodes[5]->as<EConstant>()->getConstant();
+                auto startOfWeekString = value::getStringView(startOfWeekTag, startOfWeekVal);
+                startOfWeek = parseDayOfWeek(startOfWeekString);
+            }
+
+            code.append(_nodes[1]->compileDirect(ctx));
+            code.appendDateTrunc(unit, binSize, timezone, startOfWeek);
+            return code;
+        }
 
         for (size_t idx = arity; idx-- > 0;) {
             code.append(_nodes[idx]->compileDirect(ctx));
@@ -733,7 +787,7 @@ std::vector<DebugPrinter::Block> EFunction::debugPrint() const {
     std::vector<DebugPrinter::Block> ret;
     DebugPrinter::addKeyword(ret, _name);
 
-    ret.emplace_back("(`");
+    ret.emplace_back("`(`");
     for (size_t idx = 0; idx < _nodes.size(); ++idx) {
         if (idx) {
             ret.emplace_back("`,");
@@ -780,20 +834,24 @@ vm::CodeFragment EIf::compileDirect(CompileCtx& ctx) const {
 
 std::vector<DebugPrinter::Block> EIf::debugPrint() const {
     std::vector<DebugPrinter::Block> ret;
-    DebugPrinter::addKeyword(ret, "if");
 
-    ret.emplace_back("(`");
+    ret.emplace_back(DebugPrinter::Block::cmdIncIndent);
 
     // Print the condition.
+    DebugPrinter::addKeyword(ret, "if");
     DebugPrinter::addBlocks(ret, _nodes[0]->debugPrint());
-    ret.emplace_back("`,");
+    DebugPrinter::addNewLine(ret);
+
     // Print thenBranch.
+    DebugPrinter::addKeyword(ret, "then");
     DebugPrinter::addBlocks(ret, _nodes[1]->debugPrint());
-    ret.emplace_back("`,");
+    DebugPrinter::addNewLine(ret);
+
     // Print elseBranch.
+    DebugPrinter::addKeyword(ret, "else");
     DebugPrinter::addBlocks(ret, _nodes[2]->debugPrint());
 
-    ret.emplace_back("`)");
+    ret.emplace_back(DebugPrinter::Block::cmdDecIndent);
 
     return ret;
 }
@@ -836,21 +894,29 @@ vm::CodeFragment ELocalBind::compileDirect(CompileCtx& ctx) const {
 std::vector<DebugPrinter::Block> ELocalBind::debugPrint() const {
     std::vector<DebugPrinter::Block> ret;
 
-    DebugPrinter::addKeyword(ret, "let");
+    ret.emplace_back(DebugPrinter::Block::cmdIncIndent);
 
+    DebugPrinter::addKeyword(ret, "let");
     ret.emplace_back("[`");
+    ret.emplace_back(DebugPrinter::Block::cmdIncIndent);
+
     for (size_t idx = 0; idx < _nodes.size() - 1; ++idx) {
         if (idx != 0) {
-            ret.emplace_back("`,");
+            DebugPrinter::addNewLine(ret);
         }
 
         DebugPrinter::addIdentifier(ret, _frameId, idx);
         ret.emplace_back("=");
         DebugPrinter::addBlocks(ret, _nodes[idx]->debugPrint());
     }
-    ret.emplace_back("`]");
+    ret.emplace_back(DebugPrinter::Block::cmdDecIndent);
+    ret.emplace_back("]");
+    DebugPrinter::addNewLine(ret);
 
+    DebugPrinter::addKeyword(ret, "in");
     DebugPrinter::addBlocks(ret, _nodes.back()->debugPrint());
+
+    ret.emplace_back(DebugPrinter::Block::cmdDecIndent);
 
     return ret;
 }
@@ -896,10 +962,13 @@ vm::CodeFragment ELocalLambda::compileDirect(CompileCtx& ctx) const {
 std::vector<DebugPrinter::Block> ELocalLambda::debugPrint() const {
     std::vector<DebugPrinter::Block> ret;
 
-    DebugPrinter::addKeyword(ret, "\\");
+    DebugPrinter::addKeyword(ret, "lambda");
+    ret.emplace_back("`(`");
     DebugPrinter::addIdentifier(ret, _frameId, 0);
-    ret.emplace_back(".");
+    ret.emplace_back("`)");
+    ret.emplace_back("{");
     DebugPrinter::addBlocks(ret, _nodes.back()->debugPrint());
+    ret.emplace_back("}");
 
     return ret;
 }
@@ -930,11 +999,13 @@ std::vector<DebugPrinter::Block> EFail::debugPrint() const {
     std::vector<DebugPrinter::Block> ret;
     DebugPrinter::addKeyword(ret, "fail");
 
-    ret.emplace_back("(");
+    ret.emplace_back("`(`");
 
     ret.emplace_back(std::to_string(_code));
-    ret.emplace_back(",`");
+    ret.emplace_back("`,");
+    ret.emplace_back("\"`");
     ret.emplace_back(getStringView(_messageTag, _messageVal));
+    ret.emplace_back("`\"`");
 
     ret.emplace_back("`)");
 

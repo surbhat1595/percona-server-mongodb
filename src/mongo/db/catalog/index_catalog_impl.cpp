@@ -670,7 +670,7 @@ StatusWith<BSONObj> IndexCatalogImpl::createIndexOnEmptyCollection(OperationCont
     boost::optional<UUID> buildUUID = boost::none;
     IndexBuildBlock indexBuildBlock(
         collection->ns(), spec, IndexBuildMethod::kForeground, buildUUID);
-    status = indexBuildBlock.init(opCtx, collection);
+    status = indexBuildBlock.init(opCtx, collection, /*forRecovery=*/false);
     if (!status.isOK())
         return status;
 
@@ -1328,6 +1328,70 @@ Status IndexCatalogImpl::dropIndex(OperationContext* opCtx,
     return dropIndexEntry(opCtx, collection, entry);
 }
 
+Status IndexCatalogImpl::resetUnfinishedIndexForRecovery(OperationContext* opCtx,
+                                                         Collection* collection,
+                                                         const IndexDescriptor* desc) {
+    invariant(opCtx->lockState()->isCollectionLockedForMode(collection->ns(), MODE_X));
+    invariant(opCtx->lockState()->inAWriteUnitOfWork());
+
+    IndexCatalogEntry* entry = desc->getEntry();
+    const std::string indexName = entry->descriptor()->indexName();
+
+    // Only indexes that aren't ready can be reset.
+    invariant(!collection->isIndexReady(indexName));
+
+    auto released = [&] {
+        if (auto released = _readyIndexes.release(entry->descriptor())) {
+            invariant(!released, "Cannot reset a ready index");
+        }
+        if (auto released = _buildingIndexes.release(entry->descriptor())) {
+            return released;
+        }
+        if (auto released = _frozenIndexes.release(entry->descriptor())) {
+            return released;
+        }
+        MONGO_UNREACHABLE;
+    }();
+
+    LOGV2(6987700,
+          "Resetting unfinished index",
+          logAttrs(collection->ns()),
+          "index"_attr = indexName,
+          "ident"_attr = released->getIdent());
+
+    invariant(released.get() == entry);
+
+    // Drop the ident if it exists. The storage engine will return OK if the ident is not found.
+    auto engine = opCtx->getServiceContext()->getStorageEngine();
+    const std::string ident = released->getIdent();
+    Status status = engine->getEngine()->dropIdent(opCtx->recoveryUnit(), ident);
+    if (!status.isOK()) {
+        return status;
+    }
+
+    // Recreate the ident on-disk. DurableCatalog::createIndex() will lookup the ident internally
+    // using the catalogId and index name.
+    status = DurableCatalog::get(opCtx)->createIndex(opCtx,
+                                                     collection->getCatalogId(),
+                                                     collection->ns(),
+                                                     collection->getCollectionOptions(),
+                                                     released->descriptor());
+    if (!status.isOK()) {
+        return status;
+    }
+
+    // Update the index entry state in preparation to rebuild the index.
+    if (!released->accessMethod()) {
+        released->setAccessMethod(IndexAccessMethodFactory::get(opCtx)->make(
+            opCtx, collection->ns(), collection->getCollectionOptions(), released.get(), ident));
+    }
+
+    released->setIsFrozen(false);
+    _buildingIndexes.add(std::move(released));
+
+    return Status::OK();
+}
+
 Status IndexCatalogImpl::dropUnfinishedIndex(OperationContext* opCtx,
                                              Collection* collection,
                                              const IndexDescriptor* desc) {
@@ -1345,27 +1409,25 @@ Status IndexCatalogImpl::dropUnfinishedIndex(OperationContext* opCtx,
 namespace {
 class IndexRemoveChange final : public RecoveryUnit::Change {
 public:
-    IndexRemoveChange(OperationContext* opCtx,
-                      const NamespaceString& nss,
+    IndexRemoveChange(const NamespaceString& nss,
                       const UUID& uuid,
                       std::shared_ptr<IndexCatalogEntry> entry,
                       SharedCollectionDecorations* collectionDecorations)
-        : _opCtx(opCtx),
-          _nss(nss),
+        : _nss(nss),
           _uuid(uuid),
           _entry(std::move(entry)),
           _collectionDecorations(collectionDecorations) {}
 
-    void commit(boost::optional<Timestamp> commitTime) final {
+    void commit(OperationContext* opCtx, boost::optional<Timestamp> commitTime) final {
         if (commitTime) {
-            HistoricalIdentTracker::get(_opCtx).recordDrop(
+            HistoricalIdentTracker::get(opCtx).recordDrop(
                 _entry->getIdent(), _nss, _uuid, commitTime.value());
         }
 
         _entry->setDropped();
     }
 
-    void rollback() final {
+    void rollback(OperationContext* opCtx) final {
         auto indexDescriptor = _entry->descriptor();
 
         // Refresh the CollectionIndexUsageTrackerDecoration's knowledge of what indices are
@@ -1377,7 +1439,6 @@ public:
     }
 
 private:
-    OperationContext* _opCtx;
     const NamespaceString _nss;
     const UUID _uuid;
     std::shared_ptr<IndexCatalogEntry> _entry;
@@ -1410,7 +1471,7 @@ Status IndexCatalogImpl::dropIndexEntry(OperationContext* opCtx,
 
     invariant(released.get() == entry);
     opCtx->recoveryUnit()->registerChange(std::make_unique<IndexRemoveChange>(
-        opCtx, collection->ns(), collection->uuid(), released, collection->getSharedDecorations()));
+        collection->ns(), collection->uuid(), released, collection->getSharedDecorations()));
 
     CollectionQueryInfo::get(collection).rebuildIndexData(opCtx, collection);
     CollectionIndexUsageTrackerDecoration::get(collection->getSharedDecorations())
@@ -1584,8 +1645,7 @@ const IndexDescriptor* IndexCatalogImpl::refreshEntry(OperationContext* opCtx,
     auto oldEntry = _readyIndexes.release(oldDesc);
     invariant(oldEntry);
     opCtx->recoveryUnit()->registerChange(
-        std::make_unique<IndexRemoveChange>(opCtx,
-                                            collection->ns(),
+        std::make_unique<IndexRemoveChange>(collection->ns(),
                                             collection->uuid(),
                                             std::move(oldEntry),
                                             collection->getSharedDecorations()));
@@ -1651,7 +1711,7 @@ Status IndexCatalogImpl::_indexRecords(OperationContext* opCtx,
         return _indexFilteredRecords(opCtx, coll, index, bsonRecords, keysInsertedOut);
 
     std::vector<BsonRecord> filteredBsonRecords;
-    for (auto bsonRecord : bsonRecords) {
+    for (const auto& bsonRecord : bsonRecords) {
         if (filter->matchesBSON(*(bsonRecord.docPtr)))
             filteredBsonRecords.push_back(bsonRecord);
     }

@@ -5,9 +5,16 @@
 
 load('jstests/aggregation/extras/utils.js');  // For arrayEq()
 
-const mongod = MongoRunner.runMongod(
-    {auth: '', setParameter: {multitenancySupport: true, featureFlagMongoStore: true}});
-const adminDb = mongod.getDB('admin');
+// TODO SERVER-69726 Make this replica set have multiple nodes.
+const rst = new ReplSetTest({
+    nodes: 1,
+    nodeOptions: {auth: '', setParameter: {multitenancySupport: true, featureFlagMongoStore: true}}
+});
+rst.startSet({keyFile: 'jstests/libs/key1'});
+rst.initiate();
+
+const primary = rst.getPrimary();
+const adminDb = primary.getDB('admin');
 
 // Prepare a user for testing pass tenant via $tenant.
 // Must be authenticated as a user with ActionType::useTenant in order to use $tenant.
@@ -16,10 +23,9 @@ assert(adminDb.auth('admin', 'pwd'));
 
 const kTenant = ObjectId();
 const kOtherTenant = ObjectId();
-const kDbName = 'test';
-const kCollName = 'myColl0';
-
-const tokenConn = new Mongo(mongod.host);
+const kDbName = 'myDb';
+const kCollName = 'myColl';
+const tokenConn = new Mongo(primary.host);
 const securityToken = _createSecurityToken({user: "userTenant1", db: '$external', tenant: kTenant});
 const tokenDB = tokenConn.getDB(kDbName);
 
@@ -30,7 +36,7 @@ const tokenDB = tokenConn.getDB(kDbName);
 // Test commands using a security token for one tenant.
 {
     // Create a user for kTenant and then set the security token on the connection.
-    assert.commandWorked(mongod.getDB('$external').runCommand({
+    assert.commandWorked(primary.getDB('$external').runCommand({
         createUser: "userTenant1",
         '$tenant': kTenant,
         roles:
@@ -132,17 +138,98 @@ const tokenDB = tokenConn.getDB(kDbName);
             {findAndModify: kCollName, query: {a: 11}, update: {$set: {a: 1, b: 1}}}));
     }
 
-    // Drop the database and check that listCollections no longer returns the 3 collections.
+    // ListDatabases only returns databases associated with kTenant.
     {
+        // Create databases for kTenant. A new database is implicitly created when a collection is
+        // created.
+        const kOtherDbName = 'otherDb';
+        assert.commandWorked(tokenConn.getDB(kOtherDbName).createCollection("collName"));
+        const tokenAdminDB = tokenConn.getDB('admin');
+        const dbs =
+            assert.commandWorked(tokenAdminDB.runCommand({listDatabases: 1, nameOnly: true}));
+        assert.eq(3, dbs.databases.length);
+        // TODO SERVER-70053: Change this check to check that we get tenantId prefixed db names.
+        const expectedDbs = ['admin', kDbName, kOtherDbName];
+        assert(arrayEq(expectedDbs, dbs.databases.map(db => db.name)));
+    }
+
+    // Drop the collection, and then the database. Check that listCollections no longer returns the
+    // 3 collections.
+    {
+        assert.commandWorked(tokenDB.runCommand({drop: kCollName}));
+        const collsAfterDropColl = assert.commandWorked(
+            tokenDB.runCommand({listCollections: 1, nameOnly: true, filter: {name: kCollName}}));
+        assert.eq(0,
+                  collsAfterDropColl.cursor.firstBatch.length,
+                  tojson(collsAfterDropColl.cursor.firstBatch));
+
         assert.commandWorked(tokenDB.runCommand({dropDatabase: 1}));
-        const collsAfterDrop =
+        const collsAfterDropDb =
             assert.commandWorked(tokenDB.runCommand({listCollections: 1, nameOnly: true}));
-        assert.eq(
-            0, collsAfterDrop.cursor.firstBatch.length, tojson(collsAfterDrop.cursor.firstBatch));
+        assert.eq(0,
+                  collsAfterDropDb.cursor.firstBatch.length,
+                  tojson(collsAfterDropDb.cursor.firstBatch));
 
         // Reset the collection and document.
         assert.commandWorked(
             tokenDB.runCommand({insert: kCollName, documents: [{_id: 0, a: 1, b: 1}]}));
+    }
+
+    // Test that transactions can be run successfully.
+    {
+        const session = tokenDB.getMongo().startSession();
+        const sessionDb = session.getDatabase(kDbName);
+        session.startTransaction();
+        assert.commandWorked(sessionDb.runCommand(
+            {delete: kCollName, deletes: [{q: {_id: 0, a: 1, b: 1}, limit: 1}]}));
+        session.commitTransaction_forTesting();
+
+        const findRes = assert.commandWorked(tokenDB.runCommand({find: kCollName}));
+        assert.eq(0, findRes.cursor.firstBatch.length, tojson(findRes.cursor.firstBatch));
+
+        // Reset the collection and document.
+        assert.commandWorked(
+            tokenDB.runCommand({insert: kCollName, documents: [{_id: 0, a: 1, b: 1}]}));
+    }
+
+    // Test createIndexes, listIndexes and dropIndexes command.
+    {
+        var sortIndexesByName = function(indexes) {
+            return indexes.sort(function(a, b) {
+                return a.name > b.name;
+            });
+        };
+
+        var getIndexesKeyAndName = function(indexes) {
+            return sortIndexesByName(indexes).map(function(index) {
+                return {key: index.key, name: index.name};
+            });
+        };
+
+        let res = assert.commandWorked(tokenDB.runCommand({
+            createIndexes: kCollName,
+            indexes: [{key: {a: 1}, name: "indexA"}, {key: {b: 1}, name: "indexB"}]
+        }));
+        assert.eq(3, res.numIndexesAfter);
+
+        res = assert.commandWorked(tokenDB.runCommand({listIndexes: kCollName}));
+        assert.eq(3, res.cursor.firstBatch.length);
+        assert(arrayEq(
+            [
+                {key: {"_id": 1}, name: "_id_"},
+                {key: {a: 1}, name: "indexA"},
+                {key: {b: 1}, name: "indexB"}
+            ],
+            getIndexesKeyAndName(res.cursor.firstBatch)));
+
+        // Drop those new created indexes.
+        res = assert.commandWorked(
+            tokenDB.runCommand({dropIndexes: kCollName, index: ["indexA", "indexB"]}));
+
+        res = assert.commandWorked(tokenDB.runCommand({listIndexes: kCollName}));
+        assert.eq(1, res.cursor.firstBatch.length);
+        assert(arrayEq([{key: {"_id": 1}, name: "_id_"}],
+                       getIndexesKeyAndName(res.cursor.firstBatch)));
     }
 }
 
@@ -151,7 +238,7 @@ const tokenDB = tokenConn.getDB(kDbName);
 {
     // Create a user for a different tenant, and set the security token on the connection.
     // We reuse the same connection, but swap the token out.
-    assert.commandWorked(mongod.getDB('$external').runCommand({
+    assert.commandWorked(primary.getDB('$external').runCommand({
         createUser: "userTenant2",
         '$tenant': kOtherTenant,
         roles:
@@ -189,6 +276,19 @@ const tokenDB = tokenConn.getDB(kDbName);
         adminDb.runCommand({renameCollection: fromName, to: toName, dropTarget: true}),
         ErrorCodes.NamespaceNotFound);
 
+    assert.commandFailedWithCode(tokenDB2.runCommand({listIndexes: kCollName}),
+                                 ErrorCodes.NamespaceNotFound);
+    assert.commandFailedWithCode(
+        tokenDB2.runCommand({dropIndexes: kCollName, index: ["indexA", "indexB"]}),
+        ErrorCodes.NamespaceNotFound);
+
+    // ListDatabases with securityToken of kOtherTenant cannot access databases created by kTenant.
+    const dbsWithDiffToken = assert.commandWorked(
+        tokenConn.getDB('admin').runCommand({listDatabases: 1, nameOnly: true}));
+    // Only the 'admin' db exists
+    assert.eq(1, dbsWithDiffToken.databases.length);
+    assert(arrayEq(['admin'], dbsWithDiffToken.databases.map(db => db.name)));
+
     // Attempt to drop the database, then check it was not dropped.
     assert.commandWorked(tokenDB2.runCommand({dropDatabase: 1}));
 
@@ -205,9 +305,9 @@ const tokenDB = tokenConn.getDB(kDbName);
 // commands on the doc when passing the correct tenant, but not when passing a different
 // tenant.
 {
-    const privelegedConn = new Mongo(mongod.host);
+    const privelegedConn = new Mongo(primary.host);
     assert(privelegedConn.getDB('admin').auth('admin', 'pwd'));
-    const privelegedDB = privelegedConn.getDB('test');
+    const privelegedDB = privelegedConn.getDB(kDbName);
 
     // Find and modify the document using $tenant.
     {
@@ -265,5 +365,5 @@ const tokenDB = tokenConn.getDB(kDbName);
     }
 }
 
-MongoRunner.stopMongod(mongod);
+rst.stopSet();
 })();

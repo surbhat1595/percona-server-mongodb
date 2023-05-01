@@ -27,6 +27,7 @@
  *    it in the license file.
  */
 
+#include "mongo/bson/bsonobj.h"
 #include "mongo/unittest/unittest.h"
 
 #include "mongo/db/matcher/expression_parser.h"
@@ -811,54 +812,47 @@ TEST(InternalSchemaBinDataEncryptedTypeExpressionTest, NonBinDataValueDoesNotMat
     ASSERT_FALSE(expr->matchesBSON(notMatch));
 }
 
-TEST(EncryptedBetweenMatchExpressionTest, EncryptedBetweenExpectedBehaviorRHSNumeric) {
-    BSONObj query = BSON("a" << BSON("$encryptedBetween" << 5));
-    BSONObj inner = BSON("$encryptedBetween" << 5);
+TEST(BetweenMatchExpressionTest, BetweenExpectedBehaviorRHSNumeric) {
+    BSONObj query = fromjson("{'a': {$between: [3.10, 6.20]}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
-    ASSERT_TRUE(result.isOK());
 
-    ASSERT_EQ(result.getValue()->matchType(), MatchExpression::ENCRYPTED_BETWEEN);
-    auto ptr = result.getValue().get();
-    auto expr = static_cast<EncryptedBetweenMatchExpression*>(ptr);
-    ASSERT_BSONOBJ_EQ(expr->getSerializedRightHandSide(), inner);
+    ASSERT_TRUE(result.isOK());
+    ASSERT_EQ(result.getValue()->matchType(), MatchExpression::AND);
+    result.getValue()->matchesBSON(fromjson("{a: {$gte: 3.10, $lte: 6.20}}"));
 }
 
-TEST(EncryptedBetweenMatchExpressionTest, EncryptedBetweenExpectedBehaviorRHSDate) {
-    auto date = Date_t::now();
-    BSONObj query = BSON("a" << BSON("$encryptedBetween" << date));
-    BSONObj inner = BSON("$encryptedBetween" << date);
+TEST(BetweenMatchExpressionTest, BetweenExpectedBehaviorRHSDate) {
+    Date_t date = Date_t::now();
+    Date_t pastDate = date - Seconds(100);
+    BSONObj query = BSON("a" << BSON("$between" << BSON_ARRAY(pastDate << date)));
+    BSONObj greater = BSON("$gte" << pastDate);
+    BSONObj lesser = BSON("$lte" << date);
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
-    ASSERT_TRUE(result.isOK());
 
-    ASSERT_EQ(result.getValue()->matchType(), MatchExpression::ENCRYPTED_BETWEEN);
-    auto ptr = result.getValue().get();
-    auto expr = static_cast<EncryptedBetweenMatchExpression*>(ptr);
-    ASSERT_BSONOBJ_EQ(expr->getSerializedRightHandSide(), inner);
+    ASSERT_TRUE(result.isOK());
+    ASSERT_EQ(result.getValue()->matchType(), MatchExpression::AND);
+    result.getValue()->matchesBSON(BSON("a" << BSON_ARRAY(greater << lesser)));
 }
 
-TEST(EncryptedBetweenMatchExpressionTest, EncryptedBetweenExpectedBehaviorInsideAnd) {
-    BSONObj query = fromjson("{$and: [{x: 1}, {a: {$encryptedBetween: 5}}]}");
-    BSONObj inner = BSON("$encryptedBetween" << 5);
+TEST(BetweenMatchExpressionTest, BetweenExpectedBehaviorInsideAnd) {
+    BSONObj query =
+        fromjson("{$and: [{ a: { $ne: 'yellow' }}, {a: {$between: ['galaxy', 'zebra']}}]}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT_EQ(result.getValue()->matchType(), MatchExpression::AND);
-    ASSERT_EQ(result.getValue()->getChild(0)->matchType(), MatchExpression::EQ);
+    ASSERT_EQ(result.getValue()->getChild(0)->matchType(), MatchExpression::NOT);
 
-    auto ptr = result.getValue().get();
-    auto encryptedBetweenChild = ptr->getChild(1);
-    ASSERT_EQ(encryptedBetweenChild->matchType(), MatchExpression::ENCRYPTED_BETWEEN);
-
-    auto expr = static_cast<EncryptedBetweenMatchExpression*>(encryptedBetweenChild);
-    ASSERT_BSONOBJ_EQ(expr->getSerializedRightHandSide(), inner);
+    auto ptr = result.getValue()->getChild(1);
+    ASSERT_EQ(ptr->matchType(), MatchExpression::AND);
+    ptr->matchesBSON(fromjson("{a: {$gte: 'galaxy', $lte: 'zebra'}}"));
 }
 
-TEST(EncryptedBetweenMatchExpressionTest, EncryptedBetweenExpectedBehaviorInsideNot) {
-    BSONObj query = fromjson("{a: {$not: {$encryptedBetween: 5}}}");
-    BSONObj inner = BSON("$encryptedBetween" << 5);
+TEST(BetweenMatchExpressionTest, BetweenExpectedBehaviorInsideNot) {
+    BSONObj query = fromjson("{a: {$not: {$between: [3, 5]}}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
@@ -866,25 +860,57 @@ TEST(EncryptedBetweenMatchExpressionTest, EncryptedBetweenExpectedBehaviorInside
     ASSERT_EQ(result.getValue()->matchType(), MatchExpression::NOT);
     ASSERT_EQ(result.getValue()->getChild(0)->matchType(), MatchExpression::AND);
 
-    auto ptr = result.getValue().get();
-    auto encryptedBetweenChild = ptr->getChild(0)->getChild(0);
-    ASSERT_EQ(encryptedBetweenChild->matchType(), MatchExpression::ENCRYPTED_BETWEEN);
-    auto expr = static_cast<EncryptedBetweenMatchExpression*>(encryptedBetweenChild);
-    ASSERT_BSONOBJ_EQ(expr->getSerializedRightHandSide(), inner);
+    auto ptr = result.getValue()->getChild(0)->getChild(0);
+    ptr->matchesBSON(fromjson("{a: {$gte: 3, $lte: 5}}"));
 }
 
-TEST(EncryptedBetweenMatchExpressionTest, EncryptedBetweenExpectedBehaviorDottedPath) {
-    BSONObj query = fromjson("{'a.b': {$encryptedBetween: 5}}");
-    BSONObj inner = BSON("$encryptedBetween" << 5);
+TEST(BetweenMatchExpressionTest, BetweenExpectedBehaviorDottedPath) {
+    BSONObj query = fromjson("{'a.b': {$between: [3, 5]}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
-    ASSERT_TRUE(result.isOK());
-    ASSERT_EQ(result.getValue()->path(), "a.b");
 
-    ASSERT_EQ(result.getValue()->matchType(), MatchExpression::ENCRYPTED_BETWEEN);
-    auto ptr = result.getValue().get();
-    auto expr = static_cast<EncryptedBetweenMatchExpression*>(ptr);
-    ASSERT_BSONOBJ_EQ(expr->getSerializedRightHandSide(), inner);
+    ASSERT_TRUE(result.isOK());
+    ASSERT_EQ(result.getValue()->matchType(), MatchExpression::AND);
+    result.getValue()->matchesBSON(fromjson("{'a.b': {$gte: 3, $lte: 5}}"));
+}
+
+TEST(BetweenMatchExpressionTest, BetweenExpectedBehaviorBinData) {
+    uint8_t bytes[] = {0, 1, 2, 3, 4, 5};
+    BSONObj match = BSON("a" << BSON("$between" << BSONBinData(bytes, 5, BinDataType::Encrypt)));
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(match, expCtx);
+    ASSERT_TRUE(result.isOK());
+    ASSERT_EQ(result.getValue()->matchType(), MatchExpression::BETWEEN);
+}
+
+TEST(BetweenMatchExpressionTest, BetweenFailsWithUnencryptedBinData) {
+    uint8_t bytes[] = {0, 1, 2, 3, 4, 5};
+    BSONObj match = BSON("a" << BSON("$between" << BSONBinData(bytes, 5, BinDataType::bdtCustom)));
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(match, expCtx);
+    ASSERT_EQ(result.getStatus(), ErrorCodes::BadValue);
+}
+
+TEST(BetweenMatchExpressionTest, BetweenFailsToParseArrayTooSmall) {
+    BSONObj query = BSON("a" << BSON("$between" << BSON_ARRAY(1)));
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
+    ASSERT_EQ(result.getStatus(), ErrorCodes::FailedToParse);
+}
+
+TEST(BetweenMatchExpressionTest, BetweenFailsToParseArrayTooLarge) {
+    BSONObj query = BSON("a" << BSON("$between" << BSON_ARRAY(1 << 5 << "apple")));
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
+    ASSERT_EQ(result.getStatus(), ErrorCodes::FailedToParse);
+}
+
+TEST(BetweenMatchExpressionTest, BetweenFailsWithBadValue) {
+    BSONObj query = BSON("a" << BSON("$between"
+                                     << "galaxy"));
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
+    ASSERT_EQ(result.getStatus(), ErrorCodes::BadValue);
 }
 
 }  // namespace mongo

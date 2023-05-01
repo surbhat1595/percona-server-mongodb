@@ -82,6 +82,12 @@ public:
     // Name for the system.js collection
     static constexpr StringData kSystemDotJavascriptCollectionName = "system.js"_sd;
 
+    // Name of the pre-images collection.
+    static constexpr StringData kPreImagesCollectionName = "system.preimages"_sd;
+
+    // Prefix for the collection storing collection statistics.
+    static constexpr StringData kStatisticsCollectionPrefix = "system.statistics."_sd;
+
     // Name for the change stream change collection.
     static constexpr StringData kChangeCollectionName = "system.change_collection"_sd;
 
@@ -170,9 +176,6 @@ public:
 
     // Namespace for storing the last replica set election vote.
     static const NamespaceString kLastVoteNamespace;
-
-    // Namespace for change stream pre-images collection.
-    static const NamespaceString kChangeStreamPreImagesNamespace;
 
     // Namespace for index build entries.
     static const NamespaceString kIndexBuildEntryNamespace;
@@ -263,6 +266,9 @@ public:
 
     // Namespace used for storing global index cloner state documents.
     static const NamespaceString kGlobalIndexClonerNamespace;
+
+    // Namespace used for storing query analyzer settings.
+    static const NamespaceString kConfigQueryAnalyzersNamespace;
 
     /**
      * Constructs an empty NamespaceString.
@@ -547,6 +553,11 @@ public:
      * Returns true if the namespace is an oplog or a change collection, false otherwise.
      */
     bool isOplogOrChangeCollection() const;
+
+    /**
+     * Returns true if the namespace is a system.statistics collection, false otherwise.
+     */
+    bool isSystemStatsCollection() const;
 
     /**
      * Returns the time-series buckets namespace for this view.

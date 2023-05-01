@@ -115,10 +115,10 @@ struct Multiplication {
  * standard numeric types and also operations on the Date type.
  */
 template <typename Op>
-std::tuple<bool, value::TypeTags, value::Value> genericArithmeticOp(value::TypeTags lhsTag,
-                                                                    value::Value lhsValue,
-                                                                    value::TypeTags rhsTag,
-                                                                    value::Value rhsValue) {
+FastTuple<bool, value::TypeTags, value::Value> genericArithmeticOp(value::TypeTags lhsTag,
+                                                                   value::Value lhsValue,
+                                                                   value::TypeTags rhsTag,
+                                                                   value::Value rhsValue) {
     if (value::isNumber(lhsTag) && value::isNumber(rhsTag)) {
         switch (getWidestNumericalType(lhsTag, rhsTag)) {
             case value::TypeTags::NumberInt32: {
@@ -215,12 +215,12 @@ std::tuple<bool, value::TypeTags, value::Value> genericArithmeticOp(value::TypeT
                     break;
                 }
                 case TypeTags::NumberDecimal: {
-                    using limits = std::numeric_limits<int64_t>;
                     auto decimalRhs = numericCast<Decimal128>(rhsTag, rhsValue);
-                    if (decimalRhs.isGreaterEqual(Decimal128{limits::min()}) &&
-                        decimalRhs.isLess(Decimal128{limits::max()}) &&
-                        !Op::doOperation(
-                            bitcastTo<int64_t>(lhsValue), decimalRhs.toLong(), result)) {
+
+                    std::uint32_t signalingFlags = Decimal128::SignalingFlag::kNoFlag;
+                    std::int64_t longRhs = decimalRhs.toLong(&signalingFlags);
+                    if (signalingFlags == Decimal128::SignalingFlag::kNoFlag &&
+                        !Op::doOperation(bitcastTo<int64_t>(lhsValue), longRhs, result)) {
                         return {false, value::TypeTags::Date, value::bitcastFrom<int64_t>(result)};
                     }
                     break;
@@ -236,7 +236,7 @@ std::tuple<bool, value::TypeTags, value::Value> genericArithmeticOp(value::TypeT
         } else {
             int64_t result;
             if (!Op::doOperation(
-                    bitcastTo<int64_t>(lhsValue), bitcastTo<int64_t>(lhsValue), result)) {
+                    bitcastTo<int64_t>(lhsValue), bitcastTo<int64_t>(rhsValue), result)) {
                 return {false, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(result)};
             }
         }
@@ -247,25 +247,46 @@ std::tuple<bool, value::TypeTags, value::Value> genericArithmeticOp(value::TypeT
     return {false, value::TypeTags::Nothing, 0};
 }
 
-std::tuple<bool, value::TypeTags, value::Value> genericAdd(value::TypeTags lhsTag,
-                                                           value::Value lhsValue,
-                                                           value::TypeTags rhsTag,
-                                                           value::Value rhsValue) {
+FastTuple<bool, value::TypeTags, value::Value> genericAdd(value::TypeTags lhsTag,
+                                                          value::Value lhsValue,
+                                                          value::TypeTags rhsTag,
+                                                          value::Value rhsValue) {
     return genericArithmeticOp<Addition>(lhsTag, lhsValue, rhsTag, rhsValue);
 }
 
-std::tuple<bool, value::TypeTags, value::Value> genericSub(value::TypeTags lhsTag,
-                                                           value::Value lhsValue,
-                                                           value::TypeTags rhsTag,
-                                                           value::Value rhsValue) {
+FastTuple<bool, value::TypeTags, value::Value> genericSub(value::TypeTags lhsTag,
+                                                          value::Value lhsValue,
+                                                          value::TypeTags rhsTag,
+                                                          value::Value rhsValue) {
     return genericArithmeticOp<Subtraction>(lhsTag, lhsValue, rhsTag, rhsValue);
 }
 
-std::tuple<bool, value::TypeTags, value::Value> genericMul(value::TypeTags lhsTag,
-                                                           value::Value lhsValue,
-                                                           value::TypeTags rhsTag,
-                                                           value::Value rhsValue) {
+FastTuple<bool, value::TypeTags, value::Value> genericMul(value::TypeTags lhsTag,
+                                                          value::Value lhsValue,
+                                                          value::TypeTags rhsTag,
+                                                          value::Value rhsValue) {
     return genericArithmeticOp<Multiplication>(lhsTag, lhsValue, rhsTag, rhsValue);
+}
+
+FastTuple<bool, value::TypeTags, value::Value> genericNumConvert(value::TypeTags lhsTag,
+                                                                 value::Value lhsValue,
+                                                                 value::TypeTags targetTag) {
+    if (value::isNumber(lhsTag)) {
+        switch (lhsTag) {
+            case value::TypeTags::NumberInt32:
+                return numericConvLossless<int32_t>(value::bitcastTo<int32_t>(lhsValue), targetTag);
+            case value::TypeTags::NumberInt64:
+                return numericConvLossless<int64_t>(value::bitcastTo<int64_t>(lhsValue), targetTag);
+            case value::TypeTags::NumberDouble:
+                return numericConvLossless<double>(value::bitcastTo<double>(lhsValue), targetTag);
+            case value::TypeTags::NumberDecimal:
+                return numericConvLossless<Decimal128>(value::bitcastTo<Decimal128>(lhsValue),
+                                                       targetTag);
+            default:
+                MONGO_UNREACHABLE
+        }
+    }
+    return {false, value::TypeTags::Nothing, 0};
 }
 
 }  // namespace mongo::sbe::value

@@ -32,6 +32,7 @@
 
 #include "mongo/db/repl/oplog_entry.h"
 
+#include "mongo/db/global_index.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/server_feature_flags_gen.h"
@@ -125,6 +126,20 @@ BSONObj makeOplogEntryDoc(OpTime opTime,
     }
     return builder.obj();
 }
+
+ReplOperation makeGlobalIndexCrudOperation(const NamespaceString& indexNss,
+                                           const UUID indexUuid,
+                                           const BSONObj& key,
+                                           const BSONObj& docKey) {
+    ReplOperation op;
+    // The 'ns' field is technically redundant as it can be derived from the uuid, however it's a
+    // required oplog entry field.
+    op.setNss(indexNss.getCommandNS());
+    op.setUuid(indexUuid);
+    op.setObject(BSON(global_index::kOplogEntryIndexKeyFieldName
+                      << key << global_index::kOplogEntryDocKeyFieldName << docKey));
+    return op;
+}
 }  // namespace
 
 DurableOplogEntry::CommandType parseCommandType(const BSONObj& objectField) {
@@ -163,12 +178,16 @@ DurableOplogEntry::CommandType parseCommandType(const BSONObj& objectField) {
         return DurableOplogEntry::CommandType::kAbortTransaction;
     } else if (commandString == "importCollection") {
         return DurableOplogEntry::CommandType::kImportCollection;
+    } else if (commandString == "modifyShardedCollectionGlobalIndexCatalog") {
+        return DurableOplogEntry::CommandType::kModifyShardedCollectionGlobalIndexCatalog;
     } else if (commandString == "createGlobalIndex") {
         return DurableOplogEntry::CommandType::kCreateGlobalIndex;
     } else if (commandString == "dropGlobalIndex") {
         return DurableOplogEntry::CommandType::kDropGlobalIndex;
     } else if (commandString == "xi") {
         return DurableOplogEntry::CommandType::kInsertGlobalIndexKey;
+    } else if (commandString == "xd") {
+        return DurableOplogEntry::CommandType::kDeleteGlobalIndexKey;
     } else {
         uasserted(ErrorCodes::BadValue,
                   str::stream() << "Unknown oplog entry command type: " << commandString
@@ -283,11 +302,17 @@ ReplOperation MutableOplogEntry::makeInsertGlobalIndexKeyOperation(const Namespa
                                                                    const UUID indexUuid,
                                                                    const BSONObj& key,
                                                                    const BSONObj& docKey) {
-    ReplOperation op;
+    ReplOperation op = makeGlobalIndexCrudOperation(indexNss, indexUuid, key, docKey);
     op.setOpType(OpTypeEnum::kInsertGlobalIndexKey);
-    op.setNss(indexNss.getCommandNS());
-    op.setUuid(indexUuid);
-    op.setObject(BSON("key" << key << "docKey" << docKey));
+    return op;
+}
+
+ReplOperation MutableOplogEntry::makeDeleteGlobalIndexKeyOperation(const NamespaceString& indexNss,
+                                                                   const UUID indexUuid,
+                                                                   const BSONObj& key,
+                                                                   const BSONObj& docKey) {
+    ReplOperation op = makeGlobalIndexCrudOperation(indexNss, indexUuid, key, docKey);
+    op.setOpType(OpTypeEnum::kDeleteGlobalIndexKey);
     return op;
 }
 
@@ -400,6 +425,7 @@ bool DurableOplogEntry::isCrudOpType(OpTypeEnum opType) {
         case OpTypeEnum::kDelete:
         case OpTypeEnum::kUpdate:
         case OpTypeEnum::kInsertGlobalIndexKey:
+        case OpTypeEnum::kDeleteGlobalIndexKey:
             return true;
         case OpTypeEnum::kCommand:
         case OpTypeEnum::kNoop:
@@ -417,6 +443,7 @@ bool DurableOplogEntry::isUpdateOrDelete() const {
     switch (opType) {
         case OpTypeEnum::kDelete:
         case OpTypeEnum::kUpdate:
+        case OpTypeEnum::kDeleteGlobalIndexKey:
             return true;
         case OpTypeEnum::kInsert:
         case OpTypeEnum::kCommand:
@@ -755,6 +782,7 @@ mongo::Date_t OplogEntry::getWallClockTimeForPreImage() const {
 bool OplogEntry::isCrudOpType() const {
     return _entry.isCrudOpType();
 }
+
 bool OplogEntry::isUpdateOrDelete() const {
     return _entry.isUpdateOrDelete();
 }

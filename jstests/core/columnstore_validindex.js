@@ -3,9 +3,12 @@
  * @tags: [
  *   # Uses index building in background.
  *   requires_background_index,
- *   # Columnstore indexes are new in 6.2.
- *   requires_fcv_62,
+ *   # column store indexes are still under a feature flag and require full sbe
  *   uses_column_store_index,
+ *   featureFlagColumnstoreIndexes,
+ *   featureFlagSbeFull,
+ *   # TODO SERVER-69884: featureFlag guarded tests shouldn't require explicit 'no_selinux' tag.
+ *   no_selinux,
  * ]
  */
 (function() {
@@ -13,16 +16,6 @@
 
 load("jstests/libs/index_catalog_helpers.js");     // For "IndexCatalogHelpers."
 load("jstests/libs/collection_drop_recreate.js");  // For "assertDropCollection."
-
-const getParamResponse =
-    assert.commandWorked(db.adminCommand({getParameter: 1, featureFlagColumnstoreIndexes: 1}));
-const columnstoreEnabled = getParamResponse.hasOwnProperty("featureFlagColumnstoreIndexes") &&
-    getParamResponse.featureFlagColumnstoreIndexes.value;
-if (!columnstoreEnabled) {
-    jsTestLog("Skipping test about validating columnstore index specifications since the" +
-              " columnstore index feature flag is not enabled.");
-    return;
-}
 
 const kCollectionName = "columnstore_validindex";
 const coll = db.getCollection(kCollectionName);

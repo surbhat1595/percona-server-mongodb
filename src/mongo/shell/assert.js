@@ -207,15 +207,18 @@ assert = (function() {
             msg, "[" + tojson(a) + "] != [" + tojson(b) + "] are not equal"));
     };
 
-    assert.setEq = function(aSet, bSet, msg) {
+    assert.setEq = function(expectedSet, actualSet, msg) {
         const failAssertion = function() {
-            doassert(_buildAssertionMessage(msg, tojson(aSet) + " != " + tojson(bSet)));
+            doassert(_buildAssertionMessage(msg,
+                                            "expected set " + tojson(expectedSet) +
+                                                " and actual set " + tojson(actualSet) +
+                                                " are not equal"));
         };
-        if (aSet.size !== bSet.size) {
+        if (expectedSet.size !== actualSet.size) {
             failAssertion();
         }
-        for (let a of aSet) {
-            if (!bSet.has(a)) {
+        for (let a of expectedSet) {
+            if (!actualSet.has(a)) {
                 failAssertion();
             }
         }
@@ -341,14 +344,6 @@ assert = (function() {
     assert.soon = function(func, msg, timeout, interval, {runHangAnalyzer = true} = {}) {
         _validateAssertionMessage(msg);
 
-        var msgPrefix = "assert.soon failed: " + func;
-
-        if (msg) {
-            if (typeof (msg) != "function") {
-                msgPrefix = "assert.soon failed, msg";
-            }
-        }
-
         var start = new Date();
 
         if (TestData && TestData.inEvergreen) {
@@ -358,6 +353,14 @@ assert = (function() {
         }
 
         interval = interval || 200;
+
+        var msgPrefix = "assert.soon failed (timeout " + timeout + "ms): " + func;
+
+        if (msg) {
+            if (typeof (msg) != "function") {
+                msgPrefix = "assert.soon failed (timeout " + timeout + "ms), msg";
+            }
+        }
 
         while (1) {
             if (typeof (func) == "string") {

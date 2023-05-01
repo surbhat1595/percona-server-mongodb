@@ -31,6 +31,7 @@
 
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/change_stream_change_collection_manager.h"
+#include "mongo/db/change_stream_serverless_helpers.h"
 #include "mongo/db/change_streams_cluster_parameter_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -56,28 +57,27 @@ MONGO_FAIL_POINT_DEFINE(injectCurrentWallTimeForRemovingExpiredDocuments);
 
 namespace {
 
-// TODO SERVER-61822 Provide the real implementation after 'listDatabasesForAllTenants' is
-// available.
-std::vector<boost::optional<TenantId>> getAllTenants() {
-    return {boost::none};
+change_stream_serverless_helpers::TenantSet getConfigDbTenants(OperationContext* opCtx) {
+    auto tenantIds = change_stream_serverless_helpers::getConfigDbTenants(opCtx);
+    if (auto testTenantId = change_stream_serverless_helpers::resolveTenantId(boost::none)) {
+        tenantIds.insert(*testTenantId);
+    }
+
+    return tenantIds;
 }
 
-boost::optional<int64_t> getExpireAfterSeconds(boost::optional<TenantId> tid) {
+boost::optional<int64_t> getExpireAfterSeconds(const TenantId& tenantId) {
     auto* clusterParameters = ServerParameterSet::getClusterParameterSet();
     auto* changeStreamsParam =
         clusterParameters->get<ClusterParameterWithStorage<ChangeStreamsClusterParameterStorage>>(
             "changeStreams");
-    return changeStreamsParam->getValue(tid).getExpireAfterSeconds();
+
+    // TODO SERVER-69511 Pass 'tenantId' instead of 'boost::none'. Move this function to
+    // 'change_stream_serverless_helpers'.
+    return changeStreamsParam->getValue(boost::none).getExpireAfterSeconds();
 }
 
 void removeExpiredDocuments(Client* client) {
-    // TODO SERVER-66717 Remove this logic from this method. Due to the delay in the feature flag
-    // activation it was placed here. The remover job should ultimately be initialized at the mongod
-    // startup when launched in serverless mode.
-    if (!ChangeStreamChangeCollectionManager::isChangeCollectionsModeActive()) {
-        return;
-    }
-
     hangBeforeRemovingExpiredChanges.pauseWhileSet();
 
     try {
@@ -98,7 +98,7 @@ void removeExpiredDocuments(Client* client) {
         long long maxStartWallTime = 0;
         auto& changeCollectionManager = ChangeStreamChangeCollectionManager::get(opCtx.get());
 
-        for (const auto& tenantId : getAllTenants()) {
+        for (const auto& tenantId : getConfigDbTenants(opCtx.get())) {
             auto expiredAfterSeconds = getExpireAfterSeconds(tenantId);
             invariant(expiredAfterSeconds);
 
@@ -169,13 +169,13 @@ void removeExpiredDocuments(Client* client) {
 
 /**
  * Defines a periodic background job to remove expired documents from change collections.
- * The job will run every 'changeCollectionRemoverJobSleepSeconds', as defined in the cluster
- * parameter.
+ * The job will run every 'changeCollectionExpiredDocumentsRemoverJobSleepSeconds', as defined in
+ * the cluster parameter.
  */
 class ChangeCollectionExpiredDocumentsRemover {
 public:
     ChangeCollectionExpiredDocumentsRemover(ServiceContext* serviceContext) {
-        const auto period = Seconds{gChangeCollectionRemoverJobSleepSeconds.load()};
+        const auto period = Seconds{gChangeCollectionExpiredDocumentsRemoverJobSleepSeconds.load()};
         _jobAnchor = serviceContext->getPeriodicRunner()->makeJob(
             {"ChangeCollectionExpiredDocumentsRemover", removeExpiredDocuments, period});
         _jobAnchor.start();
@@ -204,12 +204,16 @@ private:
 }  // namespace
 
 void startChangeCollectionExpiredDocumentsRemover(ServiceContext* serviceContext) {
-    LOGV2(6663507, "Starting the ChangeCollectionExpiredChangeRemover");
-    ChangeCollectionExpiredDocumentsRemover::start(serviceContext);
+    if (change_stream_serverless_helpers::canInitializeServices()) {
+        LOGV2(6663507, "Starting the ChangeCollectionExpiredChangeRemover");
+        ChangeCollectionExpiredDocumentsRemover::start(serviceContext);
+    }
 }
 
 void shutdownChangeCollectionExpiredDocumentsRemover(ServiceContext* serviceContext) {
-    LOGV2(6663508, "Shutting down the ChangeCollectionExpiredChangeRemover");
-    ChangeCollectionExpiredDocumentsRemover::shutdown(serviceContext);
+    if (change_stream_serverless_helpers::canInitializeServices()) {
+        LOGV2(6663508, "Shutting down the ChangeCollectionExpiredChangeRemover");
+        ChangeCollectionExpiredDocumentsRemover::shutdown(serviceContext);
+    }
 }
 }  // namespace mongo

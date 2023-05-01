@@ -41,7 +41,7 @@ public:
     RecoveryUnit* newRecoveryUnit() final {
         return nullptr;
     }
-    std::vector<DatabaseName> listDatabases() const final {
+    std::vector<DatabaseName> listDatabases(boost::optional<TenantId> tenantId) const final {
         return {};
     }
     bool supportsCappedCollections() const final {
@@ -53,7 +53,9 @@ public:
     bool isEphemeral() const final {
         return true;
     }
-    void loadCatalog(OperationContext* opCtx, LastShutdownState lastShutdownState) final {}
+    void loadCatalog(OperationContext* opCtx,
+                     boost::optional<Timestamp> stableTs,
+                     LastShutdownState lastShutdownState) final {}
     void closeCatalog(OperationContext* opCtx) final {}
     Status closeDatabase(OperationContext* opCtx, const DatabaseName& dbName) final {
         return Status::OK();
@@ -100,7 +102,7 @@ public:
         OperationContext* opCtx, StringData ident) final {
         return {};
     }
-    void cleanShutdown() final {}
+    void cleanShutdown(ServiceContext* svcCtx) final {}
     SnapshotManager* getSnapshotManager() const final {
         return nullptr;
     }
@@ -171,9 +173,13 @@ public:
     void addDropPendingIdent(const Timestamp& dropTimestamp,
                              std::shared_ptr<Ident> ident,
                              DropIdentCallback&& onDrop) final {}
+    void dropIdentsOlderThan(OperationContext* opCtx, const Timestamp& ts) final {}
+    std::shared_ptr<Ident> markIdentInUse(const std::string& ident) final {
+        return nullptr;
+    }
     void startTimestampMonitor() final {}
 
-    void checkpoint() final {}
+    void checkpoint(OperationContext* opCtx) final {}
 
     int64_t sizeOnDiskForDb(OperationContext* opCtx, const DatabaseName& dbName) final {
         return 0;

@@ -262,17 +262,15 @@ var TenantMigrationUtil = (function() {
         return res;
     }
 
-    const ServerlessLockType = {
-        ShardSplitDonor: 'shard split donor',
-        TenantMigrationDonor: 'tenant migration donor',
-        TenantMigrationRecipient: 'tenant migration recipient'
-    };
+    const ServerlessLockType =
+        {None: 0, ShardSplitDonor: 1, TenantMigrationDonor: 2, TenantMigrationRecipient: 3};
 
     /**
      * Return the active serverless operation lock, if one is acquired.
      */
     function getServerlessOperationLock(node) {
-        return assert.commandWorked(node.adminCommand({serverStatus: 1})).serverless.operationLock;
+        return assert.commandWorked(node.adminCommand({serverStatus: 1, serverless: 1}))
+            .serverless.operationLock;
     }
 
     /**

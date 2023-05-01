@@ -509,11 +509,8 @@ private:
                 auto const lockDeadline = Date_t::now() + timeoutMs;
                 timeoutMs *= 2;
 
-                AutoGetCollection agc(opCtx,
-                                      info.nss,
-                                      lockMode,
-                                      AutoGetCollectionViewMode::kViewsForbidden,
-                                      lockDeadline);
+                AutoGetCollection agc(
+                    opCtx, info.nss, lockMode, AutoGetCollection::Options{}.deadline(lockDeadline));
 
                 if (_stepdownHasOccurred(opCtx, info.nss)) {
                     _done = true;
@@ -671,12 +668,12 @@ public:
                "Invoke with {dbCheck: 1} to check all collections in the database.";
     }
 
-    virtual Status checkAuthForCommand(Client* client,
-                                       const std::string& dbname,
-                                       const BSONObj& cmdObj) const {
-        const bool isAuthorized =
-            AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
-                ResourcePattern::forAnyResource(), ActionType::dbCheck);
+    Status checkAuthForOperation(OperationContext* opCtx,
+                                 const DatabaseName&,
+                                 const BSONObj&) const override {
+        const bool isAuthorized = AuthorizationSession::get(opCtx->getClient())
+                                      ->isAuthorizedForActionsOnResource(
+                                          ResourcePattern::forAnyResource(), ActionType::dbCheck);
         return isAuthorized ? Status::OK() : Status(ErrorCodes::Unauthorized, "Unauthorized");
     }
 

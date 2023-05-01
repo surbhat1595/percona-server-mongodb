@@ -146,7 +146,8 @@ StatusWith<WriteConcernOptions> extractWriteConcern(OperationContext* opCtx,
         serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&
         !opCtx->getClient()->isInDirectClient() &&
         (opCtx->getClient()->session() &&
-         (opCtx->getClient()->session()->getTags() & transport::Session::kInternalClient))) {
+         (opCtx->getClient()->session()->getTags() & transport::Session::kInternalClient)) &&
+        !opCtx->inMultiDocumentTransaction()) {
         // Upconvert the writeConcern of any incoming requests from internal connections (i.e.,
         // from other nodes in the cluster) to "majority." This protects against internal code that
         // does not specify writeConcern when writing to the config server.
@@ -269,8 +270,7 @@ Status waitForWriteConcern(OperationContext* opCtx,
         // This fail point pauses with an open snapshot on the oplog. Some tests pause on this fail
         // point prior to running replication rollback. This prevents the operation from being
         // killed and the snapshot being released. Hence, we release the snapshot here.
-        auto recoveryUnit = opCtx->releaseAndReplaceRecoveryUnit();
-        recoveryUnit.reset();
+        opCtx->replaceRecoveryUnit();
 
         hangBeforeWaitingForWriteConcern.pauseWhileSet();
     }

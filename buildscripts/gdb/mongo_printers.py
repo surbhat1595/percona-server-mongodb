@@ -774,7 +774,11 @@ class SbeCodeFragmentPrinter(object):
         value_size = gdb.lookup_type('mongo::sbe::value::Value').sizeof
         uint8_size = gdb.lookup_type('uint8_t').sizeof
         uint32_size = gdb.lookup_type('uint32_t').sizeof
+        uint64_size = gdb.lookup_type('uint64_t').sizeof
         builtin_size = gdb.lookup_type('mongo::sbe::vm::Builtin').sizeof
+        time_unit_size = gdb.lookup_type('mongo::TimeUnit').sizeof
+        timezone_size = gdb.lookup_type('mongo::TimeZone').sizeof
+        day_of_week_size = gdb.lookup_type('mongo::DayOfWeek').sizeof
 
         cur_op = self.pdata
         end_op = self.pdata + self.size
@@ -802,7 +806,7 @@ class SbeCodeFragmentPrinter(object):
                 offset = read_as_integer(cur_op, int_size)
                 cur_op += int_size
                 args = 'offset: ' + str(offset) + ', target: ' + hex(cur_op + offset)
-            elif op_name in ['pushConstVal', 'getFieldConst']:
+            elif op_name in ['pushConstVal', 'getFieldImm']:
                 tag = read_as_integer(cur_op, tag_size)
                 args = 'tag: ' + self.valuetags_lookup.get(tag, "unknown") + \
                     ', value: ' + hex(read_as_integer(cur_op + tag_size, value_size))
@@ -814,7 +818,7 @@ class SbeCodeFragmentPrinter(object):
                 args = 'convert to: ' + \
                     self.valuetags_lookup.get(read_as_integer(cur_op, tag_size), "unknown")
                 cur_op += tag_size
-            elif op_name in ['typeMatch']:
+            elif op_name in ['typeMatchImm']:
                 args = 'mask: ' + hex(read_as_integer(cur_op, uint32_size))
                 cur_op += uint32_size
             elif op_name in ['function', 'functionSmall']:
@@ -826,10 +830,10 @@ class SbeCodeFragmentPrinter(object):
                 args = 'builtin: ' + self.builtins_lookup.get(builtin_id, "unknown")
                 args += ' arity: ' + str(read_as_integer(cur_op + builtin_size, arity_size))
                 cur_op += (builtin_size + arity_size)
-            elif op_name in ['fillEmptyConst']:
+            elif op_name in ['fillEmptyImm']:
                 args = 'Instruction::Constants: ' + str(read_as_integer(cur_op, uint8_size))
                 cur_op += uint8_size
-            elif op_name in ['traverseFConst', 'traversePConst']:
+            elif op_name in ['traverseFImm', 'traversePImm']:
                 const_enum = read_as_integer(cur_op, uint8_size)
                 cur_op += uint8_size
                 args = \
@@ -838,6 +842,19 @@ class SbeCodeFragmentPrinter(object):
             elif op_name in ['applyClassicMatcher']:
                 args = 'MatchExpression* ' + hex(read_as_integer(cur_op, ptr_size))
                 cur_op += ptr_size
+            elif op_name in ['dateTruncImm']:
+                unit = read_as_integer(cur_op, time_unit_size)
+                cur_op += time_unit_size
+                args = 'unit: ' + str(unit)
+                bin_size = read_as_integer(cur_op, uint64_size)
+                cur_op += uint64_size
+                args += ', binSize: ' + str(bin_size)
+                timezone = read_as_integer(cur_op, timezone_size)
+                cur_op += timezone_size
+                args += ', timezone: ' + hex(timezone)
+                day_of_week = read_as_integer(cur_op, day_of_week_size)
+                cur_op += day_of_week_size
+                args += ', dayOfWeek: ' + str(day_of_week)
 
             yield hex(op_addr), '{} ({})'.format(op_name, args)
 

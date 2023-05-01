@@ -129,7 +129,7 @@ public:
     }
 
     Status checkAuthForOperation(OperationContext* opCtx,
-                                 const std::string& dbname,
+                                 const DatabaseName& dbname,
                                  const BSONObj& cmdObj) const override {
         AuthorizationSession* authSession = AuthorizationSession::get(opCtx->getClient());
 
@@ -138,11 +138,10 @@ public:
         }
 
         const auto hasTerm = false;
-        return auth::checkAuthForFind(
-            authSession,
-            CollectionCatalog::get(opCtx)->resolveNamespaceStringOrUUID(
-                opCtx, CommandHelpers::parseNsOrUUID({boost::none, dbname}, cmdObj)),
-            hasTerm);
+        return auth::checkAuthForFind(authSession,
+                                      CollectionCatalog::get(opCtx)->resolveNamespaceStringOrUUID(
+                                          opCtx, CommandHelpers::parseNsOrUUID(dbname, cmdObj)),
+                                      hasTerm);
     }
 
     Status explain(OperationContext* opCtx,
@@ -156,7 +155,7 @@ public:
         boost::optional<AutoGetCollectionForReadCommandMaybeLockFree> ctx;
         ctx.emplace(opCtx,
                     CommandHelpers::parseNsCollectionRequired(dbName, cmdObj),
-                    AutoGetCollectionViewMode::kViewsPermitted);
+                    auto_get_collection::ViewMode::kViewsPermitted);
         const auto nss = ctx->getNss();
 
         CountCommandRequest request(NamespaceStringOrUUID(NamespaceString{}));
@@ -237,7 +236,7 @@ public:
         boost::optional<AutoGetCollectionForReadCommandMaybeLockFree> ctx;
         ctx.emplace(opCtx,
                     CommandHelpers::parseNsOrUUID(dbName, cmdObj),
-                    AutoGetCollectionViewMode::kViewsPermitted);
+                    auto_get_collection::ViewMode::kViewsPermitted);
         const auto& nss = ctx->getNss();
 
         CurOpFailpointHelpers::waitWhileFailPointEnabled(

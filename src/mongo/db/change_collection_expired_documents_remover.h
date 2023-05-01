@@ -35,7 +35,8 @@ namespace mongo {
 
 /**
  * Starts a periodic background job to remove expired documents from change collections. The job
- * will run every 'changeCollectionRemoverJobSleepSeconds' as defined in the cluster parameter.
+ * will run every 'changeCollectionExpiredDocumentsRemoverJobSleepSeconds' as defined in the cluster
+ * parameter.
  */
 void startChangeCollectionExpiredDocumentsRemover(ServiceContext* serviceContext);
 

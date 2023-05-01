@@ -554,12 +554,10 @@ using GroupsMap = DocumentSourceGroup::GroupsMap;
 
 class SorterComparator {
 public:
-    typedef pair<Value, Value> Data;
-
     SorterComparator(ValueComparator valueComparator) : _valueComparator(valueComparator) {}
 
-    int operator()(const Data& lhs, const Data& rhs) const {
-        return _valueComparator.compare(lhs.first, rhs.first);
+    int operator()(const Value& lhs, const Value& rhs) const {
+        return _valueComparator.compare(lhs, rhs);
     }
 
 private:
@@ -746,7 +744,7 @@ shared_ptr<Sorter<Value, Value>::Iterator> DocumentSourceGroup::spill() {
     _groups->clear();
     // Zero out the current per-accumulation statement memory consumption, as the memory has been
     // freed by spilling.
-    for (auto accum : _accumulatedFields) {
+    for (const auto& accum : _accumulatedFields) {
         _memoryTracker.set(accum.fieldName, 0);
     }
 

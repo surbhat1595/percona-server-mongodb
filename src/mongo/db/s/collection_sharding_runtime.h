@@ -30,12 +30,11 @@
 #pragma once
 
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/namespace_string.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/metadata_manager.h"
 #include "mongo/db/s/sharding_migration_critical_section.h"
 #include "mongo/db/s/sharding_state_lock.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/s/global_index_cache.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/decorable.h"
 
@@ -72,11 +71,15 @@ public:
      */
     static CollectionShardingRuntime* get(CollectionShardingState* css);
 
+    const NamespaceString& nss() const override {
+        return _nss;
+    }
+
+    ScopedCollectionDescription getCollectionDescription(OperationContext* opCtx) override;
+
     ScopedCollectionFilter getOwnershipFilter(OperationContext* opCtx,
                                               OrphanCleanupPolicy orphanCleanupPolicy,
                                               bool supportNonVersionedOperations) override;
-
-    ScopedCollectionDescription getCollectionDescription(OperationContext* opCtx) override;
 
     void checkShardVersionOrThrow(OperationContext* opCtx) override;
 
@@ -187,6 +190,12 @@ public:
                                ChunkRange orphanRange,
                                Date_t deadline);
 
+    /**
+     * Returns a future marked as ready when all the ongoing queries retaining the range complete
+     */
+    SharedSemiFuture<void> getOngoingQueriesCompletionFuture(const UUID& collectionUuid,
+                                                             ChunkRange const& range);
+
     std::uint64_t getNumMetadataManagerChanges_forTest() {
         return _numMetadataManagerChanges;
     }
@@ -220,14 +229,33 @@ public:
     void resetShardVersionRecoverRefreshFuture(const CSRLock&);
 
     /**
-     * Sets an index version under a lock.
-     */
-    void setIndexVersion(OperationContext* opCtx, const boost::optional<Timestamp>& indexVersion);
-
-    /**
      * Gets an index version under a lock.
      */
     boost::optional<Timestamp> getIndexVersion(OperationContext* opCtx);
+
+    /**
+     * Gets the index list under a lock.
+     */
+    GlobalIndexesCache& getIndexes(OperationContext* opCtx);
+
+    /**
+     * Add a new index to the shard-role index cache under a lock.
+     */
+    void addIndex(OperationContext* opCtx,
+                  const IndexCatalogType& index,
+                  const Timestamp& indexVersion);
+
+    /**
+     * Removes an index from the shard-role index cache under a lock.
+     */
+    void removeIndex(OperationContext* opCtx,
+                     const std::string& name,
+                     const Timestamp& indexVersion);
+
+    /**
+     * Clears the shard-role index cache and set the indexVersion to boost::none.
+     */
+    void clearIndexes(OperationContext* opCtx);
 
 private:
     friend CSRLock;
@@ -324,6 +352,8 @@ private:
     // Contains the latest index version of the collection. This is used to indicate the creation or
     // drop of a global index.
     boost::optional<Timestamp> _indexVersion;
+
+    GlobalIndexesCache _indexCache;
 };
 
 /**

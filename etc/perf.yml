@@ -781,7 +781,12 @@ microbenchmark-buildvariants:
       # We are explicitly tracking the rhel62 variant compile options from evergreen.yml for
       # microbenchmarks, since they run on the centos6 boxes.  If we can get proper artifacts directly
       # from that project, we should do that and remove the compile tasks.
-      compile_flags: --ssl --separate-debug MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+      compile_flags: >-
+        --ssl
+        --separate-debug MONGO_DISTMOD=rhel62
+        -j$(grep -c ^processor /proc/cpuinfo)
+        --release
+        --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
       mongod_exec_wrapper: &exec_wrapper "numactl --physcpubind=4,5,6,7 -i 1"
       perf_exec_wrapper: &perf_wrapper "numactl --physcpubind=1,2,3 -i 0"
       use_scons_cache: true
@@ -863,14 +868,16 @@ buildvariants:
   - <<: *linux-wt-standalone
     name: linux-wt-standalone-classic-query-engine
     display_name: Standalone Linux inMemory (Classic Query Engine)
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
+    cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
     expansions:
       mongodb_setup: microbenchmarks_standalone-classic-query-engine
 
   - <<: *linux-wt-standalone
     name: linux-wt-standalone-sbe
     display_name: Standalone Linux inMemory (SBE)
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
+    cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
     expansions:
       mongodb_setup: microbenchmarks_standalone-sbe
 

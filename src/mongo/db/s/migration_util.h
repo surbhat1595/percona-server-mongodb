@@ -47,8 +47,6 @@ class ShardId;
 
 namespace migrationutil {
 
-constexpr auto kRangeDeletionThreadName = "range-deleter"_sd;
-
 /**
  * Creates a report document with the provided parameters:
  *
@@ -138,15 +136,6 @@ void persistRangeDeletionTaskLocally(OperationContext* opCtx,
                                      const WriteConcernOptions& writeConcern);
 
 /**
- * Updates the range deletion task document to increase or decrease numOrphanedDocs and waits for
- * write concern.
- */
-void persistUpdatedNumOrphans(OperationContext* opCtx,
-                              const UUID& collectionUuid,
-                              const ChunkRange& range,
-                              long long changeInOrphans);
-
-/**
  * Retrieves the value of 'numOrphanedDocs' from the recipient shard's range deletion task document.
  */
 long long retrieveNumOrphansFromRecipient(OperationContext* opCtx,
@@ -183,7 +172,8 @@ void deleteRangeDeletionTaskLocally(
 void deleteRangeDeletionTaskOnRecipient(OperationContext* opCtx,
                                         const ShardId& recipientId,
                                         const UUID& collectionUuid,
-                                        const ChunkRange& range);
+                                        const ChunkRange& range,
+                                        const UUID& migrationId);
 
 /**
  * Advances the optime for the current transaction by performing a write operation as a retryable
@@ -212,7 +202,8 @@ void markAsReadyRangeDeletionTaskLocally(OperationContext* opCtx,
 void markAsReadyRangeDeletionTaskOnRecipient(OperationContext* opCtx,
                                              const ShardId& recipientId,
                                              const UUID& collectionUuid,
-                                             const ChunkRange& range);
+                                             const ChunkRange& range,
+                                             const UUID& migrationId);
 
 /**
  * Submits an asynchronous task to scan config.migrationCoordinators and drive each unfinished

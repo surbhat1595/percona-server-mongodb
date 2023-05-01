@@ -41,7 +41,7 @@ public:
     ServerlessServerStatus() : ServerStatusSection("serverless") {}
 
     bool includeByDefault() const override {
-        return true;
+        return false;
     }
 
     BSONObj generateSection(OperationContext* opCtx,

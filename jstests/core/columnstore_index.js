@@ -3,23 +3,18 @@
  * @tags: [
  *   # Uses $indexStats which is not supported inside a transaction.
  *   does_not_support_transactions,
- *   # columnstore indexes are new in 6.2.
- *   requires_fcv_62,
+ *   # column store indexes are still under a feature flag and require full sbe
  *   uses_column_store_index,
+ *   featureFlagColumnstoreIndexes,
+ *   featureFlagSbeFull,
+ *   # TODO SERVER-69884: featureFlag guarded tests shouldn't require explicit 'no_selinux' tag.
+ *   no_selinux,
  * ]
  */
 (function() {
 "use strict";
 
 load("jstests/libs/analyze_plan.js");
-load("jstests/libs/sbe_util.js");  // For checkSBEEnabled.
-
-const columnstoreEnabled =
-    checkSBEEnabled(db, ["featureFlagColumnstoreIndexes", "featureFlagSbeFull"]);
-if (!columnstoreEnabled) {
-    jsTestLog("Skipping columnstore index validation test since the feature flag is not enabled.");
-    return;
-}
 
 const coll = db.columnstore_index;
 coll.drop();

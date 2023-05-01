@@ -1,9 +1,15 @@
 // Tests the behavior of queries with a {$eq: null} or {$ne: null} predicate.
+// @tags: [
+//   uses_column_store_index,
+// ]
 //
 (function() {
 "use strict";
 
 load("jstests/aggregation/extras/utils.js");  // For 'resultsEq'.
+// For areAllCollectionsClustered.
+load("jstests/libs/clustered_collections/clustered_collection_util.js");
+load("jstests/libs/sbe_util.js");  // For checkSBEEnabled.
 
 function extractAValues(results) {
     return results.map(function(res) {
@@ -699,6 +705,13 @@ const keyPatterns = [
     {keyPattern: {"$**": 1}},
     {keyPattern: {"a.$**": 1}}
 ];
+
+// Include Columnstore Index only if FF is enabled and collection is not clustered.
+const columnstoreEnabled = checkSBEEnabled(
+    db, ["featureFlagColumnstoreIndexes", "featureFlagSbeFull"], true /* checkAllNodes */);
+if (columnstoreEnabled && !ClusteredCollectionUtil.areAllCollectionsClustered(db.getMongo())) {
+    keyPatterns.push({keyPattern: {"$**": "columnstore"}});
+}
 
 // Test with a variety of other indexes.
 for (let indexSpec of keyPatterns) {

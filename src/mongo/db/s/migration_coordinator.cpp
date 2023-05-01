@@ -31,6 +31,7 @@
 
 #include "mongo/db/s/migration_util.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
+#include "mongo/db/s/range_deletion_util.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/vector_clock_mutable.h"
 #include "mongo/logv2/log.h"
@@ -74,6 +75,7 @@ MigrationCoordinator::MigrationCoordinator(MigrationSessionId sessionId,
                                            UUID collectionUuid,
                                            ChunkRange range,
                                            ChunkVersion preMigrationChunkVersion,
+                                           const KeyPattern& shardKeyPattern,
                                            bool waitForDelete)
     : _migrationInfo(UUID::gen(),
                      std::move(sessionId),
@@ -85,6 +87,7 @@ MigrationCoordinator::MigrationCoordinator(MigrationSessionId sessionId,
                      std::move(recipientShard),
                      std::move(range),
                      std::move(preMigrationChunkVersion)),
+      _shardKeyPattern(shardKeyPattern),
       _waitForDelete(waitForDelete) {}
 
 MigrationCoordinator::MigrationCoordinator(const MigrationCoordinatorDocument& doc)
@@ -121,6 +124,7 @@ void MigrationCoordinator::startMigration(OperationContext* opCtx) {
                                         _waitForDelete ? CleanWhenEnum::kNow
                                                        : CleanWhenEnum::kDelayed);
     donorDeletionTask.setPending(true);
+    donorDeletionTask.setKeyPattern(*_shardKeyPattern);
     const auto currentTime = VectorClock::get(opCtx)->getTime();
     donorDeletionTask.setTimestamp(currentTime.clusterTime().asTimestamp());
     migrationutil::persistRangeDeletionTaskLocally(
@@ -215,7 +219,7 @@ SemiFuture<void> MigrationCoordinator::_commitMigrationOnDonorAndRecipient(
     const auto numOrphans = migrationutil::retrieveNumOrphansFromRecipient(opCtx, _migrationInfo);
 
     if (numOrphans > 0) {
-        migrationutil::persistUpdatedNumOrphans(
+        persistUpdatedNumOrphans(
             opCtx, _migrationInfo.getCollectionUuid(), _migrationInfo.getRange(), numOrphans);
     }
 
@@ -226,7 +230,8 @@ SemiFuture<void> MigrationCoordinator::_commitMigrationOnDonorAndRecipient(
     migrationutil::deleteRangeDeletionTaskOnRecipient(opCtx,
                                                       _migrationInfo.getRecipientShardId(),
                                                       _migrationInfo.getCollectionUuid(),
-                                                      _migrationInfo.getRange());
+                                                      _migrationInfo.getRange(),
+                                                      _migrationInfo.getId());
 
     LOGV2_DEBUG(23897,
                 2,
@@ -307,7 +312,8 @@ void MigrationCoordinator::_abortMigrationOnDonorAndRecipient(OperationContext* 
     migrationutil::markAsReadyRangeDeletionTaskOnRecipient(opCtx,
                                                            _migrationInfo.getRecipientShardId(),
                                                            _migrationInfo.getCollectionUuid(),
-                                                           _migrationInfo.getRange());
+                                                           _migrationInfo.getRange(),
+                                                           _migrationInfo.getId());
 }
 
 void MigrationCoordinator::forgetMigration(OperationContext* opCtx) {

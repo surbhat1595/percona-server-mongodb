@@ -161,7 +161,7 @@ std::vector<std::shared_ptr<ReplIndexBuildState>> ActiveIndexBuilds::_filterInde
     WithLock lk, IndexBuildFilterFn indexBuildFilter) const {
 
     std::vector<std::shared_ptr<ReplIndexBuildState>> indexBuilds;
-    for (auto pair : _allIndexBuilds) {
+    for (const auto& pair : _allIndexBuilds) {
         auto replState = pair.second;
         if (!indexBuildFilter(*replState)) {
             continue;
@@ -174,9 +174,7 @@ std::vector<std::shared_ptr<ReplIndexBuildState>> ActiveIndexBuilds::_filterInde
 void ActiveIndexBuilds::awaitNoBgOpInProgForDb(OperationContext* opCtx,
                                                const DatabaseName& dbName) {
     stdx::unique_lock<Latch> lk(_mutex);
-    auto indexBuildFilter = [dbName](const auto& replState) {
-        return dbName.toStringWithTenantId() == replState.dbName;
-    };
+    auto indexBuildFilter = [dbName](const auto& replState) { return dbName == replState.dbName; };
     auto pred = [&, this]() {
         auto dbIndexBuilds = _filterIndexBuilds_inlock(lk, indexBuildFilter);
         return dbIndexBuilds.empty();
@@ -194,7 +192,7 @@ Status ActiveIndexBuilds::registerIndexBuild(
         return replIndexBuildState->collectionUUID == replState.collectionUUID;
     };
     auto collIndexBuilds = _filterIndexBuilds_inlock(lk, pred);
-    for (auto existingIndexBuild : collIndexBuilds) {
+    for (const auto& existingIndexBuild : collIndexBuilds) {
         for (const auto& name : replIndexBuildState->indexNames) {
             if (existingIndexBuild->indexNames.end() !=
                 std::find(existingIndexBuild->indexNames.begin(),

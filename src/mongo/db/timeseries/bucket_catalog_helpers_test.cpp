@@ -32,7 +32,9 @@
 #include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog_raii.h"
+#include "mongo/db/dbdirectclient.h"
 #include "mongo/db/timeseries/bucket_catalog_helpers.h"
+#include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/unittest.h"
 
@@ -47,6 +49,10 @@ protected:
     StringData _metaField = "mm";
 
     void _insertIntoBucketColl(const BSONObj& bucketDoc);
+    BSONObj _findSuitableBucket(OperationContext* opCtx,
+                                const NamespaceString& bucketNss,
+                                const TimeseriesOptions& options,
+                                const BSONObj& measurementDoc);
 };
 
 void BucketCatalogHelpersTest::_insertIntoBucketColl(const BSONObj& bucketDoc) {
@@ -60,6 +66,40 @@ void BucketCatalogHelpersTest::_insertIntoBucketColl(const BSONObj& bucketDoc) {
             operationContext(), coll, InsertStatement(bucketDoc), nullOpDebug));
         wuow.commit();
     }
+}
+
+BSONObj BucketCatalogHelpersTest::_findSuitableBucket(OperationContext* opCtx,
+                                                      const NamespaceString& bucketNss,
+                                                      const TimeseriesOptions& options,
+                                                      const BSONObj& measurementDoc) {
+    uassert(ErrorCodes::InvalidOptions,
+            "Missing bucketMaxSpanSeconds option.",
+            options.getBucketMaxSpanSeconds());
+
+    auto swDocTimeAndMeta = timeseries::extractTimeAndMeta(measurementDoc, options);
+    if (!swDocTimeAndMeta.isOK()) {
+        return BSONObj();
+    }
+    auto [time, metadata] = swDocTimeAndMeta.getValue();
+    auto controlMinTimePath =
+        timeseries::kControlMinFieldNamePrefix.toString() + options.getTimeField();
+
+    boost::optional<BSONObj> normalizedMetadata;
+    if (metadata && (*metadata).ok()) {
+        BSONObjBuilder builder;
+        timeseries::normalizeMetadata(&builder, *metadata, timeseries::kBucketMetaFieldName);
+        normalizedMetadata = builder.obj();
+    }
+
+    // Generate all the filters we need to add to our 'find' query for a suitable bucket.
+    auto fullFilterExpression = timeseries::generateReopeningFilters(
+        time,
+        normalizedMetadata ? normalizedMetadata->firstElement() : metadata,
+        controlMinTimePath,
+        *options.getBucketMaxSpanSeconds());
+
+    DBDirectClient client(opCtx);
+    return client.findOne(bucketNss, fullFilterExpression);
 }
 
 TEST_F(BucketCatalogHelpersTest, GenerateMinMaxBadBucketDocumentsTest) {
@@ -356,7 +396,7 @@ TEST_F(BucketCatalogHelpersTest, FindSuitableBucketForMeasurements) {
     // insert into.
     for (size_t i = 0; i < docsWithSuitableBuckets.size(); ++i) {
         const auto& doc = docsWithSuitableBuckets[i];
-        auto result = timeseries::findSuitableBucket(
+        auto result = _findSuitableBucket(
             operationContext(), kNss.makeTimeseriesBucketsNamespace(), tsOptions, doc);
         ASSERT_FALSE(result.isEmpty());
         ASSERT_EQ(bucketDocs[i]["_id"].OID(), result["_id"].OID());
@@ -366,13 +406,13 @@ TEST_F(BucketCatalogHelpersTest, FindSuitableBucketForMeasurements) {
     // no meta field specified.
     {
         std::vector<BSONObj> docsWithOutMeta;
-        for (auto doc : docsWithSuitableBuckets) {
+        for (const auto& doc : docsWithSuitableBuckets) {
             docsWithOutMeta.push_back(doc.removeField(_metaField));
         }
 
         for (size_t i = 0; i < docsWithOutMeta.size(); ++i) {
             const auto& doc = docsWithOutMeta[i];
-            auto result = timeseries::findSuitableBucket(
+            auto result = _findSuitableBucket(
                 operationContext(), kNss.makeTimeseriesBucketsNamespace(), tsOptions, doc);
             ASSERT(result.isEmpty());
         }
@@ -392,7 +432,7 @@ TEST_F(BucketCatalogHelpersTest, FindSuitableBucketForMeasurements) {
                     "a":{"0":1,"1":2,"2":3}}})");
         _insertIntoBucketColl(metalessBucket);
 
-        auto result = timeseries::findSuitableBucket(
+        auto result = _findSuitableBucket(
             operationContext(), kNss.makeTimeseriesBucketsNamespace(), tsOptions, metalessDoc);
         ASSERT_FALSE(result.isEmpty());
         ASSERT_EQ(metalessBucket["_id"].OID(), result["_id"].OID());
@@ -409,7 +449,7 @@ TEST_F(BucketCatalogHelpersTest, FindSuitableBucketForMeasurements) {
     for (const auto& doc : docsWithoutSuitableBuckets) {
         BSONObj measurementMeta =
             (doc.hasField(metaFieldName)) ? doc.getField(metaFieldName).wrap() : BSONObj();
-        auto result = timeseries::findSuitableBucket(
+        auto result = _findSuitableBucket(
             operationContext(), kNss.makeTimeseriesBucketsNamespace(), tsOptions, doc);
         ASSERT(result.isEmpty());
     }
@@ -479,9 +519,78 @@ TEST_F(BucketCatalogHelpersTest, IncompatibleBucketsForNewMeasurements) {
     // bucket is compressed and/or closed, we should not see it as a candid bucket for future
     // inserts.
     for (const auto& doc : validMeasurementDocs) {
-        auto result = timeseries::findSuitableBucket(
+        auto result = _findSuitableBucket(
             operationContext(), kNss.makeTimeseriesBucketsNamespace(), tsOptions, doc);
         ASSERT(result.isEmpty());
+    }
+}
+
+TEST_F(BucketCatalogHelpersTest, FindDocumentFromOID) {
+    ASSERT_OK(createCollection(
+        operationContext(),
+        kNss.dbName(),
+        BSON("create" << kNss.coll() << "timeseries"
+                      << BSON("timeField" << _timeField << "metaField" << _metaField))));
+
+    AutoGetCollection autoColl(operationContext(), kNss.makeTimeseriesBucketsNamespace(), MODE_IX);
+    ASSERT(autoColl->getTimeseriesOptions() && autoColl->getTimeseriesOptions()->getMetaField());
+
+    std::vector<BSONObj> bucketDocs = {mongo::fromjson(
+                                           R"({
+            "_id":{"$oid":"62e7e6ec27c28d338ab29200"},
+            "control":{"version":1,"min":{"_id":1,"time":{"$date":"2021-08-01T11:00:00Z"},"a":1},
+                                   "max":{"_id":3,"time":{"$date":"2021-08-01T12:00:00Z"},"a":3},
+                       "closed":false},
+            "meta":1,
+            "data":{"time":{"0":{"$date":"2021-08-01T11:00:00Z"},
+                            "1":{"$date":"2021-08-01T11:00:00Z"},
+                            "2":{"$date":"2021-08-01T11:00:00Z"}},
+                    "a":{"0":1,"1":2,"2":3}}})"),
+                                       mongo::fromjson(
+                                           R"(
+            {"_id":{"$oid":"62e7eee4f33f295800073138"},
+            "control":{"version":1,"min":{"_id":7,"time":{"$date":"2022-08-01T12:00:00Z"},"a":1},
+                                   "max":{"_id":10,"time":{"$date":"2022-08-01T13:00:00Z"},"a":3}},
+            "meta":2,
+            "data":{"time":{"0":{"$date":"2022-08-01T12:00:00Z"},
+                            "1":{"$date":"2022-08-01T12:00:00Z"},
+                            "2":{"$date":"2022-08-01T12:00:00Z"}},
+                    "a":{"0":1,"1":2,"2":3}}})"),
+                                       mongo::fromjson(
+                                           R"({
+            "_id":{"$oid":"629e1e680958e279dc29a517"},
+            "control":{"version":1,"min":{"_id":7,"time":{"$date":"2023-08-01T13:00:00Z"},"a":1},
+                                   "max":{"_id":10,"time":{"$date":"2023-08-01T14:00:00Z"},"a":3},
+                       "closed":false},
+            "meta":3,
+            "data":{"time":{"0":{"$date":"2023-08-01T13:00:00Z"},
+                            "1":{"$date":"2023-08-01T13:00:00Z"},
+                            "2":{"$date":"2023-08-01T13:00:00Z"}},
+                    "a":{"0":1,"1":2,"2":3}}})")};
+
+    // Insert bucket documents into the system.buckets collection.
+    for (const auto& doc : bucketDocs) {
+        _insertIntoBucketColl(doc);
+    }
+
+    // Given a valid OID for a bucket document, we should be able to retrieve the full bucket
+    // document.
+    for (const auto& doc : bucketDocs) {
+        const auto bucketId = doc["_id"].OID();
+        auto retrievedBucket =
+            timeseries::findDocFromOID(operationContext(), (*autoColl).get(), bucketId);
+        ASSERT(!retrievedBucket.isEmpty());
+        ASSERT_BSONOBJ_EQ(retrievedBucket, doc);
+    }
+
+    // For non-existent OIDs, we don't expect to retrieve anything.
+    std::vector<OID> nonExistentOIDs = {OID("26e7e6ec27c28d338ab29200"),
+                                        OID("90e7e6ec27c28d338ab29200"),
+                                        OID("00e7e6ec27c28d338ab29200")};
+    for (const auto& oid : nonExistentOIDs) {
+        auto retrievedBucket =
+            timeseries::findDocFromOID(operationContext(), (*autoColl).get(), oid);
+        ASSERT(retrievedBucket.isEmpty());
     }
 }
 

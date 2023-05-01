@@ -307,6 +307,16 @@ BSONObj getQueryFilterForRangeDeletionTask(const UUID& collectionUuid, const Chu
                 << range.getMax());
 }
 
+// Add `migrationId` to the query filter in order to be resilient to delayed network retries: only
+// relying on collection's UUID and range may lead to undesired updates/deletes on tasks created by
+// future migrations.
+BSONObj getQueryFilterForRangeDeletionTaskOnRecipient(const UUID& collectionUuid,
+                                                      const ChunkRange& range,
+                                                      const UUID& migrationId) {
+    return getQueryFilterForRangeDeletionTask(collectionUuid, range)
+        .addFields(BSON(RangeDeletionTask::kIdFieldName << migrationId));
+}
+
 
 }  // namespace
 
@@ -404,21 +414,25 @@ ExecutorFuture<void> cleanUpRange(ServiceContext* serviceContext,
                auto opCtx = uniqueOpCtx.get();
                opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
 
-               const NamespaceString& nss = deletionTask.getNss();
+               const auto dbName = deletionTask.getNss().dbName();
+               const auto collectionUuid = deletionTask.getCollectionUuid();
 
                while (true) {
-                   {
+                   boost::optional<NamespaceString> optNss;
+                   try {
                        // Holding the locks while enqueueing the task protects against possible
                        // concurrent cleanups of the filtering metadata, that be serialized
-                       AutoGetCollection autoColl(opCtx, nss, MODE_IS);
-                       auto csr = CollectionShardingRuntime::get(opCtx, nss);
+                       AutoGetCollection autoColl(
+                           opCtx, NamespaceStringOrUUID{dbName, collectionUuid}, MODE_IS);
+                       optNss.emplace(autoColl.getNss());
+                       auto csr = CollectionShardingRuntime::get(opCtx, *optNss);
                        auto csrLock = CollectionShardingRuntime::CSRLock::lockShared(opCtx, csr);
                        auto optCollDescr = csr->getCurrentMetadataIfKnown();
 
                        if (optCollDescr) {
                            uassert(ErrorCodes::
                                        RangeDeletionAbandonedBecauseCollectionWithUUIDDoesNotExist,
-                                   str::stream() << "Filtering metadata for " << nss
+                                   str::stream() << "Filtering metadata for " << *optNss
                                                  << (optCollDescr->isSharded()
                                                          ? " has UUID that does not match UUID of "
                                                            "the deletion task"
@@ -437,9 +451,16 @@ ExecutorFuture<void> cleanUpRange(ServiceContext* serviceContext,
 
                            return csr->cleanUpRange(deletionTask.getRange(), whenToClean);
                        }
+                   } catch (ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
+                       uasserted(
+                           ErrorCodes::RangeDeletionAbandonedBecauseCollectionWithUUIDDoesNotExist,
+                           str::stream() << "Collection has been dropped since enqueuing this "
+                                            "range deletion task: "
+                                         << deletionTask.toBSON());
                    }
 
-                   refreshFilteringMetadataUntilSuccess(opCtx, nss);
+
+                   refreshFilteringMetadataUntilSuccess(opCtx, *optNss);
                }
            })
         .until([](Status status) mutable {
@@ -622,30 +643,6 @@ void persistRangeDeletionTaskLocally(OperationContext* opCtx,
     }
 }
 
-void persistUpdatedNumOrphans(OperationContext* opCtx,
-                              const UUID& collectionUuid,
-                              const ChunkRange& range,
-                              long long changeInOrphans) {
-    const auto query = getQueryFilterForRangeDeletionTask(collectionUuid, range);
-    try {
-        PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
-        ScopedRangeDeleterLock rangeDeleterLock(opCtx, collectionUuid);
-        // The DBDirectClient will not retry WriteConflictExceptions internally while holding an X
-        // mode lock, so we need to retry at this level.
-        writeConflictRetry(
-            opCtx, "updateOrphanCount", NamespaceString::kRangeDeletionNamespace.ns(), [&] {
-                store.update(opCtx,
-                             query,
-                             BSON("$inc" << BSON(RangeDeletionTask::kNumOrphanDocsFieldName
-                                                 << changeInOrphans)),
-                             WriteConcerns::kLocalWriteConcern);
-            });
-        BalancerStatsRegistry::get(opCtx)->updateOrphansCount(collectionUuid, changeInOrphans);
-    } catch (const ExceptionFor<ErrorCodes::NoMatchingDocument>&) {
-        // When upgrading or downgrading, there may be no documents with the orphan count field.
-    }
-}
-
 long long retrieveNumOrphansFromRecipient(OperationContext* opCtx,
                                           const MigrationCoordinatorDocument& migrationInfo) {
     const auto recipientShard = uassertStatusOK(
@@ -794,8 +791,10 @@ void persistAbortDecision(OperationContext* opCtx,
 void deleteRangeDeletionTaskOnRecipient(OperationContext* opCtx,
                                         const ShardId& recipientId,
                                         const UUID& collectionUuid,
-                                        const ChunkRange& range) {
-    const auto queryFilter = getQueryFilterForRangeDeletionTask(collectionUuid, range);
+                                        const ChunkRange& range,
+                                        const UUID& migrationId) {
+    const auto queryFilter =
+        getQueryFilterForRangeDeletionTaskOnRecipient(collectionUuid, range, migrationId);
     write_ops::DeleteCommandRequest deleteOp(NamespaceString::kRangeDeletionNamespace);
     write_ops::DeleteOpEntry query(queryFilter, false /*multi*/);
     deleteOp.setDeletes({query});
@@ -833,12 +832,16 @@ void deleteRangeDeletionTaskLocally(OperationContext* opCtx,
 void markAsReadyRangeDeletionTaskOnRecipient(OperationContext* opCtx,
                                              const ShardId& recipientId,
                                              const UUID& collectionUuid,
-                                             const ChunkRange& range) {
+                                             const ChunkRange& range,
+                                             const UUID& migrationId) {
     write_ops::UpdateCommandRequest updateOp(NamespaceString::kRangeDeletionNamespace);
-    const auto queryFilter = getQueryFilterForRangeDeletionTask(collectionUuid, range);
+    const auto queryFilter =
+        getQueryFilterForRangeDeletionTaskOnRecipient(collectionUuid, range, migrationId);
     auto updateModification =
         write_ops::UpdateModification(write_ops::UpdateModification::parseFromClassicUpdate(
-            BSON("$unset" << BSON(RangeDeletionTask::kPendingFieldName << ""))));
+            BSON("$unset" << BSON(RangeDeletionTask::kPendingFieldName << "") << "$set"
+                          << BSON(RangeDeletionTask::kWhenToCleanFieldName
+                                  << CleanWhen_serializer(CleanWhenEnum::kNow)))));
     write_ops::UpdateOpEntry updateEntry(queryFilter, updateModification);
     updateEntry.setMulti(false);
     updateEntry.setUpsert(false);
@@ -1055,8 +1058,11 @@ void recoverMigrationCoordinations(OperationContext* opCtx,
                           "coordinatorDocumentUUID"_attr = doc.getCollectionUuid());
                 }
 
-                deleteRangeDeletionTaskOnRecipient(
-                    opCtx, doc.getRecipientShardId(), doc.getCollectionUuid(), doc.getRange());
+                deleteRangeDeletionTaskOnRecipient(opCtx,
+                                                   doc.getRecipientShardId(),
+                                                   doc.getCollectionUuid(),
+                                                   doc.getRange(),
+                                                   doc.getId());
                 deleteRangeDeletionTaskLocally(opCtx, doc.getCollectionUuid(), doc.getRange());
                 coordinator.forgetMigration(opCtx);
                 setFilteringMetadata();

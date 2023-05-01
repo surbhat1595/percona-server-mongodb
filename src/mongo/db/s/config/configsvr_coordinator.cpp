@@ -104,6 +104,7 @@ SemiFuture<void> ConfigsvrCoordinator::run(std::shared_ptr<executor::ScopedTaskE
                                            const CancellationToken& token) noexcept {
     if (hangAndEndBeforeRunningConfigsvrCoordinatorInstance.shouldFail()) {
         hangAndEndBeforeRunningConfigsvrCoordinatorInstance.pauseWhileSet();
+        _completionPromise.emplaceValue();
         return Status::OK();
     }
     return ExecutorFuture<void>(**executor)

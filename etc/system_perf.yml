@@ -974,7 +974,7 @@ tasks:
           test_control: "initialsync-logkeeper"
           mongodb_setup: "initialsync-logkeeper-short"
           # Logkeeper dataset with FCV set to 6.0
-          mongodb_dataset: "https://s3-us-west-2.amazonaws.com/dsi-donot-remove/InitialSyncLogKeeper/logkeeper-slice-data-mongodb-6.0.tgz"
+          mongodb_dataset: "https://dsi-donot-remove.s3-us-west-2.amazonaws.com/InitialSyncLogKeeper/logkeeper-slice-data-mongodb-6.1.tgz"
 
   - name: initialsync-logkeeper-short-fcbis
     priority: 5
@@ -984,7 +984,7 @@ tasks:
           test_control: "initialsync-logkeeper"
           mongodb_setup: "initialsync-logkeeper-short-fcbis"
           # Logkeeper dataset with FCV set to 6.0
-          mongodb_dataset: "https://s3-us-west-2.amazonaws.com/dsi-donot-remove/InitialSyncLogKeeper/logkeeper-slice-data-mongodb-6.0.tgz"
+          mongodb_dataset: "https://dsi-donot-remove.s3-us-west-2.amazonaws.com/InitialSyncLogKeeper/logkeeper-slice-data-mongodb-6.1.tgz"
 
   - name: initialsync-logkeeper
     priority: 5
@@ -1016,7 +1016,7 @@ tasks:
           test_control: "initialsync-logkeeper-short-s3-update"
           mongodb_setup: "initialsync-logkeeper-short-s3-update"
           # Update this to Logkeeper dataset with FCV set to latest after each LTS release.
-          mongodb_dataset: "https://s3-us-west-2.amazonaws.com/dsi-donot-remove/InitialSyncLogKeeper/logkeeper-slice-data-mongodb-6.0.tgz"
+          mongodb_dataset: "https://dsi-donot-remove.s3-us-west-2.amazonaws.com/InitialSyncLogKeeper/logkeeper-slice-data-mongodb-6.1.tgz"
 
   - name: initialsync-logkeeper-snapshot-update
     priority: 5
@@ -1151,7 +1151,7 @@ buildvariants:
 
   - name: linux-standalone
     display_name: Linux Standalone
-    cron: "0 0 * * *" # Everyday at 00:00
+    cron: "0 0 * * 2,4,6" # Tuesday, Thursday and Saturday at 00:00
     modules: *modules
     expansions:
       mongodb_setup: standalone
@@ -1190,7 +1190,7 @@ buildvariants:
 
   - name: linux-standalone-all-feature-flags
     display_name: Linux Standalone (all feature flags)
-    cron: "0 0 * * *" # Everyday at 00:00
+    cron: "0 0 * * 2,4,6" # Tuesday, Thursday and Saturday at 00:00
     modules: *modules
     expansions:
       mongodb_setup: standalone-all-feature-flags
@@ -1225,7 +1225,8 @@ buildvariants:
 
   - name: linux-standalone-classic-query-engine
     display_name: Linux Standalone (Classic Query Engine)
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
+    cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
     modules: *modules
     expansions:
       mongodb_setup: standalone-classic-query-engine
@@ -1259,7 +1260,8 @@ buildvariants:
 
   - name: linux-standalone-sbe
     display_name: Linux Standalone (SBE)
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
+    cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
     modules: *modules
     expansions:
       mongodb_setup: standalone-sbe
@@ -1275,7 +1277,8 @@ buildvariants:
 
   - name: linux-1-node-replSet-classic-query-engine
     display_name: Linux 1-Node ReplSet (Classic Query Engine)
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
+    cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
     modules: *modules
     expansions:
       mongodb_setup: single-replica-classic-query-engine
@@ -1292,10 +1295,12 @@ buildvariants:
       - name: schedule_variant_auto_tasks
       - name: linkbench
       - name: linkbench2
+      - name: snapshot_reads
 
   - name: linux-1-node-replSet-sbe
     display_name: Linux 1-Node ReplSet (SBE)
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
+    cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
     modules: *modules
     expansions:
       mongodb_setup: single-replica-sbe
@@ -1420,7 +1425,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-audit-log-encryption-no-compression
     display_name: Linux Single-node Replica Set Audit w/ At-Rest Log Encryption (No compression)
-    batchtime: 10080 # 7 days
+    cron: "0 0 * * 4" # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-audit-log-encryption-no-compression
@@ -1436,7 +1441,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-audit
     display_name: Linux Single-node Replica Set Audit
-    batchtime: 10080 # 7 days
+    cron: "0 0 * * 4" # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-audit
@@ -1452,7 +1457,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-audit-log-encryption-compression
     display_name: Linux Single-node Replica Set Audit w/ At-Rest Log Encryption (With compression)
-    batchtime: 10080 # 7 days
+    cron: "0 0 * * 4" # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-audit-log-encryption-compression
@@ -1509,7 +1514,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-ese-cbc
     display_name: Linux 1-Node ReplSet ESE CBC
-    cron: "0 0 * * 0,4" # 00:00 on Sunday,Thursday
+    cron: "0 0 * * 4" # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-ese-cbc
@@ -1531,7 +1536,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-ese-gcm
     display_name: Linux 1-Node ReplSet ESE GCM
-    cron: "0 0 * * 0,4" # 00:00 on Sunday,Thursday
+    cron: "0 0 * * 4" # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-ese-gcm
@@ -1553,7 +1558,7 @@ buildvariants:
 
   - name: linux-1-node-15gbwtcache
     display_name: Linux 1-Node ReplSet 15 GB WiredTiger Cache
-    cron: "0 0 * * 0,2,4" # 00:00 on Sunday,Tuesday,Thursday
+    cron: "0 0 * * 2,4" # 00:00 on Tuesday,Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-15gbwtcache
@@ -1758,7 +1763,7 @@ buildvariants:
 
   - name: linux-shard-single
     display_name: Linux Shard Single
-    cron: "0 0 * * 0,4" # 00:00 on Sunday,Thursday
+    cron: "0 0 * * 2,4" # 00:00 on Tuesday,Thursday
     modules: *modules
     expansions:
       mongodb_setup: shard-single
@@ -1776,7 +1781,7 @@ buildvariants:
 
   - name: linux-3-node-replSet
     display_name: Linux 3-Node ReplSet
-    cron: "0 0 * * *" # Everyday at 00:00
+    cron: "0 0 * * 1,2,3,4,5,6" # Everyday except Sunday at 00:00
     modules: *modules
     expansions:
       mongodb_setup: replica
@@ -2090,7 +2095,7 @@ buildvariants:
 
   - name: linux-3-node-replSet-initialsync
     display_name: Linux 3-Node ReplSet Initial Sync
-    cron: "0 0 * * 0,2,4" # 00:00 on Sunday,Tuesday,Thursday
+    cron: "0 0 * * 2,4" # 00:00 on Tuesday,Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-2node
@@ -2120,7 +2125,7 @@ buildvariants:
       mongodb_setup: initialsync-logkeeper
       infrastructure_provisioning: initialsync-logkeeper
       # EBS logkeeper snapshot with FCV set to 6.0
-      snapshotId: snap-0306dce35f030ebec
+      snapshotId: snap-0716ed59d18225693
       platform: linux
       authentication: disabled
       storageEngine: wiredTiger
@@ -2144,7 +2149,7 @@ buildvariants:
   #    mongodb_setup: initialsync-logkeeper-snapshot-update
   #    infrastructure_provisioning: initialsync-logkeeper-snapshot-update
   #    # Update this to latest snapshot after each LTS release.
-  #    snapshotId: snap-0306dce35f030ebec
+  #    snapshotId: snap-0716ed59d18225693
   #    platform: linux
   #    authentication: disabled
   #    storageEngine: wiredTiger
@@ -2236,6 +2241,40 @@ buildvariants:
       - name: change_streams_listen_throughput
       - name: snapshot_reads
       - name: secondary_reads
+      - name: tpcc
+      - name: linkbench
+      - name: linkbench2
+
+  - name: atlas-M60-real
+    display_name: M60-Atlas ReplSet
+    cron: "0 0 * * 0,4" # 00:00 on Sunday, Thursday
+    modules: *modules
+    expansions:
+      mongodb_setup: atlas
+      canaries: none
+      atlas_setup: M60-repl
+      use_custom_build: true
+      infrastructure_provisioning: graviton-replica
+      platform: linux
+      project_dir: *project_dir
+      storageEngine: wiredTiger
+      run_server_on_arm: true
+    run_on:
+      - "rhel70-perf-M60-like"
+    depends_on:
+      - name: compile
+        variant: compile-amazon2
+      - name: schedule_global_auto_tasks
+        variant: task_generation
+      - name: compile
+        variant: compile-amazon-linux2-arm64
+      - name: schedule_global_auto_tasks
+        variant: task_generation
+    tasks: # Cannot use *3nodetasks because secondary_performance uses a special mongodb setup
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
+      - name: industry_benchmarks
+      - name: ycsb_60GB
       - name: tpcc
       - name: linkbench
       - name: linkbench2

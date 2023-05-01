@@ -72,7 +72,7 @@ bool joinDbVersionOperation(
     invariant(scopedDss->has_value());
 
     if (auto critSect =
-            (**scopedDss)->getCriticalSectionSignal(ShardingMigrationCriticalSection::kRead)) {
+            (**scopedDss)->getCriticalSectionSignal(ShardingMigrationCriticalSection::kWrite)) {
         LOGV2_DEBUG(6697201,
                     2,
                     "Waiting for exit from the critical section",
@@ -183,7 +183,7 @@ SharedSemiFuture<void> recoverRefreshDbVersion(OperationContext* opCtx,
                     str::stream() << "Canceled metadata refresh for database " << dbName,
                     !cancellationToken.isCanceled());
 
-            if (status.isOK()) {
+            if (status.isOK() || status == ErrorCodes::NamespaceNotFound) {
                 LOGV2(6697204, "Refreshed database metadata", "db"_attr = dbName);
             } else {
                 LOGV2_ERROR(6697205,

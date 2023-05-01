@@ -143,12 +143,12 @@ public:
                             const repl::OpTime& opTime)
         : _cloner(cloner), _idObj(idObj.getOwned()), _op(op), _opTime(opTime) {}
 
-    void commit(boost::optional<Timestamp>) override {
+    void commit(OperationContext* opCtx, boost::optional<Timestamp>) override {
         _cloner->_addToTransferModsQueue(_idObj, _op, _opTime);
         _cloner->_decrementOutstandingOperationTrackRequests();
     }
 
-    void rollback() override {
+    void rollback(OperationContext* opCtx) override {
         _cloner->_decrementOutstandingOperationTrackRequests();
     }
 
@@ -159,7 +159,8 @@ private:
     const repl::OpTime _opTime;
 };
 
-void LogTransactionOperationsForShardingHandler::commit(boost::optional<Timestamp>) {
+void LogTransactionOperationsForShardingHandler::commit(OperationContext* opCtx,
+                                                        boost::optional<Timestamp>) {
     std::set<NamespaceString> namespacesTouchedByTransaction;
 
     // Inform the session migration subsystem that a transaction has committed for the given
@@ -772,7 +773,6 @@ Status MigrationChunkClonerSourceLegacy::nextModsBatch(OperationContext* opCtx,
         updateList.splice(updateList.cbegin(), _reload);
     }
 
-    StringData ns = nss().ns().c_str();
     BSONArrayBuilder arrDel(builder->subarrayStart("deleted"));
     auto noopFn = [](BSONObj idDoc, BSONObj* fullDoc) {
         *fullDoc = idDoc;
@@ -783,8 +783,8 @@ Status MigrationChunkClonerSourceLegacy::nextModsBatch(OperationContext* opCtx,
 
     if (deleteList.empty()) {
         BSONArrayBuilder arrUpd(builder->subarrayStart("reload"));
-        auto findByIdWrapper = [opCtx, ns](BSONObj idDoc, BSONObj* fullDoc) {
-            return Helpers::findById(opCtx, ns, idDoc, *fullDoc);
+        auto findByIdWrapper = [opCtx, this](BSONObj idDoc, BSONObj* fullDoc) {
+            return Helpers::findById(opCtx, this->nss(), idDoc, *fullDoc);
         };
         totalDocSize = xferMods(&arrUpd, &updateList, totalDocSize, findByIdWrapper);
         arrUpd.done();

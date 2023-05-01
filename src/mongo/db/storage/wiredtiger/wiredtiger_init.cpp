@@ -120,7 +120,8 @@ public:
             }
         }
         auto kv =
-            std::make_unique<WiredTigerKVEngine>(getCanonicalName().toString(),
+            std::make_unique<WiredTigerKVEngine>(opCtx,
+                                                 getCanonicalName().toString(),
                                                  params.dbpath,
                                                  getGlobalServiceContext()->getFastClockSource(),
                                                  wiredTigerGlobalOptions.engineConfig,

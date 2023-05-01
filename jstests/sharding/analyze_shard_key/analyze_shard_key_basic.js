@@ -32,6 +32,32 @@ function testExistingUnshardedCollection(writeConn, testCases) {
     const candidateKey1 = {candidateKey1: 1};  // does not have a supporting index.
     assert.commandWorked(coll.createIndex(candidateKey0));
 
+    // Analyze shard keys while the collection is empty.
+    testCases.forEach(testCase => {
+        jsTest.log(`Running analyzeShardKey command against an empty unsharded collection: ${
+            tojson(testCase)}`);
+
+        const res0 = testCase.conn.adminCommand({analyzeShardKey: ns, key: candidateKey0});
+        const res1 = testCase.conn.adminCommand({analyzeShardKey: ns, key: candidateKey1});
+        if (testCase.isSupported) {
+            // This is an unsharded collection so in a sharded cluster it only exists on the
+            // primary shard.
+            let expectedErrCode = (() => {
+                if (testCase.isMongos || testCase.isNonShardsvrMongod) {
+                    return ErrorCodes.InvalidOptions;
+                } else if (testCase.isPrimaryShardMongod) {
+                    return ErrorCodes.CollectionIsEmptyLocally;
+                }
+                return ErrorCodes.NamespaceNotFound;
+            })();
+            assert.commandFailedWithCode(res0, expectedErrCode);
+            assert.commandFailedWithCode(res1, expectedErrCode);
+        } else {
+            assert.commandFailedWithCode(res0, ErrorCodes.IllegalOperation);
+            assert.commandFailedWithCode(res1, ErrorCodes.IllegalOperation);
+        }
+    });
+
     // Analyze shard keys while the collection is non-empty.
     assert.commandWorked(coll.insert([{candidateKey0: 1, candidateKey1: 1}]));
     testCases.forEach(testCase => {
@@ -75,6 +101,27 @@ function testExistingShardedCollection(st, testCases) {
     const candidateKey0 = {candidateKey0: 1};
     const candidateKey1 = {candidateKey1: 1};  // does not have a supporting index
     assert.commandWorked(coll.createIndex(candidateKey0));
+
+    // Analyze shard keys while the collection is empty.
+    testCases.forEach(testCase => {
+        jsTest.log(`Running analyzeShardKey command against an empty sharded collection: ${
+            tojson(testCase)}`);
+
+        const res = testCase.conn.adminCommand({analyzeShardKey: ns, key: currentKey});
+        const res0 = testCase.conn.adminCommand({analyzeShardKey: ns, key: candidateKey0});
+        const res1 = testCase.conn.adminCommand({analyzeShardKey: ns, key: candidateKey1});
+        if (testCase.isSupported) {
+            const expectedErrCode =
+                testCase.isMongos ? ErrorCodes.InvalidOptions : ErrorCodes.CollectionIsEmptyLocally;
+            assert.commandFailedWithCode(res, expectedErrCode);
+            assert.commandFailedWithCode(res0, expectedErrCode);
+            assert.commandFailedWithCode(res1, expectedErrCode);
+        } else {
+            assert.commandFailedWithCode(res, ErrorCodes.IllegalOperation);
+            assert.commandFailedWithCode(res0, ErrorCodes.IllegalOperation);
+            assert.commandFailedWithCode(res1, ErrorCodes.IllegalOperation);
+        }
+    });
 
     // Analyze shard keys while the collection is non-empty.
     assert.commandWorked(coll.insert([

@@ -31,6 +31,7 @@
 
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/db_raii.h"
+#include "mongo/db/s/range_deletion_util.h"
 #include "mongo/db/s/sharding_ddl_util.h"
 #include "mongo/db/s/sharding_logging.h"
 #include "mongo/db/s/sharding_state.h"
@@ -46,22 +47,66 @@ namespace mongo {
 
 DropReply DropCollectionCoordinator::dropCollectionLocally(OperationContext* opCtx,
                                                            const NamespaceString& nss) {
+
+    boost::optional<UUID> collectionUUID;
     {
-        // Clear CollectionShardingRuntime entry
         Lock::DBLock dbLock(opCtx, nss.dbName(), MODE_IX);
         Lock::CollectionLock collLock(opCtx, nss, MODE_IX);
+
+        // Get collectionUUID
+        collectionUUID = [&]() -> boost::optional<UUID> {
+            auto localCatalog = CollectionCatalog::get(opCtx);
+            const auto coll = localCatalog->lookupCollectionByNamespace(opCtx, nss);
+            if (coll) {
+                return coll->uuid();
+            }
+            return boost::none;
+        }();
+
+        // Clear CollectionShardingRuntime entry
         auto* csr = CollectionShardingRuntime::get(opCtx, nss);
         csr->clearFilteringMetadataForDroppedCollection(opCtx);
+    }
+
+    // Remove all range deletion task documents present on disk for the collection to drop. This is
+    // a best-effort tentative considering that migrations are not blocked, hence some new document
+    // may be inserted before actually dropping the collection.
+    if (collectionUUID) {
+        // The multi-document remove command cannot be run in  transactions, so run it using
+        // an alternative client.
+        auto newClient = opCtx->getServiceContext()->makeClient("removeRangeDeletions-" +
+                                                                collectionUUID->toString());
+        {
+            stdx::lock_guard<Client> lk(*newClient.get());
+            newClient->setSystemOperationKillableByStepdown(lk);
+        }
+        auto alternativeOpCtx = newClient->makeOperationContext();
+        AlternativeClientRegion acr{newClient};
+
+        try {
+            removePersistentRangeDeletionTasksByUUID(alternativeOpCtx.get(), *collectionUUID);
+        } catch (const DBException& e) {
+            LOGV2_ERROR(6501601,
+                        "Failed to remove persistent range deletion tasks on drop collection",
+                        logAttrs(nss),
+                        "collectionUUID"_attr = (*collectionUUID).toString(),
+                        "error"_attr = e);
+            throw;
+        }
     }
 
     DropReply result;
     uassertStatusOK(dropCollection(
         opCtx, nss, &result, DropCollectionSystemCollectionMode::kDisallowSystemCollectionDrops));
 
+
     // Force the refresh of the catalog cache to purge outdated information
     const auto catalog = Grid::get(opCtx)->catalogCache();
     uassertStatusOK(catalog->getCollectionRoutingInfoWithRefresh(opCtx, nss));
     CatalogCacheLoader::get(opCtx).waitForCollectionFlush(opCtx, nss);
+
+    // Ensures the remove of range deletions and the refresh of the catalog cache will be waited for
+    // majority at the end of the command
     repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
 
     return result;
@@ -87,8 +132,11 @@ ExecutorFuture<void> DropCollectionCoordinator::_runImpl(
                 }
 
                 {
-                    AutoGetCollection coll{
-                        opCtx, nss(), MODE_IS, AutoGetCollectionViewMode::kViewsPermitted};
+                    AutoGetCollection coll{opCtx,
+                                           nss(),
+                                           MODE_IS,
+                                           AutoGetCollection::Options{}.viewMode(
+                                               auto_get_collection::ViewMode::kViewsPermitted)};
                     checkCollectionUUIDMismatch(opCtx, nss(), *coll, _doc.getCollectionUUID());
                 }
 
@@ -133,6 +181,8 @@ ExecutorFuture<void> DropCollectionCoordinator::_runImpl(
                             "Dropping collection",
                             "namespace"_attr = nss(),
                             "sharded"_attr = collIsSharded);
+
+                sharding_ddl_util::removeQueryAnalyzerMetadataFromConfig(opCtx, nss(), boost::none);
 
                 if (collIsSharded) {
                     invariant(_doc.getCollInfo());

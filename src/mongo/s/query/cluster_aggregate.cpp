@@ -314,6 +314,7 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
     auto hasChangeStream = liteParsedPipeline.hasChangeStream();
     auto involvedNamespaces = liteParsedPipeline.getInvolvedNamespaces();
     auto shouldDoFLERewrite = ::mongo::shouldDoFLERewrite(request);
+    auto startsWithDocuments = liteParsedPipeline.startsWithDocuments();
 
     // If the routing table is not already taken by the higher level, fill it now.
     if (!cm) {
@@ -328,7 +329,7 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
             sharded_agg_helpers::getExecutionNsRoutingInfo(opCtx, namespaces.executionNss);
 
         if (!executionNsRoutingInfoStatus.isOK()) {
-            uassert(CollectionUUIDMismatchInfo(request.getDbName().toString(),
+            uassert(CollectionUUIDMismatchInfo(request.getDbName(),
                                                *request.getCollectionUUID(),
                                                request.getNamespace().coll().toString(),
                                                boost::none),
@@ -343,7 +344,7 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
 
         if (executionNsRoutingInfoStatus.isOK()) {
             cm = std::move(executionNsRoutingInfoStatus.getValue());
-        } else if (!(hasChangeStream &&
+        } else if (!((hasChangeStream || startsWithDocuments) &&
                      executionNsRoutingInfoStatus == ErrorCodes::NamespaceNotFound)) {
             appendEmptyResultSetWithStatus(
                 opCtx, namespaces.requestedNss, executionNsRoutingInfoStatus.getStatus(), result);
@@ -407,6 +408,7 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
         cm,
         involvedNamespaces,
         hasChangeStream,
+        startsWithDocuments,
         allowedToPassthrough,
         request.getPassthroughToShard().has_value());
 
@@ -481,7 +483,8 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
                     namespaces,
                     privileges,
                     result,
-                    hasChangeStream);
+                    hasChangeStream,
+                    startsWithDocuments);
             }
             case cluster_aggregation_planner::AggregationTargeter::TargetingPolicy::
                 kSpecificShardOnly: {

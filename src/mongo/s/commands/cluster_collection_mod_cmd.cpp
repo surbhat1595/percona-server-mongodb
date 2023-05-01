@@ -71,11 +71,11 @@ public:
         return false;
     }
 
-    Status checkAuthForCommand(Client* client,
-                               const std::string& dbname,
-                               const BSONObj& cmdObj) const override {
-        const NamespaceString nss(
-            CommandHelpers::parseNsCollectionRequired({boost::none, dbname}, cmdObj));
+    Status checkAuthForOperation(OperationContext* opCtx,
+                                 const DatabaseName& dbName,
+                                 const BSONObj& cmdObj) const override {
+        auto* client = opCtx->getClient();
+        const NamespaceString nss(CommandHelpers::parseNsCollectionRequired(dbName, cmdObj));
         return auth::checkAuthForCollMod(
             client->getOperationContext(), AuthorizationSession::get(client), nss, cmdObj, true);
     }
@@ -101,12 +101,11 @@ public:
         auto swDbInfo = Grid::get(opCtx)->catalogCache()->getDatabase(
             opCtx, cmd.getDbName().toStringWithTenantId());
         if (swDbInfo == ErrorCodes::NamespaceNotFound) {
-            uassert(CollectionUUIDMismatchInfo(cmd.getDbName().toString(),
-                                               *cmd.getCollectionUUID(),
-                                               nss.coll().toString(),
-                                               boost::none),
-                    "Database does not exist",
-                    !cmd.getCollectionUUID());
+            uassert(
+                CollectionUUIDMismatchInfo(
+                    cmd.getDbName(), *cmd.getCollectionUUID(), nss.coll().toString(), boost::none),
+                "Database does not exist",
+                !cmd.getCollectionUUID());
         }
         const auto dbInfo = uassertStatusOK(swDbInfo);
 

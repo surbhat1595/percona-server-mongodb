@@ -196,7 +196,7 @@ bool hintMatchesColumnStoreIndex(const BSONObj& hintObj, const ColumnIndexEntry&
 }
 
 /**
- * Returns the dependencies for the CanoncialQuery, split by those needed to answer the filter,
+ * Returns the dependencies for the CanonicalQuery, split by those needed to answer the filter,
  * and those needed for "everything else" which is the project and sort.
  */
 std::pair<DepsTracker, DepsTracker> computeDeps(const QueryPlannerParams& params,
@@ -462,9 +462,6 @@ string optionString(size_t options) {
                 break;
             case QueryPlannerParams::STRICT_DISTINCT_ONLY:
                 ss << "STRICT_DISTINCT_ONLY ";
-                break;
-            case QueryPlannerParams::PRESERVE_RECORD_ID:
-                ss << "PRESERVE_RECORD_ID ";
                 break;
             case QueryPlannerParams::ASSERT_MIN_TS_HAS_NOT_FALLEN_OFF_OPLOG:
                 ss << "ASSERT_MIN_TS_HAS_NOT_FALLEN_OFF_OPLOG ";
@@ -1601,7 +1598,12 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
     }
 
     solution->extendWith(std::move(solnForAgg));
-    return QueryPlannerAnalysis::removeInclusionProjectionBelowGroup(std::move(solution));
+
+    solution = QueryPlannerAnalysis::removeInclusionProjectionBelowGroup(std::move(solution));
+
+    QueryPlannerAnalysis::removeUselessColumnScanRowStoreExpression(*solution->root());
+
+    return std::move(solution);
 }
 
 StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::choosePlanForSubqueries(

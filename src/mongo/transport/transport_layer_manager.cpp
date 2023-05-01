@@ -76,7 +76,7 @@ Future<SessionHandle> TransportLayerManager::asyncConnect(
     ConnectSSLMode sslMode,
     const ReactorHandle& reactor,
     Milliseconds timeout,
-    ConnectionMetrics* connectionMetrics,
+    std::shared_ptr<ConnectionMetrics> connectionMetrics,
     std::shared_ptr<const SSLConnectionContext> transientSSLContext) {
     return _tls.front()->asyncConnect(
         peer, sslMode, reactor, timeout, connectionMetrics, transientSSLContext);
@@ -117,8 +117,12 @@ Status TransportLayerManager::setup() {
     return Status::OK();
 }
 
-void TransportLayerManager::appendStats(BSONObjBuilder* bob) const {
-    _foreach([&](const TransportLayer* tl) { tl->appendStats(bob); });
+void TransportLayerManager::appendStatsForServerStatus(BSONObjBuilder* bob) const {
+    _foreach([&](const TransportLayer* tl) { tl->appendStatsForServerStatus(bob); });
+}
+
+void TransportLayerManager::appendStatsForFTDC(BSONObjBuilder& bob) const {
+    _foreach([&](const TransportLayer* tl) { tl->appendStatsForFTDC(bob); });
 }
 
 Status TransportLayerManager::addAndStartTransportLayer(std::unique_ptr<TransportLayer> tl) {

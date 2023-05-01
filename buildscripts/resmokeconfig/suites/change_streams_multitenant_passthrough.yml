@@ -4,8 +4,9 @@ selector:
   roots:
   - jstests/change_streams/**/*.js
   exclude_files:
-  # TODO SERVER-66840 investigate the failing test case.
+  # TODO SERVER-68341: Implement enable/disable command for mongoQ in the serverless.
   - jstests/change_streams/projection_fakes_internal_event.js
+  # TODO SERVER-69959: Implement a majority-committed insert listener.
   - jstests/change_streams/only_wake_getmore_for_relevant_changes.js
   exclude_with_any_tags:
   ##
@@ -30,7 +31,10 @@ executor:
           enableMajorityReadConcern: ''
       # Enable causal consistency for change streams suites using 1 node replica sets. See
       # change_streams.yml for detailed explanation.
-      #TODO SERVER-67267 load 'inject_tenant_prefix.js'.
+      # TODO SERVER-67267 Load 'inject_tenant_prefix.js', add 'multitenancySupport',
+      #                   'featureFlagMongoStore' and 'featureFlagRequireTenantID' flags. The
+      #                   'inject_tenant_prefix' should also be called for the
+      #                   'enable_change_stream.py' file.
       eval: >-
         var testingReplication = true;
         load('jstests/libs/override_methods/set_read_and_write_concerns.js');
@@ -47,11 +51,15 @@ executor:
   - class: EnableChangeStream
   fixture:
     class: ReplicaSetFixture
+    replset_name: "ChangeStreamMultitenantReplSet"
     mongod_options:
       bind_ip_all: ''
+      serverless: true
       set_parameters:
         enableTestCommands: 1
         featureFlagServerlessChangeStreams: true
+        internalChangeStreamUseTenantIdForTesting: true
         failpoint.assertChangeStreamNssCollection:
           "{'mode': 'alwaysOn', 'data': {'collectionName': 'system.change_collection'}}"
-    num_nodes: 2
+    # TODO SERVER-69115 Set number of nodes to 2 after oplog application is working properly.
+    num_nodes: 1

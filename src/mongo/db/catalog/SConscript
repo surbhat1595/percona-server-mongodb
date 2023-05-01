@@ -43,7 +43,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/server_options_core',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
-        '$BUILD_DIR/mongo/idl/feature_flag',
         'clustered_collection_options',
     ],
 )
@@ -293,6 +292,7 @@ env.Library(
         'views_for_database.cpp',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/concurrency/lock_manager',
         '$BUILD_DIR/mongo/db/multitenancy',
         '$BUILD_DIR/mongo/db/profile_filter',
         '$BUILD_DIR/mongo/db/query/collation/collator_factory_interface',
@@ -370,6 +370,7 @@ env.Library(
         'index_catalog_entry_impl.cpp',
         'index_catalog_impl.cpp',
         'index_consistency.cpp',
+        'virtual_collection_impl.cpp',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
@@ -620,19 +621,6 @@ env.Library(
     ],
 )
 
-env.Library(
-    target='derived_metadata',
-    source=[
-        'derived_metadata_collection_count.cpp',
-        'derived_metadata_collection_controller.cpp',
-        'derived_metadata_controller.cpp',
-    ],
-    LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/db/service_context',
-    ],
-)
-
 if wiredtiger:
     env.CppUnitTest(
         target='db_catalog_test',
@@ -640,7 +628,6 @@ if wiredtiger:
             'capped_utils_test.cpp',
             'catalog_control_test.cpp',
             'collection_catalog_test.cpp',
-            'derived_metadata_test.cpp',
             'collection_options_test.cpp',
             'collection_test.cpp',
             'collection_validation_test.cpp',
@@ -663,6 +650,7 @@ if wiredtiger:
             '$BUILD_DIR/mongo/db/auth/authmocks',
             '$BUILD_DIR/mongo/db/catalog/collection_crud',
             '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
+            '$BUILD_DIR/mongo/db/index/index_access_method',
             '$BUILD_DIR/mongo/db/index_builds_coordinator_mongod',
             '$BUILD_DIR/mongo/db/multitenancy',
             '$BUILD_DIR/mongo/db/op_observer/op_observer',
@@ -689,6 +677,7 @@ if wiredtiger:
             '$BUILD_DIR/mongo/util/pcre_wrapper',
             'catalog_control',
             'catalog_helpers',
+            'catalog_impl',
             'catalog_test_fixture',
             'collection',
             'collection_catalog',
@@ -697,7 +686,6 @@ if wiredtiger:
             'collection_validation',
             'commit_quorum_options',
             'database_holder',
-            'derived_metadata',
             'index_build_block',
             'index_build_entry_idl',
             'index_builds_manager',

@@ -41,8 +41,7 @@
 namespace mongo {
 namespace {
 
-class ShardsvrCreateGlobalIndexCommand final
-    : public TypedCommand<ShardsvrCreateGlobalIndexCommand> {
+class ShardsvrDropGlobalIndexCommand final : public TypedCommand<ShardsvrDropGlobalIndexCommand> {
 public:
     using Request = DropGlobalIndex;
 
@@ -84,10 +83,9 @@ public:
         }
 
         void typedRun(OperationContext* opCtx) {
-
             uassert(ErrorCodes::CommandNotSupported,
-                    "_shardsvrDropGlobalIndex command not enabled",
-                    gFeatureFlagGlobalIndexes.isEnabledAndIgnoreFCV());
+                    "Global indexes are not enabled.",
+                    gFeatureFlagGlobalIndexes.isEnabled(serverGlobalParams.featureCompatibility));
 
             const auto indexUUID = request().getCommandParameter();
             global_index::dropContainer(opCtx, indexUUID);
@@ -102,7 +100,10 @@ public:
                                                            ActionType::internal));
         }
     };
-} shardsvrDropGlobalIndexCommand;
+};
+
+MONGO_REGISTER_FEATURE_FLAGGED_COMMAND(ShardsvrDropGlobalIndexCommand,
+                                       mongo::gFeatureFlagGlobalIndexes);
 
 }  // namespace
 }  // namespace mongo

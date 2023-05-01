@@ -41,6 +41,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/commands/fsync_locked.h"
 #include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/exec/delete_stage.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -321,6 +322,7 @@ void TTLMonitor::shutdown() {
 void TTLMonitor::_doTTLPass() {
     const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
     OperationContext* opCtx = opCtxPtr.get();
+    SetTicketAquisitionPriorityForLock priority(opCtx, AdmissionContext::Priority::kLow);
 
     hangTTLMonitorBetweenPasses.pauseWhileSet(opCtx);
 
@@ -493,7 +495,7 @@ bool TTLMonitor::_doTTLIndexDelete(OperationContext* opCtx,
                       "error"_attr = ex);
         return false;
     } catch (const DBException& ex) {
-        if (opCtx->isKillPending()) {
+        if (!opCtx->checkForInterruptNoAssert().isOK()) {
             // The exception is relevant to the entire TTL monitoring process, not just the specific
             // TTL index. Let the exception escape so it can be addressed at the higher monitoring
             // layer.

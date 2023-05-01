@@ -13,7 +13,6 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/client/read_preference',
         '$BUILD_DIR/mongo/db/server_base',
-        '$BUILD_DIR/mongo/idl/feature_flag',
     ],
 )
 
@@ -75,7 +74,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/multi_index_block',
         '$BUILD_DIR/mongo/db/change_stream_change_collection_manager',
         '$BUILD_DIR/mongo/db/change_stream_pre_images_collection_manager',
-        '$BUILD_DIR/mongo/db/commands/feature_compatibility_parsers',
+        '$BUILD_DIR/mongo/db/change_stream_serverless_helpers',
         '$BUILD_DIR/mongo/db/commands/txn_cmd_request',
         '$BUILD_DIR/mongo/db/concurrency/exception_util',
         '$BUILD_DIR/mongo/db/dbdirectclient',
@@ -87,6 +86,8 @@ env.Library(
         '$BUILD_DIR/mongo/db/op_observer/op_observer_util',
         '$BUILD_DIR/mongo/db/ops/write_ops',
         '$BUILD_DIR/mongo/db/pipeline/change_stream_preimage',
+        '$BUILD_DIR/mongo/db/s/sharding_catalog',
+        '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/session/session_catalog_mongod',
         '$BUILD_DIR/mongo/db/shard_role',
         '$BUILD_DIR/mongo/db/stats/counters',
@@ -94,6 +95,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/transaction/transaction',
         '$BUILD_DIR/mongo/idl/idl_parser',
         '$BUILD_DIR/mongo/rpc/command_status',
+        '$BUILD_DIR/mongo/s/common_s',
         'dbcheck',
         'image_collection_entry',
         'repl_coordinator_interface',
@@ -634,6 +636,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/catalog/collection_crud',
         '$BUILD_DIR/mongo/db/change_stream_change_collection_manager',
+        '$BUILD_DIR/mongo/db/change_stream_serverless_helpers',
         '$BUILD_DIR/mongo/db/commands/mongod_fsync',
         '$BUILD_DIR/mongo/db/concurrency/exception_util',
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
@@ -903,7 +906,6 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/server_base',
-        '$BUILD_DIR/mongo/idl/feature_flag',
         'repl_server_parameters',
         'split_horizon',
     ],
@@ -1243,8 +1245,8 @@ env.Library(
         'tenant_migration_access_blocker',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/commands/feature_compatibility_parsers',
         '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
+        '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/serverless/serverless_lock',
         '$BUILD_DIR/mongo/db/session/session_catalog_mongod',
         '$BUILD_DIR/mongo/executor/scoped_task_executor',
@@ -1502,6 +1504,7 @@ env.Library(
         '$BUILD_DIR/mongo/client/clientdriver_network',
         '$BUILD_DIR/mongo/db/auth/auth',
         '$BUILD_DIR/mongo/db/change_stream_pre_images_collection_manager',
+        '$BUILD_DIR/mongo/db/change_stream_serverless_helpers',
         '$BUILD_DIR/mongo/db/cloner',
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
         '$BUILD_DIR/mongo/db/curop',
@@ -1713,7 +1716,6 @@ if wiredtiger:
             '$BUILD_DIR/mongo/db/auth/authorization_manager_global',
             '$BUILD_DIR/mongo/db/catalog/catalog_helpers',
             '$BUILD_DIR/mongo/db/change_stream_pre_images_collection_manager',
-            '$BUILD_DIR/mongo/db/commands/feature_compatibility_parsers',
             '$BUILD_DIR/mongo/db/commands/mongod_fcv',
             '$BUILD_DIR/mongo/db/commands/txn_cmd_request',
             '$BUILD_DIR/mongo/db/dbdirectclient',

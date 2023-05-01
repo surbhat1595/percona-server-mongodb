@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <boost/algorithm/string.hpp>
+#include <cstdint>
 #include <cstdio>
 #include <utility>
 #include <vector>
@@ -42,9 +43,9 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/crypto/fle_crypto.h"
 #include "mongo/db/bson/dotted_path_support.h"
-#include "mongo/db/commands/feature_compatibility_version_documentation.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/feature_compatibility_version_documentation.h"
 #include "mongo/db/hasher.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -417,7 +418,7 @@ public:
     }
 
 private:
-    // Convert current value into date.
+    // Convert 'valToAdd' into the data type used for dates (long long) and add it to 'longTotal'.
     void addToDateValue(Value valToAdd) {
         switch (valToAdd.getType()) {
             case NumberInt:
@@ -441,10 +442,17 @@ private:
                 }
                 break;
             }
-            case NumberDecimal:
-                // Decimal dates are not checked for overflow.
-                longTotal += valToAdd.coerceToDecimal().toLong();
+            case NumberDecimal: {
+                Decimal128 decimalToAdd = valToAdd.coerceToDecimal();
+
+                std::uint32_t signalingFlags = Decimal128::SignalingFlag::kNoFlag;
+                std::int64_t longToAdd = decimalToAdd.toLong(&signalingFlags);
+                if (signalingFlags != Decimal128::SignalingFlag::kNoFlag ||
+                    overflow::add(longTotal, longToAdd, &longTotal)) {
+                    uasserted(ErrorCodes::Overflow, "date overflow in $add");
+                }
                 break;
+            }
             default:
                 MONGO_UNREACHABLE;
         }
@@ -7544,9 +7552,7 @@ ExpressionDateTrunc::ExpressionDateTrunc(ExpressionContext* const expCtx,
       _unit{_children[1]},
       _binSize{_children[2]},
       _timeZone{_children[3]},
-      _startOfWeek{_children[4]} {
-    expCtx->sbeCompatible = false;
-}
+      _startOfWeek{_children[4]} {}
 
 boost::intrusive_ptr<Expression> ExpressionDateTrunc::parse(ExpressionContext* const expCtx,
                                                             BSONElement expr,
@@ -7988,13 +7994,13 @@ Value ExpressionTsIncrement::evaluate(const Document& root, Variables* variables
 
 REGISTER_STABLE_EXPRESSION(tsIncrement, ExpressionTsIncrement::parse);
 
-/* ------------------------- ExpressionEncryptedBetween ----------------------------- */
+/* ------------------------- ExpressionBetween ----------------------------- */
 
-Value ExpressionEncryptedBetween::evaluate(const Document& root, Variables* variables) const {
-    uasserted(6882800, "$encryptedBetween does not have a runtime implementation.");
+Value ExpressionBetween::evaluate(const Document& root, Variables* variables) const {
+    tasserted(6882800, "$between does not have a runtime implementation.");
 }
 
-REGISTER_STABLE_EXPRESSION(encryptedBetween, ExpressionEncryptedBetween::parse);
+REGISTER_STABLE_EXPRESSION(between, ExpressionBetween::parse);
 
 MONGO_INITIALIZER_GROUP(BeginExpressionRegistration, ("default"), ("EndExpressionRegistration"))
 MONGO_INITIALIZER_GROUP(EndExpressionRegistration, ("BeginExpressionRegistration"), ())

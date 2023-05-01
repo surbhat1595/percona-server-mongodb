@@ -42,6 +42,7 @@
 #include "mongo/db/exec/sbe/stages/project.h"
 #include "mongo/db/exec/sbe/stages/traverse.h"
 #include "mongo/db/exec/sbe/stages/union.h"
+#include "mongo/db/exec/sbe/values/arith_common.h"
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/accumulator.h"
@@ -334,7 +335,7 @@ public:
     void visit(const ExpressionDateToString* expr) final {}
     void visit(const ExpressionDateTrunc* expr) final {}
     void visit(const ExpressionDivide* expr) final {}
-    void visit(const ExpressionEncryptedBetween* expr) final {}
+    void visit(const ExpressionBetween* expr) final {}
     void visit(const ExpressionExp* expr) final {}
     void visit(const ExpressionFieldPath* expr) final {}
     void visit(const ExpressionFilter* expr) final {
@@ -511,7 +512,7 @@ public:
     void visit(const ExpressionDateToString* expr) final {}
     void visit(const ExpressionDateTrunc*) final {}
     void visit(const ExpressionDivide* expr) final {}
-    void visit(const ExpressionEncryptedBetween* expr) final {}
+    void visit(const ExpressionBetween* expr) final {}
     void visit(const ExpressionExp* expr) final {}
     void visit(const ExpressionFieldPath* expr) final {}
     void visit(const ExpressionFilter* expr) final {
@@ -1748,8 +1749,205 @@ public:
     void visit(const ExpressionDateToString* expr) final {
         unsupportedExpression("$dateFromString");
     }
-    void visit(const ExpressionDateTrunc*) final {
-        unsupportedExpression("$dateTrunc");
+    void visit(const ExpressionDateTrunc* expr) final {
+        auto children = expr->getChildren();
+        invariant(children.size() == 5);
+        _context->ensureArity(2 + (expr->isBinSizeSpecified() ? 1 : 0) +
+                              (expr->isTimezoneSpecified() ? 1 : 0) +
+                              (expr->isStartOfWeekSpecified() ? 1 : 0));
+
+        // Get child expressions.
+        auto startOfWeekExpression =
+            expr->isStartOfWeekSpecified() ? _context->popExpr() : makeConstant("sun"_sd);
+        auto timezoneExpression =
+            expr->isTimezoneSpecified() ? _context->popExpr() : makeConstant("UTC"_sd);
+        auto binSizeExpression = expr->isBinSizeSpecified()
+            ? _context->popExpr()
+            : makeConstant(sbe::value::TypeTags::NumberInt64, 1);
+        auto unitExpression = _context->popExpr();
+        auto dateExpression = _context->popExpr();
+
+        auto timezoneDBSlot = _context->state.data->env->getSlot("timeZoneDB"_sd);
+        auto [timezoneDBTag, timezoneDBVal] =
+            _context->state.data->env->getAccessor(timezoneDBSlot)->getViewOfValue();
+        tassert(7003901,
+                "$dateTrunc first argument must be a timezoneDB object",
+                timezoneDBTag == sbe::value::TypeTags::timeZoneDB);
+        auto timezoneDB = sbe::value::getTimeZoneDBView(timezoneDBVal);
+
+        // Local bind to hold the date expression result
+        auto dateFrameId = _context->state.frameId();
+        sbe::EExpression::Vector dateBindings;
+        sbe::EVariable dateRef(dateFrameId, 0);
+        dateBindings.push_back(std::move(dateExpression));
+
+        // Set parameters for an invocation of built-in "dateTrunc" function.
+        sbe::EExpression::Vector arguments;
+        arguments.push_back(makeVariable(timezoneDBSlot));
+        arguments.push_back(dateRef.clone());
+        arguments.push_back(unitExpression->clone());
+        arguments.push_back(binSizeExpression->clone());
+        arguments.push_back(timezoneExpression->clone());
+        arguments.push_back(startOfWeekExpression->clone());
+
+        // Create an expression to invoke built-in "dateTrunc" function.
+        auto dateTruncFunctionCall =
+            sbe::makeE<sbe::EFunction>("dateTrunc"_sd, std::move(arguments));
+
+        // Local bind to hold the $dateTrunc function call result
+        auto dateTruncFrameId = _context->state.frameId();
+        sbe::EExpression::Vector dateTruncBindings;
+        sbe::EVariable dateTruncRef(dateTruncFrameId, 0);
+        dateTruncBindings.push_back(std::move(dateTruncFunctionCall));
+
+        // Local bind to hold the unitIsWeek common subexpression
+        auto unitIsWeekFrameId = _context->state.frameId();
+        sbe::EExpression::Vector unitIsWeekBindings;
+        sbe::EVariable unitIsWeekRef(unitIsWeekFrameId, 0);
+        unitIsWeekBindings.push_back(generateIsEqualToStringCheck(*unitExpression, "week"_sd));
+
+        // Create expressions to check that each argument to "dateTrunc" function exists, is not
+        // null, and is of the correct type.
+        std::vector<CaseValuePair> inputValidationCases;
+
+        // Return null if any of the parameters is either null or missing.
+        inputValidationCases.push_back(generateReturnNullIfNullOrMissing(dateRef));
+        inputValidationCases.push_back(generateReturnNullIfNullOrMissing(unitExpression->clone()));
+        inputValidationCases.push_back(
+            generateReturnNullIfNullOrMissing(binSizeExpression->clone()));
+        inputValidationCases.push_back(
+            generateReturnNullIfNullOrMissing(timezoneExpression->clone()));
+        inputValidationCases.emplace_back(
+            makeBinaryOp(sbe::EPrimBinary::logicAnd,
+                         unitIsWeekRef.clone(),
+                         generateNullOrMissing(startOfWeekExpression->clone())),
+            makeConstant(sbe::value::TypeTags::Null, 0));
+
+        // "timezone" parameter validation.
+        if (timezoneExpression->as<sbe::EConstant>()) {
+            auto [timezoneTag, timezoneVal] =
+                timezoneExpression->as<sbe::EConstant>()->getConstant();
+            tassert(7003907,
+                    "$dateTrunc parameter 'timezone' must be a string",
+                    sbe::value::isString(timezoneTag));
+            tassert(7003908,
+                    "$dateTrunc parameter 'timezone' must be a valid timezone",
+                    sbe::vm::isValidTimezone(timezoneTag, timezoneVal, timezoneDB));
+        } else {
+            inputValidationCases.emplace_back(
+                generateNonStringCheck(*timezoneExpression),
+                makeFail(5439100, "$dateTrunc parameter 'timezone' must be a string"));
+            inputValidationCases.emplace_back(
+                makeNot(makeFunction(
+                    "isTimezone", makeVariable(timezoneDBSlot), timezoneExpression->clone())),
+                makeFail(5439101, "$dateTrunc parameter 'timezone' must be a valid timezone"));
+        }
+
+        // "date" parameter validation.
+        inputValidationCases.emplace_back(generateFailIfNotCoercibleToDate(
+            dateRef, ErrorCodes::Error{5439102}, "$dateTrunc"_sd, "date"_sd));
+
+        // "unit" parameter validation.
+        if (unitExpression->as<sbe::EConstant>()) {
+            auto [unitTag, unitVal] = unitExpression->as<sbe::EConstant>()->getConstant();
+            tassert(7003902,
+                    "$dateTrunc parameter 'unit' must be a string",
+                    sbe::value::isString(unitTag));
+            auto unitString = sbe::value::getStringView(unitTag, unitVal);
+            tassert(7003903,
+                    "$dateTrunc parameter 'unit' must be a valid time unit",
+                    isValidTimeUnit(unitString));
+        } else {
+            inputValidationCases.emplace_back(
+                generateNonStringCheck(*unitExpression),
+                makeFail(5439103, "$dateTrunc parameter 'unit' must be a string"));
+            inputValidationCases.emplace_back(
+                makeNot(makeFunction("isTimeUnit", unitExpression->clone())),
+                makeFail(5439104, "$dateTrunc parameter 'unit' must be a valid time unit"));
+        }
+
+        // "binSize" parameter validation.
+        if (expr->isBinSizeSpecified()) {
+            if (binSizeExpression->as<sbe::EConstant>()) {
+                auto [binSizeTag, binSizeValue] =
+                    binSizeExpression->as<sbe::EConstant>()->getConstant();
+                tassert(
+                    7003904,
+                    "$dateTrunc parameter 'binSize' must be coercible to a positive 64-bit integer",
+                    sbe::value::isNumber(binSizeTag));
+                auto [binSizeLongOwn, binSizeLongTag, binSizeLongValue] =
+                    sbe::value::genericNumConvert(
+                        binSizeTag, binSizeValue, sbe::value::TypeTags::NumberInt64);
+                tassert(
+                    7003905,
+                    "$dateTrunc parameter 'binSize' must be coercible to a positive 64-bit integer",
+                    binSizeLongTag != sbe::value::TypeTags::Nothing);
+                auto binSize = sbe::value::bitcastTo<int64_t>(binSizeLongValue);
+                tassert(
+                    7003906,
+                    "$dateTrunc parameter 'binSize' must be coercible to a positive 64-bit integer",
+                    binSize > 0);
+            } else {
+                inputValidationCases.emplace_back(
+                    makeNot(makeBinaryOp(
+                        sbe::EPrimBinary::logicAnd,
+                        makeBinaryOp(sbe::EPrimBinary::logicAnd,
+                                     makeFunction("isNumber", binSizeExpression->clone()),
+                                     makeFunction("exists",
+                                                  sbe::makeE<sbe::ENumericConvert>(
+                                                      binSizeExpression->clone(),
+                                                      sbe::value::TypeTags::NumberInt64))),
+                        generatePositiveCheck(*binSizeExpression))),
+                    makeFail(
+                        5439105,
+                        "$dateTrunc parameter 'binSize' must be coercible to a positive 64-bit "
+                        "integer"));
+            }
+        }
+
+        // "startOfWeek" parameter validation.
+        if (expr->isStartOfWeekSpecified()) {
+            if (startOfWeekExpression->as<sbe::EConstant>()) {
+                auto [startOfWeekTag, startOfWeekVal] =
+                    startOfWeekExpression->as<sbe::EConstant>()->getConstant();
+                tassert(7003909,
+                        "$dateTrunc parameter 'startOfWeek' must be a string",
+                        sbe::value::isString(startOfWeekTag));
+                auto startOfWeekString = sbe::value::getStringView(startOfWeekTag, startOfWeekVal);
+                tassert(7003910,
+                        "$dateTrunc parameter 'startOfWeek' must be a valid day of the week",
+                        isValidDayOfWeek(startOfWeekString));
+            } else {
+                // If 'timeUnit' value is equal to "week" then validate "startOfWeek" parameter.
+                inputValidationCases.emplace_back(
+                    makeBinaryOp(sbe::EPrimBinary::logicAnd,
+                                 unitIsWeekRef.clone(),
+                                 generateNonStringCheck(*startOfWeekExpression)),
+                    makeFail(5439106, "$dateTrunc parameter 'startOfWeek' must be a string"));
+                inputValidationCases.emplace_back(
+                    makeBinaryOp(
+                        sbe::EPrimBinary::logicAnd,
+                        unitIsWeekRef.clone(),
+                        makeNot(makeFunction("isDayOfWeek", startOfWeekExpression->clone()))),
+                    makeFail(5439107,
+                             "$dateTrunc parameter 'startOfWeek' must be a valid day of the week"));
+            }
+        }
+
+        _context->pushExpr(sbe::makeE<sbe::ELocalBind>(
+            dateFrameId,
+            std::move(dateBindings),
+            sbe::makeE<sbe::ELocalBind>(
+                dateTruncFrameId,
+                std::move(dateTruncBindings),
+                sbe::makeE<sbe::EIf>(makeFunction("exists", dateTruncRef.clone()),
+                                     dateTruncRef.clone(),
+                                     sbe::makeE<sbe::ELocalBind>(
+                                         unitIsWeekFrameId,
+                                         std::move(unitIsWeekBindings),
+                                         buildMultiBranchConditionalFromCaseValuePairs(
+                                             std::move(inputValidationCases),
+                                             makeConstant(sbe::value::TypeTags::Nothing, 0)))))));
     }
     void visit(const ExpressionDivide* expr) final {
         _context->ensureArity(2);
@@ -1797,8 +1995,8 @@ public:
         _context->pushExpr(
             sbe::makeE<sbe::ELocalBind>(frameId, std::move(binds), std::move(expExpr)));
     }
-    void visit(const ExpressionEncryptedBetween* expr) final {
-        unsupportedExpression("$_encryptedBetween");
+    void visit(const ExpressionBetween* expr) final {
+        unsupportedExpression("$_between");
     }
     void visit(const ExpressionFieldPath* expr) final {
         // There's a chance that we've already generated a SBE plan stage tree for this field path,
@@ -2777,7 +2975,43 @@ public:
         unsupportedExpression(expr->getOpName());
     }
     void visit(const ExpressionSubtract* expr) final {
-        unsupportedExpression(expr->getOpName());
+        invariant(expr->getChildren().size() == 2);
+        _context->ensureArity(2);
+
+        auto rhs = _context->popExpr();
+        auto lhs = _context->popExpr();
+
+        auto frameId = _context->state.frameId();
+        auto binds = sbe::makeEs(std::move(lhs), std::move(rhs));
+        sbe::EVariable lhsRef{frameId, 0};
+        sbe::EVariable rhsRef{frameId, 1};
+
+        auto checkNullArguments = makeBinaryOp(sbe::EPrimBinary::logicOr,
+                                               generateNullOrMissing(lhsRef.clone()),
+                                               generateNullOrMissing(rhsRef.clone()));
+
+        auto checkArgumentTypes = makeNot(sbe::makeE<sbe::EIf>(
+            makeFunction("isNumber", lhsRef.clone()),
+            makeFunction("isNumber", rhsRef.clone()),
+            makeBinaryOp(sbe::EPrimBinary::logicAnd,
+                         makeFunction("isDate", lhsRef.clone()),
+                         makeBinaryOp(sbe::EPrimBinary::logicOr,
+                                      makeFunction("isNumber", rhsRef.clone()),
+                                      makeFunction("isDate", rhsRef.clone())))));
+
+        auto subtractOp = makeBinaryOp(sbe::EPrimBinary::sub, lhsRef.clone(), rhsRef.clone());
+        auto subtractExpr = buildMultiBranchConditional(
+            CaseValuePair{std::move(checkNullArguments),
+                          makeConstant(sbe::value::TypeTags::Null, 0)},
+            CaseValuePair{
+                std::move(checkArgumentTypes),
+                makeFail(5156200,
+                         "Only numbers and dates are allowed in an $subtract expression. To "
+                         "subtract a number from a date, the date must be the first argument.")},
+            std::move(subtractOp));
+
+        _context->pushExpr(
+            sbe::makeE<sbe::ELocalBind>(frameId, std::move(binds), std::move(subtractExpr)));
     }
     void visit(const ExpressionSwitch* expr) final {
         visitConditionalExpression(expr);
@@ -3250,16 +3484,20 @@ private:
         return {generateNullOrMissing(variable), makeConstant(sbe::value::TypeTags::Null, 0)};
     }
 
+    static CaseValuePair generateReturnNullIfNullOrMissing(std::unique_ptr<sbe::EExpression> expr) {
+        return {generateNullOrMissing(std::move(expr)),
+                makeConstant(sbe::value::TypeTags::Null, 0)};
+    }
+
     /**
      * Creates a boolean expression to check if 'variable' is equal to string 'string'.
      */
     static std::unique_ptr<sbe::EExpression> generateIsEqualToStringCheck(
-        const sbe::EVariable& variable, StringData string) {
-        return sbe::makeE<sbe::EPrimBinary>(sbe::EPrimBinary::logicAnd,
-                                            makeFunction("isString", variable.clone()),
-                                            sbe::makeE<sbe::EPrimBinary>(sbe::EPrimBinary::eq,
-                                                                         variable.clone(),
-                                                                         makeConstant(string)));
+        const sbe::EExpression& expr, StringData string) {
+        return sbe::makeE<sbe::EPrimBinary>(
+            sbe::EPrimBinary::logicAnd,
+            makeFunction("isString", expr.clone()),
+            sbe::makeE<sbe::EPrimBinary>(sbe::EPrimBinary::eq, expr.clone(), makeConstant(string)));
     }
 
     /**

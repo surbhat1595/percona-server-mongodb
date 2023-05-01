@@ -56,15 +56,19 @@ structs:
 
   configureQueryAnalyzerResponse:
     description: "The response for the 'configureQueryAnalyzer' command."
+    strict: false
+    inline_chained_structs: true
+    chained_structs:
+      queryAnalyzerConfiguration: newConfiguration
 
 commands:
   configureQueryAnalyzer:
     description: "The command for setting the query analyzer configuration for a collection."
     command_name: configureQueryAnalyzer
-    strict: true
+    strict: false
     namespace: type
     api_version: ""
     type: namespacestring
     inline_chained_structs: true
     chained_structs:
-      queryAnalyzerConfiguration: queryAnalyzerConfiguration
+      queryAnalyzerConfiguration: configuration

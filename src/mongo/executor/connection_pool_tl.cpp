@@ -32,6 +32,7 @@
 
 #include "mongo/executor/connection_pool_tl.h"
 
+#include "mongo/base/error_codes.h"
 #include "mongo/client/authenticate.h"
 #include "mongo/config.h"
 #include "mongo/db/auth/authorization_manager.h"
@@ -329,6 +330,11 @@ private:
 void TLConnection::setup(Milliseconds timeout, SetupCallback cb, std::string instanceName) {
     auto anchor = shared_from_this();
 
+    // Create a shared_ptr to _connMetrics that shares the ownership information with the
+    // anchor. We want to keep this TLConnection instance alive as long as the shared_ptr
+    // to _connMetrics is in use.
+    std::shared_ptr<ConnectionMetrics> connMetricsAnchor{anchor, &_connMetrics};
+
     auto pf = makePromiseFuture<void>();
     auto handler = std::make_shared<TimeoutHandler>(std::move(pf.promise));
     std::move(pf.future).thenRunOn(_reactor).getAsync(
@@ -361,11 +367,21 @@ void TLConnection::setup(Milliseconds timeout, SetupCallback cb, std::string ins
     // For transient connections, only use X.509 auth.
     auto isMasterHook = std::make_shared<TLConnectionSetupHook>(_onConnectHook, x509AuthOnly);
 
-    AsyncDBClient::connect(
-        _peer, _sslMode, _serviceContext, _reactor, timeout, &_connMetrics, _transientSSLContext)
+    AsyncDBClient::connect(_peer,
+                           _sslMode,
+                           _serviceContext,
+                           _reactor,
+                           timeout,
+                           connMetricsAnchor,
+                           _transientSSLContext)
         .thenRunOn(_reactor)
         .onError([](StatusWith<AsyncDBClient::Handle> swc) -> StatusWith<AsyncDBClient::Handle> {
-            return Status(ErrorCodes::HostUnreachable, swc.getStatus().reason());
+            if (const Status& status = swc.getStatus();
+                status.code() == ErrorCodes::ConnectionError) {
+                return status;
+            } else {
+                return Status(ErrorCodes::HostUnreachable, status.reason());
+            }
         })
         .then([this, isMasterHook, instanceName = std::move(instanceName)](
                   AsyncDBClient::Handle client) {
@@ -489,6 +505,15 @@ Date_t TLConnection::now() {
 void TLConnection::cancelAsync() {
     if (_client)
         _client->cancel();
+}
+
+void TLConnection::startConnAcquiredTimer() {
+    _connMetrics.startConnAcquiredTimer();
+}
+
+std::shared_ptr<Timer> TLConnection::getConnAcquiredTimer() {
+    auto anchor = shared_from_this();
+    return std::shared_ptr<Timer>{anchor, _connMetrics.getConnAcquiredTimer()};
 }
 
 auto TLTypeFactory::reactor() {

@@ -4,31 +4,24 @@
  * Indexes are validated by comparing query results that use the index with results from a control
  * query that uses a collection scan.
  * @tags: [
- *   # columnstore indexes are new in 6.1.
- *   requires_fcv_61,
  *   # We could potentially need to resume an index build in the event of a stepdown, which is not
  *   # yet implemented.
  *   does_not_support_stepdowns,
- *   # Columnstore indexes are incompatible with clustered collections.
- *   incompatible_with_clustered_collection,
+ *   # column store indexes are still under a feature flag and require full sbe
+ *   uses_column_store_index,
+ *   featureFlagColumnstoreIndexes,
+ *   featureFlagSbeFull,
+ *   # TODO SERVER-69884: featureFlag guarded tests shouldn't require explicit 'no_selinux' tag.
+ *   no_selinux,
  * ]
  */
 (function() {
 "use strict";
 
 load("jstests/libs/analyze_plan.js");
-load("jstests/libs/sbe_util.js");  // For checkSBEEnabled.
 
 const mongod = MongoRunner.runMongod({});
 const db = mongod.getDB("test");
-
-const columnStoreEnabled =
-    checkSBEEnabled(db, ["featureFlagColumnstoreIndexes", "featureFlagSbeFull"]);
-if (!columnStoreEnabled) {
-    jsTestLog("Skipping column store bulk load test test since the feature flag is not enabled.");
-    MongoRunner.stopMongod(mongod);
-    return;
-}
 
 //
 // Create test documents.

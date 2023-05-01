@@ -44,6 +44,7 @@ let testCases = {
     _addShard: {skip: "primary only"},
     _shardsvrCloneCatalogData: {skip: "primary only"},
     _clusterQueryWithoutShardKey: {skip: "internal command"},
+    _clusterWriteWithoutShardKey: {skip: "internal command"},
     _configsvrAddShard: {skip: "primary only"},
     _configsvrAddShardToZone: {skip: "primary only"},
     _configsvrBalancerCollectionStatus: {skip: "primary only"},
@@ -55,9 +56,6 @@ let testCases = {
     _configsvrCommitChunkMigration: {skip: "primary only"},
     _configsvrCommitChunkSplit: {skip: "primary only"},
     _configsvrCommitIndex: {skip: "primary only"},
-    _configsvrConfigureAutoSplit: {
-        skip: "primary only"
-    },  // TODO SERVER-62374: remove this once 5.3 becomes last continuos release
     _configsvrConfigureCollectionBalancing: {skip: "primary only"},
     _configsvrDropIndexCatalogEntry: {skip: "primary only"},
     _configsvrMoveChunk: {skip: "primary only"},
@@ -121,6 +119,7 @@ let testCases = {
     clusterAbortTransaction: {skip: "already tested by 'abortTransaction' tests on mongos"},
     clusterAggregate: {skip: "already tested by 'aggregate' tests on mongos"},
     clusterCommitTransaction: {skip: "already tested by 'commitTransaction' tests on mongos"},
+    clusterCount: {skip: "already tested by 'count' tests on mongos"},
     clusterDelete: {skip: "already tested by 'delete' tests on mongos"},
     clusterFind: {skip: "already tested by 'find' tests on mongos"},
     clusterGetMore: {skip: "already tested by 'getMore' tests on mongos"},
@@ -132,9 +131,6 @@ let testCases = {
     commitTransaction: {skip: "primary only"},
     compact: {skip: "does not return user data"},
     compactStructuredEncryptionData: {skip: "does not return user data"},
-    configureCollectionAutoSplitter: {
-        skip: "does not return user data"
-    },  // TODO SERVER-62374: remove this once 5.3 becomes last continuos release
     configureCollectionBalancing: {skip: "does not return user data"},
     configureFailPoint: {skip: "does not return user data"},
     configureQueryAnalyzer: {skip: "does not return user data"},

@@ -111,8 +111,10 @@ public:
             getCatalog()->getMetaData(operationContext(), catalogId),
             std::move(coll.second));
         CollectionCatalog::write(operationContext(), [&](CollectionCatalog& catalog) {
-            catalog.registerCollection(
-                operationContext(), options.uuid.value(), std::move(collection));
+            catalog.registerCollection(operationContext(),
+                                       options.uuid.value(),
+                                       std::move(collection),
+                                       /*ts=*/boost::none);
         });
 
         wuow.commit();
@@ -233,7 +235,7 @@ protected:
         wuow.commit();
 
         auto engine = operationContext()->getServiceContext()->getStorageEngine()->getEngine();
-        engine->checkpoint();
+        engine->checkpoint(operationContext());
 
         storageMetadata =
             BSON(ident << unittest::assertGet(engine->getStorageMetadata(ident)) << idxIdent

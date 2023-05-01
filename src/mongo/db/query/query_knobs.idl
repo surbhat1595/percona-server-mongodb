@@ -723,7 +723,7 @@ server_parameters:
         expr: 100 * 1024 * 1024
     validator:
         gt: 0
-  
+
   internalQueryCardinalityEstimatorMode:
     description: "Set to select a method for estimating cardinality in the Cascades optimizer."
     set_at: [ startup, runtime ]
@@ -789,6 +789,13 @@ server_parameters:
     cpp_varname: "internalCascadesOptimizerFastIndexNullHandling"
     cpp_vartype: AtomicWord<bool>
     default: false
+
+  internalCascadesOptimizerDisableYieldingTolerantPlans:
+    description: "Controls if we prefer to insert redundant index predicates on the Seek side in order to prevent issues arising from yielding."
+    set_at: [ startup, runtime ]
+    cpp_varname: "internalCascadesOptimizerDisableYieldingTolerantPlans"
+    cpp_vartype: AtomicWord<bool>
+    default: true
 
   internalCascadesOptimizerStdCoutDebugOutput:
     description: "Enables verbose, non-JSON, debug output for Cascades optimizer."
@@ -889,7 +896,7 @@ server_parameters:
     validator:
         gt: 0
         lt: 16777216
-        
+
   internalMeasureQueryExecutionTimeInMicroseconds:
     description: "If true, the explain results include an additional 'executionTimeMicros' field to
     represent the execution time of each plan stage in microseconds"
@@ -903,6 +910,24 @@ server_parameters:
     set_at: [ startup, runtime ]
     cpp_varname: "internalQueryFLEAlwaysUseEncryptedCollScanMode"
     cpp_vartype: AtomicWord<bool>
+    default:
+        expr: false
+
+  # TODO SERVER-68341 Remove this query knob after tenancy is supported in the sharded cluster.
+  internalChangeStreamUseTenantIdForTesting:
+    description: "If true, then change streams will operate upon an internal tenant id for testing
+                  purposes if the actual tenant is not provided."
+    set_at: [ startup ]
+    cpp_varname: "internalChangeStreamUseTenantIdForTesting"
+    cpp_vartype: AtomicWord<bool>
+    default: false
+
+  enableComputeMode:
+    description: "Boolean flag to enable the compute mode in which mongod is used not as a
+    persistent storage node, but as a worker node for executing queries."
+    set_at: [ startup ]
+    cpp_varname: "computeModeEnabled"
+    cpp_vartype: bool
     default:
         expr: false
 

@@ -35,12 +35,12 @@
 #include "mongo/db/catalog/drop_collection.h"
 #include "mongo/db/catalog/multi_index_block.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
-#include "mongo/db/commands/feature_compatibility_version_document_gen.h"
-#include "mongo/db/commands/feature_compatibility_version_documentation.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/feature_compatibility_version_document_gen.h"
+#include "mongo/db/feature_compatibility_version_documentation.h"
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -155,6 +155,10 @@ bool checkIdIndexExists(OperationContext* opCtx, const CollectionPtr& coll) {
 Status buildMissingIdIndex(OperationContext* opCtx, Collection* collection) {
     LOGV2(4805002, "Building missing _id index", logAttrs(*collection));
     MultiIndexBlock indexer;
+    // This method is called in startup recovery so we can safely build the id index in foreground
+    // mode. This prevents us from yielding a MODE_X lock (which is disallowed).
+    indexer.setIndexBuildMethod(IndexBuildMethod::kForeground);
+
     ScopeGuard abortOnExit([&] {
         CollectionWriter collWriter(collection);
         indexer.abortIndexBuild(opCtx, collWriter, MultiIndexBlock::kNoopOnCleanUpFn);

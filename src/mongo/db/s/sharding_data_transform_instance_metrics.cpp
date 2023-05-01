@@ -315,12 +315,11 @@ void ShardingDataTransformInstanceMetrics::onWriteToStashedCollections() {
 
 void ShardingDataTransformInstanceMetrics::onReadDuringCriticalSection() {
     _readsDuringCriticalSection.fetchAndAdd(1);
-    _cumulativeMetrics->onWriteDuringCriticalSection();
+    _cumulativeMetrics->onReadDuringCriticalSection();
 }
 
-void ShardingDataTransformInstanceMetrics::onCloningTotalRemoteBatchRetrieval(
-    Milliseconds elapsed) {
-    _cumulativeMetrics->onCloningTotalRemoteBatchRetrieval(elapsed);
+void ShardingDataTransformInstanceMetrics::onCloningRemoteBatchRetrieval(Milliseconds elapsed) {
+    _cumulativeMetrics->onCloningRemoteBatchRetrieval(elapsed);
 }
 
 ShardingDataTransformCumulativeMetrics*

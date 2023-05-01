@@ -36,6 +36,13 @@ namespace mongo {
 
 class CollectionImpl final : public Collection {
 public:
+    // Uses the collator factory to convert the BSON representation of a collator to a
+    // CollatorInterface. Returns null if the BSONObj is empty. We expect the stored collation to be
+    // valid, since it gets validated on collection create.
+    static std::unique_ptr<CollatorInterface> parseCollation(OperationContext* opCtx,
+                                                             const NamespaceString& nss,
+                                                             BSONObj collationSpec);
+
     // TODO SERVER-56999: We should just need one API to create Collections
     explicit CollectionImpl(OperationContext* opCtx,
                             const NamespaceString& nss,
@@ -73,9 +80,9 @@ public:
     SharedCollectionDecorations* getSharedDecorations() const final;
 
     void init(OperationContext* opCtx) final;
-    void initFromExisting(OperationContext* opCtx,
-                          std::shared_ptr<Collection> collection,
-                          Timestamp readTimestamp) final;
+    Status initFromExisting(OperationContext* opCtx,
+                            std::shared_ptr<Collection> collection,
+                            Timestamp readTimestamp) final;
     bool isInitialized() const final;
     bool isCommitted() const final;
     void setCommitted(bool val) final;
@@ -107,9 +114,11 @@ public:
     }
 
     std::shared_ptr<Ident> getSharedIdent() const final {
-        // Use shared_ptr's aliasing constructor so we can keep all shared state in a single
-        // reference counted object
-        return {_shared, _shared->_recordStore.get()};
+        return _shared->_recordStore->getSharedIdent();
+    }
+
+    void setIdent(std::shared_ptr<Ident> newIdent) final {
+        _shared->_recordStore->setIdent(std::move(newIdent));
     }
 
     BSONObj getValidatorDoc() const final {
@@ -202,18 +211,19 @@ public:
     bool updateWithDamagesSupported() const final;
 
     /**
-     * Not allowed to modify indexes.
      * Illegal to call if updateWithDamagesSupported() returns false.
      * Sets 'args.updatedDoc' to the updated version of the document with damages applied, on
      * success.
-     * @return the contents of the updated record.
+     * Returns the contents of the updated document.
      */
-    StatusWith<RecordData> updateDocumentWithDamages(OperationContext* opCtx,
-                                                     const RecordId& loc,
-                                                     const Snapshotted<RecordData>& oldRec,
-                                                     const char* damageSource,
-                                                     const mutablebson::DamageVector& damages,
-                                                     CollectionUpdateArgs* args) const final;
+    StatusWith<BSONObj> updateDocumentWithDamages(OperationContext* opCtx,
+                                                  const RecordId& loc,
+                                                  const Snapshotted<BSONObj>& oldDoc,
+                                                  const char* damageSource,
+                                                  const mutablebson::DamageVector& damages,
+                                                  bool indexesAffected,
+                                                  OpDebug* opDebug,
+                                                  CollectionUpdateArgs* args) const final;
 
     // -----------
 

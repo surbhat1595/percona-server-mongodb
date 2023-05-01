@@ -58,6 +58,14 @@ public:
         _observers.push_back(std::move(observer));
     }
 
+    void onModifyShardedCollectionGlobalIndexCatalogEntry(OperationContext* opCtx,
+                                                          const NamespaceString& nss,
+                                                          const UUID& uuid,
+                                                          BSONObj indexDoc) override {
+        for (auto& o : _observers)
+            o->onModifyShardedCollectionGlobalIndexCatalogEntry(opCtx, nss, uuid, indexDoc);
+    }
+
     void onCreateGlobalIndex(OperationContext* opCtx,
                              const NamespaceString& globalIndexNss,
                              const UUID& globalIndexUUID) final {
@@ -68,10 +76,11 @@ public:
 
     void onDropGlobalIndex(OperationContext* opCtx,
                            const NamespaceString& globalIndexNss,
-                           const UUID& globalIndexUUID) final {
+                           const UUID& globalIndexUUID,
+                           long long numKeys) final {
         ReservedTimes times{opCtx};
         for (auto& o : _observers)
-            o->onDropGlobalIndex(opCtx, globalIndexNss, globalIndexUUID);
+            o->onDropGlobalIndex(opCtx, globalIndexNss, globalIndexUUID, numKeys);
     };
 
     void onCreateIndex(OperationContext* const opCtx,
@@ -156,6 +165,16 @@ public:
         ReservedTimes times{opCtx};
         for (auto& o : _observers)
             o->onInsertGlobalIndexKey(opCtx, globalIndexNss, globalIndexUuid, key, docKey);
+    }
+
+    void onDeleteGlobalIndexKey(OperationContext* opCtx,
+                                const NamespaceString& globalIndexNss,
+                                const UUID& globalIndexUuid,
+                                const BSONObj& key,
+                                const BSONObj& docKey) override {
+        ReservedTimes times{opCtx};
+        for (auto& o : _observers)
+            o->onDeleteGlobalIndexKey(opCtx, globalIndexNss, globalIndexUuid, key, docKey);
     }
 
     void onUpdate(OperationContext* const opCtx, const OplogUpdateEntryArgs& args) override {
@@ -415,14 +434,13 @@ public:
     std::unique_ptr<ApplyOpsOplogSlotAndOperationAssignment> preTransactionPrepare(
         OperationContext* opCtx,
         const std::vector<OplogSlot>& reservedSlots,
-        size_t numberOfPrePostImagesToWrite,
         Date_t wallClockTime,
         std::vector<repl::ReplOperation>* statements) override {
         std::unique_ptr<ApplyOpsOplogSlotAndOperationAssignment>
             applyOpsOplogSlotAndOperationAssignment;
         for (auto&& observer : _observers) {
-            auto applyOpsAssignment = observer->preTransactionPrepare(
-                opCtx, reservedSlots, numberOfPrePostImagesToWrite, wallClockTime, statements);
+            auto applyOpsAssignment =
+                observer->preTransactionPrepare(opCtx, reservedSlots, wallClockTime, statements);
             tassert(6278501,
                     "More than one OpObserver returned operation to \"applyOps\" assignment",
                     !(applyOpsAssignment && applyOpsOplogSlotAndOperationAssignment));

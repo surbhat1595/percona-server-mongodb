@@ -96,7 +96,8 @@ void removeTableChecksFile() {
     }
 }
 
-void setTableWriteTimestampAssertion(WiredTigerSessionCache* sessionCache,
+void setTableWriteTimestampAssertion(OperationContext* opCtx,
+                                     WiredTigerSessionCache* sessionCache,
                                      const std::string& uri,
                                      bool on) {
     const std::string setting = on ? "assert=(write_timestamp=on)" : "assert=(write_timestamp=off)";
@@ -105,7 +106,7 @@ void setTableWriteTimestampAssertion(WiredTigerSessionCache* sessionCache,
                 "Changing table write timestamp assertion settings",
                 "uri"_attr = uri,
                 "writeTimestampAssertionOn"_attr = on);
-    auto status = sessionCache->getKVEngine()->alterMetadata(uri, setting);
+    auto status = sessionCache->getKVEngine()->alterMetadata(opCtx, uri, setting);
     if (!status.isOK()) {
         // Dump the storage engine's internal state to assist in diagnosis.
         sessionCache->getKVEngine()->dump();
@@ -436,7 +437,7 @@ Status WiredTigerUtil::checkTableCreationOptions(const BSONElement& configElem) 
     if (!status.isOK()) {
         StringBuilder errorMsg;
         errorMsg << status.reason();
-        for (std::string error : errors) {
+        for (const std::string& error : errors) {
             errorMsg << ". " << error;
         }
         errorMsg << ".";
@@ -500,6 +501,37 @@ int64_t WiredTigerUtil::getIdentSize(WT_SESSION* s, const std::string& uri) {
     return result.getValue();
 }
 
+int64_t WiredTigerUtil::getEphemeralIdentSize(WT_SESSION* s, const std::string& uri) {
+    // For ephemeral case, use cursor statistics
+    const auto statsUri = "statistics:" + uri;
+
+    // Helper function to retrieve stats and check for errors
+    auto getStats = [&](int key) -> int64_t {
+        auto result = getStatisticsValue(s, statsUri, "statistics=(fast)", key);
+        if (!result.isOK()) {
+            if (result.getStatus().code() == ErrorCodes::CursorNotFound)
+                return 0;  // ident gone, so return 0
+
+            uassertStatusOK(result.getStatus());
+        }
+        return result.getValue();
+    };
+
+    auto inserts = getStats(WT_STAT_DSRC_CURSOR_INSERT);
+    auto removes = getStats(WT_STAT_DSRC_CURSOR_REMOVE);
+    auto insertBytes = getStats(WT_STAT_DSRC_CURSOR_INSERT_BYTES);
+
+    if (inserts == 0 || removes >= inserts)
+        return 0;
+
+    // Rough approximation of index size as average entry size times number of entries.
+    // May be off if key sizes change significantly over the life time of the collection,
+    // but is the best we can do currrently with the statistics available.
+    auto bytesPerEntry = (insertBytes + inserts - 1) / inserts;  // round up
+    auto numEntries = inserts - removes;
+    return numEntries * bytesPerEntry;
+}
+
 int64_t WiredTigerUtil::getIdentReuseSize(WT_SESSION* s, const std::string& uri) {
     auto result = WiredTigerUtil::getStatisticsValue(
         s, "statistics:" + uri, "statistics=(fast)", WT_STAT_DSRC_BLOCK_REUSE_BYTES);
@@ -529,6 +561,48 @@ size_t WiredTigerUtil::getCacheSizeMB(double requestedCacheSizeGB) {
     }
     return static_cast<size_t>(cacheSizeMB);
 }
+
+bool WiredTigerUtil::appendCustomStats(OperationContext* opCtx,
+                                       BSONObjBuilder* output,
+                                       double scale,
+                                       const std::string& uri) {
+    dassert(opCtx->lockState()->isReadLocked());
+    {
+        BSONObjBuilder metadata(output->subobjStart("metadata"));
+        Status status = WiredTigerUtil::getApplicationMetadata(opCtx, uri, &metadata);
+        if (!status.isOK()) {
+            metadata.append("error", "unable to retrieve metadata");
+            metadata.append("code", static_cast<int>(status.code()));
+            metadata.append("reason", status.reason());
+        }
+    }
+    std::string type, sourceURI;
+    WiredTigerUtil::fetchTypeAndSourceURI(opCtx, uri, &type, &sourceURI);
+    StatusWith<std::string> metadataResult = WiredTigerUtil::getMetadataCreate(opCtx, sourceURI);
+    StringData creationStringName("creationString");
+    if (!metadataResult.isOK()) {
+        BSONObjBuilder creationString(output->subobjStart(creationStringName));
+        creationString.append("error", "unable to retrieve creation config");
+        creationString.append("code", static_cast<int>(metadataResult.getStatus().code()));
+        creationString.append("reason", metadataResult.getStatus().reason());
+    } else {
+        output->append(creationStringName, metadataResult.getValue());
+        // Type can be "lsm" or "file"
+        output->append("type", type);
+    }
+
+    WiredTigerSession* session = WiredTigerRecoveryUnit::get(opCtx)->getSession();
+    WT_SESSION* s = session->getSession();
+    Status status =
+        WiredTigerUtil::exportTableToBSON(s, "statistics:" + uri, "statistics=(fast)", output);
+    if (!status.isOK()) {
+        output->append("error", "unable to retrieve statistics");
+        output->append("code", static_cast<int>(status.code()));
+        output->append("reason", status.reason());
+    }
+    return true;
+}
+
 
 logv2::LogSeverity getWTLOGV2SeverityLevel(const BSONObj& obj) {
     const std::string field = "verbose_level_id";
@@ -741,6 +815,7 @@ WiredTigerEventHandler::WiredTigerEventHandler() {
     handler->handle_message = mdb_handle_message;
     handler->handle_progress = mdb_handle_progress;
     handler->handle_close = nullptr;
+    handler->handle_general = nullptr;
 }
 
 WT_EVENT_HANDLER* WiredTigerEventHandler::getWtEventHandler() {
@@ -875,7 +950,7 @@ Status WiredTigerUtil::setTableLogging(OperationContext* opCtx, const std::strin
         22432, 1, "Changing table logging settings", "uri"_attr = uri, "loggingEnabled"_attr = on);
     // Only alter the metadata once we're sure that we need to change the table settings, since
     // WT_SESSION::alter may return EBUSY and require taking a checkpoint to make progress.
-    auto status = sessionCache->getKVEngine()->alterMetadata(uri, setting);
+    auto status = sessionCache->getKVEngine()->alterMetadata(opCtx, uri, setting);
     if (!status.isOK()) {
         // Dump the storage engine's internal state to assist in diagnosis.
         sessionCache->getKVEngine()->dump();
@@ -892,10 +967,10 @@ Status WiredTigerUtil::setTableLogging(OperationContext* opCtx, const std::strin
     // The write timestamp assertion setting only needs to be changed at startup. It will be turned
     // on when logging is disabled, and off when logging is enabled.
     if (TestingProctor::instance().isEnabled()) {
-        setTableWriteTimestampAssertion(sessionCache, uri, !on);
+        setTableWriteTimestampAssertion(opCtx, sessionCache, uri, !on);
     } else {
         // Disables the assertion when the testing proctor is off.
-        setTableWriteTimestampAssertion(sessionCache, uri, false /* on */);
+        setTableWriteTimestampAssertion(opCtx, sessionCache, uri, false /* on */);
     }
 
     return Status::OK();

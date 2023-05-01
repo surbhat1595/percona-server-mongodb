@@ -36,6 +36,7 @@
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/change_stream_change_collection_manager.h"
+#include "mongo/db/change_stream_serverless_helpers.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/fsync.h"
 #include "mongo/db/db_raii.h"
@@ -150,7 +151,7 @@ Status _insertDocumentsToOplogAndChangeCollections(
 
     // Write the corresponding oplog entries to tenants respective change
     // collections in the serverless.
-    if (ChangeStreamChangeCollectionManager::isChangeCollectionsModeActive()) {
+    if (change_stream_serverless_helpers::isChangeCollectionsModeActive()) {
         auto status =
             ChangeStreamChangeCollectionManager::get(opCtx).insertDocumentsToChangeCollection(
                 opCtx,
@@ -416,8 +417,7 @@ void scheduleWritesToOplogAndChangeCollection(OperationContext* opCtx,
                                               bool skipWritesToOplog) {
     // Skip performing any writes during the startup recovery when running in the non-serverless
     // environment.
-    if (skipWritesToOplog &&
-        !ChangeStreamChangeCollectionManager::isChangeCollectionsModeActive()) {
+    if (skipWritesToOplog && !change_stream_serverless_helpers::isChangeCollectionsModeActive()) {
         return;
     }
 
@@ -642,8 +642,8 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
     Timestamp firstTimeInBatch = ops.front().getTimestamp();
     // Set any indexes to multikey that this batch ignored. This must be done while holding the
     // parallel batch writer mode lock.
-    for (WorkerMultikeyPathInfo infoVector : multikeyVector) {
-        for (MultikeyPathInfo info : infoVector) {
+    for (const WorkerMultikeyPathInfo& infoVector : multikeyVector) {
+        for (const MultikeyPathInfo& info : infoVector) {
             // We timestamp every multikey write with the first timestamp in the batch. It is always
             // safe to set an index as multikey too early, just not too late. We conservatively pick
             // the first timestamp in the batch since we do not have enough information to find out

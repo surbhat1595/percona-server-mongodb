@@ -61,13 +61,19 @@ public:
     ReshardingOpObserver();
     ~ReshardingOpObserver() override;
 
+    void onModifyShardedCollectionGlobalIndexCatalogEntry(OperationContext* opCtx,
+                                                          const NamespaceString& nss,
+                                                          const UUID& uuid,
+                                                          BSONObj indexDoc) override {}
+
     void onCreateGlobalIndex(OperationContext* opCtx,
                              const NamespaceString& globalIndexNss,
                              const UUID& globalIndexUUID) final{};
 
     void onDropGlobalIndex(OperationContext* opCtx,
                            const NamespaceString& globalIndexNss,
-                           const UUID& globalIndexUUID) final{};
+                           const UUID& globalIndexUUID,
+                           long long numKeys) final{};
 
     void onCreateIndex(OperationContext* opCtx,
                        const NamespaceString& nss,
@@ -114,6 +120,12 @@ public:
                                 const UUID& globalIndexUuid,
                                 const BSONObj& key,
                                 const BSONObj& docKey) final{};
+
+    void onDeleteGlobalIndexKey(OperationContext* opCtx,
+                                const NamespaceString& globalIndexNss,
+                                const UUID& globalIndexUuid,
+                                const BSONObj& key,
+                                const BSONObj& docKey) final {}
 
     void onUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& args) override;
 
@@ -227,7 +239,6 @@ public:
     std::unique_ptr<ApplyOpsOplogSlotAndOperationAssignment> preTransactionPrepare(
         OperationContext* opCtx,
         const std::vector<OplogSlot>& reservedSlots,
-        size_t numberOfPrePostImagesToWrite,
         Date_t wallClockTime,
         std::vector<repl::ReplOperation>* statements) override {
         return nullptr;

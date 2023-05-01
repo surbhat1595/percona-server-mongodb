@@ -14,6 +14,7 @@
 //   directly_against_shardsvrs_incompatible,
 //   # This test has statements that do not support non-local read concern.
 //   does_not_support_causal_consistency,
+//   uses_compact
 // ]
 
 /*
@@ -82,6 +83,7 @@ let viewsCommandTests = {
     _cloneCatalogData: {skip: isAnInternalCommand},
     _cloneCollectionOptionsFromPrimaryShard: {skip: isAnInternalCommand},
     _clusterQueryWithoutShardKey: {skip: isAnInternalCommand},
+    _clusterWriteWithoutShardKey: {skip: isAnInternalCommand},
     _configsvrAbortReshardCollection: {skip: isAnInternalCommand},
     _configsvrAddShard: {skip: isAnInternalCommand},
     _configsvrAddShardToZone: {skip: isAnInternalCommand},
@@ -99,9 +101,6 @@ let viewsCommandTests = {
     _configsvrCommitMovePrimary:
         {skip: isAnInternalCommand},  // Can be removed once 6.0 is last LTS
     _configsvrCommitReshardCollection: {skip: isAnInternalCommand},
-    _configsvrConfigureAutoSplit: {
-        skip: isAnInternalCommand
-    },  // TODO SERVER-62374: remove this once 5.3 becomes last continuos release
     _configsvrConfigureCollectionBalancing: {skip: isAnInternalCommand},
     _configsvrCreateDatabase: {skip: isAnInternalCommand},
     _configsvrDropIndexCatalogEntry: {skip: isAnInternalCommand},
@@ -142,6 +141,7 @@ let viewsCommandTests = {
     _recvChunkReleaseCritSec: {skip: isAnInternalCommand},
     _recvChunkStart: {skip: isAnInternalCommand},
     _recvChunkStatus: {skip: isAnInternalCommand},
+    _refreshQueryAnalyzerConfiguration: {skip: isAnInternalCommand},
     _shardsvrAbortReshardCollection: {skip: isAnInternalCommand},
     _shardsvrCloneCatalogData: {skip: isAnInternalCommand},
     _shardsvrCompactStructuredEncryptionData: {skip: isAnInternalCommand},
@@ -151,6 +151,8 @@ let viewsCommandTests = {
     _shardsvrDropIndexCatalogEntryParticipant: {skip: isAnInternalCommand},
     _shardsvrDropIndexes: {skip: isAnInternalCommand},
     _shardsvrInsertGlobalIndexKey: {skip: isAnInternalCommand},
+    _shardsvrDeleteGlobalIndexKey: {skip: isAnInternalCommand},
+    _shardsvrWriteGlobalIndexKeys: {skip: isAnInternalCommand},
     _shardsvrCleanupReshardCollection: {skip: isAnInternalCommand},
     _shardsvrRegisterIndex: {skip: isAnInternalCommand},
     _shardsvrCommitIndexParticipant: {skip: isAnInternalCommand},
@@ -251,6 +253,7 @@ let viewsCommandTests = {
     clusterAbortTransaction: {skip: "already tested by 'abortTransaction' tests on mongos"},
     clusterAggregate: {skip: "already tested by 'aggregate' tests on mongos"},
     clusterCommitTransaction: {skip: "already tested by 'commitTransaction' tests on mongos"},
+    clusterCount: {skip: "already tested by 'count' tests on mongos"},
     clusterDelete: {skip: "already tested by 'delete' tests on mongos"},
     clusterFind: {skip: "already tested by 'find' tests on mongos"},
     clusterGetMore: {skip: "already tested by 'getMore' tests on mongos"},
@@ -263,9 +266,6 @@ let viewsCommandTests = {
     compact: {command: {compact: "view", force: true}, expectFailure: true, skipSharded: true},
     compactStructuredEncryptionData: {skip: isUnrelated},
     configureFailPoint: {skip: isUnrelated},
-    configureCollectionAutoSplitter: {
-        skip: isUnrelated
-    },  // TODO SERVER-62374: remove this once 5.3 becomes last continuos release
     configureCollectionBalancing: {skip: isUnrelated},
     configureQueryAnalyzer: {
         command: {configureQueryAnalyzer: "test.view", mode: "full", sampleRate: 1},

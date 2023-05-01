@@ -299,7 +299,7 @@ TEST_F(TenantOplogBatcherTest, GetNextApplierBatchChecksBatchLimitsForSizeOfOper
 
     // Set batch limits so that only the first two operations can fit into the first batch.
     auto limits = bigBatchLimits;
-    limits.bytes = std::size_t(srcOps[0].objsize() + srcOps[1].objsize());
+    limits.bytes = std::size_t(srcOps[0].objsize()) + std::size_t(srcOps[1].objsize());
     auto batcher = std::make_shared<TenantOplogBatcher>(
         _migrationUuid, &_oplogBuffer, _executor, Timestamp(), OpTime());
     ASSERT_OK(batcher->startup());
@@ -336,7 +336,7 @@ TEST_F(TenantOplogBatcherTest, LargeTransactionProcessedIndividuallyAndExpanded)
     // Makes entries with ts from range [2, 5).
     std::vector<OplogEntry> multiEntryTransaction = makeMultiEntryTransactionOplogEntries(
         2, dbName, /* prepared */ false, {innerOps1, innerOps2, innerOps3});
-    for (auto entry : multiEntryTransaction) {
+    for (const auto& entry : multiEntryTransaction) {
         srcOps.push_back(entry.getEntry().toBSON());
     }
 

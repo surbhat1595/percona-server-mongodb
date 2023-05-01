@@ -35,6 +35,7 @@
 #include "mongo/db/catalog/uncommitted_catalog_updates.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/concurrency/resource_catalog.h"
 #include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
@@ -126,7 +127,7 @@ public:
 
     PublishCatalogUpdates(OperationContext* opCtx,
                           UncommittedCatalogUpdates& uncommittedCatalogUpdates)
-        : _opCtx(opCtx), _uncommittedCatalogUpdates(uncommittedCatalogUpdates) {}
+        : _uncommittedCatalogUpdates(uncommittedCatalogUpdates) {}
 
     static void ensureRegisteredWithRecoveryUnit(
         OperationContext* opCtx, UncommittedCatalogUpdates& UncommittedCatalogUpdates) {
@@ -137,7 +138,7 @@ public:
             std::make_unique<PublishCatalogUpdates>(opCtx, UncommittedCatalogUpdates));
     }
 
-    void commit(boost::optional<Timestamp> commitTime) override {
+    void commit(OperationContext* opCtx, boost::optional<Timestamp> commitTime) override {
         boost::container::small_vector<CollectionCatalog::CatalogWriteFn, kNumStaticActions>
             writeJobs;
 
@@ -153,43 +154,42 @@ public:
                     break;
                 }
                 case UncommittedCatalogUpdates::Entry::Action::kRenamedCollection: {
-                    writeJobs.push_back(
-                        [& from = entry.nss, &to = entry.renameTo](CollectionCatalog& catalog) {
-                            catalog._collections.erase(from);
+                    writeJobs.push_back([opCtx,
+                                         &from = entry.nss,
+                                         &to = entry.renameTo,
+                                         commitTime](CollectionCatalog& catalog) {
+                        // We just need to do modifications on 'from' here. 'to' is taken care
+                        // of by a separate kWritableCollection entry.
+                        catalog._collections.erase(from);
 
-                            ResourceId oldRid = ResourceId(RESOURCE_COLLECTION, from);
-                            ResourceId newRid = ResourceId(RESOURCE_COLLECTION, to);
+                        auto& resourceCatalog = ResourceCatalog::get(opCtx->getServiceContext());
+                        resourceCatalog.remove({RESOURCE_COLLECTION, from}, from);
+                        resourceCatalog.add({RESOURCE_COLLECTION, to}, to);
 
-                            catalog.removeResource(oldRid, from);
-                            catalog.addResource(newRid, to);
-                        });
+                        catalog._pushCatalogIdForRename(from, to, commitTime);
+                    });
                     break;
                 }
                 case UncommittedCatalogUpdates::Entry::Action::kDroppedCollection: {
-                    writeJobs.push_back(
-                        [opCtx = _opCtx,
-                         uuid = *entry.uuid(),
-                         isDropPending = *entry.isDropPending](CollectionCatalog& catalog) {
-                            catalog.deregisterCollection(opCtx, uuid, isDropPending);
-                        });
+                    writeJobs.push_back([opCtx,
+                                         uuid = *entry.uuid(),
+                                         isDropPending = *entry.isDropPending,
+                                         commitTime](CollectionCatalog& catalog) {
+                        catalog.deregisterCollection(opCtx, uuid, isDropPending, commitTime);
+                    });
                     break;
                 }
                 case UncommittedCatalogUpdates::Entry::Action::kRecreatedCollection: {
-                    writeJobs.push_back([opCtx = _opCtx,
+                    writeJobs.push_back([opCtx,
                                          collection = entry.collection,
                                          uuid = *entry.externalUUID,
                                          commitTime](CollectionCatalog& catalog) {
-                        if (commitTime) {
-                            collection->setMinimumValidSnapshot(commitTime.value());
-                        }
-                        catalog.registerCollection(opCtx, uuid, std::move(collection));
+                        catalog.registerCollection(opCtx, uuid, std::move(collection), commitTime);
                     });
                     // Fallthrough to the createCollection case to finish committing the collection.
                     [[fallthrough]];
                 }
                 case UncommittedCatalogUpdates::Entry::Action::kCreatedCollection: {
-                    auto collPtr = entry.collection.get();
-
                     // By this point, we may or may not have reserved an oplog slot for the
                     // collection creation.
                     // For example, multi-document transactions will only reserve the oplog slot at
@@ -199,11 +199,15 @@ public:
                     // we must update the minVisibleTimestamp with the appropriate value. This is
                     // fine because the collection should not be visible in the catalog until we
                     // call setCommitted(true).
-                    if (commitTime) {
-                        collPtr->setMinimumVisibleSnapshot(commitTime.value());
-                        collPtr->setMinimumValidSnapshot(commitTime.value());
-                    }
-                    collPtr->setCommitted(true);
+                    writeJobs.push_back([coll = entry.collection.get(),
+                                         commitTime](CollectionCatalog& catalog) {
+                        if (commitTime) {
+                            coll->setMinimumVisibleSnapshot(commitTime.value());
+                            coll->setMinimumValidSnapshot(commitTime.value());
+                        }
+                        catalog._pushCatalogIdForNSS(coll->ns(), coll->getCatalogId(), commitTime);
+                        coll->setCommitted(true);
+                    });
                     break;
                 }
                 case UncommittedCatalogUpdates::Entry::Action::kReplacedViewsForDatabase: {
@@ -215,23 +219,23 @@ public:
                     break;
                 }
                 case UncommittedCatalogUpdates::Entry::Action::kAddViewResource: {
-                    writeJobs.push_back([& viewName = entry.nss](CollectionCatalog& catalog) {
-                        auto viewRid = ResourceId(RESOURCE_COLLECTION, viewName);
-                        catalog.addResource(viewRid, viewName);
+                    writeJobs.push_back([opCtx, &viewName = entry.nss](CollectionCatalog& catalog) {
+                        ResourceCatalog::get(opCtx->getServiceContext())
+                            .add({RESOURCE_COLLECTION, viewName}, viewName);
                         catalog.deregisterUncommittedView(viewName);
                     });
                     break;
                 }
                 case UncommittedCatalogUpdates::Entry::Action::kRemoveViewResource: {
-                    writeJobs.push_back([& viewName = entry.nss](CollectionCatalog& catalog) {
-                        auto viewRid = ResourceId(RESOURCE_COLLECTION, viewName);
-                        catalog.removeResource(viewRid, viewName);
+                    writeJobs.push_back([opCtx, &viewName = entry.nss](CollectionCatalog& catalog) {
+                        ResourceCatalog::get(opCtx->getServiceContext())
+                            .remove({RESOURCE_COLLECTION, viewName}, viewName);
                     });
                     break;
                 }
                 case UncommittedCatalogUpdates::Entry::Action::kDroppedIndex: {
                     writeJobs.push_back(
-                        [opCtx = _opCtx,
+                        [opCtx,
                          indexEntry = entry.indexEntry,
                          isDropPending = *entry.isDropPending](CollectionCatalog& catalog) {
                             catalog.deregisterIndex(opCtx, std::move(indexEntry), isDropPending);
@@ -243,7 +247,7 @@ public:
 
         // Write all catalog updates to the catalog in the same write to ensure atomicity.
         if (!writeJobs.empty()) {
-            CollectionCatalog::write(_opCtx, [&writeJobs](CollectionCatalog& catalog) {
+            CollectionCatalog::write(opCtx, [&writeJobs](CollectionCatalog& catalog) {
                 for (auto&& job : writeJobs) {
                     job(catalog);
                 }
@@ -251,12 +255,11 @@ public:
         }
     }
 
-    void rollback() override {
+    void rollback(OperationContext* opCtx) override {
         _uncommittedCatalogUpdates.releaseEntries();
     }
 
 private:
-    OperationContext* _opCtx;
     UncommittedCatalogUpdates& _uncommittedCatalogUpdates;
 };
 
@@ -677,20 +680,25 @@ Status CollectionCatalog::reloadViews(OperationContext* opCtx, const DatabaseNam
 }
 
 std::shared_ptr<Collection> CollectionCatalog::openCollection(OperationContext* opCtx,
-                                                              const DurableCatalog::Entry& entry,
+                                                              const NamespaceString& nss,
                                                               Timestamp readTimestamp) const {
     if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCV()) {
         return nullptr;
     }
 
-    auto metadata = DurableCatalog::get(opCtx)->getMetaData(opCtx, entry.catalogId);
-    if (!metadata) {
+    auto catalogId = lookupCatalogIdByNSS(nss, readTimestamp);
+    if (!catalogId) {
+        return nullptr;
+    }
+
+    auto catalogEntry = DurableCatalog::get(opCtx)->getParsedCatalogEntry(opCtx, *catalogId);
+    if (!catalogEntry) {
         // Treat the collection as non-existent at a point-in-time the same as not-existent at
         // latest.
         return nullptr;
     }
 
-    const auto& collectionOptions = metadata->options;
+    const auto& collectionOptions = catalogEntry->metadata->options;
 
     // Check if the collection already exists in the catalog and if it's compatible with the read
     // timestamp.
@@ -701,7 +709,7 @@ std::shared_ptr<Collection> CollectionCatalog::openCollection(OperationContext* 
 
     // Check if the collection is drop pending, not expired, and compatible with the read timestamp.
     std::shared_ptr<Collection> dropPendingColl = [&]() -> std::shared_ptr<Collection> {
-        auto dropPendingIt = _dropPendingCollection.find(entry.ident);
+        auto dropPendingIt = _dropPendingCollection.find(catalogEntry->ident);
         if (dropPendingIt == _dropPendingCollection.end()) {
             return nullptr;
         }
@@ -721,33 +729,60 @@ std::shared_ptr<Collection> CollectionCatalog::openCollection(OperationContext* 
         LOGV2_DEBUG(6825400,
                     1,
                     "Instantiating a collection using shared state",
-                    logAttrs(entry.nss),
-                    "ident"_attr = entry.ident,
-                    "md"_attr = metadata->toBSON(),
+                    logAttrs(nss),
+                    "ident"_attr = catalogEntry->ident,
+                    "md"_attr = catalogEntry->metadata->toBSON(),
                     "timestamp"_attr = readTimestamp);
 
         std::shared_ptr<Collection> collToReturn = Collection::Factory::get(opCtx)->make(
-            opCtx, entry.nss, entry.catalogId, metadata, /*rs=*/nullptr);
-        collToReturn->initFromExisting(
+            opCtx, nss, *catalogId, catalogEntry->metadata, /*rs=*/nullptr);
+        Status status = collToReturn->initFromExisting(
             opCtx, latestColl ? latestColl : dropPendingColl, readTimestamp);
+        if (!status.isOK()) {
+            LOGV2_DEBUG(
+                6857100, 1, "Failed to instantiate collection", "reason"_attr = status.reason());
+            return nullptr;
+        }
         return collToReturn;
+    }
+
+    // The ident is expired, but it still may not have been dropped by the reaper. Try to mark it as
+    // in use.
+    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+    auto newIdent = storageEngine->markIdentInUse(catalogEntry->ident);
+    if (!newIdent) {
+        LOGV2_DEBUG(6857101,
+                    1,
+                    "Collection ident is being dropped or is already dropped",
+                    "ident"_attr = catalogEntry->ident);
+        return nullptr;
     }
 
     // Instantiate a new collection without any shared state.
     LOGV2_DEBUG(6825401,
                 1,
                 "Instantiating a new collection",
-                logAttrs(entry.nss),
-                "ident"_attr = entry.ident,
-                "md"_attr = metadata->toBSON(),
+                logAttrs(nss),
+                "ident"_attr = catalogEntry->ident,
+                "md"_attr = catalogEntry->metadata->toBSON(),
                 "timestamp"_attr = readTimestamp);
 
     std::unique_ptr<RecordStore> rs =
         opCtx->getServiceContext()->getStorageEngine()->getEngine()->getRecordStore(
-            opCtx, entry.nss, entry.ident, collectionOptions);
+            opCtx, nss, catalogEntry->ident, collectionOptions);
+
+    // Set the ident to the one returned by the ident reaper. This is to prevent the ident from
+    // being dropping prematurely.
+    rs->setIdent(std::move(newIdent));
+
     std::shared_ptr<Collection> collToReturn = Collection::Factory::get(opCtx)->make(
-        opCtx, entry.nss, entry.catalogId, metadata, std::move(rs));
-    collToReturn->init(opCtx);
+        opCtx, nss, *catalogId, catalogEntry->metadata, std::move(rs));
+    Status status = collToReturn->initFromExisting(opCtx, /*collection=*/nullptr, readTimestamp);
+    if (!status.isOK()) {
+        LOGV2_DEBUG(
+            6857102, 1, "Failed to instantiate collection", "reason"_attr = status.reason());
+        return nullptr;
+    }
     return collToReturn;
 }
 
@@ -830,21 +865,21 @@ void CollectionCatalog::onOpenDatabase(OperationContext* opCtx,
 
 void CollectionCatalog::onCloseDatabase(OperationContext* opCtx, DatabaseName dbName) {
     invariant(opCtx->lockState()->isDbLockedForMode(dbName, MODE_X));
-    auto rid = ResourceId(RESOURCE_DATABASE, dbName);
-    removeResource(rid, dbName);
+    ResourceCatalog::get(opCtx->getServiceContext()).remove({RESOURCE_DATABASE, dbName}, dbName);
     _viewsForDatabase.erase(dbName);
 }
 
-void CollectionCatalog::onCloseCatalog(OperationContext* opCtx) {
-    invariant(opCtx->lockState()->isW());
-    invariant(!_shadowCatalog);
+void CollectionCatalog::onCloseCatalog() {
+    if (_shadowCatalog) {
+        return;
+    }
+
     _shadowCatalog.emplace();
     for (auto& entry : _catalog)
         _shadowCatalog->insert({entry.first, entry.second->ns()});
 }
 
-void CollectionCatalog::onOpenCatalog(OperationContext* opCtx) {
-    invariant(opCtx->lockState()->isW());
+void CollectionCatalog::onOpenCatalog() {
     invariant(_shadowCatalog);
     _shadowCatalog.reset();
     ++_epoch;
@@ -1098,6 +1133,25 @@ boost::optional<UUID> CollectionCatalog::lookupUUIDByNSS(OperationContext* opCtx
     return boost::none;
 }
 
+boost::optional<RecordId> CollectionCatalog::lookupCatalogIdByNSS(
+    const NamespaceString& nss, boost::optional<Timestamp> ts) const {
+    if (auto it = _catalogIds.find(nss); it != _catalogIds.end()) {
+        const auto& range = it->second;
+        if (!ts) {
+            return range.back().id;
+        }
+
+        auto rangeIt = std::upper_bound(
+            range.begin(), range.end(), *ts, [](const auto& ts, const auto& entry) {
+                return ts < entry.ts;
+            });
+        if (rangeIt != range.begin()) {
+            return (--rangeIt)->id;
+        }
+    }
+    return boost::none;
+}
+
 void CollectionCatalog::iterateViews(OperationContext* opCtx,
                                      const DatabaseName& dbName,
                                      ViewIteratorCallback callback,
@@ -1216,12 +1270,17 @@ std::vector<NamespaceString> CollectionCatalog::getAllCollectionNamesFromDb(
     return ret;
 }
 
-std::vector<DatabaseName> CollectionCatalog::getAllDbNames() const {
+std::vector<DatabaseName> CollectionCatalog::_getAllDbNamesHelper(DatabaseName firstDbName) const {
     std::vector<DatabaseName> ret;
     auto maxUuid = UUID::parse("FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF").getValue();
-    auto iter = _orderedCollections.upper_bound(std::make_pair(DatabaseName(), maxUuid));
+    // _orderedCollections is sorted by <dbName, uuid>. upper_bound will return the iterator to the
+    // first element in _orderedCollections greater than <firstDbName, maxUuid>.
+    auto iter = _orderedCollections.upper_bound(std::make_pair(firstDbName, maxUuid));
     while (iter != _orderedCollections.end()) {
         auto dbName = iter->first.first;
+        if (firstDbName.tenantId() != boost::none && dbName.tenantId() != firstDbName.tenantId()) {
+            break;
+        }
         if (iter->second->isCommitted()) {
             ret.push_back(dbName);
         } else {
@@ -1235,6 +1294,15 @@ std::vector<DatabaseName> CollectionCatalog::getAllDbNames() const {
         iter = _orderedCollections.upper_bound(std::make_pair(dbName, maxUuid));
     }
     return ret;
+}
+
+std::vector<DatabaseName> CollectionCatalog::getAllDbNames() const {
+    return _getAllDbNamesHelper(DatabaseName());
+}
+
+std::vector<DatabaseName> CollectionCatalog::getAllDbNamesForTenant(
+    boost::optional<TenantId> tenantId) const {
+    return _getAllDbNamesHelper(DatabaseName(tenantId, ""));
 }
 
 void CollectionCatalog::setDatabaseProfileSettings(
@@ -1281,7 +1349,8 @@ CollectionCatalog::ViewCatalogSet CollectionCatalog::getViewCatalogDbNames(
 
 void CollectionCatalog::registerCollection(OperationContext* opCtx,
                                            const UUID& uuid,
-                                           std::shared_ptr<Collection> coll) {
+                                           std::shared_ptr<Collection> coll,
+                                           boost::optional<Timestamp> commitTime) {
     auto nss = coll->ns();
     _ensureNamespaceDoesNotExist(opCtx, nss, NamespaceType::kAll);
 
@@ -1302,6 +1371,12 @@ void CollectionCatalog::registerCollection(OperationContext* opCtx,
     _collections[nss] = coll;
     _orderedCollections[dbIdPair] = coll;
 
+    if (commitTime && !commitTime->isNull()) {
+        coll->setMinimumValidSnapshot(commitTime.value());
+        _pushCatalogIdForNSS(nss, coll->getCatalogId(), commitTime);
+    }
+
+
     if (!nss.isOnInternalDb() && !nss.isSystem()) {
         _stats.userCollections += 1;
         if (coll->isCapped()) {
@@ -1316,16 +1391,16 @@ void CollectionCatalog::registerCollection(OperationContext* opCtx,
 
     invariant(static_cast<size_t>(_stats.internal + _stats.userCollections) == _collections.size());
 
-    auto dbRid = ResourceId(RESOURCE_DATABASE, nss.dbName());
-    addResource(dbRid, nss.dbName());
-
-    auto collRid = ResourceId(RESOURCE_COLLECTION, nss);
-    addResource(collRid, nss);
+    auto& resourceCatalog = ResourceCatalog::get(opCtx->getServiceContext());
+    resourceCatalog.add({RESOURCE_DATABASE, nss.dbName()}, nss.dbName());
+    resourceCatalog.add({RESOURCE_COLLECTION, nss}, nss);
 }
 
-std::shared_ptr<Collection> CollectionCatalog::deregisterCollection(OperationContext* opCtx,
-                                                                    const UUID& uuid,
-                                                                    bool isDropPending) {
+std::shared_ptr<Collection> CollectionCatalog::deregisterCollection(
+    OperationContext* opCtx,
+    const UUID& uuid,
+    bool isDropPending,
+    boost::optional<Timestamp> commitTime) {
     invariant(_catalog.find(uuid) != _catalog.end());
 
     auto coll = std::move(_catalog[uuid]);
@@ -1352,6 +1427,11 @@ std::shared_ptr<Collection> CollectionCatalog::deregisterCollection(OperationCon
     _collections.erase(ns);
     _catalog.erase(uuid);
 
+    // Push drop unless this is a rollback of a create
+    if (coll->isCommitted()) {
+        _pushCatalogIdForNSS(ns, boost::none, commitTime);
+    }
+
     if (!ns.isOnInternalDb() && !ns.isSystem()) {
         _stats.userCollections -= 1;
         if (coll->isCapped()) {
@@ -1368,8 +1448,7 @@ std::shared_ptr<Collection> CollectionCatalog::deregisterCollection(OperationCon
 
     coll->onDeregisterFromCatalog(opCtx);
 
-    auto collRid = ResourceId(RESOURCE_COLLECTION, ns);
-    removeResource(collRid, ns);
+    ResourceCatalog::get(opCtx->getServiceContext()).remove({RESOURCE_COLLECTION, ns}, ns);
 
     return coll;
 }
@@ -1425,7 +1504,111 @@ void CollectionCatalog::_ensureNamespaceDoesNotExist(OperationContext* opCtx,
     }
 }
 
-void CollectionCatalog::deregisterAllCollectionsAndViews() {
+void CollectionCatalog::_pushCatalogIdForNSS(const NamespaceString& nss,
+                                             boost::optional<RecordId> catalogId,
+                                             boost::optional<Timestamp> ts) {
+    // TODO SERVER-68674: Remove feature flag check.
+    if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCV()) {
+        // No-op.
+        return;
+    }
+
+    auto& ids = _catalogIds[nss];
+
+    if (!ts) {
+        // Make sure untimestamped writes have a single entry in mapping. If we're mixing
+        // timestamped with untimestamped (such as repair). Ignore the untimestamped writes as an
+        // untimestamped deregister will correspond with an untimestamped register. We should leave
+        // the mapping as-is in this case.
+        if (ids.empty() && catalogId) {
+            // This namespace was added due to an untimestamped write, add an entry with min
+            // timestamp
+            ids.push_back(TimestampedCatalogId{catalogId, Timestamp::min()});
+        } else if (ids.size() == 1 && !catalogId) {
+            // This namespace was removed due to an untimestamped write, clear entries.
+            ids.clear();
+        }
+        return;
+    }
+
+    // Re-write latest entry if timestamp match (multiple changes occured in this transaction)
+    if (!ids.empty() && ids.back().ts == *ts) {
+        ids.back().id = catalogId;
+        return;
+    }
+
+    // Otherwise, push new entry at the end. Timestamp is always increasing
+    invariant(ids.empty() || ids.back().ts < *ts);
+    // If the catalogId is the same as last entry, there's nothing we need to do. This can happen
+    // when the catalog is reopened.
+    if (!ids.empty() && ids.back().id == catalogId) {
+        return;
+    }
+
+    ids.push_back(TimestampedCatalogId{catalogId, *ts});
+    _markNamespaceForCatalogIdCleanupIfNeeded(nss, ids);
+}
+
+void CollectionCatalog::_pushCatalogIdForRename(const NamespaceString& from,
+                                                const NamespaceString& to,
+                                                boost::optional<Timestamp> ts) {
+    // TODO SERVER-68674: Remove feature flag check.
+    if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCV()) {
+        // No-op.
+        return;
+    }
+
+    if (!ts)
+        return;
+
+    // Get 'toIds' first, it may need to instantiate in the container which invalidates all
+    // references.
+    auto& toIds = _catalogIds[to];
+    auto& fromIds = _catalogIds.at(from);
+    invariant(!fromIds.empty());
+
+    // Re-write latest entry if timestamp match (multiple changes occured in this transaction),
+    // otherwise push at end
+    if (!toIds.empty() && toIds.back().ts == *ts) {
+        toIds.back().id = fromIds.back().id;
+    } else {
+        invariant(toIds.empty() || toIds.back().ts < *ts);
+        toIds.push_back(TimestampedCatalogId{fromIds.back().id, *ts});
+        _markNamespaceForCatalogIdCleanupIfNeeded(to, toIds);
+    }
+
+    // Re-write latest entry if timestamp match (multiple changes occured in this transaction),
+    // otherwise push at end
+    if (!fromIds.empty() && fromIds.back().ts == *ts) {
+        fromIds.back().id = boost::none;
+    } else {
+        invariant(fromIds.empty() || fromIds.back().ts < *ts);
+        fromIds.push_back(TimestampedCatalogId{boost::none, *ts});
+        _markNamespaceForCatalogIdCleanupIfNeeded(from, fromIds);
+    }
+}
+
+void CollectionCatalog::_markNamespaceForCatalogIdCleanupIfNeeded(
+    const NamespaceString& nss, const std::vector<TimestampedCatalogId>& ids) {
+
+    auto markForCleanup = [this, &nss](Timestamp ts) {
+        _catalogIdChanges.insert(nss);
+        if (ts < _lowestCatalogIdTimestampForCleanup) {
+            _lowestCatalogIdTimestampForCleanup = ts;
+        }
+    };
+
+    // Cleanup may occur if we have more than one entry for the namespace or if the only entry is a
+    // drop. Use the first entry as lowest cleanup time if we have a drop and the second otherwise
+    // (as the first is needed until that time is reached)
+    if (!ids.empty() && ids.front().id == boost::none) {
+        markForCleanup(ids.front().ts);
+    } else if (ids.size() > 1) {
+        markForCleanup(ids.at(1).ts);
+    }
+}
+
+void CollectionCatalog::deregisterAllCollectionsAndViews(ServiceContext* svcCtx) {
     LOGV2(20282, "Deregistering all the collections");
     for (auto& entry : _catalog) {
         auto uuid = entry.first;
@@ -1444,7 +1627,7 @@ void CollectionCatalog::deregisterAllCollectionsAndViews() {
     _dropPendingIndex.clear();
     _stats = {};
 
-    _resourceInformation.clear();
+    ResourceCatalog::get(svcCtx).clear();
 }
 
 void CollectionCatalog::clearViews(OperationContext* opCtx, const DatabaseName& dbName) const {
@@ -1517,75 +1700,97 @@ CollectionCatalog::iterator CollectionCatalog::end(OperationContext* opCtx) cons
     return iterator(opCtx, _orderedCollections.end(), *this);
 }
 
-boost::optional<std::string> CollectionCatalog::lookupResourceName(const ResourceId& rid) const {
-    invariant(rid.getType() == RESOURCE_DATABASE || rid.getType() == RESOURCE_COLLECTION);
-
-    auto search = _resourceInformation.find(rid);
-    if (search == _resourceInformation.end()) {
-        return boost::none;
+bool CollectionCatalog::needsCleanupForOldestTimestamp(Timestamp oldest) const {
+    // TODO SERVER-68674: Remove feature flag check.
+    if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCV()) {
+        // No-op.
+        return false;
     }
 
-    const std::set<std::string>& namespaces = search->second;
+    return _lowestCatalogIdTimestampForCleanup <= oldest;
+}
 
-    // When there are multiple namespaces mapped to the same ResourceId, return boost::none as the
-    // ResourceId does not identify a single namespace.
-    if (namespaces.size() > 1) {
-        return boost::none;
+void CollectionCatalog::cleanupForOldestTimestampAdvanced(Timestamp oldest) {
+    Timestamp nextLowestCleanupTimestamp = Timestamp::max();
+    // Helper to calculate the smallest entry that needs to be kept and its timestamp
+    auto assignLowestCleanupTimestamp = [&nextLowestCleanupTimestamp](const auto& range) {
+        auto it = range.begin();
+        // Drops can be cleaned up right away, otherwise the second entry is cleanup time.
+        if (it->id.has_value()) {
+            ++it;
+        }
+        nextLowestCleanupTimestamp = std::min(nextLowestCleanupTimestamp, it->ts);
+    };
+
+    // Iterate over all namespaces that is marked that they need cleanup
+    for (auto it = _catalogIdChanges.begin(), end = _catalogIdChanges.end(); it != end;) {
+        auto& range = _catalogIds[*it];
+
+        // Binary search for next larger timestamp
+        auto rangeIt = std::upper_bound(
+            range.begin(), range.end(), oldest, [](const auto& ts, const auto& entry) {
+                return ts < entry.ts;
+            });
+
+        // Continue if there is nothing to cleanup for this timestamp yet
+        if (rangeIt == range.begin()) {
+            assignLowestCleanupTimestamp(range);
+            ++it;
+            continue;
+        }
+
+        // The iterator is positioned to the closest entry that has a larger timestamp, decrement to
+        // get a lower or equal timestamp
+        --rangeIt;
+
+        // If we are positioned on a drop it can be removed
+        if (!rangeIt->id.has_value()) {
+            ++rangeIt;
+        }
+
+        // Erase range
+        range.erase(range.begin(), rangeIt);
+
+        // If the range is now empty or we need to keep the last item we can unmark this namespace
+        // for needing changes.
+        if (range.size() <= 1) {
+            _catalogIdChanges.erase(it++);
+            continue;
+        }
+
+        // More changes are needed for this namespace, keep it in the set and keep track of lowest
+        // timestamp.
+        assignLowestCleanupTimestamp(range);
+        ++it;
     }
 
-    return *namespaces.begin();
+    _lowestCatalogIdTimestampForCleanup = nextLowestCleanupTimestamp;
 }
 
+void CollectionCatalog::cleanupForCatalogReopen(Timestamp stable) {
+    _catalogIdChanges.clear();
+    _lowestCatalogIdTimestampForCleanup = Timestamp::max();
 
-void CollectionCatalog::_removeResource(const ResourceId& rid, const std::string& entry) {
-    auto search = _resourceInformation.find(rid);
-    if (search == _resourceInformation.end()) {
-        return;
+    for (auto it = _catalogIds.begin(); it != _catalogIds.end();) {
+        auto& ids = it->second;
+
+        // Remove all larger timestamps in this range
+        ids.erase(std::upper_bound(ids.begin(),
+                                   ids.end(),
+                                   stable,
+                                   [](Timestamp ts, const auto& entry) { return ts < entry.ts; }),
+                  ids.end());
+
+        // Remove namespace if there are no entries left
+        if (ids.empty()) {
+            _catalogIds.erase(it++);
+            continue;
+        }
+
+        // Calculate when this namespace needs to be cleaned up next
+        _markNamespaceForCatalogIdCleanupIfNeeded(it->first, ids);
+        ++it;
     }
-
-    std::set<std::string>& namespaces = search->second;
-    namespaces.erase(entry);
-
-    // Remove the map entry if this is the last namespace in the set for the ResourceId.
-    if (namespaces.size() == 0) {
-        _resourceInformation.erase(search);
-    }
-}
-
-void CollectionCatalog::removeResource(const ResourceId& rid, const NamespaceString& nss) {
-    invariant(rid.getType() == RESOURCE_COLLECTION);
-    _removeResource(rid, nss.toStringWithTenantId());
-}
-
-void CollectionCatalog::removeResource(const ResourceId& rid, const DatabaseName& dbName) {
-    invariant(rid.getType() == RESOURCE_DATABASE);
-    _removeResource(rid, dbName.toStringWithTenantId());
-}
-
-void CollectionCatalog::_addResource(const ResourceId& rid, const std::string& entry) {
-    auto search = _resourceInformation.find(rid);
-    if (search == _resourceInformation.end()) {
-        std::set<std::string> newSet = {entry};
-        _resourceInformation.insert(std::make_pair(rid, newSet));
-        return;
-    }
-
-    std::set<std::string>& namespaces = search->second;
-    if (namespaces.count(entry) > 0) {
-        return;
-    }
-
-    namespaces.insert(entry);
-}
-
-void CollectionCatalog::addResource(const ResourceId& rid, const NamespaceString& nss) {
-    invariant(rid.getType() == RESOURCE_COLLECTION);
-    _addResource(rid, nss.toStringWithTenantId());
-}
-
-void CollectionCatalog::addResource(const ResourceId& rid, const DatabaseName& dbName) {
-    invariant(rid.getType() == RESOURCE_DATABASE);
-    _addResource(rid, dbName.toStringWithTenantId());
 }
 
 void CollectionCatalog::invariantHasExclusiveAccessToCollection(OperationContext* opCtx,
@@ -1639,7 +1844,7 @@ Status CollectionCatalog::_createOrUpdateView(
     // Build the BSON definition for this view to be saved in the durable view catalog and/or to
     // insert in the viewMap. If the collation is empty, omit it from the definition altogether.
     BSONObjBuilder viewDefBuilder;
-    // TODO SERVER-67155 Use serialize function on NamespaceString to create the string to write.
+    // TODO SERVER-69499 Use serialize function on NamespaceString to create the string to write.
     if (!gMultitenancySupport ||
         (serverGlobalParams.featureCompatibility.isVersionInitialized() &&
          gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))) {

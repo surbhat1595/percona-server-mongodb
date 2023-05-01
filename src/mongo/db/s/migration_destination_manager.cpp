@@ -58,6 +58,7 @@
 #include "mongo/db/s/move_timing_helper.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
+#include "mongo/db/s/range_deletion_util.h"
 #include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/sharding_recovery_service.h"
 #include "mongo/db/s/sharding_runtime_d_params_gen.h"
@@ -208,7 +209,7 @@ bool willOverrideLocalId(OperationContext* opCtx,
                          BSONObj remoteDoc,
                          BSONObj* localDoc) {
     *localDoc = BSONObj();
-    if (Helpers::findById(opCtx, nss.ns(), remoteDoc, *localDoc)) {
+    if (Helpers::findById(opCtx, nss, remoteDoc, *localDoc)) {
         return !isInRange(*localDoc, min, max, shardKeyPattern);
     }
 
@@ -1282,6 +1283,7 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
             recipientDeletionTask.setPending(true);
             const auto currentTime = VectorClock::get(outerOpCtx)->getTime();
             recipientDeletionTask.setTimestamp(currentTime.clusterTime().asTimestamp());
+            recipientDeletionTask.setKeyPattern(KeyPattern(_shardKeyPattern));
 
             // It is illegal to wait for write concern with a session checked out, so persist the
             // range deletion task with an immediately satsifiable write concern and then wait for
@@ -1379,7 +1381,7 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
                         // Revert to the original DocumentValidationSettings for opCtx
                     }
 
-                    migrationutil::persistUpdatedNumOrphans(
+                    persistUpdatedNumOrphans(
                         opCtx, *_collectionUuid, ChunkRange(_min, _max), batchNumCloned);
 
                     {
@@ -1750,7 +1752,7 @@ bool MigrationDestinationManager::_applyMigrateOp(OperationContext* opCtx, const
 
             // Do not apply delete if doc does not belong to the chunk being migrated
             BSONObj fullObj;
-            if (Helpers::findById(opCtx, _nss.ns(), id, fullObj)) {
+            if (Helpers::findById(opCtx, _nss, id, fullObj)) {
                 if (!isInRange(fullObj, _min, _max, _shardKeyPattern)) {
                     if (MONGO_unlikely(failMigrationReceivedOutOfRangeOperation.shouldFail())) {
                         MONGO_UNREACHABLE;
@@ -1827,8 +1829,7 @@ bool MigrationDestinationManager::_applyMigrateOp(OperationContext* opCtx, const
     }
 
     if (changeInOrphans != 0) {
-        migrationutil::persistUpdatedNumOrphans(
-            opCtx, *_collectionUuid, ChunkRange(_min, _max), changeInOrphans);
+        persistUpdatedNumOrphans(opCtx, *_collectionUuid, ChunkRange(_min, _max), changeInOrphans);
     }
     return didAnything;
 }

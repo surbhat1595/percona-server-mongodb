@@ -57,11 +57,12 @@ public:
                "storage engine's data directory.\n"
                "{ createBackup: 1, backupDir: <destination directory> }";
     }
-    Status checkAuthForCommand(Client* client,
-                               const std::string& dbname,
-                               const BSONObj& cmdObj) const override {
-        return AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
-                   ResourcePattern::forAnyNormalResource(), ActionType::startBackup)
+    Status checkAuthForOperation(OperationContext* opCtx,
+                                 const DatabaseName& dbname,
+                                 const BSONObj& cmdObj) const override {
+        return AuthorizationSession::get(opCtx->getClient())
+                   ->isAuthorizedForActionsOnResource(ResourcePattern::forAnyNormalResource(),
+                                                      ActionType::startBackup)
             ? Status::OK()
             : Status(ErrorCodes::Unauthorized, "Unauthorized");
     }

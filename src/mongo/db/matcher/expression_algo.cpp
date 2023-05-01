@@ -580,7 +580,7 @@ std::unique_ptr<MatchExpression> splitMatchExpressionForColumns(
         case MatchExpression::ALWAYS_TRUE:
         case MatchExpression::ELEM_MATCH_OBJECT:
         case MatchExpression::ELEM_MATCH_VALUE:  // This one should be feasible. May be valuable.
-        case MatchExpression::ENCRYPTED_BETWEEN:
+        case MatchExpression::BETWEEN:
         case MatchExpression::EXPRESSION:
         case MatchExpression::GEO:
         case MatchExpression::GEO_NEAR:
@@ -782,7 +782,7 @@ bool containsDependency(const OrderedPathSet& testSet, const OrderedPathSet& pre
 
     PathComparator pathComparator;
     auto i2 = testSet.begin();
-    for (auto p1 : prefixCandidates) {
+    for (const auto& p1 : prefixCandidates) {
         while (pathComparator(*i2, p1)) {
             ++i2;
             if (i2 == testSet.end()) {

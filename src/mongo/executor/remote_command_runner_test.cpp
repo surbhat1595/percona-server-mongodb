@@ -27,15 +27,17 @@
  *    it in the license file.
  */
 
+#include "mongo/bson/oid.h"
+#include "mongo/db/query/cursor_response.h"
+#include "mongo/db/query/find_command_gen.h"
+#include "mongo/db/repl/hello_gen.h"
+#include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/remote_command_retry_policy.h"
 #include "mongo/executor/remote_command_runner.h"
+#include "mongo/executor/remote_command_runner_error_info.h"
 #include "mongo/executor/remote_command_runner_test_fixture.h"
 #include "mongo/executor/remote_command_targeter.h"
-
-#include "mongo/bson/oid.h"
-#include "mongo/db/repl/hello_gen.h"
-#include "mongo/executor/network_test_env.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/task_executor_test_fixture.h"
 #include "mongo/executor/thread_pool_task_executor.h"
@@ -79,6 +81,86 @@ TEST_F(RemoteCommandRunnerTestFixture, SuccessfulHello) {
 }
 
 /*
+ * Tests that 'doRequest' will appropriately retry multiple times under the conditions defined by
+ * the retry policy.
+ */
+TEST_F(RemoteCommandRunnerTestFixture, RetryOnSuccessfulHelloAdditionalAttempts) {
+    std::unique_ptr<RemoteCommandHostTargeter> targeter =
+        std::make_unique<RemoteCommandLocalHostTargeter>();
+    HelloCommandReply helloReply = HelloCommandReply(TopologyVersion(OID::gen(), 0));
+    HelloCommand helloCmd;
+    initializeCommand(helloCmd);
+    // Define a retry policy that simply decides to always retry a command three additional times.
+    std::shared_ptr<RemoteCommandTestRetryPolicy> testPolicy =
+        std::make_shared<RemoteCommandTestRetryPolicy>();
+    const auto maxNumRetries = 3;
+    const auto retryDelay = Milliseconds(100);
+    testPolicy->setMaxNumRetries(maxNumRetries);
+    testPolicy->setRetryDelay(retryDelay);
+
+    auto opCtxHolder = makeOperationContext();
+    SemiFuture<RemoteCommandRunnerResponse<HelloCommandReply>> resultFuture =
+        doRequest(helloCmd,
+                  opCtxHolder.get(),
+                  std::move(targeter),
+                  getExecutorPtr(),
+                  _cancellationToken,
+                  testPolicy);
+
+    const auto onCommandFunc = [&](const auto& request) {
+        ASSERT(request.cmdObj["hello"]);
+        ASSERT_EQ(HostAndPort("localhost", serverGlobalParams.port), request.target);
+        return helloReply.toBSON();
+    };
+    // Schedule 1 request as the initial attempt, and then three following retries to satisfy the
+    // condition for the runner to stop retrying.
+    for (auto i = 0; i <= maxNumRetries; i++) {
+        scheduleRequestAndAdvanceClockForRetry(testPolicy, onCommandFunc);
+    }
+    RemoteCommandRunnerResponse res = resultFuture.get();
+
+    ASSERT_BSONOBJ_EQ(res.response.toBSON(), helloReply.toBSON());
+    ASSERT_EQ(HostAndPort("localhost", serverGlobalParams.port), res.targetUsed);
+    ASSERT_EQ(maxNumRetries, testPolicy->getNumRetriesPerformed());
+}
+
+/*
+ * Tests that 'doRequest' will not retry when the retry policy indicates accordingly.
+ */
+TEST_F(RemoteCommandRunnerTestFixture, DoNotRetryOnErrorAccordingToPolicy) {
+    std::unique_ptr<RemoteCommandHostTargeter> targeter =
+        std::make_unique<RemoteCommandLocalHostTargeter>();
+    HelloCommandReply helloReply = HelloCommandReply(TopologyVersion(OID::gen(), 0));
+    HelloCommand helloCmd;
+    initializeCommand(helloCmd);
+    std::shared_ptr<RemoteCommandTestRetryPolicy> testPolicy =
+        std::make_shared<RemoteCommandTestRetryPolicy>();
+    const auto zeroRetries = 0;
+    testPolicy->setMaxNumRetries(zeroRetries);
+
+    auto opCtxHolder = makeOperationContext();
+    SemiFuture<RemoteCommandRunnerResponse<HelloCommandReply>> resultFuture =
+        doRequest(helloCmd,
+                  opCtxHolder.get(),
+                  std::move(targeter),
+                  getExecutorPtr(),
+                  _cancellationToken,
+                  testPolicy);
+
+    onCommand([&](const auto& request) {
+        ASSERT(request.cmdObj["hello"]);
+        ASSERT_EQ(HostAndPort("localhost", serverGlobalParams.port), request.target);
+        return Status(ErrorCodes::NetworkTimeout, "mock");
+    });
+
+    auto error = resultFuture.getNoThrow().getStatus();
+
+    // The error returned by our API should always be RemoteCommandExecutionError
+    ASSERT_EQ(error.code(), ErrorCodes::RemoteCommandExecutionError);
+    ASSERT_EQ(zeroRetries, testPolicy->getNumRetriesPerformed());
+}
+
+/*
  * Mock error on local host side.
  */
 TEST_F(RemoteCommandRunnerTestFixture, LocalError) {
@@ -97,7 +179,17 @@ TEST_F(RemoteCommandRunnerTestFixture, LocalError) {
         return Status(ErrorCodes::NetworkTimeout, "mock");
     });
 
-    ASSERT_THROWS_CODE(resultFuture.get(), DBException, ErrorCodes::NetworkTimeout);
+    auto error = resultFuture.getNoThrow().getStatus();
+
+    // The error returned by our API should always be RemoteCommandExecutionError
+    ASSERT_EQ(error.code(), ErrorCodes::RemoteCommandExecutionError);
+    // Make sure we can extract the extra error info
+    auto extraInfo = error.extraInfo<RemoteCommandExecutionErrorInfo>();
+    ASSERT(extraInfo);
+    // Make sure the extra info indicates the error was local, and that the
+    // local error (which is just a Status) has the correct code.
+    ASSERT(extraInfo->isLocal());
+    ASSERT_EQ(extraInfo->asLocal().code(), ErrorCodes::NetworkTimeout);
 }
 
 /*
@@ -119,7 +211,45 @@ TEST_F(RemoteCommandRunnerTestFixture, RemoteError) {
         return createErrorResponse(Status(ErrorCodes::BadValue, "mock"));
     });
 
-    ASSERT_THROWS_CODE(resultFuture.get(), DBException, ErrorCodes::BadValue);
+    auto error = resultFuture.getNoThrow().getStatus();
+    ASSERT_EQ(error.code(), ErrorCodes::RemoteCommandExecutionError);
+
+    auto extraInfo = error.extraInfo<RemoteCommandExecutionErrorInfo>();
+    ASSERT(extraInfo);
+
+    ASSERT(extraInfo->isRemote());
+    auto remoteError = extraInfo->asRemote();
+    ASSERT_EQ(remoteError.getRemoteCommandResult(), Status(ErrorCodes::BadValue, "mock"));
+
+    // No write concern or write errors expected
+    ASSERT_EQ(remoteError.getRemoteCommandWriteConcernError(), Status::OK());
+    ASSERT_EQ(remoteError.getRemoteCommandFirstWriteError(), Status::OK());
+}
+
+TEST_F(RemoteCommandRunnerTestFixture, SuccessfulFind) {
+    std::unique_ptr<RemoteCommandHostTargeter> targeter =
+        std::make_unique<RemoteCommandLocalHostTargeter>();
+    auto opCtxHolder = makeOperationContext();
+    DatabaseName testDbName = DatabaseName("testdb", boost::none);
+    NamespaceString nss(testDbName);
+
+    FindCommandRequest findCmd(nss);
+    auto resultFuture = doRequest(
+        findCmd, opCtxHolder.get(), std::move(targeter), getExecutorPtr(), _cancellationToken);
+
+    onCommand([&](const auto& request) {
+        ASSERT(request.cmdObj["find"]);
+        // The BSON documents in this cursor response are created here.
+        // When the remote_command_runner parses the response, it participates
+        // in ownership of the underlying data, so it will participate in
+        // owning the data in the cursor response.
+        return CursorResponse(nss, 0LL, {BSON("x" << 1)})
+            .toBSON(CursorResponse::ResponseType::InitialResponse);
+    });
+
+    CursorInitialReply res = std::move(resultFuture).get().response;
+
+    ASSERT_BSONOBJ_EQ(res.getCursor()->getFirstBatch()[0], BSON("x" << 1));
 }
 
 /*
@@ -146,7 +276,20 @@ TEST_F(RemoteCommandRunnerTestFixture, WriteConcernError) {
         return resWithWriteConcernError;
     });
 
-    ASSERT_THROWS_CODE(resultFuture.get(), DBException, ErrorCodes::WriteConcernFailed);
+    auto error = resultFuture.getNoThrow().getStatus();
+    ASSERT_EQ(error.code(), ErrorCodes::RemoteCommandExecutionError);
+
+    auto extraInfo = error.extraInfo<RemoteCommandExecutionErrorInfo>();
+    ASSERT(extraInfo);
+
+    ASSERT(extraInfo->isRemote());
+    auto remoteError = extraInfo->asRemote();
+    ASSERT_EQ(remoteError.getRemoteCommandWriteConcernError(),
+              Status(ErrorCodes::WriteConcernFailed, "mock"));
+
+    // No top-level command or write errors expected
+    ASSERT_EQ(remoteError.getRemoteCommandFirstWriteError(), Status::OK());
+    ASSERT_EQ(remoteError.getRemoteCommandResult(), Status::OK());
 }
 
 /*
@@ -173,8 +316,22 @@ TEST_F(RemoteCommandRunnerTestFixture, WriteError) {
 
         return resWithWriteError;
     });
+    auto error = resultFuture.getNoThrow().getStatus();
+    ASSERT_EQ(error.code(), ErrorCodes::RemoteCommandExecutionError);
 
-    ASSERT_THROWS_CODE(resultFuture.get(), DBException, ErrorCodes::DocumentValidationFailure);
+    auto extraInfo = error.extraInfo<RemoteCommandExecutionErrorInfo>();
+    ASSERT(extraInfo);
+
+    ASSERT(extraInfo->isRemote());
+    auto remoteError = extraInfo->asRemote();
+    ASSERT_EQ(remoteError.getRemoteCommandFirstWriteError(),
+              Status(ErrorCodes::DocumentValidationFailure,
+                     "Document failed validation",
+                     BSON("errInfo" << writeErrorExtraInfo)));
+
+    // No top-level command or write errors expected
+    ASSERT_EQ(remoteError.getRemoteCommandWriteConcernError(), Status::OK());
+    ASSERT_EQ(remoteError.getRemoteCommandResult(), Status::OK());
 }
 
 /*
@@ -207,7 +364,7 @@ TEST_F(RemoteCommandRunnerTestFixture, HostAndPortTargeter) {
 TEST_F(RemoteCommandRunnerTestFixture, NoRetry) {
     RemoteCommandNoRetryPolicy p;
 
-    ASSERT_FALSE(p.shouldRetry(Status(ErrorCodes::BadValue, "mock")));
+    ASSERT_FALSE(p.recordAndEvaluateRetry(Status(ErrorCodes::BadValue, "mock")));
     ASSERT_EQUALS(p.getNextRetryDelay(), Milliseconds::zero());
 }
 

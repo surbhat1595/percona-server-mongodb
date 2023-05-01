@@ -36,9 +36,9 @@
 #include "mongo/client/streamable_replica_set_monitor_for_testing.h"
 #include "mongo/config.h"
 #include "mongo/db/client.h"
-#include "mongo/db/commands/feature_compatibility_version_document_gen.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/feature_compatibility_version_document_gen.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/op_observer/oplog_writer_impl.h"
@@ -1326,6 +1326,8 @@ TEST_F(TenantMigrationRecipientServiceTest,
 
 TEST_F(TenantMigrationRecipientServiceTest, TenantMigrationRecipientGetStartOpTime_NoTransaction) {
     stopFailPointEnableBlock fp("fpAfterRetrievingStartOpTimesMigrationRecipientInstance");
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
 
     const UUID migrationUUID = UUID::gen();
     const OpTime topOfOplogOpTime(Timestamp(5, 1), 1);
@@ -1360,6 +1362,8 @@ TEST_F(TenantMigrationRecipientServiceTest, TenantMigrationRecipientGetStartOpTi
 
 TEST_F(TenantMigrationRecipientServiceTest, TenantMigrationRecipientGetStartOpTime_Transaction) {
     stopFailPointEnableBlock fp("fpAfterRetrievingStartOpTimesMigrationRecipientInstance");
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
 
     const UUID migrationUUID = UUID::gen();
     const OpTime txnStartOpTime(Timestamp(3, 1), 1);
@@ -1403,6 +1407,8 @@ TEST_F(TenantMigrationRecipientServiceTest, TenantMigrationRecipientGetStartOpTi
 TEST_F(TenantMigrationRecipientServiceTest,
        TenantMigrationRecipientGetStartOpTimes_RemoteOplogQueryFails) {
     stopFailPointEnableBlock fp("fpAfterRetrievingStartOpTimesMigrationRecipientInstance");
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
 
     const UUID migrationUUID = UUID::gen();
 
@@ -1434,6 +1440,8 @@ TEST_F(TenantMigrationRecipientServiceTest,
 
 TEST_F(TenantMigrationRecipientServiceTest, TenantMigrationRecipientStartOplogFetcher) {
     stopFailPointEnableBlock fp("fpAfterStartingOplogFetcherMigrationRecipientInstance");
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
 
     auto taskFp = globalFailPointRegistry().find("hangBeforeTaskCompletion");
     auto initialTimesEntered = taskFp->setMode(FailPoint::alwaysOn);
@@ -1482,6 +1490,8 @@ TEST_F(TenantMigrationRecipientServiceTest, TenantMigrationRecipientStartOplogFe
 
 TEST_F(TenantMigrationRecipientServiceTest, TenantMigrationRecipientStartsCloner) {
     stopFailPointEnableBlock fp("fpBeforeFetchingCommittedTransactions");
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
 
     auto taskFp = globalFailPointRegistry().find("hangBeforeTaskCompletion");
     ScopeGuard taskFpGuard([&taskFp] { taskFp->setMode(FailPoint::off); });
@@ -1550,6 +1560,9 @@ TEST_F(TenantMigrationRecipientServiceTest, TenantMigrationRecipientStartsCloner
 }
 
 TEST_F(TenantMigrationRecipientServiceTest, OplogFetcherFailsDuringOplogApplication) {
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
+
     const UUID migrationUUID = UUID::gen();
     const OpTime topOfOplogOpTime(Timestamp(5, 1), 1);
 
@@ -2081,12 +2094,12 @@ TEST_F(TenantMigrationRecipientServiceTest,
                                              collUuid,
                                              entryAfterStartApplyingOpTime,
                                              boost::none /* migrationUUID */));
-    for (auto entry : oplogEntries) {
+    for (const auto& entry : oplogEntries) {
         auto opTime = entry.getOpTime();
         ASSERT_OK(storage->insertDocument(
             opCtx.get(), oplogNss, {entry.toBSON(), opTime.getTimestamp()}, opTime.getTerm()));
     }
-    for (auto entry : noOpEntries) {
+    for (const auto& entry : noOpEntries) {
         auto opTime = entry.getOpTime();
         ASSERT_OK(storage->insertDocument(
             opCtx.get(), oplogNss, {entry.toBSON(), opTime.getTimestamp()}, opTime.getTerm()));
@@ -2229,7 +2242,7 @@ TEST_F(TenantMigrationRecipientServiceTest, OplogApplierResumesFromStartDonorApp
                                               entryAfterStartApplyingOpTime,
                                               boost::none /* migrationUUID */);
 
-    for (auto entry : oplogEntries) {
+    for (const auto& entry : oplogEntries) {
         auto opTime = entry.getOpTime();
         ASSERT_OK(storage->insertDocument(
             opCtx.get(), oplogNss, {entry.toBSON(), opTime.getTimestamp()}, opTime.getTerm()));
@@ -2385,6 +2398,9 @@ TEST_F(TenantMigrationRecipientServiceTest,
 }
 
 TEST_F(TenantMigrationRecipientServiceTest, OplogApplierFails) {
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
+
     const UUID migrationUUID = UUID::gen();
     const OpTime topOfOplogOpTime(Timestamp(5, 1), 1);
     const OpTime injectedEntryOpTime(Timestamp(6, 1), 1);
@@ -2453,6 +2469,9 @@ TEST_F(TenantMigrationRecipientServiceTest, OplogApplierFails) {
 }
 
 TEST_F(TenantMigrationRecipientServiceTest, StoppingApplierAllowsCompletion) {
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
+
     const UUID migrationUUID = UUID::gen();
     const OpTime topOfOplogOpTime(Timestamp(5, 1), 1);
 
@@ -2687,6 +2706,8 @@ TEST_F(TenantMigrationRecipientServiceTest, RecipientForgetMigration_WaitUntilSt
     // state doc.
     auto autoForgetFp = globalFailPointRegistry().find("autoRecipientForgetMigration");
     autoForgetFp->setMode(FailPoint::off);
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
 
     const UUID migrationUUID = UUID::gen();
     const OpTime topOfOplogOpTime(Timestamp(5, 1), 1);
@@ -2772,7 +2793,8 @@ TEST_F(TenantMigrationRecipientServiceTest, RecipientForgetMigration_AfterStartO
                                            0,
                                            BSON("action"
                                                 << "hang"));
-
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
 
     const UUID migrationUUID = UUID::gen();
     const OpTime topOfOplogOpTime(Timestamp(5, 1), 1);
@@ -2838,6 +2860,9 @@ TEST_F(TenantMigrationRecipientServiceTest, RecipientForgetMigration_AfterConsis
                                                          0,
                                                          BSON("action"
                                                               << "hang"));
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
+
 
     const UUID migrationUUID = UUID::gen();
     const OpTime topOfOplogOpTime(Timestamp(5, 1), 1);
@@ -2927,6 +2952,9 @@ TEST_F(TenantMigrationRecipientServiceTest, RecipientForgetMigration_AfterFail) 
     auto autoForgetFp = globalFailPointRegistry().find("autoRecipientForgetMigration");
     autoForgetFp->setMode(FailPoint::off);
 
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
+
     stopFailPointEnableBlock fp("fpBeforeFetchingCommittedTransactions");
     const UUID migrationUUID = UUID::gen();
     const OpTime topOfOplogOpTime(Timestamp(5, 1), 1);
@@ -3015,6 +3043,9 @@ TEST_F(TenantMigrationRecipientServiceTest, RecipientForgetMigration_FailToMarkG
     stopFailPointEnableBlock fp("fpAfterPersistingTenantMigrationRecipientInstanceStateDoc");
     const UUID migrationUUID = UUID::gen();
 
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
+
     MockReplicaSet replSet("donorSet", 3, true /* hasPrimary */, true /* dollarPrefixHosts */);
     getTopologyManager()->setTopologyDescription(replSet.getTopologyDescription(clock()));
 
@@ -3066,6 +3097,8 @@ TEST_F(TenantMigrationRecipientServiceTest, RecipientForgetMigration_FailToMarkG
 
 TEST_F(TenantMigrationRecipientServiceTest, TenantMigrationRecipientServiceRecordsFCVAtStart) {
     stopFailPointEnableBlock fp("fpAfterRecordingRecipientPrimaryStartingFCV");
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
 
     const UUID migrationUUID = UUID::gen();
     MockReplicaSet replSet("donorSet", 3, true /* hasPrimary */, true /* dollarPrefixHosts */);
@@ -3102,6 +3135,9 @@ TEST_F(TenantMigrationRecipientServiceTest, TenantMigrationRecipientServiceRecor
 TEST_F(TenantMigrationRecipientServiceTest,
        TenantMigrationRecipientServiceAlreadyRecordedFCV_Match) {
     stopFailPointEnableBlock fp("fpAfterRecordingRecipientPrimaryStartingFCV");
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
+
 
     const UUID migrationUUID = UUID::gen();
     MockReplicaSet replSet("donorSet", 3, true /* hasPrimary */, true /* dollarPrefixHosts */);
@@ -3225,6 +3261,9 @@ TEST_F(TenantMigrationRecipientServiceTest,
 }
 
 TEST_F(TenantMigrationRecipientServiceTest, WaitUntilMigrationReachesReturnAfterReachingTimestamp) {
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
+
     const UUID migrationUUID = UUID::gen();
     const OpTime topOfOplogOpTime(Timestamp(5, 1), 1);
 
@@ -3285,6 +3324,9 @@ TEST_F(TenantMigrationRecipientServiceTest, RecipientReceivesRetriableFetcherErr
                                            0,
                                            BSON("action"
                                                 << "hang"));
+
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
 
     const UUID migrationUUID = UUID::gen();
     const OpTime topOfOplogOpTime(Timestamp(5, 1), 1);
@@ -3351,6 +3393,9 @@ TEST_F(TenantMigrationRecipientServiceTest, RecipientReceivesNonRetriableFetcher
                                            BSON("action"
                                                 << "hang"));
 
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
+
     const UUID migrationUUID = UUID::gen();
     const OpTime topOfOplogOpTime(Timestamp(5, 1), 1);
 
@@ -3411,6 +3456,9 @@ TEST_F(TenantMigrationRecipientServiceTest, RecipientWillNotRetryOnExternalInter
                                            BSON("action"
                                                 << "hang"));
 
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
+
     const UUID migrationUUID = UUID::gen();
     const OpTime topOfOplogOpTime(Timestamp(5, 1), 1);
 
@@ -3470,6 +3518,9 @@ TEST_F(TenantMigrationRecipientServiceTest, RecipientWillNotRetryOnReceivingForg
                                                  0,
                                                  BSON("action"
                                                       << "hang"));
+
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
 
     const UUID migrationUUID = UUID::gen();
     const OpTime topOfOplogOpTime(Timestamp(5, 1), 1);
@@ -3542,6 +3593,10 @@ TEST_F(TenantMigrationRecipientServiceTest, RecipientReceivesRetriableClonerErro
                                            0,
                                            BSON("action"
                                                 << "hang"));
+
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
+
 
     const UUID migrationUUID = UUID::gen();
     const OpTime topOfOplogOpTime(Timestamp(5, 1), 1);
@@ -3616,6 +3671,10 @@ TEST_F(TenantMigrationRecipientServiceTest, RecipientReceivesNonRetriableClonerE
                                            BSON("action"
                                                 << "hang"));
 
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
+
+
     const UUID migrationUUID = UUID::gen();
     const OpTime topOfOplogOpTime(Timestamp(5, 1), 1);
 
@@ -3670,7 +3729,11 @@ TEST_F(TenantMigrationRecipientServiceTest, RecipientReceivesNonRetriableClonerE
 }
 
 TEST_F(TenantMigrationRecipientServiceTest, IncrementNumRestartsDueToRecipientFailureCounter) {
+    FailPointEnableBlock createIndexesFailpointBlock("skipCreatingIndexDuringRebuildService");
     stopFailPointEnableBlock fp("fpAfterPersistingTenantMigrationRecipientInstanceStateDoc");
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
+
     const UUID migrationUUID = UUID::gen();
     const OpTime topOfOplogOpTime(Timestamp(1, 1), 1);
 
@@ -3723,6 +3786,10 @@ TEST_F(TenantMigrationRecipientServiceTest, IncrementNumRestartsDueToRecipientFa
 
 TEST_F(TenantMigrationRecipientServiceTest,
        RecipientFailureCounterNotIncrementedWhenMigrationForgotten) {
+    FailPointEnableBlock createIndexesFailpointBlock("skipCreatingIndexDuringRebuildService");
+    // Hang before deleting the state doc so that we can check the state doc was persisted.
+    FailPointEnableBlock fpDeletingStateDoc("pauseTenantMigrationRecipientBeforeDeletingStateDoc");
+
     const UUID migrationUUID = UUID::gen();
     const OpTime topOfOplogOpTime(Timestamp(1, 1), 1);
 

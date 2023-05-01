@@ -99,7 +99,7 @@ public:
         ConnectSSLMode sslMode,
         const ReactorHandle& reactor,
         Milliseconds timeout,
-        ConnectionMetrics* connectionMetrics,  // must remain valid until the future is ready
+        std::shared_ptr<ConnectionMetrics> connectionMetrics,
         std::shared_ptr<const SSLConnectionContext> transientSSLContext) = 0;
 
     /**
@@ -123,8 +123,11 @@ public:
      */
     virtual Status setup() = 0;
 
-    /** Allows a `TransportLayer` to contribute to a stats summary (e.g. `serverStatus`). */
-    virtual void appendStats(BSONObjBuilder* bob) const {}
+    /** Allows a `TransportLayer` to contribute to a serverStatus readout. */
+    virtual void appendStatsForServerStatus(BSONObjBuilder* bob) const {}
+
+    /** Allows a `TransportLayer` to contribute to a FTDC readout. */
+    virtual void appendStatsForFTDC(BSONObjBuilder& bob) const {}
 
     enum WhichReactor { kIngress, kEgress, kNewReactor };
     virtual ReactorHandle getReactor(WhichReactor which) = 0;

@@ -50,7 +50,6 @@
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/write_stage_common.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/internal_transactions_feature_flag_gen.h"
 #include "mongo/db/keys_collection_document_gen.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/multitenancy_gen.h"
@@ -305,6 +304,7 @@ void logGlobalIndexDDLOperation(OperationContext* opCtx,
                                 const NamespaceString& globalIndexNss,
                                 const UUID& globalIndexUUID,
                                 const StringData commandString,
+                                boost::optional<long long> numKeys,
                                 OplogWriter* oplogWriter) {
     invariant(!opCtx->inMultiDocumentTransaction());
 
@@ -315,6 +315,18 @@ void logGlobalIndexDDLOperation(OperationContext* opCtx,
     MutableOplogEntry oplogEntry;
     oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
     oplogEntry.setObject(builder.done());
+
+    // On global index drops, persist the number of records into the 'o2' field similar to a
+    // collection drop. This allows for efficiently restoring the index keys count after rollback
+    // without forcing a collection scan.
+    invariant((numKeys && commandString == "dropGlobalIndex") ||
+              (!numKeys && commandString == "createGlobalIndex"));
+    if (numKeys) {
+        oplogEntry.setObject2(makeObject2ForDropOrRename(*numKeys));
+    }
+
+    // The 'ns' field is technically redundant as it can be derived from the uuid, however it's a
+    // required oplog entry field.
     oplogEntry.setNss(globalIndexNss.getCommandNS());
     oplogEntry.setUuid(globalIndexUUID);
 
@@ -346,16 +358,21 @@ void OpObserverImpl::onCreateGlobalIndex(OperationContext* opCtx,
                                          const NamespaceString& globalIndexNss,
                                          const UUID& globalIndexUUID) {
     constexpr StringData commandString = "createGlobalIndex"_sd;
-    logGlobalIndexDDLOperation(
-        opCtx, globalIndexNss, globalIndexUUID, commandString, _oplogWriter.get());
+    logGlobalIndexDDLOperation(opCtx,
+                               globalIndexNss,
+                               globalIndexUUID,
+                               commandString,
+                               boost::none /* numKeys */,
+                               _oplogWriter.get());
 }
 
 void OpObserverImpl::onDropGlobalIndex(OperationContext* opCtx,
                                        const NamespaceString& globalIndexNss,
-                                       const UUID& globalIndexUUID) {
+                                       const UUID& globalIndexUUID,
+                                       long long numKeys) {
     constexpr StringData commandString = "dropGlobalIndex"_sd;
     logGlobalIndexDDLOperation(
-        opCtx, globalIndexNss, globalIndexUUID, commandString, _oplogWriter.get());
+        opCtx, globalIndexNss, globalIndexUUID, commandString, numKeys, _oplogWriter.get());
 }
 
 void OpObserverImpl::onCreateIndex(OperationContext* opCtx,
@@ -399,7 +416,7 @@ void OpObserverImpl::onStartIndexBuild(OperationContext* opCtx,
     indexBuildUUID.appendToBuilder(&oplogEntryBuilder, "indexBuildUUID");
 
     BSONArrayBuilder indexesArr(oplogEntryBuilder.subarrayStart("indexes"));
-    for (auto indexDoc : indexes) {
+    for (const auto& indexDoc : indexes) {
         indexesArr.append(indexDoc);
     }
     indexesArr.done();
@@ -464,7 +481,7 @@ void OpObserverImpl::onCommitIndexBuild(OperationContext* opCtx,
     indexBuildUUID.appendToBuilder(&oplogEntryBuilder, "indexBuildUUID");
 
     BSONArrayBuilder indexesArr(oplogEntryBuilder.subarrayStart("indexes"));
-    for (auto indexDoc : indexes) {
+    for (const auto& indexDoc : indexes) {
         indexesArr.append(indexDoc);
     }
     indexesArr.done();
@@ -493,7 +510,7 @@ void OpObserverImpl::onAbortIndexBuild(OperationContext* opCtx,
     indexBuildUUID.appendToBuilder(&oplogEntryBuilder, "indexBuildUUID");
 
     BSONArrayBuilder indexesArr(oplogEntryBuilder.subarrayStart("indexes"));
-    for (auto indexDoc : indexes) {
+    for (const auto& indexDoc : indexes) {
         indexesArr.append(indexDoc);
     }
     indexesArr.done();
@@ -722,6 +739,25 @@ void OpObserverImpl::onInsertGlobalIndexKey(OperationContext* opCtx,
     invariant(!opCtx->isRetryableWrite());
 
     const auto op = MutableOplogEntry::makeInsertGlobalIndexKeyOperation(
+        globalIndexNss, globalIndexUuid, key, docKey);
+    txnParticipant.addTransactionOperation(opCtx, op);
+}
+
+void OpObserverImpl::onDeleteGlobalIndexKey(OperationContext* opCtx,
+                                            const NamespaceString& globalIndexNss,
+                                            const UUID& globalIndexUuid,
+                                            const BSONObj& key,
+                                            const BSONObj& docKey) {
+    if (!opCtx->writesAreReplicated()) {
+        return;
+    }
+
+    // _shardsvrDeleteGlobalIndexKey must run inside a multi-doc transaction.
+    auto txnParticipant = TransactionParticipant::get(opCtx);
+    invariant(txnParticipant && txnParticipant.transactionIsOpen());
+    invariant(!opCtx->isRetryableWrite());
+
+    const auto op = MutableOplogEntry::makeDeleteGlobalIndexKeyOperation(
         globalIndexNss, globalIndexUuid, key, docKey);
     txnParticipant.addTransactionOperation(opCtx, op);
 }
@@ -1072,6 +1108,12 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
     } else if (nss == NamespaceString::kConfigSettingsNamespace) {
         ReadWriteConcernDefaults::get(opCtx).observeDirectWriteToConfigSettings(
             opCtx, documentKey.getId().firstElement(), boost::none);
+    } else if (nss.isTimeseriesBucketsCollection() &&
+               feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
+                   serverGlobalParams.featureCompatibility)) {
+        invariant(args.deletedDoc);
+        auto& bucketCatalog = BucketCatalog::get(opCtx);
+        bucketCatalog.clear(args.deletedDoc->getField("_id").OID());
     }
 }
 
@@ -2132,7 +2174,6 @@ void OpObserverImpl::onPreparedTransactionCommit(
 std::unique_ptr<OpObserver::ApplyOpsOplogSlotAndOperationAssignment>
 OpObserverImpl::preTransactionPrepare(OperationContext* opCtx,
                                       const std::vector<OplogSlot>& reservedSlots,
-                                      size_t numberOfPrePostImagesToWrite,
                                       Date_t wallClockTime,
                                       std::vector<repl::ReplOperation>* statements) {
     auto applyOpsOplogSlotAndOperationAssignment =
@@ -2257,6 +2298,20 @@ void OpObserverImpl::onTransactionAbort(OperationContext* opCtx,
 
     logCommitOrAbortForPreparedTransaction(
         opCtx, &oplogEntry, DurableTxnStateEnum::kAborted, _oplogWriter.get());
+}
+
+void OpObserverImpl::onModifyShardedCollectionGlobalIndexCatalogEntry(OperationContext* opCtx,
+                                                                      const NamespaceString& nss,
+                                                                      const UUID& uuid,
+                                                                      BSONObj opDoc) {
+    repl::MutableOplogEntry oplogEntry;
+    auto obj = BSON("modifyShardedCollectionGlobalIndexCatalog" << nss.toString()).addFields(opDoc);
+    oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
+    oplogEntry.setNss(nss);
+    oplogEntry.setUuid(uuid);
+    oplogEntry.setObject(obj);
+
+    logOperation(opCtx, &oplogEntry, true, _oplogWriter.get());
 }
 
 void OpObserverImpl::_onReplicationRollback(OperationContext* opCtx,

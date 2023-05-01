@@ -7,9 +7,15 @@
 const originalReplSet = ReplSetTest;
 
 ReplSetTest = function(opts) {
+    // Setup the 'serverless' environment if the 'opts' is not a connection string, ie. the
+    // replica-set does not already exist and the replica-set is not part of the sharded cluster,
+    // ie. 'setParametersMongos' property does not exist.
+    const newOpts = typeof opts !== "string" && !TestData.hasOwnProperty("setParametersMongos")
+        ? Object.assign({name: "OverridenServerlessChangeStreamReplSet", serverless: true}, opts)
+        : opts;
+
     // Call the constructor with the original 'ReplSetTest' to populate 'this' with required fields.
-    // TODO SERVER-67267 add {serverless:true} to the 'opts'.
-    originalReplSet.apply(this, [opts]);
+    originalReplSet.apply(this, [newOpts]);
 
     // Make a copy of the original 'startSetAsync' function and then override it to include the
     // required parameters.
@@ -22,20 +28,13 @@ ReplSetTest = function(opts) {
 
         let setParameter = {};
 
-        // The 'setParameter' that should be merged with 'newOpts' for the sharded-cluster and the
-        // replica-set.
-        if (newOptions.hasOwnProperty("shardsvr")) {
-            setParameter = {
-                // TODO SERVER-67267 check if 'forceEnableChangeCollectionsMode' can be removed.
-                "failpoint.forceEnableChangeCollectionsMode": tojson({mode: "alwaysOn"}),
-                "failpoint.assertChangeStreamNssCollection": fpAssertChangeStreamNssColl
-            };
-        } else if (!newOptions.hasOwnProperty("configsvr")) {
-            // This is the case for the replica-set. A change collection does not exist in the
-            // config server.
+        // A change collection does not exist in the config server, do not set any change collection
+        // related parameter.
+        if (!newOptions.hasOwnProperty("configsvr")) {
             setParameter = {
                 featureFlagServerlessChangeStreams: true,
-                "failpoint.assertChangeStreamNssCollection": fpAssertChangeStreamNssColl
+                internalChangeStreamUseTenantIdForTesting: true,
+                "failpoint.assertChangeStreamNssCollection": fpAssertChangeStreamNssColl,
             };
         }
 

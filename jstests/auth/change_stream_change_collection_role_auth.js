@@ -157,14 +157,22 @@ function removeChangeCollectionDoc(authDb) {
 
 // Start a replica-set test with one-node and authentication enabled. Connect to the primary node
 // and create users.
-const replSetTest =
-    new ReplSetTest({name: "shard", nodes: 1, useHostName: true, waitForKeys: false});
+const replSetTest = new ReplSetTest({
+    name: "shard",
+    nodes: 1,
+    useHostName: true,
+    waitForKeys: false,
+    serverless: true,
+});
 
-// TODO SERVER-67267: Add 'featureFlagServerlessChangeStreams', 'multitenancySupport' and
-// 'serverless' flags and remove 'failpoint.forceEnableChangeCollectionsMode'.
 replSetTest.startSet({
     keyFile: keyFile,
-    setParameter: {"failpoint.forceEnableChangeCollectionsMode": tojson({mode: "alwaysOn"})}
+    setParameter: {
+        featureFlagServerlessChangeStreams: true,
+        multitenancySupport: true,
+        featureFlagMongoStore: true,
+        internalChangeStreamUseTenantIdForTesting: true,
+    }
 });
 replSetTest.initiate();
 const primary = replSetTest.getPrimary();

@@ -225,7 +225,7 @@ protected:
         reset(opCtx, NamespaceString::kRsOplogNamespace);
         reset(opCtx, NamespaceString::kSessionTransactionsTableNamespace);
         reset(opCtx, NamespaceString::kConfigImagesNamespace);
-        reset(opCtx, NamespaceString::kChangeStreamPreImagesNamespace);
+        reset(opCtx, NamespaceString::makePreImageCollectionNSS(boost::none));
     }
 
     // Assert that the oplog has the expected number of entries, and return them
@@ -288,7 +288,7 @@ protected:
     bool didWriteDeletedDocToPreImagesCollection(OperationContext* opCtx,
                                                  const ChangeStreamPreImageId preImageId) {
         AutoGetCollection preImagesCollection(
-            opCtx, NamespaceString::kChangeStreamPreImagesNamespace, MODE_IS);
+            opCtx, NamespaceString::makePreImageCollectionNSS(boost::none), LockMode::MODE_IS);
         const auto preImage = Helpers::findOneForTesting(
             opCtx, preImagesCollection.getCollection(), BSON("_id" << preImageId.toBSON()), false);
         return !preImage.isEmpty();
@@ -323,7 +323,7 @@ protected:
                                                  const ChangeStreamPreImageId& preImageId,
                                                  BSONObj* container) {
         AutoGetCollection preImagesCollection(
-            opCtx, NamespaceString::kChangeStreamPreImagesNamespace, MODE_IS);
+            opCtx, NamespaceString::makePreImageCollectionNSS(boost::none), LockMode::MODE_IS);
         *container = Helpers::findOneForTesting(opCtx,
                                                 preImagesCollection.getCollection(),
                                                 BSON("_id" << preImageId.toBSON()))
@@ -618,7 +618,7 @@ TEST_F(OpObserverTest, OnDropCollectionReturnsDropOpTime) {
 }
 
 TEST_F(OpObserverTest, OnDropCollectionInlcudesTenantId) {
-    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
     OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
     auto opCtx = cc().makeOperationContext();
@@ -679,7 +679,7 @@ TEST_F(OpObserverTest, OnRenameCollectionReturnsRenameOpTime) {
 }
 
 TEST_F(OpObserverTest, OnRenameCollectionIncludesTenantIdFeatureFlagOff) {
-    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", false);
     OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
     auto opCtx = cc().makeOperationContext();
@@ -716,7 +716,7 @@ TEST_F(OpObserverTest, OnRenameCollectionIncludesTenantIdFeatureFlagOff) {
 }
 
 TEST_F(OpObserverTest, OnRenameCollectionIncludesTenantIdFeatureFlagOn) {
-    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
     OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
     auto opCtx = cc().makeOperationContext();
@@ -834,7 +834,7 @@ TEST_F(OpObserverTest, ImportCollectionOplogEntry) {
 }
 
 TEST_F(OpObserverTest, ImportCollectionOplogEntryIncludesTenantId) {
-    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
     OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
     auto opCtx = cc().makeOperationContext();
@@ -879,7 +879,7 @@ TEST_F(OpObserverTest, ImportCollectionOplogEntryIncludesTenantId) {
 }
 
 TEST_F(OpObserverTest, SingleStatementInsertTestIncludesTenantId) {
-    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
 
     std::vector<InsertStatement> insert;
@@ -906,7 +906,7 @@ TEST_F(OpObserverTest, SingleStatementInsertTestIncludesTenantId) {
 }
 
 TEST_F(OpObserverTest, SingleStatementUpdateTestIncludesTenantId) {
-    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
 
     CollectionUpdateArgs updateArgs;
@@ -936,7 +936,7 @@ TEST_F(OpObserverTest, SingleStatementUpdateTestIncludesTenantId) {
 }
 
 TEST_F(OpObserverTest, SingleStatementDeleteTestIncludesTenantId) {
-    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
 
     auto opCtx = cc().makeOperationContext();
@@ -1145,8 +1145,8 @@ protected:
                             size_t numberOfPrePostImagesToWrite = 0) {
         auto txnOps = txnParticipant().retrieveCompletedTransactionOperations(opCtx());
         auto currentTime = Date_t::now();
-        auto applyOpsAssignment = opObserver().preTransactionPrepare(
-            opCtx(), reservedSlots, numberOfPrePostImagesToWrite, currentTime, txnOps);
+        auto applyOpsAssignment =
+            opObserver().preTransactionPrepare(opCtx(), reservedSlots, currentTime, txnOps);
         opCtx()->recoveryUnit()->setPrepareTimestamp(prepareOpTime.getTimestamp());
         opObserver().onTransactionPrepare(opCtx(),
                                           reservedSlots,
@@ -1708,7 +1708,7 @@ TEST_F(OpObserverTransactionTest, TransactionalInsertTest) {
 }
 
 TEST_F(OpObserverTransactionTest, TransactionalInsertTestIncludesTenantId) {
-    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
 
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -1832,7 +1832,7 @@ TEST_F(OpObserverTransactionTest, TransactionalUpdateTest) {
 }
 
 TEST_F(OpObserverTransactionTest, TransactionalUpdateTestIncludesTenantId) {
-    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
 
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -1932,7 +1932,7 @@ TEST_F(OpObserverTransactionTest, TransactionalDeleteTest) {
 }
 
 TEST_F(OpObserverTransactionTest, TransactionalDeleteTestIncludesTenantId) {
-    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
 
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -2858,7 +2858,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdate) {
 
 // Repeat the same test as above, but assert tenantId is included when available
 TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdateIncludesTenantId) {
-    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
     // Setup.
     auto opCtxRaii = cc().makeOperationContext();

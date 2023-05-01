@@ -57,6 +57,7 @@
 #include "mongo/db/catalog/rename_collection.h"
 #include "mongo/db/change_stream_change_collection_manager.h"
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
+#include "mongo/db/change_stream_serverless_helpers.h"
 #include "mongo/db/client.h"
 #include "mongo/db/coll_mod_gen.h"
 #include "mongo/db/commands.h"
@@ -89,6 +90,7 @@
 #include "mongo/db/repl/tenant_migration_decoration.h"
 #include "mongo/db/repl/timestamp_block.h"
 #include "mongo/db/repl/transaction_oplog_application.h"
+#include "mongo/db/s/global_index_ddl_util.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/counters.h"
@@ -100,6 +102,7 @@
 #include "mongo/platform/random.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/op_msg.h"
+#include "mongo/s/catalog/type_index_catalog_gen.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/elapsed_tracker.h"
@@ -390,7 +393,7 @@ void _logOpsInner(OperationContext* opCtx,
     }
 
     // Insert the oplog records to the respective tenants change collections.
-    if (ChangeStreamChangeCollectionManager::isChangeCollectionsModeActive()) {
+    if (change_stream_serverless_helpers::isChangeCollectionsModeActive()) {
         ChangeStreamChangeCollectionManager::get(opCtx).insertDocumentsToChangeCollection(
             opCtx, *records, timestamps);
     }
@@ -1096,6 +1099,40 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
      {[](OperationContext* opCtx, const OplogEntry& entry, OplogApplication::Mode mode) -> Status {
          return applyAbortTransaction(opCtx, entry, mode);
      }}},
+    {"modifyShardedCollectionGlobalIndexCatalog",
+     {[](OperationContext* opCtx, const OplogEntry& entry, OplogApplication::Mode mode) -> Status {
+         auto entryObj = entry.getObject();
+         try {
+             if (entry.getObject()["op"].str() == "i") {
+                 auto indexEntry = IndexCatalogType::parse(
+                     IDLParserContext("OplogModifyCatalogEntryContext"), entryObj["entry"].Obj());
+                 addGlobalIndexCatalogEntryToCollection(opCtx,
+                                                        entry.getNss(),
+                                                        indexEntry.getName().toString(),
+                                                        indexEntry.getKeyPattern(),
+                                                        indexEntry.getOptions(),
+                                                        indexEntry.getCollectionUUID(),
+                                                        indexEntry.getLastmod(),
+                                                        indexEntry.getIndexCollectionUUID());
+
+             } else {
+                 removeGlobalIndexCatalogEntryFromCollection(
+                     opCtx,
+                     entry.getNss(),
+                     uassertStatusOK(UUID::parse(
+                         entryObj["entry"][IndexCatalogType::kCollectionUUIDFieldName])),
+                     entryObj["entry"][IndexCatalogType::kNameFieldName].str(),
+                     entryObj["entry"][IndexCatalogType::kLastmodFieldName].timestamp());
+             }
+         } catch (const DBException& ex) {
+             LOGV2_ERROR(6712302,
+                         "Failed to apply modifyShardedCollectionGlobalIndexCatalog with entry obj",
+                         "entryObj"_attr = redact(entryObj),
+                         "error"_attr = redact(ex));
+             return ex.toStatus();
+         }
+         return Status::OK();
+     }}},
     {"createGlobalIndex",
      {[](OperationContext* opCtx, const OplogEntry& entry, OplogApplication::Mode mode) -> Status {
          const auto& globalIndexUUID = entry.getUuid().get();
@@ -1344,7 +1381,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                     return status;
                 }
                 wuow.commit();
-                for (auto entry : insertObjs) {
+                for (size_t i = 0; i < insertObjs.size(); i++) {
                     opCounters->gotInsert();
                     if (shouldUseGlobalOpCounters) {
                         ServerWriteConcernMetrics::get(opCtx)->recordWriteConcernForInsert(
@@ -1591,11 +1628,8 @@ Status applyOperation_inlock(OperationContext* opCtx,
                     invariant(op.getObject2());
                     auto&& documentId = *op.getObject2();
 
-                    // TODO SERVER-69541 pass in NamespaceString object instead
-                    auto documentFound = Helpers::findById(opCtx,
-                                                           collection->ns().toStringWithTenantId(),
-                                                           documentId,
-                                                           changeStreamPreImage);
+                    auto documentFound = Helpers::findById(
+                        opCtx, collection->ns(), documentId, changeStreamPreImage);
                     invariant(documentFound);
                 }
 
@@ -1829,10 +1863,21 @@ Status applyOperation_inlock(OperationContext* opCtx,
         case OpTypeEnum::kInsertGlobalIndexKey: {
             invariant(op.getUuid());
 
-            global_index::insertKey(opCtx,
-                                    *op.getUuid(),
-                                    op.getObject().getObjectField("key"),
-                                    op.getObject().getObjectField("docKey"));
+            global_index::insertKey(
+                opCtx,
+                *op.getUuid(),
+                op.getObject().getObjectField(global_index::kOplogEntryIndexKeyFieldName),
+                op.getObject().getObjectField(global_index::kOplogEntryDocKeyFieldName));
+            break;
+        }
+        case OpTypeEnum::kDeleteGlobalIndexKey: {
+            invariant(op.getUuid());
+
+            global_index::deleteKey(
+                opCtx,
+                *op.getUuid(),
+                op.getObject().getObjectField(global_index::kOplogEntryIndexKeyFieldName),
+                op.getObject().getObjectField(global_index::kOplogEntryDocKeyFieldName));
             break;
         }
         default: {

@@ -375,41 +375,7 @@ void WiredTigerIndex::fullValidate(OperationContext* opCtx,
 bool WiredTigerIndex::appendCustomStats(OperationContext* opCtx,
                                         BSONObjBuilder* output,
                                         double scale) const {
-    dassert(opCtx->lockState()->isReadLocked());
-    {
-        BSONObjBuilder metadata(output->subobjStart("metadata"));
-        Status status = WiredTigerUtil::getApplicationMetadata(opCtx, uri(), &metadata);
-        if (!status.isOK()) {
-            metadata.append("error", "unable to retrieve metadata");
-            metadata.append("code", static_cast<int>(status.code()));
-            metadata.append("reason", status.reason());
-        }
-    }
-    std::string type, sourceURI;
-    WiredTigerUtil::fetchTypeAndSourceURI(opCtx, _uri, &type, &sourceURI);
-    StatusWith<std::string> metadataResult = WiredTigerUtil::getMetadataCreate(opCtx, sourceURI);
-    StringData creationStringName("creationString");
-    if (!metadataResult.isOK()) {
-        BSONObjBuilder creationString(output->subobjStart(creationStringName));
-        creationString.append("error", "unable to retrieve creation config");
-        creationString.append("code", static_cast<int>(metadataResult.getStatus().code()));
-        creationString.append("reason", metadataResult.getStatus().reason());
-    } else {
-        output->append(creationStringName, metadataResult.getValue());
-        // Type can be "lsm" or "file"
-        output->append("type", type);
-    }
-
-    WiredTigerSession* session = WiredTigerRecoveryUnit::get(opCtx)->getSession();
-    WT_SESSION* s = session->getSession();
-    Status status =
-        WiredTigerUtil::exportTableToBSON(s, "statistics:" + uri(), "statistics=(fast)", output);
-    if (!status.isOK()) {
-        output->append("error", "unable to retrieve statistics");
-        output->append("code", static_cast<int>(status.code()));
-        output->append("reason", status.reason());
-    }
-    return true;
+    return WiredTigerUtil::appendCustomStats(opCtx, output, scale, _uri);
 }
 
 Status WiredTigerIndex::dupKeyCheck(OperationContext* opCtx, const KeyString::Value& key) {
@@ -509,41 +475,12 @@ void WiredTigerIndex::printIndexEntryMetadata(OperationContext* opCtx,
 long long WiredTigerIndex::getSpaceUsedBytes(OperationContext* opCtx) const {
     dassert(opCtx->lockState()->isReadLocked());
     auto ru = WiredTigerRecoveryUnit::get(opCtx);
-    WiredTigerSession* session = ru->getSession();
+    WT_SESSION* s = ru->getSession()->getSession();
 
     if (ru->getSessionCache()->isEphemeral()) {
-        // For ephemeral case, use cursor statistics
-        const auto statsUri = "statistics:" + uri();
-
-        // Helper function to retrieve stats and check for errors
-        auto getStats = [&](int key) -> int64_t {
-            auto result = WiredTigerUtil::getStatisticsValue(
-                session->getSession(), statsUri, "statistics=(fast)", key);
-            if (!result.isOK()) {
-                if (result.getStatus().code() == ErrorCodes::CursorNotFound)
-                    return 0;  // ident gone, so return 0
-
-                uassertStatusOK(result.getStatus());
-            }
-            return result.getValue();
-        };
-
-        auto inserts = getStats(WT_STAT_DSRC_CURSOR_INSERT);
-        auto removes = getStats(WT_STAT_DSRC_CURSOR_REMOVE);
-        auto insertBytes = getStats(WT_STAT_DSRC_CURSOR_INSERT_BYTES);
-
-        if (inserts == 0 || removes >= inserts)
-            return 0;
-
-        // Rough approximation of index size as average entry size times number of entries.
-        // May be off if key sizes change significantly over the life time of the collection,
-        // but is the best we can do currrently with the statistics available.
-        auto bytesPerEntry = (insertBytes + inserts - 1) / inserts;  // round up
-        auto numEntries = inserts - removes;
-        return numEntries * bytesPerEntry;
+        return static_cast<long long>(WiredTigerUtil::getEphemeralIdentSize(s, _uri));
     }
-
-    return static_cast<long long>(WiredTigerUtil::getIdentSize(session->getSession(), _uri));
+    return static_cast<long long>(WiredTigerUtil::getIdentSize(s, _uri));
 }
 
 long long WiredTigerIndex::getFreeStorageBytes(OperationContext* opCtx) const {
@@ -565,6 +502,9 @@ Status WiredTigerIndex::compact(OperationContext* opCtx) {
     if (!cache->isEphemeral()) {
         WT_SESSION* s = WiredTigerRecoveryUnit::get(opCtx)->getSession()->getSession();
         opCtx->recoveryUnit()->abandonSnapshot();
+        // WT compact prompts WT to take checkpoints, so we need to take the checkpoint lock around
+        // WT compact calls.
+        Lock::ResourceLock checkpointLock{opCtx, ResourceId(RESOURCE_MUTEX, "checkpoint"), MODE_X};
         int ret = s->compact(s, uri().c_str(), "timeout=0");
         if (MONGO_unlikely(WTCompactIndexEBUSY.shouldFail())) {
             ret = EBUSY;

@@ -32,6 +32,7 @@
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data_comparator_interface.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/catalog/collection.h"
 #include "mongo/db/timeseries/flat_bson.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 
@@ -63,9 +64,26 @@ StatusWith<Schema> generateSchemaFromBucketDoc(const BSONObj& bucketDoc,
 StatusWith<std::pair<Date_t, boost::optional<BSONElement>>> extractTimeAndMeta(
     const BSONObj& doc, const TimeseriesOptions& options);
 
+
 /**
- * Executes a 'find' query on the timeseries bucket collection to find a bucket eligible to
- * receive a new measurement specified by a document's metadata and timestamp (measurementTs).
+ * Retrieves a document from the record store based off of the bucket ID.
+ */
+BSONObj findDocFromOID(OperationContext* opCtx, const Collection* coll, const OID& bucketId);
+
+/**
+ * Normalize metaField value (i.e. sort object keys) for a time-series measurement so that we can
+ * more effectively match a measurement to an existing bucket. If 'as' is specified, the normalized
+ * value will be added to 'builder' with the specified field name; otherwise it will be added with
+ * its original field name.
+ */
+void normalizeMetadata(BSONObjBuilder* builder,
+                       const BSONElement& elem,
+                       boost::optional<StringData> as);
+
+/**
+ * Generates filters that can be used to run a 'find' query on the timeseries bucket collection to
+ * find a bucket eligible to receive a new measurement specified by a document's metadata and
+ * timestamp (measurementTs).
  *
  * A bucket is deemed suitable for the new measurement iff:
  * i.   the bucket is uncompressed and not closed
@@ -83,9 +101,9 @@ StatusWith<std::pair<Date_t, boost::optional<BSONElement>>> extractTimeAndMeta(
  *       }]
  * }
  */
-BSONObj findSuitableBucket(OperationContext* opCtx,
-                           const NamespaceString& bucketNss,
-                           const TimeseriesOptions& options,
-                           const BSONObj& measurementDoc);
+BSONObj generateReopeningFilters(const Date_t& time,
+                                 boost::optional<BSONElement> metadata,
+                                 const std::string& controlMinTimePath,
+                                 int64_t bucketMaxSpanSeconds);
 
 }  // namespace mongo::timeseries

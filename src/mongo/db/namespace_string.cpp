@@ -111,8 +111,6 @@ const NamespaceString NamespaceString::kSystemReplSetNamespace(NamespaceString::
                                                                "system.replset");
 const NamespaceString NamespaceString::kLastVoteNamespace(NamespaceString::kLocalDb,
                                                           "replset.election");
-const NamespaceString NamespaceString::kChangeStreamPreImagesNamespace(NamespaceString::kConfigDb,
-                                                                       "system.preimages");
 const NamespaceString NamespaceString::kIndexBuildEntryNamespace(NamespaceString::kConfigDb,
                                                                  "system.indexBuilds");
 const NamespaceString NamespaceString::kRangeDeletionNamespace(NamespaceString::kConfigDb,
@@ -194,6 +192,9 @@ const NamespaceString NamespaceString::kSetChangeStreamStateCoordinatorNamespace
 const NamespaceString NamespaceString::kGlobalIndexClonerNamespace(
     NamespaceString::kConfigDb, "localGlobalIndexOperations.cloner");
 
+const NamespaceString NamespaceString::kConfigQueryAnalyzersNamespace(NamespaceString::kConfigDb,
+                                                                      "queryAnalyzers");
+
 NamespaceString NamespaceString::parseFromStringExpectTenantIdInMultitenancyMode(StringData ns) {
     if (!gMultitenancySupport) {
         return NamespaceString(ns, boost::none);
@@ -222,20 +223,6 @@ bool NamespaceString::isCollectionlessAggregateNS() const {
 bool NamespaceString::isLegalClientSystemNS(
     const ServerGlobalParams::FeatureCompatibility& currentFCV) const {
     auto dbname = dbName().db();
-
-    NamespaceString parsedNSS;
-    if (gMultitenancySupport && !tenantId()) {
-        // TODO (SERVER-67423) Remove support for mangled dbname in isLegalClientSystemNS check
-        // Transitional support for accepting tenantId as a mangled database name.
-        try {
-            parsedNSS = parseFromStringExpectTenantIdInMultitenancyMode(ns());
-            if (parsedNSS.tenantId()) {
-                dbname = parsedNSS.dbName().db();
-            }
-        } catch (const DBException&) {
-            // Swallow exception.
-        }
-    }
 
     if (dbname == kAdminDb) {
         if (coll() == "system.roles")
@@ -284,6 +271,10 @@ bool NamespaceString::isLegalClientSystemNS(
     }
 
     if (isChangeCollection()) {
+        return true;
+    }
+
+    if (isSystemStatsCollection()) {
         return true;
     }
 
@@ -338,8 +329,7 @@ NamespaceString NamespaceString::makeCollectionlessAggregateNSS(const DatabaseNa
 
 NamespaceString NamespaceString::makeChangeCollectionNSS(
     const boost::optional<TenantId>& tenantId) {
-    // TODO: SERVER-65950 create namespace for a particular tenant.
-    return NamespaceString{NamespaceString::kConfigDb, NamespaceString::kChangeCollectionName};
+    return NamespaceString{tenantId, kConfigDb, kChangeCollectionName};
 }
 
 NamespaceString NamespaceString::makeGlobalIndexNSS(const UUID& id) {
@@ -350,8 +340,7 @@ NamespaceString NamespaceString::makeGlobalIndexNSS(const UUID& id) {
 
 NamespaceString NamespaceString::makePreImageCollectionNSS(
     const boost::optional<TenantId>& tenantId) {
-    return tenantId ? NamespaceString(tenantId, kConfigDb, "system.preimages")
-                    : kChangeStreamPreImagesNamespace;
+    return NamespaceString{tenantId, kConfigDb, kPreImagesCollectionName};
 }
 
 std::string NamespaceString::getSisterNS(StringData local) const {
@@ -469,11 +458,11 @@ bool NamespaceString::isTimeseriesBucketsCollection() const {
 }
 
 bool NamespaceString::isChangeStreamPreImagesCollection() const {
-    return ns() == kChangeStreamPreImagesNamespace.ns();
+    return _dbName.db() == kConfigDb && coll() == kPreImagesCollectionName;
 }
 
 bool NamespaceString::isChangeCollection() const {
-    return db() == kConfigDb && coll() == kChangeCollectionName;
+    return _dbName.db() == kConfigDb && coll() == kChangeCollectionName;
 }
 
 bool NamespaceString::isConfigImagesCollection() const {
@@ -492,6 +481,10 @@ bool NamespaceString::isFLE2StateCollection() const {
 
 bool NamespaceString::isOplogOrChangeCollection() const {
     return isOplog() || isChangeCollection();
+}
+
+bool NamespaceString::isSystemStatsCollection() const {
+    return coll().startsWith(kStatisticsCollectionPrefix);
 }
 
 NamespaceString NamespaceString::makeTimeseriesBucketsNamespace() const {

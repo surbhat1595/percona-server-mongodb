@@ -45,6 +45,7 @@
 #include "mongo/db/catalog/local_oplog_info.h"
 #include "mongo/db/change_stream_change_collection_manager.h"
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
+#include "mongo/db/change_stream_serverless_helpers.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/commands/rwc_defaults_commands_gen.h"
@@ -541,7 +542,7 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
     });
 
     // Create the pre-images collection if it doesn't exist yet in the non-serverless environment.
-    if (!ChangeStreamChangeCollectionManager::isChangeCollectionsModeActive()) {
+    if (!change_stream_serverless_helpers::isChangeCollectionsModeActive()) {
         ChangeStreamPreImagesCollectionManager::createPreImagesCollection(
             opCtx, boost::none /* tenantId */);
     }
@@ -691,7 +692,16 @@ Status ReplicationCoordinatorExternalStateImpl::storeLocalLastVoteDocument(
         // don't want to have this process interrupted due to us stepping down, since we
         // want to be able to cast our vote for a new primary right away. Both the write's lock
         // acquisition and the "waitUntilDurable" lock acquisition must be uninterruptible.
-        UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+        //
+        // It is not safe to take an uninterruptible lock during STARTUP2, so we only take this lock
+        // if we are primary or secondary.  We do not have the RSTL but that is OK because we never
+        // move in to STARTUP2 from PRIMARY or SECONDARY, so the consequence of a stale state is
+        // only that we don't take an uninterruptible lock when we should.
+        auto* replCoord = ReplicationCoordinator::get(opCtx);
+
+        boost::optional<UninterruptibleLockGuard> noInterrupt;
+        if (replCoord->isInPrimaryOrSecondaryState_UNSAFE())
+            noInterrupt.emplace(opCtx->lockState());
 
         Status status = writeConflictRetry(
             opCtx,

@@ -188,6 +188,10 @@ public:
     bool collectsResourceConsumptionMetrics() const final {
         return true;
     }
+    bool allowedWithSecurityToken() const final {
+        return true;
+    }
+
     class Invocation final : public InvocationBaseGen {
     public:
         using InvocationBaseGen::InvocationBaseGen;
@@ -428,9 +432,9 @@ public:
     using Request = CollStatsCommand;
 
     Status checkAuthForOperation(OperationContext* opCtx,
-                                 const std::string& dbname,
+                                 const DatabaseName& dbName,
                                  const BSONObj& cmdObj) const final {
-        const auto nss = CommandHelpers::parseNsCollectionRequired({boost::none, dbname}, cmdObj);
+        const auto nss = CommandHelpers::parseNsCollectionRequired(dbName, cmdObj);
         auto as = AuthorizationSession::get(opCtx->getClient());
         if (!as->isAuthorizedForActionsOnResource(ResourcePattern::forExactNamespace(nss),
                                                   ActionType::collStats)) {
@@ -509,10 +513,11 @@ public:
                "Example: { collMod: 'foo', index: {name: 'bar', expireAfterSeconds: 600} }\n";
     }
 
-    virtual Status checkAuthForCommand(Client* client,
-                                       const std::string& dbname,
-                                       const BSONObj& cmdObj) const {
-        const NamespaceString nss(parseNs({boost::none, dbname}, cmdObj));
+    Status checkAuthForOperation(OperationContext* opCtx,
+                                 const DatabaseName& dbName,
+                                 const BSONObj& cmdObj) const override {
+        auto client = opCtx->getClient();
+        auto nss = parseNs(dbName, cmdObj);
         return auth::checkAuthForCollMod(
             client->getOperationContext(), AuthorizationSession::get(client), nss, cmdObj, false);
     }
@@ -724,9 +729,12 @@ public:
         return false;
     }
 
-    void addRequiredPrivileges(const std::string& dbname,
-                               const BSONObj& cmdObj,
-                               std::vector<Privilege>* out) const final {}  // No auth required
+    Status checkAuthForOperation(OperationContext*,
+                                 const DatabaseName&,
+                                 const BSONObj&) const override {
+        return Status::OK();
+    }
+
     std::string help() const final {
         return "get version #, etc.\n"
                "{ buildinfo:1 }";

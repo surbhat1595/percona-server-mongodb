@@ -32,13 +32,17 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/executor/remote_command_response.h"
+#include "mongo/executor/remote_command_retry_policy.h"
+#include "mongo/executor/remote_command_runner_error_info.h"
 #include "mongo/executor/remote_command_targeter.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/future.h"
+#include "mongo/util/future_util.h"
 #include "mongo/util/net/hostandport.h"
+#include "mongo/util/time_support.h"
 #include <memory>
 
 namespace mongo::executor::remote_command_runner {
@@ -67,13 +71,26 @@ public:
     virtual ExecutorFuture<RemoteCommandInternalResponse> _doRequest(
         StringData dbName,
         BSONObj cmdBSON,
-        std::unique_ptr<RemoteCommandHostTargeter> targeter,
+        RemoteCommandHostTargeter* targeter,
         OperationContext* opCtx,
         std::shared_ptr<TaskExecutor> exec,
         CancellationToken token) = 0;
     static RemoteCommandRunner* get(ServiceContext* serviceContext);
     static void set(ServiceContext* serviceContext, std::unique_ptr<RemoteCommandRunner> theRunner);
 };
+
+/**
+ * Returns a RemoteCommandExecutionError with ErrorExtraInfo populated to contain
+ * details about any error, local or remote, contained in `r`.
+ */
+inline Status makeErrorIfNeeded(TaskExecutor::ResponseOnAnyStatus r) {
+    if (r.status.isOK() && getStatusFromCommandResult(r.data).isOK() &&
+        getWriteConcernStatusFromCommandResult(r.data).isOK() &&
+        getFirstWriteErrorStatusFromCommandResult(r.data).isOK()) {
+        return Status::OK();
+    }
+    return {RemoteCommandExecutionErrorInfo(r), "Remote command execution failed"};
+}
 }  // namespace detail
 
 template <typename CommandReplyType>
@@ -92,21 +109,30 @@ SemiFuture<RemoteCommandRunnerResponse<typename CommandType::Reply>> doRequest(
     OperationContext* opCtx,
     std::unique_ptr<RemoteCommandHostTargeter> targeter,
     std::shared_ptr<executor::TaskExecutor> exec,
-    CancellationToken token) {
-    /* Execute the command after extracting the db name and bson from the CommandType. Wrapping this
-     * function allows us to seperate the CommandType parsing logic from the implementation details
-     * of executing the remote command asynchronously.
-     */
-    auto resFuture =
-        detail::RemoteCommandRunner::get(opCtx->getServiceContext())
-            ->_doRequest(
-                cmd.getDbName().db(), cmd.toBSON({}), std::move(targeter), opCtx, exec, token);
+    CancellationToken token,
+    std::shared_ptr<RemoteCommandRetryPolicy> retryPolicy =
+        std::make_shared<RemoteCommandNoRetryPolicy>()) {
+    auto tryBody = [=, targeter = std::move(targeter)] {
+        // Execute the command after extracting the db name and bson from the CommandType.
+        // Wrapping this function allows us to separate the CommandType parsing logic from the
+        // implementation details of executing the remote command asynchronously.
+        return detail::RemoteCommandRunner::get(opCtx->getServiceContext())
+            ->_doRequest(cmd.getDbName().db(), cmd.toBSON({}), targeter.get(), opCtx, exec, token);
+    };
+    auto resFuture = AsyncTry<decltype(tryBody)>(std::move(tryBody))
+                         .until([token, retryPolicy](
+                                    StatusWith<detail::RemoteCommandInternalResponse> swResponse) {
+                             return token.isCanceled() ||
+                                 !retryPolicy->recordAndEvaluateRetry(swResponse.getStatus());
+                         })
+                         .withDelayBetweenIterations(retryPolicy->getNextRetryDelay())
+                         .on(exec, CancellationToken::uncancelable());
 
     return std::move(resFuture)
         .then([](detail::RemoteCommandInternalResponse r) {
             // TODO SERVER-67661: Make IDL reply types have string representation for logging
-            auto res =
-                CommandType::Reply::parse(IDLParserContext("RemoteCommandRunner"), r.response);
+            auto res = CommandType::Reply::parseSharingOwnership(
+                IDLParserContext("RemoteCommandRunner"), r.response);
 
             struct RemoteCommandRunnerResponse<typename CommandType::Reply> fullRes = {
                 res, r.targetUsed

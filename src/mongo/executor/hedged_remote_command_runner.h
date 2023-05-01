@@ -37,9 +37,11 @@
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/remote_command_runner.h"
+#include "mongo/executor/remote_command_runner_error_info.h"
 #include "mongo/executor/remote_command_targeter.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/s/hedge_options_util.h"
 #include "mongo/s/mongos_server_parameters_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/cancellation.h"
@@ -124,58 +126,75 @@ SemiFuture<RemoteCommandRunnerResponse<typename CommandType::Reply>> doHedgedReq
     OperationContext* opCtx,
     std::unique_ptr<RemoteCommandHostTargeter> targeter,
     std::shared_ptr<executor::TaskExecutor> exec,
-    CancellationToken token) {
+    CancellationToken token,
+    std::shared_ptr<RemoteCommandRetryPolicy> retryPolicy =
+        std::make_shared<RemoteCommandNoRetryPolicy>()) {
     using SingleResponse = RemoteCommandRunnerResponse<typename CommandType::Reply>;
 
     // Set up cancellation token to cancel remaining hedged operations.
     CancellationSource hedgeCancellationToken{token};
+    auto tryBody = [=, targeter = std::move(targeter)] {
+        return targeter->resolve(token).thenRunOn(exec).then(
+            [cmd, opCtx, exec, token, hedgeCancellationToken](std::vector<HostAndPort> targets) {
+                uassert(ErrorCodes::HostNotFound, "No hosts available.", targets.size() != 0);
 
-    return targeter->resolve(token)
-        .thenRunOn(exec)
-        .then([cmd, opCtx, exec, token, hedgeCancellationToken](std::vector<HostAndPort> targets) {
-            uassert(ErrorCodes::HostNotFound, "No hosts available.", targets.size() != 0);
+                bool shouldHedge = (gReadHedgingMode.load() == ReadHedgingMode::kOn) &&
+                    (supportedCmds.count(CommandType::kCommandName.toString()));
 
-            bool shouldHedge = (gReadHedgingMode.load() == ReadHedgingMode::kOn) &&
-                (supportedCmds.count(CommandType::kCommandName.toString()));
+                // When hedging is disabled, the requests vector will be of size 1.
+                size_t hedgeCount = shouldHedge ? targets.size() : 1;
 
-            // When hedging is disabled, the requests vector will be of size 1.
-            size_t hedgeCount = shouldHedge ? targets.size() : 1;
+                std::vector<ExecutorFuture<SingleResponse>> requests;
+                for (size_t i = 0; i < hedgeCount; i++) {
+                    std::unique_ptr<RemoteCommandHostTargeter> t =
+                        std::make_unique<RemoteCommandFixedTargeter>(targets[i]);
+                    requests.emplace_back(
+                        doRequest(cmd, opCtx, std::move(t), exec, hedgeCancellationToken.token())
+                            .thenRunOn(exec));
+                }
 
-            std::vector<ExecutorFuture<SingleResponse>> requests;
-            for (size_t i = 0; i < hedgeCount; i++) {
-                std::unique_ptr<RemoteCommandHostTargeter> t =
-                    std::make_unique<RemoteCommandFixedTargeter>(targets[i]);
-                requests.emplace_back(
-                    doRequest(cmd, opCtx, std::move(t), exec, hedgeCancellationToken.token())
-                        .thenRunOn(exec));
-            }
+                /**
+                 * When whenAnyThat is used in doHedgedRequest, the shouldAccept function
+                 * always accepts the future with index 0, which we treat as the
+                 * "authoritative" request. This is the codepath followed when we are not
+                 * hedging or there is only 1 target provided.
+                 */
+                return whenAnyThat(
+                    std::move(requests), [](StatusWith<SingleResponse> response, size_t index) {
+                        Status commandStatus = response.getStatus();
 
-            /**
-             * When whenAnyThat is used in doHedgedRequest, the shouldAccept function always accepts
-             * the future with index 0, which we treat as the "authoritative" request. This is the
-             * codepath followed when we are not hedging or there is only 1 target provided.
-             */
-            return whenAnyThat(std::move(requests),
-                               [](StatusWith<SingleResponse> response, size_t index) {
-                                   Status commandStatus = response.getStatus();
-                                   if (index == 0) {
-                                       return true;
-                                   }
+                        if (index == 0) {
+                            return true;
+                        }
+                        if (commandStatus.code() == Status::OK()) {
+                            return true;
+                        }
 
-                                   if (commandStatus == ErrorCodes::MaxTimeMSExpired ||
-                                       commandStatus == ErrorCodes::StaleDbVersion ||
-                                       ErrorCodes::isStaleShardVersionError(commandStatus)) {
-                                       return false;
-                                   }
-                                   return true;
-                               });
+                        // TODO SERVER-69592 Account for interior executor shutdown
+                        invariant(commandStatus.code() == ErrorCodes::RemoteCommandExecutionError,
+                                  commandStatus.toString());
+                        boost::optional<Status> remoteErr;
+                        auto extraInfo = commandStatus.extraInfo<RemoteCommandExecutionErrorInfo>();
+                        if (extraInfo->isRemote()) {
+                            remoteErr = extraInfo->asRemote().getRemoteCommandResult();
+                        }
+
+                        if (remoteErr && isIgnorableAsHedgeResult(*remoteErr)) {
+                            return false;
+                        }
+                        return true;
+                    });
+            });
+    };
+    return AsyncTry<decltype(tryBody)>(std::move(tryBody))
+        .until([token, retryPolicy](StatusWith<SingleResponse> swResponse) {
+            return token.isCanceled() ||
+                !retryPolicy->recordAndEvaluateRetry(swResponse.getStatus());
         })
+        .withDelayBetweenIterations(retryPolicy->getNextRetryDelay())
+        .on(exec, CancellationToken::uncancelable())
         .onCompletion([hedgeCancellationToken](StatusWith<SingleResponse> result) mutable {
-            // TODO SERVER-68101 add retry logic
-            // TODO SERVER-68555 add extra error handling info
-
             hedgeCancellationToken.cancel();
-
             return result;
         })
         .semi();

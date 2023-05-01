@@ -79,36 +79,6 @@ MONGO_FAIL_POINT_DEFINE(allowSettingMalformedCollectionValidators);
 
 MONGO_FAIL_POINT_DEFINE(skipCappedDeletes);
 
-// Uses the collator factory to convert the BSON representation of a collator to a
-// CollatorInterface. Returns null if the BSONObj is empty. We expect the stored collation to be
-// valid, since it gets validated on collection create.
-std::unique_ptr<CollatorInterface> parseCollation(OperationContext* opCtx,
-                                                  const NamespaceString& nss,
-                                                  BSONObj collationSpec) {
-    if (collationSpec.isEmpty()) {
-        return {nullptr};
-    }
-
-    auto collator =
-        CollatorFactoryInterface::get(opCtx->getServiceContext())->makeFromBSON(collationSpec);
-
-    // If the collection's default collator has a version not currently supported by our ICU
-    // integration, shut down the server. Errors other than IncompatibleCollationVersion should not
-    // be possible, so these are an invariant rather than fassert.
-    if (collator == ErrorCodes::IncompatibleCollationVersion) {
-        LOGV2(20288,
-              "Collection {namespace} has a default collation which is incompatible with this "
-              "version: {collationSpec}"
-              "Collection has a default collation incompatible with this version",
-              logAttrs(nss),
-              "collationSpec"_attr = collationSpec);
-        fassertFailedNoTrace(40144);
-    }
-    invariant(collator.getStatus());
-
-    return std::move(collator.getValue());
-}
-
 Status checkValidatorCanBeUsedOnNs(const BSONObj& validator,
                                    const NamespaceString& nss,
                                    const UUID& uuid) {
@@ -258,7 +228,47 @@ bool doesMinMaxHaveMixedSchemaData(const BSONObj& min, const BSONObj& max) {
     return false;
 }
 
+bool isIndexCompatible(std::shared_ptr<IndexCatalogEntry> index, Timestamp readTimestamp) {
+    if (!index) {
+        return false;
+    }
+
+    boost::optional<Timestamp> minVisibleSnapshot = index->getMinimumVisibleSnapshot();
+    if (!minVisibleSnapshot) {
+        // Index is valid in all snapshots.
+        return true;
+    }
+    return readTimestamp >= *minVisibleSnapshot;
+}
+
 }  // namespace
+
+std::unique_ptr<CollatorInterface> CollectionImpl::parseCollation(OperationContext* opCtx,
+                                                                  const NamespaceString& nss,
+                                                                  BSONObj collationSpec) {
+    if (collationSpec.isEmpty()) {
+        return nullptr;
+    }
+
+    auto collator =
+        CollatorFactoryInterface::get(opCtx->getServiceContext())->makeFromBSON(collationSpec);
+
+    // If the collection's default collator has a version not currently supported by our ICU
+    // integration, shut down the server. Errors other than IncompatibleCollationVersion should not
+    // be possible, so these are an invariant rather than fassert.
+    if (collator == ErrorCodes::IncompatibleCollationVersion) {
+        LOGV2(20288,
+              "Collection {namespace} has a default collation which is incompatible with this "
+              "version: {collationSpec}"
+              "Collection has a default collation incompatible with this version",
+              logAttrs(nss),
+              "collationSpec"_attr = collationSpec);
+        fassertFailedNoTrace(40144);
+    }
+    invariant(collator.getStatus());
+
+    return std::move(collator.getValue());
+}
 
 CollectionImpl::SharedState::SharedState(CollectionImpl* collection,
                                          std::unique_ptr<RecordStore> recordStore,
@@ -368,17 +378,19 @@ void CollectionImpl::init(OperationContext* opCtx) {
     _initialized = true;
 }
 
-void CollectionImpl::initFromExisting(OperationContext* opCtx,
-                                      std::shared_ptr<Collection> collection,
-                                      Timestamp readTimestamp) {
+Status CollectionImpl::initFromExisting(OperationContext* opCtx,
+                                        std::shared_ptr<Collection> collection,
+                                        Timestamp readTimestamp) {
     LOGV2_DEBUG(
         6825402, 1, "Initializing collection using shared state", logAttrs(collection->ns()));
 
     // We are per definition committed if we initialize from an existing collection.
     _cachedCommitted = true;
 
-    // Use the shared state from the existing collection.
-    _shared = static_cast<CollectionImpl*>(collection.get())->_shared;
+    if (collection) {
+        // Use the shared state from the existing collection.
+        _shared = static_cast<CollectionImpl*>(collection.get())->_shared;
+    }
 
     // When initializing a collection from an earlier point-in-time, we don't know when the last DDL
     // operation took place at that point-in-time. We conservatively set the minimum valid snapshot
@@ -388,52 +400,73 @@ void CollectionImpl::initFromExisting(OperationContext* opCtx,
 
     _initCommon(opCtx);
 
+    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+    stdx::unordered_map<std::string, std::shared_ptr<Ident>> sharedIdents;
+
     // Determine which indexes from the existing collection can be shared with this newly
     // initialized collection. The remaining indexes will be initialized by the IndexCatalog.
     IndexCatalogEntryContainer preexistingIndexes;
     for (const auto& index : _metadata->indexes) {
         // First check the index catalog of the existing collection for the index entry.
-        std::shared_ptr<IndexCatalogEntry> entry = [&]() -> std::shared_ptr<IndexCatalogEntry> {
+        auto latestEntry = [&]() -> std::shared_ptr<IndexCatalogEntry> {
+            if (!collection)
+                return nullptr;
+
             auto desc =
                 collection->getIndexCatalog()->findIndexByName(opCtx, index.nameStringData());
             if (!desc)
                 return nullptr;
-
-            auto entry = collection->getIndexCatalog()->getEntryShared(desc);
-            if (!entry->getMinimumVisibleSnapshot())
-                // Index is valid in all snapshots.
-                return entry;
-            return readTimestamp < *entry->getMinimumVisibleSnapshot() ? nullptr : entry;
+            return collection->getIndexCatalog()->getEntryShared(desc);
         }();
 
-        if (entry) {
-            preexistingIndexes.add(std::move(entry));
+        if (isIndexCompatible(latestEntry, readTimestamp)) {
+            preexistingIndexes.add(std::move(latestEntry));
             continue;
         }
+
+        const std::string indexName = index.nameStringData().toString();
+        const std::string ident =
+            DurableCatalog::get(opCtx)->getIndexIdent(opCtx, _catalogId, index.nameStringData());
 
         // Next check the CollectionCatalog for a compatible drop pending index.
-        entry = [&]() -> std::shared_ptr<IndexCatalogEntry> {
-            const std::string ident = DurableCatalog::get(opCtx)->getIndexIdent(
-                opCtx, _catalogId, index.nameStringData());
-            auto entry = CollectionCatalog::get(opCtx)->findDropPendingIndex(ident);
-            if (!entry)
-                return nullptr;
-
-            if (!entry->getMinimumVisibleSnapshot())
-                // Index is valid in all snapshots.
-                return entry;
-            return readTimestamp < *entry->getMinimumVisibleSnapshot() ? nullptr : entry;
-        }();
-
-        if (entry) {
-            preexistingIndexes.add(std::move(entry));
+        auto dropPendingEntry = CollectionCatalog::get(opCtx)->findDropPendingIndex(ident);
+        if (isIndexCompatible(dropPendingEntry, readTimestamp)) {
+            preexistingIndexes.add(std::move(dropPendingEntry));
             continue;
         }
+
+        // The index entries are incompatible with the read timestamp, but we need to use the same
+        // shared ident to prevent the reaper from dropping idents prematurely.
+        if (latestEntry || dropPendingEntry) {
+            sharedIdents.emplace(indexName,
+                                 latestEntry ? latestEntry->getSharedIdent()
+                                             : dropPendingEntry->getSharedIdent());
+            continue;
+        }
+
+        // The index ident is expired, but it could still be drop pending. Mark it as in use if
+        // possible.
+        auto newIdent = storageEngine->markIdentInUse(ident);
+        if (!newIdent) {
+            return {ErrorCodes::SnapshotTooOld,
+                    str::stream() << "Index ident " << ident
+                                  << " is being dropped or is already dropped."};
+        }
+        sharedIdents.emplace(indexName, newIdent);
     }
 
     uassertStatusOK(
         getIndexCatalog()->initFromExisting(opCtx, this, preexistingIndexes, readTimestamp));
+
+    // Update the idents for the newly initialized indexes.
+    for (const auto& sharedIdent : sharedIdents) {
+        auto desc = getIndexCatalog()->findIndexByName(opCtx, sharedIdent.first);
+        auto entry = getIndexCatalog()->getEntryShared(desc);
+        entry->setIdent(sharedIdent.second);
+    }
+
     _initialized = true;
+    return Status::OK();
 }
 
 void CollectionImpl::_initCommon(OperationContext* opCtx) {
@@ -808,7 +841,13 @@ void CollectionImpl::deleteDocument(OperationContext* opCtx,
     boost::optional<BSONObj> deletedDoc;
     const bool isRecordingPreImageForRetryableWrite =
         retryableFindAndModifyLocation != RetryableFindAndModifyLocation::kNone;
-    if (isRecordingPreImageForRetryableWrite || isChangeStreamPreAndPostImagesEnabled()) {
+    const bool isTimeseriesCollection =
+        getTimeseriesOptions() || ns().isTimeseriesBucketsCollection();
+
+    if (isRecordingPreImageForRetryableWrite || isChangeStreamPreAndPostImagesEnabled() ||
+        (isTimeseriesCollection &&
+         feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
+             serverGlobalParams.featureCompatibility))) {
         deletedDoc.emplace(doc.value().getOwned());
     }
     int64_t keysDeleted = 0;
@@ -970,22 +1009,24 @@ bool CollectionImpl::updateWithDamagesSupported() const {
     return _shared->_recordStore->updateWithDamagesSupported();
 }
 
-StatusWith<RecordData> CollectionImpl::updateDocumentWithDamages(
+StatusWith<BSONObj> CollectionImpl::updateDocumentWithDamages(
     OperationContext* opCtx,
     const RecordId& loc,
-    const Snapshotted<RecordData>& oldRec,
+    const Snapshotted<BSONObj>& oldDoc,
     const char* damageSource,
     const mutablebson::DamageVector& damages,
+    bool indexesAffected,
+    OpDebug* opDebug,
     CollectionUpdateArgs* args) const {
     dassert(opCtx->lockState()->isCollectionLockedForMode(ns(), MODE_IX));
-    invariant(oldRec.snapshotId() == opCtx->recoveryUnit()->getSnapshotId());
+    invariant(oldDoc.snapshotId() == opCtx->recoveryUnit()->getSnapshotId());
     invariant(updateWithDamagesSupported());
 
     // For in-place updates we need to grab an owned copy of the pre-image doc if pre-image
     // recording is enabled and we haven't already set the pre-image due to this update being
     // a retryable findAndModify or a possible update to the shard key.
     if (!args->preImageDoc && isChangeStreamPreAndPostImagesEnabled()) {
-        args->preImageDoc = oldRec.value().toBson().getOwned();
+        args->preImageDoc = oldDoc.value().getOwned();
     }
     OplogUpdateEntryArgs onUpdateArgs(args, ns(), _uuid);
     const bool setNeedsRetryImageOplogField =
@@ -1008,17 +1049,44 @@ StatusWith<RecordData> CollectionImpl::updateDocumentWithDamages(
         invariant(!(isRetryableWrite(opCtx) && setNeedsRetryImageOplogField));
     }
 
-    auto newRecStatus =
-        _shared->_recordStore->updateWithDamages(opCtx, loc, oldRec.value(), damageSource, damages);
+    RecordData oldRecordData(oldDoc.value().objdata(), oldDoc.value().objsize());
+    StatusWith<RecordData> recordData =
+        _shared->_recordStore->updateWithDamages(opCtx, loc, oldRecordData, damageSource, damages);
+    if (!recordData.isOK())
+        return recordData.getStatus();
+    BSONObj newDoc = std::move(recordData.getValue()).releaseToBson().getOwned();
 
-    if (newRecStatus.isOK()) {
-        args->updatedDoc = newRecStatus.getValue().toBson();
-        args->changeStreamPreAndPostImagesEnabledForCollection =
-            isChangeStreamPreAndPostImagesEnabled();
+    args->updatedDoc = newDoc;
+    args->changeStreamPreAndPostImagesEnabledForCollection =
+        isChangeStreamPreAndPostImagesEnabled();
 
-        opCtx->getServiceContext()->getOpObserver()->onUpdate(opCtx, onUpdateArgs);
+    if (indexesAffected) {
+        int64_t keysInserted = 0;
+        int64_t keysDeleted = 0;
+
+        uassertStatusOK(_indexCatalog->updateRecord(opCtx,
+                                                    {this, CollectionPtr::NoYieldTag{}},
+                                                    oldDoc.value(),
+                                                    args->updatedDoc,
+                                                    loc,
+                                                    &keysInserted,
+                                                    &keysDeleted));
+
+        if (opDebug) {
+            opDebug->additiveMetrics.incrementKeysInserted(keysInserted);
+            opDebug->additiveMetrics.incrementKeysDeleted(keysDeleted);
+            // 'opDebug' may be deleted at rollback time in case of multi-document transaction.
+            if (!opCtx->inMultiDocumentTransaction()) {
+                opCtx->recoveryUnit()->onRollback([opDebug, keysInserted, keysDeleted]() {
+                    opDebug->additiveMetrics.incrementKeysInserted(-keysInserted);
+                    opDebug->additiveMetrics.incrementKeysDeleted(-keysDeleted);
+                });
+            }
+        }
     }
-    return newRecStatus;
+
+    opCtx->getServiceContext()->getOpObserver()->onUpdate(opCtx, onUpdateArgs);
+    return newDoc;
 }
 
 bool CollectionImpl::isTemporary() const {

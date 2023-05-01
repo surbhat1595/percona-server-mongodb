@@ -104,16 +104,6 @@ std::string readPrefToStringFull(const ReadPreferenceSetting& readPref) {
     return builder.obj().toString();
 }
 
-std::string hostListToString(boost::optional<std::vector<HostAndPort>> x) {
-    std::stringstream s;
-    if (x) {
-        for (auto h : *x) {
-            s << h.toString() << "; ";
-        }
-    }
-    return s.str();
-}
-
 double pingTimeMillis(const ServerDescriptionPtr& serverDescription) {
     const auto& serverRtt = serverDescription->getRtt();
     // Convert to micros so we don't lose information if under a ms
@@ -607,7 +597,7 @@ void StreamableReplicaSetMonitor::appendInfo(BSONObjBuilder& bsonObjBuilder, boo
 
     BSONObjBuilder monitorInfo(bsonObjBuilder.subobjStart(getName()));
     if (forFTDC) {
-        for (auto serverDescription : topologyDescription->getServers()) {
+        for (const auto& serverDescription : topologyDescription->getServers()) {
             monitorInfo.appendNumber(serverDescription->getAddress().toString(),
                                      pingTimeMillis(serverDescription));
         }

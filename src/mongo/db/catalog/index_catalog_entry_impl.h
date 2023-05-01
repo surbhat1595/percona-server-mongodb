@@ -67,6 +67,8 @@ public:
 
     std::shared_ptr<Ident> getSharedIdent() const final;
 
+    void setIdent(std::shared_ptr<Ident> newIdent) final;
+
     IndexDescriptor* descriptor() final {
         return _descriptor.get();
     }
@@ -109,6 +111,8 @@ public:
     /// ---------------------
 
     void setIsReady(bool newIsReady) final;
+
+    void setIsFrozen(bool newIsFrozen) final;
 
     void setDropped() final {
         _isDropped.store(true);

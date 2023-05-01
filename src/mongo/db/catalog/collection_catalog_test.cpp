@@ -36,8 +36,10 @@
 #include "mongo/db/catalog/collection_mock.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/concurrency/resource_catalog.h"
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/db/storage/durable_catalog.h"
 #include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
@@ -73,7 +75,7 @@ public:
         std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(colUUID, nss);
         col = CollectionPtr(collection.get(), CollectionPtr::NoYieldTag{});
         // Register dummy collection in catalog.
-        catalog.registerCollection(opCtx.get(), colUUID, collection);
+        catalog.registerCollection(opCtx.get(), colUUID, collection, boost::none);
 
         // Validate that kNumCollectionReferencesStored is correct, add one reference for the one we
         // hold in this function.
@@ -111,15 +113,16 @@ public:
             dbMap["foo"].insert(std::make_pair(fooUuid, fooColl.get()));
             dbMap["bar"].insert(std::make_pair(barUuid, barColl.get()));
 
-            catalog.registerCollection(opCtx.get(), fooUuid, fooColl);
-            catalog.registerCollection(opCtx.get(), barUuid, barColl);
+            catalog.registerCollection(opCtx.get(), fooUuid, fooColl, boost::none);
+            catalog.registerCollection(opCtx.get(), barUuid, barColl, boost::none);
         }
     }
 
     void tearDown() {
         for (auto& it : dbMap) {
             for (auto& kv : it.second) {
-                catalog.deregisterCollection(opCtx.get(), kv.first, /*isDropPending=*/false);
+                catalog.deregisterCollection(
+                    opCtx.get(), kv.first, /*isDropPending=*/false, boost::none);
             }
         }
     }
@@ -165,124 +168,6 @@ protected:
     std::map<std::string, std::map<UUID, CollectionPtr>> dbMap;
 };
 
-class CollectionCatalogResourceMapTest : public unittest::Test {
-public:
-    void setUp() {
-        // The first and second collection namespaces map to the same ResourceId.
-        firstCollection = NamespaceString(boost::none, "1661880728");
-        secondCollection = NamespaceString(boost::none, "1626936312");
-
-        firstResourceId = ResourceId(RESOURCE_COLLECTION, firstCollection);
-        secondResourceId = ResourceId(RESOURCE_COLLECTION, secondCollection);
-        ASSERT_EQ(firstResourceId, secondResourceId);
-
-        thirdCollection = NamespaceString(boost::none, "2930102946");
-        thirdResourceId = ResourceId(RESOURCE_COLLECTION, thirdCollection);
-        ASSERT_NE(firstResourceId, thirdResourceId);
-    }
-
-protected:
-    NamespaceString firstCollection;
-    ResourceId firstResourceId;
-
-    NamespaceString secondCollection;
-    ResourceId secondResourceId;
-
-    NamespaceString thirdCollection;
-    ResourceId thirdResourceId;
-
-    CollectionCatalog catalog;
-};
-
-TEST_F(CollectionCatalogResourceMapTest, EmptyTest) {
-    boost::optional<std::string> resource = catalog.lookupResourceName(firstResourceId);
-    ASSERT_EQ(boost::none, resource);
-
-    catalog.removeResource(secondResourceId, secondCollection);
-    resource = catalog.lookupResourceName(secondResourceId);
-    ASSERT_EQ(boost::none, resource);
-}
-
-TEST_F(CollectionCatalogResourceMapTest, InsertTest) {
-    catalog.addResource(firstResourceId, firstCollection);
-    boost::optional<std::string> resource = catalog.lookupResourceName(thirdResourceId);
-    ASSERT_EQ(boost::none, resource);
-
-    catalog.addResource(thirdResourceId, thirdCollection);
-
-    resource = catalog.lookupResourceName(firstResourceId);
-    ASSERT_EQ(firstCollection.toStringWithTenantId(), *resource);
-
-    resource = catalog.lookupResourceName(thirdResourceId);
-    ASSERT_EQ(thirdCollection.toStringWithTenantId(), resource);
-}
-
-TEST_F(CollectionCatalogResourceMapTest, RemoveTest) {
-    catalog.addResource(firstResourceId, firstCollection);
-    catalog.addResource(thirdResourceId, thirdCollection);
-
-    // This fails to remove the resource because of an invalid namespace.
-    catalog.removeResource(firstResourceId, NamespaceString(boost::none, "BadNamespace"));
-    boost::optional<std::string> resource = catalog.lookupResourceName(firstResourceId);
-    ASSERT_EQ(firstCollection.toStringWithTenantId(), *resource);
-
-    catalog.removeResource(firstResourceId, firstCollection);
-    catalog.removeResource(firstResourceId, firstCollection);
-    catalog.removeResource(thirdResourceId, thirdCollection);
-
-    resource = catalog.lookupResourceName(firstResourceId);
-    ASSERT_EQ(boost::none, resource);
-
-    resource = catalog.lookupResourceName(thirdResourceId);
-    ASSERT_EQ(boost::none, resource);
-}
-
-TEST_F(CollectionCatalogResourceMapTest, CollisionTest) {
-    // firstCollection and secondCollection map to the same ResourceId.
-    catalog.addResource(firstResourceId, firstCollection);
-    catalog.addResource(secondResourceId, secondCollection);
-
-    // Looking up the namespace on a ResourceId while it has a collision should
-    // return the empty string.
-    boost::optional<std::string> resource = catalog.lookupResourceName(firstResourceId);
-    ASSERT_EQ(boost::none, resource);
-
-    resource = catalog.lookupResourceName(secondResourceId);
-    ASSERT_EQ(boost::none, resource);
-
-    // We remove a namespace, resolving the collision.
-    catalog.removeResource(firstResourceId, firstCollection);
-    resource = catalog.lookupResourceName(secondResourceId);
-    ASSERT_EQ(secondCollection.toStringWithTenantId(), *resource);
-
-    // Adding the same namespace twice does not create a collision.
-    catalog.addResource(secondResourceId, secondCollection);
-    resource = catalog.lookupResourceName(secondResourceId);
-    ASSERT_EQ(secondCollection.toStringWithTenantId(), *resource);
-
-    // The map should function normally for entries without collisions.
-    catalog.addResource(firstResourceId, firstCollection);
-    resource = catalog.lookupResourceName(secondResourceId);
-    ASSERT_EQ(boost::none, resource);
-
-    catalog.addResource(thirdResourceId, thirdCollection);
-    resource = catalog.lookupResourceName(thirdResourceId);
-    ASSERT_EQ(thirdCollection.toStringWithTenantId(), *resource);
-
-    catalog.removeResource(thirdResourceId, thirdCollection);
-    resource = catalog.lookupResourceName(thirdResourceId);
-    ASSERT_EQ(boost::none, resource);
-
-    catalog.removeResource(firstResourceId, firstCollection);
-    catalog.removeResource(secondResourceId, secondCollection);
-
-    resource = catalog.lookupResourceName(firstResourceId);
-    ASSERT_EQ(boost::none, resource);
-
-    resource = catalog.lookupResourceName(secondResourceId);
-    ASSERT_EQ(boost::none, resource);
-}
-
 class CollectionCatalogResourceTest : public ServiceContextMongoDTest {
 public:
     void setUp() {
@@ -294,7 +179,7 @@ public:
             std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
             auto uuid = collection->uuid();
 
-            catalog.registerCollection(opCtx.get(), uuid, std::move(collection));
+            catalog.registerCollection(opCtx.get(), uuid, std::move(collection), boost::none);
         }
 
         int numEntries = 0;
@@ -305,7 +190,7 @@ public:
             auto collName = coll->ns();
             ResourceId rid(RESOURCE_COLLECTION, collName);
 
-            ASSERT_NE(catalog.lookupResourceName(rid), boost::none);
+            ASSERT_NE(ResourceCatalog::get(getServiceContext()).name(rid), boost::none);
             numEntries++;
         }
         ASSERT_EQ(5, numEntries);
@@ -326,7 +211,7 @@ public:
         }
 
         for (auto&& uuid : collectionsToDeregister) {
-            catalog.deregisterCollection(opCtx.get(), uuid, /*isDropPending=*/false);
+            catalog.deregisterCollection(opCtx.get(), uuid, /*isDropPending=*/false, boost::none);
         }
 
         int numEntries = 0;
@@ -344,23 +229,23 @@ protected:
 };
 
 TEST_F(CollectionCatalogResourceTest, RemoveAllResources) {
-    catalog.deregisterAllCollectionsAndViews();
+    catalog.deregisterAllCollectionsAndViews(getServiceContext());
 
     const DatabaseName dbName = DatabaseName(boost::none, "resourceDb");
     auto rid = ResourceId(RESOURCE_DATABASE, dbName);
-    ASSERT_EQ(boost::none, catalog.lookupResourceName(rid));
+    ASSERT_EQ(boost::none, ResourceCatalog::get(getServiceContext()).name(rid));
 
     for (int i = 0; i < 5; i++) {
         NamespaceString nss("resourceDb", "coll" + std::to_string(i));
         rid = ResourceId(RESOURCE_COLLECTION, nss);
-        ASSERT_EQ(boost::none, catalog.lookupResourceName((rid)));
+        ASSERT_EQ(boost::none, ResourceCatalog::get(getServiceContext()).name(rid));
     }
 }
 
 TEST_F(CollectionCatalogResourceTest, LookupDatabaseResource) {
     const DatabaseName dbName = DatabaseName(boost::none, "resourceDb");
     auto rid = ResourceId(RESOURCE_DATABASE, dbName);
-    boost::optional<std::string> ridStr = catalog.lookupResourceName(rid);
+    auto ridStr = ResourceCatalog::get(getServiceContext()).name(rid);
 
     ASSERT(ridStr);
     ASSERT(ridStr->find(dbName.toStringWithTenantId()) != std::string::npos);
@@ -369,13 +254,13 @@ TEST_F(CollectionCatalogResourceTest, LookupDatabaseResource) {
 TEST_F(CollectionCatalogResourceTest, LookupMissingDatabaseResource) {
     const DatabaseName dbName = DatabaseName(boost::none, "missingDb");
     auto rid = ResourceId(RESOURCE_DATABASE, dbName);
-    ASSERT(!catalog.lookupResourceName(rid));
+    ASSERT(!ResourceCatalog::get(getServiceContext()).name(rid));
 }
 
 TEST_F(CollectionCatalogResourceTest, LookupCollectionResource) {
     const NamespaceString collNs = NamespaceString(boost::none, "resourceDb.coll1");
     auto rid = ResourceId(RESOURCE_COLLECTION, collNs);
-    boost::optional<std::string> ridStr = catalog.lookupResourceName(rid);
+    auto ridStr = ResourceCatalog::get(getServiceContext()).name(rid);
 
     ASSERT(ridStr);
     ASSERT(ridStr->find(collNs.toStringWithTenantId()) != std::string::npos);
@@ -384,15 +269,15 @@ TEST_F(CollectionCatalogResourceTest, LookupCollectionResource) {
 TEST_F(CollectionCatalogResourceTest, LookupMissingCollectionResource) {
     const NamespaceString nss = NamespaceString(boost::none, "resourceDb.coll5");
     auto rid = ResourceId(RESOURCE_COLLECTION, nss);
-    ASSERT(!catalog.lookupResourceName(rid));
+    ASSERT(!ResourceCatalog::get(getServiceContext()).name(rid));
 }
 
 TEST_F(CollectionCatalogResourceTest, RemoveCollection) {
     const NamespaceString collNs = NamespaceString(boost::none, "resourceDb.coll1");
     auto coll = catalog.lookupCollectionByNamespace(opCtx.get(), NamespaceString(collNs));
-    catalog.deregisterCollection(opCtx.get(), coll->uuid(), /*isDropPending=*/false);
+    catalog.deregisterCollection(opCtx.get(), coll->uuid(), /*isDropPending=*/false, boost::none);
     auto rid = ResourceId(RESOURCE_COLLECTION, collNs);
-    ASSERT(!catalog.lookupResourceName(rid));
+    ASSERT(!ResourceCatalog::get(getServiceContext()).name(rid));
 }
 
 // Create an iterator over the CollectionCatalog and assert that all collections are present.
@@ -412,7 +297,7 @@ TEST_F(CollectionCatalogIterationTest, GetUUIDWontRepositionEvenIfEntryIsDropped
     auto it = catalog.begin(opCtx.get(), DatabaseName(boost::none, "bar"));
     auto collsIt = collsIterator("bar");
     auto uuid = collsIt->first;
-    catalog.deregisterCollection(opCtx.get(), uuid, /*isDropPending=*/false);
+    catalog.deregisterCollection(opCtx.get(), uuid, /*isDropPending=*/false, boost::none);
     dropColl("bar", uuid);
 
     ASSERT_EQUALS(uuid, it.uuid());
@@ -446,7 +331,7 @@ TEST_F(CollectionCatalogTest, InsertAfterLookup) {
     // Ensure that looking up non-existing UUIDs doesn't affect later registration of those UUIDs.
     ASSERT(catalog.lookupCollectionByUUID(opCtx.get(), newUUID) == nullptr);
     ASSERT_EQUALS(catalog.lookupNSSByUUID(opCtx.get(), newUUID), boost::none);
-    catalog.registerCollection(opCtx.get(), newUUID, std::move(newCollShared));
+    catalog.registerCollection(opCtx.get(), newUUID, std::move(newCollShared), boost::none);
     ASSERT_EQUALS(catalog.lookupCollectionByUUID(opCtx.get(), newUUID), newCol);
     ASSERT_EQUALS(*catalog.lookupNSSByUUID(opCtx.get(), colUUID), nss);
 }
@@ -475,7 +360,7 @@ TEST_F(CollectionCatalogTest, OnDropCollection) {
     yieldableColl.yield();
     ASSERT_FALSE(yieldableColl);
 
-    catalog.deregisterCollection(opCtx.get(), colUUID, /*isDropPending=*/false);
+    catalog.deregisterCollection(opCtx.get(), colUUID, /*isDropPending=*/false, boost::none);
     // Ensure the lookup returns a null pointer upon removing the colUUID entry.
     ASSERT(catalog.lookupCollectionByUUID(opCtx.get(), colUUID) == nullptr);
 
@@ -489,7 +374,7 @@ TEST_F(CollectionCatalogTest, RenameCollection) {
     NamespaceString oldNss(nss.db(), "oldcol");
     std::shared_ptr<Collection> collShared = std::make_shared<CollectionMock>(uuid, oldNss);
     auto collection = collShared.get();
-    catalog.registerCollection(opCtx.get(), uuid, std::move(collShared));
+    catalog.registerCollection(opCtx.get(), uuid, std::move(collShared), boost::none);
     auto yieldableColl = catalog.lookupCollectionByUUID(opCtx.get(), uuid);
     ASSERT(yieldableColl);
     ASSERT_EQUALS(yieldableColl, collection);
@@ -526,16 +411,16 @@ TEST_F(CollectionCatalogTest, RenameCollection) {
 TEST_F(CollectionCatalogTest, LookupNSSByUUIDForClosedCatalogReturnsOldNSSIfDropped) {
     {
         Lock::GlobalLock globalLk(opCtx.get(), MODE_X);
-        catalog.onCloseCatalog(opCtx.get());
+        catalog.onCloseCatalog();
     }
 
-    catalog.deregisterCollection(opCtx.get(), colUUID, /*isDropPending=*/false);
+    catalog.deregisterCollection(opCtx.get(), colUUID, /*isDropPending=*/false, boost::none);
     ASSERT(catalog.lookupCollectionByUUID(opCtx.get(), colUUID) == nullptr);
     ASSERT_EQUALS(*catalog.lookupNSSByUUID(opCtx.get(), colUUID), nss);
 
     {
         Lock::GlobalLock globalLk(opCtx.get(), MODE_X);
-        catalog.onOpenCatalog(opCtx.get());
+        catalog.onOpenCatalog();
     }
 
     ASSERT_EQUALS(catalog.lookupNSSByUUID(opCtx.get(), colUUID), boost::none);
@@ -550,19 +435,19 @@ TEST_F(CollectionCatalogTest, LookupNSSByUUIDForClosedCatalogReturnsNewlyCreated
     // Ensure that looking up non-existing UUIDs doesn't affect later registration of those UUIDs.
     {
         Lock::GlobalLock globalLk(opCtx.get(), MODE_X);
-        catalog.onCloseCatalog(opCtx.get());
+        catalog.onCloseCatalog();
     }
 
     ASSERT(catalog.lookupCollectionByUUID(opCtx.get(), newUUID) == nullptr);
     ASSERT_EQUALS(catalog.lookupNSSByUUID(opCtx.get(), newUUID), boost::none);
-    catalog.registerCollection(opCtx.get(), newUUID, std::move(newCollShared));
+    catalog.registerCollection(opCtx.get(), newUUID, std::move(newCollShared), boost::none);
     ASSERT_EQUALS(catalog.lookupCollectionByUUID(opCtx.get(), newUUID), newCol);
     ASSERT_EQUALS(*catalog.lookupNSSByUUID(opCtx.get(), colUUID), nss);
 
     // Ensure that collection still exists after opening the catalog again.
     {
         Lock::GlobalLock globalLk(opCtx.get(), MODE_X);
-        catalog.onOpenCatalog(opCtx.get());
+        catalog.onOpenCatalog();
     }
 
     ASSERT_EQUALS(catalog.lookupCollectionByUUID(opCtx.get(), newUUID), newCol);
@@ -576,20 +461,20 @@ TEST_F(CollectionCatalogTest, LookupNSSByUUIDForClosedCatalogReturnsFreshestNSS)
 
     {
         Lock::GlobalLock globalLk(opCtx.get(), MODE_X);
-        catalog.onCloseCatalog(opCtx.get());
+        catalog.onCloseCatalog();
     }
 
-    catalog.deregisterCollection(opCtx.get(), colUUID, /*isDropPending=*/false);
+    catalog.deregisterCollection(opCtx.get(), colUUID, /*isDropPending=*/false, boost::none);
     ASSERT(catalog.lookupCollectionByUUID(opCtx.get(), colUUID) == nullptr);
     ASSERT_EQUALS(*catalog.lookupNSSByUUID(opCtx.get(), colUUID), nss);
-    catalog.registerCollection(opCtx.get(), colUUID, std::move(newCollShared));
+    catalog.registerCollection(opCtx.get(), colUUID, std::move(newCollShared), boost::none);
     ASSERT_EQUALS(catalog.lookupCollectionByUUID(opCtx.get(), colUUID), newCol);
     ASSERT_EQUALS(*catalog.lookupNSSByUUID(opCtx.get(), colUUID), newNss);
 
     // Ensure that collection still exists after opening the catalog again.
     {
         Lock::GlobalLock globalLk(opCtx.get(), MODE_X);
-        catalog.onOpenCatalog(opCtx.get());
+        catalog.onOpenCatalog();
     }
 
     ASSERT_EQUALS(catalog.lookupCollectionByUUID(opCtx.get(), colUUID), newCol);
@@ -602,17 +487,12 @@ TEST_F(CollectionCatalogTest, CollectionCatalogEpoch) {
 
     {
         Lock::GlobalLock globalLk(opCtx.get(), MODE_X);
-        catalog.onCloseCatalog(opCtx.get());
-        catalog.onOpenCatalog(opCtx.get());
+        catalog.onCloseCatalog();
+        catalog.onOpenCatalog();
     }
 
     auto incrementedEpoch = catalog.getEpoch();
     ASSERT_EQ(originalEpoch + 1, incrementedEpoch);
-}
-
-DEATH_TEST_F(CollectionCatalogResourceTest, AddInvalidResourceType, "invariant") {
-    auto rid = ResourceId(RESOURCE_GLOBAL, 0);
-    catalog.addResource(rid, NamespaceString(boost::none, ""));
 }
 
 TEST_F(CollectionCatalogTest, GetAllCollectionNamesAndGetAllDbNames) {
@@ -628,7 +508,7 @@ TEST_F(CollectionCatalogTest, GetAllCollectionNamesAndGetAllDbNames) {
     for (auto& nss : nsss) {
         std::shared_ptr<Collection> newColl = std::make_shared<CollectionMock>(nss);
         auto uuid = UUID::gen();
-        catalog.registerCollection(opCtx.get(), uuid, std::move(newColl));
+        catalog.registerCollection(opCtx.get(), uuid, std::move(newColl), boost::none);
     }
 
     std::vector<NamespaceString> dCollList = {d1Coll, d2Coll, d3Coll};
@@ -645,7 +525,32 @@ TEST_F(CollectionCatalogTest, GetAllCollectionNamesAndGetAllDbNames) {
                                          DatabaseName(boost::none, "testdb")};
     ASSERT(catalog.getAllDbNames() == dbNames);
 
-    catalog.deregisterAllCollectionsAndViews();
+    catalog.deregisterAllCollectionsAndViews(getServiceContext());
+}
+
+TEST_F(CollectionCatalogTest, GetAllDbNamesForTenant) {
+    TenantId tid1 = TenantId(OID::gen());
+    TenantId tid2 = TenantId(OID::gen());
+    NamespaceString dbA(tid1, "dbA.collA");
+    NamespaceString dbB(tid1, "dbB.collA");
+    NamespaceString dbC(tid1, "dbC.collA");
+    NamespaceString dbD(tid2, "dbB.collA");
+
+    std::vector<NamespaceString> nsss = {dbA, dbB, dbC, dbD};
+    for (auto& nss : nsss) {
+        std::shared_ptr<Collection> newColl = std::make_shared<CollectionMock>(nss);
+        auto uuid = UUID::gen();
+        catalog.registerCollection(opCtx.get(), uuid, std::move(newColl), boost::none);
+    }
+
+    std::vector<DatabaseName> dbNamesForTid1 = {
+        DatabaseName(tid1, "dbA"), DatabaseName(tid1, "dbB"), DatabaseName(tid1, "dbC")};
+    ASSERT(catalog.getAllDbNamesForTenant(tid1) == dbNamesForTid1);
+
+    std::vector<DatabaseName> dbNamesForTid2 = {DatabaseName(tid2, "dbB")};
+    ASSERT(catalog.getAllDbNamesForTenant(tid2) == dbNamesForTid2);
+
+    catalog.deregisterAllCollectionsAndViews(getServiceContext());
 }
 
 // Test setting and fetching the profile level for a database.
@@ -683,7 +588,7 @@ TEST_F(CollectionCatalogTest, GetAllCollectionNamesAndGetAllDbNamesWithUncommitt
     for (auto& nss : nsss) {
         std::shared_ptr<Collection> newColl = std::make_shared<CollectionMock>(nss);
         auto uuid = UUID::gen();
-        catalog.registerCollection(opCtx.get(), uuid, std::move(newColl));
+        catalog.registerCollection(opCtx.get(), uuid, std::move(newColl), boost::none);
     }
 
     // One dbName with only an invisible collection does not appear in dbNames. Use const_cast to
@@ -739,7 +644,7 @@ TEST_F(CollectionCatalogTest, GetAllCollectionNamesAndGetAllDbNamesWithUncommitt
     std::vector<DatabaseName> dbList = {DatabaseName(boost::none, "testdb")};
     ASSERT(catalog.getAllDbNames() == dbList);
 
-    catalog.deregisterAllCollectionsAndViews();
+    catalog.deregisterAllCollectionsAndViews(getServiceContext());
 }
 
 class ForEachCollectionFromDbTest : public CatalogTestFixture {
@@ -894,6 +799,10 @@ public:
         opCtx = makeOperationContext();
     }
 
+    std::shared_ptr<const CollectionCatalog> catalog() {
+        return CollectionCatalog::get(opCtx.get());
+    }
+
     void createCollection(OperationContext* opCtx,
                           const NamespaceString& nss,
                           Timestamp timestamp) {
@@ -915,7 +824,7 @@ public:
         CollectionOptions options;
         options.uuid.emplace(UUID::gen());
 
-        auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+        auto storageEngine = getServiceContext()->getStorageEngine();
         std::pair<RecordId, std::unique_ptr<RecordStore>> catalogIdRecordStorePair =
             uassertStatusOK(storageEngine->getCatalog()->createCollection(
                 opCtx, nss, options, /*allocateDefaultSpace=*/true));
@@ -944,8 +853,40 @@ public:
         CollectionWriter collection(opCtx, nss);
 
         WriteUnitOfWork wuow(opCtx);
+
+        // Add the collection ident to the drop-pending reaper.
+        opCtx->getServiceContext()->getStorageEngine()->addDropPendingIdent(
+            timestamp, collection->getRecordStore()->getSharedIdent());
+
         CollectionCatalog::get(opCtx)->dropCollection(
             opCtx, collection.getWritableCollection(opCtx), /*isDropPending=*/true);
+        wuow.commit();
+    }
+
+    void renameCollection(OperationContext* opCtx,
+                          const NamespaceString& from,
+                          const NamespaceString& to,
+                          Timestamp timestamp) {
+        invariant(from.db() == to.db());
+
+        opCtx->recoveryUnit()->setTimestampReadSource(RecoveryUnit::ReadSource::kNoTimestamp);
+        opCtx->recoveryUnit()->abandonSnapshot();
+
+        if (!opCtx->recoveryUnit()->getCommitTimestamp().isNull()) {
+            opCtx->recoveryUnit()->clearCommitTimestamp();
+        }
+        opCtx->recoveryUnit()->setCommitTimestamp(timestamp);
+
+        Lock::DBLock dbLk(opCtx, from.db(), MODE_IX);
+        Lock::CollectionLock fromLk(opCtx, from, MODE_X);
+        Lock::CollectionLock toLk(opCtx, to, MODE_X);
+
+        CollectionWriter collection(opCtx, from);
+
+        WriteUnitOfWork wuow(opCtx);
+        ASSERT_OK(collection.getWritableCollection(opCtx)->rename(opCtx, to, false));
+        CollectionCatalog::get(opCtx)->onCollectionRename(
+            opCtx, collection.getWritableCollection(opCtx), from);
         wuow.commit();
     }
 
@@ -994,22 +935,18 @@ public:
         IndexCatalog* indexCatalog = writableCollection->getIndexCatalog();
         auto indexDescriptor =
             indexCatalog->findIndexByName(opCtx, indexName, IndexCatalog::InclusionPolicy::kReady);
+
+        // This also adds the index ident to the drop-pending reaper.
         ASSERT_OK(indexCatalog->dropIndex(opCtx, writableCollection, indexDescriptor));
 
         wuow.commit();
     }
 
-    DurableCatalog::Entry getEntry(OperationContext* opCtx, const NamespaceString& nss) {
-        AutoGetCollection autoColl(opCtx, nss, LockMode::MODE_IS);
-        auto durableCatalog = DurableCatalog::get(opCtx);
-        return durableCatalog->getEntry(autoColl->getCatalogId());
-    }
-
     std::shared_ptr<Collection> openCollection(OperationContext* opCtx,
-                                               const DurableCatalog::Entry& entry,
+                                               const NamespaceString& nss,
                                                Timestamp readTimestamp) {
         Lock::GlobalLock globalLock(opCtx, MODE_IS);
-        auto coll = CollectionCatalog::get(opCtx)->openCollection(opCtx, entry, readTimestamp);
+        auto coll = CollectionCatalog::get(opCtx)->openCollection(opCtx, nss, readTimestamp);
         ASSERT(coll);
         return coll;
     }
@@ -1070,14 +1007,13 @@ TEST_F(CollectionCatalogTimestampTest, OpenCollectionBeforeCreateTimestamp) {
     const Timestamp createCollectionTs = Timestamp(10, 10);
 
     createCollection(opCtx.get(), nss, createCollectionTs);
-    DurableCatalog::Entry entry = getEntry(opCtx.get(), nss);
 
     // Try to open the collection before it was created.
     const Timestamp readTimestamp(5, 5);
     Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
     OneOffRead oor(opCtx.get(), readTimestamp);
     auto coll =
-        CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), entry, readTimestamp);
+        CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, readTimestamp);
     ASSERT(!coll);
 }
 
@@ -1097,18 +1033,16 @@ TEST_F(CollectionCatalogTimestampTest, OpenEarlierCollection) {
                          << "key" << BSON("x" << 1)),
                 createIndexTs);
 
-    DurableCatalog::Entry entry = getEntry(opCtx.get(), nss);
-
     // Open an instance of the collection before the index was created.
     const Timestamp readTimestamp(15, 15);
     OneOffRead oor(opCtx.get(), readTimestamp);
-    std::shared_ptr<Collection> coll = openCollection(opCtx.get(), entry, readTimestamp);
+    std::shared_ptr<Collection> coll = openCollection(opCtx.get(), nss, readTimestamp);
     ASSERT(coll);
     ASSERT_EQ(0, coll->getIndexCatalog()->numIndexesTotal(opCtx.get()));
 
     // Verify that the CollectionCatalog returns the latest collection with the index present.
-    auto latestColl = CollectionCatalog::get(opCtx.get())
-                          ->lookupCollectionByNamespaceForRead(opCtx.get(), entry.nss);
+    auto latestColl =
+        CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespaceForRead(opCtx.get(), nss);
     ASSERT(latestColl);
     ASSERT_EQ(1, latestColl->getIndexCatalog()->numIndexesTotal(opCtx.get()));
 
@@ -1140,18 +1074,16 @@ TEST_F(CollectionCatalogTimestampTest, OpenEarlierCollectionWithIndex) {
                          << "key" << BSON("y" << 1)),
                 createYIndexTs);
 
-    DurableCatalog::Entry entry = getEntry(opCtx.get(), nss);
-
     // Open an instance of the collection when only one of the two indexes were present.
     const Timestamp readTimestamp(25, 25);
     OneOffRead oor(opCtx.get(), readTimestamp);
-    std::shared_ptr<Collection> coll = openCollection(opCtx.get(), entry, readTimestamp);
+    std::shared_ptr<Collection> coll = openCollection(opCtx.get(), nss, readTimestamp);
     ASSERT(coll);
     ASSERT_EQ(1, coll->getIndexCatalog()->numIndexesTotal(opCtx.get()));
 
     // Verify that the CollectionCatalog returns the latest collection.
-    auto latestColl = CollectionCatalog::get(opCtx.get())
-                          ->lookupCollectionByNamespaceForRead(opCtx.get(), entry.nss);
+    auto latestColl =
+        CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespaceForRead(opCtx.get(), nss);
     ASSERT(latestColl);
     ASSERT_EQ(2, latestColl->getIndexCatalog()->numIndexesTotal(opCtx.get()));
 
@@ -1182,18 +1114,16 @@ TEST_F(CollectionCatalogTimestampTest, OpenLatestCollectionWithIndex) {
                          << "key" << BSON("x" << 1)),
                 createXIndexTs);
 
-    DurableCatalog::Entry entry = getEntry(opCtx.get(), nss);
-
     // Setting the read timestamp to the last DDL operation on the collection returns the latest
     // collection.
     const Timestamp readTimestamp(20, 20);
     OneOffRead oor(opCtx.get(), readTimestamp);
-    std::shared_ptr<Collection> coll = openCollection(opCtx.get(), entry, readTimestamp);
+    std::shared_ptr<Collection> coll = openCollection(opCtx.get(), nss, readTimestamp);
     ASSERT(coll);
 
     // Verify that the CollectionCatalog returns the latest collection.
-    auto currentColl = CollectionCatalog::get(opCtx.get())
-                           ->lookupCollectionByNamespaceForRead(opCtx.get(), entry.nss);
+    auto currentColl =
+        CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespaceForRead(opCtx.get(), nss);
     ASSERT_EQ(coll, currentColl);
 
     // Ensure the idents are shared between the collection and index instances.
@@ -1229,13 +1159,11 @@ TEST_F(CollectionCatalogTimestampTest, OpenEarlierCollectionWithDropPendingIndex
                          << "key" << BSON("y" << 1)),
                 createIndexTs);
 
-    DurableCatalog::Entry entry = getEntry(opCtx.get(), nss);
-
     // Maintain a shared_ptr to "x_1", so it's not expired in drop pending map, but not for "y_1".
     std::shared_ptr<const IndexCatalogEntry> index;
     {
         auto latestColl = CollectionCatalog::get(opCtx.get())
-                              ->lookupCollectionByNamespaceForRead(opCtx.get(), entry.nss);
+                              ->lookupCollectionByNamespaceForRead(opCtx.get(), nss);
         auto desc = latestColl->getIndexCatalog()->findIndexByName(opCtx.get(), "x_1");
         index = latestColl->getIndexCatalog()->getEntryShared(desc);
     }
@@ -1246,12 +1174,12 @@ TEST_F(CollectionCatalogTimestampTest, OpenEarlierCollectionWithDropPendingIndex
     // Open the collection while both indexes were present.
     const Timestamp readTimestamp(20, 20);
     OneOffRead oor(opCtx.get(), readTimestamp);
-    std::shared_ptr<Collection> coll = openCollection(opCtx.get(), entry, readTimestamp);
+    std::shared_ptr<Collection> coll = openCollection(opCtx.get(), nss, readTimestamp);
     ASSERT(coll);
 
     // Collection is not shared from the latest instance.
-    auto latestColl = CollectionCatalog::get(opCtx.get())
-                          ->lookupCollectionByNamespaceForRead(opCtx.get(), entry.nss);
+    auto latestColl =
+        CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespaceForRead(opCtx.get(), nss);
     ASSERT_NE(coll, latestColl);
 
     auto indexDescX = coll->getIndexCatalog()->findIndexByName(opCtx.get(), "x_1");
@@ -1282,9 +1210,6 @@ TEST_F(CollectionCatalogTimestampTest, OpenEarlierAlreadyDropPendingCollection) 
     createCollection(opCtx.get(), firstNss, createCollectionTs);
     createCollection(opCtx.get(), secondNss, createCollectionTs);
 
-    DurableCatalog::Entry firstEntry = getEntry(opCtx.get(), firstNss);
-    DurableCatalog::Entry secondEntry = getEntry(opCtx.get(), secondNss);
-
     // Maintain a shared_ptr to "a.b" so that it isn't expired in the drop pending map after we drop
     // the collections.
     std::shared_ptr<const Collection> coll =
@@ -1303,7 +1228,7 @@ TEST_F(CollectionCatalogTimestampTest, OpenEarlierAlreadyDropPendingCollection) 
     {
         // Open "a.b", which is not expired in the drop pending map.
         std::shared_ptr<Collection> openedColl =
-            openCollection(opCtx.get(), firstEntry, readTimestamp);
+            openCollection(opCtx.get(), firstNss, readTimestamp);
         ASSERT(openedColl);
         ASSERT_EQ(coll, openedColl);
 
@@ -1314,7 +1239,7 @@ TEST_F(CollectionCatalogTimestampTest, OpenEarlierAlreadyDropPendingCollection) 
     {
         // Open "c.d" which is expired in the drop pending map.
         std::shared_ptr<Collection> openedColl =
-            openCollection(opCtx.get(), secondEntry, readTimestamp);
+            openCollection(opCtx.get(), secondNss, readTimestamp);
         ASSERT(openedColl);
         ASSERT_NE(coll, openedColl);
 
@@ -1340,8 +1265,6 @@ TEST_F(CollectionCatalogTimestampTest, OpenNewCollectionUsingDropPendingCollecti
                          << "key" << BSON("x" << 1)),
                 createIndexTs);
 
-    DurableCatalog::Entry entry = getEntry(opCtx.get(), nss);
-
     // Maintain a shared_ptr to "a.b" so that it isn't expired in the drop pending map after we drop
     // it.
     std::shared_ptr<const Collection> coll =
@@ -1358,7 +1281,7 @@ TEST_F(CollectionCatalogTimestampTest, OpenNewCollectionUsingDropPendingCollecti
     const Timestamp readTimestamp(10, 10);
     OneOffRead oor(opCtx.get(), readTimestamp);
 
-    std::shared_ptr<Collection> openedColl = openCollection(opCtx.get(), entry, readTimestamp);
+    std::shared_ptr<Collection> openedColl = openCollection(opCtx.get(), nss, readTimestamp);
     ASSERT(openedColl);
     ASSERT_NE(coll, openedColl);
 
@@ -1367,6 +1290,685 @@ TEST_F(CollectionCatalogTimestampTest, OpenNewCollectionUsingDropPendingCollecti
 
     // Ensure the idents are shared between the opened collection and the drop pending collection.
     ASSERT_EQ(coll->getSharedIdent(), openedColl->getSharedIdent());
+}
+
+TEST_F(CollectionCatalogTimestampTest, OpenExistingCollectionWithReaper) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    const NamespaceString nss("a.b");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+    const Timestamp dropCollectionTs = Timestamp(20, 20);
+
+    createCollection(opCtx.get(), nss, createCollectionTs);
+
+    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+
+    // Maintain a shared_ptr so that the reaper cannot drop the collection ident.
+    std::shared_ptr<const Collection> coll =
+        CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespaceForRead(opCtx.get(), nss);
+    ASSERT(coll);
+
+    // Mark the collection as drop pending. The dropToken in the ident reaper is not expired as we
+    // still have a reference.
+    dropCollection(opCtx.get(), nss, dropCollectionTs);
+
+    {
+        ASSERT_EQ(1, storageEngine->getDropPendingIdents().size());
+        ASSERT_EQ(coll->getRecordStore()->getSharedIdent()->getIdent(),
+                  *storageEngine->getDropPendingIdents().begin());
+
+        // Ident is not expired and should not be removed.
+        storageEngine->dropIdentsOlderThan(opCtx.get(), Timestamp::max());
+
+        ASSERT_EQ(1, storageEngine->getDropPendingIdents().size());
+        ASSERT_EQ(coll->getRecordStore()->getSharedIdent()->getIdent(),
+                  *storageEngine->getDropPendingIdents().begin());
+    }
+
+    std::shared_ptr<Collection> openedColl = openCollection(opCtx.get(), nss, createCollectionTs);
+    ASSERT(openedColl);
+    ASSERT_EQ(coll->getSharedIdent(), openedColl->getSharedIdent());
+
+    // The ident is now expired and should be removed the next time the ident reaper runs.
+    coll.reset();
+    openedColl.reset();
+
+    storageEngine->dropIdentsOlderThan(opCtx.get(), Timestamp::max());
+    ASSERT_EQ(0, storageEngine->getDropPendingIdents().size());
+
+    // Now we fail to open the collection as the ident has been removed.
+    OneOffRead oor(opCtx.get(), createCollectionTs);
+    Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+    ASSERT(
+        !CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, createCollectionTs));
+}
+
+TEST_F(CollectionCatalogTimestampTest, OpenNewCollectionWithReaper) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    const NamespaceString nss("a.b");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+    const Timestamp dropCollectionTs = Timestamp(20, 20);
+
+    createCollection(opCtx.get(), nss, createCollectionTs);
+
+    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+
+    // Make the collection drop pending. The dropToken in the ident reaper is now expired as we
+    // don't maintain any references to the collection.
+    dropCollection(opCtx.get(), nss, dropCollectionTs);
+
+    {
+        // Open the collection, which marks the ident as in use before running the ident reaper.
+        OneOffRead oor(opCtx.get(), createCollectionTs);
+
+        std::shared_ptr<Collection> openedColl =
+            openCollection(opCtx.get(), nss, createCollectionTs);
+        ASSERT(openedColl);
+
+        ASSERT_EQ(1, storageEngine->getDropPendingIdents().size());
+        ASSERT_EQ(openedColl->getRecordStore()->getSharedIdent()->getIdent(),
+                  *storageEngine->getDropPendingIdents().begin());
+
+        // Ident is marked as in use and it should not be removed.
+        storageEngine->dropIdentsOlderThan(opCtx.get(), Timestamp::max());
+
+        ASSERT_EQ(1, storageEngine->getDropPendingIdents().size());
+        ASSERT_EQ(openedColl->getRecordStore()->getSharedIdent()->getIdent(),
+                  *storageEngine->getDropPendingIdents().begin());
+    }
+
+    {
+        // Run the ident reaper before opening the collection.
+        ASSERT_EQ(1, storageEngine->getDropPendingIdents().size());
+
+        // The dropToken is expired as the ident is no longer in use.
+        storageEngine->dropIdentsOlderThan(opCtx.get(), Timestamp::max());
+
+        ASSERT_EQ(0, storageEngine->getDropPendingIdents().size());
+
+        // Now we fail to open the collection as the ident has been removed.
+        OneOffRead oor(opCtx.get(), createCollectionTs);
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+        ASSERT(!CollectionCatalog::get(opCtx.get())
+                    ->openCollection(opCtx.get(), nss, createCollectionTs));
+    }
+}
+
+TEST_F(CollectionCatalogTimestampTest, OpenExistingCollectionAndIndexesWithReaper) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    const NamespaceString nss("a.b");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+    const Timestamp createIndexTs = Timestamp(20, 20);
+    const Timestamp dropXIndexTs = Timestamp(30, 30);
+    const Timestamp dropYIndexTs = Timestamp(40, 40);
+    const Timestamp dropCollectionTs = Timestamp(50, 50);
+
+    createCollection(opCtx.get(), nss, createCollectionTs);
+    createIndex(opCtx.get(),
+                nss,
+                BSON("v" << 2 << "name"
+                         << "x_1"
+                         << "key" << BSON("x" << 1)),
+                createIndexTs);
+    createIndex(opCtx.get(),
+                nss,
+                BSON("v" << 2 << "name"
+                         << "y_1"
+                         << "key" << BSON("y" << 1)),
+                createIndexTs);
+
+    // Perform index drops at different timestamps. By not maintaining shared_ptrs to the these
+    // indexes, their idents are expired.
+    dropIndex(opCtx.get(), nss, "x_1", dropXIndexTs);
+    dropIndex(opCtx.get(), nss, "y_1", dropYIndexTs);
+
+    // Maintain a shared_ptr to the collection so that the reaper cannot drop the collection ident.
+    std::shared_ptr<const Collection> coll =
+        CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespaceForRead(opCtx.get(), nss);
+    ASSERT(coll);
+
+    dropCollection(opCtx.get(), nss, dropCollectionTs);
+
+    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+    ASSERT_EQ(3, storageEngine->getDropPendingIdents().size());
+
+    {
+        // Open the collection using shared state before any index drops.
+        OneOffRead oor(opCtx.get(), createIndexTs);
+
+        std::shared_ptr<Collection> openedColl = openCollection(opCtx.get(), nss, createIndexTs);
+        ASSERT(openedColl);
+        ASSERT_EQ(openedColl->getSharedIdent(), coll->getSharedIdent());
+        ASSERT_EQ(2, openedColl->getIndexCatalog()->numIndexesTotal(opCtx.get()));
+
+        // All idents are marked as in use and none should be removed.
+        storageEngine->dropIdentsOlderThan(opCtx.get(), Timestamp::max());
+        ASSERT_EQ(3, storageEngine->getDropPendingIdents().size());
+    }
+
+    {
+        // Open the collection using shared state after a single index was dropped.
+        OneOffRead oor(opCtx.get(), dropXIndexTs);
+
+        std::shared_ptr<Collection> openedColl = openCollection(opCtx.get(), nss, dropXIndexTs);
+        ASSERT(openedColl);
+        ASSERT_EQ(openedColl->getSharedIdent(), coll->getSharedIdent());
+        ASSERT_EQ(1, openedColl->getIndexCatalog()->numIndexesTotal(opCtx.get()));
+
+        std::vector<std::string> indexNames;
+        openedColl->getAllIndexes(&indexNames);
+        ASSERT_EQ(1, indexNames.size());
+        ASSERT_EQ("y_1", indexNames.front());
+
+        // Only the collection and 'y' index idents are marked as in use. The 'x' index ident will
+        // be removed.
+        storageEngine->dropIdentsOlderThan(opCtx.get(), Timestamp::max());
+        ASSERT_EQ(2, storageEngine->getDropPendingIdents().size());
+    }
+
+    {
+        // Open the collection using shared state before any indexes were created.
+        OneOffRead oor(opCtx.get(), createCollectionTs);
+
+        std::shared_ptr<Collection> openedColl =
+            openCollection(opCtx.get(), nss, createCollectionTs);
+        ASSERT(openedColl);
+        ASSERT_EQ(openedColl->getSharedIdent(), coll->getSharedIdent());
+        ASSERT_EQ(0, openedColl->getIndexCatalog()->numIndexesTotal(opCtx.get()));
+    }
+
+    {
+        // Try to open the collection using shared state when both indexes were present. This should
+        // fail as the ident for index 'x' was already removed.
+        OneOffRead oor(opCtx.get(), createIndexTs);
+
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+        ASSERT(
+            !CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, createIndexTs));
+
+        ASSERT_EQ(2, storageEngine->getDropPendingIdents().size());
+    }
+
+    {
+        // Drop all remaining idents.
+        coll.reset();
+
+        storageEngine->dropIdentsOlderThan(opCtx.get(), Timestamp::max());
+        ASSERT_EQ(0, storageEngine->getDropPendingIdents().size());
+
+        // All idents are removed so opening the collection before any indexes were created should
+        // fail.
+        OneOffRead oor(opCtx.get(), createCollectionTs);
+
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+        ASSERT(!CollectionCatalog::get(opCtx.get())
+                    ->openCollection(opCtx.get(), nss, createCollectionTs));
+    }
+}
+
+TEST_F(CollectionCatalogTimestampTest, OpenNewCollectionAndIndexesWithReaper) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    const NamespaceString nss("a.b");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+    const Timestamp createIndexTs = Timestamp(20, 20);
+    const Timestamp dropXIndexTs = Timestamp(30, 30);
+    const Timestamp dropYIndexTs = Timestamp(40, 40);
+    const Timestamp dropCollectionTs = Timestamp(50, 50);
+
+    createCollection(opCtx.get(), nss, createCollectionTs);
+    createIndex(opCtx.get(),
+                nss,
+                BSON("v" << 2 << "name"
+                         << "x_1"
+                         << "key" << BSON("x" << 1)),
+                createIndexTs);
+    createIndex(opCtx.get(),
+                nss,
+                BSON("v" << 2 << "name"
+                         << "y_1"
+                         << "key" << BSON("y" << 1)),
+                createIndexTs);
+
+    // Perform drops at different timestamps. By not maintaining shared_ptrs to the these, their
+    // idents are expired.
+    dropIndex(opCtx.get(), nss, "x_1", dropXIndexTs);
+    dropIndex(opCtx.get(), nss, "y_1", dropYIndexTs);
+    dropCollection(opCtx.get(), nss, dropCollectionTs);
+
+    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+    ASSERT_EQ(3, storageEngine->getDropPendingIdents().size());
+
+    {
+        // Open the collection before any index drops.
+        OneOffRead oor(opCtx.get(), createIndexTs);
+
+        std::shared_ptr<Collection> openedColl = openCollection(opCtx.get(), nss, createIndexTs);
+        ASSERT(openedColl);
+        ASSERT_EQ(2, openedColl->getIndexCatalog()->numIndexesTotal(opCtx.get()));
+
+        // All idents are marked as in use and none should be removed.
+        storageEngine->dropIdentsOlderThan(opCtx.get(), Timestamp::max());
+        ASSERT_EQ(3, storageEngine->getDropPendingIdents().size());
+    }
+
+    {
+        // Open the collection after the 'x' index was dropped.
+        OneOffRead oor(opCtx.get(), dropXIndexTs);
+
+        std::shared_ptr<Collection> openedColl = openCollection(opCtx.get(), nss, dropXIndexTs);
+        ASSERT(openedColl);
+        ASSERT_EQ(1, openedColl->getIndexCatalog()->numIndexesTotal(opCtx.get()));
+
+        std::vector<std::string> indexNames;
+        openedColl->getAllIndexes(&indexNames);
+        ASSERT_EQ(1, indexNames.size());
+        ASSERT_EQ("y_1", indexNames.front());
+
+        // The 'x' index ident will be removed.
+        storageEngine->dropIdentsOlderThan(opCtx.get(), Timestamp::max());
+        ASSERT_EQ(2, storageEngine->getDropPendingIdents().size());
+    }
+
+    {
+        // Open the collection before any indexes were created.
+        OneOffRead oor(opCtx.get(), createCollectionTs);
+
+        std::shared_ptr<Collection> openedColl =
+            openCollection(opCtx.get(), nss, createCollectionTs);
+        ASSERT(openedColl);
+        ASSERT_EQ(0, openedColl->getIndexCatalog()->numIndexesTotal(opCtx.get()));
+    }
+
+    {
+        // Try to open the collection before any index drops. Because the 'x' index ident is already
+        // dropped, this should fail.
+        OneOffRead oor(opCtx.get(), createIndexTs);
+
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+        ASSERT(
+            !CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, createIndexTs));
+
+        ASSERT_EQ(2, storageEngine->getDropPendingIdents().size());
+    }
+
+    {
+        // Drop all remaining idents and try to open the collection. This should fail.
+        storageEngine->dropIdentsOlderThan(opCtx.get(), Timestamp::max());
+        ASSERT_EQ(0, storageEngine->getDropPendingIdents().size());
+
+        OneOffRead oor(opCtx.get(), createCollectionTs);
+
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+        ASSERT(!CollectionCatalog::get(opCtx.get())
+                    ->openCollection(opCtx.get(), nss, createCollectionTs));
+    }
+}
+
+TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingCreate) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    NamespaceString nss("a.b");
+
+    // Create collection and extract the catalogId
+    createCollection(opCtx.get(), nss, Timestamp(1, 2));
+    RecordId rid = catalog()->lookupCollectionByNamespace(opCtx.get(), nss)->getCatalogId();
+
+    // Lookup without timestamp returns latest catalogId
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, boost::none), rid);
+    // Lookup before create returns none
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 1)), boost::none);
+    // Lookup at create returns catalogId
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 2)), rid);
+    // Lookup after create returns catalogId
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 3)), rid);
+}
+
+TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingDrop) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    NamespaceString nss("a.b");
+
+    // Create and drop collection. We have a time window where the namespace exists
+    createCollection(opCtx.get(), nss, Timestamp(1, 5));
+    RecordId rid = catalog()->lookupCollectionByNamespace(opCtx.get(), nss)->getCatalogId();
+    dropCollection(opCtx.get(), nss, Timestamp(1, 10));
+
+    // Lookup without timestamp returns none
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, boost::none), boost::none);
+    // Lookup before create returns none
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 4)), boost::none);
+    // Lookup at create returns catalogId
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 5)), rid);
+    // Lookup after create returns catalogId
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 6)), rid);
+    // Lookup at drop returns none
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 10)), boost::none);
+    // Lookup after drop returns none
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 20)), boost::none);
+}
+
+TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingRename) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    NamespaceString from("a.b");
+    NamespaceString to("a.c");
+
+    // Create and rename collection. We have two windows where the namespace exists but for
+    // different namespaces
+    createCollection(opCtx.get(), from, Timestamp(1, 5));
+    RecordId rid = catalog()->lookupCollectionByNamespace(opCtx.get(), from)->getCatalogId();
+    renameCollection(opCtx.get(), from, to, Timestamp(1, 10));
+
+    // Lookup without timestamp on 'from' returns none
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(from, boost::none), boost::none);
+    // Lookup before create returns none
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(from, Timestamp(1, 4)), boost::none);
+    // Lookup at create returns catalogId
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(from, Timestamp(1, 5)), rid);
+    // Lookup after create returns catalogId
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(from, Timestamp(1, 6)), rid);
+    // Lookup at rename on 'from' returns none
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(from, Timestamp(1, 10)), boost::none);
+    // Lookup after rename on 'from' returns none
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(from, Timestamp(1, 20)), boost::none);
+
+    // Lookup without timestamp on 'to' returns catalogId
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(to, boost::none), rid);
+    // Lookup before rename on 'to' returns none
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(to, Timestamp(1, 9)), boost::none);
+    // Lookup at rename on 'to' returns catalogId
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(to, Timestamp(1, 10)), rid);
+    // Lookup after rename on 'to' returns catalogId
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(to, Timestamp(1, 20)), rid);
+}
+
+TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingDropCreate) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    NamespaceString nss("a.b");
+
+    // Create, drop and recreate collection on the same namespace. We have different catalogId.
+    createCollection(opCtx.get(), nss, Timestamp(1, 5));
+    RecordId rid1 = catalog()->lookupCollectionByNamespace(opCtx.get(), nss)->getCatalogId();
+    dropCollection(opCtx.get(), nss, Timestamp(1, 10));
+    createCollection(opCtx.get(), nss, Timestamp(1, 15));
+    RecordId rid2 = catalog()->lookupCollectionByNamespace(opCtx.get(), nss)->getCatalogId();
+
+    // Lookup without timestamp returns latest catalogId
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, boost::none), rid2);
+    // Lookup before first create returns none
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 4)), boost::none);
+    // Lookup at first create returns first catalogId
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 5)), rid1);
+    // Lookup after first create returns first catalogId
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 6)), rid1);
+    // Lookup at drop returns none
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 10)), boost::none);
+    // Lookup after drop returns none
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 13)), boost::none);
+    // Lookup at second create returns second catalogId
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 15)), rid2);
+    // Lookup after second create returns second catalogId
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 20)), rid2);
+}
+
+TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingCleanupEqDrop) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    NamespaceString nss("a.b");
+
+    // Create collection and verify we have nothing to cleanup
+    createCollection(opCtx.get(), nss, Timestamp(1, 5));
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 1)));
+
+    // Drop collection and verify we have nothing to cleanup as long as the oldest timestamp is
+    // before the drop
+    dropCollection(opCtx.get(), nss, Timestamp(1, 10));
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 1)));
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 5)));
+    ASSERT_TRUE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 10)));
+
+    // Create new collection and nothing changed with answers to needsCleanupForOldestTimestamp.
+    createCollection(opCtx.get(), nss, Timestamp(1, 15));
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 1)));
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 5)));
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 7)));
+    ASSERT_TRUE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 10)));
+
+    // We can lookup the old catalogId before we advance the oldest timestamp and cleanup
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 5)), boost::none);
+
+    // Cleanup at drop timestamp
+    CollectionCatalog::write(opCtx.get(), [&](CollectionCatalog& c) {
+        c.cleanupForOldestTimestampAdvanced(Timestamp(1, 10));
+    });
+    // After cleanup, we cannot find the old catalogId anymore. Also verify that we don't need
+    // anymore cleanup
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 10)));
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 5)), boost::none);
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 15)), boost::none);
+}
+
+TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingCleanupGtDrop) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    NamespaceString nss("a.b");
+
+    // Create collection and verify we have nothing to cleanup
+    createCollection(opCtx.get(), nss, Timestamp(1, 5));
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 1)));
+
+    // Drop collection and verify we have nothing to cleanup as long as the oldest timestamp is
+    // before the drop
+    dropCollection(opCtx.get(), nss, Timestamp(1, 10));
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 1)));
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 5)));
+    ASSERT_TRUE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 10)));
+
+    // Create new collection and nothing changed with answers to needsCleanupForOldestTimestamp.
+    createCollection(opCtx.get(), nss, Timestamp(1, 15));
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 1)));
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 5)));
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 7)));
+    ASSERT_TRUE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 12)));
+
+    // We can lookup the old catalogId before we advance the oldest timestamp and cleanup
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 5)), boost::none);
+
+    // Cleanup after the drop timestamp
+    CollectionCatalog::write(opCtx.get(), [&](CollectionCatalog& c) {
+        c.cleanupForOldestTimestampAdvanced(Timestamp(1, 12));
+    });
+
+    // After cleanup, we cannot find the old catalogId anymore. Also verify that we don't need
+    // anymore cleanup
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 12)));
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 5)), boost::none);
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 15)), boost::none);
+}
+
+TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingCleanupGtRecreate) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    NamespaceString nss("a.b");
+
+    // Create collection and verify we have nothing to cleanup
+    createCollection(opCtx.get(), nss, Timestamp(1, 5));
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 1)));
+
+    // Drop collection and verify we have nothing to cleanup as long as the oldest timestamp is
+    // before the drop
+    dropCollection(opCtx.get(), nss, Timestamp(1, 10));
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 1)));
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 5)));
+    ASSERT_TRUE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 10)));
+
+    // Create new collection and nothing changed with answers to needsCleanupForOldestTimestamp.
+    createCollection(opCtx.get(), nss, Timestamp(1, 15));
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 1)));
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 5)));
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 7)));
+    ASSERT_TRUE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 20)));
+
+    // We can lookup the old catalogId before we advance the oldest timestamp and cleanup
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 5)), boost::none);
+
+    // Cleanup after the recreate timestamp
+    CollectionCatalog::write(opCtx.get(), [&](CollectionCatalog& c) {
+        c.cleanupForOldestTimestampAdvanced(Timestamp(1, 20));
+    });
+
+    // After cleanup, we cannot find the old catalogId anymore. Also verify that we don't need
+    // anymore cleanup
+    ASSERT_FALSE(catalog()->needsCleanupForOldestTimestamp(Timestamp(1, 20)));
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 5)), boost::none);
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 15)), boost::none);
+}
+
+TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingCleanupMultiple) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    NamespaceString nss("a.b");
+
+    // Create and drop multiple namespace on the same namespace
+    createCollection(opCtx.get(), nss, Timestamp(1, 5));
+    dropCollection(opCtx.get(), nss, Timestamp(1, 10));
+    createCollection(opCtx.get(), nss, Timestamp(1, 15));
+    dropCollection(opCtx.get(), nss, Timestamp(1, 20));
+    createCollection(opCtx.get(), nss, Timestamp(1, 25));
+    dropCollection(opCtx.get(), nss, Timestamp(1, 30));
+    createCollection(opCtx.get(), nss, Timestamp(1, 35));
+    dropCollection(opCtx.get(), nss, Timestamp(1, 40));
+
+    // Lookup can find all four collections
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 5)), boost::none);
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 15)), boost::none);
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 25)), boost::none);
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 35)), boost::none);
+
+    // Cleanup oldest
+    CollectionCatalog::write(opCtx.get(), [&](CollectionCatalog& c) {
+        c.cleanupForOldestTimestampAdvanced(Timestamp(1, 10));
+    });
+
+    // Lookup can find the three remaining collections
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 5)), boost::none);
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 15)), boost::none);
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 25)), boost::none);
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 35)), boost::none);
+
+    // Cleanup
+    CollectionCatalog::write(opCtx.get(), [&](CollectionCatalog& c) {
+        c.cleanupForOldestTimestampAdvanced(Timestamp(1, 21));
+    });
+
+    // Lookup can find the two remaining collections
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 5)), boost::none);
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 15)), boost::none);
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 25)), boost::none);
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 35)), boost::none);
+
+    // Cleanup
+    CollectionCatalog::write(opCtx.get(), [&](CollectionCatalog& c) {
+        c.cleanupForOldestTimestampAdvanced(Timestamp(1, 32));
+    });
+
+    // Lookup can find the last remaining collections
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 5)), boost::none);
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 15)), boost::none);
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 25)), boost::none);
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 35)), boost::none);
+
+    // Cleanup
+    CollectionCatalog::write(opCtx.get(), [&](CollectionCatalog& c) {
+        c.cleanupForOldestTimestampAdvanced(Timestamp(1, 50));
+    });
+
+    // Lookup can find no collections
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 5)), boost::none);
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 15)), boost::none);
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 25)), boost::none);
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 35)), boost::none);
+}
+
+TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingCleanupMultipleSingleCall) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    NamespaceString nss("a.b");
+
+    // Create and drop multiple namespace on the same namespace
+    createCollection(opCtx.get(), nss, Timestamp(1, 5));
+    dropCollection(opCtx.get(), nss, Timestamp(1, 10));
+    createCollection(opCtx.get(), nss, Timestamp(1, 15));
+    dropCollection(opCtx.get(), nss, Timestamp(1, 20));
+    createCollection(opCtx.get(), nss, Timestamp(1, 25));
+    dropCollection(opCtx.get(), nss, Timestamp(1, 30));
+    createCollection(opCtx.get(), nss, Timestamp(1, 35));
+    dropCollection(opCtx.get(), nss, Timestamp(1, 40));
+
+    // Lookup can find all four collections
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 5)), boost::none);
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 15)), boost::none);
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 25)), boost::none);
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 35)), boost::none);
+
+    // Cleanup all
+    CollectionCatalog::write(opCtx.get(), [&](CollectionCatalog& c) {
+        c.cleanupForOldestTimestampAdvanced(Timestamp(1, 50));
+    });
+
+    // Lookup can find no collections
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 5)), boost::none);
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 15)), boost::none);
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 25)), boost::none);
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(nss, Timestamp(1, 35)), boost::none);
+}
+
+TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingRollback) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    NamespaceString a("b.a");
+    NamespaceString b("b.b");
+    NamespaceString c("b.c");
+    NamespaceString d("b.d");
+    NamespaceString e("b.e");
+
+    // Create and drop multiple namespace on the same namespace
+    createCollection(opCtx.get(), a, Timestamp(1, 1));
+    dropCollection(opCtx.get(), a, Timestamp(1, 2));
+    createCollection(opCtx.get(), a, Timestamp(1, 3));
+    createCollection(opCtx.get(), b, Timestamp(1, 5));
+    createCollection(opCtx.get(), c, Timestamp(1, 7));
+    createCollection(opCtx.get(), d, Timestamp(1, 8));
+    createCollection(opCtx.get(), e, Timestamp(1, 9));
+    dropCollection(opCtx.get(), b, Timestamp(1, 10));
+
+    // Rollback to Timestamp(1, 8)
+    CollectionCatalog::write(
+        opCtx.get(), [&](CollectionCatalog& c) { c.cleanupForCatalogReopen(Timestamp(1, 8)); });
+
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(a, boost::none), boost::none);
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(b, boost::none), boost::none);
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(c, boost::none), boost::none);
+    ASSERT_NE(catalog()->lookupCatalogIdByNSS(d, boost::none), boost::none);
+    ASSERT_EQ(catalog()->lookupCatalogIdByNSS(e, boost::none), boost::none);
 }
 
 }  // namespace

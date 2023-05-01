@@ -9,9 +9,10 @@
 load("jstests/libs/fail_point_util.js");                         // for "configureFailPoint"
 load('jstests/libs/parallel_shell_helpers.js');                  // for "startParallelShell"
 load("jstests/noPassthrough/libs/server_parameter_helpers.js");  // for "setParameter"
-load("jstests/serverless/libs/basic_serverless_test.js");
+load("jstests/serverless/libs/shard_split_test.js");
 load("jstests/replsets/libs/tenant_migration_test.js");
-const {getServerlessOperationLock} = TenantMigrationUtil;
+load("jstests/replsets/libs/tenant_migration_util.js");
+const {ServerlessLockType, getServerlessOperationLock} = TenantMigrationUtil;
 
 (function() {
 "use strict";
@@ -21,7 +22,7 @@ TestData.skipCheckDBHashes = true;
 
 const recipientTagName = "recipientNode";
 const recipientSetName = "recipient";
-const test = new BasicServerlessTest({
+const test = new ShardSplitTest({
     recipientTagName,
     recipientSetName,
     quickGarbageCollection: true,
@@ -58,12 +59,12 @@ assert(findSplitOperation(donorPrimary, migrationId), "There must be a config do
 
 // we do not recover access blockers for kAborted marked for garbage collection
 tenantIds.every(tenantId => {
-    assert.isnull(BasicServerlessTest.getTenantMigrationAccessBlocker(
-        {node: donorPrimary, tenantId: tenantId}));
+    assert.isnull(
+        ShardSplitTest.getTenantMigrationAccessBlocker({node: donorPrimary, tenantId: tenantId}));
 });
 
 // We do not acquire the lock for document marked for garbage collection
-assert.eq(getServerlessOperationLock(donorPrimary), null);
+assert.eq(getServerlessOperationLock(donorPrimary), ServerlessLockType.None);
 
 test.stop();
 })();

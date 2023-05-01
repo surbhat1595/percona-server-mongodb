@@ -156,7 +156,7 @@ const activeServerlessLock = getServerlessOperationLock(initialSyncNode);
 if (donorDoc && !donorDoc.expireAt) {
     assert.eq(activeServerlessLock, ServerlessLockType.TenantMigrationDonor);
 } else {
-    assert.eq(activeServerlessLock, null);
+    assert.eq(activeServerlessLock, ServerlessLockType.None);
 }
 
 if (fp) {

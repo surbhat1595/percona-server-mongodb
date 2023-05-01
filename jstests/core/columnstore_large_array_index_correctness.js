@@ -1,25 +1,18 @@
 /**
  * Testing of just the query layer's integration for columnar indexes that encode large arrays.
  * @tags: [
- *   # columnstore indexes are new in 6.1.
- *   requires_fcv_61,
- *   # Columnstore indexes are incompatible with clustered collections.
- *   incompatible_with_clustered_collection,
+ *   # column store indexes are still under a feature flag and require full sbe
+ *   uses_column_store_index,
+ *   featureFlagColumnstoreIndexes,
+ *   featureFlagSbeFull,
+ *   # TODO SERVER-69884: featureFlag guarded tests shouldn't require explicit 'no_selinux' tag.
+ *   no_selinux,
  * ]
  */
 (function() {
 "use strict";
 
 load("jstests/libs/analyze_plan.js");  // For "planHasStage."
-load("jstests/libs/sbe_util.js");      // For "checkSBEEnabled.""
-
-const columnstoreEnabled = checkSBEEnabled(
-    db, ["featureFlagColumnstoreIndexes", "featureFlagSbeFull"], true /* checkAllNodes */);
-if (!columnstoreEnabled) {
-    jsTestLog(
-        "Skipping columnstore large array index validation test since the feature flag is not enabled.");
-    return;
-}
 
 const coll = db.columnstore_index_correctness;
 coll.drop();

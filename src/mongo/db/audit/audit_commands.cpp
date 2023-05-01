@@ -80,10 +80,10 @@ namespace mongo {
         // To keep compatibility for users of 'logApplicationMessage' we need to override
         // 'checkAuthForCommand' because its default implementation only allows AND predicate
         // for set of action types. We need OR here.
-        virtual Status checkAuthForCommand(Client* client,
-                                           const std::string& dbname,
-                                           const BSONObj& cmdObj) const override {
-            auto authzSess = AuthorizationSession::get(client);
+        Status checkAuthForOperation(OperationContext* opCtx,
+                                     const DatabaseName& dbname,
+                                     const BSONObj& cmdObj) const override {
+            auto authzSess = AuthorizationSession::get(opCtx->getClient());
             if (authzSess->isAuthorizedForPrivilege(Privilege{ResourcePattern::forAnyNormalResource(), ActionType::logApplicationMessage}) ||
                 authzSess->isAuthorizedForPrivilege(Privilege{ResourcePattern::forClusterResource(), ActionType::applicationMessage}))
                 return Status::OK();
@@ -121,9 +121,11 @@ namespace mongo {
                    "Example: { auditGetOptions: 1 }";
         }
 
-        virtual void addRequiredPrivileges(const std::string& dbname,
-                                           const BSONObj& cmdObj,
-                                           std::vector<Privilege>* out) const override { }
+        Status checkAuthForOperation(OperationContext*,
+                                     const DatabaseName&,
+                                     const BSONObj&) const override {
+            return Status::OK();
+        }
 
         bool errmsgRun(OperationContext* txn, const std::string& dbname, const BSONObj& jsobj, std::string& errmsg, BSONObjBuilder& result) override {
             result.appendElements(auditOptions.toBSON());

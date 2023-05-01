@@ -30,9 +30,11 @@
 #include "mongo/db/global_index.h"
 
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/query/internal_plans.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/service_context_d_test_fixture.h"
@@ -52,7 +54,7 @@ public:
         return _opCtx.get();
     }
     repl::StorageInterface* storageInterface() {
-        return _storage.get();
+        return repl::StorageInterface::get(getServiceContext());
     }
 
 protected:
@@ -61,7 +63,8 @@ protected:
         ServiceContextMongoDTest::setUp();
 
         auto service = getServiceContext();
-        _storage = std::make_unique<repl::StorageInterfaceImpl>();
+        repl::StorageInterface::set(service, std::make_unique<repl::StorageInterfaceImpl>());
+
         _opCtx = cc().makeOperationContext();
 
         // Set up ReplicationCoordinator and ensure that we are primary.
@@ -76,7 +79,6 @@ protected:
     }
 
     void tearDown() override {
-        _storage.reset();
         _opCtx.reset();
 
         // Tear down mongod.
@@ -84,7 +86,6 @@ protected:
     }
 
 private:
-    std::unique_ptr<repl::StorageInterface> _storage;
     ServiceContext::UniqueOperationContext _opCtx;
 };
 
@@ -97,16 +98,21 @@ void verifyStoredKeyMatchesIndexKey(const BSONObj& key,
     // 'tb' field stores the BinData(TypeBits(key)). The 'tb' field is not present if there are
     // no TypeBits.
 
-    auto entryIndexKeySize = indexEntry["ik"].size();
-    const auto entryIndexKeyBinData = indexEntry["ik"].binData(entryIndexKeySize);
+    auto entryIndexKeySize = indexEntry[global_index::kContainerIndexKeyFieldName].size();
+    const auto entryIndexKeyBinData =
+        indexEntry[global_index::kContainerIndexKeyFieldName].binData(entryIndexKeySize);
 
-    const auto hasTypeBits = indexEntry.hasElement("tb");
+    const auto hasTypeBits =
+        indexEntry.hasElement(global_index::kContainerIndexKeyTypeBitsFieldName);
     ASSERT_EQ(expectTypeBits, hasTypeBits);
 
     auto tb = KeyString::TypeBits(KeyString::Version::V1);
     if (hasTypeBits) {
-        auto entryTypeBitsSize = indexEntry["tb"].size();
-        auto entryTypeBitsBinData = indexEntry["tb"].binData(entryTypeBitsSize);
+        auto entryTypeBitsSize =
+            indexEntry[global_index::kContainerIndexKeyTypeBitsFieldName].size();
+        auto entryTypeBitsBinData =
+            indexEntry[global_index::kContainerIndexKeyTypeBitsFieldName].binData(
+                entryTypeBitsSize);
         auto entryTypeBitsReader = BufReader(entryTypeBitsBinData, entryTypeBitsSize);
         tb = KeyString::TypeBits::fromBuffer(KeyString::Version::V1, &entryTypeBitsReader);
         ASSERT(!tb.isAllZeros());
@@ -133,12 +139,14 @@ TEST_F(GlobalIndexTest, StorageFormat) {
         const auto key = BSON(""
                               << "hola");
         const auto docKey = BSON("shk0" << 0 << "shk1" << 0 << "_id" << 0);
-        const auto entryId = BSON("_id" << docKey);
+        const auto entryId = BSON(global_index::kContainerIndexDocKeyFieldName << docKey);
         global_index::insertKey(operationContext(), uuid, key, docKey);
 
         // Validate that the document key is stored in the index entry's _id field.
-        StatusWith<BSONObj> status = storageInterface()->findById(
-            operationContext(), NamespaceString::makeGlobalIndexNSS(uuid), entryId["_id"]);
+        StatusWith<BSONObj> status =
+            storageInterface()->findById(operationContext(),
+                                         NamespaceString::makeGlobalIndexNSS(uuid),
+                                         entryId[global_index::kContainerIndexDocKeyFieldName]);
         ASSERT_OK(status.getStatus());
         const auto indexEntry = status.getValue();
 
@@ -152,12 +160,14 @@ TEST_F(GlobalIndexTest, StorageFormat) {
                               << "hola"
                               << "" << 1);
         const auto docKey = BSON("shk0" << 1 << "shk1" << 1 << "_id" << 1);
-        const auto entryId = BSON("_id" << docKey);
+        const auto entryId = BSON(global_index::kContainerIndexDocKeyFieldName << docKey);
         global_index::insertKey(operationContext(), uuid, key, docKey);
 
         // Validate that the document key is stored in the index entry's _id field.
-        StatusWith<BSONObj> status = storageInterface()->findById(
-            operationContext(), NamespaceString::makeGlobalIndexNSS(uuid), entryId["_id"]);
+        StatusWith<BSONObj> status =
+            storageInterface()->findById(operationContext(),
+                                         NamespaceString::makeGlobalIndexNSS(uuid),
+                                         entryId[global_index::kContainerIndexDocKeyFieldName]);
         ASSERT_OK(status.getStatus());
         const auto indexEntry = status.getValue();
 
@@ -171,12 +181,14 @@ TEST_F(GlobalIndexTest, StorageFormat) {
                               << "hola"
                               << "" << 2LL);
         const auto docKey = BSON("shk0" << 2 << "shk1" << 2 << "_id" << 2);
-        const auto entryId = BSON("_id" << docKey);
+        const auto entryId = BSON(global_index::kContainerIndexDocKeyFieldName << docKey);
         global_index::insertKey(operationContext(), uuid, key, docKey);
 
         // Validate that the document key is stored in the index entry's _id field.
-        StatusWith<BSONObj> status = storageInterface()->findById(
-            operationContext(), NamespaceString::makeGlobalIndexNSS(uuid), entryId["_id"]);
+        StatusWith<BSONObj> status =
+            storageInterface()->findById(operationContext(),
+                                         NamespaceString::makeGlobalIndexNSS(uuid),
+                                         entryId[global_index::kContainerIndexDocKeyFieldName]);
         ASSERT_OK(status.getStatus());
         const auto indexEntry = status.getValue();
 
@@ -190,12 +202,14 @@ TEST_F(GlobalIndexTest, StorageFormat) {
                               << "hola"
                               << "" << 3.0);
         const auto docKey = BSON("shk0" << 2 << "shk1" << 3 << "_id" << 3);
-        const auto entryId = BSON("_id" << docKey);
+        const auto entryId = BSON(global_index::kContainerIndexDocKeyFieldName << docKey);
         global_index::insertKey(operationContext(), uuid, key, docKey);
 
         // Validate that the document key is stored in the index entry's _id field.
-        StatusWith<BSONObj> status = storageInterface()->findById(
-            operationContext(), NamespaceString::makeGlobalIndexNSS(uuid), entryId["_id"]);
+        StatusWith<BSONObj> status =
+            storageInterface()->findById(operationContext(),
+                                         NamespaceString::makeGlobalIndexNSS(uuid),
+                                         entryId[global_index::kContainerIndexDocKeyFieldName]);
         ASSERT_OK(status.getStatus());
         const auto indexEntry = status.getValue();
 
@@ -248,6 +262,127 @@ TEST_F(GlobalIndexTest, DuplicateDocumentKey) {
             operationContext(), uuid, BSON("" << 2), BSON("shk0" << 1LL << "_id" << 1)),
         DBException,
         ErrorCodes::DuplicateKey);
+}
+
+TEST_F(GlobalIndexTest, DeleteKey) {
+    const auto uuid = UUID::gen();
+
+    global_index::createContainer(operationContext(), uuid);
+
+    const auto insertAndVerifyDelete =
+        [this](const UUID& uuid, const BSONObj& key, const BSONObj& docKey) {
+            const auto entryId = BSON(global_index::kContainerIndexDocKeyFieldName << docKey);
+            const auto nss = NamespaceString::makeGlobalIndexNSS(uuid);
+
+            // Inserts already tested in StorageFormat case.
+            global_index::insertKey(operationContext(), uuid, key, docKey);
+
+            // Delete and validate that the key is not found.
+            global_index::deleteKey(operationContext(), uuid, key, docKey);
+            ASSERT_NOT_OK(storageInterface()->findById(
+                operationContext(), nss, entryId[global_index::kContainerIndexDocKeyFieldName]));
+        };
+
+    const auto docKey = BSON("shk0" << 0 << "shk1" << 0 << "_id" << 0);
+
+    // Single field index.
+    {
+        const auto key = BSON(""
+                              << "hola");
+        insertAndVerifyDelete(uuid, key, docKey);
+    }
+
+    // Compound index.
+    {
+        const auto key = BSON(""
+                              << "hola"
+                              << "" << 1);
+        insertAndVerifyDelete(uuid, key, docKey);
+    }
+
+    // Compound index with non-empty TypeBits (NumberLong).
+    {
+        const auto key = BSON(""
+                              << "hola"
+                              << "" << 2LL);
+        insertAndVerifyDelete(uuid, key, docKey);
+    }
+
+    // Compound index with non-empty TypeBits (Decimal).
+    {
+        const auto key = BSON(""
+                              << "hola"
+                              << "" << 3.0);
+        insertAndVerifyDelete(uuid, key, docKey);
+    }
+}
+
+TEST_F(GlobalIndexTest, DeleteNonExistingKeyThrows) {
+    const auto uuid = UUID::gen();
+    global_index::createContainer(operationContext(), uuid);
+
+    auto key = BSON(""
+                    << "hola");
+    auto docKey = BSON("shk0" << 0 << "shk1" << 0 << "_id" << 0);
+    ASSERT_THROWS_CODE(global_index::deleteKey(operationContext(), uuid, key, docKey),
+                       DBException,
+                       ErrorCodes::KeyNotFound);
+}
+
+/**
+ * Check collection contents.
+ */
+void _assertDocumentsInGlobalIndexById(OperationContext* opCtx,
+                                       const UUID& uuid,
+                                       const std::vector<BSONObj>& ids) {
+
+    AutoGetCollectionForRead collToScan(opCtx, NamespaceString::makeGlobalIndexNSS(uuid));
+    std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec =
+        InternalPlanner::collectionScan(opCtx,
+                                        &collToScan.getCollection(),
+                                        PlanYieldPolicy::YieldPolicy::NO_YIELD,
+                                        InternalPlanner::FORWARD);
+
+    BSONObj obj;
+    for (auto& id : ids) {
+        ASSERT_EQUALS(exec->getNext(&obj, nullptr), PlanExecutor::ADVANCED);
+        ASSERT_BSONOBJ_EQ(id, obj.getObjectField(global_index::kContainerIndexDocKeyFieldName));
+    }
+    ASSERT_EQUALS(exec->getNext(&obj, nullptr), PlanExecutor::IS_EOF);
+}
+
+TEST_F(GlobalIndexTest, DeleteIndexLookup) {
+    const auto uuid = UUID::gen();
+
+    global_index::createContainer(operationContext(), uuid);
+
+    global_index::insertKey(
+        operationContext(), uuid, BSON("" << 0), BSON("shk0" << 0 << "_id" << 0));
+    global_index::insertKey(
+        operationContext(), uuid, BSON("" << 1), BSON("shk0" << 0 << "_id" << 1));
+    global_index::insertKey(
+        operationContext(), uuid, BSON("" << 2), BSON("shk0" << 0 << "_id" << 2));
+    global_index::insertKey(
+        operationContext(), uuid, BSON("" << 3), BSON("shk0" << 0 << "_id" << 3));
+
+    global_index::deleteKey(
+        operationContext(), uuid, BSON("" << 3), BSON("shk0" << 0 << "_id" << 3));
+    _assertDocumentsInGlobalIndexById(operationContext(),
+                                      uuid,
+                                      {BSON("shk0" << 0 << "_id" << 0),
+                                       BSON("shk0" << 0 << "_id" << 1),
+                                       BSON("shk0" << 0 << "_id" << 2)});
+
+    global_index::deleteKey(
+        operationContext(), uuid, BSON("" << 1), BSON("shk0" << 0 << "_id" << 1));
+    _assertDocumentsInGlobalIndexById(
+        operationContext(),
+        uuid,
+        {BSON("shk0" << 0 << "_id" << 0), BSON("shk0" << 0 << "_id" << 2)});
+
+    global_index::deleteKey(
+        operationContext(), uuid, BSON("" << 0), BSON("shk0" << 0 << "_id" << 0));
+    _assertDocumentsInGlobalIndexById(operationContext(), uuid, {BSON("shk0" << 0 << "_id" << 2)});
 }
 
 }  // namespace

@@ -473,26 +473,6 @@ SlotBasedStageBuilder::SlotBasedStageBuilder(OperationContext* opCtx,
         _data.shouldTrackResumeToken = csn->requestResumeToken;
         _data.shouldUseTailableScan = csn->tailable;
     }
-
-    for (const auto& node : getAllNodesByType(solution.root(), STAGE_VIRTUAL_SCAN)) {
-        auto vsn = static_cast<const VirtualScanNode*>(node);
-        if (!vsn->hasRecordId) {
-            _shouldProduceRecordIdSlot = false;
-            break;
-        }
-    }
-
-    const auto [lookupNode, lookupCount] = getFirstNodeByType(solution.root(), STAGE_EQ_LOOKUP);
-    if (lookupCount) {
-        // TODO: SERVER-63604 optimize _shouldProduceRecordIdSlot maintenance
-        _shouldProduceRecordIdSlot = false;
-    }
-
-    const auto [groupNode, groupCount] = getFirstNodeByType(solution.root(), STAGE_GROUP);
-    if (groupCount) {
-        // TODO: SERVER-63604 optimize _shouldProduceRecordIdSlot maintenance
-        _shouldProduceRecordIdSlot = false;
-    }
 }
 
 std::unique_ptr<sbe::PlanStage> SlotBasedStageBuilder::build(const QuerySolutionNode* root) {
@@ -500,11 +480,15 @@ std::unique_ptr<sbe::PlanStage> SlotBasedStageBuilder::build(const QuerySolution
     invariant(!_buildHasStarted);
     _buildHasStarted = true;
 
-    // We always produce a 'resultSlot' and conditionally produce a 'recordIdSlot' based on the
-    // 'shouldProduceRecordIdSlot'.
+    // We always produce a 'resultSlot'.
     PlanStageReqs reqs;
     reqs.set(kResult);
-    reqs.setIf(kRecordId, _shouldProduceRecordIdSlot);
+    // We force the root stage to produce a 'recordId' if the iteration can be
+    // resumed (via a resume token or a tailable cursor) or if the caller simply expects to be able
+    // to read it.
+    reqs.setIf(kRecordId,
+               (_data.shouldUseTailableScan || _data.shouldTrackResumeToken ||
+                _cq.getForceGenerateRecordId()));
 
     // Set the target namespace to '_mainNss'. This is necessary as some QuerySolutionNodes that
     // require a collection when stage building do not explicitly name which collection they are
@@ -514,11 +498,10 @@ std::unique_ptr<sbe::PlanStage> SlotBasedStageBuilder::build(const QuerySolution
     // Build the SBE plan stage tree.
     auto [stage, outputs] = build(root, reqs);
 
-    // Assert that we produced a 'resultSlot' and that we prouced a 'recordIdSlot' if the
-    // 'shouldProduceRecordIdSlot' flag was set. Also assert that we produced an 'oplogTsSlot' if
-    // it's needed.
+    // Assert that we produced a 'resultSlot' and that we produced a 'recordIdSlot' only if it was
+    // needed.
     invariant(outputs.has(kResult));
-    invariant(!_shouldProduceRecordIdSlot || outputs.has(kRecordId));
+    invariant(reqs.has(kRecordId) == outputs.has(kRecordId));
 
     _data.outputs = std::move(outputs);
 
@@ -543,6 +526,10 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                       root->nodeId(),
                                       outputs.get(kReturnKey),
                                       sbe::makeE<sbe::EFunction>("newObj", sbe::makeEs()));
+    }
+    // Don't advertize the RecordId output if none of our ancestors are going to use it.
+    if (!reqs.has(kRecordId)) {
+        outputs.clear(kRecordId);
     }
 
     return {std::move(stage), std::move(outputs)};
@@ -659,6 +646,10 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                                     iamMap,
                                                     reqs.has(kIndexKeyPattern));
 
+    // Remove the RecordId from the output if we were not requested to produce it.
+    if (!reqs.has(PlanStageSlots::kRecordId) && outputs.has(kRecordId)) {
+        outputs.clear(kRecordId);
+    }
     if (reqs.has(PlanStageSlots::kReturnKey)) {
         sbe::EExpression::Vector mkObjArgs;
 
@@ -823,31 +814,6 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
     auto fieldSlotIds = _slotIdGenerator.generateMultiple(csn->allFields.size());
     auto rowStoreSlot = _slotIdGenerator.generate();
-    auto emptyExpr = sbe::makeE<sbe::EFunction>("newObj", sbe::EExpression::Vector{});
-
-    std::string rootStr = "rowStoreRoot";
-    optimizer::FieldMapBuilder builder(rootStr, true);
-
-    // When building its output document (in 'recordSlot'), the 'ColumnStoreStage' should not try to
-    // separately project both a document and its sub-fields (e.g., both 'a' and 'a.b'). Compute the
-    // subset of 'csn->allFields' that only includes a field if no other field in 'csn->allFields'
-    // is its prefix.
-    auto fieldsToProject =
-        DepsTracker::simplifyDependencies(csn->allFields, DepsTracker::TruncateToRootLevel::no);
-    for (const std::string& field : fieldsToProject) {
-        builder.integrateFieldPath(FieldPath(field),
-                                   [](const bool isLastElement, optimizer::FieldMapEntry& entry) {
-                                       entry._hasLeadingObj = true;
-                                       entry._hasKeep = true;
-                                   });
-    }
-
-    // Generate the expression that is applied to the row store record (in the case when the result
-    // cannot be reconstructed from the index).
-    optimizer::SlotVarMap slotMap{};
-    slotMap[rootStr] = rowStoreSlot;
-    auto abt = builder.generateABT();
-    auto rowStoreExpr = abt ? abtToExpr(*abt, slotMap) : emptyExpr->clone();
 
     // Get all the paths but make sure "_id" comes first (the order of paths given to the
     // column_scan stage defines the order of fields in the reconstructed record).
@@ -882,11 +848,48 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         match_expression::addDependencies(csn->postAssemblyFilter.get(), &residual);
     }
     std::vector<bool> includeInOutput(paths.size(), false);
+    OrderedPathSet fieldsToProject;  // projection when falling back to the row store
     for (size_t i = 0; i < paths.size(); i++) {
         if (csn->outputFields.find(paths[i]) != csn->outputFields.end() ||
             residual.fields.find(paths[i]) != residual.fields.end()) {
             includeInOutput[i] = true;
+            fieldsToProject.insert(paths[i]);
         }
+    }
+
+    const std::string rootStr = "rowStoreRoot";
+    optimizer::FieldMapBuilder builder(rootStr, true);
+
+    // When building its output document (in 'recordSlot'), the 'ColumnStoreStage' should not try to
+    // separately project both a document and its sub-fields (e.g., both 'a' and 'a.b'). Compute the
+    // the subset of 'csn->allFields' that only includes a field if no other field in
+    // 'csn->allFields' is its prefix.
+    fieldsToProject =
+        DepsTracker::simplifyDependencies(fieldsToProject, DepsTracker::TruncateToRootLevel::no);
+    for (const std::string& field : fieldsToProject) {
+        builder.integrateFieldPath(FieldPath(field),
+                                   [](const bool isLastElement, optimizer::FieldMapEntry& entry) {
+                                       entry._hasLeadingObj = true;
+                                       entry._hasKeep = true;
+                                   });
+    }
+
+    // Generate the expression that is applied to the row store record (in the case when the result
+    // cannot be reconstructed from the index).
+    std::unique_ptr<sbe::EExpression> rowStoreExpr = nullptr;
+
+    // Avoid generating the row store expression if the projection is not necessary, as indicated by
+    // the extraFieldsPermitted flag of the column store node.
+    if (boost::optional<optimizer::ABT> abt;
+        !csn->extraFieldsPermitted && (abt = builder.generateABT())) {
+        // We might get null abt if no paths were added to the builder. It means we should be
+        // projecting an empty object.
+        tassert(
+            6935000, "ABT must be valid if have fields to project", fieldsToProject.empty() || abt);
+        optimizer::SlotVarMap slotMap{};
+        slotMap[rootStr] = rowStoreSlot;
+        rowStoreExpr = abt ? abtToExpr(*abt, slotMap)
+                           : sbe::makeE<sbe::EFunction>("newObj", sbe::EExpression::Vector{});
     }
 
     std::unique_ptr<sbe::PlanStage> stage =
@@ -972,10 +975,15 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                              _slotIdGenerator);
 
     outputs.set(kResult, fetchResultSlot);
-    outputs.set(kRecordId, fetchRecordIdSlot);
+    // Propagate the RecordId output only if requested.
+    if (reqs.has(kRecordId)) {
+        outputs.set(kRecordId, fetchRecordIdSlot);
+    } else {
+        outputs.clear(kRecordId);
+    }
 
     if (fn->filter) {
-        forwardingReqs = reqs.copy().set(kResult).set(kRecordId);
+        forwardingReqs = reqs.copy().set(kResult);
 
         relevantSlots = sbe::makeSV();
         outputs.forEachSlot(forwardingReqs, [&](auto&& slot) { relevantSlots.push_back(slot); });
@@ -1317,7 +1325,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                     str::stream() << "Sort path map for '" << part.fieldPath->fullPath()
                                   << "' returned an index '" << slotPos
                                   << "' that is out of bounds",
-                    slotPos >= 0 && slotPos < sortIndexKeySlots.size());
+                    slotPos < sortIndexKeySlots.size());
 
             orderBy.push_back(sortIndexKeySlots[slotPos]);
         }
@@ -1664,6 +1672,10 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     if (mergeSortNode->dedup) {
         stage = sbe::makeS<sbe::UniqueStage>(
             std::move(stage), sbe::makeSV(outputs.get(kRecordId)), root->nodeId());
+        // Stop propagating the RecordId output if none of our ancestors are going to use it.
+        if (!reqs.has(kRecordId)) {
+            outputs.clear(kRecordId);
+        }
     }
 
     return {std::move(stage), std::move(outputs)};
@@ -1882,6 +1894,10 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     if (orn->dedup) {
         stage = sbe::makeS<sbe::UniqueStage>(
             std::move(stage), sbe::makeSV(outputs.get(kRecordId)), root->nodeId());
+        // Stop propagating the RecordId output if none of our ancestors are going to use it.
+        if (!reqs.has(kRecordId)) {
+            outputs.clear(kRecordId);
+        }
     }
 
     if (orn->filter) {
@@ -2074,6 +2090,10 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                                        collatorSlot,
                                                        root->nodeId());
     }
+    // Stop propagating the RecordId output if none of our ancestors are going to use it.
+    if (!reqs.has(kRecordId)) {
+        outputs.clear(kRecordId);
+    }
 
     return {std::move(hashJoinStage), std::move(outputs)};
 }
@@ -2183,50 +2203,114 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                                          sortDirs,
                                                          root->nodeId());
     }
+    // Stop propagating the RecordId output if none of our ancestors are going to use it.
+    if (!reqs.has(kRecordId)) {
+        outputs.clear(kRecordId);
+    }
 
     return {std::move(mergeJoinStage), std::move(outputs)};
 }
 
 namespace {
 template <typename F>
-struct FieldPathVisitor : public SelectiveConstExpressionVisitorBase {
+struct FieldPathAndCondPreVisitor : public SelectiveConstExpressionVisitorBase {
     // To avoid overloaded-virtual warnings.
     using SelectiveConstExpressionVisitorBase::visit;
 
-    FieldPathVisitor(const F& fn) : _fn(fn) {}
+    FieldPathAndCondPreVisitor(const F& fn, int32_t& nestedCondLevel)
+        : _fn(fn), _nestedCondLevel(nestedCondLevel) {}
 
     void visit(const ExpressionFieldPath* expr) final {
-        _fn(expr);
+        _fn(expr, _nestedCondLevel);
+    }
+
+    void visit(const ExpressionCond* expr) final {
+        ++_nestedCondLevel;
+    }
+
+    void visit(const ExpressionSwitch* expr) final {
+        ++_nestedCondLevel;
+    }
+
+    void visit(const ExpressionIfNull* expr) final {
+        ++_nestedCondLevel;
+    }
+
+    void visit(const ExpressionAnd* expr) final {
+        ++_nestedCondLevel;
+    }
+
+    void visit(const ExpressionOr* expr) final {
+        ++_nestedCondLevel;
     }
 
     F _fn;
+    // Tracks the number of conditional expressions like $cond or $ifNull that are above us in the
+    // tree.
+    int32_t& _nestedCondLevel;
+};
+
+struct CondPostVisitor : public SelectiveConstExpressionVisitorBase {
+    // To avoid overloaded-virtual warnings.
+    using SelectiveConstExpressionVisitorBase::visit;
+
+    CondPostVisitor(int32_t& nestedCondLevel) : _nestedCondLevel(nestedCondLevel) {}
+
+    void visit(const ExpressionCond* expr) final {
+        --_nestedCondLevel;
+    }
+
+    void visit(const ExpressionSwitch* expr) final {
+        --_nestedCondLevel;
+    }
+
+    void visit(const ExpressionIfNull* expr) final {
+        --_nestedCondLevel;
+    }
+
+    void visit(const ExpressionAnd* expr) final {
+        --_nestedCondLevel;
+    }
+
+    void visit(const ExpressionOr* expr) final {
+        --_nestedCondLevel;
+    }
+
+    int32_t& _nestedCondLevel;
 };
 
 /**
  * Walks through the 'expr' expression tree and whenever finds an 'ExpressionFieldPath', calls
  * the 'fn' function. Type requirement for 'fn' is it must have a const 'ExpressionFieldPath'
- * pointer parameter.
+ * pointer parameter and 'nestedCondLevel' parameter.
  */
 template <typename F>
 void walkAndActOnFieldPaths(Expression* expr, const F& fn) {
-    FieldPathVisitor<F> visitor(fn);
-    ExpressionWalker walker(&visitor, nullptr /*inVisitor*/, nullptr /*postVisitor*/);
+    int32_t nestedCondLevel = 0;
+    FieldPathAndCondPreVisitor<F> preVisitor(fn, nestedCondLevel);
+    CondPostVisitor postVisitor(nestedCondLevel);
+    ExpressionWalker walker(&preVisitor, nullptr /*inVisitor*/, &postVisitor);
     expression_walker::walk(expr, &walker);
 }
 
 /**
  * Checks whether all field paths in 'idExpr' and all accumulator expressions are top-level ones.
  */
-bool checkAllFieldPathsAreTopLevel(const boost::intrusive_ptr<Expression>& idExpr,
-                                   const std::vector<AccumulationStatement>& accStmts) {
-    auto areAllTopLevelFields = true;
+bool areAllFieldPathsOptimizable(const boost::intrusive_ptr<Expression>& idExpr,
+                                 const std::vector<AccumulationStatement>& accStmts) {
+    auto areFieldPathsOptimizable = true;
 
-    auto checkFieldPath = [&](const ExpressionFieldPath* fieldExpr) {
+    auto checkFieldPath = [&](const ExpressionFieldPath* fieldExpr, int32_t nestedCondLevel) {
         // We optimize neither a field path for the top-level document itself (getPathLength() == 1)
         // nor a field path that refers to a variable. We can optimize only top-level fields
         // (getPathLength() == 2).
-        if (fieldExpr->getFieldPath().getPathLength() != 2 || fieldExpr->isVariableReference()) {
-            areAllTopLevelFields = false;
+        //
+        // The 'nestedCondLevel' being > 0 means that a field path is refered to below conditional
+        // expressions at the parent $group node, when we cannot optimize field path access and
+        // therefore, cannot avoid materialization.
+        if (nestedCondLevel > 0 || fieldExpr->getFieldPath().getPathLength() != 2 ||
+            fieldExpr->isVariableReference()) {
+            areFieldPathsOptimizable = false;
             return;
         }
     };
@@ -2239,7 +2323,7 @@ bool checkAllFieldPathsAreTopLevel(const boost::intrusive_ptr<Expression>& idExp
         walkAndActOnFieldPaths(accStmt.expr.argument.get(), checkFieldPath);
     }
 
-    return areAllTopLevelFields;
+    return areFieldPathsOptimizable;
 }
 
 /**
@@ -2265,7 +2349,7 @@ EvalStage optimizeFieldPaths(StageBuilderState& state,
     auto searchInChildOutputs = !optionalRootSlot.has_value();
     auto retEvalStage = std::move(childEvalStage);
 
-    walkAndActOnFieldPaths(expr.get(), [&](const ExpressionFieldPath* fieldExpr) {
+    walkAndActOnFieldPaths(expr.get(), [&](const ExpressionFieldPath* fieldExpr, int32_t) {
         // We optimize neither a field path for the top-level document itself nor a field path that
         // refers to a variable instead of calling getField().
         if (fieldExpr->getFieldPath().getPathLength() == 1 || fieldExpr->isVariableReference()) {
@@ -2547,15 +2631,17 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     tassert(
         5851600, "should have one and only one child for GROUP", groupNode->children.size() == 1);
     tassert(5851601, "GROUP should have had group-by key expression", idExpr);
+    tassert(
+        6360401,
+        "GROUP cannot propagate a record id slot, but the record id was requested by the parent",
+        !reqs.has(kRecordId));
 
     const auto& childNode = groupNode->children[0].get();
     const auto& accStmts = groupNode->accumulators;
     auto childStageType = childNode->getType();
 
-    auto areAllTopLevelFields = checkAllFieldPathsAreTopLevel(idExpr, accStmts);
-
     auto childReqs = reqs.copy();
-    if (childStageType == StageType::STAGE_GROUP && areAllTopLevelFields) {
+    if (childStageType == StageType::STAGE_GROUP && areAllFieldPathsOptimizable(idExpr, accStmts)) {
         // Does not ask the GROUP child for the result slot to avoid unnecessary materialization if
         // all fields are top-level fields. See the end of this function. For example, GROUP - GROUP
         // - COLLSCAN case.
@@ -2564,7 +2650,6 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
     // Builds the child and gets the child result slot.
     auto [childStage, childOutputs] = build(childNode, childReqs);
-    _shouldProduceRecordIdSlot = false;
 
     tassert(6075900,
             "Expected no optimized expressions but got: {}"_format(_state.preGeneratedExprs.size()),

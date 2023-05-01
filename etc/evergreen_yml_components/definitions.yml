@@ -102,6 +102,17 @@ variables:
     vars:
       resmoke_args: --help
 
+- &gen_burn_in_task_template
+  name: gen_burn_in_task_template
+  depends_on:
+  - name: version_burn_in_gen
+    variant: generate-tasks-for-version
+  - name: archive_dist_test_debug
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      resmoke_args: --help
+
 - &benchmark_template
   name: benchmark_template
   depends_on:
@@ -294,11 +305,13 @@ variables:
   - enterprise-rhel-80-64-bit-suggested
   - enterprise-rhel-82-arm64
   - enterprise-rhel-83-s390x
+  - enterprise-rhel-90-64-bit
   - enterprise-suse12-64
   - enterprise-suse15-64
   - enterprise-ubuntu1804-64
   - enterprise-ubuntu1804-arm64
   - enterprise-ubuntu2004-arm64
+  - enterprise-ubuntu2204-arm64
   - enterprise-ubuntu2004-64
   - enterprise-ubuntu2204-64
   - enterprise-windows
@@ -321,6 +334,7 @@ variables:
   - enterprise-rhel-80-64-bit-dynamic-required
   - enterprise-rhel-70-64-bit
   - enterprise-rhel-82-arm64
+  - enterprise-rhel-90-64-bit
   - enterprise-amazon2-arm64
   - enterprise-ubuntu1804-64
   - enterprise-ubuntu2004-64
@@ -347,10 +361,12 @@ variables:
   - ubi8
   - rhel80
   - rhel-82-arm64
+  - rhel90
   - enterprise-rhel-80-64-bit
   - enterprise-rhel-80-64-bit-suggested  # For testing selinux.
   - enterprise-rhel-82-arm64
   - enterprise-rhel-83-s390x
+  - enterprise-rhel-90-64-bit
   - suse12
   - enterprise-suse12-64
   - suse15
@@ -358,11 +374,13 @@ variables:
   - ubuntu1804
   - ubuntu1804-arm64
   - ubuntu2004-arm64
+  - ubuntu2204-arm64
   - ubuntu2004
   - ubuntu2204
   - enterprise-ubuntu1804-64
   - enterprise-ubuntu1804-arm64
   - enterprise-ubuntu2004-arm64
+  - enterprise-ubuntu2204-arm64
   - enterprise-ubuntu2004-64
   - enterprise-windows
   - windows
@@ -1037,6 +1055,38 @@ functions:
       files:
       - src/generated_resmoke_config/*.json
 
+  "generate version burn in":
+  - *f_expansions_write
+  - *configure_evergreen_api_credentials
+  - command: subprocess.exec
+    type: test
+    params:
+      binary: bash
+      args:
+      - "./src/evergreen/generate_version_burn_in.sh"
+  - command: archive.targz_pack
+    params:
+      target: generate_tasks_config.tgz
+      source_dir: src/generated_resmoke_config
+      include:
+      - "*"
+  - command: s3.put
+    params:
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: generate_tasks_config.tgz
+      remote_file: ${project}/${revision}/generate_tasks/generated-burn-in-config-${version_id}.tgz
+      bucket: mciuploads
+      permissions: public-read
+      content_type: ${content_type|application/gzip}
+      display_name: Generated Burn In Task Config - Execution ${execution}
+      optional: true
+  - command: generate.tasks
+    params:
+      optional: true
+      files:
+      - src/generated_resmoke_config/*.json
+
   "generate resmoke tasks":
   - *fetch_artifacts
   - *f_expansions_write
@@ -1506,14 +1556,31 @@ functions:
       args:
       - "./src/evergreen/do_watchdog_setup.sh"
 
-  "run kitchen":
+  "run package test":
   - *f_expansions_write
   - command: subprocess.exec
     type: test
     params:
       binary: bash
+      add_expansions_to_env: true
       args:
-      - "./src/evergreen/kitchen_run.sh"
+      - "src/evergreen/run_python_script.sh"
+      - "buildscripts/package_test.py"
+      - "--os=none"
+      - "--extra-test"
+      - "${packager_distro}"
+      - "https://s3.amazonaws.com/mciuploads/${project}/${build_variant}/${revision}/artifacts/${build_id}-packages.tgz"
+
+  "run complete package test":
+  - *f_expansions_write
+  - command: subprocess.exec
+    type: test
+    params:
+      binary: bash
+      add_expansions_to_env: true
+      args:
+      - "src/evergreen/run_python_script.sh"
+      - "buildscripts/package_test.py"
 
   "set up EC2 instance": &set_up_ec2_instance
 
@@ -2581,26 +2648,6 @@ tasks:
 ## clang_tidy - run clang_tidy
 - name: clang_tidy
   tags: []
-  exec_timeout_secs: 3600 # 1 hour timeout for the task overall
-  depends_on:
-  - name: version_expansions_gen
-    variant: generate-tasks-for-version
-  commands:
-  - func: "scons compile"
-    vars:
-      targets: compiledb
-      compiling_for_test: true
-  - command: subprocess.exec
-    type: test
-    timeout_secs: 3600 # 1 hour timeout for no output
-    params:
-      binary: bash
-      args:
-      - "./src/evergreen/run_clang_tidy.sh"
-
-## clang_tidy_condensed - run clang_tidy with python making the results clearer
-- name: clang_tidy_condensed
-  tags: []
   exec_timeout_secs: 7200 # 1 hour timeout for the task overall
   depends_on:
   - name: version_expansions_gen
@@ -2616,7 +2663,7 @@ tasks:
     params:
       binary: bash
       args:
-      - "./src/evergreen/run_clang_tidy_condensed.sh"
+      - "./src/evergreen/run_clang_tidy.sh"
 
 ## compile_unittests ##
 - &compile_unittests
@@ -3095,7 +3142,7 @@ tasks:
       task_compile_flags: >-
         --allocator=system
         --enable-free-mon=off
-        --enterprise-features=fle
+        --enterprise-features=fle,search
         --js-engine=none
         --link-model=dynamic-sdk
         --enable-http-client=off
@@ -3133,7 +3180,7 @@ tasks:
         --opt=off
         --allocator=system
         --enable-free-mon=off
-        --enterprise-features=fle
+        --enterprise-features=fle,search
         --js-engine=none
         --link-model=dynamic-sdk
         DESTDIR='$BUILD_ROOT/crypt-lib-$MONGO_VERSION'
@@ -3171,7 +3218,7 @@ tasks:
       task_compile_flags: >-
         --allocator=system
         --enable-free-mon=off
-        --enterprise-features=fle
+        --enterprise-features=fle,search
         --js-engine=none
         --link-model=static
         DESTDIR='$BUILD_ROOT/crypt-lib-$MONGO_VERSION'
@@ -3367,7 +3414,7 @@ tasks:
       args:
       - "src/evergreen/check_idl_compat.sh"
 
-- <<: *gen_task_template
+- <<: *gen_burn_in_task_template
   name: burn_in_tests_gen
   tags: []
   commands:
@@ -3412,6 +3459,30 @@ tasks:
 #       resmoke_jobs_max: 1
 #   - func: "send benchmark results"
 #   - func: "analyze benchmark results"
+
+- <<: *benchmark_template
+  name: benchmarks_expression
+  tags: ["benchmarks"]
+  commands:
+    - func: "do benchmark setup"
+    - func: "run tests"
+      vars:
+        suite: benchmarks_expression
+        exec_timeout_secs: 18000  # 5 hour timeout.
+        resmoke_jobs_max: 1
+    - func: "send benchmark results"
+
+- <<: *benchmark_template
+  name: benchmarks_expression_sbe
+  tags: ["benchmarks"]
+  commands:
+    - func: "do benchmark setup"
+    - func: "run tests"
+      vars:
+        suite: benchmarks_expression_sbe
+        exec_timeout_secs: 18000  # 5 hour timeout.
+        resmoke_jobs_max: 1
+    - func: "send benchmark results"
 
 - <<: *run_jepsen_template
   name: jepsen_register_findAndModify
@@ -3618,7 +3689,7 @@ tasks:
 ## Standalone fuzzer for checking timeseries optimizations correctness ##
 - <<: *jstestfuzz_template
   name: aggregation_timeseries_fuzzer_gen
-  tags: ["aggfuzzer", "common", "timeseries", "require_npm", "random_name"]
+  tags: ["aggfuzzer", "common", "timeseries", "require_npm", "random_name", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3707,7 +3778,7 @@ tasks:
 ## jstestfuzz standalone update time-series generational fuzzer ##
 - <<: *jstestfuzz_template
   name: update_timeseries_fuzzer_gen
-  tags: ["updatefuzzer", "require_npm", "random_name"]
+  tags: ["updatefuzzer", "require_npm", "random_name", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -3722,7 +3793,7 @@ tasks:
 ## jstestfuzz replication update generational fuzzer ##
 - <<: *jstestfuzz_template
   name: update_fuzzer_replication_gen
-  tags: ["updatefuzzer", "require_npm", "random_name", "multiversion"]
+  tags: ["updatefuzzer", "require_npm", "random_name", "multiversion", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -4372,7 +4443,7 @@ tasks:
 
 - <<: *task_template
   name: aggregation_read_concern_majority_passthrough
-  tags: ["aggregation", "read_write_concern"]
+  tags: ["aggregation", "read_write_concern", "no_debug_mode"]
   depends_on:
   - name: aggregation
   commands:
@@ -4432,7 +4503,7 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
 
-- <<: *gen_task_template
+- <<: *gen_burn_in_task_template
   name: burn_in_tags_gen
   tags: []
   commands:
@@ -4449,6 +4520,18 @@ tasks:
   - func: "set up venv"
   - func: "upload pip requirements"
   - func: "generate version"
+
+- name: version_burn_in_gen
+  commands:
+  - command: manifest.load
+  - *git_get_project
+  - *f_expansions_write
+  - *add_git_tag
+  - *kill_processes
+  - *cleanup_environment
+  - func: "set up venv"
+  - func: "upload pip requirements"
+  - func: "generate version burn in"
 
 - name: version_expansions_gen
   commands:
@@ -4507,7 +4590,7 @@ tasks:
 
 - <<: *task_template
   name: change_streams_mongos_passthrough
-  tags: ["change_streams"]
+  tags: ["change_streams", "no_debug_mode"]
   depends_on:
   - name: change_streams
   commands:
@@ -4576,7 +4659,7 @@ tasks:
 
 - <<: *task_template
   name: change_streams_whole_db_mongos_passthrough
-  tags: ["change_streams"]
+  tags: ["change_streams", "no_debug_mode"]
   depends_on:
   - name: change_streams_mongos_passthrough
   commands:
@@ -4612,7 +4695,7 @@ tasks:
 
 - <<: *task_template
   name: change_streams_whole_cluster_mongos_passthrough
-  tags: ["change_streams"]
+  tags: ["change_streams", "no_debug_mode"]
   depends_on:
   - name: change_streams_mongos_passthrough
   commands:
@@ -5222,7 +5305,7 @@ tasks:
 
 - <<: *gen_task_template
   name: noPassthrough_gen
-  tags: ["misc_js"]
+  tags: ["misc_js", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5345,7 +5428,7 @@ tasks:
 
 - <<: *gen_task_template
   name: multi_shard_multi_stmt_txn_stepdown_primary_jscore_passthrough_gen
-  tags: ["multi_shard"]
+  tags: ["multi_shard", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5402,6 +5485,23 @@ tasks:
       use_large_distro: "true"
       fallback_num_sub_suites: 10
 
+# TODO(SERVER-57896): Add "serverless" tag to shard merge passthrough when no longer feature flagged
+- <<: *gen_task_template
+  name: shard_merge_jscore_passthrough_gen
+  tags: ["shard_merge"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
+- <<: *gen_task_template
+  name: shard_merge_causally_consistent_jscore_passthrough_gen
+  tags: ["shard_merge"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
 - <<: *gen_task_template
   name: tenant_migration_jscore_passthrough_gen
   tags: ["serverless"]
@@ -5421,6 +5521,15 @@ tasks:
 - <<: *gen_task_template
   name: tenant_migration_multi_stmt_txn_jscore_passthrough_gen
   tags: ["serverless", "txn"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
+# TODO(SERVER-68643): Add "serverless" tag to shard merge passthrough when no longer feature flagged
+- <<: *gen_task_template
+  name: shard_merge_multi_stmt_txn_jscore_passthrough_gen
+  tags: ["shard_merge"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5543,7 +5652,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_replication_multi_stmt_txn_gen
-  tags: ["concurrency", "common", "repl", "txn"]
+  tags: ["concurrency", "common", "repl", "txn", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5595,7 +5704,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_replication_gen
-  tags: ["concurrency", "common", "read_concern_maj", "large", "sharded"]
+  tags: ["concurrency", "common", "read_concern_maj", "large", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5612,7 +5721,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_replication_with_balancer_gen
-  tags: ["concurrency", "common", "read_concern_maj", "large", "sharded"]
+  tags: ["concurrency", "common", "read_concern_maj", "large", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5643,7 +5752,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_clusterwide_ops_add_remove_shards_gen
-  tags: ["concurrency", "common", "read_concern_maj", "large", "sharded"]
+  tags: ["concurrency", "common", "read_concern_maj", "large", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5652,7 +5761,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_causal_consistency_gen
-  tags: ["concurrency", "non_live_record", "sharded"]
+  tags: ["concurrency", "non_live_record", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5661,7 +5770,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_causal_consistency_and_balancer_gen
-  tags: ["concurrency", "large", "non_live_record", "sharded"]
+  tags: ["concurrency", "large", "non_live_record", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5670,7 +5779,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_with_stepdowns_gen
-  tags: ["concurrency", "stepdowns", "large", "sharded"]
+  tags: ["concurrency", "stepdowns", "large", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5679,7 +5788,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_with_stepdowns_and_balancer_gen
-  tags: ["concurrency", "stepdowns", "large", "sharded"]
+  tags: ["concurrency", "stepdowns", "large", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5688,7 +5797,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_terminate_primary_with_balancer_gen
-  tags: ["concurrency", "stepdowns", "kill_terminate", "sharded"]
+  tags: ["concurrency", "stepdowns", "kill_terminate", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5697,7 +5806,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_kill_primary_with_balancer_gen
-  tags: ["concurrency", "stepdowns", "kill_terminate", "sharded"]
+  tags: ["concurrency", "stepdowns", "kill_terminate", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5706,7 +5815,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_multi_stmt_txn_gen
-  tags: ["concurrency", "large", "sharded"]
+  tags: ["concurrency", "large", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5715,7 +5824,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_multi_stmt_txn_with_balancer_gen
-  tags: ["concurrency", "large", "sharded"]
+  tags: ["concurrency", "large", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5724,7 +5833,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_local_read_write_multi_stmt_txn_gen
-  tags: ["concurrency", "large", "sharded"]
+  tags: ["concurrency", "large", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5733,7 +5842,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_local_read_write_multi_stmt_txn_with_balancer_gen
-  tags: ["concurrency", "large", "sharded"]
+  tags: ["concurrency", "large", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5742,7 +5851,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_multi_stmt_txn_with_stepdowns_gen
-  tags: ["concurrency", "stepdowns", "large", "sharded"]
+  tags: ["concurrency", "stepdowns", "large", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5751,7 +5860,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_multi_stmt_txn_terminate_primary_gen
-  tags: ["concurrency", "stepdowns", "kill_terminate", "sharded"]
+  tags: ["concurrency", "stepdowns", "kill_terminate", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5760,7 +5869,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_multi_stmt_txn_kill_primary_gen
-  tags: ["concurrency", "stepdowns", "kill_terminate", "sharded"]
+  tags: ["concurrency", "stepdowns", "kill_terminate", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5863,7 +5972,7 @@ tasks:
 
 - <<: *gen_task_template
   name: replica_sets_ese_gen
-  tags: ["replica_sets", "encrypt", "san"]
+  tags: ["replica_sets", "encrypt", "san", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5871,7 +5980,7 @@ tasks:
 
 - <<: *gen_task_template
   name: replica_sets_ese_gcm_gen
-  tags: ["replica_sets", "encrypt", "san", "gcm"]
+  tags: ["replica_sets", "encrypt", "san", "gcm", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5879,7 +5988,7 @@ tasks:
 
 - <<: *gen_task_template
   name: replica_sets_auth_gen
-  tags: ["replica_sets", "common", "san", "auth"]
+  tags: ["replica_sets", "common", "san", "auth", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5955,7 +6064,7 @@ tasks:
 
 - <<: *gen_task_template
   name: sharding_ese_gen
-  tags: ["sharding", "encrypt"]
+  tags: ["sharding", "encrypt", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5963,7 +6072,7 @@ tasks:
 
 - <<: *gen_task_template
   name: sharding_ese_gcm_gen
-  tags: ["sharding", "encrypt", "gcm"]
+  tags: ["sharding", "encrypt", "gcm", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5971,7 +6080,7 @@ tasks:
 
 - <<: *gen_task_template
   name: sharding_auth_gen
-  tags: ["sharding", "auth"]
+  tags: ["sharding", "auth", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5979,7 +6088,7 @@ tasks:
 
 - <<: *gen_task_template
   name: sharding_auth_audit_gen
-  tags: ["auth", "audit", "non_live_record"]
+  tags: ["auth", "audit", "non_live_record", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5987,7 +6096,7 @@ tasks:
 
 - <<: *gen_task_template
   name: sharding_hello_failures_gen
-  tags: ["concurrency", "large", "sharded"]
+  tags: ["concurrency", "large", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -6302,7 +6411,7 @@ tasks:
 
 - <<: *task_template
   name: ocsp
-  tags: ["ssl", "encrypt", "ocsp", "patch_build"]
+  tags: ["ssl", "encrypt", "ocsp", "patch_build", "no_debug_mode"]
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -6498,7 +6607,41 @@ tasks:
   - func: "run selinux tests"
     vars:
       distro: rhel80-selinux
+- name: selinux_rhel9_org
+  tags: []
+  depends_on:
+  - name: archive_dist_test
+  - name: package
+  commands:
+  - command: manifest.load
+  - func: "git get project and add git tag"
+  - *f_expansions_write
+  - func: "set up venv"
+  - func: "fetch packages"
+  - func: "fetch binaries"
+  - func: "extract binaries"
+  - func: "run selinux tests"
+    vars:
+      distro: rhel90-selinux
+      test_list: jstests/selinux/*.js
+- name: selinux_rhel9_enterprise
+  tags: []
+  depends_on:
+  - name: archive_dist_test
+  - name: package
+  commands:
+  - command: manifest.load
+  - func: "git get project and add git tag"
+  - *f_expansions_write
+  - func: "set up venv"
+  - func: "fetch packages"
+  - func: "fetch binaries"
+  - func: "extract binaries"
+  - func: "run selinux tests"
+    vars:
+      distro: rhel90-selinux
       test_list: jstests/selinux/*.js src/mongo/db/modules/enterprise/jstests/selinux/*.js
+
 
 - name: selinux_rhel7_org
   tags: []
@@ -6618,13 +6761,20 @@ tasks:
   - *kill_processes
   - *cleanup_environment
   - *set_up_venv
-  - func: "set up remote credentials"
-    vars:
-      private_key_file: ~/.ssh/kitchen.pem
-      private_key_remote: ${kitchen_private_key}
-      aws_key_remote: ${kitchen_aws_key}
-      aws_secret_remote: ${kitchen_aws_secret}
-  - func: "run kitchen"
+  - func: "run package test"
+
+- name: test_packages_complete
+  tags: []
+  depends_on:
+  - name: package
+  commands:
+  - command: manifest.load
+  - func: "git get project and add git tag"
+  - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
+  - *set_up_venv
+  - func: "run complete package test"
 
 - name: package
   tags: []
@@ -7842,39 +7992,8 @@ task_groups:
   tasks:
   - build_metrics_tasks_gen
 
-- name: clang_tidy_TG
-  setup_group_can_fail_task: true
-  setup_group:
-  - command: manifest.load
-  - func: "git get project and add git tag"
-  - func: "set task expansion macros"
-  - func: "f_expansions_write"
-  - func: "kill processes"
-  - func: "cleanup environment"
-  - func: "set up venv"
-  - func: "upload pip requirements"
-  - func: "configure evergreen api credentials"
-  - func: "get buildnumber"
-  - func: "f_expansions_write"
-  - func: "set up credentials"
-  - func: "set up win mount script"
-  - func: "generate compile expansions"
-  teardown_group:
-  - func: "f_expansions_write"
-  - func: "attach report"
-  - func: "umount shared scons directory"
-  - func: "cleanup environment"
-  setup_task:
-  - func: "apply compile expansions"
-  - func: "f_expansions_write"
-  - func: "set task expansion macros"
-  - func: "f_expansions_write"
-  teardown_task:
-  tasks:
-  - clang_tidy
 
-# This is a copy of clang_tidy_TG and will hopefully replace it
-- name: clang_tidy_condensed_TG
+- name: clang_tidy_TG
   setup_group_can_fail_task: true
   setup_group:
   - command: manifest.load
@@ -7904,7 +8023,7 @@ task_groups:
   - func: "f_expansions_write"
   teardown_task:
   tasks:
-  - clang_tidy_condensed
+  - clang_tidy
 
 - name: visibility_test_TG
   setup_group_can_fail_task: true

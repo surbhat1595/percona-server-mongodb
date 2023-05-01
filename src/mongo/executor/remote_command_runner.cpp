@@ -48,13 +48,12 @@ public:
      *
      * Do not call directly - this is not part of the public API.
      */
-    ExecutorFuture<RemoteCommandInternalResponse> _doRequest(
-        StringData dbName,
-        BSONObj cmdBSON,
-        std::unique_ptr<RemoteCommandHostTargeter> targeter,
-        OperationContext* opCtx,
-        std::shared_ptr<TaskExecutor> exec,
-        CancellationToken token) final {
+    ExecutorFuture<RemoteCommandInternalResponse> _doRequest(StringData dbName,
+                                                             BSONObj cmdBSON,
+                                                             RemoteCommandHostTargeter* targeter,
+                                                             OperationContext* opCtx,
+                                                             std::shared_ptr<TaskExecutor> exec,
+                                                             CancellationToken token) final {
         return targeter->resolve(token)
             .thenRunOn(exec)
             .then([dbName, cmdBSON, opCtx, exec = std::move(exec), token](
@@ -65,14 +64,16 @@ public:
                     targets, dbName.toString(), cmdBSON, rpc::makeEmptyMetadata(), opCtx);
                 return exec->scheduleRemoteCommandOnAny(executorRequest, token);
             })
-            .then([&, exec = std::move(exec)](RemoteCommandOnAnyResponse r) {
-                // Ensure the command didn't have a local error, or any remote errors, preferring
-                // to propogate ok: 0 errors over writeConcern errors over write errors.
-                iassert(r.status);
-                iassert(getStatusFromCommandResult(r.data));
-                iassert(getWriteConcernStatusFromCommandResult(r.data));
-                iassert(getFirstWriteErrorStatusFromCommandResult(r.data));
-
+            .onError([](Status s) -> StatusWith<TaskExecutor::ResponseOnAnyStatus> {
+                // If there was a scheduling error or other local error before the
+                // command was accepted by the executor.
+                return Status{RemoteCommandExecutionErrorInfo(s),
+                              "Remote command execution failed"};
+            })
+            .then([](TaskExecutor::ResponseOnAnyStatus r) {
+                // TODO SERVER-69592 account for interior executor shutdown
+                auto s = makeErrorIfNeeded(r);
+                uassertStatusOK(s);
                 return RemoteCommandInternalResponse{r.data, r.target.get()};
             });
     }

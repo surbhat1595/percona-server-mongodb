@@ -181,6 +181,10 @@ void IndexCatalogEntryImpl::setIsReady(bool newIsReady) {
     _isReady = newIsReady;
 }
 
+void IndexCatalogEntryImpl::setIsFrozen(bool newIsFrozen) {
+    _isFrozen = newIsFrozen;
+}
+
 void IndexCatalogEntryImpl::setMultikey(OperationContext* opCtx,
                                         const CollectionPtr& collection,
                                         const KeyStringSet& multikeyMetadataKeys,
@@ -372,8 +376,13 @@ Status IndexCatalogEntryImpl::_setMultikeyInMultiDocumentTransaction(
 }
 
 std::shared_ptr<Ident> IndexCatalogEntryImpl::getSharedIdent() const {
-    return _accessMethod ? std::shared_ptr<Ident>{shared_from_this(), _accessMethod->getIdentPtr()}
-                         : nullptr;
+    return _accessMethod ? _accessMethod->getSharedIdent() : nullptr;
+}
+
+void IndexCatalogEntryImpl::setIdent(std::shared_ptr<Ident> newIdent) {
+    if (!_accessMethod)
+        return;
+    _accessMethod->setIdent(std::move(newIdent));
 }
 
 // ----

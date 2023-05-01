@@ -88,6 +88,7 @@ enum class ServerParameterType {
     kClusterWide,
 };
 
+class FeatureFlag;
 class ServerParameterSet;
 class OperationContext;
 
@@ -197,7 +198,7 @@ public:
      * retrieving it via this method.
      */
     virtual LogicalTime getClusterParameterTime(const boost::optional<TenantId>& tenantId) const {
-        MONGO_UNREACHABLE;
+        return LogicalTime::kUninitialized;
     }
 
     bool isTestOnly() const {
@@ -217,15 +218,22 @@ public:
     }
 
     virtual bool isEnabled() const {
-        return true;
+        return !featureFlagIsDisabled();
+    }
+
+    void setFeatureFlag(FeatureFlag* featureFlag) {
+        _featureFlag = featureFlag;
     }
 
 protected:
+    bool featureFlagIsDisabled() const;
+
     // Helper for translating setParameter values from BSON to string.
     StatusWith<std::string> _coerceToString(const BSONElement&);
 
 private:
     std::string _name;
+    FeatureFlag* _featureFlag = nullptr;
     ServerParameterType _type;
     bool _testOnly = false;
     bool _redact = false;

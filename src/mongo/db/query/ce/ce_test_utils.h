@@ -32,6 +32,8 @@
 #include <cstddef>
 #include <sys/types.h>
 
+#include "mongo/db/query/ce/histogram_estimation.h"
+#include "mongo/db/query/ce/scalar_histogram.h"
 #include "mongo/db/query/optimizer/cascades/interfaces.h"
 #include "mongo/db/query/optimizer/opt_phase_manager.h"
 
@@ -49,6 +51,7 @@ class CEInterface;
 namespace ce {
 
 using namespace optimizer;
+using namespace sbe;
 
 // Enable this flag to log all estimates, and let all tests pass.
 constexpr bool kCETestLogOnly = false;
@@ -56,12 +59,11 @@ constexpr bool kCETestLogOnly = false;
 const double kMaxCEError = 0.01;
 const CEType kInvalidCardinality = -1.0;
 
-const OptPhaseManager::PhaseSet kDefaultCETestPhaseSet{
-    OptPhaseManager::OptPhase::MemoSubstitutionPhase,
-    OptPhaseManager::OptPhase::MemoExplorationPhase,
-    OptPhaseManager::OptPhase::MemoImplementationPhase};
+const OptPhaseManager::PhaseSet kDefaultCETestPhaseSet{OptPhase::MemoSubstitutionPhase,
+                                                       OptPhase::MemoExplorationPhase,
+                                                       OptPhase::MemoImplementationPhase};
 
-const OptPhaseManager::PhaseSet kOnlySubPhaseSet{OptPhaseManager::OptPhase::MemoSubstitutionPhase};
+const OptPhaseManager::PhaseSet kOnlySubPhaseSet{OptPhase::MemoSubstitutionPhase};
 
 const OptPhaseManager::PhaseSet kNoOptPhaseSet{};
 
@@ -70,19 +72,40 @@ const OptPhaseManager::PhaseSet kNoOptPhaseSet{};
  * expecting.
  */
 
-#define _ASSERT_MATCH_CE(ce, predicate, expectedCE)                        \
-    if constexpr (kCETestLogOnly) {                                        \
-        ce.getCE(predicate);                                               \
-        ASSERT_APPROX_EQUAL(1.0, 1.0, kMaxCEError);                        \
-    } else {                                                               \
-        ASSERT_APPROX_EQUAL(expectedCE, ce.getCE(predicate), kMaxCEError); \
+#define _ASSERT_CE(estimatedCE, expectedCE)                             \
+    if constexpr (kCETestLogOnly) {                                     \
+        if (std::abs(estimatedCE - expectedCE) > kMaxCEError) {         \
+            std::cout << "ERROR: expected " << expectedCE << std::endl; \
+        }                                                               \
+        ASSERT_APPROX_EQUAL(1.0, 1.0, kMaxCEError);                     \
+    } else {                                                            \
+        ASSERT_APPROX_EQUAL(estimatedCE, expectedCE, kMaxCEError);      \
     }
+#define _PREDICATE(field, predicate) (str::stream() << "{" << field << ": " << predicate "}")
+#define _ELEMMATCH_PREDICATE(field, predicate) \
+    (str::stream() << "{" << field << ": {$elemMatch: " << predicate << "}}")
 
-#define ASSERT_MATCH_CE(ce, predicate, expectedCE) _ASSERT_MATCH_CE(ce, predicate, expectedCE)
+// This macro verifies the cardinality of a pipeline or an input ABT.
+#define ASSERT_CE(ce, pipeline, expectedCE) _ASSERT_CE(ce.getCE(pipeline), (expectedCE))
 
+// This macro does the same as above but also sets the collection cardinality.
+#define ASSERT_CE_CARD(ce, pipeline, expectedCE, collCard) \
+    ce.setCollCard(collCard);                              \
+    ASSERT_CE(ce, pipeline, expectedCE)
+
+// This macro verifies the cardinality of a pipeline with a single $match predicate.
+#define ASSERT_MATCH_CE(ce, predicate, expectedCE) \
+    _ASSERT_CE(ce.getMatchCE(predicate), (expectedCE))
+
+// This macro does the same as above but also sets the collection cardinality.
 #define ASSERT_MATCH_CE_CARD(ce, predicate, expectedCE, collCard) \
     ce.setCollCard(collCard);                                     \
     ASSERT_MATCH_CE(ce, predicate, expectedCE)
+
+// This macro tests cardinality of two versions of the predicate; with and without $elemMatch.
+#define ASSERT_EQ_ELEMMATCH_CE(tester, expectedCE, elemMatchExpectedCE, field, predicate) \
+    ASSERT_MATCH_CE(tester, _PREDICATE(field, predicate), expectedCE);                    \
+    ASSERT_MATCH_CE(tester, _ELEMMATCH_PREDICATE(field, predicate), elemMatchExpectedCE)
 
 /**
  * A test utility class for helping verify the cardinality of CE transports on a given $match
@@ -90,6 +113,10 @@ const OptPhaseManager::PhaseSet kNoOptPhaseSet{};
  */
 class CETester {
 public:
+    /**
+     * The tester initializes at least one collection with the name 'collName' and the cardinality
+     * 'numRecords' in the metadata.
+     */
     CETester(std::string collName,
              double numRecords,
              const OptPhaseManager::PhaseSet& optPhases = kDefaultCETestPhaseSet);
@@ -97,19 +124,40 @@ public:
     /**
      * Returns the estimated cardinality of a given 'matchPredicate'.
      */
-    CEType getCE(const std::string& matchPredicate) const;
+    CEType getMatchCE(const std::string& matchPredicate) const;
+
+    /**
+     * Returns the estimated cardinality of a given 'pipeline'.
+     */
+    CEType getCE(const std::string& pipeline) const;
 
     /**
      * Returns the estimated cardinality of a given 'abt'.
      */
     CEType getCE(ABT& abt) const;
 
-    void setCollCard(double card) {
-        _collCard = card;
-    }
+    /**
+     * Updates the cardinality of the collection '_collName'.
+     */
+    void setCollCard(double card);
 
-    void setIndexes(opt::unordered_map<std::string, IndexDefinition>&& indexes) {
-        _indexes = std::move(indexes);
+    /**
+     * Updates the indexes used by the collection '_collName'.
+     */
+    void setIndexes(opt::unordered_map<std::string, IndexDefinition> indexes);
+
+    /**
+     * Adds a ScanDefinition for an additional collection for the test.
+     */
+    void addCollection(std::string collName,
+                       double numRecords,
+                       opt::unordered_map<std::string, IndexDefinition> indexes = {});
+
+    /**
+     * Prevents the optimizer from generating collection scan plans.
+     */
+    void setDisableScan(bool disableScan) {
+        _hints._disableScan = disableScan;
     }
 
 protected:
@@ -119,14 +167,47 @@ protected:
     virtual std::unique_ptr<cascades::CEInterface> getCETransport() const = 0;
 
 private:
-    std::string _collName;
-    // The number of records in the collection we are testing.
-    double _collCard;
+    /**
+     * Helper to find the ScanDefinition of '_collName' in _metadata.
+     */
+    ScanDefinition& getCollScanDefinition();
+
     // Phases to use when optimizing an input query.
     const OptPhaseManager::PhaseSet& _optPhases;
-    opt::unordered_map<std::string, IndexDefinition> _indexes;
+
+    // Used to initialize the OptPhaseManager.
     mutable PrefixId _prefixId;
+
+    // Allows us to pass hints to the optimizer.
+    QueryHints _hints;
+
+    // Stores the ScanDefinitions for all collections defined in the test.
+    Metadata _metadata;
+
+    // Name of the collection tests will be executed against.
+    std::string _collName;
 };
+
+/**
+ * Test utility for helping with creation of manual histograms in the unit tests.
+ */
+struct BucketData {
+    Value _v;
+    double _equalFreq;
+    double _rangeFreq;
+    double _ndv;
+
+    BucketData(Value v, double equalFreq, double rangeFreq, double ndv)
+        : _v(v), _equalFreq(equalFreq), _rangeFreq(rangeFreq), _ndv(ndv) {}
+    BucketData(const std::string& v, double equalFreq, double rangeFreq, double ndv)
+        : BucketData(Value(v), equalFreq, rangeFreq, ndv) {}
+    BucketData(int v, double equalFreq, double rangeFreq, double ndv)
+        : BucketData(Value(v), equalFreq, rangeFreq, ndv) {}
+};
+
+ScalarHistogram createHistogram(const std::vector<BucketData>& data);
+
+double estimateIntValCard(const ScalarHistogram& hist, int v, EstimationType type);
 
 }  // namespace ce
 }  // namespace mongo

@@ -35,6 +35,17 @@
 
 namespace mongo::global_index {
 
+// The container (collection) fields of an index key. The document key is stored as a BSON object.
+// The index key is stored in its KeyString representation, hence the need to store TypeBits.
+constexpr auto kContainerIndexDocKeyFieldName = "_id"_sd;
+constexpr auto kContainerIndexKeyFieldName = "ik"_sd;
+constexpr auto kContainerIndexKeyTypeBitsFieldName = "tb"_sd;
+
+// The oplog entry fields representing an insert or delete of an index key. The index key and the
+// document key are BSON objects.
+constexpr auto kOplogEntryDocKeyFieldName = "dk"_sd;
+constexpr auto kOplogEntryIndexKeyFieldName = kContainerIndexKeyFieldName;
+
 /**
  * Creates the internal collection implements the global index container with the given UUID on the
  * shard. Replicates as a 'createGlobalIndex' command. This container-backing collection:
@@ -56,6 +67,16 @@ void dropContainer(OperationContext* opCtx, const UUID& indexUUID);
  * - 'docKey' is the document key of the index entry.
  */
 void insertKey(OperationContext* opCtx,
+               const UUID& indexUUID,
+               const BSONObj& key,
+               const BSONObj& docKey);
+
+/**
+ * Deletes a key from the global index container identified by UUID. Replicates as an 'xd' command.
+ * - 'key' is the unique index key.
+ * - 'docKey' is the document key of the index entry.
+ */
+void deleteKey(OperationContext* opCtx,
                const UUID& indexUUID,
                const BSONObj& key,
                const BSONObj& docKey);

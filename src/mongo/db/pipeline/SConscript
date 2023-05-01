@@ -55,8 +55,8 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/query/query_knobs',
+        '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/server_options',
-        '$BUILD_DIR/mongo/idl/feature_flag',
     ],
 )
 
@@ -111,6 +111,7 @@ env.Library(
         'accumulator_exp_moving_avg.cpp',
         'accumulator_first.cpp',
         'accumulator_integral.cpp',
+        'accumulator_internal_construct_stats.cpp',
         'accumulator_js_reduce.cpp',
         'accumulator_last.cpp',
         'accumulator_locf.cpp',
@@ -240,6 +241,7 @@ pipelineEnv.Library(
         'abt/expr_algebrizer_context.cpp',
         'abt/field_map_builder.cpp',
         'abt/match_expression_visitor.cpp',
+        'abt/projection_ast_visitor.cpp',
         'abt/transformer_visitor.cpp',
         'abt/utils.cpp',
         'document_source.cpp',
@@ -498,7 +500,8 @@ env.Library(
 env.CppUnitTest(
     target='db_pipeline_test',
     source=[
-        'abt/abt_pipeline_test.cpp',
+        'abt/abt_optimization_test.cpp',
+        'abt/abt_translation_test.cpp',
         'accumulator_js_test.cpp' if get_option('js-engine') != 'none' else [],
         'accumulator_test.cpp',
         'aggregation_request_test.cpp',
@@ -655,6 +658,21 @@ env.CppUnitTest(
     ],
 )
 
+bmEnv = env.Clone()
+bmEnv.InjectThirdParty(libraries=["benchmark"])
+
+bmEnv.Library(
+    target='expression_bm_fixture',
+    source=[
+        'expression_bm_fixture.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/exec/document_value/document_value',
+        '$BUILD_DIR/third_party/shim_benchmark',
+    ],
+)
+
 env.Benchmark(
     target='expression_bm',
     source=[
@@ -662,7 +680,7 @@ env.Benchmark(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/query/query_test_service_context',
-        '$BUILD_DIR/mongo/db/query_expressions',
-        '$BUILD_DIR/mongo/db/service_context_test_fixture',
+        '$BUILD_DIR/mongo/db/query_expressions', '$BUILD_DIR/mongo/db/service_context_test_fixture',
+        'expression_bm_fixture'
     ],
 )

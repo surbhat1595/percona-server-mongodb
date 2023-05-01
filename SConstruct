@@ -5331,6 +5331,7 @@ if (get_option('ninja') != "disabled" and ('ICECC' not in env or not env['ICECC'
 
 if get_option('ninja') != 'disabled':
 
+    env.AppendUnique(CCFLAGS=["-fdiagnostics-color"])
     if 'ICECREAM_VERSION' in env and not env.get('CCACHE', None):
         if env['ICECREAM_VERSION'] < parse_version("1.2"):
             env.FatalError(
@@ -5577,8 +5578,9 @@ if env['SPLIT_DWARF'] == "auto":
     # For static builds, splitting out the dwarf info reduces memory requirments, link time
     # and binary size significantly. It's affect is less prominent in dynamic builds. The downside
     # is .dwo files use absolute paths in the debug info, so it's not relocatable.
-    env['SPLIT_DWARF'] = not link_model == "dynamic" and env.ToolchainIs(
-        'gcc', 'clang') and env.CheckCCFLAGSSupported('-gsplit-dwarf')
+    env['SPLIT_DWARF'] = (not link_model == "dynamic" and env.ToolchainIs('gcc', 'clang')
+                          and not env.TargetOSIs('darwin')
+                          and env.CheckCCFLAGSSupported('-gsplit-dwarf'))
 
 if env['SPLIT_DWARF']:
     if env.ToolchainIs('gcc', 'clang'):

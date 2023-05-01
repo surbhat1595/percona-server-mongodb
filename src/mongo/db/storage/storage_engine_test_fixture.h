@@ -56,8 +56,8 @@ public:
             std::make_unique<repl::ReplicationCoordinatorMock>(getServiceContext()));
     }
 
-    StatusWith<DurableCatalog::Entry> createCollection(OperationContext* opCtx,
-                                                       NamespaceString ns) {
+    StatusWith<DurableCatalog::EntryIdentifier> createCollection(OperationContext* opCtx,
+                                                                 NamespaceString ns) {
         AutoGetDb db(opCtx, ns.dbName(), LockMode::MODE_X);
         CollectionOptions options;
         options.uuid = UUID::gen();
@@ -76,7 +76,8 @@ public:
             _storageEngine->getCatalog()->getMetaData(opCtx, catalogId),
             std::move(rs));
         CollectionCatalog::write(opCtx, [&](CollectionCatalog& catalog) {
-            catalog.registerCollection(opCtx, options.uuid.get(), std::move(coll));
+            catalog.registerCollection(
+                opCtx, options.uuid.get(), std::move(coll), /*ts=*/boost::none);
         });
 
         return {{_storageEngine->getCatalog()->getEntry(catalogId)}};
@@ -128,7 +129,7 @@ public:
     }
 
     bool collectionExists(OperationContext* opCtx, const NamespaceString& nss) {
-        std::vector<DurableCatalog::Entry> allCollections =
+        std::vector<DurableCatalog::EntryIdentifier> allCollections =
             _storageEngine->getCatalog()->getAllCatalogEntries(opCtx);
         return std::count_if(allCollections.begin(), allCollections.end(), [&](auto& entry) {
             return nss == entry.nss;

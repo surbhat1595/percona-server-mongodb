@@ -198,7 +198,7 @@ Status _abortIndexBuildsAndDrop(OperationContext* opCtx,
     // We only need to hold an intent lock to send abort signals to the active index builder on this
     // collection.
     boost::optional<AutoGetDb> optionalAutoDb(std::move(autoDb));
-    boost::optional<Lock::CollectionLock> collLock;
+    boost::optional<CollectionNamespaceOrUUIDLock> collLock;
     collLock.emplace(opCtx, startingNss, MODE_IX);
 
     // Abandon the snapshot as the index catalog will compare the in-memory state to the disk state,
@@ -233,7 +233,7 @@ Status _abortIndexBuildsAndDrop(OperationContext* opCtx,
     if (dropIfUUIDNotMatching && collectionUUID == *dropIfUUIDNotMatching) {
         return Status::OK();
     }
-    const NamespaceStringOrUUID dbAndUUID{coll->ns().db().toString(), coll->uuid()};
+    const NamespaceStringOrUUID dbAndUUID{coll->ns().dbName(), coll->uuid()};
     const int numIndexes = coll->getIndexCatalog()->numIndexesTotal(opCtx);
 
     while (true) {
@@ -254,7 +254,7 @@ Status _abortIndexBuildsAndDrop(OperationContext* opCtx,
                                                          << collectionUUID << ") is being dropped");
 
         // Take an exclusive lock to finish the collection drop.
-        optionalAutoDb.emplace(opCtx, startingNss.db(), MODE_IX);
+        optionalAutoDb.emplace(opCtx, startingNss.dbName(), MODE_IX);
         collLock.emplace(opCtx, dbAndUUID, MODE_X);
 
         // Abandon the snapshot as the index catalog will compare the in-memory state to the
@@ -362,7 +362,7 @@ Status _dropCollection(OperationContext* opCtx,
             auto db = autoDb.getDb();
             if (!db) {
                 return expectedUUID
-                    ? Status{CollectionUUIDMismatchInfo(collectionName.db().toString(),
+                    ? Status{CollectionUUIDMismatchInfo(collectionName.dbName(),
                                                         *expectedUUID,
                                                         collectionName.coll().toString(),
                                                         boost::none),

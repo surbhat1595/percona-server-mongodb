@@ -65,6 +65,9 @@ using std::string;
  *   writeConcern: <BSONObj>
  * }
  */
+
+constexpr StringData kCollectionVersionField = "collectionVersion"_sd;
+
 class ConfigSvrSplitChunkCommand : public BasicCommand {
 public:
     ConfigSvrSplitChunkCommand() : BasicCommand("_configsvrCommitChunkSplit") {}
@@ -91,11 +94,12 @@ public:
         return true;
     }
 
-    Status checkAuthForCommand(Client* client,
-                               const std::string& dbname,
-                               const BSONObj& cmdObj) const override {
-        if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
-                ResourcePattern::forClusterResource(), ActionType::internal)) {
+    Status checkAuthForOperation(OperationContext* opCtx,
+                                 const DatabaseName&,
+                                 const BSONObj&) const override {
+        if (!AuthorizationSession::get(opCtx->getClient())
+                 ->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
+                                                    ActionType::internal)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
         return Status::OK();
@@ -129,7 +133,9 @@ public:
                 parsedRequest.getSplitPoints(),
                 parsedRequest.getShardName(),
                 parsedRequest.isFromChunkSplitter()));
-        result.appendElements(shardAndCollVers);
+
+        shardAndCollVers.collectionVersion.serialize(kCollectionVersionField, &result);
+        shardAndCollVers.shardVersion.serialize(ChunkVersion::kChunkVersionField, &result);
 
         return true;
     }

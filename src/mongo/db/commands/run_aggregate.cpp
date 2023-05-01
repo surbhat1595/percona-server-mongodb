@@ -41,6 +41,7 @@
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/change_stream_change_collection_manager.h"
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
+#include "mongo/db/change_stream_serverless_helpers.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/cursor_manager.h"
 #include "mongo/db/db_raii.h"
@@ -708,7 +709,7 @@ Status runAggregate(OperationContext* opCtx,
     // must never hold open storage cursors while ignoring interrupt.
     InterruptibleLockGuard interruptibleLockAcquisition(opCtx->lockState());
 
-    auto initContext = [&](AutoGetCollectionViewMode m) -> void {
+    auto initContext = [&](auto_get_collection::ViewMode m) -> void {
         ctx.emplace(opCtx,
                     nss,
                     m,
@@ -757,13 +758,20 @@ Status runAggregate(OperationContext* opCtx,
             nss = NamespaceString::kRsOplogNamespace;
 
             // In case of serverless the change stream will be opened on the change collection.
-            if (ChangeStreamChangeCollectionManager::isChangeCollectionsModeActive()) {
-                auto& changeCollectionManager = ChangeStreamChangeCollectionManager::get(opCtx);
+            if (change_stream_serverless_helpers::isChangeCollectionsModeActive()) {
+                const auto tenantId =
+                    change_stream_serverless_helpers::resolveTenantId(origNss.tenantId());
+
+                uassert(ErrorCodes::BadValue,
+                        "Change streams cannot be used without tenant id",
+                        tenantId);
+
                 uassert(ErrorCodes::ChangeStreamNotEnabled,
                         "Change streams must be enabled before being used.",
-                        changeCollectionManager.isChangeStreamEnabled(opCtx, origNss.tenantId()));
+                        change_stream_serverless_helpers::isChangeStreamEnabled(opCtx, *tenantId));
 
-                nss = NamespaceString::makeChangeCollectionNSS(origNss.tenantId());
+
+                nss = NamespaceString::makeChangeCollectionNSS(tenantId);
             }
 
             // Assert that a change stream on the config server is always opened on the oplog.
@@ -785,7 +793,7 @@ Status runAggregate(OperationContext* opCtx,
                 LOGV2_INFO(6689200,
                            "Opening change stream on the namespace: {nss}",
                            "Opening change stream",
-                           "nss"_attr = nss.toString());
+                           "nss"_attr = nss.toStringWithTenantId());
             }
 
             // Upgrade and wait for read concern if necessary.
@@ -814,7 +822,7 @@ Status runAggregate(OperationContext* opCtx,
             collatorToUseMatchesDefault = match;
 
             // Obtain collection locks on the execution namespace; that is, the oplog.
-            initContext(AutoGetCollectionViewMode::kViewsForbidden);
+            initContext(auto_get_collection::ViewMode::kViewsForbidden);
         } else if (nss.isCollectionlessAggregateNS() && pipelineInvolvedNamespaces.empty()) {
             uassert(4928901,
                     str::stream() << AggregateCommandRequest::kCollectionUUIDFieldName
@@ -836,7 +844,7 @@ Status runAggregate(OperationContext* opCtx,
                     ctx == boost::none);
         } else {
             // This is a regular aggregation. Lock the collection or view.
-            initContext(AutoGetCollectionViewMode::kViewsPermitted);
+            initContext(auto_get_collection::ViewMode::kViewsPermitted);
             auto [collator, match] =
                 PipelineD::resolveCollator(opCtx,
                                            request.getCollation().get_value_or(BSONObj()),

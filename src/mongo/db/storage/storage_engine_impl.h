@@ -79,7 +79,8 @@ public:
 
     virtual RecoveryUnit* newRecoveryUnit() override;
 
-    virtual std::vector<DatabaseName> listDatabases() const override;
+    virtual std::vector<DatabaseName> listDatabases(
+        boost::optional<TenantId> tenantId = boost::none) const override;
 
     virtual bool supportsCappedCollections() const override {
         return _supportsCappedCollections;
@@ -124,7 +125,7 @@ public:
     virtual std::unique_ptr<TemporaryRecordStore> makeTemporaryRecordStoreFromExistingIdent(
         OperationContext* opCtx, StringData ident) override;
 
-    virtual void cleanShutdown() override;
+    virtual void cleanShutdown(ServiceContext* svcCtx) override;
 
     virtual void setStableTimestamp(Timestamp stableTimestamp, bool force = false) override;
 
@@ -324,9 +325,13 @@ public:
                              std::shared_ptr<Ident> ident,
                              DropIdentCallback&& onDrop) override;
 
+    void dropIdentsOlderThan(OperationContext* opCtx, const Timestamp& ts) override;
+
+    std::shared_ptr<Ident> markIdentInUse(const std::string& ident) override;
+
     void startTimestampMonitor() override;
 
-    void checkpoint() override;
+    void checkpoint(OperationContext* opCtx) override;
 
     StatusWith<ReconcileResult> reconcileCatalogAndIdents(
         OperationContext* opCtx, LastShutdownState lastShutdownState) override;
@@ -352,7 +357,9 @@ public:
     /**
      * When loading after an unclean shutdown, this performs cleanup on the DurableCatalogImpl.
      */
-    void loadCatalog(OperationContext* opCtx, LastShutdownState lastShutdownState) final;
+    void loadCatalog(OperationContext* opCtx,
+                     boost::optional<Timestamp> stableTs,
+                     LastShutdownState lastShutdownState) final;
 
     void closeCatalog(OperationContext* opCtx) final;
 
@@ -417,7 +424,7 @@ private:
      * the given catalog entry.
      */
     void _checkForIndexFiles(OperationContext* opCtx,
-                             const DurableCatalog::Entry& entry,
+                             const DurableCatalog::EntryIdentifier& entry,
                              std::vector<std::string>& identsKnownToStorageEngine) const;
 
     void _dumpCatalog(OperationContext* opCtx);
@@ -455,6 +462,9 @@ private:
     // Listener for checkpoint timestamp changes to remove historical ident entries older than the
     // checkpoint timestamp.
     TimestampMonitor::TimestampListener _historicalIdentTimestampListener;
+
+    // Listener for cleanup of CollectionCatalog when oldest timestamp advances.
+    TimestampMonitor::TimestampListener _collectionCatalogCleanupTimestampListener;
 
     const bool _supportsCappedCollections;
 

@@ -49,6 +49,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/ops/write_ops_exec.h"
+#include "mongo/db/persistent_task_store.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/repl/cloner_utils.h"
 #include "mongo/db/repl/data_replicator_external_state.h"
@@ -146,6 +147,7 @@ MONGO_FAIL_POINT_DEFINE(skipComparingRecipientAndDonorFCV);
 MONGO_FAIL_POINT_DEFINE(autoRecipientForgetMigration);
 MONGO_FAIL_POINT_DEFINE(skipFetchingCommittedTransactions);
 MONGO_FAIL_POINT_DEFINE(skipFetchingRetryableWritesEntriesBeforeStartOpTime);
+MONGO_FAIL_POINT_DEFINE(pauseTenantMigrationRecipientBeforeDeletingStateDoc);
 
 // Fails before waiting for the state doc to be majority replicated.
 MONGO_FAIL_POINT_DEFINE(failWhilePersistingTenantMigrationRecipientInstanceStateDoc);
@@ -179,6 +181,7 @@ MONGO_FAIL_POINT_DEFINE(fpWaitUntilTimestampMajorityCommitted);
 MONGO_FAIL_POINT_DEFINE(hangAfterUpdatingTransactionEntry);
 MONGO_FAIL_POINT_DEFINE(fpBeforeAdvancingStableTimestamp);
 MONGO_FAIL_POINT_DEFINE(hangMigrationBeforeRetryCheck);
+MONGO_FAIL_POINT_DEFINE(skipCreatingIndexDuringRebuildService);
 
 namespace {
 // We never restart just the oplog fetcher.  If a failure occurs, we restart the whole state machine
@@ -258,6 +261,10 @@ public:
         MONGO_UNREACHABLE;
     }
 
+    StatusWith<LastVote> loadLocalLastVoteDocument(OperationContext* opCtx) const final {
+        MONGO_UNREACHABLE;
+    }
+
     JournalListener* getReplicationJournalListener() final {
         MONGO_UNREACHABLE;
     }
@@ -298,6 +305,9 @@ void TenantMigrationRecipientService::abortAllMigrations(OperationContext* opCtx
 ExecutorFuture<void> TenantMigrationRecipientService::_rebuildService(
     std::shared_ptr<executor::ScopedTaskExecutor> executor, const CancellationToken& token) {
     return AsyncTry([this] {
+               if (MONGO_unlikely(skipCreatingIndexDuringRebuildService.shouldFail())) {
+                   return;
+               }
                auto nss = getStateDocumentsNS();
 
                AllowOpCtxWhenServiceRebuildingBlock allowOpCtxBlock(Client::getCurrent());
@@ -2962,7 +2972,8 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
             // Handle recipientForgetMigration.
             stdx::lock_guard lk(_mutex);
             if (_stateDoc.getExpireAt() ||
-                MONGO_unlikely(autoRecipientForgetMigration.shouldFail())) {
+                MONGO_unlikely(autoRecipientForgetMigration.shouldFail()) ||
+                status.code() == ErrorCodes::ConflictingServerlessOperation) {
                 // Skip waiting for the recipientForgetMigration command.
                 setPromiseOkifNotReady(lk, _receivedRecipientForgetMigrationPromise);
             }
@@ -2997,6 +3008,13 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
             return storageInterface->dropCollection(opCtx.get(),
                                                     getOplogBufferNs(getMigrationUUID()));
         })
+        .then([this, self = shared_from_this(), token] {
+            {
+                stdx::lock_guard lk(_mutex);
+                setPromiseOkifNotReady(lk, _forgetMigrationDurablePromise);
+            }
+            return _waitForGarbageCollectionDelayThenDeleteStateDoc(token);
+        })
         .thenRunOn(_recipientService->getInstanceCleanupExecutor())
         .onCompletion([this,
                        self = shared_from_this(),
@@ -3005,16 +3023,16 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
             // is safe even on shutDown/stepDown.
             stdx::lock_guard lk(_mutex);
             invariant(_dataSyncCompletionPromise.getFuture().isReady());
-            if (status.isOK()) {
-                LOGV2(4881401,
-                      "Migration marked to be garbage collectable due to "
-                      "recipientForgetMigration "
-                      "command",
+
+            if (status.code() == ErrorCodes::ConflictingServerlessOperation) {
+                LOGV2(6531506,
+                      "Migration failed as another serverless operation was in progress",
                       "migrationId"_attr = getMigrationUUID(),
                       "tenantId"_attr = getTenantId(),
-                      "expireAt"_attr = *_stateDoc.getExpireAt());
+                      "status"_attr = status);
                 setPromiseOkifNotReady(lk, _forgetMigrationDurablePromise);
-            } else {
+                return status;
+            } else if (!status.isOK()) {
                 // We should only hit here on a stepDown/shutDown, or a 'conflicting migration'
                 // error.
                 LOGV2(4881402,
@@ -3025,6 +3043,54 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
                 setPromiseErrorifNotReady(lk, _forgetMigrationDurablePromise, status);
             }
             _taskState.setState(TaskState::kDone);
+
+            return Status::OK();
+        })
+        .semi();
+}
+
+SemiFuture<void> TenantMigrationRecipientService::Instance::_removeStateDoc(
+    const CancellationToken& token) {
+    return AsyncTry([this, self = shared_from_this()] {
+               auto opCtxHolder = cc().makeOperationContext();
+               auto opCtx = opCtxHolder.get();
+
+               pauseTenantMigrationRecipientBeforeDeletingStateDoc.pauseWhileSet(opCtx);
+
+               PersistentTaskStore<TenantMigrationRecipientDocument> store(_stateDocumentsNS);
+               store.remove(
+                   opCtx,
+                   BSON(TenantMigrationRecipientDocument::kIdFieldName << _migrationUuid),
+                   WriteConcernOptions(1, WriteConcernOptions::SyncMode::UNSET, Seconds(0)));
+               LOGV2(8423371,
+                     "State document is deleted",
+                     "migrationId"_attr = _migrationUuid,
+                     "tenantId"_attr = _tenantId);
+           })
+        .until([](Status status) { return status.isOK(); })
+        .withBackoffBetweenIterations(kExponentialBackoff)
+        .on(**_scopedExecutor, token)
+        .semi();
+}
+
+SemiFuture<void>
+TenantMigrationRecipientService::Instance::_waitForGarbageCollectionDelayThenDeleteStateDoc(
+    const CancellationToken& token) {
+    stdx::lock_guard<Latch> lg(_mutex);
+    LOGV2(8423369,
+          "Waiting for garbage collection delay before deleting state document",
+          "migrationId"_attr = _migrationUuid,
+          "tenantId"_attr = _tenantId,
+          "expireAt"_attr = *_stateDoc.getExpireAt());
+
+    return (**_scopedExecutor)
+        ->sleepUntil(*_stateDoc.getExpireAt(), token)
+        .then([this, self = shared_from_this(), token]() {
+            LOGV2(8423370,
+                  "Deleting state document",
+                  "migrationId"_attr = _migrationUuid,
+                  "tenantId"_attr = _tenantId);
+            return _removeStateDoc(token);
         })
         .semi();
 }

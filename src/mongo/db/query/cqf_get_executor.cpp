@@ -195,9 +195,10 @@ static opt::unordered_map<std::string, optimizer::IndexDefinition> buildIndexSpe
                 ExtensionsCallbackNoop(),
                 MatchExpressionParser::kBanAllSpecialFeatures);
 
+            // We need a non-empty root projection name.
             ABT exprABT = generateMatchExpression(expr.get(),
                                                   false /*allowAggExpression*/,
-                                                  "" /*rootProjection*/,
+                                                  "<root>" /*rootProjection*/,
                                                   "" /*uniquePrefix*/);
             exprABT = make<EvalFilter>(std::move(exprABT), make<Variable>(scanProjName));
 
@@ -245,6 +246,8 @@ static QueryHints getHintsFromQueryKnobs() {
     hints._keepRejectedPlans = internalCascadesOptimizerKeepRejectedPlans.load();
     hints._disableBranchAndBound = internalCascadesOptimizerDisableBranchAndBound.load();
     hints._fastIndexNullHandling = internalCascadesOptimizerFastIndexNullHandling.load();
+    hints._disableYieldingTolerantPlans =
+        internalCascadesOptimizerDisableYieldingTolerantPlans.load();
 
     return hints;
 }
@@ -259,8 +262,7 @@ static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> optimizeAndCreateExe
     std::unique_ptr<CanonicalQuery> cq,
     const bool requireRID) {
 
-    const bool optimizationResult = phaseManager.optimize(abt);
-    uassert(6624252, "Optimization failed", optimizationResult);
+    phaseManager.optimize(abt);
 
     {
         const auto& memo = phaseManager.getMemo();
@@ -283,6 +285,11 @@ static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> optimizeAndCreateExe
             &phaseManager.getMemo());
         OPTIMIZER_DEBUG_LOG(6264801, 5, "Optimized ABT", "explain"_attr = explain);
     }
+
+    OPTIMIZER_DEBUG_LOG(6264802,
+                        5,
+                        "Optimized and lowered physical ABT",
+                        "explain"_attr = ExplainGenerator::explainV2(abt));
 
     auto env = VariableEnvironment::build(abt);
     SlotVarMap slotMap;
@@ -353,7 +360,7 @@ static void populateAdditionalScanDefs(
     for (const auto& involvedNss : involvedCollections) {
         // TODO handle views?
         AutoGetCollectionForReadCommandMaybeLockFree ctx(
-            opCtx, involvedNss, AutoGetCollectionViewMode::kViewsForbidden);
+            opCtx, involvedNss, auto_get_collection::ViewMode::kViewsForbidden);
         const CollectionPtr& collection = ctx ? ctx.getCollection() : CollectionPtr::null;
         const bool collectionExists = collection != nullptr;
         const std::string uuidStr =
@@ -482,9 +489,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOp
     const CollectionPtr& collection,
     const boost::optional<BSONObj>& indexHint,
     std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
-    std::unique_ptr<CanonicalQuery> canonicalQuery,
-    const bool requireRID) {
-
+    std::unique_ptr<CanonicalQuery> canonicalQuery) {
     // Ensure that either pipeline or canonicalQuery is set.
     tassert(624070,
             "getSBEExecutorViaCascadesOptimizer expects exactly one of the following to be set: "
@@ -501,6 +506,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOp
     auto curOp = CurOp::get(opCtx);
     curOp->debug().cqfUsed = true;
 
+    const bool requireRID = canonicalQuery ? canonicalQuery->getForceGenerateRecordId() : false;
     const bool collectionExists = collection != nullptr;
     const std::string uuidStr = collectionExists ? collection->uuid().toString() : "<missing_uuid>";
     const std::string collNameStr = nss.coll().toString();
@@ -622,8 +628,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOp
 }
 
 std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOptimizer(
-    const CollectionPtr& collection, std::unique_ptr<CanonicalQuery> query, const bool requireRID) {
-
+    const CollectionPtr& collection, std::unique_ptr<CanonicalQuery> query) {
     boost::optional<BSONObj> indexHint = query->getFindCommandRequest().getHint().isEmpty()
         ? boost::none
         : boost::make_optional(query->getFindCommandRequest().getHint());
@@ -633,14 +638,8 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOp
     auto expCtx = query->getExpCtx();
     auto nss = query->nss();
 
-    return getSBEExecutorViaCascadesOptimizer(opCtx,
-                                              expCtx,
-                                              nss,
-                                              collection,
-                                              indexHint,
-                                              nullptr /* pipeline */,
-                                              std::move(query),
-                                              requireRID);
+    return getSBEExecutorViaCascadesOptimizer(
+        opCtx, expCtx, nss, collection, indexHint, nullptr /* pipeline */, std::move(query));
 }
 
 }  // namespace mongo

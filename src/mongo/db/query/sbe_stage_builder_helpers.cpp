@@ -113,16 +113,20 @@ std::unique_ptr<sbe::EExpression> makeIsMember(std::unique_ptr<sbe::EExpression>
 
     return makeIsMember(std::move(input), std::move(arr), std::move(collatorVar));
 }
-
-std::unique_ptr<sbe::EExpression> generateNullOrMissing(const sbe::EVariable& var) {
-    return makeBinaryOp(sbe::EPrimBinary::logicOr,
-                        makeNot(makeFunction("exists", var.clone())),
+std::unique_ptr<sbe::EExpression> generateNullOrMissingExpr(const sbe::EExpression& expr) {
+    return makeFunction("fillEmpty",
                         makeFunction("typeMatch",
-                                     var.clone(),
+                                     expr.clone(),
                                      makeConstant(sbe::value::TypeTags::NumberInt64,
                                                   sbe::value::bitcastFrom<int64_t>(
                                                       getBSONTypeMask(BSONType::jstNULL) |
-                                                      getBSONTypeMask(BSONType::Undefined)))));
+                                                      getBSONTypeMask(BSONType::Undefined)))),
+                        sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Boolean,
+                                                   sbe::value::bitcastFrom<bool>(true)));
+}
+
+std::unique_ptr<sbe::EExpression> generateNullOrMissing(const sbe::EVariable& var) {
+    return generateNullOrMissingExpr(var);
 }
 
 std::unique_ptr<sbe::EExpression> generateNullOrMissing(const sbe::FrameId frameId,
@@ -132,14 +136,7 @@ std::unique_ptr<sbe::EExpression> generateNullOrMissing(const sbe::FrameId frame
 }
 
 std::unique_ptr<sbe::EExpression> generateNullOrMissing(std::unique_ptr<sbe::EExpression> arg) {
-    return makeBinaryOp(sbe::EPrimBinary::logicOr,
-                        makeNot(makeFunction("exists", arg->clone())),
-                        makeFunction("typeMatch",
-                                     arg->clone(),
-                                     makeConstant(sbe::value::TypeTags::NumberInt64,
-                                                  sbe::value::bitcastFrom<int64_t>(
-                                                      getBSONTypeMask(BSONType::jstNULL) |
-                                                      getBSONTypeMask(BSONType::Undefined)))));
+    return generateNullOrMissingExpr(*arg);
 }
 
 std::unique_ptr<sbe::EExpression> generateNonNumericCheck(const sbe::EVariable& var) {
@@ -176,9 +173,9 @@ std::unique_ptr<sbe::EExpression> generateNonPositiveCheck(const sbe::EVariable&
                                                    sbe::value::bitcastFrom<int32_t>(0)));
 }
 
-std::unique_ptr<sbe::EExpression> generatePositiveCheck(const sbe::EVariable& var) {
+std::unique_ptr<sbe::EExpression> generatePositiveCheck(const sbe::EExpression& expr) {
     return makeBinaryOp(sbe::EPrimBinary::EPrimBinary::greater,
-                        var.clone(),
+                        expr.clone(),
                         sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::NumberInt32,
                                                    sbe::value::bitcastFrom<int32_t>(0)));
 }
@@ -194,8 +191,8 @@ std::unique_ptr<sbe::EExpression> generateNonObjectCheck(const sbe::EVariable& v
     return makeNot(makeFunction("isObject", var.clone()));
 }
 
-std::unique_ptr<sbe::EExpression> generateNonStringCheck(const sbe::EVariable& var) {
-    return makeNot(makeFunction("isString", var.clone()));
+std::unique_ptr<sbe::EExpression> generateNonStringCheck(const sbe::EExpression& expr) {
+    return makeNot(makeFunction("isString", expr.clone()));
 }
 
 std::unique_ptr<sbe::EExpression> generateNullishOrNotRepresentableInt32Check(
@@ -569,6 +566,28 @@ EvalExprStagePair generateShortCircuitingLogicalOp(sbe::EPrimBinary::Op logicOp,
     // For AND and OR, if 'branches' only has one element, we can just return branches[0].
     if (branches.size() == 1) {
         return std::move(branches[0]);
+    }
+
+    bool exprOnlyBranches = true;
+    for (const auto& [expr, stage] : branches) {
+        if (!stage.stageIsNull()) {
+            exprOnlyBranches = false;
+            break;
+        }
+    }
+
+    if (exprOnlyBranches) {
+        std::unique_ptr<sbe::EExpression> exprOnlyOp;
+        for (int32_t i = branches.size() - 1; i >= 0; i--) {
+            auto& [expr, _] = branches[i];
+            auto stateExpr = stateHelper.getBool(expr.extractExpr());
+            if (exprOnlyOp) {
+                exprOnlyOp = makeBinaryOp(logicOp, std::move(stateExpr), std::move(exprOnlyOp));
+            } else {
+                exprOnlyOp = std::move(stateExpr);
+            }
+        }
+        return {EvalExpr{std::move(exprOnlyOp)}, EvalStage{}};
     }
 
     // Prepare to create limit-1/union with N branches (where N is the number of operands). Each

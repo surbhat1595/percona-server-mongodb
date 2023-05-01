@@ -165,7 +165,7 @@ public:
      */
     virtual Status dropIdent(RecoveryUnit* ru,
                              StringData ident,
-                             StorageEngine::DropIdentCallback&& onDrop = nullptr) = 0;
+                             const StorageEngine::DropIdentCallback& onDrop = nullptr) = 0;
 
     /**
      * Removes any knowledge of the ident from the storage engines metadata without removing the
@@ -262,7 +262,7 @@ public:
         return false;
     }
 
-    virtual void checkpoint() {}
+    virtual void checkpoint(OperationContext* opCtx) {}
 
     /**
      * Returns true if the KVEngine is ephemeral -- that is, it is NOT persistent and all data is
@@ -456,6 +456,13 @@ public:
     virtual StatusWith<BSONObj> getStorageMetadata(StringData ident) const {
         return BSONObj{};
     };
+
+    /**
+     * Returns the 'KeyFormat' tied to 'ident'.
+     */
+    virtual KeyFormat getKeyFormat(OperationContext* opCtx, StringData ident) const {
+        MONGO_UNREACHABLE;
+    }
 
     /**
      * The destructor will never be called from mongod, but may be called from tests.

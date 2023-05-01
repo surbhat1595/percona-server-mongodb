@@ -932,8 +932,7 @@ private:
     }
 
     void doCheckAuthorization(OperationContext* opCtx) const override {
-        uassertStatusOK(_command->checkAuthForOperation(
-            opCtx, _request.getDatabase().toString(), _request.body));
+        uassertStatusOK(_command->checkAuthForOperation(opCtx, _dbName, _request.body));
     }
 
     const BSONObj& cmdObj() const {
@@ -993,22 +992,6 @@ Status BasicCommandWithReplyBuilderInterface::explain(OperationContext* opCtx,
                                                       ExplainOptions::Verbosity verbosity,
                                                       rpc::ReplyBuilderInterface* result) const {
     return {ErrorCodes::IllegalOperation, str::stream() << "Cannot explain cmd: " << getName()};
-}
-
-Status BasicCommandWithReplyBuilderInterface::checkAuthForOperation(OperationContext* opCtx,
-                                                                    const std::string& dbname,
-                                                                    const BSONObj& cmdObj) const {
-    return checkAuthForCommand(opCtx->getClient(), dbname, cmdObj);
-}
-
-Status BasicCommandWithReplyBuilderInterface::checkAuthForCommand(Client* client,
-                                                                  const std::string& dbname,
-                                                                  const BSONObj& cmdObj) const {
-    std::vector<Privilege> privileges;
-    this->addRequiredPrivileges(dbname, cmdObj, &privileges);
-    if (AuthorizationSession::get(client)->isAuthorizedForPrivileges(privileges))
-        return Status::OK();
-    return Status(ErrorCodes::Unauthorized, "unauthorized");
 }
 
 void Command::generateHelpResponse(OperationContext* opCtx,

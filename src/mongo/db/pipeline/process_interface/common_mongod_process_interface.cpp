@@ -251,7 +251,7 @@ std::deque<BSONObj> CommonMongodProcessInterface::listCatalog(OperationContext* 
         AutoGetCollectionForReadCommandMaybeLockFree collLock(
             opCtx,
             systemViewsNamespaces.front(),
-            AutoGetCollectionViewMode::kViewsForbidden,
+            auto_get_collection::ViewMode::kViewsForbidden,
             Date_t::max(),
             AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
             {++systemViewsNamespaces.cbegin(), systemViewsNamespaces.cend()});
@@ -434,7 +434,7 @@ CommonMongodProcessInterface::attachCursorSourceToPipelineForLocalRead(Pipeline*
 
     autoColl.emplace(expCtx->opCtx,
                      nsOrUUID,
-                     AutoGetCollectionViewMode::kViewsForbidden,
+                     auto_get_collection::ViewMode::kViewsForbidden,
                      Date_t::max(),
                      AutoStatsTracker::LogMode::kUpdateTop,
                      secondaryNamespaces);
@@ -878,7 +878,7 @@ boost::optional<Document> CommonMongodProcessInterface::lookupSingleDocumentLoca
     const Document& documentKey) {
     AutoGetCollectionForRead autoColl(expCtx->opCtx, nss);
     BSONObj document;
-    if (!Helpers::findById(expCtx->opCtx, nss.ns(), documentKey.toBson(), document)) {
+    if (!Helpers::findById(expCtx->opCtx, nss, documentKey.toBson(), document)) {
         return boost::none;
     }
     return Document(document).getOwned();

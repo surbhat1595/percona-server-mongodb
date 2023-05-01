@@ -200,7 +200,8 @@ public:
     /**
      * List the databases stored in this storage engine.
      */
-    virtual std::vector<DatabaseName> listDatabases() const = 0;
+    virtual std::vector<DatabaseName> listDatabases(
+        boost::optional<TenantId> tenantId = boost::none) const = 0;
 
     /**
      * Returns whether the storage engine supports capped collections.
@@ -227,7 +228,9 @@ public:
      * caller. For example, on starting from a previous unclean shutdown, we may try to recover
      * orphaned idents, which are known to the storage engine but not referenced in the catalog.
      */
-    virtual void loadCatalog(OperationContext* opCtx, LastShutdownState lastShutdownState) = 0;
+    virtual void loadCatalog(OperationContext* opCtx,
+                             boost::optional<Timestamp> stableTs,
+                             LastShutdownState lastShutdownState) = 0;
     virtual void closeCatalog(OperationContext* opCtx) = 0;
 
     /**
@@ -381,7 +384,7 @@ public:
      * On error, the storage engine should assert and crash.
      * There is intentionally no uncleanShutdown().
      */
-    virtual void cleanShutdown() = 0;
+    virtual void cleanShutdown(ServiceContext* svcCtx) = 0;
 
     /**
      * Returns the SnapshotManager for this StorageEngine or NULL if not supported.
@@ -455,6 +458,20 @@ public:
                                      DropIdentCallback&& onDrop = nullptr) = 0;
 
     /**
+     * Drops all unreferenced drop-pending idents with drop timestamps before 'ts', as well as all
+     * unreferenced idents with Timestamp::min() drop timestamps (untimestamped on standalones).
+     */
+    virtual void dropIdentsOlderThan(OperationContext* opCtx, const Timestamp& ts) = 0;
+
+    /**
+     * Marks the ident as in use and prevents the reaper from dropping the ident.
+     *
+     * Returns nullptr if the ident is not known to the reaper, is already being dropped, or is
+     * already dropped.
+     */
+    virtual std::shared_ptr<Ident> markIdentInUse(const std::string& ident) = 0;
+
+    /**
      * Starts the timestamp monitor. This periodically drops idents queued by addDropPendingIdent,
      * and removes historical ident entries no longer necessary.
      */
@@ -463,8 +480,9 @@ public:
     /**
      * Called when the checkpoint thread instructs the storage engine to take a checkpoint. The
      * underlying storage engine must take a checkpoint at this point.
+     * Acquires a resource mutex before taking the checkpoint.
      */
-    virtual void checkpoint() = 0;
+    virtual void checkpoint(OperationContext* opCtx) = 0;
 
     /**
      * Recovers the storage engine state to the last stable timestamp. "Stable" in this case

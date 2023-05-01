@@ -103,7 +103,7 @@ void ServerlessOperationLockRegistry::onDropStateCollection(LockType lockType) {
 void ServerlessOperationLockRegistry::clear() {
     stdx::lock_guard<Latch> lg(_mutex);
     LOGV2(6531504,
-          "Releasing ServerlessMutualExclusionRegistry lock on shutdown",
+          "Clearing serverless operation lock registry on shutdown",
           "ns"_attr = _activeLockType);
 
     _activeOperations.clear();
@@ -164,19 +164,19 @@ void ServerlessOperationLockRegistry::appendInfoForServerStatus(BSONObjBuilder* 
     stdx::lock_guard<Latch> lg(_mutex);
 
     if (!_activeLockType) {
-        builder->appendNull(kOperationLockFieldName);
+        builder->append(kOperationLockFieldName, 0);
         return;
     }
 
     switch (_activeLockType.value()) {
         case ServerlessOperationLockRegistry::LockType::kShardSplit:
-            builder->append(kOperationLockFieldName, "shard split donor");
+            builder->append(kOperationLockFieldName, 1);
             break;
         case ServerlessOperationLockRegistry::LockType::kTenantDonor:
-            builder->append(kOperationLockFieldName, "tenant migration donor");
+            builder->append(kOperationLockFieldName, 2);
             break;
         case ServerlessOperationLockRegistry::LockType::kTenantRecipient:
-            builder->append(kOperationLockFieldName, "tenant migration recipient");
+            builder->append(kOperationLockFieldName, 3);
             break;
     }
 }

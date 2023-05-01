@@ -47,7 +47,7 @@ std::vector<repl::MemberConfig> getRecipientMembers(const repl::ReplSetConfig& c
                                                     const StringData& recipientTagName) {
     std::vector<repl::MemberConfig> result;
     const auto& tagConfig = config.getTagConfig();
-    for (auto member : config.members()) {
+    for (const auto& member : config.members()) {
         auto matchesTag =
             std::any_of(member.tagsBegin(), member.tagsEnd(), [&](const repl::ReplSetTag& tag) {
                 return tagConfig.getTagKey(tag) == recipientTagName;
@@ -253,7 +253,7 @@ Status validateRecipientNodesForShardSplit(const ShardSplitDonorDocument& stateD
 
     stdx::unordered_set<std::string> uniqueTagValues;
     const auto& tagConfig = localConfig.getTagConfig();
-    for (auto member : recipientNodes) {
+    for (const auto& member : recipientNodes) {
         for (repl::MemberConfig::TagIterator it = member.tagsBegin(); it != member.tagsEnd();
              ++it) {
             if (tagConfig.getTagKey(*it) == *recipientTagName) {

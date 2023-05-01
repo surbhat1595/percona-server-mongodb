@@ -244,7 +244,7 @@ public:
     struct InsertResult {
         std::shared_ptr<WriteBatch> batch;
         ClosedBuckets closedBuckets;
-        boost::optional<OID> candidate;
+        stdx::variant<std::monostate, OID, BSONObj> candidate;
         uint64_t catalogEra = 0;
     };
 
@@ -385,6 +385,11 @@ public:
      */
     void appendStateManagementStats(BSONObjBuilder* builder) const;
 
+    /**
+     * Reports the current memory usage.
+     */
+    long long memoryUsage() const;
+
 protected:
     enum class BucketState {
         // Bucket can be inserted into, and does not have an outstanding prepared commit
@@ -409,6 +414,7 @@ protected:
         bool operator!=(const BucketMetadata& other) const;
 
         const BSONObj& toBSON() const;
+        const BSONElement& element() const;
 
         StringData getMetaField() const;
 
@@ -569,9 +575,14 @@ protected:
         boost::optional<BucketState> getBucketState(Bucket* bucket);
 
         /**
+         * Retrieves the bucket state if it is tracked in the catalog.
+         */
+        boost::optional<BucketState> getBucketState(const OID& oid) const;
+
+        /**
          * Initializes state for the given bucket to kNormal.
          */
-        void initializeBucketState(const OID& id);
+        bool initializeBucketState(const OID& id, boost::optional<std::uint64_t> targetEra);
 
         /**
          * Remove state for the given bucket from the catalog.
@@ -888,6 +899,7 @@ protected:
                           ExecutionStatsController stats,
                           const BucketKey& key,
                           std::unique_ptr<Bucket>&& bucket,
+                          std::uint64_t targetEra,
                           ClosedBuckets* closedBuckets);
 
     /**
@@ -937,9 +949,17 @@ protected:
      * Identifies a previously archived bucket that may be able to accomodate the measurement
      * represented by 'info', if one exists.
      */
-    boost::optional<OID> _findArchivedCandidate(const Stripe& stripe,
+    boost::optional<OID> _findArchivedCandidate(Stripe* stripe,
                                                 WithLock stripeLock,
-                                                const CreationInfo& info) const;
+                                                const CreationInfo& info);
+
+    /**
+     * Identifies a previously archived bucket that may be able to accomodate the measurement
+     * represented by 'info', if one exists.
+     */
+    stdx::variant<std::monostate, OID, BSONObj> _getReopeningCandidate(Stripe* stripe,
+                                                                       WithLock stripeLock,
+                                                                       const CreationInfo& info);
 
     /**
      * Aborts 'batch', and if the corresponding bucket still exists, proceeds to abort any other
@@ -993,7 +1013,8 @@ protected:
     RolloverAction _determineRolloverAction(const BSONObj& doc,
                                             CreationInfo* info,
                                             Bucket* bucket,
-                                            uint32_t sizeToBeAdded);
+                                            uint32_t sizeToBeAdded,
+                                            AllowBucketCreation mode);
 
     /**
      * Close the existing, full bucket and open a new one for the same metadata.

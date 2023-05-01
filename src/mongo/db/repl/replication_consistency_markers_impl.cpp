@@ -193,8 +193,7 @@ OpTime ReplicationConsistencyMarkersImpl::getMinValid(OperationContext* opCtx) c
 }
 
 void ReplicationConsistencyMarkersImpl::setMinValid(OperationContext* opCtx,
-                                                    const OpTime& minValid,
-                                                    bool alwaysAllowUntimestampedWrite) {
+                                                    const OpTime& minValid) {
     LOGV2_DEBUG(21289,
                 3,
                 "setting minvalid to exactly: {minValidString}({minValidBSON})",
@@ -205,11 +204,6 @@ void ReplicationConsistencyMarkersImpl::setMinValid(OperationContext* opCtx,
         BSON("$set" << BSON(MinValidDocument::kMinValidTimestampFieldName
                             << minValid.getTimestamp() << MinValidDocument::kMinValidTermFieldName
                             << minValid.getTerm()));
-
-    // This method is only used with storage engines that do not support recover to stable
-    // timestamp. As a result, their timestamps do not matter.
-    invariant(alwaysAllowUntimestampedWrite ||
-              !opCtx->getServiceContext()->getStorageEngine()->supportsRecoverToStableTimestamp());
 
     _updateMinValidDocument(opCtx, update);
 }
@@ -498,7 +492,8 @@ ReplicationConsistencyMarkersImpl::refreshOplogTruncateAfterPointIfPrimary(
 }
 
 Status ReplicationConsistencyMarkersImpl::createInternalCollections(OperationContext* opCtx) {
-    for (auto nss : std::vector<NamespaceString>({_oplogTruncateAfterPointNss, _minValidNss})) {
+    for (const auto& nss :
+         std::vector<NamespaceString>({_oplogTruncateAfterPointNss, _minValidNss})) {
         auto status = _storageInterface->createCollection(opCtx, nss, CollectionOptions());
         if (!status.isOK() && status.code() != ErrorCodes::NamespaceExists) {
             return {ErrorCodes::CannotCreateCollection,

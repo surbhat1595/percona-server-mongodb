@@ -902,11 +902,13 @@ public:
 
     /**
      * Checks if the client associated with the given OperationContext is authorized to run this
-     * command. Default implementation defers to checkAuthForCommand.
+     * command.
+     * Command imlpementations MUST provide a method here, even if no authz checks are required.
+     * Such commands should return Status::OK(), with a comment stating "No auth required".
      */
     virtual Status checkAuthForOperation(OperationContext* opCtx,
-                                         const std::string& dbname,
-                                         const BSONObj& cmdObj) const;
+                                         const DatabaseName& dbName,
+                                         const BSONObj& cmdObj) const = 0;
 
     /**
      * supportsWriteConcern returns true if this command should be parsed for a writeConcern
@@ -969,32 +971,6 @@ public:
 private:
     std::unique_ptr<CommandInvocation> parse(OperationContext* opCtx,
                                              const OpMsgRequest& request) final;
-
-    //
-    // Deprecated virtual methods.
-    //
-
-    /**
-     * Checks if the given client is authorized to run this command on database "dbname"
-     * with the invocation described by "cmdObj".
-     *
-     * NOTE: Implement checkAuthForOperation that takes an OperationContext* instead.
-     */
-    virtual Status checkAuthForCommand(Client* client,
-                                       const std::string& dbname,
-                                       const BSONObj& cmdObj) const;
-
-    /**
-     * Appends to "*out" the privileges required to run this command on database "dbname" with
-     * the invocation described by "cmdObj".  New commands shouldn't implement this, they should
-     * implement checkAuthForOperation (which takes an OperationContext*), instead.
-     */
-    virtual void addRequiredPrivileges(const std::string& dbname,
-                                       const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) const {
-        // The default implementation of addRequiredPrivileges should never be hit.
-        fassertFailed(16940);
-    }
 };
 
 /**
@@ -1154,7 +1130,7 @@ private:
     static RequestType _parseRequest(OperationContext* opCtx,
                                      const DatabaseName& dbName,
                                      const BSONObj& cmdObj) {
-        // TODO SERVER-67155 pass tenantId to the BSONObj parse function
+        // TODO SERVER-69499 pass tenantId to the BSONObj parse function
         return RequestType::parse(
             IDLParserContext(RequestType::kCommandName,
                              APIParameters::get(opCtx).getAPIStrict().value_or(false)),

@@ -79,6 +79,9 @@ public:
     std::string help() const override {
         return "drop indexes for a collection";
     }
+    bool allowedWithSecurityToken() const final {
+        return true;
+    }
     class Invocation final : public InvocationBaseGen {
     public:
         using InvocationBaseGen::InvocationBaseGen;
@@ -133,13 +136,19 @@ public:
     std::string help() const override {
         return "re-index a collection (can only be run on a standalone mongod)";
     }
-    virtual void addRequiredPrivileges(const std::string& dbname,
-                                       const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) const {
-        ActionSet actions;
-        actions.addAction(ActionType::reIndex);
-        out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
+
+    Status checkAuthForOperation(OperationContext* opCtx,
+                                 const DatabaseName& dbName,
+                                 const BSONObj& cmdObj) const override {
+        auto* as = AuthorizationSession::get(opCtx->getClient());
+        if (!as->isAuthorizedForActionsOnResource(parseResourcePattern(dbName.db(), cmdObj),
+                                                  ActionType::reIndex)) {
+            return {ErrorCodes::Unauthorized, "unauthorized"};
+        }
+
+        return Status::OK();
     }
+
     CmdReIndex() : BasicCommand("reIndex") {}
 
     bool run(OperationContext* opCtx,
@@ -238,8 +247,8 @@ public:
             collection.getWritableCollection(opCtx)->getIndexCatalog()->dropAllIndexes(
                 opCtx, collection.getWritableCollection(opCtx), true, {});
 
-            swIndexesToRebuild =
-                indexer->init(opCtx, collection, all, MultiIndexBlock::kNoopOnInitFn);
+            swIndexesToRebuild = indexer->init(
+                opCtx, collection, all, MultiIndexBlock::kNoopOnInitFn, /*forRecovery=*/false);
             uassertStatusOK(swIndexesToRebuild.getStatus());
             wunit.commit();
         });

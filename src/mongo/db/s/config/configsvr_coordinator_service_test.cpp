@@ -55,58 +55,77 @@ public:
         auto storageMock = std::make_unique<repl::StorageInterfaceMock>();
         repl::StorageInterface::set(serviceContext, std::move(storageMock));
     }
+
+    void tearDown() override {
+        _service->shutdown();
+        repl::PrimaryOnlyServiceMongoDTest::tearDown();
+    }
 };
 
 TEST_F(ConfigsvrCoordinatorServiceTest, CoordinatorsOfSameTypeCanExist) {
-    // Ensure that the new coordinators we create won't actually run.
-    FailPointEnableBlock hangAndEndCoordinators(
-        "hangAndEndBeforeRunningConfigsvrCoordinatorInstance");
     auto opCtx = cc().makeOperationContext();
 
-    const auto service = ConfigsvrCoordinatorService::getService(opCtx.get());
+    auto* service = dynamic_cast<ConfigsvrCoordinatorService*>(_service);
 
-    SetClusterParameterCoordinatorDocument coordinatorDoc;
-    ConfigsvrCoordinatorId cid(ConfigsvrCoordinatorTypeEnum::kSetClusterParameter);
-    cid.setSubId("0"_sd);
-    coordinatorDoc.setConfigsvrCoordinatorMetadata({cid});
-    coordinatorDoc.setParameter(BSON("a" << 1));
+    std::vector<std::shared_ptr<ConfigsvrCoordinator>> instances;
+    {
+        // Ensure that the new coordinators we create won't actually run.
+        FailPointEnableBlock fp("hangAndEndBeforeRunningConfigsvrCoordinatorInstance");
 
-    SetClusterParameterCoordinatorDocument coordinatorDocSameSubId;
-    coordinatorDocSameSubId.setConfigsvrCoordinatorMetadata({cid});
-    coordinatorDocSameSubId.setParameter(BSON("b" << 2));
+        SetClusterParameterCoordinatorDocument coordinatorDoc;
+        ConfigsvrCoordinatorId cid(ConfigsvrCoordinatorTypeEnum::kSetClusterParameter);
+        cid.setSubId("0"_sd);
+        coordinatorDoc.setConfigsvrCoordinatorMetadata({cid});
+        coordinatorDoc.setParameter(BSON("a" << 1));
 
-    SetClusterParameterCoordinatorDocument coordinatorDocDiffSubId;
-    ConfigsvrCoordinatorId cid1(ConfigsvrCoordinatorTypeEnum::kSetClusterParameter);
-    cid1.setSubId("1"_sd);
-    coordinatorDocDiffSubId.setConfigsvrCoordinatorMetadata({cid1});
-    coordinatorDocDiffSubId.setParameter(BSON("a" << 1));
+        SetClusterParameterCoordinatorDocument coordinatorDocSameSubId;
+        coordinatorDocSameSubId.setConfigsvrCoordinatorMetadata({cid});
+        coordinatorDocSameSubId.setParameter(BSON("b" << 2));
 
-    SetUserWriteBlockModeCoordinatorDocument coordinatorDocDiffType;
-    ConfigsvrCoordinatorId cid2(ConfigsvrCoordinatorTypeEnum::kSetUserWriteBlockMode);
-    cid2.setSubId("0"_sd);
-    coordinatorDocDiffType.setConfigsvrCoordinatorMetadata({cid2});
-    coordinatorDocDiffType.setBlock(true);
+        SetClusterParameterCoordinatorDocument coordinatorDocDiffSubId;
+        ConfigsvrCoordinatorId cid1(ConfigsvrCoordinatorTypeEnum::kSetClusterParameter);
+        cid1.setSubId("1"_sd);
+        coordinatorDocDiffSubId.setConfigsvrCoordinatorMetadata({cid1});
+        coordinatorDocDiffSubId.setParameter(BSON("a" << 1));
 
-    // Trying to create a second coordinator with exact same fields will just get current
-    // coordinator.
-    auto coord1 = service->getOrCreateService(opCtx.get(), coordinatorDoc.toBSON());
-    auto coord1_copy = service->getOrCreateService(opCtx.get(), coordinatorDoc.toBSON());
-    // Note that this is pointer equality, so there is only one real instance.
-    ASSERT_EQUALS(coord1, coord1_copy);
+        SetUserWriteBlockModeCoordinatorDocument coordinatorDocDiffType;
+        ConfigsvrCoordinatorId cid2(ConfigsvrCoordinatorTypeEnum::kSetUserWriteBlockMode);
+        cid2.setSubId("0"_sd);
+        coordinatorDocDiffType.setConfigsvrCoordinatorMetadata({cid2});
+        coordinatorDocDiffType.setBlock(true);
 
-    // Trying to create a second coordinator with same type and subId but different fields will fail
-    // due to conflict.
-    ASSERT_THROWS(service->getOrCreateService(opCtx.get(), coordinatorDocSameSubId.toBSON()),
-                  AssertionException);
+        // Trying to create a second coordinator with exact same fields will just get current
+        // coordinator.
+        auto coord1 = service->getOrCreateService(opCtx.get(), coordinatorDoc.toBSON());
+        auto coord1_copy = service->getOrCreateService(opCtx.get(), coordinatorDoc.toBSON());
+        ASSERT(coord1);
+        // Note that this is pointer equality, so there is only one real instance.
+        ASSERT_EQUALS(coord1, coord1_copy);
 
-    // We can create a second coordinator of the same type but different subId.
-    auto coord2 = service->getOrCreateService(opCtx.get(), coordinatorDocDiffSubId.toBSON());
-    ASSERT_NOT_EQUALS(coord1, coord2);
+        // Trying to create a second coordinator with same type and subId but different fields will
+        // fail due to conflict.
+        ASSERT_THROWS(service->getOrCreateService(opCtx.get(), coordinatorDocSameSubId.toBSON()),
+                      AssertionException);
 
-    // We can create a coordinator with different type and same (or different) subId.
-    auto coord3 = service->getOrCreateService(opCtx.get(), coordinatorDocDiffType.toBSON());
-    ASSERT_NOT_EQUALS(coord1, coord3);
-    ASSERT_NOT_EQUALS(coord2, coord3);
+        // We can create a second coordinator of the same type but different subId.
+        auto coord2 = service->getOrCreateService(opCtx.get(), coordinatorDocDiffSubId.toBSON());
+        ASSERT(coord2);
+        ASSERT_NOT_EQUALS(coord1, coord2);
+
+        // We can create a coordinator with different type and same (or different) subId.
+        auto coord3 = service->getOrCreateService(opCtx.get(), coordinatorDocDiffType.toBSON());
+        ASSERT(coord3);
+        ASSERT_NOT_EQUALS(coord1, coord3);
+        ASSERT_NOT_EQUALS(coord2, coord3);
+
+        // Ensure all instances start before we disable the failpoint.
+        fp->waitForTimesEntered(fp.initialTimesEntered() + 5);
+        instances = {coord1, coord2, coord3};
+    }
+
+    for (const auto& instance : instances) {
+        instance->getCompletionFuture().wait();
+    }
 }
 
 }  // namespace

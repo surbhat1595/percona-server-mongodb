@@ -34,6 +34,7 @@
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/remove_tags_gen.h"
@@ -44,6 +45,7 @@
 #include "mongo/db/write_block_bypass.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/metadata/impersonated_user_metadata.h"
+#include "mongo/s/analyze_shard_key_documents_gen.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_tags.h"
@@ -195,7 +197,7 @@ void checkCollectionUUIDConsistencyAcrossShards(
 
     std::vector<MismatchedShard> mismatches;
 
-    for (auto cmdResponse : responses) {
+    for (const auto& cmdResponse : responses) {
         auto responseData = uassertStatusOK(cmdResponse.swResponse);
         auto collectionVector = responseData.data.firstElement()["firstBatch"].Array();
         auto shardId = cmdResponse.shardId;
@@ -217,7 +219,7 @@ void checkCollectionUUIDConsistencyAcrossShards(
                      << " with expected UUID: " << collectionUuid.toString()
                      << " has different UUIDs on the following shards: [";
 
-        for (auto mismatch : mismatches) {
+        for (const auto& mismatch : mismatches) {
             errorMessage << "{ " << mismatch.shardId << ":" << mismatch.uuid << " },";
         }
         errorMessage << "]";
@@ -239,7 +241,7 @@ void checkTargetCollectionDoesNotExistInCluster(
         opCtx, toNss.db(), cmdObj, shardIds, **executor);
 
     std::vector<std::string> shardsContainingTargetCollection;
-    for (auto cmdResponse : responses) {
+    for (const auto& cmdResponse : responses) {
         uassertStatusOK(cmdResponse.swResponse);
         auto responseData = uassertStatusOK(cmdResponse.swResponse);
         auto collectionVector = responseData.data.firstElement()["firstBatch"].Array();
@@ -311,6 +313,40 @@ void removeTagsMetadataFromConfig(OperationContext* opCtx,
     uassertStatusOKWithContext(
         Shard::CommandResponse::getEffectiveStatus(std::move(swRemoveTagsResult)),
         str::stream() << "Error removing tags for collection " << nss.toString());
+}
+
+void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx,
+                                           const NamespaceString& nss,
+                                           const boost::optional<UUID>& uuid) {
+    auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
+    write_ops::DeleteCommandRequest deleteCmd(NamespaceString::kConfigQueryAnalyzersNamespace);
+    if (uuid) {
+        deleteCmd.setDeletes({[&] {
+            write_ops::DeleteOpEntry entry;
+            entry.setQ(BSON(QueryAnalyzerDocument::kCollectionUuidFieldName << uuid->toString()));
+            entry.setMulti(false);
+            return entry;
+        }()});
+    } else {
+        deleteCmd.setDeletes({[&] {
+            write_ops::DeleteOpEntry entry;
+            entry.setQ(BSON(QueryAnalyzerDocument::kNsFieldName << nss.toString()));
+            entry.setMulti(true);
+            return entry;
+        }()});
+    }
+
+    const auto deleteResult = configShard->runCommandWithFixedRetryAttempts(
+        opCtx,
+        ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+        NamespaceString::kConfigDb.toString(),
+        CommandHelpers::appendMajorityWriteConcern(deleteCmd.toBSON({})),
+        Shard::RetryPolicy::kIdempotent);
+
+    uassertStatusOKWithContext(Shard::CommandResponse::getEffectiveStatus(std::move(deleteResult)),
+                               str::stream()
+                                   << "Error removing query analyzer configurations for collection "
+                                   << nss.toString());
 }
 
 void removeTagsMetadataFromConfig_notIdempotent(OperationContext* opCtx,
@@ -546,8 +582,9 @@ boost::optional<UUID> getCollectionUUID(OperationContext* opCtx,
     AutoGetCollection autoColl(opCtx,
                                nss,
                                MODE_IS,
-                               allowViews ? AutoGetCollectionViewMode::kViewsPermitted
-                                          : AutoGetCollectionViewMode::kViewsForbidden);
+                               AutoGetCollection::Options{}.viewMode(
+                                   allowViews ? auto_get_collection::ViewMode::kViewsPermitted
+                                              : auto_get_collection::ViewMode::kViewsForbidden));
     return autoColl ? boost::make_optional(autoColl->uuid()) : boost::none;
 }
 
@@ -602,6 +639,5 @@ BSONObj getCriticalSectionReasonForRename(const NamespaceString& from, const Nam
                 << "rename"
                 << "from" << from.toString() << "to" << to.toString());
 }
-
 }  // namespace sharding_ddl_util
 }  // namespace mongo

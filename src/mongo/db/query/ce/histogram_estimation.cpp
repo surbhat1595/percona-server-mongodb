@@ -29,50 +29,11 @@
 
 #include "mongo/db/query/ce/histogram_estimation.h"
 #include "mongo/db/exec/sbe/abt/abt_lower.h"
+#include "mongo/db/query/ce/value_utils.h"
 #include "mongo/db/query/optimizer/syntax/expr.h"
 
 namespace mongo::ce {
 using namespace sbe;
-namespace {
-
-bool sameTypeBracket(value::TypeTags tag1, value::TypeTags tag2) {
-    if (tag1 == tag2) {
-        return true;
-    }
-    return ((value::isNumber(tag1) && value::isNumber(tag2)) ||
-            (value::isString(tag1) && value::isString(tag2)));
-}
-
-double valueToDouble(value::TypeTags tag, value::Value val) {
-    double result = 0;
-    if (value::isNumber(tag)) {
-        result = value::numericCast<double>(tag, val);
-    } else if (value::isString(tag)) {
-        const StringData sd = value::getStringView(tag, val);
-
-        // Convert a prefix of the string to a double.
-        const size_t maxPrecision = std::min(sd.size(), sizeof(double));
-        for (size_t i = 0; i < maxPrecision; ++i) {
-            const char ch = sd[i];
-            const double charToDbl = ch / std::pow(2, i * 8);
-            result += charToDbl;
-        }
-    } else {
-        uassert(6844500, "Unexpected value type", false);
-    }
-
-    return result;
-}
-
-int32_t compareValues3w(value::TypeTags tag1,
-                        value::Value val1,
-                        value::TypeTags tag2,
-                        value::Value val2) {
-    const auto [compareTag, compareVal] = value::compareValue(tag1, val1, tag2, val2);
-    uassert(6695716, "Invalid comparison result", compareTag == value::TypeTags::NumberInt32);
-    return value::bitcastTo<int32_t>(compareVal);
-}
-}  // namespace
 
 EstimationResult getTotals(const ScalarHistogram& h) {
     if (h.empty()) {
@@ -134,14 +95,16 @@ EstimationResult interpolateEstimateInBucket(const ScalarHistogram& h,
         }
     }
 
-    resultCard += bucket._rangeFreq * ratio;
+    const double bucketFreqRatio = bucket._rangeFreq * ratio;
+    resultCard += bucketFreqRatio;
     resultNDV += bucket._ndv * ratio;
 
     if (type == EstimationType::kLess) {
         // Subtract from the estimate the cardinality and ndv corresponding to the equality
-        // operation.
+        // operation, if they are larger than the ratio taken from this bucket.
+        const double innerEqFreqCorrection = (bucketFreqRatio < innerEqFreq) ? 0.0 : innerEqFreq;
         const double innerEqNdv = (bucket._ndv * ratio <= 1.0) ? 0.0 : 1.0;
-        resultCard -= innerEqFreq;
+        resultCard -= innerEqFreqCorrection;
         resultNDV -= innerEqNdv;
     }
     return {resultCard, resultNDV};
@@ -170,7 +133,7 @@ EstimationResult estimate(const ScalarHistogram& h,
             const size_t half = len >> 1;
             const auto [boundTag, boundVal] = h.getBounds().getAt(bucketIndex + half);
 
-            if (compareValues3w(boundTag, boundVal, tag, val) < 0) {
+            if (compareValues(boundTag, boundVal, tag, val) < 0) {
                 bucketIndex += half + 1;
                 len -= half + 1;
             } else {
@@ -195,7 +158,7 @@ EstimationResult estimate(const ScalarHistogram& h,
 
     const Bucket& bucket = h.getBuckets().at(bucketIndex);
     const auto [boundTag, boundVal] = h.getBounds().getAt(bucketIndex);
-    const bool isEndpoint = compareValues3w(boundTag, boundVal, tag, val) == 0;
+    const bool isEndpoint = compareValues(boundTag, boundVal, tag, val) == 0;
 
     if (isEndpoint) {
         switch (type) {
@@ -223,11 +186,17 @@ EstimationResult estimate(const ScalarHistogram& h,
     }
 }
 
-double estimateCardEq(const ArrayHistogram& ah, value::TypeTags tag, value::Value val) {
+double estimateCardEq(const ArrayHistogram& ah,
+                      value::TypeTags tag,
+                      value::Value val,
+                      bool includeScalar) {
     if (tag != value::TypeTags::Null) {
-        double card = estimate(ah.getScalar(), tag, val, EstimationType::kEqual).card;
+        double card = 0.0;
+        if (includeScalar) {
+            card = estimate(ah.getScalar(), tag, val, EstimationType::kEqual).card;
+        }
         if (ah.isArray()) {
-            return card + estimate(ah.getArrayUnique(), tag, val, EstimationType::kEqual).card;
+            card += estimate(ah.getArrayUnique(), tag, val, EstimationType::kEqual).card;
         }
         return card;
     } else {
@@ -266,8 +235,30 @@ static EstimationResult estimateRange(const ScalarHistogram& histogram,
     return highEstimate - lowEstimate;
 }
 
+/**
+ * Compute an estimate for range query on array data with formula:
+ * Card(ArrayMin(a < valHigh)) - Card(ArrayMax(a < valLow))
+ */
+static EstimationResult estimateRangeQueryOnArray(const ScalarHistogram& histogramAmin,
+                                                  const ScalarHistogram& histogramAmax,
+                                                  bool lowInclusive,
+                                                  value::TypeTags tagLow,
+                                                  value::Value valLow,
+                                                  bool highInclusive,
+                                                  value::TypeTags tagHigh,
+                                                  value::Value valHigh) {
+    const EstimationType highType =
+        highInclusive ? EstimationType::kLessOrEqual : EstimationType::kLess;
+    const EstimationResult highEstimate = estimate(histogramAmin, tagHigh, valHigh, highType);
+
+    const EstimationType lowType =
+        lowInclusive ? EstimationType::kLess : EstimationType::kLessOrEqual;
+    const EstimationResult lowEstimate = estimate(histogramAmax, tagLow, valLow, lowType);
+
+    return highEstimate - lowEstimate;
+}
+
 double estimateCardRange(const ArrayHistogram& ah,
-                         bool includeScalar,
                          /* Define lower bound. */
                          bool lowInclusive,
                          value::TypeTags tagLow,
@@ -275,10 +266,12 @@ double estimateCardRange(const ArrayHistogram& ah,
                          /* Define upper bound. */
                          bool highInclusive,
                          value::TypeTags tagHigh,
-                         value::Value valHigh) {
+                         value::Value valHigh,
+                         bool includeScalar,
+                         EstimationAlgo estimationAlgo) {
     uassert(6695701,
             "Low bound must not be higher than high",
-            compareValues3w(tagLow, valLow, tagHigh, valHigh) <= 0);
+            compareValues(tagLow, valLow, tagHigh, valHigh) <= 0);
 
     // Helper lambda to shorten code for legibility.
     auto estRange = [&](const ScalarHistogram& h) {
@@ -287,16 +280,57 @@ double estimateCardRange(const ArrayHistogram& ah,
 
     double result = 0.0;
     if (ah.isArray()) {
-        const auto arrayMinEst = estRange(ah.getArrayMin());
-        const auto arrayMaxEst = estRange(ah.getArrayMax());
-        const auto arrayUniqueEst = estRange(ah.getArrayUnique());
 
-        // TODO: should we consider diving by sqrt(ndv) or just by ndv?
-        const double arrayUniqueDensity = (arrayUniqueEst.ndv == 0.0)
-            ? 0.0
-            : (arrayUniqueEst.card / std::sqrt(arrayUniqueEst.ndv));
+        if (includeScalar) {
+            // Range query on array data.
+            const EstimationResult rangeCardOnArray = estimateRangeQueryOnArray(ah.getArrayMin(),
+                                                                                ah.getArrayMax(),
+                                                                                lowInclusive,
+                                                                                tagLow,
+                                                                                valLow,
+                                                                                highInclusive,
+                                                                                tagHigh,
+                                                                                valHigh);
+            result += rangeCardOnArray.card;
+        } else {
+            // $elemMatch query on array data.
+            const auto arrayMinEst = estRange(ah.getArrayMin());
+            const auto arrayMaxEst = estRange(ah.getArrayMax());
+            const auto arrayUniqueEst = estRange(ah.getArrayUnique());
 
-        result = std::max(std::max(arrayMinEst.card, arrayMaxEst.card), arrayUniqueDensity);
+            const double totalArrayCount = getTotals(ah.getArrayMin()).card;
+            uassert(
+                6715101, "Array histograms should contain at least one array", totalArrayCount > 0);
+            switch (estimationAlgo) {
+                case EstimationAlgo::HistogramV1: {
+                    const double arrayUniqueDensity = (arrayUniqueEst.ndv == 0.0)
+                        ? 0.0
+                        : (arrayUniqueEst.card / std::sqrt(arrayUniqueEst.ndv));
+                    result =
+                        std::max(std::max(arrayMinEst.card, arrayMaxEst.card), arrayUniqueDensity);
+                    break;
+                }
+                case EstimationAlgo::HistogramV2: {
+                    const double avgArraySize =
+                        getTotals(ah.getArrayUnique()).card / totalArrayCount;
+                    const double adjustedUniqueCard = (avgArraySize == 0.0)
+                        ? 0.0
+                        : std::min(arrayUniqueEst.card / pow(avgArraySize, 0.2), totalArrayCount);
+                    result =
+                        std::max(std::max(arrayMinEst.card, arrayMaxEst.card), adjustedUniqueCard);
+                    break;
+                }
+                case EstimationAlgo::HistogramV3: {
+                    const double adjustedUniqueCard =
+                        0.85 * std::min(arrayUniqueEst.card, totalArrayCount);
+                    result =
+                        std::max(std::max(arrayMinEst.card, arrayMaxEst.card), adjustedUniqueCard);
+                    break;
+                }
+                default:
+                    MONGO_UNREACHABLE;
+            }
+        }
     }
 
     if (includeScalar) {
@@ -309,7 +343,8 @@ double estimateCardRange(const ArrayHistogram& ah,
 
 double estimateIntervalCardinality(const ce::ArrayHistogram& ah,
                                    const optimizer::IntervalRequirement& interval,
-                                   optimizer::CEType childResult) {
+                                   optimizer::CEType childResult,
+                                   bool includeScalar) {
     auto getBound = [](const optimizer::BoundRequirement& boundReq) {
         return boundReq.getBound().cast<optimizer::Constant>()->get();
     };
@@ -318,7 +353,7 @@ double estimateIntervalCardinality(const ce::ArrayHistogram& ah,
         return childResult;
     } else if (interval.isEquality()) {
         auto [tag, val] = getBound(interval.getLowBound());
-        return estimateCardEq(ah, tag, val);
+        return estimateCardEq(ah, tag, val, includeScalar);
     }
 
     // Otherwise, we have a range.
@@ -329,13 +364,13 @@ double estimateIntervalCardinality(const ce::ArrayHistogram& ah,
     auto [highTag, highVal] = getBound(highBound);
 
     return estimateCardRange(ah,
-                             true /*includeScalar*/,
                              lowBound.isInclusive(),
                              lowTag,
                              lowVal,
                              highBound.isInclusive(),
                              highTag,
-                             highVal);
+                             highVal,
+                             includeScalar);
 }
 
 }  // namespace mongo::ce

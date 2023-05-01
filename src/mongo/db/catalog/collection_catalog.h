@@ -38,8 +38,6 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/profile_filter.h"
 #include "mongo/db/service_context.h"
-// TODO SERVER-68265: remove include.
-#include "mongo/db/storage/durable_catalog.h"
 #include "mongo/db/views/view.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/uuid.h"
@@ -210,18 +208,10 @@ public:
     /**
      * Returns the collection instance representative of 'entry' at the provided read timestamp.
      *
-     * TODO SERVER-68571:
-     * - If the data files have already been removed, return nullptr.
-     * - Update the drop pending map ident token when not initialized from shared state.
-     *
-     * TODO SERVER-68265:
-     * - Use NamespaceString instead of DurableCatalog::Entry.
-     * - Remove DurableCatalog dependency.
-     *
      * Returns nullptr when reading from a point-in-time where the collection did not exist.
      */
     std::shared_ptr<Collection> openCollection(OperationContext* opCtx,
-                                               const DurableCatalog::Entry& entry,
+                                               const NamespaceString& nss,
                                                Timestamp readTimestamp) const;
 
     /**
@@ -292,7 +282,8 @@ public:
      */
     void registerCollection(OperationContext* opCtx,
                             const UUID& uuid,
-                            std::shared_ptr<Collection> collection);
+                            std::shared_ptr<Collection> collection,
+                            boost::optional<Timestamp> commitTime);
 
     /**
      * Deregister the collection.
@@ -301,7 +292,8 @@ public:
      */
     std::shared_ptr<Collection> deregisterCollection(OperationContext* opCtx,
                                                      const UUID& uuid,
-                                                     bool isDropPending);
+                                                     bool isDropPending,
+                                                     boost::optional<Timestamp> commitTime);
 
     /**
      * Create a temporary record of an uncommitted view namespace to aid in detecting a simultaneous
@@ -317,7 +309,7 @@ public:
     /**
      * Deregister all the collection objects and view namespaces.
      */
-    void deregisterAllCollectionsAndViews();
+    void deregisterAllCollectionsAndViews(ServiceContext* svcCtx);
 
     /**
      * Adds the index entry to the drop pending state in the catalog.
@@ -405,6 +397,17 @@ public:
                                           const NamespaceString& nss) const;
 
     /**
+     * Returns the CatalogId for a given 'nss' at timestamp 'ts'.
+     *
+     * Timestamp must be in the range [oldest_timestamp, now)
+     * If 'ts' is boost::none the latest CatalogId is returned.
+     *
+     * Returns boost::none if no namespace exist at the timestamp or if 'ts' is out of range.
+     */
+    boost::optional<RecordId> lookupCatalogIdByNSS(
+        const NamespaceString& nss, boost::optional<Timestamp> ts = boost::none) const;
+
+    /**
      * Iterates through the views in the catalog associated with database `dbName`, applying
      * 'callback' to each view.  If the 'callback' returns false, the iterator exits early.
      *
@@ -470,12 +473,20 @@ public:
                                                              const DatabaseName& dbName) const;
 
     /**
-     * This functions gets all the database names. The result is sorted in alphabetical ascending
+     * This function gets all the database names. The result is sorted in alphabetical ascending
      * order.
      *
      * Unlike DatabaseHolder::getNames(), this does not return databases that are empty.
      */
     std::vector<DatabaseName> getAllDbNames() const;
+
+    /**
+     * This function gets all the database names associated with tenantId. The result is sorted in
+     * alphabetical ascending order.
+     *
+     * Unlike DatabaseHolder::getNames(), this does not return databases that are empty.
+     */
+    std::vector<DatabaseName> getAllDbNamesForTenant(boost::optional<TenantId> tenantId) const;
 
     /**
      * Sets 'newProfileSettings' as the profiling settings for the database 'dbName'.
@@ -546,14 +557,14 @@ public:
      *
      * Must be called with the global lock acquired in exclusive mode.
      */
-    void onCloseCatalog(OperationContext* opCtx);
+    void onCloseCatalog();
 
     /**
      * Puts the catalog back in open state, removing the pre-close state. See onCloseCatalog.
      *
      * Must be called with the global lock acquired in exclusive mode.
      */
-    void onOpenCatalog(OperationContext* opCtx);
+    void onOpenCatalog();
 
     /**
      * The epoch is incremented whenever the catalog is closed and re-opened.
@@ -570,31 +581,21 @@ public:
     iterator end(OperationContext* opCtx) const;
 
     /**
-     * Lookup the name of a resource by its ResourceId. If there are multiple namespaces mapped to
-     * the same ResourceId entry, we return the boost::none for those namespaces until there is only
-     * one namespace in the set. If the ResourceId is not found, boost::none is returned.
+     * Checks if 'cleanupForOldestTimestampAdvanced' should be called when the oldest timestamp
+     * advanced. Used to avoid a potentially expensive call to 'cleanupForOldestTimestampAdvanced'
+     * if no write is needed.
      */
-    boost::optional<std::string> lookupResourceName(const ResourceId& rid) const;
+    bool needsCleanupForOldestTimestamp(Timestamp oldest) const;
 
     /**
-     * Removes an existing ResourceId 'rid' with namespace 'nss' from the map.
+     * Cleans up internal structures when the oldest timestamp advances
      */
-    void removeResource(const ResourceId& rid, const NamespaceString& nss);
+    void cleanupForOldestTimestampAdvanced(Timestamp oldest);
 
     /**
-     * Removes an existing ResourceId 'rid' with database name 'dbName' from the map.
+     * Cleans up internal structures after catalog reopen
      */
-    void removeResource(const ResourceId& rid, const DatabaseName& dbName);
-
-    /**
-     * Inserts a new ResourceId 'rid' into the map with namespace 'nss'.
-     */
-    void addResource(const ResourceId& rid, const NamespaceString& nss);
-
-    /**
-     * Inserts a new ResourceId 'rid' into the map with database name 'dbName'.
-     */
-    void addResource(const ResourceId& rid, const DatabaseName& dbName);
+    void cleanupForCatalogReopen(Timestamp stable);
 
     /**
      * Ensures we have a MODE_X lock on a collection or MODE_IX lock for newly created collections.
@@ -615,6 +616,11 @@ private:
     boost::optional<const ViewsForDatabase&> _getViewsForDatabase(OperationContext* opCtx,
                                                                   const DatabaseName& dbName) const;
 
+    /**
+     * Returns all relevant dbNames using the firstDbName to construct an iterator pointing to the
+     * first desired dbName.
+     */
+    std::vector<DatabaseName> _getAllDbNamesHelper(DatabaseName firstDbName) const;
     /**
      * Sets all namespaces used by views for a database. Will uassert if there is a conflicting
      * collection name in the catalog.
@@ -645,16 +651,6 @@ private:
     bool _alreadyClonedForBatchedWriter(const std::shared_ptr<Collection>& collection) const;
 
     /**
-     * Inserts a new ResourceId 'rid' into the map with namespace 'entry'.
-     */
-    void _addResource(const ResourceId& rid, const std::string& entry);
-
-    /**
-     * Removes an existing ResourceId 'rid' with namespace 'entry' from the map.
-     */
-    void _removeResource(const ResourceId& rid, const std::string& entry);
-
-    /**
      * Throws 'WriteConflictException' if given namespace is already registered with the catalog, as
      * either a view or collection. The results will include namespaces which have been registered
      * by preCommitHooks on other threads, but which have not truly been committed yet.
@@ -667,6 +663,33 @@ private:
     void _ensureNamespaceDoesNotExist(OperationContext* opCtx,
                                       const NamespaceString& nss,
                                       NamespaceType type) const;
+
+    /**
+     * CatalogId with Timestamp
+     */
+    struct TimestampedCatalogId {
+        boost::optional<RecordId> id;
+        Timestamp ts;
+    };
+
+    // Push a catalogId for namespace at given Timestamp. Timestamp needs to be larger than other
+    // entries for this namespace. boost::none for catalogId represent drop, boost::none for
+    // timestamp turns this operation into a no-op.
+    void _pushCatalogIdForNSS(const NamespaceString& nss,
+                              boost::optional<RecordId> catalogId,
+                              boost::optional<Timestamp> ts);
+
+    // Push a catalogId for 'from' and 'to' for a rename operation at given Timestamp. Timestamp
+    // needs to be larger than other entries for these namespaces. boost::none for timestamp turns
+    // this operation into a no-op.
+    void _pushCatalogIdForRename(const NamespaceString& from,
+                                 const NamespaceString& to,
+                                 boost::optional<Timestamp> ts);
+
+    // Helper to calculate if a namespace needs to be marked for cleanup for a set of timestamped
+    // catalogIds
+    void _markNamespaceForCatalogIdCleanupIfNeeded(const NamespaceString& nss,
+                                                   const std::vector<TimestampedCatalogId>& ids);
 
     /**
      * When present, indicates that the catalog is in closed state, and contains a map from UUID
@@ -688,6 +711,15 @@ private:
     NamespaceCollectionMap _collections;
     UncommittedViewsSet _uncommittedViews;
 
+    // CatalogId mappings for all known namespaces for the CollectionCatalog. The vector is sorted
+    // on timestamp.
+    absl::flat_hash_map<NamespaceString, std::vector<TimestampedCatalogId>> _catalogIds;
+    // Set of namespaces that need cleanup when the oldest timestamp advances sufficiently.
+    absl::flat_hash_set<NamespaceString> _catalogIdChanges;
+    // Point at which the oldest timestamp need to advance for there to be any catalogId namespace
+    // that can be cleaned up
+    Timestamp _lowestCatalogIdTimestampForCleanup = Timestamp::max();
+
     // Map of database names to their corresponding views and other associated state.
     ViewsForDatabaseMap _viewsForDatabase;
 
@@ -708,9 +740,6 @@ private:
     // A thread must hold the global exclusive lock to write to this variable, and must hold the
     // global lock in at least MODE_IS to read it.
     uint64_t _epoch = 0;
-
-    // Mapping from ResourceId to a set of strings that contains collection and database namespaces.
-    std::map<ResourceId, std::set<std::string>> _resourceInformation;
 
     /**
      * Contains non-default database profile settings. New collections, current collections and

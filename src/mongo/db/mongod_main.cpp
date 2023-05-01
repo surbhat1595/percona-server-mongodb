@@ -61,6 +61,7 @@
 #include "mongo/db/change_collection_expired_documents_remover.h"
 #include "mongo/db/change_stream_change_collection_manager.h"
 #include "mongo/db/change_stream_options_manager.h"
+#include "mongo/db/change_stream_serverless_helpers.h"
 #include "mongo/db/client.h"
 #include "mongo/db/client_metadata_propagation_egress_hook.h"
 #include "mongo/db/clientcursor.h"
@@ -142,6 +143,7 @@
 #include "mongo/db/s/migration_util.h"
 #include "mongo/db/s/op_observer_sharding_impl.h"
 #include "mongo/db/s/periodic_sharded_index_consistency_checker.h"
+#include "mongo/db/s/query_analysis_op_observer.h"
 #include "mongo/db/s/rename_collection_participant_service.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
 #include "mongo/db/s/resharding/resharding_donor_service.h"
@@ -354,8 +356,10 @@ void registerPrimaryOnlyServices(ServiceContext* serviceContext) {
         }
     }
 
-    // TODO SERVER-65950 create 'SetChangeStreamStateCoordinatorService' only in the serverless.
-    services.push_back(std::make_unique<SetChangeStreamStateCoordinatorService>(serviceContext));
+    if (change_stream_serverless_helpers::canInitializeServices()) {
+        services.push_back(
+            std::make_unique<SetChangeStreamStateCoordinatorService>(serviceContext));
+    }
 
     for (auto& service : services) {
         registry->registerService(std::move(service));
@@ -827,6 +831,19 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         startChangeCollectionExpiredDocumentsRemover(serviceContext);
     }
 
+    if (computeModeEnabled) {
+        if (!isStandalone || serverGlobalParams.clusterRole != ClusterRole::None) {
+            LOGV2_ERROR(6968200, "'enableComputeMode' can be used only in standalone server");
+            exitCleanly(ExitCode::badOptions);
+        }
+        LOGV2_WARNING_OPTIONS(
+            6968201,
+            {logv2::LogTag::kStartupWarnings},
+            "There could be security risks in using 'enableComputeMode'. It is recommended to use "
+            "this mode under an isolated environment and execute the server under a user with "
+            "restricted access permissions");
+    }
+
     // Set up the logical session cache
     LogicalSessionCacheServer kind = LogicalSessionCacheServer::kStandalone;
     if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
@@ -1169,6 +1186,8 @@ void setUpObservers(ServiceContext* serviceContext) {
             std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
         opObserverRegistry->addObserver(std::make_unique<ConfigServerOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ReshardingOpObserver>());
+        opObserverRegistry->addObserver(
+            std::make_unique<analyze_shard_key::QueryAnalysisOpObserver>());
     } else {
         opObserverRegistry->addObserver(
             std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
@@ -1595,8 +1614,9 @@ int mongod_main(int argc, char* argv[]) {
     ReadWriteConcernDefaults::create(service, readWriteConcernDefaultsCacheLookupMongoD);
     ChangeStreamOptionsManager::create(service);
 
-    // TODO SERVER-65950 create 'ChangeStreamChangeCollectionManager' only in the serverless.
-    ChangeStreamChangeCollectionManager::create(service);
+    if (change_stream_serverless_helpers::canInitializeServices()) {
+        ChangeStreamChangeCollectionManager::create(service);
+    }
 
 #if defined(_WIN32)
     if (ntservice::shouldStartService()) {

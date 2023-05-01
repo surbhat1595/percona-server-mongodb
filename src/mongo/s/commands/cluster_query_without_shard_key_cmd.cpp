@@ -53,7 +53,7 @@ public:
                     "_clusterQueryWithoutShardKey can only be run on Mongos",
                     isMongos());
 
-            LOGV2(6962400,
+            LOGV2(6962300,
                   "Running read phase for a write without a shard key.",
                   "clientWriteRequest"_attr = request().getWriteCmd(),
                   "stmtIdInBatch"_attr = request().getStmtId());

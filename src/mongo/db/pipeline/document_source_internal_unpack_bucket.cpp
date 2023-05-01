@@ -246,6 +246,7 @@ DocumentSourceInternalUnpackBucket::DocumentSourceInternalUnpackBucket(
     bool assumeNoMixedSchemaData)
     : DocumentSource(kStageNameInternal, expCtx),
       _assumeNoMixedSchemaData(assumeNoMixedSchemaData),
+
       _bucketUnpacker(std::move(bucketUnpacker)),
       _bucketMaxSpanSeconds{bucketMaxSpanSeconds} {}
 
@@ -353,6 +354,12 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalUnpackBucket::createF
                                   << " field must be a bool, got: " << elem.type(),
                     elem.type() == BSONType::Bool);
             bucketSpec.includeMaxTimeAsMetadata = elem.boolean();
+        } else if (fieldName == kUsesExtendedRange) {
+            uassert(6646901,
+                    str::stream() << kUsesExtendedRange
+                                  << " field must be a bool, got: " << elem.type(),
+                    elem.type() == BSONType::Bool);
+            bucketSpec.setUsesExtendedRange(elem.boolean());
         } else {
             uasserted(5346506,
                       str::stream()
@@ -514,7 +521,7 @@ bool DocumentSourceInternalUnpackBucket::pushDownComputedMetaProjection(
     if (std::next(itr) == container->end()) {
         return nextStageWasRemoved;
     }
-    if (!_bucketUnpacker.bucketSpec().metaField()) {
+    if (!_bucketUnpacker.getMetaField() || !_bucketUnpacker.includeMetaField()) {
         return nextStageWasRemoved;
     }
 
@@ -941,7 +948,7 @@ bool DocumentSourceInternalUnpackBucket::optimizeLastpoint(Pipeline::SourceConta
     auto isSortValidForGroup = [&](AccumulatorDocumentsNeeded targetAccum) {
         bool firstpointTimeIsAscending =
             (targetAccum == AccumulatorDocumentsNeeded::kFirstDocument);
-        for (auto entry : sortStage->getSortKeyPattern()) {
+        for (const auto& entry : sortStage->getSortKeyPattern()) {
             auto isTimeField = entry.fieldPath->fullPath() == timeField;
             if (isTimeField && (entry.isAscending == firstpointTimeIsAscending)) {
                 // This is a first-point query, which is disallowed.

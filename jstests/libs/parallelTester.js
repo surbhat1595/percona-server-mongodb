@@ -252,6 +252,15 @@ if (typeof _threadInject != "undefined") {
             // TODO (SERVER-63228): Remove this exclusion once the feature flag is enabled by
             // default.
             "timeseries/timeseries_index_ttl_partial.js",
+
+            // TODO SERVER-61644: Remove this exclusion once the feature flag is enabled by default.
+            "columnstore_eligibility.js",
+            "columnstore_index.js",
+            "columnstore_index_correctness.js",
+            "columnstore_index_per_path_filters.js",
+            "columnstore_large_array_index_correctness.js",
+            "columnstore_validindex.js",
+            "column_scan_skip_row_store_projection.js",
         ]);
 
         // Get files, including files in subdirectories.
@@ -314,6 +323,7 @@ if (typeof _threadInject != "undefined") {
             parallelFilesDir + "/profile_sampling.js",
             parallelFilesDir + "/profile_update.js",
             parallelFilesDir + "/cached_plan_trial_does_not_discard_work.js",
+            parallelFilesDir + "/timeseries/bucket_unpacking_with_sort_plan_cache.js",
 
             // These tests rely on a deterministically refreshable logical session cache. If they
             // run in parallel, they could interfere with the cache and cause failures.

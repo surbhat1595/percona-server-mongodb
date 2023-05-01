@@ -149,8 +149,7 @@ void reopenAllDatabasesAndReloadCollectionCatalog(OperationContext* opCtx,
 
     // Opening CollectionCatalog: The collection catalog is now in sync with the storage engine
     // catalog. Clear the pre-closing state.
-    CollectionCatalog::write(opCtx,
-                             [&](CollectionCatalog& catalog) { catalog.onOpenCatalog(opCtx); });
+    CollectionCatalog::write(opCtx, [](CollectionCatalog& catalog) { catalog.onOpenCatalog(); });
     opCtx->getServiceContext()->incrementCatalogGeneration();
     LOGV2(20278, "openCatalog: finished reloading collection catalog");
 }
@@ -210,14 +209,13 @@ PreviousCatalogState closeCatalog(OperationContext* opCtx) {
     // Need to mark the CollectionCatalog as open if we our closeAll fails, dismissed if successful.
     ScopeGuard reopenOnFailure([opCtx] {
         CollectionCatalog::write(opCtx,
-                                 [&](CollectionCatalog& catalog) { catalog.onOpenCatalog(opCtx); });
+                                 [](CollectionCatalog& catalog) { catalog.onOpenCatalog(); });
     });
     // Closing CollectionCatalog: only lookupNSSByUUID will fall back to using pre-closing state to
     // allow authorization for currently unknown UUIDs. This is needed because authorization needs
     // to work before acquiring locks, and might otherwise spuriously regard a UUID as unknown
     // while reloading the catalog.
-    CollectionCatalog::write(opCtx,
-                             [&](CollectionCatalog& catalog) { catalog.onCloseCatalog(opCtx); });
+    CollectionCatalog::write(opCtx, [](CollectionCatalog& catalog) { catalog.onCloseCatalog(); });
 
     LOGV2_DEBUG(20270, 1, "closeCatalog: closing collection catalog");
 
@@ -245,9 +243,15 @@ void openCatalog(OperationContext* opCtx,
     // Load the catalog in the storage engine.
     LOGV2(20273, "openCatalog: loading storage engine catalog");
     auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+
+    // Remove catalogId mappings for larger timestamp than 'stableTimestamp'.
+    CollectionCatalog::write(opCtx, [stableTimestamp](CollectionCatalog& catalog) {
+        catalog.cleanupForCatalogReopen(stableTimestamp);
+    });
+
     // Ignore orphaned idents because this function is used during rollback and not at
     // startup recovery, when we may try to recover orphaned idents.
-    storageEngine->loadCatalog(opCtx, StorageEngine::LastShutdownState::kClean);
+    storageEngine->loadCatalog(opCtx, stableTimestamp, StorageEngine::LastShutdownState::kClean);
 
     LOGV2(20274, "openCatalog: reconciling catalog and idents");
     auto reconcileResult = fassert(
@@ -258,7 +262,7 @@ void openCatalog(OperationContext* opCtx,
     // indexes on that collection are done at once, so we use a map to group them together.
     stdx::unordered_map<NamespaceString, IndexNameObjs> nsToIndexNameObjMap;
     auto catalog = CollectionCatalog::get(opCtx);
-    for (StorageEngine::IndexIdentifier indexIdentifier : reconcileResult.indexesToRebuild) {
+    for (const StorageEngine::IndexIdentifier& indexIdentifier : reconcileResult.indexesToRebuild) {
         auto indexName = indexIdentifier.indexName;
         auto coll = catalog->lookupCollectionByNamespace(opCtx, indexIdentifier.nss);
         auto indexSpecs = getIndexNameObjs(

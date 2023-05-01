@@ -5,9 +5,16 @@
 
 load('jstests/aggregation/extras/utils.js');  // For arrayEq()
 
-const mongod = MongoRunner.runMongod(
-    {auth: '', setParameter: {multitenancySupport: true, featureFlagMongoStore: true}});
-const adminDb = mongod.getDB('admin');
+// TODO SERVER-69726 Make this replica set have multiple nodes.
+const rst = new ReplSetTest({
+    nodes: 1,
+    nodeOptions: {auth: '', setParameter: {multitenancySupport: true, featureFlagMongoStore: true}}
+});
+rst.startSet({keyFile: 'jstests/libs/key1'});
+rst.initiate();
+
+const primary = rst.getPrimary();
+const adminDb = primary.getDB('admin');
 
 // Prepare a user for testing pass tenant via $tenant.
 // Must be authenticated as a user with ActionType::useTenant in order to use $tenant.
@@ -18,7 +25,7 @@ const kTenant = ObjectId();
 const kOtherTenant = ObjectId();
 const kDbName = 'myDb';
 const kCollName = 'myColl';
-const testDb = mongod.getDB(kDbName);
+const testDb = primary.getDB(kDbName);
 const testColl = testDb.getCollection(kCollName);
 
 // In this jstest, the collection (defined by kCollName) and the document "{_id: 0, a: 1, b: 1}"
@@ -47,6 +54,40 @@ const testColl = testDb.getCollection(kCollName);
     const collsWithDiffTenant = assert.commandWorked(
         testDb.runCommand({listCollections: 1, nameOnly: true, '$tenant': kOtherTenant}));
     assert.eq(0, collsWithDiffTenant.cursor.firstBatch.length);
+}
+
+// Test listDatabases command.
+{
+    // Create databases for kTenant. A new database is implicitly created when a collection is
+    // created.
+    const kOtherDbName = 'otherDb';
+    assert.commandWorked(
+        primary.getDB(kOtherDbName).createCollection(kCollName, {'$tenant': kTenant}));
+
+    const dbs = assert.commandWorked(
+        adminDb.runCommand({listDatabases: 1, nameOnly: true, '$tenant': kTenant}));
+    assert.eq(2, dbs.databases.length);
+    // TODO SERVER-70053: Change this check to check that we get tenantId prefixed db names.
+    // The 'admin' database is not expected because we do not create a tenant user in this test.
+    const expectedDbs = [kDbName, kOtherDbName];
+    assert(arrayEq(expectedDbs, dbs.databases.map(db => db.name)));
+
+    // These databases should not be accessed with a different tenant.
+    const dbsWithDiffTenant = assert.commandWorked(
+        adminDb.runCommand({listDatabases: 1, nameOnly: true, '$tenant': kOtherTenant}));
+    assert.eq(0, dbsWithDiffTenant.databases.length);
+
+    // If no tenantId is supplied, return all databases. We expect an empty vector when
+    // multitenancySupport and featureFlagRequireTenantId are enabled.
+    const allDbs = assert.commandWorked(adminDb.runCommand({listDatabases: 1, nameOnly: true}));
+    assert.eq(5, allDbs.databases.length);
+    expectedDbs.push("admin");
+    expectedDbs.push("config");
+    expectedDbs.push("local");
+    assert(arrayEq(expectedDbs, allDbs.databases.map(db => db.name)));
+
+    // TODO SERVER-69764: Check that we get an empty vector when multitenancySupport and
+    // featureFlagRequireTenantId are enabled, and tenantId is not supplied.
 }
 
 // Test insert, agg, find, getMore, and explain commands.
@@ -187,23 +228,43 @@ const testColl = testDb.getCollection(kCollName);
         adminDb.runCommand(
             {renameCollection: toName, to: fromName, dropTarget: true, '$tenant': kOtherTenant}),
         ErrorCodes.NamespaceNotFound);
+
+    // Reset the collection to be used below
+    assert.commandWorked(adminDb.runCommand(
+        {renameCollection: toName, to: fromName, dropTarget: true, '$tenant': kTenant}));
 }
 
-// Test the dropDatabase command.
+// Test the dropCollection and dropDatabase commands.
 {
-    // Another tenant shouldn't be able to drop the database.
+    // Another tenant shouldn't be able to drop the collection or database.
+    assert.commandWorked(testDb.runCommand({drop: kCollName, '$tenant': kOtherTenant}));
+    const collsAfterDropCollectionByOtherTenant = assert.commandWorked(testDb.runCommand(
+        {listCollections: 1, nameOnly: true, filter: {name: kCollName}, '$tenant': kTenant}));
+    assert.eq(1,
+              collsAfterDropCollectionByOtherTenant.cursor.firstBatch.length,
+              tojson(collsAfterDropCollectionByOtherTenant.cursor.firstBatch));
+
     assert.commandWorked(testDb.runCommand({dropDatabase: 1, '$tenant': kOtherTenant}));
-    const collsAfterDropByOtherTenant = assert.commandWorked(
-        testDb.runCommand({listCollections: 1, nameOnly: true, '$tenant': kTenant}));
-    assert.eq(3,
-              collsAfterDropByOtherTenant.cursor.firstBatch.length,
-              tojson(collsAfterDropByOtherTenant.cursor.firstBatch));
+    const collsAfterDropDbByOtherTenant = assert.commandWorked(testDb.runCommand(
+        {listCollections: 1, nameOnly: true, filter: {name: kCollName}, '$tenant': kTenant}));
+    assert.eq(1,
+              collsAfterDropDbByOtherTenant.cursor.firstBatch.length,
+              tojson(collsAfterDropDbByOtherTenant.cursor.firstBatch));
+
+    // Now, drop the collection using the original tenantId.
+    assert.commandWorked(testDb.runCommand({drop: kCollName, '$tenant': kTenant}));
+    const collsAfterDropCollection = assert.commandWorked(testDb.runCommand(
+        {listCollections: 1, nameOnly: true, filter: {name: kCollName}, '$tenant': kTenant}));
+    assert.eq(0,
+              collsAfterDropCollection.cursor.firstBatch.length,
+              tojson(collsAfterDropCollection.cursor.firstBatch));
 
     // Now, drop the database using the original tenantId.
     assert.commandWorked(testDb.runCommand({dropDatabase: 1, '$tenant': kTenant}));
-    const collsAfterDrop = assert.commandWorked(
-        testDb.runCommand({listCollections: 1, nameOnly: true, '$tenant': kTenant}));
-    assert.eq(0, collsAfterDrop.cursor.firstBatch.length, tojson(collsAfterDrop.cursor.firstBatch));
+    const collsAfterDropDb = assert.commandWorked(testDb.runCommand(
+        {listCollections: 1, nameOnly: true, filter: {name: kCollName}, '$tenant': kTenant}));
+    assert.eq(
+        0, collsAfterDropDb.cursor.firstBatch.length, tojson(collsAfterDropDb.cursor.firstBatch));
 
     // Reset the collection so other test cases can still access this collection with kCollName
     // after this test.
@@ -211,5 +272,83 @@ const testColl = testDb.getCollection(kCollName);
         {insert: kCollName, documents: [{_id: 0, a: 1, b: 1}], '$tenant': kTenant}));
 }
 
-MongoRunner.stopMongod(mongod);
+// Test that transactions can be run successfully.
+{
+    const lsid = assert.commandWorked(testDb.runCommand({startSession: 1, $tenant: kTenant})).id;
+    assert.commandWorked(testDb.runCommand({
+        delete: kCollName,
+        deletes: [{q: {_id: 0, a: 1, b: 1}, limit: 1}],
+        startTransaction: true,
+        lsid: lsid,
+        txnNumber: NumberLong(0),
+        autocommit: false,
+        '$tenant': kTenant
+    }));
+    assert.commandWorked(testDb.adminCommand({
+        commitTransaction: 1,
+        lsid: lsid,
+        txnNumber: NumberLong(0),
+        autocommit: false,
+        $tenant: kTenant
+    }));
+
+    const findRes = assert.commandWorked(testDb.runCommand({find: kCollName, '$tenant': kTenant}));
+    assert.eq(0, findRes.cursor.firstBatch.length, tojson(findRes.cursor.firstBatch));
+
+    // Reset the collection so other test cases can still access this collection with kCollName
+    // after this test.
+    assert.commandWorked(testDb.runCommand(
+        {insert: kCollName, documents: [{_id: 0, a: 1, b: 1}], '$tenant': kTenant}));
+}
+
+// Test createIndexes, listIndexes and dropIndexes command.
+{
+    var sortIndexesByName = function(indexes) {
+        return indexes.sort(function(a, b) {
+            return a.name > b.name;
+        });
+    };
+
+    var getIndexesKeyAndName = function(indexes) {
+        return sortIndexesByName(indexes).map(function(index) {
+            return {key: index.key, name: index.name};
+        });
+    };
+
+    let res = assert.commandWorked(testDb.runCommand({
+        createIndexes: kCollName,
+        indexes: [{key: {a: 1}, name: "indexA"}, {key: {b: 1}, name: "indexB"}],
+        '$tenant': kTenant
+    }));
+    assert.eq(3, res.numIndexesAfter);
+
+    res = assert.commandWorked(testDb.runCommand({listIndexes: kCollName, '$tenant': kTenant}));
+    assert.eq(3, res.cursor.firstBatch.length);
+    assert(arrayEq(
+        [
+            {key: {"_id": 1}, name: "_id_"},
+            {key: {a: 1}, name: "indexA"},
+            {key: {b: 1}, name: "indexB"}
+        ],
+        getIndexesKeyAndName(res.cursor.firstBatch)));
+
+    // These indexes should not be accessed with a different tenant.
+    assert.commandFailedWithCode(
+        testDb.runCommand({listIndexes: kCollName, '$tenant': kOtherTenant}),
+        ErrorCodes.NamespaceNotFound);
+    assert.commandFailedWithCode(
+        testDb.runCommand(
+            {dropIndexes: kCollName, index: ["indexA", "indexB"], '$tenant': kOtherTenant}),
+        ErrorCodes.NamespaceNotFound);
+
+    // Drop those new created indexes.
+    res = assert.commandWorked(testDb.runCommand(
+        {dropIndexes: kCollName, index: ["indexA", "indexB"], '$tenant': kTenant}));
+
+    res = assert.commandWorked(testDb.runCommand({listIndexes: kCollName, '$tenant': kTenant}));
+    assert.eq(1, res.cursor.firstBatch.length);
+    assert(arrayEq([{key: {"_id": 1}, name: "_id_"}], getIndexesKeyAndName(res.cursor.firstBatch)));
+}
+
+rst.stopSet();
 })();

@@ -5,21 +5,18 @@
  * TODO SERVER-63947 these tags shouldn't be necessary if we remove the explicit columnstore index
  * mention.
  * @tags: [
- *   # columnstore indexes are new in 6.1.
- *   requires_fcv_61,
+ *   uses_column_store_index,
  *   # We could potentially need to resume an index build in the event of a stepdown, which is not
  *   # yet implemented.
  *   does_not_support_stepdowns,
- *   # Columnstore indexes are incompatible with clustered collections.
- *   incompatible_with_clustered_collection,
  * ]
  */
 (function() {
 "use strict";
 
 load("jstests/libs/sbe_util.js");  // For checkSBEEnabled.
-const columnstoreEnabled =
-    checkSBEEnabled(db, ["featureFlagColumnstoreIndexes", "featureFlagSbeFull"]);
+const columnstoreEnabled = checkSBEEnabled(
+    db, ["featureFlagColumnstoreIndexes", "featureFlagSbeFull"], true /* checkAllNodes */);
 
 const coll = db.projection_semantics;
 coll.drop();

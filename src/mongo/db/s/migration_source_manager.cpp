@@ -27,12 +27,10 @@
  *    it in the license file.
  */
 
-
 #include "mongo/db/s/migration_source_manager.h"
 
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/catalog_raii.h"
-#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/read_concern.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -50,24 +48,18 @@
 #include "mongo/db/s/sharding_state_recovery.h"
 #include "mongo/db/s/sharding_statistics.h"
 #include "mongo/db/s/type_shard_collection.h"
-#include "mongo/db/session/logical_session_cache.h"
-#include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/timeseries/bucket_catalog.h"
 #include "mongo/db/vector_clock.h"
-#include "mongo/executor/task_executor.h"
-#include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog_cache_loader.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/shard_key_pattern.h"
 #include "mongo/util/duration.h"
-#include "mongo/util/elapsed_tracker.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kShardingMigration
-
 
 namespace mongo {
 namespace {
@@ -276,9 +268,9 @@ void MigrationSourceManager::startClone() {
         AutoGetCollection autoColl(_opCtx,
                                    nss(),
                                    replEnabled ? MODE_IX : MODE_X,
-                                   AutoGetCollectionViewMode::kViewsForbidden,
-                                   _opCtx->getServiceContext()->getPreciseClockSource()->now() +
-                                       Milliseconds(migrationLockAcquisitionMaxWaitMS.load()));
+                                   AutoGetCollection::Options{}.deadline(
+                                       _opCtx->getServiceContext()->getPreciseClockSource()->now() +
+                                       Milliseconds(migrationLockAcquisitionMaxWaitMS.load())));
 
         auto* const csr = CollectionShardingRuntime::get(_opCtx, nss());
         const auto csrLock = CollectionShardingRuntime::CSRLock::lockExclusive(_opCtx, csr);
@@ -297,6 +289,7 @@ void MigrationSourceManager::startClone() {
                              *_collectionUUID,
                              ChunkRange(*_args.getMin(), *_args.getMax()),
                              *_chunkVersion,
+                             KeyPattern(metadata.getKeyPattern()),
                              _args.getWaitForDelete());
 
         _state = kCloning;

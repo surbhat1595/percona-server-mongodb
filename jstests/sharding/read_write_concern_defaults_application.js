@@ -79,6 +79,7 @@ let testCases = {
     _addShard: {skip: "internal command"},
     _cloneCollectionOptionsFromPrimaryShard: {skip: "internal command"},
     _clusterQueryWithoutShardKey: {skip: "internal command"},
+    _clusterWriteWithoutShardKey: {skip: "internal command"},
     _configsvrAbortReshardCollection: {skip: "internal command"},
     _configsvrAddShard: {skip: "internal command"},
     _configsvrAddShardToZone: {skip: "internal command"},
@@ -95,9 +96,6 @@ let testCases = {
     _configsvrCommitIndex: {skip: "internal command"},
     _configsvrCommitMovePrimary: {skip: "internal command"},  // Can be removed once 6.0 is last LTS
     _configsvrCommitReshardCollection: {skip: "internal command"},
-    _configsvrConfigureAutoSplit: {
-        skip: "internal command"
-    },  // TODO SERVER-62374: remove this once 5.3 becomes last continuos release
     _configsvrConfigureCollectionBalancing: {skip: "internal command"},
     _configsvrCreateDatabase: {skip: "internal command"},
     _configsvrDropIndexCatalogEntry: {skip: "internal command"},
@@ -137,6 +135,7 @@ let testCases = {
     _recvChunkReleaseCritSec: {skip: "internal command"},
     _recvChunkStart: {skip: "internal command"},
     _recvChunkStatus: {skip: "internal command"},
+    _refreshQueryAnalyzerConfiguration: {skip: "internal command"},
     _shardsvrAbortReshardCollection: {skip: "internal command"},
     _shardsvrCleanupReshardCollection: {skip: "internal command"},
     _shardsvrCloneCatalogData: {skip: "internal command"},
@@ -158,6 +157,8 @@ let testCases = {
     _shardsvrDropDatabaseParticipant: {skip: "internal command"},
     _shardsvrGetStatsForBalancing: {skip: "internal command"},
     _shardsvrInsertGlobalIndexKey: {skip: "internal command"},
+    _shardsvrDeleteGlobalIndexKey: {skip: "internal command"},
+    _shardsvrWriteGlobalIndexKeys: {skip: "internal command"},
     _shardsvrJoinMigrations: {skip: "internal command"},
     _shardsvrMovePrimary: {skip: "internal command"},
     _shardsvrMoveRange: {
@@ -252,6 +253,7 @@ let testCases = {
     clusterAbortTransaction: {skip: "already tested by 'abortTransaction' tests on mongos"},
     clusterAggregate: {skip: "already tested by 'aggregate' tests on mongos"},
     clusterCommitTransaction: {skip: "already tested by 'commitTransaction' tests on mongos"},
+    clusterCount: {skip: "already tested by 'count' tests on mongos"},
     clusterDelete: {skip: "already tested by 'delete' tests on mongos"},
     clusterFind: {skip: "already tested by 'find' tests on mongos"},
     clusterGetMore: {skip: "already tested by 'getMore' tests on mongos"},
@@ -295,9 +297,6 @@ let testCases = {
     },
     compact: {skip: "does not accept read or write concern"},
     compactStructuredEncryptionData: {skip: "does not accept read or write concern"},
-    configureCollectionAutoSplitter: {
-        skip: "does not accept read or write concern"
-    },  // TODO SERVER-62374: remove this once 5.3 becomes last continuos release
     configureCollectionBalancing: {skip: "does not accept read or write concern"},
     configureFailPoint: {skip: "does not accept read or write concern"},
     configureQueryAnalyzer: {skip: "does not accept read or write concern"},

@@ -481,7 +481,7 @@ auto makeHelloReply(const std::string& setName,
 };
 
 void mockCommandReplies(MockReplicaSet* replSet) {
-    for (auto hostAndPort : replSet->getHosts()) {
+    for (const auto& hostAndPort : replSet->getHosts()) {
         auto node = replSet->getNode(hostAndPort.toString());
         node->setCommandReply("replSetStepUp", BSON("ok" << 1));
         node->setCommandReply("appendOplogNote", BSON("ok" << 1));
@@ -548,10 +548,8 @@ TEST_F(ShardSplitDonorServiceTest, ShardSplitFailsWhenLockIsHeld) {
 
     auto decisionFuture = serviceInstance->decisionFuture();
 
-    auto result = decisionFuture.get();
-    ASSERT_EQ(result.state, ShardSplitDonorStateEnum::kAborted);
-    ASSERT(result.abortReason);
-    ASSERT_EQ(result.abortReason->code(), ErrorCodes::ConflictingServerlessOperation);
+    auto result = decisionFuture.getNoThrow();
+    ASSERT_EQ(result.getStatus().code(), ErrorCodes::ConflictingServerlessOperation);
 }
 
 TEST_F(ShardSplitDonorServiceTest, ReplSetStepUpRetryable) {
@@ -1009,6 +1007,10 @@ public:
         _recStateDoc = initialStateDocument();
         uassertStatusOK(serverless::insertStateDoc(opCtx, _recStateDoc));
 
+        ServerlessOperationLockRegistry::get(getServiceContext())
+            .acquireLock(ServerlessOperationLockRegistry::LockType::kShardSplit,
+                         _recStateDoc.getId());
+
         _pauseBeforeRecipientCleanupFp =
             std::make_unique<FailPointEnableBlock>("pauseShardSplitBeforeRecipientCleanup");
 
@@ -1044,10 +1046,6 @@ public:
         stateDocument.setBlockOpTime(repl::OpTime(Timestamp(1, 1), 1));
         stateDocument.setState(ShardSplitDonorStateEnum::kBlocking);
         stateDocument.setRecipientConnectionString(ConnectionString::forLocal());
-
-        ServerlessOperationLockRegistry::get(getServiceContext())
-            .acquireLock(ServerlessOperationLockRegistry::LockType::kShardSplit,
-                         stateDocument.getId());
 
         return stateDocument;
     }

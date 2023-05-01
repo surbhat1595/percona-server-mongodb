@@ -107,7 +107,7 @@ Status ViewsForDatabase::_insert(OperationContext* opCtx,
     }
 
     NamespaceString viewName;
-    // TODO SERVER-67155 Use deserialize function on NamespaceString to reconstruct NamespaceString
+    // TODO SERVER-69499 Use deserialize function on NamespaceString to reconstruct NamespaceString
     // correctly.
     if (!gMultitenancySupport ||
         (serverGlobalParams.featureCompatibility.isVersionInitialized() &&
@@ -200,7 +200,7 @@ Status ViewsForDatabase::upsertIntoGraph(OperationContext* opCtx,
         refs.push_back(viewDef.viewOn());
 
         int pipelineSize = 0;
-        for (auto obj : viewDef.pipeline()) {
+        for (const auto& obj : viewDef.pipeline()) {
             pipelineSize += obj.objsize();
         }
 

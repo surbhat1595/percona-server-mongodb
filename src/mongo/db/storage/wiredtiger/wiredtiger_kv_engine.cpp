@@ -719,6 +719,7 @@ std::unique_ptr<EncryptionKeyDB> setUpDataAtRestEncryption(
 StringData WiredTigerKVEngine::kTableUriPrefix = "table:"_sd;
 
 WiredTigerKVEngine::WiredTigerKVEngine(
+    OperationContext* opCtx,
     const std::string& canonicalName,
     const std::string& path,
     ClockSource* cs,
@@ -961,7 +962,7 @@ WiredTigerKVEngine::WiredTigerKVEngine(
     if (repair && _hasUri(session.getSession(), _sizeStorerUri)) {
         LOGV2(22316, "Repairing size cache");
 
-        auto status = _salvageIfNeeded(_sizeStorerUri.c_str());
+        auto status = _salvageIfNeeded(opCtx, _sizeStorerUri.c_str());
         if (status.code() != ErrorCodes::DataModifiedByRepair)
             fassertNoTrace(28577, status);
     }
@@ -1203,10 +1204,10 @@ Status WiredTigerKVEngine::repairIdent(OperationContext* opCtx, StringData ident
         return Status::OK();
     }
     _ensureIdentPath(ident);
-    return _salvageIfNeeded(uri.c_str());
+    return _salvageIfNeeded(opCtx, uri.c_str());
 }
 
-Status WiredTigerKVEngine::_salvageIfNeeded(const char* uri) {
+Status WiredTigerKVEngine::_salvageIfNeeded(OperationContext* opCtx, const char* uri) {
     // Using a side session to avoid transactional issues
     WiredTigerSession sessionWrapper(_conn);
     WT_SESSION* session = sessionWrapper.getSession();
@@ -1216,7 +1217,7 @@ Status WiredTigerKVEngine::_salvageIfNeeded(const char* uri) {
     // operation it will attempt to clean up the dirty elements during checkpointing, thus allowing
     // the operation to succeed if it was the only reason to fail.
     if (rc == EBUSY) {
-        _checkpoint(session);
+        _checkpoint(opCtx, session);
         rc = (session->verify)(session, uri, nullptr);
     }
 
@@ -1230,14 +1231,14 @@ Status WiredTigerKVEngine::_salvageIfNeeded(const char* uri) {
                       "Data file is missing. Attempting to drop and re-create the collection.",
                       "uri"_attr = uri);
 
-        return _rebuildIdent(session, uri);
+        return _rebuildIdent(opCtx, session, uri);
     }
 
     LOGV2(22328, "Verify failed. Running a salvage operation.", "uri"_attr = uri);
     rc = session->salvage(session, uri, nullptr);
     // Same reasoning for handling EBUSY errors as above.
     if (rc == EBUSY) {
-        _checkpoint(session);
+        _checkpoint(opCtx, session);
         rc = session->salvage(session, uri, nullptr);
     }
     auto status = wtRCToStatus(rc, session, "Salvage failed:");
@@ -1252,10 +1253,12 @@ Status WiredTigerKVEngine::_salvageIfNeeded(const char* uri) {
                   "error"_attr = status);
 
     //  If the data is unsalvageable, we should completely rebuild the ident.
-    return _rebuildIdent(session, uri);
+    return _rebuildIdent(opCtx, session, uri);
 }
 
-Status WiredTigerKVEngine::_rebuildIdent(WT_SESSION* session, const char* uri) {
+Status WiredTigerKVEngine::_rebuildIdent(OperationContext* opCtx,
+                                         WT_SESSION* session,
+                                         const char* uri) {
     invariant(_inRepairMode);
 
     invariant(std::string(uri).find(kTableUriPrefix.rawData()) == 0);
@@ -1296,7 +1299,7 @@ Status WiredTigerKVEngine::_rebuildIdent(WT_SESSION* session, const char* uri) {
     // operation it will attempt to clean up the dirty elements during checkpointing, thus allowing
     // the operation to succeed if it was the only reason to fail.
     if (rc == EBUSY) {
-        _checkpoint(session);
+        _checkpoint(opCtx, session);
         rc = session->drop(session, uri, nullptr);
     }
     if (rc != 0) {
@@ -1709,8 +1712,9 @@ WiredTigerKVEngine::beginNonBlockingBackup(OperationContext* opCtx,
     {
         Lock::GlobalLock lk(opCtx, MODE_IS);
         DurableCatalog* catalog = DurableCatalog::get(opCtx);
-        std::vector<DurableCatalog::Entry> catalogEntries = catalog->getAllCatalogEntries(opCtx);
-        for (const DurableCatalog::Entry& e : catalogEntries) {
+        std::vector<DurableCatalog::EntryIdentifier> catalogEntries =
+            catalog->getAllCatalogEntries(opCtx);
+        for (const DurableCatalog::EntryIdentifier& e : catalogEntries) {
             // Populate the collection ident with its namespace and UUID.
             UUID uuid = catalog->getMetaData(opCtx, e.catalogId)->options.uuid.value();
             _wtBackup.identToNamespaceAndUUIDMap.emplace(e.ident, std::make_pair(e.nss, uuid));
@@ -2707,18 +2711,24 @@ void WiredTigerKVEngine::syncSizeInfo(bool sync) const {
     if (!_sizeStorer)
         return;
 
-    try {
-        _sizeStorer->flush(sync);
-    } catch (const WriteConflictException&) {
-        // ignore, we'll try again later.
-    } catch (const AssertionException& ex) {
-        // re-throw exception if it's not WT_CACHE_FULL.
-        if (_ephemeral && ex.code() == ErrorCodes::ExceededMemoryLimit) {
-            LOGV2_ERROR(29000,
-                        "size storer failed to sync cache... ignoring: {ex_what}",
-                        "ex_what"_attr = ex.what());
-        } else {
-            throw;
+    while (true) {
+        try {
+            return _sizeStorer->flush(sync);
+        } catch (const WriteConflictException&) {
+            if (!sync) {
+                // ignore, we'll try again later.
+                return;
+            }
+        } catch (const AssertionException& ex) {
+            // re-throw exception if it's not WT_CACHE_FULL.
+            if (_ephemeral && ex.code() == ErrorCodes::ExceededMemoryLimit) {
+                LOGV2_ERROR(29000,
+                            "size storer failed to sync cache... ignoring: {ex_what}",
+                            "ex_what"_attr = ex.what());
+                return;
+            } else {
+                throw;
+            }
         }
     }
 }
@@ -2894,7 +2904,7 @@ Status WiredTigerKVEngine::recoverOrphanedIdent(OperationContext* opCtx,
                   "error"_attr = status.reason());
 
     //  If the data is unsalvageable, we should completely rebuild the ident.
-    return _rebuildIdent(session, _uri(ident).c_str());
+    return _rebuildIdent(opCtx, session, _uri(ident).c_str());
 #endif
 }
 
@@ -3154,11 +3164,13 @@ void WiredTigerKVEngine::alterIdentMetadata(OperationContext* opCtx,
     // concurrent operations.
     std::string alterString =
         WiredTigerIndex::generateAppMetadataString(*desc) + "exclusive_refreshed=false,";
-    auto status = alterMetadata(uri, alterString);
+    auto status = alterMetadata(opCtx, uri, alterString);
     invariantStatusOK(status);
 }
 
-Status WiredTigerKVEngine::alterMetadata(StringData uri, StringData config) {
+Status WiredTigerKVEngine::alterMetadata(OperationContext* opCtx,
+                                         StringData uri,
+                                         StringData config) {
     // Use a dedicated session in an alter operation to avoid transaction issues.
     WiredTigerSession session(_conn);
     auto sessionPtr = session.getSession();
@@ -3172,7 +3184,7 @@ Status WiredTigerKVEngine::alterMetadata(StringData uri, StringData config) {
     // operation it will attempt to clean up the dirty elements during checkpointing, thus allowing
     // the operation to succeed if it was the only reason to fail.
     if (ret == EBUSY) {
-        _checkpoint(sessionPtr);
+        _checkpoint(opCtx, sessionPtr);
         ret =
             sessionPtr->alter(sessionPtr, uriNullTerminated.c_str(), configNullTerminated.c_str());
     }
@@ -3182,7 +3194,7 @@ Status WiredTigerKVEngine::alterMetadata(StringData uri, StringData config) {
 
 Status WiredTigerKVEngine::dropIdent(RecoveryUnit* ru,
                                      StringData ident,
-                                     StorageEngine::DropIdentCallback&& onDrop) {
+                                     const StorageEngine::DropIdentCallback& onDrop) {
     string uri = _uri(ident);
 
     WiredTigerRecoveryUnit* wtRu = checked_cast<WiredTigerRecoveryUnit*>(ru);
@@ -3266,7 +3278,7 @@ bool WiredTigerKVEngine::supportsDirectoryPerDB() const {
     return true;
 }
 
-void WiredTigerKVEngine::_checkpoint(WT_SESSION* session) {
+void WiredTigerKVEngine::_checkpoint(OperationContext* opCtx, WT_SESSION* session) {
     // Ephemeral WiredTiger instances cannot do a checkpoint to disk as there is no disk backing
     // the data.
     if (_ephemeral) {
@@ -3307,12 +3319,14 @@ void WiredTigerKVEngine::_checkpoint(WT_SESSION* session) {
         // Third, stableTimestamp >= initialDataTimestamp: Take stable checkpoint. Steady state
         // case.
         if (initialDataTimestamp.asULL() <= 1) {
+            Lock::ResourceLock checkpointLock{
+                opCtx, ResourceId(RESOURCE_MUTEX, "checkpoint"), MODE_X};
+            clearIndividuallyCheckpointedIndexes();
             invariantWTOK(session->checkpoint(session, "use_timestamp=false"), session);
             LOGV2_FOR_RECOVERY(5576602,
                                2,
                                "Completed unstable checkpoint.",
                                "initialDataTimestamp"_attr = initialDataTimestamp.toString());
-            clearIndividuallyCheckpointedIndexes();
         } else if (stableTimestamp < initialDataTimestamp) {
             LOGV2_FOR_RECOVERY(
                 23985,
@@ -3330,8 +3344,10 @@ void WiredTigerKVEngine::_checkpoint(WT_SESSION* session) {
                                "oplogNeededForRollback"_attr = toString(oplogNeededForRollback));
 
             {
-                invariantWTOK(session->checkpoint(session, "use_timestamp=true"), session);
+                Lock::ResourceLock checkpointLock{
+                    opCtx, ResourceId(RESOURCE_MUTEX, "checkpoint"), MODE_X};
                 clearIndividuallyCheckpointedIndexes();
+                invariantWTOK(session->checkpoint(session, "use_timestamp=true"), session);
             }
 
             if (oplogNeededForRollback.isOK()) {
@@ -3353,10 +3369,10 @@ void WiredTigerKVEngine::_checkpoint(WT_SESSION* session) {
     }
 }
 
-void WiredTigerKVEngine::checkpoint() {
+void WiredTigerKVEngine::checkpoint(OperationContext* opCtx) {
     UniqueWiredTigerSession session = _sessionCache->getSession();
     WT_SESSION* s = session->getSession();
-    return _checkpoint(s);
+    return _checkpoint(opCtx, s);
 }
 
 bool WiredTigerKVEngine::hasIdent(OperationContext* opCtx, StringData ident) const {
@@ -4040,6 +4056,13 @@ StatusWith<BSONObj> WiredTigerKVEngine::getStorageMetadata(StringData ident) con
 
     return BSON("tableMetadata" << tableMetadata.getValue() << "fileMetadata"
                                 << fileMetadata.getValue());
+}
+
+KeyFormat WiredTigerKVEngine::getKeyFormat(OperationContext* opCtx, StringData ident) const {
+
+    const std::string wtTableConfig =
+        uassertStatusOK(WiredTigerUtil::getMetadataCreate(opCtx, "table:{}"_format(ident)));
+    return wtTableConfig.find("key_format=u") != string::npos ? KeyFormat::String : KeyFormat::Long;
 }
 
 }  // namespace mongo

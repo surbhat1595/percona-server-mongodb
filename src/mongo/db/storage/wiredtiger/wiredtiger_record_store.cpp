@@ -148,13 +148,11 @@ public:
     InsertChange(OplogStones* oplogStones,
                  int64_t bytesInserted,
                  const Record& highestInsertedRecord,
-                 int64_t countInserted,
-                 OperationContext* opCtx)
+                 int64_t countInserted)
         : _oplogStones(oplogStones),
           _bytesInserted(bytesInserted),
           _recordId(highestInsertedRecord.id),
-          _countInserted(countInserted),
-          _opCtx(opCtx) {
+          _countInserted(countInserted) {
         // We only want to initialize _wall by parsing BSONObj when we expect to need it in
         // OplogStone::createNewStoneIfNeeded.
         int64_t currBytes = _oplogStones->_currentBytes.load() + _bytesInserted;
@@ -172,7 +170,7 @@ public:
         }
     }
 
-    void commit(boost::optional<Timestamp>) final {
+    void commit(OperationContext* opCtx, boost::optional<Timestamp>) final {
         invariant(_bytesInserted >= 0);
         invariant(_recordId.isValid());
 
@@ -182,18 +180,17 @@ public:
             // When other InsertChanges commit concurrently, an uninitialized wallTime may delay the
             // creation of a new stone. This delay is limited to the number of concurrently running
             // transactions, so the size difference should be inconsequential.
-            _oplogStones->createNewStoneIfNeeded(_opCtx, _recordId, _wall);
+            _oplogStones->createNewStoneIfNeeded(opCtx, _recordId, _wall);
         }
     }
 
-    void rollback() final {}
+    void rollback(OperationContext* opCtx) final {}
 
 private:
     OplogStones* _oplogStones;
     int64_t _bytesInserted;
     RecordId _recordId;
     int64_t _countInserted;
-    OperationContext* _opCtx;
     Date_t _wall;
 };
 
@@ -369,8 +366,8 @@ void WiredTigerRecordStore::OplogStones::updateCurrentStoneAfterInsertOnCommit(
     int64_t bytesInserted,
     const Record& highestInsertedRecord,
     int64_t countInserted) {
-    opCtx->recoveryUnit()->registerChange(std::make_unique<InsertChange>(
-        this, bytesInserted, highestInsertedRecord, countInserted, opCtx));
+    opCtx->recoveryUnit()->registerChange(
+        std::make_unique<InsertChange>(this, bytesInserted, highestInsertedRecord, countInserted));
 }
 
 void WiredTigerRecordStore::OplogStones::clearStonesOnCommit(OperationContext* opCtx) {
@@ -1633,6 +1630,9 @@ StatusWith<RecordData> WiredTigerRecordStore::doUpdateWithDamages(
     WT_ITEM value;
     invariantWTOK(c->get_value(c, &value), c->session);
 
+    _increaseDataSize(opCtx,
+                      static_cast<int64_t>(value.size) - static_cast<int64_t>(oldRec.size()));
+
     return RecordData(static_cast<const char*>(value.data), value.size).getOwned();
 }
 
@@ -1736,6 +1736,9 @@ Status WiredTigerRecordStore::doCompact(OperationContext* opCtx) {
     if (!cache->isEphemeral()) {
         WT_SESSION* s = WiredTigerRecoveryUnit::get(opCtx)->getSession()->getSession();
         opCtx->recoveryUnit()->abandonSnapshot();
+        // WT compact prompts WT to take checkpoints, so we need to take the checkpoint lock around
+        // WT compact calls.
+        Lock::ResourceLock checkpointLock{opCtx, ResourceId(RESOURCE_MUTEX, "checkpoint"), MODE_X};
         int ret = s->compact(s, getURI().c_str(), "timeout=0");
         if (MONGO_unlikely(WTCompactRecordStoreEBUSY.shouldFail())) {
             ret = EBUSY;

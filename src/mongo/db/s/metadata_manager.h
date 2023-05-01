@@ -30,14 +30,10 @@
 #pragma once
 
 #include <list>
-#include <memory>
 
-#include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/range_arithmetic.h"
 #include "mongo/db/s/scoped_collection_metadata.h"
-#include "mongo/db/service_context.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/util/concurrency/with_lock.h"
@@ -148,6 +144,11 @@ public:
      */
     boost::optional<SharedSemiFuture<void>> trackOrphanedDataCleanup(
         ChunkRange const& orphans) const;
+
+    /**
+     * Returns a future marked as ready when all the ongoing queries retaining the range complete
+     */
+    SharedSemiFuture<void> getOngoingQueriesCompletionFuture(ChunkRange const& range);
 
 private:
     // Management of the _metadata list is implemented in RangePreserver

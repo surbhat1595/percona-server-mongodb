@@ -524,7 +524,7 @@ private:
         }
 
         if (ec) {
-            return _makeFuture(errorCodeToStatus(ec), peer);
+            return _makeFuture(errorCodeToStatus(ec, "resolve"), peer);
         } else {
             return _makeFuture(results, peer);
         }
@@ -716,7 +716,7 @@ StatusWith<TransportLayerASIO::ASIOSessionHandle> TransportLayerASIO::_doSyncCon
                         logv2::LogSeverity::Info(),
                         ec);
         if (tcpFastOpenIsConfigured) {
-            return errorCodeToStatus(ec);
+            return errorCodeToStatus(ec, "syncConnect tcpFastOpenIsConfigured");
         }
         ec = std::error_code();
     }
@@ -738,7 +738,7 @@ StatusWith<TransportLayerASIO::ASIOSessionHandle> TransportLayerASIO::_doSyncCon
 
     auto status = [&] {
         if (ec) {
-            return errorCodeToStatus(ec);
+            return errorCodeToStatus(ec, "syncConnect connect error");
         } else if (now >= expiration) {
             return Status(ErrorCodes::NetworkTimeout, "Timed out");
         } else {
@@ -763,7 +763,7 @@ StatusWith<TransportLayerASIO::ASIOSessionHandle> TransportLayerASIO::_doSyncCon
         return std::make_shared<ASIOSession>(
             this, std::move(sock), false, *endpoint, transientSSLContext);
     } catch (const asio::system_error& e) {
-        return errorCodeToStatus(e.code());
+        return errorCodeToStatus(e.code(), "syncConnect ASIOSession constructor");
     } catch (const DBException& e) {
         return e.toStatus();
     }
@@ -922,7 +922,7 @@ Future<SessionHandle> TransportLayerASIO::asyncConnect(
                                                          *connector->resolvedEndpoint,
                                                          transientSSLContext);
                 } catch (const asio::system_error& e) {
-                    iasserted(errorCodeToStatus(e.code()));
+                    iasserted(errorCodeToStatus(e.code(), "asyncConnect ASIOSession constructor"));
                 }
             }();
             connector->session->ensureAsync();
@@ -1245,7 +1245,7 @@ Status TransportLayerASIO::setup() {
                             logv2::LogSeverity::Info(),
                             ec);
             if (tcpFastOpenIsConfigured) {
-                return errorCodeToStatus(ec);
+                return errorCodeToStatus(ec, "setup tcpFastOpenIsConfigured");
             }
             ec = std::error_code();
         }
@@ -1257,12 +1257,12 @@ Status TransportLayerASIO::setup() {
 
         acceptor.non_blocking(true, ec);
         if (ec) {
-            return errorCodeToStatus(ec);
+            return errorCodeToStatus(ec, "setup non_blocking");
         }
 
         acceptor.bind(*addr, ec);
         if (ec) {
-            return errorCodeToStatus(ec);
+            return errorCodeToStatus(ec, "setup bind");
         }
 
 #ifndef _WIN32
@@ -1409,9 +1409,10 @@ void TransportLayerASIO::_runListener() noexcept {
 
 Status TransportLayerASIO::start() {
     stdx::unique_lock lk(_mutex);
-
-    // Make sure we haven't shutdown already
-    invariant(!_isShutdown);
+    if (_isShutdown) {
+        LOGV2(6986801, "Cannot start an already shutdown TransportLayer");
+        return ShutdownStatus;
+    }
 
     if (_listenerOptions.isIngress()) {
         _listener.thread = stdx::thread([this] { _runListener(); });
@@ -1430,7 +1431,6 @@ void TransportLayerASIO::shutdown() {
         // We were already stopped
         return;
     }
-
     lk.unlock();
     _timerService->stop();
     lk.lock();
@@ -1472,16 +1472,20 @@ ReactorHandle TransportLayerASIO::getReactor(WhichReactor which) {
 }
 
 namespace {
-void handleConnectionAcceptASIOError(const asio::system_error& e) {
-    // Swallow connection reset errors. Connection reset errors classically present as
-    // asio::error::eof, but can bubble up as asio::error::invalid_argument when calling
-    // into socket.set_option().
-    if (e.code() != asio::error::eof && e.code() != asio::error::invalid_argument) {
-        LOGV2_WARNING(5746600,
-                      "Error accepting new connection: {error}",
-                      "Error accepting new connection",
-                      "error"_attr = e.code().message());
-    }
+bool isConnectionResetError(const std::error_code& ec) {
+    // Connection reset errors classically present as asio::error::eof, but can bubble up as
+    // asio::error::invalid_argument when calling into socket.set_option().
+    return ec == asio::error::eof || ec == asio::error::invalid_argument;
+}
+
+/** Tricky: TCP can be represented by IPPROTO_IP or IPPROTO_TCP. */
+template <typename Protocol>
+bool isTcp(Protocol&& p) {
+    auto pf = p.family();
+    auto pt = p.type();
+    auto pp = p.protocol();
+    return (pf == AF_INET || pf == AF_INET6) && (pt == SOCK_STREAM) &&
+        (pp == IPPROTO_IP || pp == IPPROTO_TCP);
 }
 }  // namespace
 
@@ -1529,7 +1533,13 @@ void TransportLayerASIO::_acceptConnection(GenericAcceptor& acceptor) {
                 _sep->startSession(std::move(session));
             }
         } catch (const asio::system_error& e) {
-            handleConnectionAcceptASIOError(e);
+            // Swallow connection reset errors.
+            if (!isConnectionResetError(e.code())) {
+                LOGV2_WARNING(5746600,
+                              "Error accepting new connection: {error}",
+                              "Error accepting new connection",
+                              "error"_attr = e.code().message());
+            }
         } catch (const DBException& e) {
             LOGV2_WARNING(23023,
                           "Error accepting new connection: {error}",
@@ -1554,17 +1564,23 @@ void TransportLayerASIO::_trySetListenerSocketBacklogQueueDepth(
     GenericAcceptor& acceptor) noexcept {
 #ifdef __linux__
     try {
+        if (!isTcp(acceptor.local_endpoint().protocol()))
+            return;
         auto matchingRecord =
             std::find_if(begin(_acceptorRecords), end(_acceptorRecords), [&](const auto& record) {
                 return acceptor.local_endpoint() == record->acceptor.local_endpoint();
             });
         invariant(matchingRecord != std::end(_acceptorRecords));
-
         TcpInfoOption tcpi;
         acceptor.get_option(tcpi);
         (*matchingRecord)->backlogQueueDepth.store(tcpi->tcpi_unacked);
     } catch (const asio::system_error& e) {
-        handleConnectionAcceptASIOError(e);
+        // Swallow connection reset errors.
+        if (!isConnectionResetError(e.code())) {
+            LOGV2_WARNING(7006800,
+                          "Error retrieving tcp acceptor socket queue length",
+                          "error"_attr = e.code().message());
+        }
     }
 #endif
 }

@@ -264,6 +264,12 @@ public:
 
     virtual void checkpoint(OperationContext* opCtx) {}
 
+    virtual std::unique_ptr<StorageEngine::CheckpointLock> getCheckpointLock(
+        OperationContext* opCtx, StorageEngine::CheckpointLock::Mode mode) {
+        uasserted(ErrorCodes::CommandNotSupported,
+                  "The current storage engine does not support checkpoints");
+    }
+
     /**
      * Returns true if the KVEngine is ephemeral -- that is, it is NOT persistent and all data is
      * lost after shutdown. Otherwise, returns false.
@@ -462,6 +468,13 @@ public:
      */
     virtual KeyFormat getKeyFormat(OperationContext* opCtx, StringData ident) const {
         MONGO_UNREACHABLE;
+    }
+
+    /**
+     * Returns the cache size in MB.
+     */
+    virtual size_t getCacheSizeMB() const {
+        return 0;
     }
 
     /**

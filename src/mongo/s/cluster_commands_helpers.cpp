@@ -182,7 +182,7 @@ std::vector<AsyncRequestsSender::Request> buildVersionedRequestsForTargetedShard
                 shardId,
                 appendShardVersion(cmdToSend,
                                    ShardVersion(placementVersion,
-                                                CollectionIndexes(placementVersion, boost::none))));
+                                                boost::optional<CollectionIndexes>(boost::none))));
         }
     }
 
@@ -617,7 +617,7 @@ RawResponsesResult appendRawResponses(
 bool appendEmptyResultSet(OperationContext* opCtx,
                           BSONObjBuilder& result,
                           Status status,
-                          const std::string& ns) {
+                          const NamespaceString& nss) {
     invariant(!status.isOK());
 
     CurOp::get(opCtx)->debug().nreturned = 0;
@@ -625,7 +625,7 @@ bool appendEmptyResultSet(OperationContext* opCtx,
 
     if (status == ErrorCodes::NamespaceNotFound) {
         // New (command) style reply
-        appendCursorResponseObject(0LL, ns, BSONArray(), boost::none, &result);
+        appendCursorResponseObject(0LL, nss, BSONArray(), boost::none, &result);
 
         return true;
     }
@@ -709,7 +709,7 @@ StatusWith<Shard::QueryResponse> loadIndexesFromAuthoritativeShard(OperationCont
                 uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, minKeyShardId)),
                 appendShardVersion(cmdNoVersion,
                                    ShardVersion(placementVersion,
-                                                CollectionIndexes(placementVersion, boost::none)))};
+                                                boost::optional<CollectionIndexes>(boost::none)))};
         } else {
             // For an unsharded collection, the primary shard will have correct indexes. We attach
             // unsharded shard version to detect if the collection has become sharded.

@@ -28,36 +28,22 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
-
-#include <limits>
 
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
-#include <boost/filesystem/path.hpp>
 
 #include "mongo/base/simple_string_data_comparator.h"
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/exception_util_gen.h"
 #include "mongo/db/global_settings.h"
 #include "mongo/db/server_options_general_gen.h"
 #include "mongo/db/snapshot_window_options_gen.h"
-#include "mongo/db/storage/storage_file_util.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_global_options.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_parameters_gen.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/logv2/log.h"
-#include "mongo/util/assert_util.h"
 #include "mongo/util/processinfo.h"
-#include "mongo/util/scopeguard.h"
-#include "mongo/util/static_immortal.h"
-#include "mongo/util/str.h"
 #include "mongo/util/testing_proctor.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWiredTiger
@@ -562,48 +548,6 @@ size_t WiredTigerUtil::getCacheSizeMB(double requestedCacheSizeGB) {
     return static_cast<size_t>(cacheSizeMB);
 }
 
-bool WiredTigerUtil::appendCustomStats(OperationContext* opCtx,
-                                       BSONObjBuilder* output,
-                                       double scale,
-                                       const std::string& uri) {
-    dassert(opCtx->lockState()->isReadLocked());
-    {
-        BSONObjBuilder metadata(output->subobjStart("metadata"));
-        Status status = WiredTigerUtil::getApplicationMetadata(opCtx, uri, &metadata);
-        if (!status.isOK()) {
-            metadata.append("error", "unable to retrieve metadata");
-            metadata.append("code", static_cast<int>(status.code()));
-            metadata.append("reason", status.reason());
-        }
-    }
-    std::string type, sourceURI;
-    WiredTigerUtil::fetchTypeAndSourceURI(opCtx, uri, &type, &sourceURI);
-    StatusWith<std::string> metadataResult = WiredTigerUtil::getMetadataCreate(opCtx, sourceURI);
-    StringData creationStringName("creationString");
-    if (!metadataResult.isOK()) {
-        BSONObjBuilder creationString(output->subobjStart(creationStringName));
-        creationString.append("error", "unable to retrieve creation config");
-        creationString.append("code", static_cast<int>(metadataResult.getStatus().code()));
-        creationString.append("reason", metadataResult.getStatus().reason());
-    } else {
-        output->append(creationStringName, metadataResult.getValue());
-        // Type can be "lsm" or "file"
-        output->append("type", type);
-    }
-
-    WiredTigerSession* session = WiredTigerRecoveryUnit::get(opCtx)->getSession();
-    WT_SESSION* s = session->getSession();
-    Status status =
-        WiredTigerUtil::exportTableToBSON(s, "statistics:" + uri, "statistics=(fast)", output);
-    if (!status.isOK()) {
-        output->append("error", "unable to retrieve statistics");
-        output->append("code", static_cast<int>(status.code()));
-        output->append("reason", status.reason());
-    }
-    return true;
-}
-
-
 logv2::LogSeverity getWTLOGV2SeverityLevel(const BSONObj& obj) {
     const std::string field = "verbose_level_id";
 
@@ -626,8 +570,16 @@ logv2::LogSeverity getWTLOGV2SeverityLevel(const BSONObj& obj) {
             return logv2::LogSeverity::Info();
         case WT_VERBOSE_INFO:
             return logv2::LogSeverity::Log();
-        case WT_VERBOSE_DEBUG:
+        case WT_VERBOSE_DEBUG_1:
             return logv2::LogSeverity::Debug(1);
+        case WT_VERBOSE_DEBUG_2:
+            return logv2::LogSeverity::Debug(2);
+        case WT_VERBOSE_DEBUG_3:
+            return logv2::LogSeverity::Debug(3);
+        case WT_VERBOSE_DEBUG_4:
+            return logv2::LogSeverity::Debug(4);
+        case WT_VERBOSE_DEBUG_5:
+            return logv2::LogSeverity::Debug(5);
         default:
             return logv2::LogSeverity::Log();
     }
@@ -1212,10 +1164,24 @@ std::string WiredTigerUtil::generateWTVerboseConfiguration() {
         cfg << ",";
 
         int level;
-        if (severity.toInt() >= logv2::LogSeverity::Debug(2).toInt())
-            level = WT_VERBOSE_DEBUG;
-        else
-            level = WT_VERBOSE_INFO;
+        // Deliberately skip WT_VERBOSE_DEBUG_1, as it's a bit too noisy.
+        switch (severity.toInt()) {
+            case logv2::LogSeverity::Debug(2).toInt():
+                level = WT_VERBOSE_DEBUG_2;
+                break;
+            case logv2::LogSeverity::Debug(3).toInt():
+                level = WT_VERBOSE_DEBUG_3;
+                break;
+            case logv2::LogSeverity::Debug(4).toInt():
+                level = WT_VERBOSE_DEBUG_4;
+                break;
+            case logv2::LogSeverity::Debug(5).toInt():
+                level = WT_VERBOSE_DEBUG_5;
+                break;
+            default:
+                level = WT_VERBOSE_INFO;
+                break;
+        }
 
         cfg << componentStr << ":" << level;
     }

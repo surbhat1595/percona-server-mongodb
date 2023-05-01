@@ -30,17 +30,17 @@
 #include "mongo/db/query/optimizer/explain.h"
 
 #include "mongo/db/exec/sbe/values/bson.h"
-#include "mongo/db/query/optimizer/cascades/memo.h"
 #include "mongo/db/query/optimizer/cascades/rewriter_rules.h"
 #include "mongo/db/query/optimizer/defs.h"
 #include "mongo/db/query/optimizer/node.h"
 #include "mongo/util/assert_util.h"
 
+
 namespace mongo::optimizer {
 
 BSONObj ABTPrinter::explainBSON() const {
     return ExplainGenerator::explainBSONObj(
-        _abtTree, true /*displayProperties*/, nullptr /*Memo*/, _nodeToPropsMap);
+        _abtTree, true /*displayProperties*/, nullptr /*memoInterface*/, _nodeToPropsMap);
 }
 
 enum class ExplainVersion { V1, V2, V2Compact, V3, Vmax };
@@ -558,12 +558,17 @@ public:
     using ExplainPrinter = ExplainPrinterImpl<version>;
 
     ExplainGeneratorTransporter(bool displayProperties = false,
-                                const cascades::Memo* memo = nullptr,
-                                const NodeToGroupPropsMap& nodeMap = {})
-        : _displayProperties(displayProperties), _memo(memo), _nodeMap(nodeMap) {
+                                const cascades::MemoExplainInterface* memoInterface = nullptr,
+                                const NodeToGroupPropsMap& nodeMap = {},
+                                const boost::optional<const NodeCEMap&>& nodeCEMap = boost::none)
+        : _displayProperties(displayProperties),
+          _memoInterface(memoInterface),
+          _nodeMap(nodeMap),
+          _nodeCEMap(nodeCEMap) {
         uassert(6624005,
                 "Memo must be provided in order to display properties.",
-                !_displayProperties || (_memo != nullptr || version == ExplainVersion::V3));
+                !_displayProperties ||
+                    (_memoInterface != nullptr || version == ExplainVersion::V3));
     }
 
     /**
@@ -572,7 +577,11 @@ public:
      * no-op.
      */
     void maybePrintProps(ExplainPrinter& nodePrinter, const Node& node) {
-        if (!_displayProperties || version != ExplainVersion::V3 || _nodeMap.empty()) {
+        tassert(6701800,
+                "Cannot have both _displayProperties and _nodeCEMap set.",
+                !(_displayProperties && _nodeCEMap));
+        if (_nodeCEMap || !_displayProperties || version != ExplainVersion::V3 ||
+            _nodeMap.empty()) {
             return;
         }
         auto it = _nodeMap.find(&node);
@@ -599,6 +608,25 @@ public:
         ExplainPrinter res;
         res.fieldName("properties").print(propsPrinter);
         nodePrinter.printAppend(res);
+    }
+
+    void nodeCEPropsPrint(ExplainPrinter& nodePrinter, const ABT& n, const Node& node) {
+        tassert(6701801,
+                "Cannot have both _displayProperties and _nodeCEMap set.",
+                !(_displayProperties && _nodeCEMap));
+        // Only allow in V2 and V3 explain. No point in printing CE when we have a delegator
+        // node.
+        if (!_nodeCEMap || version == ExplainVersion::V1 || n.is<MemoLogicalDelegatorNode>() ||
+            n.is<MemoPhysicalDelegatorNode>()) {
+            return;
+        }
+        auto it = _nodeCEMap->find(&node);
+        uassert(6701802, "Failed to find node ce", it != _nodeCEMap->end());
+        const CEType ce = it->second;
+
+        ExplainPrinter propsPrinter;
+        propsPrinter.fieldName("ce").print(ce);
+        nodePrinter.printAppend(propsPrinter);
     }
 
     static void printBooleanFlag(ExplainPrinter& printer,
@@ -634,13 +662,16 @@ public:
     /**
      * Nodes
      */
-    ExplainPrinter transport(const References& references, std::vector<ExplainPrinter> inResults) {
+    ExplainPrinter transport(const ABT& /*n*/,
+                             const References& references,
+                             std::vector<ExplainPrinter> inResults) {
         ExplainPrinter printer;
         printer.separator("RefBlock: ").printAppend(inResults);
         return printer;
     }
 
-    ExplainPrinter transport(const ExpressionBinder& binders,
+    ExplainPrinter transport(const ABT& /*n*/,
+                             const ExpressionBinder& binders,
                              std::vector<ExplainPrinter> inResults) {
         std::map<std::string, ExplainPrinter> ordered;
         for (size_t idx = 0; idx < inResults.size(); ++idx) {
@@ -698,37 +729,36 @@ public:
         }
     }
 
-    ExplainPrinter transport(const ScanNode& node, ExplainPrinter bindResult) {
+    ExplainPrinter transport(const ABT& n, const ScanNode& node, ExplainPrinter bindResult) {
         ExplainPrinter printer("Scan");
         maybePrintProps(printer, node);
-
         printer.separator(" [")
             .fieldName("scanDefName", ExplainVersion::V3)
             .print(node.getScanDefName())
-            .separator("]")
-            .fieldName("bindings", ExplainVersion::V3)
-            .print(bindResult);
+            .separator("]");
+        nodeCEPropsPrint(printer, n, node);
+        printer.fieldName("bindings", ExplainVersion::V3).print(bindResult);
         return printer;
     }
 
-    ExplainPrinter transport(const PhysicalScanNode& node, ExplainPrinter bindResult) {
+    ExplainPrinter transport(const ABT& n,
+                             const PhysicalScanNode& node,
+                             ExplainPrinter bindResult) {
         ExplainPrinter printer("PhysicalScan");
         maybePrintProps(printer, node);
-
         printer.separator(" [{");
         printFieldProjectionMap(printer, node.getFieldProjectionMap());
         printer.separator("}, ")
             .fieldName("scanDefName", ExplainVersion::V3)
             .print(node.getScanDefName());
-
         printBooleanFlag(printer, "parallel", node.useParallelScan());
-
-        printer.separator("]").fieldName("bindings", ExplainVersion::V3).print(bindResult);
-
+        printer.separator("]");
+        nodeCEPropsPrint(printer, n, node);
+        printer.fieldName("bindings", ExplainVersion::V3).print(bindResult);
         return printer;
     }
 
-    ExplainPrinter transport(const ValueScanNode& node, ExplainPrinter bindResult) {
+    ExplainPrinter transport(const ABT& n, const ValueScanNode& node, ExplainPrinter bindResult) {
         ExplainPrinter valuePrinter = generate(node.getValueArray());
 
         // Specifically not printing optional logical properties here. They can be displayed with
@@ -741,18 +771,20 @@ public:
             .print(node.getHasRID())
             .fieldName("arraySize")
             .print(node.getArraySize())
-            .separator("]")
-            .fieldName("values", ExplainVersion::V3)
+            .separator("]");
+        nodeCEPropsPrint(printer, n, node);
+        printer.fieldName("values", ExplainVersion::V3)
             .print(valuePrinter)
             .fieldName("bindings", ExplainVersion::V3)
             .print(bindResult);
         return printer;
     }
 
-    ExplainPrinter transport(const CoScanNode& node) {
+    ExplainPrinter transport(const ABT& n, const CoScanNode& node) {
         ExplainPrinter printer("CoScan");
         maybePrintProps(printer, node);
         printer.separator(" []");
+        nodeCEPropsPrint(printer, n, node);
         return printer;
     }
 
@@ -900,10 +932,9 @@ public:
         ExplainGeneratorTransporter& _instance;
     };
 
-    ExplainPrinter transport(const IndexScanNode& node, ExplainPrinter bindResult) {
+    ExplainPrinter transport(const ABT& n, const IndexScanNode& node, ExplainPrinter bindResult) {
         ExplainPrinter printer("IndexScan");
         maybePrintProps(printer, node);
-
         printer.separator(" [{");
         printFieldProjectionMap(printer, node.getFieldProjectionMap());
         printer.separator("}, ");
@@ -922,16 +953,18 @@ public:
 
         printBooleanFlag(printer, "reversed", spec.isReverseOrder());
 
-        printer.separator("]").fieldName("bindings", ExplainVersion::V3).print(bindResult);
+        printer.separator("]");
+        nodeCEPropsPrint(printer, n, node);
+        printer.fieldName("bindings", ExplainVersion::V3).print(bindResult);
         return printer;
     }
 
-    ExplainPrinter transport(const SeekNode& node,
+    ExplainPrinter transport(const ABT& n,
+                             const SeekNode& node,
                              ExplainPrinter bindResult,
                              ExplainPrinter refsResult) {
         ExplainPrinter printer("Seek");
         maybePrintProps(printer, node);
-
         printer.separator(" [")
             .fieldName("ridProjection")
             .print(node.getRIDProjectionName())
@@ -940,8 +973,10 @@ public:
         printer.separator("}, ")
             .fieldName("scanDefName", ExplainVersion::V3)
             .print(node.getScanDefName())
-            .separator("]")
-            .setChildCount(2)
+            .separator("]");
+        nodeCEPropsPrint(printer, n, node);
+
+        printer.setChildCount(2)
             .fieldName("bindings", ExplainVersion::V3)
             .print(bindResult)
             .fieldName("references", ExplainVersion::V3)
@@ -950,19 +985,19 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const MemoLogicalDelegatorNode& node) {
+    ExplainPrinter transport(const ABT& n, const MemoLogicalDelegatorNode& node) {
         ExplainPrinter printer("MemoLogicalDelegator");
         maybePrintProps(printer, node);
         printer.separator(" [").fieldName("groupId").print(node.getGroupId()).separator("]");
+        nodeCEPropsPrint(printer, n, node);
         return printer;
     }
 
-    ExplainPrinter transport(const MemoPhysicalDelegatorNode& node) {
+    ExplainPrinter transport(const ABT& /*n*/, const MemoPhysicalDelegatorNode& node) {
         const auto id = node.getNodeId();
 
         if (_displayProperties) {
-            const auto& group = _memo->getGroup(id._groupId);
-            const auto& result = group._physicalNodes.at(id._index);
+            const auto& result = *_memoInterface->getPhysicalNodes(id._groupId).at(id._index);
             uassert(6624076,
                     "Physical delegator must be pointing to an optimized result.",
                     result._nodeInfo.has_value());
@@ -976,7 +1011,8 @@ public:
                 return nodePrinter;
             }
 
-            ExplainPrinter logPropPrinter = printLogicalProps("Logical", group._logicalProperties);
+            ExplainPrinter logPropPrinter =
+                printLogicalProps("Logical", _memoInterface->getLogicalProps(id._groupId));
             ExplainPrinter physPropPrinter = printPhysProps("Physical", result._physProps);
 
             ExplainPrinter printer("Properties");
@@ -1011,13 +1047,15 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const FilterNode& node,
+    ExplainPrinter transport(const ABT& n,
+                             const FilterNode& node,
                              ExplainPrinter childResult,
                              ExplainPrinter filterResult) {
         ExplainPrinter printer("Filter");
         maybePrintProps(printer, node);
-        printer.separator(" []")
-            .setChildCount(2)
+        printer.separator(" []");
+        nodeCEPropsPrint(printer, n, node);
+        printer.setChildCount(2)
             .fieldName("filter", ExplainVersion::V3)
             .print(filterResult)
             .fieldName("child", ExplainVersion::V3)
@@ -1025,13 +1063,15 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const EvaluationNode& node,
+    ExplainPrinter transport(const ABT& n,
+                             const EvaluationNode& node,
                              ExplainPrinter childResult,
                              ExplainPrinter projectionResult) {
         ExplainPrinter printer("Evaluation");
         maybePrintProps(printer, node);
-        printer.separator(" []")
-            .setChildCount(2)
+        printer.separator(" []");
+        nodeCEPropsPrint(printer, n, node);
+        printer.setChildCount(2)
             .fieldName("projection", ExplainVersion::V3)
             .print(projectionResult)
             .fieldName("child", ExplainVersion::V3)
@@ -1097,7 +1137,8 @@ public:
         parent.fieldName("residualReqs").print(printers);
     }
 
-    ExplainPrinter transport(const SargableNode& node,
+    ExplainPrinter transport(const ABT& n,
+                             const SargableNode& node,
                              ExplainPrinter childResult,
                              ExplainPrinter bindResult,
                              ExplainPrinter refsResult) {
@@ -1108,8 +1149,9 @@ public:
         printer.separator(" [")
             .fieldName("target", ExplainVersion::V3)
             .print(IndexReqTargetEnum::toString[static_cast<int>(node.getTarget())])
-            .separator("]")
-            .setChildCount(scanParams ? 6 : 5);
+            .separator("]");
+        nodeCEPropsPrint(printer, n, node);
+        printer.setChildCount(scanParams ? 6 : 5);
 
         if constexpr (version < ExplainVersion::V3) {
             ExplainPrinter local;
@@ -1229,20 +1271,21 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const RIDIntersectNode& node,
+    ExplainPrinter transport(const ABT& n,
+                             const RIDIntersectNode& node,
                              ExplainPrinter leftChildResult,
                              ExplainPrinter rightChildResult) {
         ExplainPrinter printer("RIDIntersect");
         maybePrintProps(printer, node);
-
         printer.separator(" [")
             .fieldName("scanProjectionName", ExplainVersion::V3)
             .print(node.getScanProjectionName());
         printBooleanFlag(printer, "hasLeftIntervals", node.hasLeftIntervals());
         printBooleanFlag(printer, "hasRightIntervals", node.hasRightIntervals());
 
-        printer.separator("]")
-            .setChildCount(2)
+        printer.separator("]");
+        nodeCEPropsPrint(printer, n, node);
+        printer.setChildCount(2)
             .maybeReverse()
             .fieldName("leftChild", ExplainVersion::V3)
             .print(leftChildResult)
@@ -1251,13 +1294,13 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const BinaryJoinNode& node,
+    ExplainPrinter transport(const ABT& n,
+                             const BinaryJoinNode& node,
                              ExplainPrinter leftChildResult,
                              ExplainPrinter rightChildResult,
                              ExplainPrinter filterResult) {
         ExplainPrinter printer("BinaryJoin");
         maybePrintProps(printer, node);
-
         printer.separator(" [")
             .fieldName("joinType")
             .print(JoinTypeEnum::toString[static_cast<int>(node.getJoinType())]);
@@ -1293,8 +1336,9 @@ public:
             MONGO_UNREACHABLE;
         }
 
-        printer.separator("]")
-            .setChildCount(3)
+        printer.separator("]");
+        nodeCEPropsPrint(printer, n, node);
+        printer.setChildCount(3)
             .fieldName("expression", ExplainVersion::V3)
             .print(filterResult)
             .maybeReverse()
@@ -1331,17 +1375,18 @@ public:
         }
     }
 
-    ExplainPrinter transport(const HashJoinNode& node,
+    ExplainPrinter transport(const ABT& n,
+                             const HashJoinNode& node,
                              ExplainPrinter leftChildResult,
                              ExplainPrinter rightChildResult,
                              ExplainPrinter /*refsResult*/) {
         ExplainPrinter printer("HashJoin");
         maybePrintProps(printer, node);
-
         printer.separator(" [")
             .fieldName("joinType")
             .print(JoinTypeEnum::toString[static_cast<int>(node.getJoinType())])
             .separator("]");
+        nodeCEPropsPrint(printer, n, node);
 
         ExplainPrinter joinConditionPrinter;
         printEqualityJoinCondition(joinConditionPrinter, node.getLeftKeys(), node.getRightKeys());
@@ -1357,13 +1402,15 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const MergeJoinNode& node,
+    ExplainPrinter transport(const ABT& n,
+                             const MergeJoinNode& node,
                              ExplainPrinter leftChildResult,
                              ExplainPrinter rightChildResult,
                              ExplainPrinter /*refsResult*/) {
         ExplainPrinter printer("MergeJoin");
         maybePrintProps(printer, node);
         printer.separator(" []");
+        nodeCEPropsPrint(printer, n, node);
 
         ExplainPrinter joinConditionPrinter;
         printEqualityJoinCondition(joinConditionPrinter, node.getLeftKeys(), node.getRightKeys());
@@ -1401,14 +1448,16 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const UnionNode& node,
+    ExplainPrinter transport(const ABT& n,
+                             const UnionNode& node,
                              std::vector<ExplainPrinter> childResults,
                              ExplainPrinter bindResult,
                              ExplainPrinter /*refsResult*/) {
         ExplainPrinter printer("Union");
         maybePrintProps(printer, node);
-        printer.separator(" []")
-            .setChildCount(childResults.size() + 1)
+        printer.separator(" []");
+        nodeCEPropsPrint(printer, n, node);
+        printer.setChildCount(childResults.size() + 1)
             .fieldName("bindings", ExplainVersion::V3)
             .print(bindResult)
             .maybeReverse()
@@ -1417,7 +1466,8 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const GroupByNode& node,
+    ExplainPrinter transport(const ABT& n,
+                             const GroupByNode& node,
                              ExplainPrinter childResult,
                              ExplainPrinter bindAggResult,
                              ExplainPrinter refsAggResult,
@@ -1437,6 +1487,7 @@ public:
                 .print(GroupNodeTypeEnum::toString[static_cast<int>(node.getType())]);
         }
         printer.separator("]");
+        nodeCEPropsPrint(printer, n, node);
 
         std::vector<ExplainPrinter> aggPrinters;
         for (const auto& [projectionName, index] : ordered) {
@@ -1464,16 +1515,17 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const UnwindNode& node,
+    ExplainPrinter transport(const ABT& n,
+                             const UnwindNode& node,
                              ExplainPrinter childResult,
                              ExplainPrinter bindResult,
                              ExplainPrinter refsResult) {
         ExplainPrinter printer("Unwind");
         maybePrintProps(printer, node);
-
         printer.separator(" [");
         printBooleanFlag(printer, "retainNonArrays", node.getRetainNonArrays(), false /*addComma*/);
         printer.separator("]");
+        nodeCEPropsPrint(printer, n, node);
 
         printer.setChildCount(2)
             .fieldName("bind", ExplainVersion::V3)
@@ -1502,26 +1554,32 @@ public:
         });
     }
 
-    ExplainPrinter transport(const UniqueNode& node,
+    ExplainPrinter transport(const ABT& n,
+                             const UniqueNode& node,
                              ExplainPrinter childResult,
                              ExplainPrinter /*refsResult*/) {
         ExplainPrinter printer("Unique");
         maybePrintProps(printer, node);
+        printer.separator(" []");
+        nodeCEPropsPrint(printer, n, node);
 
-        printer.separator(" []").setChildCount(2);
+        printer.setChildCount(2);
         printPropertyProjections(printer, node.getProjections(), false /*directToParent*/);
         printer.fieldName("child", ExplainVersion::V3).print(childResult);
 
         return printer;
     }
 
-    ExplainPrinter transport(const CollationNode& node,
+    ExplainPrinter transport(const ABT& n,
+                             const CollationNode& node,
                              ExplainPrinter childResult,
                              ExplainPrinter refsResult) {
         ExplainPrinter printer("Collation");
         maybePrintProps(printer, node);
+        printer.separator(" []");
+        nodeCEPropsPrint(printer, n, node);
 
-        printer.separator(" []").setChildCount(3);
+        printer.setChildCount(3);
         printCollationProperty(printer, node.getProperty(), false /*directToParent*/);
         printer.fieldName("references", ExplainVersion::V3)
             .print(refsResult)
@@ -1561,11 +1619,13 @@ public:
         });
     }
 
-    ExplainPrinter transport(const LimitSkipNode& node, ExplainPrinter childResult) {
+    ExplainPrinter transport(const ABT& n, const LimitSkipNode& node, ExplainPrinter childResult) {
         ExplainPrinter printer("LimitSkip");
         maybePrintProps(printer, node);
+        printer.separator(" []");
+        nodeCEPropsPrint(printer, n, node);
 
-        printer.separator(" []").setChildCount(2);
+        printer.setChildCount(2);
         printLimitSkipProperty(printer, node.getProperty(), false /*directToParent*/);
         printer.fieldName("child", ExplainVersion::V3).print(childResult);
 
@@ -1624,13 +1684,16 @@ public:
         printPropertyProjections(parent, property.getProjections().getVector(), directToParent);
     }
 
-    ExplainPrinter transport(const ExchangeNode& node,
+    ExplainPrinter transport(const ABT& n,
+                             const ExchangeNode& node,
                              ExplainPrinter childResult,
                              ExplainPrinter refsResult) {
         ExplainPrinter printer("Exchange");
         maybePrintProps(printer, node);
+        printer.separator(" []");
+        nodeCEPropsPrint(printer, n, node);
 
-        printer.separator(" []").setChildCount(3);
+        printer.setChildCount(3);
         printDistributionProperty(printer, node.getProperty(), false /*directToParent*/);
         printer.fieldName("references", ExplainVersion::V3)
             .print(refsResult)
@@ -1868,13 +1931,16 @@ public:
         return printProps<properties::PhysProperty, PhysPropPrintVisitor>(description, props);
     }
 
-    ExplainPrinter transport(const RootNode& node,
+    ExplainPrinter transport(const ABT& n,
+                             const RootNode& node,
                              ExplainPrinter childResult,
                              ExplainPrinter refsResult) {
         ExplainPrinter printer("Root");
         maybePrintProps(printer, node);
+        printer.separator(" []");
+        nodeCEPropsPrint(printer, n, node);
 
-        printer.separator(" []").setChildCount(3);
+        printer.setChildCount(3);
         printProjectionRequirementProperty(printer, node.getProperty(), false /*directToParent*/);
         printer.fieldName("references", ExplainVersion::V3)
             .print(refsResult)
@@ -1887,22 +1953,28 @@ public:
     /**
      * Expressions
      */
-    ExplainPrinter transport(const Blackhole& expr) {
+    ExplainPrinter transport(const ABT& /*n*/, const Blackhole& expr) {
         ExplainPrinter printer("Blackhole");
         printer.separator(" []");
         return printer;
     }
 
-    ExplainPrinter transport(const Constant& expr) {
+    ExplainPrinter transport(const ABT& /*n*/, const Constant& expr) {
         ExplainPrinter printer("Const");
-        printer.separator(" [")
-            .fieldName("value", ExplainVersion::V3)
-            .print(expr.get())
-            .separator("]");
+        printer.separator(" [").fieldName("tag", ExplainVersion::V3);
+
+        if (version == ExplainVersion::V3) {
+            std::stringstream ss;
+            ss << expr.get().first;
+            std::string tagAsString = ss.str();
+            printer.print(tagAsString);
+        }
+
+        printer.fieldName("value", ExplainVersion::V3).print(expr.get()).separator("]");
         return printer;
     }
 
-    ExplainPrinter transport(const Variable& expr) {
+    ExplainPrinter transport(const ABT& /*n*/, const Variable& expr) {
         ExplainPrinter printer("Variable");
         printer.separator(" [")
             .fieldName("name", ExplainVersion::V3)
@@ -1911,7 +1983,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const UnaryOp& expr, ExplainPrinter inResult) {
+    ExplainPrinter transport(const ABT& /*n*/, const UnaryOp& expr, ExplainPrinter inResult) {
         ExplainPrinter printer("UnaryOp");
         printer.separator(" [")
             .fieldName("op", ExplainVersion::V3)
@@ -1923,7 +1995,8 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const BinaryOp& expr,
+    ExplainPrinter transport(const ABT& /*n*/,
+                             const BinaryOp& expr,
                              ExplainPrinter leftResult,
                              ExplainPrinter rightResult) {
         ExplainPrinter printer("BinaryOp");
@@ -1941,7 +2014,8 @@ public:
     }
 
 
-    ExplainPrinter transport(const If& expr,
+    ExplainPrinter transport(const ABT& /*n*/,
+                             const If& expr,
                              ExplainPrinter condResult,
                              ExplainPrinter thenResult,
                              ExplainPrinter elseResult) {
@@ -1958,7 +2032,8 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const Let& expr,
+    ExplainPrinter transport(const ABT& /*n*/,
+                             const Let& expr,
                              ExplainPrinter bindResult,
                              ExplainPrinter exprResult) {
         ExplainPrinter printer("Let");
@@ -1975,7 +2050,9 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const LambdaAbstraction& expr, ExplainPrinter inResult) {
+    ExplainPrinter transport(const ABT& /*n*/,
+                             const LambdaAbstraction& expr,
+                             ExplainPrinter inResult) {
         ExplainPrinter printer("LambdaAbstraction");
         printer.separator(" [")
             .fieldName("variable", ExplainVersion::V3)
@@ -1987,7 +2064,8 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const LambdaApplication& expr,
+    ExplainPrinter transport(const ABT& /*n*/,
+                             const LambdaApplication& expr,
                              ExplainPrinter lambdaResult,
                              ExplainPrinter argumentResult) {
         ExplainPrinter printer("LambdaApplication");
@@ -2001,7 +2079,9 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const FunctionCall& expr, std::vector<ExplainPrinter> argResults) {
+    ExplainPrinter transport(const ABT& /*n*/,
+                             const FunctionCall& expr,
+                             std::vector<ExplainPrinter> argResults) {
         ExplainPrinter printer("FunctionCall");
         printer.separator(" [")
             .fieldName("name", ExplainVersion::V3)
@@ -2016,7 +2096,8 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const EvalPath& expr,
+    ExplainPrinter transport(const ABT& /*n*/,
+                             const EvalPath& expr,
                              ExplainPrinter pathResult,
                              ExplainPrinter inputResult) {
         ExplainPrinter printer("EvalPath");
@@ -2030,7 +2111,8 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const EvalFilter& expr,
+    ExplainPrinter transport(const ABT& /*n*/,
+                             const EvalFilter& expr,
                              ExplainPrinter pathResult,
                              ExplainPrinter inputResult) {
         ExplainPrinter printer("EvalFilter");
@@ -2047,7 +2129,7 @@ public:
     /**
      * Paths
      */
-    ExplainPrinter transport(const PathConstant& path, ExplainPrinter inResult) {
+    ExplainPrinter transport(const ABT& /*n*/, const PathConstant& path, ExplainPrinter inResult) {
         ExplainPrinter printer("PathConstant");
         printer.separator(" []")
             .setChildCount(1)
@@ -2056,7 +2138,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const PathLambda& path, ExplainPrinter inResult) {
+    ExplainPrinter transport(const ABT& /*n*/, const PathLambda& path, ExplainPrinter inResult) {
         ExplainPrinter printer("PathLambda");
         printer.separator(" []")
             .setChildCount(1)
@@ -2065,13 +2147,13 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const PathIdentity& path) {
+    ExplainPrinter transport(const ABT& /*n*/, const PathIdentity& path) {
         ExplainPrinter printer("PathIdentity");
         printer.separator(" []");
         return printer;
     }
 
-    ExplainPrinter transport(const PathDefault& path, ExplainPrinter inResult) {
+    ExplainPrinter transport(const ABT& /*n*/, const PathDefault& path, ExplainPrinter inResult) {
         ExplainPrinter printer("PathDefault");
         printer.separator(" []")
             .setChildCount(1)
@@ -2080,7 +2162,9 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const PathCompare& path, ExplainPrinter valueResult) {
+    ExplainPrinter transport(const ABT& /*n*/,
+                             const PathCompare& path,
+                             ExplainPrinter valueResult) {
         ExplainPrinter printer("PathCompare");
         printer.separator(" [")
             .fieldName("op", ExplainVersion::V3)
@@ -2116,7 +2200,7 @@ public:
         }
     }
 
-    ExplainPrinter transport(const PathDrop& path) {
+    ExplainPrinter transport(const ABT& /*n*/, const PathDrop& path) {
         ExplainPrinter printer("PathDrop");
         printer.separator(" [");
         printPathProjections(printer, path.getNames());
@@ -2124,7 +2208,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const PathKeep& path) {
+    ExplainPrinter transport(const ABT& /*n*/, const PathKeep& path) {
         ExplainPrinter printer("PathKeep");
         printer.separator(" [");
         printPathProjections(printer, path.getNames());
@@ -2132,19 +2216,19 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const PathObj& path) {
+    ExplainPrinter transport(const ABT& /*n*/, const PathObj& path) {
         ExplainPrinter printer("PathObj");
         printer.separator(" []");
         return printer;
     }
 
-    ExplainPrinter transport(const PathArr& path) {
+    ExplainPrinter transport(const ABT& /*n*/, const PathArr& path) {
         ExplainPrinter printer("PathArr");
         printer.separator(" []");
         return printer;
     }
 
-    ExplainPrinter transport(const PathTraverse& path, ExplainPrinter inResult) {
+    ExplainPrinter transport(const ABT& /*n*/, const PathTraverse& path, ExplainPrinter inResult) {
         ExplainPrinter printer("PathTraverse");
         printer.separator(" [");
 
@@ -2167,7 +2251,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const PathField& path, ExplainPrinter inResult) {
+    ExplainPrinter transport(const ABT& /*n*/, const PathField& path, ExplainPrinter inResult) {
         ExplainPrinter printer("PathField");
         printer.separator(" [")
             .fieldName("path", ExplainVersion::V3)
@@ -2179,7 +2263,7 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const PathGet& path, ExplainPrinter inResult) {
+    ExplainPrinter transport(const ABT& /*n*/, const PathGet& path, ExplainPrinter inResult) {
         ExplainPrinter printer("PathGet");
         printer.separator(" [")
             .fieldName("path", ExplainVersion::V3)
@@ -2191,7 +2275,8 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const PathComposeM& path,
+    ExplainPrinter transport(const ABT& /*n*/,
+                             const PathComposeM& path,
                              ExplainPrinter leftResult,
                              ExplainPrinter rightResult) {
         ExplainPrinter printer("PathComposeM");
@@ -2205,7 +2290,8 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const PathComposeA& path,
+    ExplainPrinter transport(const ABT& /*n*/,
+                             const PathComposeA& path,
                              ExplainPrinter leftResult,
                              ExplainPrinter rightResult) {
         ExplainPrinter printer("PathComposeA");
@@ -2219,14 +2305,14 @@ public:
         return printer;
     }
 
-    ExplainPrinter transport(const Source& expr) {
+    ExplainPrinter transport(const ABT& /*n*/, const Source& expr) {
         ExplainPrinter printer("Source");
         printer.separator(" []");
         return printer;
     }
 
     ExplainPrinter generate(const ABT& node) {
-        return algebra::transport<false>(node, *this);
+        return algebra::transport<true>(node, *this);
     }
 
     void printPhysNodeInfo(ExplainPrinter& printer, const cascades::PhysNodeInfo& nodeInfo) {
@@ -2243,31 +2329,31 @@ public:
             .fieldName("adjustedCE")
             .print(nodeInfo._adjustedCE);
 
-        ExplainPrinter nodePrinter = generate(nodeInfo._node);
+        ExplainGeneratorTransporter<version> subGen(
+            _displayProperties, _memoInterface, _nodeMap, nodeInfo._nodeCEMap);
+        ExplainPrinter nodePrinter = subGen.generate(nodeInfo._node);
         printer.separator(", ").fieldName("node").print(nodePrinter);
     }
 
     ExplainPrinter printMemo() {
         std::vector<ExplainPrinter> groupPrinters;
-        for (size_t groupId = 0; groupId < _memo->getGroupCount(); groupId++) {
-            const cascades::Group& group = _memo->getGroup(groupId);
-
+        for (size_t groupId = 0; groupId < _memoInterface->getGroupCount(); groupId++) {
             ExplainPrinter groupPrinter;
             groupPrinter.fieldName("groupId").print(groupId).setChildCount(3);
             {
-                ExplainPrinter logicalPropPrinter =
-                    printLogicalProps("Logical properties", group._logicalProperties);
+                ExplainPrinter logicalPropPrinter = printLogicalProps(
+                    "Logical properties", _memoInterface->getLogicalProps(groupId));
                 groupPrinter.fieldName("logicalProperties", ExplainVersion::V3)
                     .print(logicalPropPrinter);
             }
 
             {
                 std::vector<ExplainPrinter> logicalNodePrinters;
-                const ABTVector& logicalNodes = group._logicalNodes.getVector();
+                const ABTVector& logicalNodes = _memoInterface->getLogicalNodes(groupId);
                 for (size_t i = 0; i < logicalNodes.size(); i++) {
                     ExplainPrinter local;
                     local.fieldName("logicalNodeId").print(i).separator(", ");
-                    const auto rule = group._rules.at(i);
+                    const auto rule = _memoInterface->getRules(groupId).at(i);
                     local.fieldName("rule").print(
                         cascades::LogicalRewriterTypeEnum::toString[static_cast<int>(rule)]);
 
@@ -2284,7 +2370,7 @@ public:
 
             {
                 std::vector<ExplainPrinter> physicalNodePrinters;
-                for (const auto& physOptResult : group._physicalNodes.getNodes()) {
+                for (const auto& physOptResult : _memoInterface->getPhysicalNodes(groupId)) {
                     ExplainPrinter local;
                     local.fieldName("physicalNodeId")
                         .print(physOptResult->_index)
@@ -2346,31 +2432,37 @@ private:
     const bool _displayProperties;
 
     // We don't own this.
-    const cascades::Memo* _memo;
+    const cascades::MemoExplainInterface* _memoInterface;
     const NodeToGroupPropsMap& _nodeMap;
+    boost::optional<const NodeCEMap&> _nodeCEMap;
 };
+
+using ExplainGeneratorV1 = ExplainGeneratorTransporter<ExplainVersion::V1>;
+using ExplainGeneratorV2 = ExplainGeneratorTransporter<ExplainVersion::V2>;
+using ExplainGeneratorV2Compact = ExplainGeneratorTransporter<ExplainVersion::V2Compact>;
+using ExplainGeneratorV3 = ExplainGeneratorTransporter<ExplainVersion::V3>;
 
 std::string ExplainGenerator::explain(const ABT& node,
                                       const bool displayProperties,
-                                      const cascades::Memo* memo,
+                                      const cascades::MemoExplainInterface* memoInterface,
                                       const NodeToGroupPropsMap& nodeMap) {
-    ExplainGeneratorTransporter gen(displayProperties, memo, nodeMap);
+    ExplainGeneratorV1 gen(displayProperties, memoInterface, nodeMap);
     return gen.generate(node).str();
 }
 
 std::string ExplainGenerator::explainV2(const ABT& node,
                                         const bool displayProperties,
-                                        const cascades::Memo* memo,
+                                        const cascades::MemoExplainInterface* memoInterface,
                                         const NodeToGroupPropsMap& nodeMap) {
-    ExplainGeneratorTransporter<ExplainVersion::V2> gen(displayProperties, memo, nodeMap);
+    ExplainGeneratorV2 gen(displayProperties, memoInterface, nodeMap);
     return gen.generate(node).str();
 }
 
 std::string ExplainGenerator::explainV2Compact(const ABT& node,
                                                const bool displayProperties,
-                                               const cascades::Memo* memo,
+                                               const cascades::MemoExplainInterface* memoInterface,
                                                const NodeToGroupPropsMap& nodeMap) {
-    ExplainGeneratorTransporter<ExplainVersion::V2Compact> gen(displayProperties, memo, nodeMap);
+    ExplainGeneratorV2Compact gen(displayProperties, memoInterface, nodeMap);
     return gen.generate(node).str();
 }
 
@@ -2384,24 +2476,26 @@ std::string ExplainGenerator::explainNode(const ABT& node) {
 std::pair<sbe::value::TypeTags, sbe::value::Value> ExplainGenerator::explainBSON(
     const ABT& node,
     const bool displayProperties,
-    const cascades::Memo* memo,
+    const cascades::MemoExplainInterface* memoInterface,
     const NodeToGroupPropsMap& nodeMap) {
-    ExplainGeneratorTransporter<ExplainVersion::V3> gen(displayProperties, memo, nodeMap);
+    ExplainGeneratorV3 gen(displayProperties, memoInterface, nodeMap);
     return gen.generate(node).moveValue();
+}
+
+BSONObj convertSbeValToBSONObj(const std::pair<sbe::value::TypeTags, sbe::value::Value> val) {
+    uassert(6624070, "Expected an object", val.first == sbe::value::TypeTags::Object);
+    sbe::value::ValueGuard vg(val.first, val.second);
+
+    BSONObjBuilder builder;
+    sbe::bson::convertToBsonObj(builder, sbe::value::getObjectView(val.second));
+    return builder.done().getOwned();
 }
 
 BSONObj ExplainGenerator::explainBSONObj(const ABT& node,
                                          const bool displayProperties,
-                                         const cascades::Memo* memo,
+                                         const cascades::MemoExplainInterface* memoInterface,
                                          const NodeToGroupPropsMap& nodeMap) {
-    auto [tag, val] =
-        optimizer::ExplainGenerator::explainBSON(node, displayProperties, memo, nodeMap);
-    uassert(6624070, "Expected an object", tag == sbe::value::TypeTags::Object);
-    sbe::value::ValueGuard vg(tag, val);
-
-    BSONObjBuilder builder;
-    sbe::bson::convertToBsonObj(builder, sbe::value::getObjectView(val));
-    return builder.done().getOwned();
+    return convertSbeValToBSONObj(explainBSON(node, displayProperties, memoInterface, nodeMap));
 }
 
 template <class PrinterType>
@@ -2461,41 +2555,43 @@ std::string ExplainGenerator::printBSON(const sbe::value::TypeTags tag,
 
 std::string ExplainGenerator::explainLogicalProps(const std::string& description,
                                                   const properties::LogicalProps& props) {
-    return ExplainGeneratorTransporter<ExplainVersion::V2>::printLogicalProps(description, props)
-        .str();
+    return ExplainGeneratorV2::printLogicalProps(description, props).str();
 }
 
 std::string ExplainGenerator::explainPhysProps(const std::string& description,
                                                const properties::PhysProps& props) {
-    return ExplainGeneratorTransporter<ExplainVersion::V2>::printPhysProps(description, props)
-        .str();
+    return ExplainGeneratorV2::printPhysProps(description, props).str();
 }
 
-std::string ExplainGenerator::explainMemo(const cascades::Memo& memo) {
-    ExplainGeneratorTransporter<ExplainVersion::V2> gen(false /*displayProperties*/, &memo);
+std::string ExplainGenerator::explainMemo(const cascades::MemoExplainInterface& memoInterface) {
+    ExplainGeneratorV2 gen(false /*displayProperties*/, &memoInterface);
     return gen.printMemo().str();
 }
 
 std::pair<sbe::value::TypeTags, sbe::value::Value> ExplainGenerator::explainMemoBSON(
-    const cascades::Memo& memo) {
-    ExplainGeneratorTransporter<ExplainVersion::V3> gen(false /*displayProperties*/, &memo);
+    const cascades::MemoExplainInterface& memoInterface) {
+    ExplainGeneratorV3 gen(false /*displayProperties*/, &memoInterface);
     return gen.printMemo().moveValue();
 }
 
+BSONObj ExplainGenerator::explainMemoBSONObj(const cascades::MemoExplainInterface& memoInterface) {
+    return convertSbeValToBSONObj(explainMemoBSON(memoInterface));
+}
+
 std::string ExplainGenerator::explainPartialSchemaReqMap(const PartialSchemaRequirements& reqMap) {
-    ExplainGeneratorTransporter<ExplainVersion::V2> gen;
-    ExplainGeneratorTransporter<ExplainVersion::V2>::ExplainPrinter result;
+    ExplainGeneratorV2 gen;
+    ExplainGeneratorV2::ExplainPrinter result;
     gen.printPartialSchemaReqMap(result, reqMap);
     return result.str();
 }
 
 std::string ExplainGenerator::explainInterval(const IntervalRequirement& interval) {
-    ExplainGeneratorTransporter<ExplainVersion::V2> gen;
+    ExplainGeneratorV2 gen;
     return gen.printInterval(interval);
 }
 
 std::string ExplainGenerator::explainIntervalExpr(const IntervalReqExpr::Node& intervalExpr) {
-    ExplainGeneratorTransporter<ExplainVersion::V2> gen;
+    ExplainGeneratorV2 gen;
     return gen.printIntervalExpr(intervalExpr).str();
 }
 

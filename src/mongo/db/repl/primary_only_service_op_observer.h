@@ -207,8 +207,7 @@ public:
                        const UUID& uuid) final {}
 
     void onUnpreparedTransactionCommit(OperationContext* opCtx,
-                                       std::vector<repl::ReplOperation>* statements,
-                                       size_t numberOfPrePostImagesToWrite) final {}
+                                       TransactionOperations* transactionOperations) final {}
 
     void onPreparedTransactionCommit(
         OperationContext* opCtx,
@@ -220,7 +219,7 @@ public:
         OperationContext* opCtx,
         const std::vector<OplogSlot>& reservedSlots,
         Date_t wallClockTime,
-        std::vector<repl::ReplOperation>* statements) final {
+        TransactionOperations* transactionOperations) final {
         return nullptr;
     }
 

@@ -79,28 +79,4 @@ StatsCache::LookupResult StatsCache::_lookupStats(OperationContext* opCtx,
     }
 }
 
-void StatsCache::set(ServiceContext* serviceContext, std::unique_ptr<StatsCache> cache) {
-    auto& statsCache = statsCacheDecoration(serviceContext);
-    invariant(!statsCache);
-
-    statsCache = std::move(cache);
-}
-
-void StatsCache::clearForTests(ServiceContext* serviceContext) {
-    auto& statsCache = statsCacheDecoration(serviceContext);
-    invariant(statsCache);
-
-    statsCache.reset();
-}
-
-StatsCache& StatsCache::get(ServiceContext* serviceContext) {
-    auto& statsCache = statsCacheDecoration(serviceContext);
-    invariant(statsCache);
-
-    return *statsCache;
-}
-
-StatsCache& StatsCache::get(OperationContext* opCtx) {
-    return get(opCtx->getServiceContext());
-}
 }  // namespace mongo

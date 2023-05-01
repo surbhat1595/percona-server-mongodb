@@ -144,8 +144,12 @@ void finishCurOp(OperationContext* opCtx, CurOp* curOp) {
 
         // Mark the op as complete, and log it if appropriate. Returns a boolean indicating whether
         // this op should be sampled for profiling.
-        const bool shouldProfile =
-            curOp->completeAndLogOperation(opCtx, MONGO_LOGV2_DEFAULT_COMPONENT);
+        const bool shouldProfile = curOp->completeAndLogOperation(
+            opCtx,
+            MONGO_LOGV2_DEFAULT_COMPONENT,
+            CollectionCatalog::get(opCtx)
+                ->getDatabaseProfileSettings(curOp->getNSS().dbName())
+                .filter);
 
         if (shouldProfile) {
             // Stash the current transaction so that writes to the profile collection are not
@@ -445,11 +449,8 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
             collection.emplace(
                 opCtx,
                 wholeOp.getNamespace(),
-                fixLockModeForSystemDotViewsChanges(wholeOp.getNamespace(), MODE_IX));
-            checkCollectionUUIDMismatch(opCtx,
-                                        wholeOp.getNamespace(),
-                                        collection->getCollection(),
-                                        wholeOp.getCollectionUUID());
+                fixLockModeForSystemDotViewsChanges(wholeOp.getNamespace(), MODE_IX),
+                AutoGetCollection::Options{}.expectedUUID(wholeOp.getCollectionUUID()));
             if (*collection) {
                 break;
             }
@@ -787,8 +788,10 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
 
     boost::optional<AutoGetCollection> collection;
     while (true) {
-        collection.emplace(opCtx, ns, fixLockModeForSystemDotViewsChanges(ns, MODE_IX));
-        checkCollectionUUIDMismatch(opCtx, ns, collection->getCollection(), opCollectionUUID);
+        collection.emplace(opCtx,
+                           ns,
+                           fixLockModeForSystemDotViewsChanges(ns, MODE_IX),
+                           AutoGetCollection::Options{}.expectedUUID(opCollectionUUID));
         if (*collection) {
             break;
         }
@@ -1161,7 +1164,10 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
         uasserted(ErrorCodes::InternalError, "failAllRemoves failpoint active!");
     }
 
-    AutoGetCollection collection(opCtx, ns, fixLockModeForSystemDotViewsChanges(ns, MODE_IX));
+    AutoGetCollection collection(opCtx,
+                                 ns,
+                                 fixLockModeForSystemDotViewsChanges(ns, MODE_IX),
+                                 AutoGetCollection::Options{}.expectedUUID(opCollectionUUID));
 
     DeleteStageParams::DocumentCounter documentCounter = nullptr;
 
@@ -1196,8 +1202,6 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
         documentCounter =
             timeseries::numMeasurementsForBucketCounter(timeseriesOptions->getTimeField());
     }
-
-    checkCollectionUUIDMismatch(opCtx, ns, collection.getCollection(), opCollectionUUID);
 
     ParsedDelete parsedDelete(opCtx, &request);
     uassertStatusOK(parsedDelete.parseRequest());
@@ -1417,20 +1421,37 @@ Status performAtomicTimeseriesWrites(
         auto recordId = record_id_helpers::keyForOID(update.getQ()["_id"].OID());
 
         auto original = coll->docFor(opCtx, recordId);
-        auto [updated, indexesAffected] =
-            doc_diff::applyDiff(original.value(),
-                                update.getU().getDiff(),
-                                &CollectionQueryInfo::get(*coll).getIndexKeys(opCtx),
-                                static_cast<bool>(repl::tenantMigrationInfo(opCtx)));
 
         CollectionUpdateArgs args;
         if (const auto& stmtIds = op.getStmtIds()) {
             args.stmtIds = *stmtIds;
         }
         args.preImageDoc = original.value();
-        args.update = update_oplog_entry::makeDeltaOplogEntry(update.getU().getDiff());
         args.criteria = update.getQ();
         args.source = OperationSource::kTimeseriesInsert;
+
+        BSONObj updated;
+        bool indexesAffected = true;
+        if (update.getU().type() == write_ops::UpdateModification::Type::kDelta) {
+            auto result = doc_diff::applyDiff(original.value(),
+                                              update.getU().getDiff(),
+                                              &CollectionQueryInfo::get(*coll).getIndexKeys(opCtx),
+                                              static_cast<bool>(repl::tenantMigrationInfo(opCtx)));
+            updated = result.postImage;
+            indexesAffected = result.indexesAffected;
+            args.update = update_oplog_entry::makeDeltaOplogEntry(update.getU().getDiff());
+        } else if (update.getU().type() == write_ops::UpdateModification::Type::kTransform) {
+            const auto& transform = update.getU().getTransform();
+            auto transformed = transform(original.value());
+            tassert(7050400,
+                    "Could not apply transformation to time series bucket document",
+                    transformed.has_value());
+            updated = std::move(transformed.value());
+            args.update = update_oplog_entry::makeReplacementOplogEntry(updated);
+        } else {
+            invariant(false, "Unexpected update type");
+        }
+
         if (slot) {
             args.oplogSlots = {**slot};
             fassert(5481600,

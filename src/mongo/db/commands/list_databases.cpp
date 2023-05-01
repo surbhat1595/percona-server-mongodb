@@ -123,6 +123,7 @@ public:
                 CurOpFailpointHelpers::waitWhileFailPointEnabled(
                     &hangBeforeListDatabases, opCtx, "hangBeforeListDatabases", []() {});
                 auto tid = cmd.getDbName().tenantId();
+
                 if (gMultitenancySupport &&
                     serverGlobalParams.featureCompatibility.isVersionInitialized() &&
                     gFeatureFlagRequireTenantID.isEnabled(

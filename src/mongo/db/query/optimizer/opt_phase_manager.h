@@ -34,6 +34,8 @@
 #include "mongo/db/query/optimizer/cascades/interfaces.h"
 #include "mongo/db/query/optimizer/cascades/logical_rewriter.h"
 #include "mongo/db/query/optimizer/cascades/physical_rewriter.h"
+#include "mongo/db/query/optimizer/reference_tracker.h"
+
 
 namespace mongo::optimizer {
 
@@ -85,14 +87,15 @@ public:
                     std::unique_ptr<CEInterface> ceDerivation,
                     std::unique_ptr<CostingInterface> costDerivation,
                     PathToIntervalFn pathToInterval,
+                    ConstFoldFn constFold,
                     DebugInfo debugInfo,
                     QueryHints queryHints = {});
 
-    // TODO SERVER-68914: Fix object ownership issues of data members of the Memo class.
-    OptPhaseManager(const OptPhaseManager&) = delete;
-    OptPhaseManager& operator=(const OptPhaseManager&) = delete;
-    OptPhaseManager(OptPhaseManager&&) = delete;
-    OptPhaseManager& operator=(OptPhaseManager&&) = delete;
+    // We only allow moving.
+    OptPhaseManager(const OptPhaseManager& /*other*/) = delete;
+    OptPhaseManager(OptPhaseManager&& /*other*/) = default;
+    OptPhaseManager& operator=(const OptPhaseManager& /*other*/) = delete;
+    OptPhaseManager& operator=(OptPhaseManager&& /*other*/) = delete;
 
     /**
      * Optimization modifies the input argument.
@@ -166,14 +169,29 @@ private:
     Memo _memo;
 
     /**
-     * Cost derivation interface.
+     * Logical properties derivation implementation.
+     */
+    std::unique_ptr<LogicalPropsInterface> _logicalPropsDerivation;
+
+    /**
+     * Cardinality estimation implementation.
+     */
+    std::unique_ptr<CEInterface> _ceDerivation;
+
+    /**
+     * Cost derivation implementation.
      */
     std::unique_ptr<CostingInterface> _costDerivation;
 
     /**
-     * Path ABT node to index bounds converter interface.
+     * Path ABT node to index bounds converter implementation.
      */
     PathToIntervalFn _pathToInterval;
+
+    /**
+     * Constant fold an expression.
+     */
+    ConstFoldFn _constFold;
 
     /**
      * Root physical node if we have performed physical rewrites.

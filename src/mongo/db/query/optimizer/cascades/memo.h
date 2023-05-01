@@ -34,75 +34,17 @@
 #include <unordered_map>
 #include <vector>
 
-#include "mongo/db/query/optimizer/cascades/ce_heuristic.h"
 #include "mongo/db/query/optimizer/cascades/interfaces.h"
+#include "mongo/db/query/optimizer/cascades/memo_defs.h"
+#include "mongo/db/query/optimizer/cascades/memo_explain_interface.h"
+#include "mongo/db/query/optimizer/cascades/memo_group_binder_interface.h"
 #include "mongo/db/query/optimizer/cascades/rewrite_queues.h"
-#include "mongo/db/query/optimizer/cascades/rewriter_rules.h"
-#include "mongo/db/query/optimizer/defs.h"
-#include "mongo/db/query/optimizer/reference_tracker.h"
+
 
 namespace mongo::optimizer::cascades {
 
-struct MemoNodeRefHash {
-    size_t operator()(const ABT::reference_type& nodeRef) const;
-};
-
-struct MemoNodeRefCompare {
-    bool operator()(const ABT::reference_type& left, const ABT::reference_type& right) const;
-};
-
-class OrderPreservingABTSet {
-public:
-    OrderPreservingABTSet() = default;
-    OrderPreservingABTSet(const OrderPreservingABTSet&) = delete;
-    OrderPreservingABTSet(OrderPreservingABTSet&&) = default;
-
-    ABT::reference_type at(size_t index) const;
-    std::pair<size_t, bool> emplace_back(ABT node);
-    std::pair<size_t, bool> find(ABT::reference_type node) const;
-
-    void clear();
-
-    size_t size() const;
-    const ABTVector& getVector() const;
-
-private:
-    opt::unordered_map<ABT::reference_type, size_t, MemoNodeRefHash, MemoNodeRefCompare> _map;
-    ABTVector _vector;
-};
-
-struct PhysNodeInfo {
-    ABT _node;
-
-    // Total cost for the entire subtree.
-    CostType _cost;
-
-    // Operator cost (without including the subtree).
-    CostType _localCost;
-
-    // For display purposes, adjusted cardinality based on physical properties (e.g. Repetition and
-    // Limit-Skip).
-    CEType _adjustedCE;
-
-    // Rule that triggered the creation of this node.
-    PhysicalRewriteType _rule;
-};
-
-struct PhysOptimizationResult {
-    PhysOptimizationResult();
-    PhysOptimizationResult(size_t index, properties::PhysProps physProps, CostType costLimit);
-
-    bool isOptimized() const;
-    void raiseCostLimit(CostType costLimit);
-
-    const size_t _index;
-    const properties::PhysProps _physProps;
-
-    CostType _costLimit;
-    // If set, we have successfully optimized.
-    boost::optional<PhysNodeInfo> _nodeInfo;
-    // Rejected physical plans.
-    std::vector<PhysNodeInfo> _rejectedNodeInfo;
+struct PhysQueueAndImplPos {
+    PhysQueueAndImplPos() : _lastImplementedNodePos(0), _queue() {}
 
     // Index of last logical node in our group we implemented.
     size_t _lastImplementedNodePos;
@@ -110,9 +52,10 @@ struct PhysOptimizationResult {
     PhysRewriteQueue _queue;
 };
 
+/**
+ * List of physical nodes and associated physical properties for a given group.
+ */
 struct PhysNodes {
-    using PhysNodeVector = std::vector<std::unique_ptr<PhysOptimizationResult>>;
-
     PhysNodes() = default;
 
     PhysOptimizationResult& addOptimizationResult(properties::PhysProps properties,
@@ -125,8 +68,16 @@ struct PhysNodes {
 
     const PhysNodeVector& getNodes() const;
 
+    const PhysQueueAndImplPos& getQueue(size_t index) const;
+    PhysQueueAndImplPos& getQueue(size_t index);
+
+    bool isOptimized(size_t index) const;
+    void raiseCostLimit(size_t index, CostType costLimit);
+
 private:
     PhysNodeVector _physicalNodes;
+
+    std::vector<std::unique_ptr<PhysQueueAndImplPos>> _physicalQueues;
 
     struct PhysPropsHasher {
         size_t operator()(const properties::PhysProps& physProps) const;
@@ -158,11 +109,32 @@ struct Group {
     PhysNodes _physicalNodes;
 };
 
-class Memo {
+/**
+ * TODO SERVER-70407: Improve documentation around the Memo and related classes.
+ */
+class Memo : public MemoExplainInterface, public MemoGroupBinderInterface {
+    // To be able to access _stats field.
     friend class PhysicalRewriter;
 
 public:
     using GroupIdVector = std::vector<GroupIdType>;
+
+    /**
+     * This structure is essentially a parameter pack to simplify passing multiple references to
+     * external objects to facilitate derivation of the memo group's logical properties.
+     */
+    struct Context {
+        Context(const Metadata* metadata,
+                const DebugInfo* debugInfo,
+                const LogicalPropsInterface* logicalPropsDerivation,
+                const CEInterface* ceDerivation);
+
+        // None of those should be null.
+        const Metadata* _metadata;
+        const DebugInfo* _debugInfo;
+        const LogicalPropsInterface* _logicalPropsDerivation;
+        const CEInterface* _ceDerivation;
+    };
 
     struct Stats {
         // Number of calls to integrate()
@@ -189,47 +161,47 @@ public:
     using NodeTargetGroupMap =
         opt::unordered_map<ABT::reference_type, GroupIdType, NodeTargetGroupHash>;
 
-    Memo(DebugInfo debugInfo,
-         const Metadata& metadata,
-         std::unique_ptr<LogicalPropsInterface> logicalPropsDerivation,
-         std::unique_ptr<CEInterface> ceDerivation);
+    Memo() = default;
+    Memo(const Memo& /*other*/) = default;
+    Memo(Memo&& /*other*/) = default;
+    Memo& operator=(const Memo& /*other*/) = delete;
+    Memo& operator=(Memo&& /*other*/) = delete;
 
-    // TODO SERVER-68914: Fix object ownership issues of data members of the Memo class.
-    Memo(const Memo&) = delete;
-    Memo& operator=(const Memo&) = delete;
-    Memo(Memo&&) = delete;
-    Memo& operator=(Memo&&) = delete;
+    size_t getGroupCount() const final;
 
-    const Group& getGroup(GroupIdType groupId) const;
-    Group& getGroup(GroupIdType groupId);
-    size_t getGroupCount() const;
+    const ExpressionBinder& getBinderForGroup(GroupIdType groupId) const final;
+
+    const properties::LogicalProps& getLogicalProps(GroupIdType groupId) const final;
+    const ABTVector& getLogicalNodes(GroupIdType groupId) const final;
+    const PhysNodeVector& getPhysicalNodes(GroupIdType groupId) const final;
+    const std::vector<LogicalRewriteType>& getRules(GroupIdType groupId) const final;
+
+    LogicalRewriteQueue& getLogicalRewriteQueue(GroupIdType groupId);
 
     std::pair<size_t, bool> findNodeInGroup(GroupIdType groupId, ABT::reference_type node) const;
 
     ABT::reference_type getNode(MemoLogicalNodeId nodeMemoId) const;
 
-    void estimateCE(GroupIdType groupId, bool useHeuristicCE);
+    void estimateCE(const Context& ctx, GroupIdType groupId);
 
-    MemoLogicalNodeId addNode(GroupIdVector groupVector,
+    MemoLogicalNodeId addNode(const Context& ctx,
+                              GroupIdVector groupVector,
                               ProjectionNameSet projections,
                               GroupIdType targetGroupId,
                               NodeIdSet& insertedNodeIds,
                               ABT n,
-                              LogicalRewriteType rule,
-                              bool useHeuristicCE = false);
+                              LogicalRewriteType rule);
 
-    GroupIdType integrate(const ABT& node,
+    GroupIdType integrate(const Context& ctx,
+                          const ABT& node,
                           NodeTargetGroupMap targetGroupMap,
                           NodeIdSet& insertedNodeIds,
                           LogicalRewriteType rule = LogicalRewriteType::Root,
-                          bool addExistingNodeWithNewChild = false,
-                          bool useHeuristicCE = false);
+                          bool addExistingNodeWithNewChild = false);
 
     void clearLogicalNodes(GroupIdType groupId);
 
     const InputGroupsToNodeIdMap& getInputGroupsToNodeIdMap() const;
-
-    const DebugInfo& getDebugInfo() const;
 
     void clear();
 
@@ -237,10 +209,10 @@ public:
     size_t getLogicalNodeCount() const;
     size_t getPhysicalNodeCount() const;
 
-    const Metadata& getMetadata() const;
-    const CEInterface& getCEDerivation() const;
-
 private:
+    const Group& getGroup(GroupIdType groupId) const;
+    Group& getGroup(GroupIdType groupId);
+
     GroupIdType addGroup(ProjectionNameSet projections);
 
     std::pair<MemoLogicalNodeId, bool> addNode(GroupIdType groupId, ABT n, LogicalRewriteType rule);
@@ -253,14 +225,6 @@ private:
     InputGroupsToNodeIdMap _inputGroupsToNodeIdMap;
 
     NodeIdToInputGroupsMap _nodeIdToInputGroupsMap;
-
-    const Metadata& _metadata;
-    std::unique_ptr<LogicalPropsInterface> _logicalPropsDerivation;
-    std::unique_ptr<CEInterface> _ceDerivation;
-    // Used during the substitution phase, where we don't need to call _ceDerivation.
-    HeuristicCE _heuristicCE;
-
-    const DebugInfo _debugInfo;
 
     Stats _stats;
 };

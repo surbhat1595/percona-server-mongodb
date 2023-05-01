@@ -38,10 +38,14 @@ class CESamplingTransportImpl;
 
 class CESamplingTransport : public CEInterface {
 public:
-    CESamplingTransport(OperationContext* opCtx, OptPhaseManager& phaseManager, int64_t numRecords);
+    CESamplingTransport(OperationContext* opCtx,
+                        OptPhaseManager phaseManager,
+                        int64_t numRecords,
+                        std::unique_ptr<CEInterface> fallbackCE);
     ~CESamplingTransport();
 
-    CEType deriveCE(const Memo& memo,
+    CEType deriveCE(const Metadata& metadata,
+                    const Memo& memo,
                     const properties::LogicalProps& logicalProps,
                     ABT::reference_type logicalNodeRef) const final;
 

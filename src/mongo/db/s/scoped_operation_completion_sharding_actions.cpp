@@ -76,14 +76,15 @@ ScopedOperationCompletionShardingActions::~ScopedOperationCompletionShardingActi
         bool inCriticalSection = staleInfo->getCriticalSectionSignal().has_value();
         bool stableLocalVersion = !inCriticalSection && staleInfo->getVersionWanted();
 
-        if (stableLocalVersion && ChunkVersion::isIgnoredVersion(staleInfo->getVersionReceived())) {
+        if (stableLocalVersion && ShardVersion::isIgnoredVersion(staleInfo->getVersionReceived())) {
             // Shard is recovered, but the router didn't sent a shard version, therefore we just
             // need to tell the router how much it needs to advance to (getVersionWanted).
             return;
         }
 
         if (stableLocalVersion &&
-            staleInfo->getVersionReceived().isOlderThan(*staleInfo->getVersionWanted())) {
+            staleInfo->getVersionReceived().placementVersion().isOlderThan(
+                staleInfo->getVersionWanted()->placementVersion())) {
             // Shard is recovered and the router is staler than the shard
             return;
         }
@@ -92,8 +93,8 @@ ScopedOperationCompletionShardingActions::~ScopedOperationCompletionShardingActi
             resharding_metrics::onCriticalSectionError(_opCtx, *staleInfo);
         }
 
-        auto handleMismatchStatus = onShardVersionMismatchNoExcept(
-            _opCtx, staleInfo->getNss(), staleInfo->getVersionReceived());
+        auto handleMismatchStatus = onCollectionPlacementVersionMismatchNoExcept(
+            _opCtx, staleInfo->getNss(), staleInfo->getVersionReceived().placementVersion());
         if (!handleMismatchStatus.isOK())
             LOGV2(22053,
                   "Failed to handle stale version exception as part of the current operation: "

@@ -45,6 +45,7 @@
 #include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -418,6 +419,13 @@ public:
      * Return true if only the admin ns has privileges to run this command.
      */
     virtual bool adminOnly() const {
+        return false;
+    }
+
+    /**
+     * Returns true if this command is part of the auth handshake conversation.
+     */
+    virtual bool isPartOfAuthHandshake() const {
         return false;
     }
 
@@ -1130,10 +1138,10 @@ private:
     static RequestType _parseRequest(OperationContext* opCtx,
                                      const DatabaseName& dbName,
                                      const BSONObj& cmdObj) {
-        // TODO SERVER-69499 pass tenantId to the BSONObj parse function
         return RequestType::parse(
             IDLParserContext(RequestType::kCommandName,
-                             APIParameters::get(opCtx).getAPIStrict().value_or(false)),
+                             APIParameters::get(opCtx).getAPIStrict().value_or(false),
+                             dbName.tenantId()),
             cmdObj);
     }
 

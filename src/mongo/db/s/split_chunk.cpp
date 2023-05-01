@@ -126,7 +126,7 @@ bool checkMetadataForSuccessfulSplitChunk(OperationContext* opCtx,
                 nss,
                 ShardVersion::IGNORED() /* receivedVersion */,
                 ShardVersion(placementVersion,
-                             CollectionIndexes(placementVersion, boost::none)) /* wantedVersion */,
+                             boost::optional<CollectionIndexes>(boost::none)) /* wantedVersion */,
                 shardId),
             str::stream() << "Collection " << nss.ns() << " changed since split start",
             epoch == expectedEpoch &&
@@ -254,20 +254,14 @@ StatusWith<boost::optional<ChunkRange>> splitChunk(
 
     const Shard::CommandResponse& cmdResponse = cmdResponseStatus.getValue();
 
-    boost::optional<ShardVersion> shardVersionReceived = [&]() -> boost::optional<ShardVersion> {
+    boost::optional<ChunkVersion> chunkVersionReceived = [&]() -> boost::optional<ChunkVersion> {
         // old versions might not have the shardVersion field
         if (cmdResponse.response[ChunkVersion::kChunkVersionField]) {
-            ChunkVersion placementVersion =
-                ChunkVersion::parse(cmdResponse.response[ChunkVersion::kChunkVersionField]);
-            return ShardVersion(
-                placementVersion,
-                CollectionIndexes{
-                    CollectionGeneration{placementVersion.epoch(), placementVersion.getTimestamp()},
-                    boost::none});
+            return ChunkVersion::parse(cmdResponse.response[ChunkVersion::kChunkVersionField]);
         }
         return boost::none;
     }();
-    onShardVersionMismatch(opCtx, nss, shardVersionReceived);
+    onCollectionPlacementVersionMismatch(opCtx, nss, chunkVersionReceived);
 
     // Check commandStatus and writeConcernStatus
     auto commandStatus = cmdResponse.commandStatus;

@@ -31,7 +31,6 @@
 
 #include "mongo/db/exec/sbe/abt/abt_lower.h"
 #include "mongo/db/query/cqf_command_utils.h"
-#include "mongo/db/query/optimizer/cascades/ce_heuristic.h"
 #include "mongo/db/query/optimizer/explain.h"
 #include "mongo/db/query/optimizer/utils/abt_hash.h"
 #include "mongo/db/query/optimizer/utils/memo_utils.h"
@@ -51,7 +50,7 @@ public:
         : _memo(memo), _sampleSize(sampleSize), _phaseManager(phaseManager) {}
 
     void transport(ABT& n, const MemoLogicalDelegatorNode& node) {
-        n = extract(_memo.getGroup(node.getGroupId())._logicalNodes.at(0));
+        n = extract(_memo.getLogicalNodes(node.getGroupId()).front());
     }
 
     void transport(ABT& n, const ScanNode& /*node*/, ABT& /*binder*/) {
@@ -117,39 +116,42 @@ class CESamplingTransportImpl {
 
 public:
     CESamplingTransportImpl(OperationContext* opCtx,
-                            OptPhaseManager& phaseManager,
-                            const int64_t numRecords)
-        : _opCtx(opCtx),
-          _phaseManager(phaseManager),
-          _heuristicCE(),
-          _sampleSize(std::min<int64_t>(numRecords, kMaxSampleSize)) {}
+                            OptPhaseManager phaseManager,
+                            const int64_t numRecords,
+                            std::unique_ptr<CEInterface> fallbackCE)
+        : _phaseManager(std::move(phaseManager)),
+          _opCtx(opCtx),
+          _sampleSize(std::min<int64_t>(numRecords, kMaxSampleSize)),
+          _fallbackCE(std::move(fallbackCE)) {}
 
     CEType transport(const ABT& n,
                      const FilterNode& node,
+                     const Metadata& metadata,
                      const Memo& memo,
                      const LogicalProps& logicalProps,
                      CEType childResult,
                      CEType /*exprResult*/) {
         if (!hasProperty<IndexingAvailability>(logicalProps)) {
-            return _heuristicCE.deriveCE(memo, logicalProps, n.ref());
+            return _fallbackCE->deriveCE(metadata, memo, logicalProps, n.ref());
         }
 
         SamplingPlanExtractor planExtractor(memo, _phaseManager, _sampleSize);
         // Create a plan with all eval nodes so far and the filter last.
         ABT abtTree = make<FilterNode>(node.getFilter(), planExtractor.extract(n));
 
-        return estimateFilterCE(memo, logicalProps, n, std::move(abtTree), childResult);
+        return estimateFilterCE(metadata, memo, logicalProps, n, std::move(abtTree), childResult);
     }
 
     CEType transport(const ABT& n,
                      const SargableNode& node,
+                     const Metadata& metadata,
                      const Memo& memo,
                      const LogicalProps& logicalProps,
                      CEType childResult,
                      CEType /*bindResult*/,
                      CEType /*refsResult*/) {
         if (!hasProperty<IndexingAvailability>(logicalProps)) {
-            return _heuristicCE.deriveCE(memo, logicalProps, n.ref());
+            return _fallbackCE->deriveCE(metadata, memo, logicalProps, n.ref());
         }
 
         SamplingPlanExtractor planExtractor(memo, _phaseManager, _sampleSize);
@@ -175,7 +177,8 @@ public:
                                               lowered,
                                               _phaseManager.getPathToInterval());
                 uassert(6624243, "Expected a filter node", lowered.is<FilterNode>());
-                result = estimateFilterCE(memo, logicalProps, n, std::move(lowered), result);
+                result =
+                    estimateFilterCE(metadata, memo, logicalProps, n, std::move(lowered), result);
             }
         }
 
@@ -188,23 +191,26 @@ public:
     template <typename T, typename... Ts>
     CEType transport(const ABT& n,
                      const T& /*node*/,
+                     const Metadata& metadata,
                      const Memo& memo,
                      const LogicalProps& logicalProps,
                      Ts&&...) {
         if (canBeLogicalNode<T>()) {
-            return _heuristicCE.deriveCE(memo, logicalProps, n.ref());
+            return _fallbackCE->deriveCE(metadata, memo, logicalProps, n.ref());
         }
         return 0.0;
     }
 
-    CEType derive(const Memo& memo,
+    CEType derive(const Metadata& metadata,
+                  const Memo& memo,
                   const properties::LogicalProps& logicalProps,
                   const ABT::reference_type logicalNodeRef) {
-        return algebra::transport<true>(logicalNodeRef, *this, memo, logicalProps);
+        return algebra::transport<true>(logicalNodeRef, *this, metadata, memo, logicalProps);
     }
 
 private:
-    CEType estimateFilterCE(const Memo& memo,
+    CEType estimateFilterCE(const Metadata& metadata,
+                            const Memo& memo,
                             const LogicalProps& logicalProps,
                             const ABT& n,
                             ABT abtTree,
@@ -217,7 +223,7 @@ private:
 
         const auto [success, selectivity] = estimateSelectivity(abtTree);
         if (!success) {
-            return _heuristicCE.deriveCE(memo, logicalProps, n.ref());
+            return _fallbackCE->deriveCE(metadata, memo, logicalProps, n.ref());
         }
 
         _selectivityCacheMap.emplace(std::move(abtTree), selectivity);
@@ -308,25 +314,29 @@ private:
     // Cache a logical node reference to computed selectivity. Used for Filter and Sargable nodes.
     opt::unordered_map<ABT, SelectivityType, NodeRefHash, NodeRefCompare> _selectivityCacheMap;
 
-    // We don't own those.
-    OperationContext* _opCtx;
-    OptPhaseManager& _phaseManager;
+    OptPhaseManager _phaseManager;
 
-    HeuristicCE _heuristicCE;
+    // We don't own this.
+    OperationContext* _opCtx;
+
     const int64_t _sampleSize;
+    std::unique_ptr<CEInterface> _fallbackCE;
 };
 
 CESamplingTransport::CESamplingTransport(OperationContext* opCtx,
-                                         OptPhaseManager& phaseManager,
-                                         const int64_t numRecords)
-    : _impl(std::make_unique<CESamplingTransportImpl>(opCtx, phaseManager, numRecords)) {}
+                                         OptPhaseManager phaseManager,
+                                         const int64_t numRecords,
+                                         std::unique_ptr<CEInterface> fallbackCE)
+    : _impl(std::make_unique<CESamplingTransportImpl>(
+          opCtx, std::move(phaseManager), numRecords, std::move(fallbackCE))) {}
 
 CESamplingTransport::~CESamplingTransport() {}
 
-CEType CESamplingTransport::deriveCE(const Memo& memo,
+CEType CESamplingTransport::deriveCE(const Metadata& metadata,
+                                     const Memo& memo,
                                      const LogicalProps& logicalProps,
                                      const ABT::reference_type logicalNodeRef) const {
-    return _impl->derive(memo, logicalProps, logicalNodeRef);
+    return _impl->derive(metadata, memo, logicalProps, logicalNodeRef);
 }
 
 }  // namespace mongo::optimizer::cascades

@@ -27,16 +27,17 @@
  *    it in the license file.
  */
 
-#include "mongo/db/pipeline/abt/utils.h"
 #include "mongo/db/query/optimizer/cascades/ce_heuristic.h"
-#include "mongo/db/query/optimizer/cascades/cost_derivation.h"
 #include "mongo/db/query/optimizer/cascades/logical_props_derivation.h"
 #include "mongo/db/query/optimizer/cascades/rewriter_rules.h"
 #include "mongo/db/query/optimizer/explain.h"
+#include "mongo/db/query/optimizer/metadata_factory.h"
 #include "mongo/db/query/optimizer/node.h"
 #include "mongo/db/query/optimizer/opt_phase_manager.h"
+#include "mongo/db/query/optimizer/rewrites/const_eval.h"
 #include "mongo/db/query/optimizer/utils/unit_test_utils.h"
 #include "mongo/unittest/unittest.h"
+
 
 namespace mongo::optimizer {
 namespace {
@@ -75,7 +76,7 @@ TEST(LogicalRewriter, RootNodeMerge) {
 
     OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase},
                                  prefixId,
-                                 {{{"test", {{}, {}}}}},
+                                 {{{"test", createScanDef({}, {})}}},
                                  DebugInfo::kDefaultForTests);
     ABT rewritten = std::move(rootNode);
     phaseManager.optimize(rewritten);
@@ -102,10 +103,11 @@ TEST(LogicalRewriter, Memo) {
     using namespace properties;
 
     Metadata metadata{{{"test", {}}}};
-    Memo memo(DebugInfo::kDefaultForTests,
-              metadata,
-              std::make_unique<DefaultLogicalPropsDerivation>(),
-              std::make_unique<HeuristicCE>());
+    auto debugInfo = DebugInfo::kDefaultForTests;
+    DefaultLogicalPropsDerivation lPropsDerivation;
+    HeuristicCE heuristicCE;
+    Memo::Context memoCtx{&metadata, &debugInfo, &lPropsDerivation, &heuristicCE};
+    Memo memo;
 
     ABT scanNode = make<ScanNode>("ptest", "test");
     ABT filterNode = make<FilterNode>(
@@ -118,7 +120,7 @@ TEST(LogicalRewriter, Memo) {
         std::move(filterNode));
 
     NodeIdSet insertedNodeIds;
-    const GroupIdType rootGroupId = memo.integrate(evalNode, {}, insertedNodeIds);
+    const GroupIdType rootGroupId = memo.integrate(memoCtx, evalNode, {}, insertedNodeIds);
     ASSERT_EQ(2, rootGroupId);
     ASSERT_EQ(3, memo.getGroupCount());
 
@@ -200,14 +202,14 @@ TEST(LogicalRewriter, Memo) {
     {
         // Try to insert into the memo again.
         NodeIdSet insertedNodeIds;
-        const GroupIdType group = memo.integrate(evalNode, {}, insertedNodeIds);
+        const GroupIdType group = memo.integrate(memoCtx, evalNode, {}, insertedNodeIds);
         ASSERT_EQ(2, group);
         ASSERT_EQ(3, memo.getGroupCount());
 
         // Nothing was inserted.
-        ASSERT_EQ(1, memo.getGroup(0)._logicalNodes.size());
-        ASSERT_EQ(1, memo.getGroup(1)._logicalNodes.size());
-        ASSERT_EQ(1, memo.getGroup(2)._logicalNodes.size());
+        ASSERT_EQ(1, memo.getLogicalNodes(0).size());
+        ASSERT_EQ(1, memo.getLogicalNodes(1).size());
+        ASSERT_EQ(1, memo.getLogicalNodes(2).size());
     }
 
     // Insert a different tree, this time only scan and project.
@@ -219,19 +221,18 @@ TEST(LogicalRewriter, Memo) {
 
     {
         NodeIdSet insertedNodeIds1;
-        const GroupIdType rootGroupId1 = memo.integrate(evalNode1, {}, insertedNodeIds1);
+        const GroupIdType rootGroupId1 = memo.integrate(memoCtx, evalNode1, {}, insertedNodeIds1);
         ASSERT_EQ(3, rootGroupId1);
         ASSERT_EQ(4, memo.getGroupCount());
 
         // Nothing was inserted in first 3 groups.
-        ASSERT_EQ(1, memo.getGroup(0)._logicalNodes.size());
-        ASSERT_EQ(1, memo.getGroup(1)._logicalNodes.size());
-        ASSERT_EQ(1, memo.getGroup(2)._logicalNodes.size());
+        ASSERT_EQ(1, memo.getLogicalNodes(0).size());
+        ASSERT_EQ(1, memo.getLogicalNodes(1).size());
+        ASSERT_EQ(1, memo.getLogicalNodes(2).size());
     }
 
     {
-        const Group& group = memo.getGroup(3);
-        ASSERT_EQ(1, group._logicalNodes.size());
+        ASSERT_EQ(1, memo.getLogicalNodes(3).size());
 
         ASSERT_EXPLAIN(
             "Evaluation []\n"
@@ -242,7 +243,7 @@ TEST(LogicalRewriter, Memo) {
             "          Const [2]\n"
             "        Variable [ptest]\n"
             "  MemoLogicalDelegator [groupId: 0]\n",
-            group._logicalNodes.at(0));
+            memo.getLogicalNodes(3).front());
     }
 }
 
@@ -289,7 +290,7 @@ TEST(LogicalRewriter, FilterProjectRewrite) {
 
     OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase},
                                  prefixId,
-                                 {{{"test", {{}, {}}}}},
+                                 {{{"test", createScanDef({}, {})}}},
                                  DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
@@ -400,7 +401,7 @@ TEST(LogicalRewriter, FilterProjectComplexRewrite) {
 
     OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase},
                                  prefixId,
-                                 {{{"test", {{}, {}}}}},
+                                 {{{"test", createScanDef({}, {})}}},
                                  DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
@@ -478,7 +479,7 @@ TEST(LogicalRewriter, FilterProjectGroupRewrite) {
 
     OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase},
                                  prefixId,
-                                 {{{"test", {{}, {}}}}},
+                                 {{{"test", createScanDef({}, {})}}},
                                  DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
@@ -548,7 +549,7 @@ TEST(LogicalRewriter, FilterProjectUnwindRewrite) {
 
     OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase},
                                  prefixId,
-                                 {{{"test", {{}, {}}}}},
+                                 {{{"test", createScanDef({}, {})}}},
                                  DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
@@ -619,7 +620,7 @@ TEST(LogicalRewriter, FilterProjectExchangeRewrite) {
 
     OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase},
                                  prefixId,
-                                 {{{"test", {{}, {}}}}},
+                                 {{{"test", createScanDef({}, {})}}},
                                  DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
@@ -691,7 +692,7 @@ TEST(LogicalRewriter, UnwindCollationRewrite) {
 
     OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase},
                                  prefixId,
-                                 {{{"test", {{}, {}}}}},
+                                 {{{"test", createScanDef({}, {})}}},
                                  DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
@@ -801,10 +802,11 @@ TEST(LogicalRewriter, FilterUnionReorderSingleProjection) {
         "            Source []\n",
         latest);
 
-    OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase, OptPhase::MemoExplorationPhase},
-                                 prefixId,
-                                 {{{"test1", {{}, {}}}, {"test2", {{}, {}}}}},
-                                 DebugInfo::kDefaultForTests);
+    OptPhaseManager phaseManager(
+        {OptPhase::MemoSubstitutionPhase, OptPhase::MemoExplorationPhase},
+        prefixId,
+        {{{"test1", createScanDef({}, {})}, {"test2", createScanDef({}, {})}}},
+        DebugInfo::kDefaultForTests);
     phaseManager.optimize(latest);
 
     ASSERT_EXPLAIN_V2(
@@ -964,10 +966,11 @@ TEST(LogicalRewriter, MultipleFilterUnionReorder) {
         "            Source []\n",
         latest);
 
-    OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase, OptPhase::MemoExplorationPhase},
-                                 prefixId,
-                                 {{{"test1", {{}, {}}}, {"test2", {{}, {}}}}},
-                                 DebugInfo::kDefaultForTests);
+    OptPhaseManager phaseManager(
+        {OptPhase::MemoSubstitutionPhase, OptPhase::MemoExplorationPhase},
+        prefixId,
+        {{{"test1", createScanDef({}, {})}, {"test2", createScanDef({}, {})}}},
+        DebugInfo::kDefaultForTests);
     phaseManager.optimize(latest);
 
     ASSERT_EXPLAIN_V2(
@@ -1069,7 +1072,9 @@ TEST(LogicalRewriter, FilterUnionUnionPushdown) {
 
     OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase},
                                  prefixId,
-                                 {{{"test1", {{}, {}}}, {"test2", {{}, {}}}, {"test3", {{}, {}}}}},
+                                 {{{"test1", createScanDef({}, {})},
+                                   {"test2", createScanDef({}, {})},
+                                   {"test3", createScanDef({}, {})}}},
                                  DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
 
@@ -1196,15 +1201,17 @@ TEST(LogicalRewriter, UnionPreservesCommonLogicalProps) {
                                   std::move(unionNode));
 
     Metadata metadata{{{"test1",
-                        ScanDefinition{{},
-                                       {},
-                                       {DistributionType::HashPartitioning,
-                                        makeSeq(make<PathGet>("a", make<PathIdentity>()))}}},
+                        createScanDef({},
+                                      {},
+                                      ConstEval::constFold,
+                                      {DistributionType::HashPartitioning,
+                                       makeSeq(make<PathGet>("a", make<PathIdentity>()))})},
                        {"test2",
-                        ScanDefinition{{},
-                                       {},
-                                       {DistributionType::HashPartitioning,
-                                        makeSeq(make<PathGet>("a", make<PathIdentity>()))}}}},
+                        createScanDef({},
+                                      {},
+                                      ConstEval::constFold,
+                                      {DistributionType::HashPartitioning,
+                                       makeSeq(make<PathGet>("a", make<PathIdentity>()))})}},
                       2};
 
     // Run the reordering rewrite such that the scan produces a hash partition.
@@ -1427,7 +1434,7 @@ TEST(LogicalRewriter, SargableCE) {
     ABT rootNode = sargableCETestSetup();
     OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase, OptPhase::MemoExplorationPhase},
                                  prefixId,
-                                 {{{"test", {{}, {}}}}},
+                                 {{{"test", createScanDef({}, {})}}},
                                  DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
@@ -1535,7 +1542,7 @@ TEST(LogicalRewriter, RemoveNoopFilter) {
 
     OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase},
                                  prefixId,
-                                 {{{"test", {{}, {}}}}},
+                                 {{{"test", createScanDef({}, {})}}},
                                  DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);

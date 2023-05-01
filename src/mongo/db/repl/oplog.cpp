@@ -108,6 +108,7 @@
 #include "mongo/util/elapsed_tracker.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/file.h"
+#include "mongo/util/namespace_string_util.h"
 #include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
@@ -341,6 +342,7 @@ void writeToImageCollection(OperationContext* opCtx,
     "c" db cmd
     "n" no op
     "xi" insert global index key
+    "xd" delete global index key
 */
 
 
@@ -785,14 +787,14 @@ std::vector<OplogSlot> getNextOpTimes(OperationContext* opCtx, std::size_t count
 // -------------------------------------
 
 namespace {
-NamespaceString extractNs(StringData db, const BSONObj& cmdObj) {
+NamespaceString extractNs(DatabaseName dbName, const BSONObj& cmdObj) {
     BSONElement first = cmdObj.firstElement();
     uassert(40073,
             str::stream() << "collection name has invalid type " << typeName(first.type()),
             first.canonicalType() == canonicalizeBSONType(mongo::String));
     StringData coll = first.valueStringData();
     uassert(28635, "no collection name specified", !coll.empty());
-    return NamespaceString(db, coll);
+    return NamespaceString(dbName, coll);
 }
 
 NamespaceString extractNsFromUUID(OperationContext* opCtx, const UUID& uuid) {
@@ -806,7 +808,7 @@ NamespaceString extractNsFromUUIDorNs(OperationContext* opCtx,
                                       const NamespaceString& ns,
                                       const boost::optional<UUID>& ui,
                                       const BSONObj& cmd) {
-    return ui ? extractNsFromUUID(opCtx, ui.value()) : extractNs(ns.db(), cmd);
+    return ui ? extractNsFromUUID(opCtx, ui.value()) : extractNs(ns.dbName(), cmd);
 }
 
 using OpApplyFn = std::function<Status(
@@ -834,7 +836,8 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
      {[](OperationContext* opCtx, const OplogEntry& entry, OplogApplication::Mode mode) -> Status {
           const auto& ui = entry.getUuid();
           const auto& cmd = entry.getObject();
-          const NamespaceString nss(extractNs(entry.getNss().db(), cmd));
+
+          const NamespaceString nss(extractNs(entry.getNss().dbName(), cmd));
 
           const auto& migrationId = entry.getFromTenantMigration();
           if (migrationId) {
@@ -853,7 +856,7 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
               // Remove "idIndex" field from command.
               auto cmdWithoutIdIndex = cmd.removeField("idIndex");
               return createCollectionForApplyOps(opCtx,
-                                                 nss.db().toString(),
+                                                 nss.dbName(),
                                                  ui,
                                                  cmdWithoutIdIndex,
                                                  allowRenameOutOfTheWay,
@@ -863,7 +866,7 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
           // Collections clustered by _id do not need _id indexes.
           if (auto clusteredElem = cmd["clusteredIndex"]) {
               return createCollectionForApplyOps(
-                  opCtx, nss.db().toString(), ui, cmd, allowRenameOutOfTheWay, boost::none);
+                  opCtx, nss.dbName(), ui, cmd, allowRenameOutOfTheWay, boost::none);
           }
 
           // No _id index spec was provided, so we should build a v:1 _id index.
@@ -872,12 +875,8 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
                                     static_cast<int>(IndexVersion::kV1));
           idIndexSpecBuilder.append(IndexDescriptor::kIndexNameFieldName, "_id_");
           idIndexSpecBuilder.append(IndexDescriptor::kKeyPatternFieldName, BSON("_id" << 1));
-          return createCollectionForApplyOps(opCtx,
-                                             nss.db().toString(),
-                                             ui,
-                                             cmd,
-                                             allowRenameOutOfTheWay,
-                                             idIndexSpecBuilder.done());
+          return createCollectionForApplyOps(
+              opCtx, nss.dbName(), ui, cmd, allowRenameOutOfTheWay, idIndexSpecBuilder.done());
       },
       {ErrorCodes::NamespaceExists}}},
     {"createIndexes",
@@ -968,8 +967,12 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
     {"collMod",
      {[](OperationContext* opCtx, const OplogEntry& entry, OplogApplication::Mode mode) -> Status {
           const auto& cmd = entry.getObject();
-          auto opMsg = OpMsgRequest::fromDBAndBody(entry.getNss().db(), cmd);
-          auto collModCmd = CollMod::parse(IDLParserContext("collModOplogEntry"), opMsg);
+          auto opMsg = OpMsgRequestBuilder::create(entry.getNss().dbName(), cmd);
+
+          auto collModCmd = CollMod::parse(IDLParserContext("collModOplogEntry",
+                                                            false /* apiStrict */,
+                                                            entry.getNss().tenantId()),
+                                           opMsg.body);
           const auto nssOrUUID([&collModCmd, &entry, mode]() -> NamespaceStringOrUUID {
               // Oplog entries from secondary oplog application will allways have the Uuid set and
               // it is only invocations of applyOps directly that may omit it
@@ -978,7 +981,7 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
                   return collModCmd.getNamespace();
               }
 
-              return {collModCmd.getDbName().toString(), *entry.getUuid()};
+              return {collModCmd.getDbName(), *entry.getUuid()};
           }());
           return processCollModCommandForApplyOps(opCtx, nssOrUUID, collModCmd, mode);
       },
@@ -1051,13 +1054,15 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
               opTime = entry.getOpTime();
           }
           return renameCollectionForApplyOps(
-              opCtx, entry.getNss().db().toString(), entry.getUuid(), entry.getObject(), opTime);
+              opCtx, entry.getUuid(), entry.getTid(), entry.getObject(), opTime);
       },
       {ErrorCodes::NamespaceNotFound, ErrorCodes::NamespaceExists}}},
     {"importCollection",
      {[](OperationContext* opCtx, const OplogEntry& entry, OplogApplication::Mode mode) -> Status {
           auto importEntry = mongo::ImportCollectionOplogEntry::parse(
-              IDLParserContext("importCollectionOplogEntry"), entry.getObject());
+              IDLParserContext(
+                  "importCollectionOplogEntry", false /* apiStrict */, entry.getNss().tenantId()),
+              entry.getObject());
           applyImportCollection(opCtx,
                                 importEntry.getImportUUID(),
                                 importEntry.getImportCollection(),
@@ -1159,9 +1164,8 @@ void writeChangeStreamPreImage(OperationContext* opCtx,
     ChangeStreamPreImage preImageDocument{
         std::move(preImageId), oplogEntry.getWallClockTimeForPreImage(), preImage};
 
-    // TODO SERVER-66643 Pass tenant id to the pre-images collection if running in the serverless.
     ChangeStreamPreImagesCollectionManager::insertPreImage(
-        opCtx, /* tenantId */ boost::none, preImageDocument);
+        opCtx, oplogEntry.getTid(), preImageDocument);
 }
 }  // namespace
 
@@ -1863,21 +1867,49 @@ Status applyOperation_inlock(OperationContext* opCtx,
         case OpTypeEnum::kInsertGlobalIndexKey: {
             invariant(op.getUuid());
 
-            global_index::insertKey(
-                opCtx,
-                *op.getUuid(),
-                op.getObject().getObjectField(global_index::kOplogEntryIndexKeyFieldName),
-                op.getObject().getObjectField(global_index::kOplogEntryDocKeyFieldName));
+            Timestamp timestamp;
+            if (assignOperationTimestamp) {
+                timestamp = op.getTimestamp();
+            }
+
+            writeConflictRetry(opCtx, "applyOps_insertGlobalIndexKey", collection->ns().ns(), [&] {
+                WriteUnitOfWork wuow(opCtx);
+                if (timestamp != Timestamp::min()) {
+                    uassertStatusOK(opCtx->recoveryUnit()->setTimestamp(timestamp));
+                }
+
+                global_index::insertKey(
+                    opCtx,
+                    collection,
+                    op.getObject().getObjectField(global_index::kOplogEntryIndexKeyFieldName),
+                    op.getObject().getObjectField(global_index::kOplogEntryDocKeyFieldName));
+
+                wuow.commit();
+            });
             break;
         }
         case OpTypeEnum::kDeleteGlobalIndexKey: {
             invariant(op.getUuid());
 
-            global_index::deleteKey(
-                opCtx,
-                *op.getUuid(),
-                op.getObject().getObjectField(global_index::kOplogEntryIndexKeyFieldName),
-                op.getObject().getObjectField(global_index::kOplogEntryDocKeyFieldName));
+            Timestamp timestamp;
+            if (assignOperationTimestamp) {
+                timestamp = op.getTimestamp();
+            }
+
+            writeConflictRetry(opCtx, "applyOps_deleteGlobalIndexKey", collection->ns().ns(), [&] {
+                WriteUnitOfWork wuow(opCtx);
+                if (timestamp != Timestamp::min()) {
+                    uassertStatusOK(opCtx->recoveryUnit()->setTimestamp(timestamp));
+                }
+
+                global_index::deleteKey(
+                    opCtx,
+                    collection,
+                    op.getObject().getObjectField(global_index::kOplogEntryIndexKeyFieldName),
+                    op.getObject().getObjectField(global_index::kOplogEntryDocKeyFieldName));
+
+                wuow.commit();
+            });
             break;
         }
         default: {
@@ -1939,7 +1971,7 @@ Status applyCommand_inlock(OperationContext* opCtx,
     if ((mode == OplogApplication::Mode::kInitialSync) &&
         (std::find(allowlistedOps.begin(), allowlistedOps.end(), o.firstElementFieldName()) ==
          allowlistedOps.end()) &&
-        extractNs(nss.db(), o) == NamespaceString::kServerConfigurationNamespace) {
+        extractNs(nss.dbName(), o) == NamespaceString::kServerConfigurationNamespace) {
         return Status(ErrorCodes::OplogOperationUnsupported,
                       str::stream() << "Applying command to feature compatibility version "
                                        "collection not supported in initial sync: "

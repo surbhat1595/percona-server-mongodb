@@ -31,8 +31,11 @@
 
 #include "mongo/db/query/optimizer/cascades/rewriter_rules.h"
 #include "mongo/db/query/optimizer/props.h"
+#include "mongo/db/query/optimizer/reference_tracker.h"
 #include "mongo/db/query/optimizer/utils/ce_math.h"
 #include "mongo/db/query/optimizer/utils/memo_utils.h"
+#include "mongo/db/query/optimizer/utils/reftracker_utils.h"
+
 
 namespace mongo::optimizer::cascades {
 using namespace properties;
@@ -76,11 +79,6 @@ public:
             return;
         }
 
-        const auto& requiredProjections =
-            getPropertyConst<ProjectionRequirement>(_physProps).getProjections();
-        const ProjectionName& ridProjName = _ridProjections.at(node.getScanDefName());
-        const bool needsRID = requiredProjections.find(ridProjName).second;
-
         const auto& indexReq = getPropertyConst<IndexingRequirement>(_physProps);
         const IndexReqTarget indexReqTarget = indexReq.getIndexReqTarget();
         switch (indexReqTarget) {
@@ -110,7 +108,7 @@ public:
         bool canUseParallelScan = false;
         if (!distributionsCompatible(
                 indexReqTarget,
-                _memo.getMetadata()._scanDefs.at(node.getScanDefName()).getDistributionAndPaths(),
+                _metadata._scanDefs.at(node.getScanDefName()).getDistributionAndPaths(),
                 node.getProjectionName(),
                 _logicalProps,
                 {},
@@ -118,12 +116,19 @@ public:
             return;
         }
 
+        const auto& requiredProjections =
+            getPropertyConst<ProjectionRequirement>(_physProps).getProjections();
+        const ProjectionName& ridProjName = _ridProjections.at(node.getScanDefName());
+
         FieldProjectionMap fieldProjectionMap;
         for (const ProjectionName& required : requiredProjections.getVector()) {
             if (required == node.getProjectionName()) {
                 fieldProjectionMap._rootProjection = node.getProjectionName();
+            } else if (required == ridProjName) {
+                fieldProjectionMap._ridProjection = ridProjName;
             } else {
-                // Regular scan node can satisfy only using its root projection (not fields).
+                // Regular scan node can satisfy only using its root or rid projections (not
+                // fields).
                 return;
             }
         }
@@ -147,9 +152,6 @@ public:
                                      {},
                                      std::move(nodeCEMap));
         } else {
-            if (needsRID) {
-                fieldProjectionMap._ridProjection = ridProjName;
-            }
             ABT physicalScan = make<PhysicalScanNode>(
                 std::move(fieldProjectionMap), node.getScanDefName(), canUseParallelScan);
             optimizeChild<PhysicalScanNode, PhysicalRewriteType::PhysicalScan>(
@@ -380,7 +382,7 @@ public:
         }
 
         const std::string& scanDefName = indexingAvailability.getScanDefName();
-        const auto& scanDef = _memo.getMetadata()._scanDefs.at(scanDefName);
+        const auto& scanDef = _metadata._scanDefs.at(scanDefName);
 
 
         // We do not check indexDefs to be empty here. We want to allow evaluations to be covered
@@ -419,7 +421,7 @@ public:
 
         const ProjectionName& scanProjectionName = indexingAvailability.getScanProjection();
         const GroupIdType scanGroupId = indexingAvailability.getScanGroupId();
-        const LogicalProps& scanLogicalProps = _memo.getGroup(scanGroupId)._logicalProperties;
+        const LogicalProps& scanLogicalProps = _memo.getLogicalProps(scanGroupId);
         const CEType scanGroupCE =
             getPropertyConst<CardinalityEstimate>(scanLogicalProps).getEstimate();
 
@@ -476,8 +478,7 @@ public:
 
             const auto& satisfiedPartialIndexes =
                 getPropertyConst<IndexingAvailability>(
-                    _memo.getGroup(requirements.getSatisfiedPartialIndexesGroupId())
-                        ._logicalProperties)
+                    _memo.getLogicalProps(requirements.getSatisfiedPartialIndexesGroupId()))
                     .getSatisfiedPartialIndexes();
 
             // Consider all candidate indexes, and check if they satisfy the collation and
@@ -559,9 +560,20 @@ public:
 
                 // TODO: consider pre-computing as part of the candidateIndexes structure.
                 const auto singularInterval = CompoundIntervalReqExpr::getSingularDNF(intervals);
-                const bool needsUniqueStage =
-                    (!singularInterval || !areCompoundIntervalsEqualities(*singularInterval)) &&
-                    indexDef.isMultiKey() && requirements.getDedupRID();
+
+                // TODO SERVER-70298: Allow merge join of RIDs on interval level index intersection,
+                // in which case we may need to worry about deduping.
+                /* The following logic determines whether we need a unique stage to deduplicate the
+                RIDs returned by the query. If the caller doesn't need unique RIDs then you don't
+                need to provide them. if the index is non-multikey there are no duplicates. If there
+                is more than one interval in the BoolExpr, then the helper method that is called
+                currently creates Groupby+Union which will already deduplicate. Finally, if there
+                is only one interval, but it's a point interval, then the index won't have
+                duplicates.
+                 */
+                const bool needsUniqueStage = singularInterval &&
+                    !areCompoundIntervalsEqualities(*singularInterval) && indexDef.isMultiKey() &&
+                    requirements.getDedupRID();
 
                 indexProjectionMap._ridProjection =
                     (needsRID || needsUniqueStage) ? ridProjName : "";
@@ -679,7 +691,7 @@ public:
         const auto& indexingAvailability = getPropertyConst<IndexingAvailability>(_logicalProps);
         const std::string& scanDefName = indexingAvailability.getScanDefName();
         {
-            const auto& scanDef = _memo.getMetadata()._scanDefs.at(scanDefName);
+            const auto& scanDef = _metadata._scanDefs.at(scanDefName);
             if (scanDef.getIndexDefs().empty()) {
                 // Reject if we do not have any indexes.
                 return;
@@ -723,8 +735,8 @@ public:
         const GroupIdType rightGroupId =
             node.getRightChild().cast<MemoLogicalDelegatorNode>()->getGroupId();
 
-        const LogicalProps& leftLogicalProps = _memo.getGroup(leftGroupId)._logicalProperties;
-        const LogicalProps& rightLogicalProps = _memo.getGroup(rightGroupId)._logicalProperties;
+        const LogicalProps& leftLogicalProps = _memo.getLogicalProps(leftGroupId);
+        const LogicalProps& rightLogicalProps = _memo.getLogicalProps(rightGroupId);
 
         const CEType intersectedCE =
             getPropertyConst<CardinalityEstimate>(_logicalProps).getEstimate();
@@ -897,8 +909,8 @@ public:
         const GroupIdType rightGroupId =
             node.getRightChild().cast<MemoLogicalDelegatorNode>()->getGroupId();
 
-        const LogicalProps& leftLogicalProps = _memo.getGroup(leftGroupId)._logicalProperties;
-        const LogicalProps& rightLogicalProps = _memo.getGroup(rightGroupId)._logicalProperties;
+        const LogicalProps& leftLogicalProps = _memo.getLogicalProps(leftGroupId);
+        const LogicalProps& rightLogicalProps = _memo.getLogicalProps(rightGroupId);
 
         const ProjectionNameSet& leftProjections =
             getPropertyConst<ProjectionAvailability>(leftLogicalProps).getProjections();
@@ -1213,7 +1225,8 @@ public:
         static_assert(!canBeLogicalNode<T>(), "Logical node must implement its visitor.");
     }
 
-    ImplementationVisitor(const Memo& memo,
+    ImplementationVisitor(const Metadata& metadata,
+                          const Memo& memo,
                           const QueryHints& hints,
                           const RIDProjectionsMap& ridProjections,
                           PrefixId& prefixId,
@@ -1221,7 +1234,8 @@ public:
                           const PhysProps& physProps,
                           const LogicalProps& logicalProps,
                           const PathToIntervalFn& pathToInterval)
-        : _memo(memo),
+        : _metadata(metadata),
+          _memo(memo),
           _hints(hints),
           _ridProjections(ridProjections),
           _prefixId(prefixId),
@@ -1616,6 +1630,7 @@ private:
     }
 
     // We don't own any of those:
+    const Metadata& _metadata;
     const Memo& _memo;
     const QueryHints& _hints;
     const RIDProjectionsMap& _ridProjections;
@@ -1626,24 +1641,27 @@ private:
     const PathToIntervalFn& _pathToInterval;
 };
 
-void addImplementers(const Memo& memo,
+void addImplementers(const Metadata& metadata,
+                     const Memo& memo,
                      const QueryHints& hints,
                      const RIDProjectionsMap& ridProjections,
                      PrefixId& prefixId,
-                     PhysOptimizationResult& bestResult,
+                     const properties::PhysProps& physProps,
+                     PhysQueueAndImplPos& queue,
                      const properties::LogicalProps& logicalProps,
                      const OrderPreservingABTSet& logicalNodes,
                      const PathToIntervalFn& pathToInterval) {
-    ImplementationVisitor visitor(memo,
+    ImplementationVisitor visitor(metadata,
+                                  memo,
                                   hints,
                                   ridProjections,
                                   prefixId,
-                                  bestResult._queue,
-                                  bestResult._physProps,
+                                  queue._queue,
+                                  physProps,
                                   logicalProps,
                                   pathToInterval);
-    while (bestResult._lastImplementedNodePos < logicalNodes.size()) {
-        logicalNodes.at(bestResult._lastImplementedNodePos++).visit(visitor);
+    while (queue._lastImplementedNodePos < logicalNodes.size()) {
+        logicalNodes.at(queue._lastImplementedNodePos++).visit(visitor);
     }
 }
 

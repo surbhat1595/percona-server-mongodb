@@ -37,6 +37,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/logv2/redaction.h"
+#include "mongo/util/namespace_string_util.h"
 #include "mongo/util/time_support.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
@@ -81,7 +82,7 @@ BSONObj makeOplogEntryDoc(OpTime opTime,
         gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility)) {
         nss.tenantId()->serializeToBSON(OplogEntryBase::kTidFieldName, &builder);
     }
-    builder.append(OplogEntryBase::kNssFieldName, nss.toString());
+    builder.append(OplogEntryBase::kNssFieldName, NamespaceStringUtil::serialize(nss));
     builder.append(OplogEntryBase::kWallClockTimeFieldName, wallClockTime);
     if (uuid) {
         uuid->appendToBuilder(&builder, OplogEntryBase::kUuidFieldName);
@@ -184,10 +185,6 @@ DurableOplogEntry::CommandType parseCommandType(const BSONObj& objectField) {
         return DurableOplogEntry::CommandType::kCreateGlobalIndex;
     } else if (commandString == "dropGlobalIndex") {
         return DurableOplogEntry::CommandType::kDropGlobalIndex;
-    } else if (commandString == "xi") {
-        return DurableOplogEntry::CommandType::kInsertGlobalIndexKey;
-    } else if (commandString == "xd") {
-        return DurableOplogEntry::CommandType::kDeleteGlobalIndexKey;
     } else {
         uasserted(ErrorCodes::BadValue,
                   str::stream() << "Unknown oplog entry command type: " << commandString
@@ -436,6 +433,15 @@ bool DurableOplogEntry::isCrudOpType(OpTypeEnum opType) {
 
 bool DurableOplogEntry::isCrudOpType() const {
     return isCrudOpType(getOpType());
+}
+
+bool DurableOplogEntry::isGlobalIndexCrudOpType(OpTypeEnum opType) {
+    return opType == OpTypeEnum::kInsertGlobalIndexKey ||
+        opType == OpTypeEnum::kDeleteGlobalIndexKey;
+}
+
+bool DurableOplogEntry::isGlobalIndexCrudOpType() const {
+    return isGlobalIndexCrudOpType(getOpType());
 }
 
 bool DurableOplogEntry::isUpdateOrDelete() const {
@@ -781,6 +787,10 @@ mongo::Date_t OplogEntry::getWallClockTimeForPreImage() const {
 
 bool OplogEntry::isCrudOpType() const {
     return _entry.isCrudOpType();
+}
+
+bool OplogEntry::isGlobalIndexCrudOpType() const {
+    return _entry.isGlobalIndexCrudOpType();
 }
 
 bool OplogEntry::isUpdateOrDelete() const {

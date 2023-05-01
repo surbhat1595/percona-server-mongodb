@@ -90,10 +90,10 @@
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_settings.h"
 #include "mongo/db/query/query_settings_decoration.h"
+#include "mongo/db/query/query_utils.h"
 #include "mongo/db/query/sbe_cached_solution_planner.h"
 #include "mongo/db/query/sbe_multi_planner.h"
 #include "mongo/db/query/sbe_sub_planner.h"
-#include "mongo/db/query/sbe_utils.h"
 #include "mongo/db/query/stage_builder_util.h"
 #include "mongo/db/query/util/make_data_structure.h"
 #include "mongo/db/query/wildcard_multikey_paths.h"
@@ -154,18 +154,6 @@ namespace {
 namespace wcp = ::mongo::wildcard_planning;
 // The body is below in the "count hack" section but getExecutor calls it.
 bool turnIxscanIntoCount(QuerySolution* soln);
-
-/**
- * Returns 'true' if 'query' on the given 'collection' can be answered using a special IDHACK plan.
- */
-bool isIdHackEligibleQuery(const CollectionPtr& collection, const CanonicalQuery& query) {
-    const auto& findCommand = query.getFindCommandRequest();
-    return !findCommand.getShowRecordId() && findCommand.getHint().isEmpty() &&
-        findCommand.getMin().isEmpty() && findCommand.getMax().isEmpty() &&
-        !findCommand.getSkip() && CanonicalQuery::isSimpleIdQuery(findCommand.getFilter()) &&
-        !findCommand.getTailable() &&
-        CollatorInterface::collatorsMatch(query.getCollator(), collection->getDefaultCollator());
-}
 }  // namespace
 
 bool isAnyComponentOfPathMultikey(const BSONObj& indexKeyPattern,
@@ -521,10 +509,17 @@ public:
     std::tuple<std::unique_ptr<PlanStage>, std::unique_ptr<QuerySolution>> extractResultData() {
         return std::make_tuple(std::move(_root), std::move(_solution));
     }
+    void setRecoveredFromPlanCache(bool val) {
+        _fromPlanCache = val;
+    }
+    bool isRecoveredFromPlanCache() {
+        return _fromPlanCache;
+    }
 
 private:
     std::unique_ptr<PlanStage> _root;
     std::unique_ptr<QuerySolution> _solution;
+    bool _fromPlanCache{false};
 };
 
 /**
@@ -601,12 +596,21 @@ public:
         _recoveredPinnedCacheEntry = pinnedEntry;
     }
 
+    void setRecoveredFromPlanCache(bool val) {
+        _fromPlanCache = val;
+    }
+
+    bool isRecoveredFromPlanCache() {
+        return _fromPlanCache;
+    }
+
 private:
     QuerySolutionVector _solutions;
     PlanStageVector _roots;
     boost::optional<size_t> _decisionWorks;
     bool _needSubplanning{false};
     bool _recoveredPinnedCacheEntry{false};
+    bool _fromPlanCache{false};
 };
 
 /**
@@ -1039,86 +1043,6 @@ public:
     }
 
 protected:
-    std::unique_ptr<SlotBasedPrepareExecutionResult> buildIdHackPlan() {
-        // When the SBE plan cache is enabled we rely on it for fast find-by-_id queries rather than
-        // having a special implementation of the idhack. Therefore, this function returns nullptr
-        // early when the SBE plan cache is on.
-        //
-        // This is still fast for idhack eligible queries. The first invocation of such a query will
-        // go through the normal planning and plan compilation process, resulting in an
-        // auto-parameterized SBE plan cache entry. Subsequent idhack queries can simply re-use this
-        // cache entry, and the hot path for recovering cached plans is already carefully optimized.
-        if (feature_flags::gFeatureFlagSbeFull.isEnabledAndIgnoreFCV()) {
-            return nullptr;
-        }
-
-        const auto& mainColl = getMainCollection();
-        if (!isIdHackEligibleQuery(mainColl, *_cq))
-            return nullptr;
-        const IndexDescriptor* descriptor = mainColl->getIndexCatalog()->findIdIndex(_opCtx);
-        if (!descriptor)
-            return nullptr;
-
-        LOGV2_DEBUG(
-            6006801, 2, "Using SBE idhack", "canonicalQuery"_attr = redact(_cq->toStringShort()));
-        tassert(5536100,
-                "SBE cannot handle query with metadata",
-                !_cq->metadataDeps()[DocumentMetadataFields::kSortKey]);
-
-        // For the return key case, we use the common path.
-        if (_cq->getFindCommandRequest().getReturnKey()) {
-            return nullptr;
-        }
-
-        invariant(descriptor->getEntry());
-        std::unique_ptr<QuerySolutionNode> root = [&]() {
-            auto ixScan = std::make_unique<IndexScanNode>(indexEntryFromIndexCatalogEntry(
-                _opCtx, _collections.getMainCollection(), *descriptor->getEntry(), _cq));
-
-            const auto bsonKey =
-                IndexBoundsBuilder::objFromElement(_cq->getQueryObj()["_id"], _cq->getCollator());
-            OrderedIntervalList oil("_id");
-            oil.intervals.push_back(IndexBoundsBuilder::makePointInterval(bsonKey));
-
-            ixScan->bounds.fields.push_back(std::move(oil));
-            ixScan->queryCollator = _cq->getCollator();
-            return ixScan;
-        }();
-
-        // IDHack plans always include a FETCH by convention. A covered IDHack probably isn't a
-        // common case (a point query on _id where the only field returned is _id). It could be
-        // useful for an existence check, but we don't go out of our way to support it.
-        root = std::make_unique<FetchNode>(std::move(root));
-
-        initializePlannerParamsIfNeeded();
-        if (_plannerParams.options & QueryPlannerParams::INCLUDE_SHARD_FILTER) {
-            auto shardFilter = std::make_unique<ShardingFilterNode>();
-            shardFilter->children.push_back(std::move(root));
-            root = std::move(shardFilter);
-        }
-
-        if (const auto* projection = _cq->getProj(); projection) {
-            invariant(_cq->root());
-
-            if (projection->isSimple()) {
-                root = std::make_unique<ProjectionNodeSimple>(
-                    std::move(root), *_cq->root(), *projection);
-            } else {
-                root = std::make_unique<ProjectionNodeDefault>(
-                    std::move(root), *_cq->root(), *projection);
-            }
-        }
-
-        auto soln = std::make_unique<QuerySolution>();
-        soln->setRoot(std::move(root));
-
-        auto execTree = buildExecutableTree(*soln);
-        auto result = makeResult();
-        result->emplace(std::move(execTree), std::move(soln));
-
-        return result;
-    }
-
     sbe::PlanCacheKey buildPlanCacheKey() const {
         return plan_cache_key_factory::make(*_cq, _collections);
     }
@@ -1127,14 +1051,7 @@ protected:
         const sbe::PlanCacheKey& planCacheKey) final {
         if (shouldCacheQuery(*_cq)) {
             if (!feature_flags::gFeatureFlagSbeFull.isEnabledAndIgnoreFCV()) {
-                // If the feature flag is off, we first try to build an "id hack" plan because the
-                // id hack plans are not cached in the classic cache. We then fall back to use the
-                // classic plan cache.
-                if (auto result = buildIdHackPlan()) {
-                    return result;
-                } else {
-                    return buildCachedPlanFromClassicCache();
-                }
+                return buildCachedPlanFromClassicCache();
             } else {
                 OpDebug& opDebug = CurOp::get(_opCtx)->debug();
                 if (!opDebug.planCacheKey) {
@@ -1156,13 +1073,12 @@ protected:
                 result->setDecisionWorks(cacheEntry->decisionWorks);
                 result->setRecoveredPinnedCacheEntry(cacheEntry->isPinned());
                 result->emplace(std::make_pair(std::move(root), std::move(stageData)));
+                result->setRecoveredFromPlanCache(true);
                 return result;
             }
         }
 
-        // If a cached plan can be used we will have already returned the resulting plan. Otherwise
-        // we try to construct a find-by-_id plan
-        return buildIdHackPlan();
+        return nullptr;
     }
 
     // A temporary function to allow recovering SBE plans from the classic plan cache. When the
@@ -1197,7 +1113,7 @@ protected:
 
                 result->emplace(std::move(execTree), std::move(querySolution));
                 result->setDecisionWorks(cs->decisionWorks);
-
+                result->setRecoveredFromPlanCache(true);
                 return result;
             }
         }
@@ -1308,7 +1224,7 @@ std::unique_ptr<sbe::RuntimePlanner> makeRuntimePlannerIfNeeded(
     invariant(numSolutions == 1);
 
     // If we have a single solution and the plan is not pinned or plan contains a hash_lookup stage,
-    // we will need we will need to do the runtime planning to check if the cached plan still
+    // we will need to do the runtime planning to check if the cached plan still
     // performs efficiently, or requires re-planning.
     tassert(6693503, "PlanStageData must be present", planStageData);
     const bool hasHashLookup = !planStageData->foreignHashJoinCollections.empty();
@@ -1411,7 +1327,6 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
     // Prepare the SBE tree for execution.
     stage_builder::prepareSlotBasedExecutableTree(
         opCtx, root.get(), &data, *cq, collections, yieldPolicy.get(), true);
-
     return plan_executor_factory::make(opCtx,
                                        std::move(cq),
                                        std::move(solutions[0]),
@@ -1420,7 +1335,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
                                        collections,
                                        plannerParams.options,
                                        std::move(nss),
-                                       std::move(yieldPolicy));
+                                       std::move(yieldPolicy),
+                                       planningResult->isRecoveredFromPlanCache());
 }
 }  // namespace
 
@@ -1434,7 +1350,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
     invariant(canonicalQuery);
     const auto& mainColl = collections.getMainCollection();
     canonicalQuery->setSbeCompatible(
-        sbe::isQuerySbeCompatible(&mainColl, canonicalQuery.get(), plannerParams.options));
+        isQuerySbeCompatible(&mainColl, canonicalQuery.get(), plannerParams.options));
 
     if (isEligibleForBonsai(*canonicalQuery, opCtx, mainColl)) {
         return getSBEExecutorViaCascadesOptimizer(mainColl, std::move(canonicalQuery));

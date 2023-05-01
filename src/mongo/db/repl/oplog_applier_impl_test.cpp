@@ -41,6 +41,7 @@
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
+#include "mongo/db/catalog/import_collection_oplog_entry_gen.h"
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
@@ -57,6 +58,7 @@
 #include "mongo/db/repl/idempotency_test_fixture.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_applier.h"
+#include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_test_helpers.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -511,7 +513,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryToRecordChangeStreamPreImages) {
     }
 }
 
-TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsCommand) {
+TEST_F(OplogApplierImplTest, CreateCollectionCommand) {
     NamespaceString nss("test.t");
     auto op =
         BSON("op"
@@ -535,6 +537,294 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsCommand) {
         _opCtx.get(), &entry, OplogApplication::Mode::kInitialSync));
     ASSERT_TRUE(applyCmdCalled);
 }
+
+TEST_F(OplogApplierImplTest, CreateCollectionCommandMultitenant) {
+    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
+
+    auto tid{TenantId(OID::gen())};
+    NamespaceString nss(tid, "test.foo");
+
+    auto op = BSON("create" << nss.coll());
+    bool applyCmdCalled = false;
+    _opObserver->onCreateCollectionFn = [&](OperationContext* opCtx,
+                                            const CollectionPtr&,
+                                            const NamespaceString& collNss,
+                                            const CollectionOptions&,
+                                            const BSONObj&) {
+        applyCmdCalled = true;
+        ASSERT_TRUE(opCtx);
+        ASSERT_TRUE(opCtx->lockState()->isDbLockedForMode(nss.dbName(), MODE_IX));
+        ASSERT_TRUE(collNss.tenantId());
+        ASSERT_EQ(tid, collNss.tenantId().get());
+        ASSERT_EQUALS(nss, collNss);
+        return Status::OK();
+    };
+
+    auto entry = makeCommandOplogEntry(nextOpTime(), nss, op, UUID::gen());
+    ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
+        _opCtx.get(), &entry, OplogApplication::Mode::kSecondary));
+    ASSERT_TRUE(applyCmdCalled);
+}
+
+TEST_F(OplogApplierImplTest, CreateCollectionCommandMultitenantRequireTenantIDFalse) {
+    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", false);
+
+    auto tid{TenantId(OID::gen())};
+    NamespaceString nss(tid, "test.foo");
+
+    auto op =
+        BSON("op"
+             << "c"
+             << "ns" << nss.getCommandNS().toStringWithTenantId() << "wall" << Date_t() << "o"
+             << BSON("create" << nss.coll()) << "ts" << Timestamp(1, 1) << "ui" << UUID::gen());
+
+
+    bool applyCmdCalled = false;
+    _opObserver->onCreateCollectionFn = [&](OperationContext* opCtx,
+                                            const CollectionPtr&,
+                                            const NamespaceString& collNss,
+                                            const CollectionOptions&,
+                                            const BSONObj&) {
+        applyCmdCalled = true;
+        ASSERT_TRUE(opCtx);
+        ASSERT_TRUE(opCtx->lockState()->isDbLockedForMode(nss.dbName(), MODE_IX));
+        ASSERT_TRUE(collNss.tenantId());
+        ASSERT_EQ(tid, collNss.tenantId().get());
+        ASSERT_EQUALS(nss, collNss);
+        return Status::OK();
+    };
+
+    auto entry = OplogEntry(op);
+    ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
+        _opCtx.get(), &entry, OplogApplication::Mode::kSecondary));
+    ASSERT_TRUE(applyCmdCalled);
+}
+
+TEST_F(OplogApplierImplTest, CreateCollectionCommandMultitenantAlreadyExists) {
+    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
+
+    auto tid1{TenantId(OID::gen())};
+    auto tid2{TenantId(OID::gen())};
+    std::string commonNamespace("test.foo");
+    NamespaceString nssTenant1(tid1, commonNamespace);
+    NamespaceString nssTenant2(tid2, commonNamespace);
+    ASSERT_NE(tid1, tid2);
+
+    CollectionOptions options;
+    options.uuid = kUuid;
+
+    repl::createCollection(_opCtx.get(), nssTenant1, options);
+    auto op1 = BSON("create" << nssTenant1.coll());
+    auto op2 = BSON("create" << nssTenant2.coll());
+
+    bool applyCmdCalled = false;
+
+    // Target this callback to only work with nssTenant2
+    _opObserver->onCreateCollectionFn = [&](OperationContext* opCtx,
+                                            const CollectionPtr&,
+                                            const NamespaceString& collNss,
+                                            const CollectionOptions&,
+                                            const BSONObj&) {
+        applyCmdCalled = true;
+        ASSERT_TRUE(opCtx);
+        ASSERT_TRUE(opCtx->lockState()->isDbLockedForMode(nssTenant2.dbName(), MODE_IX));
+        ASSERT_TRUE(collNss.tenantId());
+        ASSERT_EQ(tid2, collNss.tenantId().get());
+        ASSERT_EQUALS(nssTenant2, collNss);
+        return Status::OK();
+    };
+
+    ASSERT_TRUE(collectionExists(_opCtx.get(), nssTenant1));
+    ASSERT_FALSE(collectionExists(_opCtx.get(), nssTenant2));
+
+    auto entry1 = makeCommandOplogEntry(nextOpTime(), nssTenant1, op1, kUuid);
+    auto entry2 = makeCommandOplogEntry(nextOpTime(), nssTenant2, op2, UUID::gen());
+
+    // This fails silently so we won't see any indication of a collision, but we can also assert
+    // that the opObserver event above won't be called in the event of a collision.
+    ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
+        _opCtx.get(), &entry1, OplogApplication::Mode::kSecondary));
+    ASSERT_FALSE(applyCmdCalled);
+
+    ASSERT_TRUE(collectionExists(_opCtx.get(), nssTenant1));
+    ASSERT_FALSE(collectionExists(_opCtx.get(), nssTenant2));
+
+    ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
+        _opCtx.get(), &entry2, OplogApplication::Mode::kSecondary));
+    ASSERT_TRUE(applyCmdCalled);
+
+    ASSERT_TRUE(collectionExists(_opCtx.get(), nssTenant1));
+    ASSERT_TRUE(collectionExists(_opCtx.get(), nssTenant2));
+}
+
+TEST_F(OplogApplierImplTest, RenameCollectionCommandMultitenant) {
+    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
+
+    auto tid{TenantId(OID::gen())};  // rename should not occur across tenants
+    const NamespaceString sourceNss(tid, "test.foo");
+    const NamespaceString targetNss(tid, "test.bar");
+
+    auto oRename = BSON("renameCollection" << sourceNss.toString() << "to" << targetNss.toString()
+                                           << "tid" << tid);
+
+    repl::createCollection(_opCtx.get(), sourceNss, {});
+    // createCollection uses an actual opTime, so we must generate an actually opTime in the future.
+    auto opTime = [opCtx = _opCtx.get()] {
+        WriteUnitOfWork wuow{opCtx};
+        ScopeGuard guard{[&wuow] { wuow.commit(); }};
+        return repl::getNextOpTime(opCtx);
+    }();
+    auto op = makeCommandOplogEntry(opTime, sourceNss, oRename, {});
+
+    ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
+        _opCtx.get(), &op, OplogApplication::Mode::kSecondary));
+    ASSERT_FALSE(collectionExists(_opCtx.get(), sourceNss));
+    ASSERT_TRUE(collectionExists(_opCtx.get(), targetNss));
+}
+
+TEST_F(OplogApplierImplTest, RenameCollectionCommandMultitenantRequireTenantIDFalse) {
+    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", false);
+
+    auto tid{TenantId(OID::gen())};  // rename should not occur across tenants
+    const NamespaceString sourceNss(tid, "test.foo");
+    const NamespaceString targetNss(tid, "test.bar");
+
+    auto oRename = BSON("renameCollection" << sourceNss.toStringWithTenantId() << "to"
+                                           << targetNss.toStringWithTenantId());
+
+    repl::createCollection(_opCtx.get(), sourceNss, {});
+    // createCollection uses an actual opTime, so we must generate an actually opTime in the future.
+    auto opTime = [opCtx = _opCtx.get()] {
+        WriteUnitOfWork wuow{opCtx};
+        ScopeGuard guard{[&wuow] { wuow.commit(); }};
+        return repl::getNextOpTime(opCtx);
+    }();
+    auto op = makeCommandOplogEntry(opTime, sourceNss, oRename, {});
+
+    ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
+        _opCtx.get(), &op, OplogApplication::Mode::kSecondary));
+    ASSERT_FALSE(collectionExists(_opCtx.get(), sourceNss));
+    ASSERT_TRUE(collectionExists(_opCtx.get(), targetNss));
+}
+
+TEST_F(OplogApplierImplTest, RenameCollectionCommandMultitenantAcrossTenantsRequireTenantIDFalse) {
+    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", false);
+
+    auto tid{TenantId(OID::gen())};
+    auto wrongTid{TenantId(OID::gen())};  // rename should not occur across tenants
+    const NamespaceString sourceNss(tid, "test.foo");
+    const NamespaceString targetNss(tid, "test.bar");
+    const NamespaceString wrongTargetNss(wrongTid, targetNss.toString());
+
+    ASSERT_NE(sourceNss, wrongTargetNss);
+
+    auto oRename = BSON("renameCollection" << sourceNss.toStringWithTenantId() << "to"
+                                           << wrongTargetNss.toStringWithTenantId());
+
+    repl::createCollection(_opCtx.get(), sourceNss, {});
+    // createCollection uses an actual opTime, so we must generate an actually opTime in the future.
+    auto opTime = [opCtx = _opCtx.get()] {
+        WriteUnitOfWork wuow{opCtx};
+        ScopeGuard guard{[&wuow] { wuow.commit(); }};
+        return repl::getNextOpTime(opCtx);
+    }();
+    auto op = makeCommandOplogEntry(opTime, sourceNss, oRename, {});
+
+    ASSERT_EQ(ErrorCodes::IllegalOperation,
+              _applyOplogEntryOrGroupedInsertsWrapper(
+                  _opCtx.get(), &op, OplogApplication::Mode::kSecondary));
+    ASSERT_TRUE(collectionExists(_opCtx.get(), sourceNss));
+    ASSERT_FALSE(collectionExists(_opCtx.get(), targetNss));
+    ASSERT_FALSE(collectionExists(_opCtx.get(), wrongTargetNss));
+}
+
+TEST_F(IdempotencyTest, CollModCommandMultitenant) {
+    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
+
+    auto tid{TenantId(OID::gen())};
+    const NamespaceString nss(tid, "test.foo");
+
+    setNss(nss);  // IdempotencyTest keeps nss state, update with tid
+
+    bool applyCmdCalled = false;
+    _opObserver->onCollModFn = [&](OperationContext* opCtx,
+                                   const NamespaceString& targetNss,
+                                   const UUID& uuid,
+                                   const BSONObj& collModCmd,
+                                   const CollectionOptions& oldCollOptions,
+                                   boost::optional<IndexCollModInfo> indexInfo) {
+        applyCmdCalled = true;
+
+        ASSERT_TRUE(targetNss.tenantId());
+        ASSERT_EQ(targetNss, nss);
+    };
+
+    ASSERT_OK(ReplicationCoordinator::get(getGlobalServiceContext())
+                  ->setFollowerMode(MemberState::RS_SECONDARY));
+    ASSERT_OK(
+        runOpInitialSync(makeCreateCollectionOplogEntry(nextOpTime(), nss, BSON("uuid" << kUuid))));
+    ASSERT_OK(runOpInitialSync(
+        buildIndex(BSON("createdAt" << 1), BSON("expireAfterSeconds" << 3600), kUuid)));
+
+    auto indexChange = fromjson("{keyPattern: {createdAt:1}, expireAfterSeconds:4000}}");
+    auto collModCmd = BSON("collMod" << nss.coll() << "index" << indexChange);
+    auto op = makeCommandOplogEntry(nextOpTime(), nss, collModCmd, kUuid);
+
+    ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
+        _opCtx.get(), &op, OplogApplication::Mode::kSecondary));
+    ASSERT_TRUE(applyCmdCalled);
+}
+
+TEST_F(IdempotencyTest, CollModCommandMultitenantWrongTenant) {
+    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
+
+    auto tid1{TenantId(OID::gen())};
+    auto tid2{TenantId(OID::gen())};
+    std::string commonNamespace("test.foo");
+    NamespaceString nssTenant1(tid1, commonNamespace);
+    NamespaceString nssTenant2(tid2, commonNamespace);
+    ASSERT_NE(tid1, tid2);
+
+    setNss(nssTenant1);  // IdempotencyTest keeps nss state, update with tid of the created nss
+
+    bool applyCmdCalled = false;
+    _opObserver->onCollModFn = [&](OperationContext* opCtx,
+                                   const NamespaceString& targetNss,
+                                   const UUID& uuid,
+                                   const BSONObj& collModCmd,
+                                   const CollectionOptions& oldCollOptions,
+                                   boost::optional<IndexCollModInfo> indexInfo) {
+        applyCmdCalled = true;  // We should not be able to reach this
+    };
+
+    ASSERT_OK(ReplicationCoordinator::get(getGlobalServiceContext())
+                  ->setFollowerMode(MemberState::RS_SECONDARY));
+    ASSERT_OK(runOpInitialSync(
+        makeCreateCollectionOplogEntry(nextOpTime(), nssTenant1, BSON("uuid" << kUuid))));
+    ASSERT_OK(runOpInitialSync(
+        buildIndex(BSON("createdAt" << 1), BSON("expireAfterSeconds" << 3600), kUuid)));
+
+    auto indexChange = fromjson("{keyPattern: {createdAt:1}, expireAfterSeconds:4000}}");
+    auto collModCmd = BSON("collMod" << nssTenant2.coll() << "index" << indexChange);
+    auto op = makeCommandOplogEntry(nextOpTime(), nssTenant2, collModCmd, kUuid);
+
+    // A NamespaceNotFound error is absorbed by the applier, but we can still determine the
+    // op_observer callback was never called
+    ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
+        _opCtx.get(), &op, OplogApplication::Mode::kSecondary));
+    ASSERT_FALSE(applyCmdCalled);
+}
+
+// TODO SERVER-70295: Ensure the collMod gFeatureFlagRequireTenantID=false tests work
+
 
 /**
  * Test only subclass of OplogApplierImpl that does not apply oplog entries, but tracks ops.
@@ -722,8 +1012,8 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsInsertDocumentInclud
     auto op = makeOplogEntry(OpTypeEnum::kInsert, nss, boost::none, doc, boost::none);
 
     _testApplyOplogEntryOrGroupedInsertsCrudOperation(ErrorCodes::OK, op, nss, true);
-
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, doc));
+    CollectionReader collectionReader(_opCtx.get(), nss);
+    ASSERT_BSONOBJ_EQ(doc, unittest::assertGet(collectionReader.next()));
 }
 
 TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsInsertDocumentIncorrectTenantId) {
@@ -744,17 +1034,18 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsInsertDocumentIncorr
         _testApplyOplogEntryOrGroupedInsertsCrudOperation(ErrorCodes::OK, op, nssTenant2, false),
         ExceptionFor<ErrorCodes::NamespaceNotFound>);
 
-    ASSERT_FALSE(docExists(_opCtx.get(), nssTenant1, doc));
-    ASSERT_FALSE(docExists(_opCtx.get(), nssTenant2, doc));
+    CollectionReader collectionReaderTenant1(_opCtx.get(), nssTenant1);
+    ASSERT_EQUALS(ErrorCodes::CollectionIsEmpty, collectionReaderTenant1.next().getStatus());
+
+    ASSERT(!collectionExists(_opCtx.get(), nssTenant2));
 }
 
 TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsDeleteDocumentIncludesTenantId) {
     // Setup the pre-images collection.
-    ChangeStreamPreImagesCollectionManager::createPreImagesCollection(_opCtx.get(),
-                                                                      boost::none /* tenantId */);
+    const TenantId tid(OID::gen());
+    ChangeStreamPreImagesCollectionManager::createPreImagesCollection(_opCtx.get(), tid);
     RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
-    const TenantId tid(OID::gen());
     const NamespaceString nss(tid, "test.t");
     BSONObj doc = BSON("_id" << 0);
 
@@ -770,7 +1061,8 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsDeleteDocumentInclud
     _testApplyOplogEntryOrGroupedInsertsCrudOperation(ErrorCodes::OK, op, nss, true);
 
     // Check that the doc actually got deleted.
-    ASSERT_FALSE(docExists(_opCtx.get(), nss, doc));
+    CollectionReader collectionReader(_opCtx.get(), nss);
+    ASSERT_EQUALS(ErrorCodes::CollectionIsEmpty, collectionReader.next().getStatus());
 }
 
 TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsDeleteDocumentIncorrectTenantId) {
@@ -790,8 +1082,10 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsDeleteDocumentIncorr
 
     _testApplyOplogEntryOrGroupedInsertsCrudOperation(ErrorCodes::OK, op, nssTenant2, false);
 
-    ASSERT_TRUE(docExists(_opCtx.get(), nssTenant1, doc));
-    ASSERT_FALSE(docExists(_opCtx.get(), nssTenant2, doc));
+    CollectionReader collectionReaderTenant1(_opCtx.get(), nssTenant1);
+    ASSERT_BSONOBJ_EQ(doc, unittest::assertGet(collectionReaderTenant1.next()));
+
+    ASSERT(!collectionExists(_opCtx.get(), nssTenant2));
 }
 
 // Steady state constraints are required for secondaries in order to avoid turning an insert into an
@@ -844,7 +1138,8 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsUpdateDocumentInclud
 
     // Check that the doc exists in its new updated form.
     BSONObj updatedDoc = BSON("_id" << 0 << "a" << 1);
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, updatedDoc));
+    CollectionReader collectionReader(_opCtx.get(), nss);
+    ASSERT_BSONOBJ_EQ(updatedDoc, unittest::assertGet(collectionReader.next()));
 }
 
 TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsUpdateDocumentIncorrectTenantId) {
@@ -871,8 +1166,10 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsUpdateDocumentIncorr
         _testApplyOplogEntryOrGroupedInsertsCrudOperation(ErrorCodes::OK, op, nssTenant2, true),
         ExceptionFor<ErrorCodes::NamespaceNotFound>);
 
-    ASSERT_TRUE(docExists(_opCtx.get(), nssTenant1, doc));
-    ASSERT_FALSE(docExists(_opCtx.get(), nssTenant2, doc));
+    CollectionReader collectionReaderTenant1(_opCtx.get(), nssTenant1);
+    ASSERT_BSONOBJ_EQ(doc, unittest::assertGet(collectionReaderTenant1.next()));
+
+    ASSERT(!collectionExists(_opCtx.get(), nssTenant2));
 }
 
 class MultiOplogEntryOplogApplierImplTest : public OplogApplierImplTest {
@@ -2609,16 +2906,16 @@ TEST_F(IdempotencyTest, CreateCollectionWithValidation) {
     auto runOpsAndValidate = [this, uuidObj]() {
         auto options1 = fromjson("{'validator' : {'phone' : {'$type' : 'string' } } }");
         options1 = options1.addField(uuidObj.firstElement());
-        auto createColl1 = makeCreateCollectionOplogEntry(nextOpTime(), nss, options1);
-        auto dropColl = makeCommandOplogEntry(nextOpTime(), nss, BSON("drop" << nss.coll()));
+        auto createColl1 = makeCreateCollectionOplogEntry(nextOpTime(), _nss, options1);
+        auto dropColl = makeCommandOplogEntry(nextOpTime(), _nss, BSON("drop" << _nss.coll()));
 
         auto options2 = fromjson("{'validator' : {'phone' : {'$type' : 'number' } } }");
         options2 = options2.addField(uuidObj.firstElement());
-        auto createColl2 = makeCreateCollectionOplogEntry(nextOpTime(), nss, options2);
+        auto createColl2 = makeCreateCollectionOplogEntry(nextOpTime(), _nss, options2);
 
         auto ops = {createColl1, dropColl, createColl2};
         ASSERT_OK(runOpsInitialSync(ops));
-        auto state = validate();
+        auto state = validate(_nss);
 
         return state;
     };
@@ -2646,7 +2943,7 @@ TEST_F(IdempotencyTest, CreateCollectionWithCollation) {
                                     << "normalization" << false << "backwards" << false << "version"
                                     << "57.1")
                             << "uuid" << uuid);
-        auto createColl = makeCreateCollectionOplogEntry(nextOpTime(), nss, options);
+        auto createColl = makeCreateCollectionOplogEntry(nextOpTime(), _nss, options);
         auto insertOp1 = insert(fromjson("{ _id: 'foo' }"));
         auto insertOp2 = insert(fromjson("{ _id: 'Foo', x: 1 }"));
         auto updateOp = update("foo",
@@ -2657,7 +2954,7 @@ TEST_F(IdempotencyTest, CreateCollectionWithCollation) {
         // to wait until second-phase drop to completely finish.
         auto ops = {createColl, insertOp1, insertOp2, updateOp};
         ASSERT_OK(runOpsInitialSync(ops));
-        auto state = validate();
+        auto state = validate(_nss);
 
         return state;
     };
@@ -2676,14 +2973,14 @@ TEST_F(IdempotencyTest, CreateCollectionWithView) {
     // Create data collection
     ASSERT_OK(runOpInitialSync(createCollection()));
     // Create "system.views" collection
-    auto viewNss = NamespaceString(nss.db(), "system.views");
+    auto viewNss = NamespaceString(_nss.db(), "system.views");
     ASSERT_OK(
         runOpInitialSync(makeCreateCollectionOplogEntry(nextOpTime(), viewNss, options.toBSON())));
 
-    auto viewDoc = BSON("_id" << NamespaceString(nss.db(), "view").ns() << "viewOn" << nss.coll()
+    auto viewDoc = BSON("_id" << NamespaceString(_nss.db(), "view").ns() << "viewOn" << _nss.coll()
                               << "pipeline" << fromjson("[ { '$project' : { 'x' : 1 } } ]"));
     auto insertViewOp = makeInsertDocumentOplogEntry(nextOpTime(), viewNss, viewDoc);
-    auto dropColl = makeCommandOplogEntry(nextOpTime(), nss, BSON("drop" << nss.coll()));
+    auto dropColl = makeCommandOplogEntry(nextOpTime(), _nss, BSON("drop" << _nss.coll()));
 
     auto ops = {insertViewOp, dropColl};
     testOpsAreIdempotent(ops);
@@ -2698,9 +2995,9 @@ TEST_F(IdempotencyTest, CollModNamespaceNotFound) {
         buildIndex(BSON("createdAt" << 1), BSON("expireAfterSeconds" << 3600), kUuid)));
 
     auto indexChange = fromjson("{keyPattern: {createdAt:1}, expireAfterSeconds:4000}}");
-    auto collModCmd = BSON("collMod" << nss.coll() << "index" << indexChange);
-    auto collModOp = makeCommandOplogEntry(nextOpTime(), nss, collModCmd, kUuid);
-    auto dropCollOp = makeCommandOplogEntry(nextOpTime(), nss, BSON("drop" << nss.coll()), kUuid);
+    auto collModCmd = BSON("collMod" << _nss.coll() << "index" << indexChange);
+    auto collModOp = makeCommandOplogEntry(nextOpTime(), _nss, collModCmd, kUuid);
+    auto dropCollOp = makeCommandOplogEntry(nextOpTime(), _nss, BSON("drop" << _nss.coll()), kUuid);
 
     auto ops = {collModOp, dropCollOp};
     testOpsAreIdempotent(ops);
@@ -2715,8 +3012,8 @@ TEST_F(IdempotencyTest, CollModIndexNotFound) {
         buildIndex(BSON("createdAt" << 1), BSON("expireAfterSeconds" << 3600), kUuid)));
 
     auto indexChange = fromjson("{keyPattern: {createdAt:1}, expireAfterSeconds:4000}}");
-    auto collModCmd = BSON("collMod" << nss.coll() << "index" << indexChange);
-    auto collModOp = makeCommandOplogEntry(nextOpTime(), nss, collModCmd, kUuid);
+    auto collModCmd = BSON("collMod" << _nss.coll() << "index" << indexChange);
+    auto collModOp = makeCommandOplogEntry(nextOpTime(), _nss, collModCmd, kUuid);
     auto dropIndexOp = dropIndex("createdAt_index", kUuid);
 
     auto ops = {collModOp, dropIndexOp};
@@ -2788,7 +3085,7 @@ TEST_F(OplogApplierImplTest, DropDatabaseSucceedsInRecovering) {
 
 TEST_F(OplogApplierImplWithFastAutoAdvancingClockTest, LogSlowOpApplicationWhenSuccessful) {
     // This duration is greater than "slowMS", so the op would be considered slow.
-    auto applyDuration = serverGlobalParams.slowMS * 10;
+    auto applyDuration = serverGlobalParams.slowMS.load() * 10;
 
     // We are inserting into an existing collection.
     const NamespaceString nss("test.t");
@@ -2812,7 +3109,7 @@ TEST_F(OplogApplierImplWithFastAutoAdvancingClockTest, LogSlowOpApplicationWhenS
 
 TEST_F(OplogApplierImplWithFastAutoAdvancingClockTest, DoNotLogSlowOpApplicationWhenFailed) {
     // This duration is greater than "slowMS", so the op would be considered slow.
-    auto applyDuration = serverGlobalParams.slowMS * 10;
+    auto applyDuration = serverGlobalParams.slowMS.load() * 10;
 
     // We are trying to insert into a non-existing database.
     NamespaceString nss("test.t");
@@ -2834,7 +3131,7 @@ TEST_F(OplogApplierImplWithFastAutoAdvancingClockTest, DoNotLogSlowOpApplication
 
 TEST_F(OplogApplierImplWithSlowAutoAdvancingClockTest, DoNotLogNonSlowOpApplicationWhenSuccessful) {
     // This duration is below "slowMS", so the op would *not* be considered slow.
-    auto applyDuration = serverGlobalParams.slowMS / 10;
+    auto applyDuration = serverGlobalParams.slowMS.load() / 10;
 
     // We are inserting into an existing collection.
     const NamespaceString nss("test.t");
@@ -3495,15 +3792,15 @@ TEST_F(OplogApplierImplTxnTableTest, NonMigrateNoOpEntriesShouldNotUpdateTxnTabl
 
 TEST_F(IdempotencyTest, EmptyCappedNamespaceNotFound) {
     // Create a BSON "emptycapped" command.
-    auto emptyCappedCmd = BSON("emptycapped" << nss.coll());
+    auto emptyCappedCmd = BSON("emptycapped" << _nss.coll());
 
     // Create an "emptycapped" oplog entry.
-    auto emptyCappedOp = makeCommandOplogEntry(nextOpTime(), nss, emptyCappedCmd);
+    auto emptyCappedOp = makeCommandOplogEntry(nextOpTime(), _nss, emptyCappedCmd);
 
     // Ensure that NamespaceNotFound is acceptable.
     ASSERT_OK(runOpInitialSync(emptyCappedOp));
 
-    AutoGetCollectionForReadCommand autoColl(_opCtx.get(), nss);
+    AutoGetCollectionForReadCommand autoColl(_opCtx.get(), _nss);
     ASSERT_FALSE(autoColl);
 }
 
@@ -3535,10 +3832,10 @@ typedef SetSteadyStateConstraints<IdempotencyTest, true>
 
 TEST_F(IdempotencyTestDisableSteadyStateConstraints, AcceptableErrorsRecordedInSteadyStateMode) {
     // Create a BSON "emptycapped" command.
-    auto emptyCappedCmd = BSON("emptycapped" << nss.coll());
+    auto emptyCappedCmd = BSON("emptycapped" << _nss.coll());
 
     // Create a "emptycapped" oplog entry.
-    auto emptyCappedOp = makeCommandOplogEntry(nextOpTime(), nss, emptyCappedCmd);
+    auto emptyCappedOp = makeCommandOplogEntry(nextOpTime(), _nss, emptyCappedCmd);
 
     // Ensure that NamespaceNotFound is "acceptable" but counted.
     int prevAcceptableError = replOpCounters.getAcceptableErrorInCommand()->load();
@@ -3557,10 +3854,10 @@ TEST_F(IdempotencyTestDisableSteadyStateConstraints, AcceptableErrorsRecordedInS
 TEST_F(IdempotencyTestEnableSteadyStateConstraints,
        AcceptableErrorsNotAcceptableInSteadyStateMode) {
     // Create a BSON "emptycapped" command.
-    auto emptyCappedCmd = BSON("emptycapped" << nss.coll());
+    auto emptyCappedCmd = BSON("emptycapped" << _nss.coll());
 
     // Create a "emptyCapped" oplog entry.
-    auto emptyCappedOp = makeCommandOplogEntry(nextOpTime(), nss, emptyCappedCmd);
+    auto emptyCappedOp = makeCommandOplogEntry(nextOpTime(), _nss, emptyCappedCmd);
 
     // Ensure that NamespaceNotFound is returned.
     ASSERT_EQUALS(ErrorCodes::NamespaceNotFound, runOpSteadyState(emptyCappedOp));
@@ -3574,12 +3871,12 @@ const BSONObj doc2 = fromjson("{_id: 2}");
 
 TEST_F(IdempotencyTestTxns, CommitUnpreparedTransaction) {
     createCollectionWithUuid(_opCtx.get(), NamespaceString::kSessionTransactionsTableNamespace);
-    auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
+    auto uuid = createCollectionWithUuid(_opCtx.get(), _nss);
     auto lsid = makeLogicalSessionId(_opCtx.get());
     TxnNumber txnNum(0);
 
     auto commitOp = commitUnprepared(
-        lsid, txnNum, StmtId(0), BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc)));
+        lsid, txnNum, StmtId(0), BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc)));
 
     ASSERT_OK(ReplicationCoordinator::get(getGlobalServiceContext())
                   ->setFollowerMode(MemberState::RS_RECOVERING));
@@ -3592,12 +3889,12 @@ TEST_F(IdempotencyTestTxns, CommitUnpreparedTransaction) {
                         commitOp.getWallClockTime(),
                         boost::none,
                         DurableTxnStateEnum::kCommitted);
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, doc));
+    ASSERT_TRUE(docExists(_opCtx.get(), _nss, doc));
 }
 
 TEST_F(IdempotencyTestTxns, CommitUnpreparedTransactionDataPartiallyApplied) {
     createCollectionWithUuid(_opCtx.get(), NamespaceString::kSessionTransactionsTableNamespace);
-    auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
+    auto uuid = createCollectionWithUuid(_opCtx.get(), _nss);
     auto lsid = makeLogicalSessionId(_opCtx.get());
     TxnNumber txnNum(0);
 
@@ -3607,16 +3904,16 @@ TEST_F(IdempotencyTestTxns, CommitUnpreparedTransactionDataPartiallyApplied) {
     auto commitOp = commitUnprepared(lsid,
                                      txnNum,
                                      StmtId(0),
-                                     BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc)
+                                     BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc)
                                                 << makeInsertApplyOpsEntry(nss2, uuid2, doc)));
 
     // Manually insert one of the documents so that the data will partially reflect the transaction
     // when the commitTransaction oplog entry is applied during initial sync.
     ASSERT_OK(getStorageInterface()->insertDocument(_opCtx.get(),
-                                                    nss,
+                                                    _nss,
                                                     {doc, commitOp.getOpTime().getTimestamp()},
                                                     commitOp.getOpTime().getTerm()));
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, doc));
+    ASSERT_TRUE(docExists(_opCtx.get(), _nss, doc));
     ASSERT_FALSE(docExists(_opCtx.get(), nss2, doc));
 
     ASSERT_OK(ReplicationCoordinator::get(getGlobalServiceContext())
@@ -3630,18 +3927,18 @@ TEST_F(IdempotencyTestTxns, CommitUnpreparedTransactionDataPartiallyApplied) {
                         commitOp.getWallClockTime(),
                         boost::none,
                         DurableTxnStateEnum::kCommitted);
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, doc));
+    ASSERT_TRUE(docExists(_opCtx.get(), _nss, doc));
     ASSERT_TRUE(docExists(_opCtx.get(), nss2, doc));
 }
 
 TEST_F(IdempotencyTestTxns, CommitPreparedTransaction) {
     createCollectionWithUuid(_opCtx.get(), NamespaceString::kSessionTransactionsTableNamespace);
-    auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
+    auto uuid = createCollectionWithUuid(_opCtx.get(), _nss);
     auto lsid = makeLogicalSessionId(_opCtx.get());
     TxnNumber txnNum(0);
 
     auto prepareOp =
-        prepare(lsid, txnNum, StmtId(0), BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc)));
+        prepare(lsid, txnNum, StmtId(0), BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc)));
 
     auto commitOp = commitPrepared(lsid, txnNum, StmtId(1), prepareOp.getOpTime());
 
@@ -3656,12 +3953,12 @@ TEST_F(IdempotencyTestTxns, CommitPreparedTransaction) {
                         commitOp.getWallClockTime(),
                         boost::none,
                         DurableTxnStateEnum::kCommitted);
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, doc));
+    ASSERT_TRUE(docExists(_opCtx.get(), _nss, doc));
 }
 
 TEST_F(IdempotencyTestTxns, CommitPreparedTransactionDataPartiallyApplied) {
     createCollectionWithUuid(_opCtx.get(), NamespaceString::kSessionTransactionsTableNamespace);
-    auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
+    auto uuid = createCollectionWithUuid(_opCtx.get(), _nss);
     auto lsid = makeLogicalSessionId(_opCtx.get());
     TxnNumber txnNum(0);
 
@@ -3671,7 +3968,7 @@ TEST_F(IdempotencyTestTxns, CommitPreparedTransactionDataPartiallyApplied) {
     auto prepareOp = prepare(lsid,
                              txnNum,
                              StmtId(0),
-                             BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc)
+                             BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc)
                                         << makeInsertApplyOpsEntry(nss2, uuid2, doc)));
 
     auto commitOp = commitPrepared(lsid, txnNum, StmtId(1), prepareOp.getOpTime());
@@ -3679,10 +3976,10 @@ TEST_F(IdempotencyTestTxns, CommitPreparedTransactionDataPartiallyApplied) {
     // Manually insert one of the documents so that the data will partially reflect the transaction
     // when the commitTransaction oplog entry is applied during initial sync.
     ASSERT_OK(getStorageInterface()->insertDocument(_opCtx.get(),
-                                                    nss,
+                                                    _nss,
                                                     {doc, commitOp.getOpTime().getTimestamp()},
                                                     commitOp.getOpTime().getTerm()));
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, doc));
+    ASSERT_TRUE(docExists(_opCtx.get(), _nss, doc));
     ASSERT_FALSE(docExists(_opCtx.get(), nss2, doc));
 
     ASSERT_OK(ReplicationCoordinator::get(getGlobalServiceContext())
@@ -3696,18 +3993,18 @@ TEST_F(IdempotencyTestTxns, CommitPreparedTransactionDataPartiallyApplied) {
                         commitOp.getWallClockTime(),
                         boost::none,
                         DurableTxnStateEnum::kCommitted);
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, doc));
+    ASSERT_TRUE(docExists(_opCtx.get(), _nss, doc));
     ASSERT_TRUE(docExists(_opCtx.get(), nss2, doc));
 }
 
 TEST_F(IdempotencyTestTxns, AbortPreparedTransaction) {
     createCollectionWithUuid(_opCtx.get(), NamespaceString::kSessionTransactionsTableNamespace);
-    auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
+    auto uuid = createCollectionWithUuid(_opCtx.get(), _nss);
     auto lsid = makeLogicalSessionId(_opCtx.get());
     TxnNumber txnNum(0);
 
     auto prepareOp =
-        prepare(lsid, txnNum, StmtId(0), BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc)));
+        prepare(lsid, txnNum, StmtId(0), BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc)));
     auto abortOp = abortPrepared(lsid, txnNum, StmtId(1), prepareOp.getOpTime());
 
     ASSERT_OK(ReplicationCoordinator::get(getGlobalServiceContext())
@@ -3721,17 +4018,17 @@ TEST_F(IdempotencyTestTxns, AbortPreparedTransaction) {
                         abortOp.getWallClockTime(),
                         boost::none,
                         DurableTxnStateEnum::kAborted);
-    ASSERT_FALSE(docExists(_opCtx.get(), nss, doc));
+    ASSERT_FALSE(docExists(_opCtx.get(), _nss, doc));
 }
 
 TEST_F(IdempotencyTestTxns, SinglePartialTxnOp) {
     createCollectionWithUuid(_opCtx.get(), NamespaceString::kSessionTransactionsTableNamespace);
-    auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
+    auto uuid = createCollectionWithUuid(_opCtx.get(), _nss);
     auto lsid = makeLogicalSessionId(_opCtx.get());
     TxnNumber txnNum(0);
 
     auto partialOp = partialTxn(
-        lsid, txnNum, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc)));
+        lsid, txnNum, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc)));
 
     ASSERT_OK(ReplicationCoordinator::get(getGlobalServiceContext())
                   ->setFollowerMode(MemberState::RS_RECOVERING));
@@ -3747,22 +4044,22 @@ TEST_F(IdempotencyTestTxns, SinglePartialTxnOp) {
                         DurableTxnStateEnum::kInProgress);
 
     // Document should not be visible yet.
-    ASSERT_FALSE(docExists(_opCtx.get(), nss, doc));
+    ASSERT_FALSE(docExists(_opCtx.get(), _nss, doc));
 }
 
 TEST_F(IdempotencyTestTxns, MultiplePartialTxnOps) {
     createCollectionWithUuid(_opCtx.get(), NamespaceString::kSessionTransactionsTableNamespace);
-    auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
+    auto uuid = createCollectionWithUuid(_opCtx.get(), _nss);
     auto lsid = makeLogicalSessionId(_opCtx.get());
     TxnNumber txnNum(0);
 
     auto partialOp1 = partialTxn(
-        lsid, txnNum, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc)));
+        lsid, txnNum, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc)));
     auto partialOp2 = partialTxn(lsid,
                                  txnNum,
                                  StmtId(1),
                                  partialOp1.getOpTime(),
-                                 BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc2)));
+                                 BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc2)));
     ASSERT_OK(ReplicationCoordinator::get(getGlobalServiceContext())
                   ->setFollowerMode(MemberState::RS_RECOVERING));
 
@@ -3776,23 +4073,23 @@ TEST_F(IdempotencyTestTxns, MultiplePartialTxnOps) {
                         expectedStartOpTime,
                         DurableTxnStateEnum::kInProgress);
     // Document should not be visible yet.
-    ASSERT_FALSE(docExists(_opCtx.get(), nss, doc));
-    ASSERT_FALSE(docExists(_opCtx.get(), nss, doc2));
+    ASSERT_FALSE(docExists(_opCtx.get(), _nss, doc));
+    ASSERT_FALSE(docExists(_opCtx.get(), _nss, doc2));
 }
 
 TEST_F(IdempotencyTestTxns, CommitUnpreparedTransactionWithPartialTxnOps) {
     createCollectionWithUuid(_opCtx.get(), NamespaceString::kSessionTransactionsTableNamespace);
-    auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
+    auto uuid = createCollectionWithUuid(_opCtx.get(), _nss);
     auto lsid = makeLogicalSessionId(_opCtx.get());
     TxnNumber txnNum(0);
 
     auto partialOp = partialTxn(
-        lsid, txnNum, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc)));
+        lsid, txnNum, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc)));
 
     auto commitOp = commitUnprepared(lsid,
                                      txnNum,
                                      StmtId(1),
-                                     BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc2)),
+                                     BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc2)),
                                      partialOp.getOpTime());
 
     ASSERT_OK(ReplicationCoordinator::get(getGlobalServiceContext())
@@ -3806,25 +4103,25 @@ TEST_F(IdempotencyTestTxns, CommitUnpreparedTransactionWithPartialTxnOps) {
                         commitOp.getWallClockTime(),
                         boost::none,
                         DurableTxnStateEnum::kCommitted);
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, doc));
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, doc2));
+    ASSERT_TRUE(docExists(_opCtx.get(), _nss, doc));
+    ASSERT_TRUE(docExists(_opCtx.get(), _nss, doc2));
 }
 
 TEST_F(IdempotencyTestTxns, CommitTwoUnpreparedTransactionsWithPartialTxnOpsAtOnce) {
     createCollectionWithUuid(_opCtx.get(), NamespaceString::kSessionTransactionsTableNamespace);
-    auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
+    auto uuid = createCollectionWithUuid(_opCtx.get(), _nss);
     auto lsid = makeLogicalSessionId(_opCtx.get());
     TxnNumber txnNum1(1);
     TxnNumber txnNum2(2);
 
     auto partialOp1 = partialTxn(
-        lsid, txnNum1, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc)));
+        lsid, txnNum1, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc)));
     auto commitOp1 =
         commitUnprepared(lsid, txnNum1, StmtId(1), BSONArray(), partialOp1.getOpTime());
 
     // The second transaction (with a different transaction number) in the same session.
     auto partialOp2 = partialTxn(
-        lsid, txnNum2, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc2)));
+        lsid, txnNum2, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc2)));
     auto commitOp2 =
         commitUnprepared(lsid, txnNum2, StmtId(1), BSONArray(), partialOp2.getOpTime());
 
@@ -3845,24 +4142,24 @@ TEST_F(IdempotencyTestTxns, CommitTwoUnpreparedTransactionsWithPartialTxnOpsAtOn
                         commitOp2.getWallClockTime(),
                         boost::none,
                         DurableTxnStateEnum::kCommitted);
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, doc));
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, doc2));
+    ASSERT_TRUE(docExists(_opCtx.get(), _nss, doc));
+    ASSERT_TRUE(docExists(_opCtx.get(), _nss, doc2));
 }
 
 TEST_F(IdempotencyTestTxns, CommitAndAbortTwoTransactionsWithPartialTxnOpsAtOnce) {
     createCollectionWithUuid(_opCtx.get(), NamespaceString::kSessionTransactionsTableNamespace);
-    auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
+    auto uuid = createCollectionWithUuid(_opCtx.get(), _nss);
     auto lsid = makeLogicalSessionId(_opCtx.get());
     TxnNumber txnNum1(1);
     TxnNumber txnNum2(2);
 
     auto partialOp1 = partialTxn(
-        lsid, txnNum1, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc)));
+        lsid, txnNum1, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc)));
     auto abortOp1 = abortPrepared(lsid, txnNum1, StmtId(1), partialOp1.getOpTime());
 
     // The second transaction (with a different transaction number) in the same session.
     auto partialOp2 = partialTxn(
-        lsid, txnNum2, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc2)));
+        lsid, txnNum2, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc2)));
     auto commitOp2 =
         commitUnprepared(lsid, txnNum2, StmtId(1), BSONArray(), partialOp2.getOpTime());
 
@@ -3883,23 +4180,23 @@ TEST_F(IdempotencyTestTxns, CommitAndAbortTwoTransactionsWithPartialTxnOpsAtOnce
                         commitOp2.getWallClockTime(),
                         boost::none,
                         DurableTxnStateEnum::kCommitted);
-    ASSERT_FALSE(docExists(_opCtx.get(), nss, doc));
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, doc2));
+    ASSERT_FALSE(docExists(_opCtx.get(), _nss, doc));
+    ASSERT_TRUE(docExists(_opCtx.get(), _nss, doc2));
 }
 
 TEST_F(IdempotencyTestTxns, CommitUnpreparedTransactionWithPartialTxnOpsAndDataPartiallyApplied) {
     createCollectionWithUuid(_opCtx.get(), NamespaceString::kSessionTransactionsTableNamespace);
-    auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
+    auto uuid = createCollectionWithUuid(_opCtx.get(), _nss);
     auto lsid = makeLogicalSessionId(_opCtx.get());
     TxnNumber txnNum(0);
 
     auto partialOp = partialTxn(
-        lsid, txnNum, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc)));
+        lsid, txnNum, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc)));
 
     auto commitOp = commitUnprepared(lsid,
                                      txnNum,
                                      StmtId(1),
-                                     BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc2)),
+                                     BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc2)),
                                      partialOp.getOpTime());
 
     // Manually insert the first document so that the data will partially reflect the transaction
@@ -3907,7 +4204,7 @@ TEST_F(IdempotencyTestTxns, CommitUnpreparedTransactionWithPartialTxnOpsAndDataP
     // case where the transaction committed on the sync source at a point during the initial sync,
     // such that we cloned 'doc' but missed 'doc2'.
     ASSERT_OK(getStorageInterface()->insertDocument(_opCtx.get(),
-                                                    nss,
+                                                    _nss,
                                                     {doc, commitOp.getOpTime().getTimestamp()},
                                                     commitOp.getOpTime().getTerm()));
 
@@ -3922,22 +4219,22 @@ TEST_F(IdempotencyTestTxns, CommitUnpreparedTransactionWithPartialTxnOpsAndDataP
                         commitOp.getWallClockTime(),
                         boost::none,
                         DurableTxnStateEnum::kCommitted);
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, doc));
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, doc2));
+    ASSERT_TRUE(docExists(_opCtx.get(), _nss, doc));
+    ASSERT_TRUE(docExists(_opCtx.get(), _nss, doc2));
 }
 
 TEST_F(IdempotencyTestTxns, PrepareTransactionWithPartialTxnOps) {
     createCollectionWithUuid(_opCtx.get(), NamespaceString::kSessionTransactionsTableNamespace);
-    auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
+    auto uuid = createCollectionWithUuid(_opCtx.get(), _nss);
     auto lsid = makeLogicalSessionId(_opCtx.get());
     TxnNumber txnNum(0);
 
     auto partialOp = partialTxn(
-        lsid, txnNum, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc)));
+        lsid, txnNum, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc)));
     auto prepareOp = prepare(lsid,
                              txnNum,
                              StmtId(1),
-                             BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc2)),
+                             BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc2)),
                              partialOp.getOpTime());
 
     ASSERT_OK(ReplicationCoordinator::get(getGlobalServiceContext())
@@ -3952,7 +4249,7 @@ TEST_F(IdempotencyTestTxns, PrepareTransactionWithPartialTxnOps) {
                         partialOp.getOpTime(),
                         DurableTxnStateEnum::kPrepared);
     // Document should not be visible yet.
-    ASSERT_FALSE(docExists(_opCtx.get(), nss, doc));
+    ASSERT_FALSE(docExists(_opCtx.get(), _nss, doc));
 }
 
 TEST_F(IdempotencyTestTxns, EmptyPrepareTransaction) {
@@ -3978,16 +4275,16 @@ TEST_F(IdempotencyTestTxns, EmptyPrepareTransaction) {
 
 TEST_F(IdempotencyTestTxns, CommitPreparedTransactionWithPartialTxnOps) {
     createCollectionWithUuid(_opCtx.get(), NamespaceString::kSessionTransactionsTableNamespace);
-    auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
+    auto uuid = createCollectionWithUuid(_opCtx.get(), _nss);
     auto lsid = makeLogicalSessionId(_opCtx.get());
     TxnNumber txnNum(0);
 
     auto partialOp = partialTxn(
-        lsid, txnNum, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc)));
+        lsid, txnNum, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc)));
     auto prepareOp = prepare(lsid,
                              txnNum,
                              StmtId(1),
-                             BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc2)),
+                             BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc2)),
                              partialOp.getOpTime());
     auto commitOp = commitPrepared(lsid, txnNum, StmtId(2), prepareOp.getOpTime());
 
@@ -4002,25 +4299,25 @@ TEST_F(IdempotencyTestTxns, CommitPreparedTransactionWithPartialTxnOps) {
                         commitOp.getWallClockTime(),
                         boost::none,
                         DurableTxnStateEnum::kCommitted);
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, doc));
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, doc2));
+    ASSERT_TRUE(docExists(_opCtx.get(), _nss, doc));
+    ASSERT_TRUE(docExists(_opCtx.get(), _nss, doc2));
 }
 
 TEST_F(IdempotencyTestTxns, CommitTwoPreparedTransactionsWithPartialTxnOpsAtOnce) {
     createCollectionWithUuid(_opCtx.get(), NamespaceString::kSessionTransactionsTableNamespace);
-    auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
+    auto uuid = createCollectionWithUuid(_opCtx.get(), _nss);
     auto lsid = makeLogicalSessionId(_opCtx.get());
     TxnNumber txnNum1(1);
     TxnNumber txnNum2(2);
 
     auto partialOp1 = partialTxn(
-        lsid, txnNum1, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc)));
+        lsid, txnNum1, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc)));
     auto prepareOp1 = prepare(lsid, txnNum1, StmtId(1), BSONArray(), partialOp1.getOpTime());
     auto commitOp1 = commitPrepared(lsid, txnNum1, StmtId(2), prepareOp1.getOpTime());
 
     // The second transaction (with a different transaction number) in the same session.
     auto partialOp2 = partialTxn(
-        lsid, txnNum2, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc2)));
+        lsid, txnNum2, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc2)));
     auto prepareOp2 = prepare(lsid, txnNum2, StmtId(1), BSONArray(), partialOp2.getOpTime());
     auto commitOp2 = commitPrepared(lsid, txnNum2, StmtId(2), prepareOp2.getOpTime());
 
@@ -4041,22 +4338,22 @@ TEST_F(IdempotencyTestTxns, CommitTwoPreparedTransactionsWithPartialTxnOpsAtOnce
                         commitOp2.getWallClockTime(),
                         boost::none,
                         DurableTxnStateEnum::kCommitted);
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, doc));
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, doc2));
+    ASSERT_TRUE(docExists(_opCtx.get(), _nss, doc));
+    ASSERT_TRUE(docExists(_opCtx.get(), _nss, doc2));
 }
 
 TEST_F(IdempotencyTestTxns, CommitPreparedTransactionWithPartialTxnOpsAndDataPartiallyApplied) {
     createCollectionWithUuid(_opCtx.get(), NamespaceString::kSessionTransactionsTableNamespace);
-    auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
+    auto uuid = createCollectionWithUuid(_opCtx.get(), _nss);
     auto lsid = makeLogicalSessionId(_opCtx.get());
     TxnNumber txnNum(0);
 
     auto partialOp = partialTxn(
-        lsid, txnNum, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc)));
+        lsid, txnNum, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc)));
     auto prepareOp = prepare(lsid,
                              txnNum,
                              StmtId(1),
-                             BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc2)),
+                             BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc2)),
                              partialOp.getOpTime());
     auto commitOp = commitPrepared(lsid, txnNum, StmtId(2), prepareOp.getOpTime());
 
@@ -4065,7 +4362,7 @@ TEST_F(IdempotencyTestTxns, CommitPreparedTransactionWithPartialTxnOpsAndDataPar
     // case where the transaction committed on the sync source at a point during the initial sync,
     // such that we cloned 'doc' but missed 'doc2'.
     ASSERT_OK(getStorageInterface()->insertDocument(_opCtx.get(),
-                                                    nss,
+                                                    _nss,
                                                     {doc, commitOp.getOpTime().getTimestamp()},
                                                     commitOp.getOpTime().getTerm()));
 
@@ -4080,22 +4377,22 @@ TEST_F(IdempotencyTestTxns, CommitPreparedTransactionWithPartialTxnOpsAndDataPar
                         commitOp.getWallClockTime(),
                         boost::none,
                         DurableTxnStateEnum::kCommitted);
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, doc));
-    ASSERT_TRUE(docExists(_opCtx.get(), nss, doc2));
+    ASSERT_TRUE(docExists(_opCtx.get(), _nss, doc));
+    ASSERT_TRUE(docExists(_opCtx.get(), _nss, doc2));
 }
 
 TEST_F(IdempotencyTestTxns, AbortPreparedTransactionWithPartialTxnOps) {
     createCollectionWithUuid(_opCtx.get(), NamespaceString::kSessionTransactionsTableNamespace);
-    auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
+    auto uuid = createCollectionWithUuid(_opCtx.get(), _nss);
     auto lsid = makeLogicalSessionId(_opCtx.get());
     TxnNumber txnNum(0);
 
     auto partialOp = partialTxn(
-        lsid, txnNum, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc)));
+        lsid, txnNum, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc)));
     auto prepareOp = prepare(lsid,
                              txnNum,
                              StmtId(1),
-                             BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc2)),
+                             BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc2)),
                              partialOp.getOpTime());
     auto abortOp = abortPrepared(lsid, txnNum, StmtId(2), prepareOp.getOpTime());
 
@@ -4110,18 +4407,18 @@ TEST_F(IdempotencyTestTxns, AbortPreparedTransactionWithPartialTxnOps) {
                         abortOp.getWallClockTime(),
                         boost::none,
                         DurableTxnStateEnum::kAborted);
-    ASSERT_FALSE(docExists(_opCtx.get(), nss, doc));
-    ASSERT_FALSE(docExists(_opCtx.get(), nss, doc2));
+    ASSERT_FALSE(docExists(_opCtx.get(), _nss, doc));
+    ASSERT_FALSE(docExists(_opCtx.get(), _nss, doc2));
 }
 
 TEST_F(IdempotencyTestTxns, AbortInProgressTransaction) {
     createCollectionWithUuid(_opCtx.get(), NamespaceString::kSessionTransactionsTableNamespace);
-    auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
+    auto uuid = createCollectionWithUuid(_opCtx.get(), _nss);
     auto lsid = makeLogicalSessionId(_opCtx.get());
     TxnNumber txnNum(0);
 
     auto partialOp = partialTxn(
-        lsid, txnNum, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc)));
+        lsid, txnNum, StmtId(0), OpTime(), BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc)));
     auto abortOp = abortPrepared(lsid, txnNum, StmtId(1), partialOp.getOpTime());
 
     ASSERT_OK(ReplicationCoordinator::get(getGlobalServiceContext())
@@ -4135,7 +4432,7 @@ TEST_F(IdempotencyTestTxns, AbortInProgressTransaction) {
                         abortOp.getWallClockTime(),
                         boost::none,
                         DurableTxnStateEnum::kAborted);
-    ASSERT_FALSE(docExists(_opCtx.get(), nss, doc));
+    ASSERT_FALSE(docExists(_opCtx.get(), _nss, doc));
 }
 
 TEST_F(IdempotencyTestTxns, CommitUnpreparedTransactionIgnoresNamespaceNotFoundErrors) {
@@ -4154,7 +4451,7 @@ TEST_F(IdempotencyTestTxns, CommitUnpreparedTransactionIgnoresNamespaceNotFoundE
     TxnNumber txnNum(0);
 
     auto commitOp = commitUnprepared(
-        lsid, txnNum, StmtId(1), BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc)), OpTime());
+        lsid, txnNum, StmtId(1), BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc)), OpTime());
 
     ASSERT_OK(ReplicationCoordinator::get(getGlobalServiceContext())
                   ->setFollowerMode(MemberState::RS_RECOVERING));
@@ -4163,7 +4460,7 @@ TEST_F(IdempotencyTestTxns, CommitUnpreparedTransactionIgnoresNamespaceNotFoundE
 
     // The op should have thrown a NamespaceNotFound error, which should have been ignored, so the
     // operation has no effect.
-    ASSERT_FALSE(docExists(_opCtx.get(), nss, doc));
+    ASSERT_FALSE(docExists(_opCtx.get(), _nss, doc));
 }
 
 TEST_F(IdempotencyTestTxns, CommitPreparedTransactionIgnoresNamespaceNotFoundErrors) {
@@ -4182,7 +4479,7 @@ TEST_F(IdempotencyTestTxns, CommitPreparedTransactionIgnoresNamespaceNotFoundErr
     TxnNumber txnNum(0);
 
     auto prepareOp = prepare(
-        lsid, txnNum, StmtId(0), BSON_ARRAY(makeInsertApplyOpsEntry(nss, uuid, doc)), OpTime());
+        lsid, txnNum, StmtId(0), BSON_ARRAY(makeInsertApplyOpsEntry(_nss, uuid, doc)), OpTime());
     auto commitOp = commitPrepared(lsid, txnNum, StmtId(1), prepareOp.getOpTime());
 
     ASSERT_OK(ReplicationCoordinator::get(getGlobalServiceContext())
@@ -4191,8 +4488,185 @@ TEST_F(IdempotencyTestTxns, CommitPreparedTransactionIgnoresNamespaceNotFoundErr
 
     // The op should have thrown a NamespaceNotFound error, which should have been ignored, so the
     // operation has no effect.
-    ASSERT_FALSE(docExists(_opCtx.get(), nss, doc));
+    ASSERT_FALSE(docExists(_opCtx.get(), _nss, doc));
 }
+
+class GlobalIndexTest : public OplogApplierImplTest {
+protected:
+    using WriterVectors = std::vector<std::vector<const OplogEntry*>>;
+
+    void setUp() override {
+        OplogApplierImplTest::setUp();
+        writerPool = makeReplWriterPool();
+        applier = std::make_unique<TrackOpsAppliedApplier>(
+            nullptr,  // executor
+            nullptr,  // oplogBuffer
+            &observer,
+            ReplicationCoordinator::get(_opCtx.get()),
+            getConsistencyMarkers(),
+            getStorageInterface(),
+            repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary),
+            writerPool.get());
+    }
+
+    struct GlobalIndexCrudOp {
+        enum class Type { Insert, Delete };
+
+        UUID uuid;
+        Type type;
+        BSONObj key;
+        BSONObj docKey;
+    };
+
+    auto makeApplyOpsForGlobalIndexCrudBatch(const std::vector<GlobalIndexCrudOp>& batch) {
+        BSONArrayBuilder arrBuilder;
+        NamespaceString nss("system"_sd);
+        for (const auto& op : batch) {
+            if (op.type == GlobalIndexCrudOp::Type::Insert) {
+                arrBuilder << MutableOplogEntry::makeInsertGlobalIndexKeyOperation(
+                                  nss, op.uuid, op.key, op.docKey)
+                                  .toBSON();
+            } else {
+                arrBuilder << MutableOplogEntry::makeDeleteGlobalIndexKeyOperation(
+                                  nss, op.uuid, op.key, op.docKey)
+                                  .toBSON();
+            }
+        }
+        return BSON("applyOps" << arrBuilder.arr());
+    }
+
+    std::vector<OplogEntry> makeGlobalIndexCrudApplyOpsOplogBatch(
+        const std::vector<GlobalIndexCrudOp>& batch) {
+        const auto sessionId = makeLogicalSessionIdForTest();
+        OperationSessionInfo sessionInfo;
+        sessionInfo.setSessionId(sessionId);
+        sessionInfo.setTxnNumber(3);
+        const NamespaceString& nss{"admin", "$cmd"};
+        repl::OpTime opTime(Timestamp(1, 0), 1);
+
+        return {makeOplogEntry(opTime,                                      // optime
+                               OpTypeEnum::kCommand,                        // op type
+                               nss,                                         // namespace
+                               makeApplyOpsForGlobalIndexCrudBatch(batch),  // o
+                               boost::none,                                 // o2
+                               sessionInfo,                                 // session info
+                               Date_t::now(),                               // wall clock time
+                               {},
+                               boost::none,
+                               repl::OpTime())};
+    }
+
+    void filterConfigTransactionsEntryFromWriterVectors(WriterVectors& writerVectors) {
+        for (auto& vector : writerVectors) {
+            for (auto it = vector.begin(); it != vector.end(); ++it) {
+                if ((*it)->getNss() == NamespaceString::kSessionTransactionsTableNamespace) {
+                    vector.erase(it);
+                    return;
+                }
+            }
+        }
+    }
+
+    std::unique_ptr<TrackOpsAppliedApplier> applier;
+    std::unique_ptr<ThreadPool> writerPool;
+    NoopOplogApplierObserver observer;
+};
+
+TEST_F(GlobalIndexTest, SameUUIDSameDocKeyToSameWriter) {
+    // Regardless of the UUID, if the docKey is the same, the writer should be the same.
+    const UUID uuid1 = UUID::gen();
+
+    auto key1 = BSON("a" << 1);
+    auto key2 = BSON("a" << 20);
+
+    auto sameDocKey = BSON("sk" << 1 << "_id" << 1);
+
+    auto ops = makeGlobalIndexCrudApplyOpsOplogBatch(
+        {{uuid1, GlobalIndexCrudOp::Type::Insert, key1, sameDocKey},
+         {uuid1, GlobalIndexCrudOp::Type::Insert, key2, sameDocKey}});
+
+    WriterVectors writerVectors(writerPool->getStats().options.maxThreads);
+    std::vector<std::vector<OplogEntry>> derivedOps;
+    applier->fillWriterVectors_forTest(_opCtx.get(), &ops, &writerVectors, &derivedOps);
+    filterConfigTransactionsEntryFromWriterVectors(writerVectors);
+
+    bool found = false;
+    // We expect the two operations to be in the same writer vector. Only one of the writers should
+    // contain operations.
+    for (auto& vector : writerVectors) {
+        if (found) {
+            ASSERT(vector.size() == 0);
+        } else {
+            // An oplog entry
+            found = (vector.size() == 2);
+            ASSERT(vector.size() == 0 || found);
+        }
+    }
+    ASSERT(found);
+}
+
+TEST_F(GlobalIndexTest, LargeBatchSameUUIDDifferentDocKeyAssignsAtLeastOneOpToEachWriter) {
+    // Scale the test by the number of writer threads, so it does not start failing if maxThreads
+    // changes.
+    const int kNumEntries = writerPool->getStats().options.maxThreads * 1000;
+    const UUID uuid1 = UUID::gen();
+    std::vector<GlobalIndexCrudOp> opBatch;
+    opBatch.reserve(kNumEntries);
+
+    for (int i = 0; i < kNumEntries / 2; i++) {
+        auto key = BSON("a" << i);
+        auto docKey = BSON("sk" << 1 << "_id" << i);
+        opBatch.emplace_back(
+            GlobalIndexCrudOp{uuid1, GlobalIndexCrudOp::Type::Insert, key, docKey});
+        opBatch.emplace_back(
+            GlobalIndexCrudOp{uuid1, GlobalIndexCrudOp::Type::Delete, key, docKey});
+    }
+
+    auto ops = makeGlobalIndexCrudApplyOpsOplogBatch(opBatch);
+
+    WriterVectors writerVectors(writerPool->getStats().options.maxThreads);
+    std::vector<std::vector<OplogEntry>> derivedOps;
+    applier->fillWriterVectors_forTest(_opCtx.get(), &ops, &writerVectors, &derivedOps);
+
+    size_t count = 0;
+    for (auto& vector : writerVectors) {
+        // Verify each writer has been assigned some operations.
+        ASSERT_GT(vector.size(), 0);
+        count += vector.size();
+    }
+    ASSERT_EQ(count, kNumEntries + 1);  // CRUD ops + 1 config.transactions entry.
+}
+
+TEST_F(GlobalIndexTest, LargeBatchDifferentUUIDAssignsAtLeastOneOpToEachWriter) {
+    // Scale the test by the number of writer threads, so it does not start failing if maxThreads
+    // changes.
+    const int kNumEntries = writerPool->getStats().options.maxThreads * 1000;
+    std::vector<GlobalIndexCrudOp> opBatch;
+    opBatch.reserve(kNumEntries);
+
+    auto key = BSON("a" << 1);
+    auto docKey = BSON("sk" << 1 << "_id" << 1);
+    for (int i = 0; i < kNumEntries / 2; i++) {
+        const auto uuid = UUID::gen();
+        opBatch.emplace_back(GlobalIndexCrudOp{uuid, GlobalIndexCrudOp::Type::Insert, key, docKey});
+        opBatch.emplace_back(GlobalIndexCrudOp{uuid, GlobalIndexCrudOp::Type::Delete, key, docKey});
+    }
+
+    auto ops = makeGlobalIndexCrudApplyOpsOplogBatch(opBatch);
+
+    WriterVectors writerVectors(writerPool->getStats().options.maxThreads);
+    std::vector<std::vector<OplogEntry>> derivedOps;
+    applier->fillWriterVectors_forTest(_opCtx.get(), &ops, &writerVectors, &derivedOps);
+
+    size_t count = 0;
+    for (auto& vector : writerVectors) {
+        // Verify each writer has been assigned some operations.
+        ASSERT_GT(vector.size(), 0);
+        count += vector.size();
+    }
+    ASSERT_EQ(count, kNumEntries + 1);  // CRUD ops + 1 config.transactions entry.
+}
+
 }  // namespace
 }  // namespace repl
 }  // namespace mongo

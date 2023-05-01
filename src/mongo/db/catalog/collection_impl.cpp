@@ -379,7 +379,7 @@ void CollectionImpl::init(OperationContext* opCtx) {
 }
 
 Status CollectionImpl::initFromExisting(OperationContext* opCtx,
-                                        std::shared_ptr<Collection> collection,
+                                        const std::shared_ptr<Collection>& collection,
                                         Timestamp readTimestamp) {
     LOGV2_DEBUG(
         6825402, 1, "Initializing collection using shared state", logAttrs(collection->ns()));
@@ -841,13 +841,8 @@ void CollectionImpl::deleteDocument(OperationContext* opCtx,
     boost::optional<BSONObj> deletedDoc;
     const bool isRecordingPreImageForRetryableWrite =
         retryableFindAndModifyLocation != RetryableFindAndModifyLocation::kNone;
-    const bool isTimeseriesCollection =
-        getTimeseriesOptions() || ns().isTimeseriesBucketsCollection();
 
-    if (isRecordingPreImageForRetryableWrite || isChangeStreamPreAndPostImagesEnabled() ||
-        (isTimeseriesCollection &&
-         feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
-             serverGlobalParams.featureCompatibility))) {
+    if (isRecordingPreImageForRetryableWrite || isChangeStreamPreAndPostImagesEnabled()) {
         deletedDoc.emplace(doc.value().getOwned());
     }
     int64_t keysDeleted = 0;
@@ -1304,7 +1299,7 @@ uint64_t CollectionImpl::getIndexFreeStorageBytes(OperationContext* const opCtx)
  */
 Status CollectionImpl::truncate(OperationContext* opCtx) {
     dassert(opCtx->lockState()->isCollectionLockedForMode(ns(), MODE_X));
-    invariant(_indexCatalog->numIndexesInProgress(opCtx) == 0);
+    invariant(_indexCatalog->numIndexesInProgress() == 0);
 
     // 1) store index specs
     std::vector<BSONObj> indexSpecs;

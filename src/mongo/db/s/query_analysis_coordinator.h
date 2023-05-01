@@ -33,6 +33,7 @@
 #include "mongo/db/repl/replica_set_aware_service.h"
 #include "mongo/db/service_context.h"
 #include "mongo/s/analyze_shard_key_common_gen.h"
+#include "mongo/s/analyze_shard_key_util.h"
 #include "mongo/util/periodic_runner.h"
 
 namespace mongo {
@@ -47,6 +48,8 @@ namespace analyze_shard_key {
  */
 class QueryAnalysisCoordinator : public ReplicaSetAwareService<QueryAnalysisCoordinator> {
 public:
+    using CollectionQueryAnalyzerConfigurationMap =
+        stdx::unordered_map<UUID, CollectionQueryAnalyzerConfiguration, UUID::Hash>;
     /**
      * Stores the last ping time and the last exponential moving average number of queries executed
      * per second for a sampler.
@@ -113,7 +116,7 @@ public:
         OperationContext* opCtx, StringData samplerName, double numQueriesExecutedPerSecond);
 
 
-    std::map<UUID, CollectionQueryAnalyzerConfiguration> getConfigurationsForTest() const {
+    CollectionQueryAnalyzerConfigurationMap getConfigurationsForTest() const {
         stdx::lock_guard<Latch> lk(_mutex);
         return _configurations;
     }
@@ -153,7 +156,8 @@ private:
     Date_t _getMinLastPingTime();
 
     mutable Mutex _mutex = MONGO_MAKE_LATCH("QueryAnalysisCoordinator::_mutex");
-    std::map<UUID, CollectionQueryAnalyzerConfiguration> _configurations;
+
+    CollectionQueryAnalyzerConfigurationMap _configurations;
     StringMap<Sampler> _samplers;
 };
 

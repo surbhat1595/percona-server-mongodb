@@ -133,6 +133,9 @@ public:
 
     void checkpoint(OperationContext* opCtx) override;
 
+    std::unique_ptr<StorageEngine::CheckpointLock> getCheckpointLock(
+        OperationContext* opCtx, StorageEngine::CheckpointLock::Mode mode) override;
+
     bool isEphemeral() const override {
         return _ephemeral;
     }
@@ -434,6 +437,8 @@ public:
 
     KeyFormat getKeyFormat(OperationContext* opCtx, StringData ident) const override;
 
+    size_t getCacheSizeMB() const override;
+
 private:
     class WiredTigerSessionSweeper;
 
@@ -588,9 +593,7 @@ private:
     // timestamp.
     AtomicWord<std::uint64_t> _pinnedOplogTimestamp;
 
-    // Limits the actions of concurrent checkpoint callers as we update some internal data during a
-    // checkpoint. WT has a mutex of its own to only have one checkpoint active at all times so this
-    // is only to protect our internal updates.
-    Mutex _checkpointMutex = MONGO_MAKE_LATCH("WiredTigerKVEngine::_checkpointMutex");
+    // The amount of memory alloted for the WiredTiger cache.
+    size_t _cacheSizeMB;
 };
 }  // namespace mongo

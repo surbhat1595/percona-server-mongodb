@@ -49,20 +49,46 @@ std::string NamespaceStringUtil::serialize(const NamespaceString& ns) {
 
 NamespaceString NamespaceStringUtil::deserialize(boost::optional<TenantId> tenantId,
                                                  StringData ns) {
-    if (gMultitenancySupport) {
-        if (serverGlobalParams.featureCompatibility.isVersionInitialized() &&
-            gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility)) {
-            invariant(tenantId != boost::none);
+    if (ns.empty()) {
+        return NamespaceString();
+    }
+
+    if (!gMultitenancySupport) {
+        massert(6972102,
+                str::stream() << "TenantId must not be set, but it is " << tenantId->toString(),
+                tenantId == boost::none);
+        return NamespaceString(boost::none, ns);
+    }
+
+    if (serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+        gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility)) {
+        // TODO SERVER-62491: Invariant for all databases. Remove the invariant bypass for
+        // admin, local, config dbs.
+        // TODO SERVER-70742 Uncomment out the massert below.
+        /* StringData dbName = ns.substr(0, ns.find('.'));
+        if (!(dbName == NamespaceString::kAdminDb) && !(dbName == NamespaceString::kLocalDb) &&
+            !(dbName == NamespaceString::kConfigDb)) {
+            massert(6972100,
+                    str::stream() << "TenantId must be set on nss " << ns,
+                    tenantId != boost::none);
+        } */
+        return NamespaceString(std::move(tenantId), ns);
+    }
+
+    auto nss = NamespaceString::parseFromStringExpectTenantIdInMultitenancyMode(ns);
+    // TenantId could be prefixed, or passed in separately (or both) and namespace is always
+    // constructed with the tenantId separately.
+    if (tenantId != boost::none) {
+        if (!nss.tenantId()) {
             return NamespaceString(std::move(tenantId), ns);
         }
-        auto nss = NamespaceString::parseFromStringExpectTenantIdInMultitenancyMode(ns);
-        if (tenantId != boost::none) {
-            invariant(tenantId == nss.tenantId());
-        }
-        return nss;
+        massert(6972101,
+                str::stream() << "TenantId must match the db prefix tenantId: "
+                              << tenantId->toString() << " prefix " << nss.tenantId()->toString(),
+                tenantId == nss.tenantId());
     }
-    invariant(tenantId == boost::none);
-    return NamespaceString(boost::none, ns);
+
+    return nss;
 }
 
 }  // namespace mongo

@@ -12,6 +12,9 @@
  *   # false when the test assumes they are true because the query has already been run many times.
  *   assumes_balancer_off,
  *   inspects_whether_plan_cache_entry_is_active,
+ *   requires_fcv_62,
+ *   # Plan cache state is node-local and will not get migrated alongside tenant data.
+ *   tenant_migration_incompatible,
  * ]
  */
 (function() {

@@ -36,12 +36,12 @@ feature_flags:
     description: "Guarding code for the no more auto-splitter project"
     cpp_varname: feature_flags::gNoMoreAutoSplitter
     default: true
-    version: 6.1
+    version: 6.0 # Starting from v6.0.3
   featureFlagBalanceAccordingToDataSize:
     description: Balancer taking decisions based on the data size if enabled, based on number of chunks if disabled
     cpp_varname: feature_flags::gBalanceAccordingToDataSize
     default: true
-    version: 6.1
+    version: 6.0 # Starting from v6.0.3
   featureFlagOrphanTracking:
     description: "Feature flag for enabling orphan tracking during migrations and range deletions"
     cpp_varname: feature_flags::gOrphanTracking
@@ -54,7 +54,8 @@ feature_flags:
   featureFlagRangeDeleterService:
     description: "Feature flag protecting instantiation and usages of the range deleter service"
     cpp_varname: feature_flags::gRangeDeleterService
-    default: false
+    default: true
+    version: 6.2
   featureFlagCollModCoordinatorV3:
     description: "Feature for enabling new coll mod coordinator v3"
     cpp_varname: feature_flags::gCollModCoordinatorV3
@@ -81,4 +82,8 @@ feature_flags:
                   --catalogsvr flag indicates to the node that it is part of a replica set that hosts both
                   config data and user data.  It is a shard server, and the config server."
     cpp_varname: feature_flags::gCatalogShard
+    default: false
+  featureFlagConcurrencyInChunkMigration:
+    description: "Feature flag for enabling concurrency within a chunk migration"
+    cpp_varname: feature_flags::gConcurrencyInChunkMigration
     default: false

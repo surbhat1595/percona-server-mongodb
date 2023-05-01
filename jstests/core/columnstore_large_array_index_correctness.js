@@ -5,8 +5,6 @@
  *   uses_column_store_index,
  *   featureFlagColumnstoreIndexes,
  *   featureFlagSbeFull,
- *   # TODO SERVER-69884: featureFlag guarded tests shouldn't require explicit 'no_selinux' tag.
- *   no_selinux,
  * ]
  */
 (function() {
@@ -14,7 +12,7 @@
 
 load("jstests/libs/analyze_plan.js");  // For "planHasStage."
 
-const coll = db.columnstore_index_correctness;
+const coll = db.columnstore_large_array_index_correctness;
 coll.drop();
 
 const uint8 = {

@@ -111,6 +111,8 @@
 #include "mongo/db/periodic_runner_job_abort_expired_transactions.h"
 #include "mongo/db/pipeline/change_stream_expired_pre_image_remover.h"
 #include "mongo/db/pipeline/process_interface/replica_set_node_process_interface.h"
+#include "mongo/db/query/ce/stats_cache_loader_impl.h"
+#include "mongo/db/query/ce/stats_catalog.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/read_write_concern_defaults_cache_lookup_mongod.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
@@ -204,6 +206,7 @@
 #include "mongo/scripting/engine.h"
 #include "mongo/stdx/future.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/transport/session_auth_metrics.h"
 #include "mongo/transport/transport_layer_manager.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/background.h"
@@ -321,15 +324,40 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(WireSpec, ("EndStartupOptionHandling"))(Ini
 
 void initializeCommandHooks(ServiceContext* serviceContext) {
     class MongodCommandInvocationHooks final : public CommandInvocationHooks {
-        void onBeforeRun(OperationContext*, const OpMsgRequest&, CommandInvocation*) {}
+    public:
+        void onBeforeRun(OperationContext* opCtx,
+                         const OpMsgRequest& request,
+                         CommandInvocation* invocation) override {
+            _nextHook.onBeforeRun(opCtx, request, invocation);
+        }
 
-        void onAfterRun(OperationContext* opCtx, const OpMsgRequest&, CommandInvocation*) {
+        void onBeforeAsyncRun(std::shared_ptr<RequestExecutionContext> rec,
+                              CommandInvocation* invocation) override {
+            _nextHook.onBeforeAsyncRun(rec, invocation);
+        }
+
+        void onAfterRun(OperationContext* opCtx,
+                        const OpMsgRequest& request,
+                        CommandInvocation* invocation) override {
+            _nextHook.onAfterRun(opCtx, request, invocation);
+            _onAfterRunImpl(opCtx);
+        }
+
+        void onAfterAsyncRun(std::shared_ptr<RequestExecutionContext> rec,
+                             CommandInvocation* invocation) override {
+            _nextHook.onAfterAsyncRun(rec, invocation);
+            _onAfterRunImpl(rec->getOpCtx());
+        }
+
+    private:
+        void _onAfterRunImpl(OperationContext* opCtx) const {
             MirrorMaestro::tryMirrorRequest(opCtx);
             MirrorMaestro::onReceiveMirroredRead(opCtx);
         }
+
+        transport::SessionAuthMetricsCommandHooks _nextHook{};
     };
 
-    MirrorMaestro::init(serviceContext);
     CommandInvocationHooks::set(serviceContext, std::make_unique<MongodCommandInvocationHooks>());
 }
 
@@ -401,6 +429,8 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
 #endif
 
     logProcessDetails(nullptr);
+
+    initializeCommandHooks(serviceContext);
 
     serviceContext->setServiceEntryPoint(std::make_unique<ServiceEntryPointMongod>(serviceContext));
 
@@ -701,7 +731,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         replCoord->startup(startupOpCtx.get(), lastShutdownState);
     }
 
-    initializeCommandHooks(serviceContext);
+    MirrorMaestro::init(serviceContext);
 
     if (!storageGlobalParams.queryableBackupMode) {
 
@@ -855,6 +885,10 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     }
 
     LogicalSessionCache::set(serviceContext, makeLogicalSessionCacheD(kind));
+
+    auto cacheLoader = std::make_unique<StatsCacheLoaderImpl>();
+    auto catalog = std::make_unique<StatsCatalog>(serviceContext, std::move(cacheLoader));
+    StatsCatalog::set(serviceContext, std::move(catalog));
 
     // MessageServer::run will return when exit code closes its socket and we don't need the
     // operation context anymore

@@ -105,6 +105,8 @@ variables:
 - &gen_burn_in_task_template
   name: gen_burn_in_task_template
   depends_on:
+  - name: version_gen
+    variant: generate-tasks-for-version
   - name: version_burn_in_gen
     variant: generate-tasks-for-version
   - name: archive_dist_test_debug
@@ -288,6 +290,7 @@ variables:
 - mongocryptd_variants: &mongocryptd_variants
   - enterprise-amazon2
   - enterprise-amazon2-arm64
+  - enterprise-amazon2022-arm64
   - enterprise-debian10-64
   - enterprise-debian11-64
   - enterprise-linux-64-amazon-ami
@@ -336,6 +339,7 @@ variables:
   - enterprise-rhel-82-arm64
   - enterprise-rhel-90-64-bit
   - enterprise-amazon2-arm64
+  - enterprise-amazon2022-arm64
   - enterprise-ubuntu1804-64
   - enterprise-ubuntu2004-64
   - enterprise-ubuntu2204-64
@@ -347,8 +351,10 @@ variables:
   - amazon
   - enterprise-linux-64-amazon-ami
   - amazon2
+  - amazon2022-arm64
   - enterprise-amazon2
   - enterprise-amazon2-arm64
+  - enterprise-amazon2022-arm64
   - debian10
   - debian11
   - enterprise-debian10-64
@@ -1567,6 +1573,7 @@ functions:
       - "src/evergreen/run_python_script.sh"
       - "buildscripts/package_test.py"
       - "--os=none"
+      - "--arch=${packager_arch}"
       - "--extra-test"
       - "${packager_distro}"
       - "https://s3.amazonaws.com/mciuploads/${project}/${build_variant}/${revision}/artifacts/${build_id}-packages.tgz"
@@ -3222,6 +3229,7 @@ tasks:
         --js-engine=none
         --link-model=static
         DESTDIR='$BUILD_ROOT/crypt-lib-$MONGO_VERSION'
+        RPATH='$$RPATH_ESCAPED_DOLLAR_ORIGIN/../lib'
   - command: s3.put
     params:
       aws_key: ${aws_key}
@@ -5578,6 +5586,14 @@ tasks:
       use_large_distro: "true"
 
 - <<: *gen_task_template
+  name: native_tenant_data_isolation_jscore_passthrough_gen
+  tags: ["serverless"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
+- <<: *gen_task_template
   name: clustered_collection_passthrough_gen
   tags: ["large", "clustered_collections"]
   commands:
@@ -7774,6 +7790,18 @@ tasks:
   - func: "run tests"
     vars:
       suite: query_golden_cqf
+
+- name: vpc_connectivity
+  commands:
+  - *f_expansions_write
+  - func: "do non-compile setup"
+  - command: subprocess.exec
+    type: test
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/run_python_script.sh"
+      - "evergreen/vpc_connectivity.py"
 
 #######################################
 #             Task Groups             #

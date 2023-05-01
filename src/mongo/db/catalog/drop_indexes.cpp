@@ -397,9 +397,9 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
     // We only need to hold an intent lock to send abort signals to the active index builder(s) we
     // intend to abort.
     boost::optional<AutoGetCollection> collection;
-    collection.emplace(opCtx, nss, MODE_IX);
+    collection.emplace(
+        opCtx, nss, MODE_IX, AutoGetCollection::Options{}.expectedUUID(expectedUUID));
 
-    checkCollectionUUIDMismatch(opCtx, nss, collection->getCollection(), expectedUUID);
     uassertStatusOK(checkView(opCtx, nss, collection->getCollection()));
 
     const UUID collectionUUID = (*collection)->uuid();
@@ -425,7 +425,7 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
     }
 
     DropIndexesReply reply;
-    reply.setNIndexesWas((*collection)->getIndexCatalog()->numIndexesTotal(opCtx));
+    reply.setNIndexesWas((*collection)->getIndexCatalog()->numIndexesTotal());
 
     const bool isWildcard =
         stdx::holds_alternative<std::string>(index) && stdx::get<std::string>(index) == "*";
@@ -550,7 +550,7 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
         invariant(isWildcard);
         invariant(indexNames.size() == 1);
         invariant(indexNames.front() == "*");
-        invariant((*collection)->getIndexCatalog()->numIndexesInProgress(opCtx) == 0);
+        invariant((*collection)->getIndexCatalog()->numIndexesInProgress() == 0);
     }
 
     writeConflictRetry(

@@ -63,7 +63,7 @@ public:
      * (e.g. FTDC), and any operation that is releasing resources (e.g. committing or aborting
      * prepared transactions). Should be used sparingly.
      */
-    enum class Priority { kLow, kNormal, kImmediate };
+    enum class Priority { kLow = 0, kNormal, kImmediate };
 
     void start(TickSource* tickSource) {
         admissions++;
@@ -104,8 +104,38 @@ private:
     TickSource::Tick _startProcessingTime{0};
     int admissions{0};
     LockMode _lockMode = LockMode::MODE_NONE;
-    // TODO SERVER-68933: Don't default _priority to kNormal.
     boost::optional<Priority> _priority{Priority::kNormal};
 };
+
+StringData toString(AdmissionContext::Priority priority);
+
+inline int compare(AdmissionContext::Priority lhs, AdmissionContext::Priority rhs) {
+    using enum_t = std::underlying_type_t<AdmissionContext::Priority>;
+    return static_cast<enum_t>(lhs) - static_cast<enum_t>(rhs);
+}
+
+inline bool operator==(AdmissionContext::Priority lhs, AdmissionContext::Priority rhs) {
+    return compare(lhs, rhs) == 0;
+}
+
+inline bool operator!=(AdmissionContext::Priority lhs, AdmissionContext::Priority rhs) {
+    return compare(lhs, rhs) != 0;
+}
+
+inline bool operator<(AdmissionContext::Priority lhs, AdmissionContext::Priority rhs) {
+    return compare(lhs, rhs) < 0;
+}
+
+inline bool operator>(AdmissionContext::Priority lhs, AdmissionContext::Priority rhs) {
+    return compare(lhs, rhs) > 0;
+}
+
+inline bool operator<=(AdmissionContext::Priority lhs, AdmissionContext::Priority rhs) {
+    return compare(lhs, rhs) <= 0;
+}
+
+inline bool operator>=(AdmissionContext::Priority lhs, AdmissionContext::Priority rhs) {
+    return compare(lhs, rhs) >= 0;
+}
 
 }  // namespace mongo

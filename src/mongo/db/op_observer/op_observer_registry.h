@@ -413,11 +413,10 @@ public:
     }
 
     void onUnpreparedTransactionCommit(OperationContext* opCtx,
-                                       std::vector<repl::ReplOperation>* statements,
-                                       size_t numberOfPrePostImagesToWrite) override {
+                                       TransactionOperations* transactionOperations) override {
         ReservedTimes times{opCtx};
         for (auto& o : _observers)
-            o->onUnpreparedTransactionCommit(opCtx, statements, numberOfPrePostImagesToWrite);
+            o->onUnpreparedTransactionCommit(opCtx, transactionOperations);
     }
 
     void onPreparedTransactionCommit(
@@ -435,12 +434,12 @@ public:
         OperationContext* opCtx,
         const std::vector<OplogSlot>& reservedSlots,
         Date_t wallClockTime,
-        std::vector<repl::ReplOperation>* statements) override {
+        TransactionOperations* transactionOperations) override {
         std::unique_ptr<ApplyOpsOplogSlotAndOperationAssignment>
             applyOpsOplogSlotAndOperationAssignment;
         for (auto&& observer : _observers) {
-            auto applyOpsAssignment =
-                observer->preTransactionPrepare(opCtx, reservedSlots, wallClockTime, statements);
+            auto applyOpsAssignment = observer->preTransactionPrepare(
+                opCtx, reservedSlots, wallClockTime, transactionOperations);
             tassert(6278501,
                     "More than one OpObserver returned operation to \"applyOps\" assignment",
                     !(applyOpsAssignment && applyOpsOplogSlotAndOperationAssignment));

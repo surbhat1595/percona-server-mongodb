@@ -39,10 +39,13 @@ namespace mongo {
 namespace timeseries {
 
 /**
- * Returns true if the granularity transition is valid.
+ * Evaluates whether the transition of timeseries granularities is valid (returning Status::OK if
+ * the transition is acceptable) and if a pointer is given, it will be modified to reflect if the
+ * options have changed.
  */
-bool isValidTimeseriesGranularityTransition(BucketGranularityEnum current,
-                                            BucketGranularityEnum target);
+Status isTimeseriesGranularityValidAndUnchanged(const TimeseriesOptions& currentOptions,
+                                                const CollModTimeseries& targetOptions,
+                                                bool* shouldUpdateOptions = nullptr);
 
 /**
  * Returns the default bucket timespan associated with the given granularity.
@@ -65,5 +68,12 @@ int getBucketRoundingSecondsFromGranularity(BucketGranularityEnum granularity);
  * Rounds down timestamp to the specified granularity.
  */
 Date_t roundTimestampToGranularity(const Date_t& time, const TimeseriesOptions& options);
+
+/**
+ * Validates the combination of bucketRoundingSeconds, bucketMaxSpanSeconds and granularity in
+ * TimeseriesOptions. If the parameters are not valid we return a bad status and if no parameters
+ * are passed through we set them to their default values.
+ */
+Status validateAndSetBucketingParameters(TimeseriesOptions& timeseriesOptions);
 }  // namespace timeseries
 }  // namespace mongo

@@ -57,18 +57,26 @@ std::string Bucket::toString() const {
     return os.str();
 }
 
+std::string Bucket::dump() const {
+    std::ostringstream os;
+    os << _equalFreq << ", " << _rangeFreq << ", " << _ndv;
+    return os.str();
+}
+
 ScalarHistogram::ScalarHistogram() : ScalarHistogram({}, {}) {}
 
-ScalarHistogram::ScalarHistogram(std::vector<StatsBucket> buckets) {
+ScalarHistogram::ScalarHistogram(const StatsHistogram& histogram) {
 
-    for (const auto& bucket : buckets) {
+    for (const auto& bucket : histogram.getBuckets()) {
         Bucket b(bucket.getBoundaryCount(),
                  bucket.getRangeCount(),
                  bucket.getCumulativeCount(),
                  bucket.getRangeDistincts(),
                  bucket.getCumulativeDistincts());
         _buckets.push_back(std::move(b));
-        auto value = sbe::bson::convertFrom<1>(bucket.getUpperBoundary().getElement());
+    }
+    for (const auto& bound : histogram.getBounds()) {
+        auto value = sbe::bson::convertFrom<1>(bound.getElement());
         _bounds.push_back(value.first, value.second);
     }
 }
@@ -127,6 +135,16 @@ std::string ScalarHistogram::plot() const {
     }
     os << maxLine << "\n";
 
+    return os.str();
+}
+
+std::string ScalarHistogram::dump() const {
+    std::ostringstream os;
+    os << "Histogram:\n{";
+    for (size_t i = 0; i < _buckets.size(); i++) {
+        os << "{" << _bounds.getAt(i) << ", " << _buckets.at(i).dump() << "},\n";
+    }
+    os << "}";
     return os.str();
 }
 

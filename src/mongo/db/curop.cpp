@@ -46,6 +46,8 @@
 #include "mongo/db/profile_filter.h"
 #include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/query/plan_summary_stats.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/storage/storage_engine_parameters_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/rpc/metadata/impersonated_user_metadata.h"
@@ -393,10 +395,11 @@ static constexpr size_t appendMaxElementSize = 50 * 1024;
 
 bool CurOp::completeAndLogOperation(OperationContext* opCtx,
                                     logv2::LogComponent component,
+                                    std::shared_ptr<ProfileFilter> filter,
                                     boost::optional<size_t> responseLength,
                                     boost::optional<long long> slowMsOverride,
                                     bool forceLog) {
-    const long long slowMs = slowMsOverride.value_or(serverGlobalParams.slowMS);
+    const long long slowMs = slowMsOverride.value_or(serverGlobalParams.slowMS.load());
 
     // Record the size of the response returned to the client, if applicable.
     if (responseLength) {
@@ -415,8 +418,7 @@ bool CurOp::completeAndLogOperation(OperationContext* opCtx,
 
     bool shouldLogSlowOp, shouldProfileAtLevel1;
 
-    if (auto filter =
-            CollectionCatalog::get(opCtx)->getDatabaseProfileSettings(getNSS().db()).filter) {
+    if (filter) {
         bool passesFilter = filter->matches(opCtx, _debug, *this);
 
         shouldLogSlowOp = passesFilter;
@@ -695,10 +697,15 @@ void CurOp::reportState(OperationContext* opCtx, BSONObjBuilder* builder, bool t
     if (_debug.dataThroughputAverage) {
         builder->append("dataThroughputAverage", *_debug.dataThroughputAverage);
     }
+
+    if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations.isEnabledAndIgnoreFCV()) {
+        builder->append("admissionPriority", toString(opCtx->lockState()->getAdmissionPriority()));
+    }
 }
 
 bool CurOp::_shouldDBProfileWithRateLimit(OperationContext* opCtx, long long slowMS) {
-    if (serverGlobalParams.rateLimit > 1) {
+    auto rateLimit = serverGlobalParams.rateLimit.load();
+    if (rateLimit > 1) {
         // Slow operations are always profiled
         if (elapsedTimeExcludingPauses() >= Milliseconds{slowMS}) {
             return true;
@@ -712,7 +719,7 @@ bool CurOp::_shouldDBProfileWithRateLimit(OperationContext* opCtx, long long slo
                           "int64_t range");
             const auto client = opCtx->getClient();
             _rateLimitSample.emplace(client->getPrng().nextInt64(RATE_LIMIT_MULTIPLIER) *
-                                         serverGlobalParams.rateLimit <
+                                         rateLimit <
                                      RATE_LIMIT_MULTIPLIER);
         }
         return *_rateLimitSample;
@@ -855,6 +862,7 @@ void OpDebug::report(OperationContext* opCtx,
     OPDEBUG_TOATTR_HELP_BOOL(hasSortStage);
     OPDEBUG_TOATTR_HELP_BOOL(usedDisk);
     OPDEBUG_TOATTR_HELP_BOOL(fromMultiPlanner);
+    OPDEBUG_TOATTR_HELP_BOOL(fromPlanCache);
     if (replanReason) {
         bool replanned = true;
         OPDEBUG_TOATTR_HELP_BOOL(replanned);
@@ -901,6 +909,10 @@ void OpDebug::report(OperationContext* opCtx,
 
     if (responseLength > 0) {
         pAttrs->add("reslen", responseLength);
+    }
+
+    if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations.isEnabledAndIgnoreFCV()) {
+        pAttrs->add("admissionPriority", opCtx->lockState()->getAdmissionPriority());
     }
 
     if (lockStats) {
@@ -1023,6 +1035,7 @@ void OpDebug::append(OperationContext* opCtx,
     OPDEBUG_APPEND_BOOL(b, hasSortStage);
     OPDEBUG_APPEND_BOOL(b, usedDisk);
     OPDEBUG_APPEND_BOOL(b, fromMultiPlanner);
+    OPDEBUG_APPEND_BOOL(b, fromPlanCache);
     if (replanReason) {
         bool replanned = true;
         OPDEBUG_APPEND_BOOL(b, replanned);
@@ -1122,8 +1135,9 @@ void OpDebug::append(OperationContext* opCtx,
 
     b.appendNumber("millis", durationCount<Milliseconds>(executionTime));
     b.append("rateLimit",
-             durationCount<Milliseconds>(executionTime) >= serverGlobalParams.slowMS ? 1 : serverGlobalParams.rateLimit);
-
+             durationCount<Milliseconds>(executionTime) >= serverGlobalParams.slowMS.load()
+                 ? 1
+                 : serverGlobalParams.rateLimit.load());
     if (!curop.getPlanSummary().empty()) {
         b.append("planSummary", curop.getPlanSummary());
     }
@@ -1253,6 +1267,9 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
     });
     addIfNeeded("fromMultiPlanner", [](auto field, auto args, auto& b) {
         OPDEBUG_APPEND_BOOL2(b, field, args.op.fromMultiPlanner);
+    });
+    addIfNeeded("fromPlanCache", [](auto field, auto args, auto& b) {
+        OPDEBUG_APPEND_BOOL2(b, field, args.op.fromPlanCache);
     });
     addIfNeeded("replanned", [](auto field, auto args, auto& b) {
         if (args.op.replanReason) {
@@ -1422,9 +1439,10 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
 
     addIfNeeded("rateLimit", [](auto field, auto args, auto& b) {
         b.append(field,
-                 durationCount<Milliseconds>(args.op.executionTime) >= serverGlobalParams.slowMS
+                 durationCount<Milliseconds>(args.op.executionTime) >=
+                         serverGlobalParams.slowMS.load()
                      ? 1
-                     : serverGlobalParams.rateLimit);
+                     : serverGlobalParams.rateLimit.load());
     });
 
     addIfNeeded("planSummary", [](auto field, auto args, auto& b) {
@@ -1476,6 +1494,7 @@ void OpDebug::setPlanSummaryMetrics(const PlanSummaryStats& planSummaryStats) {
     sortTotalDataSizeBytes = planSummaryStats.sortTotalDataSizeBytes;
     keysSorted = planSummaryStats.keysSorted;
     fromMultiPlanner = planSummaryStats.fromMultiPlanner;
+    fromPlanCache = planSummaryStats.fromPlanCache;
     replanReason = planSummaryStats.replanReason;
 }
 

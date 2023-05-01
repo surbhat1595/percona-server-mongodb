@@ -75,7 +75,7 @@ bool ProfileCmdBase::run(OperationContext* opCtx,
     const auto profilingLevel = request.getCommandParameter();
 
     // Validate arguments before making changes.
-    int newRateLimit = serverGlobalParams.rateLimit;
+    int newRateLimit = serverGlobalParams.rateLimit.load();
     if (auto optRateLimit = request.getRatelimit()) {
         const decltype(optRateLimit)::value_type rateLimit = *optRateLimit;
         uassert(ErrorCodes::BadValue,
@@ -83,7 +83,7 @@ bool ProfileCmdBase::run(OperationContext* opCtx,
                 0 <= rateLimit && rateLimit <= RATE_LIMIT_MAX);
         newRateLimit = std::max(rateLimit, static_cast<decltype(rateLimit)>(1));
     }
-    double newSampleRate = serverGlobalParams.sampleRate;
+    double newSampleRate = serverGlobalParams.sampleRate.load();
     if (auto sampleRate = request.getSampleRate()) {
         uassert(ErrorCodes::BadValue,
                 "'sampleRate' must be between 0.0 and 1.0 inclusive",
@@ -97,9 +97,9 @@ bool ProfileCmdBase::run(OperationContext* opCtx,
     // Delegate to _applyProfilingLevel to set the profiling level appropriately whether
     // we are on mongoD or mongoS.
     auto oldSettings = _applyProfilingLevel(opCtx, dbName, request);
-    auto oldSlowMS = serverGlobalParams.slowMS;
-    auto oldRateLimit = serverGlobalParams.rateLimit;
-    auto oldSampleRate = serverGlobalParams.sampleRate;
+    auto oldSlowMS = serverGlobalParams.slowMS.load();
+    auto oldRateLimit = serverGlobalParams.rateLimit.load();
+    auto oldSampleRate = serverGlobalParams.sampleRate.load();
 
     result.append("was", oldSettings.level);
     result.append("slowms", oldSlowMS);
@@ -115,15 +115,15 @@ bool ProfileCmdBase::run(OperationContext* opCtx,
     }
 
     if (auto slowms = request.getSlowms()) {
-        serverGlobalParams.slowMS = *slowms;
+        serverGlobalParams.slowMS.store(*slowms);
     }
     if (auto optRateLimit = request.getRatelimit()) {
         const decltype(optRateLimit)::value_type rateLimit = *optRateLimit;
-        serverGlobalParams.rateLimit = std::max(rateLimit, static_cast<decltype(rateLimit)>(1));
-
+        serverGlobalParams.rateLimit.store(
+            std::max(rateLimit, static_cast<decltype(rateLimit)>(1)));
     }
     if (auto sampleRate = request.getSampleRate()) {
-        serverGlobalParams.sampleRate = *sampleRate;
+        serverGlobalParams.sampleRate.store(*sampleRate);
     }
 
     // Log the change made to server's profiling settings, if the request asks to change anything.
@@ -148,9 +148,9 @@ bool ProfileCmdBase::run(OperationContext* opCtx,
         // (0, 1, or 2).
         auto newSettings = CollectionCatalog::get(opCtx)->getDatabaseProfileSettings(dbName);
         newState.append("level"_sd, newSettings.level);
-        newState.append("slowms"_sd, serverGlobalParams.slowMS);
-        newState.append("ratelimit"_sd, serverGlobalParams.rateLimit);
-        newState.append("sampleRate"_sd, serverGlobalParams.sampleRate);
+        newState.append("slowms"_sd, serverGlobalParams.slowMS.load());
+        newState.append("ratelimit"_sd, serverGlobalParams.rateLimit.load());
+        newState.append("sampleRate"_sd, serverGlobalParams.sampleRate.load());
         if (newSettings.filter) {
             newState.append("filter"_sd, newSettings.filter->serialize());
         }

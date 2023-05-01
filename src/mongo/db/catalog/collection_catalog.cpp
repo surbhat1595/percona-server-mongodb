@@ -79,6 +79,13 @@ bool isCollectionCompatible(std::shared_ptr<Collection> coll, Timestamp readTime
     return readTimestamp >= *minValidSnapshot;
 }
 
+void assertViewCatalogValid(const ViewsForDatabase& viewsForDb) {
+    uassert(ErrorCodes::InvalidViewDefinition,
+            "Invalid view definition detected in the view catalog. Remove the invalid view "
+            "manually to prevent disallowing any further usage of the view catalog.",
+            viewsForDb.valid());
+}
+
 }  // namespace
 
 class IgnoreExternalViewChangesForDatabase {
@@ -123,19 +130,54 @@ public:
         catalog._catalog[collection->uuid()] = collection;
         auto dbIdPair = std::make_pair(collection->ns().dbName(), collection->uuid());
         catalog._orderedCollections[dbIdPair] = collection;
+
+        catalog._pendingCommitNamespaces.erase(collection->ns());
+        catalog._pendingCommitUUIDs.erase(collection->uuid());
     }
 
-    PublishCatalogUpdates(OperationContext* opCtx,
-                          UncommittedCatalogUpdates& uncommittedCatalogUpdates)
+    PublishCatalogUpdates(UncommittedCatalogUpdates& uncommittedCatalogUpdates)
         : _uncommittedCatalogUpdates(uncommittedCatalogUpdates) {}
 
     static void ensureRegisteredWithRecoveryUnit(
-        OperationContext* opCtx, UncommittedCatalogUpdates& UncommittedCatalogUpdates) {
+        OperationContext* opCtx, UncommittedCatalogUpdates& uncommittedCatalogUpdates) {
         if (opCtx->recoveryUnit()->hasRegisteredChangeForCatalogVisibility())
             return;
 
+        if (feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCV()) {
+            opCtx->recoveryUnit()->registerPreCommitHook(
+                [](OperationContext* opCtx) { PublishCatalogUpdates::preCommit(opCtx); });
+        }
+
         opCtx->recoveryUnit()->registerChangeForCatalogVisibility(
-            std::make_unique<PublishCatalogUpdates>(opCtx, UncommittedCatalogUpdates));
+            std::make_unique<PublishCatalogUpdates>(uncommittedCatalogUpdates));
+    }
+
+    static void preCommit(OperationContext* opCtx) {
+        const auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
+        const auto& entries = uncommittedCatalogUpdates.entries();
+
+        if (std::none_of(
+                entries.begin(), entries.end(), UncommittedCatalogUpdates::isTwoPhaseCommitEntry)) {
+            // Nothing to do, avoid calling CollectionCatalog::write.
+            return;
+        }
+        CollectionCatalog::write(opCtx, [&](CollectionCatalog& catalog) {
+            for (auto&& entry : entries) {
+                if (!UncommittedCatalogUpdates::isTwoPhaseCommitEntry(entry)) {
+                    continue;
+                }
+
+                // Mark the namespace as pending commit even if we don't have a collection instance.
+                std::shared_ptr<Collection>& collection =
+                    catalog._pendingCommitNamespaces[entry.nss];
+
+                if (!entry.collection)
+                    continue;
+
+                collection = entry.collection;
+                catalog._pendingCommitUUIDs[collection->uuid()] = collection;
+            }
+        });
     }
 
     void commit(OperationContext* opCtx, boost::optional<Timestamp> commitTime) override {
@@ -161,6 +203,7 @@ public:
                         // We just need to do modifications on 'from' here. 'to' is taken care
                         // of by a separate kWritableCollection entry.
                         catalog._collections.erase(from);
+                        catalog._pendingCommitNamespaces.erase(from);
 
                         auto& resourceCatalog = ResourceCatalog::get(opCtx->getServiceContext());
                         resourceCatalog.remove({RESOURCE_COLLECTION, from}, from);
@@ -184,7 +227,12 @@ public:
                                          collection = entry.collection,
                                          uuid = *entry.externalUUID,
                                          commitTime](CollectionCatalog& catalog) {
-                        catalog.registerCollection(opCtx, uuid, std::move(collection), commitTime);
+                        // Override existing Collection on this namespace
+                        catalog._registerCollection(opCtx,
+                                                    uuid,
+                                                    std::move(collection),
+                                                    /*twoPhase=*/false,
+                                                    /*ts=*/commitTime);
                     });
                     // Fallthrough to the createCollection case to finish committing the collection.
                     [[fallthrough]];
@@ -206,6 +254,9 @@ public:
                             coll->setMinimumValidSnapshot(commitTime.value());
                         }
                         catalog._pushCatalogIdForNSS(coll->ns(), coll->getCatalogId(), commitTime);
+
+                        catalog._pendingCommitNamespaces.erase(coll->ns());
+                        catalog._pendingCommitUUIDs.erase(coll->uuid());
                         coll->setCommitted(true);
                     });
                     break;
@@ -242,6 +293,11 @@ public:
                         });
                     break;
                 }
+                case UncommittedCatalogUpdates::Entry::Action::kOpenedCollection: {
+                    // No-op. Collections opened from earlier points in time remain local to the
+                    // operation.
+                    break;
+                }
             };
         }
 
@@ -256,7 +312,31 @@ public:
     }
 
     void rollback(OperationContext* opCtx) override {
-        _uncommittedCatalogUpdates.releaseEntries();
+        auto entries = _uncommittedCatalogUpdates.releaseEntries();
+        if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCV())
+            return;
+
+        if (std::none_of(
+                entries.begin(), entries.end(), UncommittedCatalogUpdates::isTwoPhaseCommitEntry)) {
+            // Nothing to do, avoid calling CollectionCatalog::write.
+            return;
+        }
+
+        CollectionCatalog::write(opCtx, [&](CollectionCatalog& catalog) {
+            for (auto&& entry : entries) {
+                if (!UncommittedCatalogUpdates::isTwoPhaseCommitEntry(entry)) {
+                    continue;
+                }
+
+                catalog._pendingCommitNamespaces.erase(entry.nss);
+
+                // Entry without collection, nothing more to do
+                if (!entry.collection)
+                    continue;
+
+                catalog._pendingCommitUUIDs.erase(entry.collection->uuid());
+            }
+        });
     }
 
 private:
@@ -514,12 +594,10 @@ Status CollectionCatalog::createView(OperationContext* opCtx,
                                      const NamespaceString& viewName,
                                      const NamespaceString& viewOn,
                                      const BSONArray& pipeline,
+                                     const ViewsForDatabase::PipelineValidatorFn& validatePipeline,
                                      const BSONObj& collation,
-                                     const ViewsForDatabase::PipelineValidatorFn& pipelineValidator,
-                                     const ViewUpsertMode insertViewMode) const {
-    // A view document direct write can occur via the oplog application path, which may only hold a
-    // lock on the collection being updated (the database views collection).
-    invariant(insertViewMode == ViewUpsertMode::kAlreadyDurableView ||
+                                     ViewsForDatabase::Durability durability) const {
+    invariant(durability == ViewsForDatabase::Durability::kAlreadyDurable ||
               opCtx->lockState()->isCollectionLockedForMode(viewName, MODE_IX));
     invariant(opCtx->lockState()->isCollectionLockedForMode(
         NamespaceString(viewName.dbName(), NamespaceString::kSystemDotViewsCollectionName),
@@ -544,25 +622,24 @@ Status CollectionCatalog::createView(OperationContext* opCtx,
         return Status(ErrorCodes::InvalidNamespace,
                       str::stream() << "invalid name for 'viewOn': " << viewOn.coll());
 
-    auto collator = ViewsForDatabase::parseCollator(opCtx, collation);
-    if (!collator.isOK())
-        return collator.getStatus();
+    IgnoreExternalViewChangesForDatabase ignore(opCtx, viewName.dbName());
 
-    Status result = Status::OK();
-    {
-        IgnoreExternalViewChangesForDatabase ignore(opCtx, viewName.dbName());
+    assertViewCatalogValid(viewsForDb);
+    auto systemViews = _lookupSystemViews(opCtx, viewName.dbName());
 
-        result = _createOrUpdateView(opCtx,
-                                     viewName,
-                                     viewOn,
-                                     pipeline,
-                                     pipelineValidator,
-                                     std::move(collator.getValue()),
-                                     ViewsForDatabase{viewsForDb},
-                                     insertViewMode);
+    ViewsForDatabase writable{viewsForDb};
+    auto status = writable.insert(
+        opCtx, systemViews, viewName, viewOn, pipeline, validatePipeline, collation, durability);
+
+    if (status.isOK()) {
+        auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
+        uncommittedCatalogUpdates.addView(opCtx, viewName);
+        uncommittedCatalogUpdates.replaceViewsForDatabase(viewName.dbName(), std::move(writable));
+
+        PublishCatalogUpdates::ensureRegisteredWithRecoveryUnit(opCtx, uncommittedCatalogUpdates);
     }
 
-    return result;
+    return status;
 }
 
 Status CollectionCatalog::modifyView(
@@ -570,7 +647,7 @@ Status CollectionCatalog::modifyView(
     const NamespaceString& viewName,
     const NamespaceString& viewOn,
     const BSONArray& pipeline,
-    const ViewsForDatabase::PipelineValidatorFn& pipelineValidator) const {
+    const ViewsForDatabase::PipelineValidatorFn& validatePipeline) const {
     invariant(opCtx->lockState()->isCollectionLockedForMode(viewName, MODE_X));
     invariant(opCtx->lockState()->isCollectionLockedForMode(
         NamespaceString(viewName.dbName(), NamespaceString::kSystemDotViewsCollectionName),
@@ -591,21 +668,29 @@ Status CollectionCatalog::modifyView(
         return Status(ErrorCodes::InvalidNamespace,
                       str::stream() << "invalid name for 'viewOn': " << viewOn.coll());
 
-    Status result = Status::OK();
-    {
-        IgnoreExternalViewChangesForDatabase ignore(opCtx, viewName.dbName());
+    IgnoreExternalViewChangesForDatabase ignore(opCtx, viewName.dbName());
 
-        result = _createOrUpdateView(opCtx,
-                                     viewName,
-                                     viewOn,
-                                     pipeline,
-                                     pipelineValidator,
-                                     CollatorInterface::cloneCollator(viewPtr->defaultCollator()),
-                                     ViewsForDatabase{viewsForDb},
-                                     ViewUpsertMode::kUpdateView);
+    assertViewCatalogValid(viewsForDb);
+    auto systemViews = _lookupSystemViews(opCtx, viewName.dbName());
+
+    ViewsForDatabase writable{viewsForDb};
+    auto status = writable.update(opCtx,
+                                  systemViews,
+                                  viewName,
+                                  viewOn,
+                                  pipeline,
+                                  validatePipeline,
+                                  CollatorInterface::cloneCollator(viewPtr->defaultCollator()));
+
+    if (status.isOK()) {
+        auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
+        uncommittedCatalogUpdates.addView(opCtx, viewName);
+        uncommittedCatalogUpdates.replaceViewsForDatabase(viewName.dbName(), std::move(writable));
+
+        PublishCatalogUpdates::ensureRegisteredWithRecoveryUnit(opCtx, uncommittedCatalogUpdates);
     }
 
-    return result;
+    return status;
 }
 
 Status CollectionCatalog::dropView(OperationContext* opCtx, const NamespaceString& viewName) const {
@@ -615,7 +700,7 @@ Status CollectionCatalog::dropView(OperationContext* opCtx, const NamespaceStrin
         MODE_X));
     invariant(_viewsForDatabase.contains(viewName.dbName()));
     const ViewsForDatabase& viewsForDb = *_getViewsForDatabase(opCtx, viewName.dbName());
-    viewsForDb.requireValidCatalog();
+    assertViewCatalogValid(viewsForDb);
 
     // Make sure the view exists before proceeding.
     if (auto viewPtr = viewsForDb.lookup(viewName); !viewPtr) {
@@ -627,15 +712,13 @@ Status CollectionCatalog::dropView(OperationContext* opCtx, const NamespaceStrin
     {
         IgnoreExternalViewChangesForDatabase ignore(opCtx, viewName.dbName());
 
-        ViewsForDatabase writable{viewsForDb};
+        auto systemViews = _lookupSystemViews(opCtx, viewName.dbName());
 
-        writable.durable->remove(opCtx, viewName);
-        writable.viewGraph.remove(viewName);
-        writable.viewMap.erase(viewName);
-        writable.stats = {};
+        ViewsForDatabase writable{viewsForDb};
+        writable.remove(opCtx, systemViews, viewName);
 
         // Reload the view catalog with the changes applied.
-        result = writable.reload(opCtx);
+        result = writable.reload(opCtx, systemViews);
         if (result.isOK()) {
             auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
             uncommittedCatalogUpdates.removeView(viewName);
@@ -661,17 +744,8 @@ Status CollectionCatalog::reloadViews(OperationContext* opCtx, const DatabaseNam
 
     LOGV2_DEBUG(22546, 1, "Reloading view catalog for database", "db"_attr = dbName.toString());
 
-    // Create a copy of the ViewsForDatabase instance to modify it. Reset the views for this
-    // database, but preserve the DurableViewCatalog pointer.
-    auto it = _viewsForDatabase.find(dbName);
-    invariant(it != _viewsForDatabase.end());
-    ViewsForDatabase viewsForDb{it->second.durable};
-    viewsForDb.valid = false;
-    viewsForDb.viewGraphNeedsRefresh = true;
-    viewsForDb.viewMap.clear();
-    viewsForDb.stats = {};
-
-    auto status = viewsForDb.reload(opCtx);
+    ViewsForDatabase viewsForDb;
+    auto status = viewsForDb.reload(opCtx, _lookupSystemViews(opCtx, dbName));
     CollectionCatalog::write(opCtx, [&](CollectionCatalog& catalog) {
         catalog._replaceViewsForDatabase(dbName, std::move(viewsForDb));
     });
@@ -686,34 +760,69 @@ std::shared_ptr<Collection> CollectionCatalog::openCollection(OperationContext* 
         return nullptr;
     }
 
-    auto catalogId = lookupCatalogIdByNSS(nss, readTimestamp);
-    if (!catalogId) {
-        return nullptr;
+    // Check if the storage transaction already has this collection instantiated.
+    auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
+    auto lookupResult = uncommittedCatalogUpdates.lookupCollection(opCtx, nss);
+    if (lookupResult.found && !lookupResult.newColl) {
+        invariant(isCollectionCompatible(lookupResult.collection, readTimestamp));
+        return lookupResult.collection;
     }
 
-    auto catalogEntry = DurableCatalog::get(opCtx)->getParsedCatalogEntry(opCtx, *catalogId);
+    // Try to find a catalog entry matching 'readTimestamp'.
+    auto catalogEntry = _fetchPITCatalogEntry(opCtx, nss, readTimestamp);
     if (!catalogEntry) {
         // Treat the collection as non-existent at a point-in-time the same as not-existent at
         // latest.
         return nullptr;
     }
 
-    const auto& collectionOptions = catalogEntry->metadata->options;
+    auto latestCollection = _lookupCollectionByUUID(*catalogEntry->metadata->options.uuid);
 
-    // Check if the collection already exists in the catalog and if it's compatible with the read
-    // timestamp.
-    std::shared_ptr<Collection> latestColl = _lookupCollectionByUUID(*collectionOptions.uuid);
-    if (isCollectionCompatible(latestColl, readTimestamp)) {
-        return latestColl;
+    // Return the in-memory Collection instance if it is compatible with the read timestamp.
+    if (isCollectionCompatible(latestCollection, readTimestamp)) {
+        uncommittedCatalogUpdates.openCollection(opCtx, latestCollection);
+        return latestCollection;
     }
 
+    // Use the shared collection state from the latest Collection in the in-memory collection
+    // catalog if it is compatible.
+    auto compatibleCollection =
+        _createCompatibleCollection(opCtx, latestCollection, readTimestamp, catalogEntry.get());
+    if (compatibleCollection) {
+        uncommittedCatalogUpdates.openCollection(opCtx, compatibleCollection);
+        return compatibleCollection;
+    }
+
+    // There is no state in-memory that matches the catalog entry. Try to instantiate a new
+    // Collection instance from scratch.
+    auto newCollection = _createNewPITCollection(opCtx, readTimestamp, catalogEntry.get());
+    if (newCollection) {
+        uncommittedCatalogUpdates.openCollection(opCtx, newCollection);
+    }
+    return newCollection;
+}
+
+boost::optional<DurableCatalogEntry> CollectionCatalog::_fetchPITCatalogEntry(
+    OperationContext* opCtx, const NamespaceString& nss, const Timestamp& readTimestamp) const {
+    auto catalogId = lookupCatalogIdByNSS(nss, readTimestamp);
+    if (!catalogId) {
+        return boost::none;
+    }
+
+    return DurableCatalog::get(opCtx)->getParsedCatalogEntry(opCtx, *catalogId);
+}
+
+std::shared_ptr<Collection> CollectionCatalog::_createCompatibleCollection(
+    OperationContext* opCtx,
+    const std::shared_ptr<Collection>& latestCollection,
+    const Timestamp& readTimestamp,
+    const DurableCatalogEntry& catalogEntry) const {
     // Check if the collection is drop pending, not expired, and compatible with the read timestamp.
     std::shared_ptr<Collection> dropPendingColl = [&]() -> std::shared_ptr<Collection> {
-        auto dropPendingIt = _dropPendingCollection.find(catalogEntry->ident);
+        auto dropPendingIt = _dropPendingCollection.find(catalogEntry.ident);
         if (dropPendingIt == _dropPendingCollection.end()) {
             return nullptr;
         }
-
         return dropPendingIt->second.lock();
     }();
 
@@ -721,40 +830,50 @@ std::shared_ptr<Collection> CollectionCatalog::openCollection(OperationContext* 
         return dropPendingColl;
     }
 
-    // Neither the latest collection or drop pending collection exist, or were compatible with the
-    // read timestamp. We'll need to instantiate a new Collection instance.
-    if (latestColl || dropPendingColl) {
-        // If the latest or drop pending collection exists, instantiate a new collection using
-        // their shared state.
+    // If either the latest or drop pending collection exists, instantiate a new collection using
+    // the shared state.
+    if (latestCollection || dropPendingColl) {
         LOGV2_DEBUG(6825400,
                     1,
                     "Instantiating a collection using shared state",
-                    logAttrs(nss),
-                    "ident"_attr = catalogEntry->ident,
-                    "md"_attr = catalogEntry->metadata->toBSON(),
+                    logAttrs(catalogEntry.metadata->nss),
+                    "ident"_attr = catalogEntry.ident,
+                    "md"_attr = catalogEntry.metadata->toBSON(),
                     "timestamp"_attr = readTimestamp);
 
-        std::shared_ptr<Collection> collToReturn = Collection::Factory::get(opCtx)->make(
-            opCtx, nss, *catalogId, catalogEntry->metadata, /*rs=*/nullptr);
+        std::shared_ptr<Collection> collToReturn =
+            Collection::Factory::get(opCtx)->make(opCtx,
+                                                  catalogEntry.metadata->nss,
+                                                  catalogEntry.catalogId,
+                                                  catalogEntry.metadata,
+                                                  /*rs=*/nullptr);
         Status status = collToReturn->initFromExisting(
-            opCtx, latestColl ? latestColl : dropPendingColl, readTimestamp);
+            opCtx, latestCollection ? latestCollection : dropPendingColl, readTimestamp);
         if (!status.isOK()) {
             LOGV2_DEBUG(
                 6857100, 1, "Failed to instantiate collection", "reason"_attr = status.reason());
             return nullptr;
         }
+
         return collToReturn;
     }
 
+    return nullptr;
+}
+
+std::shared_ptr<Collection> CollectionCatalog::_createNewPITCollection(
+    OperationContext* opCtx,
+    const Timestamp& readTimestamp,
+    const DurableCatalogEntry& catalogEntry) const {
     // The ident is expired, but it still may not have been dropped by the reaper. Try to mark it as
     // in use.
     auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
-    auto newIdent = storageEngine->markIdentInUse(catalogEntry->ident);
+    auto newIdent = storageEngine->markIdentInUse(catalogEntry.ident);
     if (!newIdent) {
         LOGV2_DEBUG(6857101,
                     1,
                     "Collection ident is being dropped or is already dropped",
-                    "ident"_attr = catalogEntry->ident);
+                    "ident"_attr = catalogEntry.ident);
         return nullptr;
     }
 
@@ -762,27 +881,32 @@ std::shared_ptr<Collection> CollectionCatalog::openCollection(OperationContext* 
     LOGV2_DEBUG(6825401,
                 1,
                 "Instantiating a new collection",
-                logAttrs(nss),
-                "ident"_attr = catalogEntry->ident,
-                "md"_attr = catalogEntry->metadata->toBSON(),
+                logAttrs(catalogEntry.metadata->nss),
+                "ident"_attr = catalogEntry.ident,
+                "md"_attr = catalogEntry.metadata->toBSON(),
                 "timestamp"_attr = readTimestamp);
 
     std::unique_ptr<RecordStore> rs =
         opCtx->getServiceContext()->getStorageEngine()->getEngine()->getRecordStore(
-            opCtx, nss, catalogEntry->ident, collectionOptions);
+            opCtx, catalogEntry.metadata->nss, catalogEntry.ident, catalogEntry.metadata->options);
 
     // Set the ident to the one returned by the ident reaper. This is to prevent the ident from
     // being dropping prematurely.
     rs->setIdent(std::move(newIdent));
 
-    std::shared_ptr<Collection> collToReturn = Collection::Factory::get(opCtx)->make(
-        opCtx, nss, *catalogId, catalogEntry->metadata, std::move(rs));
+    std::shared_ptr<Collection> collToReturn =
+        Collection::Factory::get(opCtx)->make(opCtx,
+                                              catalogEntry.metadata->nss,
+                                              catalogEntry.catalogId,
+                                              catalogEntry.metadata,
+                                              std::move(rs));
     Status status = collToReturn->initFromExisting(opCtx, /*collection=*/nullptr, readTimestamp);
     if (!status.isOK()) {
         LOGV2_DEBUG(
             6857102, 1, "Failed to instantiate collection", "reason"_attr = status.reason());
         return nullptr;
     }
+
     return collToReturn;
 }
 
@@ -850,17 +974,6 @@ void CollectionCatalog::dropCollection(OperationContext* opCtx,
     // with the recovery unit. However, when the writable Collection was requested in Inplace mode
     // (or is the oplog) this is not the case. So make sure we are registered in all cases.
     PublishCatalogUpdates::ensureRegisteredWithRecoveryUnit(opCtx, uncommittedCatalogUpdates);
-}
-
-void CollectionCatalog::onOpenDatabase(OperationContext* opCtx,
-                                       const DatabaseName& dbName,
-                                       ViewsForDatabase&& viewsForDb) {
-    invariant(opCtx->lockState()->isDbLockedForMode(dbName, MODE_IS));
-    uassert(ErrorCodes::AlreadyInitialized,
-            str::stream() << "Database " << dbName << " is already initialized",
-            _viewsForDatabase.find(dbName) == _viewsForDatabase.end());
-
-    _viewsForDatabase[dbName] = std::move(viewsForDb);
 }
 
 void CollectionCatalog::onCloseDatabase(OperationContext* opCtx, DatabaseName dbName) {
@@ -1152,24 +1265,17 @@ boost::optional<RecordId> CollectionCatalog::lookupCatalogIdByNSS(
     return boost::none;
 }
 
-void CollectionCatalog::iterateViews(OperationContext* opCtx,
-                                     const DatabaseName& dbName,
-                                     ViewIteratorCallback callback,
-                                     ViewCatalogLookupBehavior lookupBehavior) const {
+void CollectionCatalog::iterateViews(
+    OperationContext* opCtx,
+    const DatabaseName& dbName,
+    const std::function<bool(const ViewDefinition& view)>& callback) const {
     auto viewsForDb = _getViewsForDatabase(opCtx, dbName);
     if (!viewsForDb) {
         return;
     }
 
-    if (lookupBehavior != ViewCatalogLookupBehavior::kAllowInvalidViews) {
-        viewsForDb->requireValidCatalog();
-    }
-
-    for (auto&& view : viewsForDb->viewMap) {
-        if (!callback(*view.second)) {
-            break;
-        }
-    }
+    assertViewCatalogValid(*viewsForDb);
+    viewsForDb->iterate(callback);
 }
 
 std::shared_ptr<const ViewDefinition> CollectionCatalog::lookupView(
@@ -1179,7 +1285,7 @@ std::shared_ptr<const ViewDefinition> CollectionCatalog::lookupView(
         return nullptr;
     }
 
-    if (!viewsForDb->valid && opCtx->getClient()->isFromUserConnection()) {
+    if (!viewsForDb->valid() && opCtx->getClient()->isFromUserConnection()) {
         // We want to avoid lookups on invalid collection names.
         if (!NamespaceString::validCollectionName(ns.ns())) {
             return nullptr;
@@ -1188,7 +1294,7 @@ std::shared_ptr<const ViewDefinition> CollectionCatalog::lookupView(
         // ApplyOps should work on a valid existing collection, despite the presence of bad views
         // otherwise the server would crash. The view catalog will remain invalid until the bad view
         // definitions are removed.
-        viewsForDb->requireValidCatalog();
+        assertViewCatalogValid(*viewsForDb);
     }
 
     return viewsForDb->lookup(ns);
@@ -1222,7 +1328,7 @@ NamespaceString CollectionCatalog::resolveNamespaceStringOrUUID(
     uassert(ErrorCodes::NamespaceNotFound,
             str::stream() << "UUID " << nsOrUUID.toString() << " specified in " << nsOrUUID.dbname()
                           << " resolved to a collection in a different database: " << *resolvedNss,
-            resolvedNss->db() == nsOrUUID.dbname());
+            resolvedNss->dbName() == nsOrUUID.dbName());
 
     return std::move(*resolvedNss);
 }
@@ -1331,10 +1437,7 @@ CollectionCatalog::Stats CollectionCatalog::getStats() const {
 boost::optional<ViewsForDatabase::Stats> CollectionCatalog::getViewStatsForDatabase(
     OperationContext* opCtx, const DatabaseName& dbName) const {
     auto viewsForDb = _getViewsForDatabase(opCtx, dbName);
-    if (!viewsForDb) {
-        return boost::none;
-    }
-    return viewsForDb->stats;
+    return viewsForDb ? boost::make_optional(viewsForDb->stats()) : boost::none;
 }
 
 CollectionCatalog::ViewCatalogSet CollectionCatalog::getViewCatalogDbNames(
@@ -1351,6 +1454,22 @@ void CollectionCatalog::registerCollection(OperationContext* opCtx,
                                            const UUID& uuid,
                                            std::shared_ptr<Collection> coll,
                                            boost::optional<Timestamp> commitTime) {
+    invariant(opCtx->lockState()->isW());
+    _registerCollection(opCtx, uuid, std::move(coll), /*twoPhase=*/false, commitTime);
+}
+
+void CollectionCatalog::registerCollectionTwoPhase(OperationContext* opCtx,
+                                                   const UUID& uuid,
+                                                   std::shared_ptr<Collection> coll,
+                                                   boost::optional<Timestamp> commitTime) {
+    _registerCollection(opCtx, uuid, std::move(coll), /*twoPhase=*/true, commitTime);
+}
+
+void CollectionCatalog::_registerCollection(OperationContext* opCtx,
+                                            const UUID& uuid,
+                                            std::shared_ptr<Collection> coll,
+                                            bool twoPhase,
+                                            boost::optional<Timestamp> commitTime) {
     auto nss = coll->ns();
     _ensureNamespaceDoesNotExist(opCtx, nss, NamespaceType::kAll);
 
@@ -1370,6 +1489,13 @@ void CollectionCatalog::registerCollection(OperationContext* opCtx,
     _catalog[uuid] = coll;
     _collections[nss] = coll;
     _orderedCollections[dbIdPair] = coll;
+    if (twoPhase) {
+        _pendingCommitNamespaces[nss] = coll;
+        _pendingCommitUUIDs[uuid] = coll;
+    } else {
+        _pendingCommitNamespaces.erase(nss);
+        _pendingCommitUUIDs.erase(uuid);
+    }
 
     if (commitTime && !commitTime->isNull()) {
         coll->setMinimumValidSnapshot(commitTime.value());
@@ -1394,6 +1520,19 @@ void CollectionCatalog::registerCollection(OperationContext* opCtx,
     auto& resourceCatalog = ResourceCatalog::get(opCtx->getServiceContext());
     resourceCatalog.add({RESOURCE_DATABASE, nss.dbName()}, nss.dbName());
     resourceCatalog.add({RESOURCE_COLLECTION, nss}, nss);
+
+    if (!storageGlobalParams.repair && coll->ns().isSystemDotViews()) {
+        auto [it, emplaced] = _viewsForDatabase.try_emplace(coll->ns().dbName());
+        if (auto status = it->second.reload(opCtx, _lookupSystemViews(opCtx, coll->ns().dbName()));
+            !status.isOK()) {
+            LOGV2_WARNING_OPTIONS(20326,
+                                  {logv2::LogTag::kStartupWarnings},
+                                  "Unable to parse views; remove any invalid views from the "
+                                  "collection to restore server functionality",
+                                  "error"_attr = redact(status),
+                                  logAttrs(coll->ns()));
+        }
+    }
 }
 
 std::shared_ptr<Collection> CollectionCatalog::deregisterCollection(
@@ -1449,6 +1588,10 @@ std::shared_ptr<Collection> CollectionCatalog::deregisterCollection(
     coll->onDeregisterFromCatalog(opCtx);
 
     ResourceCatalog::get(opCtx->getServiceContext()).remove({RESOURCE_COLLECTION, ns}, ns);
+
+    if (!storageGlobalParams.repair && coll->ns().isSystemDotViews()) {
+        _viewsForDatabase.erase(coll->ns().dbName());
+    }
 
     return coll;
 }
@@ -1636,13 +1779,10 @@ void CollectionCatalog::clearViews(OperationContext* opCtx, const DatabaseName& 
 
     auto it = _viewsForDatabase.find(dbName);
     invariant(it != _viewsForDatabase.end());
-    ViewsForDatabase viewsForDb = it->second;
 
-    viewsForDb.viewMap.clear();
-    viewsForDb.viewGraph.clear();
-    viewsForDb.valid = true;
-    viewsForDb.viewGraphNeedsRefresh = false;
-    viewsForDb.stats = {};
+    ViewsForDatabase viewsForDb = it->second;
+    viewsForDb.clear(opCtx);
+
     CollectionCatalog::write(opCtx, [&](CollectionCatalog& catalog) {
         catalog._replaceViewsForDatabase(dbName, std::move(viewsForDb));
     });
@@ -1802,6 +1942,12 @@ void CollectionCatalog::invariantHasExclusiveAccessToCollection(OperationContext
               nss.toString());
 }
 
+CollectionPtr CollectionCatalog::_lookupSystemViews(OperationContext* opCtx,
+                                                    const DatabaseName& dbName) const {
+    return lookupCollectionByNamespace(opCtx,
+                                       {dbName, NamespaceString::kSystemDotViewsCollectionName});
+}
+
 boost::optional<const ViewsForDatabase&> CollectionCatalog::_getViewsForDatabase(
     OperationContext* opCtx, const DatabaseName& dbName) const {
     auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
@@ -1821,90 +1967,6 @@ void CollectionCatalog::_replaceViewsForDatabase(const DatabaseName& dbName,
                                                  ViewsForDatabase&& views) {
     _viewsForDatabase[dbName] = std::move(views);
 }
-
-Status CollectionCatalog::_createOrUpdateView(
-    OperationContext* opCtx,
-    const NamespaceString& viewName,
-    const NamespaceString& viewOn,
-    const BSONArray& pipeline,
-    const ViewsForDatabase::PipelineValidatorFn& pipelineValidator,
-    std::unique_ptr<CollatorInterface> collator,
-    ViewsForDatabase&& viewsForDb,
-    ViewUpsertMode insertViewMode) const {
-    // A view document direct write can occur via the oplog application path, which may only hold a
-    // lock on the collection being updated (the database views collection).
-    invariant(insertViewMode == ViewUpsertMode::kAlreadyDurableView ||
-              opCtx->lockState()->isCollectionLockedForMode(viewName, MODE_IX));
-    invariant(opCtx->lockState()->isCollectionLockedForMode(
-        NamespaceString(viewName.dbName(), NamespaceString::kSystemDotViewsCollectionName),
-        MODE_X));
-
-    viewsForDb.requireValidCatalog();
-
-    // Build the BSON definition for this view to be saved in the durable view catalog and/or to
-    // insert in the viewMap. If the collation is empty, omit it from the definition altogether.
-    BSONObjBuilder viewDefBuilder;
-    // TODO SERVER-69499 Use serialize function on NamespaceString to create the string to write.
-    if (!gMultitenancySupport ||
-        (serverGlobalParams.featureCompatibility.isVersionInitialized() &&
-         gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))) {
-        viewDefBuilder.append("_id", viewName.toString());
-    } else {
-        viewDefBuilder.append("_id", viewName.toStringWithTenantId());
-    }
-    viewDefBuilder.append("viewOn", viewOn.coll());
-    viewDefBuilder.append("pipeline", pipeline);
-    if (collator) {
-        viewDefBuilder.append("collation", collator->getSpec().toBSON());
-    }
-
-    BSONObj viewDef = viewDefBuilder.obj();
-    BSONObj ownedPipeline = pipeline.getOwned();
-    ViewDefinition view(
-        viewName.dbName(), viewName.coll(), viewOn.coll(), ownedPipeline, std::move(collator));
-
-    // If the view is already in the durable view catalog, we don't need to validate the graph. If
-    // we need to update the durable view catalog, we need to check that the resulting dependency
-    // graph is acyclic and within the maximum depth.
-    const bool viewGraphNeedsValidation = insertViewMode != ViewUpsertMode::kAlreadyDurableView;
-    Status graphStatus =
-        viewsForDb.upsertIntoGraph(opCtx, view, pipelineValidator, viewGraphNeedsValidation);
-    if (!graphStatus.isOK()) {
-        return graphStatus;
-    }
-
-    if (insertViewMode != ViewUpsertMode::kAlreadyDurableView) {
-        viewsForDb.durable->upsert(opCtx, viewName, viewDef);
-    }
-
-    viewsForDb.valid = false;
-    auto res = [&] {
-        switch (insertViewMode) {
-            case ViewUpsertMode::kCreateView:
-            case ViewUpsertMode::kAlreadyDurableView:
-                return viewsForDb.insert(opCtx, viewDef, viewName.tenantId());
-            case ViewUpsertMode::kUpdateView:
-                viewsForDb.viewMap.clear();
-                viewsForDb.viewGraphNeedsRefresh = true;
-                viewsForDb.stats = {};
-
-                // Reload the view catalog with the changes applied.
-                return viewsForDb.reload(opCtx);
-        }
-        MONGO_UNREACHABLE;
-    }();
-
-    if (res.isOK()) {
-        auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
-        uncommittedCatalogUpdates.addView(opCtx, viewName);
-        uncommittedCatalogUpdates.replaceViewsForDatabase(viewName.dbName(), std::move(viewsForDb));
-
-        PublishCatalogUpdates::ensureRegisteredWithRecoveryUnit(opCtx, uncommittedCatalogUpdates);
-    }
-
-    return res;
-}
-
 
 bool CollectionCatalog::_isCatalogBatchWriter() const {
     return batchedCatalogWriteInstance.get() == this;

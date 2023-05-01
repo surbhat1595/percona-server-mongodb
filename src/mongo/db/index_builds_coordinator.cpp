@@ -106,6 +106,7 @@ constexpr StringData kAbortIndexBuildFieldName = "abortIndexBuild"_sd;
 constexpr StringData kIndexesFieldName = "indexes"_sd;
 constexpr StringData kKeyFieldName = "key"_sd;
 constexpr StringData kUniqueFieldName = "unique"_sd;
+constexpr StringData kPrepareUniqueFieldName = "prepareUnique"_sd;
 
 /**
  * Checks if unique index specification is compatible with sharding configuration.
@@ -121,9 +122,9 @@ void checkShardKeyRestrictions(OperationContext* opCtx,
 
     const ShardKeyPattern shardKeyPattern(collDesc.getKeyPattern());
     uassert(ErrorCodes::CannotCreateIndex,
-            str::stream() << "cannot create unique index over " << newIdxKey
-                          << " with shard key pattern " << shardKeyPattern.toBSON(),
-            shardKeyPattern.isUniqueIndexCompatible(newIdxKey));
+            str::stream() << "cannot create index with 'unique' or 'prepareUnique' option over "
+                          << newIdxKey << " with shard key pattern " << shardKeyPattern.toBSON(),
+            shardKeyPattern.isIndexUniquenessCompatible(newIdxKey));
 }
 
 /**
@@ -191,6 +192,11 @@ void removeIndexBuildEntryAfterCommitOrAbort(OperationContext* opCtx,
     if (replCoord->getSettings().shouldRecoverFromOplogAsStandalone()) {
         // Writes to the 'config.system.indexBuilds' collection are replicated and the index entry
         // will be removed when the delete oplog entry is replayed at a later time.
+        return;
+    }
+
+    if (replState.isSettingUp()) {
+        // The index build document is not written to config.system.indexBuilds collection yet.
         return;
     }
 
@@ -2135,9 +2141,22 @@ Status IndexBuildsCoordinator::_setUpIndexBuild(OperationContext* opCtx,
         postSetupAction =
             _setUpIndexBuildInner(opCtx, replState, startTimestamp, indexBuildOptions);
     } catch (const DBException& ex) {
-        activeIndexBuilds.unregisterIndexBuild(&_indexBuildsManager, replState);
+        auto status = ex.toStatus();
+        auto collectionSharedPtr = CollectionCatalog::get(opCtx)->lookupCollectionByUUIDForRead(
+            opCtx, replState->collectionUUID);
+        CollectionPtr collection(collectionSharedPtr.get(), CollectionPtr::NoYieldTag{});
+        invariant(collection,
+                  str::stream() << "Collection with UUID " << replState->collectionUUID
+                                << " should exist because an index build is in progress: "
+                                << replState->buildUUID);
+        if (IndexBuildProtocol::kSinglePhase == replState->protocol) {
+            _cleanUpSinglePhaseAfterFailure(
+                opCtx, collection, replState, indexBuildOptions, status);
+        } else {
+            _cleanUpTwoPhaseAfterFailure(opCtx, collection, replState, indexBuildOptions, status);
+        }
 
-        return ex.toStatus();
+        return status;
     }
 
     // The indexes are in the durable catalog in an unfinished state. Return an OK status so
@@ -2281,15 +2300,23 @@ void IndexBuildsCoordinator::_cleanUpTwoPhaseAfterFailure(
             // changing.
             Lock::DBLock dbLock(abortCtx, replState->dbName, MODE_IX);
 
-            // Index builds may not fail on secondaries. If a primary replicated an abortIndexBuild
-            // oplog entry, then this index build would have received an IndexBuildAborted error
-            // code.
             const NamespaceStringOrUUID dbAndUUID(replState->dbName, replState->collectionUUID);
             auto replCoord = repl::ReplicationCoordinator::get(abortCtx);
             if (!replCoord->canAcceptWritesFor(abortCtx, dbAndUUID)) {
-                fassert(51101,
-                        status.withContext(str::stream() << "Index build: " << replState->buildUUID
-                                                         << "; Database: " << replState->dbName));
+                if (replState->isSettingUp()) {
+                    // Clean up if the error happens before StartIndexBuild oplog entry is
+                    // replicated during startup or stepdown.
+                    activeIndexBuilds.unregisterIndexBuild(&_indexBuildsManager, replState);
+                    return;
+                } else {
+                    // Index builds may not fail on secondaries. If a primary replicated an
+                    // abortIndexBuild oplog entry, then this index build would have received an
+                    // IndexBuildAborted error code.
+                    fassert(51101,
+                            status.withContext(str::stream()
+                                               << "Index build: " << replState->buildUUID
+                                               << "; Database: " << replState->dbName));
+                }
             }
 
             CollectionNamespaceOrUUIDLock collLock(abortCtx, dbAndUUID, MODE_X);
@@ -2406,9 +2433,7 @@ void IndexBuildsCoordinator::_runIndexBuildInner(
     //   _insertKeysFromSideTablesAndCommit().
     // * Explicitly abort the index build with abortIndexBuildByBuildUUID() before performing an
     //   operation that causes the index build to throw an error.
-    // TODO (SERVER-69264): Remove ErrorCodes::CannotCreateIndex.
-    if (opCtx->checkForInterruptNoAssert().isOK() &&
-        status.code() != ErrorCodes::CannotCreateIndex) {
+    if (opCtx->checkForInterruptNoAssert().isOK()) {
         if (TestingProctor::instance().isEnabled()) {
             LOGV2_FATAL(
                 6967700, "Unexpected error code during index build cleanup", "error"_attr = status);
@@ -3004,7 +3029,7 @@ int IndexBuildsCoordinator::getNumIndexesTotal(OperationContext* opCtx,
     auto indexCatalog = collection->getIndexCatalog();
     invariant(indexCatalog, str::stream() << "Collection is missing index catalog: " << nss);
 
-    return indexCatalog->numIndexesTotal(opCtx);
+    return indexCatalog->numIndexesTotal();
 }
 
 std::vector<BSONObj> IndexBuildsCoordinator::prepareSpecListForCreate(
@@ -3032,7 +3057,7 @@ std::vector<BSONObj> IndexBuildsCoordinator::prepareSpecListForCreate(
 
     // Verify that each spec is compatible with the collection's sharding state.
     for (const BSONObj& spec : resultSpecs) {
-        if (spec[kUniqueFieldName].trueValue()) {
+        if (spec[kUniqueFieldName].trueValue() || spec[kPrepareUniqueFieldName].trueValue()) {
             checkShardKeyRestrictions(opCtx, nss, spec[kKeyFieldName].Obj());
         }
     }

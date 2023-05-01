@@ -44,9 +44,6 @@
 namespace mongo {
 
 namespace {
-const auto ticketHolderDecoration =
-    mongo::ServiceContext::declareDecoration<std::unique_ptr<mongo::TicketHolder>>();
-
 void updateQueueStatsOnRelease(ServiceContext* serviceContext,
                                TicketHolderWithQueueingStats::QueueStats& queueStats,
                                AdmissionContext* admCtx) {
@@ -90,120 +87,6 @@ void appendCommonQueueImplStats(BSONObjBuilder& b,
     b.append("totalTimeQueuedMicros", stats.totalTimeQueuedMicros.loadRelaxed());
 }
 }  // namespace
-
-TicketHolder* TicketHolder::get(ServiceContext* svcCtx) {
-    return ticketHolderDecoration(svcCtx).get();
-}
-
-void TicketHolder::use(ServiceContext* svcCtx, std::unique_ptr<TicketHolder> newTicketHolder) {
-    ticketHolderDecoration(svcCtx) = std::move(newTicketHolder);
-}
-
-ReaderWriterTicketHolder::~ReaderWriterTicketHolder(){};
-
-Ticket ReaderWriterTicketHolder::acquireImmediateTicket(AdmissionContext* admCtx) {
-    switch (admCtx->getLockMode()) {
-        case MODE_IS:
-        case MODE_S:
-            return _reader->acquireImmediateTicket(admCtx);
-        case MODE_IX:
-            return _writer->acquireImmediateTicket(admCtx);
-        default:
-            // Tickets are linked to the GlobalLock and a MODE_X lock is already exclusive - all
-            // other operations waiting for MODE_X will be blocked so no need to go through the
-            // ticketing mechanism.
-            MONGO_UNREACHABLE;
-    }
-}
-
-boost::optional<Ticket> ReaderWriterTicketHolder::tryAcquire(AdmissionContext* admCtx) {
-
-    switch (admCtx->getLockMode()) {
-        case MODE_IS:
-        case MODE_S:
-            return _reader->tryAcquire(admCtx);
-        case MODE_IX:
-            return _writer->tryAcquire(admCtx);
-        default:
-            MONGO_UNREACHABLE;
-    }
-}
-
-Ticket ReaderWriterTicketHolder::waitForTicket(OperationContext* opCtx,
-                                               AdmissionContext* admCtx,
-                                               WaitMode waitMode) {
-    switch (admCtx->getLockMode()) {
-        case MODE_IS:
-        case MODE_S:
-            return _reader->waitForTicket(opCtx, admCtx, waitMode);
-        case MODE_IX:
-            return _writer->waitForTicket(opCtx, admCtx, waitMode);
-        default:
-            MONGO_UNREACHABLE;
-    }
-}
-
-boost::optional<Ticket> ReaderWriterTicketHolder::waitForTicketUntil(OperationContext* opCtx,
-                                                                     AdmissionContext* admCtx,
-                                                                     Date_t until,
-                                                                     WaitMode waitMode) {
-    switch (admCtx->getLockMode()) {
-        case MODE_IS:
-        case MODE_S:
-            return _reader->waitForTicketUntil(opCtx, admCtx, until, waitMode);
-        case MODE_IX:
-            return _writer->waitForTicketUntil(opCtx, admCtx, until, waitMode);
-        default:
-            MONGO_UNREACHABLE;
-    }
-}
-
-void ReaderWriterTicketHolder::appendStats(BSONObjBuilder& b) const {
-    invariant(_writer, "Writer queue is not present in the ticketholder");
-    invariant(_reader, "Reader queue is not present in the ticketholder");
-    {
-        BSONObjBuilder bbb(b.subobjStart("write"));
-        _writer->appendStats(bbb);
-        bbb.done();
-    }
-    {
-        BSONObjBuilder bbb(b.subobjStart("read"));
-        _reader->appendStats(bbb);
-        bbb.done();
-    }
-}
-
-void ReaderWriterTicketHolder::_releaseImmediateTicket(AdmissionContext* admCtx) noexcept {
-    switch (admCtx->getLockMode()) {
-        case MODE_IS:
-        case MODE_S:
-            return _reader->_releaseImmediateTicket(admCtx);
-        case MODE_IX:
-            return _writer->_releaseImmediateTicket(admCtx);
-        default:
-            MONGO_UNREACHABLE;
-    }
-}
-
-void ReaderWriterTicketHolder::_releaseToTicketPool(AdmissionContext* admCtx) noexcept {
-    switch (admCtx->getLockMode()) {
-        case MODE_IS:
-        case MODE_S:
-            return _reader->_releaseToTicketPool(admCtx);
-        case MODE_IX:
-            return _writer->_releaseToTicketPool(admCtx);
-        default:
-            MONGO_UNREACHABLE;
-    }
-}
-
-void ReaderWriterTicketHolder::resizeReaders(int newSize) {
-    return _reader->resize(newSize);
-}
-
-void ReaderWriterTicketHolder::resizeWriters(int newSize) {
-    return _writer->resize(newSize);
-}
 
 Ticket TicketHolderWithQueueingStats::acquireImmediateTicket(AdmissionContext* admCtx) {
     invariant(admCtx->getPriority() == AdmissionContext::Priority::kImmediate);
@@ -496,11 +379,12 @@ void SemaphoreTicketHolder::_resize(int newSize, int oldSize) noexcept {
 #endif
 
 PriorityTicketHolder::PriorityTicketHolder(int numTickets, ServiceContext* serviceContext)
-    : TicketHolderWithQueueingStats(numTickets, serviceContext), _serviceContext(serviceContext) {
-    for (std::size_t i = 0; i < static_cast<unsigned int>(QueueType::QueueTypeSize); i++) {
-        _queues.emplace_back(this);
-    }
-    _queues.shrink_to_fit();
+    : TicketHolderWithQueueingStats(numTickets, serviceContext),
+      _queues{Queue(this, QueueType::LowPriorityQueue),
+              Queue(this, QueueType::NormalPriorityQueue),
+              Queue(this, QueueType::ImmediatePriorityNoOpQueue)},
+      _serviceContext(serviceContext) {
+
     _ticketsAvailable.store(numTickets);
     _enqueuedElements.store(0);
 }
@@ -530,14 +414,14 @@ void PriorityTicketHolder::_releaseToTicketPoolImpl(AdmissionContext* admCtx) no
     //
     // Under this lock the queues cannot be modified in terms of someone attempting to enqueue on
     // them, only waking threads is allowed.
-    ReleaserLockGuard lk(_queueMutex);  // NOLINT
+    ReleaserLockGuard releaserLock(_queueMutex);  // NOLINT
     _ticketsAvailable.addAndFetch(1);
     if (std::all_of(_queues.begin(), _queues.end(), [](const Queue& queue) {
             return queue.queuedElems() == 0;
         })) {
         return;
     }
-    _dequeueWaitingThread();
+    _dequeueWaitingThread(releaserLock);
 }
 
 bool PriorityTicketHolder::_tryAcquireTicket() {
@@ -551,10 +435,14 @@ bool PriorityTicketHolder::_tryAcquireTicket() {
 
 boost::optional<Ticket> PriorityTicketHolder::_tryAcquireImpl(AdmissionContext* admCtx) {
     invariant(admCtx);
-
-    auto hasAcquired = _tryAcquireTicket();
-    if (hasAcquired) {
-        return Ticket{this, admCtx};
+    // Low priority operations cannot use optimistic ticket acquisition and will go to the queue
+    // instead. This is done to prevent them from skipping the line before other high-priority
+    // operations.
+    if (admCtx->getPriority() >= AdmissionContext::Priority::kNormal) {
+        auto hasAcquired = _tryAcquireTicket();
+        if (hasAcquired) {
+            return Ticket{this, admCtx};
+        }
     }
     return boost::none;
 }
@@ -569,15 +457,29 @@ boost::optional<Ticket> PriorityTicketHolder::_waitForTicketUntilImpl(OperationC
 
     bool assigned;
     {
-        stdx::unique_lock lk(_queueMutex);
+        EnqueuerLockGuard enqueuerLock(_queueMutex);
         _enqueuedElements.addAndFetch(1);
         ON_BLOCK_EXIT([&] { _enqueuedElements.subtractAndFetch(1); });
-        assigned = queue.enqueue(opCtx, lk, until, waitMode);
+        assigned = queue.enqueue(opCtx, enqueuerLock, until, waitMode);
     }
     if (assigned) {
         return Ticket{this, admCtx};
     } else {
         return boost::none;
+    }
+}
+
+bool PriorityTicketHolder::_hasToWaitForHigherPriority(const EnqueuerLockGuard& lk,
+                                                       QueueType queue) {
+    switch (queue) {
+        case QueueType::LowPriorityQueue: {
+            const auto& normalQueue =
+                _queues[static_cast<unsigned int>(QueueType::NormalPriorityQueue)];
+            auto pending = normalQueue.getThreadsPendingToWake();
+            return pending != 0 && pending >= _ticketsAvailable.load();
+        }
+        default:
+            return false;
     }
 }
 
@@ -589,9 +491,9 @@ void PriorityTicketHolder::_resize(int newSize, int oldSize) noexcept {
     if (difference > 0) {
         // As we're adding tickets the waiting threads need to be notified that there are new
         // tickets available.
-        ReleaserLockGuard lk(_queueMutex);
+        ReleaserLockGuard releaserLock(_queueMutex);
         for (int i = 0; i < difference; i++) {
-            _dequeueWaitingThread();
+            _dequeueWaitingThread(releaserLock);
         }
     }
 
@@ -599,7 +501,7 @@ void PriorityTicketHolder::_resize(int newSize, int oldSize) noexcept {
     // have to wait until the current ticket holders release their tickets.
 }
 
-bool PriorityTicketHolder::Queue::attemptToDequeue() {
+bool PriorityTicketHolder::Queue::attemptToDequeue(const ReleaserLockGuard& releaserLock) {
     auto threadsToBeWoken = _threadsToBeWoken.load();
     while (threadsToBeWoken < _queuedThreads) {
         auto canDequeue = _threadsToBeWoken.compareAndSwap(&threadsToBeWoken, threadsToBeWoken + 1);
@@ -611,7 +513,7 @@ bool PriorityTicketHolder::Queue::attemptToDequeue() {
     return false;
 }
 
-void PriorityTicketHolder::Queue::_signalThreadWoken() {
+void PriorityTicketHolder::Queue::_signalThreadWoken(const EnqueuerLockGuard& enqueuerLock) {
     auto currentThreadsToBeWoken = _threadsToBeWoken.load();
     while (currentThreadsToBeWoken > 0) {
         if (_threadsToBeWoken.compareAndSwap(&currentThreadsToBeWoken,
@@ -622,7 +524,7 @@ void PriorityTicketHolder::Queue::_signalThreadWoken() {
 }
 
 bool PriorityTicketHolder::Queue::enqueue(OperationContext* opCtx,
-                                          EnqueuerLockGuard& queueLock,
+                                          EnqueuerLockGuard& enqueuerLock,
                                           const Date_t& until,
                                           WaitMode waitMode) {
     _queuedThreads++;
@@ -644,11 +546,13 @@ bool PriorityTicketHolder::Queue::enqueue(OperationContext* opCtx,
         // check. The problem is that we must call a method that signals that the thread has been
         // woken after the condition variable wait, not before which is where the predicate would
         // go.
-        while (_holder->_ticketsAvailable.load() <= 0) {
+        while (_holder->_ticketsAvailable.load() <= 0 ||
+               _holder->_hasToWaitForHigherPriority(enqueuerLock, _queueType)) {
             // This method must be called after getting woken in all cases, so we use a ScopeGuard
             // to handle exceptions as well as early returns.
-            ON_BLOCK_EXIT([&] { _signalThreadWoken(); });
-            auto waitResult = clockSource->waitForConditionUntil(_cv, queueLock, deadline, baton);
+            ON_BLOCK_EXIT([&] { _signalThreadWoken(enqueuerLock); });
+            auto waitResult =
+                clockSource->waitForConditionUntil(_cv, enqueuerLock, deadline, baton);
             // We check if the operation has been interrupted (timeout, killed, etc.) here.
             if (waitMode == WaitMode::kInterruptible) {
                 opCtx->checkForInterrupt();
@@ -660,11 +564,11 @@ bool PriorityTicketHolder::Queue::enqueue(OperationContext* opCtx,
     return true;
 }
 
-void PriorityTicketHolder::_dequeueWaitingThread() {
+void PriorityTicketHolder::_dequeueWaitingThread(const ReleaserLockGuard& releaserLock) {
     // There should never be anything to dequeue from 'QueueType::ImmediatePriorityNoOpQueue' since
     // 'kImmediate' operations should always bypass the need to queue.
     int currentIndexQueue = static_cast<unsigned int>(QueueType::ImmediatePriorityNoOpQueue) - 1;
-    while (!_queues[currentIndexQueue].attemptToDequeue()) {
+    while (!_queues[currentIndexQueue].attemptToDequeue(releaserLock)) {
         if (currentIndexQueue == 0)
             break;
         else

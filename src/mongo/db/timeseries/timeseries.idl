@@ -74,6 +74,15 @@ server_parameters:
         cpp_varname: "gTimeseriesBucketMinCount"
         default:  10
         validator: { gte: 1 }
+    "timeseriesBucketMinSize":
+        description: "If there is high memory pressure on the system, we will lower the maximum 
+                      size (in bytes) of measurements we pack into buckets. This value represents
+                      the absolute lowest size we will limit buckets to."
+        set_at: [ startup ]
+        cpp_vartype: "std::int32_t"
+        cpp_varname: "gTimeseriesBucketMinSize"
+        default: 5120 # 5KB
+        validator: { gte: 1 }
 
 enums:
     BucketGranularity:
@@ -106,7 +115,7 @@ structs:
             granularity:
                 description: "Describes the expected interval between subsequent measurements"
                 type: BucketGranularity
-                default: Seconds
+                optional: true
                 stability: stable
             bucketRoundingSeconds:
                 description: "Used to determine the minimum time boundary when opening a new bucket 
@@ -131,3 +140,13 @@ structs:
                 optional: true
                 type: BucketGranularity
                 stability: stable
+            bucketRoundingSeconds:
+                optional: true
+                type: safeInt
+                stability: unstable
+                validator: { gte: 1 }
+            bucketMaxSpanSeconds:
+                optional: true
+                type: safeInt
+                stability: unstable
+                validator: { gte: 1 }

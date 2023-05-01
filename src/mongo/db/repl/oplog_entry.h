@@ -459,8 +459,6 @@ public:
         kModifyShardedCollectionGlobalIndexCatalog,
         kCreateGlobalIndex,
         kDropGlobalIndex,
-        kInsertGlobalIndexKey,
-        kDeleteGlobalIndexKey,
     };
 
     // Get the in-memory size in bytes of a ReplOperation.
@@ -547,6 +545,12 @@ public:
      */
     static bool isCrudOpType(OpTypeEnum opType);
     bool isCrudOpType() const;
+
+    /**
+     * Returns true if the oplog entry is for a global index CRUD operation.
+     */
+    static bool isGlobalIndexCrudOpType(OpTypeEnum opType);
+    bool isGlobalIndexCrudOpType() const;
 
     /**
      * Returns true if the oplog entry is for an Update or Delete operation.
@@ -756,6 +760,7 @@ public:
     mongo::Date_t getWallClockTimeForPreImage() const;
 
     bool isCrudOpType() const;
+    bool isGlobalIndexCrudOpType() const;
     bool isUpdateOrDelete() const;
     bool isIndexCommandType() const;
     bool shouldPrepare() const;

@@ -64,7 +64,8 @@ std::vector<std::string> extractIndexNames(const std::vector<BSONObj>& specs) {
 bool checkIfValidTransition(IndexBuildState::StateFlag currentState,
                             IndexBuildState::StateFlag newState) {
     if ((currentState == IndexBuildState::StateFlag::kSetup &&
-         newState == IndexBuildState::StateFlag::kInProgress) ||
+         (newState == IndexBuildState::StateFlag::kInProgress ||
+          newState == IndexBuildState::StateFlag::kAborted)) ||
         (currentState == IndexBuildState::StateFlag::kInProgress &&
          newState != IndexBuildState::StateFlag::kSetup) ||
         (currentState == IndexBuildState::StateFlag::kPrepareCommit &&
@@ -212,6 +213,11 @@ bool ReplIndexBuildState::isAborted() const {
     return _indexBuildState.isAborted();
 }
 
+bool ReplIndexBuildState::isSettingUp() const {
+    stdx::unique_lock<Latch> lk(_mutex);
+    return _indexBuildState.isSettingUp();
+}
+
 std::string ReplIndexBuildState::getAbortReason() const {
     stdx::unique_lock<Latch> lk(_mutex);
     invariant(_indexBuildState.isAborted(),
@@ -310,6 +316,10 @@ ReplIndexBuildState::TryAbortResult ReplIndexBuildState::tryAbort(OperationConte
                     "waiting until index build is done setting up before attempting to abort",
                     "buildUUID"_attr = buildUUID);
         return TryAbortResult::kRetry;
+    }
+    if (_indexBuildState.isAborted()) {
+        // Returns if a concurrent operation already aborts the index build.
+        return TryAbortResult::kAlreadyAborted;
     }
     if (_waitForNextAction->getFuture().isReady()) {
         const auto nextAction = _waitForNextAction->getFuture().get(opCtx);

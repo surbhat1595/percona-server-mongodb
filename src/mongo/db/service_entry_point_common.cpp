@@ -1827,7 +1827,7 @@ Future<void> ExecCommandDatabase::_commandExec() {
                     bool stableLocalVersion = !inCriticalSection && sce->getVersionWanted();
 
                     if (stableLocalVersion &&
-                        ChunkVersion::isIgnoredVersion(sce->getVersionReceived())) {
+                        ShardVersion::isIgnoredVersion(sce->getVersionReceived())) {
                         // Shard is recovered, but the router didn't sent a shard version, therefore
                         // we just need to tell the router how much it needs to advance to
                         // (getVersionWanted).
@@ -1835,7 +1835,8 @@ Future<void> ExecCommandDatabase::_commandExec() {
                     }
 
                     if (stableLocalVersion &&
-                        sce->getVersionReceived().isOlderThan(*sce->getVersionWanted())) {
+                        sce->getVersionReceived().placementVersion().isOlderThan(
+                            sce->getVersionWanted()->placementVersion())) {
                         // Shard is recovered and the router is staler than the shard
                         return s;
                     }
@@ -2287,11 +2288,15 @@ void HandleRequest::completeOperation(DbResponse& response) {
 
     // Mark the op as complete, and log it if appropriate. Returns a boolean indicating whether
     // this op should be written to the profiler.
-    const bool shouldProfile = currentOp.completeAndLogOperation(opCtx,
-                                                                 MONGO_LOGV2_DEFAULT_COMPONENT,
-                                                                 response.response.size(),
-                                                                 executionContext->slowMsOverride,
-                                                                 executionContext->forceLog);
+    const bool shouldProfile = currentOp.completeAndLogOperation(
+        opCtx,
+        MONGO_LOGV2_DEFAULT_COMPONENT,
+        CollectionCatalog::get(opCtx)
+            ->getDatabaseProfileSettings(currentOp.getNSS().dbName())
+            .filter,
+        response.response.size(),
+        executionContext->slowMsOverride,
+        executionContext->forceLog);
 
     Top::get(opCtx->getServiceContext())
         .incrementGlobalLatencyStats(

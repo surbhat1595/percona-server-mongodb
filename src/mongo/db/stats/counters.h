@@ -132,7 +132,15 @@ public:
         return &*_acceptableErrorInCommand;
     }
 
+    // Reset all counters. To used for testing purposes only.
+    void resetForTest() {
+        _reset();
+    }
+
 private:
+    // Reset all counters.
+    void _reset();
+
     // Increment member `counter` by `n`, resetting all counters if it was > 2^60.
     void _checkWrap(CacheExclusive<AtomicWord<long long>> OpCounters::*counter, int n);
 
@@ -442,5 +450,10 @@ extern OperatorCounters operatorCountersMatchExpressions;
 extern OperatorCounters operatorCountersGroupAccumulatorExpressions;
 // Global counters for accumulator expressions apply to $setWindowFields.
 extern OperatorCounters operatorCountersWindowAccumulatorExpressions;
+
+// Track the number of {multi:true} updates.
+extern CounterMetric updateManyCount;
+// Track the number of deleteMany calls.
+extern CounterMetric deleteManyCount;
 
 }  // namespace mongo

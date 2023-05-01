@@ -36,6 +36,7 @@
 #include "mongo/db/catalog/commit_quorum_options.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/repl/rollback.h"
+#include "mongo/db/transaction/transaction_operations.h"
 
 namespace mongo {
 
@@ -111,6 +112,8 @@ struct IndexCollModInfo {
  */
 class OpObserver {
 public:
+    using ApplyOpsOplogSlotAndOperationAssignment = TransactionOperations::ApplyOpsInfo;
+
     enum class CollectionDropType {
         // The collection is being dropped immediately, in one step.
         kOnePhase,
@@ -410,15 +413,11 @@ public:
      * transaction, before the RecoveryUnit onCommit() is called.  It must not be called when no
      * transaction is active.
      *
-     * The 'statements' are the list of CRUD operations to be applied in this transaction.
-     *
-     * The 'numberOfPrePostImagesToWrite' is the number of CRUD operations that have a pre-image
-     * to write as a noop oplog entry. The op observer will reserve oplog slots for these
-     * preimages in addition to the statements.
+     * The 'transactionOperations' contains the list of CRUD operations (formerly 'statements') to
+     * be applied in this transaction.
      */
     virtual void onUnpreparedTransactionCommit(OperationContext* opCtx,
-                                               std::vector<repl::ReplOperation>* statements,
-                                               size_t numberOfPrePostImagesToWrite) = 0;
+                                               TransactionOperations* transactionOperations) = 0;
     /**
      * The onPreparedTransactionCommit method is called on the commit of a prepared transaction,
      * after the RecoveryUnit onCommit() is called.  It must not be called when no transaction is
@@ -457,25 +456,6 @@ public:
     virtual void onBatchedWriteAbort(OperationContext* opCtx) = 0;
 
     /**
-     * Contains "applyOps" oplog entries for a transaction. "applyOps" entries are not actual
-     * "applyOps" entries to be written to the oplog, but comprise certain parts of those entries -
-     * BSON serialized operations, and the assigned oplog slot. The operations in field
-     * 'ApplyOpsEntry::operations' should be considered opaque outside the OpObserver.
-     */
-    struct ApplyOpsOplogSlotAndOperationAssignment {
-        struct ApplyOpsEntry {
-            OplogSlot oplogSlot;
-            std::vector<BSONObj> operations;
-        };
-
-        // Representation of "applyOps" oplog entries.
-        std::vector<ApplyOpsEntry> applyOpsEntries;
-
-        // Number of oplog slots utilized.
-        size_t numberOfOplogSlotsUsed;
-    };
-
-    /**
      * This method is called before an atomic transaction is prepared. It must be called when a
      * transaction is active.
      *
@@ -490,14 +470,15 @@ public:
      * The 'wallClockTime' is the time to record as wall clock time on oplog entries resulting from
      * transaction preparation.
      *
-     * The 'statements' are the list of CRUD operations to be applied in this transaction. The
-     * operations may be modified by setting pre-image and post-image oplog entry timestamps.
+     * The 'transactionOperations' contains the list of CRUD operations to be applied in this
+     * transaction. The operations may be modified by setting pre-image and post-image oplog entry
+     * timestamps.
      */
     virtual std::unique_ptr<ApplyOpsOplogSlotAndOperationAssignment> preTransactionPrepare(
         OperationContext* opCtx,
         const std::vector<OplogSlot>& reservedSlots,
         Date_t wallClockTime,
-        std::vector<repl::ReplOperation>* statements) = 0;
+        TransactionOperations* transactionOperations) = 0;
 
     /**
      * The onTransactionPrepare method is called when an atomic transaction is prepared. It must be

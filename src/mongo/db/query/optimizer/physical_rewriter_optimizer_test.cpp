@@ -33,9 +33,10 @@
 #include "mongo/db/query/optimizer/cascades/cost_derivation.h"
 #include "mongo/db/query/optimizer/cascades/rewriter_rules.h"
 #include "mongo/db/query/optimizer/explain.h"
-#include "mongo/db/query/optimizer/metadata.h"
+#include "mongo/db/query/optimizer/metadata_factory.h"
 #include "mongo/db/query/optimizer/node.h"
 #include "mongo/db/query/optimizer/opt_phase_manager.h"
+#include "mongo/db/query/optimizer/rewrites/const_eval.h"
 #include "mongo/db/query/optimizer/utils/unit_test_utils.h"
 #include "mongo/unittest/unittest.h"
 
@@ -70,7 +71,7 @@ TEST(PhysRewriter, PhysicalRewriterBasic) {
          OptPhase::MemoExplorationPhase,
          OptPhase::MemoImplementationPhase},
         prefixId,
-        {{{"test", {{}, {}}}}},
+        {{{"test", createScanDef({}, {})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
@@ -275,7 +276,7 @@ TEST(PhysRewriter, GroupBy) {
          OptPhase::MemoExplorationPhase,
          OptPhase::MemoImplementationPhase},
         prefixId,
-        {{{"test", {{}, {}}}}},
+        {{{"test", createScanDef({}, {})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
@@ -345,12 +346,23 @@ TEST(PhysRewriter, GroupBy1) {
          OptPhase::MemoExplorationPhase,
          OptPhase::MemoImplementationPhase},
         prefixId,
-        {{{"test", {{}, {}}}}},
+        {{{"test", createScanDef({}, {})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
     phaseManager.optimize(optimized);
     ASSERT_EQ(5, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+
+    // Assert we have specific CE details at certain nodes.
+    std::vector<std::string> cePaths = {"Memo.0.physicalNodes.0.nodeInfo.node.ce",
+                                        "Memo.1.physicalNodes.0.nodeInfo.node.ce",
+                                        "Memo.3.physicalNodes.0.nodeInfo.node.ce",
+                                        "Memo.4.physicalNodes.0.nodeInfo.node.ce"};
+    BSONObj bsonMemo = ExplainGenerator::explainMemoBSONObj(phaseManager.getMemo());
+    for (const auto& cePath : cePaths) {
+        BSONElement ce = dotted_path_support::extractElementAtPath(bsonMemo, cePath);
+        ASSERT(!ce.eoo());
+    }
 
     // Projection "pb1" is unused and we do not generate an aggregation expression for it.
     ASSERT_EXPLAIN_V2(
@@ -406,7 +418,7 @@ TEST(PhysRewriter, Unwind) {
          OptPhase::MemoExplorationPhase,
          OptPhase::MemoImplementationPhase},
         prefixId,
-        {{{"test", {{}, {}}}}},
+        {{{"test", createScanDef({}, {})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
@@ -484,7 +496,7 @@ TEST(PhysRewriter, DuplicateFilter) {
          OptPhase::MemoExplorationPhase,
          OptPhase::MemoImplementationPhase},
         prefixId,
-        {{{"c1", {{}, {}}}}},
+        {{{"c1", createScanDef({}, {})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
@@ -545,7 +557,7 @@ TEST(PhysRewriter, FilterCollation) {
          OptPhase::MemoExplorationPhase,
          OptPhase::MemoImplementationPhase},
         prefixId,
-        {{{"c1", {{}, {}}}}},
+        {{{"c1", createScanDef({}, {})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
@@ -601,7 +613,7 @@ TEST(PhysRewriter, EvalCollation) {
          OptPhase::MemoExplorationPhase,
          OptPhase::MemoImplementationPhase},
         prefixId,
-        {{{"c1", {{}, {}}}}},
+        {{{"c1", createScanDef({}, {})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
@@ -656,7 +668,7 @@ TEST(PhysRewriter, FilterEvalCollation) {
          OptPhase::MemoExplorationPhase,
          OptPhase::MemoImplementationPhase},
         prefixId,
-        {{{"c1", {{}, {}}}}},
+        {{{"c1", createScanDef({}, {})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
@@ -711,8 +723,7 @@ TEST(PhysRewriter, FilterIndexing) {
             {OptPhase::MemoSubstitutionPhase, OptPhase::MemoExplorationPhase},
             prefixId,
             {{{"c1",
-               ScanDefinition{{},
-                              {{"index1", makeIndexDefinition("a", CollationOp::Ascending)}}}}}},
+               createScanDef({}, {{"index1", makeIndexDefinition("a", CollationOp::Ascending)}})}}},
             {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
         // Demonstrate sargable node is rewritten from filter node.
@@ -757,8 +768,7 @@ TEST(PhysRewriter, FilterIndexing) {
              OptPhase::MemoImplementationPhase},
             prefixId,
             {{{"c1",
-               ScanDefinition{{},
-                              {{"index1", makeIndexDefinition("a", CollationOp::Ascending)}}}}}},
+               createScanDef({}, {{"index1", makeIndexDefinition("a", CollationOp::Ascending)}})}}},
             {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
         ABT optimized = rootNode;
@@ -799,7 +809,7 @@ TEST(PhysRewriter, FilterIndexing) {
              OptPhase::MemoExplorationPhase,
              OptPhase::MemoImplementationPhase},
             prefixId,
-            {{{"c1", {{}, {}}}}},
+            {{{"c1", createScanDef({}, {})}}},
             {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
         ABT optimized = rootNode;
@@ -864,7 +874,7 @@ TEST(PhysRewriter, FilterIndexing1) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{{}, {{"index1", makeIndexDefinition("a", CollationOp::Ascending)}}}}}},
+           createScanDef({}, {{"index1", makeIndexDefinition("a", CollationOp::Ascending)}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -929,11 +939,11 @@ TEST(PhysRewriter, FilterIndexing2) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{{},
-                          {{"index1",
-                            {{{make<PathGet>("a", make<PathGet>("b", make<PathIdentity>())),
-                               CollationOp::Ascending}},
-                             false /*isMultiKey*/}}}}}}},
+           createScanDef({},
+                         {{"index1",
+                           {{{make<PathGet>("a", make<PathGet>("b", make<PathIdentity>())),
+                              CollationOp::Ascending}},
+                            false /*isMultiKey*/}}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -1009,10 +1019,10 @@ TEST(PhysRewriter, FilterIndexing2NonSarg) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
-                 makeIndexDefinition("a", CollationOp::Ascending, false /*isMultiKey*/)}}}}}},
+                 makeIndexDefinition("a", CollationOp::Ascending, false /*isMultiKey*/)}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -1089,12 +1099,11 @@ TEST(PhysRewriter, FilterIndexing2NonSarg) {
     int physicalRuleIndex = 0;
     const Memo& memo = phaseManager.getMemo();
     for (size_t groupId = 0; groupId < memo.getGroupCount(); groupId++) {
-        const Group& group = memo.getGroup(groupId);
-        for (const auto rule : group._rules) {
+        for (const auto rule : memo.getRules(groupId)) {
             ASSERT(rule == logicalRules[logicalRuleIndex]);
             logicalRuleIndex++;
         }
-        for (const auto& physOptResult : group._physicalNodes.getNodes()) {
+        for (const auto& physOptResult : memo.getPhysicalNodes(groupId)) {
             const auto rule = physOptResult->_nodeInfo->_rule;
             ASSERT(rule == physicalRules[physicalRuleIndex]);
             physicalRuleIndex++;
@@ -1128,14 +1137,14 @@ TEST(PhysRewriter, FilterIndexing3) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
                  IndexDefinition{{{makeNonMultikeyIndexPath("a"), CollationOp::Ascending},
                                   {makeNonMultikeyIndexPath("b"), CollationOp::Ascending}},
                                  false /*isMultiKey*/,
                                  {DistributionType::Centralized},
-                                 {}}}}}}}},
+                                 {}}}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
@@ -1183,13 +1192,13 @@ TEST(PhysRewriter, FilterIndexing3MultiKey) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{{},
-                          {{"index1",
-                            IndexDefinition{{{makeIndexPath("a"), CollationOp::Ascending},
-                                             {makeIndexPath("b"), CollationOp::Ascending}},
-                                            true /*isMultiKey*/,
-                                            {DistributionType::Centralized},
-                                            {}}}}}}}},
+           createScanDef({},
+                         {{"index1",
+                           IndexDefinition{{{makeIndexPath("a"), CollationOp::Ascending},
+                                            {makeIndexPath("b"), CollationOp::Ascending}},
+                                           true /*isMultiKey*/,
+                                           {DistributionType::Centralized},
+                                           {}}}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
@@ -1277,7 +1286,7 @@ TEST(PhysRewriter, FilterIndexing4) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
                  IndexDefinition{{{makeNonMultikeyIndexPath("a"), CollationOp::Ascending},
@@ -1286,7 +1295,7 @@ TEST(PhysRewriter, FilterIndexing4) {
                                   {makeNonMultikeyIndexPath("d"), CollationOp::Ascending}},
                                  false /*isMultiKey*/,
                                  {DistributionType::Centralized},
-                                 {}}}}}}}},
+                                 {}}}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
@@ -1295,6 +1304,18 @@ TEST(PhysRewriter, FilterIndexing4) {
     phaseManager.getHints()._disableHashJoinRIDIntersect = true;
     phaseManager.optimize(optimized);
     ASSERT_BETWEEN(60, 75, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+
+    // Assert the correct CEs for each node in group 1. Group 1 contains residual predicates.
+    std::vector<std::pair<std::string, double>> pathAndCEs = {
+        {"Memo.1.physicalNodes.1.nodeInfo.node.ce", 143.6810174757394},
+        {"Memo.1.physicalNodes.1.nodeInfo.node.child.ce", 189.57056733575502},
+        {"Memo.1.physicalNodes.1.nodeInfo.node.child.child.ce", 330.00000000000006},
+        {"Memo.1.physicalNodes.1.nodeInfo.node.child.child.child.ce", 330.00000000000006}};
+    const BSONObj explain = ExplainGenerator::explainMemoBSONObj(phaseManager.getMemo());
+    for (const auto& pathAndCE : pathAndCEs) {
+        BSONElement el = dotted_path_support::extractElementAtPath(explain, pathAndCE.first);
+        ASSERT_EQ(el.Double(), pathAndCE.second);
+    }
 
     ASSERT_EXPLAIN_V2(
         "Root []\n"
@@ -1373,14 +1394,14 @@ TEST(PhysRewriter, FilterIndexing5) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
                  IndexDefinition{{{makeNonMultikeyIndexPath("a"), CollationOp::Ascending},
                                   {makeNonMultikeyIndexPath("b"), CollationOp::Ascending}},
                                  false /*isMultiKey*/,
                                  {DistributionType::Centralized},
-                                 {}}}}}}}},
+                                 {}}}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
@@ -1463,14 +1484,14 @@ TEST(PhysRewriter, FilterIndexing6) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
                  IndexDefinition{{{makeNonMultikeyIndexPath("a"), CollationOp::Ascending},
                                   {makeNonMultikeyIndexPath("b"), CollationOp::Ascending}},
                                  false /*isMultiKey*/,
                                  {DistributionType::Centralized},
-                                 {}}}}}}}},
+                                 {}}}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
@@ -1526,7 +1547,7 @@ TEST(PhysRewriter, FilterIndexingStress) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
                  IndexDefinition{{{makeNonMultikeyIndexPath("field0"), CollationOp::Ascending},
@@ -1544,7 +1565,7 @@ TEST(PhysRewriter, FilterIndexingStress) {
                                   {makeNonMultikeyIndexPath("field4"), CollationOp::Ascending}},
                                  false /*isMultiKey*/,
                                  {DistributionType::Centralized},
-                                 {}}}}}}}},
+                                 {}}}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
@@ -1626,10 +1647,10 @@ TEST(PhysRewriter, FilterIndexingVariable) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
-                 makeIndexDefinition("a", CollationOp::Ascending, false /*isMultiKey*/)}}}}}},
+                 makeIndexDefinition("a", CollationOp::Ascending, false /*isMultiKey*/)}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
@@ -1721,7 +1742,7 @@ TEST(PhysRewriter, FilterIndexingMaxKey) {
          OptPhase::MemoExplorationPhase,
          OptPhase::MemoImplementationPhase},
         prefixId,
-        {{{"c1", ScanDefinition{{}, {}}}}},
+        {{{"c1", createScanDef({}, {})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -1787,7 +1808,7 @@ TEST(PhysRewriter, SargableProjectionRenames) {
     OptPhaseManager phaseManager(
         {OptPhase::MemoSubstitutionPhase},
         prefixId,
-        {{{"c1", {{}, {}}}}},
+        {{{"c1", createScanDef({}, {})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -1849,7 +1870,7 @@ TEST(PhysRewriter, SargableAcquireProjection) {
     OptPhaseManager phaseManager(
         {OptPhase::MemoSubstitutionPhase},
         prefixId,
-        {{{"c1", {{}, {}}}}},
+        {{{"c1", createScanDef({}, {})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -1918,10 +1939,11 @@ TEST(PhysRewriter, FilterReorder) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         false /*requireRID*/,
-        {{{"c1", ScanDefinition{{}, {}}}}},
+        {{{"c1", createScanDef({}, {})}}},
         std::make_unique<HintedCE>(std::move(hints)),
         std::make_unique<DefaultCosting>(),
         {} /*pathToInterval*/,
+        ConstEval::constFold,
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
@@ -2013,13 +2035,14 @@ TEST(PhysRewriter, CoveredScan) {
         prefixId,
         false /*requireRID*/,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
-                 makeIndexDefinition("a", CollationOp::Ascending, false /*isMultiKey*/)}}}}}},
+                 makeIndexDefinition("a", CollationOp::Ascending, false /*isMultiKey*/)}})}}},
         std::make_unique<HintedCE>(std::move(hints)),
         std::make_unique<DefaultCosting>(),
         {} /*pathToInterval*/,
+        ConstEval::constFold,
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
@@ -2083,10 +2106,10 @@ TEST(PhysRewriter, EvalIndexing) {
              OptPhase::MemoImplementationPhase},
             prefixId,
             {{{"c1",
-               ScanDefinition{
+               createScanDef(
                    {},
                    {{"index1",
-                     makeIndexDefinition("a", CollationOp::Ascending, false /*isMultiKey*/)}}}}}},
+                     makeIndexDefinition("a", CollationOp::Ascending, false /*isMultiKey*/)}})}}},
             {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
         ABT optimized = rootNode;
@@ -2116,10 +2139,10 @@ TEST(PhysRewriter, EvalIndexing) {
              OptPhase::MemoImplementationPhase},
             prefixId,
             {{{"c1",
-               ScanDefinition{
+               createScanDef(
                    {},
                    {{"index1",
-                     makeIndexDefinition("a", CollationOp::Clustered, false /*isMultiKey*/)}}}}}},
+                     makeIndexDefinition("a", CollationOp::Clustered, false /*isMultiKey*/)}})}}},
             {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
         ABT optimized = rootNode;
@@ -2175,10 +2198,10 @@ TEST(PhysRewriter, EvalIndexing1) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
-                 makeIndexDefinition("a", CollationOp::Ascending, false /*isMultiKey*/)}}}}}},
+                 makeIndexDefinition("a", CollationOp::Ascending, false /*isMultiKey*/)}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -2247,10 +2270,10 @@ TEST(PhysRewriter, EvalIndexing2) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
-                 makeIndexDefinition("a", CollationOp::Ascending, false /*isMultiKey*/)}}}}}},
+                 makeIndexDefinition("a", CollationOp::Ascending, false /*isMultiKey*/)}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -2331,14 +2354,15 @@ TEST(PhysRewriter, MultiKeyIndex) {
         prefixId,
         false /*requireRID*/,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1", makeIndexDefinition("a", CollationOp::Ascending, false /*isMultiKey*/)},
                 {"index2",
-                 makeIndexDefinition("b", CollationOp::Descending, false /*isMultiKey*/)}}}}}},
+                 makeIndexDefinition("b", CollationOp::Descending, false /*isMultiKey*/)}})}}},
         std::make_unique<HintedCE>(std::move(hints)),
         std::make_unique<DefaultCosting>(),
         {} /*pathToInterval*/,
+        ConstEval::constFold,
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     {
@@ -2553,7 +2577,7 @@ TEST(PhysRewriter, CompoundIndex1) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
                  IndexDefinition{{{makeNonMultikeyIndexPath("a"), CollationOp::Ascending},
@@ -2562,7 +2586,7 @@ TEST(PhysRewriter, CompoundIndex1) {
                 {"index2",
                  IndexDefinition{{{makeNonMultikeyIndexPath("b"), CollationOp::Ascending},
                                   {makeNonMultikeyIndexPath("d"), CollationOp::Ascending}},
-                                 false /*isMultiKey*/}}}}}}},
+                                 false /*isMultiKey*/}}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -2638,7 +2662,7 @@ TEST(PhysRewriter, CompoundIndex2) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {
                    {"index1",
@@ -2649,7 +2673,7 @@ TEST(PhysRewriter, CompoundIndex2) {
                     IndexDefinition{{{makeNonMultikeyIndexPath("b"), CollationOp::Ascending},
                                      {makeNonMultikeyIndexPath("d"), CollationOp::Ascending}},
                                     false /*isMultiKey*/}},
-               }}}}},
+               })}}},
         {true /*debugMode*/, 3 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -2725,15 +2749,15 @@ TEST(PhysRewriter, CompoundIndex3) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{{},
-                          {{"index1",
-                            IndexDefinition{{{makeIndexPath("a"), CollationOp::Ascending},
-                                             {makeIndexPath("c"), CollationOp::Descending}},
-                                            true /*isMultiKey*/}},
-                           {"index2",
-                            IndexDefinition{{{makeIndexPath("b"), CollationOp::Ascending},
-                                             {makeIndexPath("d"), CollationOp::Ascending}},
-                                            true /*isMultiKey*/}}}}}}},
+           createScanDef({},
+                         {{"index1",
+                           IndexDefinition{{{makeIndexPath("a"), CollationOp::Ascending},
+                                            {makeIndexPath("c"), CollationOp::Descending}},
+                                           true /*isMultiKey*/}},
+                          {"index2",
+                           IndexDefinition{{{makeIndexPath("b"), CollationOp::Ascending},
+                                            {makeIndexPath("d"), CollationOp::Ascending}},
+                                           true /*isMultiKey*/}}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -2813,7 +2837,7 @@ TEST(PhysRewriter, CompoundIndex4Negative) {
         prefixId,
         false /*requireRID*/,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
                  IndexDefinition{{{makeNonMultikeyIndexPath("a"), CollationOp::Ascending},
@@ -2822,10 +2846,11 @@ TEST(PhysRewriter, CompoundIndex4Negative) {
                 {"index2",
                  IndexDefinition{{{makeNonMultikeyIndexPath("b"), CollationOp::Ascending},
                                   {makeNonMultikeyIndexPath("d"), CollationOp::Ascending}},
-                                 false /*isMultiKey*/}}}}}}},
+                                 false /*isMultiKey*/}}})}}},
         std::make_unique<HintedCE>(std::move(hints)),
         std::make_unique<DefaultCosting>(),
         {} /*pathToInterval*/,
+        ConstEval::constFold,
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -2886,11 +2911,11 @@ TEST(PhysRewriter, IndexBoundsIntersect) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{{},
-                          {{"index1",
-                            IndexDefinition{{{makeIndexPath("b"), CollationOp::Ascending},
-                                             {makeIndexPath("a"), CollationOp::Ascending}},
-                                            true /*isMultiKey*/}}}}}}},
+           createScanDef({},
+                         {{"index1",
+                           IndexDefinition{{{makeIndexPath("b"), CollationOp::Ascending},
+                                            {makeIndexPath("a"), CollationOp::Ascending}},
+                                           true /*isMultiKey*/}}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -2961,11 +2986,11 @@ TEST(PhysRewriter, IndexBoundsIntersect1) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
                  IndexDefinition{{{makeNonMultikeyIndexPath("a"), CollationOp::Ascending}},
-                                 false /*isMultiKey*/}}}}}}},
+                                 false /*isMultiKey*/}}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -3029,10 +3054,10 @@ TEST(PhysRewriter, IndexBoundsIntersect2) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{{},
-                          {{"index1",
-                            IndexDefinition{{{makeIndexPath("a"), CollationOp::Ascending}},
-                                            true /*isMultiKey*/}}}}}}},
+           createScanDef({},
+                         {{"index1",
+                           IndexDefinition{{{makeIndexPath("a"), CollationOp::Ascending}},
+                                           true /*isMultiKey*/}}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -3103,7 +3128,7 @@ TEST(PhysRewriter, IndexBoundsIntersect3) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
                  IndexDefinition{{{makeIndexPath(FieldPathType{"a", "b"}, true /*isMultiKey*/),
@@ -3112,7 +3137,7 @@ TEST(PhysRewriter, IndexBoundsIntersect3) {
                 {"index2",
                  IndexDefinition{{{makeIndexPath(FieldPathType{"a", "c"}, true /*isMultiKey*/),
                                    CollationOp::Ascending}},
-                                 true /*isMultiKey*/}}}}}}},
+                                 true /*isMultiKey*/}}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -3182,12 +3207,12 @@ TEST(PhysRewriter, IndexResidualReq) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
                  IndexDefinition{{{makeNonMultikeyIndexPath("a"), CollationOp::Ascending},
                                   {makeNonMultikeyIndexPath("b"), CollationOp::Ascending}},
-                                 false /*isMultiKey*/}}}}}}},
+                                 false /*isMultiKey*/}}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -3302,7 +3327,7 @@ TEST(PhysRewriter, IndexResidualReq1) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
                  makeCompositeIndexDefinition({{"a", CollationOp::Ascending, false /*isMultiKey*/},
@@ -3318,7 +3343,7 @@ TEST(PhysRewriter, IndexResidualReq1) {
                 {"index3",
                  makeCompositeIndexDefinition({{"a", CollationOp::Ascending, false /*isMultiKey*/},
                                                {"d", CollationOp::Ascending, false /*isMultiKey*/}},
-                                              false /*isMultiKey*/)}}}}}},
+                                              false /*isMultiKey*/)}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -3385,12 +3410,12 @@ TEST(PhysRewriter, IndexResidualReq2) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{{},
-                          {{"index1",
-                            makeCompositeIndexDefinition(
-                                {{"a", CollationOp::Ascending, true /*isMultiKey*/},
-                                 {"c", CollationOp::Ascending, true /*isMultiKey*/},
-                                 {"b", CollationOp::Ascending, true /*isMultiKey*/}})}}}}}},
+           createScanDef({},
+                         {{"index1",
+                           makeCompositeIndexDefinition(
+                               {{"a", CollationOp::Ascending, true /*isMultiKey*/},
+                                {"c", CollationOp::Ascending, true /*isMultiKey*/},
+                                {"b", CollationOp::Ascending, true /*isMultiKey*/}})}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -3465,10 +3490,11 @@ TEST(PhysRewriter, ElemMatchIndex) {
         prefixId,
         false /*requireRID*/,
         {{{"c1",
-           ScanDefinition{{}, {{"index1", makeIndexDefinition("a", CollationOp::Ascending)}}}}}},
+           createScanDef({}, {{"index1", makeIndexDefinition("a", CollationOp::Ascending)}})}}},
         std::make_unique<HeuristicCE>(),
         std::make_unique<DefaultCosting>(),
         defaultConvertPathToInterval,
+        ConstEval::constFold,
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -3548,14 +3574,15 @@ TEST(PhysRewriter, ElemMatchIndex1) {
         prefixId,
         false /*requireRID*/,
         {{{"c1",
-           ScanDefinition{{},
-                          {{"index1",
-                            makeCompositeIndexDefinition(
-                                {{"b", CollationOp::Ascending, true /*isMultiKey*/},
-                                 {"a", CollationOp::Ascending, true /*isMultiKey*/}})}}}}}},
+           createScanDef({},
+                         {{"index1",
+                           makeCompositeIndexDefinition(
+                               {{"b", CollationOp::Ascending, true /*isMultiKey*/},
+                                {"a", CollationOp::Ascending, true /*isMultiKey*/}})}})}}},
         std::make_unique<HeuristicCE>(),
         std::make_unique<DefaultCosting>(),
         defaultConvertPathToInterval,
+        ConstEval::constFold,
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -3630,13 +3657,14 @@ TEST(PhysRewriter, ElemMatchIndexNoArrays) {
         prefixId,
         false /*requireRID*/,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
-                 makeIndexDefinition("a", CollationOp::Ascending, false /*multiKey*/)}}}}}},
+                 makeIndexDefinition("a", CollationOp::Ascending, false /*multiKey*/)}})}}},
         std::make_unique<HeuristicCE>(),
         std::make_unique<DefaultCosting>(),
         defaultConvertPathToInterval,
+        ConstEval::constFold,
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -3698,14 +3726,15 @@ TEST(PhysRewriter, ObjectElemMatch) {
         prefixId,
         false /*requireRID*/,
         {{{"c1",
-           ScanDefinition{{},
-                          {{"index1",
-                            makeCompositeIndexDefinition(
-                                {{"b", CollationOp::Ascending, true /*isMultiKey*/},
-                                 {"a", CollationOp::Ascending, true /*isMultiKey*/}})}}}}}},
+           createScanDef({},
+                         {{"index1",
+                           makeCompositeIndexDefinition(
+                               {{"b", CollationOp::Ascending, true /*isMultiKey*/},
+                                {"a", CollationOp::Ascending, true /*isMultiKey*/}})}})}}},
         std::make_unique<HeuristicCE>(),
         std::make_unique<DefaultCosting>(),
         defaultConvertPathToInterval,
+        ConstEval::constFold,
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -3782,14 +3811,15 @@ TEST(PhysRewriter, ObjectElemMatchPathObj) {
         prefixId,
         false /*requireRID*/,
         {{{"c1",
-           ScanDefinition{{},
-                          {{"index1",
-                            makeCompositeIndexDefinition(
-                                {{"b", CollationOp::Ascending, true /*isMultiKey*/},
-                                 {"a", CollationOp::Ascending, true /*isMultiKey*/}})}}}}}},
+           createScanDef({},
+                         {{"index1",
+                           makeCompositeIndexDefinition(
+                               {{"b", CollationOp::Ascending, true /*isMultiKey*/},
+                                {"a", CollationOp::Ascending, true /*isMultiKey*/}})}})}}},
         std::make_unique<HeuristicCE>(),
         std::make_unique<DefaultCosting>(),
         defaultConvertPathToInterval,
+        ConstEval::constFold,
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -3862,11 +3892,11 @@ TEST(PhysRewriter, ArrayConstantIndex) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{{},
-                          {{"index1",
-                            makeCompositeIndexDefinition(
-                                {{"b", CollationOp::Ascending, true /*isMultiKey*/},
-                                 {"a", CollationOp::Ascending, true /*isMultiKey*/}})}}}}}},
+           createScanDef({},
+                         {{"index1",
+                           makeCompositeIndexDefinition(
+                               {{"b", CollationOp::Ascending, true /*isMultiKey*/},
+                                {"a", CollationOp::Ascending, true /*isMultiKey*/}})}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -3876,7 +3906,6 @@ TEST(PhysRewriter, ArrayConstantIndex) {
     // Demonstrate we get index bounds to handle the array constant, while we also retain the
     // original filter. We have index bound with the array itself unioned with bound using the first
     // array element.
-    // TODO SERVER-70120: Reduce GroupBy Unique to just GroupBy.
     ASSERT_EXPLAIN_V2(
         "Root []\n"
         "|   |   projections: \n"
@@ -3905,9 +3934,6 @@ TEST(PhysRewriter, ArrayConstantIndex) {
         "|   |           Source []\n"
         "|   RefBlock: \n"
         "|       Variable [rid_0]\n"
-        "Unique []\n"
-        "|   projections: \n"
-        "|       rid_0\n"
         "GroupBy []\n"
         "|   |   groupings: \n"
         "|   |       RefBlock: \n"
@@ -3970,7 +3996,7 @@ TEST(PhysRewriter, ArrayConstantNoIndex) {
          OptPhase::MemoExplorationPhase,
          OptPhase::MemoImplementationPhase},
         prefixId,
-        {{{"c1", {{}, {}}}}},
+        {{{"c1", createScanDef({}, {})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -4032,7 +4058,8 @@ TEST(PhysRewriter, ParallelScan) {
          OptPhase::MemoExplorationPhase,
          OptPhase::MemoImplementationPhase},
         prefixId,
-        {{{"c1", ScanDefinition{{}, {}, {DistributionType::UnknownPartitioning}}}},
+        {{{"c1",
+           createScanDef({}, {}, ConstEval::constFold, {DistributionType::UnknownPartitioning})}},
          5 /*numberOfPartitions*/},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
@@ -4094,10 +4121,11 @@ TEST(PhysRewriter, HashPartitioning) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{{},
-                          {},
-                          {DistributionType::HashPartitioning,
-                           makeSeq(make<PathGet>("a", make<PathIdentity>()))}}}},
+           createScanDef({},
+                         {},
+                         ConstEval::constFold,
+                         {DistributionType::HashPartitioning,
+                          makeSeq(make<PathGet>("a", make<PathIdentity>()))})}},
          5 /*numberOfPartitions*/},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
@@ -4178,7 +4206,7 @@ TEST(PhysRewriter, IndexPartitioning) {
         prefixId,
         false /*requireRID*/,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
                  IndexDefinition{
@@ -4186,11 +4214,13 @@ TEST(PhysRewriter, IndexPartitioning) {
                      false /*isMultiKey*/,
                      {DistributionType::HashPartitioning, makeSeq(makeNonMultikeyIndexPath("a"))},
                      {}}}},
-               {DistributionType::HashPartitioning, makeSeq(makeNonMultikeyIndexPath("b"))}}}},
+               ConstEval::constFold,
+               {DistributionType::HashPartitioning, makeSeq(makeNonMultikeyIndexPath("b"))})}},
          5 /*numberOfPartitions*/},
         std::make_unique<HintedCE>(std::move(hints)),
         std::make_unique<DefaultCosting>(),
         {} /*pathToInterval*/,
+        ConstEval::constFold,
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -4292,7 +4322,7 @@ TEST(PhysRewriter, IndexPartitioning1) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
                  IndexDefinition{
@@ -4306,7 +4336,8 @@ TEST(PhysRewriter, IndexPartitioning1) {
                      false /*isMultiKey*/,
                      {DistributionType::HashPartitioning, makeSeq(makeNonMultikeyIndexPath("b"))},
                      {}}}},
-               {DistributionType::HashPartitioning, makeSeq(makeNonMultikeyIndexPath("c"))}}}},
+               ConstEval::constFold,
+               {DistributionType::HashPartitioning, makeSeq(makeNonMultikeyIndexPath("c"))})}},
          5 /*numberOfPartitions*/},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
@@ -4363,7 +4394,8 @@ TEST(PhysRewriter, LocalGlobalAgg) {
          OptPhase::MemoExplorationPhase,
          OptPhase::MemoImplementationPhase},
         prefixId,
-        {{{"c1", ScanDefinition{{}, {}, {DistributionType::UnknownPartitioning}}}},
+        {{{"c1",
+           createScanDef({}, {}, ConstEval::constFold, {DistributionType::UnknownPartitioning})}},
          5 /*numberOfPartitions*/},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
@@ -4440,7 +4472,8 @@ TEST(PhysRewriter, LocalGlobalAgg1) {
          OptPhase::MemoExplorationPhase,
          OptPhase::MemoImplementationPhase},
         prefixId,
-        {{{"c1", ScanDefinition{{}, {}, {DistributionType::UnknownPartitioning}}}},
+        {{{"c1",
+           createScanDef({}, {}, ConstEval::constFold, {DistributionType::UnknownPartitioning})}},
          5 /*numberOfPartitions*/},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
@@ -4494,7 +4527,8 @@ TEST(PhysRewriter, LocalLimitSkip) {
          OptPhase::MemoExplorationPhase,
          OptPhase::MemoImplementationPhase},
         prefixId,
-        {{{"c1", ScanDefinition{{}, {}, {DistributionType::UnknownPartitioning}}}},
+        {{{"c1",
+           createScanDef({}, {}, ConstEval::constFold, {DistributionType::UnknownPartitioning})}},
          5 /*numberOfPartitions*/},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
@@ -4627,7 +4661,7 @@ TEST(PhysRewriter, CollationLimit) {
          OptPhase::MemoExplorationPhase,
          OptPhase::MemoImplementationPhase},
         prefixId,
-        {{{"c1", {{}, {}}}}},
+        {{{"c1", createScanDef({}, {})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -4769,12 +4803,12 @@ TEST(PhysRewriter, PartialIndex1) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{{},
-                          {{"index1",
-                            IndexDefinition{{{makeIndexPath("a"), CollationOp::Ascending}},
-                                            true /*isMultiKey*/,
-                                            {DistributionType::Centralized},
-                                            std::move(conversionResult->_reqMap)}}}}}}},
+           createScanDef({},
+                         {{"index1",
+                           IndexDefinition{{{makeIndexPath("a"), CollationOp::Ascending}},
+                                           true /*isMultiKey*/,
+                                           {DistributionType::Centralized},
+                                           std::move(conversionResult->_reqMap)}}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -4850,12 +4884,12 @@ TEST(PhysRewriter, PartialIndex2) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{{},
-                          {{"index1",
-                            IndexDefinition{{{makeIndexPath("a"), CollationOp::Ascending}},
-                                            true /*isMultiKey*/,
-                                            {DistributionType::Centralized},
-                                            std::move(conversionResult->_reqMap)}}}}}}},
+           createScanDef({},
+                         {{"index1",
+                           IndexDefinition{{{makeIndexPath("a"), CollationOp::Ascending}},
+                                           true /*isMultiKey*/,
+                                           {DistributionType::Centralized},
+                                           std::move(conversionResult->_reqMap)}}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -4930,12 +4964,12 @@ TEST(PhysRewriter, PartialIndexReject) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{{},
-                          {{"index1",
-                            IndexDefinition{{{makeIndexPath("a"), CollationOp::Ascending}},
-                                            true /*isMultiKey*/,
-                                            {DistributionType::Centralized},
-                                            std::move(conversionResult->_reqMap)}}}}}}},
+           createScanDef({},
+                         {{"index1",
+                           IndexDefinition{{{makeIndexPath("a"), CollationOp::Ascending}},
+                                           true /*isMultiKey*/,
+                                           {DistributionType::Centralized},
+                                           std::move(conversionResult->_reqMap)}}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -4995,10 +5029,11 @@ TEST(PhysRewriter, RequireRID) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         true /*requireRID*/,
-        {{{"c1", ScanDefinition{{}, {}}}}},
+        {{{"c1", createScanDef({}, {})}}},
         std::make_unique<HeuristicCE>(),
         std::make_unique<DefaultCosting>(),
         {} /*pathToInterval*/,
+        ConstEval::constFold,
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -5027,6 +5062,54 @@ TEST(PhysRewriter, RequireRID) {
         "        [rid_0]\n"
         "            Source []\n"
         "        [root]\n"
+        "            Source []\n",
+        optimized);
+}
+
+TEST(PhysRewriter, RequireRID1) {
+    using namespace properties;
+
+    ABT scanNode = make<ScanNode>("scan_0", "c1");
+
+    // Non-sargable filter node.
+    ABT filterNode = make<FilterNode>(Constant::boolean(true), std::move(scanNode));
+
+    ABT rootNode = make<RootNode>(ProjectionRequirement{ProjectionNameVector{"scan_0"}},
+                                  std::move(filterNode));
+
+    PrefixId prefixId;
+    OptPhaseManager phaseManager(
+        {OptPhase::MemoSubstitutionPhase,
+         OptPhase::MemoExplorationPhase,
+         OptPhase::MemoImplementationPhase},
+        prefixId,
+        true /*requireRID*/,
+        {{{"c1", createScanDef({}, {})}}},
+        std::make_unique<HeuristicCE>(),
+        std::make_unique<DefaultCosting>(),
+        {} /*pathToInterval*/,
+        ConstEval::constFold,
+        {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
+
+    ABT optimized = rootNode;
+    phaseManager.optimize(optimized);
+    ASSERT_EQ(3, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+
+    ASSERT_EXPLAIN_V2(
+        "Root []\n"
+        "|   |   projections: \n"
+        "|   |       rid_0\n"
+        "|   |       scan_0\n"
+        "|   RefBlock: \n"
+        "|       Variable [rid_0]\n"
+        "|       Variable [scan_0]\n"
+        "Filter []\n"
+        "|   Const [true]\n"
+        "PhysicalScan [{'<rid>': rid_0, '<root>': scan_0}, c1]\n"
+        "    BindBlock:\n"
+        "        [rid_0]\n"
+        "            Source []\n"
+        "        [scan_0]\n"
         "            Source []\n",
         optimized);
 }
@@ -5068,7 +5151,7 @@ TEST(PhysRewriter, UnionRewrite) {
          OptPhase::MemoExplorationPhase,
          OptPhase::MemoImplementationPhase},
         prefixId,
-        {{{"test1", {{}, {}}}, {"test2", {{}, {}}}}},
+        {{{"test1", createScanDef({}, {})}, {"test2", createScanDef({}, {})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
@@ -5137,7 +5220,7 @@ TEST(PhysRewriter, JoinRewrite) {
          OptPhase::MemoExplorationPhase,
          OptPhase::MemoImplementationPhase},
         prefixId,
-        {{{"test1", {{}, {}}}, {"test2", {{}, {}}}}},
+        {{{"test1", createScanDef({}, {})}, {"test2", createScanDef({}, {})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
@@ -5212,12 +5295,12 @@ TEST(PhysRewriter, JoinRewrite1) {
          OptPhase::MemoExplorationPhase,
          OptPhase::MemoImplementationPhase},
         prefixId,
-        {{{"test1", {{}, {}}},
+        {{{"test1", createScanDef({}, {})},
           {"test2",
-           {{},
-            {{"index1",
-              {{{makeNonMultikeyIndexPath("b"), CollationOp::Ascending}},
-               false /*isMultiKey*/}}}}}}},
+           createScanDef({},
+                         {{"index1",
+                           {{{makeNonMultikeyIndexPath("b"), CollationOp::Ascending}},
+                            false /*isMultiKey*/}}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = std::move(rootNode);
@@ -5267,7 +5350,7 @@ TEST(PhysRewriter, RootInterval) {
          OptPhase::MemoExplorationPhase,
          OptPhase::MemoImplementationPhase},
         prefixId,
-        {{{"c1", ScanDefinition{{}, {}}}}},
+        {{{"c1", createScanDef({}, {})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -5320,10 +5403,10 @@ TEST(PhysRewriter, EqMemberSargable) {
             {OptPhase::MemoSubstitutionPhase},
             prefixId,
             {{{"c1",
-               ScanDefinition{
+               createScanDef(
                    {},
                    {{"index1",
-                     makeIndexDefinition("a", CollationOp::Ascending, false /*isMultiKey*/)}}}}}},
+                     makeIndexDefinition("a", CollationOp::Ascending, false /*isMultiKey*/)}})}}},
             {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
         ABT optimized = rootNode;
@@ -5370,8 +5453,7 @@ TEST(PhysRewriter, EqMemberSargable) {
              OptPhase::MemoImplementationPhase},
             prefixId,
             {{{"c1",
-               ScanDefinition{{},
-                              {{"index1", makeIndexDefinition("a", CollationOp::Ascending)}}}}}},
+               createScanDef({}, {{"index1", makeIndexDefinition("a", CollationOp::Ascending)}})}}},
             {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
         ABT optimized = rootNode;
@@ -5379,7 +5461,6 @@ TEST(PhysRewriter, EqMemberSargable) {
         ASSERT_EQ(4, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
         // Test sargable filter is satisfied with an index scan.
-        // TODO SERVER-70120: Reduce GroupBy Unique to just GroupBy.
         ASSERT_EXPLAIN_V2(
             "Root []\n"
             "|   |   projections: \n"
@@ -5398,9 +5479,6 @@ TEST(PhysRewriter, EqMemberSargable) {
             "|   |           Source []\n"
             "|   RefBlock: \n"
             "|       Variable [rid_0]\n"
-            "Unique []\n"
-            "|   projections: \n"
-            "|       rid_0\n"
             "GroupBy []\n"
             "|   |   groupings: \n"
             "|   |       RefBlock: \n"
@@ -5475,10 +5553,10 @@ TEST(PhysRewriter, IndexSubfieldCovered) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
-                 makeIndexDefinition("a", CollationOp::Ascending, false /*isMultiKey*/)}}}}}},
+                 makeIndexDefinition("a", CollationOp::Ascending, false /*isMultiKey*/)}})}}},
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -5560,15 +5638,16 @@ TEST(PhysRewriter, PerfOnlyPreds1) {
         prefixId,
         false /*requireRID*/,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1",
                  makeCompositeIndexDefinition({{"b", CollationOp::Ascending, false /*isMultiKey*/},
                                                {"a", CollationOp::Ascending, false /*isMultiKey*/}},
-                                              false /*isMultiKey*/)}}}}}},
+                                              false /*isMultiKey*/)}})}}},
         std::make_unique<HintedCE>(std::move(hints)),
         std::make_unique<DefaultCosting>(),
         {} /*pathToInterval*/,
+        ConstEval::constFold,
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;
@@ -5652,14 +5731,15 @@ TEST(PhysRewriter, PerfOnlyPreds2) {
         prefixId,
         false /*requireRID*/,
         {{{"c1",
-           ScanDefinition{
+           createScanDef(
                {},
                {{"index1", makeIndexDefinition("a", CollationOp::Ascending, false /*isMultiKey*/)},
                 {"index2",
-                 makeIndexDefinition("b", CollationOp::Ascending, false /*isMultiKey*/)}}}}}},
+                 makeIndexDefinition("b", CollationOp::Ascending, false /*isMultiKey*/)}})}}},
         std::make_unique<HintedCE>(std::move(hints)),
         std::make_unique<DefaultCosting>(),
         {} /*pathToInterval*/,
+        ConstEval::constFold,
         {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
     ABT optimized = rootNode;

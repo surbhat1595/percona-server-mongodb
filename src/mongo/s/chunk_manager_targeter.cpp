@@ -39,6 +39,7 @@
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
+#include "mongo/db/stats/counters.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/timeseries/timeseries_update_delete_util.h"
@@ -229,6 +230,8 @@ ChunkManagerTargeter::ChunkManagerTargeter(OperationContext* opCtx,
                                            boost::optional<OID> targetEpoch)
     : _nss(nss), _targetEpoch(std::move(targetEpoch)), _cm(_init(opCtx, false)) {}
 
+ChunkManagerTargeter::ChunkManagerTargeter(const ChunkManager& cm) : _nss(cm.getNss()), _cm(cm) {}
+
 /**
  * Initializes and returns the ChunkManger which needs to be used for targeting.
  * If 'refresh' is true, additionally fetches the latest routing info from the config servers.
@@ -330,7 +333,8 @@ BSONObj ChunkManagerTargeter::extractBucketsShardKeyFromTimeseriesDoc(
 }
 
 ShardEndpoint ChunkManagerTargeter::targetInsert(OperationContext* opCtx,
-                                                 const BSONObj& doc) const {
+                                                 const BSONObj& doc,
+                                                 std::set<ChunkRange>* chunkRanges) const {
     BSONObj shardKey;
 
     if (_cm.isSharded()) {
@@ -355,7 +359,7 @@ ShardEndpoint ChunkManagerTargeter::targetInsert(OperationContext* opCtx,
 
     // Target the shard key or database primary
     if (!shardKey.isEmpty()) {
-        return uassertStatusOK(_targetShardKey(shardKey, CollationSpec::kSimpleSpec));
+        return uassertStatusOK(_targetShardKey(shardKey, CollationSpec::kSimpleSpec, chunkRanges));
     }
 
     // TODO (SERVER-51070): Remove the boost::none when the config server can support shardVersion
@@ -366,8 +370,8 @@ ShardEndpoint ChunkManagerTargeter::targetInsert(OperationContext* opCtx,
         _nss.isOnInternalDb() ? boost::optional<DatabaseVersion>() : _cm.dbVersion());
 }
 
-std::vector<ShardEndpoint> ChunkManagerTargeter::targetUpdate(OperationContext* opCtx,
-                                                              const BatchItemRef& itemRef) const {
+std::vector<ShardEndpoint> ChunkManagerTargeter::targetUpdate(
+    OperationContext* opCtx, const BatchItemRef& itemRef, std::set<ChunkRange>* chunkRanges) const {
     // If the update is replacement-style:
     // 1. Attempt to target using the query. If this fails, AND the query targets more than one
     //    shard,
@@ -383,6 +387,10 @@ std::vector<ShardEndpoint> ChunkManagerTargeter::targetUpdate(OperationContext* 
     // replacement document for targeting purposes.
 
     const auto& updateOp = itemRef.getUpdate();
+
+    if (updateOp.getMulti()) {
+        updateManyCount.increment(1);
+    }
 
     // If the collection is not sharded, forward the update to the primary shard.
     if (!_cm.isSharded()) {
@@ -438,12 +446,14 @@ std::vector<ShardEndpoint> ChunkManagerTargeter::targetUpdate(OperationContext* 
         getUpdateExprForTargeting(expCtx, shardKeyPattern, query, updateOp.getU());
 
     // Utility function to target an update by shard key, and to handle any potential error results.
-    auto targetByShardKey = [this, &collation](StatusWith<BSONObj> swShardKey, std::string msg) {
+    auto targetByShardKey = [this, &collation, &chunkRanges](StatusWith<BSONObj> swShardKey,
+                                                             std::string msg) {
         const auto& shardKey = uassertStatusOKWithContext(std::move(swShardKey), msg);
         uassert(ErrorCodes::ShardKeyNotFound,
                 str::stream() << msg << " :: could not extract exact shard key",
                 !shardKey.isEmpty());
-        return std::vector{uassertStatusOKWithContext(_targetShardKey(shardKey, collation), msg)};
+        return std::vector{
+            uassertStatusOKWithContext(_targetShardKey(shardKey, collation, chunkRanges), msg)};
     };
 
     // If this is an upsert, then the query must contain an exact match on the shard key. If we were
@@ -456,7 +466,7 @@ std::vector<ShardEndpoint> ChunkManagerTargeter::targetUpdate(OperationContext* 
 
     // We first try to target based on the update's query. It is always valid to forward any update
     // or upsert to a single shard, so return immediately if we are able to target a single shard.
-    auto endPoints = uassertStatusOK(_targetQuery(expCtx, query, collation));
+    auto endPoints = uassertStatusOK(_targetQuery(expCtx, query, collation, chunkRanges));
     if (endPoints.size() == 1) {
         return endPoints;
     }
@@ -464,6 +474,9 @@ std::vector<ShardEndpoint> ChunkManagerTargeter::targetUpdate(OperationContext* 
     // Replacement-style updates must always target a single shard. If we were unable to do so using
     // the query, we attempt to extract the shard key from the replacement and target based on it.
     if (updateOp.getU().type() == write_ops::UpdateModification::Type::kReplacement) {
+        if (chunkRanges) {
+            chunkRanges->clear();
+        }
         return targetByShardKey(shardKeyPattern.extractShardKeyFromDoc(updateExpr),
                                 "Failed to target update by replacement document");
     }
@@ -488,8 +501,8 @@ std::vector<ShardEndpoint> ChunkManagerTargeter::targetUpdate(OperationContext* 
     return endPoints;
 }
 
-std::vector<ShardEndpoint> ChunkManagerTargeter::targetDelete(OperationContext* opCtx,
-                                                              const BatchItemRef& itemRef) const {
+std::vector<ShardEndpoint> ChunkManagerTargeter::targetDelete(
+    OperationContext* opCtx, const BatchItemRef& itemRef, std::set<ChunkRange>* chunkRanges) const {
     const auto& deleteOp = itemRef.getDelete();
     const auto collation = write_ops::collationOf(deleteOp);
 
@@ -499,6 +512,10 @@ std::vector<ShardEndpoint> ChunkManagerTargeter::targetDelete(OperationContext* 
                                                                boost::none,  // explain
                                                                itemRef.getLet(),
                                                                itemRef.getLegacyRuntimeConstants());
+
+    if (deleteOp.getMulti()) {
+        deleteManyCount.increment(1);
+    }
 
     BSONObj deleteQuery = deleteOp.getQ();
     BSONObj shardKey;
@@ -537,7 +554,7 @@ std::vector<ShardEndpoint> ChunkManagerTargeter::targetDelete(OperationContext* 
 
     // Target the shard key or delete query
     if (!shardKey.isEmpty()) {
-        auto swEndpoint = _targetShardKey(shardKey, collation);
+        auto swEndpoint = _targetShardKey(shardKey, collation, chunkRanges);
         if (swEndpoint.isOK()) {
             return std::vector{std::move(swEndpoint.getValue())};
         }
@@ -569,13 +586,17 @@ std::vector<ShardEndpoint> ChunkManagerTargeter::targetDelete(OperationContext* 
                           << ", shard key pattern: " << _cm.getShardKeyPattern().toString(),
             !_cm.isSharded() || deleteOp.getMulti() || isExactIdQuery(opCtx, *cq, _cm));
 
-    return uassertStatusOK(_targetQuery(expCtx, deleteQuery, collation));
+    if (chunkRanges) {
+        chunkRanges->clear();
+    }
+    return uassertStatusOK(_targetQuery(expCtx, deleteQuery, collation, chunkRanges));
 }
 
 StatusWith<std::vector<ShardEndpoint>> ChunkManagerTargeter::_targetQuery(
     boost::intrusive_ptr<ExpressionContext> expCtx,
     const BSONObj& query,
-    const BSONObj& collation) const {
+    const BSONObj& collation,
+    std::set<ChunkRange>* chunkRanges) const {
     if (!_cm.isSharded()) {
         // TODO (SERVER-51070): Remove the boost::none when the config server can support
         // shardVersion in commands
@@ -587,7 +608,7 @@ StatusWith<std::vector<ShardEndpoint>> ChunkManagerTargeter::_targetQuery(
 
     std::set<ShardId> shardIds;
     try {
-        _cm.getShardIdsForQuery(expCtx, query, collation, &shardIds);
+        _cm.getShardIdsForQuery(expCtx, query, collation, &shardIds, chunkRanges);
     } catch (const DBException& ex) {
         return ex.toStatus();
     }
@@ -597,21 +618,24 @@ StatusWith<std::vector<ShardEndpoint>> ChunkManagerTargeter::_targetQuery(
         const auto placementVersion = _cm.getVersion(shardId);
         endpoints.emplace_back(
             std::move(shardId),
-            ShardVersion(placementVersion, CollectionIndexes(placementVersion, boost::none)),
+            ShardVersion(placementVersion, boost::optional<CollectionIndexes>(boost::none)),
             boost::none);
     }
 
     return endpoints;
 }
 
-StatusWith<ShardEndpoint> ChunkManagerTargeter::_targetShardKey(const BSONObj& shardKey,
-                                                                const BSONObj& collation) const {
+StatusWith<ShardEndpoint> ChunkManagerTargeter::_targetShardKey(
+    const BSONObj& shardKey, const BSONObj& collation, std::set<ChunkRange>* chunkRanges) const {
     try {
         auto chunk = _cm.findIntersectingChunk(shardKey, collation);
+        if (chunkRanges) {
+            chunkRanges->insert(chunk.getRange());
+        }
         const auto placementVersion = _cm.getVersion(chunk.getShardId());
         return ShardEndpoint(
             chunk.getShardId(),
-            ShardVersion(placementVersion, CollectionIndexes(placementVersion, boost::none)),
+            ShardVersion(placementVersion, boost::optional<CollectionIndexes>(boost::none)),
             boost::none);
     } catch (const DBException& ex) {
         return ex.toStatus();
@@ -619,7 +643,8 @@ StatusWith<ShardEndpoint> ChunkManagerTargeter::_targetShardKey(const BSONObj& s
     MONGO_UNREACHABLE;
 }
 
-std::vector<ShardEndpoint> ChunkManagerTargeter::targetAllShards(OperationContext* opCtx) const {
+std::vector<ShardEndpoint> ChunkManagerTargeter::targetAllShards(
+    OperationContext* opCtx, std::set<ChunkRange>* chunkRanges) const {
     // This function is only called if doing a multi write that targets more than one shard. This
     // implies the collection is sharded, so we should always have a chunk manager.
     invariant(_cm.isSharded());
@@ -631,8 +656,12 @@ std::vector<ShardEndpoint> ChunkManagerTargeter::targetAllShards(OperationContex
         const auto placementVersion = _cm.getVersion(shardId);
         endpoints.emplace_back(
             std::move(shardId),
-            ShardVersion(placementVersion, CollectionIndexes(placementVersion, boost::none)),
+            ShardVersion(placementVersion, boost::optional<CollectionIndexes>(boost::none)),
             boost::none);
+    }
+
+    if (chunkRanges) {
+        _cm.getAllChunkRanges(chunkRanges);
     }
 
     return endpoints;

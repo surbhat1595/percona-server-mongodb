@@ -51,6 +51,8 @@ struct Bucket {
            double cumulativeNDV);
 
     std::string toString() const;
+    // Help function to dump the bucket content as needed by histogram creation in the unit tests.
+    std::string dump() const;
 
     // Frequency of the bound value itself.
     double _equalFreq;
@@ -76,18 +78,31 @@ struct Bucket {
 class ScalarHistogram {
 public:
     ScalarHistogram();
-    ScalarHistogram(std::vector<StatsBucket> histogram);
+    ScalarHistogram(const StatsHistogram& histogram);
     ScalarHistogram(sbe::value::Array bounds, std::vector<Bucket> buckets);
 
+    // Print a human-readable representation of a histogram.
     std::string toString() const;
     std::string plot() const;
+    // Help function to dump the content of the histogram as needed by the manual histogram creation
+    // in the unit tests (without cummulative frequency and NDV).
+    std::string dump() const;
 
     const sbe::value::Array& getBounds() const;
     const std::vector<Bucket>& getBuckets() const;
+    // Return the total number of histogrammed values.
+    size_t getCardinality() const {
+        if (_buckets.empty()) {
+            return 0.0;
+        }
+        return _buckets.back()._cumulativeFreq;
+    }
 
     bool empty() const {
         return _buckets.empty();
     }
+
+    static constexpr size_t kMaxBuckets = 100;
 
 private:
     // Bucket bounds representing the **highest** value in each bucket.

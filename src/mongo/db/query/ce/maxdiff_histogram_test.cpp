@@ -34,6 +34,7 @@
 #include "mongo/db/exec/sbe/abt/sbe_abt_test_util.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/query/ce/array_histogram.h"
+#include "mongo/db/query/ce/ce_test_utils.h"
 #include "mongo/db/query/ce/histogram_estimation.h"
 #include "mongo/db/query/ce/max_diff.h"
 #include "mongo/db/query/ce/maxdiff_test_utils.h"
@@ -190,7 +191,7 @@ TEST_F(HistogramTest, MaxDiffIntArrays) {
     constexpr size_t nBuckets = 10;
 
     auto rawData = genFixedValueArray(nElems, 1.0, 0.0);
-    auto arrayData = nestArrays(rawData);
+    auto arrayData = nestArrays(rawData, 0 /* No empty arrays */);
 
     ArrayHistogram estimator = createArrayEstimator(arrayData, nBuckets);
 
@@ -247,6 +248,21 @@ TEST_F(HistogramTest, MaxDiffIntArrays) {
         ASSERT_EQ(2, actualCard);
         ASSERT_APPROX_EQUAL(3.15479, estimatedCard, kTolerance);
     }
+}
+
+TEST_F(HistogramTest, MaxDiffEmptyArrays) {
+    constexpr size_t nElems = 21;
+    constexpr size_t nBuckets = 5;
+    constexpr size_t emptyArrayCount = 3;
+
+    auto rawData = genFixedValueArray(nElems, 1.0, 0.0);
+    auto arrayData = nestArrays(rawData, emptyArrayCount);
+    std::cout << "Generated " << nElems << " arrayData:\n"
+              << printValueArray(arrayData) << "\n"
+              << std::flush;
+
+    ArrayHistogram arrayHist = createArrayEstimator(arrayData, nBuckets);
+    ASSERT_EQ(arrayHist.getEmptyArrayCount(), emptyArrayCount);
 }
 
 }  // namespace

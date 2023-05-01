@@ -65,6 +65,7 @@ env.Library(
     source=[
         'aggregation_request_helper.cpp',
         'aggregate_command.idl',
+        'external_data_source_option.idl',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/exec/document_value/document_value',
@@ -111,7 +112,6 @@ env.Library(
         'accumulator_exp_moving_avg.cpp',
         'accumulator_first.cpp',
         'accumulator_integral.cpp',
-        'accumulator_internal_construct_stats.cpp',
         'accumulator_js_reduce.cpp',
         'accumulator_last.cpp',
         'accumulator_locf.cpp',
@@ -133,6 +133,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/exec/document_value/document_value',
+        '$BUILD_DIR/mongo/db/query/ce/query_stats',
         '$BUILD_DIR/mongo/db/query/query_knobs',
         '$BUILD_DIR/mongo/db/query_expressions',
         '$BUILD_DIR/mongo/scripting/scripting_common',
@@ -219,6 +220,18 @@ env.Library(
     ],
 )
 
+env.Library(
+    target="abt_utils",
+    source=[
+        "abt/utils.cpp",
+    ],
+    LIBDEPS=[
+        "$BUILD_DIR/mongo/db/exec/document_value/document_value",
+        "$BUILD_DIR/mongo/db/query/optimizer/optimizer_base",
+        "field_path",
+    ],
+)
+
 # pipeline stages which exist in mongod only
 env.Library(
     target='pipeline_mongod',
@@ -243,7 +256,7 @@ pipelineEnv.Library(
         'abt/match_expression_visitor.cpp',
         'abt/projection_ast_visitor.cpp',
         'abt/transformer_visitor.cpp',
-        'abt/utils.cpp',
+        'accumulator_internal_construct_stats.cpp',
         'document_source.cpp',
         'document_source_add_fields.cpp',
         'document_source_bucket.cpp',
@@ -328,6 +341,7 @@ pipelineEnv.Library(
         '$BUILD_DIR/mongo/db/index/key_generator',
         '$BUILD_DIR/mongo/db/pipeline/change_stream_error_extra_info',
         '$BUILD_DIR/mongo/db/pipeline/lite_parsed_document_source',
+        '$BUILD_DIR/mongo/db/query/ce/query_stats_gen',
         '$BUILD_DIR/mongo/db/query/collation/collator_factory_interface',
         '$BUILD_DIR/mongo/db/query/collation/collator_interface',
         '$BUILD_DIR/mongo/db/query/cursor_response_idl',
@@ -352,6 +366,7 @@ pipelineEnv.Library(
         '$BUILD_DIR/mongo/db/views/resolved_view',
         '$BUILD_DIR/mongo/s/is_mongos',
         '$BUILD_DIR/third_party/shim_snappy',
+        'abt_utils',
         'accumulator',
         'dependencies',
         'document_path_support',
@@ -409,6 +424,7 @@ env.Library(
         'document_source_change_stream_unwind_transaction.cpp',
     ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/db/change_stream_serverless_helpers',
         '$BUILD_DIR/mongo/db/multitenancy',
         '$BUILD_DIR/mongo/db/ops/write_ops_parsers',
         '$BUILD_DIR/mongo/db/pipeline/pipeline',
@@ -625,7 +641,7 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/pipeline/change_stream_expired_pre_image_remover',
         '$BUILD_DIR/mongo/db/query/collation/collator_interface_mock',
         '$BUILD_DIR/mongo/db/query/optimizer/optimizer',
-        '$BUILD_DIR/mongo/db/query/optimizer/unit_test_utils',
+        '$BUILD_DIR/mongo/db/query/optimizer/unit_test_pipeline_utils',
         '$BUILD_DIR/mongo/db/query/query_test_service_context',
         '$BUILD_DIR/mongo/db/query_expressions',
         '$BUILD_DIR/mongo/db/repl/image_collection_entry',

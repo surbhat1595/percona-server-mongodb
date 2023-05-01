@@ -163,7 +163,9 @@ public:
         clientAndCtx1 = makeClientAndOpCtx(harnessHelper.get(), "writer");
         clientAndCtx2 = makeClientAndOpCtx(harnessHelper.get(), "reader");
         ru1 = checked_cast<WiredTigerRecoveryUnit*>(clientAndCtx1.second->recoveryUnit());
+        ru1->setOperationContext(clientAndCtx1.second.get());
         ru2 = checked_cast<WiredTigerRecoveryUnit*>(clientAndCtx2.second->recoveryUnit());
+        ru2->setOperationContext(clientAndCtx2.second.get());
         snapshotManager = dynamic_cast<WiredTigerSnapshotManager*>(
             harnessHelper->getEngine()->getSnapshotManager());
     }
@@ -624,7 +626,7 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CommitTimestampAfterSetTimestampOnAbor
     ASSERT(!commitTs);
 }
 
-TEST_F(WiredTigerRecoveryUnitTestFixture, CheckpointCursorsCached) {
+TEST_F(WiredTigerRecoveryUnitTestFixture, CheckpointCursorsAreNotCached) {
     auto opCtx = clientAndCtx1.second.get();
 
     // Hold the global lock throughout the test to avoid having the global lock destructor
@@ -664,7 +666,8 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CheckpointCursorsCached) {
     // Force a checkpoint.
     engine->flushAllFiles(opCtx, /*callerHoldsReadLock*/ false);
 
-    // Test 2: Checkpoint cursors will be released into the cache.
+    // Test 2: Checkpoint cursors are not expected to be cached, they
+    // should be immediately closed when destructed.
     ru->setTimestampReadSource(WiredTigerRecoveryUnit::ReadSource::kCheckpoint);
 
     // Close any cached cursors to establish a new 'before' state.
@@ -674,9 +677,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CheckpointCursorsCached) {
     // Will search the checkpoint cursor for the record, then release the checkpoint cursor.
     ASSERT_TRUE(rs->findRecord(opCtx, s.getValue(), &rd));
 
-    // A new cursor should have been released into the cache, along with a metadata cursor that is
-    // opened to determine if the table is LSM. Metadata cursors are cached.
-    ASSERT_GT(ru->getSession()->cachedCursors(), cachedCursorsBefore + 1);
+    // No new cursors should have been released into the cache, with the exception of a metadata
+    // cursor that is opened to determine if the table is LSM. Metadata cursors are cached.
+    ASSERT_EQ(ru->getSession()->cachedCursors(), cachedCursorsBefore + 1);
 
     // All opened cursors are closed.
     ASSERT_EQ(0, ru->getSession()->cursorsOut());
@@ -985,6 +988,84 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, AbandonSnapshotAbortMode) {
     const char* returnedKey = nullptr;
     ASSERT_EQ(0, cursor->get_key(cursor, &returnedKey));
     ASSERT_EQ(0, strncmp(key, returnedKey, strlen(key)));
+}
+
+TEST_F(WiredTigerRecoveryUnitTestFixture, AbandonSnapshotChange) {
+    size_t numOnOpenSnapshotCalled = 0;
+    size_t numOnCloseSnapshotCalled = 0;
+
+    ru1->onOpenSnapshot(
+        [&numOnOpenSnapshotCalled](OperationContext* opCtx) -> void { numOnOpenSnapshotCalled++; });
+    ru1->onCloseSnapshot([&numOnCloseSnapshotCalled](OperationContext* opCtx) -> void {
+        numOnCloseSnapshotCalled++;
+    });
+
+    ASSERT_EQ(0, numOnOpenSnapshotCalled);
+    ASSERT_EQ(0, numOnCloseSnapshotCalled);
+
+    // Open a snapshot.
+    ASSERT(ru1->getSession());
+    ASSERT_EQ(1, numOnOpenSnapshotCalled);
+    ASSERT_EQ(0, numOnCloseSnapshotCalled);
+
+    ru1->abandonSnapshot();
+
+    ASSERT_EQ(1, numOnOpenSnapshotCalled);
+    ASSERT_EQ(1, numOnCloseSnapshotCalled);
+}
+
+TEST_F(WiredTigerRecoveryUnitTestFixture, CommitSnapshotChange) {
+    size_t numOnOpenSnapshotCalled = 0;
+    size_t numOnCloseSnapshotCalled = 0;
+
+    ru1->onOpenSnapshot(
+        [&numOnOpenSnapshotCalled](OperationContext* opCtx) -> void { numOnOpenSnapshotCalled++; });
+    ru1->onCloseSnapshot([&numOnCloseSnapshotCalled](OperationContext* opCtx) -> void {
+        numOnCloseSnapshotCalled++;
+    });
+
+    ASSERT_EQ(0, numOnOpenSnapshotCalled);
+    ASSERT_EQ(0, numOnCloseSnapshotCalled);
+
+    ru1->beginUnitOfWork(/*readOnly=*/false);
+    ASSERT_EQ(0, numOnOpenSnapshotCalled);
+    ASSERT_EQ(0, numOnCloseSnapshotCalled);
+
+    // Open a snapshot after beginning a unit of work.
+    ASSERT(ru1->getSession());
+    ASSERT_EQ(1, numOnOpenSnapshotCalled);
+    ASSERT_EQ(0, numOnCloseSnapshotCalled);
+
+    ru1->commitUnitOfWork();
+    ASSERT_EQ(1, numOnOpenSnapshotCalled);
+    ASSERT_EQ(1, numOnCloseSnapshotCalled);
+}
+
+TEST_F(WiredTigerRecoveryUnitTestFixture, AbortSnapshotChange) {
+    size_t numOnOpenSnapshotCalled = 0;
+    size_t numOnCloseSnapshotCalled = 0;
+
+    ru1->onOpenSnapshot(
+        [&numOnOpenSnapshotCalled](OperationContext* opCtx) -> void { numOnOpenSnapshotCalled++; });
+    ru1->onCloseSnapshot([&numOnCloseSnapshotCalled](OperationContext* opCtx) -> void {
+        numOnCloseSnapshotCalled++;
+    });
+
+    ASSERT_EQ(0, numOnOpenSnapshotCalled);
+    ASSERT_EQ(0, numOnCloseSnapshotCalled);
+
+    // Open a snapshot before beginning a unit of work.
+    ASSERT(ru1->getSession());
+    ASSERT_EQ(1, numOnOpenSnapshotCalled);
+    ASSERT_EQ(0, numOnCloseSnapshotCalled);
+
+    ru1->beginUnitOfWork(/*readOnly=*/false);
+    ASSERT_EQ(1, numOnOpenSnapshotCalled);
+    ASSERT_EQ(0, numOnCloseSnapshotCalled);
+
+    ru1->abortUnitOfWork();
+    ASSERT_EQ(1, numOnOpenSnapshotCalled);
+    ASSERT_EQ(1, numOnCloseSnapshotCalled);
 }
 
 DEATH_TEST_REGEX_F(WiredTigerRecoveryUnitTestFixture,

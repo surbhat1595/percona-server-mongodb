@@ -53,6 +53,7 @@
 # - func: "set up venv"
 
 include:
+- filename: etc/evergreen_yml_components/project_and_distro_settings.yml
 - filename: etc/evergreen_yml_components/definitions.yml
 - filename: etc/evergreen_yml_components/variants/task_generation.yml
 - filename: etc/evergreen_yml_components/variants/sanitizer.yml
@@ -827,6 +828,15 @@ buildvariants:
   tasks:
   - name: blackduck_scanner
 
+- name: tooling-metrics
+  display_name: "Tooling Metrics"
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  run_on:
+  - ubuntu1804-small
+  stepback: false
+  tasks:
+  - name: vpc_connectivity
+
 ###########################################
 #         Windows buildvariants           #
 ###########################################
@@ -977,7 +987,7 @@ buildvariants:
   - name: noPassthroughWithMongod_gen
   - name: .replica_sets .common !.ignore_non_generated_replica_sets_jscore_passthrough
   - name: .replica_sets .multi_oplog !.ignore_non_generated_replica_sets_jscore_passthrough
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
     distros:
     - windows-vsCurrent-large
   - name: replica_sets_ese_gen
@@ -2450,7 +2460,7 @@ buildvariants:
 - &enterprise-rhel-80-64-dynamic-clang-tidy
   name: enterprise-rhel80-dynamic-clang-tidy-required
   display_name: "! Enterprise Clang Tidy"
-  cron: "0 4 * * *"
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
   modules:
   - enterprise
   run_on:

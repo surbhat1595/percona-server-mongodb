@@ -34,6 +34,7 @@ global:
         - "mongo/db/logical_time.h"
         - "mongo/db/namespace_string.h"
         - "mongo/db/tenant_id.h"
+        - "mongo/util/namespace_string_util.h"
         - "mongo/util/uuid.h"
 
 types:
@@ -224,9 +225,23 @@ types:
         bson_serialization_type: string
         description: "A MongoDB NamespaceString"
         cpp_type: "mongo::NamespaceString"
-        serializer: mongo::NamespaceString::toString
-        deserializer: mongo::NamespaceString
+        serializer: ::mongo::NamespaceStringUtil::serialize
+        deserializer: mongo::NamespaceStringUtil::deserialize
         deserialize_with_tenant: true
+
+    base64string:
+        bson_serialization_type: string
+        description: "A binary-safe base64 encoded string"
+        cpp_type: "std::string"
+        serializer: "::mongo::base64::encode"
+        deserializer: "mongo::base64::decode"
+
+    base64urlstring:
+        bson_serialization_type: string
+        description: "A binary-safe base64url encoded string"
+        cpp_type: "std::string"
+        serializer: "::mongo::base64url::encode"
+        deserializer: "mongo::base64url::decode"
 
     connection_string:
         bson_serialization_type: string

@@ -1050,6 +1050,22 @@ env_vars.Add(
     help='Path to the dsymutil utility',
 )
 
+
+def validate_dwarf_version(key, val, env):
+    if val == '4' or val == '5':
+        return
+
+    print(f"Invalid DWARF_VERSION '{val}'. Only valid versions are 4 or 5.")
+    Exit(1)
+
+
+env_vars.Add(
+    'DWARF_VERSION',
+    help='Sets the DWARF version (non-Windows). Incompatible with SPLIT_DWARF=1.',
+    validator=validate_dwarf_version,
+    converter=int,
+)
+
 env_vars.Add(
     'GITDIFFFLAGS',
     help='Sets flags for git diff',
@@ -1352,8 +1368,11 @@ env_vars.Add(
 
 env_vars.Add(
     'SPLIT_DWARF',
-    help='Set the boolean (auto, on/off true/false 1/0) to enable gsplit-dwarf (non-Windows).',
-    converter=split_dwarf_converter, default="auto")
+    help=
+    'Set the boolean (auto, on/off true/false 1/0) to enable gsplit-dwarf (non-Windows). Incompatible with DWARF_VERSION=5',
+    converter=split_dwarf_converter,
+    default="auto",
+)
 
 env_vars.Add(
     'TAPI',
@@ -1391,6 +1410,13 @@ env_vars.Add(
     help='Controls build verbosity (auto, on/off true/false 1/0)',
     default='auto',
 )
+
+env_vars.Add(
+    PathVariable(
+        'VALIDATE_ENV_SCRIPT',
+        help='''Path of a python script to validate the mongo workspace for common issues.
+        An example script is located at buildscripts/validate_env.py
+        ''', default=None, validator=PathVariable.PathIsFile))
 
 env_vars.Add(
     'WINDOWS_OPENSSL_BIN',
@@ -1633,6 +1659,38 @@ else:
         env.FatalError(f"Error setting VERBOSE variable: {e}")
 env.AddMethod(lambda env: env['VERBOSE'], 'Verbose')
 
+
+def CheckDevEnv(context):
+    context.Message('Checking if dev env is valid... ')
+    context.sconf.cached = 0
+    if env.get('VALIDATE_ENV_SCRIPT'):
+        proc = subprocess.run(
+            [sys.executable, env.File('$VALIDATE_ENV_SCRIPT').get_path()], capture_output=True,
+            text=True)
+        context.Log(proc.stdout)
+        context.Log(proc.stderr)
+        context.sconf.lastTarget = Value(proc.stdout + proc.stderr)
+        result = proc.returncode == 0
+        context.Result(result)
+        if env.Verbose():
+            print(proc.stdout)
+    else:
+        context.Result("skipped")
+        result = True
+    return result
+
+
+devenv_check = Configure(
+    env,
+    help=False,
+    custom_tests={
+        'CheckDevEnv': CheckDevEnv,
+    },
+)
+if not devenv_check.CheckDevEnv():
+    env.ConfError(f"Failed to validate dev env:\n{devenv_check.lastTarget.get_contents().decode()}")
+devenv_check.Finish()
+
 # Normalize the ICECC_DEBUG option
 try:
     env['ICECC_DEBUG'] = to_boolean(env['ICECC_DEBUG'])
@@ -1837,8 +1895,8 @@ env.AddMethod(get_toolchain_name, 'ToolchainName')
 env.AddMethod(is_toolchain, 'ToolchainIs')
 
 releaseBuild = has_option("release")
-optBuild = get_option('opt')
 debugBuild = get_option('dbg') == "on"
+optBuild = mongo_generators.get_opt_options(env)
 
 if env.ToolchainIs('clang'):
     # LLVM utilizes the stack extensively without optimization enabled, which
@@ -1851,11 +1909,6 @@ if env.ToolchainIs('clang'):
     if has_option('sanitize') and optBuild not in ("on", "debug"):
         env.FatalError("Error: A clang --sanitize build must have either --opt=debug or --opt=on " +
                        "to prevent crashes due to excessive stack usage")
-
-# Special cases - if debug is not enabled and optimization is not specified,
-# default to full optimizationm otherwise turn it off.
-if optBuild == "auto":
-    optBuild = "on" if not debugBuild else "off"
 
 if releaseBuild and (debugBuild or optBuild != "on"):
     env.FatalError(
@@ -2305,18 +2358,22 @@ libdeps.setup_environment(
     linting=get_option('libdeps-linting'),
 )
 
-# Both the abidw tool and the thin archive tool must be loaded after
-# libdeps, so that the scanners they inject can see the library
-# dependencies added by libdeps.
-if link_model.startswith("dynamic"):
+# The abilink/tapilink tools and the thin archive tool must be loaded
+# after libdeps, so that the scanners they inject can see the library
+# dependencies added by libdeps. Neither abilink nor tapilink can work
+# with the current Ninja generation because they rely on adding
+# ListActions to builders.
+if get_option('ninja') == 'disabled' and link_model.startswith("dynamic"):
     # Add in the abi linking tool if the user requested and it is
     # supported on this platform.
+    #
+    # TODO: Can we unify the `abilink` and `tapilink` tools?
     if env.get('ABIDW'):
         abilink = Tool('abilink')
         if abilink.exists(env):
             abilink(env)
 
-    if env.TargetOSIs('darwin') and env.get('TAPI'):
+    if env.get('TAPI'):
         tapilink = Tool('tapilink')
         if tapilink.exists(env):
             tapilink(env)
@@ -2841,6 +2898,14 @@ if env.TargetOSIs('posix'):
             "-Wno-unknown-pragmas",
             "-Winvalid-pch",
         ], )
+
+    if env.get('DWARF_VERSION'):
+        if env.TargetOSIs('darwin'):
+            env.FatalError("Setting DWARF_VERSION on darwin is not supported.")
+        env.AppendUnique(
+            CCFLAGS=['-gdwarf-$DWARF_VERSION'],
+            LINKFLAGS=['-gdwarf-$DWARF_VERSION'],
+        )
 
     # TODO: At least on x86, glibc as of 2.3.4 will consult the
     # .eh_frame info via _Unwind_Backtrace to do backtracing without
@@ -5331,7 +5396,8 @@ if (get_option('ninja') != "disabled" and ('ICECC' not in env or not env['ICECC'
 
 if get_option('ninja') != 'disabled':
 
-    env.AppendUnique(CCFLAGS=["-fdiagnostics-color"])
+    if env.ToolchainIs('gcc', 'clang'):
+        env.AppendUnique(CCFLAGS=["-fdiagnostics-color"])
     if 'ICECREAM_VERSION' in env and not env.get('CCACHE', None):
         if env['ICECREAM_VERSION'] < parse_version("1.2"):
             env.FatalError(
@@ -5578,11 +5644,20 @@ if env['SPLIT_DWARF'] == "auto":
     # For static builds, splitting out the dwarf info reduces memory requirments, link time
     # and binary size significantly. It's affect is less prominent in dynamic builds. The downside
     # is .dwo files use absolute paths in the debug info, so it's not relocatable.
+    # We also found the running splitdwarf with dwarf5 failed to compile
+    # so unless we set DWARF_VERSION = 4 we are going to turn off split dwarf
     env['SPLIT_DWARF'] = (not link_model == "dynamic" and env.ToolchainIs('gcc', 'clang')
                           and not env.TargetOSIs('darwin')
-                          and env.CheckCCFLAGSSupported('-gsplit-dwarf'))
+                          and env.CheckCCFLAGSSupported('-gsplit-dwarf')
+                          and env.get('DWARF_VERSION') == 4)
 
 if env['SPLIT_DWARF']:
+    if env.TargetOSIs('darwin'):
+        env.FatalError("Setting SPLIT_DWARF=1 on darwin is not supported.")
+    if env.get('DWARF_VERSION') != 4:
+        env.FatalError(
+            'Running split dwarf outside of DWARF4 has shown compilation issues when using DWARF5 and gdb index. Disabling this functionality for now. Use SPLIT_DWARF=0 to disable building with split dwarf or use DWARF_VERSION=4 to pin to DWARF version 4.'
+        )
     if env.ToolchainIs('gcc', 'clang'):
         env.AddToLINKFLAGSIfSupported('-Wl,--gdb-index')
     env.Tool('split_dwarf')
@@ -5744,8 +5819,10 @@ env.AddPackageNameAlias(
     name="mh-debugsymbols",
 )
 
+env['RPATH_ESCAPED_DOLLAR_ORIGIN'] = '\\$$$$ORIGIN'
 
-def rpath_generator(env, source, target, for_signature):
+
+def prefix_libdir_rpath_generator(env, source, target, for_signature):
     # If the PREFIX_LIBDIR has an absolute path, we will use that directly as
     # RPATH because that indicates the final install destination of the libraries.
     prefix_libdir = env.subst('$PREFIX_LIBDIR')
@@ -5757,19 +5834,18 @@ def rpath_generator(env, source, target, for_signature):
     lib_rel = os.path.relpath(prefix_libdir, env.subst('$PREFIX_BINDIR'))
 
     if env['PLATFORM'] == 'posix':\
-        return [env.Literal(f"\\$$ORIGIN/{lib_rel}")]
+        return f"$RPATH_ESCAPED_DOLLAR_ORIGIN/{lib_rel}"
 
     if env['PLATFORM'] == 'darwin':
-        return [
-            f"@loader_path/{lib_rel}",
-        ]
+        return f"@loader_path/{lib_rel}"
 
 
-env['RPATH_GENERATOR'] = rpath_generator
+if get_option('link-model').startswith('dynamic'):
+    env['PREFIX_LIBDIR_RPATH_GENERATOR'] = prefix_libdir_rpath_generator
 
 if env['PLATFORM'] == 'posix':
     env.AppendUnique(
-        RPATH='$RPATH_GENERATOR',
+        RPATH=['$PREFIX_LIBDIR_RPATH_GENERATOR'],
         LINKFLAGS=[
             # Most systems *require* -z,origin to make origin work, but android
             # blows up at runtime if it finds DF_ORIGIN_1 in DT_FLAGS_1.
@@ -5789,12 +5865,12 @@ elif env['PLATFORM'] == 'darwin':
     # so we setup RPATH and LINKFLAGS ourselves.
     env['RPATHPREFIX'] = '-Wl,-rpath,'
     env['RPATHSUFFIX'] = ''
-    env['RPATH'] = '$RPATH_GENERATOR'
     env.AppendUnique(
         LINKFLAGS="${_concat(RPATHPREFIX, RPATH, RPATHSUFFIX, __env__)}",
         SHLINKFLAGS=[
             "-Wl,-install_name,@rpath/${TARGET.file}",
         ],
+        RPATH=['$PREFIX_LIBDIR_RPATH_GENERATOR'],
     )
 
 env.Default(env.Alias("install-default"))

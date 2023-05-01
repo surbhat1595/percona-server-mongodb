@@ -244,7 +244,7 @@ void _testDropCollectionThrowsExceptionIfThereAreIndexesInProgress(OperationCont
         }
 
         auto indexCatalog = collection->getIndexCatalog();
-        ASSERT_EQUALS(indexCatalog->numIndexesInProgress(opCtx), 0);
+        ASSERT_EQUALS(indexCatalog->numIndexesInProgress(), 0);
         auto indexInfoObj = BSON("v" << int(IndexDescriptor::kLatestIndexVersion) << "key"
                                      << BSON("a" << 1) << "name"
                                      << "a_1");
@@ -262,7 +262,7 @@ void _testDropCollectionThrowsExceptionIfThereAreIndexesInProgress(OperationCont
             wuow.commit();
         });
 
-        ASSERT_GREATER_THAN(indexCatalog->numIndexesInProgress(opCtx), 0);
+        ASSERT_GREATER_THAN(indexCatalog->numIndexesInProgress(), 0);
 
         WriteUnitOfWork wuow(opCtx);
         ASSERT_THROWS_CODE(db->dropCollection(opCtx, nss),
@@ -443,7 +443,7 @@ TEST_F(DatabaseTest, AutoGetCollectionForReadCommandSucceedsWithDeadlineNow) {
     ASSERT(_opCtx.get()->lockState()->isCollectionLockedForMode(nss, MODE_X));
     try {
         AutoGetCollectionForReadCommand db(
-            _opCtx.get(), nss, auto_get_collection::ViewMode::kViewsForbidden, Date_t::now());
+            _opCtx.get(), nss, AutoGetCollection::Options{}.deadline(Date_t::now()));
     } catch (const ExceptionFor<ErrorCodes::LockTimeout>&) {
         FAIL("Should get the db within the timeout");
     }
@@ -457,7 +457,7 @@ TEST_F(DatabaseTest, AutoGetCollectionForReadCommandSucceedsWithDeadlineMin) {
     ASSERT(_opCtx.get()->lockState()->isCollectionLockedForMode(nss, MODE_X));
     try {
         AutoGetCollectionForReadCommand db(
-            _opCtx.get(), nss, auto_get_collection::ViewMode::kViewsForbidden, Date_t());
+            _opCtx.get(), nss, AutoGetCollection::Options{}.deadline(Date_t()));
     } catch (const ExceptionFor<ErrorCodes::LockTimeout>&) {
         FAIL("Should get the db within the timeout");
     }

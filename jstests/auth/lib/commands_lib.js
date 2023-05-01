@@ -224,7 +224,16 @@ var authCommandsLib = {
         },
         {
           testname: "_clusterQueryWithoutShardKey",
-          command: {_clusterQueryWithoutShardKey: 1, writeCmd: {}, stmtId: NumberInt(1)},
+          command: {
+              _clusterQueryWithoutShardKey: 1,
+              writeCmd: {
+                  update: "foo",
+                  updates: [
+                      {q: {x: 1}, u: {$set: {a: 90}, upsert: false}},
+                  ]
+              },
+              stmtId: NumberInt(1)
+          },
           skipUnlessSharded: true,
           skipTest: (conn) => {
               return !TestData.setParameters.featureFlagUpdateOneWithoutShardKey;
@@ -234,22 +243,25 @@ var authCommandsLib = {
                   runOnDb: adminDbName,
                   roles: {__system: 1},
                   privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                  expectFail: true
               },
               {
                   runOnDb: firstDbName,
                   roles: {__system: 1},
                   privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                  expectFail: true
               },
               {
                   runOnDb: secondDbName,
                   roles: {__system: 1},
                   privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                  expectFail: true
               }
           ]
         },
         {
           testname: "_clusterWriteWithoutShardKey",
-          command: {_clusterWriteWithoutShardKey: 1, writeCmd: {}, shardId: ""},
+          command: {_clusterWriteWithoutShardKey: 1, writeCmd: {}, shardId: "", targetDocId: {}},
           skipUnlessSharded: true,
           skipTest: (conn) => {
               return !TestData.setParameters.featureFlagUpdateOneWithoutShardKey;
@@ -259,16 +271,22 @@ var authCommandsLib = {
                   runOnDb: adminDbName,
                   roles: {__system: 1},
                   privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                  // The command expects to be run within a transaction.
+                  expectFail: true
               },
               {
                   runOnDb: firstDbName,
                   roles: {__system: 1},
                   privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                  // The command expects to be run within a transaction.
+                  expectFail: true
               },
               {
                   runOnDb: secondDbName,
                   roles: {__system: 1},
                   privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                  // The command expects to be run within a transaction.
+                  expectFail: true
               }
           ]
         },
@@ -5265,7 +5283,7 @@ var authCommandsLib = {
         {
           testname: "d_moveChunk",
           command: {moveChunk: "test.x", fromShard: "a", toShard: "b", min: {}, max: {}, maxChunkSizeBytes: 1024},
-          skipSharded: true, // TODO SERVER-64204 review this condition
+          skipSharded: true,
           testcases: [
               {
                 runOnDb: adminDbName,

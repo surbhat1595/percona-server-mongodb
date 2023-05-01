@@ -40,6 +40,7 @@ wtEnv.Library(
         'wiredtiger_encryption_hooks.cpp',
         'wiredtiger_global_options.cpp',
         'wiredtiger_index.cpp',
+        'wiredtiger_index_util.cpp',
         'wiredtiger_kv_engine.cpp',
         'wiredtiger_oplog_manager.cpp',
         'wiredtiger_parameters.cpp',
@@ -172,6 +173,7 @@ wtEnv.CppUnitTest(
     target='storage_wiredtiger_test',
     source=[
         'wiredtiger_init_test.cpp',
+        'wiredtiger_c_api_test.cpp',
         'wiredtiger_kv_engine_test.cpp',
         'wiredtiger_recovery_unit_test.cpp',
         'wiredtiger_session_cache_test.cpp',

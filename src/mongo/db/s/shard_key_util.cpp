@@ -115,12 +115,14 @@ bool validShardKeyIndexExists(OperationContext* opCtx,
     for (const auto& idx : indexes) {
         BSONObj currentKey = idx["key"].embeddedObject();
         bool isUnique = idx["unique"].trueValue();
+        bool isPrepareUnique = idx["prepareUnique"].trueValue();
         uassert(ErrorCodes::InvalidOptions,
                 str::stream() << "can't shard collection '" << nss.ns() << "' with unique index on "
                               << currentKey << " and proposed shard key "
                               << shardKeyPattern.toBSON()
                               << ". Uniqueness can't be maintained unless shard key is a prefix",
-                !isUnique || shardKeyPattern.isUniqueIndexCompatible(currentKey));
+                (!isUnique && !isPrepareUnique) ||
+                    shardKeyPattern.isIndexUniquenessCompatible(currentKey));
     }
 
     // 2. Check for a useful index
@@ -332,7 +334,7 @@ std::vector<BSONObj> ValidationBehaviorsRefineShardKey::loadIndexes(
         nss.db().toString(),
         appendShardVersion(
             BSON("listIndexes" << nss.coll()),
-            ShardVersion(placementVersion, CollectionIndexes(placementVersion, boost::none))),
+            ShardVersion(placementVersion, boost::optional<CollectionIndexes>(boost::none))),
         Milliseconds(-1));
     if (indexesRes.getStatus().code() != ErrorCodes::NamespaceNotFound) {
         return uassertStatusOK(indexesRes).docs;
@@ -349,7 +351,7 @@ void ValidationBehaviorsRefineShardKey::verifyUsefulNonMultiKeyIndex(
         "admin",
         appendShardVersion(
             BSON(kCheckShardingIndexCmdName << nss.ns() << kKeyPatternField << proposedKey),
-            ShardVersion(placementVersion, CollectionIndexes(placementVersion, boost::none))),
+            ShardVersion(placementVersion, boost::optional<CollectionIndexes>(boost::none))),
         Shard::RetryPolicy::kIdempotent));
     if (checkShardingIndexRes.commandStatus == ErrorCodes::UnknownError) {
         // CheckShardingIndex returns UnknownError if a compatible shard key index cannot be found,

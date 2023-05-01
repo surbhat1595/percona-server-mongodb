@@ -13,6 +13,9 @@
 //   does_not_support_stepdowns,
 //   does_not_support_repeated_reads,
 //   inspects_whether_plan_cache_entry_is_active,
+//   requires_fcv_62,
+//   # Plan cache state is node-local and will not get migrated alongside tenant data.
+//   tenant_migration_incompatible,
 // ]
 
 (function() {

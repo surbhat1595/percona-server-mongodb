@@ -34,6 +34,7 @@
 #include "mongo/db/catalog/catalog_test_fixture.h"
 #include "mongo/db/catalog/collection_catalog_helper.h"
 #include "mongo/db/catalog/collection_mock.h"
+#include "mongo/db/catalog/uncommitted_catalog_updates.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/concurrency/resource_catalog.h"
@@ -71,6 +72,7 @@ public:
     void setUp() override {
         ServiceContextMongoDTest::setUp();
         opCtx = makeOperationContext();
+        globalLock.emplace(opCtx.get());
 
         std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(colUUID, nss);
         col = CollectionPtr(collection.get(), CollectionPtr::NoYieldTag{});
@@ -83,10 +85,15 @@ public:
                       CollectionCatalog::kNumCollectionReferencesStored + 1);
     }
 
+    void tearDown() {
+        globalLock.reset();
+    }
+
 protected:
     std::shared_ptr<CollectionCatalog> sharedCatalog = std::make_shared<CollectionCatalog>();
     CollectionCatalog& catalog = *sharedCatalog;
     ServiceContext::UniqueOperationContext opCtx;
+    boost::optional<Lock::GlobalWrite> globalLock;
     NamespaceString nss;
     CollectionPtr col;
     UUID colUUID;
@@ -99,6 +106,7 @@ public:
     void setUp() {
         ServiceContextMongoDTest::setUp();
         opCtx = makeOperationContext();
+        globalLock.emplace(opCtx.get());
 
         for (int counter = 0; counter < 5; ++counter) {
             NamespaceString fooNss("foo", "coll" + std::to_string(counter));
@@ -125,6 +133,7 @@ public:
                     opCtx.get(), kv.first, /*isDropPending=*/false, boost::none);
             }
         }
+        globalLock.reset();
     }
 
     std::map<UUID, CollectionPtr>::iterator collsIterator(std::string dbName) {
@@ -165,6 +174,7 @@ public:
 protected:
     CollectionCatalog catalog;
     ServiceContext::UniqueOperationContext opCtx;
+    boost::optional<Lock::GlobalWrite> globalLock;
     std::map<std::string, std::map<UUID, CollectionPtr>> dbMap;
 };
 
@@ -173,6 +183,7 @@ public:
     void setUp() {
         ServiceContextMongoDTest::setUp();
         opCtx = makeOperationContext();
+        globalLock.emplace(opCtx.get());
 
         for (int i = 0; i < 5; i++) {
             NamespaceString nss("resourceDb", "coll" + std::to_string(i));
@@ -221,11 +232,13 @@ public:
             numEntries++;
         }
         ASSERT_EQ(0, numEntries);
+        globalLock.reset();
     }
 
 protected:
     ServiceContext::UniqueOperationContext opCtx;
     CollectionCatalog catalog;
+    boost::optional<Lock::GlobalWrite> globalLock;
 };
 
 TEST_F(CollectionCatalogResourceTest, RemoveAllResources) {
@@ -467,7 +480,11 @@ TEST_F(CollectionCatalogTest, LookupNSSByUUIDForClosedCatalogReturnsFreshestNSS)
     catalog.deregisterCollection(opCtx.get(), colUUID, /*isDropPending=*/false, boost::none);
     ASSERT(catalog.lookupCollectionByUUID(opCtx.get(), colUUID) == nullptr);
     ASSERT_EQUALS(*catalog.lookupNSSByUUID(opCtx.get(), colUUID), nss);
-    catalog.registerCollection(opCtx.get(), colUUID, std::move(newCollShared), boost::none);
+    {
+        Lock::GlobalWrite lk(opCtx.get());
+        catalog.registerCollection(opCtx.get(), colUUID, std::move(newCollShared), boost::none);
+    }
+
     ASSERT_EQUALS(catalog.lookupCollectionByUUID(opCtx.get(), colUUID), newCol);
     ASSERT_EQUALS(*catalog.lookupNSSByUUID(opCtx.get(), colUUID), newNss);
 
@@ -942,15 +959,6 @@ public:
         wuow.commit();
     }
 
-    std::shared_ptr<Collection> openCollection(OperationContext* opCtx,
-                                               const NamespaceString& nss,
-                                               Timestamp readTimestamp) {
-        Lock::GlobalLock globalLock(opCtx, MODE_IS);
-        auto coll = CollectionCatalog::get(opCtx)->openCollection(opCtx, nss, readTimestamp);
-        ASSERT(coll);
-        return coll;
-    }
-
 protected:
     ServiceContext::UniqueOperationContext opCtx;
 };
@@ -1036,15 +1044,22 @@ TEST_F(CollectionCatalogTimestampTest, OpenEarlierCollection) {
     // Open an instance of the collection before the index was created.
     const Timestamp readTimestamp(15, 15);
     OneOffRead oor(opCtx.get(), readTimestamp);
-    std::shared_ptr<Collection> coll = openCollection(opCtx.get(), nss, readTimestamp);
+    Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+    std::shared_ptr<Collection> coll =
+        CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, readTimestamp);
     ASSERT(coll);
-    ASSERT_EQ(0, coll->getIndexCatalog()->numIndexesTotal(opCtx.get()));
+    ASSERT_EQ(0, coll->getIndexCatalog()->numIndexesTotal());
 
-    // Verify that the CollectionCatalog returns the latest collection with the index present.
-    auto latestColl =
-        CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespaceForRead(opCtx.get(), nss);
+    // Verify that the CollectionCatalog returns the latest collection with the index present. This
+    // has to be done in an alternative client as we already have an open snapshot from an earlier
+    // point-in-time above.
+    auto newClient = opCtx->getServiceContext()->makeClient("AlternativeClient");
+    AlternativeClientRegion acr(newClient);
+    auto newOpCtx = cc().makeOperationContext();
+    auto latestColl = CollectionCatalog::get(newOpCtx.get())
+                          ->lookupCollectionByNamespaceForRead(newOpCtx.get(), nss);
     ASSERT(latestColl);
-    ASSERT_EQ(1, latestColl->getIndexCatalog()->numIndexesTotal(opCtx.get()));
+    ASSERT_EQ(1, latestColl->getIndexCatalog()->numIndexesTotal());
 
     // Ensure the idents are shared between the collection instances.
     ASSERT_NE(coll, latestColl);
@@ -1077,22 +1092,28 @@ TEST_F(CollectionCatalogTimestampTest, OpenEarlierCollectionWithIndex) {
     // Open an instance of the collection when only one of the two indexes were present.
     const Timestamp readTimestamp(25, 25);
     OneOffRead oor(opCtx.get(), readTimestamp);
-    std::shared_ptr<Collection> coll = openCollection(opCtx.get(), nss, readTimestamp);
+    Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+    std::shared_ptr<Collection> coll =
+        CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, readTimestamp);
     ASSERT(coll);
-    ASSERT_EQ(1, coll->getIndexCatalog()->numIndexesTotal(opCtx.get()));
+    ASSERT_EQ(1, coll->getIndexCatalog()->numIndexesTotal());
 
-    // Verify that the CollectionCatalog returns the latest collection.
-    auto latestColl =
-        CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespaceForRead(opCtx.get(), nss);
+    // Verify that the CollectionCatalog returns the latest collection. This has to be done in an
+    // alternative client as we already have an open snapshot from an earlier point-in-time above.
+    auto newClient = opCtx->getServiceContext()->makeClient("AlternativeClient");
+    AlternativeClientRegion acr(newClient);
+    auto newOpCtx = cc().makeOperationContext();
+    auto latestColl = CollectionCatalog::get(newOpCtx.get())
+                          ->lookupCollectionByNamespaceForRead(newOpCtx.get(), nss);
     ASSERT(latestColl);
-    ASSERT_EQ(2, latestColl->getIndexCatalog()->numIndexesTotal(opCtx.get()));
+    ASSERT_EQ(2, latestColl->getIndexCatalog()->numIndexesTotal());
 
     // Ensure the idents are shared between the collection and index instances.
     ASSERT_NE(coll, latestColl);
     ASSERT_EQ(coll->getSharedIdent(), latestColl->getSharedIdent());
 
     auto indexDescPast = coll->getIndexCatalog()->findIndexByName(opCtx.get(), "x_1");
-    auto indexDescLatest = latestColl->getIndexCatalog()->findIndexByName(opCtx.get(), "x_1");
+    auto indexDescLatest = latestColl->getIndexCatalog()->findIndexByName(newOpCtx.get(), "x_1");
     ASSERT_BSONOBJ_EQ(indexDescPast->infoObj(), indexDescLatest->infoObj());
     ASSERT_EQ(coll->getIndexCatalog()->getEntryShared(indexDescPast),
               latestColl->getIndexCatalog()->getEntryShared(indexDescLatest));
@@ -1118,7 +1139,9 @@ TEST_F(CollectionCatalogTimestampTest, OpenLatestCollectionWithIndex) {
     // collection.
     const Timestamp readTimestamp(20, 20);
     OneOffRead oor(opCtx.get(), readTimestamp);
-    std::shared_ptr<Collection> coll = openCollection(opCtx.get(), nss, readTimestamp);
+    Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+    std::shared_ptr<Collection> coll =
+        CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, readTimestamp);
     ASSERT(coll);
 
     // Verify that the CollectionCatalog returns the latest collection.
@@ -1174,12 +1197,18 @@ TEST_F(CollectionCatalogTimestampTest, OpenEarlierCollectionWithDropPendingIndex
     // Open the collection while both indexes were present.
     const Timestamp readTimestamp(20, 20);
     OneOffRead oor(opCtx.get(), readTimestamp);
-    std::shared_ptr<Collection> coll = openCollection(opCtx.get(), nss, readTimestamp);
+    Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+    std::shared_ptr<Collection> coll =
+        CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, readTimestamp);
     ASSERT(coll);
 
-    // Collection is not shared from the latest instance.
-    auto latestColl =
-        CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespaceForRead(opCtx.get(), nss);
+    // Collection is not shared from the latest instance. This has to be done in an  alternative
+    // client as we already have an open snapshot from an earlier point-in-time above.
+    auto newClient = opCtx->getServiceContext()->makeClient("AlternativeClient");
+    AlternativeClientRegion acr(newClient);
+    auto newOpCtx = cc().makeOperationContext();
+    auto latestColl = CollectionCatalog::get(newOpCtx.get())
+                          ->lookupCollectionByNamespaceForRead(newOpCtx.get(), nss);
     ASSERT_NE(coll, latestColl);
 
     auto indexDescX = coll->getIndexCatalog()->findIndexByName(opCtx.get(), "x_1");
@@ -1223,27 +1252,42 @@ TEST_F(CollectionCatalogTimestampTest, OpenEarlierAlreadyDropPendingCollection) 
 
     // Set the read timestamp to be before the drop timestamp.
     const Timestamp readTimestamp(20, 20);
-    OneOffRead oor(opCtx.get(), readTimestamp);
 
     {
+        OneOffRead oor(opCtx.get(), readTimestamp);
+
         // Open "a.b", which is not expired in the drop pending map.
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
         std::shared_ptr<Collection> openedColl =
-            openCollection(opCtx.get(), firstNss, readTimestamp);
+            CollectionCatalog::get(opCtx.get())
+                ->openCollection(opCtx.get(), firstNss, readTimestamp);
         ASSERT(openedColl);
         ASSERT_EQ(coll, openedColl);
 
+        // Check use_count(). 2 in the unit test, 1 in UncommittedCatalogUpdates.
+        ASSERT_EQ(3, openedColl.use_count());
+
         // Check use_count(). 2 in the unit test.
+        opCtx->recoveryUnit()->abandonSnapshot();
         ASSERT_EQ(2, openedColl.use_count());
     }
 
     {
+        OneOffRead oor(opCtx.get(), readTimestamp);
+
         // Open "c.d" which is expired in the drop pending map.
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
         std::shared_ptr<Collection> openedColl =
-            openCollection(opCtx.get(), secondNss, readTimestamp);
+            CollectionCatalog::get(opCtx.get())
+                ->openCollection(opCtx.get(), secondNss, readTimestamp);
         ASSERT(openedColl);
         ASSERT_NE(coll, openedColl);
 
+        // Check use_count(). 1 in the unit test, 1 in UncommittedCatalogUpdates.
+        ASSERT_EQ(2, openedColl.use_count());
+
         // Check use_count(). 1 in the unit test.
+        opCtx->recoveryUnit()->abandonSnapshot();
         ASSERT_EQ(1, openedColl.use_count());
     }
 }
@@ -1281,15 +1325,21 @@ TEST_F(CollectionCatalogTimestampTest, OpenNewCollectionUsingDropPendingCollecti
     const Timestamp readTimestamp(10, 10);
     OneOffRead oor(opCtx.get(), readTimestamp);
 
-    std::shared_ptr<Collection> openedColl = openCollection(opCtx.get(), nss, readTimestamp);
+    Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+    std::shared_ptr<Collection> openedColl =
+        CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, readTimestamp);
     ASSERT(openedColl);
     ASSERT_NE(coll, openedColl);
 
-    // Check use_count(). 1 in the unit test.
-    ASSERT_EQ(1, openedColl.use_count());
+    // Check use_count(). 1 in the unit test, 1 in UncommittedCatalogUpdates.
+    ASSERT_EQ(2, openedColl.use_count());
 
     // Ensure the idents are shared between the opened collection and the drop pending collection.
     ASSERT_EQ(coll->getSharedIdent(), openedColl->getSharedIdent());
+
+    // Check use_count(). 1 in the unit test.
+    opCtx->recoveryUnit()->abandonSnapshot();
+    ASSERT_EQ(1, openedColl.use_count());
 }
 
 TEST_F(CollectionCatalogTimestampTest, OpenExistingCollectionWithReaper) {
@@ -1326,7 +1376,9 @@ TEST_F(CollectionCatalogTimestampTest, OpenExistingCollectionWithReaper) {
                   *storageEngine->getDropPendingIdents().begin());
     }
 
-    std::shared_ptr<Collection> openedColl = openCollection(opCtx.get(), nss, createCollectionTs);
+    Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+    std::shared_ptr<Collection> openedColl =
+        CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, createCollectionTs);
     ASSERT(openedColl);
     ASSERT_EQ(coll->getSharedIdent(), openedColl->getSharedIdent());
 
@@ -1334,12 +1386,14 @@ TEST_F(CollectionCatalogTimestampTest, OpenExistingCollectionWithReaper) {
     coll.reset();
     openedColl.reset();
 
+    // Remove the collection reference in UncommittedCatalogUpdates.
+    opCtx->recoveryUnit()->abandonSnapshot();
+
     storageEngine->dropIdentsOlderThan(opCtx.get(), Timestamp::max());
     ASSERT_EQ(0, storageEngine->getDropPendingIdents().size());
 
     // Now we fail to open the collection as the ident has been removed.
     OneOffRead oor(opCtx.get(), createCollectionTs);
-    Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
     ASSERT(
         !CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, createCollectionTs));
 }
@@ -1364,8 +1418,10 @@ TEST_F(CollectionCatalogTimestampTest, OpenNewCollectionWithReaper) {
         // Open the collection, which marks the ident as in use before running the ident reaper.
         OneOffRead oor(opCtx.get(), createCollectionTs);
 
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
         std::shared_ptr<Collection> openedColl =
-            openCollection(opCtx.get(), nss, createCollectionTs);
+            CollectionCatalog::get(opCtx.get())
+                ->openCollection(opCtx.get(), nss, createCollectionTs);
         ASSERT(openedColl);
 
         ASSERT_EQ(1, storageEngine->getDropPendingIdents().size());
@@ -1441,10 +1497,12 @@ TEST_F(CollectionCatalogTimestampTest, OpenExistingCollectionAndIndexesWithReape
         // Open the collection using shared state before any index drops.
         OneOffRead oor(opCtx.get(), createIndexTs);
 
-        std::shared_ptr<Collection> openedColl = openCollection(opCtx.get(), nss, createIndexTs);
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+        std::shared_ptr<Collection> openedColl =
+            CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, createIndexTs);
         ASSERT(openedColl);
         ASSERT_EQ(openedColl->getSharedIdent(), coll->getSharedIdent());
-        ASSERT_EQ(2, openedColl->getIndexCatalog()->numIndexesTotal(opCtx.get()));
+        ASSERT_EQ(2, openedColl->getIndexCatalog()->numIndexesTotal());
 
         // All idents are marked as in use and none should be removed.
         storageEngine->dropIdentsOlderThan(opCtx.get(), Timestamp::max());
@@ -1455,10 +1513,12 @@ TEST_F(CollectionCatalogTimestampTest, OpenExistingCollectionAndIndexesWithReape
         // Open the collection using shared state after a single index was dropped.
         OneOffRead oor(opCtx.get(), dropXIndexTs);
 
-        std::shared_ptr<Collection> openedColl = openCollection(opCtx.get(), nss, dropXIndexTs);
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+        std::shared_ptr<Collection> openedColl =
+            CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, dropXIndexTs);
         ASSERT(openedColl);
         ASSERT_EQ(openedColl->getSharedIdent(), coll->getSharedIdent());
-        ASSERT_EQ(1, openedColl->getIndexCatalog()->numIndexesTotal(opCtx.get()));
+        ASSERT_EQ(1, openedColl->getIndexCatalog()->numIndexesTotal());
 
         std::vector<std::string> indexNames;
         openedColl->getAllIndexes(&indexNames);
@@ -1475,11 +1535,13 @@ TEST_F(CollectionCatalogTimestampTest, OpenExistingCollectionAndIndexesWithReape
         // Open the collection using shared state before any indexes were created.
         OneOffRead oor(opCtx.get(), createCollectionTs);
 
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
         std::shared_ptr<Collection> openedColl =
-            openCollection(opCtx.get(), nss, createCollectionTs);
+            CollectionCatalog::get(opCtx.get())
+                ->openCollection(opCtx.get(), nss, createCollectionTs);
         ASSERT(openedColl);
         ASSERT_EQ(openedColl->getSharedIdent(), coll->getSharedIdent());
-        ASSERT_EQ(0, openedColl->getIndexCatalog()->numIndexesTotal(opCtx.get()));
+        ASSERT_EQ(0, openedColl->getIndexCatalog()->numIndexesTotal());
     }
 
     {
@@ -1549,9 +1611,11 @@ TEST_F(CollectionCatalogTimestampTest, OpenNewCollectionAndIndexesWithReaper) {
         // Open the collection before any index drops.
         OneOffRead oor(opCtx.get(), createIndexTs);
 
-        std::shared_ptr<Collection> openedColl = openCollection(opCtx.get(), nss, createIndexTs);
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+        std::shared_ptr<Collection> openedColl =
+            CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, createIndexTs);
         ASSERT(openedColl);
-        ASSERT_EQ(2, openedColl->getIndexCatalog()->numIndexesTotal(opCtx.get()));
+        ASSERT_EQ(2, openedColl->getIndexCatalog()->numIndexesTotal());
 
         // All idents are marked as in use and none should be removed.
         storageEngine->dropIdentsOlderThan(opCtx.get(), Timestamp::max());
@@ -1562,9 +1626,11 @@ TEST_F(CollectionCatalogTimestampTest, OpenNewCollectionAndIndexesWithReaper) {
         // Open the collection after the 'x' index was dropped.
         OneOffRead oor(opCtx.get(), dropXIndexTs);
 
-        std::shared_ptr<Collection> openedColl = openCollection(opCtx.get(), nss, dropXIndexTs);
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+        std::shared_ptr<Collection> openedColl =
+            CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, dropXIndexTs);
         ASSERT(openedColl);
-        ASSERT_EQ(1, openedColl->getIndexCatalog()->numIndexesTotal(opCtx.get()));
+        ASSERT_EQ(1, openedColl->getIndexCatalog()->numIndexesTotal());
 
         std::vector<std::string> indexNames;
         openedColl->getAllIndexes(&indexNames);
@@ -1580,10 +1646,12 @@ TEST_F(CollectionCatalogTimestampTest, OpenNewCollectionAndIndexesWithReaper) {
         // Open the collection before any indexes were created.
         OneOffRead oor(opCtx.get(), createCollectionTs);
 
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
         std::shared_ptr<Collection> openedColl =
-            openCollection(opCtx.get(), nss, createCollectionTs);
+            CollectionCatalog::get(opCtx.get())
+                ->openCollection(opCtx.get(), nss, createCollectionTs);
         ASSERT(openedColl);
-        ASSERT_EQ(0, openedColl->getIndexCatalog()->numIndexesTotal(opCtx.get()));
+        ASSERT_EQ(0, openedColl->getIndexCatalog()->numIndexesTotal());
     }
 
     {
@@ -1969,6 +2037,116 @@ TEST_F(CollectionCatalogTimestampTest, CatalogIdMappingRollback) {
     ASSERT_NE(catalog()->lookupCatalogIdByNSS(c, boost::none), boost::none);
     ASSERT_NE(catalog()->lookupCatalogIdByNSS(d, boost::none), boost::none);
     ASSERT_EQ(catalog()->lookupCatalogIdByNSS(e, boost::none), boost::none);
+}
+
+TEST_F(CollectionCatalogTimestampTest, CollectionLifetimeTiedToStorageTransactionLifetime) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    const NamespaceString nss("a.b");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+    const Timestamp createIndexTs = Timestamp(20, 20);
+
+    createCollection(opCtx.get(), nss, createCollectionTs);
+    createIndex(opCtx.get(),
+                nss,
+                BSON("v" << 2 << "name"
+                         << "x_1"
+                         << "key" << BSON("x" << 1)),
+                createIndexTs);
+
+    const Timestamp readTimestamp(15, 15);
+    auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx.get());
+
+    {
+        // Test that the collection is released when the storage snapshot is abandoned.
+        OneOffRead oor(opCtx.get(), readTimestamp);
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+        std::shared_ptr<Collection> coll =
+            CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, readTimestamp);
+        ASSERT(coll);
+
+        std::shared_ptr<Collection> fetchedColl =
+            uncommittedCatalogUpdates.lookupCollection(opCtx.get(), nss).collection;
+        ASSERT(fetchedColl);
+        ASSERT_EQ(coll.get(), fetchedColl.get());
+        ASSERT_EQ(coll->getSharedIdent(), fetchedColl->getSharedIdent());
+
+        opCtx->recoveryUnit()->abandonSnapshot();
+        ASSERT(!uncommittedCatalogUpdates.lookupCollection(opCtx.get(), nss).collection);
+    }
+
+    {
+        // Test that the collection is released when the storage snapshot is committed.
+        OneOffRead oor(opCtx.get(), readTimestamp);
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+        std::shared_ptr<Collection> coll =
+            CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, readTimestamp);
+        ASSERT(coll);
+
+        WriteUnitOfWork wuow(opCtx.get());
+
+        std::shared_ptr<Collection> fetchedColl =
+            uncommittedCatalogUpdates.lookupCollection(opCtx.get(), nss).collection;
+        ASSERT(fetchedColl);
+        ASSERT_EQ(coll.get(), fetchedColl.get());
+        ASSERT_EQ(coll->getSharedIdent(), fetchedColl->getSharedIdent());
+
+        wuow.commit();
+        ASSERT(!uncommittedCatalogUpdates.lookupCollection(opCtx.get(), nss).collection);
+
+        opCtx->recoveryUnit()->abandonSnapshot();
+        ASSERT(!uncommittedCatalogUpdates.lookupCollection(opCtx.get(), nss).collection);
+    }
+
+    {
+        // Test that the collection is released when the storage snapshot is aborted.
+        OneOffRead oor(opCtx.get(), readTimestamp);
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+        std::shared_ptr<Collection> coll =
+            CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, readTimestamp);
+        ASSERT(coll);
+
+        boost::optional<WriteUnitOfWork> wuow(opCtx.get());
+
+        std::shared_ptr<Collection> fetchedColl =
+            uncommittedCatalogUpdates.lookupCollection(opCtx.get(), nss).collection;
+        ASSERT(fetchedColl);
+        ASSERT_EQ(coll.get(), fetchedColl.get());
+        ASSERT_EQ(coll->getSharedIdent(), fetchedColl->getSharedIdent());
+
+        // The storage snapshot is aborted when the WriteUnitOfWork destructor runs.
+        wuow.reset();
+        ASSERT(!uncommittedCatalogUpdates.lookupCollection(opCtx.get(), nss).collection);
+
+        opCtx->recoveryUnit()->abandonSnapshot();
+        ASSERT(!uncommittedCatalogUpdates.lookupCollection(opCtx.get(), nss).collection);
+    }
+}
+
+DEATH_TEST_F(CollectionCatalogTimestampTest, OpenCollectionInWriteUnitOfWork, "invariant") {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    const NamespaceString nss("a.b");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+    const Timestamp createIndexTs = Timestamp(20, 20);
+
+    createCollection(opCtx.get(), nss, createCollectionTs);
+    createIndex(opCtx.get(),
+                nss,
+                BSON("v" << 2 << "name"
+                         << "x_1"
+                         << "key" << BSON("x" << 1)),
+                createIndexTs);
+
+    const Timestamp readTimestamp(15, 15);
+
+    WriteUnitOfWork wuow(opCtx.get());
+
+    Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+    std::shared_ptr<Collection> coll =
+        CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, readTimestamp);
 }
 
 }  // namespace

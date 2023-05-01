@@ -162,9 +162,9 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
                 AutoGetCollection coll{opCtx,
                                        nss(),
                                        MODE_IS,
-                                       AutoGetCollection::Options{}.viewMode(
-                                           auto_get_collection::ViewMode::kViewsPermitted)};
-                checkCollectionUUIDMismatch(opCtx, nss(), *coll, _request.getCollectionUUID());
+                                       AutoGetCollection::Options{}
+                                           .viewMode(auto_get_collection::ViewMode::kViewsPermitted)
+                                           .expectedUUID(_request.getCollectionUUID())};
             }
 
             _saveCollectionInfoOnCoordinatorIfNecessary(opCtx);
@@ -174,12 +174,8 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
                     "Cannot use time-series options for a non-timeseries collection",
                     _collInfo->timeSeriesOptions || !isGranularityUpdate);
             if (isGranularityUpdate) {
-                uassert(ErrorCodes::InvalidOptions,
-                        "Invalid transition for timeseries.granularity. Can only transition "
-                        "from 'seconds' to 'minutes' or 'minutes' to 'hours'.",
-                        timeseries::isValidTimeseriesGranularityTransition(
-                            _collInfo->timeSeriesOptions->getGranularity(),
-                            *_request.getTimeseries()->getGranularity()));
+                uassertStatusOK(timeseries::isTimeseriesGranularityValidAndUnchanged(
+                    _collInfo->timeSeriesOptions.get(), _request.getTimeseries().get()));
             }
         })
         .then([this, executor = executor, anchor = shared_from_this()] {

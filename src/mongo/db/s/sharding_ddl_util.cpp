@@ -323,7 +323,7 @@ void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx,
     if (uuid) {
         deleteCmd.setDeletes({[&] {
             write_ops::DeleteOpEntry entry;
-            entry.setQ(BSON(QueryAnalyzerDocument::kCollectionUuidFieldName << uuid->toString()));
+            entry.setQ(BSON(QueryAnalyzerDocument::kCollectionUuidFieldName << *uuid));
             entry.setMulti(false);
             return entry;
         }()});
@@ -559,7 +559,7 @@ boost::optional<CreateCollectionResponse> checkIfCollectionAlreadySharded(
                 cm.isUnique() == unique);
 
     CreateCollectionResponse response(
-        {cm.getVersion(), CollectionIndexes(cm.getVersion(), boost::none)});
+        {cm.getVersion(), boost::optional<CollectionIndexes>(boost::none)});
     response.setCollectionUUID(cm.getUUID());
     return response;
 }

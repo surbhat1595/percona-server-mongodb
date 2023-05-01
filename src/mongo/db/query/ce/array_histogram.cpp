@@ -40,19 +40,24 @@ ArrayHistogram::ArrayHistogram(ScalarHistogram scalar,
                                ScalarHistogram arrayUnique,
                                ScalarHistogram arrayMin,
                                ScalarHistogram arrayMax,
-                               TypeCounts arrayTypeCounts)
+                               TypeCounts arrayTypeCounts,
+                               size_t emptyArrayCount)
     : _scalar(std::move(scalar)),
       _typeCounts(std::move(typeCounts)),
+      _emptyArrayCount(emptyArrayCount),
       _arrayUnique(std::move(arrayUnique)),
       _arrayMin(std::move(arrayMin)),
       _arrayMax(std::move(arrayMax)),
       _arrayTypeCounts(std::move(arrayTypeCounts)) {
     invariant(isArray());
+    // ArrayMin/Max histograms must have the same number of buckets.
+    invariant(_arrayMin->getBuckets().size() == _arrayMax->getBuckets().size());
 }
 
 ArrayHistogram::ArrayHistogram(ScalarHistogram scalar, TypeCounts typeCounts)
     : _scalar(std::move(scalar)),
       _typeCounts(std::move(typeCounts)),
+      _emptyArrayCount(0),
       _arrayUnique(boost::none),
       _arrayMin(boost::none),
       _arrayMax(boost::none),
@@ -119,6 +124,19 @@ const TypeCounts& ArrayHistogram::getTypeCounts() const {
 const TypeCounts& ArrayHistogram::getArrayTypeCounts() const {
     invariant(isArray());
     return *_arrayTypeCounts;
+}
+
+size_t ArrayHistogram::getArrayCount() const {
+    if (isArray()) {
+        auto findArray = _typeCounts.find(value::TypeTags::Array);
+        uassert(6979504,
+                "Histogram with array data must have a total array count.",
+                findArray != _typeCounts.end());
+        size_t arrayCount = findArray->second;
+        uassert(6979503, "Histogram with array data must have at least one array.", arrayCount > 0);
+        return arrayCount;
+    }
+    return 0;
 }
 
 }  // namespace mongo::ce

@@ -211,8 +211,7 @@ private:
                        const UUID& uuid) override {}
 
     void onUnpreparedTransactionCommit(OperationContext* opCtx,
-                                       std::vector<repl::ReplOperation>* statements,
-                                       size_t numberOfPrePostImagesToWrite) override {}
+                                       TransactionOperations* transactionOperations) override {}
 
     void onPreparedTransactionCommit(
         OperationContext* opCtx,
@@ -224,7 +223,7 @@ private:
         OperationContext* opCtx,
         const std::vector<OplogSlot>& reservedSlots,
         Date_t wallClockTime,
-        std::vector<repl::ReplOperation>* statements) override {
+        TransactionOperations* transactionOperations) override {
         return nullptr;
     }
 

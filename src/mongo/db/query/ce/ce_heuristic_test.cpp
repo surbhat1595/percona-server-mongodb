@@ -68,56 +68,56 @@ protected:
 TEST(CEHeuristicTest, CEWithoutOptimizationGtLtNum) {
     std::string query = "{a0 : {$gt : 14, $lt : 21}}";
     HeuristicCETester ht(collName, kNoOptPhaseSet);
-    ASSERT_MATCH_CE(ht, query, 1849.0);
+    ASSERT_MATCH_CE(ht, query, 1089.0);
 }
 
 TEST(CEHeuristicTest, CEWithoutOptimizationEqNum) {
     std::string query = "{a: 123}";
     HeuristicCETester ht(collName, kNoOptPhaseSet);
     ASSERT_MATCH_CE_CARD(ht, query, 0.0, 0.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 2.03205, 3.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 3.34575, 7.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 4.16228, 10.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 20.0, 100.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 1100.0, 10000.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 1.73205, 3.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 2.64575, 7.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 3.16228, 10.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 10.0, 100.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 100.0, 10000.0);
 }
 
 TEST(CEHeuristicTest, CEWithoutOptimizationEqStr) {
     std::string query = "{a: 'foo'}";
     HeuristicCETester ht(collName, kNoOptPhaseSet);
     ASSERT_MATCH_CE_CARD(ht, query, 0.0, 0.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 2.03205, 3.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 3.34575, 7.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 4.16228, 10.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 20.0, 100.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 1100.0, 10000.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 1.73205, 3.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 2.64575, 7.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 3.16228, 10.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 10.0, 100.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 100.0, 10000.0);
 }
 
 TEST(CEHeuristicTest, CEWithoutOptimizationGtNum) {
     std::string query = "{a: {$gt: 44}}";
     HeuristicCETester ht(collName, kNoOptPhaseSet);
     ASSERT_MATCH_CE_CARD(ht, query, 0.0, 0.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 7.2, 9.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 54.45, 99.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 430.0, 1000.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 6.3, 9.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 44.55, 99.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 330.0, 1000.0);
 }
 
 TEST(CEHeuristicTest, CEWithoutOptimizationGtStr) {
     std::string query = "{a: {$gt: 'foo'}}";
     HeuristicCETester ht(collName, kNoOptPhaseSet);
     ASSERT_MATCH_CE_CARD(ht, query, 0.0, 0.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 7.2, 9.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 54.45, 99.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 430.0, 1000.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 6.3, 9.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 44.55, 99.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 330.0, 1000.0);
 }
 
 TEST(CEHeuristicTest, CEWithoutOptimizationLtNum) {
     std::string query = "{a: {$lt: 44}}";
     HeuristicCETester ht(collName, kNoOptPhaseSet);
     ASSERT_MATCH_CE_CARD(ht, query, 0.0, 0.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 7.2, 9.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 54.45, 99.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 430.0, 1000.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 6.3, 9.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 44.55, 99.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 330.0, 1000.0);
 }
 
 TEST(CEHeuristicTest, CEWithoutOptimizationDNF1pathSimple) {
@@ -127,9 +127,9 @@ TEST(CEHeuristicTest, CEWithoutOptimizationDNF1pathSimple) {
         "{$and: [{a0: {$gt:40}}, {a0: {$lt: 44}}]}"
         "]}";
     HeuristicCETester ht(collName, kNoOptPhaseSet);
-    ASSERT_MATCH_CE_CARD(ht, query, 7.8336, 9.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 50.8359, 99.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 335.612, 1000.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 6.6591, 9.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 36.0354, 99.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 205.941, 1000.0);
 }
 
 TEST(CEHeuristicTest, CEWithoutOptimizationNestedConjAndDisj1) {
@@ -140,9 +140,9 @@ TEST(CEHeuristicTest, CEWithoutOptimizationNestedConjAndDisj1) {
         "]}";
     HeuristicCETester ht(collName, kNoOptPhaseSet);
     ASSERT_MATCH_CE_CARD(ht, query, 0.0, 0.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 8.352, 9.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 67.9264, 99.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 535.393, 1000.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 7.623, 9.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 55.5761, 99.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 402.963, 1000.0);
 }
 
 TEST(CEHeuristicTest, CEWithoutOptimizationNestedConjAndDisj2) {
@@ -153,9 +153,9 @@ TEST(CEHeuristicTest, CEWithoutOptimizationNestedConjAndDisj2) {
         "]}";
     HeuristicCETester ht(collName, kNoOptPhaseSet);
     ASSERT_MATCH_CE_CARD(ht, query, 0.0, 0.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 6.912, 9.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 43.4239, 99.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 290.293, 1000.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 5.733, 9.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 31.0736, 99.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 181.863, 1000.0);
 }
 
 TEST(CEHeuristicTest, CEWithoutOptimizationNestedConjAndDisj3) {
@@ -170,9 +170,9 @@ TEST(CEHeuristicTest, CEWithoutOptimizationNestedConjAndDisj3) {
         "]}";
     HeuristicCETester ht(collName, kNoOptPhaseSet);
     ASSERT_MATCH_CE_CARD(ht, query, 0.0, 0.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 3.01561, 9.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 9.37173, 99.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 19.3064, 1000.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 1.52063, 9.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 4.15975, 99.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 9.11877, 1000.0);
 }
 
 TEST(CEHeuristicTest, CEWithoutOptimizationNestedConjAndDisj4) {
@@ -187,9 +187,9 @@ TEST(CEHeuristicTest, CEWithoutOptimizationNestedConjAndDisj4) {
         "]}";
     HeuristicCETester ht(collName, kNoOptPhaseSet);
     ASSERT_MATCH_CE_CARD(ht, query, 0.0, 0.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 8.98677, 9.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 94.9731, 99.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 894.681, 1000.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 8.9298, 9.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 89.9501, 99.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 798.495, 1000.0);
 }
 
 TEST(CEHeuristicTest, CEWithoutOptimizationTraverseSelectivityDoesNotAccumulate) {
@@ -206,8 +206,8 @@ TEST(CEHeuristicTest, CEWithoutOptimizationTraverseSelectivityDoesNotAccumulate)
         "{'b0.b1.b3': {$gt: 10}}"
         "]}";
     HeuristicCETester ht(collName, kNoOptPhaseSet);
-    auto ce1 = ht.getMatchCE(query);
-    auto ce2 = ht.getMatchCE(queryWithLongPaths);
+    auto ce1 = ht.getMatchCE<optimizer::RootNode>(query);
+    auto ce2 = ht.getMatchCE<optimizer::RootNode>(queryWithLongPaths);
     ASSERT_APPROX_EQUAL(ce1, ce2, kMaxCEError);
 }
 
@@ -219,9 +219,9 @@ TEST(CEHeuristicTest, CEWithoutOptimizationIntervalWithEqOnSameValue) {
         "]}";
     HeuristicCETester ht(collName, kNoOptPhaseSet);
     ASSERT_MATCH_CE_CARD(ht, query, 0.0, 0.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 5.6, 9.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 27.8048, 99.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 159.083, 1000.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 5.0, 9.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 18.8997, 99.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 62.2456, 1000.0);
 }
 
 TEST(CEHeuristicTest, CEWithoutOptimizationIntervalWithEqOnDifferentValues) {
@@ -232,9 +232,9 @@ TEST(CEHeuristicTest, CEWithoutOptimizationIntervalWithEqOnDifferentValues) {
         "]}";
     HeuristicCETester ht(collName, kNoOptPhaseSet);
     ASSERT_MATCH_CE_CARD(ht, query, 0.0, 0.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 3.9, 9.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 19.8499, 99.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 131.623, 1000.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 3.0, 9.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 9.94987, 99.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 31.6228, 1000.0);
 }
 
 TEST(CEHeuristicTest, CEWithoutOptimizationConjunctionWithIn) {
@@ -247,9 +247,9 @@ TEST(CEHeuristicTest, CEWithoutOptimizationConjunctionWithIn) {
     // Estimation for $in is not implemented yet, so we assume it has the default filter selectivity
     // of 0.1.
     ASSERT_MATCH_CE_CARD(ht, query, 0.0, 0.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 4.41, 9.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 27.7649, 99.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 218.46, 1000.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 3.6, 9.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 18.8549, 99.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 128.46, 1000.0);
 }
 
 TEST(CEHeuristicTest, CEWithoutOptimizationOneLowBoundWithoutTraverse) {
@@ -546,11 +546,11 @@ TEST(CEHeuristicTest, CEWithoutOptimizationConjunctionOfBoundsWithDifferentPaths
 
     HeuristicCETester ht(collName, kNoOptPhaseSet);
     ASSERT_CE_CARD(ht, rootNode, 0.0, 0.0);
-    ASSERT_CE_CARD(ht, rootNode, 1.92, 3.0);
-    ASSERT_CE_CARD(ht, rootNode, 4.48, 7.0);
-    ASSERT_CE_CARD(ht, rootNode, 6.4, 10.0);
-    ASSERT_CE_CARD(ht, rootNode, 18.49, 100.0);
-    ASSERT_CE_CARD(ht, rootNode, 1849.0, 10000.0);
+    ASSERT_CE_CARD(ht, rootNode, 1.47, 3.0);
+    ASSERT_CE_CARD(ht, rootNode, 3.43, 7.0);
+    ASSERT_CE_CARD(ht, rootNode, 4.9, 10.0);
+    ASSERT_CE_CARD(ht, rootNode, 10.89, 100.0);
+    ASSERT_CE_CARD(ht, rootNode, 1089.0, 10000.0);
 }
 
 TEST(CEHeuristicTest, CEWithoutOptimizationDisjunctionOnSamePathWithoutTraverse) {
@@ -649,8 +649,8 @@ TEST(CEHeuristicTest, CEWithoutOptimizationEquivalentConjunctions) {
 
     HeuristicCETester ht(collName, kNoOptPhaseSet);
     ht.setCollCard(kCollCard);
-    auto ce1 = ht.getCE(rootNode1);
-    auto ce2 = ht.getCE(rootNode2);
+    auto ce1 = ht.getCE<optimizer::RootNode>(rootNode1);
+    auto ce2 = ht.getCE<optimizer::RootNode>(rootNode2);
     ASSERT_APPROX_EQUAL(ce1, ce2, kMaxCEError);
 }
 
@@ -717,9 +717,9 @@ TEST(CEHeuristicTest, CEAfterMemoSubstitutionPhase_OR2paths) {
     std::string query = "{$or: [{a0: {$gt:44}}, {b0: {$lt: 9}}]}";
     HeuristicCETester ht(collName, kOnlySubPhaseSet);
     // Disjunctions on different paths are not SARGable.
-    ASSERT_MATCH_CE_CARD(ht, query, 8.64, 9.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 78.9525, 99.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 675.1, 1000.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 8.19, 9.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 69.0525, 99.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 551.1, 1000.0);
 }
 
 TEST(CEHeuristicTest, CEAfterMemoSubstitutionPhase_DNF1pathSimple) {
@@ -750,7 +750,7 @@ TEST(CEHeuristicTest, CEAfterMemoSubstitutionPhase_DNF1pathComplex) {
         "{$and: [{a0: {$gt:40}}, {a0: {$lt: 99}}, {a0: {$gt: 42}}, {a0: {$lt: 88}}, {a0: {$lt: "
         "81}}, {a0: {$lt: 77}}]}"
         "]}";
-    auto ce1 = ht.getMatchCE(query1);
+    auto ce1 = ht.getMatchCE<optimizer::RootNode>(query1);
     // The conjuncts are in inverse selectivity order.
     std::string query2 =
         "{$or: ["
@@ -762,7 +762,7 @@ TEST(CEHeuristicTest, CEAfterMemoSubstitutionPhase_DNF1pathComplex) {
         "{$and: [{a0: {$gt: 9}}, {a0: {$lt: 12}}, {a0: {$gt: 42}}]},"
         "{$and: [{a0: {$gt: 9}}, {a0: {$lt: 12}}]}"
         "]}";
-    auto ce2 = ht.getMatchCE(query2);
+    auto ce2 = ht.getMatchCE<optimizer::RootNode>(query2);
     ASSERT_APPROX_EQUAL(ce1, ce2, kMaxCEError);
 }
 
@@ -774,9 +774,9 @@ TEST(CEHeuristicTest, CEAfterMemoSubstitutionPhase_DNF2paths) {
         "]}";
     HeuristicCETester ht(collName, kOnlySubPhaseSet);
     // Disjunctions on different paths are not SARGable.
-    ASSERT_MATCH_CE_CARD(ht, query, 7.8336, 9.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 50.8359, 99.0);
-    ASSERT_MATCH_CE_CARD(ht, query, 335.612, 1000.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 6.6591, 9.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 36.0354, 99.0);
+    ASSERT_MATCH_CE_CARD(ht, query, 205.941, 1000.0);
 }
 
 TEST(CEHeuristicTest, CEAfterMemoSubstitutionPhase_CNF1path) {
@@ -804,10 +804,190 @@ TEST(CEHeuristicTest, CEAfterMemoSubstitutionPhase_CNF2paths) {
 }
 
 TEST(CEHeuristicTest, CEAfterMemoSubstitutionExplorationPhases) {
-    std::string query = "{a : 13, b : 42}";
     HeuristicCETester ht(collName);
-    double ce = ht.getMatchCE(query);
-    ASSERT_APPROX_EQUAL(10.0, ce, kMaxCEError);
+    ASSERT_MATCH_CE(ht, "{a : 13, b : 42}", 10.0);
+}
+
+TEST(CEHeuristicTest, CENotEquality) {
+    double collCard = kCollCard;
+    HeuristicCETester opt(collName);
+
+    // We avoid optimizing in order to verify heuristic estimate of FilterNode subtree. Note that we
+    // do not generate SargableNodes for $not predicates, but we do generate SargableNodes without
+    // it; for the purposes of this test, we want to demonstrate that $not returns the inverse of
+    // the FilterNode estimate.
+    HeuristicCETester noOpt(collName, kNoOptPhaseSet);
+
+    // Equality selectivity is sqrt(kCollCard)/kCollCard = 0.01. When we see a UnaryOp [Not] above
+    // this subtree, we invert the selectivity 1.0 - 0.01 = 0.99.
+    double ce = 100.0;
+    double inverseCE = collCard - ce;
+    ASSERT_MATCH_CE(noOpt, "{a: {$eq: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$eq: 1}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{'validate.long.path.estimate': {$eq: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{'validate.long.path.estimate': {$not: {$eq: 1}}}", inverseCE);
+
+    // Update cardinality to 25.
+    collCard = 25;
+    opt.setCollCard(collCard);
+    noOpt.setCollCard(collCard);
+
+    // Selectivity is sqrt(25)/25.
+    ce = 5.0;
+    inverseCE = collCard - ce;
+    ASSERT_MATCH_CE(noOpt, "{a: {$eq: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$eq: 1}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{'validate.long.path.estimate': {$eq: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{'validate.long.path.estimate': {$not: {$eq: 1}}}", inverseCE);
+
+    // Update cardinality to 9.
+    collCard = 9;
+    opt.setCollCard(collCard);
+    noOpt.setCollCard(collCard);
+
+    // Selectivity is sqrt(3)/9.
+    ce = 3.0;
+    inverseCE = collCard - ce;
+    ASSERT_MATCH_CE(noOpt, "{a: {$eq: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$eq: 1}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{'validate.long.path.estimate': {$eq: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{'validate.long.path.estimate': {$not: {$eq: 1}}}", inverseCE);
+}
+
+TEST(CEHeuristicTest, CENotOpenRange) {
+    // Repeat the above test for open ranges; the $not cardinality estimate should add up with the
+    // non-$not estimate to the collection cardinality.
+    double collCard = kCollCard;
+    HeuristicCETester opt(collName);
+    HeuristicCETester noOpt(collName, kNoOptPhaseSet);
+
+    // Expect open-range selectivity for input card > 100 (0.33).
+    double ce = 3300;
+    double inverseCE = collCard - ce;
+
+    ASSERT_MATCH_CE(noOpt, "{a: {$lt: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$lt: 1}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{a: {$lte: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$lte: 1}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{a: {$gt: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$gt: 1}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{a: {$gte: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$gte: 1}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{'validate.long.path.estimate': {$gte: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{'validate.long.path.estimate': {$not: {$gte: 1}}}", inverseCE);
+
+    // Update cardinality to 25.
+    collCard = 25;
+    opt.setCollCard(collCard);
+    noOpt.setCollCard(collCard);
+
+    // Expect open-range selectivity for input card in range (20, 100) (0.45).
+    ce = 11.25;
+    inverseCE = collCard - ce;
+
+    ASSERT_MATCH_CE(noOpt, "{a: {$lt: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$lt: 1}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{a: {$lte: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$lte: 1}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{a: {$gt: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$gt: 1}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{a: {$gte: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$gte: 1}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{'validate.long.path.estimate': {$gte: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{'validate.long.path.estimate': {$not: {$gte: 1}}}", inverseCE);
+
+    // Update cardinality to 10.
+    collCard = 10.0;
+    opt.setCollCard(collCard);
+    noOpt.setCollCard(collCard);
+
+    // Expect open-range selectivity for input card < 20 (0.70).
+    ce = 7.0;
+    inverseCE = collCard - ce;
+
+    ASSERT_MATCH_CE(noOpt, "{a: {$lt: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$lt: 1}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{a: {$lte: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$lte: 1}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{a: {$gt: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$gt: 1}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{a: {$gte: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$gte: 1}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{'validate.long.path.estimate': {$gte: 1}}", ce);
+    ASSERT_MATCH_CE(opt, "{'validate.long.path.estimate': {$not: {$gte: 1}}}", inverseCE);
+}
+
+TEST(CEHeuristicTest, CENotClosedRange) {
+    // Repeat the above test for closed ranges; the $not cardinality estimate should add up with the
+    // non-$not estimate to the collection cardinality.
+    double collCard = kCollCard;
+    double ce = 1089.0;
+    double inverseCE = collCard - ce;
+    HeuristicCETester opt(collName);
+    HeuristicCETester noOpt(collName, kNoOptPhaseSet);
+
+    ASSERT_MATCH_CE(noOpt, "{a: {$gt: 10, $lt: 20}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$gt: 10, $lt: 20}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{a: {$gte: 10, $lt: 20}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$gte: 10, $lt: 20}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{a: {$gte: 10, $lte: 20}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$gte: 10, $lte: 20}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{a: {$gt: 10, $lte: 20}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$gt: 10, $lte: 20}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{'validate.long.path.estimate': {$gte: 10, $lt: 20}}", ce);
+    ASSERT_MATCH_CE(opt, "{'validate.long.path.estimate': {$not: {$gte: 10, $lt: 20}}}", inverseCE);
+
+    /*
+     * Update cardinality to 25. Here we observe an interesting edge case where the estimated
+     * cardinality is not the inverse of the actual cardinality.
+     *
+     * Consider the predicate {a: {$gt: 10, $lt: 20}}. This generates two FilterNodes stacked on top
+     * of each other. However, the predicate {a: {$not: {$gt: 10, $lt: 20}}} generates just one
+     * FilterNode.
+     *
+     * We always use input cardinality to determine which interval selectivity we're going to use.
+     * However, we have a different input cardinality for the one FilterNode case (collCard) than
+     * for the two FilterNodes case: the first node gets collCard, and the second node gets a
+     * smaller value after the selectivity of the first filter is applied.
+     *
+     * Because we use a piecewise function to pick the selectivity, and because we go from inputCard
+     * < 100 to inputCard < 20, we choose different selectivities for the intervals in the second
+     * FilterNode (0.50) than in the first (0.33).
+     */
+    collCard = 25;
+    ce = 7.875;
+    inverseCE = 19.9375;
+    opt.setCollCard(collCard);
+    noOpt.setCollCard(collCard);
+
+    ASSERT_MATCH_CE(noOpt, "{a: {$gt: 10, $lt: 20}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$gt: 10, $lt: 20}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{a: {$gte: 10, $lt: 20}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$gte: 10, $lt: 20}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{a: {$gte: 10, $lte: 20}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$gte: 10, $lte: 20}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{a: {$gt: 10, $lte: 20}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$gt: 10, $lte: 20}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{'validate.long.path.estimate': {$gte: 10, $lt: 20}}", ce);
+    ASSERT_MATCH_CE(opt, "{'validate.long.path.estimate': {$not: {$gte: 10, $lt: 20}}}", inverseCE);
+
+    // Update cardinality to 10.
+    collCard = 10.0;
+    ce = 4.9;
+    inverseCE = collCard - ce;
+    opt.setCollCard(collCard);
+    noOpt.setCollCard(collCard);
+
+    ASSERT_MATCH_CE(noOpt, "{a: {$gt: 10, $lt: 20}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$gt: 10, $lt: 20}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{a: {$gte: 10, $lt: 20}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$gte: 10, $lt: 20}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{a: {$gte: 10, $lte: 20}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$gte: 10, $lte: 20}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{a: {$gt: 10, $lte: 20}}", ce);
+    ASSERT_MATCH_CE(opt, "{a: {$not: {$gt: 10, $lte: 20}}}", inverseCE);
+    ASSERT_MATCH_CE(noOpt, "{'validate.long.path.estimate': {$gte: 10, $lt: 20}}", ce);
+    ASSERT_MATCH_CE(opt, "{'validate.long.path.estimate': {$not: {$gte: 10, $lt: 20}}}", inverseCE);
 }
 
 }  // namespace

@@ -39,12 +39,16 @@
 #include "mongo/db/query/ce/ce_sampling.h"
 #include "mongo/db/query/ce/collection_statistics_impl.h"
 #include "mongo/db/query/ce_mode_parameter.h"
+#include "mongo/db/query/cost_model/cost_model_manager.h"
 #include "mongo/db/query/cqf_command_utils.h"
 #include "mongo/db/query/optimizer/cascades/ce_heuristic.h"
 #include "mongo/db/query/optimizer/cascades/cost_derivation.h"
+#include "mongo/db/query/optimizer/cascades/cost_model_gen.h"
 #include "mongo/db/query/optimizer/explain.h"
+#include "mongo/db/query/optimizer/metadata_factory.h"
 #include "mongo/db/query/optimizer/node.h"
 #include "mongo/db/query/optimizer/opt_phase_manager.h"
+#include "mongo/db/query/optimizer/rewrites/const_eval.h"
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner_params.h"
@@ -56,8 +60,21 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
-
 using namespace optimizer;
+using cost_model::CostModelManager;
+
+namespace {
+const auto costModelManager = ServiceContext::declareDecoration<CostModelManager>();
+
+BSONObj getCostModelCoefficientsOverride() {
+    if (internalCostModelCoefficients.empty()) {
+        return BSONObj();
+    }
+
+    return fromjson(internalCostModelCoefficients);
+}
+}  // namespace
+
 
 static opt::unordered_map<std::string, optimizer::IndexDefinition> buildIndexSpecsOptimizer(
     boost::intrusive_ptr<ExpressionContext> expCtx,
@@ -149,7 +166,7 @@ static opt::unordered_map<std::string, optimizer::IndexDefinition> buildIndexSpe
             for (size_t i = 0; i < path.getPathLength(); i++) {
                 const std::string& fieldName = path.getFieldName(i).toString();
                 if (fieldName == "$**") {
-                    // TODO: For now disallow wildcard indexes.
+                    // TODO SERVER-70309: Support wildcard indexes.
                     useIndex = false;
                     break;
                 }
@@ -202,12 +219,11 @@ static opt::unordered_map<std::string, optimizer::IndexDefinition> buildIndexSpe
                                                   "" /*uniquePrefix*/);
             exprABT = make<EvalFilter>(std::move(exprABT), make<Variable>(scanProjName));
 
-            // TODO: simplify expression.
-
+            // TODO SERVER-70315: simplify partial filter expression.
             auto conversion = convertExprToPartialSchemaReq(
                 exprABT, true /*isFilterContext*/, {} /*pathToIntervalFn*/);
             if (!conversion) {
-                // TODO: should this conversion be always possible?
+                // TODO SERVER-70315: should this conversion be always possible?
                 continue;
             }
             tassert(6624257,
@@ -253,7 +269,7 @@ static QueryHints getHintsFromQueryKnobs() {
 }
 
 static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> optimizeAndCreateExecutor(
-    OptPhaseManager& phaseManager,
+    OptPhaseManager phaseManager,
     ABT abt,
     OperationContext* opCtx,
     boost::intrusive_ptr<ExpressionContext> expCtx,
@@ -343,7 +359,8 @@ static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> optimizeAndCreateExe
         MultipleCollectionAccessor(collection),
         QueryPlannerParams::Options::DEFAULT,
         nss,
-        std::move(yieldPolicy)));
+        std::move(yieldPolicy),
+        false /*isFromPlanCache*/));
     return planExec;
 }
 
@@ -355,26 +372,27 @@ static void populateAdditionalScanDefs(
     const size_t numberOfPartitions,
     PrefixId& prefixId,
     opt::unordered_map<std::string, ScanDefinition>& scanDefs,
+    const ConstFoldFn& constFold,
     const DisableIndexOptions disableIndexOptions,
     bool& disableScan) {
     for (const auto& involvedNss : involvedCollections) {
-        // TODO handle views?
-        AutoGetCollectionForReadCommandMaybeLockFree ctx(
-            opCtx, involvedNss, auto_get_collection::ViewMode::kViewsForbidden);
+        // TODO SERVER-70304 Allow queries over views and reconsider locking strategy for
+        // multi-collection queries.
+        AutoGetCollectionForReadCommandMaybeLockFree ctx(opCtx, involvedNss);
         const CollectionPtr& collection = ctx ? ctx.getCollection() : CollectionPtr::null;
         const bool collectionExists = collection != nullptr;
         const std::string uuidStr =
             collectionExists ? collection->uuid().toString() : "<missing_uuid>";
-
         const std::string collNameStr = involvedNss.coll().toString();
-        // TODO: We cannot add the uuidStr suffix because the pipeline translation does not have
+
+        // TODO SERVER-70349: Make this consistent with the base collection scan def name.
+        // We cannot add the uuidStr suffix because the pipeline translation does not have
         // access to the metadata so it generates a scan over just the collection name.
         const std::string scanDefName = collNameStr;
 
         opt::unordered_map<std::string, optimizer::IndexDefinition> indexDefs;
         const ProjectionName& scanProjName = prefixId.getNextId("scan");
         if (collectionExists) {
-            // TODO: add locks on used indexes?
             indexDefs = buildIndexSpecsOptimizer(expCtx,
                                                  opCtx,
                                                  collection,
@@ -390,21 +408,71 @@ static void populateAdditionalScanDefs(
                                               : DistributionType::UnknownPartitioning};
 
         const CEType collectionCE = collectionExists ? collection->numRecords(opCtx) : -1.0;
-        scanDefs[scanDefName] =
-            ScanDefinition({{"type", "mongod"},
-                            {"database", involvedNss.db().toString()},
-                            {"uuid", uuidStr},
-                            {ScanNode::kDefaultCollectionNameSpec, collNameStr}},
-                           std::move(indexDefs),
-                           std::move(distribution),
-                           collectionExists,
-                           collectionCE);
+        scanDefs.emplace(scanDefName,
+                         createScanDef({{"type", "mongod"},
+                                        {"database", involvedNss.db().toString()},
+                                        {"uuid", uuidStr},
+                                        {ScanNode::kDefaultCollectionNameSpec, collNameStr}},
+                                       std::move(indexDefs),
+                                       constFold,
+                                       std::move(distribution),
+                                       collectionExists,
+                                       collectionCE));
     }
 }
 
-void validateCommandOptions(const CollectionPtr& collection,
+// Enforce that unsupported command options don't run through Bonsai. Note these checks are already
+// present in the Bonsai fallback mechansim, but those checks are skipped when Bonsai is forced.
+// This function prevents us from accidently forcing Bonsai with an unsupported option.
+void validateFindCommandOptions(const FindCommandRequest& req) {
+    uassert(ErrorCodes::InternalErrorNotSupported,
+            "$_requestResumeToken unsupported in CQF",
+            !req.getRequestResumeToken());
+    uassert(ErrorCodes::InternalErrorNotSupported,
+            "allowPartialResults unsupported in CQF",
+            !req.getAllowPartialResults());
+    uassert(ErrorCodes::InternalErrorNotSupported,
+            "allowSpeculativeMajorityRead unsupported in CQF",
+            !req.getAllowSpeculativeMajorityRead());
+    uassert(
+        ErrorCodes::InternalErrorNotSupported, "awaitData unsupported in CQF", !req.getAwaitData());
+    uassert(ErrorCodes::InternalErrorNotSupported,
+            "collation unsupported in CQF",
+            req.getCollation().isEmpty() ||
+                SimpleBSONObjComparator::kInstance.evaluate(req.getCollation() ==
+                                                            CollationSpec::kSimpleSpec));
+    uassert(ErrorCodes::InternalErrorNotSupported,
+            "let unsupported in CQF",
+            !req.getLet() || req.getLet()->isEmpty());
+    uassert(
+        ErrorCodes::InternalErrorNotSupported, "min unsupported in CQF", req.getMin().isEmpty());
+    uassert(
+        ErrorCodes::InternalErrorNotSupported, "max unsupported in CQF", req.getMax().isEmpty());
+    uassert(ErrorCodes::InternalErrorNotSupported,
+            "noCursorTimeout unsupported in CQF",
+            !req.getNoCursorTimeout());
+    uassert(
+        ErrorCodes::InternalErrorNotSupported, "readOnce unsupported in CQF", !req.getReadOnce());
+    uassert(
+        ErrorCodes::InternalErrorNotSupported, "returnKey unsupported in CQF", !req.getReturnKey());
+    uassert(ErrorCodes::InternalErrorNotSupported,
+            "runtimeConstants unsupported in CQF",
+            !req.getLegacyRuntimeConstants());
+    uassert(ErrorCodes::InternalErrorNotSupported,
+            "showRecordId unsupported in CQF",
+            !req.getShowRecordId());
+    uassert(
+        ErrorCodes::InternalErrorNotSupported, "tailable unsupported in CQF", !req.getTailable());
+    uassert(ErrorCodes::InternalErrorNotSupported, "term unsupported in CQF", !req.getTerm());
+}
+
+void validateCommandOptions(const CanonicalQuery* query,
+                            const CollectionPtr& collection,
                             const boost::optional<BSONObj>& indexHint,
                             const stdx::unordered_set<NamespaceString>& involvedCollections) {
+    if (query) {
+        validateFindCommandOptions(query->getFindCommandRequest());
+    }
     if (indexHint && !involvedCollections.empty()) {
         uasserted(6624256,
                   "For now we can apply hints only for queries involving a single collection");
@@ -431,6 +499,7 @@ Metadata populateMetadata(boost::intrusive_ptr<ExpressionContext> expCtx,
                           const ProjectionName& scanProjName,
                           const std::string& uuidStr,
                           const std::string& scanDefName,
+                          const ConstFoldFn& constFold,
                           QueryHints& queryHints,
                           PrefixId& prefixId) {
     auto opCtx = expCtx->opCtx;
@@ -439,7 +508,6 @@ Metadata populateMetadata(boost::intrusive_ptr<ExpressionContext> expCtx,
     // Add the base collection metadata.
     opt::unordered_map<std::string, optimizer::IndexDefinition> indexDefs;
     if (collectionExists) {
-        // TODO: add locks on used indexes?
         indexDefs = buildIndexSpecsOptimizer(expCtx,
                                              opCtx,
                                              collection,
@@ -458,14 +526,15 @@ Metadata populateMetadata(boost::intrusive_ptr<ExpressionContext> expCtx,
     opt::unordered_map<std::string, ScanDefinition> scanDefs;
     const int64_t numRecords = collectionExists ? collection->numRecords(opCtx) : -1;
     scanDefs.emplace(scanDefName,
-                     ScanDefinition({{"type", "mongod"},
-                                     {"database", nss.db().toString()},
-                                     {"uuid", uuidStr},
-                                     {ScanNode::kDefaultCollectionNameSpec, nss.coll().toString()}},
-                                    std::move(indexDefs),
-                                    std::move(distribution),
-                                    collectionExists,
-                                    static_cast<CEType>(numRecords)));
+                     createScanDef({{"type", "mongod"},
+                                    {"database", nss.db().toString()},
+                                    {"uuid", uuidStr},
+                                    {ScanNode::kDefaultCollectionNameSpec, nss.coll().toString()}},
+                                   std::move(indexDefs),
+                                   constFold,
+                                   std::move(distribution),
+                                   collectionExists,
+                                   static_cast<CEType>(numRecords)));
 
     // Add a scan definition for all involved collections. Note that the base namespace has already
     // been accounted for above and isn't included here.
@@ -476,10 +545,88 @@ Metadata populateMetadata(boost::intrusive_ptr<ExpressionContext> expCtx,
                                numberOfPartitions,
                                prefixId,
                                scanDefs,
+                               constFold,
                                queryHints._disableIndexes,
                                queryHints._disableScan);
 
     return {std::move(scanDefs), numberOfPartitions};
+}
+
+enum class CEMode { kSampling, kHistogram, kHeuristic };
+
+static OptPhaseManager createPhaseManager(const CEMode mode,
+                                          const CostModelCoefficients& costModel,
+                                          const NamespaceString& nss,
+                                          OperationContext* opCtx,
+                                          const int64_t collectionSize,
+                                          PrefixId& prefixId,
+                                          const bool requireRID,
+                                          Metadata metadata,
+                                          const ConstFoldFn& constFold,
+                                          QueryHints hints) {
+    switch (mode) {
+        case CEMode::kSampling: {
+            Metadata metadataForSampling = metadata;
+            // Do not use indexes for sampling.
+            for (auto& entry : metadataForSampling._scanDefs) {
+                entry.second.getIndexDefs().clear();
+            }
+
+            // TODO: consider a limited rewrite set.
+            OptPhaseManager phaseManagerForSampling{OptPhaseManager::getAllRewritesSet(),
+                                                    prefixId,
+                                                    false /*requireRID*/,
+                                                    std::move(metadataForSampling),
+                                                    std::make_unique<HeuristicCE>(),
+                                                    std::make_unique<DefaultCosting>(costModel),
+                                                    defaultConvertPathToInterval,
+                                                    constFold,
+                                                    DebugInfo::kDefaultForProd,
+                                                    {} /*hints*/};
+            return {OptPhaseManager::getAllRewritesSet(),
+                    prefixId,
+                    requireRID,
+                    std::move(metadata),
+                    std::make_unique<CESamplingTransport>(opCtx,
+                                                          std::move(phaseManagerForSampling),
+                                                          collectionSize,
+                                                          std::make_unique<HeuristicCE>()),
+                    std::make_unique<DefaultCosting>(costModel),
+                    defaultConvertPathToInterval,
+                    constFold,
+                    DebugInfo::kDefaultForProd,
+                    std::move(hints)};
+        }
+
+        case CEMode::kHistogram:
+            return {OptPhaseManager::getAllRewritesSet(),
+                    prefixId,
+                    requireRID,
+                    std::move(metadata),
+                    std::make_unique<CEHistogramTransport>(
+                        std::make_shared<ce::CollectionStatisticsImpl>(collectionSize, nss),
+                        std::make_unique<HeuristicCE>()),
+                    std::make_unique<DefaultCosting>(costModel),
+                    defaultConvertPathToInterval,
+                    constFold,
+                    DebugInfo::kDefaultForProd,
+                    std::move(hints)};
+
+        case CEMode::kHeuristic:
+            return {OptPhaseManager::getAllRewritesSet(),
+                    prefixId,
+                    requireRID,
+                    std::move(metadata),
+                    std::make_unique<HeuristicCE>(),
+                    std::make_unique<DefaultCosting>(costModel),
+                    defaultConvertPathToInterval,
+                    constFold,
+                    DebugInfo::kDefaultForProd,
+                    std::move(hints)};
+
+        default:
+            MONGO_UNREACHABLE;
+    }
 }
 
 std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOptimizer(
@@ -501,7 +648,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOp
         involvedCollections = pipeline->getInvolvedCollections();
     }
 
-    validateCommandOptions(collection, indexHint, involvedCollections);
+    validateCommandOptions(canonicalQuery.get(), collection, indexHint, involvedCollections);
 
     auto curOp = CurOp::get(opCtx);
     curOp->debug().cqfUsed = true;
@@ -515,6 +662,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOp
     const ProjectionName& scanProjName = prefixId.getNextId("scan");
     QueryHints queryHints = getHintsFromQueryKnobs();
 
+    ConstFoldFn constFold = ConstEval::constFold;
     auto metadata = populateMetadata(expCtx,
                                      collection,
                                      involvedCollections,
@@ -523,6 +671,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOp
                                      scanProjName,
                                      uuidStr,
                                      scanDefName,
+                                     constFold,
                                      queryHints,
                                      prefixId);
 
@@ -542,82 +691,37 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOp
         6264803, 5, "Translated ABT", "explain"_attr = ExplainGenerator::explainV2Compact(abt));
 
     const int64_t numRecords = collectionExists ? collection->numRecords(opCtx) : -1;
+    CEMode mode = CEMode::kHeuristic;
 
-    // TODO SERVER-68919: Move OptPhaseManager construction to its own function.
-    if (internalQueryCardinalityEstimatorMode == ce::kSampling && collectionExists &&
-        numRecords > 0) {
-        Metadata metadataForSampling = metadata;
-        // Do not use indexes for sampling.
-        for (auto& entry : metadataForSampling._scanDefs) {
-            entry.second.getIndexDefs().clear();
+    // TODO: SERVER-70241: Handle "auto" estimation mode.
+    if (internalQueryCardinalityEstimatorMode == ce::kSampling) {
+        if (collectionExists && numRecords > 0) {
+            mode = CEMode::kSampling;
         }
-
-        // TODO: consider a limited rewrite set.
-        OptPhaseManager phaseManagerForSampling(OptPhaseManager::getAllRewritesSet(),
-                                                prefixId,
-                                                false /*requireRID*/,
-                                                std::move(metadataForSampling),
-                                                std::make_unique<HeuristicCE>(),
-                                                std::make_unique<DefaultCosting>(),
-                                                defaultConvertPathToInterval,
-                                                DebugInfo::kDefaultForProd,
-                                                {});
-
-        OptPhaseManager phaseManager{
-            OptPhaseManager::getAllRewritesSet(),
-            prefixId,
-            requireRID,
-            std::move(metadata),
-            std::make_unique<CESamplingTransport>(opCtx, phaseManagerForSampling, numRecords),
-            std::make_unique<DefaultCosting>(),
-            defaultConvertPathToInterval,
-            DebugInfo::kDefaultForProd,
-            std::move(queryHints)};
-
-        return optimizeAndCreateExecutor(phaseManager,
-                                         std::move(abt),
-                                         opCtx,
-                                         expCtx,
-                                         nss,
-                                         collection,
-                                         std::move(canonicalQuery),
-                                         requireRID);
-
     } else if (internalQueryCardinalityEstimatorMode == ce::kHistogram) {
-        auto ceDerivation =
-            std::make_unique<CEHistogramTransport>(std::shared_ptr<ce::CollectionStatistics>(
-                new ce::CollectionStatisticsImpl(numRecords, nss)));
-        OptPhaseManager phaseManager{OptPhaseManager::getAllRewritesSet(),
-                                     prefixId,
-                                     requireRID,
-                                     std::move(metadata),
-                                     std::move(ceDerivation),
-                                     std::make_unique<DefaultCosting>(),
-                                     defaultConvertPathToInterval,
-                                     DebugInfo::kDefaultForProd,
-                                     std::move(queryHints)};
-
-        return optimizeAndCreateExecutor(phaseManager,
-                                         std::move(abt),
-                                         opCtx,
-                                         expCtx,
-                                         nss,
-                                         collection,
-                                         std::move(canonicalQuery),
-                                         requireRID);
+        mode = CEMode::kHistogram;
+    } else if (internalQueryCardinalityEstimatorMode == ce::kHeuristic) {
+        mode = CEMode::kHeuristic;
+    } else {
+        tasserted(6624252,
+                  str::stream() << "Unknown estimator mode: "
+                                << internalQueryCardinalityEstimatorMode);
     }
-    // Default to using heuristics.
-    OptPhaseManager phaseManager{OptPhaseManager::getAllRewritesSet(),
-                                 prefixId,
-                                 requireRID,
-                                 std::move(metadata),
-                                 std::make_unique<HeuristicCE>(),
-                                 std::make_unique<DefaultCosting>(),
-                                 defaultConvertPathToInterval,
-                                 DebugInfo::kDefaultForProd,
-                                 std::move(queryHints)};
 
-    return optimizeAndCreateExecutor(phaseManager,
+    auto costModel = costModelManager(opCtx->getServiceContext())
+                         .getCoefficients(getCostModelCoefficientsOverride());
+
+    OptPhaseManager phaseManager = createPhaseManager(mode,
+                                                      costModel,
+                                                      nss,
+                                                      opCtx,
+                                                      numRecords,
+                                                      prefixId,
+                                                      requireRID,
+                                                      std::move(metadata),
+                                                      constFold,
+                                                      std::move(queryHints));
+    return optimizeAndCreateExecutor(std::move(phaseManager),
                                      std::move(abt),
                                      opCtx,
                                      expCtx,

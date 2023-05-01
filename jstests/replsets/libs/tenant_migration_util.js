@@ -22,19 +22,6 @@ var TenantMigrationUtil = (function() {
     }
 
     /**
-     * Returns true if feature flag 'featureFlagShardSplit' is enabled, false otherwise.
-     */
-    function isShardSplitEnabled(db) {
-        const admin = db.getSiblingDB("admin");
-        const flagDoc = admin.runCommand({getParameter: 1, featureFlagShardSplit: 1});
-        const fcvDoc = admin.runCommand({getParameter: 1, featureCompatibilityVersion: 1});
-        return flagDoc.hasOwnProperty("featureFlagShardSplit") &&
-            flagDoc.featureFlagShardSplit.value &&
-            MongoRunner.compareBinVersions(fcvDoc.featureCompatibilityVersion.version,
-                                           flagDoc.featureFlagShardSplit.fcv) >= 0;
-    }
-
-    /**
      * Construct a donorStartMigration command object with protocol: "shard merge" if the feature
      * flag is enabled.
      */
@@ -365,12 +352,15 @@ var TenantMigrationUtil = (function() {
      * Compares the hashes for DBs that belong to the specified tenant between the donor and
      * recipient primaries.
      */
-    function checkTenantDBHashes(donorRst,
-                                 recipientRst,
-                                 tenantId,
-                                 excludedDBs = [],
-                                 msgPrefix = 'checkTenantDBHashes',
-                                 ignoreUUIDs = false) {
+    function checkTenantDBHashes({
+        donorRst,
+        recipientRst,
+        tenantId,
+        excludedDBs = [],
+        msgPrefix = 'checkTenantDBHashes',
+        ignoreUUIDs = false,
+        skipTempCollections = false
+    }) {
         // Always skip db hash checks for the config, admin, and local database.
         excludedDBs = [...excludedDBs, "config", "admin", "local"];
 
@@ -407,10 +397,10 @@ var TenantMigrationUtil = (function() {
                 for (const dbName of combinedDBNames) {
                     // Pass in an empty array for the secondaries, since we only wish to compare
                     // the DB hashes between the donor and recipient primary in this test.
-                    const donorDBHash =
-                        assert.commandWorked(donorRst.getHashes(dbName, []).primary);
-                    const recipientDBHash =
-                        assert.commandWorked(recipientRst.getHashes(dbName, []).primary);
+                    const donorDBHash = assert.commandWorked(
+                        donorRst.getHashes(dbName, [], skipTempCollections).primary);
+                    const recipientDBHash = assert.commandWorked(
+                        recipientRst.getHashes(dbName, [], skipTempCollections).primary);
 
                     const donorCollections = Object.keys(donorDBHash.collections);
                     const donorCollInfos = new CollInfos(donorPrimaryConn, 'donorPrimary', dbName);
@@ -557,7 +547,6 @@ var TenantMigrationUtil = (function() {
 
     return {
         kExternalKeysNs,
-        isShardSplitEnabled,
         isShardMergeEnabled,
         donorStartMigrationWithProtocol,
         getExternalKeys,

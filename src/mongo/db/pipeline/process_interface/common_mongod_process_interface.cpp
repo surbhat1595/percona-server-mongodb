@@ -251,10 +251,9 @@ std::deque<BSONObj> CommonMongodProcessInterface::listCatalog(OperationContext* 
         AutoGetCollectionForReadCommandMaybeLockFree collLock(
             opCtx,
             systemViewsNamespaces.front(),
-            auto_get_collection::ViewMode::kViewsForbidden,
-            Date_t::max(),
-            AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
-            {++systemViewsNamespaces.cbegin(), systemViewsNamespaces.cend()});
+            AutoGetCollection::Options{}.secondaryNssOrUUIDs(
+                {++systemViewsNamespaces.cbegin(), systemViewsNamespaces.cend()}),
+            AutoStatsTracker::LogMode::kUpdateTopAndCurOp);
 
         // If the primary collection is not available, it means the information from parsing
         // _mdb_catalog is no longer valid. Therefore, we restart this process from the top.
@@ -434,10 +433,8 @@ CommonMongodProcessInterface::attachCursorSourceToPipelineForLocalRead(Pipeline*
 
     autoColl.emplace(expCtx->opCtx,
                      nsOrUUID,
-                     auto_get_collection::ViewMode::kViewsForbidden,
-                     Date_t::max(),
-                     AutoStatsTracker::LogMode::kUpdateTop,
-                     secondaryNamespaces);
+                     AutoGetCollection::Options{}.secondaryNssOrUUIDs(secondaryNamespaces),
+                     AutoStatsTracker::LogMode::kUpdateTop);
 
     MultipleCollectionAccessor holder{expCtx->opCtx,
                                       &autoColl->getCollection(),
@@ -798,14 +795,8 @@ BSONObj CommonMongodProcessInterface::_convertRenameToInternalRename(
 
     BSONObjBuilder newCmd;
     newCmd.append("internalRenameIfOptionsAndIndexesMatch", 1);
-    if (!gMultitenancySupport ||
-        gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility)) {
-        newCmd.append("from", sourceNs.ns());
-        newCmd.append("to", targetNs.ns());
-    } else {
-        newCmd.append("from", sourceNs.toStringWithTenantId());
-        newCmd.append("to", targetNs.toStringWithTenantId());
-    }
+    newCmd.append("from", NamespaceStringUtil::serialize(sourceNs));
+    newCmd.append("to", NamespaceStringUtil::serialize(targetNs));
     newCmd.append("collectionOptions", originalCollectionOptions);
     BSONArrayBuilder indexArrayBuilder(newCmd.subarrayStart("indexes"));
     for (auto&& index : originalIndexes) {

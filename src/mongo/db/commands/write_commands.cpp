@@ -1018,9 +1018,41 @@ public:
                         "Sharded time-series buckets collection is missing time-series fields",
                         collDesc.getTimeseriesFields());
                 auto granularity = collDesc.getTimeseriesFields()->getGranularity();
-                auto bucketSpan = timeseries::getMaxSpanSecondsFromGranularity(granularity);
-                timeSeriesOptions.setGranularity(granularity);
-                timeSeriesOptions.setBucketMaxSpanSeconds(bucketSpan);
+                auto bucketMaxSpanSeconds =
+                    collDesc.getTimeseriesFields()->getBucketMaxSpanSeconds();
+
+                if (granularity) {
+                    timeSeriesOptions.setGranularity(granularity.get());
+                    timeSeriesOptions.setBucketMaxSpanSeconds(
+                        timeseries::getMaxSpanSecondsFromGranularity(*granularity));
+
+                    if (feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
+                            serverGlobalParams.featureCompatibility)) {
+                        timeSeriesOptions.setBucketRoundingSeconds(
+                            timeseries::getBucketRoundingSecondsFromGranularity(*granularity));
+                    }
+                } else if (!bucketMaxSpanSeconds) {
+                    timeSeriesOptions.setGranularity(BucketGranularityEnum::Seconds);
+                    timeSeriesOptions.setBucketMaxSpanSeconds(
+                        timeseries::getMaxSpanSecondsFromGranularity(
+                            *timeSeriesOptions.getGranularity()));
+                    if (feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
+                            serverGlobalParams.featureCompatibility)) {
+                        timeSeriesOptions.setBucketRoundingSeconds(
+                            timeseries::getBucketRoundingSecondsFromGranularity(
+                                *timeSeriesOptions.getGranularity()));
+                    }
+                } else {
+                    invariant(feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
+                                  serverGlobalParams.featureCompatibility) &&
+                              bucketMaxSpanSeconds);
+                    timeSeriesOptions.setBucketMaxSpanSeconds(bucketMaxSpanSeconds);
+
+                    auto bucketRoundingSeconds =
+                        collDesc.getTimeseriesFields()->getBucketRoundingSeconds();
+                    invariant(bucketRoundingSeconds);
+                    timeSeriesOptions.setBucketRoundingSeconds(bucketRoundingSeconds);
+                }
             }
         }
 
@@ -1666,6 +1698,9 @@ public:
                 if (update.getArrayFilters()) {
                     CmdUpdate::updateMetrics.incrementExecutedWithArrayFilters();
                 }
+                if (update.getMulti()) {
+                    updateManyCount.increment(1);
+                }
             }
 
             return updateReply;
@@ -1823,6 +1858,13 @@ public:
                           request().getDeletes().size(),
                           std::move(reply),
                           &deleteReply);
+
+            // Collect metrics.
+            for (auto&& deletes : request().getDeletes()) {
+                if (deletes.getMulti()) {
+                    deleteManyCount.increment(1);
+                }
+            }
 
             return deleteReply;
         } catch (const DBException& ex) {

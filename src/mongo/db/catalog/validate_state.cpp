@@ -40,6 +40,7 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/storage/durable_catalog.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/fail_point.h"
 
@@ -69,11 +70,10 @@ ValidateState::ValidateState(OperationContext* opCtx,
         // being validated.
         _noPBWM.emplace(opCtx->lockState());
 
-        _globalLock.emplace(opCtx, MODE_IS);
-        _databaseLock.emplace(opCtx, _nss.db(), MODE_IS);
+        _databaseLock.emplace(opCtx, _nss.dbName(), MODE_IS);
         _collectionLock.emplace(opCtx, _nss, MODE_IS);
     } else {
-        _databaseLock.emplace(opCtx, _nss.db(), MODE_IX);
+        _databaseLock.emplace(opCtx, _nss.dbName(), MODE_IX);
         _collectionLock.emplace(opCtx, _nss, MODE_X);
     }
 
@@ -196,11 +196,6 @@ void ValidateState::_yieldCursors(OperationContext* opCtx) {
     _traverseRecordStoreCursor->save();
     _seekRecordStoreCursor->save();
 
-    if (isBackground() && _validateTs) {
-        // Reset snapshot to help ameliorate WiredTiger cache pressure.
-        opCtx->recoveryUnit()->refreshSnapshot();
-    }
-
     // Restore all the cursors.
     for (const auto& indexCursor : _indexCursors) {
         indexCursor.second->restore();
@@ -218,25 +213,12 @@ void ValidateState::initializeCursors(OperationContext* opCtx) {
     invariant(!_traverseRecordStoreCursor && !_seekRecordStoreCursor && _indexCursors.size() == 0 &&
               _indexes.size() == 0);
 
-    // Background validation (on replica sets) will read from a snapshot opened on the kNoOverlap
-    // read source, which is the minimum of the last applied and all durable timestamps, instead of
-    // the latest data. Using the kNoOverlap read source prevents us from having to take the PBWM
-    // lock, which blocks replication. We cannot solely rely on the all durable timestamp as it can
-    // be set while we're in the middle of applying a batch on secondary nodes.
-    // Background validation on standalones uses the kNoTimestamp read source because standalones
-    // have no timestamps to use for maintaining a consistent snapshot.
+    // Background validation reads from the last stable checkpoint instead of the latest data. This
+    // allows concurrent writes to go ahead without interfering with validation's view of the data.
     RecoveryUnit::ReadSource rs = RecoveryUnit::ReadSource::kNoTimestamp;
     if (isBackground()) {
         opCtx->recoveryUnit()->abandonSnapshot();
-        // Background validation is expecting to read from the no overlap timestamp, but
-        // standalones do not support timestamps. Therefore, if this process is currently running as
-        // a standalone, don't use a timestamp.
-
-        if (repl::ReplicationCoordinator::get(opCtx)->isReplEnabled()) {
-            rs = RecoveryUnit::ReadSource::kNoOverlap;
-        } else {
-            rs = RecoveryUnit::ReadSource::kNoTimestamp;
-        }
+        rs = RecoveryUnit::ReadSource::kCheckpoint;
         opCtx->recoveryUnit()->setTimestampReadSource(rs);
     }
 
@@ -247,15 +229,29 @@ void ValidateState::initializeCursors(OperationContext* opCtx) {
         _dataThrottle.turnThrottlingOff();
     }
 
-    _traverseRecordStoreCursor = std::make_unique<SeekableRecordThrottleCursor>(
-        opCtx, _collection->getRecordStore(), &_dataThrottle);
-    _seekRecordStoreCursor = std::make_unique<SeekableRecordThrottleCursor>(
-        opCtx, _collection->getRecordStore(), &_dataThrottle);
+    // Acquire the checkpoint lock to prevent a checkpoint from being taken while we are opening our
+    // checkpoint cursors. This ensures all cursors are reading from the same point in time.
+    auto checkpointLock = isBackground()
+        ? opCtx->getServiceContext()->getStorageEngine()->getCheckpointLock(
+              opCtx, StorageEngine::CheckpointLock::Mode::kShared)
+        : nullptr;
 
-    if (rs != RecoveryUnit::ReadSource::kNoTimestamp) {
-        invariant(rs == RecoveryUnit::ReadSource::kNoOverlap);
+    StringSet readyDurableIndexes;
+    try {
+        _traverseRecordStoreCursor = std::make_unique<SeekableRecordThrottleCursor>(
+            opCtx, _collection->getRecordStore(), &_dataThrottle);
+        _seekRecordStoreCursor = std::make_unique<SeekableRecordThrottleCursor>(
+            opCtx, _collection->getRecordStore(), &_dataThrottle);
+        DurableCatalog::get(opCtx)->getReadyIndexes(
+            opCtx, _collection->getCatalogId(), &readyDurableIndexes);
+    } catch (const ExceptionFor<ErrorCodes::CursorNotFound>& ex) {
         invariant(isBackground());
-        _validateTs = opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx);
+        // End the validation if we can't open a checkpoint cursor on the collection.
+        LOGV2(6868900,
+              "Skipping background validation because the collection is not yet in a checkpoint",
+              "nss"_attr = _nss,
+              "ex"_attr = ex);
+        throw;
     }
 
     const IndexCatalog* indexCatalog = _collection->getIndexCatalog();
@@ -266,6 +262,36 @@ void ValidateState::initializeCursors(OperationContext* opCtx) {
         const IndexCatalogEntry* entry = it->next();
         const IndexDescriptor* desc = entry->descriptor();
 
+        // Filter out any in-memory index in the collection that is not in our PIT view of the
+        // MDB catalog. This is only important when background:true because we are then reading
+        // from the checkpoint's view of the MDB catalog and data.
+        if (isBackground() &&
+            readyDurableIndexes.find(desc->indexName()) == readyDurableIndexes.end()) {
+            LOGV2(6868901,
+                  "Skipping background validation on the index because the index is not yet in a "
+                  "checkpoint.",
+                  "desc_indexName"_attr = desc->indexName(),
+                  "nss"_attr = _nss);
+            continue;
+        }
+
+        // Read the index's ident from disk (the checkpoint if background:true). If it does not
+        // match the in-memory ident saved in the IndexCatalogEntry, then our PIT view of the
+        // index is old and the index has been dropped and recreated. In this case we will skip
+        // it since there is no utility in checking a dropped index (we also cannot currently
+        // access it because its in-memory representation is gone).
+        auto diskIndexIdent =
+            opCtx->getServiceContext()->getStorageEngine()->getCatalog()->getIndexIdent(
+                opCtx, _collection->getCatalogId(), desc->indexName());
+        if (entry->getIdent() != diskIndexIdent) {
+            LOGV2(6868902,
+                  "Skipping validation on the index because the index was recreated and is not "
+                  "yet in a checkpoint.",
+                  "desc_indexName"_attr = desc->indexName(),
+                  "nss"_attr = _nss);
+            continue;
+        }
+
         auto iam = entry->accessMethod()->asSortedData();
         if (!iam)
             continue;
@@ -274,7 +300,29 @@ void ValidateState::initializeCursors(OperationContext* opCtx) {
             desc->indexName(),
             std::make_unique<SortedDataInterfaceThrottleCursor>(opCtx, iam, &_dataThrottle));
 
+        // Skip any newly created indexes that, because they were built with a WT bulk loader,
+        // are checkpoint'ed but not yet consistent with the rest of checkpoint's PIT view of
+        // the data.
+        if (isBackground() &&
+            opCtx->getServiceContext()->getStorageEngine()->isInIndividuallyCheckpointedIndexes(
+                diskIndexIdent)) {
+            _indexCursors.erase(desc->indexName());
+            LOGV2(6868903,
+                  "Skipping background validation on the index because the index data is not yet "
+                  "consistent in the checkpoint.",
+                  "desc_indexName"_attr = desc->indexName(),
+                  "nss"_attr = _nss);
+            continue;
+        }
+
         _indexes.push_back(indexCatalog->getEntryShared(desc));
+    }
+
+    if (rs != RecoveryUnit::ReadSource::kNoTimestamp) {
+        invariant(rs == RecoveryUnit::ReadSource::kCheckpoint);
+        invariant(isBackground());
+        auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+        _validateTs = storageEngine->getLastStableRecoveryTimestamp();
     }
 
     // Because SeekableRecordCursors don't have a method to reset to the start, we save and then
@@ -303,7 +351,7 @@ void ValidateState::_relockDatabaseAndCollection(OperationContext* opCtx) {
         << "Interrupted due to: database drop: " << _nss.db()
         << " while validating collection: " << _nss << " (" << *_uuid << ")";
 
-    _databaseLock.emplace(opCtx, _nss.db(), MODE_IS);
+    _databaseLock.emplace(opCtx, _nss.dbName(), MODE_IS);
     _database = DatabaseHolder::get(opCtx)->getDb(opCtx, _nss.dbName());
     uassert(ErrorCodes::Interrupted, dbErrMsg, _database);
     uassert(ErrorCodes::Interrupted, dbErrMsg, !_database->isDropPending(opCtx));
@@ -312,7 +360,7 @@ void ValidateState::_relockDatabaseAndCollection(OperationContext* opCtx) {
                                            << " (" << *_uuid << ") while validating the collection";
 
     try {
-        NamespaceStringOrUUID nssOrUUID(std::string(_nss.db()), *_uuid);
+        NamespaceStringOrUUID nssOrUUID(_nss.dbName(), *_uuid);
         _collectionLock.emplace(opCtx, nssOrUUID, MODE_IS);
     } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
         uasserted(ErrorCodes::Interrupted, collErrMsg);

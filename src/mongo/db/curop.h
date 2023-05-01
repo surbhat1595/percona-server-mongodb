@@ -251,6 +251,7 @@ public:
     // single solution).
     bool fromMultiPlanner{false};
 
+    bool fromPlanCache{false};
     // True if a replan was triggered during the execution of this operation.
     boost::optional<std::string> replanReason;
 
@@ -423,6 +424,7 @@ public:
      */
     bool completeAndLogOperation(OperationContext* opCtx,
                                  logv2::LogComponent logComponent,
+                                 std::shared_ptr<ProfileFilter> filter,
                                  boost::optional<size_t> responseLength = boost::none,
                                  boost::optional<long long> slowMsOverride = boost::none,
                                  bool forceLog = false);
@@ -520,7 +522,7 @@ public:
         // Profile level 2 should override any sample rate or slowms settings.
         // rateLimit only affects profiler at level 2
         if (_dbprofile >= 2)
-            return _shouldDBProfileWithRateLimit(opCtx, serverGlobalParams.slowMS);
+            return _shouldDBProfileWithRateLimit(opCtx, serverGlobalParams.slowMS.load());
 
         if (_dbprofile <= 0)
             return false;
@@ -528,7 +530,7 @@ public:
         if (CollectionCatalog::get(opCtx)->getDatabaseProfileSettings(getNSS().db()).filter)
             return true;
 
-        return elapsedTimeExcludingPauses() >= Milliseconds{serverGlobalParams.slowMS};
+        return elapsedTimeExcludingPauses() >= Milliseconds{serverGlobalParams.slowMS.load()};
     }
 
     /**

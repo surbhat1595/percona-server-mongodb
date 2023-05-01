@@ -234,6 +234,7 @@ clientDriverEnv.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/auth/auth',
         '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
+        '$BUILD_DIR/mongo/db/server_feature_flags',
         '$BUILD_DIR/mongo/transport/message_compressor',
         '$BUILD_DIR/mongo/util/net/ssl_manager',
     ],
@@ -347,7 +348,7 @@ if wiredtiger:
     env.CppUnitTest(
         target='client_test',
         source=[
-            'async_remote_command_targeter_test.cpp',
+            'async_remote_command_targeter_adapter_test.cpp',
             'authenticate_test.cpp',
             'connection_string_test.cpp',
             'dbclient_cursor_test.cpp',
@@ -427,6 +428,15 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/util/clock_source_mock',
         'clientdriver_network',
         'replica_set_monitor_test_helper',
+    ],
+)
+
+env.CppUnitTest(
+    target='scoped_db_connection_pool_test',
+    source=['scoped_db_connection_test.cpp'],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/dbtests/mocklib',
+        'clientdriver_network',
     ],
 )
 

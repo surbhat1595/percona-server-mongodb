@@ -602,7 +602,6 @@ TEST_F(RangeDeleterServiceTest, TotalNumOfRegisteredTasks) {
 }
 
 TEST_F(RangeDeleterServiceTest, RegisterTaskWithDisableResumableRangeDeleterFlagEnabled) {
-
     RAIIServerParameterControllerForTest enableFeatureFlag{"disableResumableRangeDeleter", true};
 
     auto rds = RangeDeleterService::get(opCtx);
@@ -617,7 +616,6 @@ TEST_F(RangeDeleterServiceTest, RegisterTaskWithDisableResumableRangeDeleterFlag
 
 TEST_F(RangeDeleterServiceTest,
        GetOverlappingRangeDeletionsFutureWithDisableResumableRangeDeleterFlagEnabled) {
-
     auto rds = RangeDeleterService::get(opCtx);
     auto taskWithOngoingQueries = rangeDeletionTask0ForCollA;
     auto completionFuture =
@@ -849,6 +847,56 @@ TEST_F(RangeDeleterServiceTest, GetOverlappingRangeDeletionsWithNonContiguousTas
 
     taskWithOngoingQueries30->drainOngoingQueries();
     ASSERT_OK(futureReadyWhenTask30Ready.getNoThrow(opCtx));
+}
+
+TEST_F(RangeDeleterServiceTest, RegisterPendingTaskAndMarkItNonPending) {
+    // Set delay for waiting secondary queries to 0
+    int defaultOrphanCleanupDelaySecs = orphanCleanupDelaySecs.load();
+    ScopeGuard reset([=] { orphanCleanupDelaySecs.store(defaultOrphanCleanupDelaySecs); });
+    orphanCleanupDelaySecs.store(0);
+
+    auto rds = RangeDeleterService::get(opCtx);
+    auto taskWithOngoingQueries = rangeDeletionTask0ForCollA;
+
+    // Drain queries since the beginning
+    taskWithOngoingQueries->drainOngoingQueries();
+
+    // Register task as pending (will not be processed until someone registers it again as !pending)
+    auto completionFuture = rds->registerTask(taskWithOngoingQueries->getTask(),
+                                              taskWithOngoingQueries->getOngoingQueriesFuture(),
+                                              false /* from step up*/,
+                                              true /* pending */);
+
+    ASSERT(!completionFuture.isReady());
+
+    // Re-registering the task as non-pending must unblock the range deletion
+    registerAndCreatePersistentTask(
+        opCtx, taskWithOngoingQueries->getTask(), taskWithOngoingQueries->getOngoingQueriesFuture())
+        .get(opCtx);
+
+    ASSERT(completionFuture.isReady());
+}
+
+TEST_F(RangeDeleterServiceTest, WaitForOngoingQueriesInvalidatedOnStepDown) {
+    auto rds = RangeDeleterService::get(opCtx);
+
+    auto taskWithOngoingQueries =
+        createRangeDeletionTaskWithOngoingQueries(uuidCollA, BSON("a" << 0), BSON("a" << 10));
+
+    auto completionFuture = rds->registerTask(taskWithOngoingQueries->getTask(),
+                                              taskWithOngoingQueries->getOngoingQueriesFuture());
+
+    // Manually trigger disabling of the service
+    rds->onStepDown();
+    ON_BLOCK_EXIT([&] {
+        rds->onStepUpComplete(opCtx, 0L);  // Re-enable the service
+    });
+
+    try {
+        completionFuture.get(opCtx);
+    } catch (const ExceptionForCat<ErrorCategory::Interruption>&) {
+        // Future must have been set to an interruption error because the service was disabled
+    }
 }
 
 }  // namespace mongo

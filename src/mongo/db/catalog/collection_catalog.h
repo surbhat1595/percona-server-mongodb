@@ -38,6 +38,7 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/profile_filter.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/storage/durable_catalog_entry.h"
 #include "mongo/db/views/view.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/uuid.h"
@@ -49,7 +50,6 @@ class CollectionCatalog {
 
 public:
     using CollectionInfoFn = std::function<bool(const CollectionPtr& collection)>;
-    using ViewIteratorCallback = std::function<bool(const ViewDefinition& view)>;
 
     // Number of how many Collection references for a single Collection that is stored in the
     // catalog. Used to determine whether there are external references (uniquely owned). Needs to
@@ -112,19 +112,6 @@ public:
         }
     };
 
-    enum class ViewUpsertMode {
-        // Insert all data for that view into the view map, view graph, and durable view catalog.
-        kCreateView,
-
-        // Insert into the view map and view graph without reinserting the view into the durable
-        // view catalog. Skip view graph validation.
-        kAlreadyDurableView,
-
-        // Reload the view map, insert into the view graph (flagging it as needing refresh), and
-        // update the durable view catalog.
-        kUpdateView,
-    };
-
     static std::shared_ptr<const CollectionCatalog> get(ServiceContext* svcCtx);
     static std::shared_ptr<const CollectionCatalog> get(OperationContext* opCtx);
 
@@ -153,20 +140,22 @@ public:
 
     /**
      * Create a new view 'viewName' with contents defined by running the specified aggregation
-     * 'pipeline' with collation 'collation' on a collection or view 'viewOn'.
+     * 'pipeline' with collation 'collation' on a collection or view 'viewOn'. May insert this view
+     * into the system.views collection depending on 'durability'.
      *
      * Must be in WriteUnitOfWork. View creation rolls back if the unit of work aborts.
      *
      * Caller must ensure corresponding database exists. Expects db.system.views MODE_X lock and
-     * view namespace MODE_IX lock (unless 'insertViewMode' is set to kAlreadyDurableView).
+     * view namespace MODE_IX lock (unless 'durability' is set to kAlreadyDurable).
      */
     Status createView(OperationContext* opCtx,
                       const NamespaceString& viewName,
                       const NamespaceString& viewOn,
                       const BSONArray& pipeline,
+                      const ViewsForDatabase::PipelineValidatorFn& validatePipeline,
                       const BSONObj& collation,
-                      const ViewsForDatabase::PipelineValidatorFn& pipelineValidator,
-                      ViewUpsertMode insertViewMode = ViewUpsertMode::kCreateView) const;
+                      ViewsForDatabase::Durability durability =
+                          ViewsForDatabase::Durability::kNotYetDurable) const;
 
     /**
      * Drop the view named 'viewName'.
@@ -188,7 +177,7 @@ public:
                       const NamespaceString& viewName,
                       const NamespaceString& viewOn,
                       const BSONArray& pipeline,
-                      const ViewsForDatabase::PipelineValidatorFn& pipelineValidator) const;
+                      const ViewsForDatabase::PipelineValidatorFn& validatePipeline) const;
 
     /**
      * Reloads the in-memory state of the view catalog from the 'system.views' collection. The
@@ -263,14 +252,6 @@ public:
     void dropCollection(OperationContext* opCtx, Collection* coll, bool isDropPending) const;
 
     /**
-     * Initializes view records for database 'dbName'. Can throw a 'WriteConflictException' if this
-     * database has already been initialized.
-     */
-    void onOpenDatabase(OperationContext* opCtx,
-                        const DatabaseName& dbName,
-                        ViewsForDatabase&& viewsForDb);
-
-    /**
      * Removes the view records associated with 'dbName', if any, from the in-memory
      * representation of the catalog. Should be called when Database instance is closed. Requires X
      * lock on database namespace.
@@ -278,12 +259,25 @@ public:
     void onCloseDatabase(OperationContext* opCtx, DatabaseName dbName);
 
     /**
-     * Register the collection with `uuid`.
+     * Register the collection with `uuid` at a given commitTime.
+     *
+     * The global lock must be held in exclusive mode.
      */
     void registerCollection(OperationContext* opCtx,
                             const UUID& uuid,
                             std::shared_ptr<Collection> collection,
                             boost::optional<Timestamp> commitTime);
+
+    /**
+     * Like 'registerCollection' above but allows the Collection to be registered using just a
+     * MODE_IX lock on the namespace. The collection will be added to the catalog using a two-phase
+     * commit where it is marked as 'pending commit' internally. The user must call
+     * 'onCreateCollection' which sets up the necessary state for finishing the two-phase commit.
+     */
+    void registerCollectionTwoPhase(OperationContext* opCtx,
+                                    const UUID& uuid,
+                                    std::shared_ptr<Collection> collection,
+                                    boost::optional<Timestamp> commitTime);
 
     /**
      * Deregister the collection.
@@ -413,11 +407,9 @@ public:
      *
      * Caller must ensure corresponding database exists.
      */
-    void iterateViews(
-        OperationContext* opCtx,
-        const DatabaseName& dbName,
-        ViewIteratorCallback callback,
-        ViewCatalogLookupBehavior lookupBehavior = ViewCatalogLookupBehavior::kValidateViews) const;
+    void iterateViews(OperationContext* opCtx,
+                      const DatabaseName& dbName,
+                      const std::function<bool(const ViewDefinition& view)>& callback) const;
 
     /**
      * Look up the 'nss' in the view catalog, returning a shared pointer to a View definition,
@@ -607,7 +599,45 @@ private:
     friend class CollectionCatalog::iterator;
     class PublishCatalogUpdates;
 
+    /**
+     * Register the collection with `uuid`.
+     *
+     * If 'twoPhase' is true, this call must be followed by 'onCreateCollection' which continues the
+     * two-phase commit process.
+     */
+    void _registerCollection(OperationContext* opCtx,
+                             const UUID& uuid,
+                             std::shared_ptr<Collection> collection,
+                             bool twoPhase,
+                             boost::optional<Timestamp> commitTime);
+
     std::shared_ptr<Collection> _lookupCollectionByUUID(UUID uuid) const;
+
+    CollectionPtr _lookupSystemViews(OperationContext* opCtx, const DatabaseName& dbName) const;
+
+    /**
+     * Searches for a catalog entry at a point-in-time.
+     */
+    boost::optional<DurableCatalogEntry> _fetchPITCatalogEntry(
+        OperationContext* opCtx, const NamespaceString& nss, const Timestamp& readTimestamp) const;
+
+    /**
+     * Tries to create a Collection instance using existing shared collection state. Returns nullptr
+     * if unable to do so.
+     */
+    std::shared_ptr<Collection> _createCompatibleCollection(
+        OperationContext* opCtx,
+        const std::shared_ptr<Collection>& latestCollection,
+        const Timestamp& readTimestamp,
+        const DurableCatalogEntry& catalogEntry) const;
+
+    /**
+     * Creates a Collection instance from scratch if the ident has not yet been dropped.
+     */
+    std::shared_ptr<Collection> _createNewPITCollection(
+        OperationContext* opCtx,
+        const Timestamp& readTimestamp,
+        const DurableCatalogEntry& catalogEntry) const;
 
     /**
      * Retrieves the views for a given database, including any uncommitted changes for this
@@ -626,18 +656,6 @@ private:
      * collection name in the catalog.
      */
     void _replaceViewsForDatabase(const DatabaseName& dbName, ViewsForDatabase&& views);
-
-    /**
-     * Helper to take care of shared functionality for 'createView(...)' and 'modifyView(...)'.
-     */
-    Status _createOrUpdateView(OperationContext* opCtx,
-                               const NamespaceString& viewName,
-                               const NamespaceString& viewOn,
-                               const BSONArray& pipeline,
-                               const ViewsForDatabase::PipelineValidatorFn& pipelineValidator,
-                               std::unique_ptr<CollatorInterface> collator,
-                               ViewsForDatabase&& viewsForDb,
-                               ViewUpsertMode insertViewMode) const;
 
     /**
      * Returns true if this CollectionCatalog instance is part of an ongoing batched catalog write.
@@ -710,6 +728,12 @@ private:
     OrderedCollectionMap _orderedCollections;  // Ordered by <dbName, collUUID> pair
     NamespaceCollectionMap _collections;
     UncommittedViewsSet _uncommittedViews;
+
+    // Namespaces and UUIDs in pending commit. The opened storage snapshot must be consulted to
+    // confirm visibility. The instance may be used if the namespace/uuid are otherwise unoccupied
+    // in the CollectionCatalog.
+    absl::flat_hash_map<NamespaceString, std::shared_ptr<Collection>> _pendingCommitNamespaces;
+    absl::flat_hash_map<UUID, std::shared_ptr<Collection>, UUID::Hash> _pendingCommitUUIDs;
 
     // CatalogId mappings for all known namespaces for the CollectionCatalog. The vector is sorted
     // on timestamp.

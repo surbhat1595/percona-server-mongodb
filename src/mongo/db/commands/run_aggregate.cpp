@@ -95,11 +95,6 @@
 
 namespace mongo {
 
-// A fail point that provides the collection name upon which the change stream should be opened.
-// This is used to assert that the change stream is getting opened on the required namespace.
-// TODO SERVER-67594 remove the failpoint.
-MONGO_FAIL_POINT_DEFINE(assertChangeStreamNssCollection);
-
 using boost::intrusive_ptr;
 using std::shared_ptr;
 using std::string;
@@ -155,7 +150,7 @@ bool handleCursorCommand(OperationContext* opCtx,
 
             BSONObjBuilder cursorResult;
             appendCursorResponseObject(cursors[idx]->cursorid(),
-                                       nsForCursor.ns(),
+                                       nsForCursor,
                                        BSONArray(),
                                        cursors[idx]->getExecutor()->getExecutorType(),
                                        &cursorResult);
@@ -289,7 +284,7 @@ bool handleCursorCommand(OperationContext* opCtx,
     }
 
     const CursorId cursorId = cursor ? cursor->cursorid() : 0LL;
-    responseBuilder.done(cursorId, nsForCursor.ns());
+    responseBuilder.done(cursorId, nsForCursor);
 
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
     metricsCollector.incrementDocUnitsReturned(curOp->getNS(), docUnitsReturned);
@@ -710,12 +705,11 @@ Status runAggregate(OperationContext* opCtx,
     InterruptibleLockGuard interruptibleLockAcquisition(opCtx->lockState());
 
     auto initContext = [&](auto_get_collection::ViewMode m) -> void {
-        ctx.emplace(opCtx,
-                    nss,
-                    m,
-                    Date_t::max(),
-                    AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
-                    secondaryExecNssList);
+        ctx.emplace(
+            opCtx,
+            nss,
+            AutoGetCollection::Options{}.viewMode(m).secondaryNssOrUUIDs(secondaryExecNssList),
+            AutoStatsTracker::LogMode::kUpdateTopAndCurOp);
         collections = MultipleCollectionAccessor(opCtx,
                                                  &ctx->getCollection(),
                                                  ctx->getNss(),
@@ -779,22 +773,6 @@ Status runAggregate(OperationContext* opCtx,
                     str::stream() << "Change stream was unexpectedly opened on the namespace: "
                                   << nss << " in the config server",
                     serverGlobalParams.clusterRole != ClusterRole::ConfigServer || nss.isOplog());
-
-            // If the 'assertChangeStreamNssCollection' failpoint is active then ensure that we are
-            // opening the change stream on the correct namespace.
-            if (auto scopedFp = assertChangeStreamNssCollection.scoped();
-                MONGO_unlikely(scopedFp.isActive())) {
-                tassert(6689201,
-                        str::stream()
-                            << "Change stream was opened on the namespace with collection name: "
-                            << nss.coll() << ", expected: " << scopedFp.getData()["collectionName"],
-                        scopedFp.getData()["collectionName"].String() == nss.coll());
-
-                LOGV2_INFO(6689200,
-                           "Opening change stream on the namespace: {nss}",
-                           "Opening change stream",
-                           "nss"_attr = nss.toStringWithTenantId());
-            }
 
             // Upgrade and wait for read concern if necessary.
             _adjustChangeStreamReadConcern(opCtx);
@@ -985,6 +963,20 @@ Status runAggregate(OperationContext* opCtx,
             uassert(6624344,
                     "Exchanging is not supported in the Cascades optimizer",
                     !request.getExchange().has_value());
+            uassert(ErrorCodes::InternalErrorNotSupported,
+                    "let unsupported in CQF",
+                    !request.getLet() || request.getLet()->isEmpty());
+            uassert(ErrorCodes::InternalErrorNotSupported,
+                    "runtimeConstants unsupported in CQF",
+                    !request.getLegacyRuntimeConstants());
+            uassert(ErrorCodes::InternalErrorNotSupported,
+                    "$_requestReshardingResumeToken in CQF",
+                    !request.getRequestReshardingResumeToken());
+            uassert(ErrorCodes::InternalErrorNotSupported,
+                    "collation unsupported in CQF",
+                    !request.getCollation() || request.getCollation()->isEmpty() ||
+                        SimpleBSONObjComparator::kInstance.evaluate(*request.getCollation() ==
+                                                                    CollationSpec::kSimpleSpec));
 
             auto timeBegin = Date_t::now();
             execs.emplace_back(getSBEExecutorViaCascadesOptimizer(opCtx,

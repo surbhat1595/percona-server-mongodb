@@ -182,6 +182,7 @@ MONGO_FAIL_POINT_DEFINE(hangAfterUpdatingTransactionEntry);
 MONGO_FAIL_POINT_DEFINE(fpBeforeAdvancingStableTimestamp);
 MONGO_FAIL_POINT_DEFINE(hangMigrationBeforeRetryCheck);
 MONGO_FAIL_POINT_DEFINE(skipCreatingIndexDuringRebuildService);
+MONGO_FAIL_POINT_DEFINE(pauseTenantMigrationRecipientInstanceBeforeDeletingOldStateDoc);
 
 namespace {
 // We never restart just the oplog fetcher.  If a failure occurs, we restart the whole state machine
@@ -1766,11 +1767,11 @@ void TenantMigrationRecipientService::Instance::_startOplogFetcher() {
     // Fetch all oplog entries for shard merge protocol.
     if (_stateDoc.getProtocol() != MigrationProtocolEnum::kShardMerge) {
         oplogFetcherConfig.queryFilter = _getOplogFetcherFilter();
+        oplogFetcherConfig.requestResumeToken = true;
     }
 
     oplogFetcherConfig.queryReadConcern =
         ReadConcernArgs(repl::ReadConcernLevel::kMajorityReadConcern);
-    oplogFetcherConfig.requestResumeToken = true;
     oplogFetcherConfig.name =
         "TenantOplogFetcher_" + getTenantId() + "_" + getMigrationUUID().toString();
     oplogFetcherConfig.startingPoint = resumingFromOplogBuffer
@@ -1810,6 +1811,13 @@ Status TenantMigrationRecipientService::Instance::_enqueueDocuments(
         // Buffer docs for later application.
         _donorOplogBuffer->push(opCtx.get(), begin, end);
     }
+
+    if (_protocol == MigrationProtocolEnum::kShardMerge) {
+        // Shard merge does not need to write no-op oplog entries since it fetches all oplog
+        // entries.
+        return Status::OK();
+    }
+
     if (info.resumeToken.isNull()) {
         return Status(ErrorCodes::Error(5124600), "Resume token returned is null");
     }
@@ -2765,15 +2773,32 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
                            // Otherwise, there is a real conflict so we should throw
                            // ConflictingInProgress.
                            lk.unlock();
-                           auto deleted =
-                               uassertStatusOK(tenantMigrationRecipientEntryHelpers::
-                                                   deleteStateDocIfMarkedAsGarbageCollectable(
-                                                       opCtx.get(), _tenantId));
+
+                           auto existingStateDoc =
+                               tenantMigrationRecipientEntryHelpers::getStateDoc(
+                                   opCtx.get(), mtab->getMigrationId());
+                           uassertStatusOK(existingStateDoc.getStatus());
+
                            uassert(ErrorCodes::ConflictingOperationInProgress,
                                    str::stream()
                                        << "Found active migration for tenantId \"" << _tenantId
                                        << "\" with migration id " << mtab->getMigrationId(),
-                                   deleted);
+                                   existingStateDoc.getValue().getExpireAt());
+
+                           pauseTenantMigrationRecipientInstanceBeforeDeletingOldStateDoc
+                               .pauseWhileSet();
+
+                           auto deleted =
+                               uassertStatusOK(tenantMigrationRecipientEntryHelpers::
+                                                   deleteStateDocIfMarkedAsGarbageCollectable(
+                                                       opCtx.get(), _tenantId));
+                           // The doc has an expireAt but was deleted before we had time to delete
+                           // it above therefore it's safe to pursue since it has been cleaned up.
+                           if (!deleted) {
+                               LOGV2_WARNING(6792601,
+                                             "Existing state document was deleted before we could "
+                                             "delete it ourselves.");
+                           }
                            lk.lock();
                        }
 
@@ -2985,6 +3010,13 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
             return _receivedRecipientForgetMigrationPromise.getFuture();
         })
         .then([this, self = shared_from_this(), token] {
+            auto expireAt = [&]() {
+                stdx::lock_guard<Latch> lg(_mutex);
+                return _stateDoc.getExpireAt();
+            }();
+            if (expireAt) {
+                return ExecutorFuture(**_scopedExecutor);
+            }
             // Note marking the keys as garbage collectable is not atomic with marking the
             // state document garbage collectable, so an interleaved failover can lead the
             // keys to be deleted before the state document has an expiration date. This is

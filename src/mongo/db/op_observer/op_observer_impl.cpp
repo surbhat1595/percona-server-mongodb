@@ -70,10 +70,12 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/timeseries/bucket_catalog.h"
+#include "mongo/db/timeseries/deleted_buckets.h"
 #include "mongo/db/timeseries/timeseries_extended_range.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction/transaction_participant_gen.h"
-#include "mongo/db/views/durable_view_catalog.h"
+#include "mongo/db/views/util.h"
+#include "mongo/db/views/view_catalog_helpers.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
@@ -667,15 +669,25 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
 
     if (nss.coll() == "system.js") {
         Scope::storedFuncMod(opCtx);
-    } else if (nss.coll() == DurableViewCatalog::viewsCollectionName()) {
+    } else if (nss.isSystemDotViews()) {
         try {
             for (auto it = first; it != last; it++) {
-                uassertStatusOK(DurableViewCatalog::onExternalInsert(opCtx, it->doc, nss));
+                view_util::validateViewDefinitionBSON(opCtx, it->doc, nss.dbName());
+
+                uassertStatusOK(CollectionCatalog::get(opCtx)->createView(
+                    opCtx,
+                    NamespaceStringUtil::deserialize(nss.dbName().tenantId(),
+                                                     it->doc.getStringField("_id")),
+                    {nss.dbName(), it->doc.getStringField("viewOn")},
+                    BSONArray{it->doc.getObjectField("pipeline")},
+                    view_catalog_helpers::validatePipeline,
+                    it->doc.getObjectField("collation"),
+                    ViewsForDatabase::Durability::kAlreadyDurable));
             }
         } catch (const DBException&) {
             // If a previous operation left the view catalog in an invalid state, our inserts can
             // fail even if all the definitions are valid. Reloading may help us reset the state.
-            DurableViewCatalog::onExternalChange(opCtx, nss);
+            CollectionCatalog::get(opCtx)->reloadViews(opCtx, nss.dbName()).ignore();
         }
     } else if (nss == NamespaceString::kSessionTransactionsTableNamespace && !lastOpTime.isNull()) {
         for (auto it = first; it != last; it++) {
@@ -894,10 +906,8 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
             ChangeStreamPreImageId id(args.uuid, opTime.writeOpTime.getTimestamp(), 0);
             ChangeStreamPreImage preImage(id, opTime.wallClockTime, preImageDoc.value());
 
-            // TODO SERVER-66643 Pass tenant id to the pre-images collection if running in the
-            // serverless.
             ChangeStreamPreImagesCollectionManager::insertPreImage(
-                opCtx, /* tenantId */ boost::none, preImage);
+                opCtx, args.nss.tenantId(), preImage);
         }
 
         SessionTxnRecord sessionTxnRecord;
@@ -921,8 +931,8 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
 
     if (args.nss.coll() == "system.js") {
         Scope::storedFuncMod(opCtx);
-    } else if (args.nss.coll() == DurableViewCatalog::viewsCollectionName()) {
-        DurableViewCatalog::onExternalChange(opCtx, args.nss);
+    } else if (args.nss.isSystemDotViews()) {
+        CollectionCatalog::get(opCtx)->reloadViews(opCtx, args.nss.dbName()).ignore();
     } else if (args.nss == NamespaceString::kSessionTransactionsTableNamespace &&
                !opTime.writeOpTime.isNull()) {
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
@@ -954,8 +964,14 @@ void OpObserverImpl::aboutToDelete(OperationContext* opCtx,
     shardObserveAboutToDelete(opCtx, nss, doc);
 
     if (nss.isTimeseriesBucketsCollection()) {
-        auto& bucketCatalog = BucketCatalog::get(opCtx);
-        bucketCatalog.clear(doc["_id"].OID());
+        if (feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
+                serverGlobalParams.featureCompatibility)) {
+            auto& deletedBuckets = timeseries::DeletedBuckets::get(opCtx);
+            deletedBuckets.emplace(doc["_id"].OID());
+        } else {
+            auto& bucketCatalog = BucketCatalog::get(opCtx);
+            bucketCatalog.clear(doc["_id"].OID());
+        }
     }
 }
 
@@ -1072,10 +1088,7 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
             ChangeStreamPreImageId id(uuid, opTime.writeOpTime.getTimestamp(), 0);
             ChangeStreamPreImage preImage(id, opTime.wallClockTime, *args.deletedDoc);
 
-            // TODO SERVER-66643 Pass tenant id to the pre-images collection if running in the
-            // serverless.
-            ChangeStreamPreImagesCollectionManager::insertPreImage(
-                opCtx, /* tenantId */ boost::none, preImage);
+            ChangeStreamPreImagesCollectionManager::insertPreImage(opCtx, nss.tenantId(), preImage);
         }
 
         SessionTxnRecord sessionTxnRecord;
@@ -1099,8 +1112,8 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
 
     if (nss.coll() == "system.js") {
         Scope::storedFuncMod(opCtx);
-    } else if (nss.coll() == DurableViewCatalog::viewsCollectionName()) {
-        DurableViewCatalog::onExternalChange(opCtx, nss);
+    } else if (nss.isSystemDotViews()) {
+        CollectionCatalog::get(opCtx)->reloadViews(opCtx, nss.dbName()).ignore();
     } else if (nss == NamespaceString::kSessionTransactionsTableNamespace &&
                !opTime.writeOpTime.isNull()) {
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
@@ -1111,9 +1124,10 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
     } else if (nss.isTimeseriesBucketsCollection() &&
                feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
                    serverGlobalParams.featureCompatibility)) {
-        invariant(args.deletedDoc);
         auto& bucketCatalog = BucketCatalog::get(opCtx);
-        bucketCatalog.clear(args.deletedDoc->getField("_id").OID());
+        auto& deletedBuckets = timeseries::DeletedBuckets::get(opCtx);
+        deletedBuckets.for_each_once(
+            [&bucketCatalog](const OID& oid) { bucketCatalog.clear(oid); });
     }
 }
 
@@ -1289,8 +1303,8 @@ repl::OpTime OpObserverImpl::onDropCollection(OperationContext* opCtx,
             "dropping the server configuration collection (admin.system.version) is not allowed.",
             collectionName != NamespaceString::kServerConfigurationNamespace);
 
-    if (collectionName.coll() == DurableViewCatalog::viewsCollectionName()) {
-        DurableViewCatalog::onSystemViewsCollectionDrop(opCtx, collectionName);
+    if (collectionName.isSystemDotViews()) {
+        CollectionCatalog::get(opCtx)->clearViews(opCtx, collectionName.dbName());
     } else if (collectionName == NamespaceString::kSessionTransactionsTableNamespace) {
         // Disallow this drop if there are currently prepared transactions.
         const auto sessionCatalog = SessionCatalog::get(opCtx);
@@ -1364,16 +1378,9 @@ repl::OpTime OpObserverImpl::preRenameCollection(OperationContext* const opCtx,
                                                  bool stayTemp,
                                                  bool markFromMigrate) {
     BSONObjBuilder builder;
-    if (!gMultitenancySupport ||
-        (serverGlobalParams.featureCompatibility.isVersionInitialized() &&
-         gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))) {
-        builder.append("renameCollection", fromCollection.ns());
-        builder.append("to", toCollection.ns());
-    } else {
-        builder.append("renameCollection", fromCollection.toStringWithTenantId());
-        builder.append("to", toCollection.toStringWithTenantId());
-    }
 
+    builder.append("renameCollection", NamespaceStringUtil::serialize(fromCollection));
+    builder.append("to", NamespaceStringUtil::serialize(toCollection));
     builder.append("stayTemp", stayTemp);
     if (dropTargetUUID) {
         dropTargetUUID->appendToBuilder(&builder, "dropTarget");
@@ -1401,9 +1408,9 @@ void OpObserverImpl::postRenameCollection(OperationContext* const opCtx,
                                           const boost::optional<UUID>& dropTargetUUID,
                                           bool stayTemp) {
     if (fromCollection.isSystemDotViews())
-        DurableViewCatalog::onExternalChange(opCtx, fromCollection);
+        CollectionCatalog::get(opCtx)->reloadViews(opCtx, fromCollection.dbName()).ignore();
     if (toCollection.isSystemDotViews())
-        DurableViewCatalog::onExternalChange(opCtx, toCollection);
+        CollectionCatalog::get(opCtx)->reloadViews(opCtx, toCollection.dbName()).ignore();
 }
 
 void OpObserverImpl::onRenameCollection(OperationContext* const opCtx,
@@ -1513,11 +1520,9 @@ void writeChangeStreamPreImagesForApplyOpsEntries(
             invariant(operation.getUuid());
             invariant(!operation.getPreImage().isEmpty());
 
-            // TODO SERVER-66643 Pass tenant id to the pre-images collection if running in the
-            // serverless.
             ChangeStreamPreImagesCollectionManager::insertPreImage(
                 opCtx,
-                /* tenantId */ boost::none,
+                operation.getTid(),
                 ChangeStreamPreImage{
                     ChangeStreamPreImageId{*operation.getUuid(), applyOpsTimestamp, applyOpsIndex},
                     operationTime,
@@ -1528,119 +1533,33 @@ void writeChangeStreamPreImagesForApplyOpsEntries(
 }
 
 /**
- * Returns operations that can fit into an "applyOps" entry. The returned operations are
- * serialized to BSON. The operations are given by range ['operationsBegin',
- * 'operationsEnd').
- * Multi-document transactions follow the following constraints for fitting the operations: (1) the
- * resulting "applyOps" entry shouldn't exceed the 16MB limit, unless only one operation is
- * allocated to it; (2) the number of operations is not larger than the maximum number of
- * transaction statements allowed in one entry as defined by
- * 'gMaxNumberOfTransactionOperationsInSingleOplogEntry'. Batched writes (WUOWs that pack writes
- * into a single applyOps outside of a multi-doc transaction) are exempt from the constraints above.
- * If the operations cannot be packed into a single applyOps that's within the BSON size limit
- * (16MB), the batched write will fail with TransactionTooLarge.
+ * Returns maximum number of operations to pack into a single oplog entry,
+ * when multi-oplog format for transactions is in use.
+ *
+ * Stop packing when either number of transaction operations is reached, or when the
+ * next one would make the total size of operations larger than the maximum BSON Object
+ * User Size. We rely on the headroom between BSONObjMaxUserSize and
+ * BSONObjMaxInternalSize to cover the BSON overhead and the other "applyOps" entry
+ * fields. But if a single operation in the set exceeds BSONObjMaxUserSize, we still fit
+ * it, as a single max-length operation should be able to be packed into an "applyOps"
+ * entry.
  */
-std::vector<BSONObj> packOperationsIntoApplyOps(
-    OperationContext* opCtx,
-    std::vector<repl::ReplOperation>::const_iterator operationsBegin,
-    std::vector<repl::ReplOperation>::const_iterator operationsEnd) {
-    // Conservative BSON array element overhead assuming maximum 6 digit array index.
-    constexpr size_t kBSONArrayElementOverhead{8};
+std::size_t getMaxNumberOfTransactionOperationsInSingleOplogEntry() {
     tassert(6278503,
             "gMaxNumberOfTransactionOperationsInSingleOplogEntry should be positive number",
             gMaxNumberOfTransactionOperationsInSingleOplogEntry > 0);
-    std::vector<BSONObj> operations;
-    size_t totalOperationsSize{0};
-    for (auto operationIter = operationsBegin; operationIter != operationsEnd; ++operationIter) {
-        const auto& operation = *operationIter;
-
-        if (TransactionParticipant::get(opCtx)) {
-            // Stop packing when either number of transaction operations is reached, or when the
-            // next one would make the total size of operations larger than the maximum BSON Object
-            // User Size. We rely on the headroom between BSONObjMaxUserSize and
-            // BSONObjMaxInternalSize to cover the BSON overhead and the other "applyOps" entry
-            // fields. But if a single operation in the set exceeds BSONObjMaxUserSize, we still fit
-            // it, as a single max-length operation should be able to be packed into an "applyOps"
-            // entry.
-            if (operations.size() ==
-                    static_cast<size_t>(gMaxNumberOfTransactionOperationsInSingleOplogEntry) ||
-                (operations.size() > 0 &&
-                 (totalOperationsSize + DurableOplogEntry::getDurableReplOperationSize(operation) >
-                  BSONObjMaxUserSize))) {
-                break;
-            }
-        } else {
-            // This a batched write, so we don't break the batch into multiple applyOps. It is the
-            // reponsibility of the caller to generate a batch that fits within a single applyOps.
-            // If the batch doesn't fit within an applyOps, we throw a TransactionTooLarge later
-            // on when serializing to BSON.
-        }
-        auto serializedOperation = operation.toBSON();
-        totalOperationsSize += static_cast<size_t>(serializedOperation.objsize());
-
-        // Add BSON array element overhead since operations will ultimately be packed into BSON
-        // array.
-        totalOperationsSize += kBSONArrayElementOverhead;
-
-        operations.emplace_back(std::move(serializedOperation));
-    }
-    return operations;
+    return static_cast<std::size_t>(gMaxNumberOfTransactionOperationsInSingleOplogEntry);
 }
 
 /**
- * Returns oplog slots to be used for "applyOps" oplog entries, BSON serialized operations, their
- * assignments to "applyOps" entries, and oplog slots to be used for writing pre- and post- image
- * oplog entries for the transaction consisting of 'operations'. Allocates oplog slots from
- * 'oplogSlots'. The 'prepare' indicates if the function is called when preparing a transaction.
+ * Returns maximum size (bytes) of operations to pack into a single oplog entry,
+ * when multi-oplog format for transactions is in use.
+ *
+ * Refer to getMaxNumberOfTransactionOperationsInSingleOplogEntry() comments for a
+ * description on packing transaction operations into "applyOps" entries.
  */
-OpObserver::ApplyOpsOplogSlotAndOperationAssignment
-getApplyOpsOplogSlotAndOperationAssignmentForTransaction(
-    OperationContext* opCtx,
-    const std::vector<OplogSlot>& oplogSlots,
-    bool prepare,
-    std::vector<repl::ReplOperation>& operations) {
-    if (operations.empty()) {
-        return {{}, 0 /*numberOfOplogSlotsUsed*/};
-    }
-    tassert(6278504, "Insufficient number of oplogSlots", operations.size() <= oplogSlots.size());
-
-    std::vector<OpObserver::ApplyOpsOplogSlotAndOperationAssignment::ApplyOpsEntry> applyOpsEntries;
-    auto oplogSlotIter = oplogSlots.begin();
-    auto getNextOplogSlot = [&]() {
-        tassert(6278505, "Unexpected end of oplog slot vector", oplogSlotIter != oplogSlots.end());
-        return *oplogSlotIter++;
-    };
-
-    auto hasNeedsRetryImage = [](const repl::ReplOperation& operation) {
-        return static_cast<bool>(operation.getNeedsRetryImage());
-    };
-
-    // Assign operations to "applyOps" entries.
-    for (auto operationIt = operations.begin(); operationIt != operations.end();) {
-        auto applyOpsOperations = packOperationsIntoApplyOps(opCtx, operationIt, operations.end());
-        const auto opCountWithNeedsRetryImage =
-            std::count_if(operationIt, operationIt + applyOpsOperations.size(), hasNeedsRetryImage);
-        if (opCountWithNeedsRetryImage > 0) {
-            // Reserve a slot for a forged no-op entry.
-            getNextOplogSlot();
-        }
-        operationIt += applyOpsOperations.size();
-        applyOpsEntries.emplace_back(
-            OpObserver::ApplyOpsOplogSlotAndOperationAssignment::ApplyOpsEntry{
-                getNextOplogSlot(), std::move(applyOpsOperations)});
-    }
-
-    auto& batchedWriteContext = BatchedWriteContext::get(opCtx);
-    tassert(6501800,
-            "batched writes must generate a single applyOps entry",
-            !batchedWriteContext.writesAreBatched() || applyOpsEntries.size() == 1);
-
-    // In the special case of writing the implicit 'prepare' oplog entry, we use the last reserved
-    // oplog slot. This may mean we skipped over some reserved slots, but there's no harm in that.
-    if (prepare) {
-        applyOpsEntries.back().oplogSlot = oplogSlots.back();
-    }
-    return {std::move(applyOpsEntries), static_cast<size_t>(oplogSlotIter - oplogSlots.begin())};
+std::size_t getMaxSizeOfTransactionOperationsInSingleOplogEntryBytes() {
+    return static_cast<std::size_t>(BSONObjMaxUserSize);
 }
 
 /**
@@ -2027,8 +1946,10 @@ void logCommitOrAbortForPreparedTransaction(OperationContext* opCtx,
 }  // namespace
 
 void OpObserverImpl::onUnpreparedTransactionCommit(OperationContext* opCtx,
-                                                   std::vector<repl::ReplOperation>* statements,
-                                                   size_t numberOfPrePostImagesToWrite) {
+                                                   TransactionOperations* transactionOperations) {
+    auto statements = transactionOperations->getMutableOperationsForOpObserver();
+    auto numberOfPrePostImagesToWrite = transactionOperations->getNumberOfPrePostImagesToWrite();
+
     invariant(opCtx->getTxnNumber());
 
     if (!opCtx->writesAreReplicated()) {
@@ -2059,9 +1980,11 @@ void OpObserverImpl::onUnpreparedTransactionCommit(OperationContext* opCtx,
 
     // Serialize transaction statements to BSON and determine their assignment to "applyOps"
     // entries.
-    const auto applyOpsOplogSlotAndOperationAssignment =
-        getApplyOpsOplogSlotAndOperationAssignmentForTransaction(
-            opCtx, oplogSlots, false /*prepare*/, *statements);
+    const auto applyOpsOplogSlotAndOperationAssignment = transactionOperations->getApplyOpsInfo(
+        oplogSlots,
+        /*prepare=*/false,
+        getMaxNumberOfTransactionOperationsInSingleOplogEntry(),
+        getMaxSizeOfTransactionOperationsInSingleOplogEntryBytes());
     const auto wallClockTime = getWallClockTimeForOpLog(opCtx);
 
     // Log in-progress entries for the transaction along with the implicit commit.
@@ -2107,32 +2030,40 @@ void OpObserverImpl::onBatchedWriteCommit(OperationContext* opCtx) {
     }
 
     auto& batchedWriteContext = BatchedWriteContext::get(opCtx);
-    auto& batchedOps = batchedWriteContext.getBatchedOperations(opCtx);
+    auto* batchedOps = batchedWriteContext.getBatchedOperations(opCtx);
 
-    if (!batchedOps.size()) {
+    if (batchedOps->isEmpty()) {
         return;
     }
 
     // Reserve all the optimes in advance, so we only need to get the optime mutex once.  We
     // reserve enough entries for all statements in the transaction.
-    auto oplogSlots = _oplogWriter->getNextOpTimes(opCtx, batchedOps.size());
+    auto oplogSlots = _oplogWriter->getNextOpTimes(opCtx, batchedOps->numOperations());
 
     // Throw TenantMigrationConflict error if the database for the transaction statements is being
     // migrated. We only need check the namespace of the first statement since a transaction's
     // statements must all be for the same tenant.
+    const auto& firstOpNss = batchedOps->getMutableOperationsForOpObserver()->begin()->getNss();
     tenant_migration_access_blocker::checkIfCanWriteOrThrow(
-        opCtx, batchedOps.begin()->getNss().db(), oplogSlots.back().getTimestamp());
+        opCtx, firstOpNss.db(), oplogSlots.back().getTimestamp());
 
     auto noPrePostImage = boost::optional<ImageBundle>(boost::none);
 
     // Serialize batched statements to BSON and determine their assignment to "applyOps"
     // entries.
     const auto applyOpsOplogSlotAndOperationAssignment =
-        getApplyOpsOplogSlotAndOperationAssignmentForTransaction(
-            opCtx, oplogSlots, false /*prepare*/, batchedOps);
+        batchedOps->getApplyOpsInfo(oplogSlots,
+                                    /*prepare=*/false,
+                                    /*oplogEntryCountLimit=*/boost::none,
+                                    /*oplogEntrySizeLimitBytes=*/boost::none);
+
+    tassert(6501800,
+            "batched writes must generate a single applyOps entry",
+            applyOpsOplogSlotAndOperationAssignment.applyOpsEntries.size() == 1);
+
     const auto wallClockTime = getWallClockTimeForOpLog(opCtx);
     logOplogEntries(opCtx,
-                    &batchedOps,
+                    batchedOps->getMutableOperationsForOpObserver(),
                     oplogSlots,
                     applyOpsOplogSlotAndOperationAssignment,
                     &noPrePostImage,
@@ -2175,10 +2106,13 @@ std::unique_ptr<OpObserver::ApplyOpsOplogSlotAndOperationAssignment>
 OpObserverImpl::preTransactionPrepare(OperationContext* opCtx,
                                       const std::vector<OplogSlot>& reservedSlots,
                                       Date_t wallClockTime,
-                                      std::vector<repl::ReplOperation>* statements) {
-    auto applyOpsOplogSlotAndOperationAssignment =
-        getApplyOpsOplogSlotAndOperationAssignmentForTransaction(
-            opCtx, reservedSlots, true /*prepare*/, *statements);
+                                      TransactionOperations* transactionOperations) {
+    auto applyOpsOplogSlotAndOperationAssignment = transactionOperations->getApplyOpsInfo(
+        reservedSlots,
+        /*prepare=*/true,
+        getMaxNumberOfTransactionOperationsInSingleOplogEntry(),
+        getMaxSizeOfTransactionOperationsInSingleOplogEntryBytes());
+    auto* statements = transactionOperations->getMutableOperationsForOpObserver();
     writeChangeStreamPreImagesForTransaction(
         opCtx, *statements, applyOpsOplogSlotAndOperationAssignment, wallClockTime);
     return std::make_unique<OpObserver::ApplyOpsOplogSlotAndOperationAssignment>(

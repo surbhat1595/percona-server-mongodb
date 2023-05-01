@@ -102,6 +102,7 @@
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/storage_repair_observer.h"
+#include "mongo/db/storage/ticketholder_manager.h"
 #include "mongo/db/storage/wiredtiger/encryption_keydb.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_backup_cursor_hooks.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_column_store.h"
@@ -167,6 +168,24 @@ constexpr bool kThreadSanitizerEnabled = true;
 #else
 constexpr bool kThreadSanitizerEnabled = false;
 #endif
+
+class WiredTigerCheckpointLock : public StorageEngine::CheckpointLock {
+public:
+    WiredTigerCheckpointLock(OperationContext* opCtx, StorageEngine::CheckpointLock::Mode mode)
+        : _lock([&]() -> stdx::variant<Lock::SharedLock, Lock::ExclusiveLock> {
+              static Lock::ResourceMutex mutex{"checkpoint"};
+              switch (mode) {
+                  case StorageEngine::CheckpointLock::Mode::kShared:
+                      return Lock::SharedLock{opCtx, mutex};
+                  case StorageEngine::CheckpointLock::Mode::kExclusive:
+                      return Lock::ExclusiveLock{opCtx, mutex};
+              }
+              MONGO_UNREACHABLE;
+          }()) {}
+
+private:
+    stdx::variant<Lock::SharedLock, Lock::ExclusiveLock> _lock;
+};
 
 boost::filesystem::path getOngoingBackupPath() {
     return boost::filesystem::path(storageGlobalParams.dbpath) /
@@ -740,7 +759,8 @@ WiredTigerKVEngine::WiredTigerKVEngine(
       _sizeStorerSyncTracker(cs, 100000, Seconds(60)),
       _ephemeral(ephemeral),
       _inRepairMode(repair),
-      _keepDataHistory(serverGlobalParams.enableMajorityReadConcern) {
+      _keepDataHistory(serverGlobalParams.enableMajorityReadConcern),
+      _cacheSizeMB(cacheSizeMB) {
     _pinnedOplogTimestamp.store(Timestamp::max().asULL());
     boost::filesystem::path journalPath = path;
     journalPath /= "journal";
@@ -991,8 +1011,8 @@ void WiredTigerKVEngine::notifyStartupComplete() {
 
 void WiredTigerKVEngine::appendGlobalStats(OperationContext* opCtx, BSONObjBuilder& b) {
     BSONObjBuilder bb(b.subobjStart("concurrentTransactions"));
-    auto ticketHolder = TicketHolder::get(opCtx->getServiceContext());
-    ticketHolder->appendStats(bb);
+    auto ticketHolderManager = TicketHolderManager::get(opCtx->getServiceContext());
+    ticketHolderManager->appendStats(bb);
     bb.done();
 }
 
@@ -3278,15 +3298,19 @@ bool WiredTigerKVEngine::supportsDirectoryPerDB() const {
     return true;
 }
 
-void WiredTigerKVEngine::_checkpoint(OperationContext* opCtx, WT_SESSION* session) {
+void WiredTigerKVEngine::_checkpoint(OperationContext* opCtx, WT_SESSION* session) try {
     // Ephemeral WiredTiger instances cannot do a checkpoint to disk as there is no disk backing
     // the data.
     if (_ephemeral) {
         return;
     }
+
+    // Limits the actions of concurrent checkpoint callers as we update some internal data during a
+    // checkpoint. WT has a mutex of its own to only have one checkpoint active at all times so this
+    // is only to protect our internal updates.
     // TODO: SERVER-64507: Investigate whether we can smartly rely on one checkpointer if two or
     // more threads checkpoint at the same time.
-    stdx::lock_guard lk(_checkpointMutex);
+    auto checkpointLock = getCheckpointLock(opCtx, StorageEngine::CheckpointLock::Mode::kExclusive);
 
     const Timestamp stableTimestamp = getStableTimestamp();
     const Timestamp initialDataTimestamp = getInitialDataTimestamp();
@@ -3306,73 +3330,75 @@ void WiredTigerKVEngine::_checkpoint(OperationContext* opCtx, WT_SESSION* sessio
     // safely assume that the oplog needed for crash recovery has caught up to the recorded value.
     // After the checkpoint, this value will be published such that actors which truncate the oplog
     // can read an updated value.
-    try {
-        // Three cases:
-        //
-        // First, initialDataTimestamp is Timestamp(0, 1) -> Take full checkpoint. This is when
-        // there is no consistent view of the data (e.g: during initial sync).
-        //
-        // Second, stableTimestamp < initialDataTimestamp: Skip checkpoints. The data on disk is
-        // prone to being rolled back. Hold off on checkpoints.  Hope that the stable timestamp
-        // surpasses the data on disk, allowing storage to persist newer copies to disk.
-        //
-        // Third, stableTimestamp >= initialDataTimestamp: Take stable checkpoint. Steady state
-        // case.
-        if (initialDataTimestamp.asULL() <= 1) {
-            Lock::ResourceLock checkpointLock{
-                opCtx, ResourceId(RESOURCE_MUTEX, "checkpoint"), MODE_X};
+
+    // Three cases:
+    //
+    // First, initialDataTimestamp is Timestamp(0, 1) -> Take full checkpoint. This is when there is
+    // no consistent view of the data (e.g: during initial sync).
+    //
+    // Second, stableTimestamp < initialDataTimestamp: Skip checkpoints. The data on disk is prone
+    // to being rolled back. Hold off on checkpoints.  Hope that the stable timestamp surpasses the
+    // data on disk, allowing storage to persist newer copies to disk.
+    //
+    // Third, stableTimestamp >= initialDataTimestamp: Take stable checkpoint. Steady state case.
+    if (initialDataTimestamp.asULL() <= 1) {
+        invariantWTOK(session->checkpoint(session, "use_timestamp=false"), session);
+        LOGV2_FOR_RECOVERY(5576602,
+                           2,
+                           "Completed unstable checkpoint.",
+                           "initialDataTimestamp"_attr = initialDataTimestamp.toString());
+        clearIndividuallyCheckpointedIndexes();
+    } else if (stableTimestamp < initialDataTimestamp) {
+        LOGV2_FOR_RECOVERY(
+            23985,
+            2,
+            "Stable timestamp is behind the initial data timestamp, skipping a checkpoint.",
+            "stableTimestamp"_attr = stableTimestamp.toString(),
+            "initialDataTimestamp"_attr = initialDataTimestamp.toString());
+    } else {
+        auto oplogNeededForRollback = getOplogNeededForRollback();
+
+        LOGV2_FOR_RECOVERY(23986,
+                           2,
+                           "Performing stable checkpoint.",
+                           "stableTimestamp"_attr = stableTimestamp,
+                           "oplogNeededForRollback"_attr = toString(oplogNeededForRollback));
+
+        {
+            invariantWTOK(session->checkpoint(session, "use_timestamp=true"), session);
             clearIndividuallyCheckpointedIndexes();
-            invariantWTOK(session->checkpoint(session, "use_timestamp=false"), session);
-            LOGV2_FOR_RECOVERY(5576602,
-                               2,
-                               "Completed unstable checkpoint.",
-                               "initialDataTimestamp"_attr = initialDataTimestamp.toString());
-        } else if (stableTimestamp < initialDataTimestamp) {
-            LOGV2_FOR_RECOVERY(
-                23985,
-                2,
-                "Stable timestamp is behind the initial data timestamp, skipping a checkpoint.",
-                "stableTimestamp"_attr = stableTimestamp.toString(),
-                "initialDataTimestamp"_attr = initialDataTimestamp.toString());
-        } else {
-            auto oplogNeededForRollback = getOplogNeededForRollback();
-
-            LOGV2_FOR_RECOVERY(23986,
-                               2,
-                               "Performing stable checkpoint.",
-                               "stableTimestamp"_attr = stableTimestamp,
-                               "oplogNeededForRollback"_attr = toString(oplogNeededForRollback));
-
-            {
-                Lock::ResourceLock checkpointLock{
-                    opCtx, ResourceId(RESOURCE_MUTEX, "checkpoint"), MODE_X};
-                clearIndividuallyCheckpointedIndexes();
-                invariantWTOK(session->checkpoint(session, "use_timestamp=true"), session);
-            }
-
-            if (oplogNeededForRollback.isOK()) {
-                // Now that the checkpoint is durable, publish the oplog needed to recover from it.
-                _oplogNeededForCrashRecovery.store(oplogNeededForRollback.getValue().asULL());
-            }
         }
-        // Do KeysDB checkpoint
-        auto encryptionKeyDB = _sessionCache->getKVEngine()->getEncryptionKeyDB();
-        if (encryptionKeyDB) {
-            std::unique_ptr<WiredTigerSession> sess = std::make_unique<WiredTigerSession>(encryptionKeyDB->getConnection());
-            WT_SESSION* s = sess->getSession();
-            invariantWTOK(s->checkpoint(s, "use_timestamp=false"), s);
+
+        if (oplogNeededForRollback.isOK()) {
+            // Now that the checkpoint is durable, publish the oplog needed to recover from it.
+            _oplogNeededForCrashRecovery.store(oplogNeededForRollback.getValue().asULL());
         }
-    } catch (const WriteConflictException&) {
-        LOGV2_WARNING(22346, "Checkpoint encountered a write conflict exception.");
-    } catch (const AssertionException& exc) {
-        invariant(ErrorCodes::isShutdownError(exc.code()), exc.what());
     }
+    // Do KeysDB checkpoint
+    auto encryptionKeyDB = _sessionCache->getKVEngine()->getEncryptionKeyDB();
+    if (encryptionKeyDB) {
+        std::unique_ptr<WiredTigerSession> sess = std::make_unique<WiredTigerSession>(encryptionKeyDB->getConnection());
+        WT_SESSION* s = sess->getSession();
+        invariantWTOK(s->checkpoint(s, "use_timestamp=false"), s);
+    }
+} catch (const WriteConflictException&) {
+    LOGV2_WARNING(22346, "Checkpoint encountered a write conflict exception.");
+} catch (const AssertionException& exc) {
+    invariant(exc.code() == ErrorCodes::InterruptedAtShutdown ||
+                  exc.code() == ErrorCodes::Interrupted,
+              exc.toString());
+    LOGV2(7021300, "Skipping checkpoint due to exception", "exception"_attr = exc.toStatus());
 }
 
 void WiredTigerKVEngine::checkpoint(OperationContext* opCtx) {
     UniqueWiredTigerSession session = _sessionCache->getSession();
     WT_SESSION* s = session->getSession();
     return _checkpoint(opCtx, s);
+}
+
+std::unique_ptr<StorageEngine::CheckpointLock> WiredTigerKVEngine::getCheckpointLock(
+    OperationContext* opCtx, StorageEngine::CheckpointLock::Mode mode) {
+    return std::make_unique<WiredTigerCheckpointLock>(opCtx, mode);
 }
 
 bool WiredTigerKVEngine::hasIdent(OperationContext* opCtx, StringData ident) const {
@@ -4063,6 +4089,10 @@ KeyFormat WiredTigerKVEngine::getKeyFormat(OperationContext* opCtx, StringData i
     const std::string wtTableConfig =
         uassertStatusOK(WiredTigerUtil::getMetadataCreate(opCtx, "table:{}"_format(ident)));
     return wtTableConfig.find("key_format=u") != string::npos ? KeyFormat::String : KeyFormat::Long;
+}
+
+size_t WiredTigerKVEngine::getCacheSizeMB() const {
+    return _cacheSizeMB;
 }
 
 }  // namespace mongo

@@ -42,7 +42,7 @@ void RateLimitParameter::append(OperationContext* txn,
                                 BSONObjBuilder* b,
                                 StringData name,
                                 const boost::optional<TenantId>&) {
-    b->append(name, serverGlobalParams.rateLimit);
+    b->append(name, serverGlobalParams.rateLimit.load());
 }
 
 namespace {
@@ -51,8 +51,8 @@ Status _set(int rateLimit) {
     if (rateLimit == 0)
         rateLimit = 1;
     if (1 <= rateLimit && rateLimit <= RATE_LIMIT_MAX) {
-        if (rateLimit == 1 || serverGlobalParams.sampleRate == 1.0) {
-            serverGlobalParams.rateLimit = rateLimit;
+        if (rateLimit == 1 || serverGlobalParams.sampleRate.load() == 1.0) {
+            serverGlobalParams.rateLimit.store(rateLimit);
             return Status::OK();
         }
         return Status(ErrorCodes::BadValue,

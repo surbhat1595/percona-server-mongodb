@@ -372,21 +372,6 @@ void WiredTigerRecoveryUnit::preallocateSnapshotForOplogRead() {
     preallocateSnapshot();
 }
 
-void WiredTigerRecoveryUnit::refreshSnapshot() {
-    // Currently, this code only works for kNoOverlap or kNoTimestamp.
-    invariant(_timestampReadSource == ReadSource::kNoOverlap ||
-              _timestampReadSource == ReadSource::kNoTimestamp);
-    invariant(_isActive());
-    invariant(!_inUnitOfWork());
-    invariant(!_noEvictionAfterRollback);
-    invariant(_abandonSnapshotMode == AbandonSnapshotMode::kAbort);
-
-    auto session = _session->getSession();
-    invariantWTOK(session->reset_snapshot(session), session);
-    LOGV2_DEBUG(
-        6235000, 3, "WT refreshed snapshot", "snapshotId"_attr = getSnapshotId().toNumber());
-}
-
 void WiredTigerRecoveryUnit::_txnClose(bool commit) {
     invariant(_isActive(), toString(_getState()));
 
@@ -439,7 +424,7 @@ void WiredTigerRecoveryUnit::_txnClose(bool commit) {
         const int transactionTime = _timer->millis();
         // `serverGlobalParams.slowMs` can be set to values <= 0. In those cases, give logging a
         // break.
-        if (transactionTime >= std::max(1, serverGlobalParams.slowMS)) {
+        if (transactionTime >= std::max(1, serverGlobalParams.slowMS.load())) {
             LOGV2_DEBUG(22411,
                         kSlowTransactionSeverity.toInt(),
                         "Slow WT transaction. Lifetime of SnapshotId {snapshotId} was "

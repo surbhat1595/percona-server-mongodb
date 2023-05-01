@@ -98,7 +98,6 @@ public:
             // The change collection does not exist for a particular tenant because either the
             // change collection is not enabled or is in the process of enablement. Ignore this
             // insert for now.
-            // TODO SERVER-67170 Move this check before inserting to the map.
             if (!tenantChangeCollection) {
                 continue;
             }
@@ -142,7 +141,6 @@ private:
     bool _shouldAddEntry(const InsertStatement& insertStatement) {
         auto& oplogDoc = insertStatement.doc;
 
-        // TODO SERVER-67170 avoid inspecting the oplog BSON object.
         if (auto nssFieldElem = oplogDoc[repl::OplogEntry::kNssFieldName]) {
             // Avoid writing entry with empty 'ns' field, for eg. 'periodic noop' entry.
             if (nssFieldElem.String().empty()) {
@@ -334,83 +332,57 @@ Status ChangeStreamChangeCollectionManager::insertDocumentsToChangeCollection(
 
 boost::optional<ChangeCollectionPurgingJobMetadata>
 ChangeStreamChangeCollectionManager::getChangeCollectionPurgingJobMetadata(
-    OperationContext* opCtx, const CollectionPtr* changeCollection, const Date_t& expirationTime) {
-    const auto isExpired = [&](const BSONObj& changeDoc) {
-        const BSONElement& wallElem = changeDoc["wall"];
-        invariant(wallElem);
+    OperationContext* opCtx, const CollectionPtr* changeCollection) {
+    auto findWallTimeAndRecordIdForFirstDocument = [&](InternalPlanner::Direction direction)
+        -> boost::optional<std::pair<long long, RecordId>> {
+        BSONObj currChangeDoc;
+        RecordId currRecordId;
 
-        auto bsonType = wallElem.type();
-        invariant(bsonType == BSONType::Date);
-
-        return wallElem.Date() <= expirationTime;
+        auto scanExecutor = InternalPlanner::collectionScan(
+            opCtx, changeCollection, PlanYieldPolicy::YieldPolicy::YIELD_AUTO, direction);
+        switch (scanExecutor->getNext(&currChangeDoc, &currRecordId)) {
+            case PlanExecutor::IS_EOF:
+                return boost::none;
+            case PlanExecutor::ADVANCED:
+                return {{currChangeDoc["wall"].Date().toMillisSinceEpoch(), currRecordId}};
+            default:
+                MONGO_UNREACHABLE_TASSERT(7010800);
+        }
     };
 
-    BSONObj currChangeDoc;
-    RecordId currRecordId;
-
-    boost::optional<long long> firstDocWallTime;
-    boost::optional<RecordId> prevRecordId;
-    boost::optional<RecordId> prevPrevRecordId;
-
-    auto scanExecutor = InternalPlanner::collectionScan(opCtx,
-                                                        changeCollection,
-                                                        PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
-                                                        InternalPlanner::Direction::FORWARD);
-    while (true) {
-        auto getNextState = scanExecutor->getNext(&currChangeDoc, &currRecordId);
-        switch (getNextState) {
-            case PlanExecutor::IS_EOF: {
-                // Either the collection is empty (case in which return boost::none), or all the
-                // documents have expired. The remover job should never delete the last entry of a
-                // change collection, so return the recordId of the document previous to the last
-                // one.
-                if (!prevPrevRecordId) {
-                    return boost::none;
-                }
-
-                return {{*firstDocWallTime, RecordIdBound(*prevPrevRecordId)}};
-            }
-            case PlanExecutor::ADVANCED: {
-                if (!prevRecordId.has_value()) {
-                    firstDocWallTime =
-                        boost::make_optional(currChangeDoc["wall"].Date().toMillisSinceEpoch());
-                }
-
-                if (!isExpired(currChangeDoc)) {
-                    if (!prevRecordId) {
-                        return boost::none;
-                    }
-
-                    return {{*firstDocWallTime, RecordIdBound(*prevRecordId)}};
-                }
-            }
-        }
-
-        prevPrevRecordId = prevRecordId;
-        prevRecordId = currRecordId;
+    const auto firstDocAttributes =
+        findWallTimeAndRecordIdForFirstDocument(InternalPlanner::Direction::FORWARD);
+    if (!firstDocAttributes) {
+        return boost::none;
     }
-
-    MONGO_UNREACHABLE;
+    auto [_, lastDocRecordId] =
+        *findWallTimeAndRecordIdForFirstDocument(InternalPlanner::Direction::BACKWARD);
+    return {{firstDocAttributes->first, RecordIdBound(std::move(lastDocRecordId))}};
 }
 
 size_t ChangeStreamChangeCollectionManager::removeExpiredChangeCollectionsDocuments(
     OperationContext* opCtx,
     const CollectionPtr* changeCollection,
-    const RecordIdBound& maxRecordIdBound) {
+    RecordIdBound maxRecordIdBound,
+    Date_t expirationTime) {
     auto params = std::make_unique<DeleteStageParams>();
     params->isMulti = true;
 
     auto batchedDeleteParams = std::make_unique<BatchedDeleteStageParams>();
+    LTEMatchExpression filter{"wall"_sd, Value(expirationTime)};
     auto deleteExecutor = InternalPlanner::deleteWithCollectionScan(
         opCtx,
         &(*changeCollection),
         std::move(params),
         PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
         InternalPlanner::Direction::FORWARD,
-        boost::none,
+        boost::none /* minRecord */,
         std::move(maxRecordIdBound),
-        CollectionScanParams::ScanBoundInclusion::kIncludeBothStartAndEndRecords,
-        std::move(batchedDeleteParams));
+        CollectionScanParams::ScanBoundInclusion::kIncludeStartRecordOnly,
+        std::move(batchedDeleteParams),
+        &filter,
+        true /* shouldReturnEofOnFilterMismatch */
+    );
 
     try {
         (void)deleteExecutor->executeDelete();

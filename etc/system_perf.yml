@@ -56,7 +56,6 @@ variables:
     # - mongo
     - dsi
     - genny
-    - signal-processing
     - workloads
     - linkbench
     - linkbench2
@@ -80,10 +79,6 @@ modules:
     branch: master
   - name: genny
     repo: git@github.com:10gen/genny.git
-    prefix: ${workdir}/src
-    branch: master
-  - name: signal-processing
-    repo: git@github.com:10gen/signal-processing.git
     prefix: ${workdir}/src
     branch: master
   - name: workloads
@@ -165,7 +160,6 @@ functions:
         revisions:
           dsi: ${dsi_rev}
           genny: ${genny_rev}
-          signal-processing: ${signal-processing_rev}
           linkbench: ${linkbench_rev}
           linkbench2: ${linkbench2_rev}
           tsbs: ${tsbs_rev}
@@ -402,7 +396,6 @@ functions:
         revisions:
           dsi: ${dsi_rev}
           genny: ${genny_rev}
-          signal-processing: ${signal-processing_rev}
           linkbench: ${linkbench_rev}
           linkbench2: ${linkbench2_rev}
           tsbs: ${tsbs_rev}
@@ -2201,7 +2194,7 @@ buildvariants:
       - name: schedule_variant_auto_tasks
 
   - name: atlas-like-M60
-    display_name: M60-Like 3-Node ReplSet
+    display_name: M60-Like-old 3-Node ReplSet
     cron: "0 0 * * 0,4" # 00:00 on Sunday,Thursday
     modules: *modules
     expansions:
@@ -2244,6 +2237,31 @@ buildvariants:
       - name: tpcc
       - name: linkbench
       - name: linkbench2
+
+  - name: atlas-like-replica.2022-10
+    display_name: M60-like-replica.2022-10 3-Node ReplSet
+    cron: "0 0 * * 0,4" # 00:00 on Sunday,Thursday
+    modules: *modules
+    expansions:
+      mongodb_setup: atlas-like-replica.2022-10
+      infrastructure_provisioning: M60-like-replica.2022-10
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+      compile-variant: -arm64
+    run_on:
+      - "rhel70-perf-M60-like"
+    depends_on: *_real_compile_amazon_linux2_arm64
+    tasks:  # Cannot use *3nodetasks because secondary_performance uses a special mongodb setup.
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
+      - name: industry_benchmarks
+      - name: ycsb_60GB
+      - name: linkbench
+      # TODO
+      # - name: tpcc
+      # - name: linkbench2
 
   - name: atlas-M60-real
     display_name: M60-Atlas ReplSet

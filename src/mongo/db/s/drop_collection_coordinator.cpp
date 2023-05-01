@@ -132,12 +132,13 @@ ExecutorFuture<void> DropCollectionCoordinator::_runImpl(
                 }
 
                 {
-                    AutoGetCollection coll{opCtx,
-                                           nss(),
-                                           MODE_IS,
-                                           AutoGetCollection::Options{}.viewMode(
-                                               auto_get_collection::ViewMode::kViewsPermitted)};
-                    checkCollectionUUIDMismatch(opCtx, nss(), *coll, _doc.getCollectionUUID());
+                    AutoGetCollection coll{
+                        opCtx,
+                        nss(),
+                        MODE_IS,
+                        AutoGetCollection::Options{}
+                            .viewMode(auto_get_collection::ViewMode::kViewsPermitted)
+                            .expectedUUID(_doc.getCollectionUUID())};
                 }
 
                 BSONObjBuilder logChangeDetail;
@@ -182,8 +183,6 @@ ExecutorFuture<void> DropCollectionCoordinator::_runImpl(
                             "namespace"_attr = nss(),
                             "sharded"_attr = collIsSharded);
 
-                sharding_ddl_util::removeQueryAnalyzerMetadataFromConfig(opCtx, nss(), boost::none);
-
                 if (collIsSharded) {
                     invariant(_doc.getCollInfo());
                     const auto& coll = _doc.getCollInfo().value();
@@ -216,6 +215,8 @@ ExecutorFuture<void> DropCollectionCoordinator::_runImpl(
                 // unsharded with a higher optime than all of the drops.
                 sharding_ddl_util::sendDropCollectionParticipantCommandToShards(
                     opCtx, nss(), {primaryShardId}, **executor, getCurrentSession());
+
+                sharding_ddl_util::removeQueryAnalyzerMetadataFromConfig(opCtx, nss(), boost::none);
 
                 ShardingLogging::get(opCtx)->logChange(opCtx, "dropCollection", nss().ns());
                 LOGV2(5390503, "Collection dropped", "namespace"_attr = nss());

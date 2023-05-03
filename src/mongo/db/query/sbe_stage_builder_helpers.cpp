@@ -553,6 +553,27 @@ EvalExprStagePair generateSingleResultUnion(std::vector<EvalExprStagePair> branc
                       unionEvalStage.extractOutSlots()}};
 }
 
+std::unique_ptr<sbe::EExpression> makeBalancedBooleanOpTree(
+    sbe::EPrimBinary::Op logicOp,
+    std::vector<std::unique_ptr<sbe::EExpression>>& leaves,
+    size_t from,
+    size_t until) {
+    invariant(from < until);
+    if (from + 1 == until) {
+        return std::move(leaves[from]);
+    } else {
+        size_t mid = (from + until) / 2;
+        auto lhs = makeBalancedBooleanOpTree(logicOp, leaves, from, mid);
+        auto rhs = makeBalancedBooleanOpTree(logicOp, leaves, mid, until);
+        return makeBinaryOp(logicOp, std::move(lhs), std::move(rhs));
+    }
+}
+
+std::unique_ptr<sbe::EExpression> makeBalancedBooleanOpTree(
+    sbe::EPrimBinary::Op logicOp, std::vector<std::unique_ptr<sbe::EExpression>>& leaves) {
+    return makeBalancedBooleanOpTree(logicOp, leaves, 0, leaves.size());
+}
+
 EvalExprStagePair generateShortCircuitingLogicalOp(sbe::EPrimBinary::Op logicOp,
                                                    std::vector<EvalExprStagePair> branches,
                                                    PlanNodeId planNodeId,
@@ -583,16 +604,14 @@ EvalExprStagePair generateShortCircuitingLogicalOp(sbe::EPrimBinary::Op logicOp,
     }
 
     if (exprOnlyBranches) {
-        std::unique_ptr<sbe::EExpression> exprOnlyOp;
-        for (int32_t i = branches.size() - 1; i >= 0; i--) {
-            auto& [expr, _] = branches[i];
-            auto stateExpr = stateHelper.getBool(expr.extractExpr());
-            if (exprOnlyOp) {
-                exprOnlyOp = makeBinaryOp(logicOp, std::move(stateExpr), std::move(exprOnlyOp));
-            } else {
-                exprOnlyOp = std::move(stateExpr);
-            }
+        std::vector<std::unique_ptr<sbe::EExpression>> leaves;
+        leaves.reserve(branches.size());
+        for (auto& branch : branches) {
+            auto& [expr, _] = branch;
+            leaves.push_back(stateHelper.getBool(expr.extractExpr()));
         }
+        // Create the balanced binary tree to keep the tree shallow and safe for recursion.
+        auto exprOnlyOp = makeBalancedBooleanOpTree(logicOp, leaves, 0, branches.size());
         return {EvalExpr{std::move(exprOnlyOp)}, EvalStage{}};
     }
 
@@ -777,32 +796,6 @@ std::unique_ptr<FilterStateHelper> makeFilterStateHelper(bool trackIndex) {
         return std::make_unique<IndexStateHelper>();
     }
     return std::make_unique<BooleanStateHelper>();
-}
-
-sbe::value::SlotVector makeIndexKeyOutputSlotsMatchingParentReqs(
-    const BSONObj& indexKeyPattern,
-    sbe::IndexKeysInclusionSet parentIndexKeyReqs,
-    sbe::IndexKeysInclusionSet childIndexKeyReqs,
-    sbe::value::SlotVector childOutputSlots) {
-    tassert(5308000,
-            "'childIndexKeyReqs' had fewer bits set than 'parentIndexKeyReqs'",
-            parentIndexKeyReqs.count() <= childIndexKeyReqs.count());
-    sbe::value::SlotVector newIndexKeySlots;
-
-    size_t slotIdx = 0;
-    for (size_t indexFieldNumber = 0;
-         indexFieldNumber < static_cast<size_t>(indexKeyPattern.nFields());
-         ++indexFieldNumber) {
-        if (parentIndexKeyReqs.test(indexFieldNumber)) {
-            newIndexKeySlots.push_back(childOutputSlots[slotIdx]);
-        }
-
-        if (childIndexKeyReqs.test(indexFieldNumber)) {
-            ++slotIdx;
-        }
-    }
-
-    return newIndexKeySlots;
 }
 
 sbe::value::SlotId StageBuilderState::getGlobalVariableSlot(Variables::Id variableId) {
@@ -1238,6 +1231,34 @@ IndexKeyPatternTreeNode buildPatternTree(const projection_ast::Projection& proje
     return std::move(context.root);
 }
 
+namespace {
+class ProjectionExprDepsBuilder final : public projection_ast::ProjectionASTConstVisitor {
+public:
+    explicit ProjectionExprDepsBuilder(DepsTracker* deps) : _deps(deps) {}
+
+    void visit(const projection_ast::ExpressionASTNode* node) final {
+        expression::addDependencies(node->expressionRaw(), _deps);
+    }
+
+    void visit(const projection_ast::ProjectionPathASTNode* node) final {}
+    void visit(const projection_ast::BooleanConstantASTNode* node) final {}
+    void visit(const projection_ast::ProjectionSliceASTNode* node) final {}
+    void visit(const projection_ast::ProjectionPositionalASTNode* node) final {}
+    void visit(const projection_ast::ProjectionElemMatchASTNode* node) final {}
+    void visit(const projection_ast::MatchExpressionASTNode* node) final {}
+
+private:
+    DepsTracker* _deps = nullptr;
+};
+}  // namespace
+
+void addProjectionExprDependencies(const projection_ast::Projection& projection,
+                                   DepsTracker* deps) {
+    ProjectionExprDepsBuilder visitor{deps};
+    projection_ast::ProjectionASTConstWalker walker{nullptr, nullptr, &visitor};
+    tree_walker::walk<true, projection_ast::ASTNode>(projection.root(), &walker);
+}
+
 std::pair<std::unique_ptr<sbe::PlanStage>, sbe::value::SlotVector> projectTopLevelFields(
     std::unique_ptr<sbe::PlanStage> stage,
     const std::vector<std::string>& fields,
@@ -1271,7 +1292,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, sbe::value::SlotVector> projectNothin
     PlanNodeId nodeId,
     sbe::value::SlotIdGenerator* slotIdGenerator) {
     if (n == 0) {
-        return {std::move(stage), sbe::value::SlotVector{}};
+        return {std::move(stage), sbe::makeSV()};
     }
 
     auto outputSlots = slotIdGenerator->generateMultiple(n);

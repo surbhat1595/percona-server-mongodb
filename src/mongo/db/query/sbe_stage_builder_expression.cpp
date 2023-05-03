@@ -329,6 +329,7 @@ public:
     void visit(const ExpressionAnyElementTrue* expr) final {}
     void visit(const ExpressionArray* expr) final {}
     void visit(const ExpressionArrayElemAt* expr) final {}
+    void visit(const ExpressionBitNot* expr) final {}
     void visit(const ExpressionFirst* expr) final {}
     void visit(const ExpressionLast* expr) final {}
     void visit(const ExpressionObjectToArray* expr) final {}
@@ -474,6 +475,7 @@ public:
     void visit(const ExpressionSetField* expr) final {}
     void visit(const ExpressionTsSecond* expr) final {}
     void visit(const ExpressionTsIncrement* expr) final {}
+    void visit(const ExpressionInternalOwningShard* expr) final {}
 
 private:
     void visitMultiBranchLogicExpression(const Expression* expr, sbe::EPrimBinary::Op logicOp) {
@@ -505,6 +507,7 @@ public:
     void visit(const ExpressionAnyElementTrue* expr) final {}
     void visit(const ExpressionArray* expr) final {}
     void visit(const ExpressionArrayElemAt* expr) final {}
+    void visit(const ExpressionBitNot* expr) final {}
     void visit(const ExpressionFirst* expr) final {}
     void visit(const ExpressionLast* expr) final {}
     void visit(const ExpressionObjectToArray* expr) final {}
@@ -708,6 +711,7 @@ public:
     void visit(const ExpressionSetField* expr) final {}
     void visit(const ExpressionTsSecond* expr) final {}
     void visit(const ExpressionTsIncrement* expr) final {}
+    void visit(const ExpressionInternalOwningShard* expr) final {}
 
 private:
     void visitMultiBranchLogicExpression(const Expression* expr, sbe::EPrimBinary::Op logicOp) {
@@ -947,6 +951,11 @@ public:
             sbe::makeE<sbe::ELocalBind>(frameId, std::move(binds), std::move(arrayElemAtExpr)),
             std::move(stage));
     }
+
+    void visit(const ExpressionBitNot* expr) final {
+        unsupportedExpression(expr->getOpName());
+    }
+
     void visit(const ExpressionFirst* expr) final {
         buildArrayAccessByConstantIndex(_context, expr->getOpName(), 0);
     }
@@ -3241,6 +3250,10 @@ public:
             },
             _context->popExpr());
         _context->pushExpr(std::move(tsIncrementExpr));
+    }
+
+    void visit(const ExpressionInternalOwningShard* expr) final {
+        unsupportedExpression("$_internalOwningShard");
     }
 
 private:

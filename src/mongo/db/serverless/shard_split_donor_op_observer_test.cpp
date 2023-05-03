@@ -86,7 +86,7 @@ public:
 protected:
     void runInsertTestCase(
         ShardSplitDonorDocument stateDocument,
-        const std::vector<std::string>& tenants,
+        const std::vector<TenantId>& tenants,
         std::function<void(std::shared_ptr<TenantMigrationAccessBlocker>)> mtabVerifier) {
 
         std::vector<InsertStatement> inserts;
@@ -104,20 +104,25 @@ protected:
 
     void runUpdateTestCase(
         ShardSplitDonorDocument stateDocument,
-        const std::vector<std::string>& tenants,
+        const std::vector<TenantId>& tenants,
         std::function<void(std::shared_ptr<TenantMigrationAccessBlocker>)> mtabVerifier) {
 
         // If there's an exception, aborting without removing the access blocker will trigger an
         // invariant. This creates a confusing error log in the test output.
         test::shard_split::ScopedTenantAccessBlocker scopedTenants(_tenantIds, _opCtx.get());
 
-        CollectionUpdateArgs updateArgs;
+        const auto criteria = BSON("_id" << stateDocument.getId());
+        auto preImageDoc = defaultStateDocument();
+        preImageDoc.setState(ShardSplitDonorStateEnum::kBlocking);
+        preImageDoc.setBlockOpTime(repl::OpTime(Timestamp(1, 1), 1));
+
+        CollectionUpdateArgs updateArgs{preImageDoc.toBSON()};
+        updateArgs.criteria = criteria;
         updateArgs.stmtIds = {};
         updateArgs.updatedDoc = stateDocument.toBSON();
         updateArgs.update =
             BSON("$set" << BSON(ShardSplitDonorDocument::kStateFieldName
                                 << ShardSplitDonorState_serializer(stateDocument.getState())));
-        updateArgs.criteria = BSON("_id" << stateDocument.getId());
         AutoGetCollection autoColl(_opCtx.get(), _nss, MODE_IX);
         OplogUpdateEntryArgs update(&updateArgs, *autoColl);
 
@@ -131,7 +136,7 @@ protected:
 
     std::shared_ptr<TenantMigrationDonorAccessBlocker> createAccessBlockerAndStartBlockingWrites(
         const UUID& migrationId,
-        const std::vector<std::string>& tenants,
+        const std::vector<TenantId>& tenants,
         OperationContext* opCtx,
         bool isSecondary = false) {
         auto mtab = std::make_shared<TenantMigrationDonorAccessBlocker>(_opCtx->getServiceContext(),
@@ -141,17 +146,17 @@ protected:
             mtab->startBlockingWrites();
         }
 
-        auto tenantsAsStringData = std::vector<StringData>(begin(tenants), end(tenants));
-        TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext())
-            .add(tenantsAsStringData, mtab);
+        TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext()).add(tenants, mtab);
         return mtab;
     }
 
     ShardSplitDonorDocument defaultStateDocument() const {
-        return ShardSplitDonorDocument::parse(
+        auto shardSplitStateDoc = ShardSplitDonorDocument::parse(
             IDLParserContext{"donor.document"},
-            BSON("_id" << _uuid << "tenantIds" << _tenantIds << "recipientTagName"
-                       << _recipientTagName << "recipientSetName" << _recipientSetName));
+            BSON("_id" << _uuid << "recipientTagName" << _recipientTagName << "recipientSetName"
+                       << _recipientSetName));
+        shardSplitStateDoc.setTenantIds(_tenantIds);
+        return shardSplitStateDoc;
     }
 
 protected:
@@ -160,7 +165,7 @@ protected:
     MockReplicaSet _recipientReplSet =
         MockReplicaSet("recipientSet", 3, true /* hasPrimary */, true /* dollarPrefixHosts */);
     const NamespaceString _nss = NamespaceString::kShardSplitDonorsNamespace;
-    std::vector<std::string> _tenantIds = {"tenant1", "tenantAB"};
+    std::vector<TenantId> _tenantIds = {TenantId(OID::gen()), TenantId(OID::gen())};
     UUID _uuid = UUID::gen();
     std::string _recipientTagName{"$recipientNode"};
     std::string _recipientSetName{_replSet.getURI().getSetName()};
@@ -172,18 +177,21 @@ protected:
 
 private:
     void verifyAndRemoveMtab(
-        const std::vector<std::string>& tenants,
+        const std::vector<TenantId>& tenants,
         const std::function<void(std::shared_ptr<TenantMigrationAccessBlocker>)>& mtabVerifier) {
         for (const auto& tenantId : tenants) {
-            auto mtab = TenantMigrationAccessBlockerRegistry::get(_opCtx->getServiceContext())
-                            .getTenantMigrationAccessBlockerForTenantId(
-                                tenantId, TenantMigrationAccessBlocker::BlockerType::kDonor);
+            // TODO SERVER-71186 use tenantId directly instead of a string conversion.
+            auto mtab =
+                TenantMigrationAccessBlockerRegistry::get(_opCtx->getServiceContext())
+                    .getTenantMigrationAccessBlockerForTenantId(
+                        tenantId.toString(), TenantMigrationAccessBlocker::BlockerType::kDonor);
             mtabVerifier(mtab);
         }
 
         for (const auto& tenantId : tenants) {
+            // TODO SERVER-71186 use tenantId directly instead of a string conversion.
             TenantMigrationAccessBlockerRegistry::get(_opCtx->getServiceContext())
-                .remove(tenantId, TenantMigrationAccessBlocker::BlockerType::kDonor);
+                .remove(tenantId.toString(), TenantMigrationAccessBlocker::BlockerType::kDonor);
         }
     }
     // Creates a reasonable set of ReplSettings for most tests.  We need to be able to
@@ -250,9 +258,10 @@ TEST_F(ShardSplitDonorOpObserverTest, InsertValidAbortedDocument) {
     }
 
     for (const auto& tenant : _tenantIds) {
+        // TODO SERVER-71186 use tenantId directly instead of a string conversion.
         ASSERT_FALSE(TenantMigrationAccessBlockerRegistry::get(_opCtx->getServiceContext())
                          .getTenantMigrationAccessBlockerForTenantId(
-                             tenant, TenantMigrationAccessBlocker::BlockerType::kDonor));
+                             tenant.toString(), TenantMigrationAccessBlocker::BlockerType::kDonor));
     }
 }
 
@@ -334,13 +343,15 @@ TEST_F(ShardSplitDonorOpObserverTest, TransitionToAbortingIndexBuildsFail) {
     auto stateDocument = defaultStateDocument();
     stateDocument.setState(ShardSplitDonorStateEnum::kAbortingIndexBuilds);
 
-    CollectionUpdateArgs updateArgs;
+    const auto criteria = BSON("_id" << stateDocument.getId());
+    const auto preImageDoc = criteria;
+    CollectionUpdateArgs updateArgs{preImageDoc};
+    updateArgs.criteria = criteria;
     updateArgs.stmtIds = {};
     updateArgs.updatedDoc = stateDocument.toBSON();
     updateArgs.update =
         BSON("$set" << BSON(ShardSplitDonorDocument::kStateFieldName
                             << ShardSplitDonorState_serializer(stateDocument.getState())));
-    updateArgs.criteria = BSON("_id" << stateDocument.getId());
     AutoGetCollection autoColl(_opCtx.get(), _nss, MODE_IX);
     OplogUpdateEntryArgs update(&updateArgs, *autoColl);
 
@@ -478,9 +489,11 @@ TEST_F(ShardSplitDonorOpObserverTest, DeleteAbortedDocumentDoesNotRemoveBlockers
 
     // Verify blockers have not been removed
     for (const auto& tenantId : _tenantIds) {
-        ASSERT_TRUE(TenantMigrationAccessBlockerRegistry::get(_opCtx->getServiceContext())
-                        .getTenantMigrationAccessBlockerForTenantId(
-                            tenantId, TenantMigrationAccessBlocker::BlockerType::kDonor));
+        // TODO SERVER-71186 use tenantId directly instead of a string conversion.
+        ASSERT_TRUE(
+            TenantMigrationAccessBlockerRegistry::get(_opCtx->getServiceContext())
+                .getTenantMigrationAccessBlockerForTenantId(
+                    tenantId.toString(), TenantMigrationAccessBlocker::BlockerType::kDonor));
     }
 }
 
@@ -516,9 +529,11 @@ TEST_F(ShardSplitDonorOpObserverTest, DeleteCommittedDocumentRemovesBlockers) {
 
     // Verify blockers have been removed
     for (const auto& tenantId : _tenantIds) {
-        ASSERT_FALSE(TenantMigrationAccessBlockerRegistry::get(_opCtx->getServiceContext())
-                         .getTenantMigrationAccessBlockerForTenantId(
-                             tenantId, TenantMigrationAccessBlocker::BlockerType::kDonor));
+        // TODO SERVER-71186 use tenantId directly instead of a string conversion.
+        ASSERT_FALSE(
+            TenantMigrationAccessBlockerRegistry::get(_opCtx->getServiceContext())
+                .getTenantMigrationAccessBlockerForTenantId(
+                    tenantId.toString(), TenantMigrationAccessBlocker::BlockerType::kDonor));
     }
 }
 

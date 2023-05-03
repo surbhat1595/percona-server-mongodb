@@ -1225,9 +1225,9 @@ public:
                     return false;
                 }
 
-                const auto& insertResult = swResult.getValue();
-                const auto& batch = insertResult.batch;
-                batches.emplace_back(batch, index);
+                auto& insertResult = swResult.getValue();
+                batches.emplace_back(std::move(insertResult.batch), index);
+                const auto& batch = batches.back().first;
                 if (isTimeseriesWriteRetryable(opCtx)) {
                     stmtIds[batch->bucket().id].push_back(stmtId);
                 }
@@ -1659,16 +1659,21 @@ public:
             }
 
             if (isTimeseries(opCtx, request())) {
-                uassert(ErrorCodes::InvalidOptions,
-                        "Time-series updates are not enabled",
-                        feature_flags::gTimeseriesUpdatesAndDeletes.isEnabled(
-                            serverGlobalParams.featureCompatibility));
                 uassert(ErrorCodes::OperationNotSupportedInTransaction,
                         str::stream() << "Cannot perform a multi-document transaction on a "
                                          "time-series collection: "
                                       << ns(),
                         !opCtx->inMultiDocumentTransaction());
                 source = OperationSource::kTimeseriesUpdate;
+            }
+
+            // On debug builds, verify that the estimated size of the updates are at least as large
+            // as the actual, serialized size. This ensures that the logic that estimates the size
+            // of deletes for batch writes is correct.
+            if constexpr (kDebugBuild) {
+                for (auto&& updateOp : request().getUpdates()) {
+                    invariant(write_ops::verifySizeEstimate(updateOp));
+                }
             }
 
             long long nModified = 0;
@@ -1861,16 +1866,21 @@ public:
             }
 
             if (isTimeseries(opCtx, request())) {
-                uassert(ErrorCodes::InvalidOptions,
-                        "Time-series deletes are not enabled",
-                        feature_flags::gTimeseriesUpdatesAndDeletes.isEnabled(
-                            serverGlobalParams.featureCompatibility));
                 uassert(ErrorCodes::OperationNotSupportedInTransaction,
                         str::stream() << "Cannot perform a multi-document transaction on a "
                                          "time-series collection: "
                                       << ns(),
                         !opCtx->inMultiDocumentTransaction());
                 source = OperationSource::kTimeseriesDelete;
+            }
+
+            // On debug builds, verify that the estimated size of the deletes are at least as large
+            // as the actual, serialized size. This ensures that the logic that estimates the size
+            // of deletes for batch writes is correct.
+            if constexpr (kDebugBuild) {
+                for (auto&& deleteOp : request().getDeletes()) {
+                    invariant(write_ops::verifySizeEstimate(deleteOp));
+                }
             }
 
             auto reply = write_ops_exec::performDeletes(opCtx, request(), source);

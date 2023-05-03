@@ -56,6 +56,7 @@ public:
     void visit(const ExpressionAnyElementTrue*) {}
     void visit(const ExpressionArray*) {}
     void visit(const ExpressionArrayElemAt*) {}
+    void visit(const ExpressionBitNot*) {}
     void visit(const ExpressionFirst*) {}
     void visit(const ExpressionLast*) {}
     void visit(const ExpressionObjectToArray*) {}
@@ -181,6 +182,7 @@ public:
     void visit(const ExpressionObject*) {}
     void visit(const ExpressionInternalFLEEqual*) {}
     void visit(const ExpressionInternalFLEBetween*) {}
+    void visit(const ExpressionInternalOwningShard*) {}
 };
 
 class DependencyVisitor : public DefaultDependencyVisitor {

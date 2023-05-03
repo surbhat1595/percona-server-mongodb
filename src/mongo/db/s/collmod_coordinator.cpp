@@ -70,8 +70,12 @@ bool isShardedColl(OperationContext* opCtx, const NamespaceString& nss) {
     }
 }
 
-bool hasTimeSeriesGranularityUpdate(const CollModRequest& request) {
-    return request.getTimeseries() && request.getTimeseries()->getGranularity();
+bool hasTimeSeriesBucketingUpdate(const CollModRequest& request) {
+    if (!request.getTimeseries().has_value()) {
+        return false;
+    }
+    auto& ts = request.getTimeseries();
+    return ts->getGranularity() || ts->getBucketMaxSpanSeconds() || ts->getBucketRoundingSeconds();
 }
 
 }  // namespace
@@ -134,7 +138,7 @@ void CollModCoordinator::_saveShardingInfoOnCoordinatorIfNecessary(OperationCont
     if (!_shardingInfo && _collInfo->isSharded) {
         ShardingInfo info;
         const auto chunkManager =
-            uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithRefresh(
+            uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionPlacementInfoWithRefresh(
                 opCtx, _collInfo->nsForTargeting));
 
         info.primaryShard = chunkManager.dbPrimary();
@@ -170,7 +174,7 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
 
             _saveCollectionInfoOnCoordinatorIfNecessary(opCtx);
 
-            auto isGranularityUpdate = hasTimeSeriesGranularityUpdate(_request);
+            auto isGranularityUpdate = hasTimeSeriesBucketingUpdate(_request);
             uassert(6201808,
                     "Cannot use time-series options for a non-timeseries collection",
                     _collInfo->timeSeriesOptions || !isGranularityUpdate);
@@ -183,7 +187,7 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
             if (_isPre61Compatible()) {
                 return;
             }
-            _executePhase(
+            _buildPhaseHandler(
                 Phase::kFreezeMigrations, [this, executor = executor, anchor = shared_from_this()] {
                     auto opCtxHolder = cc().makeOperationContext();
                     auto* opCtx = opCtxHolder.get();
@@ -199,7 +203,7 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
                     }
                 })();
         })
-        .then(_executePhase(
+        .then(_buildPhaseHandler(
             Phase::kBlockShards,
             [this, executor = executor, anchor = shared_from_this()] {
                 auto opCtxHolder = cc().makeOperationContext();
@@ -212,7 +216,7 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
 
                 if (_isPre61Compatible() && _collInfo->isSharded) {
                     const auto migrationsAlreadyBlockedForBucketNss =
-                        hasTimeSeriesGranularityUpdate(_request) &&
+                        hasTimeSeriesBucketingUpdate(_request) &&
                         _doc.getMigrationsAlreadyBlockedForBucketNss();
 
                     if (!migrationsAlreadyBlockedForBucketNss) {
@@ -225,7 +229,7 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
 
                 _saveShardingInfoOnCoordinatorIfNecessary(opCtx);
 
-                if (_collInfo->isSharded && hasTimeSeriesGranularityUpdate(_request)) {
+                if (_collInfo->isSharded && hasTimeSeriesBucketingUpdate(_request)) {
                     if (_isPre61Compatible()) {
                         auto newDoc = _doc;
                         newDoc.setMigrationsAlreadyBlockedForBucketNss(true);
@@ -239,7 +243,7 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
                         opCtx, nss().db(), cmdObj, _shardingInfo->shardsOwningChunks, **executor);
                 }
             }))
-        .then(_executePhase(
+        .then(_buildPhaseHandler(
             Phase::kUpdateConfig,
             [this, executor = executor, anchor = shared_from_this()] {
                 collModBeforeConfigServerUpdate.pauseWhileSet();
@@ -254,7 +258,7 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
                 _saveShardingInfoOnCoordinatorIfNecessary(opCtx);
 
                 if (_collInfo->isSharded && _collInfo->timeSeriesOptions &&
-                    hasTimeSeriesGranularityUpdate(_request)) {
+                    hasTimeSeriesBucketingUpdate(_request)) {
                     ConfigsvrCollMod request(_collInfo->nsForTargeting, _request);
                     const auto cmdObj =
                         CommandHelpers::appendMajorityWriteConcern(request.toBSON({}));
@@ -268,7 +272,7 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
                                                 Shard::RetryPolicy::kIdempotent)));
                 }
             }))
-        .then(_executePhase(
+        .then(_buildPhaseHandler(
             Phase::kUpdateShards,
             [this, executor = executor, anchor = shared_from_this()] {
                 auto opCtxHolder = cc().makeOperationContext();
@@ -283,7 +287,7 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
                 if (_collInfo->isSharded) {
                     ShardsvrCollModParticipant request(originalNss(), _request);
                     bool needsUnblock =
-                        _collInfo->timeSeriesOptions && hasTimeSeriesGranularityUpdate(_request);
+                        _collInfo->timeSeriesOptions && hasTimeSeriesBucketingUpdate(_request);
                     request.setNeedsUnblock(needsUnblock);
 
                     std::vector<AsyncRequestsSender::Response> responses;
@@ -378,7 +382,7 @@ ExecutorFuture<void> CollModCoordinator::_runImpl(
                             "error"_attr = redact(status));
                 // If we have the collection UUID set, this error happened in a sharded collection,
                 // we should restore the migrations.
-                if (_doc.getCollUUID()) {
+                if (_doc.getCollUUID() && _collInfo) {
                     auto opCtxHolder = cc().makeOperationContext();
                     auto* opCtx = opCtxHolder.get();
                     getForwardableOpMetadata().setOn(opCtx);

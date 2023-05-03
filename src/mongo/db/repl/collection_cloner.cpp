@@ -40,6 +40,7 @@
 #include "mongo/db/repl/collection_cloner.h"
 #include "mongo/db/repl/database_cloner_gen.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -103,8 +104,8 @@ CollectionCloner::CollectionCloner(const NamespaceString& sourceNss,
       _dbWorkTaskRunner(dbPool) {
     invariant(sourceNss.isValid());
     invariant(collectionOptions.uuid);
-    _sourceDbAndUuid = NamespaceStringOrUUID(sourceNss.db().toString(), *collectionOptions.uuid);
-    _stats.ns = _sourceNss.ns();
+    _sourceDbAndUuid = NamespaceStringOrUUID(sourceNss.dbName(), *collectionOptions.uuid);
+    _stats.nss = _sourceNss;
 }
 
 BaseCloner::ClonerStages CollectionCloner::getStages() {
@@ -126,9 +127,16 @@ BaseCloner::ClonerStages CollectionCloner::getStages() {
 void CollectionCloner::preStage() {
     stdx::lock_guard<Latch> lk(_mutex);
     _stats.start = getSharedData()->getClock()->now();
+
+    BSONObjBuilder b(BSON("collStats" << _sourceNss.coll().toString()));
+    if (gMultitenancySupport && serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+        gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility) &&
+        _sourceNss.tenantId()) {
+        _sourceNss.tenantId()->serializeToBSON("$tenant", &b);
+    }
+
     BSONObj res;
-    getClient()->runCommand(
-        _sourceNss.db().toString(), BSON("collStats" << _sourceNss.coll().toString()), res);
+    getClient()->runCommand(DatabaseNameUtil::serialize(_sourceNss.dbName()), b.obj(), res);
     if (auto status = getStatusFromCommandResult(res); status.isOK()) {
         _stats.bytesToCopy = res.getField("size").safeNumberLong();
         if (_stats.bytesToCopy > 0) {
@@ -171,12 +179,18 @@ BaseCloner::AfterStageBehavior CollectionCloner::CollectionClonerStage::run() {
 }
 
 BaseCloner::AfterStageBehavior CollectionCloner::countStage() {
+    const auto dollarTenant = gMultitenancySupport &&
+            serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+            gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility)
+        ? _sourceNss.tenantId()
+        : boost::none;
     auto count = getClient()->count(_sourceDbAndUuid,
                                     {} /* Query */,
                                     QueryOption_SecondaryOk,
                                     0 /* limit */,
                                     0 /* skip */,
-                                    ReadConcernArgs::kLocal);
+                                    ReadConcernArgs::kLocal,
+                                    dollarTenant);
 
     // The count command may return a negative value after an unclean shutdown,
     // so we set it to zero here to avoid aborting the collection clone.
@@ -198,8 +212,15 @@ BaseCloner::AfterStageBehavior CollectionCloner::countStage() {
 
 BaseCloner::AfterStageBehavior CollectionCloner::listIndexesStage() {
     const bool includeBuildUUIDs = true;
-    auto indexSpecs =
-        getClient()->getIndexSpecs(_sourceDbAndUuid, includeBuildUUIDs, QueryOption_SecondaryOk);
+
+    const auto dollarTenant = gMultitenancySupport &&
+            serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+            gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility)
+        ? _sourceNss.tenantId()
+        : boost::none;
+
+    auto indexSpecs = getClient()->getIndexSpecs(
+        _sourceDbAndUuid, includeBuildUUIDs, QueryOption_SecondaryOk, dollarTenant);
     if (indexSpecs.empty()) {
         LOGV2_WARNING(21143,
                       "No indexes found for collection {namespace} while cloning from {source}",
@@ -424,7 +445,6 @@ void CollectionCloner::handleNextBatch(DBClientCursor& cursor) {
 
 void CollectionCloner::insertDocumentsCallback(const executor::TaskExecutor::CallbackArgs& cbd) {
     uassertStatusOK(cbd.status);
-
     {
         stdx::lock_guard<Latch> lk(_mutex);
         std::vector<BSONObj> docs;
@@ -486,7 +506,7 @@ std::string CollectionCloner::Stats::toString() const {
 
 BSONObj CollectionCloner::Stats::toBSON() const {
     BSONObjBuilder bob;
-    bob.append("ns", ns);
+    bob.append("ns", NamespaceStringUtil::serialize(nss));
     append(&bob);
     return bob.obj();
 }

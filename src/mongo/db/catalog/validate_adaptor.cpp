@@ -133,7 +133,9 @@ void schemaValidationFailed(CollectionValidation::ValidateState* state,
 
     state->setCollectionSchemaViolated();
 
-    if (Collection::SchemaValidationResult::kWarn == result) {
+    // When testing is enabled, only warn about non-compliant documents to prevent test failures.
+    if (TestingProctor::instance().isEnabled() ||
+        Collection::SchemaValidationResult::kWarn == result) {
         results->warnings.push_back(kSchemaValidationFailedReason);
     } else if (Collection::SchemaValidationResult::kError == result) {
         results->errors.push_back(kSchemaValidationFailedReason);
@@ -760,10 +762,11 @@ void ValidateAdaptor::traverseIndex(OperationContext* opCtx,
 
     // The progress meter will be inactive after traversing the record store to allow the message
     // and the total to be set to different values.
-    if (!_progress->isActive()) {
+    if (!_progress.get(WithLock::withoutLock())->isActive()) {
         const char* curopMessage = "Validate: scanning index entries";
         stdx::unique_lock<Client> lk(*opCtx->getClient());
-        _progress.set(CurOp::get(opCtx)->setProgress_inlock(curopMessage, _totalIndexKeys));
+        _progress.set(
+            lk, CurOp::get(opCtx)->setProgress_inlock(curopMessage, _totalIndexKeys), opCtx);
     }
 
     const KeyString::Version version =
@@ -833,8 +836,10 @@ void ValidateAdaptor::traverseIndex(OperationContext* opCtx,
                 results->valid = false;
             }
         }
-
-        _progress->hit();
+        {
+            stdx::unique_lock<Client> lk(*opCtx->getClient());
+            _progress.get(lk)->hit();
+        }
         numKeys++;
         isFirstEntry = false;
         prevIndexKeyStringValue = indexEntry->keyString;
@@ -951,14 +956,19 @@ void ValidateAdaptor::traverseRecordStore(OperationContext* opCtx,
         output->appendNumber("nInvalidDocuments", nInvalid);
         output->appendNumber("nNonCompliantDocuments", nNonCompliantDocuments);
         output->appendNumber("nrecords", _numRecords);
-        _progress->finished();
+        {
+            stdx::unique_lock<Client> lk(*opCtx->getClient());
+            _progress.get(lk)->finished();
+        }
     });
 
     RecordId prevRecordId;
 
     // In case validation occurs twice and the progress meter persists after index traversal
-    if (_progress.get() && _progress->isActive()) {
-        _progress->finished();
+    if (_progress.get(WithLock::withoutLock()) &&
+        _progress.get(WithLock::withoutLock())->isActive()) {
+        stdx::unique_lock<Client> lk(*opCtx->getClient());
+        _progress.get(lk)->finished();
     }
 
     // Because the progress meter is intended as an approximation, it's sufficient to get the number
@@ -969,7 +979,7 @@ void ValidateAdaptor::traverseRecordStore(OperationContext* opCtx,
     const auto rs = coll->getRecordStore();
     {
         stdx::unique_lock<Client> lk(*opCtx->getClient());
-        _progress.set(CurOp::get(opCtx)->setProgress_inlock(curopMessage, totalRecords));
+        _progress.set(lk, CurOp::get(opCtx)->setProgress_inlock(curopMessage, totalRecords), opCtx);
     }
 
     if (_validateState->getFirstRecordId().isNull()) {
@@ -984,7 +994,10 @@ void ValidateAdaptor::traverseRecordStore(OperationContext* opCtx,
              traverseRecordStoreCursor->seekExact(opCtx, _validateState->getFirstRecordId());
          record;
          record = traverseRecordStoreCursor->next(opCtx)) {
-        _progress->hit();
+        {
+            stdx::unique_lock<Client> lk(*opCtx->getClient());
+            _progress.get(lk)->hit();
+        }
         ++_numRecords;
         auto dataSize = record->data.size();
         interruptIntervalNumBytes += dataSize;

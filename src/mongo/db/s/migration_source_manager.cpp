@@ -37,7 +37,7 @@
 #include "mongo/db/s/auto_split_vector.h"
 #include "mongo/db/s/chunk_operation_precondition_checks.h"
 #include "mongo/db/s/commit_chunk_migration_gen.h"
-#include "mongo/db/s/migration_chunk_cloner_source_legacy.h"
+#include "mongo/db/s/migration_chunk_cloner_source.h"
 #include "mongo/db/s/migration_coordinator.h"
 #include "mongo/db/s/migration_util.h"
 #include "mongo/db/s/shard_filtering_metadata_refresh.h"
@@ -179,13 +179,15 @@ MigrationSourceManager::MigrationSourceManager(OperationContext* opCtx,
     }
 
     // Snapshot the committed metadata from the time the migration starts
-    const auto [collectionMetadata, collectionUUID] = [&] {
-        UninterruptibleLockGuard noInterrupt(_opCtx->lockState());
+    const auto [collectionMetadata, collectionIndexInfo, collectionUUID] = [&] {
+        // TODO (SERVER-71444): Fix to be interruptible or document exception.
+        UninterruptibleLockGuard noInterrupt(_opCtx->lockState());  // NOLINT.
         AutoGetCollection autoColl(_opCtx, nss(), MODE_IS);
         auto scopedCsr = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
             opCtx, nss(), CSRAcquisitionMode::kExclusive);
 
-        const auto metadata = checkCollectionIdentity(_opCtx, nss(), _args.getEpoch(), boost::none);
+        const auto [metadata, indexInfo] =
+            checkCollectionIdentity(_opCtx, nss(), _args.getEpoch(), boost::none);
 
         UUID collectionUUID = autoColl.getCollection()->uuid();
 
@@ -199,7 +201,8 @@ MigrationSourceManager::MigrationSourceManager(OperationContext* opCtx,
 
         _scopedRegisterer.emplace(this, *scopedCsr);
 
-        return std::make_tuple(std::move(metadata), std::move(collectionUUID));
+        return std::make_tuple(
+            std::move(metadata), std::move(indexInfo), std::move(collectionUUID));
     }();
 
     // Compute the max bound in case only `min` is set (moveRange)
@@ -219,10 +222,16 @@ MigrationSourceManager::MigrationSourceManager(OperationContext* opCtx,
         _moveTimingHelper.setMax(max);
     }
 
-    checkShardKeyPattern(
-        _opCtx, nss(), collectionMetadata, ChunkRange(*_args.getMin(), *_args.getMax()));
-    checkRangeWithinChunk(
-        _opCtx, nss(), collectionMetadata, ChunkRange(*_args.getMin(), *_args.getMax()));
+    checkShardKeyPattern(_opCtx,
+                         nss(),
+                         collectionMetadata,
+                         collectionIndexInfo,
+                         ChunkRange(*_args.getMin(), *_args.getMax()));
+    checkRangeWithinChunk(_opCtx,
+                          nss(),
+                          collectionMetadata,
+                          collectionIndexInfo,
+                          ChunkRange(*_args.getMin(), *_args.getMax()));
 
     _collectionEpoch = _args.getEpoch();
     _collectionUUID = collectionUUID;
@@ -278,8 +287,8 @@ void MigrationSourceManager::startClone() {
         // that a chunk on that collection is being migrated to the OpObservers. With an active
         // migration, write operations require the cloner to be present in order to track changes to
         // the chunk which needs to be transmitted to the recipient.
-        _cloneDriver = std::make_shared<MigrationChunkClonerSourceLegacy>(
-            _args, _writeConcern, metadata.getKeyPattern(), _donorConnStr, _recipientHost);
+        _cloneDriver = std::make_shared<MigrationChunkClonerSource>(
+            _opCtx, _args, _writeConcern, metadata.getKeyPattern(), _donorConnStr, _recipientHost);
 
         _coordinator.emplace(_cloneDriver->getSessionId(),
                              _args.getFromShard(),
@@ -472,7 +481,8 @@ void MigrationSourceManager::commitChunkMetadataOnConfig() {
 
     if (!migrationCommitStatus.isOK()) {
         {
-            UninterruptibleLockGuard noInterrupt(_opCtx->lockState());
+            // TODO (SERVER-71444): Fix to be interruptible or document exception.
+            UninterruptibleLockGuard noInterrupt(_opCtx->lockState());  // NOLINT.
             AutoGetCollection autoColl(_opCtx, nss(), MODE_IX);
             CollectionShardingRuntime::assertCollectionLockedAndAcquire(
                 _opCtx, nss(), CSRAcquisitionMode::kExclusive)
@@ -511,7 +521,8 @@ void MigrationSourceManager::commitChunkMetadataOnConfig() {
                             "migrationId"_attr = _coordinator->getMigrationId(),
                             "error"_attr = redact(ex));
         {
-            UninterruptibleLockGuard noInterrupt(_opCtx->lockState());
+            // TODO (SERVER-71444): Fix to be interruptible or document exception.
+            UninterruptibleLockGuard noInterrupt(_opCtx->lockState());  // NOLINT.
             AutoGetCollection autoColl(_opCtx, nss(), MODE_IX);
             CollectionShardingRuntime::assertCollectionLockedAndAcquire(
                 _opCtx, nss(), CSRAcquisitionMode::kExclusive)
@@ -629,7 +640,8 @@ SharedSemiFuture<void> MigrationSourceManager::abort() {
 
 CollectionMetadata MigrationSourceManager::_getCurrentMetadataAndCheckEpoch() {
     auto metadata = [&] {
-        UninterruptibleLockGuard noInterrupt(_opCtx->lockState());
+        // TODO (SERVER-71444): Fix to be interruptible or document exception.
+        UninterruptibleLockGuard noInterrupt(_opCtx->lockState());  // NOLINT.
         AutoGetCollection autoColl(_opCtx, _args.getCommandParameter(), MODE_IS);
         auto scopedCsr = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
             _opCtx, _args.getCommandParameter(), CSRAcquisitionMode::kShared);
@@ -657,7 +669,8 @@ void MigrationSourceManager::_cleanup(bool completeMigration) noexcept {
 
     auto cloneDriver = [&]() {
         // Unregister from the collection's sharding state and exit the migration critical section.
-        UninterruptibleLockGuard noInterrupt(_opCtx->lockState());
+        // TODO (SERVER-71444): Fix to be interruptible or document exception.
+        UninterruptibleLockGuard noInterrupt(_opCtx->lockState());  // NOLINT.
         AutoGetCollection autoColl(_opCtx, nss(), MODE_IX);
         auto scopedCsr = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
             _opCtx, nss(), CSRAcquisitionMode::kExclusive);
@@ -751,7 +764,8 @@ void MigrationSourceManager::_cleanup(bool completeMigration) noexcept {
                       "migrationId"_attr = _coordinator->getMigrationId());
         // Something went really wrong when completing the migration just unset the metadata and let
         // the next op to recover.
-        UninterruptibleLockGuard noInterrupt(_opCtx->lockState());
+        // TODO (SERVER-71444): Fix to be interruptible or document exception.
+        UninterruptibleLockGuard noInterrupt(_opCtx->lockState());  // NOLINT.
         AutoGetCollection autoColl(_opCtx, nss(), MODE_IX);
         CollectionShardingRuntime::assertCollectionLockedAndAcquire(
             _opCtx, nss(), CSRAcquisitionMode::kExclusive)
@@ -759,15 +773,28 @@ void MigrationSourceManager::_cleanup(bool completeMigration) noexcept {
     }
 }
 
-BSONObj MigrationSourceManager::getMigrationStatusReport() const {
-    return migrationutil::makeMigrationStatusDocument(
+BSONObj MigrationSourceManager::getMigrationStatusReport(
+    const CollectionShardingRuntime::ScopedCollectionShardingRuntime& scopedCsrLock) const {
+    boost::optional<long long> sessionOplogEntriesToBeMigratedSoFar;
+    boost::optional<long long> sessionOplogEntriesSkippedSoFarLowerBound;
+
+    if (_cloneDriver) {
+        sessionOplogEntriesToBeMigratedSoFar =
+            _cloneDriver->getSessionOplogEntriesToBeMigratedSoFar();
+        sessionOplogEntriesSkippedSoFarLowerBound =
+            _cloneDriver->getSessionOplogEntriesSkippedSoFarLowerBound();
+    }
+
+    return migrationutil::makeMigrationStatusDocumentSource(
         _args.getCommandParameter(),
         _args.getFromShard(),
         _args.getToShard(),
         true,
         // TODO SERVER-64926 do not assume min always present
         *_args.getMin(),
-        _args.getMax().value_or(BSONObj()));
+        _args.getMax().value_or(BSONObj()),
+        sessionOplogEntriesToBeMigratedSoFar,
+        sessionOplogEntriesSkippedSoFarLowerBound);
 }
 
 MigrationSourceManager::ScopedRegisterer::ScopedRegisterer(MigrationSourceManager* msm,
@@ -777,7 +804,8 @@ MigrationSourceManager::ScopedRegisterer::ScopedRegisterer(MigrationSourceManage
 }
 
 MigrationSourceManager::ScopedRegisterer::~ScopedRegisterer() {
-    UninterruptibleLockGuard noInterrupt(_msm->_opCtx->lockState());
+    // TODO (SERVER-71444): Fix to be interruptible or document exception.
+    UninterruptibleLockGuard noInterrupt(_msm->_opCtx->lockState());  // NOLINT.
     AutoGetCollection autoColl(_msm->_opCtx, _msm->_args.getCommandParameter(), MODE_IX);
     auto scopedCsr = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
         _msm->_opCtx, _msm->_args.getCommandParameter(), CSRAcquisitionMode::kExclusive);

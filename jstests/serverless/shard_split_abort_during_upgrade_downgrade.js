@@ -23,8 +23,8 @@ TestData.skipCheckDBHashes = true;
 const test = new ShardSplitTest({quickGarbageCollection: true});
 test.addRecipientNodes();
 
-const donorPrimary = testFixture.donor.getPrimary();
-const tenantIds = ["tenant1", "tenant2"];
+const donorPrimary = test.donor.getPrimary();
+const tenantIds = [ObjectId(), ObjectId()];
 
 jsTestLog("Assert shard splits are aborted when downgrading.");
 const downgradeFCV = lastContinuousFCV;

@@ -87,6 +87,10 @@ public:
         unsupportedExpression(expr->getOpName());
     }
 
+    void visit(const ExpressionBitNot* expr) override final {
+        unsupportedExpression(expr->getOpName());
+    }
+
     void visit(const ExpressionFirst* expr) override final {
         unsupportedExpression(expr->getOpName());
     }
@@ -762,6 +766,10 @@ public:
 
     void visit(const ExpressionTsIncrement* expr) override final {
         unsupportedExpression("tsIncrement");
+    }
+
+    void visit(const ExpressionInternalOwningShard* expr) override final {
+        unsupportedExpression("$_internalOwningShard");
     }
 
 private:

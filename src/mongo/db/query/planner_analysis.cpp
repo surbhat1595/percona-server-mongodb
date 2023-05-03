@@ -660,11 +660,11 @@ bool isIndexEligibleForRightSideOfLookupPushdown(const IndexEntry& index,
 
 bool QueryPlannerAnalysis::isEligibleForHashJoin(const SecondaryCollectionInfo& foreignCollInfo) {
     return !internalQueryDisableLookupExecutionUsingHashJoin.load() && foreignCollInfo.exists &&
-        foreignCollInfo.noOfRecords <=
+        foreignCollInfo.stats.noOfRecords <=
         internalQueryCollectionMaxNoOfDocumentsToChooseHashJoin.load() &&
-        foreignCollInfo.approximateDataSizeBytes <=
+        foreignCollInfo.stats.approximateDataSizeBytes <=
         internalQueryCollectionMaxDataSizeBytesToChooseHashJoin.load() &&
-        foreignCollInfo.storageSizeBytes <=
+        foreignCollInfo.stats.storageSizeBytes <=
         internalQueryCollectionMaxStorageSizeBytesToChooseHashJoin.load();
 }
 
@@ -1208,7 +1208,7 @@ std::unique_ptr<QuerySolution> QueryPlannerAnalysis::analyzeDataAccess(
         solnRoot = addSortKeyGeneratorStageIfNeeded(query, hasSortStage, std::move(solnRoot));
 
         // If there's no projection, we must fetch, as the user wants the entire doc.
-        if (!solnRoot->fetched() && !(params.options & QueryPlannerParams::IS_COUNT)) {
+        if (!solnRoot->fetched() && !query.isCount()) {
             auto fetch = std::make_unique<FetchNode>();
             fetch->children.push_back(std::move(solnRoot));
             solnRoot = std::move(fetch);

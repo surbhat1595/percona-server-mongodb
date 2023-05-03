@@ -303,6 +303,7 @@ def _parse_condition(ctxt, node):
             "constexpr": _RuleDesc("scalar"),
             "expr": _RuleDesc("scalar"),
             "feature_flag": _RuleDesc("scalar"),
+            "min_fcv": _RuleDesc("scalar"),
         })
 
     return condition
@@ -381,6 +382,10 @@ def _parse_field(ctxt, name, node):
                 _RuleDesc("scalar"),
             "always_serialize":
                 _RuleDesc("bool_scalar"),
+            "forward_to_shards":
+                _RuleDesc('bool_scalar'),
+            "forward_from_shards":
+                _RuleDesc('bool_scalar'),
         })
 
     return field
@@ -551,6 +556,7 @@ def _parse_struct(ctxt, spec, name, node):
             "non_const_getter": _RuleDesc('bool_scalar'),
             "cpp_validator_func": _RuleDesc('scalar'),
             "is_command_reply": _RuleDesc('bool_scalar'),
+            "is_generic_cmd_list": _RuleDesc('scalar'),
         })
 
     # PyLint has difficulty with some iterables: https://github.com/PyCQA/pylint/issues/3105
@@ -561,6 +567,11 @@ def _parse_struct(ctxt, spec, name, node):
         return
 
     spec.symbols.add_struct(ctxt, struct)
+    if struct.is_generic_cmd_list:
+        if struct.is_generic_cmd_list == "arg":
+            spec.symbols.add_generic_argument_list(struct)
+        elif struct.is_generic_cmd_list == "reply":
+            spec.symbols.add_generic_reply_field_list(struct)
 
 
 def _parse_generic_argument_list(ctxt, spec, name, node):
@@ -569,8 +580,7 @@ def _parse_generic_argument_list(ctxt, spec, name, node):
     if not ctxt.is_mapping_node(node, "generic_argument_list"):
         return
 
-    field_list = syntax.GenericArgumentList(ctxt.file_name, node.start_mark.line,
-                                            node.start_mark.column)
+    field_list = syntax.Struct(ctxt.file_name, node.start_mark.line, node.start_mark.column)
     field_list.name = name
 
     _generic_parser(
@@ -583,7 +593,7 @@ def _parse_generic_argument_list(ctxt, spec, name, node):
                 _RuleDesc('mapping', mapping_parser_func=_parse_generic_argument_list_entries),
         })
 
-    spec.symbols.add_generic_argument_list(ctxt, field_list)
+    spec.symbols.add_generic_argument_list(field_list)
 
 
 def _parse_generic_reply_field_list(ctxt, spec, name, node):
@@ -592,8 +602,7 @@ def _parse_generic_reply_field_list(ctxt, spec, name, node):
     if not ctxt.is_mapping_node(node, "generic_reply_field_list"):
         return
 
-    field_list = syntax.GenericReplyFieldList(ctxt.file_name, node.start_mark.line,
-                                              node.start_mark.column)
+    field_list = syntax.Struct(ctxt.file_name, node.start_mark.line, node.start_mark.column)
     field_list.name = name
 
     _generic_parser(
@@ -606,7 +615,7 @@ def _parse_generic_reply_field_list(ctxt, spec, name, node):
                 _RuleDesc('mapping', mapping_parser_func=_parse_generic_reply_field_list_entries),
         })
 
-    spec.symbols.add_generic_reply_field_list(ctxt, field_list)
+    spec.symbols.add_generic_reply_field_list(field_list)
 
 
 def _parse_field_list_entry(ctxt, name, node, is_generic_argument_field_list):
@@ -1023,7 +1032,7 @@ def _propagate_globals(spec):
         idltype.cpp_type = _prefix_with_namespace(cpp_namespace, idltype.cpp_type)
 
 
-def _parse(stream, error_file_name):
+def parse_file(stream, error_file_name):
     # type: (Any, str) -> syntax.IDLParsedSpec
     """
     Parse a YAML document into an idl.syntax tree.
@@ -1125,7 +1134,7 @@ def parse(stream, input_file_name, resolver):
     input_file_name: a file name for error messages to use, and to help resolve imported files.
     """
 
-    root_doc = _parse(stream, input_file_name)
+    root_doc = parse_file(stream, input_file_name)
 
     if root_doc.errors:
         return root_doc
@@ -1162,7 +1171,7 @@ def parse(stream, input_file_name, resolver):
 
         # Parse imported file
         with resolver.open(resolved_file_name) as file_stream:
-            parsed_doc = _parse(file_stream, resolved_file_name)
+            parsed_doc = parse_file(file_stream, resolved_file_name)
 
         # Check for errors
         if parsed_doc.errors:

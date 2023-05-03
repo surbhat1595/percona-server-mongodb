@@ -1051,6 +1051,14 @@ functions:
       source_dir: src/generated_resmoke_config
       include:
       - "*"
+  - command: subprocess.exec
+    type: test
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/run_python_script.sh"
+      - "buildscripts/validate_file_size.py"
+      - "generate_tasks_config.tgz"
   - command: s3.put
     params:
       aws_key: ${aws_key}
@@ -1393,15 +1401,6 @@ functions:
       binary: bash
       args:
       - "./src/evergreen/jepsen_test_fail.sh"
-
-  "load aws test credentials":
-  - *f_expansions_write
-  - command: subprocess.exec
-    params:
-      binary: bash
-      silent: true
-      args:
-      - "./src/evergreen/functions/aws_test_credentials_load.sh"
 
   "setup jstestfuzz":
   - *f_expansions_write
@@ -2502,7 +2501,25 @@ tasks:
       separate_debug: off
       task_compile_flags: >-
         --build-profile=default
-        --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+        --ninja
+  - *f_expansions_write
+  - func: "ninja compile"
+    vars:
+      ninja_file: "build.ninja"
+
+- name: compile_ninja_default_profile_linux
+  tags: []
+  depends_on:
+  - name: version_expansions_gen
+    variant: generate-tasks-for-version
+  commands:
+  - func: "scons compile"
+    vars:
+      generating_for_ninja: true
+      separate_debug: off
+      task_compile_flags: >-
+        --build-profile=default
+        --variables-files=etc/scons/mongodbtoolchain_stable_clang.vars
         --ninja
   - *f_expansions_write
   - func: "ninja compile"
@@ -2565,6 +2582,24 @@ tasks:
   - func: "ninja compile"
     vars:
       ninja_file: "san.ninja"
+
+- name: compile_ninja_compiledb_profile
+  tags: []
+  depends_on:
+  - name: version_expansions_gen
+    variant: generate-tasks-for-version
+  commands:
+  - func: "scons compile"
+    vars:
+      generating_for_ninja: true
+      separate_debug: off
+      task_compile_flags: >-
+        --build-profile=compiledb
+        --ninja
+  - *f_expansions_write
+  - func: "ninja compile"
+    vars:
+      ninja_file: "compiledb.ninja"
 
 - name: compile_ninja_next
   tags: []
@@ -5017,7 +5052,9 @@ tasks:
   - func: "run tests"
     vars:
       suite: core
-      resmoke_args: --fuzzMongodConfigs
+      resmoke_args: >-
+        --fuzzMongodConfigs
+        --excludeWithAnyTags=does_not_support_config_fuzzer
 
 - <<: *task_template
   name: config_fuzzer_concurrency
@@ -5027,7 +5064,9 @@ tasks:
   - func: "run tests"
     vars:
       suite: concurrency
-      resmoke_args: --fuzzMongodConfigs
+      resmoke_args: >-
+        --fuzzMongodConfigs
+        --excludeWithAnyTags=does_not_support_config_fuzzer
 
 - <<: *task_template
   name: config_fuzzer_simulate_crash_concurrency_replication
@@ -5037,7 +5076,9 @@ tasks:
   - func: "run tests"
     vars:
       suite: simulate_crash_concurrency_replication
-      resmoke_args: --fuzzMongodConfigs
+      resmoke_args: >-
+        --fuzzMongodConfigs
+        --excludeWithAnyTags=does_not_support_config_fuzzer
 
 - <<: *task_template
   name: config_fuzzer_concurrency_replication
@@ -5047,7 +5088,9 @@ tasks:
   - func: "run tests"
     vars:
       suite: concurrency_replication
-      resmoke_args: --fuzzMongodConfigs
+      resmoke_args: >-
+        --fuzzMongodConfigs
+        --excludeWithAnyTags=does_not_support_config_fuzzer
 
 - <<: *task_template
   name: config_fuzzer_replica_sets_jscore_passthrough
@@ -5057,7 +5100,9 @@ tasks:
   - func: "run tests"
     vars:
       suite: replica_sets_jscore_passthrough
-      resmoke_args: --fuzzMongodConfigs
+      resmoke_args: >-
+        --fuzzMongodConfigs
+        --excludeWithAnyTags=does_not_support_config_fuzzer
 
 - <<: *task_template
   name: jsCore_ese
@@ -5681,6 +5726,14 @@ tasks:
       resmoke_jobs_max: 1
 
 - <<: *gen_task_template
+  name: concurrency_compute_mode_gen
+  tags: ["concurrency", "no_passthrough", "compute_mode"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      resmoke_jobs_max: 1
+
+- <<: *gen_task_template
   name: concurrency_replication_metrics_gen
   tags: ["concurrency", "repl", "disabled_on_code_coverage"]
   commands:
@@ -5852,6 +5905,15 @@ tasks:
 - <<: *gen_task_template
   name: concurrency_sharded_with_stepdowns_and_balancer_gen
   tags: ["concurrency", "stepdowns", "large", "sharded", "no_debug_mode"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+      resmoke_jobs_max: 1
+
+- <<: *gen_task_template
+  name: concurrency_sharded_initial_sync_gen
+  tags: ["concurrency", "stepdowns", "initsync", "large", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -6431,7 +6493,6 @@ tasks:
   tags: ["encrypt", "patch_build"]
   commands:
   - func: "do setup"
-  - func: "load aws test credentials"
   - func: "run tests"
     vars:
       resmoke_jobs_max: 1
@@ -6441,7 +6502,6 @@ tasks:
   tags: ["encrypt", "patch_build"]
   commands:
   - func: "do setup"
-  - func: "load aws test credentials"
   - func: "run tests"
 
 - <<: *task_template
@@ -7959,6 +8019,11 @@ task_groups:
   - compile_ninja_default_profile
 
 - <<: *compile_task_group_template
+  name: compile_ninja_default_profile_linux_TG
+  tasks:
+  - compile_ninja_default_profile_linux
+
+- <<: *compile_task_group_template
   name: compile_ninja_opt_profile_TG
   tasks:
   - compile_ninja_opt_profile
@@ -7972,6 +8037,11 @@ task_groups:
   name: compile_ninja_fast_profile_TG
   tasks:
   - compile_ninja_fast_profile
+
+- <<: *compile_task_group_template
+  name: compile_ninja_compiledb_profile_TG
+  tasks:
+  - compile_ninja_compiledb_profile
 
 - <<: *compile_task_group_template
   name: server_discovery_and_monitoring_json_test_TG

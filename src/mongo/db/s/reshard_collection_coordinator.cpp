@@ -129,7 +129,7 @@ ExecutorFuture<void> ReshardCollectionCoordinator::_runImpl(
     std::shared_ptr<executor::ScopedTaskExecutor> executor,
     const CancellationToken& token) noexcept {
     return ExecutorFuture<void>(**executor)
-        .then(_executePhase(
+        .then(_buildPhaseHandler(
             Phase::kReshard,
             [this, anchor = shared_from_this()] {
                 auto opCtxHolder = cc().makeOperationContext();
@@ -147,7 +147,7 @@ ExecutorFuture<void> ReshardCollectionCoordinator::_runImpl(
                 }
 
                 const auto cmOld = uassertStatusOK(
-                    Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithRefresh(
+                    Grid::get(opCtx)->catalogCache()->getShardedCollectionPlacementInfoWithRefresh(
                         opCtx, nss()));
 
                 StateDoc newDoc(_doc);
@@ -178,7 +178,7 @@ ExecutorFuture<void> ReshardCollectionCoordinator::_runImpl(
 
                 // Report command completion to the oplog.
                 const auto cm = uassertStatusOK(
-                    Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithRefresh(
+                    Grid::get(opCtx)->catalogCache()->getShardedCollectionPlacementInfoWithRefresh(
                         opCtx, nss()));
 
                 if (_doc.getOldCollectionUUID() && _doc.getOldCollectionUUID() != cm.getUUID()) {

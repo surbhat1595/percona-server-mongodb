@@ -33,6 +33,7 @@
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/catalog/database_holder.h"
+#include "mongo/db/repl/collection_utils.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/sharding_state.h"
@@ -244,7 +245,15 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
           // databases).
 
           Lock::DBLockSkipOptions dbLockOptions;
-          dbLockOptions.skipRSTLLock = false;
+          dbLockOptions.skipRSTLLock = [&] {
+              const auto& maybeNss = nsOrUUID.nss();
+
+              if (maybeNss) {
+                  const auto& nss = *maybeNss;
+                  return repl::canCollectionSkipRSTLLockAcquisition(nss);
+              }
+              return false;
+          }();
           dbLockOptions.skipFlowControlTicket = [&nsOrUUID] {
               const auto& maybeNss = nsOrUUID.nss();
 
@@ -619,6 +628,8 @@ ReadSourceScope::ReadSourceScope(OperationContext* opCtx,
                                  RecoveryUnit::ReadSource readSource,
                                  boost::optional<Timestamp> provided)
     : _opCtx(opCtx), _originalReadSource(opCtx->recoveryUnit()->getTimestampReadSource()) {
+    // Abandoning the snapshot is unsafe when the snapshot is managed by a lock free read helper.
+    invariant(!_opCtx->isLockFreeReadsOp());
 
     if (_originalReadSource == RecoveryUnit::ReadSource::kProvided) {
         _originalReadTimestamp = *_opCtx->recoveryUnit()->getPointInTimeReadTimestamp(_opCtx);
@@ -629,6 +640,9 @@ ReadSourceScope::ReadSourceScope(OperationContext* opCtx,
 }
 
 ReadSourceScope::~ReadSourceScope() {
+    // Abandoning the snapshot is unsafe when the snapshot is managed by a lock free read helper.
+    invariant(!_opCtx->isLockFreeReadsOp());
+
     _opCtx->recoveryUnit()->abandonSnapshot();
     if (_originalReadSource == RecoveryUnit::ReadSource::kProvided) {
         _opCtx->recoveryUnit()->setTimestampReadSource(_originalReadSource, _originalReadTimestamp);

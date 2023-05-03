@@ -244,8 +244,7 @@ DBCollection.prototype.find = function(filter, projection, limit, skip, batchSiz
 
         const client = session._getSessionAwareClient();
         const readConcern = client.getReadConcern(session);
-        if (readConcern !== null &&
-            client.canUseReadConcern(session, cursor._convertToCommand(true))) {
+        if (readConcern !== null && client.canUseReadConcern(session, cursor._convertToCommand())) {
             cursor.readConcern(readConcern.level);
         }
     }
@@ -534,8 +533,8 @@ DBCollection.prototype.save = function(obj, opts) {
     if (obj == null)
         throw Error("can't save a null");
 
-    if (typeof (obj) == "number" || typeof (obj) == "string")
-        throw Error("can't save a number or string");
+    if (typeof (obj) == "number" || typeof (obj) == "string" || Array.isArray(obj))
+        throw Error("can't save a number, a string or an array");
 
     if (typeof (obj._id) == "undefined") {
         obj._id = new ObjectId();

@@ -55,7 +55,7 @@ def update_test_data(suite):
     """Update TestData to be compatible with antithesis."""
     suite.setdefault("executor", {}).setdefault(
         "config", {}).setdefault("shell_options", {}).setdefault("global_vars", {}).setdefault(
-            "TestData", {}).update({"useStepdownPermittedFile": False})
+            "TestData", {}).update({"useActionPermittedFile": False})
 
 
 def update_shell(suite):
@@ -67,8 +67,11 @@ def update_shell(suite):
 
 def update_exclude_tags(suite):
     """Update the exclude tags to exclude antithesis incompatible tests."""
-    suite.setdefault('selector', {}).setdefault('exclude_with_any_tags',
-                                                []).append("antithesis_incompatible")
+    suite.setdefault('selector', {})
+    if not suite.get('selector').get('exclude_with_any_tags'):
+        suite['selector']['exclude_with_any_tags'] = ["antithesis_incompatible"]
+    else:
+        suite['selector']['exclude_with_any_tags'].append('antithesis_incompatible')
 
 
 def make_suite_antithesis_compatible(suite):

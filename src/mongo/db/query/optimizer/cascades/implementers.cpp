@@ -177,7 +177,7 @@ public:
         if (hasProperty<IndexingAvailability>(_logicalProps)) {
             ridProjName = _ridProjections.at(
                 getPropertyConst<IndexingAvailability>(_logicalProps).getScanDefName());
-            needsRID = requiredProjections.find(*ridProjName).second;
+            needsRID = requiredProjections.find(*ridProjName).has_value();
         }
         if (needsRID && !node.getHasRID()) {
             // We cannot provide RID.
@@ -193,7 +193,7 @@ public:
             nodeCEMap.emplace(physNode.cast<Node>(), 0.0);
 
             for (const ProjectionName& boundProjName : node.binder().names()) {
-                if (requiredProjections.find(boundProjName).second) {
+                if (requiredProjections.find(boundProjName)) {
                     physNode = make<EvaluationNode>(
                         boundProjName, Constant::nothing(), std::move(physNode));
                     nodeCEMap.emplace(physNode.cast<Node>(), 0.0);
@@ -234,7 +234,7 @@ public:
             const ProjectionNameVector& boundProjNames = node.binder().names();
             for (size_t i = 0; i < boundProjNames.size(); i++) {
                 const ProjectionName& boundProjName = boundProjNames.at(i);
-                if (requiredProjections.find(boundProjName).second) {
+                if (requiredProjections.find(boundProjName)) {
                     physNode = make<EvaluationNode>(boundProjName,
                                                     getElementFn(i + (node.getHasRID() ? 1 : 0)),
                                                     std::move(physNode));
@@ -415,7 +415,7 @@ public:
         const auto& requiredProjections =
             getPropertyConst<ProjectionRequirement>(_physProps).getProjections();
         const ProjectionName& ridProjName = _ridProjections.at(scanDefName);
-        const bool needsRID = requiredProjections.find(ridProjName).second;
+        const bool needsRID = requiredProjections.find(ridProjName).has_value();
 
         const ProjectionName& scanProjectionName = indexingAvailability.getScanProjection();
         const GroupIdType scanGroupId = indexingAvailability.getScanGroupId();
@@ -551,7 +551,12 @@ public:
                     }
                 }
 
-                const auto& intervals = candidateIndexEntry._intervals;
+                // TODO: SERVER-69027. Support RIN with multiple equality prefixes.
+                tassert(6624113,
+                        "For now we only support single equality prefix",
+                        candidateIndexEntry._intervals.size() == 1);
+                const auto& intervals = candidateIndexEntry._intervals.front();
+
                 ABT physNode = make<Blackhole>();
                 NodeCEMap nodeCEMap;
 
@@ -575,26 +580,16 @@ public:
                 if (needsRID || needsUniqueStage) {
                     indexProjectionMap._ridProjection = ridProjName;
                 }
-                if (singularInterval) {
-                    physNode =
-                        make<IndexScanNode>(std::move(indexProjectionMap),
-                                            IndexSpecification{scanDefName,
-                                                               indexDefName,
-                                                               *singularInterval,
-                                                               !availableDirections._forward});
-                    nodeCEMap.emplace(physNode.cast<Node>(), indexCE);
-                } else {
-                    physNode = lowerIntervals(_prefixId,
-                                              ridProjName,
-                                              std::move(indexProjectionMap),
-                                              scanDefName,
-                                              indexDefName,
-                                              intervals,
-                                              !availableDirections._forward,
-                                              indexCE,
-                                              scanGroupCE,
-                                              nodeCEMap);
-                }
+                physNode = lowerIntervals(_prefixId,
+                                          ridProjName,
+                                          std::move(indexProjectionMap),
+                                          scanDefName,
+                                          indexDefName,
+                                          intervals,
+                                          !availableDirections._forward,
+                                          indexCE,
+                                          scanGroupCE,
+                                          nodeCEMap);
 
                 lowerPartialSchemaRequirements(scanGroupCE,
                                                std::move(indexPredSels),
@@ -997,13 +992,17 @@ public:
         }
 
         // TODO: consider hash join if the predicate is equality.
-        ABT physicalJoin = n;
-        BinaryJoinNode& newNode = *physicalJoin.cast<BinaryJoinNode>();
+        ABT nlj = make<NestedLoopJoinNode>(std::move(node.getJoinType()),
+                                           std::move(node.getCorrelatedProjectionNames()),
+                                           std::move(node.getFilter()),
+                                           std::move(node.getLeftChild()),
+                                           std::move(node.getRightChild()));
+        NestedLoopJoinNode& newNode = *nlj.cast<NestedLoopJoinNode>();
 
-        optimizeChildren<BinaryJoinNode, PhysicalRewriteType::NLJ>(
+        optimizeChildren<NestedLoopJoinNode, PhysicalRewriteType::NLJ>(
             _queue,
             kDefaultPriority,
-            std::move(physicalJoin),
+            std::move(nlj),
             ChildPropsType{{&newNode.getLeftChild(), std::move(leftPhysProps)},
                            {&newNode.getRightChild(), std::move(rightPhysProps)}});
     }
@@ -1120,7 +1119,7 @@ public:
             const ProjectionName& aggProjectionName =
                 node.getAggregationProjectionNames().at(aggIndex);
 
-            if (requiredProjections.find(aggProjectionName).second) {
+            if (requiredProjections.find(aggProjectionName)) {
                 // We require this agg expression.
                 aggregationProjectionNames.push_back(aggProjectionName);
                 const ABT& aggExpr = node.getAggregationExpressions().at(aggIndex);
@@ -1634,21 +1633,21 @@ private:
                 }
             }
         } else {
-            ABT physicalJoin = make<BinaryJoinNode>(JoinType::Inner,
-                                                    ProjectionNameSet{ridProjectionName},
-                                                    Constant::boolean(true),
-                                                    leftChild,
-                                                    rightChild);
+            ABT nlj = make<NestedLoopJoinNode>(JoinType::Inner,
+                                               ProjectionNameSet{ridProjectionName},
+                                               Constant::boolean(true),
+                                               leftChild,
+                                               rightChild);
 
             PhysProps leftPhysPropsLocal = leftPhysProps;
             PhysProps rightPhysPropsLocal = rightPhysProps;
             setCollationForRIDIntersect(
                 collationLeftRightSplit, leftPhysPropsLocal, rightPhysPropsLocal);
 
-            optimizeChildren<BinaryJoinNode, PhysicalRewriteType::IndexFetch>(
+            optimizeChildren<NestedLoopJoinNode, PhysicalRewriteType::IndexFetch>(
                 _queue,
                 kDefaultPriority,
-                std::move(physicalJoin),
+                std::move(nlj),
                 std::move(leftPhysPropsLocal),
                 std::move(rightPhysPropsLocal));
         }

@@ -22,6 +22,10 @@ from pkg_resources import parse_version
 
 import SCons
 import SCons.Script
+from buildscripts.metrics.metrics_datatypes import SConsToolingMetrics
+from buildscripts.metrics.tooling_exit_hook import initialize_exit_hook
+from buildscripts.metrics.tooling_metrics_utils import register_metrics_collection_atexit
+from site_scons.mongo import build_profiles
 
 # This must be first, even before EnsureSConsVersion, if
 # we are to avoid bulk loading all tools in the DefaultEnvironment.
@@ -34,7 +38,6 @@ import mongo.platform as mongo_platform
 import mongo.toolchain as mongo_toolchain
 import mongo.generators as mongo_generators
 import mongo.install_actions as install_actions
-from mongo.build_profiles import BUILD_PROFILES
 
 EnsurePythonVersion(3, 6)
 EnsureSConsVersion(3, 1, 1)
@@ -52,8 +55,6 @@ SCons.Node.FS.File.release_target_info = release_target_info_noop
 
 from buildscripts import utils
 from buildscripts import moduleconfig
-from buildscripts.metrics.scons_tooling_metrics import setup_scons_metrics_collection_atexit
-
 import psutil
 
 scons_invocation = '{} {}'.format(sys.executable, ' '.join(sys.argv))
@@ -135,8 +136,8 @@ SetOption('random', 1)
 
 add_option(
     'build-profile',
-    choices=list(BUILD_PROFILES.keys()),
-    default='default',
+    choices=[type for type in build_profiles.BuildProfileType],
+    default=build_profiles.BuildProfileType.DEFAULT,
     type='choice',
     help='''Short hand for common build configurations. These profiles are well supported by the build
     and are kept up to date. The 'default' profile should be used unless you have the required
@@ -146,7 +147,7 @@ add_option(
     site_scons/mongo/build_profiles.py to see each profile.''',
 )
 
-build_profile = BUILD_PROFILES[get_option('build-profile')]
+build_profile = build_profiles.get_build_profile(get_option('build-profile'))
 
 add_option(
     'ninja',
@@ -489,7 +490,8 @@ for pack in [
     ('google-benchmark', 'Google benchmark'),
     ('icu', 'ICU'),
     ('intel_decimal128', 'intel decimal128'),
-    ('kms-message', ),
+    ('libbson', ),
+    ('libmongocrypt', ),
     ('pcre2', ),
     ('snappy', ),
     ('stemmer', ),
@@ -1573,10 +1575,17 @@ env = Environment(variables=env_vars, **envDict)
 del envDict
 env.AddMethod(lambda env, name, **kwargs: add_option(name, **kwargs), 'AddOption')
 
-# Setup atexit method to store tooling metrics
-# The placement of this is intentional. We should only register this function atexit after
-# env, env_vars and the parser have been properly initialized.
-setup_scons_metrics_collection_atexit(utc_starttime, env_vars, env, _parser, sys.argv)
+# The placement of this is intentional. Here we setup an atexit method to store tooling metrics.
+# We should only register this function after env, env_vars and the parser have been properly initialized.
+register_metrics_collection_atexit(
+    SConsToolingMetrics.generate_metrics, {
+        "utc_starttime": datetime.utcnow(),
+        "env_vars": env_vars,
+        "env": env,
+        "parser": _parser,
+        "args": sys.argv,
+        "exit_hook": initialize_exit_hook(),
+    })
 
 if get_option('build-metrics'):
     env['BUILD_METRICS_ARTIFACTS_DIR'] = '$BUILD_ROOT/$VARIANT_DIR'
@@ -2902,7 +2911,7 @@ if env.TargetOSIs('posix'):
     env.Append(
         CCFLAGS=[
             "-fasynchronous-unwind-tables",
-            "-ggdb" if not env.TargetOSIs('emscripten') else "-g",
+            "-g2" if not env.TargetOSIs('emscripten') else "-g",
             "-Wall",
             "-Wsign-compare",
             "-Wno-unknown-pragmas",
@@ -2976,11 +2985,13 @@ if env.TargetOSIs('posix'):
     if not (env.TargetOSIs('darwin') and env.ToolchainIs('clang')):
         env.Append(LINKFLAGS=["-pthread"])
 
-    # SERVER-9761: Ensure early detection of missing symbols in dependent libraries at program
-    # startup.
-    env.Append(LINKFLAGS=[
-        "-Wl,-bind_at_load" if env.TargetOSIs('macOS') else "-Wl,-z,now",
-    ], )
+    # SERVER-9761: Ensure early detection of missing symbols in dependent
+    # libraries at program startup. For non-release dynamic builds we disable
+    # this behavior in the interest of improved mongod startup times.
+    if has_option('release') or get_option('link-model') != 'dynamic':
+        env.Append(LINKFLAGS=[
+            "-Wl,-bind_at_load" if env.TargetOSIs('macOS') else "-Wl,-z,now",
+        ], )
 
     # We need to use rdynamic for backtraces with glibc unless we have libunwind.
     nordyn = (env.TargetOSIs('darwin') or use_libunwind)
@@ -4362,18 +4373,26 @@ def doConfigure(myenv):
         #
         myenv.Append(CCFLAGS=["/Zc:inline"])
 
+    if myenv.ToolchainIs('clang'):
+        # We add this flag to make clang emit debug info for c++ stl types so that our pretty
+        # printers will work with newer clang's which omit this debug info. This does increase
+        # the overall debug info size.
+        myenv.AddToCCFLAGSIfSupported('-fno-limit-debug-info')
+
     if myenv.ToolchainIs('gcc', 'clang'):
         # Usually, --gdb-index is too expensive in big static binaries, but for dynamic
         # builds it works well.
         if link_model.startswith("dynamic"):
             myenv.AddToLINKFLAGSIfSupported('-Wl,--gdb-index')
 
-        if link_model != 'dynamic':
+        if myenv.AddToCCFLAGSIfSupported('-gdwarf64'):
+            myenv.AppendUnique(LINKFLAGS=['-gdwarf64'])
+        elif link_model != 'dynamic':
             # This will create an extra section where debug types can be referred from,
             # reducing other section sizes. This helps most with big static links as there
             # will be lots of duplicate debug type info.
-            myenv.AddToCCFLAGSIfSupported('-fdebug-types-section')
-            myenv.AddToLINKFLAGSIfSupported('-fdebug-types-section')
+            if myenv.AddToCCFLAGSIfSupported('-fdebug-types-section'):
+                myenv.AppendUnique(LINKFLAGS=['-fdebug-types-section'])
 
         # Our build is already parallel.
         myenv.AddToLINKFLAGSIfSupported('-Wl,--no-threads')

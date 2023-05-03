@@ -811,6 +811,10 @@ public:
     CollectionCatalogTimestampTest()
         : ServiceContextMongoDTest(Options{}.forceDisableTableLogging()) {}
 
+    // Special constructor to _disable_ timestamping. Not to be used directly.
+    struct DisableTimestampingTag {};
+    CollectionCatalogTimestampTest(DisableTimestampingTag) : ServiceContextMongoDTest() {}
+
     void setUp() override {
         ServiceContextMongoDTest::setUp();
         opCtx = makeOperationContext();
@@ -823,6 +827,192 @@ public:
     void createCollection(OperationContext* opCtx,
                           const NamespaceString& nss,
                           Timestamp timestamp) {
+        _setupDDLOperation(opCtx, timestamp);
+        WriteUnitOfWork wuow(opCtx);
+        _createCollection(opCtx, nss);
+        wuow.commit();
+    }
+
+    void dropCollection(OperationContext* opCtx, const NamespaceString& nss, Timestamp timestamp) {
+        _setupDDLOperation(opCtx, timestamp);
+        WriteUnitOfWork wuow(opCtx);
+        _dropCollection(opCtx, nss, timestamp);
+        wuow.commit();
+    }
+
+    void renameCollection(OperationContext* opCtx,
+                          const NamespaceString& from,
+                          const NamespaceString& to,
+                          Timestamp timestamp) {
+        invariant(from.db() == to.db());
+
+        _setupDDLOperation(opCtx, timestamp);
+        WriteUnitOfWork wuow(opCtx);
+        _renameCollection(opCtx, from, to);
+        wuow.commit();
+    }
+
+    void createIndex(OperationContext* opCtx,
+                     const NamespaceString& nss,
+                     BSONObj indexSpec,
+                     Timestamp timestamp) {
+        _setupDDLOperation(opCtx, timestamp);
+        WriteUnitOfWork wuow(opCtx);
+        _createIndex(opCtx, nss, indexSpec);
+        wuow.commit();
+    }
+
+    void dropIndex(OperationContext* opCtx,
+                   const NamespaceString& nss,
+                   const std::string& indexName,
+                   Timestamp timestamp) {
+        _setupDDLOperation(opCtx, timestamp);
+        WriteUnitOfWork wuow(opCtx);
+        _dropIndex(opCtx, nss, indexName);
+        wuow.commit();
+    }
+
+    /**
+     * Starts an index build, but leaves the build in progress rather than ready. Returns the
+     * IndexBuildBlock performing the build, necessary to finish the build later via
+     * finishIndexBuild below.
+     */
+    std::unique_ptr<IndexBuildBlock> createIndexWithoutFinishingBuild(OperationContext* opCtx,
+                                                                      const NamespaceString& nss,
+                                                                      BSONObj indexSpec,
+                                                                      Timestamp createTimestamp) {
+        _setupDDLOperation(opCtx, createTimestamp);
+
+        AutoGetCollection autoColl(opCtx, nss, MODE_X);
+        WriteUnitOfWork wuow(opCtx);
+        CollectionWriter collection(opCtx, nss);
+
+        auto writableColl = collection.getWritableCollection(opCtx);
+
+        StatusWith<BSONObj> statusWithSpec = writableColl->getIndexCatalog()->prepareSpecForCreate(
+            opCtx, writableColl, indexSpec, boost::none);
+        uassertStatusOK(statusWithSpec.getStatus());
+        indexSpec = statusWithSpec.getValue();
+
+        auto indexBuildBlock = std::make_unique<IndexBuildBlock>(
+            writableColl->ns(), indexSpec, IndexBuildMethod::kForeground, UUID::gen());
+        uassertStatusOK(indexBuildBlock->init(opCtx, writableColl, /*forRecover=*/false));
+        uassertStatusOK(indexBuildBlock->getEntry(opCtx, writableColl)
+                            ->accessMethod()
+                            ->initializeAsEmpty(opCtx));
+        wuow.commit();
+
+        return indexBuildBlock;
+    }
+
+    /**
+     * Finishes an index build that was started by createIndexWithoutFinishingBuild.
+     */
+    void finishIndexBuild(OperationContext* opCtx,
+                          const NamespaceString& nss,
+                          std::unique_ptr<IndexBuildBlock> indexBuildBlock,
+                          Timestamp readyTimestamp) {
+        _setupDDLOperation(opCtx, readyTimestamp);
+
+        AutoGetCollection autoColl(opCtx, nss, MODE_X);
+        WriteUnitOfWork wuow(opCtx);
+        CollectionWriter collection(opCtx, nss);
+        indexBuildBlock->success(opCtx, collection.getWritableCollection(opCtx));
+        wuow.commit();
+    }
+
+    void concurrentCreateCollectionAndOpenCollection(OperationContext* opCtx,
+                                                     const NamespaceString& nss,
+                                                     Timestamp timestamp,
+                                                     bool openSnapshotBeforeCommit,
+                                                     bool expectedExistence,
+                                                     int expectedNumIndexes) {
+        _concurrentDDLOperationAndOpenCollection(
+            opCtx,
+            nss,
+            timestamp,
+            [this, &nss](OperationContext* opCtx) { _createCollection(opCtx, nss); },
+            openSnapshotBeforeCommit,
+            expectedExistence,
+            expectedNumIndexes);
+    }
+
+    void concurrentDropCollectionAndOpenCollection(OperationContext* opCtx,
+                                                   const NamespaceString& nss,
+                                                   Timestamp timestamp,
+                                                   bool openSnapshotBeforeCommit,
+                                                   bool expectedExistence,
+                                                   int expectedNumIndexes) {
+        _concurrentDDLOperationAndOpenCollection(opCtx,
+                                                 nss,
+                                                 timestamp,
+                                                 [this, &nss, &timestamp](OperationContext* opCtx) {
+                                                     _dropCollection(opCtx, nss, timestamp);
+                                                 },
+                                                 openSnapshotBeforeCommit,
+                                                 expectedExistence,
+                                                 expectedNumIndexes);
+    }
+
+    void concurrentRenameCollectionAndOpenCollection(OperationContext* opCtx,
+                                                     const NamespaceString& from,
+                                                     const NamespaceString& to,
+                                                     const NamespaceString& lookupNss,
+                                                     Timestamp timestamp,
+                                                     bool openSnapshotBeforeCommit,
+                                                     bool expectedExistence,
+                                                     int expectedNumIndexes) {
+        _concurrentDDLOperationAndOpenCollection(
+            opCtx,
+            lookupNss,
+            timestamp,
+            [this, &from, &to](OperationContext* opCtx) { _renameCollection(opCtx, from, to); },
+            openSnapshotBeforeCommit,
+            expectedExistence,
+            expectedNumIndexes);
+    }
+
+    void concurrentCreateIndexAndOpenCollection(OperationContext* opCtx,
+                                                const NamespaceString& nss,
+                                                BSONObj indexSpec,
+                                                Timestamp timestamp,
+                                                bool openSnapshotBeforeCommit,
+                                                bool expectedExistence,
+                                                int expectedNumIndexes) {
+        _concurrentDDLOperationAndOpenCollection(opCtx,
+                                                 nss,
+                                                 timestamp,
+                                                 [this, &nss, &indexSpec](OperationContext* opCtx) {
+                                                     _createIndex(opCtx, nss, indexSpec);
+                                                 },
+                                                 openSnapshotBeforeCommit,
+                                                 expectedExistence,
+                                                 expectedNumIndexes);
+    }
+
+    void concurrentDropIndexAndOpenCollection(OperationContext* opCtx,
+                                              const NamespaceString& nss,
+                                              const std::string& indexName,
+                                              Timestamp timestamp,
+                                              bool openSnapshotBeforeCommit,
+                                              bool expectedExistence,
+                                              int expectedNumIndexes) {
+        _concurrentDDLOperationAndOpenCollection(opCtx,
+                                                 nss,
+                                                 timestamp,
+                                                 [this, &nss, &indexName](OperationContext* opCtx) {
+                                                     _dropIndex(opCtx, nss, indexName);
+                                                 },
+                                                 openSnapshotBeforeCommit,
+                                                 expectedExistence,
+                                                 expectedNumIndexes);
+    }
+
+protected:
+    ServiceContext::UniqueOperationContext opCtx;
+
+private:
+    void _setupDDLOperation(OperationContext* opCtx, Timestamp timestamp) {
         opCtx->recoveryUnit()->setTimestampReadSource(RecoveryUnit::ReadSource::kNoTimestamp);
         opCtx->recoveryUnit()->abandonSnapshot();
 
@@ -830,14 +1020,15 @@ public:
             opCtx->recoveryUnit()->clearCommitTimestamp();
         }
         opCtx->recoveryUnit()->setCommitTimestamp(timestamp);
+    }
 
+    void _createCollection(OperationContext* opCtx, const NamespaceString& nss) {
         AutoGetDb databaseWriteGuard(opCtx, nss.dbName(), MODE_IX);
         auto db = databaseWriteGuard.ensureDbExists(opCtx);
         ASSERT(db);
 
         Lock::CollectionLock lk(opCtx, nss, MODE_IX);
 
-        WriteUnitOfWork wuow(opCtx);
         CollectionOptions options;
         options.uuid.emplace(UUID::gen());
 
@@ -854,24 +1045,12 @@ public:
 
         // Adds the collection to the in-memory catalog.
         CollectionCatalog::get(opCtx)->onCreateCollection(opCtx, std::move(ownedCollection));
-
-        wuow.commit();
     }
 
-    void dropCollection(OperationContext* opCtx, const NamespaceString& nss, Timestamp timestamp) {
-        opCtx->recoveryUnit()->setTimestampReadSource(RecoveryUnit::ReadSource::kNoTimestamp);
-        opCtx->recoveryUnit()->abandonSnapshot();
-
-        if (!opCtx->recoveryUnit()->getCommitTimestamp().isNull()) {
-            opCtx->recoveryUnit()->clearCommitTimestamp();
-        }
-        opCtx->recoveryUnit()->setCommitTimestamp(timestamp);
-
+    void _dropCollection(OperationContext* opCtx, const NamespaceString& nss, Timestamp timestamp) {
         Lock::DBLock dbLk(opCtx, nss.db(), MODE_IX);
         Lock::CollectionLock collLk(opCtx, nss, MODE_X);
         CollectionWriter collection(opCtx, nss);
-
-        WriteUnitOfWork wuow(opCtx);
 
         Collection* writableCollection = collection.getWritableCollection(opCtx);
 
@@ -899,74 +1078,34 @@ public:
         // Drops the collection from the in-memory catalog.
         CollectionCatalog::get(opCtx)->dropCollection(
             opCtx, writableCollection, /*isDropPending=*/true);
-        wuow.commit();
     }
 
-    void renameCollection(OperationContext* opCtx,
-                          const NamespaceString& from,
-                          const NamespaceString& to,
-                          Timestamp timestamp) {
-        invariant(from.db() == to.db());
-
-        opCtx->recoveryUnit()->setTimestampReadSource(RecoveryUnit::ReadSource::kNoTimestamp);
-        opCtx->recoveryUnit()->abandonSnapshot();
-
-        if (!opCtx->recoveryUnit()->getCommitTimestamp().isNull()) {
-            opCtx->recoveryUnit()->clearCommitTimestamp();
-        }
-        opCtx->recoveryUnit()->setCommitTimestamp(timestamp);
-
+    void _renameCollection(OperationContext* opCtx,
+                           const NamespaceString& from,
+                           const NamespaceString& to) {
         Lock::DBLock dbLk(opCtx, from.db(), MODE_IX);
         Lock::CollectionLock fromLk(opCtx, from, MODE_X);
         Lock::CollectionLock toLk(opCtx, to, MODE_X);
 
         CollectionWriter collection(opCtx, from);
 
-        WriteUnitOfWork wuow(opCtx);
         ASSERT_OK(collection.getWritableCollection(opCtx)->rename(opCtx, to, false));
         CollectionCatalog::get(opCtx)->onCollectionRename(
             opCtx, collection.getWritableCollection(opCtx), from);
-        wuow.commit();
     }
 
-    void createIndex(OperationContext* opCtx,
-                     const NamespaceString& nss,
-                     BSONObj indexSpec,
-                     Timestamp timestamp) {
-        opCtx->recoveryUnit()->setTimestampReadSource(RecoveryUnit::ReadSource::kNoTimestamp);
-        opCtx->recoveryUnit()->abandonSnapshot();
-
-        if (!opCtx->recoveryUnit()->getCommitTimestamp().isNull()) {
-            opCtx->recoveryUnit()->clearCommitTimestamp();
-        }
-        opCtx->recoveryUnit()->setCommitTimestamp(timestamp);
-
+    void _createIndex(OperationContext* opCtx, const NamespaceString& nss, BSONObj indexSpec) {
         AutoGetCollection autoColl(opCtx, nss, MODE_X);
-
-        WriteUnitOfWork wuow(opCtx);
         CollectionWriter collection(opCtx, nss);
-
         IndexBuildsCoordinator::get(opCtx)->createIndexesOnEmptyCollection(
             opCtx, collection, {indexSpec}, /*fromMigrate=*/false);
-
-        wuow.commit();
     }
 
-    void dropIndex(OperationContext* opCtx,
-                   const NamespaceString& nss,
-                   const std::string& indexName,
-                   Timestamp timestamp) {
-        opCtx->recoveryUnit()->setTimestampReadSource(RecoveryUnit::ReadSource::kNoTimestamp);
-        opCtx->recoveryUnit()->abandonSnapshot();
-
-        if (!opCtx->recoveryUnit()->getCommitTimestamp().isNull()) {
-            opCtx->recoveryUnit()->clearCommitTimestamp();
-        }
-        opCtx->recoveryUnit()->setCommitTimestamp(timestamp);
-
+    void _dropIndex(OperationContext* opCtx,
+                    const NamespaceString& nss,
+                    const std::string& indexName) {
         AutoGetCollection autoColl(opCtx, nss, MODE_X);
 
-        WriteUnitOfWork wuow(opCtx);
         CollectionWriter collection(opCtx, nss);
 
         Collection* writableCollection = collection.getWritableCollection(opCtx);
@@ -977,12 +1116,110 @@ public:
 
         // This also adds the index ident to the drop-pending reaper.
         ASSERT_OK(indexCatalog->dropIndex(opCtx, writableCollection, indexDescriptor));
-
-        wuow.commit();
     }
 
-protected:
-    ServiceContext::UniqueOperationContext opCtx;
+    /**
+     * Simulates performing a given ddlOperation concurrently with an untimestamped openCollection
+     * lookup.
+     *
+     * If openSnapshotBeforeCommit is true, the ddlOperation stalls right after the catalog places
+     * the collection in _pendingCommitNamespaces but before writing to the durable catalog.
+     * Otherwise, the ddlOperation stalls right after writing to the durable catalog but before
+     * updating the in-memory catalog.
+     */
+    template <typename Callable>
+    void _concurrentDDLOperationAndOpenCollection(OperationContext* opCtx,
+                                                  const NamespaceString& nss,
+                                                  Timestamp timestamp,
+                                                  Callable&& ddlOperation,
+                                                  bool openSnapshotBeforeCommit,
+                                                  bool expectedExistence,
+                                                  int expectedNumIndexes) {
+        mongo::Mutex mutex;
+        stdx::condition_variable cv;
+        int numCalls = 0;
+
+        stdx::thread t([&, svcCtx = getServiceContext()] {
+            ThreadClient client(svcCtx);
+            auto newOpCtx = client->makeOperationContext();
+            _setupDDLOperation(newOpCtx.get(), timestamp);
+
+            WriteUnitOfWork wuow(newOpCtx.get());
+
+            // Register a hook either preCommit or onCommit that will block until the
+            // main thread has finished its openCollection lookup.
+            auto commitHandler = [&]() {
+                stdx::unique_lock lock(mutex);
+
+                // Let the main thread know we have committed to the storage engine.
+                numCalls = 1;
+                cv.notify_all();
+
+                // Wait until the main thread has finished its openCollection lookup.
+                cv.wait(lock, [&numCalls]() { return numCalls == 2; });
+            };
+
+            // The onCommit handler must be registered prior to the DDL operation so it's executed
+            // before any onCommit handlers set up in the operation.
+            if (!openSnapshotBeforeCommit) {
+                newOpCtx.get()->recoveryUnit()->onCommit(
+                    [&commitHandler](boost::optional<Timestamp> commitTime) { commitHandler(); });
+            }
+
+            ddlOperation(newOpCtx.get());
+
+            // The preCommit handler must be registered after the DDL operation so it's executed
+            // after any preCommit hooks set up in the operation.
+            if (openSnapshotBeforeCommit) {
+                newOpCtx.get()->recoveryUnit()->registerPreCommitHook(
+                    [&commitHandler](OperationContext* opCtx) { commitHandler(); });
+            }
+
+            wuow.commit();
+        });
+
+        // Wait for the thread above to start its commit of the DDL operation.
+        {
+            stdx::unique_lock lock(mutex);
+            cv.wait(lock, [&numCalls]() { return numCalls == 1; });
+        }
+
+        // Perform the openCollection lookup.
+        OneOffRead oor(opCtx, Timestamp());
+        Lock::GlobalLock globalLock(opCtx, MODE_IS);
+        CollectionPtr coll = CollectionCatalog::get(opCtx)->openCollection(opCtx, nss, boost::none);
+
+        // Notify the thread that our openCollection lookup is done.
+        {
+            stdx::unique_lock lock(mutex);
+            numCalls = 2;
+            cv.notify_all();
+        }
+        t.join();
+
+        if (expectedExistence) {
+            ASSERT(coll);
+
+            ASSERT_EQ(coll->ns(), nss);
+            ASSERT_EQ(coll->getIndexCatalog()->numIndexesTotal(), expectedNumIndexes);
+
+            auto catalogEntry =
+                DurableCatalog::get(opCtx)->getParsedCatalogEntry(opCtx, coll->getCatalogId());
+            ASSERT(catalogEntry);
+            ASSERT(coll->isMetadataEqual(*catalogEntry->metadata.get()));
+        } else {
+            ASSERT(!coll);
+            auto catalogEntry = DurableCatalog::get(opCtx)->scanForCatalogEntryByNss(opCtx, nss);
+            ASSERT(!catalogEntry);
+        }
+    }
+};
+
+class CollectionCatalogNoTimestampTest : public CollectionCatalogTimestampTest {
+public:
+    CollectionCatalogNoTimestampTest()
+        : CollectionCatalogTimestampTest(CollectionCatalogTimestampTest::DisableTimestampingTag{}) {
+    }
 };
 
 TEST_F(CollectionCatalogTimestampTest, MinimumValidSnapshot) {
@@ -1223,6 +1460,7 @@ TEST_F(CollectionCatalogTimestampTest, OpenEarlierCollectionWithDropPendingIndex
     auto coll =
         CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, readTimestamp);
     ASSERT(coll);
+    ASSERT_EQ(coll->getIndexCatalog()->numIndexesReady(), 2);
 
     // Collection is not shared from the latest instance. This has to be done in an  alternative
     // client as we already have an open snapshot from an earlier point-in-time above.
@@ -2393,6 +2631,24 @@ TEST_F(CollectionCatalogTimestampTest, CollectionLifetimeTiedToStorageTransactio
     }
 }
 
+TEST_F(CollectionCatalogNoTimestampTest, CatalogIdMappingNoTimestamp) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    NamespaceString nss("a.b");
+
+    // Create a collection on the namespace and confirm that we can lookup
+    createCollection(opCtx.get(), nss, Timestamp());
+    ASSERT(catalog()->lookupCatalogIdByNSS(nss).result ==
+           CollectionCatalog::CatalogIdLookup::NamespaceExistence::kExists);
+
+    // Drop the collection and confirm it is also removed from mapping
+    dropCollection(opCtx.get(), nss, Timestamp());
+    ASSERT(catalog()->lookupCatalogIdByNSS(nss).result ==
+           CollectionCatalog::CatalogIdLookup::NamespaceExistence::kNotExists);
+}
+
+
 DEATH_TEST_F(CollectionCatalogTimestampTest, OpenCollectionInWriteUnitOfWork, "invariant") {
     RAIIServerParameterControllerForTest featureFlagController(
         "featureFlagPointInTimeCatalogLookups", true);
@@ -2418,49 +2674,292 @@ DEATH_TEST_F(CollectionCatalogTimestampTest, OpenCollectionInWriteUnitOfWork, "i
         CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, readTimestamp);
 }
 
-TEST_F(CollectionCatalogTimestampTest, OpenCollectionNoTimestamp) {
+TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateCollectionAndOpenCollectionBeforeCommit) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    const NamespaceString nss("a.b");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+
+    // When the snapshot is opened right before the create is committed to the durable catalog, the
+    // collection instance should not exist yet.
+    concurrentCreateCollectionAndOpenCollection(
+        opCtx.get(), nss, createCollectionTs, true, false, 0);
+}
+
+TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateCollectionAndOpenCollectionAfterCommit) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    const NamespaceString nss("a.b");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+
+    // When the snapshot is opened right after the create is committed to the durable catalog, the
+    // collection instance should exist.
+    concurrentCreateCollectionAndOpenCollection(
+        opCtx.get(), nss, createCollectionTs, false, true, 0);
+}
+
+TEST_F(CollectionCatalogTimestampTest, ConcurrentDropCollectionAndOpenCollectionBeforeCommit) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    const NamespaceString nss("a.b");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+    const Timestamp dropCollectionTs = Timestamp(20, 20);
+
+    createCollection(opCtx.get(), nss, createCollectionTs);
+
+    // When the snapshot is opened right before the drop is committed to the durable catalog, the
+    // collection instance should be returned.
+    concurrentDropCollectionAndOpenCollection(opCtx.get(), nss, dropCollectionTs, true, true, 0);
+}
+
+TEST_F(CollectionCatalogTimestampTest, ConcurrentDropCollectionAndOpenCollectionAfterCommit) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    const NamespaceString nss("a.b");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+    const Timestamp dropCollectionTs = Timestamp(20, 20);
+
+    createCollection(opCtx.get(), nss, createCollectionTs);
+
+    // When the snapshot is opened right after the drop is committed to the durable catalog, no
+    // collection instance should be returned.
+    concurrentDropCollectionAndOpenCollection(opCtx.get(), nss, dropCollectionTs, false, false, 0);
+}
+
+TEST_F(CollectionCatalogTimestampTest,
+       ConcurrentRenameCollectionAndOpenCollectionWithOriginalNameBeforeCommit) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    const NamespaceString originalNss("a.b");
+    const NamespaceString newNss("a.c");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+    const Timestamp renameCollectionTs = Timestamp(20, 20);
+
+    createCollection(opCtx.get(), originalNss, createCollectionTs);
+
+    // When the snapshot is opened right before the rename is committed to the durable catalog, and
+    // the openCollection looks for the originalNss, the collection instance should be returned.
+    concurrentRenameCollectionAndOpenCollection(
+        opCtx.get(), originalNss, newNss, originalNss, renameCollectionTs, true, true, 0);
+}
+
+TEST_F(CollectionCatalogTimestampTest,
+       ConcurrentRenameCollectionAndOpenCollectionWithOriginalNameAfterCommit) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    const NamespaceString originalNss("a.b");
+    const NamespaceString newNss("a.c");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+    const Timestamp renameCollectionTs = Timestamp(20, 20);
+
+    createCollection(opCtx.get(), originalNss, createCollectionTs);
+
+    // When the snapshot is opened right after the rename is committed to the durable catalog, and
+    // the openCollection looks for the originalNss, no collection instance should be returned.
+    concurrentRenameCollectionAndOpenCollection(
+        opCtx.get(), originalNss, newNss, originalNss, renameCollectionTs, false, false, 0);
+}
+
+TEST_F(CollectionCatalogTimestampTest,
+       ConcurrentRenameCollectionAndOpenCollectionWithNewNameBeforeCommit) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    const NamespaceString originalNss("a.b");
+    const NamespaceString newNss("a.c");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+    const Timestamp renameCollectionTs = Timestamp(20, 20);
+
+    createCollection(opCtx.get(), originalNss, createCollectionTs);
+
+    // When the snapshot is opened right before the rename is committed to the durable catalog, and
+    // the openCollection looks for the newNss, no collection instance should be returned.
+    concurrentRenameCollectionAndOpenCollection(
+        opCtx.get(), originalNss, newNss, newNss, renameCollectionTs, true, false, 0);
+}
+
+TEST_F(CollectionCatalogTimestampTest,
+       ConcurrentRenameCollectionAndOpenCollectionWithNewNameAfterCommit) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    const NamespaceString originalNss("a.b");
+    const NamespaceString newNss("a.c");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+    const Timestamp renameCollectionTs = Timestamp(20, 20);
+
+    createCollection(opCtx.get(), originalNss, createCollectionTs);
+
+    // When the snapshot is opened right after the rename is committed to the durable catalog, and
+    // the openCollection looks for the newNss, the collection instance should be returned.
+    concurrentRenameCollectionAndOpenCollection(
+        opCtx.get(), originalNss, newNss, newNss, renameCollectionTs, false, true, 0);
+}
+
+TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateIndexAndOpenCollectionBeforeCommit) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    const NamespaceString nss("a.b");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+    const Timestamp createXIndexTs = Timestamp(20, 20);
+    const Timestamp createYIndexTs = Timestamp(30, 30);
+
+    createCollection(opCtx.get(), nss, createCollectionTs);
+    createIndex(opCtx.get(),
+                nss,
+                BSON("v" << 2 << "name"
+                         << "x_1"
+                         << "key" << BSON("x" << 1)),
+                createXIndexTs);
+
+    // When the snapshot is opened right before the second index create is committed to the durable
+    // catalog, the collection instance should not have the second index.
+    concurrentCreateIndexAndOpenCollection(opCtx.get(),
+                                           nss,
+                                           BSON("v" << 2 << "name"
+                                                    << "y_1"
+                                                    << "key" << BSON("y" << 1)),
+                                           createYIndexTs,
+                                           true,
+                                           true,
+                                           1);
+}
+
+TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateIndexAndOpenCollectionAfterCommit) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    const NamespaceString nss("a.b");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+    const Timestamp createXIndexTs = Timestamp(20, 20);
+    const Timestamp createYIndexTs = Timestamp(30, 30);
+
+    createCollection(opCtx.get(), nss, createCollectionTs);
+    createIndex(opCtx.get(),
+                nss,
+                BSON("v" << 2 << "name"
+                         << "x_1"
+                         << "key" << BSON("x" << 1)),
+                createXIndexTs);
+
+    // When the snapshot is opened right before the second index create is committed to the durable
+    // catalog, the collection instance should have both indexes.
+    concurrentCreateIndexAndOpenCollection(opCtx.get(),
+                                           nss,
+                                           BSON("v" << 2 << "name"
+                                                    << "y_1"
+                                                    << "key" << BSON("y" << 1)),
+                                           createYIndexTs,
+                                           false,
+                                           true,
+                                           2);
+}
+
+TEST_F(CollectionCatalogTimestampTest, ConcurrentDropIndexAndOpenCollectionBeforeCommit) {
     RAIIServerParameterControllerForTest featureFlagController(
         "featureFlagPointInTimeCatalogLookups", true);
 
     const NamespaceString nss("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp createIndexTs = Timestamp(20, 20);
-    const Timestamp readTimestamp = Timestamp(30, 30);
+    const Timestamp dropIndexTs = Timestamp(30, 30);
 
     createCollection(opCtx.get(), nss, createCollectionTs);
-
-    // Fetch a collection instance after creation but before creating an index. Maintain a reference
-    // to the current catalog so the collection instance isn't invalidated when the snapshot is
-    // abandoned.
-    auto preIndexCatalog = CollectionCatalog::get(opCtx.get());
-    auto preIndexColl = preIndexCatalog->lookupCollectionByNamespace(opCtx.get(), nss);
-    ASSERT(preIndexColl);
-    ASSERT_EQ(0, preIndexColl->getIndexCatalog()->numIndexesTotal());
-
     createIndex(opCtx.get(),
                 nss,
                 BSON("v" << 2 << "name"
                          << "x_1"
                          << "key" << BSON("x" << 1)),
                 createIndexTs);
-    OneOffRead oor(opCtx.get(), readTimestamp);
-    Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+    createIndex(opCtx.get(),
+                nss,
+                BSON("v" << 2 << "name"
+                         << "y_1"
+                         << "key" << BSON("y" << 1)),
+                createIndexTs);
 
-    // Open an instance of the latest collection by passing no timestamp.
-    auto coll = CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, boost::none);
-    ASSERT(coll);
-    ASSERT_EQ(1, coll->getIndexCatalog()->numIndexesTotal());
+    // When the snapshot is opened right before the index drop is committed to the durable
+    // catalog, the collection instance should not have the second index.
+    concurrentDropIndexAndOpenCollection(opCtx.get(), nss, "y_1", dropIndexTs, true, true, 2);
+}
 
-    // Verify the CollectionCatalog returns the latest collection.
-    auto currentColl =
-        CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespace(opCtx.get(), nss);
-    ASSERT(currentColl);
-    ASSERT_EQ(1, currentColl->getIndexCatalog()->numIndexesTotal());
-    ASSERT_EQ(coll, currentColl);
-    ASSERT_NE(coll, preIndexColl);
+TEST_F(CollectionCatalogTimestampTest, ConcurrentDropIndexAndOpenCollectionAfterCommit) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
 
-    // Ensure the idents are shared between the up-to-date instances.
-    ASSERT_EQ(coll->getSharedIdent(), currentColl->getSharedIdent());
+    const NamespaceString nss("a.b");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+    const Timestamp createIndexTs = Timestamp(20, 20);
+    const Timestamp dropIndexTs = Timestamp(30, 30);
+
+    createCollection(opCtx.get(), nss, createCollectionTs);
+    createIndex(opCtx.get(),
+                nss,
+                BSON("v" << 2 << "name"
+                         << "x_1"
+                         << "key" << BSON("x" << 1)),
+                createIndexTs);
+    createIndex(opCtx.get(),
+                nss,
+                BSON("v" << 2 << "name"
+                         << "y_1"
+                         << "key" << BSON("y" << 1)),
+                createIndexTs);
+
+    // When the snapshot is opened right before the index drop is committed to the durable
+    // catalog, the collection instance should not have the second index.
+    concurrentDropIndexAndOpenCollection(opCtx.get(), nss, "y_1", dropIndexTs, false, true, 1);
+}
+
+TEST_F(CollectionCatalogTimestampTest, OpenCollectionBetweenIndexBuildInProgressAndReady) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagPointInTimeCatalogLookups", true);
+
+    const NamespaceString nss("a.b");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+    const Timestamp createIndexTs = Timestamp(20, 20);
+    const Timestamp indexReadyTs = Timestamp(30, 30);
+
+    createCollection(opCtx.get(), nss, createCollectionTs);
+
+    auto indexBuildBlock = createIndexWithoutFinishingBuild(opCtx.get(),
+                                                            nss,
+                                                            BSON("v" << 2 << "name"
+                                                                     << "x_1"
+                                                                     << "key" << BSON("x" << 1)),
+                                                            createIndexTs);
+
+    // Confirm openCollection with timestamp createCollectionTs indicates no indexes.
+    {
+        OneOffRead oor(opCtx.get(), createCollectionTs);
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+
+        auto coll = CollectionCatalog::get(opCtx.get())
+                        ->openCollection(opCtx.get(), nss, createCollectionTs);
+        ASSERT(coll);
+        ASSERT_EQ(coll->getIndexCatalog()->numIndexesReady(), 0);
+    }
+
+    finishIndexBuild(opCtx.get(), nss, std::move(indexBuildBlock), indexReadyTs);
+
+    // Confirm openCollection with timestamp createIndexTs returns the same value as before, once
+    // the index build has finished (since it can no longer use the latest state).
+    {
+        OneOffRead oor(opCtx.get(), createIndexTs);
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+
+        auto coll =
+            CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, createIndexTs);
+        ASSERT(coll);
+        ASSERT_EQ(coll->getIndexCatalog()->numIndexesReady(), 0);
+    }
 }
 }  // namespace
 }  // namespace mongo

@@ -35,6 +35,7 @@
 #include "mongo/db/repl/database_cloner.h"
 #include "mongo/db/repl/database_cloner_common.h"
 #include "mongo/db/repl/database_cloner_gen.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 
@@ -44,7 +45,7 @@
 namespace mongo {
 namespace repl {
 
-DatabaseCloner::DatabaseCloner(const std::string& dbName,
+DatabaseCloner::DatabaseCloner(const DatabaseName& dbName,
                                InitialSyncSharedData* sharedData,
                                const HostAndPort& source,
                                DBClientConnection* client,
@@ -54,7 +55,7 @@ DatabaseCloner::DatabaseCloner(const std::string& dbName,
           "DatabaseCloner"_sd, sharedData, source, client, storageInterface, dbPool),
       _dbName(dbName),
       _listCollectionsStage("listCollections", this, &DatabaseCloner::listCollectionsStage) {
-    invariant(!dbName.empty());
+    invariant(!dbName.db().empty());
     _stats.dbname = dbName;
 }
 
@@ -69,8 +70,13 @@ void DatabaseCloner::preStage() {
 
 BaseCloner::AfterStageBehavior DatabaseCloner::listCollectionsStage() {
     BSONObj res;
-    auto collectionInfos =
-        getClient()->getCollectionInfos(_dbName, ListCollectionsFilter::makeTypeCollectionFilter());
+    auto dollarTenant = gMultitenancySupport &&
+            serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+            gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility)
+        ? _dbName.tenantId()
+        : boost::none;
+    auto collectionInfos = getClient()->getCollectionInfos(
+        _dbName, ListCollectionsFilter::makeTypeCollectionFilter(), dollarTenant);
 
     stdx::unordered_set<std::string> seen;
     for (auto&& info : collectionInfos) {
@@ -85,6 +91,7 @@ BaseCloner::AfterStageBehavior DatabaseCloner::listCollectionsStage() {
                     .withContext(str::stream() << "Collection info could not be parsed : " << info)
                     .reason());
         }
+
         NamespaceString collectionNamespace(_dbName, result.getName());
         if (collectionNamespace.isSystem() && !collectionNamespace.isReplicated()) {
             LOGV2_DEBUG(21146,
@@ -116,7 +123,8 @@ BaseCloner::AfterStageBehavior DatabaseCloner::listCollectionsStage() {
 }
 
 bool DatabaseCloner::isMyFailPoint(const BSONObj& data) const {
-    return data["database"].str() == _dbName && BaseCloner::isMyFailPoint(data);
+    return data["database"].str() == _dbName.toStringWithTenantId() &&
+        BaseCloner::isMyFailPoint(data);
 }
 
 void DatabaseCloner::postStage() {
@@ -126,7 +134,7 @@ void DatabaseCloner::postStage() {
         _stats.collectionStats.reserve(_collections.size());
         for (const auto& coll : _collections) {
             _stats.collectionStats.emplace_back();
-            _stats.collectionStats.back().ns = coll.first.ns();
+            _stats.collectionStats.back().nss = coll.first;
         }
     }
     for (const auto& coll : _collections) {
@@ -190,7 +198,7 @@ std::string DatabaseCloner::Stats::toString() const {
 
 BSONObj DatabaseCloner::Stats::toBSON() const {
     BSONObjBuilder bob;
-    bob.append("dbname", dbname);
+    bob.append("dbname", DatabaseNameUtil::serialize(dbname));
     append(&bob);
     return bob.obj();
 }
@@ -209,7 +217,8 @@ void DatabaseCloner::Stats::append(BSONObjBuilder* builder) const {
     }
 
     for (auto&& collection : collectionStats) {
-        BSONObjBuilder collectionBuilder(builder->subobjStart(collection.ns));
+        BSONObjBuilder collectionBuilder(
+            builder->subobjStart(NamespaceStringUtil::serialize(collection.nss)));
         collection.append(&collectionBuilder);
         collectionBuilder.doneFast();
     }

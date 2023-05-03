@@ -2204,6 +2204,16 @@ Value ExpressionDateDiff::evaluate(const Document& root, Variables* variables) c
     return Value{dateDiff(startDate, endDate, unit, *timezone, startOfWeek)};
 }
 
+monotonic::State ExpressionDateDiff::getMonotonicState(const FieldPath& sortedFieldPath) const {
+    if (!ExpressionConstant::allNullOrConstant({_unit, _timeZone, _startOfWeek})) {
+        return monotonic::State::NonMonotonic;
+    }
+    // Because the result of this expression can be negative, this works the same way as
+    // ExpressionSubtract. Edge cases with DST and other timezone changes are handled correctly
+    // according to dateDiff.
+    return monotonic::combine(_endDate->getMonotonicState(sortedFieldPath),
+                              monotonic::opposite(_startDate->getMonotonicState(sortedFieldPath)));
+}
 
 /* ----------------------- ExpressionDivide ---------------------------- */
 
@@ -2558,6 +2568,11 @@ std::unique_ptr<Expression> ExpressionFieldPath::copyWithSubstitution(
         }
     }
     return nullptr;
+}
+
+monotonic::State ExpressionFieldPath::getMonotonicState(const FieldPath& sortedFieldPath) const {
+    return getFieldPathWithoutCurrentPrefix() == sortedFieldPath ? monotonic::State::Increasing
+                                                                 : monotonic::State::NonMonotonic;
 }
 
 /* ------------------------- ExpressionFilter ----------------------------- */
@@ -5609,6 +5624,16 @@ const char* ExpressionSubtract::getOpName() const {
     return "$subtract";
 }
 
+monotonic::State ExpressionSubtract::getMonotonicState(const FieldPath& sortedFieldPath) const {
+    // 1. Get monotonic states of the both children.
+    // 2. Apply monotonic::opposite to the state of the second child, because it is negated.
+    // 3. Combine children. Function monotonic::combine correctly handles all the cases where, for
+    // example, argumemnts are both monotonic, but in the opposite directions.
+    return monotonic::combine(
+        getChildren()[0]->getMonotonicState(sortedFieldPath),
+        monotonic::opposite(getChildren()[1]->getMonotonicState(sortedFieldPath)));
+}
+
 /* ------------------------- ExpressionSwitch ------------------------------ */
 
 REGISTER_STABLE_EXPRESSION(switch, ExpressionSwitch::parse);
@@ -7484,6 +7509,15 @@ Value ExpressionDateArithmetics::evaluate(const Document& root, Variables* varia
         startDate.coerceToDate(), unit, amount.coerceToLong(), timezone.value());
 }
 
+monotonic::State ExpressionDateArithmetics::getMonotonicState(
+    const FieldPath& sortedFieldPath) const {
+    if (!ExpressionConstant::allNullOrConstant({_unit, _timeZone})) {
+        return monotonic::State::NonMonotonic;
+    }
+    return combineMonotonicStateOfArguments(_startDate->getMonotonicState(sortedFieldPath),
+                                            _amount->getMonotonicState(sortedFieldPath));
+}
+
 /* ----------------------- ExpressionDateAdd ---------------------------- */
 REGISTER_STABLE_EXPRESSION(dateAdd, ExpressionDateAdd::parse);
 
@@ -7506,6 +7540,11 @@ Value ExpressionDateAdd::evaluateDateArithmetics(Date_t date,
                                                  long long amount,
                                                  const TimeZone& timezone) const {
     return Value(dateAdd(date, unit, amount, timezone));
+}
+
+monotonic::State ExpressionDateAdd::combineMonotonicStateOfArguments(
+    monotonic::State startDataMonotonicState, monotonic::State amountMonotonicState) const {
+    return monotonic::combine(startDataMonotonicState, amountMonotonicState);
 }
 
 /* ----------------------- ExpressionDateSubtract ---------------------------- */
@@ -7535,6 +7574,11 @@ Value ExpressionDateSubtract::evaluateDateArithmetics(Date_t date,
             str::stream() << "invalid $dateSubtract 'amount' parameter value: " << amount,
             amount != std::numeric_limits<long long>::min());
     return Value(dateAdd(date, unit, -amount, timezone));
+}
+
+monotonic::State ExpressionDateSubtract::combineMonotonicStateOfArguments(
+    monotonic::State startDataMonotonicState, monotonic::State amountMonotonicState) const {
+    return monotonic::combine(startDataMonotonicState, amountMonotonicState);
 }
 
 /* ----------------------- ExpressionDateTrunc ---------------------------- */
@@ -7744,6 +7788,12 @@ Value ExpressionDateTrunc::evaluate(const Document& root, Variables* variables) 
     return Value{truncateDate(date, unit, binSize, *timezone, startOfWeek)};
 }
 
+monotonic::State ExpressionDateTrunc::getMonotonicState(const FieldPath& sortedFieldPath) const {
+    if (!ExpressionConstant::allNullOrConstant({_unit, _binSize, _timeZone, _startOfWeek})) {
+        return monotonic::State::NonMonotonic;
+    }
+    return _date->getMonotonicState(sortedFieldPath);
+}
 
 /* -------------------------- ExpressionGetField ------------------------------ */
 
@@ -7998,6 +8048,27 @@ Value ExpressionTsIncrement::evaluate(const Document& root, Variables* variables
 }
 
 REGISTER_STABLE_EXPRESSION(tsIncrement, ExpressionTsIncrement::parse);
+
+/* ----------------------- ExpressionBitNot ---------------------------- */
+
+Value ExpressionBitNot::evaluateNumericArg(const Value& numericArg) const {
+    BSONType type = numericArg.getType();
+
+    if (type == NumberInt) {
+        return Value(~numericArg.getInt());
+    } else if (type == NumberLong) {
+        return Value(~numericArg.getLong());
+    } else {
+        uasserted(ErrorCodes::TypeMismatch,
+                  str::stream() << getOpName()
+                                << " only supports int and long, not: " << typeName(type) << ".");
+    }
+}
+
+REGISTER_STABLE_EXPRESSION(bitNot, ExpressionBitNot::parse);
+const char* ExpressionBitNot::getOpName() const {
+    return "$bitNot";
+}
 
 
 MONGO_INITIALIZER_GROUP(BeginExpressionRegistration, ("default"), ("EndExpressionRegistration"))

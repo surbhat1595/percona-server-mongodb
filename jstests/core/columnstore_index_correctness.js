@@ -4,9 +4,15 @@
  *   # Runs explain on an aggregate command which is only compatible with readConcern local.
  *   assumes_read_concern_unchanged,
  *   # column store indexes are still under a feature flag and require full sbe
- *   uses_column_store_index,
  *   featureFlagColumnstoreIndexes,
  *   featureFlagSbeFull,
+ *   # Columnstore tests set server parameters to disable columnstore query planning heuristics -
+ *   # 1) server parameters are stored in-memory only so are not transferred onto the recipient,
+ *   # 2) server parameters may not be set in stepdown passthroughs because it is a command that may
+ *   #      return different values after a failover
+ *   tenant_migration_incompatible,
+ *   does_not_support_stepdowns,
+ *   not_allowed_with_security_token,
  * ]
  */
 (function() {
@@ -15,6 +21,11 @@
 load("jstests/libs/fail_point_util.js");
 load("jstests/libs/analyze_plan.js");         // For "planHasStage."
 load("jstests/aggregation/extras/utils.js");  // For "resultsEq."
+load("jstests/libs/columnstore_util.js");     // For "setUpServerForColumnStoreIndexTest."
+
+if (!setUpServerForColumnStoreIndexTest(db)) {
+    return;
+}
 
 const coll = db.columnstore_index_correctness;
 
@@ -338,5 +349,39 @@ assert.commandWorked(coll.createIndex({"$**": "columnstore"}));
             tojson(coll.aggregate(pipeline).toArray())} Running resultsEq with verbose`);
         resultsEq(expectedResults, coll.aggregate(pipeline).toArray(), true);
     });
+})();
+
+// Test count-like queries.
+(function testCount() {
+    let c = db.columnstore_index_count_correctness;
+    c.drop();
+    for (let i = 0; i < 5; ++i) {
+        c.insert({a: 1, b: 4});
+        c.insert({a: 2, b: 5});
+        c.insert({a: 3, b: 6});
+    }
+    c.createIndex({"$**": "columnstore"});
+
+    // Now test a few different count pipelines.
+    let pipelines = [
+        [{$match: {a: 1}}, {$count: "count"}],
+        [{$count: "count"}],
+        [{$match: {$or: [{a: 1}, {b: 5}]}}, {$count: "count"}],
+        [{$match: {a: 1}}, {$group: {_id: null, count: {$sum: 1}}}]
+    ];
+
+    let expectedResults = [[{count: 5}], [{count: 15}], [{count: 10}], [{_id: null, count: 5}]];
+
+    for (let i = 0; i < pipelines.length; ++i) {
+        let pipeline = pipelines[i];
+
+        let explain = c.explain().aggregate(pipeline);
+        assert(aggPlanHasStage(explain, "COLUMN_SCAN"), explain);
+        assert(!aggPlanHasStage(explain, "PROJECTION_DEFAULT"), explain);
+        assert(!aggPlanHasStage(explain, "PROJECTION_SIMPLE"), explain);
+
+        let actualResults = c.aggregate(pipeline).toArray();
+        assert(resultsEq(expectedResults[i], actualResults), explain);
+    }
 })();
 })();

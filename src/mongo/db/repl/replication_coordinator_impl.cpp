@@ -2854,7 +2854,7 @@ void ReplicationCoordinatorImpl::stepDown(OperationContext* opCtx,
             // attempt, we might as well spend whatever time we need to acquire it now.  For
             // the same reason, we also disable lock acquisition interruption, to guarantee that
             // we get the lock eventually.
-            UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+            UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
 
             // Since we have released the RSTL lock at this point, there can be some read
             // operations sneaked in here, that might hold global lock in S mode or blocked on
@@ -3017,10 +3017,31 @@ bool ReplicationCoordinatorImpl::canAcceptNonLocalWrites() const {
     return _readWriteAbility->canAcceptNonLocalWrites(lk);
 }
 
+namespace {
+bool isSystemDotProfile(OperationContext* opCtx, const NamespaceStringOrUUID& nsOrUUID) {
+    if (auto ns = nsOrUUID.nss()) {
+        return ns->isSystemDotProfile();
+    } else {
+        auto uuid = nsOrUUID.uuid();
+        invariant(uuid, nsOrUUID.toString());
+        if (auto ns = CollectionCatalog::get(opCtx)->lookupNSSByUUID(opCtx, *uuid)) {
+            return ns->isSystemDotProfile();
+        }
+    }
+    return false;
+}
+}  // namespace
+
 bool ReplicationCoordinatorImpl::canAcceptWritesFor(OperationContext* opCtx,
                                                     const NamespaceStringOrUUID& nsOrUUID) {
     if (!isReplEnabled() || nsOrUUID.db() == kLocalDB) {
         // Writes on stand-alone nodes or "local" database are always permitted.
+        return true;
+    }
+
+    // Writes to the system.profile collection are always permitted as it is an unreplicated
+    // collection
+    if (isSystemDotProfile(opCtx, nsOrUUID)) {
         return true;
     }
 
@@ -3032,20 +3053,8 @@ bool ReplicationCoordinatorImpl::canAcceptWritesFor_UNSAFE(OperationContext* opC
                                                            const NamespaceStringOrUUID& nsOrUUID) {
     bool canWriteToDB = canAcceptWritesForDatabase_UNSAFE(opCtx, nsOrUUID.db());
 
-    if (!canWriteToDB) {
-        if (auto ns = nsOrUUID.nss()) {
-            if (!ns->isSystemDotProfile()) {
-                return false;
-            }
-        } else {
-            auto uuid = nsOrUUID.uuid();
-            invariant(uuid, nsOrUUID.toString());
-            if (auto ns = CollectionCatalog::get(opCtx)->lookupNSSByUUID(opCtx, *uuid)) {
-                if (!ns->isSystemDotProfile()) {
-                    return false;
-                }
-            }
-        }
+    if (!canWriteToDB && !isSystemDotProfile(opCtx, nsOrUUID)) {
+        return false;
     }
 
     // Even if we think we can write to the database we need to make sure we're not trying

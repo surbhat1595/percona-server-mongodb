@@ -184,8 +184,12 @@ BaseCloner::AfterStageBehavior AllDatabaseCloner::listDatabasesStage() {
             _databases.emplace_back(dbName);
 
             // Put admin dbs in the front of the vector.
-            if (dbName.db() == "admin" && _databases.size() > 1) {
-                std::iter_swap(_databases.begin() + idxToInsertNextAdmin, _databases.end() - 1);
+            if (dbName.db() == "admin") {
+                if (_databases.size() > 1) {
+                    std::iter_swap(_databases.begin() + idxToInsertNextAdmin, _databases.end() - 1);
+                }
+                // Index to track where the last admin db is in the list. If the first db returned
+                // is an admin db, we still must bump this.
                 idxToInsertNextAdmin++;
             }
         }
@@ -221,7 +225,7 @@ void AllDatabaseCloner::postStage() {
         _stats.databaseStats.reserve(_databases.size());
         for (const auto& dbName : _databases) {
             _stats.databaseStats.emplace_back();
-            _stats.databaseStats.back().dbname = dbName.toStringWithTenantId();
+            _stats.databaseStats.back().dbname = dbName;
 
             auto db = DatabaseNameUtil::serialize(dbName);
 
@@ -259,8 +263,7 @@ void AllDatabaseCloner::postStage() {
     for (const auto& dbName : _databases) {
         {
             stdx::lock_guard<Latch> lk(_mutex);
-            // TODO SERVER-70430: Pass in dbName directly to the constructor.
-            _currentDatabaseCloner = std::make_unique<DatabaseCloner>(dbName.toStringWithTenantId(),
+            _currentDatabaseCloner = std::make_unique<DatabaseCloner>(dbName,
                                                                       getSharedData(),
                                                                       getSource(),
                                                                       getClient(),
@@ -377,7 +380,7 @@ void AllDatabaseCloner::Stats::append(BSONObjBuilder* builder) const {
     builder->appendNumber("databasesToClone", static_cast<long long>(databasesToClone));
     builder->appendNumber("databasesCloned", static_cast<long long>(databasesCloned));
     for (auto&& db : databaseStats) {
-        BSONObjBuilder dbBuilder(builder->subobjStart(db.dbname));
+        BSONObjBuilder dbBuilder(builder->subobjStart(DatabaseNameUtil::serialize(db.dbname)));
         db.append(&dbBuilder);
         dbBuilder.doneFast();
     }

@@ -91,7 +91,11 @@ env.Library(
     ],
 )
 
-env.Library(
+fleCryptoEnv = env.Clone()
+fleCryptoEnv.InjectThirdParty(libraries=['libmongocrypt'])
+fleCryptoEnv.InjectThirdParty(libraries=['libbson'])
+
+fleCryptoEnv.Library(
     target="fle_crypto",
     source=[
         "encryption_fields_util.cpp",
@@ -108,6 +112,7 @@ env.Library(
         '$BUILD_DIR/mongo/bson/util/bson_extract',
         '$BUILD_DIR/mongo/db/exec/document_value/document_value',
         '$BUILD_DIR/mongo/db/query/query_knobs',
+        '$BUILD_DIR/third_party/shim_libmongocrypt',
         'aead_encryption',
         'encrypted_field_config',
         'fle_fields',
@@ -133,6 +138,7 @@ env.CppUnitTest(
         'aead_encryption_test.cpp',
         'encryption_fields_util_test.cpp',
         'encryption_fields_validation_test.cpp',
+        'jwt_test.cpp',
         'fle_crypto_test.cpp',
         'fle_crypto_test_vectors.cpp',
         'mechanism_scram_test.cpp',
@@ -148,6 +154,7 @@ env.CppUnitTest(
         'aead_encryption',
         'encrypted_field_config',
         'fle_crypto',
+        'jwt',
         'sha_block_${MONGO_CRYPTO}',
     ],
 )
@@ -165,16 +172,5 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/idl/idl_parser',
-    ],
-)
-
-env.CppUnitTest(
-    target='jwt_test',
-    source=[
-        'jwt_test.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/base',
-        'jwt',
     ],
 )

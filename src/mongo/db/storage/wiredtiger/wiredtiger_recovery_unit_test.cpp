@@ -30,6 +30,7 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
 
 #include "mongo/base/checked_cast.h"
+#include "mongo/db/global_settings.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/service_context.h"
@@ -62,10 +63,14 @@ public:
                   false,                  // .ephemeral
                   false                   // .repair
           ) {
-        repl::ReplicationCoordinator::set(
-            getGlobalServiceContext(),
-            std::unique_ptr<repl::ReplicationCoordinator>(new repl::ReplicationCoordinatorMock(
-                getGlobalServiceContext(), repl::ReplSettings())));
+        // Use a replica set so that writes to replicated collections are not journaled and thus
+        // retain their timestamps.
+        repl::ReplSettings replSettings;
+        replSettings.setReplSetString("rs");
+        setGlobalReplSettings(replSettings);
+        repl::ReplicationCoordinator::set(getGlobalServiceContext(),
+                                          std::make_unique<repl::ReplicationCoordinatorMock>(
+                                              getGlobalServiceContext(), replSettings));
         _engine.notifyStartupComplete();
     }
 
@@ -990,80 +995,75 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, AbandonSnapshotAbortMode) {
     ASSERT_EQ(0, strncmp(key, returnedKey, strlen(key)));
 }
 
-TEST_F(WiredTigerRecoveryUnitTestFixture, AbandonSnapshotChange) {
-    size_t numOnOpenSnapshotCalled = 0;
-    size_t numOnCloseSnapshotCalled = 0;
+size_t numOnOpenSnapshotCalled = 0;
+size_t numOnCloseSnapshotCalled = 0;
 
-    ru1->onOpenSnapshot(
-        [&numOnOpenSnapshotCalled](OperationContext* opCtx) -> void { numOnOpenSnapshotCalled++; });
-    ru1->onCloseSnapshot([&numOnCloseSnapshotCalled](OperationContext* opCtx) -> void {
+class SnapshotTestDecoration {
+public:
+    SnapshotTestDecoration() {
+        numOnOpenSnapshotCalled++;
+    }
+
+    ~SnapshotTestDecoration() {
         numOnCloseSnapshotCalled++;
-    });
+    }
+};
 
-    ASSERT_EQ(0, numOnOpenSnapshotCalled);
-    ASSERT_EQ(0, numOnCloseSnapshotCalled);
+const RecoveryUnit::Snapshot::Decoration<SnapshotTestDecoration> getSnapshotDecoration =
+    RecoveryUnit::Snapshot::declareDecoration<SnapshotTestDecoration>();
 
-    // Open a snapshot.
+TEST_F(WiredTigerRecoveryUnitTestFixture, AbandonSnapshotChange) {
+    numOnOpenSnapshotCalled = 0;
+    numOnCloseSnapshotCalled = 0;
+
+    // A snapshot is already open from when the RU was constructed.
     ASSERT(ru1->getSession());
-    ASSERT_EQ(1, numOnOpenSnapshotCalled);
+    ASSERT_EQ(0, numOnOpenSnapshotCalled);
     ASSERT_EQ(0, numOnCloseSnapshotCalled);
 
     ru1->abandonSnapshot();
 
+    // A snapshot is opened after closing the last one.
     ASSERT_EQ(1, numOnOpenSnapshotCalled);
     ASSERT_EQ(1, numOnCloseSnapshotCalled);
 }
 
 TEST_F(WiredTigerRecoveryUnitTestFixture, CommitSnapshotChange) {
-    size_t numOnOpenSnapshotCalled = 0;
-    size_t numOnCloseSnapshotCalled = 0;
-
-    ru1->onOpenSnapshot(
-        [&numOnOpenSnapshotCalled](OperationContext* opCtx) -> void { numOnOpenSnapshotCalled++; });
-    ru1->onCloseSnapshot([&numOnCloseSnapshotCalled](OperationContext* opCtx) -> void {
-        numOnCloseSnapshotCalled++;
-    });
-
-    ASSERT_EQ(0, numOnOpenSnapshotCalled);
-    ASSERT_EQ(0, numOnCloseSnapshotCalled);
+    numOnOpenSnapshotCalled = 0;
+    numOnCloseSnapshotCalled = 0;
 
     ru1->beginUnitOfWork(/*readOnly=*/false);
     ASSERT_EQ(0, numOnOpenSnapshotCalled);
     ASSERT_EQ(0, numOnCloseSnapshotCalled);
 
-    // Open a snapshot after beginning a unit of work.
+    // A snapshot is already open from when the RU was constructed.
     ASSERT(ru1->getSession());
-    ASSERT_EQ(1, numOnOpenSnapshotCalled);
+    ASSERT_EQ(0, numOnOpenSnapshotCalled);
     ASSERT_EQ(0, numOnCloseSnapshotCalled);
 
     ru1->commitUnitOfWork();
+
+    // A snapshot is opened after closing the last one.
     ASSERT_EQ(1, numOnOpenSnapshotCalled);
     ASSERT_EQ(1, numOnCloseSnapshotCalled);
 }
 
 TEST_F(WiredTigerRecoveryUnitTestFixture, AbortSnapshotChange) {
-    size_t numOnOpenSnapshotCalled = 0;
-    size_t numOnCloseSnapshotCalled = 0;
+    numOnOpenSnapshotCalled = 0;
+    numOnCloseSnapshotCalled = 0;
 
-    ru1->onOpenSnapshot(
-        [&numOnOpenSnapshotCalled](OperationContext* opCtx) -> void { numOnOpenSnapshotCalled++; });
-    ru1->onCloseSnapshot([&numOnCloseSnapshotCalled](OperationContext* opCtx) -> void {
-        numOnCloseSnapshotCalled++;
-    });
-
+    // A snapshot is already open from when the RU was constructed.
+    ASSERT(ru1->getSession());
     ASSERT_EQ(0, numOnOpenSnapshotCalled);
     ASSERT_EQ(0, numOnCloseSnapshotCalled);
 
-    // Open a snapshot before beginning a unit of work.
-    ASSERT(ru1->getSession());
-    ASSERT_EQ(1, numOnOpenSnapshotCalled);
-    ASSERT_EQ(0, numOnCloseSnapshotCalled);
-
     ru1->beginUnitOfWork(/*readOnly=*/false);
-    ASSERT_EQ(1, numOnOpenSnapshotCalled);
+    ASSERT_EQ(0, numOnOpenSnapshotCalled);
     ASSERT_EQ(0, numOnCloseSnapshotCalled);
 
     ru1->abortUnitOfWork();
+
+    // A snapshot is opened after closing the last one.
     ASSERT_EQ(1, numOnOpenSnapshotCalled);
     ASSERT_EQ(1, numOnCloseSnapshotCalled);
 }

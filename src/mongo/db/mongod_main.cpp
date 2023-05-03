@@ -111,9 +111,9 @@
 #include "mongo/db/periodic_runner_job_abort_expired_transactions.h"
 #include "mongo/db/pipeline/change_stream_expired_pre_image_remover.h"
 #include "mongo/db/pipeline/process_interface/replica_set_node_process_interface.h"
-#include "mongo/db/query/ce/stats_cache_loader_impl.h"
-#include "mongo/db/query/ce/stats_catalog.h"
 #include "mongo/db/query/internal_plans.h"
+#include "mongo/db/query/stats/stats_cache_loader_impl.h"
+#include "mongo/db/query/stats/stats_catalog.h"
 #include "mongo/db/read_write_concern_defaults_cache_lookup_mongod.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/initial_syncer_factory.h"
@@ -208,7 +208,7 @@
 #include "mongo/scripting/engine.h"
 #include "mongo/stdx/future.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/transport/session_auth_metrics.h"
+#include "mongo/transport/ingress_handshake_metrics.h"
 #include "mongo/transport/transport_layer_manager.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/background.h"
@@ -340,8 +340,9 @@ void initializeCommandHooks(ServiceContext* serviceContext) {
 
         void onAfterRun(OperationContext* opCtx,
                         const OpMsgRequest& request,
-                        CommandInvocation* invocation) override {
-            _nextHook.onAfterRun(opCtx, request, invocation);
+                        CommandInvocation* invocation,
+                        rpc::ReplyBuilderInterface* response) override {
+            _nextHook.onAfterRun(opCtx, request, invocation, response);
             _onAfterRunImpl(opCtx);
         }
 
@@ -357,7 +358,7 @@ void initializeCommandHooks(ServiceContext* serviceContext) {
             MirrorMaestro::onReceiveMirroredRead(opCtx);
         }
 
-        transport::SessionAuthMetricsCommandHooks _nextHook{};
+        transport::IngressHandshakeMetricsCommandHooks _nextHook{};
     };
 
     CommandInvocationHooks::set(serviceContext, std::make_unique<MongodCommandInvocationHooks>());
@@ -763,7 +764,12 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
 
             Grid::get(startupOpCtx.get())->setShardingInitialized();
         } else if (replSettings.usingReplSets()) {  // standalone replica set
-            auto keysCollectionClient = std::make_unique<KeysCollectionClientDirect>();
+            // The keys client must use local read concern if the storage engine can't support
+            // majority read concern.
+            auto keysClientMustUseLocalReads =
+                !serviceContext->getStorageEngine()->supportsReadConcernMajority();
+            auto keysCollectionClient =
+                std::make_unique<KeysCollectionClientDirect>(keysClientMustUseLocalReads);
             auto keyManager = std::make_shared<KeysCollectionManager>(
                 KeysCollectionManager::kKeyManagerPurposeString,
                 std::move(keysCollectionClient),
@@ -868,12 +874,24 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
             LOGV2_ERROR(6968200, "'enableComputeMode' can be used only in standalone server");
             exitCleanly(ExitCode::badOptions);
         }
+        if (externalPipeDir != "" && externalPipeDir.find("..") != std::string::npos) {
+            LOGV2_ERROR(7001102, "'externalPipeDir' must not have '..'");
+            exitCleanly(ExitCode::badOptions);
+        }
+
         LOGV2_WARNING_OPTIONS(
             6968201,
             {logv2::LogTag::kStartupWarnings},
             "There could be security risks in using 'enableComputeMode'. It is recommended to use "
             "this mode under an isolated environment and execute the server under a user with "
             "restricted access permissions");
+    } else {
+        if (externalPipeDir != "") {
+            LOGV2_WARNING_OPTIONS(
+                7001103,
+                {logv2::LogTag::kStartupWarnings},
+                "'externalPipeDir' is effective only when enableComputeMode=true");
+        }
     }
 
     // Set up the logical session cache
@@ -888,9 +906,9 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
 
     LogicalSessionCache::set(serviceContext, makeLogicalSessionCacheD(kind));
 
-    auto cacheLoader = std::make_unique<StatsCacheLoaderImpl>();
-    auto catalog = std::make_unique<StatsCatalog>(serviceContext, std::move(cacheLoader));
-    StatsCatalog::set(serviceContext, std::move(catalog));
+    auto cacheLoader = std::make_unique<stats::StatsCacheLoaderImpl>();
+    auto catalog = std::make_unique<stats::StatsCatalog>(serviceContext, std::move(cacheLoader));
+    stats::StatsCatalog::set(serviceContext, std::move(catalog));
 
     if (analyze_shard_key::supportsPersistingSampledQueriesIgnoreFCV()) {
         analyze_shard_key::QueryAnalysisWriter::get(serviceContext).onStartup();

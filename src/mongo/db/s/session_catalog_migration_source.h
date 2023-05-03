@@ -95,6 +95,13 @@ public:
                                   KeyPattern shardKey);
 
     /**
+     * Gets the session oplog entries to be sent to the destination. The initialization is separated
+     * from the constructor to allow the member functions of the SessionCatalogMigrationSource to be
+     * called before the initialization step is finished.
+     */
+    void init(OperationContext* opCtx);
+
+    /**
      * Returns true if there are more oplog entries to fetch at this moment. Note that new writes
      * can still continue to come in after this has returned false, so it can become true again.
      * Once this has returned false, this means that it has depleted the existing buffer so it
@@ -170,6 +177,9 @@ public:
     static bool shouldSkipOplogEntry(const mongo::repl::OplogEntry& oplogEntry,
                                      const ShardKeyPattern& shardKeyPattern,
                                      const ChunkRange& chunkRange);
+
+    long long getSessionOplogEntriesToBeMigratedSoFar();
+    long long getSessionOplogEntriesSkippedSoFarLowerBound();
 
 private:
     /**
@@ -324,6 +334,16 @@ private:
     // Sets to true if there is no need to fetch an oplog anymore (for example, because migration
     // aborted).
     std::shared_ptr<Notification<bool>> _newOplogNotification;
+
+    // The number of session oplog entries that need to be migrated
+    // from the source to the destination
+    AtomicWord<long long> _sessionOplogEntriesToBeMigratedSoFar{0};
+
+    // There are optimizations so that we do not send all of the oplog
+    // entries to the destination. This stat provides a lower bound on the number of session oplog
+    // entries that we did not send to the destination. It is a lower bound because some of the
+    // optimizations do not allow us to know the exact number of oplog entries we skipped.
+    AtomicWord<long long> _sessionOplogEntriesSkippedSoFarLowerBound{0};
 };
 
 }  // namespace mongo

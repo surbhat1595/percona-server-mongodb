@@ -110,7 +110,7 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
     std::shared_ptr<executor::ScopedTaskExecutor> executor,
     const CancellationToken& token) noexcept {
     return ExecutorFuture<void>(**executor)
-        .then(_executePhase(
+        .then(_buildPhaseHandler(
             Phase::kRefineCollectionShardKey,
             [this, anchor = shared_from_this()] {
                 auto opCtxHolder = cc().makeOperationContext();
@@ -131,7 +131,7 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                     opCtx, nss(), ShardKeyPattern(_newShardKey.toBSON()));
 
                 const auto cm = uassertStatusOK(
-                    Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithRefresh(
+                    Grid::get(opCtx)->catalogCache()->getShardedCollectionPlacementInfoWithRefresh(
                         opCtx, nss()));
 
                 _oldShardKey = cm.getShardKeyPattern().getKeyPattern();

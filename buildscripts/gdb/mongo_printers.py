@@ -24,8 +24,7 @@ if sys.version_info[0] < 3:
 
 def get_unique_ptr(obj):
     """Read the value of a libstdc++ std::unique_ptr."""
-    return obj['_M_t']['_M_t']['_M_head_impl']
-
+    return obj.cast(gdb.lookup_type('std::_Head_base<0, unsigned char*, false>'))['_M_head_impl']
 
 ###################################################################################################
 #
@@ -1067,6 +1066,7 @@ def register_abt_printers(pp):
                                "BinaryJoinNode",
                                "HashJoinNode",
                                "MergeJoinNode",
+                               "NestedLoopJoinNode",
                                "UnionNode",
                                "GroupByNode",
                                "UnwindNode",

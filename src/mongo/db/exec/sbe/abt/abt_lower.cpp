@@ -362,7 +362,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const RootNode& n,
 
         const auto& projections =
             getPropertyConst<ProjectionRequirement>(props._physicalProps).getProjections();
-        if (projections.find(ridProjName).second) {
+        if (projections.find(ridProjName)) {
             // Deliver the ridSlot separate from the slotMap.
             _ridSlot = _slotMap.at(ridProjName);
             finalMap.erase(ridProjName);
@@ -641,7 +641,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const GroupByNode& n,
                                          planNodeId);
 }
 
-std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const BinaryJoinNode& n,
+std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const NestedLoopJoinNode& n,
                                                       const ABT& leftChild,
                                                       const ABT& rightChild,
                                                       const ABT& filter) {

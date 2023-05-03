@@ -120,6 +120,7 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/util/background.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/concurrency/ticketholder.h"
@@ -1997,7 +1998,10 @@ static void copy_file_size(OperationContext* opCtx,
         src.read(bufptr, cnt);
         dst.write(bufptr, cnt);
         fsize -= cnt;
-        progressMeter.hit(cnt);
+        {
+            stdx::unique_lock<Client> lk(*opCtx->getClient());
+            progressMeter.get(lk)->hit(cnt);
+        }
     }
 }
 
@@ -2112,8 +2116,8 @@ static void setupHotBackupProgressMeter(OperationContext* opCtx,
                                         boost::uintmax_t totalfsize) {
     constexpr auto curopMessage = "Hot Backup: copying data bytes"_sd;
     stdx::unique_lock<Client> lk(*opCtx->getClient());
-    progressMeter.set(CurOp::get(opCtx)->setProgress_inlock(curopMessage));
-    progressMeter->reset(totalfsize, 10, 512);
+    progressMeter.set(lk, CurOp::get(opCtx)->setProgress_inlock(curopMessage), opCtx);
+    progressMeter.get(lk)->reset(totalfsize, 10, 512);
 }
 
 namespace {
@@ -2189,9 +2193,14 @@ public:
 
     bool ShouldRetry() const { return _retry_cnt-- > 0; }
 
-    void doProgress(ProgressMeterHolder& progressMeter, uint64_t bytes_transferred) const {
+    void doProgress(OperationContext* opCtx,
+                    ProgressMeterHolder& progressMeter,
+                    uint64_t bytes_transferred) const {
         if (bytes_transferred > _bytes_reported) {
-            progressMeter.hit(bytes_transferred - _bytes_reported);
+            {
+                stdx::unique_lock<Client> lk(*opCtx->getClient());
+                progressMeter.get(lk)->hit(bytes_transferred - _bytes_reported);
+            }
             _bytes_reported = bytes_transferred;
         }
     }
@@ -2392,7 +2401,9 @@ Status WiredTigerKVEngine::hotBackup(OperationContext* opCtx, const percona::S3B
         synchronized_value<std::string> cancelMessage;
 
         // upload callback
-        trManConf.uploadProgressCallback = [&](const TransferManager* trMan, const std::shared_ptr<const TransferHandle>& h) {
+        trManConf.uploadProgressCallback = [&,
+                                            opCtx](const TransferManager* trMan,
+                                                   const std::shared_ptr<const TransferHandle>& h) {
             if (backupCancelled.load()) {
                 if (h->IsMultipart()) {
                     const_cast<TransferManager*>(trMan)->AbortMultipartUpload(
@@ -2402,7 +2413,7 @@ Status WiredTigerKVEngine::hotBackup(OperationContext* opCtx, const percona::S3B
                 }
             }
             auto uploadContext = std::static_pointer_cast<const UploadContext>(h->GetContext());
-            uploadContext->doProgress(progressMeter, h->GetBytesTransferred());
+            uploadContext->doProgress(opCtx, progressMeter, h->GetBytesTransferred());
             opCtx->checkForInterrupt();
         };
 
@@ -2554,7 +2565,10 @@ Status WiredTigerKVEngine::hotBackup(OperationContext* opCtx, const percona::S3B
     // TODO: for GCP/GCS it is possible to use 'compose' operations
 
     // reconfigure progressMeter since in this case we will call hit() once per file
-    progressMeter->reset(totalfsize, 10, 1);
+    {
+        stdx::unique_lock<Client> lk(*opCtx->getClient());
+        progressMeter.get(lk)->reset(totalfsize, 10, 1);
+    }
 
     for (auto&& file : filesList) {
         boost::filesystem::path srcFile{std::get<0>(file)};
@@ -2585,7 +2599,10 @@ Status WiredTigerKVEngine::hotBackup(OperationContext* opCtx, const percona::S3B
                                         << " : " << outcome.GetError().GetExceptionName()
                                         << " : " << outcome.GetError().GetMessage());
         }
-        progressMeter.hit(fsize);
+        {
+            stdx::unique_lock<Client> lk(*opCtx->getClient());
+            progressMeter.get(lk)->hit(fsize);
+        }
         LOGV2_DEBUG(29004, 2, "Successfully uploaded file: {destFile}",
                     "destFile"_attr = destFile.string());
         opCtx->checkForInterrupt();
@@ -2732,7 +2749,10 @@ Status WiredTigerKVEngine::hotBackupTar(OperationContext* opCtx, const std::stri
                 src.read(bufptr, cnt);
                 a_assert_eq(a, cnt, archive_write_data(a, bufptr, cnt));
                 fsize -= cnt;
-                progressMeter.hit(cnt);
+                {
+                    stdx::unique_lock<Client> lk(*opCtx->getClient());
+                    progressMeter.get(lk)->hit(cnt);
+                }
             }
         }
     } catch (const fs::filesystem_error& ex) {

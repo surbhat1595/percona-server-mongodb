@@ -62,6 +62,12 @@ protected:
         // We're interested in testing plans that use a columnar index, so don't generate collection
         // scans.
         params.options &= ~QueryPlannerParams::INCLUDE_COLLSCAN;
+
+        // Initialize some made up collection stats but disable the column scan knobs by default.
+        params.collectionStats.noOfRecords = 12345;
+        params.collectionStats.approximateDataSizeBytes = 100000;
+        internalQueryColumnScanMinCollectionSizeBytes.store(0);
+        internalQueryColumnScanMinAvgDocSizeBytes.store(0);
     }
 
     void tearDown() final {
@@ -104,6 +110,15 @@ protected:
                                        BSONObj keyPattern = kKeyPattern) {
         return column_keygen::ColumnKeyGenerator::createProjectionExecutor(keyPattern,
                                                                            columnstoreProjection);
+    }
+
+    long long collectionSizeBytes() {
+        return params.collectionStats.approximateDataSizeBytes;
+    }
+
+    long long avgDocumentSizeBytes() {
+        return static_cast<double>(params.collectionStats.approximateDataSizeBytes) /
+            params.collectionStats.noOfRecords;
     }
 
 private:
@@ -1171,6 +1186,159 @@ TEST_F(QueryPlannerColumnarTest, NoColumnIndexCoversQuery) {
 
     // Valid for column scan, but no column store indices that cover the query.
     runQuerySortProj(BSONObj(), BSONObj(), BSON("a" << 1));
+    assertNumSolutions(1U);
+    assertSolutionExists(R"({proj: {spec: {a: 1}, node: {cscan: {dir: 1}}}})");
+}
+
+TEST_F(QueryPlannerColumnarTest, ColumnIndexForCount) {
+    setCountQuery();
+    addColumnStoreIndexAndEnableFilterSplitting();
+
+    runQuerySortProj(BSONObj(), BSONObj(), BSONObj());
+
+    assertNumSolutions(1U);
+    assertSolutionExists(R"({
+        column_scan: {
+            filtersByPath: {},
+            outputFields: [],
+            matchFields: []
+        }
+    })");
+}
+
+TEST_F(QueryPlannerColumnarTest, ColumnIndexForCountIncludesShardFilter) {
+    setCountQuery();
+    addColumnStoreIndexAndEnableFilterSplitting();
+
+    params.options |= QueryPlannerParams::INCLUDE_SHARD_FILTER;
+    params.shardKey = BSON("sk1" << 1 << "sk2.nested" << 1);
+
+    runQuerySortProj(BSONObj(), BSONObj(), BSONObj());
+
+    assertNumSolutions(1U);
+    assertSolutionExists(R"({
+        sharding_filter: {
+            node: {
+                column_scan: {
+                    filtersByPath: {},
+                    outputFields: ['sk1', 'sk2.nested'],
+                    matchFields: []
+                }
+            }
+        }
+    })");
+}
+
+TEST_F(QueryPlannerColumnarTest, ColumnIndexForCountWithColumnPathFilter) {
+    setCountQuery();
+    addColumnStoreIndexAndEnableFilterSplitting();
+
+    runQuerySortProj(BSON("a" << BSON("$gt" << 3)), BSONObj(), BSONObj());
+
+    assertNumSolutions(1U);
+    assertSolutionExists(R"({
+        column_scan: {
+            filtersByPath: {a: {a: {$gt: 3}}},
+            outputFields: [],
+            matchFields: ['a']
+        }
+    })");
+}
+
+TEST_F(QueryPlannerColumnarTest, ColumnIndexForCountWithPostAssemblyFilter) {
+    setCountQuery();
+    addColumnStoreIndexAndEnableFilterSplitting();
+
+    runQuerySortProj(
+        BSON("$or" << BSON_ARRAY(BSON("a" << 3) << BSON("b" << 4))), BSONObj(), BSONObj());
+
+    assertNumSolutions(1U);
+    assertSolutionExists(R"({
+        column_scan: {
+            filtersByPath: {},
+            outputFields: [],
+            matchFields: ['a', 'b'],
+            postAssemblyFilter: {$or: [{a: 3}, {b: 4}]}
+        }
+    })");
+}
+
+TEST_F(QueryPlannerColumnarTest, AvgDocSizeTooSmall) {
+    addColumnStoreIndexAndEnableFilterSplitting();
+    internalQueryColumnScanMinAvgDocSizeBytes.store(avgDocumentSizeBytes() + 1);
+
+    runQuerySortProj(BSONObj(), BSONObj(), BSON("a" << 1));
+
+    assertNumSolutions(1U);
+    assertSolutionExists(R"({proj: {spec: {a: 1}, node: {cscan: {dir: 1}}}})");
+}
+
+TEST_F(QueryPlannerColumnarTest, AvgDocSizeLargeEnough) {
+    addColumnStoreIndexAndEnableFilterSplitting();
+    internalQueryColumnScanMinAvgDocSizeBytes.store(avgDocumentSizeBytes());
+
+    runQuerySortProj(BSONObj(), BSONObj(), BSON("a" << 1));
+
+    assertNumSolutions(1U);
+    assertSolutionExists(R"({
+        column_scan: {
+            filtersByPath: {},
+            outputFields: ['a', '_id'],
+            matchFields: []
+        }
+    })");
+}
+
+TEST_F(QueryPlannerColumnarTest, CollectionTooSmall) {
+    addColumnStoreIndexAndEnableFilterSplitting();
+    internalQueryColumnScanMinCollectionSizeBytes.store(collectionSizeBytes() + 1);
+
+    runQuerySortProj(BSONObj(), BSONObj(), BSON("a" << 1));
+
+    assertNumSolutions(1U);
+    assertSolutionExists(R"({proj: {spec: {a: 1}, node: {cscan: {dir: 1}}}})");
+}
+
+TEST_F(QueryPlannerColumnarTest, CollectionLargeEnough) {
+    addColumnStoreIndexAndEnableFilterSplitting();
+    internalQueryColumnScanMinCollectionSizeBytes.store(collectionSizeBytes());
+
+    runQuerySortProj(BSONObj(), BSONObj(), BSON("a" << 1));
+
+    assertNumSolutions(1U);
+    assertSolutionExists(R"({
+        column_scan: {
+            filtersByPath: {},
+            outputFields: ['a', '_id'],
+            matchFields: []
+        }
+    })");
+}
+
+TEST_F(QueryPlannerColumnarTest, EmptyCollectionWithAvgDocSizeThreshold) {
+    addColumnStoreIndexAndEnableFilterSplitting();
+    // Set a non-zero threshold.
+    internalQueryColumnScanMinAvgDocSizeBytes.store(avgDocumentSizeBytes());
+    // Update the collection's stats to be zero/empty.
+    params.collectionStats.noOfRecords = 0;
+    params.collectionStats.approximateDataSizeBytes = 0;
+
+    runQuerySortProj(BSONObj(), BSONObj(), BSON("a" << 1));
+
+    assertNumSolutions(1U);
+    assertSolutionExists(R"({proj: {spec: {a: 1}, node: {cscan: {dir: 1}}}})");
+}
+
+TEST_F(QueryPlannerColumnarTest, EmptyCollectionWithCollectionSizeThreshold) {
+    addColumnStoreIndexAndEnableFilterSplitting();
+    // Set a non-zero threshold.
+    internalQueryColumnScanMinCollectionSizeBytes.store(collectionSizeBytes());
+    // Update the collection's stats to be zero/empty.
+    params.collectionStats.noOfRecords = 0;
+    params.collectionStats.approximateDataSizeBytes = 0;
+
+    runQuerySortProj(BSONObj(), BSONObj(), BSON("a" << 1));
+
     assertNumSolutions(1U);
     assertSolutionExists(R"({proj: {spec: {a: 1}, node: {cscan: {dir: 1}}}})");
 }

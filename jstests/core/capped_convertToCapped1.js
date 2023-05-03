@@ -1,7 +1,10 @@
 /**
  * Test cloneCollectionAsCapped
  *
+ * The test runs commands that are not allowed with security token: cloneCollectionAsCapped,
+ * convertToCapped.
  * @tags: [
+ *  not_allowed_with_security_token,
  *  requires_non_retryable_commands,
  *  requires_fastcount,
  *  requires_capped,
@@ -9,7 +12,7 @@
  *  assumes_unsharded_collection,
  *  # cloneCollectionAsCapped command is not supported on mongos
  *  assumes_against_mongod_not_mongos,
- *  # TODO (SERVER-52727): Synchronize cloneCollectionAsCapped with tenant migrations.
+ *  # cloneCollectionAsCapped (and capped collections) are not supported on serverless
  *  tenant_migration_incompatible,
  * ]
  */

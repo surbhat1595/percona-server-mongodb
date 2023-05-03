@@ -863,7 +863,7 @@ void QueryPlannerAccess::finishTextNode(QuerySolutionNode* node, const IndexEntr
         // stash in prefixExprs.
         size_t curChild = 0;
         while (curChild < amExpr->numChildren()) {
-            IndexTag* ixtag = static_cast<IndexTag*>(amExpr->getChild(curChild)->getTag());
+            IndexTag* ixtag = checked_cast<IndexTag*>(amExpr->getChild(curChild)->getTag());
             invariant(nullptr != ixtag);
             // Skip this child if it's not part of a prefix, or if we've already assigned a
             // predicate to this prefix position.
@@ -1111,10 +1111,10 @@ std::vector<std::unique_ptr<QuerySolutionNode>> QueryPlannerAccess::collapseEqui
 /**
  * This helper determines if a query can be covered depending on the query projection.
  */
-bool projNeedsFetch(const CanonicalQuery& query, const QueryPlannerParams& params) {
+bool projNeedsFetch(const CanonicalQuery& query) {
     // If nothing is being projected, the query is fully covered without a fetch.
     // This is trivially true for a count query.
-    if (params.options & QueryPlannerParams::Options::IS_COUNT) {
+    if (query.isCount()) {
         return false;
     }
 
@@ -1149,12 +1149,11 @@ bool projNeedsFetch(const CanonicalQuery& query, const QueryPlannerParams& param
  * INEXACT_FETCH, depending on whether we need a FETCH/filter to answer the query projection.
  */
 void refineTightnessForMaybeCoveredQuery(const CanonicalQuery& query,
-                                         const QueryPlannerParams& params,
                                          IndexBoundsBuilder::BoundsTightness& tightnessOut) {
     // We need to refine the tightness in case we have a "MAYBE_COVERED" tightness bound which
     // depends on the query's projection. We will not have information about the projection
     // later on in order to make this determination, so we do it here.
-    const bool noFetchNeededForProj = !projNeedsFetch(query, params);
+    const bool noFetchNeededForProj = !projNeedsFetch(query);
     if (tightnessOut == IndexBoundsBuilder::EXACT_MAYBE_COVERED) {
         if (noFetchNeededForProj) {
             tightnessOut = IndexBoundsBuilder::EXACT;
@@ -1188,7 +1187,7 @@ bool QueryPlannerAccess::processIndexScans(const CanonicalQuery& query,
             break;
         }
 
-        scanState.ixtag = static_cast<IndexTag*>(child->getTag());
+        scanState.ixtag = checked_cast<IndexTag*>(child->getTag());
         // If there's a tag it must be valid.
         verify(IndexTag::kNoIndex != scanState.ixtag->index);
 
@@ -1214,7 +1213,7 @@ bool QueryPlannerAccess::processIndexScans(const CanonicalQuery& query,
         // If 'child' is a NOT, then the tag we're interested in is on the NOT's
         // child node.
         if (MatchExpression::NOT == child->matchType()) {
-            scanState.ixtag = static_cast<IndexTag*>(child->getChild(0)->getTag());
+            scanState.ixtag = checked_cast<IndexTag*>(child->getChild(0)->getTag());
             invariant(IndexTag::kNoIndex != scanState.ixtag->index);
         }
 
@@ -1243,7 +1242,7 @@ bool QueryPlannerAccess::processIndexScans(const CanonicalQuery& query,
             verify(scanState.currentIndexNumber == scanState.ixtag->index);
             scanState.tightness = IndexBoundsBuilder::INEXACT_FETCH;
             mergeWithLeafNode(child, &scanState);
-            refineTightnessForMaybeCoveredQuery(query, params, scanState.tightness);
+            refineTightnessForMaybeCoveredQuery(query, scanState.tightness);
             handleFilter(&scanState);
         } else {
             if (nullptr != scanState.currentScan.get()) {
@@ -1263,7 +1262,7 @@ bool QueryPlannerAccess::processIndexScans(const CanonicalQuery& query,
                                                  &scanState.tightness,
                                                  scanState.getCurrentIETBuilder());
 
-            refineTightnessForMaybeCoveredQuery(query, params, scanState.tightness);
+            refineTightnessForMaybeCoveredQuery(query, scanState.tightness);
             handleFilter(&scanState);
         }
     }
@@ -1336,13 +1335,13 @@ bool QueryPlannerAccess::processIndexScansElemMatch(
     for (size_t i = 0; i < emChildren.size(); ++i) {
         MatchExpression* emChild = emChildren[i];
         invariant(nullptr != emChild->getTag());
-        scanState->ixtag = static_cast<IndexTag*>(emChild->getTag());
+        scanState->ixtag = checked_cast<IndexTag*>(emChild->getTag());
 
         // If 'emChild' is a NOT, then the tag we're interested in is on the NOT's
         // child node.
         if (MatchExpression::NOT == emChild->matchType()) {
             invariant(nullptr != emChild->getChild(0)->getTag());
-            scanState->ixtag = static_cast<IndexTag*>(emChild->getChild(0)->getTag());
+            scanState->ixtag = checked_cast<IndexTag*>(emChild->getChild(0)->getTag());
             invariant(IndexTag::kNoIndex != scanState->ixtag->index);
         }
 
@@ -1653,7 +1652,7 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::_buildIndexedDataAccess(
             return nullptr;
         } else if (Indexability::isBoundsGenerating(root)) {
             // Make an index scan over the tagged index #.
-            IndexTag* tag = static_cast<IndexTag*>(root->getTag());
+            IndexTag* tag = checked_cast<IndexTag*>(root->getTag());
 
             IndexBoundsBuilder::BoundsTightness tightness = IndexBoundsBuilder::EXACT;
 
@@ -1684,7 +1683,7 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::_buildIndexedDataAccess(
             // inexact, for instance if the query is counting null values on an indexed field
             // without projecting that field. We therefore convert "MAYBE_COVERED" bounds into
             // either EXACT or INEXACT, depending on the query projection.
-            refineTightnessForMaybeCoveredQuery(query, params, tightness);
+            refineTightnessForMaybeCoveredQuery(query, tightness);
 
             // If the bounds are exact, the set of documents that satisfy the predicate is
             // exactly equal to the set of documents that the scan provides.

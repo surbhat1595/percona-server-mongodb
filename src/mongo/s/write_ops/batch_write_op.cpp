@@ -35,12 +35,14 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/db/catalog/collection_uuid_mismatch_info.h"
+#include "mongo/db/internal_transactions_feature_flag_gen.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/s/client/num_hosts_targeted_metrics.h"
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/collection_uuid_mismatch.h"
 #include "mongo/s/transaction_router.h"
+#include "mongo/s/write_ops/write_without_shard_key_util.h"
 #include "mongo/util/transitional_tools_do_not_use/vector_spooling.h"
 
 namespace mongo {
@@ -52,14 +54,6 @@ struct WriteErrorComp {
         return errorA.getIndex() < errorB.getIndex();
     }
 };
-
-// MAGIC NUMBERS
-//
-// Before serializing updates/deletes, we don't know how big their fields would be, but we break
-// batches before serializing.
-//
-// TODO: Revisit when we revisit command limits in general
-const int kEstDeleteOverheadBytes = (BSONObjMaxInternalSize - BSONObjMaxUserSize) / 100;
 
 /**
  * Returns a new write concern that has the copy of every field from the original
@@ -165,35 +159,19 @@ int getWriteSizeBytes(const WriteOp& writeOp) {
                                                         update.getUpsertSupplied().has_value(),
                                                         update.getCollation(),
                                                         update.getArrayFilters(),
-                                                        update.getHint());
+                                                        update.getHint(),
+                                                        update.getSampleId());
 
         // When running a debug build, verify that estSize is at least the BSON serialization size.
         dassert(estSize >= update.toBSON().objsize());
         return estSize;
     } else if (batchType == BatchedCommandRequest::BatchType_Delete) {
-        // Note: Be conservative here - it's okay if we send slightly too many batches.
-        auto estSize = static_cast<int>(BSONObj::kMinBSONLength);
-        static const auto intSize = 4;
-
-        // Add the size of the 'collation' field, if present.
-        estSize += !item.getDelete().getCollation() ? 0
-                                                    : (DeleteOpEntry::kCollationFieldName.size() +
-                                                       item.getDelete().getCollation()->objsize());
-
-        // Add the size of the 'limit' field.
-        estSize += DeleteOpEntry::kMultiFieldName.size() + intSize;
-
-        // Add the size of 'hint' field if present.
-        if (auto hint = item.getDelete().getHint(); !hint.isEmpty()) {
-            estSize += DeleteOpEntry::kHintFieldName.size() + hint.objsize();
-        }
-
-        // Add the size of the 'q' field, plus the constant deleteOp overhead size.
-        estSize += kEstDeleteOverheadBytes +
-            (DeleteOpEntry::kQFieldName.size() + item.getDelete().getQ().objsize());
+        const auto& deleteOp = item.getDelete();
+        auto estSize = write_ops::getDeleteSizeEstimate(
+            deleteOp.getQ(), deleteOp.getCollation(), deleteOp.getHint(), deleteOp.getSampleId());
 
         // When running a debug build, verify that estSize is at least the BSON serialization size.
-        dassert(estSize >= item.getDelete().toBSON().objsize());
+        dassert(estSize >= deleteOp.toBSON().objsize());
         return estSize;
     }
 
@@ -276,7 +254,7 @@ BatchWriteOp::BatchWriteOp(OperationContext* opCtx, const BatchedCommandRequest&
     }
 }
 
-Status BatchWriteOp::targetBatch(
+StatusWith<bool> BatchWriteOp::targetBatch(
     const NSTargeter& targeter,
     bool recordTargetErrors,
     std::map<ShardId, std::unique_ptr<TargetedWriteBatch>>* targetedBatches) {
@@ -315,6 +293,8 @@ Status BatchWriteOp::targetBatch(
 
     const bool ordered = _clientRequest.getWriteCommandRequestBase().getOrdered();
 
+    bool isWriteWithoutShardKeyOrId = false;
+
     TargetedBatchMap batchMap;
     std::set<ShardId> targetedShards;
 
@@ -327,6 +307,12 @@ Status BatchWriteOp::targetBatch(
         if (writeOp.getWriteState() != WriteOpState_Ready)
             continue;
 
+        // If we got a write without shard key in the previous iteration, it should be sent in its
+        // own batch.
+        if (isWriteWithoutShardKeyOrId) {
+            break;
+        }
+
         //
         // Get TargetedWrites from the targeter for the write operation
         //
@@ -334,6 +320,7 @@ Status BatchWriteOp::targetBatch(
         std::vector<std::unique_ptr<TargetedWrite>> writes;
 
         Status targetStatus = Status::OK();
+
         try {
             writeOp.targetWrites(_opCtx, targeter, &writes);
         } catch (const DBException& ex) {
@@ -361,7 +348,7 @@ Status BatchWriteOp::targetBatch(
                 writeOp.setOpError(targetError);
 
                 if (ordered)
-                    return Status::OK();
+                    return StatusWith<bool>(isWriteWithoutShardKeyOrId);
 
                 continue;
             } else {
@@ -420,6 +407,37 @@ Status BatchWriteOp::targetBatch(
             break;
         }
 
+        // Check if an updateOne or deleteOne necessitates using the two phase write in the case
+        // where the query does not contain a shard key or _id to target by.
+        if (auto writeItem = writeOp.getWriteItem();
+            writeItem.getOpType() == BatchedCommandRequest::BatchType_Update ||
+            writeItem.getOpType() == BatchedCommandRequest::BatchType_Delete) {
+
+            bool isMultiWrite = false;
+            BSONObj query;
+
+            if (writeItem.getOpType() == BatchedCommandRequest::BatchType_Update) {
+                isMultiWrite = writeItem.getUpdate().getMulti();
+                query = writeItem.getUpdate().getQ();
+            } else {
+                isMultiWrite = writeItem.getDelete().getMulti();
+                query = writeItem.getDelete().getQ();
+            }
+
+            if (!isMultiWrite &&
+                write_without_shard_key::useTwoPhaseProtocol(
+                    _opCtx, targeter.getNS(), true /* isUpdateOrDelete */, query)) {
+
+                // Writes without shard key should be in their own batch.
+                if (!batchMap.empty()) {
+                    writeOp.cancelWrites(nullptr);
+                    break;
+                } else {
+                    isWriteWithoutShardKeyOrId = true;
+                }
+            };
+        }
+
         //
         // Targeting went ok, add to appropriate TargetedBatch
         //
@@ -468,7 +486,7 @@ Status BatchWriteOp::targetBatch(
 
     _nShardsOwningChunks = targeter.getNShardsOwningChunks();
 
-    return Status::OK();
+    return StatusWith<bool>(isWriteWithoutShardKeyOrId);
 }
 
 BatchedCommandRequest BatchWriteOp::buildBatchRequest(const TargetedWriteBatch& targetedBatch,

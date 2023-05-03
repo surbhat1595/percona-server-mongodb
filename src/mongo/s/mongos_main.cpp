@@ -57,6 +57,7 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/ftdc/ftdc_mongos.h"
 #include "mongo/db/initialize_server_global_state.h"
+#include "mongo/db/keys_collection_client_sharded.h"
 #include "mongo/db/ldap/ldap_manager.h"
 #include "mongo/db/log_process_details.h"
 #include "mongo/db/logical_time_validator.h"
@@ -105,7 +106,7 @@
 #include "mongo/scripting/dbdirectclient_factory.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/transport/session_auth_metrics.h"
+#include "mongo/transport/ingress_handshake_metrics.h"
 #include "mongo/transport/transport_layer_manager.h"
 #include "mongo/util/admin_access.h"
 #include "mongo/util/cmdline_utils/censor_cmdline.h"
@@ -448,7 +449,10 @@ Status initializeSharding(OperationContext* opCtx) {
             hookList->addHook(std::make_unique<rpc::ClientMetadataPropagationEgressHook>());
             return hookList;
         },
-        boost::none);
+        boost::none,
+        [](ShardingCatalogClient* catalogClient) {
+            return std::make_unique<KeysCollectionClientSharded>(catalogClient);
+        });
 
     if (!status.isOK()) {
         return status;
@@ -751,7 +755,7 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
     }
 
     CommandInvocationHooks::set(serviceContext,
-                                std::make_unique<transport::SessionAuthMetricsCommandHooks>());
+                                std::make_unique<transport::IngressHandshakeMetricsCommandHooks>());
 
     startMongoSFTDC();
 

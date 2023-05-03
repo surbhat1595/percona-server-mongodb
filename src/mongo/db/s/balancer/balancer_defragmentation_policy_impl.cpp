@@ -64,9 +64,8 @@ const std::string kRemainingChunksToProcess("remainingChunksToProcess");
 ShardVersion getShardVersion(OperationContext* opCtx,
                              const ShardId& shardId,
                              const NamespaceString& nss) {
-    auto cm = Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfo(opCtx, nss);
-    const auto placementVersion = cm.getVersion(shardId);
-    return ShardVersion(placementVersion, boost::optional<CollectionIndexes>(boost::none));
+    auto cri = Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfo(opCtx, nss);
+    return cri.getShardVersion(shardId);
 }
 
 std::vector<ChunkType> getCollectionChunks(OperationContext* opCtx, const CollectionType& coll) {
@@ -521,6 +520,14 @@ public:
                     moveRequest.chunkToMove->busyInOperation = false;
                     moveRequest.chunkToMergeWith->busyInOperation = false;
 
+                    if (migrationResponse.code() == ErrorCodes::ChunkTooBig ||
+                        migrationResponse.code() == ErrorCodes::ExceededMemoryLimit) {
+                        // Never try moving this chunk again, it isn't actually small
+                        _removeIteratorFromSmallChunks(moveRequest.chunkToMove,
+                                                       moveRequest.chunkToMove->shard);
+                        return;
+                    }
+
                     if (isRetriableForDefragmentation(migrationResponse)) {
                         // The migration will be eventually retried
                         return;
@@ -711,7 +718,7 @@ private:
                                chunkToMove->range.getMin(),
                                chunkToMove->range.getMax(),
                                version,
-                               ForceJumbo::kForceBalancer,
+                               ForceJumbo::kDoNotForce,
                                maxChunkSizeBytes);
         }
 

@@ -28,16 +28,12 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/s/sharding_ddl_coordinator_service.h"
 
 #include "mongo/base/checked_cast.h"
 #include "mongo/db/catalog/catalog_helper.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
-#include "mongo/db/pipeline/document_source_count.h"
-#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/s/collmod_coordinator.h"
 #include "mongo/db/s/compact_structured_encryption_data_coordinator.h"
 #include "mongo/db/s/create_collection_coordinator.h"
@@ -45,6 +41,7 @@
 #include "mongo/db/s/drop_collection_coordinator.h"
 #include "mongo/db/s/drop_database_coordinator.h"
 #include "mongo/db/s/move_primary_coordinator.h"
+#include "mongo/db/s/move_primary_coordinator_no_resilient.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/refine_collection_shard_key_coordinator.h"
 #include "mongo/db/s/rename_collection_coordinator.h"
@@ -65,6 +62,11 @@ std::shared_ptr<ShardingDDLCoordinator> constructShardingDDLCoordinatorInstance(
     LOGV2(
         5390510, "Constructing new sharding DDL coordinator", "coordinatorDoc"_attr = op.toBSON());
     switch (op.getId().getOperationType()) {
+        // TODO (SERVER-71309): Remove once 7.0 becomes last LTS.
+        case DDLCoordinatorTypeEnum::kMovePrimaryNoResilient:
+            return std::make_shared<MovePrimaryCoordinatorNoResilient>(service,
+                                                                       std::move(initialState));
+            break;
         case DDLCoordinatorTypeEnum::kMovePrimary:
             return std::make_shared<MovePrimaryCoordinator>(service, std::move(initialState));
             break;
@@ -196,14 +198,9 @@ void ShardingDDLCoordinatorService::_afterStepDown() {
 
 size_t ShardingDDLCoordinatorService::_countCoordinatorDocs(OperationContext* opCtx) {
     constexpr auto kNumCoordLabel = "numCoordinators"_sd;
+    static const auto countStage = BSON("$count" << kNumCoordLabel);
 
-    auto aggRequest = [&]() -> AggregateCommandRequest {
-        auto expCtx = make_intrusive<ExpressionContext>(opCtx, nullptr, getStateDocumentsNS());
-        const auto countSpec = BSON("$count" << kNumCoordLabel);
-        auto stages = DocumentSourceCount::createFromBson(countSpec.firstElement(), expCtx);
-        auto pipeline = Pipeline::create(std::move(stages), expCtx);
-        return {getStateDocumentsNS(), pipeline->serializeToBson()};
-    }();
+    AggregateCommandRequest aggRequest{getStateDocumentsNS(), {countStage}};
 
     DBDirectClient client(opCtx);
     auto cursor = uassertStatusOKWithContext(

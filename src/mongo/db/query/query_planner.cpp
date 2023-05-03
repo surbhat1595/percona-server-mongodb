@@ -69,6 +69,7 @@
 #include "mongo/db/query/util/set_util.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util_core.h"
+#include "mongo/util/processinfo.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -204,23 +205,64 @@ std::pair<DepsTracker, DepsTracker> computeDeps(const QueryPlannerParams& params
     DepsTracker filterDeps;
     match_expression::addDependencies(query.root(), &filterDeps);
     DepsTracker outputDeps;
-    if (!query.getProj() || query.getProj()->requiresDocument()) {
+    if ((!query.getProj() || query.getProj()->requiresDocument()) && !query.isCount()) {
         outputDeps.needWholeDocument = true;
         return {std::move(filterDeps), std::move(outputDeps)};
-    }
-    outputDeps.fields = query.getProj()->getRequiredFields();
-    if (auto sortPattern = query.getSortPattern()) {
-        sortPattern->addDependencies(&outputDeps);
     }
     if (params.options & QueryPlannerParams::INCLUDE_SHARD_FILTER) {
         for (auto&& field : params.shardKey) {
             outputDeps.fields.emplace(field.fieldNameStringData());
         }
     }
+    if (query.isCount()) {
+        // If this is a count, we won't have required projections, but may still need to output the
+        // shard filter.
+        return {std::move(filterDeps), std::move(outputDeps)};
+    }
+
+    const auto& reqFields = query.getProj()->getRequiredFields();
+    outputDeps.fields.insert(reqFields.begin(), reqFields.end());
+
+    if (auto sortPattern = query.getSortPattern()) {
+        sortPattern->addDependencies(&outputDeps);
+    }
     // There's no known way a sort would depend on the whole document, and we already verified
     // that the projection doesn't depend on the whole document.
     tassert(6430503, "Unexpectedly required entire object", !outputDeps.needWholeDocument);
     return {std::move(filterDeps), std::move(outputDeps)};
+}
+
+/**
+ * Determines whether a column scan should be used given stats about the collection.
+ *
+ * Column scan should not be used (i.e., would likely perform worse than a collection scan) if the
+ * entire collection can fit in memory, or if the average document size is small.
+ *
+ * Both of these thresholds (collection size and average document size) can also be adjusted via
+ * query knobs.
+ */
+bool collectionSatisfiesCsiPlanningHeuristics(const QueryPlannerParams& plannerParams) {
+    const auto numDocs = plannerParams.collectionStats.noOfRecords;
+    const auto uncompressedDataSizeBytes = plannerParams.collectionStats.approximateDataSizeBytes;
+
+    // Check if the entire uncompressed collection is greater than our min collection size
+    // threshold, or if it can fit in memory if the min size is unspecified.
+    const auto collectionSizeThresholdBytes = [&]() {
+        const auto configuredThresholdBytes = internalQueryColumnScanMinCollectionSizeBytes.load();
+        // If there is no threshold specified (== -1), use available memory size.
+        return configuredThresholdBytes == -1
+            ? static_cast<long long>(ProcessInfo::getMemSizeMB()) * 1024 * 1024
+            : configuredThresholdBytes;
+    }();
+    if (uncompressedDataSizeBytes < collectionSizeThresholdBytes) {
+        return false;
+    }
+
+    // Check if the average document size is greater than our threshold for using column scan.
+    const auto docSizeThresholdBytes = internalQueryColumnScanMinAvgDocSizeBytes.load();
+    auto avgDocSizeBytes =
+        numDocs > 0 ? uncompressedDataSizeBytes / static_cast<double>(numDocs) : 0.0;
+    return avgDocSizeBytes >= docSizeThresholdBytes;
 }
 
 Status computeColumnScanIsPossibleStatus(const CanonicalQuery& query,
@@ -237,6 +279,10 @@ Status computeColumnScanIsPossibleStatus(const CanonicalQuery& query,
         return {ErrorCodes::InvalidOptions,
                 "A columnstore index can only be used with queries in the SBE engine, but the "
                 "query specified to force the classic engine"};
+    }
+    if (!collectionSatisfiesCsiPlanningHeuristics(params)) {
+        return {ErrorCodes::Error{6995600},
+                "Collection did not pass heuristics for using column scan"};
     }
     return Status::OK();
 }
@@ -457,9 +503,6 @@ string optionString(size_t options) {
                 break;
             case QueryPlannerParams::INDEX_INTERSECTION:
                 ss << "INDEX_INTERSECTION ";
-                break;
-            case QueryPlannerParams::IS_COUNT:
-                ss << "IS_COUNT ";
                 break;
             case QueryPlannerParams::GENERATE_COVERED_IXSCANS:
                 ss << "GENERATE_COVERED_IXSCANS ";
@@ -708,7 +751,7 @@ StatusWith<std::unique_ptr<PlanCacheIndexTree>> QueryPlanner::cacheDataFromTagge
         }
 
         for (const auto& dest : orPushdownTag->getDestinations()) {
-            IndexTag* indexTag = static_cast<IndexTag*>(dest.tagData.get());
+            IndexTag* indexTag = checked_cast<IndexTag*>(dest.tagData.get());
             PlanCacheIndexTree::OrPushdown orPushdown{relevantIndices[indexTag->index].identifier,
                                                       indexTag->pos,
                                                       indexTag->canCombineBounds,
@@ -988,13 +1031,6 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> handleClusteredScanHint(
 
 StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     const CanonicalQuery& query, const QueryPlannerParams& params) {
-    // It's a little silly to ask for a count and for owned data. This could indicate a bug
-    // earlier on.
-    tassert(5397500,
-            "Count and owned data requested",
-            !((params.options & QueryPlannerParams::IS_COUNT) &&
-              (params.options & QueryPlannerParams::RETURN_OWNED_DATA)));
-
     LOGV2_DEBUG(20967,
                 5,
                 "Beginning planning",

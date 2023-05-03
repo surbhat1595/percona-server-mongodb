@@ -30,8 +30,10 @@
 #pragma once
 
 #include "mongo/db/bson/dotted_path_support.h"
-#include "mongo/db/query/ce/ce_hinted.h"
+#include "mongo/db/query/ce/hinted_estimator.h"
+#include "mongo/db/query/cost_model/cost_model_gen.h"
 #include "mongo/db/query/optimizer/defs.h"
+#include "mongo/db/query/optimizer/explain.h"
 #include "mongo/db/query/optimizer/opt_phase_manager.h"
 #include "mongo/db/query/optimizer/utils/utils.h"
 
@@ -40,18 +42,23 @@ namespace mongo::optimizer {
 
 void maybePrintABT(const ABT& abt);
 
+std::string getPropsStrForExplain(const OptPhaseManager& phaseManager);
+
+/**
+ * Computes a difference between the expected and actual formatted output and outputs it to the
+ * provide stream instance. Used to display difference between expected and actual format for
+ * auto-update macros. It is exposed in the header here for testability.
+ */
+void outputDiff(std::ostream& os,
+                const std::vector<std::string>& expFormatted,
+                const std::vector<std::string>& actualFormatted,
+                size_t lineNumber);
+
 bool handleAutoUpdate(const std::string& expected,
                       const std::string& actual,
                       const std::string& fileName,
-                      size_t lineNumber);
-
-#define ASSERT_EXPLAIN(expected, abt) \
-    maybePrintABT(abt);               \
-    ASSERT_EQ(expected, ExplainGenerator::explain(abt))
-
-#define ASSERT_EXPLAIN_V2(expected, abt) \
-    maybePrintABT(abt);                  \
-    ASSERT_EQ(expected, ExplainGenerator::explainV2(abt))
+                      size_t lineNumber,
+                      bool needsEscaping);
 
 /**
  * Auto update result back in the source file if the assert fails.
@@ -68,30 +75,77 @@ bool handleAutoUpdate(const std::string& expected,
  *      constant other than 'NOLINT'. If we have a single-line constant, the auto-updating will
  *      generate a 'NOLINT' at the end of the line.
  *      2. The expression which we are explaining ('tree' in the example above) must fit on a single
- *      line. The macro should be indented by 4 spaces.
- *
- * TODO: SERVER-71004: Extend the usability of the auto-update macro.
+ *      line.
+ *      3. The macro should be indented by 4 spaces.
  */
+#define AUTO_UPDATE_HELPER(expected, actual, needsEscaping) \
+    handleAutoUpdate(expected, actual, __FILE__, __LINE__, needsEscaping)
+
+#define ASSERT_STR_EQ_AUTO(expected, actual) ASSERT(AUTO_UPDATE_HELPER(expected, actual, true))
+
+
+#define ASSERT_EXPLAIN(expected, abt) \
+    maybePrintABT(abt);               \
+    ASSERT_EQ(expected, ExplainGenerator::explain(abt))
+
+// Do not remove macro even if unused: used to update tests before committing code.
+#define ASSERT_EXPLAIN_AUTO(expected, abt) \
+    maybePrintABT(abt);                    \
+    ASSERT_STR_EQ(expected, ExplainGenerator::explain(abt))
+
+
+#define ASSERT_EXPLAIN_V2(expected, abt) \
+    maybePrintABT(abt);                  \
+    ASSERT_EQ(expected, ExplainGenerator::explainV2(abt))
+
+// Do not remove macro even if unused: used to update tests before committing code.
 #define ASSERT_EXPLAIN_V2_AUTO(expected, abt) \
     maybePrintABT(abt);                       \
-    ASSERT(handleAutoUpdate(expected, ExplainGenerator::explainV2(abt), __FILE__, __LINE__))
+    ASSERT_STR_EQ_AUTO(expected, ExplainGenerator::explainV2(abt))
+
 
 #define ASSERT_EXPLAIN_V2Compact(expected, abt) \
     maybePrintABT(abt);                         \
     ASSERT_EQ(expected, ExplainGenerator::explainV2Compact(abt))
 
+// Do not remove macro even if unused: used to update tests before committing code.
+#define ASSERT_EXPLAIN_V2Compact_AUTO(expected, abt) \
+    maybePrintABT(abt);                              \
+    ASSERT_STR_EQ_AUTO(expected, ExplainGenerator::explainV2Compact(abt))
+
+
 #define ASSERT_EXPLAIN_BSON(expected, abt) \
     maybePrintABT(abt);                    \
     ASSERT_EQ(expected, ExplainGenerator::explainBSONStr(abt))
 
-#define ASSERT_EXPLAIN_PROPS_V2(expected, phaseManager)                              \
-    ASSERT_EQ(expected,                                                              \
-              ExplainGenerator::explainV2(                                           \
-                  make<MemoPhysicalDelegatorNode>(phaseManager.getPhysicalNodeId()), \
-                  true /*displayPhysicalProperties*/,                                \
-                  &phaseManager.getMemo()))
+// Do not remove macro even if unused: used to update tests before committing code.
+#define ASSERT_EXPLAIN_BSON_AUTO(expected, abt) \
+    maybePrintABT(abt);                         \
+    ASSERT_STR_EQ_AUTO(expected, ExplainGenerator::explainBSONStr(abt))
+
+
+#define ASSERT_EXPLAIN_PROPS_V2(expected, phaseManager) \
+    ASSERT_EQ(expected, getPropsStrForExplain(phaseManager))
+
+// Do not remove macro even if unused: used to update tests before committing code.
+#define ASSERT_EXPLAIN_PROPS_V2_AUTO(expected, phaseManager) \
+    ASSERT_STR_EQ_AUTO(expected, getPropsStrForExplain(phaseManager))
+
 
 #define ASSERT_EXPLAIN_MEMO(expected, memo) ASSERT_EQ(expected, ExplainGenerator::explainMemo(memo))
+
+// Do not remove macro even if unused: used to update tests before committing code.
+#define ASSERT_EXPLAIN_MEMO_AUTO(expected, memo) \
+    ASSERT_STR_EQ_AUTO(expected, ExplainGenerator::explainMemo(memo))
+
+
+#define ASSERT_INTERVAL(expected, interval) \
+    ASSERT_EQ(expected, ExplainGenerator::explainIntervalExpr(interval))
+
+// Do not remove macro even if unused: used to update tests before committing code.
+#define ASSERT_INTERVAL_AUTO(expected, interval) \
+    ASSERT_STR_EQ_AUTO(expected, ExplainGenerator::explainIntervalExpr(interval))
+
 
 #define ASSERT_BSON_PATH(expected, bson, path)                      \
     ASSERT_EQ(expected,                                             \
@@ -99,9 +153,26 @@ bool handleAutoUpdate(const std::string& expected,
                   .toString(false /*includeFieldName*/));
 
 
+#define ASSERT_NUMBER_EQ_AUTO(expected, actual) \
+    ASSERT(AUTO_UPDATE_HELPER(str::stream() << expected, str::stream() << actual, false))
+
 #define ASSERT_BETWEEN(a, b, value) \
     ASSERT_LTE(a, value);           \
     ASSERT_GTE(b, value);
+
+/**
+ * This is the auto-updating version of ASSERT_BETWEEN. If the value falls outside the range, we
+ * create a new range which is +-25% if the value. This is expressed as a fractional operation in
+ * order to preserve the type of the value (int->int, double->double).
+ */
+#define ASSERT_BETWEEN_AUTO(a, b, value)                                    \
+    if ((value) < (a) || (value) > (b)) {                                   \
+        ASSERT(AUTO_UPDATE_HELPER(str::stream() << (a) << ",\n"             \
+                                                << (b),                     \
+                                  str::stream() << (3 * value / 4) << ",\n" \
+                                                << (5 * value / 4),         \
+                                  false));                                  \
+    }
 
 struct TestIndexField {
     FieldNameType fieldName;
@@ -126,36 +197,52 @@ IndexDefinition makeCompositeIndexDefinition(std::vector<TestIndexField> indexFi
 /**
  * A factory function to create a heuristic-based cardinality estimator.
  */
-std::unique_ptr<CEInterface> makeHeuristicCE();
+std::unique_ptr<CardinalityEstimator> makeHeuristicCE();
 
 /**
  * A factory function to create a hint-based cardinality estimator.
  */
-std::unique_ptr<CEInterface> makeHintedCE(ce::PartialSchemaSelHints hints);
+std::unique_ptr<CardinalityEstimator> makeHintedCE(ce::PartialSchemaSelHints hints);
 
 /**
- * A convenience factory function to create costing.
+ * Return default CostModel used in unit tests.
  */
-std::unique_ptr<CostingInterface> makeCosting();
+cost_model::CostModelCoefficients getTestCostModel();
+
+/*
+ * A convenience factory function to create costing with default CostModel.
+ */
+std::unique_ptr<CostEstimator> makeCostEstimator();
 
 /**
- * A convenience factory function to create OptPhaseManager for unit tests.
+ * A convenience factory function to create costing with overriden CostModel.
  */
-OptPhaseManager makePhaseManager(OptPhaseManager::PhaseSet phaseSet,
-                                 PrefixId& prefixId,
-                                 Metadata metadata,
-                                 DebugInfo debugInfo,
-                                 QueryHints queryHints = {});
+std::unique_ptr<CostEstimator> makeCostEstimator(
+    const cost_model::CostModelCoefficients& costModel);
 
 /**
- * A convenience factory function to create OptPhaseManager for unit tests with CE hints.
+ * A convenience factory function to create OptPhaseManager for unit tests with cost model.
  */
-OptPhaseManager makePhaseManager(OptPhaseManager::PhaseSet phaseSet,
-                                 PrefixId& prefixId,
-                                 Metadata metadata,
-                                 std::unique_ptr<CEInterface> ceDerivation,
-                                 DebugInfo debugInfo,
-                                 QueryHints queryHints = {});
+OptPhaseManager makePhaseManager(
+    OptPhaseManager::PhaseSet phaseSet,
+    PrefixId& prefixId,
+    Metadata metadata,
+    const boost::optional<cost_model::CostModelCoefficients>& costModel,
+    DebugInfo debugInfo,
+    QueryHints queryHints = {});
+
+/**
+ * A convenience factory function to create OptPhaseManager for unit tests with CE hints and cost
+ * model.
+ */
+OptPhaseManager makePhaseManager(
+    OptPhaseManager::PhaseSet phaseSet,
+    PrefixId& prefixId,
+    Metadata metadata,
+    std::unique_ptr<CardinalityEstimator> ce,
+    const boost::optional<cost_model::CostModelCoefficients>& costModel,
+    DebugInfo debugInfo,
+    QueryHints queryHints = {});
 
 /**
  * A convenience factory function to create OptPhaseManager for unit tests which requires RID.

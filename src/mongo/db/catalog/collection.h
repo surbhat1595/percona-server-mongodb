@@ -65,13 +65,16 @@ class CollectionPtr;
 struct CollectionUpdateArgs {
     enum class StoreDocOption { None, PreImage, PostImage };
 
+    CollectionUpdateArgs() = delete;
+    CollectionUpdateArgs(BSONObj preImageDoc_) : preImageDoc(preImageDoc_) {}
+
     std::vector<StmtId> stmtIds = {kUninitializedStmtId};
 
     // The unique sample id for this update if it has been chosen for sampling.
     boost::optional<UUID> sampleId;
 
     // The document before modifiers were applied.
-    boost::optional<BSONObj> preImageDoc;
+    const BSONObj preImageDoc;
 
     // Fully updated document with damages (update modifiers) applied.
     BSONObj updatedDoc;
@@ -555,6 +558,8 @@ public:
 
     virtual void replaceMetadata(OperationContext* opCtx,
                                  std::shared_ptr<BSONCollectionCatalogEntry::MetaData> md) = 0;
+
+    virtual bool isMetadataEqual(const BSONCollectionCatalogEntry::MetaData& md) const = 0;
 
     /**
      * Specifies whether writes to this collection should X-lock the metadata resource. It is only

@@ -767,7 +767,7 @@ const BucketCatalog::BucketHandle& BucketCatalog::WriteBatch::bucket() const {
     return _bucket;
 }
 
-const std::vector<BSONObj>& BucketCatalog::WriteBatch::measurements() const {
+const BucketCatalog::BatchMeasurements& BucketCatalog::WriteBatch::measurements() const {
     return _measurements;
 }
 
@@ -797,9 +797,9 @@ bool BucketCatalog::WriteBatch::finished() const {
 
 BSONObj BucketCatalog::WriteBatch::toBSON() const {
     auto toFieldName = [](const auto& nameHashPair) { return nameHashPair.first; };
-    return BSON("docs" << _measurements << "bucketMin" << _min << "bucketMax" << _max
-                       << "numCommittedMeasurements" << int(_numPreviouslyCommittedMeasurements)
-                       << "newFieldNamesToBeInserted"
+    return BSON("docs" << std::vector<BSONObj>(_measurements.begin(), _measurements.end())
+                       << "bucketMin" << _min << "bucketMax" << _max << "numCommittedMeasurements"
+                       << int(_numPreviouslyCommittedMeasurements) << "newFieldNamesToBeInserted"
                        << std::set<std::string>(
                               boost::make_transform_iterator(_newFieldNamesToBeInserted.begin(),
                                                              toFieldName),
@@ -904,7 +904,6 @@ Status BucketCatalog::reopenBucket(OperationContext* opCtx,
                                 ns,
                                 coll->getDefaultCollator(),
                                 *options,
-                                stats,
                                 BucketToReopen{bucketDoc, validator},
                                 boost::none);
     if (!res.isOK()) {
@@ -1285,14 +1284,23 @@ StatusWith<std::pair<BucketCatalog::BucketKey, Date_t>> BucketCatalog::_extractB
     const StringData::ComparatorInterface* comparator,
     const TimeseriesOptions& options,
     const BSONObj& doc) const {
-    auto swDocTimeAndMeta = timeseries::extractTimeAndMeta(doc, options);
-    if (!swDocTimeAndMeta.isOK()) {
-        return swDocTimeAndMeta.getStatus();
-    }
-    auto time = swDocTimeAndMeta.getValue().first;
+    Date_t time;
     BSONElement metadata;
-    if (auto metadataValue = swDocTimeAndMeta.getValue().second) {
-        metadata = *metadataValue;
+
+    if (!options.getMetaField().has_value()) {
+        auto swTime = timeseries::extractTime(doc, options.getTimeField());
+        if (!swTime.isOK()) {
+            return swTime.getStatus();
+        }
+        time = swTime.getValue();
+    } else {
+        auto swDocTimeAndMeta = timeseries::extractTimeAndMeta(
+            doc, options.getTimeField(), options.getMetaField().value());
+        if (!swDocTimeAndMeta.isOK()) {
+            return swDocTimeAndMeta.getStatus();
+        }
+        time = swDocTimeAndMeta.getValue().first;
+        metadata = swDocTimeAndMeta.getValue().second;
     }
 
     // Buckets are spread across independently-lockable stripes to improve parallelism. We map a
@@ -1382,16 +1390,11 @@ StatusWith<std::unique_ptr<BucketCatalog::Bucket>> BucketCatalog::_rehydrateBuck
     const NamespaceString& ns,
     const StringData::ComparatorInterface* comparator,
     const TimeseriesOptions& options,
-    ExecutionStatsController stats,
-    boost::optional<BucketToReopen> bucketToReopen,
+    const BucketToReopen& bucketToReopen,
     boost::optional<const BucketKey&> expectedKey) {
-    if (!bucketToReopen) {
-        // Nothing to rehydrate.
-        return {ErrorCodes::BadValue, "No bucket to rehydrate"};
-    }
     invariant(feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
         serverGlobalParams.featureCompatibility));
-    const auto& [bucketDoc, validator, catalogEra] = bucketToReopen.value();
+    const auto& [bucketDoc, validator, catalogEra] = bucketToReopen;
     if (catalogEra < _bucketStateManager.getEra()) {
         return {ErrorCodes::WriteConflict, "Bucket is from an earlier era, may be outdated"};
     }
@@ -1428,6 +1431,10 @@ StatusWith<std::unique_ptr<BucketCatalog::Bucket>> BucketCatalog::_rehydrateBuck
         std::make_unique<Bucket>(bucketId, stripeNumber, key.hash, &_bucketStateManager);
 
     const bool isCompressed = timeseries::isCompressedBucket(bucketDoc);
+    if (isCompressed) {
+        // TODO (SERVER-69907): Allow opening compressed bucket
+        return Status{ErrorCodes::BadValue, "Reopening uncompressed buckets is not supported yet"};
+    }
 
     // Initialize the remaining member variables from the bucket document.
     bucket->setNamespace(ns);
@@ -1612,8 +1619,9 @@ StatusWith<BucketCatalog::InsertResult> BucketCatalog::_insert(
     CreationInfo info{key, stripeNumber, time, options, stats, &result.closedBuckets};
     boost::optional<BucketToReopen> bucketToReopen = std::move(bucketFindResult.bucketToReopen);
 
-    auto rehydratedBucket =
-        _rehydrateBucket(opCtx, ns, comparator, options, stats, bucketToReopen, key);
+    auto rehydratedBucket = bucketToReopen.has_value()
+        ? _rehydrateBucket(opCtx, ns, comparator, options, bucketToReopen.value(), key)
+        : StatusWith<std::unique_ptr<Bucket>>{ErrorCodes::BadValue, "No bucket to rehydrate"};
     if (rehydratedBucket.getStatus().code() == ErrorCodes::WriteConflict) {
         stats.incNumBucketReopeningsFailed();
         return rehydratedBucket.getStatus();

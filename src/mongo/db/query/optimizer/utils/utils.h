@@ -62,7 +62,22 @@ inline size_t computeHashSeq(const Args&... seq) {
     return result;
 }
 
+/**
+ * Returns a vector all paths nested under conjunctions (PathComposeM) in the given path.
+ * For example, PathComposeM(PathComposeM(Foo, Bar), Baz) returns [Foo, Bar, Baz].
+ * If the given path is not a conjunction, returns a vector with the given path.
+ */
 std::vector<ABT::reference_type> collectComposed(const ABT& n);
+
+/**
+ * Like collectComposed() but bounded by a maximum number of composed paths.
+ * If the given path has more PathComposeM;s than specified by maxDepth, then return a vector
+ * with the given path. Otherwise, returns the result of collectComposed().
+ *
+ * This is useful for preventing the optimizer from unintentionally creating a very deep tree which
+ * causes stack-overflow on a recursive traversal.
+ */
+std::vector<ABT::reference_type> collectComposedBounded(const ABT& n, size_t maxDepth);
 
 /**
  * Returns true if the path represented by 'node' is of the form PathGet "field" PathId
@@ -204,6 +219,14 @@ boost::optional<PartialSchemaReqConversion> convertExprToPartialSchemaReq(
     const ABT& expr, bool isFilterContext, const PathToIntervalFn& pathToInterval);
 
 /**
+ * Given a path and a MultikeynessTrie describing the path's input,
+ * removes any Traverse nodes that we know will never encounter an array.
+ *
+ * Returns true if any changes were made to the ABT.
+ */
+bool simplifyTraverseNonArray(ABT& path, const MultikeynessTrie& multikeynessTrie);
+
+/**
  * Given a set of non-multikey paths, remove redundant Traverse elements from paths in a Partial
  * Schema Requirement structure. Returns true if we have an empty result after simplification.
  */
@@ -245,6 +268,7 @@ CandidateIndexes computeCandidateIndexes(PrefixId& prefixId,
                                          const PartialSchemaRequirements& reqMap,
                                          const ScanDefinition& scanDef,
                                          bool fastNullHandling,
+                                         size_t maxIndexEqPrefixes,
                                          bool& hasEmptyInterval,
                                          const ConstFoldFn& constFold);
 

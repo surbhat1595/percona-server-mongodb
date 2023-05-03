@@ -27,139 +27,172 @@
  *    it in the license file.
  */
 
+#include "mongo/db/pipeline/abt/canonical_query_translation.h"
 #include "mongo/db/pipeline/abt/utils.h"
+#include "mongo/db/query/optimizer/explain.h"
 #include "mongo/db/query/optimizer/utils/unit_test_pipeline_utils.h"
+#include "mongo/db/query/optimizer/utils/unit_test_utils.h"
+#include "mongo/db/query/query_request_helper.h"
+#include "mongo/db/service_context_test_fixture.h"
 #include "mongo/unittest/golden_test.h"
-
+#include "mongo/unittest/unittest.h"
 
 namespace mongo::optimizer {
 
+namespace {
+
 unittest::GoldenTestConfig goldenTestConfigABTTranslation{"src/mongo/db/test_output/pipeline/abt"};
 
-TEST(ABTTranslate, BasicTests) {
-    unittest::GoldenTestContext gctx(&goldenTestConfigABTTranslation);
+class ABTTranslationTest : public unittest::Test {
+public:
+    ABTTranslationTest()
+        : gctx(std::make_unique<unittest::GoldenTestContext>(&goldenTestConfigABTTranslation)) {}
 
-    testABTTranslationAndOptimization(
-        gctx, "$match with $in, empty list", "[{$match: {a: {$in: []}}}]");
+protected:
+    void testTranslation(const std::string& description, const std::string& pipeline) {
+        testABTTranslationAndOptimization(*gctx, description, pipeline);
+    }
 
-    testABTTranslationAndOptimization(
-        gctx, "match with $in, singleton list", "[{$match: {a: {$in: [1]}}}]");
+    std::unique_ptr<unittest::GoldenTestContext> gctx;
+};
 
-    testABTTranslationAndOptimization(
-        gctx,
+TEST_F(ABTTranslationTest, EqTranslation) {
+    testTranslation("$match basic", "[{$match: {a: 1}}]");
+
+    testTranslation("$match with $expr $eq with dotted path",
+                    "[{$match: {$expr: {$eq: ['$a.b', 1]}}}]");
+
+    testTranslation("$match with $expr $eq", "[{$match: {$expr: {$eq: ['$a', 1]}}}]");
+}
+
+TEST_F(ABTTranslationTest, InequalityTranslation) {
+    testTranslation("$match with range", "[{$match: {'a': {$gt: 70}}}]");
+
+    testTranslation("$match with range conjunction", "[{$match: {'a': {$gt: 70, $lt: 90}}}]");
+}
+
+TEST_F(ABTTranslationTest, InTranslation) {
+    testTranslation("$match with $in, empty list", "[{$match: {a: {$in: []}}}]");
+
+    testTranslation("match with $in, singleton list", "[{$match: {a: {$in: [1]}}}]");
+
+    testTranslation(
         "$match with $in and a list of equalities becomes a comparison to an EqMember list.",
         "[{$match: {a: {$in: [1, 2, 3]}}}]");
 
-    testABTTranslationAndOptimization(gctx,
-                                      "match with $in over an array, duplicated equalities removed",
-                                      "[{$match: {a: {$in: ['abc', 'def', 'ghi', 'def']}}}]");
+    testTranslation("match with $in over an array, duplicated equalities removed",
+                    "[{$match: {a: {$in: ['abc', 'def', 'ghi', 'def']}}}]");
+}
 
+TEST_F(ABTTranslationTest, AndOrTranslation) {
+    testTranslation("$match conjunction", "[{$match: {$and: [{a: 1}, {b: 2}]}}]");
 
-    testABTTranslationAndOptimization(
-        gctx, "$match with empty $elemMatch", "[{$match: {'a': {$elemMatch: {}}}}]");
+    testTranslation("$match disjunction", "[{$match: {$or: [{a: 1}, {b: 2}]}}]");
 
-    testABTTranslationAndOptimization(
-        gctx,
+    testTranslation("$match nested conjunction",
+                    "[{$match: {$and: [{$and: [{a: 1}, {b: 2}]}, {c: 3}]}}]");
+}
+
+TEST_F(ABTTranslationTest, ElemMatchTranslation) {
+    testTranslation("$match with empty $elemMatch", "[{$match: {'a': {$elemMatch: {}}}}]");
+
+    testTranslation(
         "ensure the PathGet and PathTraverse operators interact correctly when $in is "
         "under $elemMatch",
         "[{$match: {'a.b': {$elemMatch: {$in: [1, 2, 3]}}}}]");
 
-    testABTTranslationAndOptimization(
-        gctx, "sort limit skip", "[{$limit: 5}, {$skip: 3}, {$sort: {a: 1, b: -1}}]");
-
-    testABTTranslationAndOptimization(
-        gctx, "inclusion project", "[{$project: {a1: 1, a2: 1, a3: 1, a4: 1, a5: 1, a6: 1}}]");
-
-    testABTTranslationAndOptimization(
-        gctx,
-        "project rename through addFields: since '$z' is a single element, it will be "
-        "considered a renamed path",
-        "[{$addFields: {a: '$z'}}]");
-
-    testABTTranslationAndOptimization(
-        gctx,
-        "project rename: since '$c' is a single element, it will be considered a renamed path",
-        "[{$project: {'a.b': '$c'}}]");
-
-    testABTTranslationAndOptimization(
-        gctx, "project rename dotted paths", "[{$project: {'a.b.c': '$x.y.z'}}]");
-
-    testABTTranslationAndOptimization(
-        gctx, "inclusion project dotted paths", "[{$project: {'a.b':1, 'a.c':1, 'b':1}}]");
-
-    testABTTranslationAndOptimization(gctx,
-                                      "inclusion project with computed field",
-                                      "[{$project: {a: {$add: ['$c.d', 2]}, b: 1}}]");
-
-    testABTTranslationAndOptimization(gctx, "exclusion project", "[{$project: {a: 0, b: 0}}]");
-
-    testABTTranslationAndOptimization(gctx, "replaceRoot", "[{$replaceRoot: {newRoot: '$a'}}]");
-
-    testABTTranslationAndOptimization(gctx, "$match basic", "[{$match: {a: 1, b: 2}}]");
-
-    testABTTranslationAndOptimization(
-        gctx, "$match with $expr $eq", "[{$match: {$expr: {$eq: ['$a', 1]}}}]");
-
-    testABTTranslationAndOptimization(
-        gctx, "$match with $expr $eq with dotted path", "[{$match: {$expr: {$eq: ['$a.b', 1]}}}]");
-
-    testABTTranslationAndOptimization(
-        gctx,
+    testTranslation(
         "$match with value $elemMatch: observe type bracketing in the filter.",
         "[{$project: {a: {$literal: [1, 2, 3, 4]}}}, {$match: {a: {$elemMatch: {$gte: 2, $lte: "
         "3}}}}]");
 
-    testABTTranslationAndOptimization(
-        gctx,
+    testTranslation("$match object $elemMatch", "[{$match: {'a': {$elemMatch: {'b': {$eq: 5}}}}}]");
+}
+
+TEST_F(ABTTranslationTest, ExistsTranslation) {
+    testTranslation("$match exists", "[{$match: {a: {$exists: true}}}]");
+
+    testTranslation("$match exists", "[{$match: {a: {$exists: false}}}]");
+
+    testTranslation("$match exists", "[{$match: {'a.b': {$exists: true}}}]");
+}
+
+TEST_F(ABTTranslationTest, NotTranslation) {
+    testTranslation("$match not", "[{$match: {a: {$not: {$exists: true}}}}]");
+
+    testTranslation("$match not", "[{$match: {a: {$not: {$eq: 5}}}}]");
+
+    testTranslation("$match with $ne", "[{$match: {'a': {$ne: 2}}}]");
+}
+
+TEST_F(ABTTranslationTest, SimpleProjectionTranslation) {
+    testTranslation("inclusion project",
+                    "[{$project: {a1: 1, a2: 1, a3: 1, a4: 1, a5: 1, a6: 1}}]");
+
+    testTranslation("inclusion project dotted paths", "[{$project: {'a.b':1, 'a.c':1, 'b':1}}]");
+
+    testTranslation("exclusion project", "[{$project: {a: 0, b: 0}}]");
+
+    testTranslation("$project with deeply nested path",
+                    "[{$project: {'a1.b.c':1, 'a.b.c.d.e':'str'}}]");
+}
+
+TEST_F(ABTTranslationTest, ComputedProjectionTranslation) {
+    testTranslation(
+        "project rename through addFields: since '$z' is a single element, it will be "
+        "considered a renamed path",
+        "[{$addFields: {a: '$z'}}]");
+
+    testTranslation(
+        "project rename: since '$c' is a single element, it will be considered a renamed path",
+        "[{$project: {'a.b': '$c'}}]");
+
+    testTranslation("project rename dotted paths", "[{$project: {'a.b.c': '$x.y.z'}}]");
+
+    testTranslation("inclusion project with computed field",
+                    "[{$project: {a: {$add: ['$c.d', 2]}, b: 1}}]");
+
+    testTranslation("replaceRoot", "[{$replaceRoot: {newRoot: '$a'}}]");
+
+    testTranslation("$project with computed array", "[{$project: {a: ['$b', '$c']}}]");
+}
+
+TEST_F(ABTTranslationTest, GroupTranslation) {
+    testTranslation(
         "$project then $match",
         "[{$project: {s: {$add: ['$a', '$b']}, c: 1}}, {$match: {$or: [{c: 2}, {s: {$gte: "
         "10}}]}}]");
 
-    testABTTranslationAndOptimization(
-        gctx, "$project with deeply nested path", "[{$project: {'a1.b.c':1, 'a.b.c.d.e':'str'}}]");
 
-    testABTTranslationAndOptimization(
-        gctx, "basic $group", "[{$group: {_id: '$a.b', s: {$sum: {$multiply: ['$b', '$c']}}}}]");
+    testTranslation("basic $group",
+                    "[{$group: {_id: '$a.b', s: {$sum: {$multiply: ['$b', '$c']}}}}]");
 
-    testABTTranslationAndOptimization(
-        gctx, "$group local global", "[{$group: {_id: '$a', c: {$sum: '$b'}}}]");
+    testTranslation("$group local global", "[{$group: {_id: '$a', c: {$sum: '$b'}}}]");
 
-    testABTTranslationAndOptimization(gctx, "basic $unwind", "[{$unwind: {path: '$a.b.c'}}]");
+    testTranslation("$group with complex _id",
+                    "[{$group: {_id: {'isin': '$isin', 'year': '$year'}, "
+                    "'count': {$sum: 1}, 'open': {$first: "
+                    "'$$ROOT'}}}]");
+}
 
-    testABTTranslationAndOptimization(
-        gctx,
+TEST_F(ABTTranslationTest, UnwindTranslation) {
+    testTranslation("basic $unwind", "[{$unwind: {path: '$a.b.c'}}]");
+
+    testTranslation(
         "complex $unwind",
         "[{$unwind: {path: '$a.b.c', includeArrayIndex: 'p1.pid', preserveNullAndEmptyArrays: "
         "true}}]");
 
-    testABTTranslationAndOptimization(
-        gctx,
+    testTranslation(
         "$unwind with $group",
         "[{$unwind:{path: '$a.b', preserveNullAndEmptyArrays: true}}, {$group:{_id: '$a.b'}}]");
+}
 
-    testABTTranslationAndOptimization(gctx, "$match with index", "[{$match: {'a': 10}}]");
-
-    testABTTranslationAndOptimization(
-        gctx, "$match sort index", "[{$match: {'a': 10}}, {$sort: {'a': 1}}]");
-
-    testABTTranslationAndOptimization(
-        gctx, "$match with range", "[{$match: {'a': {$gt: 70, $lt: 90}}}]");
-
-    testABTTranslationAndOptimization(gctx, "index on two keys", "[{$match: {'a': 2, 'b': 2}}]");
-
-    testABTTranslationAndOptimization(
-        gctx,
-        "$group with complex _id",
-        "[{$group: {_id: {'isin': '$isin', 'year': '$year'}, 'count': {$sum: 1}, 'open': {$first: "
-        "'$$ROOT'}}}]");
-
-    testABTTranslationAndOptimization(
-        gctx, "$project with computed array", "[{$project: {a: ['$b', '$c']}}]");
-
+TEST_F(ABTTranslationTest, UnionTranslation) {
     std::string scanDefA = "collA";
     std::string scanDefB = "collB";
     Metadata metadataUnion{{{scanDefA, {}}, {scanDefB, {}}}};
-    testABTTranslationAndOptimization(gctx,
+    testABTTranslationAndOptimization(*gctx,
                                       "union",
                                       "[{$unionWith: 'collB'}, {$match: {_id: 1}}]",
                                       scanDefA,
@@ -168,7 +201,63 @@ TEST(ABTTranslate, BasicTests) {
                                       {},
                                       false,
                                       {{NamespaceString("a." + scanDefB), {}}});
-
-    testABTTranslationAndOptimization(gctx, "$match with $ne", "[{$match: {'a': {$ne: 2}}}]");
 }
+
+TEST_F(ABTTranslationTest, SortTranslation) {
+    testTranslation("sort limit skip", "[{$limit: 5}, {$skip: 3}, {$sort: {a: 1, b: -1}}]");
+
+    testTranslation("$match sort", "[{$match: {'a': 10}}, {$sort: {'a': 1}}]");
+}
+
+}  // namespace
+
+TEST_F(ServiceContextTest, CanonicalQueryTranslation) {
+    Metadata metadata({{"collection", createScanDef({}, {})}});
+
+    auto opCtx = makeOperationContext();
+    auto findCommand = query_request_helper::makeFromFindCommandForTests(
+        fromjson("{find: 'collection', '$db': 'test', filter: {a: 10, b: 20, c:30}}"));
+    auto statusWithCQ = CanonicalQuery::canonicalize(opCtx.get(), std::move(findCommand));
+    ASSERT_OK(statusWithCQ.getStatus());
+    PrefixId prefixId;
+
+    auto translation = translateCanonicalQueryToABT(metadata,
+                                                    *(statusWithCQ.getValue()),
+                                                    ProjectionName{"test"},
+                                                    make<ScanNode>("test", "test"),
+                                                    prefixId);
+    ASSERT_EXPLAIN_V2(
+        "Root []\n"
+        "|   |   projections: \n"
+        "|   |       test\n"
+        "|   RefBlock: \n"
+        "|       Variable [test]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [test]\n"
+        "|   PathGet [b]\n"
+        "|   PathTraverse [1]\n"
+        "|   PathCompare [Eq]\n"
+        "|   Const [20]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [test]\n"
+        "|   PathGet [a]\n"
+        "|   PathTraverse [1]\n"
+        "|   PathCompare [Eq]\n"
+        "|   Const [10]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [test]\n"
+        "|   PathGet [c]\n"
+        "|   PathTraverse [1]\n"
+        "|   PathCompare [Eq]\n"
+        "|   Const [30]\n"
+        "Scan [test]\n"
+        "    BindBlock:\n"
+        "        [test]\n"
+        "            Source []\n",
+        translation);
+}
+
 }  // namespace mongo::optimizer

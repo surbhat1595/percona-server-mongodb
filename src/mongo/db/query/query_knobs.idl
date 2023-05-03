@@ -742,7 +742,7 @@ server_parameters:
     cpp_vartype: std::string
     default: sampling
     validator:
-      callback: ce::validateCEMode
+        callback: optimizer::ce::validateCEMode
 
   internalCascadesOptimizerDisableScan:
     description: "Disable full collection scans in the Cascades optimizer."
@@ -908,11 +908,12 @@ server_parameters:
         gt: 0
         lt: 16777216
 
-  internalMeasureQueryExecutionTimeInMicroseconds:
-    description: "If true, the explain results include an additional 'executionTimeMicros' field to
-    represent the execution time of each plan stage in microseconds"
+  internalMeasureQueryExecutionTimeInNanoseconds:
+    description: "If true, the explain results include 'executionTimeMicros' and
+    'executionTimeNanos' fields to represent the execution time of each SBE plan stage in
+    microseconds and in nanoseconds"
     set_at: [ startup ]
-    cpp_varname: "internalMeasureQueryExecutionTimeInMicroseconds"
+    cpp_varname: "internalMeasureQueryExecutionTimeInNanoseconds"
     cpp_vartype: AtomicWord<bool>
     default: false
 
@@ -942,12 +943,18 @@ server_parameters:
 
   enableComputeMode:
     description: "Boolean flag to enable the compute mode in which mongod is used not as a
-    persistent storage node, but as a worker node for executing queries."
+      persistent storage node, but as a worker node for executing queries."
     set_at: [ startup ]
     cpp_varname: "computeModeEnabled"
     cpp_vartype: bool
-    default:
-        expr: false
+    default: false
+
+  externalPipeDir:
+    description: "Absolute path to the directory where external named pipes can be found. The
+      trailing '/' must be included."
+    set_at: [ startup ]
+    cpp_varname: "externalPipeDir"
+    cpp_vartype: std::string
 
   internalQueryDisableExclusionProjectionFastPath:
     description: "If true, then ExclusionProjectionExecutor won't use fast path implementation. This
@@ -993,6 +1000,29 @@ server_parameters:
       data: synchronized_value<QueryTelemetryFieldNameRedactionStrategyEnum>
     default:
       expr: QueryTelemetryFieldNameRedactionStrategyEnum::kConstantRedactionStrategy
+
+  internalQueryColumnScanMinCollectionSizeBytes:
+    description: "The min collection size threshold for which column scan will be allowed. If the
+      value is -1, decision will be made based on the available memory size. If it is set to 0
+      column scan will always be allowed by definition."
+    set_at: [ startup, runtime ]
+    cpp_varname: "internalQueryColumnScanMinCollectionSizeBytes"
+    cpp_vartype: AtomicWord<long long>
+    default: 0
+    validator:
+      gte: -1
+    on_update: plan_cache_util::clearSbeCacheOnParameterChange
+
+  internalQueryColumnScanMinAvgDocSizeBytes:
+    description: "The min average document size threshold for which column scan will be allowed. If
+      it is set to 0 column scan will always be allowed by definition."
+    set_at: [ startup, runtime ]
+    cpp_varname: "internalQueryColumnScanMinAvgDocSizeBytes"
+    cpp_vartype: AtomicWord<long long>
+    default: 1024
+    validator:
+      gte: 0
+    on_update: plan_cache_util::clearSbeCacheOnParameterChange
 
 
 # Note for adding additional query knobs:

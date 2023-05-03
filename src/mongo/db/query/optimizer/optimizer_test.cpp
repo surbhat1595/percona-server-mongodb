@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#include "mongo/db/query/optimizer/explain.h"
 #include "mongo/db/query/optimizer/node.h"
 #include "mongo/db/query/optimizer/reference_tracker.h"
 #include "mongo/db/query/optimizer/rewrites/const_eval.h"
@@ -41,148 +40,7 @@
 
 namespace mongo::optimizer {
 namespace {
-
-TEST(Optimizer, AutoUpdateExplain) {
-    ABT tree = make<BinaryOp>(Operations::Add,
-                              Constant::int64(1),
-                              make<Variable>("very very very very very very very very very very "
-                                             "very very long variable name with \"quotes\""));
-
-    /**
-     * To exercise the auto-updating behavior:
-     *   1. Change the flag "kAutoUpdateOnFailure" to "true".
-     *   2. Induce a failure: change something in the expected output.
-     *   3. Recompile and run the test binary as normal.
-     *   4. Observe after the run the test file is updated with the correct output.
-     */
-    ASSERT_EXPLAIN_V2_AUTO(  // NOLINT (test auto-update)
-        "BinaryOp [Add]\n"
-        "|   Variable [very very very very very very very very very very very very long variable "
-        "name with \"quotes\"]\n"
-        "Const [1]\n",
-        tree);
-
-    // Test for short constant. It should not be inlined. The nolint comment on the string constant
-    // itself is auto-generated.
-    ABT tree1 = make<Variable>("short name");
-    ASSERT_EXPLAIN_V2_AUTO(         // NOLINT (test auto-update)
-        "Variable [short name]\n",  // NOLINT (test auto-update)
-        tree1);
-}
-
-TEST(Optimizer, ABTLiterals) {
-    using namespace unit_test_abt_literals;
-
-    // Demonstrate shorthand tree initialization using the ABT string literal constructors.
-
-    // Construct inline.
-    auto scanNode = _scan("root", "c1");
-    auto projectionANode = _eval("pa", _evalp(_get("a", _id()), "root"_var), std::move(scanNode));
-    auto filterANode =
-        _filter(_evalf(_cmp("Gt", "0"_cint64), "pa"_var), std::move(projectionANode));
-    auto projectionBNode =
-        _eval("pb", _evalp(_get("b", _id()), "root"_var), std::move(filterANode));
-    auto filterBNode =
-        _filter(_evalf(_cmp("Gt", "1"_cint64), "pb"_var), std::move(projectionBNode));
-    auto groupByNode = _gb(_varnames("pa"), _varnames("pc"), {"pb"_var}, std::move(filterBNode));
-    auto rootNode = _root("pc")(std::move(groupByNode));
-
-    ASSERT_EXPLAIN_V2(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pc\n"
-        "|   RefBlock: \n"
-        "|       Variable [pc]\n"
-        "GroupBy []\n"
-        "|   |   groupings: \n"
-        "|   |       RefBlock: \n"
-        "|   |           Variable [pa]\n"
-        "|   aggregations: \n"
-        "|       [pc]\n"
-        "|           Variable [pb]\n"
-        "Filter []\n"
-        "|   EvalFilter []\n"
-        "|   |   Variable [pb]\n"
-        "|   PathCompare [Gt]\n"
-        "|   Const [1]\n"
-        "Evaluation []\n"
-        "|   BindBlock:\n"
-        "|       [pb]\n"
-        "|           EvalPath []\n"
-        "|           |   Variable [root]\n"
-        "|           PathGet [b]\n"
-        "|           PathIdentity []\n"
-        "Filter []\n"
-        "|   EvalFilter []\n"
-        "|   |   Variable [pa]\n"
-        "|   PathCompare [Gt]\n"
-        "|   Const [0]\n"
-        "Evaluation []\n"
-        "|   BindBlock:\n"
-        "|       [pa]\n"
-        "|           EvalPath []\n"
-        "|           |   Variable [root]\n"
-        "|           PathGet [a]\n"
-        "|           PathIdentity []\n"
-        "Scan [c1]\n"
-        "    BindBlock:\n"
-        "        [root]\n"
-        "            Source []\n",
-        rootNode);
-
-    // Construct using a builder. Note we construct the tree in a top-to-bottom fashion.
-    auto rootNode1 = NodeBuilder{}
-                         .root("pc")
-                         .gb(_varnames("pa"), _varnames("pc"), {"pb"_var})
-                         .filter(_evalf(_cmp("Gt", "1"_cint64), "pb"_var))
-                         .eval("pb", _evalp(_get("b", _id()), "root"_var))
-                         .filter(_evalf(_cmp("Gt", "0"_cint64), "pa"_var))
-                         .eval("pa", _evalp(_get("a", _id()), "root"_var))
-                         .finish(_scan("root", "c1"));
-
-    ASSERT_EXPLAIN_V2(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pc\n"
-        "|   RefBlock: \n"
-        "|       Variable [pc]\n"
-        "GroupBy []\n"
-        "|   |   groupings: \n"
-        "|   |       RefBlock: \n"
-        "|   |           Variable [pa]\n"
-        "|   aggregations: \n"
-        "|       [pc]\n"
-        "|           Variable [pb]\n"
-        "Filter []\n"
-        "|   EvalFilter []\n"
-        "|   |   Variable [pb]\n"
-        "|   PathCompare [Gt]\n"
-        "|   Const [1]\n"
-        "Evaluation []\n"
-        "|   BindBlock:\n"
-        "|       [pb]\n"
-        "|           EvalPath []\n"
-        "|           |   Variable [root]\n"
-        "|           PathGet [b]\n"
-        "|           PathIdentity []\n"
-        "Filter []\n"
-        "|   EvalFilter []\n"
-        "|   |   Variable [pa]\n"
-        "|   PathCompare [Gt]\n"
-        "|   Const [0]\n"
-        "Evaluation []\n"
-        "|   BindBlock:\n"
-        "|       [pa]\n"
-        "|           EvalPath []\n"
-        "|           |   Variable [root]\n"
-        "|           PathGet [a]\n"
-        "|           PathIdentity []\n"
-        "Scan [c1]\n"
-        "    BindBlock:\n"
-        "        [root]\n"
-        "            Source []\n",
-        rootNode1);
-}
+using namespace unit_test_abt_literals;
 
 Constant* constEval(ABT& tree) {
     auto env = VariableEnvironment::build(tree);
@@ -200,7 +58,7 @@ Constant* constEval(ABT& tree) {
 
 TEST(Optimizer, ConstEval) {
     // 1 + 2
-    ABT tree = make<BinaryOp>(Operations::Add, Constant::int64(1), Constant::int64(2));
+    ABT tree = _binary("Add", "1"_cint64, "2"_cint64)._n;
     Constant* result = constEval(tree);
     ASSERT_EQ(result->getValueInt64(), 3);
 }
@@ -208,10 +66,7 @@ TEST(Optimizer, ConstEval) {
 
 TEST(Optimizer, ConstEvalCompose) {
     // (1 + 2) + 3
-    ABT tree =
-        make<BinaryOp>(Operations::Add,
-                       make<BinaryOp>(Operations::Add, Constant::int64(1), Constant::int64(2)),
-                       Constant::int64(3));
+    ABT tree = _binary("Add", _binary("Add", "1"_cint64, "2"_cint64), "3"_cint64)._n;
     Constant* result = constEval(tree);
     ASSERT_EQ(result->getValueInt64(), 6);
 }
@@ -219,18 +74,14 @@ TEST(Optimizer, ConstEvalCompose) {
 
 TEST(Optimizer, ConstEvalCompose2) {
     // 3 - (5 - 4)
-    auto tree =
-        make<BinaryOp>(Operations::Sub,
-                       Constant::int64(3),
-                       make<BinaryOp>(Operations::Sub, Constant::int64(5), Constant::int64(4)));
+    auto tree = _binary("Sub", "3"_cint64, _binary("Sub", "5"_cint64, "4"_cint64))._n;
     Constant* result = constEval(tree);
     ASSERT_EQ(result->getValueInt64(), 2);
 }
 
 TEST(Optimizer, ConstEval3) {
     // 1.5 + 0.5
-    auto tree =
-        make<BinaryOp>(Operations::Add, Constant::fromDouble(1.5), Constant::fromDouble(0.5));
+    auto tree = _binary("Add", "1.5"_cdouble, "0.5"_cdouble)._n;
     Constant* result = constEval(tree);
     ASSERT_EQ(result->getValueDouble(), 2.0);
 }
@@ -900,30 +751,14 @@ TEST(Explain, ExplainBsonForConstant) {
 }
 
 TEST(IntervalNormalize, Basic) {
-    auto intervalExpr =
-        IntervalReqExpr::make<IntervalReqExpr::Disjunction>(IntervalReqExpr::NodeVector{
-            IntervalReqExpr::make<IntervalReqExpr::Conjunction>(IntervalReqExpr::NodeVector{
-                IntervalReqExpr::make<IntervalReqExpr::Atom>(
-                    IntervalRequirement{{true /*inclusive*/, Constant::int64(3)},
-                                        {true /*inclusive*/, Constant::int64(4)}}),
-                IntervalReqExpr::make<IntervalReqExpr::Atom>(
-                    IntervalRequirement{{true /*inclusive*/, Constant::int64(1)},
-                                        {true /*inclusive*/, Constant::int64(2)}})}),
-            IntervalReqExpr::make<IntervalReqExpr::Disjunction>(IntervalReqExpr::NodeVector{
-                IntervalReqExpr::make<IntervalReqExpr::Atom>(
-                    IntervalRequirement{{true /*inclusive*/, Constant::int64(3)},
-                                        {true /*inclusive*/, Constant::int64(4)}}),
-                IntervalReqExpr::make<IntervalReqExpr::Atom>(
-                    IntervalRequirement{{false /*inclusive*/, Constant::int64(3)},
-                                        {true /*inclusive*/, Constant::int64(4)}}),
-                IntervalReqExpr::make<IntervalReqExpr::Atom>(
-                    IntervalRequirement{{true /*inclusive*/, Constant::int64(3)},
-                                        {true /*inclusive*/, Constant::int64(2)}})}),
-            IntervalReqExpr::make<IntervalReqExpr::Atom>(
-                IntervalRequirement{{true /*inclusive*/, Constant::int64(5)},
-                                    {true /*inclusive*/, Constant::int64(6)}})});
+    auto intervalExpr = _disj(_conj(_interval(_incl("3"_cint64), _incl("4"_cint64)),
+                                    _interval(_incl("1"_cint64), _incl("2"_cint64))),
+                              _disj(_interval(_incl("3"_cint64), _incl("4"_cint64)),
+                                    _interval(_excl("3"_cint64), _incl("4"_cint64)),
+                                    _interval(_incl("3"_cint64), _incl("2"_cint64))),
+                              _interval(_incl("5"_cint64), _incl("6"_cint64)));
 
-    ASSERT_EQ(
+    ASSERT_INTERVAL(
         "{\n"
         "    {\n"
         "        {[Const [3], Const [4]]}\n"
@@ -941,13 +776,13 @@ TEST(IntervalNormalize, Basic) {
         " U \n"
         "    {[Const [5], Const [6]]}\n"
         "}\n",
-        ExplainGenerator::explainIntervalExpr(intervalExpr));
+        intervalExpr);
 
     normalizeIntervals(intervalExpr);
 
     // Demonstrate that Atoms are sorted first, then conjunctions and disjunctions. Atoms are sorted
     // first on the lower then on the upper bounds.
-    ASSERT_EQ(
+    ASSERT_INTERVAL(
         "{\n"
         "    {[Const [5], Const [6]]}\n"
         " U \n"
@@ -965,7 +800,7 @@ TEST(IntervalNormalize, Basic) {
         "        {[Const [3], Const [4]]}\n"
         "    }\n"
         "}\n",
-        ExplainGenerator::explainIntervalExpr(intervalExpr));
+        intervalExpr);
 }
 
 TEST(Optimizer, ExplainRIDUnion) {

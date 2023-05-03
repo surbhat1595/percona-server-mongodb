@@ -447,9 +447,9 @@ void updateSessionEntry(OperationContext* opCtx,
                           << "session "_sd << sessionId << ", transaction "_sd << txnNum);
     }
 
-    CollectionUpdateArgs args;
-    args.update = updateMod;
+    CollectionUpdateArgs args{originalDoc};
     args.criteria = toUpdateIdDoc;
+    args.update = updateMod;
 
     // Specify indexesAffected = false because the sessions collection has two indexes: {_id: 1} and
     // {parentLsid: 1, _id.txnNumber: 1, _id: 1}, and none of the fields are mutable.
@@ -1599,7 +1599,8 @@ Timestamp TransactionParticipant::Participant::prepareTransaction(
             // of RSTL lock inside abortTransaction will be no-op since we already have it.
             // This abortGuard gets dismissed before we release the RSTL while transitioning to
             // prepared.
-            UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+            // TODO (SERVER-71610): Fix to be interruptible or document exception.
+            UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
             abortTransaction(opCtx);
         } catch (...) {
             // It is illegal for aborting a prepared transaction to fail for any reason, so we crash
@@ -1686,13 +1687,18 @@ Timestamp TransactionParticipant::Participant::prepareTransaction(
     opCtx->recoveryUnit()->setPrepareTimestamp(prepareOplogSlot.getTimestamp());
     opCtx->getWriteUnitOfWork()->prepare();
     p().needToWriteAbortEntry = true;
-    opObserver->onTransactionPrepare(
-        opCtx,
-        reservedSlots,
-        completedTransactionOperations->getMutableOperationsForOpObserver(),
-        applyOpsOplogSlotAndOperationAssignment.get(),
-        p().transactionOperations.getNumberOfPrePostImagesToWrite(),
-        wallClockTime);
+
+    const auto& statements = *(completedTransactionOperations->getMutableOperationsForOpObserver());
+    tassert(6278510,
+            "Operation assignments to applyOps entries should be present",
+            applyOpsOplogSlotAndOperationAssignment);
+
+    opObserver->onTransactionPrepare(opCtx,
+                                     reservedSlots,
+                                     statements,
+                                     *applyOpsOplogSlotAndOperationAssignment,
+                                     p().transactionOperations.getNumberOfPrePostImagesToWrite(),
+                                     wallClockTime);
 
     abortGuard.dismiss();
 
@@ -1881,7 +1887,8 @@ void TransactionParticipant::Participant::commitPreparedTransaction(
         unlockGuard.dismiss();
 
         // Once entering "committing with prepare" we cannot throw an exception.
-        UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+        // TODO (SERVER-71610): Fix to be interruptible or document exception.
+        UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
         opCtx->recoveryUnit()->setCommitTimestamp(commitTimestamp);
 
         // On secondary, we generate a fake empty oplog slot, since it's not used by opObserver.
@@ -2087,7 +2094,7 @@ void TransactionParticipant::Participant::_abortActiveTransaction(
 
         try {
             // If we need to write an abort oplog entry, this function can no longer be interrupted.
-            UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+            UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
 
             // Write the abort oplog entry. This must be done after aborting the storage
             // transaction, so that the lock state is reset, and there is no max lock timeout on the

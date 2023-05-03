@@ -43,16 +43,19 @@
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/s/session_catalog_migration.h"
 #include "mongo/db/s/session_catalog_migration_source.h"
+#include "mongo/db/s/sharding_statistics.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/session.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_txn_record_gen.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/executor/remote_command_request.h"
+#include "mongo/logv2/log.h"
 #include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 namespace mongo {
 namespace {
 
@@ -267,6 +270,7 @@ TEST_F(SessionCatalogMigrationSourceTest, NoSessionsToTransferShouldNotHaveOplog
     ASSERT_FALSE(migrationSource.hasMoreOplog());
     ASSERT_TRUE(migrationSource.inCatchupPhase());
     ASSERT_EQ(0, migrationSource.untransferredCatchUpDataSize());
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest, OneSessionWithTwoWrites) {
@@ -307,6 +311,7 @@ TEST_F(SessionCatalogMigrationSourceTest, OneSessionWithTwoWrites) {
     client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), sessionRecord.toBSON());
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
 
     {
@@ -328,6 +333,9 @@ TEST_F(SessionCatalogMigrationSourceTest, OneSessionWithTwoWrites) {
 
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
     ASSERT_FALSE(migrationSource.hasMoreOplog());
+
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 2);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest, OneSessionWithTwoWritesMultiStmtIds) {
@@ -368,6 +376,7 @@ TEST_F(SessionCatalogMigrationSourceTest, OneSessionWithTwoWritesMultiStmtIds) {
     client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), sessionRecord.toBSON());
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
 
     {
@@ -389,6 +398,9 @@ TEST_F(SessionCatalogMigrationSourceTest, OneSessionWithTwoWritesMultiStmtIds) {
 
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
     ASSERT_FALSE(migrationSource.hasMoreOplog());
+
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 2);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest, TwoSessionWithTwoWrites) {
@@ -466,6 +478,7 @@ TEST_F(SessionCatalogMigrationSourceTest, TwoSessionWithTwoWrites) {
     insertOplogEntry(entry2b);
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
 
     auto checkNextBatch = [this, &migrationSource](const repl::OplogEntry& firstExpectedOplog,
@@ -506,6 +519,9 @@ TEST_F(SessionCatalogMigrationSourceTest, TwoSessionWithTwoWrites) {
 
         checkNextBatch(entry2b, entry2a);
     }
+
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 4);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 // It is currently not possible to have 2 findAndModify operations in one transaction, but this
@@ -575,6 +591,7 @@ TEST_F(SessionCatalogMigrationSourceTest, OneSessionWithFindAndModifyPreImageAnd
     client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), sessionRecord.toBSON());
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
 
     auto expectedSequence = {entry3, entry4, entry1, entry2};
@@ -589,6 +606,8 @@ TEST_F(SessionCatalogMigrationSourceTest, OneSessionWithFindAndModifyPreImageAnd
     }
 
     ASSERT_FALSE(migrationSource.hasMoreOplog());
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 4);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest,
@@ -657,6 +676,7 @@ TEST_F(SessionCatalogMigrationSourceTest,
     client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), sessionRecord.toBSON());
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
 
     auto expectedSequence = {entry3, entry4, entry1, entry2};
@@ -671,6 +691,8 @@ TEST_F(SessionCatalogMigrationSourceTest,
     }
 
     ASSERT_FALSE(migrationSource.hasMoreOplog());
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 4);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest, ForgeImageEntriesWhenFetchingEntriesWithNeedsRetryImage) {
@@ -713,6 +735,7 @@ TEST_F(SessionCatalogMigrationSourceTest, ForgeImageEntriesWhenFetchingEntriesWi
     client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), sessionRecord.toBSON());
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     // The next oplog entry should be the forged preImage entry.
     ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
     ASSERT_TRUE(migrationSource.hasMoreOplog());
@@ -734,6 +757,9 @@ TEST_F(SessionCatalogMigrationSourceTest, ForgeImageEntriesWhenFetchingEntriesWi
     ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
     nextOplogResult = migrationSource.getLastFetchedOplog();
     ASSERT_BSONOBJ_EQ(entry.getEntry().toBSON(), nextOplogResult.oplog->getEntry().toBSON());
+
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 2);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest, OplogWithOtherNsShouldBeIgnored) {
@@ -791,6 +817,7 @@ TEST_F(SessionCatalogMigrationSourceTest, OplogWithOtherNsShouldBeIgnored) {
                   sessionRecord2.toBSON());
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
 
     ASSERT_TRUE(migrationSource.hasMoreOplog());
@@ -801,6 +828,9 @@ TEST_F(SessionCatalogMigrationSourceTest, OplogWithOtherNsShouldBeIgnored) {
 
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
     ASSERT_FALSE(migrationSource.hasMoreOplog());
+
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 1);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 1);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest, SessionDumpWithMultipleNewWrites) {
@@ -857,6 +887,7 @@ TEST_F(SessionCatalogMigrationSourceTest, SessionDumpWithMultipleNewWrites) {
     insertOplogEntry(entry3);
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
 
     migrationSource.notifyNewWriteOpTime(
@@ -890,10 +921,13 @@ TEST_F(SessionCatalogMigrationSourceTest, SessionDumpWithMultipleNewWrites) {
 
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
     ASSERT_FALSE(migrationSource.hasMoreOplog());
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 3);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest, ShouldAssertIfOplogCannotBeFound) {
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
 
     migrationSource.notifyNewWriteOpTime(
@@ -906,6 +940,7 @@ TEST_F(SessionCatalogMigrationSourceTest, ShouldAssertIfOplogCannotBeFound) {
 TEST_F(SessionCatalogMigrationSourceTest,
        ReturnDeadEndSentinelOplogEntryForNewCommittedNonInternalTransaction) {
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
 
     const auto sessionId = makeLogicalSessionIdForTest();
@@ -938,12 +973,15 @@ TEST_F(SessionCatalogMigrationSourceTest,
     ASSERT_EQ(stmtIds[0], kIncompleteHistoryStmtId);
 
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 1);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 DEATH_TEST_F(SessionCatalogMigrationSourceTest,
              ThrowUponSeeingNewCommittedForInternalTransactionForNonRetryableWrite,
              "Cannot add op time for a non-retryable internal transaction") {
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
 
     const auto sessionId = makeLogicalSessionIdWithTxnUUIDForTest();
@@ -964,11 +1002,13 @@ DEATH_TEST_F(SessionCatalogMigrationSourceTest,
         entry.getOpTime(), SessionCatalogMigrationSource::EntryAtOpTimeType::kTransaction);
     ASSERT_TRUE(migrationSource.hasMoreOplog());
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest,
        DeriveOplogEntriesForNewCommittedInternalTransactionForRetryableWriteBasic) {
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
 
     const auto sessionId = makeLogicalSessionIdWithTxnNumberAndUUIDForTest();
@@ -1036,11 +1076,14 @@ TEST_F(SessionCatalogMigrationSourceTest,
     }
 
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 3);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 3);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest,
        DeriveOplogEntriesForNewCommittedInternalTransactionForRetryableWriteFetchPrePostImage) {
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
 
     const auto sessionId = makeLogicalSessionIdWithTxnNumberAndUUIDForTest();
@@ -1138,11 +1181,14 @@ TEST_F(SessionCatalogMigrationSourceTest,
     }
 
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 7);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest,
        DeriveOplogEntriesForNewCommittedInternalTransactionForRetryableWriteForgePrePostImage) {
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
 
     std::vector<repl::RetryImageEnum> cases{repl::RetryImageEnum::kPreImage,
@@ -1225,6 +1271,9 @@ TEST_F(SessionCatalogMigrationSourceTest,
         ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
         opTimeSecs++;
     }
+
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 8);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest, ShouldBeAbleInsertNewWritesAfterBufferWasDepleted) {
@@ -1232,6 +1281,7 @@ TEST_F(SessionCatalogMigrationSourceTest, ShouldBeAbleInsertNewWritesAfterBuffer
     const auto txnNumber = TxnNumber{1};
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
 
     {
@@ -1312,6 +1362,9 @@ TEST_F(SessionCatalogMigrationSourceTest, ShouldBeAbleInsertNewWritesAfterBuffer
         ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
         ASSERT_FALSE(migrationSource.hasMoreOplog());
     }
+
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 3);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest, ReturnsDeadEndSentinelForIncompleteHistory) {
@@ -1340,6 +1393,7 @@ TEST_F(SessionCatalogMigrationSourceTest, ReturnsDeadEndSentinelForIncompleteHis
     client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), sessionRecord.toBSON());
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
 
     {
@@ -1372,6 +1426,9 @@ TEST_F(SessionCatalogMigrationSourceTest, ReturnsDeadEndSentinelForIncompleteHis
 
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
     ASSERT_FALSE(migrationSource.hasMoreOplog());
+
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 2);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest, ShouldAssertWhenRollbackDetected) {
@@ -1400,6 +1457,7 @@ TEST_F(SessionCatalogMigrationSourceTest, ShouldAssertWhenRollbackDetected) {
     client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), sessionRecord.toBSON());
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
 
     {
@@ -1414,6 +1472,9 @@ TEST_F(SessionCatalogMigrationSourceTest, ShouldAssertWhenRollbackDetected) {
 
     ASSERT_THROWS(migrationSource.fetchNextOplog(opCtx()), AssertionException);
     ASSERT_TRUE(migrationSource.hasMoreOplog());
+
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 1);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest,
@@ -1443,6 +1504,7 @@ TEST_F(SessionCatalogMigrationSourceTest,
     client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), txnRecord.toBSON());
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
 
     ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
     ASSERT_TRUE(migrationSource.hasMoreOplog());
@@ -1454,6 +1516,9 @@ TEST_F(SessionCatalogMigrationSourceTest,
                       *nextOplogResult.oplog->getObject2());
 
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
+
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 1);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest, IgnoreCommittedInternalTransactionForNonRetryableWrite) {
@@ -1482,9 +1547,13 @@ TEST_F(SessionCatalogMigrationSourceTest, IgnoreCommittedInternalTransactionForN
     client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), txnRecord.toBSON());
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
 
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
     ASSERT_FALSE(migrationSource.hasMoreOplog());
+
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 0);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest,
@@ -1566,6 +1635,7 @@ TEST_F(SessionCatalogMigrationSourceTest,
         client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), txnRecord.toBSON());
 
         SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+        migrationSource.init(opCtx());
 
         const auto expectedSessionId = *getParentSessionId(sessionId);
         const auto expectedTxnNumber = *sessionId.getTxnNumber();
@@ -1582,7 +1652,8 @@ TEST_F(SessionCatalogMigrationSourceTest,
         }
 
         ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
-
+        ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 3);
+        ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 3);
         opTimeSecs++;
         client.remove(NamespaceString::kSessionTransactionsTableNamespace.ns(), txnRecord.toBSON());
     };
@@ -1690,6 +1761,7 @@ TEST_F(SessionCatalogMigrationSourceTest,
         client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), txnRecord.toBSON());
 
         SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+        migrationSource.init(opCtx());
 
         const auto expectedSessionId = *getParentSessionId(sessionId);
         const auto expectedTxnNumber = *sessionId.getTxnNumber();
@@ -1714,6 +1786,8 @@ TEST_F(SessionCatalogMigrationSourceTest,
         }
 
         ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
+        ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 7);
+        ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 
         opTimeSecs++;
         client.remove(NamespaceString::kSessionTransactionsTableNamespace.ns(), txnRecord.toBSON());
@@ -1782,6 +1856,7 @@ TEST_F(SessionCatalogMigrationSourceTest,
         // Create a SessionCatalogMigrationSource. It should return only the oplog entry for the
         // internal session with the latest txnNumber.
         SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+        migrationSource.init(opCtx());
 
         ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
         ASSERT_TRUE(migrationSource.hasMoreOplog());
@@ -1791,6 +1866,8 @@ TEST_F(SessionCatalogMigrationSourceTest,
         ASSERT_BSONOBJ_EQ(nextOplogResult.oplog->getDurableReplOperation().toBSON(), op2.toBSON());
 
         ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
+        ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 1);
+        ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
     }
 
     const auto otherParentSessionId = makeLogicalSessionIdForTest();
@@ -1819,6 +1896,7 @@ TEST_F(SessionCatalogMigrationSourceTest,
         // Create another SessionCatalogMigrationSource. It should still return only the oplog entry
         // for the internal session with the latest txnNumber.
         SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+        migrationSource.init(opCtx());
 
         ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
         ASSERT_TRUE(migrationSource.hasMoreOplog());
@@ -1847,6 +1925,8 @@ TEST_F(SessionCatalogMigrationSourceTest,
         }
 
         ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
+        ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 2);
+        ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
     }
 }
 
@@ -1929,6 +2009,7 @@ TEST_F(
             client.insert(NamespaceString::kConfigImagesNamespace.ns(), imageEntryForOp2.toBSON());
 
             SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+            migrationSource.init(opCtx());
 
             const auto expectedSessionId = *getParentSessionId(sessionId);
             const auto expectedTxnNumber = *sessionId.getTxnNumber();
@@ -1953,6 +2034,8 @@ TEST_F(
             }
 
             ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
+            ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 4);
+            ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 
             opTimeSecs++;
             client.remove(NamespaceString::kSessionTransactionsTableNamespace.ns(),
@@ -1991,6 +2074,7 @@ TEST_F(SessionCatalogMigrationSourceTest,
     client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), txnRecord.toBSON());
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
 
     ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
     ASSERT_TRUE(migrationSource.hasMoreOplog());
@@ -2002,6 +2086,9 @@ TEST_F(SessionCatalogMigrationSourceTest,
                       *nextOplogResult.oplog->getObject2());
 
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
+
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 1);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest, IgnorePreparedInternalTransactionForNonRetryableWrite) {
@@ -2030,9 +2117,12 @@ TEST_F(SessionCatalogMigrationSourceTest, IgnorePreparedInternalTransactionForNo
     client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), txnRecord.toBSON());
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
 
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
     ASSERT_FALSE(migrationSource.hasMoreOplog());
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 0);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest, IgnorePreparedInternalTransactionForRetryableWrite) {
@@ -2061,9 +2151,12 @@ TEST_F(SessionCatalogMigrationSourceTest, IgnorePreparedInternalTransactionForRe
     client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), txnRecord.toBSON());
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
 
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
     ASSERT_FALSE(migrationSource.hasMoreOplog());
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 0);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest, IgnoreInProgressTransaction) {
@@ -2080,9 +2173,12 @@ TEST_F(SessionCatalogMigrationSourceTest, IgnoreInProgressTransaction) {
         client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), txnRecord.toBSON());
 
         SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+        migrationSource.init(opCtx());
 
         ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
         ASSERT_FALSE(migrationSource.hasMoreOplog());
+        ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 0);
+        ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
     };
 
     runTest(makeLogicalSessionIdForTest());
@@ -2129,9 +2225,12 @@ TEST_F(SessionCatalogMigrationSourceTest, IgnoreAbortedTransaction) {
         client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), txnRecord.toBSON());
 
         SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+        migrationSource.init(opCtx());
 
         ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
         ASSERT_FALSE(migrationSource.hasMoreOplog());
+        ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 0);
+        ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 
         opTimeSecs++;
     };
@@ -2185,6 +2284,7 @@ TEST_F(SessionCatalogMigrationSourceTest,
     insertOplogEntry(insertOplog);
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
 
     // Function to verify the oplog entry corresponding to the retryable write.
     auto checkRetryableWriteEntry = [&] {
@@ -2223,6 +2323,8 @@ TEST_F(SessionCatalogMigrationSourceTest,
     }
 
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 2);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest, FindAndModifyDeleteNotTouchingChunkIsIgnored) {
@@ -2264,7 +2366,11 @@ TEST_F(SessionCatalogMigrationSourceTest, FindAndModifyDeleteNotTouchingChunkIsI
     client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), sessionRecord.toBSON());
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
+
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 0);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 1);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest, FindAndModifyUpdatePrePostNotTouchingChunkIsIgnored) {
@@ -2306,7 +2412,11 @@ TEST_F(SessionCatalogMigrationSourceTest, FindAndModifyUpdatePrePostNotTouchingC
     client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), sessionRecord.toBSON());
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
+
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 0);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 1);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest,
@@ -2350,6 +2460,7 @@ TEST_F(SessionCatalogMigrationSourceTest,
     client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), sessionRecord.toBSON());
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
 
     auto expectedSequence = {entry1, entry2};
@@ -2364,6 +2475,9 @@ TEST_F(SessionCatalogMigrationSourceTest,
     }
 
     ASSERT_FALSE(migrationSource.hasMoreOplog());
+
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 2);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest,
@@ -2407,7 +2521,11 @@ TEST_F(SessionCatalogMigrationSourceTest,
     client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), sessionRecord.toBSON());
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
+
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 0);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 1);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest, FindAndModifyUpdateNotTouchingChunkShouldBeIgnored) {
@@ -2450,7 +2568,11 @@ TEST_F(SessionCatalogMigrationSourceTest, FindAndModifyUpdateNotTouchingChunkSho
     client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), sessionRecord.toBSON());
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_FALSE(migrationSource.fetchNextOplog(opCtx()));
+
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 0);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 1);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest, TwoSessionWithTwoWritesContainingWriteNotInChunk) {
@@ -2531,6 +2653,7 @@ TEST_F(SessionCatalogMigrationSourceTest, TwoSessionWithTwoWritesContainingWrite
     insertOplogEntry(entry2b);
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_TRUE(migrationSource.fetchNextOplog(opCtx()));
 
     auto expectedSequence = {entry1a, entry2b, entry2a};
@@ -2545,6 +2668,9 @@ TEST_F(SessionCatalogMigrationSourceTest, TwoSessionWithTwoWritesContainingWrite
     }
 
     ASSERT_FALSE(migrationSource.hasMoreOplog());
+
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 3);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 1);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest, UntransferredDataSizeWithCommittedWrites) {
@@ -2580,6 +2706,7 @@ TEST_F(SessionCatalogMigrationSourceTest, UntransferredDataSizeWithCommittedWrit
     // Check for the initial state of the SessionCatalogMigrationSource, and drain the majority
     // committed session writes.
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     ASSERT_TRUE(migrationSource.hasMoreOplog());
     ASSERT_FALSE(migrationSource.inCatchupPhase());
     migrationSource.fetchNextOplog(opCtx());
@@ -2619,6 +2746,7 @@ TEST_F(SessionCatalogMigrationSourceTest, UntransferredDataSizeWithNoCommittedWr
     const auto txnNumber = TxnNumber{1};
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
 
     auto entry = makeOplogEntry(
         repl::OpTime(Timestamp(52, 345), 2),  // optime
@@ -2691,11 +2819,11 @@ TEST_F(SessionCatalogMigrationSourceTest, FilterRewrittenOplogEntriesOutsideChun
         insertOplogEntry(entry);
     }
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
     std::vector<repl::OplogEntry> filteredEntries = {entries.at(1)};
 
     while (migrationSource.fetchNextOplog(opCtx())) {
         ASSERT_TRUE(migrationSource.hasMoreOplog());
-
         auto nextOplogResult = migrationSource.getLastFetchedOplog();
         std::for_each(
             filteredEntries.begin(), filteredEntries.end(), [nextOplogResult](auto& entry) {
@@ -2703,6 +2831,9 @@ TEST_F(SessionCatalogMigrationSourceTest, FilterRewrittenOplogEntriesOutsideChun
                                   nextOplogResult.oplog->getEntry().toBSON());
             });
     }
+
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 1);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 0);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest,
@@ -2737,6 +2868,7 @@ TEST_F(SessionCatalogMigrationSourceTest,
     }
 
     SessionCatalogMigrationSource migrationSource(opCtx(), kNs, kChunkRange, kShardKey);
+    migrationSource.init(opCtx());
 
     std::vector<repl::OplogEntry> filteredEntries = {entries.at(1)};
 
@@ -2751,6 +2883,9 @@ TEST_F(SessionCatalogMigrationSourceTest,
                                   nextOplogResult.oplog->getEntry().toBSON());
             });
     }
+
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesToBeMigratedSoFar(), 1);
+    ASSERT_EQ(migrationSource.getSessionOplogEntriesSkippedSoFarLowerBound(), 1);
 }
 
 TEST_F(SessionCatalogMigrationSourceTest,

@@ -172,7 +172,7 @@ components:
     homepage_url: https://github.com/mongodb/libmongocrypt
     open_hub_url: N/A
     release_monitoring_id: -1
-    local_directory_path: src/third_party/kms-message
+    local_directory_path: src/third_party/libmongocrypt
     team_owner: "Security"
     # Note: libmongocrypt exists in Black Duck, but not OpenHub
     upgrade_suppression: TODO SERVER-61193
@@ -198,6 +198,13 @@ components:
     release_monitoring_id: 1748
     local_directory_path: src/third_party/unwind
     team_owner: "Service Architecture"
+
+  "MongoDB C Driver":
+    homepage_url: https://github.com/mongodb/mongo-c-driver
+    open_hub_url: https://www.openhub.net/p/mongo-c-driver
+    release_monitoring_id: 10712
+    local_directory_path: src/third_party/libbson
+    team_owner: "Security"
 
   "Mozilla Firefox":
     homepage_url: https://www.mozilla.org/en-US/firefox/organizations/

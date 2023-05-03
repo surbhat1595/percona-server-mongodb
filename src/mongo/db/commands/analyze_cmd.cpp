@@ -38,8 +38,8 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/query/analyze_command_gen.h"
-#include "mongo/db/query/ce/stats_catalog.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
+#include "mongo/db/query/stats/stats_catalog.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 
 namespace mongo {
@@ -53,12 +53,11 @@ StatusWith<BSONObj> analyzeCommandAsAggregationCommand(OperationContext* opCtx,
     // pipeline that looks like this, assuming the analyze is on the key "a.b.c"
     //
     //      [
-    //          { $project: { val : {$_internalFindAllValuesAtPath: "a.b.c" } } },
+    //          { $project: { val : "$a.b.c" } },
     //          { $group: {
     //              _id: "a.b.c",
     //              statistics: { $_internalConstructStats: "$$ROOT" }
     //          },
-    //          { $project: { key: "$_id" } },
     //          { $merge: {
     //              into: "system.statistics." + collection,
     //              on: "key",
@@ -66,26 +65,22 @@ StatusWith<BSONObj> analyzeCommandAsAggregationCommand(OperationContext* opCtx,
     //              whenNotMatched: "insert" }
     //          }
     //      ]
+    //
+    std::string into(str::stream() << NamespaceString::kStatisticsCollectionPrefix << collection);
+    FieldPath fieldPath(keyPath);
     return BSON(
-        "aggregate"
-        << collection << "pipeline"
-        << BSON_ARRAY(
-               BSON("$project" << BSON("val" << BSON("$_internalFindAllValuesAtPath" << keyPath)
-                                             << "key" << keyPath))
-               << BSON("$group" << BSON("_id" << keyPath << "statistics"
-                                              << BSON("$_internalConstructStats"
-                                                      << "$$ROOT")))
-               << BSON("$merge" << BSON(
-                           "into" << std::string(str::stream()
-                                                 << NamespaceString::kStatisticsCollectionPrefix
-                                                 << collection)
-                                  << "on"
-                                  << "_id"
-                                  << "whenMatched"
-                                  << "replace"
-                                  << "whenNotMatched"
-                                  << "insert")))
-        << "cursor" << BSONObj());
+        "aggregate" << collection << "pipeline"
+                    << BSON_ARRAY(BSON("$project" << BSON("val" << fieldPath.fullPathWithPrefix()))
+                                  << BSON("$group" << BSON("_id" << keyPath << "statistics"
+                                                                 << BSON("$_internalConstructStats"
+                                                                         << "$$ROOT")))
+                                  << BSON("$merge" << BSON("into" << std::move(into) << "on"
+                                                                  << "_id"
+                                                                  << "whenMatched"
+                                                                  << "replace"
+                                                                  << "whenNotMatched"
+                                                                  << "insert")))
+                    << "cursor" << BSONObj());
 }
 
 class CmdAnalyze final : public TypedCommand<CmdAnalyze> {
@@ -200,7 +195,7 @@ public:
                 uassertStatusOK(getStatusFromCommandResult(analyzeResult));
 
                 // Invalidate statistics in the cache for the analyzed path
-                StatsCatalog& statsCatalog = StatsCatalog::get(opCtx);
+                stats::StatsCatalog& statsCatalog = stats::StatsCatalog::get(opCtx);
                 uassertStatusOK(statsCatalog.invalidatePath(nss, key->toString()));
 
             } else if (sampleSize || sampleRate) {

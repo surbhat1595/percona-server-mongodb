@@ -59,6 +59,7 @@
 #include "mongo/db/query/query_settings_decoration.h"
 #include "mongo/db/query/stage_builder.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/stats/resource_consumption_metrics.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/net/socket_utils.h"
 #include "mongo/util/overloaded_visitor.h"
@@ -188,13 +189,16 @@ void generateSinglePlanExecutionInfo(const PlanExplainer::PlanStatsDetails& deta
     if (totalTimeMillis) {
         out->appendNumber("executionTimeMillis", *totalTimeMillis);
     } else {
-        if (summary->executionTime.precision == QueryExecTimerPrecision::kMicros) {
+        if (summary->executionTime.precision == QueryExecTimerPrecision::kNanos) {
             out->appendNumber(
                 "executionTimeMillisEstimate",
                 durationCount<Milliseconds>(summary->executionTime.executionTimeEstimate));
             out->appendNumber(
                 "executionTimeMicros",
                 durationCount<Microseconds>(summary->executionTime.executionTimeEstimate));
+            out->appendNumber(
+                "executionTimeNanos",
+                durationCount<Nanoseconds>(summary->executionTime.executionTimeEstimate));
         } else if (summary->executionTime.precision == QueryExecTimerPrecision::kMillis) {
             out->appendNumber(
                 "executionTimeMillisEstimate",
@@ -217,6 +221,18 @@ void generateSinglePlanExecutionInfo(const PlanExplainer::PlanStatsDetails& deta
 
     // Add the tree of stages, with individual execution stats for each stage.
     out->append("executionStages", stats);
+}
+
+void generateOperationMetrics(PlanExecutor* exec, BSONObjBuilder* out) {
+    if (ResourceConsumption::isMetricsProfilingEnabled()) {
+        auto& metricsCollector = ResourceConsumption::MetricsCollector::get(exec->getOpCtx());
+        if (metricsCollector.hasCollectedMetrics()) {
+            BSONObjBuilder metricsBuilder(out->subobjStart("operationMetrics"));
+            auto& metrics = metricsCollector.getMetrics();
+            metrics.toBsonNonZeroFields(&metricsBuilder);
+            metricsBuilder.doneFast();
+        }
+    }
 }
 
 /**
@@ -284,7 +300,7 @@ void generateExecutionInfo(PlanExecutor* exec,
         }
         allPlansBob.doneFast();
     }
-
+    generateOperationMetrics(exec, &execBob);
     execBob.doneFast();
 }
 

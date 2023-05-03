@@ -88,7 +88,7 @@ LogicalRewriter::LogicalRewriter(const Metadata& metadata,
                                  const PathToIntervalFn& pathToInterval,
                                  const ConstFoldFn& constFold,
                                  const LogicalPropsInterface& logicalPropsDerivation,
-                                 const CEInterface& ceDerivation)
+                                 const CardinalityEstimator& cardinalityEstimator)
     : _activeRewriteSet(std::move(rewriteSet)),
       _groupsPending(),
       _metadata(metadata),
@@ -99,7 +99,7 @@ LogicalRewriter::LogicalRewriter(const Metadata& metadata,
       _pathToInterval(pathToInterval),
       _constFold(constFold),
       _logicalPropsDerivation(logicalPropsDerivation),
-      _ceDerivation(ceDerivation) {
+      _cardinalityEstimator(cardinalityEstimator) {
     initializeRewrites();
 
     if (_activeRewriteSet.count(LogicalRewriteType::SargableSplit) > 0) {
@@ -132,7 +132,7 @@ std::pair<GroupIdType, NodeIdSet> LogicalRewriter::addNode(const ABT& node,
     }
 
     const GroupIdType resultGroupId = _memo.integrate(
-        Memo::Context{&_metadata, &_debugInfo, &_logicalPropsDerivation, &_ceDerivation},
+        Memo::Context{&_metadata, &_debugInfo, &_logicalPropsDerivation, &_cardinalityEstimator},
         node,
         std::move(targetGroupMap),
         insertNodeIds,
@@ -602,13 +602,15 @@ static boost::optional<ABT> mergeSargableNodes(
         return {};
     }
 
+    const auto& hints = ctx.getHints();
     const ScanDefinition& scanDef =
         ctx.getMetadata()._scanDefs.at(indexingAvailability.getScanDefName());
     auto candidateIndexes = computeCandidateIndexes(ctx.getPrefixId(),
                                                     scanProjName,
                                                     mergedReqs,
                                                     scanDef,
-                                                    ctx.getHints()._fastIndexNullHandling,
+                                                    hints._fastIndexNullHandling,
+                                                    hints._maxIndexEqPrefixes,
                                                     hasEmptyInterval,
                                                     ctx.getConstFold());
     if (hasEmptyInterval) {
@@ -669,7 +671,8 @@ struct SubstituteConvert<LimitSkipNode> {
 
 static void convertFilterToSargableNode(ABT::reference_type node,
                                         const FilterNode& filterNode,
-                                        RewriteContext& ctx) {
+                                        RewriteContext& ctx,
+                                        const ProjectionName& scanProjName) {
     using namespace properties;
 
     const LogicalProps& props = ctx.getAboveLogicalProps();
@@ -677,7 +680,6 @@ static void convertFilterToSargableNode(ABT::reference_type node,
         // Can only convert to sargable node if we have indexing availability.
         return;
     }
-
     const auto& indexingAvailability = getPropertyConst<IndexingAvailability>(props);
     const ScanDefinition& scanDef =
         ctx.getMetadata()._scanDefs.at(indexingAvailability.getScanDefName());
@@ -717,7 +719,6 @@ static void convertFilterToSargableNode(ABT::reference_type node,
         return;
     }
 
-    const ProjectionName& scanProjName = indexingAvailability.getScanProjection();
     bool hasEmptyInterval = simplifyPartialSchemaReqPaths(
         scanProjName, scanDef.getMultikeynessTrie(), conversion->_reqMap, ctx.getConstFold());
     if (hasEmptyInterval) {
@@ -729,11 +730,13 @@ static void convertFilterToSargableNode(ABT::reference_type node,
         return;
     }
 
+    const auto& hints = ctx.getHints();
     auto candidateIndexes = computeCandidateIndexes(ctx.getPrefixId(),
                                                     scanProjName,
                                                     conversion->_reqMap,
                                                     scanDef,
-                                                    ctx.getHints()._fastIndexNullHandling,
+                                                    hints._fastIndexNullHandling,
+                                                    hints._maxIndexEqPrefixes,
                                                     hasEmptyInterval,
                                                     ctx.getConstFold());
 
@@ -764,6 +767,259 @@ static ABT appendFieldPath(const FieldPathType& fieldPath, ABT input) {
     return input;
 }
 
+/**
+ * Takes an expression or path and attempts to remove Not nodes by pushing them
+ * down toward the leaves. We only remove a Not if we can combine it into a
+ * PathCompare, or cancel it out with another Not.
+ *
+ * Caller provides:
+ * - an input ABT
+ * - 'negate': true if we want the new ABT to be the negation of the input.
+ *
+ * Callee can reply with either:
+ * - boost::none, meaning we can't make the ABT any simpler.
+ * - struct Simplified, which means we can make the ABT simpler.
+ *     - 'newNode' is the replacement.
+ *     - 'negated' says whether 'newNode' is the negation of the original.
+ *       For example, we can simplify the child of Traverse but not push
+ *       a Not through it.
+ */
+class NotPushdown {
+public:
+    struct Simplified {
+        // True if 'newNode' is the negation of the original node.
+        bool negated;
+        ABT newNode;
+    };
+    using Result = boost::optional<Simplified>;
+
+    Result operator()(const ABT& /*n*/, const PathGet& get, const bool negate) {
+        if (auto simplified = get.getPath().visit(*this, negate)) {
+            return {
+                {simplified->negated, make<PathGet>(get.name(), std::move(simplified->newNode))}};
+        }
+        return {};
+    }
+
+    Result operator()(const ABT& /*n*/, const PathCompare& comp, const bool negate) {
+        if (!negate) {
+            // No rewrite necessary.
+            return {};
+        }
+
+        if (auto op = negateComparisonOp(comp.op())) {
+            return {{true, make<PathCompare>(*op, comp.getVal())}};
+        }
+        return {};
+    }
+
+    Result operator()(const ABT& /*n*/, const UnaryOp& unary, const bool negate) {
+        // Only handle Not.
+        if (unary.op() != Operations::Not) {
+            return {};
+        }
+
+        const bool negateChild = !negate;
+        if (auto simplified = unary.getChild().visit(*this, negateChild)) {
+            // Remove the 'Not' if either:
+            // - it can cancel with a Not in some ancestor ('negate')
+            // - it can cancel with a Not in the child ('simplified->negated')
+            // The 'either' is exclusive because the child is only 'negated' if we
+            // requested it ('negateChild').
+            const bool removeNot = negate || simplified->negated;
+            if (removeNot) {
+                // We cancelled with a Not in some ancestor iff the caller asked us to.
+                simplified->negated = negate;
+            } else {
+                simplified->newNode =
+                    make<UnaryOp>(Operations::Not, std::move(simplified->newNode));
+            }
+            return simplified;
+        } else {
+            // We failed to simplify the child.
+            if (negate) {
+                // But we can still simplify 'n' by unwrapping the 'Not'.
+                return {{true, unary.getChild()}};
+            } else {
+                // Therefore we failed to simplify 'n'.
+                return {};
+            }
+        }
+    }
+
+    Result operator()(const ABT& /*n*/, const PathLambda& pathLambda, const bool negate) {
+        const LambdaAbstraction* lambda = pathLambda.getLambda().cast<LambdaAbstraction>();
+        if (!lambda) {
+            // Shouldn't happen; just don't simplify.
+            return {};
+        }
+
+        // Try to simplify the lambda body.
+        // If that succeeds, it may expose 'PathLambda Lambda [x] EvalFilter p (Variable [x])',
+        // which we can simplify to just 'p'. That's only valid if the Variable [x] is the
+        // only occurrence of 'x'.
+
+        if (auto simplified = lambda->getBody().visit(*this, negate)) {
+            auto&& [negated, newBody] = std::move(*simplified);
+            // If the lambda var is used only once, simplifying the body may have exposed
+            // 'PathLambda Lambda [x] EvalFilter p (Variable [x])', which we can replace
+            // with just 'p'.
+            if (auto iter = _varCounts.find(lambda->varName());
+                iter != _varCounts.end() && iter->second == 1) {
+                if (EvalFilter* evalF = newBody.cast<EvalFilter>()) {
+                    if (Variable* input = evalF->getInput().cast<Variable>();
+                        input && input->name() == lambda->varName()) {
+                        return {{negated, std::exchange(evalF->getPath(), make<Blackhole>())}};
+                    }
+                }
+            }
+            return {{
+                negated,
+                make<PathLambda>(make<LambdaAbstraction>(lambda->varName(), std::move(newBody))),
+            }};
+        }
+        return {};
+    }
+
+    Result operator()(const ABT& /*n*/, const PathTraverse& traverse, bool /*negate*/) {
+        // We actually don't care whether the caller is asking us to negate.
+        // We can't negate a Traverse; the best we can do is simplify the child.
+        if (auto simplified = traverse.getPath().visit(*this, false /*negate*/)) {
+            tassert(7022400,
+                    "NotPushdown unexpectedly negated when asked only to simplify",
+                    !simplified->negated);
+            simplified->newNode =
+                make<PathTraverse>(std::move(simplified->newNode), traverse.getMaxDepth());
+            return simplified;
+        } else {
+            return {};
+        }
+    }
+
+    Result operator()(const ABT& /*n*/, const PathComposeM& compose, const bool negate) {
+        auto simplified1 = compose.getPath1().visit(*this, negate);
+        auto simplified2 = compose.getPath2().visit(*this, negate);
+        if (!simplified1 && !simplified2) {
+            // Neither child is simplified.
+            return {};
+        }
+        // At least one child is simplified, so we're going to rebuild a node.
+        // If either child was not simplified, we're going to copy the original
+        // unsimplified child.
+        if (!simplified1) {
+            simplified1 = {{false, compose.getPath1()}};
+        }
+        if (!simplified2) {
+            simplified2 = {{false, compose.getPath2()}};
+        }
+
+        if (!simplified1->negated && !simplified2->negated) {
+            // Neither is negated: keep the ComposeM.
+            return {{false,
+                     make<PathComposeM>(std::move(simplified1->newNode),
+                                        std::move(simplified2->newNode))}};
+        }
+        // At least one child is negated, so we're going to rewrite to ComposeA.
+        // If either child was not able to aborb a Not, we'll add an explicit Not to its root.
+        if (!simplified1->negated) {
+            simplified1 = {{true, negatePath(std::move(simplified1->newNode))}};
+        }
+        if (!simplified2->negated) {
+            simplified2 = {{true, negatePath(std::move(simplified2->newNode))}};
+        }
+        return {
+            {true,
+             make<PathComposeA>(std::move(simplified1->newNode), std::move(simplified2->newNode))}};
+    }
+
+    Result operator()(const ABT& /*n*/, const EvalFilter& evalF, const bool negate) {
+        if (auto simplified = evalF.getPath().visit(*this, negate)) {
+            simplified->newNode =
+                make<EvalFilter>(std::move(simplified->newNode), evalF.getInput());
+            return simplified;
+        }
+        return {};
+    }
+
+    template <typename T>
+    Result operator()(const ABT& /*n*/, const T& /*nodeSubclass*/, bool /*negate*/) {
+        // We don't know how to simplify this node.
+        return {};
+    }
+
+    static boost::optional<ABT> simplify(const ABT& n, PrefixId& prefixId) {
+        ProjectionNameMap<size_t> varCounts;
+        VariableEnvironment::walkVariables(n,
+                                           [&](const Variable& var) { ++varCounts[var.name()]; });
+
+
+        NotPushdown instance{varCounts, prefixId};
+        if (auto simplified = n.visit(instance, false /*negate*/)) {
+            auto&& [negated, newNode] = std::move(*simplified);
+            tassert(7022401,
+                    "NotPushdown unexpectedly negated when asked only to simplify",
+                    !simplified->negated);
+            return newNode;
+        }
+        return {};
+    }
+
+private:
+    NotPushdown(const ProjectionNameMap<size_t>& varCounts, PrefixId& prefixId)
+        : _varCounts(varCounts), _prefixId(prefixId) {}
+
+    // Take a Path and negate it.  Use Lambda / EvalFilter to toggle between expressions and paths.
+    ABT negatePath(ABT path) {
+        ProjectionName freshVar = _prefixId.getNextId("tmp_bool");
+        return make<PathLambda>(make<LambdaAbstraction>(
+            freshVar,
+            make<UnaryOp>(Operations::Not,
+                          make<EvalFilter>(std::move(path), make<Variable>(freshVar)))));
+    }
+
+    const ProjectionNameMap<size_t>& _varCounts;
+    PrefixId& _prefixId;
+};
+
+/**
+ * Attempt to remove Traverse nodes from a FilterNode.
+ *
+ * If we succeed, add a replacement node to the RewriteContext and return true.
+ */
+static bool simplifyFilterPath(const FilterNode& filterNode,
+                               RewriteContext& ctx,
+                               const ProjectionName& scanProjName,
+                               const MultikeynessTrie& trie) {
+    // Expect the filter to be EvalFilter, or UnaryOp [Not] EvalFilter.
+    const ABT& filter = filterNode.getFilter();
+    const bool toplevelNot =
+        filter.is<UnaryOp>() && filter.cast<UnaryOp>()->op() == Operations::Not;
+    const ABT& argument = toplevelNot ? filter.cast<UnaryOp>()->getChild() : filter;
+    if (const auto* evalFilter = argument.cast<EvalFilter>()) {
+        if (const auto* variable = evalFilter->getInput().cast<Variable>()) {
+            // If EvalFilter is applied to the whole-document binding then
+            // we can simplify the path using what we know about the multikeyness
+            // of the collection.
+            if (variable->name() != scanProjName) {
+                return false;
+            }
+
+            ABT path = evalFilter->getPath();
+            if (simplifyTraverseNonArray(path, trie)) {
+                ABT newPredicate = make<EvalFilter>(std::move(path), evalFilter->getInput());
+                if (toplevelNot) {
+                    newPredicate = make<UnaryOp>(Operations::Not, std::move(newPredicate));
+                }
+                ctx.addNode(make<FilterNode>(std::move(newPredicate), filterNode.getChild()),
+                            true /*substitute*/);
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 template <>
 struct SubstituteConvert<FilterNode> {
     void operator()(ABT::reference_type node, RewriteContext& ctx) {
@@ -772,8 +1028,10 @@ struct SubstituteConvert<FilterNode> {
         // Sub-rewrite: attempt to de-compose filter. If we have a path with a prefix of PathGet's
         // followed by a PathComposeM, then split into two filter nodes at the composition and
         // retain the prefix for each.
-        // TODO: consider using a standalone rewrite.
-        if (auto evalFilter = filterNode.getFilter().cast<EvalFilter>(); evalFilter != nullptr) {
+        // TODO SERVER-71584: Consider splitting this rewrite into its own phase. Share its
+        // implementation with the version of this optimization performed at the end of ABT
+        // translation.
+        if (auto* evalFilter = filterNode.getFilter().cast<EvalFilter>()) {
             ABT::reference_type pathRef = evalFilter->getPath().ref();
             FieldPathType fieldPath;
             for (;;) {
@@ -801,7 +1059,33 @@ struct SubstituteConvert<FilterNode> {
             }
         }
 
-        convertFilterToSargableNode(node, filterNode, ctx);
+
+        using namespace properties;
+        const LogicalProps& props = ctx.getAboveLogicalProps();
+        if (!hasProperty<IndexingAvailability>(props)) {
+            return;
+        }
+        const auto& indexingAvailability = getPropertyConst<IndexingAvailability>(props);
+        const ProjectionName& scanProjName = indexingAvailability.getScanProjection();
+
+        const ScanDefinition& scanDef =
+            ctx.getMetadata()._scanDefs.at(indexingAvailability.getScanDefName());
+        if (!scanDef.exists()) {
+            return;
+        }
+        const MultikeynessTrie& trie = scanDef.getMultikeynessTrie();
+
+        if (simplifyFilterPath(filterNode, ctx, scanProjName, trie)) {
+            return;
+        }
+
+        if (auto filter = NotPushdown::simplify(filterNode.getFilter(), ctx.getPrefixId())) {
+            ctx.addNode(make<FilterNode>(std::move(*filter), filterNode.getChild()),
+                        true /*substitute*/);
+            return;
+        }
+
+        convertFilterToSargableNode(node, filterNode, ctx, scanProjName);
     }
 };
 
@@ -898,12 +1182,14 @@ struct SubstituteConvert<EvaluationNode> {
                     isIntervalReqFullyOpenDNF(req.getIntervals()));
         }
 
+        const auto& hints = ctx.getHints();
         bool hasEmptyInterval = false;
         auto candidateIndexes = computeCandidateIndexes(ctx.getPrefixId(),
                                                         scanProjName,
                                                         conversion->_reqMap,
                                                         scanDef,
-                                                        ctx.getHints()._fastIndexNullHandling,
+                                                        hints._fastIndexNullHandling,
+                                                        hints._maxIndexEqPrefixes,
                                                         hasEmptyInterval,
                                                         ctx.getConstFold());
 
@@ -1087,8 +1373,10 @@ struct ExploreConvert<SargableNode> {
 
         const auto& reqMap = sargableNode.getReqMap();
 
-        const bool fastIndexNullHandling = ctx.getHints()._fastIndexNullHandling;
-        const bool disableYieldingTolerantPlans = ctx.getHints()._disableYieldingTolerantPlans;
+        const auto& hints = ctx.getHints();
+        const bool fastIndexNullHandling = hints._fastIndexNullHandling;
+        const size_t maxIndexEqPrefixes = hints._maxIndexEqPrefixes;
+        const bool disableYieldingTolerantPlans = hints._disableYieldingTolerantPlans;
 
         std::vector<bool> isFullyOpen;
         std::vector<bool> mayReturnNull;
@@ -1100,8 +1388,8 @@ struct ExploreConvert<SargableNode> {
             }
 
             if (!fastIndexNullHandling && !isIndex) {
-                // Pre-compute if needed if a requirement's interval may contain nulls, and also has
-                // an output binding.
+                // Pre-compute if a requirement's interval may contain nulls, and also has an output
+                // binding.
                 mayReturnNull.reserve(reqMap.size());
                 for (const auto& [key, req] : reqMap) {
                     mayReturnNull.push_back(req.mayReturnNull(ctx.getConstFold()));
@@ -1150,6 +1438,7 @@ struct ExploreConvert<SargableNode> {
                                                                 splitResult._leftReqs,
                                                                 scanDef,
                                                                 fastIndexNullHandling,
+                                                                maxIndexEqPrefixes,
                                                                 hasEmptyLeftInterval,
                                                                 ctx.getConstFold());
             if (isIndex && leftCandidateIndexes.empty()) {
@@ -1163,6 +1452,7 @@ struct ExploreConvert<SargableNode> {
                                                                  splitResult._rightReqs,
                                                                  scanDef,
                                                                  fastIndexNullHandling,
+                                                                 maxIndexEqPrefixes,
                                                                  hasEmptyRightInterval,
                                                                  ctx.getConstFold());
             if (isIndex && rightCandidateIndexes.empty()) {

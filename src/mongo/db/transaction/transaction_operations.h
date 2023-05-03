@@ -67,12 +67,43 @@ public:
             std::vector<BSONObj> operations;
         };
 
+        ApplyOpsInfo(std::vector<ApplyOpsEntry> applyOpsEntries,
+                     std::size_t numberOfOplogSlotsUsed,
+                     bool prepare)
+            : applyOpsEntries(std::move(applyOpsEntries)),
+              numberOfOplogSlotsUsed(numberOfOplogSlotsUsed),
+              prepare(prepare) {}
+
+        explicit ApplyOpsInfo(bool prepare)
+            : applyOpsEntries(), numberOfOplogSlotsUsed(0), prepare(prepare) {}
+
         // Representation of "applyOps" oplog entries.
         std::vector<ApplyOpsEntry> applyOpsEntries;
 
         // Number of oplog slots utilized.
         std::size_t numberOfOplogSlotsUsed;
+
+        // Indicates if we are generating "applyOps" oplog entries for a prepared transaction.
+        // This is derived from the 'prepared' parameter passed to the getApplyOpsInfo() function.
+        bool prepare;
     };
+
+    /**
+     * Accepts an empty BSON builder and appends the given transaction statements to an 'applyOps'
+     * array field (and their corresponding statement ids to 'stmtIdsWritten'). The transaction
+     * statements are represented as range ['stmtBegin', 'stmtEnd') and BSON serialized objects
+     * 'operations'. If any of the statements has a pre-image or post-image that needs to be
+     * stored in the image collection, stores it to 'imageToWrite'.
+     *
+     * Used to implement logOplogEntries().
+     */
+    static void packTransactionStatementsForApplyOps(
+        std::vector<TransactionOperation>::const_iterator stmtBegin,
+        std::vector<TransactionOperation>::const_iterator stmtEnd,
+        const std::vector<BSONObj>& operations,
+        BSONObjBuilder* applyOpsBuilder,
+        std::vector<StmtId>* stmtIdsWritten,
+        boost::optional<repl::ReplOperation::ImageBundle>* imageToWrite);
 
     TransactionOperations() = default;
 

@@ -34,6 +34,7 @@
 #include "mongo/db/query/optimizer/node.h"
 #include "mongo/db/query/optimizer/opt_phase_manager.h"
 #include "mongo/db/query/optimizer/rewrites/const_eval.h"
+#include "mongo/db/query/optimizer/utils/unit_test_abt_literals.h"
 #include "mongo/db/query/optimizer/utils/unit_test_utils.h"
 #include "mongo/unittest/unittest.h"
 
@@ -76,6 +77,7 @@ TEST(LogicalRewriter, RootNodeMerge) {
     auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase},
                                          prefixId,
                                          {{{"test", createScanDef({}, {})}}},
+                                         boost::none /*costModel*/,
                                          DebugInfo::kDefaultForTests);
     ABT rewritten = std::move(rootNode);
     phaseManager.optimize(rewritten);
@@ -290,6 +292,7 @@ TEST(LogicalRewriter, FilterProjectRewrite) {
     auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase},
                                          prefixId,
                                          {{{"test", createScanDef({}, {})}}},
+                                         boost::none /*costModel*/,
                                          DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
@@ -401,6 +404,7 @@ TEST(LogicalRewriter, FilterProjectComplexRewrite) {
     auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase},
                                          prefixId,
                                          {{{"test", createScanDef({}, {})}}},
+                                         boost::none /*costModel*/,
                                          DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
@@ -479,6 +483,7 @@ TEST(LogicalRewriter, FilterProjectGroupRewrite) {
     auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase},
                                          prefixId,
                                          {{{"test", createScanDef({}, {})}}},
+                                         boost::none /*costModel*/,
                                          DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
@@ -549,6 +554,7 @@ TEST(LogicalRewriter, FilterProjectUnwindRewrite) {
     auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase},
                                          prefixId,
                                          {{{"test", createScanDef({}, {})}}},
+                                         boost::none /*costModel*/,
                                          DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
@@ -620,6 +626,7 @@ TEST(LogicalRewriter, FilterProjectExchangeRewrite) {
     auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase},
                                          prefixId,
                                          {{{"test", createScanDef({}, {})}}},
+                                         boost::none /*costModel*/,
                                          DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
@@ -692,6 +699,7 @@ TEST(LogicalRewriter, UnwindCollationRewrite) {
     auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase},
                                          prefixId,
                                          {{{"test", createScanDef({}, {})}}},
+                                         boost::none /*costModel*/,
                                          DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
@@ -805,6 +813,7 @@ TEST(LogicalRewriter, FilterUnionReorderSingleProjection) {
         makePhaseManager({OptPhase::MemoSubstitutionPhase, OptPhase::MemoExplorationPhase},
                          prefixId,
                          {{{"test1", createScanDef({}, {})}, {"test2", createScanDef({}, {})}}},
+                         boost::none /*costModel*/,
                          DebugInfo::kDefaultForTests);
     phaseManager.optimize(latest);
 
@@ -969,6 +978,7 @@ TEST(LogicalRewriter, MultipleFilterUnionReorder) {
         makePhaseManager({OptPhase::MemoSubstitutionPhase, OptPhase::MemoExplorationPhase},
                          prefixId,
                          {{{"test1", createScanDef({}, {})}, {"test2", createScanDef({}, {})}}},
+                         boost::none /*costModel*/,
                          DebugInfo::kDefaultForTests);
     phaseManager.optimize(latest);
 
@@ -1074,6 +1084,7 @@ TEST(LogicalRewriter, FilterUnionUnionPushdown) {
                                          {{{"test1", createScanDef({}, {})},
                                            {"test2", createScanDef({}, {})},
                                            {"test3", createScanDef({}, {})}}},
+                                         boost::none /*costModel*/,
                                          DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
 
@@ -1127,13 +1138,13 @@ TEST(LogicalRewriter, FilterUnionUnionPushdown) {
         "|   Sargable [Complete]\n"
         "|   |   |   |   |   |   requirementsMap: \n"
         "|   |   |   |   |   |       refProjection: ptest, path: 'PathGet [a] PathTraverse [1] "
-        "PathIdentity []', intervals: {{{[Const [1], Const [1]]}}}\n"
+        "PathIdentity []', intervals: {{{=Const [1]}}}\n"
         "|   |   |   |   |   candidateIndexes: \n"
         "|   |   |   |   scanParams: \n"
         "|   |   |   |       {'a': evalTemp_0}\n"
         "|   |   |   |           residualReqs: \n"
         "|   |   |   |               refProjection: evalTemp_0, path: 'PathTraverse [1] "
-        "PathIdentity []', intervals: {{{[Const [1], Const [1]]}}}, entryIndex: 0\n"
+        "PathIdentity []', intervals: {{{=Const [1]}}}, entryIndex: 0\n"
         "|   |   |   BindBlock:\n"
         "|   |   RefBlock: \n"
         "|   |       Variable [ptest]\n"
@@ -1148,13 +1159,13 @@ TEST(LogicalRewriter, FilterUnionUnionPushdown) {
         "|   Sargable [Complete]\n"
         "|   |   |   |   |   |   requirementsMap: \n"
         "|   |   |   |   |   |       refProjection: ptest, path: 'PathGet [a] PathTraverse [1] "
-        "PathIdentity []', intervals: {{{[Const [1], Const [1]]}}}\n"
+        "PathIdentity []', intervals: {{{=Const [1]}}}\n"
         "|   |   |   |   |   candidateIndexes: \n"
         "|   |   |   |   scanParams: \n"
         "|   |   |   |       {'a': evalTemp_2}\n"
         "|   |   |   |           residualReqs: \n"
         "|   |   |   |               refProjection: evalTemp_2, path: 'PathTraverse [1] "
-        "PathIdentity []', intervals: {{{[Const [1], Const [1]]}}}, entryIndex: 0\n"
+        "PathIdentity []', intervals: {{{=Const [1]}}}, entryIndex: 0\n"
         "|   |   |   BindBlock:\n"
         "|   |   RefBlock: \n"
         "|   |       Variable [ptest]\n"
@@ -1165,13 +1176,13 @@ TEST(LogicalRewriter, FilterUnionUnionPushdown) {
         "Sargable [Complete]\n"
         "|   |   |   |   |   requirementsMap: \n"
         "|   |   |   |   |       refProjection: ptest, path: 'PathGet [a] PathTraverse [1] "
-        "PathIdentity []', intervals: {{{[Const [1], Const [1]]}}}\n"
+        "PathIdentity []', intervals: {{{=Const [1]}}}\n"
         "|   |   |   |   candidateIndexes: \n"
         "|   |   |   scanParams: \n"
         "|   |   |       {'a': evalTemp_1}\n"
         "|   |   |           residualReqs: \n"
         "|   |   |               refProjection: evalTemp_1, path: 'PathTraverse [1] PathIdentity "
-        "[]', intervals: {{{[Const [1], Const [1]]}}}, entryIndex: 0\n"
+        "[]', intervals: {{{=Const [1]}}}, entryIndex: 0\n"
         "|   |   BindBlock:\n"
         "|   RefBlock: \n"
         "|       Variable [ptest]\n"
@@ -1219,6 +1230,7 @@ TEST(LogicalRewriter, UnionPreservesCommonLogicalProps) {
         makePhaseManager({OptPhase::MemoSubstitutionPhase, OptPhase::MemoExplorationPhase},
                          prefixId,
                          metadata,
+                         boost::none /*costModel*/,
                          DebugInfo::kDefaultForTests);
 
     ABT optimized = rootNode;
@@ -1277,7 +1289,7 @@ TEST(LogicalRewriter, UnionPreservesCommonLogicalProps) {
         "    |           Sargable [Complete]\n"
         "    |           |   |   |   |   |   requirementsMap: \n"
         "    |           |   |   |   |   |       refProjection: ptest1, path: 'PathGet [a] "
-        "PathIdentity []', boundProjection: a, intervals: {{{[Const [minKey], Const [maxKey]]}}}\n"
+        "PathIdentity []', boundProjection: a, intervals: {{{<fully open>}}}\n"
         "    |           |   |   |   |   candidateIndexes: \n"
         "    |           |   |   |   scanParams: \n"
         "    |           |   |   |       {'a': a}\n"
@@ -1339,7 +1351,7 @@ TEST(LogicalRewriter, UnionPreservesCommonLogicalProps) {
         "    |           Sargable [Complete]\n"
         "    |           |   |   |   |   |   requirementsMap: \n"
         "    |           |   |   |   |   |       refProjection: ptest2, path: 'PathGet [a] "
-        "PathIdentity []', boundProjection: a, intervals: {{{[Const [minKey], Const [maxKey]]}}}\n"
+        "PathIdentity []', boundProjection: a, intervals: {{{<fully open>}}}\n"
         "    |           |   |   |   |   candidateIndexes: \n"
         "    |           |   |   |   scanParams: \n"
         "    |           |   |   |       {'a': a}\n"
@@ -1436,6 +1448,7 @@ TEST(LogicalRewriter, SargableCE) {
         makePhaseManager({OptPhase::MemoSubstitutionPhase, OptPhase::MemoExplorationPhase},
                          prefixId,
                          {{{"test", createScanDef({}, {})}}},
+                         boost::none /*costModel*/,
                          DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
@@ -1487,17 +1500,17 @@ TEST(LogicalRewriter, SargableCE) {
         "    |           Sargable [Complete]\n"
         "    |           |   |   |   |   |   requirementsMap: \n"
         "    |           |   |   |   |   |       refProjection: ptest, path: 'PathGet [a] "
-        "PathIdentity []', intervals: {{{[Const [1], Const [1]]}}}\n"
+        "PathIdentity []', intervals: {{{=Const [1]}}}\n"
         "    |           |   |   |   |   |       refProjection: ptest, path: 'PathGet [b] "
-        "PathIdentity []', intervals: {{{[Const [2], Const [2]]}}}\n"
+        "PathIdentity []', intervals: {{{=Const [2]}}}\n"
         "    |           |   |   |   |   candidateIndexes: \n"
         "    |           |   |   |   scanParams: \n"
         "    |           |   |   |       {'a': evalTemp_2, 'b': evalTemp_3}\n"
         "    |           |   |   |           residualReqs: \n"
         "    |           |   |   |               refProjection: evalTemp_2, path: 'PathIdentity "
-        "[]', intervals: {{{[Const [1], Const [1]]}}}, entryIndex: 0\n"
+        "[]', intervals: {{{=Const [1]}}}, entryIndex: 0\n"
         "    |           |   |   |               refProjection: evalTemp_3, path: 'PathIdentity "
-        "[]', intervals: {{{[Const [2], Const [2]]}}}, entryIndex: 1\n"
+        "[]', intervals: {{{=Const [2]}}}, entryIndex: 1\n"
         "    |           |   |   BindBlock:\n"
         "    |           |   RefBlock: \n"
         "    |           |       Variable [ptest]\n"
@@ -1546,6 +1559,7 @@ TEST(LogicalRewriter, RemoveNoopFilter) {
     auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase},
                                          prefixId,
                                          {{{"test", createScanDef({}, {})}}},
+                                         boost::none /*costModel*/,
                                          DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
@@ -1561,6 +1575,834 @@ TEST(LogicalRewriter, RemoveNoopFilter) {
         "        [ptest]\n"
         "            Source []\n",
         latest);
+}
+
+TEST(LogicalRewriter, NotPushdownToplevelSuccess) {
+    using namespace properties;
+    PrefixId prefixId;
+
+    ABT scanNode = make<ScanNode>("scan_0", "coll");
+
+    ABT abEq3 = make<PathGet>(
+        "a",
+        make<PathTraverse>(
+            make<PathGet>("b",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(3)),
+                                             PathTraverse::kSingleLevel)),
+            PathTraverse::kSingleLevel));
+    ABT filterNode = make<FilterNode>(
+        make<UnaryOp>(Operations::Not, make<EvalFilter>(abEq3, make<Variable>("scan_0"))),
+        std::move(scanNode));
+
+    ABT rootNode = make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{"scan_0"}},
+                                  std::move(filterNode));
+
+    auto phaseManager = makePhaseManager(
+        {OptPhase::ConstEvalPre, OptPhase::MemoSubstitutionPhase},
+        prefixId,
+        Metadata{{
+            {"coll",
+             createScanDef(
+                 {},
+                 {{"index1",
+                   IndexDefinition{// collation
+                                   {{makeIndexPath(FieldPathType{"a", "b"}, false /*isMultiKey*/),
+                                     CollationOp::Ascending}},
+                                   false /*isMultiKey*/,
+                                   {DistributionType::Centralized},
+                                   {} /*partialReqMap*/}}})},
+        }},
+        boost::none /*costModel*/,
+        DebugInfo::kDefaultForTests);
+    ABT latest = std::move(rootNode);
+    phaseManager.optimize(latest);
+
+    // We remove the Traverse nodes, and combine the Not ... Eq into Neq.
+    ASSERT_EXPLAIN_V2(
+        "Root []\n"
+        "|   |   projections: \n"
+        "|   |       scan_0\n"
+        "|   RefBlock: \n"
+        "|       Variable [scan_0]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [scan_0]\n"
+        "|   PathGet [a]\n"
+        "|   PathGet [b]\n"
+        "|   PathCompare [Neq]\n"
+        "|   Const [3]\n"
+        "Scan [coll]\n"
+        "    BindBlock:\n"
+        "        [scan_0]\n"
+        "            Source []\n",
+        latest);
+}
+
+TEST(LogicalRewriter, NotPushdownToplevelFailureMultikey) {
+    using namespace properties;
+    PrefixId prefixId;
+
+    ABT scanNode = make<ScanNode>("scan_0", "coll");
+
+    ABT abEq3 = make<PathGet>(
+        "a",
+        make<PathTraverse>(
+            make<PathGet>("b",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(3)),
+                                             PathTraverse::kSingleLevel)),
+            PathTraverse::kSingleLevel));
+    ABT filterNode = make<FilterNode>(
+        make<UnaryOp>(Operations::Not, make<EvalFilter>(abEq3, make<Variable>("scan_0"))),
+        std::move(scanNode));
+
+    ABT rootNode = make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{"scan_0"}},
+                                  std::move(filterNode));
+
+    auto phaseManager = makePhaseManager(
+        {OptPhase::ConstEvalPre, OptPhase::MemoSubstitutionPhase},
+        prefixId,
+        Metadata{{
+            {"coll",
+             createScanDef(
+                 {},
+                 {{"index1",
+                   IndexDefinition{// collation
+                                   {{makeIndexPath(FieldPathType{"a", "b"}, true /*isMultiKey*/),
+                                     CollationOp::Ascending}},
+                                   true /*isMultiKey*/,
+                                   {DistributionType::Centralized},
+                                   {} /*partialReqMap*/}}})},
+        }},
+        boost::none /*costModel*/,
+        DebugInfo::kDefaultForTests);
+    ABT latest = std::move(rootNode);
+    phaseManager.optimize(latest);
+
+    // Because the index is multikey, we don't remove the Traverse nodes,
+    // which prevents us from pushing down the Not.
+    ASSERT_EXPLAIN_V2(
+        "Root []\n"
+        "|   |   projections: \n"
+        "|   |       scan_0\n"
+        "|   RefBlock: \n"
+        "|       Variable [scan_0]\n"
+        "Filter []\n"
+        "|   UnaryOp [Not]\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [scan_0]\n"
+        "|   PathGet [a]\n"
+        "|   PathTraverse [1]\n"
+        "|   PathGet [b]\n"
+        "|   PathTraverse [1]\n"
+        "|   PathCompare [Eq]\n"
+        "|   Const [3]\n"
+        "Scan [coll]\n"
+        "    BindBlock:\n"
+        "        [scan_0]\n"
+        "            Source []\n",
+        latest);
+}
+
+TEST(LogicalRewriter, NotPushdownComposeM) {
+    using namespace unit_test_abt_literals;
+    using namespace properties;
+
+    ABT rootNode =
+        NodeBuilder{}
+            .root("scan_0")
+            .filter(_unary("Not",
+                           _evalf(_composem(
+                                      // A ComposeM where both args can be negated.
+                                      _composem(_get("a", _cmp("Eq", "2"_cint64)),
+                                                _get("b", _cmp("Eq", "3"_cint64))),
+                                      // A ComposeM where only one arg can be negated.
+                                      _composem(_get("c", _cmp("Eq", "4"_cint64)),
+                                                _get("d", _traverse1(_cmp("Eq", "5"_cint64))))),
+                                  "scan_0"_var)))
+            .finish(_scan("scan_0", "coll"));
+
+    PrefixId prefixId;
+    auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase},
+                                         prefixId,
+                                         Metadata{{{"coll", createScanDef({}, {})}}},
+                                         boost::none /*costModel*/,
+                                         DebugInfo::kDefaultForTests);
+    ABT latest = std::move(rootNode);
+    phaseManager.optimize(latest);
+
+    // We should push the Not down as far as possible, so that some leaves become Neq.
+    // Leaves with a Traverse in the way residualize a Not instead.
+    ASSERT_EXPLAIN_V2(
+        "Root []\n"
+        "|   |   projections: \n"
+        "|   |       scan_0\n"
+        "|   RefBlock: \n"
+        "|       Variable [scan_0]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [scan_0]\n"
+        "|   PathComposeA []\n"
+        "|   |   PathComposeA []\n"
+        "|   |   |   PathLambda []\n"
+        "|   |   |   LambdaAbstraction [tmp_bool_0]\n"
+        "|   |   |   UnaryOp [Not]\n"
+        "|   |   |   EvalFilter []\n"
+        "|   |   |   |   Variable [tmp_bool_0]\n"
+        "|   |   |   PathGet [d]\n"
+        "|   |   |   PathTraverse [1]\n"
+        "|   |   |   PathCompare [Eq]\n"
+        "|   |   |   Const [5]\n"
+        "|   |   PathGet [c]\n"
+        "|   |   PathCompare [Neq]\n"
+        "|   |   Const [4]\n"
+        "|   PathComposeA []\n"
+        "|   |   PathGet [b]\n"
+        "|   |   PathCompare [Neq]\n"
+        "|   |   Const [3]\n"
+        "|   PathGet [a]\n"
+        "|   PathCompare [Neq]\n"
+        "|   Const [2]\n"
+        "Scan [coll]\n"
+        "    BindBlock:\n"
+        "        [scan_0]\n"
+        "            Source []\n",
+        latest);
+}
+
+TEST(LogicalRewriter, NotPushdownUnderLambdaSuccess) {
+    // Example translation of {a: {$elemMatch: {b: {$ne: 2}}}}
+    ABT scanNode = make<ScanNode>("scan_0", "coll");
+    ABT path = make<PathGet>(
+        "a",
+        make<PathComposeM>(
+            make<PathArr>(),
+            make<PathTraverse>(
+                make<PathComposeM>(
+                    make<PathComposeA>(make<PathArr>(), make<PathObj>()),
+                    make<PathLambda>(make<LambdaAbstraction>(
+                        "match_0_not_0",
+                        make<UnaryOp>(Operations::Not,
+                                      make<EvalFilter>(
+                                          make<PathGet>("b",
+                                                        make<PathTraverse>(
+                                                            make<PathCompare>(Operations::Eq,
+                                                                              Constant::int64(2)),
+                                                            PathTraverse::kSingleLevel)),
+                                          make<Variable>("match_0_not_0")))))),
+                PathTraverse::kSingleLevel)));
+    ABT filterNode =
+        make<FilterNode>(make<EvalFilter>(path, make<Variable>("scan_0")), std::move(scanNode));
+
+    ABT rootNode = make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{"scan_0"}},
+                                  std::move(filterNode));
+
+    PrefixId prefixId;
+    auto phaseManager = makePhaseManager(
+        {OptPhase::ConstEvalPre, OptPhase::MemoSubstitutionPhase},
+        prefixId,
+        Metadata{{
+            {"coll",
+             createScanDef(
+                 {},
+                 {{"index1",
+                   IndexDefinition{// collation
+                                   {{makeIndexPath(FieldPathType{"a", "b"}, false /*isMultiKey*/),
+                                     CollationOp::Ascending}},
+                                   false /*isMultiKey*/,
+                                   {DistributionType::Centralized},
+                                   {} /*partialReqMap*/}}})},
+        }},
+        boost::none /*costModel*/,
+        DebugInfo::kDefaultForTests);
+    ABT latest = std::move(rootNode);
+    phaseManager.optimize(latest);
+
+    // All the Traverses should be eliminated, and the Not ... Eq combined as Neq.
+    ASSERT_EXPLAIN_V2(
+        "Root []\n"
+        "|   |   projections: \n"
+        "|   |       scan_0\n"
+        "|   RefBlock: \n"
+        "|       Variable [scan_0]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [scan_0]\n"
+        "|   PathGet [a]\n"
+        "|   PathGet [b]\n"
+        "|   PathCompare [Neq]\n"
+        "|   Const [2]\n"
+        "Sargable [Complete]\n"
+        "|   |   |   |   |   requirementsMap: \n"
+        "|   |   |   |   |       refProjection: scan_0, path: 'PathGet [a] PathIdentity []', inte"
+        "rvals: {{{[Const [[]], Const [BinData(0, )])}}}\n"
+        "|   |   |   |   candidateIndexes: \n"
+        "|   |   |   scanParams: \n"
+        "|   |   |       {'a': evalTemp_2}\n"
+        "|   |   |           residualReqs: \n"
+        "|   |   |               refProjection: evalTemp_2, path: 'PathIdentity []', intervals: {"
+        "{{[Const [[]], Const [BinData(0, )])}}}, entryIndex: 0\n"
+        "|   |   BindBlock:\n"
+        "|   RefBlock: \n"
+        "|       Variable [scan_0]\n"
+        "Scan [coll]\n"
+        "    BindBlock:\n"
+        "        [scan_0]\n"
+        "            Source []\n",
+        latest);
+}
+
+TEST(LogicalRewriter, NotPushdownUnderLambdaKeepOuterTraverse) {
+    // Like 'NotPushdownUnderLambdaSuccess', but 'a' is multikey,
+    // so we can only remove the inner traverse, at 'a.b'.
+    ABT scanNode = make<ScanNode>("scan_0", "coll");
+    ABT path = make<PathGet>(
+        "a",
+        make<PathComposeM>(
+            make<PathArr>(),
+            make<PathTraverse>(
+                make<PathComposeM>(
+                    make<PathComposeA>(make<PathArr>(), make<PathObj>()),
+                    make<PathLambda>(make<LambdaAbstraction>(
+                        "match_0_not_0",
+                        make<UnaryOp>(Operations::Not,
+                                      make<EvalFilter>(
+                                          make<PathGet>("b",
+                                                        make<PathTraverse>(
+                                                            make<PathCompare>(Operations::Eq,
+                                                                              Constant::int64(2)),
+                                                            PathTraverse::kSingleLevel)),
+                                          make<Variable>("match_0_not_0")))))),
+                PathTraverse::kSingleLevel)));
+    ABT filterNode =
+        make<FilterNode>(make<EvalFilter>(path, make<Variable>("scan_0")), std::move(scanNode));
+
+    ABT rootNode = make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{"scan_0"}},
+                                  std::move(filterNode));
+
+    PrefixId prefixId;
+    auto phaseManager = makePhaseManager(
+        {OptPhase::ConstEvalPre, OptPhase::MemoSubstitutionPhase},
+        prefixId,
+        Metadata{{
+            {"coll",
+             createScanDef(
+                 {},
+                 {{"index1",
+                   IndexDefinition{
+                       // collation
+                       {{make<PathGet>("a",
+                                       make<PathTraverse>(make<PathGet>("b", make<PathIdentity>()),
+                                                          PathTraverse::kSingleLevel)),
+                         CollationOp::Ascending}},
+                       false /*isMultiKey*/,
+                       {DistributionType::Centralized},
+                       {} /*partialReqMap*/}}})},
+        }},
+        boost::none /*costModel*/,
+        DebugInfo::kDefaultForTests);
+    ABT latest = std::move(rootNode);
+    phaseManager.optimize(latest);
+
+    // The inner Traverses should be eliminated, and the Not ... Eq combined as Neq.
+    // We have to keep the outer traverse since 'a' is multikey.
+    ASSERT_EXPLAIN_V2(
+        "Root []\n"
+        "|   |   projections: \n"
+        "|   |       scan_0\n"
+        "|   RefBlock: \n"
+        "|       Variable [scan_0]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [scan_0]\n"
+        "|   PathGet [a]\n"
+        "|   PathTraverse [1]\n"
+        "|   PathComposeM []\n"
+        "|   |   PathGet [b]\n"
+        "|   |   PathCompare [Neq]\n"
+        "|   |   Const [2]\n"
+        "|   PathComposeA []\n"
+        "|   |   PathObj []\n"
+        "|   PathArr []\n"
+        "Sargable [Complete]\n"
+        "|   |   |   |   |   requirementsMap: \n"
+        "|   |   |   |   |       refProjection: scan_0, path: 'PathGet [a] PathIdentity []', inte"
+        "rvals: {{{[Const [[]], Const [BinData(0, )])}}}\n"
+        "|   |   |   |   |       refProjection: scan_0, path: 'PathGet [a] PathTraverse [1] PathI"
+        "dentity []', intervals: {{{[Const [{}], Const [[]])}} U {{[Const [[]], Const [BinData(0,"
+        " )])}}}, perfOnly\n"
+        "|   |   |   |   candidateIndexes: \n"
+        "|   |   |   scanParams: \n"
+        "|   |   |       {'a': evalTemp_1}\n"
+        "|   |   |           residualReqs: \n"
+        "|   |   |               refProjection: evalTemp_1, path: 'PathIdentity []', intervals: {"
+        "{{[Const [[]], Const [BinData(0, )])}}}, entryIndex: 0\n"
+        "|   |   BindBlock:\n"
+        "|   RefBlock: \n"
+        "|       Variable [scan_0]\n"
+        "Scan [coll]\n"
+        "    BindBlock:\n"
+        "        [scan_0]\n"
+        "            Source []\n",
+        latest);
+}
+
+TEST(LogicalRewriter, NotPushdownUnderLambdaFailsWithFreeVar) {
+    using namespace mongo::optimizer::unit_test_abt_literals;
+    // When we eliminate a Not, we can't eliminate the Lambda [x] if it would leave free
+    // occurrences of 'x'.
+
+    ABT rootNode =
+        NodeBuilder{}
+            .root("scan_0")
+            .filter(_evalf(
+                _get("a",
+                     // We can eliminate the Not by combining with Eq.
+                     _plambda(_lambda("x",
+                                      _unary("Not",
+                                             _evalf(
+                                                 // But the bound variable 'x' has more than one
+                                                 // occurrence, so we can't eliminate the lambda.
+                                                 _cmp("Eq", "x"_var),
+                                                 "x"_var))))),
+                "scan_0"_var))
+            .finish(_scan("scan_0", "coll"));
+
+    PrefixId prefixId;
+    auto phaseManager = makePhaseManager({OptPhase::ConstEvalPre, OptPhase::MemoSubstitutionPhase},
+                                         prefixId,
+                                         Metadata{{
+                                             {"coll", createScanDef({}, {})},
+                                         }},
+                                         boost::none /*costModel*/,
+                                         DebugInfo::kDefaultForTests);
+    ABT latest = std::move(rootNode);
+    phaseManager.optimize(latest);
+
+    // The Not should be gone: combined into Neq.
+    // But the Lambda [x] should still be there, because 'x' is still used.
+    ASSERT_EXPLAIN_V2(
+        "Root []\n"
+        "|   |   projections: \n"
+        "|   |       scan_0\n"
+        "|   RefBlock: \n"
+        "|       Variable [scan_0]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [scan_0]\n"
+        "|   PathGet [a]\n"
+        "|   PathLambda []\n"
+        "|   LambdaAbstraction [x]\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [x]\n"
+        "|   PathCompare [Neq]\n"
+        "|   Variable [x]\n"
+        "Scan [coll]\n"
+        "    BindBlock:\n"
+        "        [scan_0]\n"
+        "            Source []\n",
+        latest);
+}
+
+TEST(LogicalRewriter, RemoveTraverseSplitComposeM) {
+    // When we have a filter with Traverse above ComposeM, we can't immediately
+    // split the ComposeM into a top-level conjunction.  But if we can use multikeyness
+    // to remove the Traverse first, then we can split it.
+
+    // This query is similar to $elemMatch, but without the PathArr constraint.
+    ABT scanNode = make<ScanNode>("scan_0", "coll");
+    ABT path = make<PathGet>(
+        "a",
+        make<PathTraverse>(
+            make<PathGet>(
+                "b",
+                make<PathTraverse>(
+                    make<PathComposeM>(make<PathCompare>(Operations::Gt, Constant::int64(3)),
+                                       make<PathCompare>(Operations::Lt, Constant::int64(8))),
+                    PathTraverse::kSingleLevel)),
+            PathTraverse::kSingleLevel));
+    ABT filterNode =
+        make<FilterNode>(make<EvalFilter>(path, make<Variable>("scan_0")), std::move(scanNode));
+
+    ABT rootNode = make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{"scan_0"}},
+                                  std::move(filterNode));
+
+    PrefixId prefixId;
+    auto phaseManager = makePhaseManager(
+        {OptPhase::ConstEvalPre, OptPhase::MemoSubstitutionPhase},
+        prefixId,
+        Metadata{{
+            {"coll",
+             createScanDef(
+                 {},
+                 {{"index1",
+                   IndexDefinition{// collation
+                                   {{makeIndexPath(FieldPathType{"a", "b"}, false /*isMultiKey*/),
+                                     CollationOp::Ascending}},
+                                   false /*isMultiKey*/,
+                                   {DistributionType::Centralized},
+                                   {} /*partialReqMap*/}}})},
+        }},
+        boost::none /*costModel*/,
+        DebugInfo::kDefaultForTests);
+    ABT latest = std::move(rootNode);
+    phaseManager.optimize(latest);
+
+    // We should end up with a Sargable node and no residual Filter.
+    ASSERT_EXPLAIN_V2(
+        "Root []\n"
+        "|   |   projections: \n"
+        "|   |       scan_0\n"
+        "|   RefBlock: \n"
+        "|       Variable [scan_0]\n"
+        "Sargable [Complete]\n"
+        "|   |   |   |   |   requirementsMap: \n"
+        "|   |   |   |   |       refProjection: scan_0, path: 'PathGet [a] PathGet [b] "
+        "PathIdentity []', intervals: {{{(Const [3], Const [8])}}}\n"
+        "|   |   |   |   candidateIndexes: \n"
+        "|   |   |   |       candidateId: 1, index1, {}, {0}, {{{(Const [3], Const [8])}}}\n"
+        "|   |   |   scanParams: \n"
+        "|   |   |       {'a': evalTemp_2}\n"
+        "|   |   |           residualReqs: \n"
+        "|   |   |               refProjection: evalTemp_2, path: 'PathGet [b] PathIdentity []', "
+        "intervals: {{{(Const [3], Const [8])}}}, entryIndex: 0\n"
+        "|   |   BindBlock:\n"
+        "|   RefBlock: \n"
+        "|       Variable [scan_0]\n"
+        "Scan [coll]\n"
+        "    BindBlock:\n"
+        "        [scan_0]\n"
+        "            Source []\n",
+        latest);
+}
+
+TEST(LogicalRewriter, TraverseComposeMTraverse) {
+    // When we have a filter with Get a (Traverse (ComposeM _ (Traverse ...))), we should not
+    // simplify under the inner Traverse, because MultikeynessTrie contains no information about
+    // doubly-nested arrays.
+
+    ABT scanNode = make<ScanNode>("scan_0", "coll");
+    ABT path = make<PathGet>(
+        "a",
+        make<PathTraverse>(
+            make<PathComposeM>(
+                make<PathComposeA>(make<PathArr>(), make<PathObj>()),
+                make<PathTraverse>(
+                    make<PathGet>(
+                        "b",
+                        make<PathTraverse>(make<PathCompare>(Operations::Gt, Constant::int64(3)),
+                                           PathTraverse::kSingleLevel)),
+                    PathTraverse::kSingleLevel)),
+            PathTraverse::kSingleLevel));
+
+    ABT filterNode =
+        make<FilterNode>(make<EvalFilter>(path, make<Variable>("scan_0")), std::move(scanNode));
+
+    ABT rootNode = make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{"scan_0"}},
+                                  std::move(filterNode));
+
+    PrefixId prefixId;
+    auto phaseManager = makePhaseManager(
+        {OptPhase::ConstEvalPre, OptPhase::MemoSubstitutionPhase},
+        prefixId,
+        Metadata{{
+            {"coll",
+             createScanDef({},
+                           {{"index1",
+                             IndexDefinition{
+                                 // collation
+                                 {{make<PathGet>("a",
+                                                 make<PathTraverse>(
+                                                     // 'a' is multikey, but 'a.b' is non-multikey.
+                                                     make<PathGet>("b", make<PathIdentity>()),
+                                                     PathTraverse::kSingleLevel)),
+                                   CollationOp::Ascending}},
+                                 false /*isMultiKey*/,
+                                 {DistributionType::Centralized},
+                                 {} /*partialReqMap*/}}})},
+        }},
+        boost::none /*costModel*/,
+        DebugInfo::kDefaultForTests);
+    ABT latest = std::move(rootNode);
+    phaseManager.optimize(latest);
+
+    // The resulting Filter node should keep all the Traverse nodes:
+    // - Keep the outermost two because 'a' is multikey.
+    // - Keep the innermost because we don't know anything about the contents
+    //   of doubly-nested arrays.
+    // (We may also get a perfOnly Sargable node; that's not the point of this test.)
+    ASSERT_EXPLAIN_V2(
+        "Root []\n"
+        "|   |   projections: \n"
+        "|   |       scan_0\n"
+        "|   RefBlock: \n"
+        "|       Variable [scan_0]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [scan_0]\n"
+        "|   PathGet [a]\n"
+        "|   PathTraverse [1]\n"
+        "|   PathComposeM []\n"
+        "|   |   PathTraverse [1]\n"
+        "|   |   PathGet [b]\n"
+        "|   |   PathTraverse [1]\n"
+        "|   |   PathCompare [Gt]\n"
+        "|   |   Const [3]\n"
+        "|   PathComposeA []\n"
+        "|   |   PathObj []\n"
+        "|   PathArr []\n"
+        "Sargable [Complete]\n"
+        "|   |   |   |   |   requirementsMap: \n"
+        "|   |   |   |   |       refProjection: scan_0, path: 'PathGet [a] PathTraverse [1] PathI"
+        "dentity []', intervals: {{{[Const [{}], Const [[]])}} U {{[Const [[]], Const [BinData(0,"
+        " )])}}}, perfOnly\n"
+        "|   |   |   |   |       refProjection: scan_0, path: 'PathGet [a] PathTraverse [1] PathT"
+        "raverse [1] PathGet [b] PathTraverse [1] PathIdentity []', intervals: {{{>Const [3]}}}, "
+        "perfOnly\n"
+        "|   |   |   |   candidateIndexes: \n"
+        "|   |   |   scanParams: \n"
+        "|   |   |       {}\n"
+        "|   |   BindBlock:\n"
+        "|   RefBlock: \n"
+        "|       Variable [scan_0]\n"
+        "Scan [coll]\n"
+        "    BindBlock:\n"
+        "        [scan_0]\n"
+        "            Source []\n",
+        latest);
+}
+
+TEST(LogicalRewriter, RelaxComposeM) {
+    // When we have a ComposeM that:
+    // - cannot be split into a top-level conjunction, and
+    // - has a sargable predicate on only one side
+    // then we generate a Sargable node with a perfOnly predicate.
+
+    using namespace properties;
+
+    ABT scanNode = make<ScanNode>("root", "c1");
+
+    ABT path = make<PathGet>(
+        "a",
+        make<PathTraverse>(
+            make<PathComposeM>(
+                // One side is sargable.
+                make<PathGet>("b", make<PathCompare>(Operations::Gt, Constant::int64(0))),
+                // One side is not sargable.
+                // A common example is Traverse inside Not: we can't push Not
+                // to the leaf because Traverse is a disjunction (over array elements).
+                make<PathLambda>(make<LambdaAbstraction>(
+                    "x",
+                    make<UnaryOp>(
+                        Operations::Not,
+                        make<EvalFilter>(
+                            make<PathGet>("b",
+                                          make<PathTraverse>(
+                                              make<PathCompare>(Operations::Eq, Constant::int64(3)),
+                                              PathTraverse::kSingleLevel)),
+                            make<Variable>("x")))))),
+            PathTraverse::kSingleLevel));
+
+    ABT filterNode = make<FilterNode>(make<EvalFilter>(std::move(path), make<Variable>("root")),
+                                      std::move(scanNode));
+
+    ABT rootNode =
+        make<RootNode>(ProjectionRequirement{ProjectionNameVector{"root"}}, std::move(filterNode));
+
+    PrefixId prefixId;
+    auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase},
+                                         prefixId,
+                                         {{{"c1", createScanDef({}, {})}}},
+                                         boost::none /*costModel*/,
+                                         DebugInfo::kDefaultForTests,
+                                         QueryHints{});
+
+    ABT optimized = rootNode;
+    phaseManager.optimize(optimized);
+
+    ASSERT_EXPLAIN_V2(
+        "Root []\n"
+        "|   |   projections: \n"
+        "|   |       root\n"
+        "|   RefBlock: \n"
+        "|       Variable [root]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [root]\n"
+        "|   PathGet [a]\n"
+        "|   PathTraverse [1]\n"
+        "|   PathComposeM []\n"
+        "|   |   PathLambda []\n"
+        "|   |   LambdaAbstraction [x]\n"
+        "|   |   UnaryOp [Not]\n"
+        "|   |   EvalFilter []\n"
+        "|   |   |   Variable [x]\n"
+        "|   |   PathGet [b]\n"
+        "|   |   PathTraverse [1]\n"
+        "|   |   PathCompare [Eq]\n"
+        "|   |   Const [3]\n"
+        "|   PathGet [b]\n"
+        "|   PathCompare [Gt]\n"
+        "|   Const [0]\n"
+        "Sargable [Complete]\n"
+        "|   |   |   |   |   requirementsMap: \n"
+        "|   |   |   |   |       refProjection: root, path: 'PathGet [a] PathTraverse [1] PathGet"
+        " [b] PathIdentity []', intervals: {{{>Const [0]}}}, perfOnly\n"
+        "|   |   |   |   candidateIndexes: \n"
+        "|   |   |   scanParams: \n"
+        "|   |   |       {}\n"
+        "|   |   BindBlock:\n"
+        "|   RefBlock: \n"
+        "|       Variable [root]\n"
+        "Scan [c1]\n"
+        "    BindBlock:\n"
+        "        [root]\n"
+        "            Source []\n",
+        optimized);
+}
+
+TEST(PhysRewriter, FilterIndexingRIN) {
+    using namespace properties;
+    using namespace unit_test_abt_literals;
+    PrefixId prefixId;
+
+    // Construct a query which tests "a" = 1 and "b" = 2 and "c" = 3.
+    ABT rootNode = NodeBuilder{}
+                       .root("root")
+                       .filter(_evalf(_get("e", _traverse1(_cmp("Eq", "3"_cint64))), "root"_var))
+                       .filter(_evalf(_get("c", _traverse1(_cmp("Eq", "2"_cint64))), "root"_var))
+                       .filter(_evalf(_get("a", _traverse1(_cmp("Eq", "1"_cint64))), "root"_var))
+                       .finish(_scan("root", "c1"));
+
+    // We have one index with 5 fields: "a", "b", "c", "d", "e".
+    auto phaseManager = makePhaseManager(
+        {OptPhase::MemoSubstitutionPhase},
+        prefixId,
+        {{{"c1",
+           createScanDef(
+               {},
+               {{"index1",
+                 IndexDefinition{{{makeNonMultikeyIndexPath("a"), CollationOp::Ascending},
+                                  {makeNonMultikeyIndexPath("b"), CollationOp::Ascending},
+                                  {makeNonMultikeyIndexPath("c"), CollationOp::Ascending},
+                                  {makeNonMultikeyIndexPath("d"), CollationOp::Ascending},
+                                  {makeNonMultikeyIndexPath("e"), CollationOp::Ascending}},
+                                 false /*isMultiKey*/,
+                                 {DistributionType::Centralized},
+                                 {}}}})}}},
+        boost::none /*costModel*/,
+        {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
+
+    ABT optimized = std::move(rootNode);
+    phaseManager.getHints()._maxIndexEqPrefixes = 3;
+    phaseManager.optimize(optimized);
+    // No plans explored: testing only substitution phase.
+    ASSERT_EQ(0, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+
+    // The resulting sargable node is too big to explain in its entirety. We explain the important
+    // pieces.
+    const SargableNode& node = *optimized.cast<RootNode>()->getChild().cast<SargableNode>();
+
+    // Demonstrate we encode intervals for "a", "c", and "e".
+    ASSERT_EQ(
+        "requirementsMap: \n"
+        "    refProjection: root, path: 'PathGet [a] PathIdentity []', intervals: {{{=Const "
+        "[1]}}}\n"
+        "    refProjection: root, path: 'PathGet [c] PathIdentity []', intervals: {{{=Const "
+        "[2]}}}\n"
+        "    refProjection: root, path: 'PathGet [e] PathIdentity []', intervals: {{{=Const "
+        "[3]}}}\n",
+        ExplainGenerator::explainPartialSchemaReqMap(node.getReqMap()));
+
+    const auto& ci = node.getCandidateIndexes();
+
+    ASSERT_EQ(3, ci.size());
+
+    // We have one equality prefix for the first candidate index.
+    ASSERT_EQ(1, ci.at(0)._intervals.size());
+
+    // The first index field ("a") is constrained to 1, the remaining fields are not constrained.
+    ASSERT_EQ(
+        "{\n"
+        "    {\n"
+        "        {=Const [1], <fully open>, <fully open>, <fully open>, <fully open>}\n"
+        "    }\n"
+        "}\n",
+        ExplainGenerator::explainIntervalExpr(ci.at(0)._intervals.front()));
+
+    // We have two residual predicates for "c" and "e".
+    ASSERT_EQ(
+        "residualReqs: \n"
+        "    refProjection: evalTemp_24, path: 'PathIdentity []', intervals: {{{=Const [2]}}}, "
+        "entryIndex: 1\n"
+        "    refProjection: evalTemp_25, path: 'PathIdentity []', intervals: {{{=Const [3]}}}, "
+        "entryIndex: 2\n",
+        ExplainGenerator::explainResidualRequirements(ci.at(0)._residualRequirements));
+
+
+    // The second candidate index has two equality prefixes.
+    ASSERT_EQ(2, ci.at(1)._intervals.size());
+
+    // The first index field ("a") is again constrained to 1, and the remaining ones are not.
+    ASSERT_EQ(
+        "{\n"
+        "    {\n"
+        "        {=Const [1], <fully open>, <fully open>, <fully open>, <fully open>}\n"
+        "    }\n"
+        "}\n",
+        ExplainGenerator::explainIntervalExpr(ci.at(1)._intervals.at(0)));
+
+    // The first two index fields are constrained to variables obtained from the first scan, the
+    // third one ("c") is bound to "2". The last two fields are unconstrained.
+    ASSERT_EQ(
+        "{\n"
+        "    {\n"
+        "        {=Variable [evalTemp_26], =Variable [evalTemp_27], =Const [2], <fully open>, "
+        "<fully open>}\n"
+        "    }\n"
+        "}\n",
+        ExplainGenerator::explainIntervalExpr(ci.at(1)._intervals.at(1)));
+
+    // We have only one residual predicates for "e".
+    ASSERT_EQ(
+        "residualReqs: \n"
+        "    refProjection: evalTemp_28, path: 'PathIdentity []', intervals: {{{=Const [3]}}}, "
+        "entryIndex: 2\n",
+        ExplainGenerator::explainResidualRequirements(ci.at(1)._residualRequirements));
+
+
+    // The third candidate index has three equality prefixes.
+    ASSERT_EQ(3, ci.at(2)._intervals.size());
+
+    // The first index field ("a") is again constrained to 1.
+    ASSERT_EQ(
+        "{\n"
+        "    {\n"
+        "        {=Const [1], <fully open>, <fully open>, <fully open>, <fully open>}\n"
+        "    }\n"
+        "}\n",
+        ExplainGenerator::explainIntervalExpr(ci.at(2)._intervals.at(0)));
+
+    // The first two index fields are constrained to variables obtained from the first scan, the
+    // third one ("c") is bound to "2". The last two fields are unconstrained.
+    ASSERT_EQ(
+        "{\n"
+        "    {\n"
+        "        {=Variable [evalTemp_29], =Variable [evalTemp_30], =Const [2], <fully open>, "
+        "<fully open>}\n"
+        "    }\n"
+        "}\n",
+        ExplainGenerator::explainIntervalExpr(ci.at(2)._intervals.at(1)));
+
+    // The first 4 index fields are constrained to variables from the second scan, and the last one
+    // to 4.
+    ASSERT_EQ(
+        "{\n"
+        "    {\n"
+        "        {=Variable [evalTemp_29], =Variable [evalTemp_30], =Variable [evalTemp_31], "
+        "=Variable [evalTemp_32], =Const [3]}\n"
+        "    }\n"
+        "}\n",
+        ExplainGenerator::explainIntervalExpr(ci.at(2)._intervals.at(2)));
 }
 
 }  // namespace

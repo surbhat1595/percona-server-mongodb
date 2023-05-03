@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include "mongo/db/pipeline/expression.h"
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/pipeline/expression_walker.h"
@@ -47,6 +48,7 @@ class ExpressionAnd;
 class ExpressionAnyElementTrue;
 class ExpressionArray;
 class ExpressionArrayElemAt;
+class ExpressionBitNot;
 class ExpressionFirst;
 class ExpressionLast;
 class ExpressionObjectToArray;
@@ -156,6 +158,7 @@ class ExpressionInternalFindElemMatch;
 class ExpressionInternalFLEBetween;
 class ExpressionInternalFLEEqual;
 class ExpressionInternalJsEmit;
+class ExpressionInternalOwningShard;
 class ExpressionFunction;
 class ExpressionDegreesToRadians;
 class ExpressionRadiansToDegrees;
@@ -215,6 +218,7 @@ public:
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionTestApiVersion>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionArray>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionArrayElemAt>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionBitNot>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionFirst>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionLast>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionObjectToArray>) = 0;
@@ -367,6 +371,8 @@ public:
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionSetField>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionTsSecond>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionTsIncrement>) = 0;
+    virtual void visit(
+        expression_walker::MaybeConstPtr<IsConst, ExpressionInternalOwningShard>) = 0;
 };
 
 using ExpressionMutableVisitor = ExpressionVisitor<false>;
@@ -396,6 +402,7 @@ struct SelectiveConstExpressionVisitorBase : public ExpressionConstVisitor {
     void visit(const ExpressionAnyElementTrue*) override {}
     void visit(const ExpressionArray*) override {}
     void visit(const ExpressionArrayElemAt*) override {}
+    void visit(const ExpressionBitNot*) override {}
     void visit(const ExpressionFirst*) override {}
     void visit(const ExpressionLast*) override {}
     void visit(const ExpressionObjectToArray*) override {}
@@ -528,5 +535,6 @@ struct SelectiveConstExpressionVisitorBase : public ExpressionConstVisitor {
     void visit(const ExpressionSetField*) override {}
     void visit(const ExpressionTsSecond*) override {}
     void visit(const ExpressionTsIncrement*) override {}
+    void visit(const ExpressionInternalOwningShard*) override {}
 };
 }  // namespace mongo

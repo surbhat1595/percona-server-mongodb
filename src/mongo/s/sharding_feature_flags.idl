@@ -42,11 +42,6 @@ feature_flags:
     cpp_varname: feature_flags::gBalanceAccordingToDataSize
     default: true
     version: 6.0 # Starting from v6.0.3
-  featureFlagOrphanTracking:
-    description: "Feature flag for enabling orphan tracking during migrations and range deletions"
-    cpp_varname: feature_flags::gOrphanTracking
-    default: true
-    version: 6.0
   featureFlagGlobalIndexesShardingCatalog:
     description: "Feature flag for enabling sharding catalog features for global indexes"
     cpp_varname: feature_flags::gGlobalIndexesShardingCatalog
@@ -78,9 +73,7 @@ feature_flags:
     default: true
     version: 6.1
   featureFlagCatalogShard:
-    description: "Must be enabled for any mongod process started with the --catalogsvr option.  The
-                  --catalogsvr flag indicates to the node that it is part of a replica set that hosts both
-                  config data and user data.  It is a shard server, and the config server."
+    description: "Feature flag for enabling shared config server/shard server cluster role"
     cpp_varname: feature_flags::gCatalogShard
     default: false
   featureFlagConcurrencyInChunkMigration:
@@ -93,6 +86,7 @@ feature_flags:
     cpp_varname: feature_flags::gStopUsingConfigVersion
     default: true
     version: 6.2
+  # TODO (SERVER-71309): Remove once 7.0 becomes last LTS.
   featureFlagResilientMovePrimary:
     description: "Enable the resilient coordinator for the movePrimary command in order to improve
                   the tolerance in case of a failure on donor and recipient nodes"
@@ -103,4 +97,3 @@ feature_flags:
     cpp_varname: feature_flags::gConfigSettingsSchema
     default: true
     version: 6.2
-    

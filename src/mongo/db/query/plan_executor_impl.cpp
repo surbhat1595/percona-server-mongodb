@@ -140,13 +140,6 @@ PlanExecutorImpl::PlanExecutorImpl(OperationContext* opCtx,
     invariant(!_expCtx || _expCtx->opCtx == _opCtx);
     invariant(!_cq || !_expCtx || _cq->getExpCtx() == _expCtx);
 
-    // If this PlanExecutor is executing a COLLSCAN, keep a pointer directly to the COLLSCAN
-    // stage. This is used for change streams in order to keep the the latest oplog timestamp
-    // and post batch resume token up to date as the oplog scan progresses.
-    if (auto collectionScan = getStageByType(_root.get(), STAGE_COLLSCAN)) {
-        _collScanStage = static_cast<CollectionScan*>(collectionScan);
-    }
-
     // If we don't yet have a namespace string, then initialize it from either 'collection' or
     // '_cq'.
     if (_nss.isEmpty()) {
@@ -177,6 +170,13 @@ PlanExecutorImpl::PlanExecutorImpl(OperationContext* opCtx,
         auto subplanStage = static_cast<SubplanStage*>(subplan);
         _planExplainer->updateEnumeratorExplainInfo(
             subplanStage->compositeSolution()->_enumeratorExplainInfo);
+    }
+
+    // If this PlanExecutor is executing a COLLSCAN, keep a pointer directly to the COLLSCAN
+    // stage. This is used for change streams in order to keep the the latest oplog timestamp
+    // and post batch resume token up to date as the oplog scan progresses.
+    if (auto collectionScan = getStageByType(_root.get(), STAGE_COLLSCAN)) {
+        _collScanStage = static_cast<CollectionScan*>(collectionScan);
     }
 }
 
@@ -355,11 +355,10 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Snapshotted<Document>* ob
     // Capped insert data; declared outside the loop so we hold a shared pointer to the capped
     // insert notifier the entire time we are in the loop.  Holding a shared pointer to the
     // capped insert notifier is necessary for the notifierVersion to advance.
-    insert_listener::CappedInsertNotifierData cappedInsertNotifierData;
+    std::unique_ptr<insert_listener::Notifier> notifier;
     if (insert_listener::shouldListenForInserts(_opCtx, _cq.get())) {
-        // We always construct the CappedInsertNotifier for awaitData cursors.
-        cappedInsertNotifierData.notifier =
-            insert_listener::getCappedInsertNotifier(_opCtx, _nss, _yieldPolicy.get());
+        // We always construct the insert_listener::Notifier for awaitData cursors.
+        notifier = insert_listener::getCappedInsertNotifier(_opCtx, _nss, _yieldPolicy.get());
     }
     for (;;) {
         // These are the conditions which can cause us to yield:
@@ -453,8 +452,6 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Snapshotted<Document>* ob
                         "got TemporarilyUnavailable exception on a plan that cannot auto-yield");
                 }
 
-                CurOp::get(_opCtx)->debug().additiveMetrics.incrementTemporarilyUnavailableErrors(
-                    1);
                 tempUnavailErrorsInARow++;
                 handleTemporarilyUnavailableException(
                     _opCtx,
@@ -501,7 +498,7 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Snapshotted<Document>* ob
                 return PlanExecutor::IS_EOF;
             }
 
-            insert_listener::waitForInserts(_opCtx, _yieldPolicy.get(), &cappedInsertNotifierData);
+            insert_listener::waitForInserts(_opCtx, _yieldPolicy.get(), notifier);
 
             // There may be more results, keep going.
             continue;

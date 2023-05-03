@@ -61,6 +61,12 @@ void handleTemporarilyUnavailableExceptionInTransaction(OperationContext* opCtx,
                                                         StringData ns,
                                                         const TemporarilyUnavailableException& e);
 
+void handleTransactionTooLargeForCacheException(OperationContext* opCtx,
+                                                int* writeConflictAttempts,
+                                                StringData opStr,
+                                                StringData ns,
+                                                const TransactionTooLargeForCacheException& e);
+
 /**
  * A `WriteConflictException` is thrown if during a write, two or more operations conflict with each
  * other. For example if two operations get the same version of a document, and then both try to
@@ -82,6 +88,16 @@ void handleTemporarilyUnavailableExceptionInTransaction(OperationContext* opCtx,
  */
 [[noreturn]] inline void throwTemporarilyUnavailableException(StringData context) {
     iasserted({ErrorCodes::TemporarilyUnavailable, context});
+}
+
+/**
+ * A `TransactionTooLargeForCache` is thrown if it has been determined that it is unlikely to
+ * ever complete the operation because the configured cache is insufficient to hold all the
+ * transaction state. This helps to avoid retrying, maybe indefinitely, a transaction which would
+ * never be able to complete.
+ */
+[[noreturn]] inline void throwTransactionTooLargeForCache(StringData context) {
+    iasserted({ErrorCodes::TransactionTooLargeForCache, context});
 }
 
 /**
@@ -119,19 +135,20 @@ auto writeConflictRetry(OperationContext* opCtx, StringData opStr, StringData ns
         }
     }
 
-    int attempts = 0;
+    int writeConflictAttempts = 0;
     int attemptsTempUnavailable = 0;
     while (true) {
         try {
             return f();
         } catch (WriteConflictException const&) {
             CurOp::get(opCtx)->debug().additiveMetrics.incrementWriteConflicts(1);
-            logWriteConflictAndBackoff(attempts, opStr, ns);
-            ++attempts;
+            logWriteConflictAndBackoff(writeConflictAttempts, opStr, ns);
+            ++writeConflictAttempts;
             opCtx->recoveryUnit()->abandonSnapshot();
         } catch (TemporarilyUnavailableException const& e) {
-            CurOp::get(opCtx)->debug().additiveMetrics.incrementTemporarilyUnavailableErrors(1);
             handleTemporarilyUnavailableException(opCtx, ++attemptsTempUnavailable, opStr, ns, e);
+        } catch (TransactionTooLargeForCacheException const& e) {
+            handleTransactionTooLargeForCacheException(opCtx, &writeConflictAttempts, opStr, ns, e);
         }
     }
 }

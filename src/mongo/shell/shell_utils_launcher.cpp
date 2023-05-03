@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/shell/shell_utils_launcher.h"
 
 #include <algorithm>
@@ -40,6 +37,7 @@
 #include <boost/iostreams/tee.hpp>
 #include <fcntl.h>
 #include <fmt/format.h>
+#include <fstream>
 #include <iostream>
 #include <iterator>
 #include <map>
@@ -61,11 +59,15 @@
 
 #include "mongo/base/environment_buffer.h"
 #include "mongo/base/error_codes.h"
+#include "mongo/bson/bsonelement.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/client/dbclient_connection.h"
+#include "mongo/db/storage/named_pipe.h"
 #include "mongo/db/traffic_reader.h"
 #include "mongo/logv2/log.h"
+#include "mongo/platform/basic.h"
 #include "mongo/scripting/engine.h"
+#include "mongo/shell/named_pipe_test_helper.h"
 #include "mongo/shell/shell_options.h"
 #include "mongo/shell/shell_utils.h"
 #include "mongo/util/assert_util.h"
@@ -1262,6 +1264,266 @@ int KillMongoProgramInstances() {
     return returnCode;
 }
 
+/**
+ * Reads a set of test named pipes. 'args' BSONObj should contain one or more fields like:
+ *   "0": string; relative path of the first pipe
+ *   "1": string; relative path of the second pipe
+ *   ...
+ * Any field names not sequentially numbered from 0 will be ignored.
+ */
+BSONObj ReadTestPipes(const BSONObj& args, void* unused) {
+    int fieldNum = 0;                            // next field name in numeric form
+    BSONElement pipePathElem;                    // next pipe relative path
+    std::vector<std::string> pipeRelativePaths;  // all pipe relative paths
+
+    do {
+        pipePathElem = BSONElement(args.getField(std::to_string(fieldNum)));
+        if (pipePathElem.type() == BSONType::String) {
+            pipeRelativePaths.emplace_back(pipePathElem.str());
+        } else if (pipePathElem.type() != BSONType::EOO) {
+            uasserted(ErrorCodes::FailedToParse,
+                      "Argument {} (pipe path) must be a string"_format(fieldNum));
+        }
+        ++fieldNum;
+    } while (pipePathElem.type() != BSONType::EOO);
+
+    if (pipeRelativePaths.size() > 0) {
+        return NamedPipeHelper::readFromPipes(pipeRelativePaths);
+    }
+    return {};
+}
+
+/**
+ * Writes a test named pipe of generated BSONobj's. 'args' BSONObj should contain fields:
+ *   "0": string; relative path of the pipe
+ *   "1": number; number of BSON objects to write to the pipe
+ *   "2": OPTIONAL number; lower bound on size of "string" field in generated object (default 0)
+ *   "3": OPTIONAL number; upper bound on size of "string" field in generated object (default 2048)
+ *     capped at 16,750,000 (slightly less than BSON object maximum of 16 MB)
+ *   "4": OPTIONAL string; absolute path to the directory where named pipes exist. If not given,
+ *        'kDefaultPipePath' is used.
+ */
+BSONObj WriteTestPipe(const BSONObj& args, void* unused) {
+    int nFields = args.nFields();
+    uassert(ErrorCodes::FailedToParse,
+            "wrong number of arguments"_format(nFields),
+            nFields >= 2 && nFields <= 5);
+
+    const long kStringMaxSize = 16750000;  // max allowed size for generated object's "string" field
+    BSONElement pipePathElem(args.getField("0"));
+    BSONElement objectsElem(args.getField("1"));
+    BSONElement stringMinSizeStr(args.getField("2"));
+    BSONElement stringMaxSizeStr(args.getField("3"));
+    long stringMinSize = 0;     // default "string" field minimum size
+    long stringMaxSize = 2048;  // default "string" field maximum size
+
+    uassert(ErrorCodes::FailedToParse,
+            "First argument (pipe path) must be a string",
+            pipePathElem.type() == BSONType::String);
+    uassert(ErrorCodes::FailedToParse,
+            "Second argument (number of objects) must be a number",
+            objectsElem.isNumber());
+    if (stringMinSizeStr.isNumber()) {  // optional
+        stringMinSize = stringMinSizeStr.numberLong();
+        if (stringMinSize < 0) {
+            stringMinSize = 0;
+        }
+        if (stringMinSize > kStringMaxSize) {
+            stringMinSize = kStringMaxSize;
+        }
+    }
+    if (stringMaxSizeStr.isNumber()) {  // optional
+        stringMaxSize = stringMaxSizeStr.numberLong();
+        if (stringMaxSize < 0) {
+            stringMaxSize = 0;
+        }
+        if (stringMaxSize > kStringMaxSize) {
+            stringMaxSize = kStringMaxSize;
+        }
+    }
+    uassert(ErrorCodes::FailedToParse,
+            "Third argument (string min size) must be <= fourth argument (string max size)",
+            stringMinSize <= stringMaxSize);
+
+    std::string pipeDir = [&] {
+        if (nFields == 5) {
+            BSONElement pipeDirElem(args.getField("4"));
+            uassert(ErrorCodes::FailedToParse,
+                    "Fifth argument (pipe dir) must be a string",
+                    pipeDirElem.type() == BSONType::String);
+            return pipeDirElem.str();
+        } else {
+            return kDefaultPipePath.toString();
+        }
+    }();
+
+    NamedPipeHelper::writeToPipeAsync(std::move(pipeDir),
+                                      pipePathElem.str(),
+                                      objectsElem.numberLong(),
+                                      stringMinSize,
+                                      stringMaxSize);
+
+    return {};
+}
+
+namespace {
+
+/**
+ * Attempts to read the requested number of bytes from the given input stream to the given buffer
+ * and returns the number of bytes actually read.
+ */
+int32_t readBytes(char* buf, int32_t count, std::ifstream& ifs) {
+    ifs.read(buf, count);
+    return ifs.gcount();
+}
+
+}  // namespace
+
+/**
+ * Writes a test named pipe of BSONobj's that are first read into memory from a BSON file, then
+ * round-robinned into the pipe up to the requested number of objects. This is the same as function
+ * WriteTestPipeObjects except the objects are read from a file instead of passed in as a BSONArray.
+ *   "0": string; relative path of the pipe
+ *   "1": number; number of BSON objects to write to the pipe
+ *   "2": string; relative path to the file of BSON objects; these must fit in memory
+ *   "3": OPTIONAL string; absolute path to the directory where named pipes exist. If not given,
+ *        'kDefaultPipePath' is used.
+ */
+BSONObj WriteTestPipeBsonFile(const BSONObj& args, void* unused) {
+    int nFields = args.nFields();
+    uassert(ErrorCodes::FailedToParse,
+            "Function requires 3 or 4 arguments but {} were given"_format(nFields),
+            nFields == 3 || nFields == 4);
+
+    BSONElement pipePathElem(args.getField("0"));
+    BSONElement objectsElem(args.getField("1"));
+    BSONElement bsonFilePathElem(args.getField("2"));
+
+    uassert(ErrorCodes::FailedToParse,
+            "First argument (pipe path) must be a string",
+            pipePathElem.type() == BSONType::String);
+    uassert(ErrorCodes::FailedToParse,
+            "Second argument (number of objects) must be a number",
+            objectsElem.isNumber());
+    uassert(ErrorCodes::FailedToParse,
+            "Third argument (BSON file path) must be a string",
+            bsonFilePathElem.type() == BSONType::String);
+
+    std::string pipeDir = [&] {
+        if (nFields == 4) {
+            BSONElement pipeDirElem(args.getField("3"));
+            uassert(ErrorCodes::FailedToParse,
+                    "Fourth argument (pipe dir) must be a string",
+                    pipeDirElem.type() == BSONType::String);
+            return pipeDirElem.str();
+        } else {
+            return kDefaultPipePath.toString();
+        }
+    }();
+
+    // Open the BSON object file.
+    std::ifstream ifs(bsonFilePathElem.str(), std::ios::binary | std::ios::in);
+    uassert(
+        ErrorCodes::FileOpenFailed,
+        "Failed to open '{}': {}"_format(bsonFilePathElem.str(), errorMessage(lastSystemError())),
+        ifs.is_open());
+
+    // Read the BSON object file into a vector of BSONObj.
+    const int32_t kSizeSize = sizeof(int32_t);
+    std::vector<BSONObj> bsonObjs;
+    char sizeBuf[kSizeSize];  // buffer to read size of next BSONObj into
+    bool eof = false;
+    while (!eof) {
+        int32_t nBytes = readBytes(sizeBuf, kSizeSize, ifs);
+        if (nBytes == kSizeSize) {
+            int32_t size = ConstDataView(sizeBuf).read<LittleEndian<int32_t>>();
+            SharedBuffer buf = SharedBuffer::allocate(size);  // buffer for the full BSONObj
+            invariant(buf.get());
+
+            memcpy(buf.get(), sizeBuf, kSizeSize);
+            int32_t totalRead = kSizeSize;
+            while ((nBytes = readBytes(buf.get() + totalRead, size - totalRead, ifs)) > 0) {
+                totalRead += nBytes;
+                if (totalRead == size) {
+                    break;
+                }
+            }
+            uassert(ErrorCodes::InvalidBSON,
+                    "Expected {} bytes in BSON object but got {}"_format(size, totalRead),
+                    totalRead == size);
+
+            bsonObjs.emplace_back(buf);
+        } else {
+            eof = true;
+            uassert(ErrorCodes::InvalidBSON,
+                    "Expected {} bytes in size field but got {}"_format(kSizeSize, nBytes),
+                    nBytes == 0);  // 0 is normal EOF
+        }
+    }  // while !eof
+
+    // Write the pipe asynchronously.
+    NamedPipeHelper::writeToPipeObjectsAsync(
+        std::move(pipeDir), pipePathElem.str(), objectsElem.numberLong(), bsonObjs);
+
+    return {};
+}
+
+/**
+ * Writes a test named pipe by round-robinning caller-provided objects to the pipe. 'args' BSONObj
+ * should contain fields:
+ *   "0": string; relative path of the pipe
+ *   "1": number; number of BSON objects to write to the pipe
+ *   "2": BSONArray; array of objects to round-robin write to the pipe
+ *   "3": OPTIONAL string; absolute path to the directory where named pipes exist. If not given,
+ *        'kDefaultPipePath' is used.
+ */
+BSONObj WriteTestPipeObjects(const BSONObj& args, void* unused) {
+    int nFields = args.nFields();
+    uassert(ErrorCodes::FailedToParse,
+            "Function requires 3 or 4 arguments but {} were given"_format(nFields),
+            nFields == 3 || nFields == 4);
+
+    BSONElement pipePathElem(args.getField("0"));
+    BSONElement objectsElem(args.getField("1"));
+    BSONElement bsonElems(args.getField("2"));
+
+    uassert(ErrorCodes::FailedToParse,
+            "First argument (pipe path) must be a string",
+            pipePathElem.type() == BSONType::String);
+    uassert(ErrorCodes::FailedToParse,
+            "Second argument (number of objects) must be a number",
+            objectsElem.isNumber());
+    uassert(ErrorCodes::FailedToParse,
+            "Third argument must be an array of objects to round-robin over",
+            bsonElems.type() == mongo::Array);
+
+    std::string pipeDir = [&] {
+        if (nFields == 4) {
+            BSONElement pipeDirElem(args.getField("3"));
+            uassert(ErrorCodes::FailedToParse,
+                    "Fourth argument (pipe dir) must be a string",
+                    pipeDirElem.type() == BSONType::String);
+            return pipeDirElem.str();
+        } else {
+            return kDefaultPipePath.toString();
+        }
+    }();
+
+    // Convert bsonElems into bsonObjs as the former are pointers into local stack memory that will
+    // become invalid when this method returns, but they are needed by the async writer thread.
+    std::vector<BSONElement> bsonElemsVector = bsonElems.Array();
+    std::vector<BSONObj> bsonObjs;
+    for (BSONElement bsonElem : bsonElemsVector) {
+        bsonObjs.emplace_back(bsonElem.Obj().getOwned());
+    }
+
+    // Write the pipe asynchronously.
+    NamedPipeHelper::writeToPipeObjectsAsync(
+        std::move(pipeDir), pipePathElem.str(), objectsElem.numberLong(), std::move(bsonObjs));
+
+    return {};
+}
+
 std::vector<ProcessId> getRunningMongoChildProcessIds() {
     std::vector<ProcessId> registeredPids, outPids;
     registry.getRegisteredPids(registeredPids);
@@ -1308,6 +1570,26 @@ MongoProgramScope::~MongoProgramScope() {
     DESTRUCTOR_GUARD(KillMongoProgramInstances(); ClearRawMongoProgramOutput(BSONObj(), nullptr))
 }
 
+/**
+ * Defines (funcName, CallbackFunction) pairs where funcName becomes the name of a function in the
+ * mongo test shell and CallbackFunction is its C++ callback (handler). The callbacks must all have
+ * signatures like
+ *    BSONObj CallbackFunction(const BSONObj& args, void* data)
+ * (contract from injectNative()), though nobody is using the data parameter at time of writing.
+ *
+ * The BSONObj they return must put the result into field "" such as
+ *   return BSON("" << true);
+ * or
+ *   return BSON("" << BSON("resultInfo1" << resultValue1 << "resultInfo2" << resultValue2));
+ *
+ * In the shell these are called like
+ *   funcName(arg1, arg2, ...)
+ * for example
+ *   _writeTestPipe("my_pipe_file", 1234)
+ * The args will come in as the BSONObj first parameter of the callback with fields named
+ * sequentially from "0", e.g. for the above:
+ *   {"0": "my_pipe_file", "1": 1234}
+ */
 void installShellUtilsLauncher(Scope& scope) {
     scope.injectNative("_startMongoProgram", StartMongoProgram);
     scope.injectNative("_runningMongoChildProcessIds", RunningMongoChildProcessIds);
@@ -1327,6 +1609,10 @@ void installShellUtilsLauncher(Scope& scope) {
     scope.injectNative("copyDbpath", CopyDbpath);
     scope.injectNative("convertTrafficRecordingToBSON", ConvertTrafficRecordingToBSON);
     scope.injectNative("getFCVConstants", GetFCVConstants);
+    scope.injectNative("_readTestPipes", ReadTestPipes);
+    scope.injectNative("_writeTestPipe", WriteTestPipe);
+    scope.injectNative("_writeTestPipeBsonFile", WriteTestPipeBsonFile);
+    scope.injectNative("_writeTestPipeObjects", WriteTestPipeObjects);
 }
 }  // namespace shell_utils
 }  // namespace mongo

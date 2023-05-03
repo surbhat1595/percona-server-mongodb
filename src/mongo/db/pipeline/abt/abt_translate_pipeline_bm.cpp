@@ -33,6 +33,7 @@
 #include "mongo/db/pipeline/abt/abt_translate_bm_fixture.h"
 #include "mongo/db/pipeline/abt/document_source_visitor.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/query/cqf_command_utils.h"
 #include "mongo/db/query/query_test_service_context.h"
 
 namespace mongo::optimizer {
@@ -70,6 +71,11 @@ public:
         std::unique_ptr<Pipeline, PipelineDeleter> parsedPipeline =
             Pipeline::parse(pipeline, expCtx);
         parsedPipeline->optimizePipeline();
+
+        if (!isEligibleForBonsai_forTesting(*parsedPipeline.get())) {
+            state.SkipWithError("Pipeline is not supported by CQF");
+            return;
+        }
 
         // This is where recording starts.
         for (auto keepRunning : state) {

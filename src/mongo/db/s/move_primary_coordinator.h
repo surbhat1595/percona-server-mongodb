@@ -31,29 +31,29 @@
 
 #include "mongo/db/s/move_primary_coordinator_document_gen.h"
 #include "mongo/db/s/sharding_ddl_coordinator.h"
-#include "mongo/util/future.h"
 
 namespace mongo {
 
 class MovePrimaryCoordinator final
-    : public ShardingDDLCoordinatorImpl<MovePrimaryCoordinatorDocument> {
+    : public RecoverableShardingDDLCoordinator<MovePrimaryCoordinatorDocument,
+                                               MovePrimaryCoordinatorPhaseEnum> {
 public:
-    MovePrimaryCoordinator(ShardingDDLCoordinatorService* service, const BSONObj& initialState)
-        : ShardingDDLCoordinatorImpl(service, "MovePrimaryCoordinator", initialState) {}
+    using StateDoc = MovePrimaryCoordinatorDocument;
+    using Phase = MovePrimaryCoordinatorPhaseEnum;
 
+    MovePrimaryCoordinator(ShardingDDLCoordinatorService* service, const BSONObj& initialState);
     ~MovePrimaryCoordinator() = default;
 
-    void checkIfOptionsConflict(const BSONObj& coorDoc) const override;
-
-    void appendCommandInfo(BSONObjBuilder* cmdInfoBuilder) const override;
-
-    bool canAlwaysStartWhenUserWritesAreDisabled() const override {
-        return true;
-    }
+    void checkIfOptionsConflict(const BSONObj& doc) const override;
+    bool canAlwaysStartWhenUserWritesAreDisabled() const override;
 
 private:
+    StringData serializePhase(const Phase& phase) const override;
+    void appendCommandInfo(BSONObjBuilder* cmdInfoBuilder) const override;
     ExecutorFuture<void> _runImpl(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                                   const CancellationToken& token) noexcept override;
+
+    const DatabaseName _dbName;
 };
 
 }  // namespace mongo

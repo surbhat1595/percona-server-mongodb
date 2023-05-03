@@ -700,6 +700,40 @@ public:
         }
     }
 
+    static void printCorrelatedProjections(
+        ExplainPrinter& printer, const mongo::optimizer::ProjectionNameSet& correlatedProjections) {
+        ProjectionNameOrderedSet ordered;
+        for (const ProjectionName& projName : correlatedProjections) {
+            ordered.insert(projName);
+        }
+
+        if constexpr (version < ExplainVersion::V3) {
+            if (!correlatedProjections.empty()) {
+                printer.print(", {");
+                bool first = true;
+                for (const ProjectionName& projectionName : ordered) {
+                    if (first) {
+                        first = false;
+                    } else {
+                        printer.print(", ");
+                    }
+                    printer.print(projectionName);
+                }
+                printer.print("}");
+            }
+        } else if constexpr (version == ExplainVersion::V3) {
+            std::vector<ExplainPrinter> printers;
+            for (const ProjectionName& projectionName : ordered) {
+                ExplainPrinter local;
+                local.print(projectionName);
+                printers.push_back(std::move(local));
+            }
+            printer.fieldName("correlatedProjections").print(printers);
+        } else {
+            MONGO_UNREACHABLE;
+        }
+    }
+
     /**
      * Nodes
      */
@@ -842,13 +876,35 @@ public:
                 printer.printSingleLevel(boundPrinter);
             };
 
-            printer.print(lowBound.isInclusive() ? "[" : "(");
-            printBoundFn(printer, lowBound.getBound());
+            // Shortened output for half-open, fully open and point intervals.
+            if (interval.isFullyOpen()) {
+                printer.print("<fully open>");
+            } else if (interval.isEquality()) {
+                printer.print("=");
+                printBoundFn(printer, lowBound.getBound());
+            } else if (lowBound.isMinusInf()) {
+                printer.print("<");
+                if (highBound.isInclusive()) {
+                    printer.print("=");
+                }
+                printBoundFn(printer, highBound.getBound());
+            } else if (highBound.isPlusInf()) {
+                printer.print(">");
+                if (lowBound.isInclusive()) {
+                    printer.print("=");
+                }
+                printBoundFn(printer, lowBound.getBound());
+            } else {
+                // Output for a generic interval.
 
-            printer.print(", ");
-            printBoundFn(printer, highBound.getBound());
+                printer.print(lowBound.isInclusive() ? "[" : "(");
+                printBoundFn(printer, lowBound.getBound());
 
-            printer.print(highBound.isInclusive() ? "]" : ")");
+                printer.print(", ");
+                printBoundFn(printer, highBound.getBound());
+
+                printer.print(highBound.isInclusive() ? "]" : ")");
+            }
         } else if constexpr (version == ExplainVersion::V3) {
             ExplainPrinter lowBoundPrinter;
             lowBoundPrinter.fieldName("inclusive").print(lowBound.isInclusive());
@@ -873,17 +929,6 @@ public:
         }
     }
 
-    std::string printInterval(const IntervalRequirement& interval) {
-        ExplainPrinter printer;
-        printInterval(printer, interval);
-        return printer.str();
-    }
-
-    ExplainPrinter printIntervalExpr(const IntervalReqExpr::Node& intervalExpr) {
-        IntervalPrinter<IntervalReqExpr> intervalPrinter(*this);
-        return intervalPrinter.print(intervalExpr);
-    }
-
     void printInterval(ExplainPrinter& printer, const CompoundIntervalRequirement& interval) {
         if constexpr (version < ExplainVersion::V3) {
             bool first = true;
@@ -906,6 +951,19 @@ public:
         } else {
             MONGO_UNREACHABLE;
         }
+    }
+
+    template <class T>
+    std::string printInterval(const T& interval) {
+        ExplainPrinter printer;
+        printInterval(printer, interval);
+        return printer.str();
+    }
+
+    template <class T>
+    ExplainPrinter printIntervalExpr(const typename T::Node& intervalExpr) {
+        IntervalPrinter<T> intervalPrinter(*this);
+        return intervalPrinter.print(intervalExpr);
     }
 
     template <class T>
@@ -1137,7 +1195,7 @@ public:
 
             local.fieldName("intervals");
             {
-                ExplainPrinter intervals = printIntervalExpr(req.getIntervals());
+                ExplainPrinter intervals = printIntervalExpr<IntervalReqExpr>(req.getIntervals());
                 local.printSingleLevel(intervals, "" /*singleLevelSpacer*/);
             }
 
@@ -1167,7 +1225,7 @@ public:
 
             local.fieldName("intervals");
             {
-                ExplainPrinter intervals = printIntervalExpr(req.getIntervals());
+                ExplainPrinter intervals = printIntervalExpr<IntervalReqExpr>(req.getIntervals());
                 local.printSingleLevel(intervals, "" /*singleLevelSpacer*/);
             }
             local.separator(", ").fieldName("entryIndex").print(entryIndex);
@@ -1251,12 +1309,33 @@ public:
                     }
                 }
 
-                local.separator("}, ").fieldName("intervals", ExplainVersion::V3);
+                local.separator("}, ");
                 {
                     IntervalPrinter<CompoundIntervalReqExpr> intervalPrinter(*this);
-                    ExplainPrinter intervals =
-                        intervalPrinter.print(candidateIndexEntry._intervals);
-                    local.printSingleLevel(intervals, "" /*singleLevelSpacer*/);
+                    if (candidateIndexEntry._intervals.size() == 1) {
+                        local.fieldName("intervals", ExplainVersion::V3);
+
+                        ExplainPrinter intervals =
+                            intervalPrinter.print(candidateIndexEntry._intervals.front());
+                        local.printSingleLevel(intervals, "" /*singleLevelSpacer*/);
+                    } else {
+                        local.fieldName("intervals", ExplainVersion::V3);
+
+                        ExplainPrinter intervalVector;
+                        intervalVector.separator(" [");
+                        for (size_t i = 0; i < candidateIndexEntry._intervals.size(); i++) {
+                            const auto& entry = candidateIndexEntry._intervals.at(i);
+                            if (i > 0) {
+                                intervalVector.separator(", ");
+                            }
+                            ExplainPrinter intervals = intervalPrinter.print(entry);
+                            intervalVector
+                                .fieldName(str::stream() << "interval" << i, ExplainVersion::V3)
+                                .printSingleLevel(intervals, "" /*singleLevelSpacer*/);
+                        }
+
+                        local.printSingleLevel(intervalVector).separator("]");
+                    }
                 }
 
                 if (const auto& residualReqs = candidateIndexEntry._residualRequirements;
@@ -1365,36 +1444,7 @@ public:
             .fieldName("joinType")
             .print(JoinTypeEnum::toString[static_cast<int>(node.getJoinType())]);
 
-        ProjectionNameOrderedSet ordered;
-        for (const ProjectionName& projName : node.getCorrelatedProjectionNames()) {
-            ordered.insert(projName);
-        }
-
-        if constexpr (version < ExplainVersion::V3) {
-            if (!node.getCorrelatedProjectionNames().empty()) {
-                printer.print(", {");
-                bool first = true;
-                for (const ProjectionName& projectionName : ordered) {
-                    if (first) {
-                        first = false;
-                    } else {
-                        printer.print(", ");
-                    }
-                    printer.print(projectionName);
-                }
-                printer.print("}");
-            }
-        } else if constexpr (version == ExplainVersion::V3) {
-            std::vector<ExplainPrinter> printers;
-            for (const ProjectionName& projectionName : ordered) {
-                ExplainPrinter local;
-                local.print(projectionName);
-                printers.push_back(std::move(local));
-            }
-            printer.fieldName("correlatedProjections").print(printers);
-        } else {
-            MONGO_UNREACHABLE;
-        }
+        printCorrelatedProjections(printer, node.getCorrelatedProjectionNames());
 
         printer.separator("]");
         nodeCEPropsPrint(printer, n, node);
@@ -1500,6 +1550,32 @@ public:
             .print(joinConditionPrinter)
             .fieldName("collation", ExplainVersion::V3)
             .print(collationPrinter)
+            .maybeReverse()
+            .fieldName("leftChild", ExplainVersion::V3)
+            .print(leftChildResult)
+            .fieldName("rightChild", ExplainVersion::V3)
+            .print(rightChildResult);
+        return printer;
+    }
+
+    ExplainPrinter transport(const ABT& n,
+                             const NestedLoopJoinNode& node,
+                             ExplainPrinter leftChildResult,
+                             ExplainPrinter rightChildResult,
+                             ExplainPrinter filterResult) {
+        ExplainPrinter printer("NestedLoopJoin");
+        maybePrintProps(printer, node);
+        printer.separator(" [")
+            .fieldName("joinType")
+            .print(JoinTypeEnum::toString[static_cast<int>(node.getJoinType())]);
+
+        printCorrelatedProjections(printer, node.getCorrelatedProjectionNames());
+
+        printer.separator("]");
+        nodeCEPropsPrint(printer, n, node);
+        printer.setChildCount(3)
+            .fieldName("expression", ExplainVersion::V3)
+            .print(filterResult)
             .maybeReverse()
             .fieldName("leftChild", ExplainVersion::V3)
             .print(leftChildResult)
@@ -2650,14 +2726,32 @@ std::string ExplainGenerator::explainPartialSchemaReqMap(const PartialSchemaRequ
     return result.str();
 }
 
+std::string ExplainGenerator::explainResidualRequirements(const ResidualRequirements& resReqs) {
+    ExplainGeneratorV2 gen;
+    ExplainGeneratorV2::ExplainPrinter result;
+    gen.printResidualRequirements(result, resReqs);
+    return result.str();
+}
+
 std::string ExplainGenerator::explainInterval(const IntervalRequirement& interval) {
+    ExplainGeneratorV2 gen;
+    return gen.printInterval(interval);
+}
+
+std::string explainInterval(const CompoundIntervalRequirement& interval) {
     ExplainGeneratorV2 gen;
     return gen.printInterval(interval);
 }
 
 std::string ExplainGenerator::explainIntervalExpr(const IntervalReqExpr::Node& intervalExpr) {
     ExplainGeneratorV2 gen;
-    return gen.printIntervalExpr(intervalExpr).str();
+    return gen.printIntervalExpr<IntervalReqExpr>(intervalExpr).str();
+}
+
+std::string ExplainGenerator::explainIntervalExpr(
+    const CompoundIntervalReqExpr::Node& intervalExpr) {
+    ExplainGeneratorV2 gen;
+    return gen.printIntervalExpr<CompoundIntervalReqExpr>(intervalExpr).str();
 }
 
 }  // namespace mongo::optimizer

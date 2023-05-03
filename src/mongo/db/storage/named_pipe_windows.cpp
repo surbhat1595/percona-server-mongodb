@@ -36,6 +36,7 @@
 
 #include "mongo/db/storage/io_error_message.h"
 #include "mongo/logv2/log.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/util/errno_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
@@ -44,8 +45,10 @@
 namespace mongo {
 using namespace fmt::literals;
 
-NamedPipeOutput::NamedPipeOutput(const std::string& pipeRelativePath)
-    : _pipeAbsolutePath(kDefaultPipePath + pipeRelativePath),
+// On Windows, 'externalPipeDir' parameter is not supported and so the first argument is ignored and
+// instead, 'kDefultPipePath' is used.
+NamedPipeOutput::NamedPipeOutput(const std::string&, const std::string& pipeRelativePath)
+    : _pipeAbsolutePath(kDefaultPipePath.toString() + pipeRelativePath),
       _pipe(CreateNamedPipeA(_pipeAbsolutePath.c_str(),
                              PIPE_ACCESS_OUTBOUND,
                              (PIPE_TYPE_BYTE | PIPE_WAIT),
@@ -56,7 +59,7 @@ NamedPipeOutput::NamedPipeOutput(const std::string& pipeRelativePath)
                              nullptr)),  // lpSecurityAttributes
       _isOpen(false) {
     uassert(7005006,
-            "Failed to create a named pipe, error={}"_format(
+            "Failed to create a named pipe, error: {}"_format(
                 getErrorMessage("CreateNamedPipe", _pipeAbsolutePath)),
             _pipe != INVALID_HANDLE_VALUE);
 }
@@ -116,21 +119,32 @@ NamedPipeInput::NamedPipeInput(const std::string& pipeRelativePath)
       _pipe(INVALID_HANDLE_VALUE),
       _isOpen(false),
       _isGood(false),
-      _isEof(false) {}
+      _isEof(false) {
+    uassert(7001101,
+            "Pipe path must not include '..' but {} does"_format(_pipeAbsolutePath),
+            _pipeAbsolutePath.find("..") == std::string::npos);
+}
 
 NamedPipeInput::~NamedPipeInput() {
     close();
 }
 
 void NamedPipeInput::doOpen() {
-    _pipe =
-        CreateFileA(_pipeAbsolutePath.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (_pipe == INVALID_HANDLE_VALUE) {
-        return;
-    }
+    // Retry open every 1 ms for up to 1 sec in case writer has not created the pipe yet.
+    int retries = 0;
+    do {
+        _pipe = CreateFileA(
+            _pipeAbsolutePath.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (_pipe == INVALID_HANDLE_VALUE) {
+            stdx::this_thread::sleep_for(stdx::chrono::milliseconds(1));
+            ++retries;
+        }
+    } while (_pipe == INVALID_HANDLE_VALUE && retries <= 1000);
 
-    _isOpen = true;
-    _isGood = true;
+    if (_pipe != INVALID_HANDLE_VALUE) {
+        _isOpen = true;
+        _isGood = true;
+    }
 }
 
 int NamedPipeInput::doRead(char* data, int size) {

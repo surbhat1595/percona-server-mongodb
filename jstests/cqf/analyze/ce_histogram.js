@@ -13,17 +13,30 @@
 (function() {
 "use strict";
 
-load('jstests/aggregation/extras/utils.js');  // For assertArrayEq.
-load("jstests/libs/optimizer_utils.js");      // For checkCascadesOptimizerEnabled.
-load("jstests/libs/sbe_util.js");             // For checkSBEEnabled.
+load('jstests/libs/ce_stats_utils.js');
 
+const charCodeA = 65;
 const collName = "ce_histogram";
-const fields = ["int", "dbl", "str", "date"];
-const tolerance = 0.01;
+const fields = ["int", "dbl", "dec", "strS", "strB", "date", "ts", "oid"];
 
 let _id;
 
-// Helper functions.
+// Helper to sort ints lexicographically.
+// A small note: the ordering of string bounds (lexicographical) is different than that of int
+// bounds. In order to simplify the histogram validation logic, we don't want to have to account for
+// the fact that in the resulting histogram, string bounds will be sorted differently than int
+// bounds. To illustrate this, if we were to use the format `${val}` to generate strings, we would
+// generate a different order of bounds for the histogram on the string fields and the histogram on
+// the int fields, because 2 < 10, but "10" < "2". This test relies on all field values being sorted
+// the same way in the bounds.
+function lexint(val) {
+    return String.fromCharCode(charCodeA - 1 + val);  // Note: val >= 1.
+}
+
+// Helper to generate hex strings for ints from 1-10. These are trivially lexicographically sorted.
+function lexhex(val) {
+    return val > 9 ? String.fromCharCode((val - 10) + charCodeA) : `${val}`;
+}
 
 /**
  * Generates 'val' documents where each document has a distinct value for each 'field' in 'fields'.
@@ -31,16 +44,17 @@ let _id;
 function generateDocs(val) {
     let docs = [];
     const fields = {
-        int: val,
+        int: NumberInt(val),  // Necessary to cast, otherwise we get a double here.
         dbl: val + 0.1,
-        // A small note: the ordering of string bounds (lexicographical) is different than that of
-        // int bounds. In order to simplify the histogram validation logic, we don't want to have to
-        // account for the fact that string bounds will be sorted differently than int bounds. To
-        // illustrate this, if we were to use the format `string_${val}`, the string corresponding
-        // to value 10 would be the second entry in the histogram bounds array, even though it would
-        // be generated for 'val' = 10, not 'val' = 2.
-        str: `string_${String.fromCharCode(64 + val)}`,
-        date: new Date(`02 December ${val + 2000}`)
+        dec: NumberDecimal(val + 0.1),
+        strS: `${lexint(val)}`,
+        strB: `string_${lexint(val)}`,
+        date: new Date(`02 December ${val + 2000}`),
+        ts: new Timestamp(val, 1),
+        // Object Ids are represented by 12 bytes. We want to ensure the ordering matches the
+        // ordering of the other fields for the purposes of this test. As a result, we set the 4th
+        // most significant byte to a lexicographically increasing hexadecimal value.
+        oid: new ObjectId(`000${lexhex(val)}00000000000000000000`),
     };
     for (let i = 0; i < val; i++) {
         docs.push(Object.assign({_id}, fields));
@@ -50,48 +64,45 @@ function generateDocs(val) {
 }
 
 /**
- * Retrieves the cardinality estimate from a node in explain.
+ * Returns the correct type name in the stats 'typeCount' field for the given field name.
  */
-function extractCEFromExplain(node) {
-    const ce = node.properties.adjustedCE;
-    assert.neq(ce, null);
-    return ce;
+function getTypeName(field) {
+    switch (field) {
+        case "int":
+            return "NumberInt32";
+        case "dbl":
+            return "NumberDouble";
+        case "dec":
+            return "NumberDecimal";
+        case "strS":
+            return "StringSmall";
+        case "strB":
+            return "StringBig";
+        case "date":
+            return "Date";
+        case "ts":
+            return "Timestamp";
+        case "oid":
+            return "ObjectId";
+        default:
+            assert(false, `Name mapping for ${field} not defined.`);
+    }
 }
 
-/**
- * Extracts the cardinality estimate for the given $match predicate, assuming we get an index scan
- * plan.
- */
-function getIxscanCEForMatch(coll, predicate, hint) {
-    // We expect the plan to include a BinaryJoin whose left child is an IxScan whose logical
-    // representation was estimated via histograms.
-    const explain = coll.explain().aggregate([{$match: predicate}], {hint});
-    const ixScan = leftmostLeafStage(explain);
-    assert.neq(ixScan, null);
-    assert.eq(ixScan.nodeType, "IndexScan");
-    return extractCEFromExplain(ixScan);
+function isSubset(s1, s2) {
+    for (const e of s1) {
+        if (!s2.has(e)) {
+            return false;
+        }
+    }
+    return true;
 }
 
-/**
- * Asserts that expected and actual are equal, within a small tolerance.
- */
-function assertApproxEq(expected, actual, msg) {
-    assert(Math.abs(expected - actual) < tolerance, msg);
-}
-
-/**
- * Validates that the results and cardinality estimate for a given $match predicate agree.
- */
-function verifyCEForMatch({coll, predicate, expected, hint}) {
-    const actual = coll.aggregate([{$match: predicate}], {hint}).toArray();
-    assertArrayEq({actual, expected});
-
-    const expectedCE = expected.length;
-    const actualCE = getIxscanCEForMatch(coll, predicate, hint);
-    assertApproxEq(
-        actualCE,
-        expectedCE,
-        `${tojson(predicate)} returned ${expectedCE} documents, estimated ${actualCE} docs.`);
+function sameTypeClass(field, documentField) {
+    const numTypes = new Set(["dbl", "dec", "int"]);
+    const strTypes = new Set(["strS", "strB"]);
+    const fields = new Set([field, documentField]);
+    return isSubset(fields, numTypes) || isSubset(fields, strTypes);
 }
 
 /**
@@ -103,11 +114,22 @@ function verifyCEForNDV(ndv) {
     const coll = db[collName];
     coll.drop();
 
-    const expectedHistograms = [];
+    const expectedHistograms = {};
     for (const field of fields) {
         assert.commandWorked(coll.createIndex({[field]: 1}));
-        expectedHistograms.push(
-            {_id: field, statistics: {documents: 0, scalarHistogram: {buckets: [], bounds: []}}});
+
+        const typeName = getTypeName(field);
+        expectedHistograms[field] = {
+            _id: field,
+            statistics: {
+                documents: 0.0,
+                scalarHistogram: {buckets: [], bounds: []},
+                emptyArrayCount: 0.0,
+                trueCount: 0.0,
+                falseCount: 0.0,
+                typeCount: [{typeName, count: 0.0}],
+            }
+        };
     }
 
     // Set up test collection and initialize the expected histograms in order to validate basic
@@ -118,11 +140,19 @@ function verifyCEForNDV(ndv) {
     let cumulativeCount = 0;
     let allDocs = [];
     for (let val = 1; val <= ndv; val++) {
-        const docs = generateDocs(val);
+        let docs = generateDocs(val);
+        jsTestLog(tojson(docs));
         assert.commandWorked(coll.insertMany(docs));
+
+        // Small hack; when we insert a doc, we want to insert it as a NumberInt so that the
+        // appropriate type counters increment. However, when we verify it later on, we expect to
+        // see a regular number, so we should update the "int" field of docs here.
+        for (let doc of docs) {
+            doc["int"] = val;
+        }
+
         cumulativeCount += docs.length;
-        for (const expectedHistogram of expectedHistograms) {
-            const field = expectedHistogram._id;
+        for (const [f, expectedHistogram] of Object.entries(expectedHistograms)) {
             const {statistics} = expectedHistogram;
             statistics.documents = cumulativeCount;
             statistics.scalarHistogram.buckets.push({
@@ -132,37 +162,35 @@ function verifyCEForNDV(ndv) {
                 rangeDistincts: 0,
                 cumulativeDistincts: val
             });
-            statistics.scalarHistogram.bounds.push(docs[0][field]);
+            statistics.scalarHistogram.bounds.push(docs[0][f]);
+            statistics.typeCount[0].count += val;
         }
         allDocs = allDocs.concat(docs);
     }
 
-    // Set up histogram for test collection.
-    const stats = db.system.statistics[collName];
-
+    // Create histograms for all fields.
     for (const field of fields) {
-        // We can't use forceBonsai here because the new optimizer doesn't know how to handle the
-        // analyze command.
-        assert.commandWorked(
-            db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "tryBonsai"}));
-        const res = db.runCommand({analyze: collName, key: field});
-        assert.commandWorked(res);
+        createAndValidateHistogram({coll, expectedHistogram: expectedHistograms[field]});
+    }
 
-        // Validate histograms.
-        const actualHistograms = stats.aggregate([{$match: {_id: field}}]).toArray();
-        const isField = (elem) => elem === field;
+    jsTestLog(tojson(db.system.statistics[collName].find().toArray()));
 
-        assertArrayEq(
-            {actual: actualHistograms.find(isField), expected: expectedHistograms.find(isField)});
+    const doc0 = {
+        int: 0,
+        dbl: 0.0,
+        dec: NumberDecimal(0.0),
+        strS: "",
+        strB: "",
+        date: new Date(`02 December ${2000}`),
+        ts: new Timestamp(0, 1),
+        oid: new ObjectId("000000000000000000000000")
+    };
 
-        // We need to set the CE query knob to use histograms and force the use of the new optimizer
-        // to ensure that we use histograms to estimate CE here.
-        assert.commandWorked(
-            db.adminCommand({setParameter: 1, internalQueryCardinalityEstimatorMode: "histogram"}));
-        assert.commandWorked(
-            db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "forceBonsai"}));
+    // Verify CE for all distinct values of each field across multiple types.
+    forceHistogramCE();
+    for (const field of fields) {
+        jsTestLog(`Testing histogram for ndv ${ndv} and field ${field}`);
 
-        // Verify CE for all distinct values of each field across multiple types.
         let count = 0;
         const hint = {[field]: 1};
         for (let val = 1; val <= ndv; val++) {
@@ -188,47 +216,13 @@ function verifyCEForNDV(ndv) {
                     verifyCEForMatch(
                         {coll, predicate: {[field]: {$gte: fieldVal}}, hint, expected: docsGte});
 
-                } else if (field == "int" && documentField == "dbl") {
-                    // Each distinct double value corresponds to an int value + 0.1, so we shouldn't
-                    // get any equality matches.
-                    verifyCEForMatch({coll, predicate: {[field]: fieldVal}, hint, expected: []});
-
-                    // When we have a predicate ~ < val + 0.1 or <= val + 0.1, it should match all
-                    // integers <= val.
-                    verifyCEForMatch(
-                        {coll, predicate: {[field]: {$lt: fieldVal}}, hint, expected: docsLte});
-                    verifyCEForMatch(
-                        {coll, predicate: {[field]: {$lte: fieldVal}}, hint, expected: docsLte});
-
-                    // When we have a predicate ~ > val + 0.1 or >= val + 0.1, it should match all
-                    // integers > val.
-                    verifyCEForMatch(
-                        {coll, predicate: {[field]: {$gt: fieldVal}}, hint, expected: docsGt});
-                    verifyCEForMatch(
-                        {coll, predicate: {[field]: {$gte: fieldVal}}, hint, expected: docsGt});
-
-                } else if (field == "dbl" && documentField == "int") {
-                    // Each distinct double value corresponds to an int value + 0.1, so we shouldn't
-                    // get any equality matches.
-                    verifyCEForMatch({coll, predicate: {[field]: fieldVal}, hint, expected: []});
-
-                    // When we have a predicate ~ < val - 0.1 or <= val - 0.1, it should match all
-                    // doubles < val.
-                    verifyCEForMatch(
-                        {coll, predicate: {[field]: {$lt: fieldVal}}, hint, expected: docsLt});
-                    verifyCEForMatch(
-                        {coll, predicate: {[field]: {$lte: fieldVal}}, hint, expected: docsLt});
-
-                    // When we have a predicate ~ > val - 0.1 or >= val - 0.1, it should match all
-                    // doubles >= val.
-                    verifyCEForMatch(
-                        {coll, predicate: {[field]: {$gt: fieldVal}}, hint, expected: docsGte});
-                    verifyCEForMatch(
-                        {coll, predicate: {[field]: {$gte: fieldVal}}, hint, expected: docsGte});
+                } else if (sameTypeClass(field, documentField)) {
+                    // Skip this estimation- we have already tested range predicates for this type.
+                    continue;
 
                 } else {
-                    // Verify that we obtain a CE of 0 for types other than the 'field' type when at
-                    // least one type is not numeric.
+                    // Verify that we obtain a CE of 0 for types other outside the 'field' type's
+                    // type-class.
                     const expected = [];
                     verifyCEForMatch({coll, predicate: {[field]: fieldVal}, hint, expected});
                     verifyCEForMatch({coll, predicate: {[field]: {$lt: fieldVal}}, hint, expected});
@@ -244,41 +238,17 @@ function verifyCEForNDV(ndv) {
         }
 
         // Verify CE for values outside the range of distinct values for each field.
-        const docLow = {int: 0, dbl: 0.0, str: `string_0`, date: new Date(`02 December ${2000}`)};
         const docHigh = generateDocs(ndv + 1)[0];
         const expected = [];
-        verifyCEForMatch({coll, predicate: {[field]: docLow[field]}, hint, expected});
+        verifyCEForMatch({coll, predicate: {[field]: doc0[field]}, hint, expected});
         verifyCEForMatch({coll, predicate: {[field]: docHigh[field]}, hint, expected});
     }
 }
 
-// Run test.
-
-if (!checkCascadesOptimizerEnabled(db)) {
-    jsTestLog("Skipping test because the optimizer is not enabled");
-    return;
-}
-
-if (checkSBEEnabled(db, ["featureFlagSbeFull"], true)) {
-    jsTestLog("Skipping the test because it doesn't work in Full SBE");
-    return;
-}
-
-// We will be updating some query knobs, so store the old state and restore it after the test.
-const {internalQueryCardinalityEstimatorMode, internalQueryFrameworkControl} = db.adminCommand({
-    getParameter: 1,
-    internalQueryCardinalityEstimatorMode: 1,
-    internalQueryFrameworkControl: 1,
-});
-
-try {
+runHistogramsTest(function testScalarHistograms() {
     verifyCEForNDV(1);
     verifyCEForNDV(2);
     verifyCEForNDV(3);
     verifyCEForNDV(10);
-} finally {
-    // Reset query knobs to their original state.
-    assert.commandWorked(db.adminCommand(
-        {setParameter: 1, internalQueryCardinalityEstimatorMode, internalQueryFrameworkControl}));
-}
+});
 }());

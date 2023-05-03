@@ -594,8 +594,6 @@ void ParseAndRunCommand::_parseCommand() {
                                                 command->attachLogicalSessionsToOpCtx(),
                                                 true));
 
-    // TODO SERVER-28756: Change allowTransactionsOnConfigDatabase to true once we fix the bug
-    // where the mongos custom write path incorrectly drops the client's txnNumber.
     auto allowTransactionsOnConfigDatabase = !isMongos();
     validateSessionOptions(*_osi, command->getName(), nss, allowTransactionsOnConfigDatabase);
 
@@ -1002,7 +1000,7 @@ void ParseAndRunCommand::RunAndRetry::_checkRetryForTransaction(Status& status) 
         if (!txnRouter.canContinueOnStaleShardOrDbError(_parc->_commandName, status)) {
             if (status.code() == ErrorCodes::ShardInvalidatedForTargeting) {
                 auto catalogCache = Grid::get(opCtx)->catalogCache();
-                (void)catalogCache->getCollectionRoutingInfoWithRefresh(
+                (void)catalogCache->getCollectionPlacementInfoWithRefresh(
                     opCtx, status.extraInfo<ShardInvalidatedForTargetingInfo>()->getNss());
             }
 

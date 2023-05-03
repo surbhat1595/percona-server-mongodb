@@ -67,16 +67,14 @@ const ServiceContext::Decoration<LatestCollectionCatalog> getCatalog =
 
 std::shared_ptr<CollectionCatalog> batchedCatalogWriteInstance;
 
-const OperationContext::Decoration<std::shared_ptr<const CollectionCatalog>> stashedCatalog =
-    OperationContext::declareDecoration<std::shared_ptr<const CollectionCatalog>>();
+const RecoveryUnit::Snapshot::Decoration<std::shared_ptr<const CollectionCatalog>> stashedCatalog =
+    RecoveryUnit::Snapshot::declareDecoration<std::shared_ptr<const CollectionCatalog>>();
 
 /**
  * Returns true if the collection is compatible with the read timestamp.
  */
 bool isExistingCollectionCompatible(std::shared_ptr<Collection> coll,
                                     boost::optional<Timestamp> readTimestamp) {
-    // If no read timestamp is provided, no existing collection is compatible since we must
-    // instantiate a new collection instance.
     if (!coll || !readTimestamp) {
         return false;
     }
@@ -184,11 +182,15 @@ public:
                 std::shared_ptr<Collection>& collection =
                     catalog._pendingCommitNamespaces[entry.nss];
 
-                if (!entry.collection)
-                    continue;
-
                 collection = entry.collection;
-                catalog._pendingCommitUUIDs[collection->uuid()] = collection;
+                if (collection) {
+                    // If we have a collection instance for this entry also mark the uuid as pending
+                    catalog._pendingCommitUUIDs[collection->uuid()] = collection;
+                } else if (entry.externalUUID) {
+                    // Drops do not have a collection instance but set their UUID in the entry. Mark
+                    // it as pending with no collection instance.
+                    catalog._pendingCommitUUIDs[*entry.externalUUID] = nullptr;
+                }
             }
         });
     }
@@ -440,7 +442,7 @@ bool CollectionCatalog::iterator::_exhausted() {
     return _mapIter == _catalog->_orderedCollections.end() || _mapIter->first.first != _dbName;
 }
 
-std::shared_ptr<const CollectionCatalog> CollectionCatalog::get(ServiceContext* svcCtx) {
+std::shared_ptr<const CollectionCatalog> CollectionCatalog::latest(ServiceContext* svcCtx) {
     return atomic_load(&getCatalog(svcCtx).catalog);
 }
 
@@ -452,15 +454,15 @@ std::shared_ptr<const CollectionCatalog> CollectionCatalog::get(OperationContext
         return batchedCatalogWriteInstance;
     }
 
-    const auto& stashed = stashedCatalog(opCtx);
+    const auto& stashed = stashedCatalog(opCtx->recoveryUnit()->getSnapshot());
     if (stashed)
         return stashed;
-    return get(opCtx->getServiceContext());
+    return latest(opCtx->getServiceContext());
 }
 
 void CollectionCatalog::stash(OperationContext* opCtx,
                               std::shared_ptr<const CollectionCatalog> catalog) {
-    stashedCatalog(opCtx) = std::move(catalog);
+    stashedCatalog(opCtx->recoveryUnit()->getSnapshot()) = std::move(catalog);
 }
 
 void CollectionCatalog::write(ServiceContext* svcCtx, CatalogWriteFn job) {
@@ -774,6 +776,42 @@ CollectionPtr CollectionCatalog::openCollection(OperationContext* opCtx,
 
     auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
 
+    // When openCollection is called with no timestamp, the namespace must be pending commit. We
+    // compare the collection instance in _pendingCommitNamespaces and the collection instance in
+    // the in-memory catalog with the durable catalog entry to determine which instance to return.
+    if (!readTimestamp) {
+        auto it = _pendingCommitNamespaces.find(nss);
+        invariant(it != _pendingCommitNamespaces.end());
+        const auto& pendingCollection = it->second;
+
+        RecordId catalogId;
+        if (pendingCollection) {
+            catalogId = pendingCollection->getCatalogId();
+        } else {
+            auto lookupResult = lookupCatalogIdByNSS(nss, boost::none);
+            invariant(lookupResult.result == CatalogIdLookup::NamespaceExistence::kExists);
+            catalogId = lookupResult.id;
+        }
+
+        auto catalogEntry = DurableCatalog::get(opCtx)->getParsedCatalogEntry(opCtx, catalogId);
+        if (!catalogEntry || nss != catalogEntry->metadata->nss) {
+            return CollectionPtr();
+        }
+        auto latestCollection = _lookupCollectionByUUID(*catalogEntry->metadata->options.uuid);
+
+        // Use the pendingCollection if there is no latestCollection or if the metadata of the
+        // latestCollection doesn't match the durable catalogEntry.
+        if (!latestCollection || !latestCollection->isMetadataEqual(*catalogEntry->metadata)) {
+            invariant(pendingCollection->isMetadataEqual(*catalogEntry->metadata));
+            uncommittedCatalogUpdates.openCollection(opCtx, pendingCollection);
+            return CollectionPtr(pendingCollection.get(), CollectionPtr::NoYieldTag{});
+        }
+
+        invariant(latestCollection->isMetadataEqual(*catalogEntry->metadata));
+        uncommittedCatalogUpdates.openCollection(opCtx, latestCollection);
+        return CollectionPtr(latestCollection.get(), CollectionPtr::NoYieldTag{});
+    }
+
     // Try to find a catalog entry matching 'readTimestamp'.
     auto catalogEntry = _fetchPITCatalogEntry(opCtx, nss, readTimestamp);
     if (!catalogEntry) {
@@ -837,9 +875,8 @@ boost::optional<DurableCatalogEntry> CollectionCatalog::_fetchPITCatalogEntry(
     }
 
     auto catalogEntry = DurableCatalog::get(opCtx)->getParsedCatalogEntry(opCtx, catalogId);
-    // TODO SERVER-71208 remove readTimestamp check and add invariant to make sure this scan isn't
-    // reached when there is no timestamp
-    if (readTimestamp && (!catalogEntry || nss != catalogEntry->metadata->nss)) {
+    if (!catalogEntry || nss != catalogEntry->metadata->nss) {
+        invariant(readTimestamp);
         // If no entry is found or the entry contains a different namespace, the mapping might be
         // incorrect since it is incomplete after startup; scans durable catalog to confirm.
         auto catalogEntry = DurableCatalog::get(opCtx)->scanForCatalogEntryByNss(opCtx, nss);
@@ -1655,6 +1692,8 @@ std::shared_ptr<Collection> CollectionCatalog::deregisterCollection(
     _orderedCollections.erase(dbIdPair);
     _collections.erase(ns);
     _catalog.erase(uuid);
+    _pendingCommitNamespaces.erase(ns);
+    _pendingCommitUUIDs.erase(uuid);
 
     // Push drop unless this is a rollback of a create
     if (coll->isCommitted()) {
@@ -1761,6 +1800,13 @@ void CollectionCatalog::_pushCatalogIdForNSS(const NamespaceString& nss,
             // This namespace was removed due to an untimestamped write, clear entries.
             ids.clear();
         }
+
+        // Make sure we erase mapping for namespace if the list is left empty as lookups expect at
+        // least one entry for existing namespaces.
+        if (ids.empty()) {
+            _catalogIds.erase(nss);
+        }
+
         return;
     }
 

@@ -57,6 +57,7 @@ DEFAULTS = {
     "base_port": 20000,
     "backup_on_restart_dir": None,
     "buildlogger_url": "https://logkeeper2.build.10gen.cc",
+    "catalog_shard": None,
     "continue_on_failure": False,
     "dbpath_prefix": None,
     "dbtest_executable": None,
@@ -92,8 +93,9 @@ DEFAULTS = {
     "report_failure_status": "fail",
     "report_file": None,
     "run_all_feature_flag_tests": False,
-    "run_all_feature_flags_no_tests": False,
+    "run_no_feature_flag_tests": False,
     "additional_feature_flags": None,
+    "additional_feature_flags_file": None,
     "seed": int(time.time() * 256),  # Taken from random.py code in Python 2.7.
     "service_executor": None,
     "shell_conn_string": None,
@@ -299,6 +301,9 @@ DBTEST_EXECUTABLE = None
 # actually running them).
 DRY_RUN = None
 
+# If set, specifies which node is the catalog shard. Can also be set to 'any'.
+CATALOG_SHARD = None
+
 # URL to connect to the Evergreen service.
 EVERGREEN_URL = None
 
@@ -379,8 +384,11 @@ INSTALL_DIR = None
 # Whether to run tests for feature flags.
 RUN_ALL_FEATURE_FLAG_TESTS = None
 
-# Whether to run the server with feature flags. Defaults to true if `RUN_ALL_FEATURE_FLAG_TESTS` is true.
-RUN_ALL_FEATURE_FLAGS = None
+# Whether to run the tests with enabled feature flags
+RUN_NO_FEATURE_FLAG_TESTS = None
+
+# the path to a file containing feature flags
+ADDITIONAL_FEATURE_FLAGS_FILE = None
 
 # List of enabled feature flags.
 ENABLED_FEATURE_FLAGS = []

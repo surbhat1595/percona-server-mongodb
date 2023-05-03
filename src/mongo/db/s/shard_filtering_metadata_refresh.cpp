@@ -120,7 +120,8 @@ Status refreshDbMetadata(OperationContext* opCtx,
     invariant(ShardingState::get(opCtx)->canAcceptShardedCommands());
 
     ScopeGuard resetRefreshFutureOnError([&] {
-        UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+        // TODO (SERVER-71444): Fix to be interruptible or document exception.
+        UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
 
         Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
         auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
@@ -383,7 +384,8 @@ SharedSemiFuture<void> recoverRefreshCollectionPlacementVersion(
             boost::optional<CollectionMetadata> currentMetadataToInstall;
 
             ON_BLOCK_EXIT([&] {
-                UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+                // TODO (SERVER-71444): Fix to be interruptible or document exception.
+                UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
                 // A view can potentially be created after spawning a thread to recover nss's shard
                 // version. It is then ok to lock views in order to clear filtering metadata.
                 //
@@ -584,7 +586,7 @@ CollectionMetadata forceGetCurrentMetadata(OperationContext* opCtx, const Namesp
 
     try {
         const auto cm = uassertStatusOK(
-            Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithRefresh(opCtx, nss));
+            Grid::get(opCtx)->catalogCache()->getCollectionPlacementInfoWithRefresh(opCtx, nss));
 
         if (!cm.isSharded()) {
             return CollectionMetadata();
@@ -614,7 +616,7 @@ ChunkVersion forceShardFilteringMetadataRefresh(OperationContext* opCtx,
     invariant(shardingState->canAcceptShardedCommands());
 
     const auto cm = uassertStatusOK(
-        Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithRefresh(opCtx, nss));
+        Grid::get(opCtx)->catalogCache()->getCollectionPlacementInfoWithRefresh(opCtx, nss));
 
     if (!cm.isSharded()) {
         // DBLock and CollectionLock are used here to avoid throwing further recursive stale

@@ -2,7 +2,9 @@
  * Tests that invalid view definitions in system.views do not impact valid commands on existing
  * collections.
  *
+ * The test runs commands that are not allowed with security token: applyOps, compact, reIndex.
  * @tags: [
+ *   not_allowed_with_security_token,
  *   assumes_unsharded_collection,
  *   # applyOps is not available on mongos.
  *   assumes_against_mongod_not_mongos,
@@ -113,8 +115,7 @@ function runTest(badViewDefinition) {
     }
 
     assert.commandWorked(
-        viewsDB.runCommand(
-            {collMod: "collection", validator: {x: {$type: "string"}}, validationAction: "warn"}),
+        viewsDB.runCommand({collMod: "collection", validator: {x: {$type: "string"}}}),
         makeErrorMessage("collMod"));
 
     const renameCommand = {

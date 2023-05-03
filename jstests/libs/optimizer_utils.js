@@ -43,6 +43,8 @@ function leftmostLeafStage(node) {
             node = node.child;
         } else if (node.leftChild) {
             node = node.leftChild;
+        } else if (node.children) {
+            node = node.children[0];
         } else {
             break;
         }
@@ -51,10 +53,20 @@ function leftmostLeafStage(node) {
 }
 
 /**
+ * Retrieves the cardinality estimate from a node in explain.
+ */
+function extractLogicalCEFromNode(node) {
+    const ce = node.properties.logicalProperties.cardinalityEstimate[0].ce;
+    assert.neq(ce, null, tojson(node));
+    return ce;
+}
+
+/**
  * Get a very simplified version of a plan, which only includes nodeType and nesting structure.
  */
 function getPlanSkeleton(node, options = {}) {
-    const {extraKeepKeys = [], keepKeysDeep = [], printFilter = false} = options;
+    const {extraKeepKeys = [], keepKeysDeep = [], printFilter = false, printLogicalCE = false} =
+        options;
 
     const keepKeys = [
         'nodeType',
@@ -77,17 +89,48 @@ function getPlanSkeleton(node, options = {}) {
             Object.keys(node)
                 .filter(key => (keepKeys.includes(key) || keepKeysDeep.includes(key)))
                 .map(key => {
-                    if (keepKeysDeep.includes(key)) {
-                        return [key, node[key]];
-                    } else if (key === 'interval') {
+                    if (key === 'interval') {
                         return [key, prettyInterval(node[key])];
                     } else if (key === 'filter' && printFilter) {
                         return [key, prettyExpression(node[key])];
+                    } else if (key === "properties" && printLogicalCE) {
+                        return ["logicalCE", extractLogicalCEFromNode(node)];
+                    } else if (keepKeysDeep.includes(key)) {
+                        return [key, node[key]];
                     } else {
                         return [key, getPlanSkeleton(node[key], options)];
                     }
                 }));
     }
+}
+
+/**
+ * Recur into every object and array; return any subtree that matches 'predicate'.
+ * Only calls 'predicate' on objects: not arrays or scalars.
+ *
+ * This is completely ignorant of the structure of a query: for example if there
+ * are literals match the predicate, it will also match those.
+ */
+function findSubtrees(tree, predicate) {
+    let result = [];
+    const visit = subtree => {
+        if (typeof subtree === 'object' && subtree != null) {
+            if (Array.isArray(subtree)) {
+                for (const child of subtree) {
+                    visit(child);
+                }
+            } else {
+                if (predicate(subtree)) {
+                    result.push(subtree);
+                }
+                for (const key of Object.keys(subtree)) {
+                    visit(subtree[key]);
+                }
+            }
+        }
+    };
+    visit(tree);
+    return result;
 }
 
 function prettyInterval(compoundInterval) {
@@ -143,6 +186,11 @@ function prettyExpression(expr) {
             const right = prettyExpression(expr.right);
             const op = prettyOp(expr.op);
             return `(${left} ${op} ${right})`;
+        }
+        case 'UnaryOp': {
+            const op = prettyOp(expr.op);
+            const input = prettyExpression(expr.input);
+            return `(${op} ${input})`;
         }
         default:
             return tojson(expr);
@@ -220,6 +268,10 @@ function navigateToPlanPath(doc, path) {
     return navigateToPath(doc, "queryPlanner.winningPlan.optimizerPlan." + path);
 }
 
+function navigateToRootNode(doc) {
+    return navigateToPath(doc, "queryPlanner.winningPlan.optimizerPlan");
+}
+
 function assertValueOnPathFn(value, doc, path, fn) {
     try {
         assert.eq(value, fn(doc, path));
@@ -236,4 +288,20 @@ function assertValueOnPath(value, doc, path) {
 
 function assertValueOnPlanPath(value, doc, path) {
     assertValueOnPathFn(value, doc, path, navigateToPlanPath);
+}
+
+function runCommandWithCostModel(func, costModel) {
+    const oldCostModelOverrides = assert.commandWorked(db.adminCommand(
+        {'getParameter': 1, 'internalCostModelCoefficients': 1}))['internalCostModelCoefficients'];
+
+    const costModelJson = JSON.stringify(costModel);
+    assert.commandWorked(
+        db.adminCommand({'setParameter': 1, 'internalCostModelCoefficients': costModelJson}));
+
+    try {
+        return assert.commandWorked(func());
+    } finally {
+        assert.commandWorked(db.adminCommand(
+            {'setParameter': 1, 'internalCostModelCoefficients': oldCostModelOverrides}));
+    }
 }

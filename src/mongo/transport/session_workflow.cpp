@@ -48,6 +48,7 @@
 #include "mongo/platform/mutex.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/op_msg.h"
+#include "mongo/transport/ingress_handshake_metrics.h"
 #include "mongo/transport/message_compressor_base.h"
 #include "mongo/transport/message_compressor_manager.h"
 #include "mongo/transport/service_entry_point.h"
@@ -56,11 +57,13 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/debug_util.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future.h"
 #include "mongo/util/net/socket_exception.h"
 #include "mongo/util/net/ssl_manager.h"
 #include "mongo/util/net/ssl_peer_info.h"
+#include "mongo/util/time_support.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kExecutor
 
@@ -70,6 +73,7 @@ namespace {
 
 MONGO_FAIL_POINT_DEFINE(doNotSetMoreToCome);
 MONGO_FAIL_POINT_DEFINE(beforeCompressingExhaustResponse);
+MONGO_FAIL_POINT_DEFINE(sessionWorkflowDelaySendMessage);
 
 namespace metrics_detail {
 
@@ -79,6 +83,7 @@ namespace metrics_detail {
     X(receivedWork)              \
     X(processedWork)             \
     X(sentResponse)              \
+    X(yielded)                   \
     X(done)                      \
     /**/
 
@@ -93,13 +98,15 @@ namespace metrics_detail {
  *  |   [receivedWork]
  *  |   |   [processedWork]
  *  |   |   |   [sentResponse]
- *  |   |   |   |   [done]
- *  |<------------->|  total
- *  |   |<--------->|  active
- *  |<->|   |   |   |  receivedWork
- *  |   |<->|   |   |  processWork
- *  |   |   |<->|   |  sendResponse
- *  |   |   |   |<->|  finalize
+ *  |   |   |   |   [yielded]
+ *  |   |   |   |   |   [done]
+ *  |<----------------->| total
+ *  |   |<------------->| active
+ *  |<->|   |   |   |   | receivedWork
+ *  |   |<->|   |   |   | processWork
+ *  |   |   |<->|   |   | sendResponse
+ *  |   |   |   |<->|   | yield
+ *  |   |   |   |   |<->| finalize
  */
 #define EXPAND_INTERVAL_IDS(X)                   \
     X(total, started, done)                      \
@@ -107,7 +114,8 @@ namespace metrics_detail {
     X(receiveWork, started, receivedWork)        \
     X(processWork, receivedWork, processedWork)  \
     X(sendResponse, processedWork, sentResponse) \
-    X(finalize, sentResponse, done)              \
+    X(yield, sentResponse, yielded)              \
+    X(finalize, yielded, done)                   \
     /**/
 
 #define X_ID(id, ...) id,
@@ -161,6 +169,8 @@ struct SplitTimerPolicy {
     static constexpr size_t numTimeSplitIds = enumExtent<TimeSplitIdType>;
     static constexpr size_t numIntervalIds = enumExtent<IntervalIdType>;
 
+    explicit SplitTimerPolicy(ServiceEntryPoint* sep) : _sep(sep) {}
+
     template <typename E>
     static constexpr size_t toIdx(E e) {
         return static_cast<size_t>(e);
@@ -188,23 +198,35 @@ struct SplitTimerPolicy {
 
     void onFinish(SplitTimer<SplitTimerPolicy>* splitTimer) {
         splitTimer->notify(TimeSplitIdType::done);
-        auto t = splitTimer->getSplitInterval(IntervalIdType::active);
+        auto t = splitTimer->getSplitInterval(IntervalIdType::sendResponse);
         if (MONGO_likely(!t || *t < Milliseconds{serverGlobalParams.slowMS.load()}))
             return;
         BSONObjBuilder bob;
         splitTimer->appendIntervals(bob);
-        LOGV2(6983000, "Slow SessionWorkflow loop", "elapsed"_attr = bob.obj());
+
+        logv2::LogSeverity severity = sessionWorkflowDelaySendMessage.shouldFail()
+            ? logv2::LogSeverity::Info()
+            : _sep->slowSessionWorkflowLogSeverity();
+
+        LOGV2_DEBUG(6983000,
+                    severity.toInt(),
+                    "Slow network response send time",
+                    "elapsed"_attr = bob.obj());
     }
 
     Timer makeTimer() {
         return Timer{};
     }
+
+    ServiceEntryPoint* _sep;
 };
 
 class SessionWorkflowMetrics {
 public:
+    explicit SessionWorkflowMetrics(ServiceEntryPoint* sep) : _sep(sep) {}
+
     void start() {
-        _t.emplace();
+        _t.emplace(SplitTimerPolicy{_sep});
     }
     void received() {
         _t->notify(TimeSplitId::receivedWork);
@@ -212,14 +234,21 @@ public:
     void processed() {
         _t->notify(TimeSplitId::processedWork);
     }
-    void sent() {
+    void sent(Session& session) {
         _t->notify(TimeSplitId::sentResponse);
+        IngressHandshakeMetrics::get(session).onResponseSent(
+            duration_cast<Milliseconds>(*_t->getSplitInterval(IntervalId::processWork)),
+            duration_cast<Milliseconds>(*_t->getSplitInterval(IntervalId::sendResponse)));
+    }
+    void yielded() {
+        _t->notify(TimeSplitId::yielded);
     }
     void finish() {
         _t.reset();
     }
 
 private:
+    ServiceEntryPoint* _sep;
     boost::optional<SplitTimer<SplitTimerPolicy>> _t;
 };
 }  // namespace metrics_detail
@@ -387,7 +416,7 @@ public:
         return ServiceExecutorContext::get(client())->getServiceExecutor();
     }
 
-    std::shared_ptr<ServiceExecutor::TaskRunner> taskRunner() {
+    std::shared_ptr<ServiceExecutor::Executor> taskRunner() {
         auto exec = executor();
         // Allows switching the executor between iterations of the workflow.
         if (MONGO_unlikely(!_taskRunner.source || _taskRunner.source != exec))
@@ -407,9 +436,21 @@ private:
     class WorkItem;
 
     struct RunnerAndSource {
-        std::shared_ptr<ServiceExecutor::TaskRunner> runner;
+        std::shared_ptr<ServiceExecutor::Executor> runner;
         ServiceExecutor* source = nullptr;
     };
+
+    /**
+     * Notify the task runner that this would be a good time to yield. It might
+     * not actually yield, depending on implementation and on overall system
+     * state.
+     *
+     * Yielding at certain points in a command's processing pipeline has been
+     * considered to be beneficial to performance.
+     */
+    void _yieldPointReached() {
+        taskRunner()->yieldPointReached();
+    }
 
     /** Alias: refers to this Impl, but holds a ref to the enclosing workflow. */
     std::shared_ptr<Impl> shared_from_this() {
@@ -418,7 +459,7 @@ private:
 
     SessionWorkflow* const _workflow;
     ServiceContext* const _serviceContext;
-    ServiceEntryPoint* const _sep;
+    ServiceEntryPoint* _sep;
     RunnerAndSource _taskRunner;
 
     AtomicWord<bool> _isTerminated{false};
@@ -427,7 +468,7 @@ private:
     std::unique_ptr<WorkItem> _work;
     std::unique_ptr<WorkItem> _nextWork; /**< created by exhaust responses */
 
-    metrics_detail::SessionWorkflowMetrics _metrics;
+    metrics_detail::SessionWorkflowMetrics _metrics{_sep};
 };
 
 class SessionWorkflow::Impl::WorkItem {
@@ -561,6 +602,13 @@ void SessionWorkflow::Impl::sendMessage() {
     // end the session.
     //
     // Otherwise, return from this function to let startNewLoop() continue the future chaining.
+
+    sessionWorkflowDelaySendMessage.execute([](auto&& data) {
+        Milliseconds delay{data["millis"].safeNumberLong()};
+        LOGV2(6724101, "sendMessage: failpoint-induced delay", "delay"_attr = delay);
+        sleepFor(delay);
+    });
+
     if (auto status = session()->sinkMessage(_work->consumeOut()); !status.isOK()) {
         LOGV2(22989,
               "Error sending response to client. Ending connection from remote",
@@ -569,12 +617,6 @@ void SessionWorkflow::Impl::sendMessage() {
               "connectionId"_attr = session()->id());
         uassertStatusOK(status);
     }
-
-    // Performance testing showed a significant benefit from yielding here.
-    // TODO SERVER-57531: Once we enable the use of a fixed-size thread pool
-    // for handling client connection handshaking, we should only yield here if
-    // we're on a dedicated thread.
-    executor()->yieldIfAppropriate();
 }
 
 Future<void> SessionWorkflow::Impl::processMessage() {
@@ -656,6 +698,7 @@ void SessionWorkflow::Impl::scheduleNewLoop(Status status) try {
             // If we're in exhaust, we're not expecting more data.
             taskRunner()->schedule(std::move(cb));
         } else {
+            _yieldPointReached();
             taskRunner()->runOnDataAvailable(session(), std::move(cb));
         }
     } catch (const DBException& ex) {
@@ -692,7 +735,9 @@ void SessionWorkflow::Impl::startNewLoop(const Status& executorStatus) {
             _metrics.processed();
             if (_work->hasOut()) {
                 sendMessage();
-                _metrics.sent();
+                _metrics.sent(*session());
+                _yieldPointReached();
+                _metrics.yielded();
             }
         })
         .getAsync([this, anchor = shared_from_this()](Status status) {

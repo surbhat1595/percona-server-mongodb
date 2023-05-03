@@ -195,7 +195,7 @@ void updateHostsTargetedMetrics(OperationContext* opCtx,
             if (nss == executionNss)
                 continue;
 
-            const auto resolvedNsCM =
+            const auto [resolvedNsCM, _] =
                 uassertStatusOK(getCollectionRoutingInfoForTxnCmd(opCtx, nss));
             if (resolvedNsCM.isSharded()) {
                 std::set<ShardId> shardIdsForNs;
@@ -317,7 +317,8 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
             !request.getNeedsMerge() && !request.getFromMongos());
 
     const auto isSharded = [](OperationContext* opCtx, const NamespaceString& nss) {
-        const auto resolvedNsCM = uassertStatusOK(getCollectionRoutingInfoForTxnCmd(opCtx, nss));
+        const auto [resolvedNsCM, _] =
+            uassertStatusOK(getCollectionRoutingInfoForTxnCmd(opCtx, nss));
         return resolvedNsCM.isSharded();
     };
 
@@ -356,7 +357,7 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
         }
 
         if (executionNsRoutingInfoStatus.isOK()) {
-            cm = std::move(executionNsRoutingInfoStatus.getValue());
+            cm = executionNsRoutingInfoStatus.getValue().cm;
         } else if (!((hasChangeStream || startsWithDocuments) &&
                      executionNsRoutingInfoStatus == ErrorCodes::NamespaceNotFound)) {
             appendEmptyResultSetWithStatus(
@@ -589,15 +590,15 @@ Status ClusterAggregate::retryOnViewError(OperationContext* opCtx,
     nsStruct.executionNss = resolvedView.getNamespace();
 
     // For a sharded time-series collection, the routing is based on both routing table and the
-    // granularity value. We need to make sure we use the granularity value of the same version as
-    // the routing table, instead of the one attached in the view error. This way the shard
-    // versioning check can correctly catch stale routing information.
+    // bucketMaxSpanSeconds value. We need to make sure we use the bucketMaxSpanSeconds of the same
+    // version as the routing table, instead of the one attached in the view error. This way the
+    // shard versioning check can correctly catch stale routing information.
     boost::optional<ChunkManager> snapshotCm;
     if (nsStruct.executionNss.isTimeseriesBucketsCollection()) {
         auto executionNsRoutingInfoStatus =
             sharded_agg_helpers::getExecutionNsRoutingInfo(opCtx, nsStruct.executionNss);
         if (executionNsRoutingInfoStatus.isOK()) {
-            const auto& cm = executionNsRoutingInfoStatus.getValue();
+            const auto& [cm, _] = executionNsRoutingInfoStatus.getValue();
             if (cm.isSharded() && cm.getTimeseriesFields()) {
                 const auto patchedPipeline = rebuildPipelineWithTimeSeriesGranularity(
                     resolvedAggRequest.getPipeline(),

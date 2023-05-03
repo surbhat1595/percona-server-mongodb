@@ -65,8 +65,10 @@ using ProjectionName = StrongStringAlias<ProjectionNameAliasTag>;
 using ProjectionNameSet = opt::unordered_set<ProjectionName, ProjectionName::Hasher>;
 using ProjectionNameOrderedSet = std::set<ProjectionName>;
 using ProjectionNameVector = std::vector<ProjectionName>;
-using ProjectionRenames =
-    opt::unordered_map<ProjectionName, ProjectionName, ProjectionName::Hasher>;
+
+template <typename T>
+using ProjectionNameMap = opt::unordered_map<ProjectionName, T, ProjectionName::Hasher>;
+using ProjectionRenames = ProjectionNameMap<ProjectionName>;
 
 // Map from scanDefName to rid projection name.
 using RIDProjectionsMap = opt::unordered_map<std::string, ProjectionName>;
@@ -82,7 +84,7 @@ public:
     bool operator==(const ProjectionNameOrderPreservingSet& other) const;
 
     std::pair<size_t, bool> emplace_back(ProjectionName projectionName);
-    std::pair<size_t, bool> find(const ProjectionName& projectionName) const;
+    boost::optional<size_t> find(const ProjectionName& projectionName) const;
     bool erase(const ProjectionName& projectionName);
 
     bool isEqualIgnoreOrder(const ProjectionNameOrderPreservingSet& other) const;
@@ -90,7 +92,7 @@ public:
     const ProjectionNameVector& getVector() const;
 
 private:
-    opt::unordered_map<ProjectionName, size_t, ProjectionName::Hasher> _map;
+    ProjectionNameMap<size_t> _map;
     ProjectionNameVector _vector;
 };
 
@@ -279,6 +281,9 @@ struct QueryHints {
     // Controls if we prefer to insert redundant index predicates on the Seek side in order to
     // prevent issues arising from yielding.
     bool _disableYieldingTolerantPlans = true;
+
+    // Controls the maximum number of equalityPrefixes we generate for a candidate index.
+    size_t _maxIndexEqPrefixes = 1;
 };
 
 }  // namespace mongo::optimizer

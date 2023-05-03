@@ -2,8 +2,9 @@
  * This tests which collMod options are allowed on a time-series collection.
  *
  * @tags: [
+ *   # TODO (SERVER-71600): After handling multiversion scenarios, update tage to 'requires_fcv_61'.
  *   # Behavior clarified in binVersion 6.1
- *   requires_fcv_61,
+ *   requires_fcv_63,
  *   # collMod is not retryable
  *   requires_non_retryable_commands,
  *   # We need a timeseries collection.
@@ -20,6 +21,8 @@ const collName = "timeseries_collmod";
 const coll = db.getCollection(collName);
 const bucketMaxSpanSecondsHours = 60 * 60 * 24 * 30;
 const bucketRoundingSecondsHours = 60 * 60 * 24;
+const bucketingValueMax = 86400 * 365;  // Seconds in a year.
+const idlInvalidValueError = 51024;
 
 coll.drop();
 assert.commandWorked(
@@ -187,5 +190,22 @@ if (TimeseriesTest.timeseriesScalabilityImprovementsEnabled(db.getMongo())) {
     // seconds.
     assert.commandWorked(
         db.runCommand({"collMod": collName, "timeseries": {"granularity": "minutes"}}));
+
+    // Fails to set bucketMaxSpanSeconds and bucketRoundingSeconds past the bucketing limit.
+    assert.commandFailedWithCode(db.runCommand({
+        "collMod": collName,
+        "timeseries": {
+            "bucketMaxSpanSeconds": bucketingValueMax + 1,
+            "bucketRoundingSeconds": bucketingValueMax + 1
+        }
+    }),
+                                 idlInvalidValueError);
+
+    // Successfully set the bucketMaxSpanSeconds and bucketRoundingSeconds to the limit.
+    assert.commandWorked(db.runCommand({
+        "collMod": collName,
+        "timeseries":
+            {"bucketMaxSpanSeconds": bucketingValueMax, "bucketRoundingSeconds": bucketingValueMax}
+    }));
 }
 })();

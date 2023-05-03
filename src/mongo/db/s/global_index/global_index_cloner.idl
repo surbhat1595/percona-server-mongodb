@@ -35,6 +35,7 @@ global:
 imports:
     - "mongo/db/basic_types.idl"
     - "mongo/db/pipeline/value.idl"
+    - "mongo/db/s/global_index/common_types.idl"
 
 enums:
     GlobalIndexClonerState:
@@ -62,25 +63,11 @@ structs:
 
     GlobalIndexClonerDoc:
         description: "Document containing the state and specs of global index cloning operation."
+        inline_chained_structs: true
+        chained_structs:
+            CommonGlobalIndexMetadata: CommonGlobalIndexMetadata
         strict: false
         fields:
-            _id:
-                type: uuid
-                cpp_name: indexCollectionUUID
-                description: "The uuid of the global index collection."
-            nss:
-                type: namespacestring
-                description: "The namespace of the source collection."
-            collectionUUID:
-                type: uuid
-                description: "The uuid of source collection."
-            indexName:
-                type: string
-                description: "The name of the global index being created."
-            indexSpec:
-                type: object_owned
-                description: "Temporary placeholder for index spec until global index api is
-                    available."
             minFetchTimestamp:
                 type: timestamp
                 description: "The minimum timestamp to use for fetching documents from the source

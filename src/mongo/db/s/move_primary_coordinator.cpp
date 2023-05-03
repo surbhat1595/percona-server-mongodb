@@ -27,94 +27,79 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/s/move_primary_coordinator.h"
-
-#include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/s/move_primary_source_manager.h"
-#include "mongo/db/s/sharding_state.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/db/write_block_bypass.h"
-#include "mongo/logv2/log.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/grid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
-
 namespace mongo {
 
+MovePrimaryCoordinator::MovePrimaryCoordinator(ShardingDDLCoordinatorService* service,
+                                               const BSONObj& initialState)
+    : RecoverableShardingDDLCoordinator(service, "MovePrimaryCoordinator", initialState),
+      _dbName(nss().dbName()) {}
+
+bool MovePrimaryCoordinator::canAlwaysStartWhenUserWritesAreDisabled() const {
+    return true;
+}
+
+StringData MovePrimaryCoordinator::serializePhase(const Phase& phase) const {
+    return MovePrimaryCoordinatorPhase_serializer(phase);
+}
+
 void MovePrimaryCoordinator::appendCommandInfo(BSONObjBuilder* cmdInfoBuilder) const {
-    stdx::lock_guard lk{_docMutex};
-    cmdInfoBuilder->append("request", BSON(_doc.kToShardIdFieldName << _doc.getToShardId()));
+    stdx::lock_guard lk(_docMutex);
+    cmdInfoBuilder->append(
+        "request",
+        BSON(MovePrimaryCoordinatorDocument::kToShardIdFieldName << _doc.getToShardId()));
 };
 
 void MovePrimaryCoordinator::checkIfOptionsConflict(const BSONObj& doc) const {
-    // If we have two shard collections on the same namespace, then the arguments must be the same.
     const auto otherDoc = MovePrimaryCoordinatorDocument::parse(
         IDLParserContext("MovePrimaryCoordinatorDocument"), doc);
-
-    uassert(
-        ErrorCodes::ConflictingOperationInProgress,
-        "Another move primary with different arguments is already running for the same namespace",
-        _doc.getToShardId() == otherDoc.getToShardId());
+    uassert(ErrorCodes::ConflictingOperationInProgress,
+            "Another movePrimary operation with different arguments is already running ont the "
+            "same database",
+            _doc.getToShardId() == otherDoc.getToShardId());
 }
-
 
 ExecutorFuture<void> MovePrimaryCoordinator::_runImpl(
     std::shared_ptr<executor::ScopedTaskExecutor> executor,
     const CancellationToken& token) noexcept {
     return ExecutorFuture<void>(**executor)
-        .then([this, anchor = shared_from_this()] {
-            auto opCtxHolder = cc().makeOperationContext();
-            auto* opCtx = opCtxHolder.get();
-            getForwardableOpMetadata().setOn(opCtx);
-
-            // Any error should terminate the coordinator, even if it is a retryable error, this way
-            // we have a movePrimary with a similar behavior of the previous one.
-            _completeOnError = true;
-
-            auto const shardRegistry = Grid::get(opCtx)->shardRegistry();
-            // Make sure we're as up-to-date as possible with shard information. This catches the
-            // case where we might have changed a shard's host by removing/adding a shard with the
-            // same name.
-            shardRegistry->reload(opCtx);
-
-            const auto& dbName = nss().db();
-            const auto& toShard =
-                uassertStatusOK(shardRegistry->getShard(opCtx, _doc.getToShardId()));
-
-            const auto& selfShardId = ShardingState::get(opCtx)->shardId();
-            if (selfShardId == toShard->getId()) {
-                LOGV2(5275803,
-                      "Database already on the requested primary shard",
-                      "db"_attr = dbName,
-                      "shardId"_attr = _doc.getToShardId());
-                // The database primary is already the `to` shard
-                return;
-            }
-
-            // Enable write blocking bypass to allow cloning and droping the stale collections even
-            // if user writes are currently disallowed.
-            WriteBlockBypass::get(opCtx).set(true);
-
-            ShardMovePrimary movePrimaryRequest(nss(), _doc.getToShardId().toString());
-
-            auto primaryId = selfShardId;
-            auto toId = toShard->getId();
-            MovePrimarySourceManager movePrimarySourceManager(
-                opCtx, movePrimaryRequest, dbName, primaryId, toId);
-            uassertStatusOK(movePrimarySourceManager.clone(opCtx));
-            uassertStatusOK(movePrimarySourceManager.enterCriticalSection(opCtx));
-            uassertStatusOK(movePrimarySourceManager.commitOnConfig(opCtx));
-            uassertStatusOK(movePrimarySourceManager.cleanStaleData(opCtx));
-        })
+        .then(_buildPhaseHandler(Phase::kCheckPreconditions,
+                                 [this, anchor = shared_from_this()] {
+                                     auto opCtxHolder = cc().makeOperationContext();
+                                     auto* opCtx = opCtxHolder.get();
+                                     getForwardableOpMetadata().setOn(opCtx);
+                                 }))
+        .then(_buildPhaseHandler(Phase::kCloneCatalogData,
+                                 [this, anchor = shared_from_this()] {
+                                     auto opCtxHolder = cc().makeOperationContext();
+                                     auto* opCtx = opCtxHolder.get();
+                                     getForwardableOpMetadata().setOn(opCtx);
+                                 }))
+        .then(_buildPhaseHandler(Phase::kEnterCriticalSection,
+                                 [this, anchor = shared_from_this()] {
+                                     auto opCtxHolder = cc().makeOperationContext();
+                                     auto* opCtx = opCtxHolder.get();
+                                     getForwardableOpMetadata().setOn(opCtx);
+                                 }))
+        .then(_buildPhaseHandler(Phase::kCommitMetadataChanges,
+                                 [this, anchor = shared_from_this()] {
+                                     auto opCtxHolder = cc().makeOperationContext();
+                                     auto* opCtx = opCtxHolder.get();
+                                     getForwardableOpMetadata().setOn(opCtx);
+                                 }))
+        .then(_buildPhaseHandler(Phase::kCleanStaleData,
+                                 [this, anchor = shared_from_this()] {
+                                     auto opCtxHolder = cc().makeOperationContext();
+                                     auto* opCtx = opCtxHolder.get();
+                                     getForwardableOpMetadata().setOn(opCtx);
+                                 }))
         .onError([this, anchor = shared_from_this()](const Status& status) {
-            LOGV2_ERROR(5275804,
-                        "Error running move primary",
-                        "database"_attr = nss().db(),
+            LOGV2_ERROR(7120000,
+                        "Error running movePrimary",
+                        "database"_attr = nss(),
                         "to"_attr = _doc.getToShardId(),
                         "error"_attr = redact(status));
 

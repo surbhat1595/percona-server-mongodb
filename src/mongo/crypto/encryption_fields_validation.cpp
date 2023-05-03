@@ -33,6 +33,7 @@
 #include "mongo/crypto/encryption_fields_gen.h"
 #include "mongo/crypto/encryption_fields_util.h"
 #include "mongo/db/field_ref.h"
+#include <math.h>
 
 namespace mongo {
 
@@ -77,7 +78,7 @@ Value coerceValueToRangeIndexTypes(Value val, BSONType fieldType) {
 }
 
 
-void validateRangeIndex(BSONType fieldType, const QueryTypeConfig& query) {
+void validateRangeIndex(BSONType fieldType, QueryTypeConfig& query) {
     uassert(6775201,
             str::stream() << "Type '" << typeName(fieldType)
                           << "' is not a supported range indexed type",
@@ -90,18 +91,59 @@ void validateRangeIndex(BSONType fieldType, const QueryTypeConfig& query) {
             "The field 'sparsity' must be between 1 and 4",
             query.getSparsity().value() >= 1 && query.getSparsity().value() <= 4);
 
+
     switch (fieldType) {
         case NumberDouble:
-        case NumberDecimal:
-            uassert(7006601,
-                    "The field 'min' on floating point field is invalid for range index over "
-                    "double/decimal fields.",
-                    !query.getMin().has_value());
-            uassert(7006602,
-                    "The field 'max' on floating point field is invalid for range index over "
-                    "double/decimal fields.",
-                    !query.getMax().has_value());
-            break;
+        case NumberDecimal: {
+            if (!((query.getMin().has_value() == query.getMax().has_value()) &&
+                  (query.getMin().has_value() == query.getPrecision().has_value()))) {
+                uasserted(6967100,
+                          str::stream() << "Precision, min, and max must all be specified "
+                                        << "together for floating point fields");
+            }
+
+            if (!query.getMin().has_value()) {
+                if (fieldType == NumberDouble) {
+                    query.setMin(mongo::Value(std::numeric_limits<double>::lowest()));
+                    query.setMax(mongo::Value(std::numeric_limits<double>::max()));
+                } else {
+                    query.setMin(mongo::Value(Decimal128::kLargestNegative));
+                    query.setMax(mongo::Value(Decimal128::kLargestPositive));
+                }
+            }
+
+            if (query.getPrecision().has_value()) {
+                uint32_t precision = query.getPrecision().value();
+                if (fieldType == NumberDouble) {
+                    uassert(
+                        6966805,
+                        "The number of decimal digits for minimum value must be less then or equal "
+                        "to precision",
+                        validateDoublePrecisionRange(query.getMin()->coerceToDouble(), precision));
+                    uassert(
+                        6966806,
+                        "The number of decimal digits for maximum value must be less then or equal "
+                        "to precision",
+                        validateDoublePrecisionRange(query.getMax()->coerceToDouble(), precision));
+
+                } else {
+                    auto minDecimal = query.getMin()->coerceToDecimal();
+                    uassert(6966807,
+                            "The number of decimal digits for minimum value must be less then or "
+                            "equal to precision",
+                            validateDecimal128PrecisionRange(minDecimal, precision));
+                    auto maxDecimal = query.getMax()->coerceToDecimal();
+                    uassert(6966808,
+                            "The number of decimal digits for maximum value must be less then or "
+                            "equal to precision",
+                            validateDecimal128PrecisionRange(maxDecimal, precision));
+                }
+            }
+        }
+            // We want to perform the same validation after sanitizing floating
+            // point parameters, so we call FMT_FALLTHROUGH here.
+
+            FMT_FALLTHROUGH;
         case NumberInt:
         case NumberLong:
         case Date: {
@@ -170,7 +212,7 @@ void validateEncryptedField(const EncryptedField* field) {
                         "The field 'max' is not allowed for equality index but is present",
                         !encryptedIndex.getMax().has_value());
                 break;
-            case QueryTypeEnum::Range: {
+            case QueryTypeEnum::RangePreview: {
                 validateRangeIndex(fieldType, encryptedIndex);
                 break;
             }
@@ -216,4 +258,23 @@ void validateEncryptedFieldConfig(const EncryptedFieldConfig* config) {
         fieldPaths.push_back(std::move(newPath));
     }
 }
+
+bool validateDoublePrecisionRange(double d, uint32_t precision) {
+    double maybe_integer = d * pow(10.0, precision);
+    double floor_integer = floor(maybe_integer);
+
+    // We want to prevent users from making mistakes by specifing extra precision in the bounds.
+    // Since floating point is inaccurate, we need to account for this when testing for equality by
+    // considering the values almost equal to likely mean the bounds are within the precision range.
+    auto e = std::numeric_limits<double>::epsilon();
+    return fabs(maybe_integer - floor_integer) <= (e * floor_integer);
+}
+
+bool validateDecimal128PrecisionRange(Decimal128& dec, uint32_t precision) {
+    Decimal128 maybe_integer = dec.scale(precision);
+    Decimal128 floor_integer = maybe_integer.round();
+
+    return maybe_integer == floor_integer;
+}
+
 }  // namespace mongo

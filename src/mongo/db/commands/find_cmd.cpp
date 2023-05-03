@@ -55,7 +55,9 @@
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/telemetry.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
@@ -65,6 +67,8 @@
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/database_name_util.h"
 #include "mongo/util/fail_point.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -77,29 +81,6 @@ MONGO_FAIL_POINT_DEFINE(allowExternalReadsForReverseOplogScanRule);
 
 const auto kTermField = "term"_sd;
 
-// Parses the command object to a FindCommandRequest. If the client request did not specify any
-// runtime constants, make them available to the query here.
-std::unique_ptr<FindCommandRequest> parseCmdObjectToFindCommandRequest(OperationContext* opCtx,
-                                                                       NamespaceString nss,
-                                                                       BSONObj cmdObj) {
-    auto findCommand = query_request_helper::makeFromFindCommand(
-        std::move(cmdObj),
-        std::move(nss),
-        APIParameters::get(opCtx).getAPIStrict().value_or(false));
-
-    // Rewrite any FLE find payloads that exist in the query if this is a FLE 2 query.
-    if (shouldDoFLERewrite(findCommand)) {
-        invariant(findCommand->getNamespaceOrUUID().nss());
-        processFLEFindD(opCtx, findCommand->getNamespaceOrUUID().nss().value(), findCommand.get());
-    }
-
-    if (findCommand->getMirrored().value_or(false)) {
-        const auto& invocation = CommandInvocation::get(opCtx);
-        invocation->markMirrored();
-    }
-
-    return findCommand;
-}
 
 boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
     OperationContext* opCtx,
@@ -155,7 +136,7 @@ void beginQueryOp(OperationContext* opCtx, const NamespaceString& nss, const BSO
     auto curOp = CurOp::get(opCtx);
     stdx::lock_guard<Client> lk(*opCtx->getClient());
     curOp->setOpDescription_inlock(queryObj);
-    curOp->setNS_inlock(nss.ns());
+    curOp->setNS_inlock(nss);
 }
 
 /**
@@ -231,7 +212,8 @@ public:
         Invocation(const FindCmd* definition, const OpMsgRequest& request)
             : CommandInvocation(definition),
               _request(request),
-              _dbName(_request.getValidatedTenantId(), _request.getDatabase()) {
+              _dbName(DatabaseNameUtil::deserialize(_request.getValidatedTenantId(),
+                                                    _request.getDatabase())) {
             invariant(_request.body.isOwned());
         }
 
@@ -302,7 +284,7 @@ public:
             InterruptibleLockGuard interruptibleLockAcquisition(opCtx->lockState());
 
             // Parse the command BSON to a FindCommandRequest.
-            auto findCommand = parseCmdObjectToFindCommandRequest(opCtx, nss, _request.body);
+            auto findCommand = _parseCmdObjectToFindCommandRequest(opCtx, nss, _request.body);
 
             // Finish the parsing step by using the FindCommandRequest to create a CanonicalQuery.
             const ExtensionsCallbackReal extensionsCallback(opCtx, &nss);
@@ -360,6 +342,8 @@ public:
             // execution tree with an EOFStage.
             const auto& collection = ctx->getCollection();
 
+            cq->setUseCqfIfEligible(true);
+
             // Get the execution plan for the query.
             bool permitYield = true;
             auto exec =
@@ -397,8 +381,8 @@ public:
             const bool isExplain = false;
             const bool isOplogNss = (parsedNss == NamespaceString::kRsOplogNamespace);
             auto findCommand =
-                parseCmdObjectToFindCommandRequest(opCtx, std::move(parsedNss), cmdObj);
-
+                _parseCmdObjectToFindCommandRequest(opCtx, std::move(parsedNss), cmdObj);
+            opCtx->beginPlanningTimer();
             // Only allow speculative majority for internal commands that specify the correct flag.
             uassert(ErrorCodes::ReadConcernMajorityNotEnabled,
                     "Majority read concern is not enabled.",
@@ -431,10 +415,10 @@ public:
             // The presence of a term in the request indicates that this is an internal replication
             // oplog read request.
             if (term && isOplogNss) {
-                // We do not want to take tickets for internal (replication) oplog reads. Stalling
-                // on ticket acquisition can cause complicated deadlocks. Primaries may depend on
-                // data reaching secondaries in order to proceed; and secondaries may get stalled
-                // replicating because of an inability to acquire a read ticket.
+                // We do not want to wait to take tickets for internal (replication) oplog reads.
+                // Stalling on ticket acquisition can cause complicated deadlocks. Primaries may
+                // depend on data reaching secondaries in order to proceed; and secondaries may get
+                // stalled replicating because of an inability to acquire a read ticket.
                 opCtx->lockState()->setAdmissionPriority(AdmissionContext::Priority::kImmediate);
             }
 
@@ -478,6 +462,16 @@ public:
                             .viewMode(auto_get_collection::ViewMode::kViewsPermitted)
                             .expectedUUID(findCommand->getCollectionUUID()));
             const auto& nss = ctx->getNss();
+
+            if (analyze_shard_key::supportsPersistingSampledQueries() &&
+                findCommand->getSampleId()) {
+                analyze_shard_key::QueryAnalysisWriter::get(opCtx)
+                    .addFindQuery(*findCommand->getSampleId(),
+                                  nss,
+                                  findCommand->getFilter(),
+                                  findCommand->getCollation())
+                    .getAsync([](auto) {});
+            }
 
             // Going forward this operation must never ignore interrupt signals while waiting for
             // lock acquisition. This InterruptibleLockGuard will ensure that waiting for lock
@@ -540,10 +534,10 @@ public:
                 const auto& findCommand = cq->getFindCommandRequest();
                 auto viewAggregationCommand =
                     uassertStatusOK(query_request_helper::asAggregationCommand(findCommand));
-
-                BSONObj aggResult = CommandHelpers::runCommandDirectly(
-                    opCtx,
-                    OpMsgRequest::fromDBAndBody(_dbName.db(), std::move(viewAggregationCommand)));
+                auto aggRequest =
+                    OpMsgRequestBuilder::create(_dbName, std::move(viewAggregationCommand));
+                aggRequest.validatedTenancyScope = _request.validatedTenancyScope;
+                BSONObj aggResult = CommandHelpers::runCommandDirectly(opCtx, aggRequest);
                 auto status = getStatusFromCommandResult(aggResult);
                 if (status.code() == ErrorCodes::InvalidPipelineOperator) {
                     uasserted(ErrorCodes::InvalidPipelineOperator,
@@ -568,6 +562,13 @@ public:
                 // The readOnce option causes any storage-layer cursors created during plan
                 // execution to assume read data will not be needed again and need not be cached.
                 opCtx->recoveryUnit()->setReadOnce(true);
+            }
+
+            cq->setUseCqfIfEligible(true);
+
+            if (collection) {
+                telemetry::registerFindRequest(
+                    cq->getFindCommandRequest(), collection.get()->ns(), opCtx);
             }
 
             // Get the execution plan for the query.
@@ -726,6 +727,8 @@ public:
             metricsCollector.incrementDocUnitsReturned(nss.ns(), docUnitsReturned);
             query_request_helper::validateCursorResponse(result->getBodyBuilder().asTempObj(),
                                                          nss.tenantId());
+
+            telemetry::recordExecution(opCtx, CurOp::get(opCtx)->debug(), _didDoFLERewrite);
         }
 
         void appendMirrorableRequest(BSONObjBuilder* bob) const override {
@@ -755,6 +758,35 @@ public:
     private:
         const OpMsgRequest _request;
         const DatabaseName _dbName;
+
+        // Since we remove encryptionInformation after rewriting a FLE2 query, this boolean keeps
+        // track of whether the input query did originally have enryption information.
+        bool _didDoFLERewrite = false;
+
+        // Parses the command object to a FindCommandRequest. If the client request did not specify
+        // any runtime constants, make them available to the query here.
+        std::unique_ptr<FindCommandRequest> _parseCmdObjectToFindCommandRequest(
+            OperationContext* opCtx, NamespaceString nss, BSONObj cmdObj) {
+            auto findCommand = query_request_helper::makeFromFindCommand(
+                std::move(cmdObj),
+                std::move(nss),
+                APIParameters::get(opCtx).getAPIStrict().value_or(false));
+
+            // Rewrite any FLE find payloads that exist in the query if this is a FLE 2 query.
+            if (shouldDoFLERewrite(findCommand)) {
+                invariant(findCommand->getNamespaceOrUUID().nss());
+                processFLEFindD(
+                    opCtx, findCommand->getNamespaceOrUUID().nss().value(), findCommand.get());
+                _didDoFLERewrite = true;
+            }
+
+            if (findCommand->getMirrored().value_or(false)) {
+                const auto& invocation = CommandInvocation::get(opCtx);
+                invocation->markMirrored();
+            }
+
+            return findCommand;
+        }
     };
 
 } findCmd;

@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#include "mongo/db/batched_write_context.h"
 #include "mongo/db/catalog/import_collection_oplog_entry_gen.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/exception_util.h"
@@ -40,6 +39,7 @@
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/op_observer/batched_write_context.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/op_observer/op_observer_util.h"
@@ -160,7 +160,7 @@ class OpObserverTest : public ServiceContextMongoDTest {
 protected:
     explicit OpObserverTest(Options options = {}) : ServiceContextMongoDTest(std::move(options)) {}
 
-    void setUp() override {
+    virtual void setUp() override {
         // Set up mongod.
         ServiceContextMongoDTest::setUp();
 
@@ -191,6 +191,7 @@ protected:
         reset(opCtx.get(), nss, uuid);
         reset(opCtx.get(), nss1, uuid1);
         reset(opCtx.get(), nss2, uuid2);
+        reset(opCtx.get(), nss3, uuid3);
         reset(opCtx.get(), kNssUnderTenantId, kNssUnderTenantIdUUID);
         reset(opCtx.get(), NamespaceString::kRsOplogNamespace);
     }
@@ -223,6 +224,7 @@ protected:
     }
 
     void resetOplogAndTransactions(OperationContext* opCtx) const {
+        reset(opCtx, nss);
         reset(opCtx, NamespaceString::kRsOplogNamespace);
         reset(opCtx, NamespaceString::kSessionTransactionsTableNamespace);
         reset(opCtx, NamespaceString::kConfigImagesNamespace);
@@ -338,6 +340,8 @@ protected:
     const UUID uuid1{UUID::gen()};
     const NamespaceString nss2{TenantId(OID::gen()), "testDB2", "testColl2"};
     const UUID uuid2{UUID::gen()};
+    const NamespaceString nss3{boost::none, "testDB3", "testColl3"};
+    const UUID uuid3{UUID::gen()};
 
     const std::string kTenantId = "tenantId";
     const NamespaceString kNssUnderTenantId{boost::none, "tenantId_db", "testColl"};
@@ -915,11 +919,12 @@ TEST_F(OpObserverTest, SingleStatementUpdateTestIncludesTenantId) {
     updateArgs.update = BSON("$set" << BSON("data"
                                             << "x"));
     updateArgs.criteria = BSON("_id" << 0);
-    OplogUpdateEntryArgs update(&updateArgs, nss, uuid);
 
     auto opCtx = cc().makeOperationContext();
     WriteUnitOfWork wuow(opCtx.get());
     AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
+    AutoGetCollection autoColl(opCtx.get(), nss, MODE_X);
+    OplogUpdateEntryArgs update(&updateArgs, *autoColl);
 
     OpObserverRegistry opObserver;
     opObserver.addObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
@@ -950,7 +955,7 @@ TEST_F(OpObserverTest, SingleStatementDeleteTestIncludesTenantId) {
     // `OpObserverImpl::onDelete` asserts its existence.
     repl::documentKeyDecoration(opCtx.get()).emplace(BSON("_id" << 0), boost::none);
     OplogDeleteEntryArgs deleteEntryArgs;
-    opObserver.onDelete(opCtx.get(), nss, uuid, kUninitializedStmtId, deleteEntryArgs);
+    opObserver.onDelete(opCtx.get(), *locks, kUninitializedStmtId, deleteEntryArgs);
     wuow.commit();
 
     auto oplogEntryObj = getSingleOplogEntry(opCtx.get());
@@ -1044,24 +1049,23 @@ TEST_F(OpObserverSessionCatalogRollbackTest,
 }
 
 TEST_F(OpObserverTest, MultipleAboutToDeleteAndOnDelete) {
-    auto uuid = UUID::gen();
     OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
     auto opCtx = cc().makeOperationContext();
-    NamespaceString nss = {boost::none, "test", "coll"};
-    AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
+    AutoGetCollection autoColl(opCtx.get(), nss3, MODE_X);
     WriteUnitOfWork wunit(opCtx.get());
-    opObserver.aboutToDelete(opCtx.get(), nss, uuid, BSON("_id" << 1));
-    opObserver.onDelete(opCtx.get(), nss, uuid, kUninitializedStmtId, {});
-    opObserver.aboutToDelete(opCtx.get(), nss, uuid, BSON("_id" << 1));
-    opObserver.onDelete(opCtx.get(), nss, uuid, kUninitializedStmtId, {});
+    opObserver.aboutToDelete(opCtx.get(), *autoColl, BSON("_id" << 1));
+    opObserver.onDelete(opCtx.get(), *autoColl, kUninitializedStmtId, {});
+    opObserver.aboutToDelete(opCtx.get(), *autoColl, BSON("_id" << 1));
+    opObserver.onDelete(opCtx.get(), *autoColl, kUninitializedStmtId, {});
 }
 
-DEATH_TEST_F(OpObserverTest, AboutToDeleteMustPreceedOnDelete, "invariant") {
+DEATH_TEST_REGEX_F(OpObserverTest,
+                   AboutToDeleteMustPreceedOnDelete,
+                   "Invariant failure.*optDocKey") {
     OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
     auto opCtx = cc().makeOperationContext();
-    cc().swapLockState(std::make_unique<LockerNoop>());
-    NamespaceString nss = {boost::none, "test", "coll"};
-    opObserver.onDelete(opCtx.get(), nss, UUID::gen(), kUninitializedStmtId, {});
+    AutoGetCollection autoColl(opCtx.get(), nss3, MODE_IX);
+    opObserver.onDelete(opCtx.get(), *autoColl, kUninitializedStmtId, {});
 }
 
 DEATH_TEST_REGEX_F(OpObserverTest,
@@ -1069,10 +1073,8 @@ DEATH_TEST_REGEX_F(OpObserverTest,
                    "Invariant failure.*!id.isEmpty()") {
     OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
     auto opCtx = cc().makeOperationContext();
-    cc().swapLockState(std::make_unique<LockerNoop>());
-    NamespaceString nss = {boost::none, "test", "coll"};
-    UUID uuid = UUID::gen();
-    opObserver.aboutToDelete(opCtx.get(), nss, uuid, {});
+    AutoGetCollection autoColl(opCtx.get(), nss3, MODE_IX);
+    opObserver.aboutToDelete(opCtx.get(), *autoColl, {});
 }
 
 DEATH_TEST_REGEX_F(OpObserverTest,
@@ -1089,8 +1091,6 @@ DEATH_TEST_REGEX_F(OpObserverTest,
 class OpObserverTxnParticipantTest : public OpObserverTest {
 public:
     void setUp() override {
-        OpObserverTest::setUp();
-
         _opCtx = cc().makeOperationContext();
         _opObserver.emplace(std::make_unique<OplogWriterImpl>());
         _times.emplace(opCtx());
@@ -1179,6 +1179,7 @@ private:
 class OpObserverTransactionTest : public OpObserverTxnParticipantTest {
 protected:
     void setUp() override {
+        OpObserverTest::setUp();
         OpObserverTxnParticipantTest::setUp();
         OpObserverTxnParticipantTest::setUpNonRetryableTransaction();
     }
@@ -1276,15 +1277,14 @@ TEST_F(OpObserverTransactionTest, TransactionalPrepareTest) {
     updateArgs2.update = BSON("$set" << BSON("data"
                                              << "y"));
     updateArgs2.criteria = BSON("_id" << 0);
-    OplogUpdateEntryArgs update2(&updateArgs2, nss2, uuid2);
+    OplogUpdateEntryArgs update2(&updateArgs2, *autoColl2);
     opObserver().onUpdate(opCtx(), update2);
 
     opObserver().aboutToDelete(opCtx(),
-                               nss1,
-                               uuid1,
+                               *autoColl1,
                                BSON("_id" << 0 << "data"
                                           << "x"));
-    opObserver().onDelete(opCtx(), nss1, uuid1, 0, {});
+    opObserver().onDelete(opCtx(), *autoColl1, 0, {});
 
     // One reserved slot for each statement, plus the prepare.
     auto reservedSlots = reserveOpTimesInSideTransaction(opCtx(), 5);
@@ -1791,6 +1791,10 @@ TEST_F(OpObserverTransactionTest, TransactionalUpdateTest) {
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "update");
 
+    WriteUnitOfWork wuow(opCtx());
+    AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
+    AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
+
     CollectionUpdateArgs updateArgs1;
     updateArgs1.stmtIds = {0};
     updateArgs1.updatedDoc = BSON("_id" << 0 << "data"
@@ -1798,7 +1802,7 @@ TEST_F(OpObserverTransactionTest, TransactionalUpdateTest) {
     updateArgs1.update = BSON("$set" << BSON("data"
                                              << "x"));
     updateArgs1.criteria = BSON("_id" << 0);
-    OplogUpdateEntryArgs update1(&updateArgs1, nss1, uuid1);
+    OplogUpdateEntryArgs update1(&updateArgs1, *autoColl1);
 
     CollectionUpdateArgs updateArgs2;
     updateArgs2.stmtIds = {1};
@@ -1807,11 +1811,8 @@ TEST_F(OpObserverTransactionTest, TransactionalUpdateTest) {
     updateArgs2.update = BSON("$set" << BSON("data"
                                              << "y"));
     updateArgs2.criteria = BSON("_id" << 1);
-    OplogUpdateEntryArgs update2(&updateArgs2, nss2, uuid2);
+    OplogUpdateEntryArgs update2(&updateArgs2, *autoColl2);
 
-    WriteUnitOfWork wuow(opCtx());
-    AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
-    AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
     opObserver().onUpdate(opCtx(), update1);
     opObserver().onUpdate(opCtx(), update2);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
@@ -1845,6 +1846,10 @@ TEST_F(OpObserverTransactionTest, TransactionalUpdateTestIncludesTenantId) {
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "update");
 
+    WriteUnitOfWork wuow(opCtx());
+    AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
+    AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
+
     CollectionUpdateArgs updateArgs1;
     updateArgs1.stmtIds = {0};
     updateArgs1.updatedDoc = BSON("_id" << 0 << "data"
@@ -1852,7 +1857,7 @@ TEST_F(OpObserverTransactionTest, TransactionalUpdateTestIncludesTenantId) {
     updateArgs1.update = BSON("$set" << BSON("data"
                                              << "x"));
     updateArgs1.criteria = BSON("_id" << 0);
-    OplogUpdateEntryArgs update1(&updateArgs1, nss1, uuid1);
+    OplogUpdateEntryArgs update1(&updateArgs1, *autoColl1);
 
     CollectionUpdateArgs updateArgs2;
     updateArgs2.stmtIds = {1};
@@ -1861,11 +1866,8 @@ TEST_F(OpObserverTransactionTest, TransactionalUpdateTestIncludesTenantId) {
     updateArgs2.update = BSON("$set" << BSON("data"
                                              << "y"));
     updateArgs2.criteria = BSON("_id" << 1);
-    OplogUpdateEntryArgs update2(&updateArgs2, nss2, uuid2);
+    OplogUpdateEntryArgs update2(&updateArgs2, *autoColl2);
 
-    WriteUnitOfWork wuow(opCtx());
-    AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
-    AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
     opObserver().onUpdate(opCtx(), update1);
     opObserver().onUpdate(opCtx(), update2);
 
@@ -1910,17 +1912,15 @@ TEST_F(OpObserverTransactionTest, TransactionalDeleteTest) {
     AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
     AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
     opObserver().aboutToDelete(opCtx(),
-                               nss1,
-                               uuid1,
+                               *autoColl1,
                                BSON("_id" << 0 << "data"
                                           << "x"));
-    opObserver().onDelete(opCtx(), nss1, uuid1, 0, {});
+    opObserver().onDelete(opCtx(), *autoColl1, 0, {});
     opObserver().aboutToDelete(opCtx(),
-                               nss2,
-                               uuid2,
+                               *autoColl2,
                                BSON("_id" << 1 << "data"
                                           << "y"));
-    opObserver().onDelete(opCtx(), nss2, uuid2, 0, {});
+    opObserver().onDelete(opCtx(), *autoColl2, 0, {});
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
     ASSERT_EQUALS(txnOps->getNumberOfPrePostImagesToWrite(), 0);
     opObserver().onUnpreparedTransactionCommit(opCtx(), txnOps);
@@ -1951,17 +1951,15 @@ TEST_F(OpObserverTransactionTest, TransactionalDeleteTestIncludesTenantId) {
     AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
     AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
     opObserver().aboutToDelete(opCtx(),
-                               nss1,
-                               uuid1,
+                               *autoColl1,
                                BSON("_id" << 0 << "data"
                                           << "x"));
-    opObserver().onDelete(opCtx(), nss1, uuid1, 0, {});
+    opObserver().onDelete(opCtx(), *autoColl1, 0, {});
     opObserver().aboutToDelete(opCtx(),
-                               nss2,
-                               uuid2,
+                               *autoColl2,
                                BSON("_id" << 1 << "data"
                                           << "y"));
-    opObserver().onDelete(opCtx(), nss2, uuid2, 0, {});
+    opObserver().onDelete(opCtx(), *autoColl2, 0, {});
 
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
     ASSERT_EQUALS(txnOps->getNumberOfPrePostImagesToWrite(), 0);
@@ -2029,11 +2027,14 @@ public:
         OpObserverTxnParticipantTest::tearDown();
     }
 
+    void setUp() override {
+        OpObserverTest::setUp();
+        auto opCtx = cc().makeOperationContext();
+        reset(opCtx.get(), nss, uuid);
+    }
+
 protected:
     void testRetryableFindAndModifyUpdateRequestingPostImageHasNeedsRetryImage() {
-        NamespaceString nss = {boost::none, "test", "coll"};
-        const auto uuid = UUID::gen();
-
         CollectionUpdateArgs updateArgs;
         updateArgs.stmtIds = {0};
         updateArgs.updatedDoc = BSON("_id" << 0 << "data"
@@ -2042,10 +2043,11 @@ protected:
                                                 << "x"));
         updateArgs.criteria = BSON("_id" << 0);
         updateArgs.storeDocOption = CollectionUpdateArgs::StoreDocOption::PostImage;
-        OplogUpdateEntryArgs update(&updateArgs, nss, uuid);
+
+        AutoGetCollection autoColl(opCtx(), nss, MODE_IX);
+        OplogUpdateEntryArgs update(&updateArgs, *autoColl);
         update.retryableFindAndModifyLocation = RetryableFindAndModifyLocation::kSideCollection;
 
-        AutoGetDb autoDb(opCtx(), nss.dbName(), MODE_X);
         opObserver().onUpdate(opCtx(), update);
         commit();
 
@@ -2062,9 +2064,6 @@ protected:
     }
 
     void testRetryableFindAndModifyUpdateRequestingPreImageHasNeedsRetryImage() {
-        NamespaceString nss = {boost::none, "test", "coll"};
-        const auto uuid = UUID::gen();
-
         CollectionUpdateArgs updateArgs;
         updateArgs.stmtIds = {0};
         updateArgs.preImageDoc = BSON("_id" << 0 << "data"
@@ -2073,10 +2072,11 @@ protected:
                                                 << "x"));
         updateArgs.criteria = BSON("_id" << 0);
         updateArgs.storeDocOption = CollectionUpdateArgs::StoreDocOption::PreImage;
-        OplogUpdateEntryArgs update(&updateArgs, nss, uuid);
+
+        AutoGetCollection autoColl(opCtx(), nss, MODE_IX);
+        OplogUpdateEntryArgs update(&updateArgs, *autoColl);
         update.retryableFindAndModifyLocation = RetryableFindAndModifyLocation::kSideCollection;
 
-        AutoGetDb autoDb(opCtx(), nss.dbName(), MODE_X);
         opObserver().onUpdate(opCtx(), update);
         commit();
 
@@ -2093,17 +2093,16 @@ protected:
     }
 
     void testRetryableFindAndModifyDeleteHasNeedsRetryImage() {
-        NamespaceString nss = {boost::none, "test", "coll"};
-        const auto uuid = UUID::gen();
 
-        AutoGetDb autoDb(opCtx(), nss.dbName(), MODE_X);
+
+        AutoGetCollection autoColl(opCtx(), nss, MODE_IX);
         const auto deletedDoc = BSON("_id" << 0 << "data"
                                            << "x");
-        opObserver().aboutToDelete(opCtx(), nss, uuid, deletedDoc);
+        opObserver().aboutToDelete(opCtx(), *autoColl, deletedDoc);
         OplogDeleteEntryArgs args;
         args.retryableFindAndModifyLocation = RetryableFindAndModifyLocation::kSideCollection;
         args.deletedDoc = &deletedDoc;
-        opObserver().onDelete(opCtx(), nss, uuid, 0, args);
+        opObserver().onDelete(opCtx(), *autoColl, 0, args);
         commit();
 
         // Asserts that only a single oplog entry was created. In essence, we did not create any
@@ -2118,6 +2117,9 @@ protected:
         finish();
     }
 
+    NamespaceString nss = {boost::none, "test", "coll"};
+    UUID uuid = UUID::gen();
+
     virtual void commit() = 0;
 
     virtual void finish() {}
@@ -2129,6 +2131,7 @@ class OpObserverRetryableFindAndModifyOutsideTransactionTest
     : public OpObserverRetryableFindAndModifyTest {
 public:
     void setUp() override {
+        OpObserverRetryableFindAndModifyTest::setUp();
         OpObserverTxnParticipantTest::setUp();
         OpObserverTxnParticipantTest::setUpRetryableWrite();
     }
@@ -2163,6 +2166,7 @@ class OpObserverRetryableFindAndModifyInsideUnpreparedRetryableInternalTransacti
     : public OpObserverRetryableFindAndModifyTest {
 public:
     void setUp() override {
+        OpObserverRetryableFindAndModifyTest::setUp();
         OpObserverTxnParticipantTest::setUp();
         OpObserverTxnParticipantTest::setUpRetryableInternalTransaction();
     }
@@ -2199,6 +2203,7 @@ class OpObserverRetryableFindAndModifyInsidePreparedRetryableInternalTransaction
     : public OpObserverRetryableFindAndModifyTest {
 public:
     void setUp() override {
+        OpObserverRetryableFindAndModifyTest::setUp();
         OpObserverTxnParticipantTest::setUp();
         OpObserverTxnParticipantTest::setUpRetryableInternalTransaction();
     }
@@ -2339,6 +2344,7 @@ protected:
                     WriteUnitOfWork wuow(opCtx);
                     auto reservedSlots = repl::getNextOpTimes(opCtx, 3);
                     update->updateArgs->oplogSlots = reservedSlots;
+                    wuow.commit();
                 }
                 break;
         }
@@ -2410,6 +2416,12 @@ protected:
         }
     }
 
+    void setUp() override {
+        OpObserverTest::setUp();
+        auto opCtx = cc().makeOperationContext();
+        reset(opCtx.get(), _nss, _uuid);
+    }
+
     std::vector<UpdateTestCase> _cases = {
         // Regular updates.
         {kNonFaM, kChangeStreamImagesDisabled, kNotRetryable, 1},
@@ -2454,12 +2466,11 @@ TEST_F(OnUpdateOutputsTest, TestNonTransactionFundamentalOnUpdateOutputs) {
         }
 
         // Phase 2: Call the code we're testing.
-        CollectionUpdateArgs updateArgs;
-        OplogUpdateEntryArgs updateEntryArgs(&updateArgs, _nss, _uuid);
-        initializeOplogUpdateEntryArgs(opCtx, testCase, &updateEntryArgs);
-
         WriteUnitOfWork wuow(opCtx);
         AutoGetCollection locks(opCtx, _nss, MODE_IX);
+        CollectionUpdateArgs updateArgs;
+        OplogUpdateEntryArgs updateEntryArgs(&updateArgs, *locks);
+        initializeOplogUpdateEntryArgs(opCtx, testCase, &updateEntryArgs);
         opObserver.onUpdate(opCtx, updateEntryArgs);
         wuow.commit();
 
@@ -2499,12 +2510,12 @@ TEST_F(OnUpdateOutputsTest, TestFundamentalTransactionOnUpdateOutputs) {
         }
 
         // Phase 2: Call the code we're testing.
-        CollectionUpdateArgs updateArgs;
-        OplogUpdateEntryArgs updateEntryArgs(&updateArgs, _nss, _uuid);
-        initializeOplogUpdateEntryArgs(opCtx, testCase, &updateEntryArgs);
-
         WriteUnitOfWork wuow(opCtx);
         AutoGetCollection locks(opCtx, _nss, MODE_IX);
+        CollectionUpdateArgs updateArgs;
+        OplogUpdateEntryArgs updateEntryArgs(&updateArgs, *locks);
+        initializeOplogUpdateEntryArgs(opCtx, testCase, &updateEntryArgs);
+
         opObserver.onUpdate(opCtx, updateEntryArgs);
         commitUnpreparedTransaction<OpObserverRegistry>(opCtx, opObserver);
         wuow.commit();
@@ -2651,7 +2662,14 @@ public:
 
 protected:
     // The maximum numbers of documents that can be deleted in a batch. Assumes _id of integer type.
-    static const int maxDocsInBatch = 203669;
+    // This limit should be chosen such that the total size of delete operations stays under the
+    // BSON 16 MB limit.
+    // In practice, the number of delete operations is controlled by the server parameters
+    // batchedDeletesTargetStagedDocBytes and batchedDeletesTargetBatchDocs, which have much
+    // lower defaults.
+    // See maxNumberOfBatchedOperationsInSingleOplogEntry and
+    // maxSizeOfBatchedOperationsInSingleOplogEntryBytes.
+    static const int maxDeleteOpsInBatch = 202000;
     const NamespaceString _nss{boost::none, "test", "coll"};
     const NamespaceString _nssWithTid{TenantId(OID::gen()), "test", "coll"};
 };
@@ -2751,7 +2769,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsGrouping) {
                                                        boost::none);
             const OplogDeleteEntryArgs args;
             opCtx->getServiceContext()->getOpObserver()->onDelete(
-                opCtx, autoColl->ns(), autoColl->uuid(), kUninitializedStmtId, args);
+                opCtx, *autoColl, kUninitializedStmtId, args);
         }
 
         wuow.commit();
@@ -2812,7 +2830,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdate) {
         repl::documentKeyDecoration(opCtx).emplace(BSON("_id" << 1), boost::none);
         const OplogDeleteEntryArgs args;
         opCtx->getServiceContext()->getOpObserver()->onDelete(
-            opCtx, autoColl->ns(), autoColl->uuid(), kUninitializedStmtId, args);
+            opCtx, *autoColl, kUninitializedStmtId, args);
     }
     // (2) Update
     {
@@ -2820,7 +2838,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdate) {
         collUpdateArgs.update = BSON("fieldToUpdate"
                                      << "valueToUpdate");
         collUpdateArgs.criteria = BSON("_id" << 2);
-        auto args = OplogUpdateEntryArgs(&collUpdateArgs, _nss, autoColl->uuid());
+        auto args = OplogUpdateEntryArgs(&collUpdateArgs, *autoColl);
         opCtx->getServiceContext()->getOpObserver()->onUpdate(opCtx, args);
     }
 
@@ -2899,7 +2917,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdateIncludesTenantId) 
         repl::documentKeyDecoration(opCtx).emplace(BSON("_id" << 1), boost::none);
         const OplogDeleteEntryArgs args;
         opCtx->getServiceContext()->getOpObserver()->onDelete(
-            opCtx, autoColl->ns(), autoColl->uuid(), kUninitializedStmtId, args);
+            opCtx, *autoColl, kUninitializedStmtId, args);
     }
     // (2) Update
     {
@@ -2907,7 +2925,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdateIncludesTenantId) 
         collUpdateArgs.update = BSON("fieldToUpdate"
                                      << "valueToUpdate");
         collUpdateArgs.criteria = BSON("_id" << 2);
-        auto args = OplogUpdateEntryArgs(&collUpdateArgs, autoColl->ns(), autoColl->uuid());
+        auto args = OplogUpdateEntryArgs(&collUpdateArgs, *autoColl);
         opCtx->getServiceContext()->getOpObserver()->onUpdate(opCtx, args);
     }
 
@@ -2994,16 +3012,16 @@ TEST_F(BatchedWriteOutputsTest, testWUOWLarge) {
     AutoGetCollection autoColl(opCtx, _nss, MODE_IX);
     WriteUnitOfWork wuow(opCtx, true /* groupOplogEntries */);
 
-    // Delete BatchedWriteOutputsTest::maxDocsInBatch documents in a single batch, which is the
+    // Delete BatchedWriteOutputsTest::maxDeleteOpsInBatch documents in a single batch, which is the
     // maximum number of docs that can be batched while staying within 16MB of applyOps.
-    for (int docId = 0; docId < BatchedWriteOutputsTest::maxDocsInBatch; docId++) {
+    for (int docId = 0; docId < BatchedWriteOutputsTest::maxDeleteOpsInBatch; docId++) {
         // This test does not call `OpObserver::aboutToDelete`. That method has the side-effect
         // of setting of `documentKey` on the delete for sharding purposes.
         // `OpObserverImpl::onDelete` asserts its existence.
         repl::documentKeyDecoration(opCtx).emplace(BSON("_id" << docId), boost::none);
         const OplogDeleteEntryArgs args;
         opCtx->getServiceContext()->getOpObserver()->onDelete(
-            opCtx, autoColl->ns(), autoColl->uuid(), kUninitializedStmtId, args);
+            opCtx, *autoColl, kUninitializedStmtId, args);
     }
     wuow.commit();
 
@@ -3019,8 +3037,8 @@ TEST_F(BatchedWriteOutputsTest, testWUOWLarge) {
     std::vector<repl::OplogEntry> innerEntries;
     repl::ApplyOps::extractOperationsTo(
         lastOplogEntryParsed, lastOplogEntryParsed.getEntry().toBSON(), &innerEntries);
-    ASSERT(innerEntries.size() == BatchedWriteOutputsTest::maxDocsInBatch);
-    for (int opIdx = 0; opIdx < BatchedWriteOutputsTest::maxDocsInBatch; opIdx++) {
+    ASSERT(innerEntries.size() == BatchedWriteOutputsTest::maxDeleteOpsInBatch);
+    for (int opIdx = 0; opIdx < BatchedWriteOutputsTest::maxDeleteOpsInBatch; opIdx++) {
         BSONObj o = BSON("_id" << opIdx);
         const auto innerEntry = innerEntries[opIdx];
         ASSERT(innerEntry.getCommandType() == OplogEntry::CommandType::kNotCommand);
@@ -3041,187 +3059,40 @@ TEST_F(BatchedWriteOutputsTest, testWUOWTooLarge) {
     AutoGetCollection autoColl(opCtx, _nss, MODE_IX);
     WriteUnitOfWork wuow(opCtx, true /* groupOplogEntries */);
 
-    // Attempt to delete more than BatchedWriteOutputsTest::maxDocsInBatch documents in a single
-    // batch, which fails as it can't generate an applyOps entry larger than 16MB.
-    for (int docId = 0; docId < BatchedWriteOutputsTest::maxDocsInBatch + 1; docId++) {
+    // Attempt to delete more documents than allowed in a single applyOps batch because it
+    // the generated entry exceeds the limit of 16MB for an applyOps entry.
+    int approximateDifferenceBetweenBSONObjMaxUserAndInternalSize = 2000;
+    for (int docId = 0; docId < BatchedWriteOutputsTest::maxDeleteOpsInBatch +
+             approximateDifferenceBetweenBSONObjMaxUserAndInternalSize + 1;
+         docId++) {
         // This test does not call `OpObserver::aboutToDelete`. That method has the side-effect
         // of setting of `documentKey` on the delete for sharding purposes.
         // `OpObserverImpl::onDelete` asserts its existence.
         repl::documentKeyDecoration(opCtx).emplace(BSON("_id" << docId), boost::none);
         const OplogDeleteEntryArgs args;
         opCtx->getServiceContext()->getOpObserver()->onDelete(
-            opCtx, autoColl->ns(), autoColl->uuid(), kUninitializedStmtId, args);
+            opCtx, *autoColl, kUninitializedStmtId, args);
     }
 
-    ASSERT_THROWS_CODE(wuow.commit(), DBException, ErrorCodes::Error::TransactionTooLarge);
+    // This test used to rely on the BSONObjBuilder in packTransactionStatementsForApplyOps()
+    // to throw a TransactionTooLarge exception when it is unable to build a BSONObj with the
+    // delete operations. Now, we check the limit earlier in OpObserver::onBatchedWriteCommit()
+    // using the results from TransactionOperations::getApplyOpsInfo().
+    ASSERT_THROWS_CODE(wuow.commit(), DBException, ErrorCodes::TransactionTooLarge);
 
     // The getNOplogEntries call below asserts that the oplog is empty.
     getNOplogEntries(opCtx, 0);
 }
 
-class AtomicApplyOpsOutputsTest : public OpObserverTest {
-protected:
-    const NamespaceString _nss{boost::none, "test", "coll"};
-    const UUID _uuid = UUID::gen();
-};
-
-TEST_F(AtomicApplyOpsOutputsTest, InsertInNestedApplyOpsReturnsSuccess) {
-    auto opCtxRaii = cc().makeOperationContext();
-    auto opCtx = opCtxRaii.get();
-
-    reset(opCtx, _nss, _uuid);
-    resetOplogAndTransactions(opCtx);
-
-    auto opObserverRegistry = std::make_unique<OpObserverRegistry>();
-    opObserverRegistry->addObserver(
-        std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
-    opCtx->getServiceContext()->setOpObserver(std::move(opObserverRegistry));
-
-    auto mode = repl::OplogApplication::Mode::kApplyOpsCmd;
-    // Make sure the apply ops command object contains the correct UUID information.
-    CollectionOptions options;
-    options.uuid = _uuid;
-    BSONObjBuilder resultBuilder;
-
-    auto innerCmdObj = BSON("op"
-                            << "i"
-                            << "ns" << _nss.ns() << "o"
-                            << BSON("_id"
-                                    << "a")
-                            << "ui" << options.uuid.value());
-    auto innerApplyOpsObj = BSON("op"
-                                 << "c"
-                                 << "ns" << _nss.getCommandNS().ns() << "o"
-                                 << BSON("applyOps" << BSON_ARRAY(innerCmdObj)));
-    auto cmdObj = BSON("applyOps" << BSON_ARRAY(innerApplyOpsObj));
-
-    ASSERT_OK(repl::applyOps(opCtx, _nss.dbName(), cmdObj, mode, &resultBuilder));
-
-    // Retrieve the oplog entries, implicitly asserting that there's exactly one entry in the whole
-    // oplog.
-    std::vector<BSONObj> oplogs = getNOplogEntries(opCtx, 1);
-    auto lastOplogEntry = oplogs.back();
-    auto lastOplogEntryParsed = assertGet(OplogEntry::parse(oplogs.back()));
-
-    // The oplog entry is an applyOps containing the insert.
-    ASSERT(lastOplogEntryParsed.getCommandType() == OplogEntry::CommandType::kApplyOps);
-    std::vector<repl::OplogEntry> innerEntries;
-    repl::ApplyOps::extractOperationsTo(
-        lastOplogEntryParsed, lastOplogEntryParsed.getEntry().toBSON(), &innerEntries);
-    ASSERT(innerEntries.size() == 1);
-    const auto innerEntry = innerEntries[0];
-    ASSERT(innerEntry.getCommandType() == OplogEntry::CommandType::kNotCommand);
-    ASSERT(innerEntry.getOpType() == repl::OpTypeEnum::kInsert);
-    ASSERT(innerEntry.getNss() == _nss);
-    ASSERT(0 ==
-           innerEntry.getObject().woCompare(BSON("_id"
-                                                 << "a")));
-}
-
-TEST_F(AtomicApplyOpsOutputsTest, AtomicApplyOpsWithNoOpsReturnsSuccess) {
-    auto opCtxRaii = cc().makeOperationContext();
-    auto opCtx = opCtxRaii.get();
-    reset(opCtx, _nss, _uuid);
-    resetOplogAndTransactions(opCtx);
-
-    auto opObserverRegistry = std::make_unique<OpObserverRegistry>();
-    opObserverRegistry->addObserver(
-        std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
-    opCtx->getServiceContext()->setOpObserver(std::move(opObserverRegistry));
-
-    auto mode = repl::OplogApplication::Mode::kApplyOpsCmd;
-    BSONObjBuilder resultBuilder;
-    auto cmdObj = BSON("applyOps" << BSONArray());
-    ASSERT_OK(repl::applyOps(opCtx, _nss.dbName(), cmdObj, mode, &resultBuilder));
-
-    // Retrieve the oplog entries, implicitly asserting that there's exactly no entry in the whole
-    // oplog.
-    getNOplogEntries(opCtx, 0);
-}
-
-TEST_F(AtomicApplyOpsOutputsTest, AtomicApplyOpsInsertWithUuidIntoCollectionWithUuid) {
-    auto opCtxRaii = cc().makeOperationContext();
-    auto opCtx = opCtxRaii.get();
-    reset(opCtx, _nss, _uuid);
-    resetOplogAndTransactions(opCtx);
-
-    auto opObserverRegistry = std::make_unique<OpObserverRegistry>();
-    opObserverRegistry->addObserver(
-        std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
-    opCtx->getServiceContext()->setOpObserver(std::move(opObserverRegistry));
-
-    auto mode = repl::OplogApplication::Mode::kApplyOpsCmd;
-
-    auto const insertOp = BSON("op"
-                               << "i"
-                               << "ns" << _nss.ns() << "o" << BSON("_id" << 0) << "ui" << _uuid);
-    auto const cmdObj = BSON("applyOps" << BSON_ARRAY(insertOp));
-
-    BSONObjBuilder resultBuilder;
-    ASSERT_OK(repl::applyOps(opCtx, _nss.dbName(), cmdObj, mode, &resultBuilder));
-
-    // Retrieve the oplog entries, implicitly asserting that there's exactly one entry in the whole
-    // oplog.
-    std::vector<BSONObj> oplogs = getNOplogEntries(opCtx, 1);
-    auto lastOplogEntry = oplogs.back();
-    auto lastOplogEntryParsed = assertGet(OplogEntry::parse(oplogs.back()));
-
-    // The oplog entry is an applyOps containing the insert.
-    ASSERT(lastOplogEntryParsed.getCommandType() == OplogEntry::CommandType::kApplyOps);
-    std::vector<repl::OplogEntry> innerEntries;
-    repl::ApplyOps::extractOperationsTo(
-        lastOplogEntryParsed, lastOplogEntryParsed.getEntry().toBSON(), &innerEntries);
-    ASSERT(innerEntries.size() == 1);
-    const auto innerEntry = innerEntries[0];
-    ASSERT(innerEntry.getCommandType() == OplogEntry::CommandType::kNotCommand);
-    ASSERT(innerEntry.getOpType() == repl::OpTypeEnum::kInsert);
-    ASSERT(innerEntry.getNss() == _nss);
-    ASSERT(0 == innerEntry.getObject().woCompare(BSON("_id" << 0)));
-}
-
-TEST_F(AtomicApplyOpsOutputsTest, AtomicApplyOpsInsertWithoutUuidIntoCollectionWithUuid) {
-    auto opCtxRaii = cc().makeOperationContext();
-    auto opCtx = opCtxRaii.get();
-    reset(opCtx, _nss, _uuid);
-    resetOplogAndTransactions(opCtx);
-
-    auto opObserverRegistry = std::make_unique<OpObserverRegistry>();
-    opObserverRegistry->addObserver(
-        std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
-    opCtx->getServiceContext()->setOpObserver(std::move(opObserverRegistry));
-
-    auto mode = repl::OplogApplication::Mode::kApplyOpsCmd;
-
-    auto const insertOp = BSON("op"
-                               << "i"
-                               << "ns" << _nss.ns() << "o" << BSON("_id" << 0) /* no UUID */);
-    auto const cmdObj = BSON("applyOps" << BSON_ARRAY(insertOp));
-
-    BSONObjBuilder resultBuilder;
-    ASSERT_OK(repl::applyOps(opCtx, _nss.dbName(), cmdObj, mode, &resultBuilder));
-
-    // Retrieve the oplog entries, implicitly asserting that there's exactly one entry in the whole
-    // oplog.
-    std::vector<BSONObj> oplogs = getNOplogEntries(opCtx, 1);
-    auto lastOplogEntry = oplogs.back();
-    auto lastOplogEntryParsed = assertGet(OplogEntry::parse(oplogs.back()));
-
-    // The oplog entry is an applyOps containing the insert.
-    ASSERT(lastOplogEntryParsed.getCommandType() == OplogEntry::CommandType::kApplyOps);
-    std::vector<repl::OplogEntry> innerEntries;
-    repl::ApplyOps::extractOperationsTo(
-        lastOplogEntryParsed, lastOplogEntryParsed.getEntry().toBSON(), &innerEntries);
-    ASSERT(innerEntries.size() == 1);
-    const auto innerEntry = innerEntries[0];
-    ASSERT(innerEntry.getCommandType() == OplogEntry::CommandType::kNotCommand);
-    ASSERT(innerEntry.getOpType() == repl::OpTypeEnum::kInsert);
-    ASSERT(innerEntry.getNss() == _nss);
-    ASSERT(0 == innerEntry.getObject().woCompare(BSON("_id" << 0)));
-}
-
 class OnDeleteOutputsTest : public OpObserverTest {
 
 protected:
+    void setUp() override {
+        OpObserverTest::setUp();
+        auto opCtx = cc().makeOperationContext();
+        reset(opCtx.get(), _nss, _uuid);
+    }
+
     void logTestCase(const DeleteTestCase& testCase) {
         LOGV2(5739905,
               "DeleteTestCase",
@@ -3346,7 +3217,7 @@ TEST_F(OnDeleteOutputsTest, TestNonTransactionFundamentalOnDeleteOutputs) {
         // `OpObserverImpl::onDelete` asserts its existence.
         repl::documentKeyDecoration(opCtx).emplace(_deletedDoc["_id"].wrap(), boost::none);
         opObserver.onDelete(
-            opCtx, _nss, _uuid, testCase.isRetryable() ? 1 : kUninitializedStmtId, deleteEntryArgs);
+            opCtx, *locks, testCase.isRetryable() ? 1 : kUninitializedStmtId, deleteEntryArgs);
         wuow.commit();
 
         // Phase 3: Analyze the results:
@@ -3395,7 +3266,7 @@ TEST_F(OnDeleteOutputsTest, TestTransactionFundamentalOnDeleteOutputs) {
         // of setting of `documentKey` on the delete for sharding purposes.
         // `OpObserverImpl::onDelete` asserts its existence.
         repl::documentKeyDecoration(opCtx).emplace(_deletedDoc["_id"].wrap(), boost::none);
-        opObserver.onDelete(opCtx, _nss, _uuid, stmtId, deleteEntryArgs);
+        opObserver.onDelete(opCtx, *locks, stmtId, deleteEntryArgs);
         commitUnpreparedTransaction<OpObserverRegistry>(opCtx, opObserver);
         wuow.commit();
 
@@ -3525,6 +3396,10 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalUpdateTest) {
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "update");
 
+    WriteUnitOfWork wuow(opCtx());
+    AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
+    AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
+
     CollectionUpdateArgs updateArgs1;
     updateArgs1.stmtIds = {0};
     updateArgs1.updatedDoc = BSON("_id" << 0 << "data"
@@ -3532,7 +3407,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalUpdateTest) {
     updateArgs1.update = BSON("$set" << BSON("data"
                                              << "x"));
     updateArgs1.criteria = BSON("_id" << 0);
-    OplogUpdateEntryArgs update1(&updateArgs1, nss1, uuid1);
+    OplogUpdateEntryArgs update1(&updateArgs1, *autoColl1);
 
     CollectionUpdateArgs updateArgs2;
     updateArgs2.stmtIds = {1};
@@ -3541,11 +3416,8 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalUpdateTest) {
     updateArgs2.update = BSON("$set" << BSON("data"
                                              << "y"));
     updateArgs2.criteria = BSON("_id" << 1);
-    OplogUpdateEntryArgs update2(&updateArgs2, nss2, uuid2);
+    OplogUpdateEntryArgs update2(&updateArgs2, *autoColl2);
 
-    WriteUnitOfWork wuow(opCtx());
-    AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
-    AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
     opObserver().onUpdate(opCtx(), update1);
     opObserver().onUpdate(opCtx(), update2);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
@@ -3596,17 +3468,15 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalDeleteTest) {
     AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
     AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
     opObserver().aboutToDelete(opCtx(),
-                               nss1,
-                               uuid1,
+                               *autoColl1,
                                BSON("_id" << 0 << "data"
                                           << "x"));
-    opObserver().onDelete(opCtx(), nss1, uuid1, 0, {});
+    opObserver().onDelete(opCtx(), *autoColl1, 0, {});
     opObserver().aboutToDelete(opCtx(),
-                               nss2,
-                               uuid2,
+                               *autoColl2,
                                BSON("_id" << 1 << "data"
                                           << "y"));
-    opObserver().onDelete(opCtx(), nss2, uuid2, 0, {});
+    opObserver().onDelete(opCtx(), *autoColl2, 0, {});
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
     ASSERT_EQUALS(txnOps->getNumberOfPrePostImagesToWrite(), 0);
     opObserver().onUnpreparedTransactionCommit(opCtx(), txnOps);
@@ -3720,6 +3590,9 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalUpdatePrepareTest) {
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "update");
 
+    AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
+    AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
+
     CollectionUpdateArgs updateArgs1;
     updateArgs1.stmtIds = {0};
     updateArgs1.updatedDoc = BSON("_id" << 0 << "data"
@@ -3727,7 +3600,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalUpdatePrepareTest) {
     updateArgs1.update = BSON("$set" << BSON("data"
                                              << "x"));
     updateArgs1.criteria = BSON("_id" << 0);
-    OplogUpdateEntryArgs update1(&updateArgs1, nss1, uuid1);
+    OplogUpdateEntryArgs update1(&updateArgs1, *autoColl1);
 
     CollectionUpdateArgs updateArgs2;
     updateArgs2.stmtIds = {1};
@@ -3736,10 +3609,8 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalUpdatePrepareTest) {
     updateArgs2.update = BSON("$set" << BSON("data"
                                              << "y"));
     updateArgs2.criteria = BSON("_id" << 1);
-    OplogUpdateEntryArgs update2(&updateArgs2, nss2, uuid2);
+    OplogUpdateEntryArgs update2(&updateArgs2, *autoColl2);
 
-    AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
-    AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
     opObserver().onUpdate(opCtx(), update1);
     opObserver().onUpdate(opCtx(), update2);
 
@@ -3796,17 +3667,15 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalDeletePrepareTest) {
     AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
     AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
     opObserver().aboutToDelete(opCtx(),
-                               nss1,
-                               uuid1,
+                               *autoColl1,
                                BSON("_id" << 0 << "data"
                                           << "x"));
-    opObserver().onDelete(opCtx(), nss1, uuid1, 0, {});
+    opObserver().onDelete(opCtx(), *autoColl1, 0, {});
     opObserver().aboutToDelete(opCtx(),
-                               nss2,
-                               uuid2,
+                               *autoColl2,
                                BSON("_id" << 1 << "data"
                                           << "y"));
-    opObserver().onDelete(opCtx(), nss2, uuid2, 0, {});
+    opObserver().onDelete(opCtx(), *autoColl2, 0, {});
 
     auto reservedSlots = reserveOpTimesInSideTransaction(opCtx(), 2);
     auto prepareOpTime = reservedSlots.back();

@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
+import numpy as np
 from sklearn.metrics import mean_squared_error, r2_score, explained_variance_score
 from sklearn.model_selection import train_test_split
 from workload_execution import QueryParameters
@@ -44,7 +45,7 @@ class ExecutionStats:
 
 
 @dataclass
-class ModelParameters:
+class CostModelParameters:
     """Cost Model Input Parameters."""
 
     execution_stats: ExecutionStats
@@ -61,11 +62,17 @@ class LinearModel:
     mse: float  # Mean Squared Error
     r2: float  # Coefficient of determination
     evs: float  # Explained Variance Score
+    corrcoef: any  # Correlation Coefficients
 
 
 # pylint: disable=invalid-name
-def estimate(fit, X, y, test_size: float, trace: bool = False) -> LinearModel:
+def estimate(fit, X: np.ndarray, y: np.ndarray, test_size: float,
+             trace: bool = False) -> LinearModel:
     """Estimate cost model parameters."""
+
+    if len(X) == 0:
+        # no data to trainn return empty model
+        return LinearModel(coef=[], intercept=0, mse=0, r2=0, evs=0, corrcoef=[])
 
     # split data
     X_training, X_test, y_training, y_test = train_test_split(X, y, test_size=test_size)
@@ -77,13 +84,15 @@ def estimate(fit, X, y, test_size: float, trace: bool = False) -> LinearModel:
 
     if len(X_test) == 0 or len(X_training) == 0:
         # no data to trainn return empty model
-        return LinearModel(coef=[], intercept=0, mse=0, rs=0, evs=0)
+        return LinearModel(coef=[], intercept=0, mse=0, r2=0, evs=0, corrcoef=[])
 
-    model = fit(X, y)
-    y_predict = model.predict(X_test)
+    (coef, predict) = fit(X, y)
+    y_predict = predict(X_test)
 
     mse = mean_squared_error(y_test, y_predict)
     r2 = r2_score(y_test, y_predict)
     evs = explained_variance_score(y_test, y_predict)
+    corrcoef = np.corrcoef(np.transpose(X[:, 1:]), y)
 
-    return LinearModel(coef=model.coef_, intercept=model.intercept_, mse=mse, r2=r2, evs=evs)
+    return LinearModel(coef=coef[1:], intercept=coef[0], mse=mse, r2=r2, evs=evs,
+                       corrcoef=corrcoef[0, 1:])

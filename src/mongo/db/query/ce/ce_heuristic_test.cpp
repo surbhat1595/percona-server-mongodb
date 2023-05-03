@@ -29,9 +29,8 @@
 
 #include <string>
 
+#include "mongo/db/query/ce/ce_heuristic.h"
 #include "mongo/db/query/ce/ce_test_utils.h"
-#include "mongo/db/query/optimizer/cascades/ce_heuristic.h"
-#include "mongo/db/query/optimizer/cascades/cost_derivation.h"
 #include "mongo/db/query/optimizer/cascades/logical_props_derivation.h"
 #include "mongo/db/query/optimizer/cascades/memo.h"
 #include "mongo/db/query/optimizer/defs.h"
@@ -206,8 +205,8 @@ TEST(CEHeuristicTest, CEWithoutOptimizationTraverseSelectivityDoesNotAccumulate)
         "{'b0.b1.b3': {$gt: 10}}"
         "]}";
     HeuristicCETester ht(collName, kNoOptPhaseSet);
-    auto ce1 = ht.getMatchCE<optimizer::RootNode>(query);
-    auto ce2 = ht.getMatchCE<optimizer::RootNode>(queryWithLongPaths);
+    auto ce1 = ht.getMatchCE(query);
+    auto ce2 = ht.getMatchCE(queryWithLongPaths);
     ASSERT_APPROX_EQUAL(ce1, ce2, kMaxCEError);
 }
 
@@ -649,8 +648,8 @@ TEST(CEHeuristicTest, CEWithoutOptimizationEquivalentConjunctions) {
 
     HeuristicCETester ht(collName, kNoOptPhaseSet);
     ht.setCollCard(kCollCard);
-    auto ce1 = ht.getCE<optimizer::RootNode>(rootNode1);
-    auto ce2 = ht.getCE<optimizer::RootNode>(rootNode2);
+    auto ce1 = ht.getCE(rootNode1);
+    auto ce2 = ht.getCE(rootNode2);
     ASSERT_APPROX_EQUAL(ce1, ce2, kMaxCEError);
 }
 
@@ -750,7 +749,7 @@ TEST(CEHeuristicTest, CEAfterMemoSubstitutionPhase_DNF1pathComplex) {
         "{$and: [{a0: {$gt:40}}, {a0: {$lt: 99}}, {a0: {$gt: 42}}, {a0: {$lt: 88}}, {a0: {$lt: "
         "81}}, {a0: {$lt: 77}}]}"
         "]}";
-    auto ce1 = ht.getMatchCE<optimizer::RootNode>(query1);
+    auto ce1 = ht.getMatchCE(query1);
     // The conjuncts are in inverse selectivity order.
     std::string query2 =
         "{$or: ["
@@ -762,7 +761,7 @@ TEST(CEHeuristicTest, CEAfterMemoSubstitutionPhase_DNF1pathComplex) {
         "{$and: [{a0: {$gt: 9}}, {a0: {$lt: 12}}, {a0: {$gt: 42}}]},"
         "{$and: [{a0: {$gt: 9}}, {a0: {$lt: 12}}]}"
         "]}";
-    auto ce2 = ht.getMatchCE<optimizer::RootNode>(query2);
+    auto ce2 = ht.getMatchCE(query2);
     ASSERT_APPROX_EQUAL(ce1, ce2, kMaxCEError);
 }
 
@@ -988,6 +987,22 @@ TEST(CEHeuristicTest, CENotClosedRange) {
     ASSERT_MATCH_CE(opt, "{a: {$not: {$gt: 10, $lte: 20}}}", inverseCE);
     ASSERT_MATCH_CE(noOpt, "{'validate.long.path.estimate': {$gte: 10, $lt: 20}}", ce);
     ASSERT_MATCH_CE(opt, "{'validate.long.path.estimate': {$not: {$gte: 10, $lt: 20}}}", inverseCE);
+}
+
+TEST(CEHeuristicTest, CEExists) {
+    HeuristicCETester noOpt(collName);
+
+    // Test basic case + $not.
+    ASSERT_MATCH_CE(noOpt, "{a: {$exists: true}}", 7000);
+    ASSERT_MATCH_CE(noOpt, "{a: {$exists: false}}", 3000);
+    ASSERT_MATCH_CE(noOpt, "{a: {$not: {$exists: false}}}", 7000);
+    ASSERT_MATCH_CE(noOpt, "{a: {$not: {$exists: true}}}", 3000);
+
+    // Test combinations of predicates.
+    ASSERT_MATCH_CE(noOpt, "{a: {$exists: true, $eq: 123}}", 70);
+    ASSERT_MATCH_CE(noOpt, "{a: {$exists: false, $eq: null}}", 30);
+    ASSERT_MATCH_CE(noOpt, "{a: {$exists: false}, b: {$eq: 123}}", 30);
+    ASSERT_MATCH_CE(noOpt, "{a: {$exists: true, $gt: 123}}", 2310);
 }
 
 }  // namespace

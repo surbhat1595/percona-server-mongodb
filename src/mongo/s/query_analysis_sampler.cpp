@@ -49,6 +49,8 @@ MONGO_FAIL_POINT_DEFINE(disableQueryAnalysisSampler);
 
 const auto getQueryAnalysisSampler = ServiceContext::declareDecoration<QueryAnalysisSampler>();
 
+constexpr auto kActiveCollectionsFieldName = "activeCollections"_sd;
+
 bool isApproximatelyEqual(double val0, double val1, double epsilon) {
     return std::fabs(val0 - val1) < (epsilon + std::numeric_limits<double>::epsilon());
 }
@@ -60,9 +62,10 @@ QueryAnalysisSampler& QueryAnalysisSampler::get(OperationContext* opCtx) {
 }
 
 QueryAnalysisSampler& QueryAnalysisSampler::get(ServiceContext* serviceContext) {
-    invariant(analyze_shard_key::isFeatureFlagEnabled(),
+    invariant(analyze_shard_key::isFeatureFlagEnabledIgnoreFCV(),
               "Only support analyzing queries when the feature flag is enabled");
-    invariant(isMongos(), "Only support analyzing queries on a sharded cluster");
+    invariant(isMongos() || serverGlobalParams.clusterRole == ClusterRole::ShardServer,
+              "Only support analyzing queries on a sharded cluster");
     return getQueryAnalysisSampler(serviceContext);
 }
 
@@ -120,15 +123,23 @@ void QueryAnalysisSampler::QueryStats::refreshTotalCount(long long newTotalCount
     _lastTotalCount = newTotalCount;
 }
 
+long long QueryAnalysisSampler::_getTotalQueriesCount() const {
+    if (isMongos()) {
+        return globalOpCounters.getQuery()->load() + globalOpCounters.getInsert()->load() +
+            globalOpCounters.getUpdate()->load() + globalOpCounters.getDelete()->load() +
+            globalOpCounters.getCommand()->load();
+    } else if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+        return globalOpCounters.getNestedAggregate()->load();
+    }
+    MONGO_UNREACHABLE;
+}
+
 void QueryAnalysisSampler::_refreshQueryStats() {
     if (MONGO_unlikely(disableQueryAnalysisSampler.shouldFail())) {
         return;
     }
 
-    long long newTotalCount = globalOpCounters.getQuery()->load() +
-        globalOpCounters.getInsert()->load() + globalOpCounters.getUpdate()->load() +
-        globalOpCounters.getDelete()->load() + globalOpCounters.getCommand()->load();
-
+    long long newTotalCount = _getTotalQueriesCount();
     stdx::lock_guard<Latch> lk(_mutex);
     _queryStats.refreshTotalCount(newTotalCount);
 }
@@ -228,16 +239,24 @@ void QueryAnalysisSampler::_refreshConfigurations(OperationContext* opCtx) {
     _sampleRateLimiters = std::move(sampleRateLimiters);
 }
 
-bool QueryAnalysisSampler::shouldSample(const NamespaceString& nss) {
+boost::optional<UUID> QueryAnalysisSampler::tryGenerateSampleId(const NamespaceString& nss) {
     stdx::lock_guard<Latch> lk(_mutex);
     auto it = _sampleRateLimiters.find(nss);
 
     if (it == _sampleRateLimiters.end()) {
-        return false;
+        return boost::none;
     }
 
     auto& rateLimiter = it->second;
-    return rateLimiter.tryConsume();
+    if (rateLimiter.tryConsume()) {
+        return UUID::gen();
+    }
+    return boost::none;
+}
+
+void QueryAnalysisSampler::appendInfoForServerStatus(BSONObjBuilder* bob) const {
+    stdx::lock_guard<Latch> lk(_mutex);
+    bob->append(kActiveCollectionsFieldName, static_cast<int>(_sampleRateLimiters.size()));
 }
 
 }  // namespace analyze_shard_key

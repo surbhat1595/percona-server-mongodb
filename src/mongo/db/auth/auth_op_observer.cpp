@@ -67,17 +67,16 @@ void AuthOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
         return;
     }
 
-    audit::logUpdateOperation(opCtx->getClient(), args.nss, args.updateArgs->updatedDoc);
+    audit::logUpdateOperation(opCtx->getClient(), args.coll->ns(), args.updateArgs->updatedDoc);
 
     AuthorizationManager::get(opCtx->getServiceContext())
-        ->logOp(opCtx, "u", args.nss, args.updateArgs->update, &args.updateArgs->criteria);
+        ->logOp(opCtx, "u", args.coll->ns(), args.updateArgs->update, &args.updateArgs->criteria);
 }
 
 void AuthOpObserver::aboutToDelete(OperationContext* opCtx,
-                                   NamespaceString const& nss,
-                                   const UUID& uuid,
+                                   const CollectionPtr& coll,
                                    BSONObj const& doc) {
-    audit::logRemoveOperation(opCtx->getClient(), nss, doc);
+    audit::logRemoveOperation(opCtx->getClient(), coll->ns(), doc);
 
     // Extract the _id field from the document. If it does not have an _id, use the
     // document itself as the _id.
@@ -85,14 +84,13 @@ void AuthOpObserver::aboutToDelete(OperationContext* opCtx,
 }
 
 void AuthOpObserver::onDelete(OperationContext* opCtx,
-                              const NamespaceString& nss,
-                              const UUID& uuid,
+                              const CollectionPtr& coll,
                               StmtId stmtId,
                               const OplogDeleteEntryArgs& args) {
     auto& documentId = documentIdDecoration(opCtx);
     invariant(!documentId.isEmpty());
     AuthorizationManager::get(opCtx->getServiceContext())
-        ->logOp(opCtx, "d", nss, documentId, nullptr);
+        ->logOp(opCtx, "d", coll->ns(), documentId, nullptr);
 }
 
 void AuthOpObserver::onCreateCollection(OperationContext* opCtx,

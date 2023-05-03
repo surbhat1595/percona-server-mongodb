@@ -101,6 +101,7 @@
 #include "mongo/db/pipeline/document_source_skip.h"
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/document_source_tee_consumer.h"
+#include "mongo/db/pipeline/document_source_telemetry.h"
 #include "mongo/db/pipeline/document_source_union_with.h"
 #include "mongo/db/pipeline/document_source_unwind.h"
 #include "mongo/db/pipeline/visitors/document_source_visitor.h"
@@ -344,10 +345,6 @@ public:
         unsupportedExpression(expr);
     }
 
-    void visit(const BetweenMatchExpression* expr) override {
-        unsupportedExpression(expr);
-    }
-
 private:
     void unsupportedExpression(const MatchExpression* expr) {
         _eligible = false;
@@ -528,6 +525,10 @@ public:
         unsupportedStage(source);
     }
 
+    void visit(const DocumentSourceTelemetry* source) override {
+        unsupportedStage(source);
+    }
+
     void visit(const DocumentSourceGroup* source) override {
         unsupportedStage(source);
     }
@@ -620,7 +621,8 @@ bool isEligibleCommon(const RequestType& request,
                 continue;
             }
 
-            if (descriptor.isPartial() || descriptor.isSparse() ||
+            if (descriptor.infoObj().hasField(IndexDescriptor::kExpireAfterSecondsFieldName) ||
+                descriptor.isPartial() || descriptor.isSparse() ||
                 descriptor.getIndexType() != IndexType::INDEX_BTREE ||
                 !descriptor.collation().isEmpty()) {
                 return true;
@@ -634,7 +636,7 @@ bool isEligibleCommon(const RequestType& request,
             return false;
 
         if (collection->isClustered() || !collection->getCollectionOptions().collation.isEmpty() ||
-            collection->getTimeseriesOptions()) {
+            collection->getTimeseriesOptions() || collection->isCapped()) {
             return true;
         }
 
@@ -737,7 +739,7 @@ bool isEligibleForBonsai(const CanonicalQuery& cq,
         !request.getReadOnce() && !request.getShowRecordId() && !request.getTerm();
 
     // Early return to avoid unnecessary work of walking the input expression.
-    if (!commandOptionsEligible) {
+    if (!commandOptionsEligible || !cq.useCqfIfEligible()) {
         return false;
     }
 

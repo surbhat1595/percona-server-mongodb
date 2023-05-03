@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include "mongo/util/duration.h"
 #include <boost/optional.hpp>
 #include <queue>
 
@@ -97,7 +98,8 @@ public:
                      const CollectionPtr& collection,
                      bool returnOwnedBson,
                      NamespaceString nss,
-                     PlanYieldPolicy::YieldPolicy yieldPolicy);
+                     PlanYieldPolicy::YieldPolicy yieldPolicy,
+                     Microseconds timeElapsedPlanning);
 
     virtual ~PlanExecutorImpl();
     CanonicalQuery* getCanonicalQuery() const final;
@@ -126,6 +128,10 @@ public:
     BSONObj getPostBatchResumeToken() const final;
     LockPolicy lockPolicy() const final;
     const PlanExplainer& getPlanExplainer() const final;
+
+    PlanExecutor::QueryFramework getQueryFramework() const override final {
+        return PlanExecutor::QueryFramework::kClassicOnly;
+    }
 
     /**
      * Same as restoreState() but without the logic to retry if a WriteConflictException is thrown.

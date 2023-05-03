@@ -477,11 +477,6 @@ std::unique_ptr<MatchExpression> tryAddExpr(StringData path,
     if (FieldRef(path).hasNumericPathComponents())
         return me->shallowClone();
 
-    // (TODO SERVER-68743) addExpr will rightfully create AND for expressions on the same path, but
-    // we cannot translate AND into EExpressions yet.
-    if (out.find(path) != out.end())
-        return me->shallowClone();
-
     addExpr(path, me->shallowClone(), out);
     return nullptr;
 }
@@ -523,14 +518,11 @@ std::unique_ptr<MatchExpression> splitMatchExpressionForColumns(
         case MatchExpression::BITS_ALL_SET:
         case MatchExpression::BITS_ALL_CLEAR:
         case MatchExpression::BITS_ANY_SET:
-        case MatchExpression::BITS_ANY_CLEAR: {
+        case MatchExpression::BITS_ANY_CLEAR:
+        case MatchExpression::EXISTS: {
             // Note: {$exists: false} is represented as {$not: {$exists: true}}.
             auto sub = checked_cast<const PathMatchExpression*>(me);
             return tryAddExpr(sub->path(), me, out);
-        }
-        case MatchExpression::EXISTS: {
-            // (TODO SERVER-68743) need expr translation to enable pushing down $exists
-            return me->shallowClone();
         }
 
         case MatchExpression::LT:
@@ -553,8 +545,11 @@ std::unique_ptr<MatchExpression> splitMatchExpressionForColumns(
         }
 
         case MatchExpression::TYPE_OPERATOR: {
-            // (TODO SERVER-68743) need expr translation to enable pushing down $type
-            return me->shallowClone();
+            auto sub = checked_cast<const TypeMatchExpression*>(me);
+            tassert(6430600,
+                    "Not expecting to find EOO in a $type expression",
+                    !sub->typeSet().hasType(BSONType::EOO));
+            return tryAddExpr(sub->path(), me, out);
         }
 
         case MatchExpression::AND: {
@@ -574,7 +569,7 @@ std::unique_ptr<MatchExpression> splitMatchExpressionForColumns(
         }
 
         case MatchExpression::NOT: {
-            // (TODO SERVER-68743) need expr translation to enable pushing down $not
+            // (TODO SERVER-69610) need expr translation to enable pushing down $not
             return me->shallowClone();
         }
 
@@ -583,7 +578,6 @@ std::unique_ptr<MatchExpression> splitMatchExpressionForColumns(
         case MatchExpression::ALWAYS_TRUE:
         case MatchExpression::ELEM_MATCH_OBJECT:
         case MatchExpression::ELEM_MATCH_VALUE:  // This one should be feasible. May be valuable.
-        case MatchExpression::BETWEEN:
         case MatchExpression::EXPRESSION:
         case MatchExpression::GEO:
         case MatchExpression::GEO_NEAR:
@@ -815,6 +809,26 @@ bool containsOverlappingPaths(const OrderedPathSet& testSet) {
     }
     return false;
 }
+
+bool containsEmptyPaths(const OrderedPathSet& testSet) {
+    return std::any_of(testSet.begin(), testSet.end(), [](const auto& path) {
+        if (path.empty()) {
+            return true;
+        }
+
+        FieldRef fieldRef(path);
+
+        for (size_t i = 0; i < fieldRef.numParts(); ++i) {
+            if (fieldRef.getPart(i).empty()) {
+                return true;
+            }
+        }
+
+        // all non-empty
+        return false;
+    });
+}
+
 
 bool areIndependent(const OrderedPathSet& pathSet1, const OrderedPathSet& pathSet2) {
     return !containsDependency(pathSet1, pathSet2) && !containsDependency(pathSet2, pathSet1);

@@ -125,6 +125,8 @@ std::unique_ptr<sbe::EExpression> SBEExpressionLowering::transport(
                 return sbe::EPrimBinary::add;
             case Operations::Sub:
                 return sbe::EPrimBinary::sub;
+            case Operations::FillEmpty:
+                return sbe::EPrimBinary::fillEmpty;
             case Operations::And:
                 return sbe::EPrimBinary::logicAnd;
             case Operations::Or:
@@ -849,18 +851,18 @@ void SBENodeLowering::generateSlots(const FieldProjectionMap& fieldProjectionMap
                                     boost::optional<sbe::value::SlotId>& rootSlot,
                                     std::vector<std::string>& fields,
                                     sbe::value::SlotVector& vars) {
-    if (!fieldProjectionMap._ridProjection.empty()) {
+    if (const auto& projName = fieldProjectionMap._ridProjection) {
         ridSlot = _slotIdGenerator.generate();
-        _slotMap.emplace(fieldProjectionMap._ridProjection, ridSlot.value());
+        _slotMap.emplace(*projName, ridSlot.value());
     }
-    if (!fieldProjectionMap._rootProjection.empty()) {
+    if (const auto& projName = fieldProjectionMap._rootProjection) {
         rootSlot = _slotIdGenerator.generate();
-        _slotMap.emplace(fieldProjectionMap._rootProjection, rootSlot.value());
+        _slotMap.emplace(*projName, rootSlot.value());
     }
     for (const auto& [fieldName, projectionName] : fieldProjectionMap._fieldProjections) {
         vars.push_back(_slotIdGenerator.generate());
         _slotMap.emplace(projectionName, vars.back());
-        fields.push_back(fieldName);
+        fields.push_back(fieldName.value().toString());
     }
 }
 
@@ -1033,18 +1035,18 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const IndexScanNode& n, co
     // Unused.
     boost::optional<sbe::value::SlotId> resultSlot;
 
-    return sbe::makeS<sbe::IndexScanStage>(nss.uuid().value(),
-                                           indexDefName,
-                                           !indexSpec.isReverseOrder(),
-                                           resultSlot,
-                                           ridSlot,
-                                           boost::none,
-                                           indexKeysToInclude,
-                                           vars,
-                                           std::move(lowerBoundExpr),
-                                           std::move(upperBoundExpr),
-                                           nullptr /*yieldPolicy*/,
-                                           planNodeId);
+    return sbe::makeS<sbe::SimpleIndexScanStage>(nss.uuid().value(),
+                                                 indexDefName,
+                                                 !indexSpec.isReverseOrder(),
+                                                 resultSlot,
+                                                 ridSlot,
+                                                 boost::none,
+                                                 indexKeysToInclude,
+                                                 vars,
+                                                 std::move(lowerBoundExpr),
+                                                 std::move(upperBoundExpr),
+                                                 nullptr /*yieldPolicy*/,
+                                                 planNodeId);
 }
 
 std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const SeekNode& n,

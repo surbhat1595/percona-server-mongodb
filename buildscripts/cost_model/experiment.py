@@ -98,9 +98,9 @@ import dataclasses
 import bson.json_util as json
 import seaborn as sns
 import pandas as pd
-import statsmodels.api as sm
 from sklearn.metrics import r2_score
 from sklearn.linear_model import LinearRegression
+import statsmodels.api as sm
 from database_instance import DatabaseInstance
 import execution_tree as sbe
 import physical_tree as abt
@@ -169,12 +169,13 @@ def extract_abt_nodes(df: pd.DataFrame) -> pd.DataFrame:
 
         rows = []
         for abt_type, es in es_dict.items():
-            row = {
-                'abt_type': abt_type, **dataclasses.asdict(es),
-                **json.loads(df_seq['query_parameters']), 'run_id': df_seq.run_id,
-                'pipeline': df_seq.pipeline, 'source': df_seq.name
-            }
-            rows.append(row)
+            for stat in es:
+                row = {
+                    'abt_type': abt_type, **dataclasses.asdict(stat),
+                    **json.loads(df_seq['query_parameters']), 'run_id': df_seq.run_id,
+                    'pipeline': df_seq.pipeline, 'source': df_seq.name
+                }
+                rows.append(row)
         return rows
 
     return pd.DataFrame(list(df.apply(extract, axis=1).explode()))

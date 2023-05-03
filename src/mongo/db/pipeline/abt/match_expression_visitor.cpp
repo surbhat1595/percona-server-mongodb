@@ -73,11 +73,11 @@ public:
     ABTMatchExpressionPreVisitor(ExpressionAlgebrizerContext& ctx) : _ctx(ctx) {}
 
     void visit(const ElemMatchObjectMatchExpression* expr) override {
-        _ctx.enterElemMatch();
+        _ctx.enterElemMatch(expr->matchType());
     }
 
     void visit(const ElemMatchValueMatchExpression* expr) override {
-        _ctx.enterElemMatch();
+        _ctx.enterElemMatch(expr->matchType());
     }
 
 private:
@@ -135,8 +135,8 @@ public:
         assertSupportedPathExpression(expr);
 
         ABT result = make<PathDefault>(Constant::boolean(false));
-        if (!expr->path().empty()) {
-            result = generateFieldPath(FieldPath(expr->path().toString()), std::move(result));
+        if (shouldGeneratePath(expr)) {
+            result = translateFieldRef(*(expr->fieldRef()), std::move(result));
         }
         _ctx.push(std::move(result));
     }
@@ -227,9 +227,9 @@ public:
             maybeComposePath<PathComposeA>(result, make<PathDefault>(Constant::boolean(true)));
         }
 
-        // The path can be empty if we are within an $elemMatch. In this case elemMatch would
-        // insert a traverse.
-        if (!expr->path().empty()) {
+        // Do not insert a traverse if within an $elemMatch; traversal will be handled by the
+        // $elemMatch expression itself.
+        if (shouldGeneratePath(expr)) {
             // When the path we are comparing is a path to an array, the comparison is
             // considered true if it evaluates to true for the array itself or for any of the
             // array’s elements. 'result' evaluates comparison on the array elements, and
@@ -249,7 +249,7 @@ public:
                                       make<Constant>(tagArraysOnly, valArraysOnly)));
                 arrOnlyGuard.reset();
             }
-            result = generateFieldPath(FieldPath(expr->path().toString()), std::move(result));
+            result = translateFieldRef(*(expr->fieldRef()), std::move(result));
         }
         _ctx.push(std::move(result));
     }
@@ -418,7 +418,7 @@ public:
     void visit(const SizeMatchExpression* expr) override {
         assertSupportedPathExpression(expr);
 
-        const std::string lambdaProjName = _ctx.getNextId("lambda_sizeMatch");
+        const ProjectionName lambdaProjName{_ctx.getNextId("lambda_sizeMatch")};
         ABT result = make<PathLambda>(make<LambdaAbstraction>(
             lambdaProjName,
             make<BinaryOp>(
@@ -426,14 +426,8 @@ public:
                 make<FunctionCall>("getArraySize", makeSeq(make<Variable>(lambdaProjName))),
                 Constant::int64(expr->getData()))));
 
-        if (!expr->path().empty()) {
-            // No traverse.
-            result = translateFieldPath(
-                FieldPath(expr->path().toString()),
-                std::move(result),
-                [](const std::string& fieldName, const bool /*isLastElement*/, ABT input) {
-                    return make<PathGet>(fieldName, std::move(input));
-                });
+        if (shouldGeneratePath(expr)) {
+            result = translateFieldRef(*(expr->fieldRef()), std::move(result));
         }
         _ctx.push(std::move(result));
     }
@@ -453,16 +447,14 @@ public:
     void visit(const TypeMatchExpression* expr) override {
         assertSupportedPathExpression(expr);
 
-        const std::string lambdaProjName = _ctx.getNextId("lambda_typeMatch");
+        const ProjectionName lambdaProjName{_ctx.getNextId("lambda_typeMatch")};
         ABT result = make<PathLambda>(make<LambdaAbstraction>(
             lambdaProjName,
             make<FunctionCall>("typeMatch",
                                makeSeq(make<Variable>(lambdaProjName),
                                        Constant::int32(expr->typeSet().getBSONTypeMask())))));
 
-        // The path can be empty if we are within an $elemMatch. In this case elemMatch would insert
-        // a traverse.
-        if (!expr->path().empty()) {
+        if (shouldGeneratePath(expr)) {
             result = make<PathTraverse>(std::move(result), PathTraverse::kSingleLevel);
             if (expr->typeSet().hasType(BSONType::Array)) {
                 // If we are testing against array type, insert a comparison against the
@@ -470,7 +462,7 @@ public:
                 result = make<PathComposeA>(make<PathArr>(), std::move(result));
             }
 
-            result = generateFieldPath(FieldPath(expr->path().toString()), std::move(result));
+            result = translateFieldRef(*(expr->fieldRef()), std::move(result));
         }
         _ctx.push(std::move(result));
     }
@@ -480,10 +472,6 @@ public:
     }
 
     void visit(const WhereNoOpMatchExpression* expr) override {
-        unsupportedExpression(expr);
-    }
-
-    void visit(const BetweenMatchExpression* expr) override {
         unsupportedExpression(expr);
     }
 
@@ -499,9 +487,8 @@ private:
         // Returns true if at least one sub-objects matches the condition.
 
         const size_t childCount = expr->numChildren();
-        if (childCount == 0) {
-            _ctx.push(Constant::boolean(true));
-        }
+        tassert(
+            7021700, "ArrayMatchingMatchExpression must have at least one child", childCount > 0);
 
         _ctx.ensureArity(childCount);
         ABT result = _ctx.pop();
@@ -517,31 +504,11 @@ private:
         // Make sure we consider only arrays fields on the path.
         maybeComposePath(result, make<PathArr>());
 
-        if (!expr->path().empty()) {
-            result = translateFieldPath(
-                FieldPath{expr->path().toString()},
-                std::move(result),
-                [&](const std::string& fieldName, const bool isLastElement, ABT input) {
-                    if (!isLastElement) {
-                        input = make<PathTraverse>(std::move(input), PathTraverse::kSingleLevel);
-                    }
-                    return make<PathGet>(fieldName, std::move(input));
-                });
+        if (shouldGeneratePath(expr)) {
+            result = translateFieldRef(*(expr->fieldRef()), std::move(result));
         }
 
         _ctx.push(std::move(result));
-    }
-
-    ABT generateFieldPath(const FieldPath& fieldPath, ABT initial) {
-        return translateFieldPath(
-            fieldPath,
-            std::move(initial),
-            [&](const std::string& fieldName, const bool isLastElement, ABT input) {
-                if (!isLastElement) {
-                    input = make<PathTraverse>(std::move(input), PathTraverse::kSingleLevel);
-                }
-                return make<PathGet>(fieldName, std::move(input));
-            });
     }
 
     void assertSupportedPathExpression(const PathMatchExpression* expr) {
@@ -607,12 +574,12 @@ private:
             }
 
             default:
-                break;
+                tasserted(7021701,
+                          str::stream() << "Cannot generate comparison for operation: "
+                                        << OperationsEnum::toString[static_cast<int>(op)]);
         }
 
-        // The path can be empty if we are within an $elemMatch. In this case elemMatch would
-        // insert a traverse.
-        if (!expr->path().empty()) {
+        if (shouldGeneratePath(expr)) {
             if (tag == sbe::value::TypeTags::Array || tag == sbe::value::TypeTags::MinKey ||
                 tag == sbe::value::TypeTags::MaxKey) {
                 // The behavior of PathTraverse when it encounters an array is to apply its subpath
@@ -628,8 +595,9 @@ private:
                 result = make<PathTraverse>(std::move(result), PathTraverse::kSingleLevel);
             }
 
-            result = generateFieldPath(FieldPath(expr->path().toString()), std::move(result));
+            result = translateFieldRef(*(expr->fieldRef()), std::move(result));
         }
+
         _ctx.push(std::move(result));
     }
 
@@ -659,6 +627,23 @@ private:
                   str::stream() << "Match expression is not supported: " << expr->matchType());
     }
 
+    /**
+     * Returns whether the currently visiting expression should consider the path it's operating on
+     * and build the appropriate ABT. This can return false for expressions within an $elemMatch
+     * that operate against each value in an array (aka "elemMatch value").
+     */
+    bool shouldGeneratePath(const PathMatchExpression* expr) const {
+        // The only case where any expression, including $elemMatch, should ignore it's path is if
+        // it's directly under a value $elemMatch. The 'elemMatchStack' includes 'expr' if it's an
+        // $elemMatch, so we need to look back an extra element.
+        if (expr->matchType() == MatchExpression::MatchType::ELEM_MATCH_OBJECT ||
+            expr->matchType() == MatchExpression::MatchType::ELEM_MATCH_VALUE) {
+            return _ctx.shouldGeneratePathForElemMatch();
+        }
+
+        return _ctx.shouldGeneratePath();
+    }
+
     // If we are parsing a partial index filter, we don't allow agg expressions.
     const bool _allowAggExpressions;
 
@@ -668,10 +653,12 @@ private:
 
 ABT generateMatchExpression(const MatchExpression* expr,
                             const bool allowAggExpressions,
-                            const std::string& rootProjection,
-                            const std::string& uniqueIdPrefix) {
-    ExpressionAlgebrizerContext ctx(
-        false /*assertExprSort*/, true /*assertPathSort*/, rootProjection, uniqueIdPrefix);
+                            const ProjectionName& rootProjection,
+                            boost::optional<ProjectionName> uniqueIdPrefix) {
+    ExpressionAlgebrizerContext ctx(false /*assertExprSort*/,
+                                    true /*assertPathSort*/,
+                                    rootProjection,
+                                    std::move(uniqueIdPrefix));
     ABTMatchExpressionPreVisitor preVisitor(ctx);
     ABTMatchExpressionVisitor postVisitor(ctx, allowAggExpressions);
     MatchExpressionWalker walker(&preVisitor, nullptr /*inVisitor*/, &postVisitor);

@@ -68,7 +68,7 @@ public:
 
     Status initFromExisting(OperationContext* opCtx,
                             const std::shared_ptr<Collection>& collection,
-                            Timestamp readTimestamp) {
+                            boost::optional<Timestamp> readTimestamp) {
         MONGO_UNREACHABLE;
     }
 
@@ -136,52 +136,7 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    void deleteDocument(OperationContext* opCtx,
-                        StmtId stmtId,
-                        const RecordId& loc,
-                        OpDebug* opDebug,
-                        bool fromMigrate,
-                        bool noWarn,
-                        Collection::StoreDeletedDoc storeDeletedDoc,
-                        CheckRecordId checkRecordId) const {
-        MONGO_UNREACHABLE;
-    }
-
-    void deleteDocument(
-        OperationContext* opCtx,
-        Snapshotted<BSONObj> doc,
-        StmtId stmtId,
-        const RecordId& loc,
-        OpDebug* opDebug,
-        bool fromMigrate = false,
-        bool noWarn = false,
-        Collection::StoreDeletedDoc storeDeletedDoc = Collection::StoreDeletedDoc::Off,
-        CheckRecordId checkRecordId = CheckRecordId::Off) const {
-        MONGO_UNREACHABLE;
-    }
-
-    RecordId updateDocument(OperationContext* opCtx,
-                            const RecordId& oldLocation,
-                            const Snapshotted<BSONObj>& oldDoc,
-                            const BSONObj& newDoc,
-                            bool indexesAffected,
-                            OpDebug* opDebug,
-                            CollectionUpdateArgs* args) const {
-        MONGO_UNREACHABLE;
-    }
-
     bool updateWithDamagesSupported() const {
-        MONGO_UNREACHABLE;
-    }
-
-    StatusWith<BSONObj> updateDocumentWithDamages(OperationContext* opCtx,
-                                                  const RecordId& loc,
-                                                  const Snapshotted<BSONObj>& oldDoc,
-                                                  const char* damageSource,
-                                                  const mutablebson::DamageVector& damages,
-                                                  bool indexesAffected,
-                                                  OpDebug* opDebug,
-                                                  CollectionUpdateArgs* args) const {
         MONGO_UNREACHABLE;
     }
 

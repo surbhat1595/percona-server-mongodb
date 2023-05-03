@@ -85,11 +85,13 @@ public:
         o.parseProtected(ctxt, bsonObject);
         return o;
     }
-    const BSONObj& getPreImageDocumentKey() const {
-        return _preImageDocumentKey;
+
+    const BSONObj& getPostImageDocumentKey() const {
+        return _postImageDocumentKey;
     }
-    void setPreImageDocumentKey(BSONObj value) {
-        _preImageDocumentKey = std::move(value);
+
+    void setPostImageDocumentKey(BSONObj value) {
+        _postImageDocumentKey = std::move(value);
     }
 
     const BSONObj& getPreImage() const {
@@ -194,8 +196,29 @@ public:
             DurableReplOperation::setTid(value);
     }
 
+    /**
+     * Exports pre/post image information, if present, for writing to the image collection.
+     *
+     * Exported information includes both the image document and a flag to indicate if this
+     * is for a pre or post image.
+     * Does not fill in 'timestamp' - this will be filled in by OpObserverImpl after we have
+     * written the corresponding applyOps oplog entry.
+     *
+     * Accepts an output parameter that for the image information that we expect
+     * to be an uninitialized optional value. This output parameter may be set by a previous
+     * call to this function. In this case, if this ReplOperation has an image, this will
+     * result in an exception thrown.
+     */
+    using ImageBundle = struct {
+        repl::RetryImageEnum imageKind;
+        BSONObj imageDoc;
+        Timestamp timestamp;
+    };
+    void extractPrePostImageForTransaction(boost::optional<ImageBundle>* image) const;
+
 private:
-    BSONObj _preImageDocumentKey;
+    // Stores the post image _id + shard key values.
+    BSONObj _postImageDocumentKey;
 
     // Used for storing the pre-image and post-image for the operation in-memory regardless of where
     // the images should be persisted.

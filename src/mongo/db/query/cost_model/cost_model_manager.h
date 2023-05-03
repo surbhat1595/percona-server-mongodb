@@ -29,7 +29,10 @@
 
 #pragma once
 
-#include "mongo/db/query/optimizer/cascades/cost_model_gen.h"
+#include <shared_mutex>
+
+#include "mongo/db/query/cost_model/cost_model_gen.h"
+#include "mongo/stdx/mutex.h"
 
 namespace mongo::cost_model {
 
@@ -42,23 +45,25 @@ public:
     CostModelManager();
 
     /**
-     * Returns default version of Cost Model Coefficients with applied overrides specified in the
-     * 'overrides' parameters as a BSON Object. See the IDL definition of 'CostModelCoefficients'
-     * for the names of the fields.
-     *
-     * Usage:
-     * @code
-     * costModelManager.getCoefficients(BSON("scanIncrementalCost" << 0.001));
-     * @endcode
+     * Returns the current cost model coefficients. They may not be the default ones as the
+     * coefficients can be changed at runtime. See the IDL definition of 'CostModelCoefficients' for
+     * the names of the fields.
      */
-    optimizer::cascades::CostModelCoefficients getCoefficients(const BSONObj& overrides) const;
+    CostModelCoefficients getCoefficients() const;
 
     /**
-     * Returns default version of Cost Model Coefficients.
+     * This update function will be called when the cost model coefficients are changed at runtime.
      */
-    optimizer::cascades::CostModelCoefficients getDefaultCoefficients() const;
+    void updateCostModelCoefficients(const BSONObj& overrides);
+
+    /**
+     * Returns the default version of Cost Model Coefficients no matter whether there are
+     * user-defined coefficients or not.
+     */
+    static CostModelCoefficients getDefaultCoefficients();
 
 private:
-    BSONObj _coefficients;
+    CostModelCoefficients _coefficients;
+    mutable std::shared_mutex _mutex;  // NOLINT
 };
 }  // namespace mongo::cost_model

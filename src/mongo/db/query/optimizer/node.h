@@ -105,7 +105,6 @@ public:
     }
 
     const ProjectionName& getProjectionName() const;
-    const ProjectionType& getProjection() const;
 
     const std::string& getScanDefName() const;
 
@@ -389,11 +388,7 @@ class RIDIntersectNode final : public Operator<2>, public ExclusivelyLogicalNode
     using Base = Operator<2>;
 
 public:
-    RIDIntersectNode(ProjectionName scanProjectionName,
-                     bool hasLeftIntervals,
-                     bool hasRightIntervals,
-                     ABT leftChild,
-                     ABT rightChild);
+    RIDIntersectNode(ProjectionName scanProjectionName, ABT leftChild, ABT rightChild);
 
     bool operator==(const RIDIntersectNode& other) const;
 
@@ -405,15 +400,32 @@ public:
 
     const ProjectionName& getScanProjectionName() const;
 
-    bool hasLeftIntervals() const;
-    bool hasRightIntervals() const;
+private:
+    const ProjectionName _scanProjectionName;
+};
+
+/**
+ * RID union node.
+ * This is a logical node representing index-index unioning. Used for index OR-ing.
+ */
+class RIDUnionNode final : public Operator<2>, public ExclusivelyLogicalNode {
+    using Base = Operator<2>;
+
+public:
+    RIDUnionNode(ProjectionName scanProjectionName, ABT leftChild, ABT rightChild);
+
+    bool operator==(const RIDUnionNode& other) const;
+
+    const ABT& getLeftChild() const;
+    ABT& getLeftChild();
+
+    const ABT& getRightChild() const;
+    ABT& getRightChild();
+
+    const ProjectionName& getScanProjectionName() const;
 
 private:
     const ProjectionName _scanProjectionName;
-
-    // If true left and right children have at least one proper interval (not fully open).
-    const bool _hasLeftIntervals;
-    const bool _hasRightIntervals;
 };
 
 /**
@@ -856,11 +868,6 @@ public:
 
 private:
     properties::DistributionRequirement _distribution;
-
-    /**
-     * Defined for hash and range-based partitioning.
-     */
-    const ProjectionName _projectionName;
 };
 
 /**

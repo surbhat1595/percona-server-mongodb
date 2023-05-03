@@ -76,8 +76,8 @@ static void populateDistributionPaths(const PartialSchemaRequirements& req,
                 if (it == req.cend()) {
                     break;
                 }
-                if (it->second.hasBoundProjectionName()) {
-                    distributionProjections.push_back(it->second.getBoundProjectionName());
+                if (const auto& boundProjName = it->second.getBoundProjectionName()) {
+                    distributionProjections.push_back(*boundProjName);
                 }
             }
 
@@ -222,8 +222,7 @@ public:
             indexingAvailability.setEqPredsOnly(computeEqPredsOnly(node.getReqMap()));
         }
 
-        auto& satisfiedPartialIndexes =
-            getProperty<IndexingAvailability>(result).getSatisfiedPartialIndexes();
+        auto& satisfiedPartialIndexes = indexingAvailability.getSatisfiedPartialIndexes();
         for (const auto& [indexDefName, indexDef] : scanDef.getIndexDefs()) {
             if (!indexDef.getPartialReqMap().empty()) {
                 auto intersection = node.getReqMap();
@@ -237,6 +236,8 @@ public:
             }
         }
 
+        indexingAvailability.setHasProperInterval(hasProperIntervals(node.getReqMap()));
+
         return maybeUpdateNodePropsMap(node, std::move(result));
     }
 
@@ -246,6 +247,14 @@ public:
         // Properties for the group should already be derived via the underlying Filter or
         // Evaluation logical nodes.
         uasserted(6624042, "Should not be necessary to derive properties for RIDIntersectNode");
+    }
+
+    LogicalProps transport(const RIDUnionNode& node,
+                           LogicalProps /*leftChildResult*/,
+                           LogicalProps /*rightChildResult*/) {
+        // Properties for the group should already be derived via the underlying Filter or
+        // Evaluation logical nodes.
+        uasserted(7016302, "Should not be necessary to derive properties for RIDUnionNode");
     }
 
     LogicalProps transport(const BinaryJoinNode& node,

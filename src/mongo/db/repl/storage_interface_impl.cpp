@@ -586,7 +586,7 @@ Status StorageInterfaceImpl::setIndexIsMultikey(OperationContext* opCtx,
     }
 
     return writeConflictRetry(opCtx, "StorageInterfaceImpl::setIndexIsMultikey", nss.ns(), [&] {
-        const NamespaceStringOrUUID nsOrUUID(nss.db().toString(), collectionUUID);
+        const NamespaceStringOrUUID nsOrUUID(nss.dbName(), collectionUUID);
         boost::optional<AutoGetCollection> autoColl;
         try {
             autoColl.emplace(opCtx, nsOrUUID, MODE_IX);
@@ -1422,70 +1422,11 @@ boost::optional<Timestamp> StorageInterfaceImpl::getRecoveryTimestamp(
     return serviceCtx->getStorageEngine()->getRecoveryTimestamp();
 }
 
-Status StorageInterfaceImpl::isAdminDbValid(OperationContext* opCtx) {
-    AutoGetDb autoDB(opCtx, DatabaseName(boost::none, "admin"), MODE_X);
-    auto adminDb = autoDB.getDb();
-    if (!adminDb) {
-        return Status::OK();
-    }
-
-    auto catalog = CollectionCatalog::get(opCtx);
-    CollectionPtr usersCollection =
-        catalog->lookupCollectionByNamespace(opCtx, AuthorizationManager::usersCollectionNamespace);
-    const bool hasUsers =
-        usersCollection && !Helpers::findOne(opCtx, usersCollection, BSONObj()).isNull();
-    CollectionPtr adminVersionCollection = catalog->lookupCollectionByNamespace(
-        opCtx, AuthorizationManager::versionCollectionNamespace);
-    BSONObj authSchemaVersionDocument;
-    if (!adminVersionCollection ||
-        !Helpers::findOne(opCtx,
-                          adminVersionCollection,
-                          AuthorizationManager::versionDocumentQuery,
-                          authSchemaVersionDocument)) {
-        if (!hasUsers) {
-            // It's OK to have no auth version document if there are no user documents.
-            return Status::OK();
-        }
-        std::string msg = str::stream()
-            << "During initial sync, found documents in "
-            << AuthorizationManager::usersCollectionNamespace.ns()
-            << " but could not find an auth schema version document in "
-            << AuthorizationManager::versionCollectionNamespace.ns() << ".  "
-            << "This indicates that the primary of this replica set was not successfully "
-               "upgraded to schema version "
-            << AuthorizationManager::schemaVersion26Final
-            << ", which is the minimum supported schema version in this version of MongoDB";
-        return {ErrorCodes::AuthSchemaIncompatible, msg};
-    }
-    long long foundSchemaVersion;
-    Status status = bsonExtractIntegerField(authSchemaVersionDocument,
-                                            AuthorizationManager::schemaVersionFieldName,
-                                            &foundSchemaVersion);
-    if (!status.isOK()) {
-        std::string msg = str::stream()
-            << "During initial sync, found malformed auth schema version document: "
-            << status.toString() << "; document: " << authSchemaVersionDocument;
-        return {ErrorCodes::AuthSchemaIncompatible, msg};
-    }
-    if ((foundSchemaVersion != AuthorizationManager::schemaVersion26Final) &&
-        (foundSchemaVersion != AuthorizationManager::schemaVersion28SCRAM)) {
-        std::string msg = str::stream()
-            << "During initial sync, found auth schema version " << foundSchemaVersion
-            << ", but this version of MongoDB only supports schema versions "
-            << AuthorizationManager::schemaVersion26Final << " and "
-            << AuthorizationManager::schemaVersion28SCRAM;
-        return {ErrorCodes::AuthSchemaIncompatible, msg};
-    }
-
-    return Status::OK();
-}
-
 void StorageInterfaceImpl::waitForAllEarlierOplogWritesToBeVisible(OperationContext* opCtx,
                                                                    bool primaryOnly) {
     // Waiting for oplog writes to be visible in the oplog does not use any storage engine resources
-    // and must skip ticket acquisition to avoid deadlocks with updating oplog visibility.
-    SetTicketAquisitionPriorityForLock setTicketAquisition(opCtx,
-                                                           AdmissionContext::Priority::kImmediate);
+    // and must not wait for ticket acquisition to avoid deadlocks with updating oplog visibility.
+    SetAdmissionPriorityForLock setTicketAquisition(opCtx, AdmissionContext::Priority::kImmediate);
 
     AutoGetOplog oplogRead(opCtx, OplogAccessMode::kRead);
     if (primaryOnly &&
@@ -1501,8 +1442,7 @@ void StorageInterfaceImpl::oplogDiskLocRegister(OperationContext* opCtx,
                                                 bool orderedCommit) {
     // Setting the oplog visibility does not use any storage engine resources and must skip ticket
     // acquisition to avoid deadlocks with updating oplog visibility.
-    SetTicketAquisitionPriorityForLock setTicketAquisition(opCtx,
-                                                           AdmissionContext::Priority::kImmediate);
+    SetAdmissionPriorityForLock setTicketAquisition(opCtx, AdmissionContext::Priority::kImmediate);
 
     AutoGetOplog oplogRead(opCtx, OplogAccessMode::kRead);
     fassert(28557,

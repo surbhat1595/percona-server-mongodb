@@ -31,6 +31,7 @@
 
 #include "mongo/db/matcher/expression_expr.h"
 #include "mongo/db/matcher/expression_parser.h"
+#include "mongo/db/query/fle/range_validator.h"
 
 namespace mongo::fle {
 
@@ -40,12 +41,15 @@ public:
         : queryRewriter(queryRewriter), exprRewrites(exprRewrites){};
 
     std::unique_ptr<Expression> postVisit(Expression* exp) {
-        if (auto rewrite = exprRewrites.find(typeid(*exp)); rewrite != exprRewrites.end()) {
-            auto expr = rewrite->second(queryRewriter, exp);
-            if (expr != nullptr) {
-                didRewrite = true;
+        if (auto rewriteEntry = exprRewrites.find(typeid(*exp));
+            rewriteEntry != exprRewrites.end()) {
+            for (auto& rewrite : rewriteEntry->second) {
+                auto expr = rewrite(queryRewriter, exp);
+                if (expr != nullptr) {
+                    didRewrite = true;
+                    return expr;
+                }
             }
-            return expr;
         }
         return nullptr;
     }
@@ -66,6 +70,10 @@ std::unique_ptr<Expression> QueryRewriter::rewriteExpression(Expression* express
 
 boost::optional<BSONObj> QueryRewriter::rewriteMatchExpression(const BSONObj& filter) {
     auto expr = uassertStatusOK(MatchExpressionParser::parse(filter, _expCtx));
+
+    if (gFeatureFlagFLE2Range.isEnabled(serverGlobalParams.featureCompatibility)) {
+        validateRanges(*expr.get());
+    }
 
     _rewroteLastExpression = false;
     if (auto res = _rewrite(expr.get())) {
@@ -109,13 +117,17 @@ std::unique_ptr<MatchExpression> QueryRewriter::_rewrite(MatchExpression* expr) 
             return nullptr;
         }
         default: {
-            if (auto rewrite = _matchRewrites.find(expr->matchType());
-                rewrite != _matchRewrites.end()) {
-                auto rewritten = rewrite->second(this, expr);
-                if (rewritten != nullptr) {
-                    _rewroteLastExpression = true;
+            if (auto rewriteEntry = _matchRewrites.find(expr->matchType());
+                rewriteEntry != _matchRewrites.end()) {
+                for (auto& rewrite : rewriteEntry->second) {
+                    auto rewritten = rewrite(this, expr);
+                    // Only one rewrite can be applied to an expression, so return as soon as a
+                    // rewrite returns something other than nullptr.
+                    if (rewritten != nullptr) {
+                        _rewroteLastExpression = true;
+                        return rewritten;
+                    }
                 }
-                return rewritten;
             }
             return nullptr;
         }

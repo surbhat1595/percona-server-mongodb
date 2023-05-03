@@ -77,6 +77,10 @@ public:
         _checkWrap(&OpCounters::_queryDeprecated, 1);
     }
 
+    void gotNestedAggregate() {
+        _checkWrap(&OpCounters::_nestedAggregate, 1);
+    }
+
     BSONObj getObj() const;
 
     // These opcounters record operations that would fail if we were fully enforcing our consistency
@@ -116,6 +120,9 @@ public:
     const AtomicWord<long long>* getCommand() const {
         return &*_command;
     }
+    const AtomicWord<long long>* getNestedAggregate() const {
+        return &*_nestedAggregate;
+    }
     const AtomicWord<long long>* getInsertOnExistingDoc() const {
         return &*_insertOnExistingDoc;
     }
@@ -150,6 +157,7 @@ private:
     CacheExclusive<AtomicWord<long long>> _delete;
     CacheExclusive<AtomicWord<long long>> _getmore;
     CacheExclusive<AtomicWord<long long>> _command;
+    CacheExclusive<AtomicWord<long long>> _nestedAggregate;
 
     CacheExclusive<AtomicWord<long long>> _insertOnExistingDoc;
     CacheExclusive<AtomicWord<long long>> _updateOnMissingDoc;
@@ -323,31 +331,40 @@ public:
         auto& debug = curop->debug();
         const BSONObj& cmdObj = curop->opDescription();
         auto cmdName = cmdObj.firstElementFieldNameStringData();
-        if (cmdName == "find" && debug.classicEngineUsed) {
-            if (debug.classicEngineUsed.get()) {
-                classicFindQueryCounter.increment();
-            } else {
-                sbeFindQueryCounter.increment();
+
+        if (cmdName == "find") {
+            switch (debug.queryFramework) {
+                case PlanExecutor::QueryFramework::kClassicOnly:
+                    classicFindQueryCounter.increment();
+                    break;
+                case PlanExecutor::QueryFramework::kSBEOnly:
+                    sbeFindQueryCounter.increment();
+                    break;
+                case PlanExecutor::QueryFramework::kCQF:
+                    cqfFindQueryCounter.increment();
+                    break;
+                default:
+                    break;
             }
-        } else if (cmdName == "aggregate" && debug.classicEngineUsed && debug.documentSourceUsed) {
-            if (debug.classicEngineUsed.get()) {
-                if (debug.documentSourceUsed.get()) {
-                    classicHybridAggregationCounter.increment();
-                } else {
+        } else if (cmdName == "aggregate") {
+            switch (debug.queryFramework) {
+                case PlanExecutor::QueryFramework::kClassicOnly:
                     classicOnlyAggregationCounter.increment();
-                }
-            } else {
-                if (debug.documentSourceUsed.get()) {
-                    sbeHybridAggregationCounter.increment();
-                } else {
+                    break;
+                case PlanExecutor::QueryFramework::kClassicHybrid:
+                    classicHybridAggregationCounter.increment();
+                    break;
+                case PlanExecutor::QueryFramework::kSBEOnly:
                     sbeOnlyAggregationCounter.increment();
-                }
-            }
-        } else if (debug.cqfUsed) {
-            if (cmdName == "find") {
-                cqfFindQueryCounter.increment();
-            } else {
-                cqfAggregationQueryCounter.increment();
+                    break;
+                case PlanExecutor::QueryFramework::kSBEHybrid:
+                    sbeHybridAggregationCounter.increment();
+                    break;
+                case PlanExecutor::QueryFramework::kCQF:
+                    cqfAggregationQueryCounter.increment();
+                    break;
+                case PlanExecutor::QueryFramework::kUnknown:
+                    break;
             }
         }
     }

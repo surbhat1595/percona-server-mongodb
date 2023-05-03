@@ -140,6 +140,7 @@ bool runAggregationMapReduce(OperationContext* opCtx,
 
     // TODO SERVER-68721: create IDLParserContext with tenant id of dbName.
     auto parsedMr = MapReduceCommandRequest::parse(IDLParserContext("mapReduce"), cmd);
+    opCtx->beginPlanningTimer();
     auto expCtx = makeExpressionContext(opCtx, parsedMr, verbosity);
     auto runnablePipeline = [&]() {
         auto pipeline = map_reduce_common::translateFromMR(parsedMr, expCtx);
@@ -187,7 +188,7 @@ bool runAggregationMapReduce(OperationContext* opCtx,
         // this temp collection.
         {
             stdx::lock_guard<Client> lk(*opCtx->getClient());
-            CurOp::get(opCtx)->setNS_inlock(parsedMr.getNamespace().ns());
+            CurOp::get(opCtx)->setNS_inlock(parsedMr.getNamespace());
         }
 
         return true;

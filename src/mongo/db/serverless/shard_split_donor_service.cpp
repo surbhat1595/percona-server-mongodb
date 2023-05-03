@@ -29,7 +29,9 @@
 
 
 #include "mongo/db/serverless/shard_split_donor_service.h"
+
 #include "mongo/client/streamable_replica_set_monitor.h"
+#include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/dbdirectclient.h"
@@ -964,13 +966,14 @@ ExecutorFuture<repl::OpTime> ShardSplitDonorService::DonorStateMachine::_updateS
                            args.oplogSlots = {oplogSlot};
                            args.update = updatedStateDocBson;
 
-                           collection->updateDocument(opCtx,
-                                                      originalRecordId,
-                                                      originalSnapshot,
-                                                      updatedStateDocBson,
-                                                      false,
-                                                      nullptr /* OpDebug* */,
-                                                      &args);
+                           collection_internal::updateDocument(opCtx,
+                                                               *collection,
+                                                               originalRecordId,
+                                                               originalSnapshot,
+                                                               updatedStateDocBson,
+                                                               false,
+                                                               nullptr /* OpDebug* */,
+                                                               &args);
 
                            return oplogSlot;
                        }();
@@ -1039,8 +1042,7 @@ ShardSplitDonorService::DonorStateMachine::_handleErrorOrEnterAbortedState(
     ON_BLOCK_EXIT([&] {
         stdx::lock_guard<Latch> lg(_mutex);
         if (_abortSource) {
-            // Cancel source to ensure all child threads (RSM monitor, etc)
-            // terminate.
+            // Cancel source to ensure all child threads (RSM monitor, etc) terminate.
             _abortSource->cancel();
         }
     });
@@ -1049,6 +1051,11 @@ ShardSplitDonorService::DonorStateMachine::_handleErrorOrEnterAbortedState(
         stdx::lock_guard<Latch> lg(_mutex);
         if (isAbortedDocumentPersistent(lg, _stateDoc)) {
             // The document is already in aborted state. No need to write it.
+            LOGV2(8423376,
+                  "Shard split already aborted.",
+                  "id"_attr = _migrationId,
+                  "abortReason"_attr = _abortReason.value());
+
             return ExecutorFuture(**executor,
                                   DurableState{ShardSplitDonorStateEnum::kAborted, _abortReason});
         }

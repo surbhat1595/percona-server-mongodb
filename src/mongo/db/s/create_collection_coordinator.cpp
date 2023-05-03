@@ -66,6 +66,7 @@
 
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
+MONGO_FAIL_POINT_DEFINE(failAtCommitCreateCollectionCoordinator);
 
 
 namespace mongo {
@@ -415,8 +416,8 @@ void broadcastDropCollection(OperationContext* opCtx,
                              const NamespaceString& nss,
                              const std::shared_ptr<executor::TaskExecutor>& executor,
                              const OperationSessionInfo& osi) {
-    const auto primaryShardId = ShardingState::get(opCtx)->shardId();
     const ShardsvrDropCollectionParticipant dropCollectionParticipant(nss);
+    const auto primaryShardId = ShardingState::get(opCtx)->shardId();
 
     auto participants = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
     // Remove primary shard from participants
@@ -424,7 +425,7 @@ void broadcastDropCollection(OperationContext* opCtx,
                        participants.end());
 
     sharding_ddl_util::sendDropCollectionParticipantCommandToShards(
-        opCtx, nss, participants, executor, osi);
+        opCtx, nss, participants, executor, osi, true /* fromMigrate */);
 }
 
 }  // namespace
@@ -511,6 +512,14 @@ ExecutorFuture<void> CreateCollectionCoordinator::_runImpl(
                             ? resolveCollationForUserQueries(opCtx, nss(), _request.getCollation())
                             : _doc.getTranslatedRequestParams()->getCollation();
 
+                        if (_timeseriesNssResolvedByCommandHandler()) {
+                            // If the request is being re-attempted after a binary upgrade, the UUID
+                            // could have not been previously checked. Do it now.
+                            AutoGetCollection coll{opCtx, nss(), MODE_IS};
+                            checkCollectionUUIDMismatch(
+                                opCtx, nss(), coll.getCollection(), _request.getCollectionUUID());
+                        }
+
                         // Check if the collection was already sharded by a past request
                         if (auto createCollectionResponseOpt =
                                 sharding_ddl_util::checkIfCollectionAlreadySharded(
@@ -522,7 +531,9 @@ ExecutorFuture<void> CreateCollectionCoordinator::_runImpl(
 
                             // A previous request already created and committed the collection
                             // but there was a stepdown after the commit.
-                            _releaseCriticalSections(opCtx);
+                            // The critical section might have been taken by a migration, we force
+                            // to skip the invariant check and we do nothing in case it was taken.
+                            _releaseCriticalSections(opCtx, false /* throwIfReasonDiffers */);
 
                             _result = createCollectionResponseOpt;
                             return;
@@ -628,7 +639,9 @@ ExecutorFuture<void> CreateCollectionCoordinator::_runImpl(
                 auto opCtxHolder = cc().makeOperationContext();
                 auto* opCtx = opCtxHolder.get();
 
-                _releaseCriticalSections(opCtx);
+                // The critical section might have been taken by a migration, we force
+                // to skip the invariant check and we do nothing in case it was taken.
+                _releaseCriticalSections(opCtx, false /* throwIfReasonDiffers */);
             }
 
             return status;
@@ -638,15 +651,31 @@ ExecutorFuture<void> CreateCollectionCoordinator::_runImpl(
 boost::optional<CreateCollectionResponse>
 CreateCollectionCoordinator::_checkIfCollectionAlreadyShardedWithSameOptions(
     OperationContext* opCtx) {
-    // Perfom check in the translation phase if the request is coming from a C2C command; this will
-    // allow to honor the contract with mongosync (see SERVER-67885 for details)
+    // If the request is part of a C2C synchronisation, the check on the received UUID must be
+    // performed first to honor the contract with mongosync (see SERVER-67885 for details).
     if (_request.getCollectionUUID()) {
-        return boost::none;
+        if (AutoGetCollection stdColl{opCtx, originalNss(), MODE_IS};
+            stdColl || _timeseriesNssResolvedByCommandHandler()) {
+            checkCollectionUUIDMismatch(
+                opCtx, originalNss(), *stdColl, _request.getCollectionUUID());
+        } else {
+            // No standard collection is present on the local catalog, but the request is not yet
+            // translated; a timeseries version of the requested namespace may still match the
+            // requested UUID.
+            auto bucketsNamespace = originalNss().makeTimeseriesBucketsNamespace();
+            AutoGetCollection timeseriesColl{opCtx, bucketsNamespace, MODE_IS};
+            checkCollectionUUIDMismatch(
+                opCtx, originalNss(), *timeseriesColl, _request.getCollectionUUID());
+        }
     }
 
-    // Preliminary check is unsupported for DDL requests received by nodes running old FCVs.
     if (_timeseriesNssResolvedByCommandHandler()) {
-        return boost::none;
+        // It is OK to access information directly from the request object.
+        const auto shardKeyPattern = ShardKeyPattern(*_request.getShardKey()).toBSON();
+        const auto collation =
+            resolveCollationForUserQueries(opCtx, nss(), _request.getCollation());
+        return sharding_ddl_util::checkIfCollectionAlreadySharded(
+            opCtx, nss(), shardKeyPattern, collation, _request.getUnique().value_or(false));
     }
 
     // Check is there is a standard sharded collection that matches the original request parameters
@@ -967,11 +996,16 @@ void CreateCollectionCoordinator::_promoteCriticalSectionsToBlockReads(
     }
 }
 
-void CreateCollectionCoordinator::_releaseCriticalSections(OperationContext* opCtx) {
+void CreateCollectionCoordinator::_releaseCriticalSections(OperationContext* opCtx,
+                                                           bool throwIfReasonDiffers) {
     // TODO SERVER-68084 call ShardingRecoveryService without the try/catch block.
     try {
         ShardingRecoveryService::get(opCtx)->releaseRecoverableCriticalSection(
-            opCtx, originalNss(), _critSecReason, ShardingCatalogClient::kMajorityWriteConcern);
+            opCtx,
+            originalNss(),
+            _critSecReason,
+            ShardingCatalogClient::kMajorityWriteConcern,
+            throwIfReasonDiffers);
     } catch (ExceptionFor<ErrorCodes::CommandNotSupportedOnView>&) {
         // Ignore the error (when it is raised, we can assume that no critical section for the view
         // was previously acquired).
@@ -980,7 +1014,11 @@ void CreateCollectionCoordinator::_releaseCriticalSections(OperationContext* opC
     if (!_timeseriesNssResolvedByCommandHandler()) {
         const auto bucketsNamespace = originalNss().makeTimeseriesBucketsNamespace();
         ShardingRecoveryService::get(opCtx)->releaseRecoverableCriticalSection(
-            opCtx, bucketsNamespace, _critSecReason, ShardingCatalogClient::kMajorityWriteConcern);
+            opCtx,
+            bucketsNamespace,
+            _critSecReason,
+            ShardingCatalogClient::kMajorityWriteConcern,
+            throwIfReasonDiffers);
     }
 }
 
@@ -1184,6 +1222,12 @@ void CreateCollectionCoordinator::_commit(OperationContext* opCtx,
                                           const std::shared_ptr<executor::TaskExecutor>& executor) {
     LOGV2_DEBUG(5277906, 2, "Create collection _commit", "namespace"_attr = nss());
 
+    if (MONGO_unlikely(failAtCommitCreateCollectionCoordinator.shouldFail())) {
+        LOGV2_DEBUG(6960301, 2, "About to hit failAtCommitCreateCollectionCoordinator fail point");
+        uasserted(ErrorCodes::InterruptedAtShutdown,
+                  "failAtCommitCreateCollectionCoordinator fail point");
+    }
+
     // Upsert Chunks.
     _updateSession(opCtx);
     insertChunks(opCtx, _initialChunks->chunks, getCurrentSession());
@@ -1249,7 +1293,9 @@ void CreateCollectionCoordinator::_commit(OperationContext* opCtx,
         // operation to refresh the metadata.
         UninterruptibleLockGuard noInterrupt(opCtx->lockState());
         AutoGetCollection autoColl(opCtx, nss(), MODE_IX);
-        CollectionShardingRuntime::get(opCtx, nss())->clearFilteringMetadata(opCtx);
+        CollectionShardingRuntime::assertCollectionLockedAndAcquire(
+            opCtx, nss(), CSRAcquisitionMode::kExclusive)
+            ->clearFilteringMetadata(opCtx);
 
         throw;
     }

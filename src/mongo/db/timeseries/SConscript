@@ -24,7 +24,6 @@ env.Library(
     source=[
         'bucket_catalog.cpp',
         'bucket_catalog_helpers.cpp',
-        'deleted_buckets.cpp',
         'flat_bson.cpp',
     ],
     LIBDEPS_PRIVATE=[
@@ -91,6 +90,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/bson/mutable/mutable_bson',
         '$BUILD_DIR/mongo/bson/util/bson_column',
+        '$BUILD_DIR/mongo/db/catalog/index_catalog',
         '$BUILD_DIR/mongo/db/exec/bucket_unpacker',
         '$BUILD_DIR/mongo/db/index_commands_idl',
         '$BUILD_DIR/mongo/db/ops/write_ops_parsers',

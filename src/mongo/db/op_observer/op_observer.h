@@ -62,15 +62,14 @@ enum class RetryableFindAndModifyLocation {
 struct OplogUpdateEntryArgs {
     CollectionUpdateArgs* updateArgs;
 
-    NamespaceString nss;
-    UUID uuid;
+    const CollectionPtr& coll;
 
     // Specifies the pre-image recording option for retryable "findAndModify" commands.
     RetryableFindAndModifyLocation retryableFindAndModifyLocation =
         RetryableFindAndModifyLocation::kNone;
 
-    OplogUpdateEntryArgs(CollectionUpdateArgs* updateArgs, NamespaceString nss, UUID uuid)
-        : updateArgs(updateArgs), nss(std::move(nss)), uuid(std::move(uuid)) {}
+    OplogUpdateEntryArgs(CollectionUpdateArgs* updateArgs, const CollectionPtr& coll)
+        : updateArgs(updateArgs), coll(coll) {}
 };
 
 struct OplogDeleteEntryArgs {
@@ -196,9 +195,9 @@ public:
                                         const BSONObj& docKey) = 0;
 
     virtual void onUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& args) = 0;
+
     virtual void aboutToDelete(OperationContext* opCtx,
-                               const NamespaceString& nss,
-                               const UUID& uuid,
+                               const CollectionPtr& coll,
                                const BSONObj& doc) = 0;
 
     /**
@@ -211,8 +210,7 @@ public:
      * opObserver must store the `deletedDoc` in addition to the documentKey.
      */
     virtual void onDelete(OperationContext* opCtx,
-                          const NamespaceString& nss,
-                          const UUID& uuid,
+                          const CollectionPtr& coll,
                           StmtId stmtId,
                           const OplogDeleteEntryArgs& args) = 0;
 
@@ -443,8 +441,8 @@ public:
 
     /**
      * The write operations between onBatchedWriteStart() and onBatchedWriteCommit()
-     * are gathered in a single applyOps oplog entry, similar to atomic applyOps and
-     * multi-doc transactions, and written to the oplog.
+     * are gathered in a single applyOps oplog entry, similar to multi-doc transactions, and written
+     * to the oplog.
      */
     virtual void onBatchedWriteCommit(OperationContext* opCtx) = 0;
 

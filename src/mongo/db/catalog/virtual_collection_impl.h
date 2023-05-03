@@ -50,24 +50,25 @@ public:
                                    const CollectionOptions& options,
                                    std::unique_ptr<ExternalRecordStore> recordStore);
 
+    VirtualCollectionImpl(const VirtualCollectionImpl&) = default;
+
     ~VirtualCollectionImpl() = default;
 
     const VirtualCollectionOptions& getVirtualCollectionOptions() const {
-        return _recordStore->getOptions();
+        return _shared->_recordStore->getOptions();
     }
 
     std::shared_ptr<Collection> clone() const final {
-        unimplementedTasserted();
-        return nullptr;
+        return std::make_shared<VirtualCollectionImpl>(*this);
     }
 
     SharedCollectionDecorations* getSharedDecorations() const final {
-        return nullptr;
+        return &_shared->_sharedDecorations;
     }
 
     Status initFromExisting(OperationContext* opCtx,
                             const std::shared_ptr<Collection>& collection,
-                            Timestamp readTimestamp) final {
+                            boost::optional<Timestamp> readTimestamp) final {
         unimplementedTasserted();
         return Status(ErrorCodes::UnknownError, "unknown");
     };
@@ -96,19 +97,21 @@ public:
     }
 
     const IndexCatalog* getIndexCatalog() const final {
-        return nullptr;
+        return _indexCatalog.get();
     }
 
     IndexCatalog* getIndexCatalog() final {
-        return nullptr;
+        return _indexCatalog.get();
     }
 
     RecordStore* getRecordStore() const final {
-        return _recordStore.get();
+        return _shared->_recordStore.get();
     }
 
+    // A virtual collection can't have an 'ident' because 'ident' is an identifier to a WT table
+    // which a virtual colelction does not have. So returns nullptr.
     std::shared_ptr<Ident> getSharedIdent() const final {
-        return _recordStore->getSharedIdent();
+        return nullptr;
     }
 
     void setIdent(std::shared_ptr<Ident> newIdent) final {
@@ -149,60 +152,12 @@ public:
 
     std::unique_ptr<SeekableRecordCursor> getCursor(OperationContext* opCtx,
                                                     bool forward = true) const final {
-        return _recordStore->getCursor(opCtx, forward);
-    }
-
-    void deleteDocument(
-        OperationContext* opCtx,
-        StmtId stmtId,
-        const RecordId& loc,
-        OpDebug* opDebug,
-        bool fromMigrate = false,
-        bool noWarn = false,
-        Collection::StoreDeletedDoc storeDeletedDoc = Collection::StoreDeletedDoc::Off,
-        CheckRecordId checkRecordId = CheckRecordId::Off) const final {
-        unimplementedTasserted();
-    }
-
-    void deleteDocument(
-        OperationContext* opCtx,
-        Snapshotted<BSONObj> doc,
-        StmtId stmtId,
-        const RecordId& loc,
-        OpDebug* opDebug,
-        bool fromMigrate = false,
-        bool noWarn = false,
-        Collection::StoreDeletedDoc storeDeletedDoc = Collection::StoreDeletedDoc::Off,
-        CheckRecordId checkRecordId = CheckRecordId::Off) const final {
-        unimplementedTasserted();
-    }
-
-    RecordId updateDocument(OperationContext* opCtx,
-                            const RecordId& oldLocation,
-                            const Snapshotted<BSONObj>& oldDoc,
-                            const BSONObj& newDoc,
-                            bool indexesAffected,
-                            OpDebug* opDebug,
-                            CollectionUpdateArgs* args) const final {
-        unimplementedTasserted();
-        return RecordId();
+        return _shared->_recordStore->getCursor(opCtx, forward);
     }
 
     bool updateWithDamagesSupported() const final {
         unimplementedTasserted();
         return false;
-    }
-
-    StatusWith<BSONObj> updateDocumentWithDamages(OperationContext* opCtx,
-                                                  const RecordId& loc,
-                                                  const Snapshotted<BSONObj>& oldDoc,
-                                                  const char* damageSource,
-                                                  const mutablebson::DamageVector& damages,
-                                                  bool indexesAffected,
-                                                  OpDebug* opDebug,
-                                                  CollectionUpdateArgs* args) const final {
-        unimplementedTasserted();
-        return Status(ErrorCodes::UnknownError, "unknown");
     }
 
     Status truncate(OperationContext* opCtx) final {
@@ -391,35 +346,26 @@ public:
     }
 
     int getTotalIndexCount() const final {
-        unimplementedTasserted();
         return 0;
     }
 
     int getCompletedIndexCount() const final {
-        unimplementedTasserted();
         return 0;
     }
 
     BSONObj getIndexSpec(StringData indexName) const final {
-        unimplementedTasserted();
         return BSONObj();
     }
 
-    void getAllIndexes(std::vector<std::string>* names) const final {
-        unimplementedTasserted();
-    }
+    void getAllIndexes(std::vector<std::string>* names) const final {}
 
-    void getReadyIndexes(std::vector<std::string>* names) const final {
-        unimplementedTasserted();
-    }
+    void getReadyIndexes(std::vector<std::string>* names) const final {}
 
     bool isIndexPresent(StringData indexName) const final {
-        unimplementedTasserted();
         return false;
     }
 
     bool isIndexReady(StringData indexName) const final {
-        unimplementedTasserted();
         return false;
     }
 
@@ -451,15 +397,15 @@ public:
     }
 
     long long numRecords(OperationContext* opCtx) const final {
-        return _recordStore->numRecords(opCtx);
+        return _shared->_recordStore->numRecords(opCtx);
     }
 
     long long dataSize(OperationContext* opCtx) const final {
-        return _recordStore->dataSize(opCtx);
+        return _shared->_recordStore->dataSize(opCtx);
     }
 
     bool isEmpty(OperationContext* opCtx) const final {
-        return _recordStore->dataSize(opCtx) == 0LL;
+        return _shared->_recordStore->dataSize(opCtx) == 0LL;
     }
 
     inline int averageObjectSize(OperationContext* opCtx) const {
@@ -501,7 +447,7 @@ public:
      * Collection is destroyed.
      */
     const CollatorInterface* getDefaultCollator() const final {
-        return _collator.get();
+        return _shared->_collator.get();
     }
 
     const CollectionOptions& getCollectionOptions() const final {
@@ -514,12 +460,17 @@ public:
         return Status(ErrorCodes::UnknownError, "unknown");
     }
 
+    // This method is used in context of rollback and index build which are not supported for a
+    // virtual collection.
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makePlanExecutor(
         OperationContext* opCtx,
         const CollectionPtr& yieldableCollection,
         PlanYieldPolicy::YieldPolicy yieldPolicy,
         ScanDirection scanDirection,
-        const boost::optional<RecordId>& resumeAfterRecordId) const final;
+        const boost::optional<RecordId>& resumeAfterRecordId) const final {
+        unimplementedTasserted();
+        return nullptr;
+    }
 
     void indexBuildSuccess(OperationContext* opCtx, IndexCatalogEntry* index) final {
         unimplementedTasserted();
@@ -532,13 +483,32 @@ private:
         MONGO_UNIMPLEMENTED_TASSERT(6968504);
     }
 
+    struct SharedState {
+        SharedState(std::unique_ptr<ExternalRecordStore> recordStore,
+                    std::unique_ptr<CollatorInterface> collator)
+            : _recordStore(std::move(recordStore)), _collator(std::move(collator)) {}
+
+        ~SharedState() = default;
+
+        std::unique_ptr<ExternalRecordStore> _recordStore;
+
+        // This object is decorable and decorated with unversioned data related to the collection.
+        // Not associated with any particular Collection instance for the collection, but shared
+        // across all instances for the same collection. This is a vehicle for users of a collection
+        // to cache unversioned state for a collection that is accessible across all of the
+        // Collection instances.
+        SharedCollectionDecorations _sharedDecorations;
+
+        // The default collation which is applied to operations and indices which have no collation
+        // of their own. The collection's validator will respect this collation. If null, the
+        // default collation is simple binary compare.
+        std::unique_ptr<CollatorInterface> _collator;
+    };
+
     NamespaceString _nss;
     CollectionOptions _options;
-    std::unique_ptr<ExternalRecordStore> _recordStore;
 
-    // The default collation which is applied to operations and indices which have no collation
-    // of their own. The collection's validator will respect this collation. If null, the
-    // default collation is simple binary compare.
-    std::unique_ptr<CollatorInterface> _collator;
+    std::shared_ptr<SharedState> _shared;
+    clonable_ptr<IndexCatalog> _indexCatalog;
 };
 }  // namespace mongo

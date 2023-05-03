@@ -73,8 +73,9 @@ class DataGeneratorConfig:
     """Data Generator configuration."""
 
     enabled: bool
-    collection_cardinalities: list[int]
     collection_templates: list[CollectionTemplate]
+    collection_name_with_card: bool
+    write_mode: WriteMode
     batch_size: int
 
 
@@ -85,6 +86,7 @@ class CollectionTemplate:
     name: str
     fields: Sequence[FieldTemplate]
     compound_indexes: Sequence[Sequence[str]]
+    cardinalities: Sequence[int]
 
 
 @dataclass
@@ -141,5 +143,13 @@ class WorkloadExecutionConfig:
     enabled: bool
     output_collection_name: str
     write_mode: WriteMode
+    warmup_runs: int
+    runs: int
+
+
+@dataclass
+class BenchmarkConfig:
+    """A/B performance testing config."""
+
     warmup_runs: int
     runs: int

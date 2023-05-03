@@ -88,16 +88,14 @@ protected:
         CollectionUpdateArgs collectionUpdateArgs;
         collectionUpdateArgs.source =
             fromMigrate ? OperationSource::kFromMigrate : OperationSource::kStandard;
-        auto uuid = UUID::gen();
-        OplogUpdateEntryArgs updateArgs(&collectionUpdateArgs, nss, uuid);
-        updateArgs.nss = nss;
+        OplogUpdateEntryArgs updateArgs(&collectionUpdateArgs, *autoColl);
         OplogDeleteEntryArgs deleteArgs;
         deleteArgs.fromMigrate = fromMigrate;
         if (shouldSucceed) {
             try {
                 opObserver.onInserts(opCtx, *autoColl, inserts.begin(), inserts.end(), fromMigrate);
                 opObserver.onUpdate(opCtx, updateArgs);
-                opObserver.onDelete(opCtx, nss, uuid, StmtId(), deleteArgs);
+                opObserver.onDelete(opCtx, *autoColl, StmtId(), deleteArgs);
             } catch (...) {
                 // Make it easier to see that this is where we failed.
                 ASSERT_OK(exceptionToStatus());
@@ -107,7 +105,7 @@ protected:
                 opObserver.onInserts(opCtx, *autoColl, inserts.begin(), inserts.end(), fromMigrate),
                 AssertionException);
             ASSERT_THROWS(opObserver.onUpdate(opCtx, updateArgs), AssertionException);
-            ASSERT_THROWS(opObserver.onDelete(opCtx, nss, uuid, StmtId(), deleteArgs),
+            ASSERT_THROWS(opObserver.onDelete(opCtx, *autoColl, StmtId(), deleteArgs),
                           AssertionException);
         }
     }

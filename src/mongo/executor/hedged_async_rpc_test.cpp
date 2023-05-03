@@ -65,20 +65,11 @@ using executor::RemoteCommandResponse;
 
 class HedgedAsyncRPCTest : public AsyncRPCTestFixture {
 public:
-    const std::vector<HostAndPort> kEmptyHosts{};
     const std::vector<HostAndPort> kTwoHosts{HostAndPort("FakeHost1", 12345),
                                              HostAndPort("FakeHost2", 12345)};
-    const std::vector<HostAndPort> kThreeHosts{HostAndPort("FakeHost1", 12345),
-                                               HostAndPort("FakeHost2", 12345),
-                                               HostAndPort("FakeHost3", 12345)};
-
     using TwoHostCallback =
         std::function<void(NetworkInterfaceMock::NetworkOperationIterator authoritative,
                            NetworkInterfaceMock::NetworkOperationIterator hedged)>;
-    using ThreeHostCallback =
-        std::function<void(NetworkInterfaceMock::NetworkOperationIterator authoritative,
-                           NetworkInterfaceMock::NetworkOperationIterator hedged1,
-                           NetworkInterfaceMock::NetworkOperationIterator hedged2)>;
 
     NetworkInterface::Counters getNetworkInterfaceCounters() {
         auto counters = getNetworkInterfaceMock()->getCounters();
@@ -104,32 +95,6 @@ public:
         mockBehaviorFn(authoritative, hedged);
     }
 
-    void performAuthoritativeHedgeBehavior(NetworkInterfaceMock* network,
-                                           ThreeHostCallback mockBehaviorFn) {
-        std::vector<NetworkInterfaceMock::NetworkOperationIterator> nois{
-            network->getNextReadyRequest(),
-            network->getNextReadyRequest(),
-            network->getNextReadyRequest()};
-
-        NetworkInterfaceMock::NetworkOperationIterator authoritative;
-        std::vector<NetworkInterfaceMock::NetworkOperationIterator> hedged;
-        // Find authoritative and hedged NOIs.
-        std::for_each(
-            nois.begin(), nois.end(), [&](NetworkInterfaceMock::NetworkOperationIterator& noi) {
-                if (noi->getRequestOnAny().target[0] == kThreeHosts[0]) {
-                    authoritative = noi;
-                } else {
-                    hedged.push_back(noi);
-                }
-            });
-
-        auto hedged1 = hedged.back();
-        hedged.pop_back();
-        auto hedged2 = hedged.back();
-
-        mockBehaviorFn(authoritative, hedged1, hedged2);
-    }
-
     /**
      * Testing wrapper to perform common set up, then call sendHedgedCommand. Only safe to call once
      * per test fixture as to not create multiple OpCtx.
@@ -139,7 +104,9 @@ public:
         CommandType cmd,
         std::vector<HostAndPort> hosts,
         std::shared_ptr<RetryPolicy> retryPolicy = std::make_shared<NeverRetryPolicy>()) {
-        ReadPreferenceSetting readPref;
+        // Use a readPreference that's elgible for hedging.
+        ReadPreferenceSetting readPref(ReadPreference::Nearest);
+        readPref.hedgingMode = HedgingMode();
 
         auto factory = RemoteCommandTargeterFactoryMock();
         std::shared_ptr<RemoteCommandTargeter> t;
@@ -156,7 +123,8 @@ public:
                                  std::move(targeter),
                                  getExecutorPtr(),
                                  CancellationToken::uncancelable(),
-                                 retryPolicy);
+                                 retryPolicy,
+                                 readPref);
     }
 
     const NamespaceString testNS = NamespaceString("testdb", "testcoll");
@@ -164,16 +132,19 @@ public:
     const BSONObj testFirstBatch = BSON("x" << 1);
 
     const Status ignorableMaxTimeMSExpiredStatus{Status(ErrorCodes::MaxTimeMSExpired, "mock")};
-    const Status fatalNetworkTimeoutStatus{Status(ErrorCodes::NetworkTimeout, "mock")};
+    const Status ignorableNetworkTimeoutStatus{Status(ErrorCodes::NetworkTimeout, "mock")};
+    const Status fatalInternalErrorStatus{Status(ErrorCodes::InternalError, "mock")};
 
     const RemoteCommandResponse testSuccessResponse{
         CursorResponse(testNS, 0LL, {testFirstBatch})
             .toBSON(CursorResponse::ResponseType::InitialResponse),
         Milliseconds::zero()};
     const RemoteCommandResponse testFatalErrorResponse{
-        createErrorResponse(fatalNetworkTimeoutStatus), Milliseconds(1)};
+        createErrorResponse(fatalInternalErrorStatus), Milliseconds(1)};
     const RemoteCommandResponse testIgnorableErrorResponse{
         createErrorResponse(ignorableMaxTimeMSExpiredStatus), Milliseconds(1)};
+    const RemoteCommandResponse testAlternateIgnorableErrorResponse{
+        createErrorResponse(ignorableNetworkTimeoutStatus), Milliseconds(1)};
 
 private:
     // This OpCtx is used by sendHedgedCommandWithHosts and is initialized when the function is
@@ -202,29 +173,6 @@ TEST_F(HedgedAsyncRPCTest, FindHedgeRequestTwoHosts) {
     auto counters = getNetworkInterfaceCounters();
     ASSERT_EQ(counters.succeeded, 1);
     ASSERT_EQ(counters.canceled, 1);
-
-    auto resCursor = resultFuture.get().response.getCursor();
-    ASSERT_EQ(resCursor->getNs(), testNS);
-    ASSERT_BSONOBJ_EQ(resCursor->getFirstBatch()[0], testFirstBatch);
-}
-
-TEST_F(HedgedAsyncRPCTest, FindHedgeRequestThreeHosts) {
-    auto resultFuture = sendHedgedCommandWithHosts(testFindCmd, kThreeHosts);
-
-    onCommand([&](const auto& request) {
-        ASSERT(request.cmdObj["find"]);
-        return CursorResponse(testNS, 0LL, {testFirstBatch})
-            .toBSON(CursorResponse::ResponseType::InitialResponse);
-    });
-
-    auto network = getNetworkInterfaceMock();
-    network->enterNetwork();
-    network->runReadyNetworkOperations();
-    network->exitNetwork();
-
-    auto counters = getNetworkInterfaceCounters();
-    ASSERT_EQ(counters.succeeded, 1);
-    ASSERT_EQ(counters.canceled, 2);
 
     auto resCursor = resultFuture.get().response.getCursor();
     ASSERT_EQ(resCursor->getNs(), testNS);
@@ -293,15 +241,48 @@ TEST_F(HedgedAsyncRPCTest, HedgedAsyncRPCWithRetryPolicy) {
 }
 
 /**
- * When the targeter returns no hosts, we get a HostNotFound error.
+ * When the targeter returns an error, ensure we rewrite it correctly.
  */
-TEST_F(HedgedAsyncRPCTest, NoShardsFound) {
-    HelloCommandReply helloReply = HelloCommandReply(TopologyVersion(OID::gen(), 0));
+TEST_F(HedgedAsyncRPCTest, FailedTargeting) {
     HelloCommand helloCmd;
     initializeCommand(helloCmd);
-    auto resultFuture = sendHedgedCommandWithHosts(testFindCmd, kEmptyHosts);
+    auto opCtx = makeOperationContext();
+    auto targeterFailStatus = Status{ErrorCodes::InternalError, "Fake targeter failure"};
+    auto targeter = std::make_unique<FailingTargeter>(targeterFailStatus);
 
-    ASSERT_THROWS_CODE(resultFuture.get(), DBException, ErrorCodes::HostNotFound);
+    auto resultFuture = sendHedgedCommand(helloCmd,
+                                          opCtx.get(),
+                                          std::move(targeter),
+                                          getExecutorPtr(),
+                                          CancellationToken::uncancelable());
+
+    auto error = resultFuture.getNoThrow().getStatus();
+    ASSERT_EQ(error.code(), ErrorCodes::RemoteCommandExecutionError);
+
+    auto extraInfo = error.extraInfo<AsyncRPCErrorInfo>();
+    ASSERT(extraInfo);
+
+    ASSERT(extraInfo->isLocal());
+    auto localError = extraInfo->asLocal();
+    ASSERT_EQ(localError, targeterFailStatus);
+}
+
+// Ensure that the sendHedgedCommand correctly returns RemoteCommandExecutionError when the executor
+// is shutdown mid-remote-invocation, and that the executor shutdown error is contained
+// in the error's ExtraInfo.
+TEST_F(HedgedAsyncRPCTest, ExecutorShutdown) {
+    auto resultFuture = sendHedgedCommandWithHosts(testFindCmd, kTwoHosts);
+    getExecutorPtr()->shutdown();
+    auto error = resultFuture.getNoThrow().getStatus();
+    // The error returned by our API should always be RemoteCommandExecutionError
+    ASSERT_EQ(error.code(), ErrorCodes::RemoteCommandExecutionError);
+    // Make sure we can extract the extra error info
+    auto extraInfo = error.extraInfo<AsyncRPCErrorInfo>();
+    ASSERT(extraInfo);
+    // Make sure the extra info indicates the error was local, and that the
+    // local error (which is just a Status) has the correct code.
+    ASSERT(extraInfo->isLocal());
+    ASSERT(ErrorCodes::isA<ErrorCategory::CancellationError>(extraInfo->asLocal()));
 }
 
 /**
@@ -313,7 +294,7 @@ TEST_F(HedgedAsyncRPCTest, FirstCommandFailsWithSignificantError) {
 
     onCommand([&](const auto& request) {
         ASSERT(request.cmdObj["find"]);
-        return fatalNetworkTimeoutStatus;
+        return fatalInternalErrorStatus;
     });
 
     auto network = getNetworkInterfaceMock();
@@ -333,7 +314,7 @@ TEST_F(HedgedAsyncRPCTest, FirstCommandFailsWithSignificantError) {
 
     ASSERT(extraInfo->isLocal());
     auto localError = extraInfo->asLocal();
-    ASSERT_EQ(localError, fatalNetworkTimeoutStatus);
+    ASSERT_EQ(localError, fatalInternalErrorStatus);
 }
 
 /**
@@ -377,22 +358,20 @@ TEST_F(HedgedAsyncRPCTest, BothCommandsFailWithSkippableError) {
 }
 
 TEST_F(HedgedAsyncRPCTest, AllCommandsFailWithSkippableError) {
-    auto resultFuture = sendHedgedCommandWithHosts(testFindCmd, kThreeHosts);
+    auto resultFuture = sendHedgedCommandWithHosts(testFindCmd, kTwoHosts);
 
     auto network = getNetworkInterfaceMock();
     auto now = network->now();
     network->enterNetwork();
 
-    // Send "ignorable" responses for all three requests.
+    // Send "ignorable" responses for both requests.
     performAuthoritativeHedgeBehavior(
         network,
         [&](NetworkInterfaceMock::NetworkOperationIterator authoritative,
-            NetworkInterfaceMock::NetworkOperationIterator hedged1,
-            NetworkInterfaceMock::NetworkOperationIterator hedged2) {
+            NetworkInterfaceMock::NetworkOperationIterator hedged1) {
             network->scheduleResponse(
                 authoritative, now + Milliseconds(1000), testIgnorableErrorResponse);
             network->scheduleResponse(hedged1, now, testIgnorableErrorResponse);
-            network->scheduleResponse(hedged2, now, testIgnorableErrorResponse);
         });
 
     network->runUntil(now + Milliseconds(1500));
@@ -400,7 +379,7 @@ TEST_F(HedgedAsyncRPCTest, AllCommandsFailWithSkippableError) {
     auto counters = network->getCounters();
     network->exitNetwork();
 
-    ASSERT_EQ(counters.succeeded, 3);
+    ASSERT_EQ(counters.succeeded, 2);
     ASSERT_EQ(counters.canceled, 0);
 
     auto error = resultFuture.getNoThrow().getStatus();
@@ -531,7 +510,7 @@ TEST_F(HedgedAsyncRPCTest, AuthoritativeFailsWithFatalErrorHedgedCancelled) {
 
     ASSERT(extraInfo->isRemote());
     auto remoteError = extraInfo->asRemote();
-    ASSERT_EQ(remoteError.getRemoteCommandResult(), fatalNetworkTimeoutStatus);
+    ASSERT_EQ(remoteError.getRemoteCommandResult(), fatalInternalErrorStatus);
 }
 
 /**
@@ -602,6 +581,215 @@ TEST_F(HedgedAsyncRPCTest, HedgedSucceedsAuthoritativeCancelled) {
     auto res = std::move(resultFuture).get().response;
     ASSERT_EQ(res.getCursor()->getNs(), testNS);
     ASSERT_BSONOBJ_EQ(res.getCursor()->getFirstBatch()[0], testFirstBatch);
+}
+
+/**
+ * When a hedged command is sent and the first request, which is hedged, fails with an ignorable
+ * error and the second request, which is authoritative, also fails with an ignorable error, we get
+ * the ignorable error from the authoritative.
+ */
+TEST_F(HedgedAsyncRPCTest, HedgedThenAuthoritativeFailsWithIgnorableError) {
+    auto resultFuture = sendHedgedCommandWithHosts(testFindCmd, kTwoHosts);
+
+    auto network = getNetworkInterfaceMock();
+    auto now = getNetworkInterfaceMock()->now();
+    network->enterNetwork();
+
+    // Send an "ignorable" error response for both requests, but delay the response if the request
+    // is the authoritative one. Different "ignorable" responses are used in order to verify that
+    // the returned response corresponds to the authoritative request.
+    performAuthoritativeHedgeBehavior(
+        network,
+        [&](NetworkInterfaceMock::NetworkOperationIterator authoritative,
+            NetworkInterfaceMock::NetworkOperationIterator hedged) {
+            network->scheduleResponse(
+                authoritative, now + Milliseconds(1000), testIgnorableErrorResponse);
+            network->scheduleResponse(hedged, now, testAlternateIgnorableErrorResponse);
+        });
+
+    network->runUntil(now + Milliseconds(1500));
+
+    auto counters = network->getCounters();
+    network->exitNetwork();
+
+    // Any response received from a "remote" node, whether it contains the result of a successful
+    // operation or otherwise resulting error, is considered a "success" by the network interface.
+    ASSERT_EQ(counters.succeeded, 2);
+    ASSERT_EQ(counters.canceled, 0);
+
+    auto error = resultFuture.getNoThrow().getStatus();
+    ASSERT_EQ(error.code(), ErrorCodes::RemoteCommandExecutionError);
+
+    auto extraInfo = error.extraInfo<AsyncRPCErrorInfo>();
+    ASSERT(extraInfo);
+
+    ASSERT(extraInfo->isRemote());
+    auto remoteError = extraInfo->asRemote();
+    ASSERT_EQ(remoteError.getRemoteCommandResult(), ignorableMaxTimeMSExpiredStatus);
+}
+
+/**
+ * When a hedged command is sent and the first request, which is hedged, fails with an ignorable
+ * error and the second request, which is authoritative, fails with a fatal error, we get the fatal
+ * error.
+ */
+TEST_F(HedgedAsyncRPCTest, HedgedFailsWithIgnorableErrorAuthoritativeFailsWithFatalError) {
+    auto resultFuture = sendHedgedCommandWithHosts(testFindCmd, kTwoHosts);
+
+    auto network = getNetworkInterfaceMock();
+    auto now = getNetworkInterfaceMock()->now();
+    network->enterNetwork();
+
+    // Schedules an ignorable error response for the hedged request, and then a delayed fatal error
+    // response for the authoritative request.
+    performAuthoritativeHedgeBehavior(
+        network,
+        [&](NetworkInterfaceMock::NetworkOperationIterator authoritative,
+            NetworkInterfaceMock::NetworkOperationIterator hedged) {
+            network->scheduleResponse(
+                authoritative, now + Milliseconds(1000), testFatalErrorResponse);
+            network->scheduleResponse(hedged, now, testIgnorableErrorResponse);
+        });
+
+    network->runUntil(now + Milliseconds(1500));
+
+    auto counters = network->getCounters();
+    network->exitNetwork();
+
+    // Any response received from a "remote" node, whether it contains the result of a successful
+    // operation or otherwise resulting error, is considered a "success" by the network interface.
+    ASSERT_EQ(counters.succeeded, 2);
+    ASSERT_EQ(counters.canceled, 0);
+
+    auto error = resultFuture.getNoThrow().getStatus();
+    ASSERT_EQ(error.code(), ErrorCodes::RemoteCommandExecutionError);
+
+    auto extraInfo = error.extraInfo<AsyncRPCErrorInfo>();
+    ASSERT(extraInfo);
+
+    ASSERT(extraInfo->isRemote());
+    auto remoteError = extraInfo->asRemote();
+    ASSERT_EQ(remoteError.getRemoteCommandResult(), fatalInternalErrorStatus);
+}
+
+/**
+ * When a hedged command is sent and the first request, which is hedged, fails with an ignorable
+ * error and the second request, which is authoritative, succeeds, we get the success response.
+ */
+TEST_F(HedgedAsyncRPCTest, HedgedFailsWithIgnorableErrorAuthoritativeSucceeds) {
+    auto resultFuture = sendHedgedCommandWithHosts(testFindCmd, kTwoHosts);
+
+    auto network = getNetworkInterfaceMock();
+    auto now = getNetworkInterfaceMock()->now();
+    network->enterNetwork();
+
+    // Schedules an ignorable error response for the hedged request, and then a delayed success
+    // response for the authoritative request.
+    performAuthoritativeHedgeBehavior(
+        network,
+        [&](NetworkInterfaceMock::NetworkOperationIterator authoritative,
+            NetworkInterfaceMock::NetworkOperationIterator hedged) {
+            network->scheduleResponse(authoritative, now + Milliseconds(1000), testSuccessResponse);
+            network->scheduleResponse(hedged, now, testIgnorableErrorResponse);
+        });
+
+    network->runUntil(now + Milliseconds(1500));
+
+    auto counters = network->getCounters();
+    network->exitNetwork();
+
+    // Any response received from a "remote" node, whether it contains the result of a successful
+    // operation or otherwise resulting error, is considered a "success" by the network interface.
+    ASSERT_EQ(counters.succeeded, 2);
+    ASSERT_EQ(counters.canceled, 0);
+
+    auto res = std::move(resultFuture).get().response;
+    ASSERT_EQ(res.getCursor()->getNs(), testNS);
+    ASSERT_BSONOBJ_EQ(res.getCursor()->getFirstBatch()[0], testFirstBatch);
+}
+
+/**
+ * When a hedged command is sent and the first request, which is hedged, fails with a fatal
+ * error and the second request, which is authoritative, cancels, we get the fatal error.
+ */
+TEST_F(HedgedAsyncRPCTest, HedgedFailsWithFatalErrorAuthoritativeCanceled) {
+    auto resultFuture = sendHedgedCommandWithHosts(testFindCmd, kTwoHosts);
+
+    auto network = getNetworkInterfaceMock();
+    auto now = getNetworkInterfaceMock()->now();
+    network->enterNetwork();
+
+    // Schedules a fatal error response for the hedged request, and then a delayed success response
+    // for the authoritative request.
+    performAuthoritativeHedgeBehavior(
+        network,
+        [&](NetworkInterfaceMock::NetworkOperationIterator authoritative,
+            NetworkInterfaceMock::NetworkOperationIterator hedged) {
+            network->scheduleResponse(authoritative, now + Milliseconds(1000), testSuccessResponse);
+            network->scheduleResponse(hedged, now, testFatalErrorResponse);
+        });
+
+    network->runUntil(now + Milliseconds(1500));
+
+    auto counters = network->getCounters();
+    network->exitNetwork();
+
+    // Any response received from a "remote" node, whether it contains the result of a successful
+    // operation or otherwise resulting error, is considered a "success" by the network interface.
+    ASSERT_EQ(counters.succeeded, 1);
+    ASSERT_EQ(counters.canceled, 1);
+
+    auto error = resultFuture.getNoThrow().getStatus();
+    ASSERT_EQ(error.code(), ErrorCodes::RemoteCommandExecutionError);
+
+    auto extraInfo = error.extraInfo<AsyncRPCErrorInfo>();
+    ASSERT(extraInfo);
+
+    ASSERT(extraInfo->isRemote());
+    auto remoteError = extraInfo->asRemote();
+    ASSERT_EQ(remoteError.getRemoteCommandResult(), fatalInternalErrorStatus);
+}
+
+/*
+ * Tests that 'sendHedgedCommand' will appropriately retry multiple times under the conditions
+ * defined by the retry policy, with a dynmically changing wait-time between retries.
+ */
+TEST_F(HedgedAsyncRPCTest, DynamicDelayBetweenRetries) {
+    HelloCommandReply helloReply = HelloCommandReply(TopologyVersion(OID::gen(), 0));
+    HelloCommand helloCmd;
+    initializeCommand(helloCmd);
+
+    // Define a retry policy that simply decides to always retry a command three additional times,
+    // with a different delay between each retry.
+    std::shared_ptr<TestRetryPolicy> testPolicy = std::make_shared<TestRetryPolicy>();
+    const auto maxNumRetries = 3;
+    const std::array<Milliseconds, maxNumRetries> retryDelays{
+        Milliseconds(100), Milliseconds(50), Milliseconds(10)};
+    testPolicy->setMaxNumRetries(maxNumRetries);
+    testPolicy->pushRetryDelay(retryDelays[0]);
+    testPolicy->pushRetryDelay(retryDelays[1]);
+    testPolicy->pushRetryDelay(retryDelays[2]);
+
+    auto resultFuture = sendHedgedCommandWithHosts(helloCmd, kTwoHosts, testPolicy);
+
+    const auto onCommandFunc = [&](const auto& request) {
+        ASSERT(request.cmdObj["hello"]);
+        return helloReply.toBSON();
+    };
+
+    // Schedule 1 response to the initial attempt, and then two for the following retries.
+    // Advance the clock appropriately based on each retry delay.
+    for (auto i = 0; i < maxNumRetries; i++) {
+        scheduleRequestAndAdvanceClockForRetry(testPolicy, onCommandFunc, retryDelays[i]);
+    }
+    // Schedule a response to the final retry. No need to advance clock since no more
+    // retries should be attemped after this third one.
+    onCommand(onCommandFunc);
+
+    // Wait until the RPC attempt is done, including all retries. Ignore the result.
+    resultFuture.wait();
+
+    ASSERT_EQ(maxNumRetries, testPolicy->getNumRetriesPerformed());
 }
 
 }  // namespace

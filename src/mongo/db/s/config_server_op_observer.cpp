@@ -51,11 +51,10 @@ ConfigServerOpObserver::ConfigServerOpObserver() = default;
 ConfigServerOpObserver::~ConfigServerOpObserver() = default;
 
 void ConfigServerOpObserver::onDelete(OperationContext* opCtx,
-                                      const NamespaceString& nss,
-                                      const UUID& uuid,
+                                      const CollectionPtr& coll,
                                       StmtId stmtId,
                                       const OplogDeleteEntryArgs& args) {
-    if (nss == VersionType::ConfigNS) {
+    if (coll->ns() == VersionType::ConfigNS) {
         if (!repl::ReplicationCoordinator::get(opCtx)->getMemberState().rollback()) {
             uasserted(40302, "cannot delete config.version document while in --configsvr mode");
         } else {
@@ -137,7 +136,7 @@ void ConfigServerOpObserver::onInserts(OperationContext* opCtx,
 }
 
 void ConfigServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& args) {
-    if (args.nss != NamespaceString::kConfigsvrShardsNamespace) {
+    if (args.coll->ns() != NamespaceString::kConfigsvrShardsNamespace) {
         return;
     }
 

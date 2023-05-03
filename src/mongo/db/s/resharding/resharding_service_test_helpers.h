@@ -165,7 +165,7 @@ public:
     }
 
     void onUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& args) override {
-        if (args.nss != _stateDocumentNss) {
+        if (args.coll->ns() != _stateDocumentNss) {
             return;
         }
 
@@ -176,11 +176,10 @@ public:
     }
 
     void onDelete(OperationContext* opCtx,
-                  const NamespaceString& nss,
-                  const UUID& uuid,
+                  const CollectionPtr& coll,
                   StmtId stmtId,
                   const OplogDeleteEntryArgs& args) override {
-        if (nss != _stateDocumentNss) {
+        if (coll->ns() != _stateDocumentNss) {
             return;
         }
 

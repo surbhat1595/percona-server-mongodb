@@ -565,7 +565,7 @@ std::pair<SlotId /* matched docs */, std::unique_ptr<sbe::PlanStage>> buildForei
         if (i > 0) {
             // Ignoring the nulls produced by missing field in array.
             filter =
-                sbe::makeE<sbe::EIf>(makeFunction("fillEmpty"_sd,
+                sbe::makeE<sbe::EIf>(makeBinaryOp(sbe::EPrimBinary::fillEmpty,
                                                   makeFunction("isObject"_sd, lambdaArg->clone()),
                                                   makeConstant(TypeTags::Boolean, true)),
                                      std::move(filter),
@@ -786,7 +786,7 @@ std::pair<SlotId, std::unique_ptr<sbe::PlanStage>> buildIndexJoinLookupStage(
         makeProjectStage(makeLimitCoScanTree(nodeId, 1),
                          nodeId,
                          arrayBranchOutput,
-                         makeFunction("fillEmpty",
+                         makeBinaryOp(sbe::EPrimBinary::fillEmpty,
                                       makeFunction("getElement",
                                                    makeVariable(singleLocalValueSlot),
                                                    makeConstant(TypeTags::NumberInt32, 0)),
@@ -880,18 +880,18 @@ std::pair<SlotId, std::unique_ptr<sbe::PlanStage>> buildIndexJoinLookupStage(
     auto foreignRecordIdSlot = slotIdGenerator.generate();
     auto indexKeySlot = slotIdGenerator.generate();
     auto snapshotIdSlot = slotIdGenerator.generate();
-    auto ixScanStage = makeS<IndexScanStage>(foreignCollUUID,
-                                             indexName,
-                                             true /* forward */,
-                                             indexKeySlot,
-                                             foreignRecordIdSlot,
-                                             snapshotIdSlot,
-                                             IndexKeysInclusionSet{} /* indexKeysToInclude */,
-                                             makeSV() /* vars */,
-                                             makeVariable(lowKeySlot),
-                                             makeVariable(highKeySlot),
-                                             yieldPolicy,
-                                             nodeId);
+    auto ixScanStage = makeS<SimpleIndexScanStage>(foreignCollUUID,
+                                                   indexName,
+                                                   true /* forward */,
+                                                   indexKeySlot,
+                                                   foreignRecordIdSlot,
+                                                   snapshotIdSlot,
+                                                   IndexKeysInclusionSet{} /* indexKeysToInclude */,
+                                                   makeSV() /* vars */,
+                                                   makeVariable(lowKeySlot),
+                                                   makeVariable(highKeySlot),
+                                                   yieldPolicy,
+                                                   nodeId);
 
     // Loop join the low key and high key generation with the index seek stage to produce the
     // foreign record id to seek.
@@ -920,17 +920,21 @@ std::pair<SlotId, std::unique_ptr<sbe::PlanStage>> buildIndexJoinLookupStage(
     // stored in 'foreignRecordSlot'. We also pass in 'snapshotIdSlot', 'indexIdSlot',
     // 'indexKeySlot' and 'indexKeyPatternSlot' to perform index consistency check during the
     // seek.
-    auto [foreignRecordSlot, __, scanNljStage] = makeLoopJoinForFetch(std::move(ixScanNljStage),
-                                                                      foreignRecordIdSlot,
-                                                                      snapshotIdSlot,
-                                                                      indexIdSlot,
-                                                                      indexKeySlot,
-                                                                      indexKeyPatternSlot,
-                                                                      foreignColl,
-                                                                      iamMap,
-                                                                      nodeId,
-                                                                      makeSV() /* slotsToForward */,
-                                                                      slotIdGenerator);
+    auto foreignRecordSlot = slotIdGenerator.generate();
+    auto scanNljStage = makeLoopJoinForFetch(std::move(ixScanNljStage),
+                                             foreignRecordSlot,
+                                             slotIdGenerator.generate() /* unused recordId slot */,
+                                             std::vector<std::string>{},
+                                             makeSV(),
+                                             foreignRecordIdSlot,
+                                             snapshotIdSlot,
+                                             indexIdSlot,
+                                             indexKeySlot,
+                                             indexKeyPatternSlot,
+                                             foreignColl,
+                                             iamMap,
+                                             nodeId,
+                                             makeSV() /* slotsToForward */);
 
     // 'buildForeignMatches()' filters the foreign records, returned by the index scan, to match
     // those in 'localKeysSetSlot'. This is necessary because some values are encoded with the same
@@ -1013,8 +1017,10 @@ std::pair<SlotId /*matched docs*/, std::unique_ptr<sbe::PlanStage>> buildHashJoi
     // Add a projection that makes so that empty array is returned if no foreign row were matched.
     auto innerResultSlot = slotIdGenerator.generate();
     auto [emptyArrayTag, emptyArrayVal] = makeNewArray();
-    std::unique_ptr<EExpression> innerResultProjection = makeFunction(
-        "fillEmpty"_sd, makeVariable(lookupAggSlot), makeConstant(emptyArrayTag, emptyArrayVal));
+    std::unique_ptr<EExpression> innerResultProjection =
+        makeBinaryOp(sbe::EPrimBinary::fillEmpty,
+                     makeVariable(lookupAggSlot),
+                     makeConstant(emptyArrayTag, emptyArrayVal));
 
     std::unique_ptr<sbe::PlanStage> resultStage =
         makeProjectStage(std::move(hl), nodeId, innerResultSlot, std::move(innerResultProjection));

@@ -70,14 +70,13 @@ void OplogApplierImplOpObserver::onInserts(OperationContext* opCtx,
 }
 
 void OplogApplierImplOpObserver::onDelete(OperationContext* opCtx,
-                                          const NamespaceString& nss,
-                                          const UUID& uuid,
+                                          const CollectionPtr& coll,
                                           StmtId stmtId,
                                           const OplogDeleteEntryArgs& args) {
     if (!onDeleteFn) {
         return;
     }
-    onDeleteFn(opCtx, nss, uuid, stmtId, args);
+    onDeleteFn(opCtx, coll, stmtId, args);
 }
 
 void OplogApplierImplOpObserver::onUpdate(OperationContext* opCtx,
@@ -247,13 +246,12 @@ void OplogApplierImplTest::_testApplyOplogEntryOrGroupedInsertsCrudOperation(
         };
 
     _opObserver->onDeleteFn = [&](OperationContext* opCtx,
-                                  const NamespaceString& nss,
-                                  const boost::optional<UUID>& uuid,
+                                  const CollectionPtr& coll,
                                   StmtId stmtId,
                                   const OplogDeleteEntryArgs& args) {
         applyOpCalled = true;
         checkOpCtx(opCtx);
-        ASSERT_EQUALS(targetNss, nss);
+        ASSERT_EQUALS(targetNss, coll->ns());
         ASSERT(args.deletedDoc);
         ASSERT_BSONOBJ_EQ(op.getObject(), *(args.deletedDoc));
         return Status::OK();
@@ -262,7 +260,7 @@ void OplogApplierImplTest::_testApplyOplogEntryOrGroupedInsertsCrudOperation(
     _opObserver->onUpdateFn = [&](OperationContext* opCtx, const OplogUpdateEntryArgs& args) {
         applyOpCalled = true;
         checkOpCtx(opCtx);
-        ASSERT_EQUALS(targetNss, args.nss);
+        ASSERT_EQUALS(targetNss, args.coll->ns());
         return Status::OK();
     };
 

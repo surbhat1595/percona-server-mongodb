@@ -35,15 +35,16 @@
 #include "mongo/db/pipeline/abt/document_source_visitor.h"
 #include "mongo/db/pipeline/abt/match_expression_visitor.h"
 #include "mongo/db/pipeline/abt/utils.h"
+#include "mongo/db/query/ce/ce_heuristic.h"
 #include "mongo/db/query/ce/ce_histogram.h"
 #include "mongo/db/query/ce/ce_sampling.h"
 #include "mongo/db/query/ce/collection_statistics_impl.h"
 #include "mongo/db/query/ce_mode_parameter.h"
+#include "mongo/db/query/cost_model/cost_estimator.h"
+#include "mongo/db/query/cost_model/cost_model_gen.h"
 #include "mongo/db/query/cost_model/cost_model_manager.h"
+#include "mongo/db/query/cost_model/on_coefficients_change_updater_impl.h"
 #include "mongo/db/query/cqf_command_utils.h"
-#include "mongo/db/query/optimizer/cascades/ce_heuristic.h"
-#include "mongo/db/query/optimizer/cascades/cost_derivation.h"
-#include "mongo/db/query/optimizer/cascades/cost_model_gen.h"
 #include "mongo/db/query/optimizer/explain.h"
 #include "mongo/db/query/optimizer/metadata_factory.h"
 #include "mongo/db/query/optimizer/node.h"
@@ -56,25 +57,16 @@
 #include "mongo/db/query/yield_policy_callbacks_impl.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
+#include "mongo/util/fail_point.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
+MONGO_FAIL_POINT_DEFINE(failConstructingBonsaiExecutor);
+
 namespace mongo {
 using namespace optimizer;
+using cost_model::CostEstimator;
 using cost_model::CostModelManager;
-
-namespace {
-const auto costModelManager = ServiceContext::declareDecoration<CostModelManager>();
-
-BSONObj getCostModelCoefficientsOverride() {
-    if (internalCostModelCoefficients.empty()) {
-        return BSONObj();
-    }
-
-    return fromjson(internalCostModelCoefficients);
-}
-}  // namespace
-
 
 static opt::unordered_map<std::string, optimizer::IndexDefinition> buildIndexSpecsOptimizer(
     boost::intrusive_ptr<ExpressionContext> expCtx,
@@ -121,7 +113,8 @@ static opt::unordered_map<std::string, optimizer::IndexDefinition> buildIndexSpe
             continue;
         }
 
-        if (descriptor.isSparse() || descriptor.getIndexType() != IndexType::INDEX_BTREE ||
+        if (descriptor.infoObj().hasField(IndexDescriptor::kExpireAfterSecondsFieldName) ||
+            descriptor.isSparse() || descriptor.getIndexType() != IndexType::INDEX_BTREE ||
             !descriptor.collation().isEmpty()) {
             uasserted(ErrorCodes::InternalErrorNotSupported, "Unsupported index type");
         }
@@ -216,7 +209,7 @@ static opt::unordered_map<std::string, optimizer::IndexDefinition> buildIndexSpe
             ABT exprABT = generateMatchExpression(expr.get(),
                                                   false /*allowAggExpression*/,
                                                   "<root>" /*rootProjection*/,
-                                                  "" /*uniquePrefix*/);
+                                                  boost::none /*uniquePrefix*/);
             exprABT = make<EvalFilter>(std::move(exprABT), make<Variable>(scanProjName));
 
             // TODO SERVER-70315: simplify partial filter expression.
@@ -350,17 +343,25 @@ static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> optimizeAndCreateExe
                                              std::make_unique<YieldPolicyCallbacksImpl>(nss));
 
     sbePlan->prepare(data.ctx);
-    auto planExec = uassertStatusOK(plan_executor_factory::make(
-        opCtx,
-        std::move(cq),
-        nullptr /*solution*/,
-        {std::move(sbePlan), std::move(data)},
-        std::make_unique<ABTPrinter>(std::move(abt), phaseManager.getNodeToGroupPropsMap()),
-        MultipleCollectionAccessor(collection),
-        QueryPlannerParams::Options::DEFAULT,
-        nss,
-        std::move(yieldPolicy),
-        false /*isFromPlanCache*/));
+    auto
+        planExec = uassertStatusOK(plan_executor_factory::make(opCtx,
+                                                               std::move(cq),
+                                                               nullptr /*solution*/,
+                                                               {std::move(sbePlan),
+                                                                std::move(data)},
+                                                               std::make_unique<ABTPrinter>(
+                                                                   std::move(abt),
+                                                                   phaseManager
+                                                                       .getNodeToGroupPropsMap()),
+                                                               MultipleCollectionAccessor(
+                                                                   collection),
+                                                               QueryPlannerParams::Options::DEFAULT,
+                                                               nss,
+                                                               std::move(yieldPolicy),
+                                                               false /*isFromPlanCache*/,
+                                                               true /* generatedByBonsai */,
+                                                               opCtx
+                                                                   ->getElapsedQueryPlanningTime() /* metric stored in PlanExplainer via PlanExecutor construction*/));
     return planExec;
 }
 
@@ -489,6 +490,10 @@ void validateCommandOptions(const CanonicalQuery* query,
     uassert(ErrorCodes::InternalErrorNotSupported,
             "Timeseries collections are not supported",
             !collection || !collection->getTimeseriesOptions());
+
+    uassert(ErrorCodes::InternalErrorNotSupported,
+            "Capped collections are not supported",
+            !collection || !collection->isCapped());
 }
 
 Metadata populateMetadata(boost::intrusive_ptr<ExpressionContext> expCtx,
@@ -555,7 +560,7 @@ Metadata populateMetadata(boost::intrusive_ptr<ExpressionContext> expCtx,
 enum class CEMode { kSampling, kHistogram, kHeuristic };
 
 static OptPhaseManager createPhaseManager(const CEMode mode,
-                                          const CostModelCoefficients& costModel,
+                                          const cost_model::CostModelCoefficients& costModel,
                                           const NamespaceString& nss,
                                           OperationContext* opCtx,
                                           const int64_t collectionSize,
@@ -577,8 +582,9 @@ static OptPhaseManager createPhaseManager(const CEMode mode,
                                                     prefixId,
                                                     false /*requireRID*/,
                                                     std::move(metadataForSampling),
-                                                    std::make_unique<HeuristicCE>(),
-                                                    std::make_unique<DefaultCosting>(costModel),
+                                                    std::make_unique<ce::HeuristicCE>(),
+                                                    std::make_unique<ce::HeuristicCE>(),
+                                                    std::make_unique<CostEstimator>(costModel),
                                                     defaultConvertPathToInterval,
                                                     constFold,
                                                     DebugInfo::kDefaultForProd,
@@ -587,11 +593,12 @@ static OptPhaseManager createPhaseManager(const CEMode mode,
                     prefixId,
                     requireRID,
                     std::move(metadata),
-                    std::make_unique<CESamplingTransport>(opCtx,
-                                                          std::move(phaseManagerForSampling),
-                                                          collectionSize,
-                                                          std::make_unique<HeuristicCE>()),
-                    std::make_unique<DefaultCosting>(costModel),
+                    std::make_unique<ce::CESamplingTransport>(opCtx,
+                                                              std::move(phaseManagerForSampling),
+                                                              collectionSize,
+                                                              std::make_unique<ce::HeuristicCE>()),
+                    std::make_unique<ce::HeuristicCE>(),
+                    std::make_unique<CostEstimator>(costModel),
                     defaultConvertPathToInterval,
                     constFold,
                     DebugInfo::kDefaultForProd,
@@ -603,10 +610,11 @@ static OptPhaseManager createPhaseManager(const CEMode mode,
                     prefixId,
                     requireRID,
                     std::move(metadata),
-                    std::make_unique<CEHistogramTransport>(
+                    std::make_unique<ce::CEHistogramTransport>(
                         std::make_shared<ce::CollectionStatisticsImpl>(collectionSize, nss),
-                        std::make_unique<HeuristicCE>()),
-                    std::make_unique<DefaultCosting>(costModel),
+                        std::make_unique<ce::HeuristicCE>()),
+                    std::make_unique<ce::HeuristicCE>(),
+                    std::make_unique<CostEstimator>(costModel),
                     defaultConvertPathToInterval,
                     constFold,
                     DebugInfo::kDefaultForProd,
@@ -617,8 +625,9 @@ static OptPhaseManager createPhaseManager(const CEMode mode,
                     prefixId,
                     requireRID,
                     std::move(metadata),
-                    std::make_unique<HeuristicCE>(),
-                    std::make_unique<DefaultCosting>(costModel),
+                    std::make_unique<ce::HeuristicCE>(),
+                    std::make_unique<ce::HeuristicCE>(),
+                    std::make_unique<CostEstimator>(costModel),
                     defaultConvertPathToInterval,
                     constFold,
                     DebugInfo::kDefaultForProd,
@@ -637,6 +646,9 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOp
     const boost::optional<BSONObj>& indexHint,
     std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
     std::unique_ptr<CanonicalQuery> canonicalQuery) {
+    if (MONGO_unlikely(failConstructingBonsaiExecutor.shouldFail())) {
+        uasserted(620340, "attempting to use CQF while it is disabled");
+    }
     // Ensure that either pipeline or canonicalQuery is set.
     tassert(624070,
             "getSBEExecutorViaCascadesOptimizer expects exactly one of the following to be set: "
@@ -649,9 +661,6 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOp
     }
 
     validateCommandOptions(canonicalQuery.get(), collection, indexHint, involvedCollections);
-
-    auto curOp = CurOp::get(opCtx);
-    curOp->debug().cqfUsed = true;
 
     const bool requireRID = canonicalQuery ? canonicalQuery->getForceGenerateRecordId() : false;
     const bool collectionExists = collection != nullptr;
@@ -708,8 +717,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOp
                                 << internalQueryCardinalityEstimatorMode);
     }
 
-    auto costModel = costModelManager(opCtx->getServiceContext())
-                         .getCoefficients(getCostModelCoefficientsOverride());
+    auto costModel = cost_model::costModelManager(opCtx->getServiceContext()).getCoefficients();
 
     OptPhaseManager phaseManager = createPhaseManager(mode,
                                                       costModel,

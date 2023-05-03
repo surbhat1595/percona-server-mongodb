@@ -414,7 +414,7 @@ function runPerPathFiltersTest({docs, query, projection, expected, testDescripti
         {_id: 0, x: {no_y: 0}},
         {_id: 1, x: [[{y: 0}]]},
         {_id: 2, x: [[{y: {z: 0}}, {y: 0}]]},
-        {_id: 2, x: [[{y: {z: 0}}], [{y: 0}]]},
+        {_id: 3, x: [[{y: {z: 0}}], [{y: 0}]]},
     ];
     findXyPath(noMatch, 0, "Expected to match no docs from 'noMatch' but matched: ");
 
@@ -455,6 +455,140 @@ function runPerPathFiltersTest({docs, query, projection, expected, testDescripti
     findXyPath(valuesAndSubpaths,
                valuesAndSubpaths.length,
                "Expected to match all 'valuesAndSubpaths' but matched: ");
+})();
+
+// Check translation of MQL {$type: "null"}. NB: {$type: "null"} and {$eq: null} aren't equivalent!
+// The latter evaluates to "true" in some cases when the path is missing. Instead, matching type
+// "null" is the same as matching other scalar types, such as "double" or "string".
+(function testPerPathFilters_SupportedMatchExpressions_TypeNull() {
+    const docs = [
+        {_id: 0, x: {y: null}},
+        {_id: 1, x: {y: [null]}},
+        {_id: 2, x: {y: [42, null]}},
+        {_id: 3, x: [{y: 42}, {y: null}]},
+        {_id: 4, x: [{y: [42]}, {y: [null]}]},
+
+        // No "null" value on the path.
+        {_id: 100, x: {y: 42}},
+        {_id: 101, x: {y: [42, "str", [42]]}},
+        {_id: 102, x: [[{y: 42}]]},
+        {_id: 103, x: {y: {z: 42}}},
+
+        // "null" value is too deep.
+        {_id: 200, x: {y: [[null]]}},
+        {_id: 201, x: {y: [42, [null]]}},
+        {_id: 202, x: [{y: 42}, [{y: null}]]},
+
+        // "x.y" path is missing.
+        {_id: 300, x: {no_y: 0}},
+        {_id: 301, x: [0]},
+        {_id: 302, x: [{no_y: 0}]},
+    ];
+    runPerPathFiltersTest({
+        docs: docs,
+        query: {"x.y": {$type: "null"}},
+        projection: {_id: 1},
+        expected: [{_id: 0}, {_id: 1}, {_id: 2}, {_id: 3}, {_id: 4}],
+        testDescription: "type null"
+    });
+})();
+
+// Check translation of MQL {$type: "array"}.
+(function testPerPathFilters_SupportedMatchExpressions_TypeArray() {
+    const docs = [
+        // Terminal array.
+        {_id: 0, x: {y: []}},
+        {_id: 1, x: {y: [42]}},
+        {_id: 2, x: {y: [{}]}},
+        {_id: 3, x: {y: [[]]}},
+        {_id: 4, x: {y: [null, [42], 43]}},
+        {_id: 5, x: {y: [{z: 42}]}},
+        {_id: 6, x: [{y: 42}, {y: [null, [42], 43]}]},
+
+        // No terminal array.
+        {_id: 100, x: {y: 42}},
+        {_id: 101, x: [{y: 42}, {y: null}]},
+        {_id: 102, x: [[{y: 42}, {y: null}]]},
+
+        // There is a doubly-nested array along the path.
+        {_id: 200, x: [[{y: [42]}]]},
+
+        // "x.y" path is missing
+        {_id: 300, x: {no_y: 0}},
+        {_id: 301, x: [0]},
+        {_id: 302, x: [{no_y: 0}]},
+    ];
+    runPerPathFiltersTest({
+        docs: docs,
+        query: {"x.y": {$type: "array"}},
+        projection: {_id: 1},
+        expected: [{_id: 0}, {_id: 1}, {_id: 2}, {_id: 3}, {_id: 4}, {_id: 5}, {_id: 6}],
+        testDescription: "type array"
+    });
+})();
+
+// Check translation of MQL {$type: "object"}.
+(function testPerPathFilters_SupportedMatchExpressions_TypeObject() {
+    const docs = [
+        {_id: 0, x: {y: {}}},       // empty object is a value, no array info
+        {_id: 1, x: {y: {z: 42}}},  // sub-path, no array info, no values
+        {_id: 2, x: {y: [42, {}]}},
+        {_id: 3, x: {y: [42, {z: 42}]}},
+        {_id: 4, x: {y: [{z: 42}]}},  // terminal array: array info, no values
+        {_id: 5, x: [{y: {}}]},
+        {_id: 6, x: [{y: {z: 42}}]},  // array on path: array info, no values
+        {_id: 7, x: [{y: 42}, {no_y: 42}, {y: [42, {z: 42}]}]},
+
+        // No terminal object.
+        {_id: 100, x: {y: 42}},  // no array info, single value
+        {_id: 101, x: {y: [42, null]}},
+        {_id: 102, x: [{y: 42}, {y: null}]},
+
+        // The object is too deep.
+        {_id: 200, x: {y: [[{}]]}},
+        {_id: 201, x: {y: [[{z: 42}, 42, {z: 42}]]}},
+        {_id: 202, x: [[{y: {}}]]},
+        {_id: 203, x: [[{y: {z: 42}}], {y: 42}, [{y: {z: 42}}]]},
+
+        // "x.y" path is missing
+        {_id: 300, x: {no_y: 0}},
+        {_id: 301, x: [0]},
+        {_id: 302, x: [{no_y: 0}]},
+    ];
+    runPerPathFiltersTest({
+        docs: docs,
+        query: {"x.y": {$type: "object"}},
+        projection: {_id: 1},
+        expected: [{_id: 0}, {_id: 1}, {_id: 2}, {_id: 3}, {_id: 4}, {_id: 5}, {_id: 6}, {_id: 7}],
+        testDescription: "type object"
+    });
+})();
+
+// Check translation of MQL {$type: ["object", "array", "double", "null]"}.
+(function testPerPathFilters_SupportedMatchExpressions_MultipleTypes() {
+    const docs = [
+        // Only one of the types is present at the single leaf.
+        {_id: 0, x: {y: 42}},         // double
+        {_id: 1, x: {y: null}},       // null
+        {_id: 2, x: {y: {z: 42}}},    // object
+        {_id: 3, x: {y: ["abcde"]}},  // array that contains neither object, double or null
+
+        // Only one of the types is present on the path.
+        {_id: 4, x: [{y: "abcde"}, {y: 42}]},
+        {_id: 5, x: [{y: "abcde"}, {y: null}]},
+        {_id: 6, x: [{y: "abcde"}, {y: {z: 42}}]},
+        {_id: 7, x: [{y: "abcde"}, {y: ["abcde"]}]},
+
+        // Neither of the types are present
+        {_id: 100, x: [{no_y: 0}, {y: "abcde"}]},
+    ];
+    runPerPathFiltersTest({
+        docs: docs,
+        query: {"x.y": {$type: ["object", "array", "double", "null"]}},
+        projection: {_id: 1},
+        expected: [{_id: 0}, {_id: 1}, {_id: 2}, {_id: 3}, {_id: 4}, {_id: 5}, {_id: 6}, {_id: 7}],
+        testDescription: "multiple types"
+    });
 })();
 
 // Check translation of MQL $not and $ne match expressions.
@@ -672,6 +806,67 @@ function testInExpr(test) {
     }
 }());
 
+// Check match expressions that use logical AND for predicates on the same path.
+(function testPerPathFilters_SupportedMatchExpressions_And() {
+    let expected = [];
+    let actual = [];
+    let errMsg = "";
+    coll_filters.drop();
+
+    const docs = [
+        {_id: 1, x: 1, n: 1},
+        {_id: 2, x: 5, n: 2},
+        {_id: 3, x: 10, n: 3},
+
+        {_id: 11, x: ["string", 1], n: 11},
+        {_id: 12, x: ["string", 5], n: 12},
+        {_id: 13, x: ["string", 10], n: 13},
+
+        {_id: 21, x: [1, 2], n: 21},
+        {_id: 22, x: [1, 10], n: 22},
+    ];
+    coll_filters.insert(docs);
+    assert.commandWorked(coll_filters.createIndex({"$**": "columnstore"}));
+
+    errMsg = "AND of terms that only traverse cell values";
+    actual = coll_filters.find({x: {$gt: 4, $lt: 7}}, {_id: 1}).toArray();
+    expected = [{_id: 2}, {_id: 12}, {_id: 22}];
+    assert(resultsEq(actual, expected),
+           `actual=${tojson(actual)}, expected=${tojson(expected)} ${errMsg}`);
+
+    errMsg = "Another AND over values to highlight array semantics";
+    actual = coll_filters.find({x: {$lt: 5, $gt: 5}}, {_id: 1}).toArray();
+    expected = [{_id: 22}];
+    assert(resultsEq(actual, expected),
+           `actual=${tojson(actual)}, expected=${tojson(expected)} ${errMsg}`);
+
+    errMsg = "AND of terms that traverse both cell types and values";
+    actual = coll_filters.find({x: {$type: "string", $gt: 4, $lte: 10}}, {_id: 1}).toArray();
+    expected = [{_id: 12}, {_id: 13}];
+    assert(resultsEq(actual, expected),
+           `actual=${tojson(actual)}, expected=${tojson(expected)} ${errMsg}`);
+
+    errMsg = "Nested ANDs";
+    actual = coll_filters
+                 .find({$and: [{x: {$type: "string"}}, {$and: [{x: {$gt: 4}}, {n: {$lt: 13}}]}]},
+                       {_id: 1})
+                 .toArray();
+    expected = [{_id: 12}];
+    assert(resultsEq(actual, expected),
+           `actual=${tojson(actual)}, expected=${tojson(expected)} ${errMsg}`);
+
+    // OR isn't supported for pushing down but it shouldn't cause any problems, when nested under
+    // AND (the OR term of the filter will be applied as residual).
+    errMsg = "OR under AND";
+    actual = coll_filters
+                 .find({$and: [{x: {$type: "string"}}, {$or: [{x: {$gt: 5}}, {n: {$lt: 12}}]}]},
+                       {_id: 1})
+                 .toArray();
+    expected = [{_id: 11}, {_id: 13}];
+    assert(resultsEq(actual, expected),
+           `actual=${tojson(actual)}, expected=${tojson(expected)} ${errMsg}`);
+})();
+
 // Check translation of other MQL match expressions.
 (function testPerPathFilters_SupportedMatchExpressions_Oddballs() {
     const docs = [
@@ -768,13 +963,10 @@ function testInExpr(test) {
     const columnScanStages = getSbePlanStages(explain, "columnscan");
     assert.gt(columnScanStages.length, 0, `Could not find 'columnscan' stage: ${tojson(explain)}`);
 
-    if (columnScanStages.length > 1) {
-        // The test is being run in sharded environment and the state per shard would depend on
-        // how the data gets distributed.
-        jsTestLog("Skipping testPerPathFilters_ExecutionStats in sharded environment.");
-        return;
-    }
-
+    // There might be multiple columnscan stages, e.g. when running in sharded environment. We'll
+    // check the stats on the first available stage because we only care about the upper bounds to
+    // sanity check the perf and most of the test suites would have a single stage and provide the
+    // necessary coverage.
     const columns = columnScanStages[0].columns;
     assertArrayEq({
         actual: columnScanStages[0].paths,
@@ -795,16 +987,16 @@ function testInExpr(test) {
     // equal to the number of documents docsCount (NB: in non-filtered search the number of "next"
     // calls is close to k*docsCount where k is the number of paths).
     assert.eq(_id.numNexts, 0, 'Should not iterate on non-filtered column');
-    assert.eq(x.numNexts + y.numNexts, docsCount, 'Total count of "next" calls');
+    assert.lte(x.numNexts + y.numNexts, docsCount, 'Total count of "next" calls');
 
     // The columns with higher selectivity should be preferred by the zig-zag search for driving the
     // "next" calls. Due to the regularity of data in this test (if "y" matched "x" would match as
-    // well), after the first match "y" column completely takes over.
-    assert.gt(y.numNexts, 0.9 * docsCount, 'high selectivity should drive "next" calls');
+    // well), after the first match "y" column would completely take over.
+    assert.lte(x.numNexts, 0.01 * docsCount, 'High selectivity filter should drive "next" calls');
 
     // We seek into each column to set up the cursors, after that seeks into _id should only happen
     // on full match, and seeks into x or y should only happen on partial matches.
-    assert.eq(_id.numSeeks, 1 + expectedToMatchCount, "Seeks into the _id column");
+    assert.lte(_id.numSeeks, 1 + expectedToMatchCount, "Seeks into the _id column");
     assert.lt(x.numSeeks + y.numSeeks,
               2 * expectedToMatchCount,
               "Number of seeks in filtered columns should be small");

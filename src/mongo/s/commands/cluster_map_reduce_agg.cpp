@@ -201,14 +201,15 @@ bool runAggregationMapReduce(OperationContext* opCtx,
                 // needed in the normal aggregation path. For this translation, though, we need to
                 // build the pipeline to serialize and send to the primary shard.
                 auto serialized = serializeToCommand(cmd, parsedMr, pipelineBuilder().get());
-                uassertStatusOK(
-                    cluster_aggregation_planner::runPipelineOnPrimaryShard(expCtx,
-                                                                           namespaces,
-                                                                           *targeter.cm,
-                                                                           verbosity,
-                                                                           std::move(serialized),
-                                                                           privileges,
-                                                                           &tempResults));
+                uassertStatusOK(cluster_aggregation_planner::runPipelineOnPrimaryShard(
+                    expCtx,
+                    namespaces,
+                    *targeter.cm,
+                    verbosity,
+                    std::move(serialized),
+                    privileges,
+                    expCtx->eligibleForSampling(),
+                    &tempResults));
                 break;
             }
 
@@ -235,8 +236,9 @@ bool runAggregationMapReduce(OperationContext* opCtx,
                     namespaces,
                     privileges,
                     &tempResults,
-                    false,    // hasChangeStream
-                    false));  // startsWithDocuments
+                    false /* hasChangeStream */,
+                    false /* startsWithDocuments */,
+                    expCtx->eligibleForSampling()));
                 break;
             }
 

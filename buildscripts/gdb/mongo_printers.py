@@ -263,13 +263,14 @@ class RecordIdPrinter(object):
             hex_bytes = [hex(b & 0xFF)[2:].zfill(2) for b in raw_bytes]
             return "RecordId small string %d hex bytes: %s" % (str_len, str("".join(hex_bytes)))
         elif rid_format == 3:
-            heap_str = self.val['_data']['heapStr']
-            str_len = int(heap_str["size"])
-            str_ptr = heap_str['stringPtr']
-            raw_bytes = [int(str_ptr[i]) for i in range(0, str_len)]
+            holder_ptr = self.val['_data']['heapStr']["buffer"]['_buffer']["_holder"]["px"]
+            holder = holder_ptr.dereference()
+            str_len = int(holder["_capacity"])
+            # Start of data is immediately after pointer for holder
+            start_ptr = (holder_ptr + 1).dereference().cast(gdb.lookup_type("char")).address
+            raw_bytes = [int(start_ptr[i]) for i in range(0, str_len)]
             hex_bytes = [hex(b & 0xFF)[2:].zfill(2) for b in raw_bytes]
-            void_ptr = str_ptr.cast(gdb.lookup_type('void').pointer())
-            return "RecordId big string %d hex bytes @ %s: %s" % (str_len, void_ptr,
+            return "RecordId big string %d hex bytes @ %s: %s" % (str_len, holder_ptr + 1,
                                                                   str("".join(hex_bytes)))
         else:
             return "unknown RecordId format: %d" % rid_format
@@ -721,6 +722,15 @@ def read_as_integer(pmem, size):
         gdb.selected_inferior().read_memory(pmem, size).tobytes(), \
         sys.byteorder)
 
+def read_as_integer_signed(pmem, size):
+    """Read 'size' bytes at 'pmem' as an integer."""
+    # We assume the same platform for the debugger and the debuggee (thus, 'sys.byteorder'). If
+    # this becomes a problem look into whether it's possible to determine the byteorder of the
+    # inferior.
+    return int.from_bytes(
+        gdb.selected_inferior().read_memory(pmem, size).tobytes(),
+        sys.byteorder,
+        signed = True)
 
 class SbeCodeFragmentPrinter(object):
     """
@@ -803,7 +813,7 @@ class SbeCodeFragmentPrinter(object):
                 args = 'arg: ' + str(read_as_integer(cur_op, int_size))
                 cur_op += int_size
             elif op_name in ['jmp', 'jmpTrue', 'jmpNothing']:
-                offset = read_as_integer(cur_op, int_size)
+                offset = read_as_integer_signed(cur_op, int_size)
                 cur_op += int_size
                 args = 'offset: ' + str(offset) + ', target: ' + hex(cur_op + offset)
             elif op_name in ['pushConstVal', 'getFieldImm']:
@@ -838,7 +848,8 @@ class SbeCodeFragmentPrinter(object):
                 cur_op += uint8_size
                 args = \
                     'Instruction::Constants: ' + str(const_enum) + \
-                    ", offset: " + str(read_as_integer(cur_op, int_size))
+                    ", offset: " + str(read_as_integer_signed(cur_op, int_size))
+                cur_op += int_size
             elif op_name in ['applyClassicMatcher']:
                 args = 'MatchExpression* ' + hex(read_as_integer(cur_op, ptr_size))
                 cur_op += ptr_size
@@ -855,6 +866,10 @@ class SbeCodeFragmentPrinter(object):
                 day_of_week = read_as_integer(cur_op, day_of_week_size)
                 cur_op += day_of_week_size
                 args += ', dayOfWeek: ' + str(day_of_week)
+            elif op_name in ['traverseCsiCellValues', 'traverseCsiCellTypes']:
+                offset = read_as_integer_signed(cur_op, int_size)
+                cur_op += int_size
+                args = 'lambda at: ' + hex(cur_op + offset)
 
             yield hex(op_addr), '{} ({})'.format(op_name, args)
 
@@ -943,6 +958,13 @@ class IntervalPrinter(OptimizerTypePrinter):
         """Initialize IntervalPrinter."""
         super().__init__(val, "ExplainGenerator::explainInterval")
 
+class IntervalExprPrinter(OptimizerTypePrinter):
+    """Pretty-printer for mongo::optimizer::IntervalRequirement::Node."""
+
+    def __init__(self, val):
+        """Initialize IntervalExprPrinter."""
+        super().__init__(val, "ExplainGenerator::explainIntervalExpr")
+
 
 class PartialSchemaReqMapPrinter(OptimizerTypePrinter):
     """Pretty-printer for mongo::optimizer::PartialSchemaRequirements."""
@@ -965,6 +987,16 @@ def register_abt_printers(pp):
 
     # IntervalRequirement printer.
     pp.add("Interval", "mongo::optimizer::IntervalRequirement", False, IntervalPrinter)
+    # IntervalReqExpr::Node printer.
+    pp.add(
+        "IntervalExpr",
+        ("mongo::optimizer::algebra::PolyValue<" +
+         "mongo::optimizer::BoolExpr<mongo::optimizer::IntervalRequirement>::Atom, " +
+         "mongo::optimizer::BoolExpr<mongo::optimizer::IntervalRequirement>::Conjunction, " +
+         "mongo::optimizer::BoolExpr<mongo::optimizer::IntervalRequirement>::Disjunction>"),
+        False,
+        IntervalExprPrinter,
+    )
 
     # Memo printer.
     pp.add("Memo", "mongo::optimizer::cascades::Memo", False, MemoPrinter)
@@ -1031,6 +1063,7 @@ def register_abt_printers(pp):
                                "EvaluationNode",
                                "SargableNode",
                                "RIDIntersectNode",
+                               "RIDUnionNode",
                                "BinaryJoinNode",
                                "HashJoinNode",
                                "MergeJoinNode",

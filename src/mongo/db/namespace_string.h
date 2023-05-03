@@ -91,6 +91,9 @@ public:
     // Name for the change stream change collection.
     static constexpr StringData kChangeCollectionName = "system.change_collection"_sd;
 
+    // Name for the profile collection
+    static constexpr StringData kSystemDotProfileCollectionName = "system.profile"_sd;
+
     // Names of privilege document collections
     static constexpr StringData kSystemUsers = "system.users"_sd;
     static constexpr StringData kSystemRoles = "system.roles"_sd;
@@ -270,6 +273,12 @@ public:
     // Namespace used for storing query analyzer settings.
     static const NamespaceString kConfigQueryAnalyzersNamespace;
 
+    // Namespace used for storing sampled queries.
+    static const NamespaceString kConfigSampledQueriesNamespace;
+
+    // Namespace used for storing the diffs for sampled update queries.
+    static const NamespaceString kConfigSampledQueriesDiffNamespace;
+
     /**
      * Constructs an empty NamespaceString.
      */
@@ -344,6 +353,8 @@ public:
      * Constructs a NamespaceString from the string 'ns'. Should only be used when reading a
      * namespace from disk. 'ns' is expected to contain a tenantId when running in Serverless mode.
      */
+    // TODO SERVER-70013 Move this function into NamespaceStringUtil, and delegate overlapping
+    // functionality to DatabaseNameUtil::parseDbNameFromStringExpectTenantIdInMultitenancyMode.
     static NamespaceString parseFromStringExpectTenantIdInMultitenancyMode(StringData ns);
 
     /**
@@ -453,7 +464,7 @@ public:
         return db() == kLocalDb;
     }
     bool isSystemDotProfile() const {
-        return coll() == "system.profile";
+        return coll() == kSystemDotProfileCollectionName;
     }
     bool isSystemDotViews() const {
         return coll() == kSystemDotViewsCollectionName;

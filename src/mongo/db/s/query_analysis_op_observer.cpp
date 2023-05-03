@@ -31,6 +31,7 @@
 
 #include "mongo/db/s/query_analysis_coordinator.h"
 #include "mongo/db/s/query_analysis_op_observer.h"
+#include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/analyze_shard_key_util.h"
 #include "mongo/s/catalog/type_mongos.h"
@@ -74,13 +75,13 @@ void QueryAnalysisOpObserver::onInserts(OperationContext* opCtx,
 
 void QueryAnalysisOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& args) {
     if (analyze_shard_key::supportsCoordinatingQueryAnalysis()) {
-        if (args.nss == NamespaceString::kConfigQueryAnalyzersNamespace) {
+        if (args.coll->ns() == NamespaceString::kConfigQueryAnalyzersNamespace) {
             const auto& updatedDoc = args.updateArgs->updatedDoc;
             opCtx->recoveryUnit()->onCommit([opCtx, updatedDoc](boost::optional<Timestamp>) {
                 analyze_shard_key::QueryAnalysisCoordinator::get(opCtx)->onConfigurationUpdate(
                     updatedDoc);
             });
-        } else if (args.nss == MongosType::ConfigNS) {
+        } else if (args.coll->ns() == MongosType::ConfigNS) {
             const auto& updatedDoc = args.updateArgs->updatedDoc;
             opCtx->recoveryUnit()->onCommit([opCtx, updatedDoc](boost::optional<Timestamp>) {
                 analyze_shard_key::QueryAnalysisCoordinator::get(opCtx)->onSamplerUpdate(
@@ -88,32 +89,42 @@ void QueryAnalysisOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdat
             });
         }
     }
+
+    if (analyze_shard_key::supportsPersistingSampledQueries() && args.updateArgs->sampleId &&
+        args.updateArgs->preImageDoc && opCtx->writesAreReplicated()) {
+        analyze_shard_key::QueryAnalysisWriter::get(opCtx)
+            .addDiff(*args.updateArgs->sampleId,
+                     args.coll->ns(),
+                     args.coll->uuid(),
+                     *args.updateArgs->preImageDoc,
+                     args.updateArgs->updatedDoc)
+            .getAsync([](auto) {});
+    }
 }
 
 void QueryAnalysisOpObserver::aboutToDelete(OperationContext* opCtx,
-                                            NamespaceString const& nss,
-                                            const UUID& uuid,
+                                            const CollectionPtr& coll,
                                             BSONObj const& doc) {
     if (analyze_shard_key::supportsCoordinatingQueryAnalysis()) {
-        if (nss == NamespaceString::kConfigQueryAnalyzersNamespace || nss == MongosType::ConfigNS) {
+        if (coll->ns() == NamespaceString::kConfigQueryAnalyzersNamespace ||
+            coll->ns() == MongosType::ConfigNS) {
             docToDeleteDecoration(opCtx) = doc;
         }
     }
 }
 
 void QueryAnalysisOpObserver::onDelete(OperationContext* opCtx,
-                                       const NamespaceString& nss,
-                                       const UUID& uuid,
+                                       const CollectionPtr& coll,
                                        StmtId stmtId,
                                        const OplogDeleteEntryArgs& args) {
     if (analyze_shard_key::supportsCoordinatingQueryAnalysis()) {
-        if (nss == NamespaceString::kConfigQueryAnalyzersNamespace) {
+        if (coll->ns() == NamespaceString::kConfigQueryAnalyzersNamespace) {
             auto& doc = docToDeleteDecoration(opCtx);
             invariant(!doc.isEmpty());
             opCtx->recoveryUnit()->onCommit([opCtx, doc](boost::optional<Timestamp>) {
                 analyze_shard_key::QueryAnalysisCoordinator::get(opCtx)->onConfigurationDelete(doc);
             });
-        } else if (nss == MongosType::ConfigNS) {
+        } else if (coll->ns() == MongosType::ConfigNS) {
             auto& doc = docToDeleteDecoration(opCtx);
             invariant(!doc.isEmpty());
             opCtx->recoveryUnit()->onCommit([opCtx, doc](boost::optional<Timestamp>) {

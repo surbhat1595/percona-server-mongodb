@@ -29,13 +29,10 @@
 
 #pragma once
 
-#include <cstdint>
-#include <fmt/format.h>
 #include <string>
 #include <vector>
 
 #include "mongo/base/string_data.h"
-#include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/external_data_source_option_gen.h"
 #include "mongo/util/assert_util.h"
 
@@ -44,18 +41,15 @@ namespace mongo {
  * Metadata for external data source.
  */
 struct ExternalDataSourceMetadata {
-#ifndef _WIN32
-    static constexpr auto kDefaultFileUrlPrefix = "file:///tmp/"_sd;
-#else
-    static constexpr auto kDefaultFileUrlPrefix = "file:////./pipe/"_sd;
-#endif
+    static constexpr auto kUrlProtocolFile = "file://"_sd;
 
-    ExternalDataSourceMetadata(StringData url, StorageTypeEnum storageType, FileTypeEnum fileType)
-        : url(url), storageType(storageType), fileType(fileType) {
-        using namespace fmt::literals;
+    ExternalDataSourceMetadata(StringData urlStr,
+                               StorageTypeEnum storageTypeEnum,
+                               FileTypeEnum fileTypeEnum)
+        : url(urlStr), storageType(storageTypeEnum), fileType(fileTypeEnum) {
         uassert(6968500,
-                "File url must start with {}"_format(kDefaultFileUrlPrefix),
-                url.startsWith(kDefaultFileUrlPrefix));
+                "File url must start with {}"_format(kUrlProtocolFile),
+                urlStr.startsWith(kUrlProtocolFile));
         uassert(6968501, "Storage type must be 'pipe'", storageType == StorageTypeEnum::pipe);
         uassert(6968502, "File type must be 'bson'", fileType == FileTypeEnum::bson);
     }
@@ -68,7 +62,7 @@ struct ExternalDataSourceMetadata {
     /**
      * Url for an external data source
      */
-    StringData url;
+    std::string url;
 
     /**
      * Storage type for an external data source

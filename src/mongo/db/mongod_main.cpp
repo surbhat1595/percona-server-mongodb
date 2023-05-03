@@ -146,6 +146,7 @@
 #include "mongo/db/s/op_observer_sharding_impl.h"
 #include "mongo/db/s/periodic_sharded_index_consistency_checker.h"
 #include "mongo/db/s/query_analysis_op_observer.h"
+#include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/db/s/rename_collection_participant_service.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
 #include "mongo/db/s/resharding/resharding_donor_service.h"
@@ -202,6 +203,7 @@
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/query_analysis_sampler.h"
 #include "mongo/scripting/dbdirectclient_factory.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/stdx/future.h"
@@ -748,7 +750,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
             // Note: For replica sets, ShardingStateRecovery happens on transition to primary.
             if (!replCoord->isReplEnabled()) {
                 if (ShardingState::get(startupOpCtx.get())->enabled()) {
-                    uassertStatusOK(ShardingStateRecovery::recover(startupOpCtx.get()));
+                    uassertStatusOK(ShardingStateRecovery_DEPRECATED::recover(startupOpCtx.get()));
                 }
             }
         } else if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
@@ -889,6 +891,10 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     auto cacheLoader = std::make_unique<StatsCacheLoaderImpl>();
     auto catalog = std::make_unique<StatsCatalog>(serviceContext, std::move(cacheLoader));
     StatsCatalog::set(serviceContext, std::move(catalog));
+
+    if (analyze_shard_key::supportsPersistingSampledQueriesIgnoreFCV()) {
+        analyze_shard_key::QueryAnalysisWriter::get(serviceContext).onStartup();
+    }
 
     // MessageServer::run will return when exit code closes its socket and we don't need the
     // operation context anymore
@@ -1208,6 +1214,8 @@ void setUpObservers(ServiceContext* serviceContext) {
             std::make_unique<OplogWriterTransactionProxy>(std::make_unique<OplogWriterImpl>())));
         opObserverRegistry->addObserver(std::make_unique<ShardServerOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ReshardingOpObserver>());
+        opObserverRegistry->addObserver(
+            std::make_unique<analyze_shard_key::QueryAnalysisOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<repl::TenantMigrationDonorOpObserver>());
         opObserverRegistry->addObserver(
             std::make_unique<repl::TenantMigrationRecipientOpObserver>());
@@ -1346,6 +1354,15 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
     if (auto lsc = LogicalSessionCache::get(serviceContext)) {
         LOGV2(4784903, "Shutting down the LogicalSessionCache");
         lsc->joinOnShutDown();
+    }
+
+    if (analyze_shard_key::supportsSamplingQueriesIgnoreFCV()) {
+        LOGV2(7114100, "Shutting down the QueryAnalysisSampler");
+        analyze_shard_key::QueryAnalysisSampler::get(serviceContext).onShutdown();
+    }
+    if (analyze_shard_key::supportsPersistingSampledQueriesIgnoreFCV()) {
+        LOGV2(7047303, "Shutting down the QueryAnalysisWriter");
+        analyze_shard_key::QueryAnalysisWriter::get(serviceContext).onShutdown();
     }
 
     // Shutdown the TransportLayer so that new connections aren't accepted
@@ -1658,6 +1675,10 @@ int mongod_main(int argc, char* argv[]) {
         // exits directly and so never reaches here either.
     }
 #endif
+
+    LOGV2_OPTIONS(
+        7091600, {LogComponent::kTenantMigration}, "Starting TenantMigrationAccessBlockerRegistry");
+    TenantMigrationAccessBlockerRegistry::get(service).startup();
 
     ExitCode exitCode = initAndListen(service, serverGlobalParams.port);
     exitCleanly(exitCode);

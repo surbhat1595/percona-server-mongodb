@@ -32,12 +32,12 @@
 #include "mongo/db/query/ce/ce_test_utils.h"
 
 #include "mongo/db/pipeline/abt/utils.h"
-#include "mongo/db/query/optimizer/cascades/cost_derivation.h"
 #include "mongo/db/query/optimizer/explain.h"
 #include "mongo/db/query/optimizer/metadata_factory.h"
 #include "mongo/db/query/optimizer/opt_phase_manager.h"
 #include "mongo/db/query/optimizer/rewrites/const_eval.h"
 #include "mongo/db/query/optimizer/utils/unit_test_pipeline_utils.h"
+#include "mongo/db/query/optimizer/utils/unit_test_utils.h"
 #include "mongo/db/query/sbe_stage_builder_helpers.h"
 #include "mongo/unittest/unittest.h"
 
@@ -53,13 +53,13 @@ CETester::CETester(std::string collName,
     addCollection(collName, collCard);
 }
 
-template <class T>
-optimizer::CEType CETester::getMatchCE(const std::string& predicate) const {
-    return getCE<T>("[{$match: " + predicate + "}]");
+optimizer::CEType CETester::getMatchCE(const std::string& queryPredicate,
+                                       std::function<bool(const ABT&)> nodePredicate) const {
+    return getCE("[{$match: " + queryPredicate + "}]", nodePredicate);
 }
 
-template <class T>
-optimizer::CEType CETester::getCE(const std::string& pipeline) const {
+optimizer::CEType CETester::getCE(const std::string& pipeline,
+                                  std::function<bool(const ABT&)> nodePredicate) const {
     if constexpr (kCETestLogOnly) {
         std::cout << "\n\nQuery: " << pipeline << "\n";
     }
@@ -68,15 +68,10 @@ optimizer::CEType CETester::getCE(const std::string& pipeline) const {
     ABT abt = translatePipeline(pipeline, _collName);
 
     // Get cardinality estimate.
-    return getCE<T>(abt);
+    return getCE(abt, nodePredicate);
 }
 
-template optimizer::CEType CETester::getCE<optimizer::RootNode>(const std::string& query) const;
-template optimizer::CEType CETester::getCE<optimizer::SargableNode>(const std::string& query) const;
-
-
-template <class T>
-optimizer::CEType CETester::getCE(ABT& abt) const {
+optimizer::CEType CETester::getCE(ABT& abt, std::function<bool(const ABT&)> nodePredicate) const {
     if constexpr (kCETestLogOnly) {
         std::cout << ExplainGenerator::explainV2(abt) << std::endl;
     }
@@ -86,7 +81,8 @@ optimizer::CEType CETester::getCE(ABT& abt) const {
                                  false /*requireRID*/,
                                  _metadata,
                                  getCETransport(),
-                                 std::make_unique<DefaultCosting>(),
+                                 makeHeuristicCE(),
+                                 makeCosting(),
                                  defaultConvertPathToInterval,
                                  ConstEval::constFold,
                                  DebugInfo::kDefaultForTests,
@@ -146,8 +142,8 @@ optimizer::CEType CETester::getCE(ABT& abt) const {
             }
         }
 
-        if (node.is<T>()) {
-            // We want to return the cardinality for the entire ABT.
+        if (nodePredicate(node)) {
+            // We want to return the cardinality for the memo group matching the 'nodePredicate'.
             outCard = memoCE;
         }
     }
@@ -160,13 +156,6 @@ optimizer::CEType CETester::getCE(ABT& abt) const {
 
     return outCard;
 }
-
-template optimizer::CEType CETester::getCE<optimizer::RootNode>(ABT& abt) const;
-template optimizer::CEType CETester::getCE<optimizer::SargableNode>(ABT& abt) const;
-template optimizer::CEType CETester::getMatchCE<optimizer::RootNode>(
-    const std::string& matchPredicate) const;
-template optimizer::CEType CETester::getMatchCE<optimizer::SargableNode>(
-    const std::string& matchPredicate) const;
 
 ScanDefinition& CETester::getCollScanDefinition() {
     auto it = _metadata._scanDefs.find(_collName);

@@ -35,7 +35,9 @@
 namespace mongo::optimizer {
 
 struct CollectedInfo {
-    using VarRefsMap = opt::unordered_map<std::string, opt::unordered_map<const Variable*, bool>>;
+    using VarRefsMap = opt::unordered_map<ProjectionName,
+                                          opt::unordered_map<const Variable*, bool>,
+                                          ProjectionName::Hasher>;
 
     /**
      * All resolved variables so far, regardless of visibility in the ABT.
@@ -52,7 +54,10 @@ struct CollectedInfo {
      * ABT. Maps from projection name to all Variable instances referencing that name. Variables
      * move from 'freeVars' to 'useMap' when they are resolved.
      */
-    opt::unordered_map<std::string, std::vector<std::reference_wrapper<const Variable>>> freeVars;
+    opt::unordered_map<ProjectionName,
+                       std::vector<std::reference_wrapper<const Variable>>,
+                       ProjectionName::Hasher>
+        freeVars;
 
     /**
      * Maps from a node to the definitions (projections) available for use in its ancestor nodes.
@@ -69,18 +74,22 @@ struct CollectedInfo {
     /**
      * This is a destructive merge, the 'other' will be siphoned out.
      */
+    template <bool resolveFreeVarsWithOther = true>
     void merge(CollectedInfo&& other) {
-        // Incoming (other) info has some definitions. So let's try to resolve our free variables.
-        if (!other.defs.empty() && !freeVars.empty()) {
-            for (auto&& [name, def] : other.defs) {
-                resolveFreeVars(name, def);
+        if constexpr (resolveFreeVarsWithOther) {
+            // Incoming (other) info has some definitions. So let's try to resolve our free
+            // variables.
+            if (!other.defs.empty() && !freeVars.empty()) {
+                for (auto&& [name, def] : other.defs) {
+                    resolveFreeVars(name, def);
+                }
             }
-        }
 
-        // We have some definitions so let try to resolve other's free variables.
-        if (!defs.empty() && !other.freeVars.empty()) {
-            for (auto&& [name, def] : defs) {
-                other.resolveFreeVars(name, def);
+            // We have some definitions so let try to resolve other's free variables.
+            if (!defs.empty() && !other.freeVars.empty()) {
+                for (auto&& [name, def] : defs) {
+                    other.resolveFreeVars(name, def);
+                }
             }
         }
 
@@ -168,7 +177,7 @@ struct CollectedInfo {
      * Records collected last variable references for a specific variable. Should only be called
      * when the variable is guaranteed not to be referenced again in the ABT.
      */
-    void finalizeLastRefs(const std::string& name) {
+    void finalizeLastRefs(const ProjectionName& name) {
         if (auto it = varLastRefs.find(name); it != varLastRefs.end()) {
             for (auto& [var, isLastRef] : it->second) {
                 if (isLastRef) {
@@ -273,6 +282,7 @@ struct Collector {
     CollectedInfo transport(const ABT&, const T& op, Ts&&... ts) {
         // The default behavior resolves free variables, merges known definitions and propagates
         // them up unmodified.
+        // TODO: SERVER-70880: Remove default ABT type handler in the reference tracker.
         CollectedInfo result{};
         (result.merge(std::forward<Ts>(ts)), ...);
 
@@ -456,10 +466,10 @@ struct Collector {
         return result;
     }
 
-    CollectedInfo transport(const ABT& n,
-                            const RIDIntersectNode& node,
-                            CollectedInfo leftChildResult,
-                            CollectedInfo rightChildResult) {
+    template <class T>
+    CollectedInfo handleRIDNodeReferences(const T& node,
+                                          CollectedInfo leftChildResult,
+                                          CollectedInfo rightChildResult) {
         CollectedInfo result{};
 
         // This is a special case where both children of 'node' have a definition for the scan
@@ -468,11 +478,28 @@ struct Collector {
         rightChildResult.defs.erase(node.getScanProjectionName());
 
         result.merge(std::move(leftChildResult));
-        result.merge(std::move(rightChildResult));
+        result.merge<false /*resolveFreeVarsWithOther*/>(std::move(rightChildResult));
 
         result.nodeDefs[&node] = result.defs;
 
         return result;
+    }
+
+    CollectedInfo transport(const ABT& n,
+                            const RIDIntersectNode& node,
+                            CollectedInfo leftChildResult,
+                            CollectedInfo rightChildResult) {
+        return handleRIDNodeReferences(
+            node, std::move(leftChildResult), std::move(rightChildResult));
+    }
+
+    CollectedInfo transport(const ABT& n,
+                            const RIDUnionNode& node,
+                            CollectedInfo leftChildResult,
+                            CollectedInfo rightChildResult) {
+        // TODO SERVER-69026 should determine how the reference tracker for RIDUnionNode will work.
+        return handleRIDNodeReferences(
+            node, std::move(leftChildResult), std::move(rightChildResult));
     }
 
     CollectedInfo transport(const ABT& n,
@@ -493,13 +520,59 @@ struct Collector {
             }
         }
 
-        // The correlated projections will be resolved automatically by the merging. We need to
-        // propagate the right child projections here, since these may be useful to ancestor ndoes.
         result.merge(std::move(leftChildResult));
-        result.merge(std::move(rightChildResult));
+
+        if (!result.defs.empty() && !rightChildResult.freeVars.empty()) {
+            // Manually resolve free variables in the right child using the correlated variables
+            // from the left child.
+            for (auto&& [name, def] : result.defs) {
+                if (correlatedProjNames.count(name) > 0) {
+                    rightChildResult.resolveFreeVars(name, def);
+                }
+            }
+        }
+
+        // Do not resolve further free variables. We also need to propagate the right child
+        // projections here, since these may be useful to ancestor nodes.
+        result.merge<false /*resolveFreeVarsWithOther*/>(std::move(rightChildResult));
+
         result.mergeNoDefs(std::move(filterResult));
 
         result.nodeDefs[&binaryJoinNode] = result.defs;
+
+        return result;
+    }
+
+    CollectedInfo transport(const ABT& n,
+                            const HashJoinNode& hashJoinNode,
+                            CollectedInfo leftChildResult,
+                            CollectedInfo rightChildResult,
+                            CollectedInfo refsResult) {
+        CollectedInfo result{};
+
+        result.merge(std::move(leftChildResult));
+        // Do not resolve further free variables.
+        result.merge<false /*resolveFreeVarsWithOther*/>(std::move(rightChildResult));
+        result.mergeNoDefs(std::move(refsResult));
+
+        result.nodeDefs[&hashJoinNode] = result.defs;
+
+        return result;
+    }
+
+    CollectedInfo transport(const ABT& n,
+                            const MergeJoinNode& mergeJoinNode,
+                            CollectedInfo leftChildResult,
+                            CollectedInfo rightChildResult,
+                            CollectedInfo refsResult) {
+        CollectedInfo result{};
+
+        result.merge(std::move(leftChildResult));
+        // Do not resolve further free variables.
+        result.merge<false /*resolveFreeVarsWithOther*/>(std::move(rightChildResult));
+        result.mergeNoDefs(std::move(refsResult));
+
+        result.nodeDefs[&mergeJoinNode] = result.defs;
 
         return result;
     }
@@ -691,15 +764,15 @@ bool VariableEnvironment::hasFreeVariables() const {
     return !_info->freeVars.empty();
 }
 
-opt::unordered_set<std::string> VariableEnvironment::freeVariableNames() const {
-    opt::unordered_set<std::string> freeVarNames;
+ProjectionNameSet VariableEnvironment::freeVariableNames() const {
+    ProjectionNameSet freeVarNames;
     for (auto&& [name, vars] : _info->freeVars) {
         freeVarNames.insert(name);
     }
     return freeVarNames;
 }
 
-size_t VariableEnvironment::freeOccurences(const std::string& variable) const {
+size_t VariableEnvironment::freeOccurences(const ProjectionName& variable) const {
     auto it = _info->freeVars.find(variable);
     if (it == _info->freeVars.end()) {
         return 0;

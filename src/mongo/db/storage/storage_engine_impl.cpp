@@ -293,6 +293,14 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx,
     const auto loadingFromUncleanShutdownOrRepair =
         lastShutdownState == LastShutdownState::kUnclean || _options.forRepair;
     BatchedCollectionCatalogWriter catalogBatchWriter{opCtx};
+    // Use the stable timestamp as minValid. We know for a fact that the collection exist at
+    // this point and is in sync. If we use an earlier timestamp than replication rollback we
+    // may be out-of-order for the collection catalog managing this namespace.
+    Timestamp minValidTs = stableTs ? *stableTs : Timestamp::min();
+    CollectionCatalog::write(opCtx, [&minValidTs](CollectionCatalog& catalog) {
+        // Let the CollectionCatalog know that we are maintaining timestamps from minValidTs
+        catalog.cleanupForCatalogReopen(minValidTs);
+    });
     for (DurableCatalog::EntryIdentifier entry : catalogEntries) {
         if (_options.forRestore) {
             // When restoring a subset of user collections from a backup, the collections not
@@ -378,10 +386,6 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx,
         }
 
         Timestamp minVisibleTs = Timestamp::min();
-        // Use the stable timestamp as minValid. We know for a fact that the collection exist at
-        // this point and is in sync. If we use an earlier timestamp than replication rollback we
-        // may be out-of-order for the collection catalog managing this namespace.
-        Timestamp minValidTs = stableTs ? *stableTs : Timestamp::min();
         // If there's no recovery timestamp, every collection is available.
         if (boost::optional<Timestamp> recoveryTs = _engine->getRecoveryTimestamp()) {
             // Otherwise choose a minimum visible timestamp that's at least as large as the true
@@ -990,10 +994,12 @@ Status StorageEngineImpl::_dropCollectionsNoTimestamp(OperationContext* opCtx,
 
         audit::logDropCollection(opCtx->getClient(), coll->ns());
 
-        Status result = catalog::dropCollection(
-            opCtx, coll->ns(), coll->getCatalogId(), coll->getSharedIdent());
-        if (!result.isOK() && firstError.isOK()) {
-            firstError = result;
+        if (auto sharedIdent = coll->getSharedIdent()) {
+            Status result =
+                catalog::dropCollection(opCtx, coll->ns(), coll->getCatalogId(), sharedIdent);
+            if (!result.isOK() && firstError.isOK()) {
+                firstError = result;
+            }
         }
 
         CollectionCatalog::get(opCtx)->dropCollection(

@@ -33,6 +33,7 @@
 
 #include "mongo/db/query/optimizer/algebra/operator.h"
 #include "mongo/db/query/optimizer/algebra/polyvalue.h"
+#include "mongo/db/query/optimizer/defs.h"
 #include "mongo/db/query/optimizer/syntax/syntax_fwd_declare.h"
 #include "mongo/db/query/optimizer/utils/printable_enum.h"
 #include "mongo/util/assert_util.h"
@@ -86,6 +87,7 @@ using ABT = algebra::PolyValue<Blackhole,
                                EvaluationNode,
                                SargableNode,
                                RIDIntersectNode,
+                               RIDUnionNode,
                                BinaryJoinNode,
                                HashJoinNode,
                                MergeJoinNode,
@@ -153,6 +155,9 @@ inline bool operator!=(const ABT& left, const ABT& right) {
                                 \
     /* unary operations */      \
     F(Neg)                      \
+                                \
+    /* Nothing-handling */      \
+    F(FillEmpty)                \
                                 \
     /* logical operations */    \
     F(And)                      \
@@ -236,7 +241,7 @@ public:
     /**
      * Construct Variable objects out of provided vector of strings.
      */
-    References(const std::vector<std::string>& names) : Base(ABTVector{}) {
+    References(const ProjectionNameVector& names) : Base(ABTVector{}) {
         // Construct actual Variable objects from names and make them the children of this object.
         for (const auto& name : names) {
             nodes().emplace_back(make<Variable>(name));
@@ -266,17 +271,17 @@ public:
  */
 class ExpressionBinder : public OperatorDynamicHomogenous {
     using Base = OperatorDynamicHomogenous;
-    std::vector<std::string> _names;
+    ProjectionNameVector _names;
 
 public:
-    ExpressionBinder(std::string name, ABT expr) : Base(makeSeq(std::move(expr))) {
+    ExpressionBinder(ProjectionName name, ABT expr) : Base(makeSeq(std::move(expr))) {
         _names.emplace_back(std::move(name));
         for (const auto& node : nodes()) {
             assertExprSort(node);
         }
     }
 
-    ExpressionBinder(std::vector<std::string> names, ABTVector exprs)
+    ExpressionBinder(ProjectionNameVector names, ABTVector exprs)
         : Base(std::move(exprs)), _names(std::move(names)) {
         for (const auto& node : nodes()) {
             assertExprSort(node);
@@ -287,7 +292,7 @@ public:
         return _names == other._names && exprs() == other.exprs();
     }
 
-    const std::vector<std::string>& names() const {
+    const ProjectionNameVector& names() const {
         return _names;
     }
 

@@ -33,6 +33,7 @@
 #include "mongo/db/exec/batched_delete_stage.h"
 
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/exec/scoped_timer.h"
@@ -325,7 +326,8 @@ long long BatchedDeleteStage::_commitBatch(WorkingSetID* out,
 
     // Start a WUOW with 'groupOplogEntries' which groups a delete batch into a single timestamp
     // and oplog entry.
-    WriteUnitOfWork wuow(opCtx(), true /* groupOplogEntries */);
+    WriteUnitOfWork wuow(opCtx(),
+                         _stagedDeletesBuffer.size() > 1U ? true : false /* groupOplogEntries */);
     for (; *bufferOffset < _stagedDeletesBuffer.size(); ++*bufferOffset) {
         if (MONGO_unlikely(throwWriteConflictExceptionInBatchedDeleteStage.shouldFail())) {
             throwWriteConflictException(
@@ -347,6 +349,7 @@ long long BatchedDeleteStage::_commitBatch(WorkingSetID* out,
         const auto action = docStillMatches ? _preWriteFilter.computeAction(member->doc.value())
                                             : write_stage_common::PreWriteFilter::Action::kSkip;
         bool writeToOrphan = false;
+        auto retryableWrite = write_stage_common::isRetryableWrite(opCtx());
         switch (action) {
             case write_stage_common::PreWriteFilter::Action::kSkip:
                 LOGV2_DEBUG(
@@ -387,16 +390,20 @@ long long BatchedDeleteStage::_commitBatch(WorkingSetID* out,
                     return batchTimer.millis();
                 }
 
-                collection()->deleteDocument(opCtx(),
-                                             Snapshotted(memberDoc.snapshotId(), bsonObjDoc),
-                                             _params->stmtId,
-                                             member->recordId,
-                                             _params->opDebug,
-                                             _params->fromMigrate || writeToOrphan,
-                                             false,
-                                             _params->returnDeleted
-                                                 ? Collection::StoreDeletedDoc::On
-                                                 : Collection::StoreDeletedDoc::Off);
+                collection_internal::deleteDocument(
+                    opCtx(),
+                    collection(),
+                    Snapshotted(memberDoc.snapshotId(), bsonObjDoc),
+                    _params->stmtId,
+                    member->recordId,
+                    _params->opDebug,
+                    _params->fromMigrate || writeToOrphan,
+                    false,
+                    _params->returnDeleted ? collection_internal::StoreDeletedDoc::On
+                                           : collection_internal::StoreDeletedDoc::Off,
+                    CheckRecordId::Off,
+                    retryableWrite ? collection_internal::RetryableWrite::kYes
+                                   : collection_internal::RetryableWrite::kNo);
 
                 (*docsDeleted)++;
                 (*bytesDeleted) += bsonObjDoc.objsize();

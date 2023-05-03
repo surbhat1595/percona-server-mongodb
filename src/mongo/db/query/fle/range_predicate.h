@@ -34,7 +34,7 @@
 
 namespace mongo::fle {
 /**
- * Rewrite for the encrypted range index, which expects a $between expression.
+ * Rewrite for the encrypted range index, which expects a comparison operator expression.
  */
 class RangePredicate : public EncryptedPredicate {
 public:
@@ -49,6 +49,17 @@ protected:
     std::unique_ptr<MatchExpression> rewriteToRuntimeComparison(
         MatchExpression* expr) const override;
     std::unique_ptr<Expression> rewriteToRuntimeComparison(Expression* expr) const override;
+
+    virtual bool isStub(BSONElement elt) const {
+        auto parsedPayload = parseFindPayload<ParsedFindRangePayload>(elt);
+        return parsedPayload.isStub();
+    }
+
+    virtual bool isStub(Value elt) const {
+        auto parsedPayload = parseFindPayload<ParsedFindRangePayload>(elt);
+        return parsedPayload.isStub();
+    }
+
 
 private:
     EncryptedBinDataType encryptedBinDataType() const override {

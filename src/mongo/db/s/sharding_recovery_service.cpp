@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-
 #include <set>
 
 #include "mongo/platform/basic.h"
@@ -42,6 +41,7 @@
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/s/collection_critical_section_document_gen.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
+#include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/s/sharding_migration_critical_section.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/type_collection.h"
@@ -49,7 +49,6 @@
 #include "mongo/s/write_ops/batched_command_response.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
-
 
 namespace mongo {
 
@@ -154,9 +153,15 @@ void ShardingRecoveryService::acquireRecoverableCriticalSectionBlockWrites(
 
     {
         Lock::GlobalLock lk(opCtx, MODE_IX);
-        // TODO SERVER-68084 add the AutoGetCollectionViewMode::kViewsPermitted parameter to
-        // construct cCollLock.
-        AutoGetCollection cCollLock(opCtx, nss, MODE_S);
+        boost::optional<AutoGetDb> dbLock;
+        boost::optional<AutoGetCollection> collLock;
+        if (nsIsDbOnly(nss.ns())) {
+            dbLock.emplace(opCtx, nss.dbName(), MODE_S);
+        } else {
+            // TODO SERVER-68084 add the AutoGetCollectionViewMode::kViewsPermitted parameter to
+            // construct collLock.
+            collLock.emplace(opCtx, nss, MODE_S);
+        }
 
         DBDirectClient dbClient(opCtx);
         FindCommandRequest findRequest{NamespaceString::kCollectionCriticalSectionsNamespace};
@@ -172,10 +177,9 @@ void ShardingRecoveryService::acquireRecoverableCriticalSectionBlockWrites(
 
             invariant(collCSDoc.getReason().woCompare(reason) == 0,
                       str::stream()
-                          << "Trying to acquire a  critical section blocking writes for namespace "
-                          << nss << " and reason " << reason
-                          << " but it is already taken by another operation with different reason "
-                          << collCSDoc.getReason());
+                          << "Trying to acquire a critical section blocking writes for namespace "
+                          << nss << " and reason " << reason << " but it is already taken by "
+                          << "another operation with different reason " << collCSDoc.getReason());
 
             LOGV2_DEBUG(
                 5656601,
@@ -242,9 +246,15 @@ void ShardingRecoveryService::promoteRecoverableCriticalSectionToBlockAlsoReads(
     invariant(!opCtx->lockState()->isLocked());
 
     {
-        // TODO SERVER-68084 add the AutoGetCollectionViewMode::kViewsPermitted parameter to
-        // construct cCollLock.
-        AutoGetCollection cCollLock(opCtx, nss, MODE_X);
+        boost::optional<AutoGetDb> dbLock;
+        boost::optional<AutoGetCollection> collLock;
+        if (nsIsDbOnly(nss.ns())) {
+            dbLock.emplace(opCtx, nss.dbName(), MODE_X);
+        } else {
+            // TODO SERVER-68084 add the AutoGetCollectionViewMode::kViewsPermitted parameter to
+            // construct collLock.
+            collLock.emplace(opCtx, nss, MODE_X);
+        }
 
         DBDirectClient dbClient(opCtx);
         FindCommandRequest findRequest{NamespaceString::kCollectionCriticalSectionsNamespace};
@@ -333,7 +343,8 @@ void ShardingRecoveryService::releaseRecoverableCriticalSection(
     OperationContext* opCtx,
     const NamespaceString& nss,
     const BSONObj& reason,
-    const WriteConcernOptions& writeConcern) {
+    const WriteConcernOptions& writeConcern,
+    bool throwIfReasonDiffers) {
     LOGV2_DEBUG(5656606,
                 3,
                 "Releasing recoverable critical section",
@@ -344,9 +355,15 @@ void ShardingRecoveryService::releaseRecoverableCriticalSection(
     invariant(!opCtx->lockState()->isLocked());
 
     {
-        // TODO SERVER-68084 add the AutoGetCollectionViewMode::kViewsPermitted parameter to
-        // construct cCollLock.
-        AutoGetCollection collLock(opCtx, nss, MODE_X);
+        boost::optional<AutoGetDb> dbLock;
+        boost::optional<AutoGetCollection> collLock;
+        if (nsIsDbOnly(nss.ns())) {
+            dbLock.emplace(opCtx, nss.dbName(), MODE_X);
+        } else {
+            // TODO SERVER-68084 add the AutoGetCollectionViewMode::kViewsPermitted parameter to
+            // construct collLock.
+            collLock.emplace(opCtx, nss, MODE_X);
+        }
 
         DBDirectClient dbClient(opCtx);
 
@@ -371,8 +388,21 @@ void ShardingRecoveryService::releaseRecoverableCriticalSection(
         const auto collCSDoc = CollectionCriticalSectionDocument::parse(
             IDLParserContext("ReleaseRecoverableCS"), bsonObj);
 
+        const bool isDifferentReason = collCSDoc.getReason().woCompare(reason) != 0;
+        if (MONGO_unlikely(!throwIfReasonDiffers && isDifferentReason)) {
+            LOGV2_DEBUG(7019701,
+                        2,
+                        "Impossible to release recoverable critical section since it was taken by "
+                        "another operation with different reason",
+                        "namespace"_attr = nss,
+                        "callerReason"_attr = reason,
+                        "storedReason"_attr = collCSDoc.getReason(),
+                        "writeConcern"_attr = writeConcern);
+            return;
+        }
+
         invariant(
-            collCSDoc.getReason().woCompare(reason) == 0,
+            !isDifferentReason,
             str::stream() << "Trying to release a critical for namespace " << nss << " and reason "
                           << reason
                           << " but it is already taken by another operation with different reason "
@@ -428,20 +458,25 @@ void ShardingRecoveryService::recoverRecoverableCriticalSections(OperationContex
     LOGV2_DEBUG(5604000, 2, "Recovering all recoverable critical sections");
 
     // Release all in-memory critical sections
-    const auto collectionNames = CollectionShardingState::getCollectionNames(opCtx);
-    for (const auto& collName : collectionNames) {
+    for (const auto& nss : CollectionShardingState::getCollectionNames(opCtx)) {
         try {
-            AutoGetCollection collLock(opCtx, collName, MODE_X);
-            auto* const csr = CollectionShardingRuntime::get(opCtx, collName);
-            auto csrLock = CollectionShardingRuntime::CSRLock::lockExclusive(opCtx, csr);
-            csr->exitCriticalSectionNoChecks(csrLock);
+            AutoGetCollection collLock(opCtx, nss, MODE_X);
+            auto scopedCsr = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
+                opCtx, nss, CSRAcquisitionMode::kExclusive);
+            scopedCsr->exitCriticalSectionNoChecks();
         } catch (const ExceptionFor<ErrorCodes::CommandNotSupportedOnView>&) {
             LOGV2_DEBUG(6050800,
                         2,
                         "Skipping attempting to exit critical section for view in "
                         "recoverRecoverableCriticalSections",
-                        "namespace"_attr = collName);
+                        "namespace"_attr = nss);
         }
+    }
+    for (const auto& dbName : DatabaseShardingState::getDatabaseNames(opCtx)) {
+        AutoGetDb dbLock(opCtx, dbName, MODE_X);
+        auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
+            opCtx, dbName, DSSAcquisitionMode::kExclusive);
+        scopedDss->exitCriticalSectionNoChecks(opCtx);
     }
 
     // Map the critical sections that are on disk to memory
@@ -450,12 +485,23 @@ void ShardingRecoveryService::recoverRecoverableCriticalSections(OperationContex
     store.forEach(opCtx, BSONObj{}, [&opCtx](const CollectionCriticalSectionDocument& doc) {
         const auto& nss = doc.getNss();
         {
-            AutoGetCollection collLock(opCtx, nss, MODE_X);
-            auto* const csr = CollectionShardingRuntime::get(opCtx, nss);
-            auto csrLock = CollectionShardingRuntime::CSRLock::lockExclusive(opCtx, csr);
-            csr->enterCriticalSectionCatchUpPhase(csrLock, doc.getReason());
-            if (doc.getBlockReads())
-                csr->enterCriticalSectionCommitPhase(csrLock, doc.getReason());
+            if (nsIsDbOnly(nss.ns())) {
+                AutoGetDb dbLock(opCtx, nss.dbName(), MODE_X);
+                auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
+                    opCtx, nss.dbName(), DSSAcquisitionMode::kExclusive);
+                scopedDss->enterCriticalSectionCatchUpPhase(opCtx, doc.getReason());
+                if (doc.getBlockReads()) {
+                    scopedDss->enterCriticalSectionCommitPhase(opCtx, doc.getReason());
+                }
+            } else {
+                AutoGetCollection collLock(opCtx, nss, MODE_X);
+                auto scopedCsr = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
+                    opCtx, nss, CSRAcquisitionMode::kExclusive);
+                scopedCsr->enterCriticalSectionCatchUpPhase(doc.getReason());
+                if (doc.getBlockReads()) {
+                    scopedCsr->enterCriticalSectionCommitPhase(doc.getReason());
+                }
+            }
 
             return true;
         }
@@ -479,6 +525,12 @@ void ShardingRecoveryService::recoverStates(OperationContext* opCtx,
     }
 }
 
+void ShardingRecoveryService::onInitialDataAvailable(OperationContext* opCtx,
+                                                     bool isMajorityDataAvailable) {
+    recoverRecoverableCriticalSections(opCtx);
+    recoverIndexesCatalog(opCtx);
+}
+
 void ShardingRecoveryService::recoverIndexesCatalog(OperationContext* opCtx) {
     LOGV2_DEBUG(6686500, 2, "Recovering all sharding index catalog");
 
@@ -487,8 +539,9 @@ void ShardingRecoveryService::recoverIndexesCatalog(OperationContext* opCtx) {
     for (const auto& collName : collectionNames) {
         try {
             AutoGetCollection collLock(opCtx, collName, MODE_X);
-            auto* const csr = CollectionShardingRuntime::get(opCtx, collName);
-            csr->clearIndexes(opCtx);
+            CollectionShardingRuntime::assertCollectionLockedAndAcquire(
+                opCtx, collName, CSRAcquisitionMode::kExclusive)
+                ->clearIndexes(opCtx);
         } catch (const ExceptionFor<ErrorCodes::CommandNotSupportedOnView>&) {
             LOGV2_DEBUG(6686501,
                         2,
@@ -514,7 +567,9 @@ void ShardingRecoveryService::recoverIndexesCatalog(OperationContext* opCtx) {
             auto indexEntry = IndexCatalogType::parse(
                 IDLParserContext("recoverIndexesCatalogContext"), idx.Obj());
             AutoGetCollection collLock(opCtx, nss, MODE_X);
-            CollectionShardingRuntime::get(opCtx, nss)->addIndex(opCtx, indexEntry, indexVersion);
+            CollectionShardingRuntime::assertCollectionLockedAndAcquire(
+                opCtx, collLock->ns(), CSRAcquisitionMode::kExclusive)
+                ->addIndex(opCtx, indexEntry, {indexEntry.getCollectionUUID(), indexVersion});
         }
     }
     LOGV2_DEBUG(6686502, 2, "Recovered all index versions");

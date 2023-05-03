@@ -60,6 +60,7 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
 #include "mongo/db/stats/top.h"
@@ -76,6 +77,7 @@
 namespace mongo {
 namespace {
 
+MONGO_FAIL_POINT_DEFINE(failAllFindAndModify);
 MONGO_FAIL_POINT_DEFINE(hangBeforeFindAndModifyPerformsUpdate);
 
 /**
@@ -220,7 +222,8 @@ void assertCanWrite_inlock(OperationContext* opCtx, const NamespaceString& nss) 
                           << nss.ns(),
             repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, nss));
 
-    CollectionShardingState::get(opCtx, nss)->checkShardVersionOrThrow(opCtx);
+    CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
+        ->checkShardVersionOrThrow(opCtx);
 }
 
 void recordStatsForTopCommand(OperationContext* opCtx) {
@@ -364,8 +367,7 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::writeConflict
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
         CurOp::get(opCtx)->enter_inlock(
-            nsString.ns().c_str(),
-            CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nsString.dbName()));
+            nsString, CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nsString.dbName()));
     }
 
     assertCanWrite_inlock(opCtx, nsString);
@@ -429,8 +431,7 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::writeConflict
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
         CurOp::get(opCtx)->enter_inlock(
-            nsString.ns().c_str(),
-            CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nsString.dbName()));
+            nsString, CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nsString.dbName()));
     }
 
     assertCanWrite_inlock(opCtx, nsString);
@@ -550,7 +551,6 @@ void CmdFindAndModify::Invocation::doCheckAuthorization(OperationContext* opCtx)
 void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
                                            ExplainOptions::Verbosity verbosity,
                                            rpc::ReplyBuilderInterface* result) {
-
     validate(request());
     const BSONObj& cmdObj = request().toBSON(BSONObj() /* commandPassthroughFields */);
 
@@ -586,7 +586,8 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
                 str::stream() << "database " << dbName << " does not exist",
                 collection.getDb());
 
-        CollectionShardingState::get(opCtx, nss)->checkShardVersionOrThrow(opCtx);
+        CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
+            ->checkShardVersionOrThrow(opCtx);
 
         const auto exec = uassertStatusOK(
             getExecutorDelete(opDebug, &collection.getCollection(), &parsedDelete, verbosity));
@@ -610,7 +611,8 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
                 str::stream() << "database " << dbName << " does not exist",
                 collection.getDb());
 
-        CollectionShardingState::get(opCtx, nss)->checkShardVersionOrThrow(opCtx);
+        CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
+            ->checkShardVersionOrThrow(opCtx);
 
         const auto exec = uassertStatusOK(
             getExecutorUpdate(opDebug, &collection.getCollection(), &parsedUpdate, verbosity));
@@ -682,6 +684,16 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
         }
     }
 
+    if (analyze_shard_key::supportsPersistingSampledQueries() && request().getSampleId()) {
+        analyze_shard_key::QueryAnalysisWriter::get(opCtx)
+            .addFindAndModifyQuery(request())
+            .getAsync([](auto) {});
+    }
+
+    if (MONGO_unlikely(failAllFindAndModify.shouldFail())) {
+        uasserted(ErrorCodes::InternalError, "failAllFindAndModify failpoint active!");
+    }
+
     const bool inTransaction = opCtx->inMultiDocumentTransaction();
 
     // Although usually the PlanExecutor handles WCE internally, it will throw WCEs when it
@@ -711,6 +723,7 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
                 if (opCtx->getTxnNumber()) {
                     updateRequest.setStmtIds({stmtId});
                 }
+                updateRequest.setSampleId(req.getSampleId());
 
                 const ExtensionsCallbackReal extensionsCallback(
                     opCtx, &updateRequest.getNamespaceString());

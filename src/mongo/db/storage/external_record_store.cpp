@@ -29,15 +29,25 @@
 
 #include "mongo/db/storage/external_record_store.h"
 
+#include "mongo/db/storage/multi_bson_stream_cursor.h"
 #include "mongo/db/storage/record_store.h"
 
 namespace mongo {
+// 'ident' is an identifer to WT table and a virtual collection does not have any persistent data
+// in WT. So, we set the "dummy" ident for a virtual collection.
 ExternalRecordStore::ExternalRecordStore(StringData ns, const VirtualCollectionOptions& vopts)
-    : RecordStore(ns, /*identName=*/ns, /*isCapped=*/false), _vopts(vopts) {}
+    : RecordStore(ns, /*identName=*/"dummy"_sd, /*isCapped=*/false), _vopts(vopts) {}
 
+/**
+ * Returns a MultiBsonStreamCursor for this record store. Reverse scans are not currently supported
+ * for this record store type, so if 'forward' is false this asserts.
+ */
 std::unique_ptr<SeekableRecordCursor> ExternalRecordStore::getCursor(OperationContext* opCtx,
                                                                      bool forward) const {
-    // TODO SERVER-69683 Implement this method together when implementing MultiBsonStreamCursor
+    if (forward) {
+        return std::make_unique<MultiBsonStreamCursor>(getOptions());
+    }
+    tasserted(6968302, "MultiBsonStreamCursor does not support reverse scans");
     return nullptr;
 }
 }  // namespace mongo

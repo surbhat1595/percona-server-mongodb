@@ -327,13 +327,14 @@ Status ViewsForDatabase::_upsertIntoCatalog(OperationContext* opCtx,
         args.update = viewObj;
         args.criteria = BSON("_id" << NamespaceStringUtil::serialize(view.name()));
 
-        systemViews->updateDocument(opCtx,
-                                    id,
-                                    oldView,
-                                    viewObj,
-                                    true /* indexesAffected */,
-                                    &CurOp::get(opCtx)->debug(),
-                                    &args);
+        collection_internal::updateDocument(opCtx,
+                                            systemViews,
+                                            id,
+                                            oldView,
+                                            viewObj,
+                                            true /* indexesAffected */,
+                                            &CurOp::get(opCtx)->debug(),
+                                            &args);
     }
 
     return Status::OK();
@@ -361,7 +362,8 @@ void ViewsForDatabase::remove(OperationContext* opCtx,
                 "view"_attr = ns,
                 "viewCatalog"_attr = systemViews->ns());
 
-    systemViews->deleteDocument(opCtx, kUninitializedStmtId, id, &CurOp::get(opCtx)->debug());
+    collection_internal::deleteDocument(
+        opCtx, systemViews, kUninitializedStmtId, id, &CurOp::get(opCtx)->debug());
 }
 
 void ViewsForDatabase::clear(OperationContext* opCtx) {

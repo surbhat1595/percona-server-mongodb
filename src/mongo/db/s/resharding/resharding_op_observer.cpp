@@ -50,8 +50,7 @@ std::shared_ptr<ReshardingCoordinatorObserver> getReshardingCoordinatorObserver(
     OperationContext* opCtx, const BSONObj& reshardingId) {
     auto registry = repl::PrimaryOnlyServiceRegistry::get(opCtx->getServiceContext());
     auto service = registry->lookupServiceByName(ReshardingCoordinatorService::kServiceName);
-    auto instance =
-        ReshardingCoordinatorService::ReshardingCoordinator::lookup(opCtx, service, reshardingId);
+    auto instance = ReshardingCoordinator::lookup(opCtx, service, reshardingId);
 
     iassert(5400001, "ReshardingCoordinatorService instance does not exist", instance.has_value());
 
@@ -71,7 +70,9 @@ void assertCanExtractShardKeyFromDocs(OperationContext* opCtx,
                                       const NamespaceString& nss,
                                       std::vector<InsertStatement>::const_iterator begin,
                                       std::vector<InsertStatement>::const_iterator end) {
-    const auto collDesc = CollectionShardingState::get(opCtx, nss)->getCollectionDescription(opCtx);
+    auto collDesc = CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
+                        ->getCollectionDescription(opCtx);
+
     // A user can manually create a 'db.system.resharding.' collection that isn't guaranteed to be
     // sharded outside of running reshardCollection.
     uassert(ErrorCodes::NamespaceNotSharded,
@@ -204,7 +205,7 @@ void ReshardingOpObserver::onInserts(OperationContext* opCtx,
 }
 
 void ReshardingOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& args) {
-    if (args.nss == NamespaceString::kDonorReshardingOperationsNamespace) {
+    if (args.coll->ns() == NamespaceString::kDonorReshardingOperationsNamespace) {
         // Primaries and secondaries should execute pinning logic when observing changes to the
         // donor resharding document.
         _doPin(opCtx);
@@ -216,7 +217,7 @@ void ReshardingOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateEn
         return;
     }
 
-    if (args.nss == NamespaceString::kConfigReshardingOperationsNamespace) {
+    if (args.coll->ns() == NamespaceString::kConfigReshardingOperationsNamespace) {
         auto newCoordinatorDoc = ReshardingCoordinatorDocument::parse(
             IDLParserContext("reshardingCoordinatorDoc"), args.updateArgs->updatedDoc);
         opCtx->recoveryUnit()->onCommit([opCtx, newCoordinatorDoc = std::move(newCoordinatorDoc)](
@@ -239,18 +240,18 @@ void ReshardingOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateEn
                            "error"_attr = redact(ex.toStatus()));
             }
         });
-    } else if (args.nss.isTemporaryReshardingCollection()) {
+    } else if (args.coll->ns().isTemporaryReshardingCollection()) {
         const std::vector<InsertStatement> updateDoc{InsertStatement{args.updateArgs->updatedDoc}};
-        assertCanExtractShardKeyFromDocs(opCtx, args.nss, updateDoc.begin(), updateDoc.end());
+        assertCanExtractShardKeyFromDocs(
+            opCtx, args.coll->ns(), updateDoc.begin(), updateDoc.end());
     }
 }
 
 void ReshardingOpObserver::onDelete(OperationContext* opCtx,
-                                    const NamespaceString& nss,
-                                    const UUID& uuid,
+                                    const CollectionPtr& coll,
                                     StmtId stmtId,
                                     const OplogDeleteEntryArgs& args) {
-    if (nss == NamespaceString::kDonorReshardingOperationsNamespace) {
+    if (coll->ns() == NamespaceString::kDonorReshardingOperationsNamespace) {
         _doPin(opCtx);
     }
 }

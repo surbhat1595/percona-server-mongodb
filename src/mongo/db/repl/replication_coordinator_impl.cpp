@@ -3234,7 +3234,11 @@ Status ReplicationCoordinatorImpl::processReplSetGetStatus(
                             MODE_IS,
                             Date_t::now() + Milliseconds(5),
                             Lock::InterruptBehavior::kLeaveUnlocked,
-                            true /* skipRSTLLock */);
+                            [] {
+                                Lock::GlobalLockSkipOptions options;
+                                options.skipRSTLLock = true;
+                                return options;
+                            }());
         if (lk.isLocked()) {
             lastStableRecoveryTimestamp = _storage->getLastStableRecoveryTimestamp(_service);
         } else {
@@ -4215,7 +4219,8 @@ void ReplicationCoordinatorImpl::_reconfigToRemoveNewlyAddedField(
                    "An automatic reconfig. Used to remove a 'newlyAdded' config field for a "
                    "replica set member.");
         curOp->setOpDescription_inlock(bob.obj());
-        curOp->setNS_inlock("local.system.replset");
+        // TODO SERVER-62491 Use systemTenantId.
+        curOp->setNS_inlock(NamespaceString(boost::none, "local.system.replset"));
         curOp->ensureStarted();
     }
 

@@ -29,17 +29,160 @@
 
 #include "mongo/db/query/optimizer/explain.h"
 #include "mongo/db/query/optimizer/node.h"
-#include "mongo/db/query/optimizer/opt_phase_manager.h"
 #include "mongo/db/query/optimizer/reference_tracker.h"
 #include "mongo/db/query/optimizer/rewrites/const_eval.h"
 #include "mongo/db/query/optimizer/syntax/syntax.h"
-#include "mongo/db/query/optimizer/syntax/syntax_fwd_declare.h"
+#include "mongo/db/query/optimizer/utils/interval_utils.h"
+#include "mongo/db/query/optimizer/utils/unit_test_abt_literals.h"
 #include "mongo/db/query/optimizer/utils/unit_test_utils.h"
 #include "mongo/db/query/optimizer/utils/utils.h"
 #include "mongo/unittest/unittest.h"
 
+
 namespace mongo::optimizer {
 namespace {
+
+TEST(Optimizer, AutoUpdateExplain) {
+    ABT tree = make<BinaryOp>(Operations::Add,
+                              Constant::int64(1),
+                              make<Variable>("very very very very very very very very very very "
+                                             "very very long variable name with \"quotes\""));
+
+    /**
+     * To exercise the auto-updating behavior:
+     *   1. Change the flag "kAutoUpdateOnFailure" to "true".
+     *   2. Induce a failure: change something in the expected output.
+     *   3. Recompile and run the test binary as normal.
+     *   4. Observe after the run the test file is updated with the correct output.
+     */
+    ASSERT_EXPLAIN_V2_AUTO(  // NOLINT (test auto-update)
+        "BinaryOp [Add]\n"
+        "|   Variable [very very very very very very very very very very very very long variable "
+        "name with \"quotes\"]\n"
+        "Const [1]\n",
+        tree);
+
+    // Test for short constant. It should not be inlined. The nolint comment on the string constant
+    // itself is auto-generated.
+    ABT tree1 = make<Variable>("short name");
+    ASSERT_EXPLAIN_V2_AUTO(         // NOLINT (test auto-update)
+        "Variable [short name]\n",  // NOLINT (test auto-update)
+        tree1);
+}
+
+TEST(Optimizer, ABTLiterals) {
+    using namespace unit_test_abt_literals;
+
+    // Demonstrate shorthand tree initialization using the ABT string literal constructors.
+
+    // Construct inline.
+    auto scanNode = _scan("root", "c1");
+    auto projectionANode = _eval("pa", _evalp(_get("a", _id()), "root"_var), std::move(scanNode));
+    auto filterANode =
+        _filter(_evalf(_cmp("Gt", "0"_cint64), "pa"_var), std::move(projectionANode));
+    auto projectionBNode =
+        _eval("pb", _evalp(_get("b", _id()), "root"_var), std::move(filterANode));
+    auto filterBNode =
+        _filter(_evalf(_cmp("Gt", "1"_cint64), "pb"_var), std::move(projectionBNode));
+    auto groupByNode = _gb(_varnames("pa"), _varnames("pc"), {"pb"_var}, std::move(filterBNode));
+    auto rootNode = _root("pc")(std::move(groupByNode));
+
+    ASSERT_EXPLAIN_V2(
+        "Root []\n"
+        "|   |   projections: \n"
+        "|   |       pc\n"
+        "|   RefBlock: \n"
+        "|       Variable [pc]\n"
+        "GroupBy []\n"
+        "|   |   groupings: \n"
+        "|   |       RefBlock: \n"
+        "|   |           Variable [pa]\n"
+        "|   aggregations: \n"
+        "|       [pc]\n"
+        "|           Variable [pb]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [pb]\n"
+        "|   PathCompare [Gt]\n"
+        "|   Const [1]\n"
+        "Evaluation []\n"
+        "|   BindBlock:\n"
+        "|       [pb]\n"
+        "|           EvalPath []\n"
+        "|           |   Variable [root]\n"
+        "|           PathGet [b]\n"
+        "|           PathIdentity []\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [pa]\n"
+        "|   PathCompare [Gt]\n"
+        "|   Const [0]\n"
+        "Evaluation []\n"
+        "|   BindBlock:\n"
+        "|       [pa]\n"
+        "|           EvalPath []\n"
+        "|           |   Variable [root]\n"
+        "|           PathGet [a]\n"
+        "|           PathIdentity []\n"
+        "Scan [c1]\n"
+        "    BindBlock:\n"
+        "        [root]\n"
+        "            Source []\n",
+        rootNode);
+
+    // Construct using a builder. Note we construct the tree in a top-to-bottom fashion.
+    auto rootNode1 = NodeBuilder{}
+                         .root("pc")
+                         .gb(_varnames("pa"), _varnames("pc"), {"pb"_var})
+                         .filter(_evalf(_cmp("Gt", "1"_cint64), "pb"_var))
+                         .eval("pb", _evalp(_get("b", _id()), "root"_var))
+                         .filter(_evalf(_cmp("Gt", "0"_cint64), "pa"_var))
+                         .eval("pa", _evalp(_get("a", _id()), "root"_var))
+                         .finish(_scan("root", "c1"));
+
+    ASSERT_EXPLAIN_V2(
+        "Root []\n"
+        "|   |   projections: \n"
+        "|   |       pc\n"
+        "|   RefBlock: \n"
+        "|       Variable [pc]\n"
+        "GroupBy []\n"
+        "|   |   groupings: \n"
+        "|   |       RefBlock: \n"
+        "|   |           Variable [pa]\n"
+        "|   aggregations: \n"
+        "|       [pc]\n"
+        "|           Variable [pb]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [pb]\n"
+        "|   PathCompare [Gt]\n"
+        "|   Const [1]\n"
+        "Evaluation []\n"
+        "|   BindBlock:\n"
+        "|       [pb]\n"
+        "|           EvalPath []\n"
+        "|           |   Variable [root]\n"
+        "|           PathGet [b]\n"
+        "|           PathIdentity []\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [pa]\n"
+        "|   PathCompare [Gt]\n"
+        "|   Const [0]\n"
+        "Evaluation []\n"
+        "|   BindBlock:\n"
+        "|       [pa]\n"
+        "|           EvalPath []\n"
+        "|           |   Variable [root]\n"
+        "|           PathGet [a]\n"
+        "|           PathIdentity []\n"
+        "Scan [c1]\n"
+        "    BindBlock:\n"
+        "        [root]\n"
+        "            Source []\n",
+        rootNode1);
+}
 
 Constant* constEval(ABT& tree) {
     auto env = VariableEnvironment::build(tree);
@@ -746,13 +889,122 @@ TEST(Explain, ExplainV2Compact) {
 
 TEST(Explain, ExplainBsonForConstant) {
     ABT cNode = Constant::int64(3);
-    auto [tag, val] = ExplainGenerator::explainBSON(cNode);
-    sbe::value::ValueGuard vg(tag, val);
-    ASSERT_EQ(
-        "{\n    nodeType: \"Const\", \n"
+
+    ASSERT_EXPLAIN_BSON(
+        "{\n"
+        "    nodeType: \"Const\", \n"
         "    tag: \"NumberInt64\", \n"
-        "    value: 3\n}\n",
-        ExplainGenerator::printBSON(tag, val));
+        "    value: 3\n"
+        "}\n",
+        cNode);
+}
+
+TEST(IntervalNormalize, Basic) {
+    auto intervalExpr =
+        IntervalReqExpr::make<IntervalReqExpr::Disjunction>(IntervalReqExpr::NodeVector{
+            IntervalReqExpr::make<IntervalReqExpr::Conjunction>(IntervalReqExpr::NodeVector{
+                IntervalReqExpr::make<IntervalReqExpr::Atom>(
+                    IntervalRequirement{{true /*inclusive*/, Constant::int64(3)},
+                                        {true /*inclusive*/, Constant::int64(4)}}),
+                IntervalReqExpr::make<IntervalReqExpr::Atom>(
+                    IntervalRequirement{{true /*inclusive*/, Constant::int64(1)},
+                                        {true /*inclusive*/, Constant::int64(2)}})}),
+            IntervalReqExpr::make<IntervalReqExpr::Disjunction>(IntervalReqExpr::NodeVector{
+                IntervalReqExpr::make<IntervalReqExpr::Atom>(
+                    IntervalRequirement{{true /*inclusive*/, Constant::int64(3)},
+                                        {true /*inclusive*/, Constant::int64(4)}}),
+                IntervalReqExpr::make<IntervalReqExpr::Atom>(
+                    IntervalRequirement{{false /*inclusive*/, Constant::int64(3)},
+                                        {true /*inclusive*/, Constant::int64(4)}}),
+                IntervalReqExpr::make<IntervalReqExpr::Atom>(
+                    IntervalRequirement{{true /*inclusive*/, Constant::int64(3)},
+                                        {true /*inclusive*/, Constant::int64(2)}})}),
+            IntervalReqExpr::make<IntervalReqExpr::Atom>(
+                IntervalRequirement{{true /*inclusive*/, Constant::int64(5)},
+                                    {true /*inclusive*/, Constant::int64(6)}})});
+
+    ASSERT_EQ(
+        "{\n"
+        "    {\n"
+        "        {[Const [3], Const [4]]}\n"
+        "     ^ \n"
+        "        {[Const [1], Const [2]]}\n"
+        "    }\n"
+        " U \n"
+        "    {\n"
+        "        {[Const [3], Const [4]]}\n"
+        "     U \n"
+        "        {(Const [3], Const [4]]}\n"
+        "     U \n"
+        "        {[Const [3], Const [2]]}\n"
+        "    }\n"
+        " U \n"
+        "    {[Const [5], Const [6]]}\n"
+        "}\n",
+        ExplainGenerator::explainIntervalExpr(intervalExpr));
+
+    normalizeIntervals(intervalExpr);
+
+    // Demonstrate that Atoms are sorted first, then conjunctions and disjunctions. Atoms are sorted
+    // first on the lower then on the upper bounds.
+    ASSERT_EQ(
+        "{\n"
+        "    {[Const [5], Const [6]]}\n"
+        " U \n"
+        "    {\n"
+        "        {[Const [1], Const [2]]}\n"
+        "     ^ \n"
+        "        {[Const [3], Const [4]]}\n"
+        "    }\n"
+        " U \n"
+        "    {\n"
+        "        {(Const [3], Const [4]]}\n"
+        "     U \n"
+        "        {[Const [3], Const [2]]}\n"
+        "     U \n"
+        "        {[Const [3], Const [4]]}\n"
+        "    }\n"
+        "}\n",
+        ExplainGenerator::explainIntervalExpr(intervalExpr));
+}
+
+TEST(Optimizer, ExplainRIDUnion) {
+    ABT filterNode = make<FilterNode>(
+        make<EvalFilter>(
+            make<PathGet>("a",
+                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)),
+                                             PathTraverse::kSingleLevel)),
+            make<Variable>("root")),
+        make<ScanNode>("root", "c1"));
+
+    ABT unionNode = make<RIDUnionNode>("root", filterNode, make<ScanNode>("root", "c1"));
+
+    ABT rootNode = make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{"root"}},
+                                  std::move(unionNode));
+
+    ASSERT_EXPLAIN_V2(
+        "Root []\n"
+        "|   |   projections: \n"
+        "|   |       root\n"
+        "|   RefBlock: \n"
+        "|       Variable [root]\n"
+        "RIDUnion [root]\n"
+        "|   Scan [c1]\n"
+        "|       BindBlock:\n"
+        "|           [root]\n"
+        "|               Source []\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [root]\n"
+        "|   PathGet [a]\n"
+        "|   PathTraverse [1]\n"
+        "|   PathCompare [Eq]\n"
+        "|   Const [1]\n"
+        "Scan [c1]\n"
+        "    BindBlock:\n"
+        "        [root]\n"
+        "            Source []\n",
+        rootNode);
 }
 
 }  // namespace

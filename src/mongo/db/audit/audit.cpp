@@ -32,6 +32,7 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
     it in the license file.
 ======= */
 
+#include "mongo/bson/bsonobjbuilder.h"
 #ifdef PERCONA_AUDIT_ENABLED
 
 #include <cstdio>
@@ -1281,26 +1282,38 @@ namespace audit {
         _auditEvent(client, "getClusterParameter", params.done());
     }
 
-    void logSetClusterParameter(Client* client, const BSONObj& oldValue, const BSONObj& newValue) {
+    void logSetClusterParameter(Client* client,
+                                const BSONObj& oldValue,
+                                const BSONObj& newValue,
+                                boost::optional<TenantId> const& tenantId) {
         if (!_auditLog) {
             return;
         }
 
-        const BSONObj params = BSON("originalClusterServerParameter"
-                                    << oldValue << "updatedClusterServerParameter" << newValue);
-        _auditEvent(client, "setClusterParameter", params);
+        BSONObjBuilder params;
+        params << "originalClusterServerParameter" << oldValue;
+        params << "updatedClusterServerParameter" << newValue;
+        if (tenantId != boost::none) {
+            params << "tenantId" << *tenantId;
+        }
+        _auditEvent(client, "setClusterParameter", params.done());
     }
 
     void logUpdateCachedClusterParameter(Client* client,
                                          const BSONObj& oldValue,
-                                         const BSONObj& newValue) {
+                                         const BSONObj& newValue,
+                                         boost::optional<TenantId> const& tenantId) {
         if (!_auditLog) {
             return;
         }
 
-        const BSONObj params = BSON("originalClusterServerParameter"
-                                    << oldValue << "updatedClusterServerParameter" << newValue);
-        _auditEvent(client, "updateCachedClusterServerParameter", params);
+        BSONObjBuilder params;
+        params << "originalClusterServerParameter" << oldValue;
+        params << "updatedClusterServerParameter" << newValue;
+        if (tenantId != boost::none) {
+            params << "tenantId" << *tenantId;
+        }
+        _auditEvent(client, "updateCachedClusterServerParameter", params.done());
     }
 
     void writeImpersonatedUsersToMetadata(OperationContext* txn,

@@ -27,8 +27,8 @@
  *    it in the license file.
  */
 
+#include "mongo/db/query/ce/ce_heuristic.h"
 #include "mongo/db/query/ce/ce_test_utils.h"
-#include "mongo/db/query/optimizer/cascades/ce_heuristic.h"
 #include "mongo/db/query/optimizer/props.h"
 #include "mongo/db/query/optimizer/utils/unit_test_utils.h"
 #include "mongo/db/query/optimizer/utils/utils.h"
@@ -59,9 +59,15 @@ protected:
     }
 };
 
+namespace {
+bool isRootNodeFn(const ABT& node) {
+    return node.is<optimizer::RootNode>();
+}
+}  // namespace
+
 TEST(CEDataflowTest, EstimateTrivialNodes) {
     DataflowCETester t;
-    const auto matchCard = t.getMatchCE<optimizer::RootNode>("{a: 1}");
+    const auto matchCard = t.getMatchCE("{a: 1}", isRootNodeFn);
 
     // Verify 'CollationNode' estimate returns the input cardinality.
     ASSERT_CE(t, "[{$sort: {a: 1}}]", kCollCard);
@@ -75,7 +81,7 @@ TEST(CEDataflowTest, EstimateTrivialNodes) {
 
 TEST(CEDataflowTest, EstimateUnionNode) {
     auto makeUnionBranch = [](const std::string& collName) {
-        auto scanVar = "scan_" + collName;
+        ProjectionName scanVar{"scan_" + collName};
         auto scanNode = make<ScanNode>(scanVar, collName);
         auto evalPath =
             make<EvalPath>(make<PathGet>("a", make<PathIdentity>()), make<Variable>(scanVar));
@@ -132,7 +138,7 @@ TEST(CEDataflowTest, EstimateUnionNode) {
 
 TEST(CEDataflowTest, EstimateLimitSkipNode) {
     DataflowCETester t;
-    const CEType matchCard = t.getMatchCE<optimizer::RootNode>("{a: 1}");
+    const CEType matchCard = t.getMatchCE("{a: 1}", isRootNodeFn);
 
     // Verify that 'LimitSkipNode' estimate with only a limit set is min(limit, inputCE).
     ASSERT_CE(t, "[{$limit: 1}]", 1.0);
@@ -204,7 +210,7 @@ TEST(CEDataflowTest, EstimateLimitSkipNode) {
 
 TEST(CEDataflowTest, EstimateUnwindNode) {
     DataflowCETester t;
-    const CEType matchCard = t.getMatchCE<optimizer::RootNode>("{a: 1}");
+    const CEType matchCard = t.getMatchCE("{a: 1}", isRootNodeFn);
 
     // We assume that arrays on average have ~10 elements, so we estimate this as inputCard*10.
     ASSERT_CE(t, "[{$unwind: '$a'}]", 10 * kCollCard);

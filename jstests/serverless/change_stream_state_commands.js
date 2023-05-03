@@ -2,7 +2,6 @@
 // multi-tenant replica sets environment for various cases.
 // @tags: [
 //   requires_fcv_62,
-//   __TEMPORARILY_DISABLED__
 // ]
 (function() {
 "use strict";
@@ -10,10 +9,9 @@
 load("jstests/libs/fail_point_util.js");         // For configureFailPoint.
 load('jstests/libs/parallel_shell_helpers.js');  // For funWithArgs.
 
-const replSetTest = new ReplSetTest({nodes: 2});
+const replSetTest =
+    new ReplSetTest({nodes: 2, name: "change-stream-state-commands", serverless: true});
 
-// TODO SERVER-69115 Remove '__TEMPORARILY_DISABLED__ and use
-// 'ChangeStreamMultitenantReplicaSetTest'.
 replSetTest.startSet({
     serverless: true,
     setParameter: {
@@ -22,26 +20,44 @@ replSetTest.startSet({
         featureFlagMongoStore: true
     }
 });
-
 replSetTest.initiate();
 
 // Sets the change stream state for the provided tenant id.
 function setChangeStreamState(tenantId, enabled) {
-    assert.commandWorked(replSetTest.getPrimary().getDB("admin").runCommand(
-        {setChangeStreamState: 1, $tenant: tenantId, enabled: enabled}));
+    assert.soon(() => {
+        try {
+            assert.commandWorked(replSetTest.getPrimary().getDB("admin").runCommand(
+                {setChangeStreamState: 1, $tenant: tenantId, enabled: enabled}));
+            return true;
+        } catch (ex) {
+            // The 'setChangeStreamState' will throw 'ConflictingOperationInProgress' if the
+            // previous request was not completed. The conflict should get resolved eventually.
+            assert.eq(ex.code, ErrorCodes.ConflictingOperationInProgress);
+            return false;
+        }
+    });
 }
 
 // Verifies that the required change stream state is set for the provided tenant id both in the
 // primary and the secondary and the command 'getChangeStreamState' returns the same state.
 function assertChangeStreamState(tenantId, enabled) {
+    const primary = replSetTest.getPrimary();
+    const secondary = replSetTest.getSecondary();
+
     assert.eq(assert
-                  .commandWorked(replSetTest.getPrimary().getDB("admin").runCommand(
+                  .commandWorked(primary.getDB("admin").runCommand(
                       {getChangeStreamState: 1, $tenant: tenantId}))
                   .enabled,
               enabled);
 
-    const primaryColls = replSetTest.getPrimary().getDB("config").getCollectionNames();
-    const secondaryColls = replSetTest.getSecondary().getDB("config").getCollectionNames();
+    const primaryColls = assert
+                             .commandWorked(primary.getDB("config").runCommand(
+                                 {listCollections: 1, $tenant: tenantId}))
+                             .cursor.firstBatch.map(coll => coll.name);
+    const secondaryColls = assert
+                               .commandWorked(secondary.getDB("config").runCommand(
+                                   {listCollections: 1, $tenant: tenantId}))
+                               .cursor.firstBatch.map(coll => coll.name);
 
     // Verify that the change collection exists both in the primary and the secondary.
     assert.eq(primaryColls.includes("system.change_collection"), enabled);
@@ -109,9 +125,11 @@ const secondOrgTenantId = ObjectId();
 
     // While the failpoint is active, issue a request to enable change stream. This command will
     // hang at the fail point.
-    const shellReturn = startParallelShell(() => {
-        db.getSiblingDB("admin").runCommand({setChangeStreamState: 1, enabled: true});
-    }, primary.port);
+    const shellReturn = startParallelShell(
+        funWithArgs((firstOrgTenantId) => {
+            db.getSiblingDB("admin").runCommand(
+                {setChangeStreamState: 1, enabled: true, $tenant: firstOrgTenantId});
+        }, firstOrgTenantId), primary.port);
 
     // Wait until the fail point is hit.
     fpHangBeforeCmdProcessor.wait();
@@ -132,15 +150,18 @@ const secondOrgTenantId = ObjectId();
     // Disable the fail point as it is no longer needed.
     fpHangBeforeCmdProcessor.off();
 
-    // Get the new primary and the secondary.
-    const newPrimary = replSetTest.getPrimary();
-
-    // Verify that the new primary resumed the command and change stream is now enabled.
+    // Wait until the new primary has enabled the change stream.
     assert.soon(() => {
-        const collNames = newPrimary.getDB("config").getCollectionNames();
-        return collNames.includes("system.change_collection") &&
-            collNames.includes("system.preimages");
+        return assert
+            .commandWorked(replSetTest.getPrimary().getDB("admin").runCommand(
+                {getChangeStreamState: 1, $tenant: firstOrgTenantId}))
+            .enabled;
     });
+
+    // Wait until the change collection and the pre-images collection have been replicated to the
+    // secondary.
+    replSetTest.awaitReplication();
+
     assertChangeStreamState(firstOrgTenantId, true);
 })();
 
@@ -172,8 +193,10 @@ const secondOrgTenantId = ObjectId();
 
     // While the first command is still hung, issue a request to disable the change stream for the
     // same tenants. This request should bail out with 'ConflictingOperationInProgress' exception.
-    assert.throwsWithCode(() => setChangeStreamState(firstOrgTenantId, false),
-                          ErrorCodes.ConflictingOperationInProgress);
+    assert.throwsWithCode(
+        () => assert.commandWorked(replSetTest.getPrimary().getDB("admin").runCommand(
+            {setChangeStreamState: 1, $tenant: firstOrgTenantId, enabled: false})),
+        ErrorCodes.ConflictingOperationInProgress);
 
     // Turn off the fail point.
     fpHangBeforeCmdProcessor.off();

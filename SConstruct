@@ -15,6 +15,7 @@ import subprocess
 import sys
 import textwrap
 import uuid
+from datetime import datetime
 from glob import glob
 
 from pkg_resources import parse_version
@@ -38,6 +39,8 @@ from mongo.build_profiles import BUILD_PROFILES
 EnsurePythonVersion(3, 6)
 EnsureSConsVersion(3, 1, 1)
 
+utc_starttime = datetime.utcnow()
+
 
 # Monkey patch SCons.FS.File.release_target_info to be a no-op.
 # See https://github.com/SCons/scons/issues/3454
@@ -49,6 +52,7 @@ SCons.Node.FS.File.release_target_info = release_target_info_noop
 
 from buildscripts import utils
 from buildscripts import moduleconfig
+from buildscripts.metrics.scons_tooling_metrics import setup_scons_metrics_collection_atexit
 
 import psutil
 
@@ -543,7 +547,7 @@ add_option(
     action="append",
     choices=["configure", "source"],
     const="source",
-    default=[],
+    default=build_profile.disable_warnings_as_errors,
     help=
     "Don't add a warnings-as-errors flag to compiler command lines in selected contexts; defaults to 'source' if no argument is provided",
     nargs="?",
@@ -1052,7 +1056,7 @@ env_vars.Add(
 
 
 def validate_dwarf_version(key, val, env):
-    if val == '4' or val == '5':
+    if val == '4' or val == '5' or val == '':
         return
 
     print(f"Invalid DWARF_VERSION '{val}'. Only valid versions are 4 or 5.")
@@ -1063,7 +1067,8 @@ env_vars.Add(
     'DWARF_VERSION',
     help='Sets the DWARF version (non-Windows). Incompatible with SPLIT_DWARF=1.',
     validator=validate_dwarf_version,
-    converter=int,
+    converter=lambda val: int(val) if val != '' else '',
+    default='',
 )
 
 env_vars.Add(
@@ -1441,7 +1446,7 @@ for tool in ['build_metrics', 'split_dwarf']:
     try:
         Tool(tool).options(env_vars)
     except ImportError as exc:
-        print(f"Failed import while loading options for tool: {tool}\n{exc}")
+        print(f"WARNING: The {tool} tool might not work as intended due to a failed import:\n{exc}")
         pass
 
 # -- Validate user provided options --
@@ -1567,6 +1572,11 @@ if get_option('build-tools') == 'next':
 env = Environment(variables=env_vars, **envDict)
 del envDict
 env.AddMethod(lambda env, name, **kwargs: add_option(name, **kwargs), 'AddOption')
+
+# Setup atexit method to store tooling metrics
+# The placement of this is intentional. We should only register this function atexit after
+# env, env_vars and the parser have been properly initialized.
+setup_scons_metrics_collection_atexit(utc_starttime, env_vars, env, _parser, sys.argv)
 
 if get_option('build-metrics'):
     env['BUILD_METRICS_ARTIFACTS_DIR'] = '$BUILD_ROOT/$VARIANT_DIR'
@@ -4302,7 +4312,7 @@ def doConfigure(myenv):
             # setting to allow tests to continue while we figure out
             # why we're running afoul of it.
             #
-            # TODO SERVER-52413: report_thread_leaks=0 suppresses
+            # TODO SERVER-65936: report_thread_leaks=0 suppresses
             # reporting thread leaks, which we have because we don't
             # do a clean shutdown of the ServiceContext.
             #
@@ -5327,6 +5337,16 @@ if 'ICECC' in env and env['ICECC']:
 
     icecream = Tool('icecream')
     if not icecream.exists(env):
+        # SERVER-70648: Need to revert on how to update icecream
+        if 'ICECREAM_VERSION' in env and env['ICECREAM_VERSION'] < parse_version("1.3"):
+            env.FatalError(
+                textwrap.dedent(f"""\
+                Please refer to the following commands to update your icecream:
+                    sudo add-apt-repository ppa:mongodb-dev-prod/mongodb-build
+                    sudo apt update
+                    sudo apt-get --only-upgrade install icecc
+                """))
+
         env.FatalError(f"Failed to load icecream tool with ICECC={env['ICECC']}")
     icecream(env)
 
@@ -5398,11 +5418,6 @@ if get_option('ninja') != 'disabled':
 
     if env.ToolchainIs('gcc', 'clang'):
         env.AppendUnique(CCFLAGS=["-fdiagnostics-color"])
-    if 'ICECREAM_VERSION' in env and not env.get('CCACHE', None):
-        if env['ICECREAM_VERSION'] < parse_version("1.2"):
-            env.FatalError(
-                "Use of ccache is mandatory with --ninja and icecream older than 1.2. You are running {}."
-                .format(env['ICECREAM_VERSION']))
 
     ninja_builder = Tool("ninja")
     env["NINJA_BUILDDIR"] = env.Dir("$NINJA_BUILDDIR")

@@ -33,7 +33,7 @@ import csv
 import asyncio
 from typing import Mapping, Sequence
 from config import WriteMode
-from cost_estimator import ExecutionStats, ModelParameters
+from cost_estimator import ExecutionStats, CostModelParameters
 from data_generator import CollectionInfo, DataGenerator
 from database_instance import DatabaseInstance
 import abt_calibrator
@@ -45,7 +45,7 @@ from calibration_settings import distributions, main_config
 __all__ = []
 
 
-def save_to_csv(parameters: Mapping[str, Sequence[ModelParameters]], filepath: str) -> None:
+def save_to_csv(parameters: Mapping[str, Sequence[CostModelParameters]], filepath: str) -> None:
     """Save model input parameters to a csv file."""
     abt_type_name = 'abt_type'
     fieldnames = [
@@ -63,17 +63,67 @@ def save_to_csv(parameters: Mapping[str, Sequence[ModelParameters]], filepath: s
                 writer.writerow(fields)
 
 
-async def execute_general(database: DatabaseInstance, collections: Sequence[CollectionInfo]):
-    requests = []
-    for val in distributions['string_choice'].get_values()[::3]:
-        keys_length = len(val) + 2
-        for i in range(1, 5):
-            requests.append(
-                Query(pipeline=[{'$match': {f'choice{i}': val}}], keys_length_in_bytes=keys_length))
+async def execute_index_scan_queries(database: DatabaseInstance,
+                                     collections: Sequence[CollectionInfo]):
+    collection = [ci for ci in collections if ci.name.startswith('index_scan')][0]
+    fields = [f for f in collection.fields if f.name == 'choice']
 
-    await workload_execution.execute(database, main_config.workload_execution,
-                                     [ci for ci in collections if ci.name.startswith('c_str')],
+    requests = []
+
+    for field in fields:
+        for val in field.distribution.get_values():
+            if val.startswith('_'):
+                continue
+            keys_length = len(val) + 2
+            requests.append(
+                Query(pipeline=[{'$match': {field.name: val}}], keys_length_in_bytes=keys_length,
+                      note='IndexScan'))
+
+    await workload_execution.execute(database, main_config.workload_execution, [collection],
                                      requests)
+
+
+async def execute_physical_scan_queries(database: DatabaseInstance,
+                                        collections: Sequence[CollectionInfo]):
+    collections = [ci for ci in collections if ci.name.startswith('physical_scan')]
+    fields = [f for f in collections[0].fields if f.name == 'choice']
+    requests = []
+    for field in fields:
+        for val in field.distribution.get_values()[::3]:
+            if val.startswith('_'):
+                continue
+            keys_length = len(val) + 2
+            requests.append(
+                Query(pipeline=[{'$match': {field.name: val}}], keys_length_in_bytes=keys_length,
+                      note='PhysicalScan'))
+
+    await workload_execution.execute(database, main_config.workload_execution, collections,
+                                     requests)
+
+
+async def execute_index_intersections_with_requests(database: DatabaseInstance,
+                                                    collections: Sequence[CollectionInfo],
+                                                    requests: Sequence[Query]):
+    try:
+        await database.set_parameter('internalCostModelCoefficients',
+                                     '{"filterIncrementalCost": 10000.0}')
+        await database.set_parameter('internalCascadesOptimizerDisableMergeJoinRIDIntersect', False)
+        await database.set_parameter('internalCascadesOptimizerDisableHashJoinRIDIntersect', False)
+
+        await workload_execution.execute(database, main_config.workload_execution, collections,
+                                         requests)
+
+        await database.set_parameter('internalCascadesOptimizerDisableMergeJoinRIDIntersect', True)
+        await database.set_parameter('internalCascadesOptimizerDisableHashJoinRIDIntersect', True)
+
+        main_config.workload_execution.write_mode = WriteMode.APPEND
+        await workload_execution.execute(database, main_config.workload_execution, collections,
+                                         requests[::4])
+
+    finally:
+        await database.set_parameter('internalCascadesOptimizerDisableMergeJoinRIDIntersect', False)
+        await database.set_parameter('internalCascadesOptimizerDisableHashJoinRIDIntersect', False)
+        await database.set_parameter('internalCostModelCoefficients', '')
 
 
 async def execute_index_intersections(database: DatabaseInstance,
@@ -96,26 +146,7 @@ async def execute_index_intersections(database: DatabaseInstance,
             Query(pipeline=[{'$match': {'in1': i, 'in2': {'$gt': 1000 - i}}}],
                   keys_length_in_bytes=1))
 
-    try:
-        await database.set_parameter('internalCostModelCoefficients',
-                                     '{"filterIncrementalCost": 10000.0}')
-        await database.set_parameter('internalCascadesOptimizerDisableMergeJoinRIDIntersect', False)
-        await database.set_parameter('internalCascadesOptimizerDisableHashJoinRIDIntersect', False)
-
-        await workload_execution.execute(database, main_config.workload_execution, collections,
-                                         requests)
-
-        await database.set_parameter('internalCascadesOptimizerDisableMergeJoinRIDIntersect', True)
-        await database.set_parameter('internalCascadesOptimizerDisableHashJoinRIDIntersect', True)
-
-        main_config.workload_execution.write_mode = WriteMode.APPEND
-        await workload_execution.execute(database, main_config.workload_execution, collections,
-                                         requests[::4])
-
-    finally:
-        await database.set_parameter('internalCascadesOptimizerDisableMergeJoinRIDIntersect', False)
-        await database.set_parameter('internalCascadesOptimizerDisableHashJoinRIDIntersect', False)
-        await database.set_parameter('internalCostModelCoefficients', '')
+    await execute_index_intersections_with_requests(database, collections, requests)
 
 
 async def execute_evaluation(database: DatabaseInstance, collections: Sequence[CollectionInfo]):
@@ -160,15 +191,16 @@ async def main():
 
         # 3. Collecting data for calibration (optional).
         # It runs the pipelines and stores explains to the database.
-
-        await execute_general(database, generator.collection_infos)
-        main_config.workload_execution.write_mode = WriteMode.APPEND
-
-        await execute_index_intersections(database, generator.collection_infos)
-
-        await execute_evaluation(database, generator.collection_infos)
-
-        await execute_unwind(database, generator.collection_infos)
+        execution_query_functions = [
+            execute_index_scan_queries,
+            execute_physical_scan_queries,
+            execute_index_intersections,
+            execute_evaluation,
+            execute_unwind,
+        ]
+        for execute_query in execution_query_functions:
+            await execute_query(database, generator.collection_infos)
+            main_config.workload_execution.write_mode = WriteMode.APPEND
 
         # Calibration phase (optional).
         # Reads the explains stored on the previous step (this run and/or previous runs),

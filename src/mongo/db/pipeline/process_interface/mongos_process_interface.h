@@ -120,7 +120,8 @@ public:
     Status appendStorageStats(OperationContext* opCtx,
                               const NamespaceString& nss,
                               const StorageStatsSpec& spec,
-                              BSONObjBuilder* builder) const final {
+                              BSONObjBuilder* builder,
+                              const boost::optional<BSONObj>& filterObj) const final {
         MONGO_UNREACHABLE;
     }
 
@@ -173,11 +174,6 @@ public:
         Pipeline* pipeline) final {
         // It is not meaningful to perform a "local read" on mongos.
         MONGO_UNREACHABLE;
-    }
-
-    std::unique_ptr<ShardFilterer> getShardFilterer(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx) const override {
-        return nullptr;
     }
 
     std::string getShardName(OperationContext* opCtx) const final {

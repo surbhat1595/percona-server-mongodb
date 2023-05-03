@@ -30,28 +30,9 @@
 #include "mongo/db/pipeline/abt/utils.h"
 
 #include "mongo/db/exec/sbe/values/bson.h"
-
+#include "mongo/db/query/optimizer/utils/utils.h"
 
 namespace mongo::optimizer {
-
-template <bool isConjunction, typename... Args>
-ABT generateConjunctionOrDisjunction(Args&... args) {
-    ABTVector elements;
-    (elements.emplace_back(args), ...);
-
-    if (elements.size() == 0) {
-        return Constant::boolean(isConjunction);
-    }
-
-    ABT result = std::move(elements.at(0));
-    for (size_t i = 1; i < elements.size(); i++) {
-        result = make<BinaryOp>(isConjunction ? Operations::And : Operations::Or,
-                                std::move(elements.at(i)),
-                                std::move(result));
-    }
-    return result;
-}
-
 std::pair<sbe::value::TypeTags, sbe::value::Value> convertFrom(const Value val) {
     // TODO: Either make this conversion unnecessary by changing the value representation in
     // ExpressionConstant, or provide a nicer way to convert directly from Document/Value to
@@ -73,9 +54,42 @@ ABT translateFieldPath(const FieldPath& fieldPath,
     const size_t fieldPathLength = fieldPath.getPathLength();
     bool isLastElement = true;
     for (size_t i = fieldPathLength; i-- > skipFromStart;) {
-        result =
-            fieldNameFn(fieldPath.getFieldName(i).toString(), isLastElement, std::move(result));
+        result = fieldNameFn(
+            FieldNameType{fieldPath.getFieldName(i).toString()}, isLastElement, std::move(result));
         isLastElement = false;
+    }
+
+    return result;
+}
+
+ABT translateFieldRef(const FieldRef& fieldRef, ABT initial) {
+    ABT result = std::move(initial);
+
+    const size_t fieldPathLength = fieldRef.numParts();
+
+    // Handle empty field paths separately.
+    if (fieldPathLength == 0) {
+        return make<PathGet>("", std::move(result));
+    }
+
+    for (size_t i = fieldPathLength; i-- > 0;) {
+        // A single empty field path will parse to a FieldRef with 0 parts but should
+        // logically be considered a single part with an empty string.
+        if (i != fieldPathLength - 1) {
+            // For field paths with empty elements such as 'x.', we should traverse the
+            // array 'x' but not reach into any sub-objects. So a predicate such as {'x.':
+            // {$eq: 5}} should match {x: [5]} and {x: {"": 5}} but not {x: [{"": 5}]}.
+            const bool trailingEmptyPath =
+                (fieldPathLength >= 2u && i == fieldPathLength - 2u) && (fieldRef[i + 1] == ""_sd);
+            if (trailingEmptyPath) {
+                auto arrCase = make<PathArr>();
+                maybeComposePath(arrCase, result.cast<PathGet>()->getPath());
+                maybeComposePath<PathComposeA>(result, arrCase);
+            } else {
+                result = make<PathTraverse>(std::move(result), PathTraverse::kSingleLevel);
+            }
+        }
+        result = make<PathGet>(FieldNameType{fieldRef[i].toString()}, std::move(result));
     }
 
     return result;

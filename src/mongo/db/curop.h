@@ -266,17 +266,8 @@ public:
     // The hash of the query's "stable" key. This represents the query's shape.
     boost::optional<uint32_t> queryHash;
 
-    // Has a value if this operation is a query. True if the execution tree for the find part of the
-    // query was built exclusively using the classic query engine, false if any part was built using
-    // SBE.
-    boost::optional<bool> classicEngineUsed;
-
-    // Has a value if this operation is an aggregation query. True if `DocumentSources` were
-    // involved in the execution tree for this query, false if they were not.
-    boost::optional<bool> documentSourceUsed;
-
-    // Indicates whether this operation used the common query framework (CQF).
-    bool cqfUsed{false};
+    // The query framework that this operation used. Will be unknown for non query operations.
+    PlanExecutor::QueryFramework queryFramework{PlanExecutor::QueryFramework::kUnknown};
 
     // Tracks the amount of indexed loop joins in a pushed down lookup stage.
     int indexedLoopJoin{0};
@@ -292,6 +283,10 @@ public:
 
     // Details of any error (whether from an exception or a command returning failure).
     Status errInfo = Status::OK();
+
+    // Amount of time spent planning the query. Begins after parsing and ends
+    // at creation of PlanExecutor.
+    Microseconds planningTime{0};
 
     // response info
     Microseconds executionTime{0};
@@ -411,7 +406,7 @@ public:
      * thereafter. Locks the client as needed to apply the specified settings.
      */
     void setGenericOpRequestDetails(OperationContext* opCtx,
-                                    const NamespaceString& nss,
+                                    NamespaceString nss,
                                     const Command* command,
                                     BSONObj cmdObj,
                                     NetworkOp op);
@@ -449,7 +444,8 @@ public:
         return _originatingCommand;
     }
 
-    void enter_inlock(const char* ns, int dbProfileLevel);
+    void enter_inlock(NamespaceString nss, int dbProfileLevel);
+    void enter_inlock(const DatabaseName& dbName, int dbProfileLevel);
 
     /**
      * Sets the type of the current network operation.
@@ -485,9 +481,7 @@ public:
     /**
      * Gets the name of the namespace on which the current operation operates.
      */
-    std::string getNS() const {
-        return _ns;
-    }
+    std::string getNS() const;
 
     /**
      * Returns a const pointer to the UserAcquisitionStats for the current operation.
@@ -508,7 +502,7 @@ public:
      * Gets the name of the namespace on which the current operation operates.
      */
     NamespaceString getNSS() const {
-        return NamespaceString{_ns};
+        return _nss;
     }
 
     /**
@@ -707,9 +701,7 @@ public:
      * 'opDescription' must be either an owned BSONObj or guaranteed to outlive the OperationContext
      * it is associated with.
      */
-    void setOpDescription_inlock(const BSONObj& opDescription) {
-        _opDescription = opDescription;
-    }
+    void setOpDescription_inlock(const BSONObj& opDescription);
 
     /**
      * Sets the original command object.
@@ -803,7 +795,8 @@ public:
      * generally the Context should set this up
      * but sometimes you want to do it ahead of time
      */
-    void setNS_inlock(StringData ns);
+    void setNS_inlock(NamespaceString nss);
+    void setNS_inlock(const DatabaseName& dbName);
 
     StringData getPlanSummary() const {
         return _planSummary;
@@ -895,7 +888,7 @@ private:
 
     bool _isCommand{false};
     int _dbprofile{0};  // 0=off, 1=slow, 2=all
-    std::string _ns;
+    NamespaceString _nss;
     BSONObj _opDescription;
     BSONObj _originatingCommand;  // Used by getMore to display original command.
     OpDebug _debug;

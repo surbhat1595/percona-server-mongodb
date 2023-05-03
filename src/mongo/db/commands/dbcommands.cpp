@@ -286,9 +286,8 @@ public:
 
             AutoGetCollectionForReadCommand collection(opCtx, nss);
 
-            const auto collDesc =
-                CollectionShardingState::get(opCtx, nss)->getCollectionDescription(opCtx);
-
+            auto collDesc = CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
+                                ->getCollectionDescription(opCtx);
             if (collDesc.isSharded()) {
                 const ShardKeyPattern shardKeyPattern(collDesc.getKeyPattern());
                 uassert(ErrorCodes::BadValue,
@@ -427,6 +426,8 @@ public:
 
 } cmdDatasize;
 
+Rarely _collStatsSampler;
+
 class CmdCollStats final : public BasicCommandWithRequestParser<CmdCollStats> {
 public:
     using Request = CollStatsCommand;
@@ -452,6 +453,11 @@ public:
                               const BSONObj& cmdObj,
                               const RequestParser& requestParser,
                               BSONObjBuilder& result) final {
+        if (_collStatsSampler.tick())
+            LOGV2_WARNING(7024600,
+                          "The collStats command is deprecated. For more information, see "
+                          "https://dochub.mongodb.org/core/collStats-deprecated");
+
         const auto& cmd = requestParser.request();
         const auto& nss = cmd.getNamespace();
 
@@ -477,6 +483,10 @@ public:
 
     std::string help() const final {
         return Request::kCommandDescription.toString();
+    }
+
+    bool allowedWithSecurityToken() const final {
+        return true;
     }
 
     // Assume that appendCollectionStorageStats() gives us a valid response.
@@ -559,6 +569,15 @@ public:
             }
         }
 
+        if (cmd->getValidator() || cmd->getValidationLevel() || cmd->getValidationAction()) {
+            // Check for config.settings in the user command since a validator is allowed
+            // internally on this collection but the user may not modify the validator.
+            uassert(ErrorCodes::InvalidOptions,
+                    str::stream() << "Document validators not allowed on system collection "
+                                  << cmd->getNamespace(),
+                    cmd->getNamespace() != NamespaceString::kConfigSettingsNamespace);
+        }
+
         uassertStatusOK(timeseries::processCollModCommandWithTimeSeriesTranslation(
             opCtx, cmd->getNamespace(), *cmd, true, &result));
         return true;
@@ -580,6 +599,10 @@ public:
     using Reply = typename Request::Reply;
 
     CmdDbStats() : TypedCommand(Request::kCommandName, Request::kCommandAlias) {}
+
+    bool allowedWithSecurityToken() const final {
+        return true;
+    }
 
     class Invocation final : public InvocationBase {
     public:
@@ -618,7 +641,7 @@ public:
             {
                 CurOp::get(opCtx)->ensureStarted();
                 stdx::lock_guard<Client> lk(*opCtx->getClient());
-                CurOp::get(opCtx)->setNS_inlock(dbname.db());
+                CurOp::get(opCtx)->setNS_inlock(dbname);
             }
 
             AutoGetDb autoDb(opCtx, dbname, MODE_IS);
@@ -659,8 +682,7 @@ public:
                     stdx::lock_guard<Client> lk(*opCtx->getClient());
                     // TODO: OldClientContext legacy, needs to be removed
                     CurOp::get(opCtx)->enter_inlock(
-                        dbname.db().c_str(),
-                        CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(dbname));
+                        dbname, CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(dbname));
                 }
 
                 db->getStats(opCtx, &reply, cmd.getFreeStorage(), cmd.getScale());

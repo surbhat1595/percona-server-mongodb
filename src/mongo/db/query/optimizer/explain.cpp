@@ -124,6 +124,12 @@ public:
         return *this;
     }
 
+    template <class TagType>
+    ExplainPrinterImpl& print(const StrongStringAlias<TagType>& t) {
+        print(t.value().empty() ? "<empty>" : t.value());
+        return *this;
+    }
+
     /**
      * Here and below: "other" printer(s) may be siphoned out.
      */
@@ -414,8 +420,13 @@ public:
     }
 
     ExplainPrinterImpl& print(const std::string& s) {
-        auto [tag, val] = sbe::value::makeNewString(s);
-        addValue(tag, val);
+        printStringInternal(s);
+        return *this;
+    }
+
+    template <class TagType>
+    ExplainPrinterImpl& print(const StrongStringAlias<TagType>& s) {
+        printStringInternal(s.value().toString());
         return *this;
     }
 
@@ -458,12 +469,26 @@ public:
         return *this;
     }
 
+    template <size_t N>
+    ExplainPrinterImpl& fieldName(const char (&name)[N],
+                                  const ExplainVersion minVersion = ExplainVersion::V1,
+                                  const ExplainVersion maxVersion = ExplainVersion::Vmax) {
+        fieldNameInternal(name, minVersion, maxVersion);
+        return *this;
+    }
+
     ExplainPrinterImpl& fieldName(const std::string& name,
                                   const ExplainVersion minVersion = ExplainVersion::V1,
                                   const ExplainVersion maxVersion = ExplainVersion::Vmax) {
-        if (minVersion <= version && maxVersion >= version) {
-            _nextFieldName = name;
-        }
+        fieldNameInternal(name, minVersion, maxVersion);
+        return *this;
+    }
+
+    template <class TagType>
+    ExplainPrinterImpl& fieldName(const StrongStringAlias<TagType>& name,
+                                  const ExplainVersion minVersion = ExplainVersion::V1,
+                                  const ExplainVersion maxVersion = ExplainVersion::Vmax) {
+        fieldNameInternal(name.value().toString(), minVersion, maxVersion);
         return *this;
     }
 
@@ -473,6 +498,21 @@ public:
     }
 
 private:
+    ExplainPrinterImpl& printStringInternal(const std::string& s) {
+        auto [tag, val] = sbe::value::makeNewString(s);
+        addValue(tag, val);
+        return *this;
+    }
+
+    ExplainPrinterImpl& fieldNameInternal(const std::string& name,
+                                          const ExplainVersion minVersion,
+                                          const ExplainVersion maxVersion) {
+        if (minVersion <= version && maxVersion >= version) {
+            _nextFieldName = name;
+        }
+        return *this;
+    }
+
     ExplainPrinterImpl& print(ExplainPrinterImpl& other, const bool append) {
         auto [tag, val] = other.moveValue();
         addValue(tag, val, append);
@@ -496,7 +536,7 @@ private:
     void addValue(sbe::value::TypeTags tag, sbe::value::Value val, const bool append = false) {
         if (!_initialized) {
             _initialized = true;
-            _canAppend = !_nextFieldName.empty();
+            _canAppend = _nextFieldName.has_value();
             if (_canAppend) {
                 std::tie(_tag, _val) = sbe::value::makeNewObject();
             } else {
@@ -512,7 +552,7 @@ private:
         }
 
         if (append) {
-            uassert(6624073, "Field name is not empty", _nextFieldName.empty());
+            uassert(6624073, "Field name is not set", !_nextFieldName.has_value());
             uassert(6624349,
                     "Other printer does not contain Object",
                     tag == sbe::value::TypeTags::Object);
@@ -523,19 +563,19 @@ private:
                 addField(obj->field(i), fieldTag, fieldVal);
             }
         } else {
-            addField(_nextFieldName, tag, val);
-            _nextFieldName.clear();
+            tassert(6751700, "Missing field name to serialize", _nextFieldName);
+            addField(*_nextFieldName, tag, val);
+            _nextFieldName = boost::none;
         }
     }
 
     void addField(const std::string& fieldName, sbe::value::TypeTags tag, sbe::value::Value val) {
-        uassert(6624074, "Field name is empty", !fieldName.empty());
         uassert(6624075, "Duplicate field name", _fieldNameSet.insert(fieldName).second);
         sbe::value::getObjectView(_val)->push_back(fieldName, tag, val);
     }
 
     void reset() {
-        _nextFieldName.clear();
+        _nextFieldName = boost::none;
         _initialized = false;
         _canAppend = false;
         _tag = sbe::value::TypeTags::Nothing;
@@ -543,7 +583,8 @@ private:
         _fieldNameSet.clear();
     }
 
-    std::string _nextFieldName;
+    // Cannot assume empty means non-existent, so use optional<>.
+    boost::optional<std::string> _nextFieldName;
     bool _initialized;
     bool _canAppend;
     sbe::value::TypeTags _tag;
@@ -673,7 +714,7 @@ public:
     ExplainPrinter transport(const ABT& /*n*/,
                              const ExpressionBinder& binders,
                              std::vector<ExplainPrinter> inResults) {
-        std::map<std::string, ExplainPrinter> ordered;
+        std::map<ProjectionName, ExplainPrinter> ordered;
         for (size_t idx = 0; idx < inResults.size(); ++idx) {
             ordered.emplace(binders.names()[idx], std::move(inResults[idx]));
         }
@@ -698,11 +739,11 @@ public:
 
     static void printFieldProjectionMap(ExplainPrinter& printer, const FieldProjectionMap& map) {
         std::map<FieldNameType, ProjectionName> ordered;
-        if (!map._ridProjection.empty()) {
-            ordered["<rid>"] = map._ridProjection;
+        if (const auto& projName = map._ridProjection) {
+            ordered.emplace("<rid>", *projName);
         }
-        if (!map._rootProjection.empty()) {
-            ordered["<root>"] = map._rootProjection;
+        if (const auto& projName = map._rootProjection) {
+            ordered.emplace("<root>", *projName);
         }
         for (const auto& entry : map._fieldProjections) {
             ordered.insert(entry);
@@ -1084,14 +1125,14 @@ public:
         for (const auto& [key, req] : reqMap) {
             ExplainPrinter local;
 
-            local.fieldName("refProjection").print(key._projectionName).separator(", ");
+            if (const auto& projName = key._projectionName) {
+                local.fieldName("refProjection").print(*projName).separator(", ");
+            }
             ExplainPrinter pathPrinter = generate(key._path);
             local.fieldName("path").separator("'").printSingleLevel(pathPrinter).separator("', ");
 
-            if (req.hasBoundProjectionName()) {
-                local.fieldName("boundProjection")
-                    .print(req.getBoundProjectionName())
-                    .separator(", ");
+            if (const auto& boundProjName = req.getBoundProjectionName()) {
+                local.fieldName("boundProjection").print(*boundProjName).separator(", ");
             }
 
             local.fieldName("intervals");
@@ -1114,14 +1155,14 @@ public:
         for (const auto& [key, req, entryIndex] : residualReqs) {
             ExplainPrinter local;
 
-            local.fieldName("refProjection").print(key._projectionName).separator(", ");
+            if (const auto& projName = key._projectionName) {
+                local.fieldName("refProjection").print(*projName).separator(", ");
+            }
             ExplainPrinter pathPrinter = generate(key._path);
             local.fieldName("path").separator("'").printSingleLevel(pathPrinter).separator("', ");
 
-            if (req.hasBoundProjectionName()) {
-                local.fieldName("boundProjection")
-                    .print(req.getBoundProjectionName())
-                    .separator(", ");
+            if (const auto& boundProjName = req.getBoundProjectionName()) {
+                local.fieldName("boundProjection").print(*boundProjName).separator(", ");
             }
 
             local.fieldName("intervals");
@@ -1280,8 +1321,27 @@ public:
         printer.separator(" [")
             .fieldName("scanProjectionName", ExplainVersion::V3)
             .print(node.getScanProjectionName());
-        printBooleanFlag(printer, "hasLeftIntervals", node.hasLeftIntervals());
-        printBooleanFlag(printer, "hasRightIntervals", node.hasRightIntervals());
+
+        printer.separator("]");
+        nodeCEPropsPrint(printer, n, node);
+        printer.setChildCount(2)
+            .maybeReverse()
+            .fieldName("leftChild", ExplainVersion::V3)
+            .print(leftChildResult)
+            .fieldName("rightChild", ExplainVersion::V3)
+            .print(rightChildResult);
+        return printer;
+    }
+
+    ExplainPrinter transport(const ABT& n,
+                             const RIDUnionNode& node,
+                             ExplainPrinter leftChildResult,
+                             ExplainPrinter rightChildResult) {
+        ExplainPrinter printer("RIDUnion");
+        maybePrintProps(printer, node);
+        printer.separator(" [")
+            .fieldName("scanProjectionName", ExplainVersion::V3)
+            .print(node.getScanProjectionName());
 
         printer.separator("]");
         nodeCEPropsPrint(printer, n, node);
@@ -1738,10 +1798,10 @@ public:
                     ExplainPrinter pathPrinter = gen.generate(key._path);
 
                     ExplainPrinter local;
-                    local.fieldName("refProjection")
-                        .print(key._projectionName)
-                        .separator(", ")
-                        .fieldName("path")
+                    if (const auto& projName = key._projectionName) {
+                        local.fieldName("refProjection").print(*projName).separator(", ");
+                    }
+                    local.fieldName("path")
                         .separator("'")
                         .printSingleLevel(pathPrinter)
                         .separator("', ")
@@ -1770,6 +1830,7 @@ public:
                 .fieldName("scanDefName")
                 .print(prop.getScanDefName());
             printBooleanFlag(printer, "eqPredsOnly", prop.getEqPredsOnly());
+            printBooleanFlag(printer, "hasProperInterval", prop.hasProperInterval());
             printer.separator("]");
 
             if (!prop.getSatisfiedPartialIndexes().empty()) {
@@ -2176,10 +2237,10 @@ public:
         return printer;
     }
 
-    static void printPathProjections(ExplainPrinter& printer, const std::set<std::string>& names) {
+    static void printPathProjections(ExplainPrinter& printer, const FieldNameOrderedSet& names) {
         if constexpr (version < ExplainVersion::V3) {
             bool first = true;
-            for (const std::string& s : names) {
+            for (const FieldNameType& s : names) {
                 if (first) {
                     first = false;
                 } else {
@@ -2189,7 +2250,7 @@ public:
             }
         } else if constexpr (version == ExplainVersion::V3) {
             std::vector<ExplainPrinter> printers;
-            for (const std::string& s : names) {
+            for (const FieldNameType& s : names) {
                 ExplainPrinter local;
                 local.print(s);
                 printers.push_back(std::move(local));
@@ -2546,8 +2607,12 @@ static void printBSONstr(PrinterType& printer,
     }
 }
 
-std::string ExplainGenerator::printBSON(const sbe::value::TypeTags tag,
-                                        const sbe::value::Value val) {
+std::string ExplainGenerator::explainBSONStr(const ABT& node,
+                                             bool displayProperties,
+                                             const cascades::MemoExplainInterface* memoInterface,
+                                             const NodeToGroupPropsMap& nodeMap) {
+    const auto [tag, val] = explainBSON(node, displayProperties, memoInterface, nodeMap);
+    sbe::value::ValueGuard vg(tag, val);
     ExplainPrinterImpl<ExplainVersion::V2> printer;
     printBSONstr(printer, tag, val);
     return printer.str();

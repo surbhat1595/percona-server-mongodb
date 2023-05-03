@@ -583,7 +583,10 @@ public:
     static FLE2FindRangePayload serializeFindRangePayload(FLEIndexKeyAndId indexKey,
                                                           FLEUserKeyAndId userKey,
                                                           const std::vector<std::string>& edges,
-                                                          uint64_t maxContentionFactor);
+                                                          uint64_t maxContentionFactor,
+                                                          const FLE2RangeFindSpec& spec);
+
+    static FLE2FindRangePayload serializeFindRangeStub(const FLE2RangeFindSpec& spec);
 
     /**
      * Generates a client-side payload that is sent to the server.
@@ -1138,7 +1141,8 @@ struct OSTType_Double {
 
 OSTType_Double getTypeInfoDouble(double value,
                                  boost::optional<double> min,
-                                 boost::optional<double> max);
+                                 boost::optional<double> max,
+                                 boost::optional<uint32_t> precision);
 /**
  * Describe the encoding of an BSON Decimal (i.e. IEEE 754 Decimal128)
  *
@@ -1156,9 +1160,13 @@ struct OSTType_Decimal128 {
     boost::multiprecision::uint128_t max;
 };
 
+boost::multiprecision::uint128_t toInt128FromDecimal128(Decimal128 dec);
+
 OSTType_Decimal128 getTypeInfoDecimal128(Decimal128 value,
                                          boost::optional<Decimal128> min,
-                                         boost::optional<Decimal128> max);
+                                         boost::optional<Decimal128> max,
+                                         boost::optional<uint32_t> precision);
+
 
 struct FLEFindEdgeTokenSet {
     EDCDerivedFromDataToken edc;
@@ -1167,17 +1175,22 @@ struct FLEFindEdgeTokenSet {
 };
 
 struct ParsedFindRangePayload {
-    std::vector<FLEFindEdgeTokenSet> edges;
+    boost::optional<std::vector<FLEFindEdgeTokenSet>> edges;
     ServerDataEncryptionLevel1Token serverToken;
 
-    std::string operatorType;
-    std::int32_t payloadId;
+    Fle2RangeOperator firstOp;
+    boost::optional<Fle2RangeOperator> secondOp;
+    std::int32_t payloadId{};
 
-    std::int64_t maxCounter;
+    std::int64_t maxCounter{};
 
     explicit ParsedFindRangePayload(BSONElement fleFindRangePayload);
     explicit ParsedFindRangePayload(const Value& fleFindRangePayload);
     explicit ParsedFindRangePayload(ConstDataRange cdr);
+
+    bool isStub() {
+        return !edges.has_value();
+    }
 };
 
 
@@ -1208,11 +1221,14 @@ std::unique_ptr<Edges> getEdgesInt64(int64_t value,
 std::unique_ptr<Edges> getEdgesDouble(double value,
                                       boost::optional<double> min,
                                       boost::optional<double> max,
+                                      boost::optional<uint32_t> precision,
                                       int sparsity);
 
 std::unique_ptr<Edges> getEdgesDecimal128(Decimal128 value,
                                           boost::optional<Decimal128> min,
                                           boost::optional<Decimal128> max,
+                                          boost::optional<uint32_t> precision,
+
                                           int sparsity);
 /**
  * Mincover calculator
@@ -1240,6 +1256,7 @@ std::vector<std::string> minCoverDouble(double lowerBound,
                                         bool includeUpperBound,
                                         boost::optional<double> min,
                                         boost::optional<double> max,
+                                        boost::optional<uint32_t> precision,
                                         int sparsity);
 
 std::vector<std::string> minCoverDecimal128(Decimal128 lowerBound,
@@ -1248,6 +1265,8 @@ std::vector<std::string> minCoverDecimal128(Decimal128 lowerBound,
                                             bool includeUpperBound,
                                             boost::optional<Decimal128> min,
                                             boost::optional<Decimal128> max,
+                                            boost::optional<uint32_t> precision,
+
                                             int sparsity);
 /**
  * Utility functions manipulating buffers.

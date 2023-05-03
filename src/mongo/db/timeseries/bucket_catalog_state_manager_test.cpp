@@ -39,10 +39,14 @@ class BucketCatalogStateManagerTest : public BucketCatalog, public unittest::Tes
 public:
     BucketCatalogStateManagerTest() {}
 
+    void clearById(const OID& oid) {
+        directWriteStart(oid);
+        directWriteFinish(oid);
+    }
+
     bool hasBeenCleared(Bucket* bucket) {
         auto state = _bucketStateManager.getBucketState(bucket);
-        return (state &&
-                (*state == BucketState::kCleared || *state == BucketState::kPreparedAndCleared));
+        return (state && state.value().isSet(BucketStateFlag::kCleared));
     }
 
     Bucket* createBucket(const CreationInfo& info) {
@@ -54,7 +58,7 @@ public:
 
     bool cannotAccessBucket(Bucket* bucket) {
         if (hasBeenCleared(bucket)) {
-            _removeBucket(&_stripes[bucket->stripe()], withLock, bucket, false);
+            _removeBucket(&_stripes[bucket->stripe()], withLock, bucket, RemovalMode::kAbort);
             return true;
         } else {
             return false;
@@ -62,17 +66,14 @@ public:
     }
 
     void checkAndRemoveClearedBucket(Bucket* bucket, BucketKey bucketKey, WithLock withLock) {
-        auto a = _findBucket(_stripes[_getStripeNumber(bucketKey)],
-                             withLock,
-                             bucket->id(),
-                             ReturnClearedBuckets::kYes);
+        auto a = _findBucket(
+            _stripes[_getStripeNumber(bucketKey)], withLock, bucket->id(), IgnoreBucketState::kYes);
         ASSERT(a == bucket);
-        auto b = _findBucket(_stripes[_getStripeNumber(bucketKey)],
-                             withLock,
-                             bucket->id(),
-                             ReturnClearedBuckets::kNo);
+        auto b = _findBucket(
+            _stripes[_getStripeNumber(bucketKey)], withLock, bucket->id(), IgnoreBucketState::kNo);
         ASSERT(b == nullptr);
-        _removeBucket(&_stripes[_getStripeNumber(bucketKey)], withLock, bucket, false);
+        _removeBucket(
+            &_stripes[_getStripeNumber(bucketKey)], withLock, bucket, RemovalMode::kAbort);
     }
 
     WithLock withLock = WithLock::withoutLock();
@@ -96,6 +97,206 @@ public:
         bucketKey3, _getStripeNumber(bucketKey3), date, options, stats, &closedBuckets};
 };
 
+TEST_F(BucketCatalogStateManagerTest, BucketStateSetUnsetFlag) {
+    BucketState state;
+    auto testFlags = [&state](std::initializer_list<BucketStateFlag> set,
+                              std::initializer_list<BucketStateFlag> unset) {
+        for (auto flag : set) {
+            ASSERT_TRUE(state.isSet(flag));
+        }
+        for (auto flag : unset) {
+            ASSERT_FALSE(state.isSet(flag));
+        }
+    };
+
+    testFlags({},
+              {
+                  BucketStateFlag::kPrepared,
+                  BucketStateFlag::kCleared,
+                  BucketStateFlag::kPendingCompression,
+                  BucketStateFlag::kPendingDirectWrite,
+              });
+
+    state.setFlag(BucketStateFlag::kPrepared);
+    testFlags(
+        {
+            BucketStateFlag::kPrepared,
+        },
+        {
+            BucketStateFlag::kCleared,
+            BucketStateFlag::kPendingCompression,
+            BucketStateFlag::kPendingDirectWrite,
+        });
+
+    state.setFlag(BucketStateFlag::kCleared);
+    testFlags(
+        {
+            BucketStateFlag::kPrepared,
+            BucketStateFlag::kCleared,
+        },
+        {
+            BucketStateFlag::kPendingCompression,
+            BucketStateFlag::kPendingDirectWrite,
+        });
+
+    state.setFlag(BucketStateFlag::kPendingCompression);
+    testFlags(
+        {
+            BucketStateFlag::kPrepared,
+            BucketStateFlag::kCleared,
+            BucketStateFlag::kPendingCompression,
+        },
+        {
+
+            BucketStateFlag::kPendingDirectWrite,
+        });
+
+    state.setFlag(BucketStateFlag::kPendingDirectWrite);
+    testFlags(
+        {
+            BucketStateFlag::kPrepared,
+            BucketStateFlag::kCleared,
+            BucketStateFlag::kPendingCompression,
+            BucketStateFlag::kPendingDirectWrite,
+        },
+        {});
+
+    state.unsetFlag(BucketStateFlag::kPrepared);
+    testFlags(
+        {
+            BucketStateFlag::kCleared,
+            BucketStateFlag::kPendingCompression,
+            BucketStateFlag::kPendingDirectWrite,
+
+        },
+        {
+            BucketStateFlag::kPrepared,
+        });
+
+    state.unsetFlag(BucketStateFlag::kCleared);
+    testFlags(
+        {
+            BucketStateFlag::kPendingCompression,
+            BucketStateFlag::kPendingDirectWrite,
+
+        },
+        {
+            BucketStateFlag::kPrepared,
+            BucketStateFlag::kCleared,
+        });
+
+    state.unsetFlag(BucketStateFlag::kPendingCompression);
+    testFlags(
+        {
+            BucketStateFlag::kPendingDirectWrite,
+        },
+        {
+            BucketStateFlag::kPrepared,
+            BucketStateFlag::kCleared,
+            BucketStateFlag::kPendingCompression,
+        });
+
+    state.unsetFlag(BucketStateFlag::kPendingDirectWrite);
+    testFlags({},
+              {
+                  BucketStateFlag::kPrepared,
+                  BucketStateFlag::kCleared,
+                  BucketStateFlag::kPendingCompression,
+                  BucketStateFlag::kPendingDirectWrite,
+              });
+}
+
+TEST_F(BucketCatalogStateManagerTest, BucketStateReset) {
+    BucketState state;
+
+    state.setFlag(BucketStateFlag::kPrepared);
+    state.setFlag(BucketStateFlag::kCleared);
+    state.setFlag(BucketStateFlag::kPendingCompression);
+    state.setFlag(BucketStateFlag::kPendingDirectWrite);
+
+    ASSERT_TRUE(state.isSet(BucketStateFlag::kPrepared));
+    ASSERT_TRUE(state.isSet(BucketStateFlag::kCleared));
+    ASSERT_TRUE(state.isSet(BucketStateFlag::kPendingCompression));
+    ASSERT_TRUE(state.isSet(BucketStateFlag::kPendingDirectWrite));
+
+    state.reset();
+
+    ASSERT_FALSE(state.isSet(BucketStateFlag::kPrepared));
+    ASSERT_FALSE(state.isSet(BucketStateFlag::kCleared));
+    ASSERT_FALSE(state.isSet(BucketStateFlag::kPendingCompression));
+    ASSERT_FALSE(state.isSet(BucketStateFlag::kPendingDirectWrite));
+}
+
+TEST_F(BucketCatalogStateManagerTest, BucketStateIsPrepared) {
+    BucketState state;
+
+    ASSERT_FALSE(state.isPrepared());
+
+    state.setFlag(BucketStateFlag::kPrepared);
+    ASSERT_TRUE(state.isPrepared());
+
+    state.setFlag(BucketStateFlag::kCleared);
+    state.setFlag(BucketStateFlag::kPendingCompression);
+    state.setFlag(BucketStateFlag::kPendingDirectWrite);
+    ASSERT_TRUE(state.isPrepared());
+
+    state.unsetFlag(BucketStateFlag::kPrepared);
+    ASSERT_FALSE(state.isPrepared());
+}
+
+TEST_F(BucketCatalogStateManagerTest, BucketStateConflictsWithInsert) {
+    BucketState state;
+    ASSERT_FALSE(state.conflictsWithInsertion());
+
+    // Just prepared is false
+    state.setFlag(BucketStateFlag::kPrepared);
+    ASSERT_FALSE(state.conflictsWithInsertion());
+
+    // Prepared and cleared is true
+    state.setFlag(BucketStateFlag::kCleared);
+    ASSERT_TRUE(state.conflictsWithInsertion());
+
+    // Just cleared is true
+    state.reset();
+    state.setFlag(BucketStateFlag::kCleared);
+    ASSERT_TRUE(state.conflictsWithInsertion());
+
+    // Pending operations are true
+    state.reset();
+    state.setFlag(BucketStateFlag::kPendingCompression);
+    ASSERT_TRUE(state.conflictsWithInsertion());
+
+    state.reset();
+    state.setFlag(BucketStateFlag::kPendingDirectWrite);
+    ASSERT_TRUE(state.conflictsWithInsertion());
+}
+
+TEST_F(BucketCatalogStateManagerTest, BucketStateConflictsWithReopening) {
+    BucketState state;
+    ASSERT_FALSE(state.conflictsWithReopening());
+
+    // Just prepared is false
+    state.setFlag(BucketStateFlag::kPrepared);
+    ASSERT_FALSE(state.conflictsWithReopening());
+
+    // Prepared and cleared is false
+    state.setFlag(BucketStateFlag::kCleared);
+    ASSERT_FALSE(state.conflictsWithReopening());
+
+    // Just cleared is false
+    state.reset();
+    state.setFlag(BucketStateFlag::kCleared);
+    ASSERT_FALSE(state.conflictsWithReopening());
+
+    // Pending operations are true
+    state.reset();
+    state.setFlag(BucketStateFlag::kPendingCompression);
+    ASSERT_TRUE(state.conflictsWithReopening());
+
+    state.reset();
+    state.setFlag(BucketStateFlag::kPendingDirectWrite);
+    ASSERT_TRUE(state.conflictsWithReopening());
+}
 
 TEST_F(BucketCatalogStateManagerTest, EraAdvancesAsExpected) {
 
@@ -128,8 +329,8 @@ TEST_F(BucketCatalogStateManagerTest, EraAdvancesAsExpected) {
     ASSERT_EQ(bucket2->getEra(), 1);
 
     // Era also advances when clearing by OID
-    clear(OID());
-    ASSERT_EQ(_bucketStateManager.getEra(), 3);
+    clearById(OID());
+    ASSERT_EQ(_bucketStateManager.getEra(), 4);
 }
 
 TEST_F(BucketCatalogStateManagerTest, EraCountMapUpdatedCorrectly) {
@@ -177,8 +378,8 @@ TEST_F(BucketCatalogStateManagerTest, HasBeenClearedFunctionReturnsAsExpected) {
     ASSERT_EQ(bucket1->getEra(), 0);
     ASSERT_EQ(bucket2->getEra(), 0);
 
-    // After a clear operation, _hasBeenCleared returns whether a particular bucket was cleared or
-    // not. It also advances the bucket's era up to the most recent era.
+    // After a clear operation, _isMemberOfClearedSet returns whether a particular bucket was
+    // cleared or not. It also advances the bucket's era up to the most recent era.
     ASSERT_FALSE(cannotAccessBucket(bucket1));
     ASSERT_FALSE(cannotAccessBucket(bucket2));
     ASSERT_EQ(_bucketStateManager.getCountForEra(0), 2);
@@ -200,7 +401,7 @@ TEST_F(BucketCatalogStateManagerTest, HasBeenClearedFunctionReturnsAsExpected) {
     ASSERT_EQ(bucket5->getEra(), 2);
     clear(ns2);
     ASSERT(cannotAccessBucket(bucket5));
-    // _hasBeenCleared should be able to advance a bucket by multiple eras.
+    // _isMemberOfClearedSet should be able to advance a bucket by multiple eras.
     ASSERT_EQ(bucket1->getEra(), 1);
     ASSERT_EQ(_bucketStateManager.getCountForEra(1), 1);
     ASSERT_EQ(_bucketStateManager.getCountForEra(3), 0);
@@ -209,7 +410,7 @@ TEST_F(BucketCatalogStateManagerTest, HasBeenClearedFunctionReturnsAsExpected) {
     ASSERT_EQ(_bucketStateManager.getCountForEra(1), 0);
     ASSERT_EQ(_bucketStateManager.getCountForEra(3), 1);
 
-    // _hasBeenCleared works even if the bucket wasn't cleared in the most recent clear.
+    // _isMemberOfClearedSet works even if the bucket wasn't cleared in the most recent clear.
     clear(ns1);
     auto bucket6 = createBucket(info2);
     ASSERT_EQ(bucket6->getEra(), 4);
@@ -299,24 +500,114 @@ TEST_F(BucketCatalogStateManagerTest, HasBeenClearedToleratesGapsInRegistry) {
 
     auto bucket1 = createBucket(info1);
     ASSERT_EQ(bucket1->getEra(), 0);
-    clear(OID());
-    ASSERT_EQ(_bucketStateManager.getEra(), 1);
-    clear(ns1);
+    clearById(OID());
     ASSERT_EQ(_bucketStateManager.getEra(), 2);
+    clear(ns1);
+    ASSERT_EQ(_bucketStateManager.getEra(), 3);
     ASSERT_TRUE(hasBeenCleared(bucket1));
 
     auto bucket2 = createBucket(info2);
-    ASSERT_EQ(bucket2->getEra(), 2);
-    clear(OID());
-    clear(OID());
-    clear(OID());
-    ASSERT_EQ(_bucketStateManager.getEra(), 5);
+    ASSERT_EQ(bucket2->getEra(), 3);
+    clearById(OID());
+    clearById(OID());
+    clearById(OID());
+    ASSERT_EQ(_bucketStateManager.getEra(), 9);
     ASSERT_TRUE(hasBeenCleared(bucket1));
     ASSERT_FALSE(hasBeenCleared(bucket2));
     clear(ns2);
-    ASSERT_EQ(_bucketStateManager.getEra(), 6);
+    ASSERT_EQ(_bucketStateManager.getEra(), 10);
     ASSERT_TRUE(hasBeenCleared(bucket1));
     ASSERT_TRUE(hasBeenCleared(bucket2));
+}
+
+TEST_F(BucketCatalogStateManagerTest, ArchivingBucketPreservesState) {
+    RAIIServerParameterControllerForTest controller{"featureFlagTimeseriesScalabilityImprovements",
+                                                    true};
+
+    auto bucket = createBucket(info1);
+    auto bucketId = bucket->id();
+
+    ClosedBuckets closedBuckets;
+    _archiveBucket(&_stripes[info1.stripe], WithLock::withoutLock(), bucket, &closedBuckets);
+    auto state = _bucketStateManager.getBucketState(bucketId);
+    ASSERT_TRUE(state.has_value());
+    ASSERT_TRUE(state == BucketState{});
+}
+
+TEST_F(BucketCatalogStateManagerTest, AbortingBatchRemovesBucketState) {
+    RAIIServerParameterControllerForTest controller{"featureFlagTimeseriesScalabilityImprovements",
+                                                    true};
+
+    auto bucket = createBucket(info1);
+    auto bucketId = bucket->id();
+
+    auto stats = _getExecutionStats(info1.key.ns);
+    auto batch = std::make_shared<WriteBatch>(BucketHandle{bucketId, info1.stripe}, 0, stats);
+
+    _abort(&_stripes[info1.stripe], WithLock::withoutLock(), batch, Status::OK());
+    ASSERT(_bucketStateManager.getBucketState(bucketId) == boost::none);
+}
+
+TEST_F(BucketCatalogStateManagerTest, ClosingBucketGoesThroughPendingCompressionState) {
+    RAIIServerParameterControllerForTest controller{"featureFlagTimeseriesScalabilityImprovements",
+                                                    true};
+
+    auto bucket = createBucket(info1);
+    auto bucketId = bucket->id();
+
+    ASSERT(_bucketStateManager.getBucketState(bucketId).value() == BucketState{});
+
+    auto stats = _getExecutionStats(info1.key.ns);
+    auto batch = std::make_shared<WriteBatch>(BucketHandle{bucketId, info1.stripe}, 0, stats);
+    ASSERT(batch->claimCommitRights());
+    ASSERT_OK(prepareCommit(batch));
+    ASSERT(_bucketStateManager.getBucketState(bucketId).value() ==
+           BucketState{}.setFlag(BucketStateFlag::kPrepared));
+
+    {
+        // Fool the system by marking the bucket for closure, then finish the batch so it detects
+        // this and closes the bucket.
+        bucket->setRolloverAction(RolloverAction::kHardClose);
+        CommitInfo commitInfo{};
+        auto closedBucket = finish(batch, commitInfo);
+        ASSERT(closedBucket.has_value());
+        ASSERT_EQ(closedBucket.value().bucketId, bucketId);
+
+        // Bucket should now be in pending compression state.
+        ASSERT(_bucketStateManager.getBucketState(bucketId).has_value());
+        ASSERT(_bucketStateManager.getBucketState(bucketId).value() ==
+               BucketState{}.setFlag(BucketStateFlag::kPendingCompression));
+    }
+
+    // Destructing the 'ClosedBucket' struct should report it compressed should remove it from the
+    // catalog.
+    ASSERT(_bucketStateManager.getBucketState(bucketId) == boost::none);
+}
+
+TEST_F(BucketCatalogStateManagerTest, DirectWriteStartInitializesBucketState) {
+    RAIIServerParameterControllerForTest controller{"featureFlagTimeseriesScalabilityImprovements",
+                                                    true};
+
+    auto bucketId = OID();
+    directWriteStart(bucketId);
+    auto state = _bucketStateManager.getBucketState(bucketId);
+    ASSERT_TRUE(state.has_value());
+    ASSERT_TRUE(state.value().isSet(BucketStateFlag::kPendingDirectWrite));
+}
+
+TEST_F(BucketCatalogStateManagerTest, DirectWriteFinishRemovesBucketState) {
+    RAIIServerParameterControllerForTest controller{"featureFlagTimeseriesScalabilityImprovements",
+                                                    true};
+
+    auto bucketId = OID();
+    directWriteStart(bucketId);
+    auto state = _bucketStateManager.getBucketState(bucketId);
+    ASSERT_TRUE(state.has_value());
+    ASSERT_TRUE(state.value().isSet(BucketStateFlag::kPendingDirectWrite));
+
+    directWriteFinish(bucketId);
+    state = _bucketStateManager.getBucketState(bucketId);
+    ASSERT_FALSE(state.has_value());
 }
 
 }  // namespace

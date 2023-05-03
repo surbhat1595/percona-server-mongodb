@@ -40,6 +40,12 @@ namespace fs = ::boost::filesystem;
 
 class GoldenTestContext : public GoldenTestContextBase {
 public:
+    /** Format of the test header*/
+    enum HeaderFormat {
+        /** A simple text header, suitable for unstructured text output.*/
+        Text,
+    };
+
     explicit GoldenTestContext(
         const GoldenTestConfig* config,
         const TestInfo* testInfo = UnitTest::getInstance()->currentTestInfo(),
@@ -51,6 +57,11 @@ public:
               validateOnClose,
               [this](auto const&... args) { return onError(args...); }),
           _testInfo(testInfo) {}
+
+    /**
+     * Prints the test header in a specified format.
+     */
+    void printTestHeader(HeaderFormat format);
 
     // Disable move/copy because onError captures 'this' address.
     GoldenTestContext(GoldenTestContext&&) = delete;

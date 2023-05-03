@@ -27,17 +27,11 @@
  *    it in the license file.
  */
 
-#include "mongo/db/query/projection_parser.h"
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/pipeline/pipeline_d.h"
 
 #include "mongo/base/exact_cast.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/curop.h"
@@ -83,7 +77,7 @@
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/plan_executor_impl.h"
 #include "mongo/db/query/plan_summary_stats.h"
-#include "mongo/db/query/planner_analysis.h"
+#include "mongo/db/query/projection_parser.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner.h"
@@ -103,7 +97,6 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
-
 namespace mongo {
 
 using boost::intrusive_ptr;
@@ -114,7 +107,7 @@ using write_ops::InsertCommandRequest;
 
 namespace {
 /**
- * Extracts a prefix of 'DocumentSourceGroup' and 'DocumentSourceLookUp' stages from the given
+ * Finds a prefix of 'DocumentSourceGroup' and 'DocumentSourceLookUp' stages from the given
  * pipeline to prepare for pushdown of $group and $lookup into the inner query layer so that it
  * can be executed using SBE.
  * Group stages are extracted from the pipeline when all of the following conditions are met:
@@ -128,11 +121,11 @@ namespace {
  *    - The $lookup uses only the 'localField'/'foreignField' syntax (no pipelines).
  *    - The foreign collection is neither sharded nor a view.
  */
-std::vector<std::unique_ptr<InnerPipelineStageInterface>> extractSbeCompatibleStagesForPushdown(
+std::vector<std::unique_ptr<InnerPipelineStageInterface>> findSbeCompatibleStagesForPushdown(
     const intrusive_ptr<ExpressionContext>& expCtx,
     const MultipleCollectionAccessor& collections,
     const CanonicalQuery* cq,
-    Pipeline* pipeline) {
+    const Pipeline* pipeline) {
     // We will eventually use the extracted group stages to populate 'CanonicalQuery::pipeline'
     // which requires stages to be wrapped in an interface.
     std::vector<std::unique_ptr<InnerPipelineStageInterface>> stagesForPushdown;
@@ -147,7 +140,7 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> extractSbeCompatibleSt
         return {};
     }
 
-    auto&& sources = pipeline->getSources();
+    const auto& sources = pipeline->getSources();
 
     bool isMainCollectionSharded = false;
     if (const auto& mainColl = collections.getMainCollection()) {
@@ -165,8 +158,7 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> extractSbeCompatibleSt
         internalQuerySlotBasedExecutionDisableLookupPushdown.load() || isMainCollectionSharded ||
         collections.isAnySecondaryNamespaceAViewOrSharded();
 
-    std::map<NamespaceString, SecondaryCollectionInfo> secondaryCollInfo;
-    for (auto itr = sources.begin(); itr != sources.end();) {
+    for (auto itr = sources.begin(); itr != sources.end(); ++itr) {
         const bool isLastSource = itr->get() == sources.back().get();
 
         // $group pushdown logic.
@@ -178,7 +170,6 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> extractSbeCompatibleSt
             if (groupStage->sbeCompatible() && !groupStage->doingMerge()) {
                 stagesForPushdown.push_back(
                     std::make_unique<InnerPipelineStageImpl>(groupStage, isLastSource));
-                sources.erase(itr++);
                 continue;
             }
             break;
@@ -193,31 +184,9 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> extractSbeCompatibleSt
             // Note that 'lookupStage->sbeCompatible()' encodes whether the foreign collection is a
             // view.
             if (lookupStage->sbeCompatible()) {
-                // Fill out secondary collection information to assist in deciding whether we should
-                // push down any $lookup stages into SBE.
-                // TODO SERVER-67024: This should be removed once NLJ is re-enabled by default.
-                if (secondaryCollInfo.empty()) {
-                    secondaryCollInfo =
-                        fillOutSecondaryCollectionsInformation(expCtx->opCtx, collections, cq);
-                }
-
-                auto [strategy, _] = QueryPlannerAnalysis::determineLookupStrategy(
-                    lookupStage->getFromNs().toString(),
-                    lookupStage->getForeignField()->fullPath(),
-                    secondaryCollInfo,
-                    cq->getExpCtx()->allowDiskUse,
-                    cq->getCollator());
-
-                // While we do support executing NLJ in SBE, this join algorithm does not currently
-                // perform as well as executing $lookup in the classic engine, so fall back to
-                // classic unless 'gFeatureFlagSbeFull' is enabled.
-                if (strategy != EqLookupNode::LookupStrategy::kNestedLoopJoin ||
-                    feature_flags::gFeatureFlagSbeFull.isEnabledAndIgnoreFCV()) {
-                    stagesForPushdown.push_back(
-                        std::make_unique<InnerPipelineStageImpl>(lookupStage, isLastSource));
-                    sources.erase(itr++);
-                    continue;
-                }
+                stagesForPushdown.push_back(
+                    std::make_unique<InnerPipelineStageImpl>(lookupStage, isLastSource));
+                continue;
             }
             break;
         }
@@ -226,6 +195,21 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> extractSbeCompatibleSt
         break;
     }
     return stagesForPushdown;
+}
+
+/**
+ * Removes the first 'stagesToRemove' stages from the pipeline. This function is meant to be paired
+ * with a call to findSbeCompatibleStagesForPushdown() - the caller must first get the stages to
+ * push down, then remove them.
+ */
+void trimPipelineStages(Pipeline* pipeline, size_t stagesToRemove) {
+    auto& sources = pipeline->getSources();
+    tassert(7087104,
+            "stagesToRemove must be <= number of pipeline sources",
+            stagesToRemove <= sources.size());
+    for (size_t i = 0; i < stagesToRemove; ++i) {
+        sources.erase(sources.begin());
+    }
 }
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> attemptToGetExecutor(
@@ -325,9 +309,15 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> attemptToGetExe
     return getExecutorFind(expCtx->opCtx,
                            collections,
                            std::move(cq.getValue()),
-                           [&](auto* canonicalQuery) {
-                               canonicalQuery->setPipeline(extractSbeCompatibleStagesForPushdown(
-                                   expCtx, collections, canonicalQuery, pipeline));
+                           [&](auto* canonicalQuery, bool attachOnly) {
+                               if (attachOnly) {
+                                   canonicalQuery->setPipeline(findSbeCompatibleStagesForPushdown(
+                                       expCtx, collections, canonicalQuery, pipeline));
+                               } else {
+                                   // Not attaching - we need to trim the already pushed down
+                                   // pipeline stages from the pipeline.
+                                   trimPipelineStages(pipeline, canonicalQuery->pipeline().size());
+                               }
                            },
                            permitYield,
                            plannerOpts);
@@ -532,8 +522,8 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::createRan
 
     TrialStage* trialStage = nullptr;
 
-    auto css = CollectionShardingState::get(opCtx, coll->ns());
-    const auto isSharded = css->getCollectionDescription(opCtx).isSharded();
+    auto scopedCss = CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, coll->ns());
+    const bool isSharded = scopedCss->getCollectionDescription(opCtx).isSharded();
 
     // Because 'numRecords' includes orphan documents, our initial decision to optimize the $sample
     // cursor may have been mistaken. For sharded collections, build a TRIAL plan that will switch
@@ -587,7 +577,7 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::createRan
         if (isSharded) {
             // In the sharded case, we need to use a ShardFilterer within the ARHASH plan to
             // eliminate orphans from the working set, since the stage owns the cursor.
-            maybeShardFilter = std::make_unique<ShardFiltererImpl>(css->getOwnershipFilter(
+            maybeShardFilter = std::make_unique<ShardFiltererImpl>(scopedCss->getOwnershipFilter(
                 opCtx, CollectionShardingState::OrphanCleanupPolicy::kDisallowOrphanCleanup));
         }
 
@@ -610,7 +600,7 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::createRan
         if (isSharded) {
             // In the sharded case, we need to add a shard-filterer stage to the backup plan to
             // eliminate orphans. The trial plan is thus SHARDING_FILTER-COLLSCAN.
-            auto collectionFilter = css->getOwnershipFilter(
+            auto collectionFilter = scopedCss->getOwnershipFilter(
                 opCtx, CollectionShardingState::OrphanCleanupPolicy::kDisallowOrphanCleanup);
             collScanPlan = std::make_unique<ShardFilterStage>(
                 expCtx.get(), std::move(collectionFilter), ws.get(), std::move(collScanPlan));
@@ -652,7 +642,7 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::createRan
         // Since the incoming operation is sharded, use the CSS to infer the filtering metadata for
         // the collection. We get the shard ownership filter after checking to see if the collection
         // is sharded to avoid an invariant from being fired in this call.
-        auto collectionFilter = css->getOwnershipFilter(
+        auto collectionFilter = scopedCss->getOwnershipFilter(
             opCtx, CollectionShardingState::OrphanCleanupPolicy::kDisallowOrphanCleanup);
         // The trial plan is SHARDING_FILTER-MULTI_ITERATOR.
         auto randomCursorPlan = std::make_unique<ShardFilterStage>(

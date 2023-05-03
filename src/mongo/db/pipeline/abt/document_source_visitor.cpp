@@ -71,6 +71,7 @@
 #include "mongo/db/pipeline/document_source_skip.h"
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/document_source_tee_consumer.h"
+#include "mongo/db/pipeline/document_source_telemetry.h"
 #include "mongo/db/pipeline/document_source_union_with.h"
 #include "mongo/db/pipeline/document_source_unwind.h"
 #include "mongo/db/pipeline/visitors/document_source_walker.h"
@@ -131,7 +132,7 @@ public:
 
         std::vector<FieldNameType> groupByFieldNames;
         for (const auto& [fieldName, expr] : idFields) {
-            groupByFieldNames.push_back(fieldName);
+            groupByFieldNames.push_back(FieldNameType{fieldName});
         }
         const bool isSingleIdField =
             groupByFieldNames.size() == 1 && groupByFieldNames.front() == "_id";
@@ -146,7 +147,7 @@ public:
             groupByProjNames.push_back(groupByProjName);
 
             ABT groupByExpr = generateAggExpression(
-                idFields.at(fieldName).get(), entry._rootProjection, groupByProjName);
+                idFields.at(fieldName.value()).get(), entry._rootProjection, groupByProjName);
 
             _ctx.setNode<EvaluationNode>(entry._rootProjection,
                                          groupByProjName,
@@ -156,7 +157,7 @@ public:
         }
 
         // Fields corresponding to each accumulator
-        ProjectionNameVector aggProjFieldNames;
+        std::vector<FieldNameType> aggProjFieldNames;
         // Projection names corresponding to each high-level accumulator ($avg can be broken down
         // into sum and count.).
         ProjectionNameVector aggOutputProjNames;
@@ -176,10 +177,10 @@ public:
         std::vector<AvgProjNames> avgProjNames;
 
         for (const AccumulationStatement& stmt : accumulatedFields) {
-            const FieldNameType& fieldName = stmt.fieldName;
+            const FieldNameType fieldName{stmt.fieldName};
             aggProjFieldNames.push_back(fieldName);
 
-            ProjectionName aggOutputProjName = _ctx.getNextId(fieldName + "_agg");
+            ProjectionName aggOutputProjName{_ctx.getNextId(str::stream() << fieldName << "_agg")};
 
             ABT aggInputExpr = generateAggExpression(
                 stmt.expr.argument.get(), entry._rootProjection, aggOutputProjName);
@@ -198,9 +199,11 @@ public:
             aggOutputProjNames.push_back(aggOutputProjName);
             if (stmt.makeAccumulator()->getOpName() == "$avg"_sd) {
                 // Express $avg as sum / count.
-                ProjectionName sumProjName = _ctx.getNextId(fieldName + "_sum_agg");
+                ProjectionName sumProjName{
+                    _ctx.getNextId(str::stream() << fieldName << "_sum_agg")};
                 aggLowLevelOutputProjNames.push_back(sumProjName);
-                ProjectionName countProjName = _ctx.getNextId(fieldName + "_count_agg");
+                ProjectionName countProjName{
+                    _ctx.getNextId(str::stream() << fieldName << "_count_agg")};
                 aggLowLevelOutputProjNames.push_back(countProjName);
                 avgProjNames.emplace_back(AvgProjNames{std::move(aggOutputProjName),
                                                        std::move(sumProjName),
@@ -236,14 +239,14 @@ public:
 
         ABT integrationPath = make<PathIdentity>();
         for (size_t i = 0; i < groupByFieldNames.size(); i++) {
-            std::string fieldName = std::move(groupByFieldNames.at(i));
+            std::string fieldName = groupByFieldNames.at(i).value().toString();
             if (!isSingleIdField) {
                 // Erase '_id.' prefix.
                 fieldName = fieldName.substr(strlen("_id."));
             }
 
             maybeComposePath(integrationPath,
-                             make<PathField>(std::move(fieldName),
+                             make<PathField>(FieldNameType{std::move(fieldName)},
                                              make<PathConstant>(make<Variable>(
                                                  std::move(groupByProjNames.at(i))))));
         }
@@ -259,7 +262,7 @@ public:
         }
 
         entry = _ctx.getNode();
-        const std::string& mergeProject = _ctx.getNextId("agg_project");
+        const ProjectionName mergeProject{_ctx.getNextId("agg_project")};
         _ctx.setNode<EvaluationNode>(
             mergeProject,
             mergeProject,
@@ -330,9 +333,9 @@ public:
         ABT localPathGet = translateFieldPath(
             *localPath,
             make<PathIdentity>(),
-            [](const std::string& fieldName, const bool isLastElement, ABT input) {
+            [](FieldNameType fieldName, const bool isLastElement, ABT input) {
                 return make<PathGet>(
-                    fieldName,
+                    std::move(fieldName),
                     isLastElement ? std::move(input)
                                   : make<PathTraverse>(std::move(input), PathTraverse::kUnlimited));
             });
@@ -347,21 +350,21 @@ public:
 
         auto localProjName = _ctx.getNextId("local");
         entry = _ctx.getNode();
-        _ctx.setNode<EvaluationNode>(
-            entry._rootProjection,
-            localProjName,
-            make<FunctionCall>(
-                "fillEmpty",
-                makeSeq(make<Variable>(std::move(localPathProjName)), Constant::null())),
-            std::move(entry._node));
+        _ctx.setNode<EvaluationNode>(entry._rootProjection,
+                                     localProjName,
+                                     make<BinaryOp>(Operations::FillEmpty,
+                                                    make<Variable>(std::move(localPathProjName)),
+                                                    Constant::null()),
+                                     std::move(entry._node));
 
         const auto& foreignPath = source->getForeignField();
         ABT foreignSimplePath = translateFieldPath(
             *foreignPath,
             make<PathCompare>(Operations::EqMember, make<Variable>(localProjName)),
-            [](const std::string& fieldName, const bool /*isLastElement*/, ABT input) {
+            [](FieldNameType fieldName, const bool /*isLastElement*/, ABT input) {
                 return make<PathGet>(
-                    fieldName, make<PathTraverse>(std::move(input), PathTraverse::kSingleLevel));
+                    std::move(fieldName),
+                    make<PathTraverse>(std::move(input), PathTraverse::kSingleLevel));
             });
 
         // Retain only the top-level get into foreignSimplePath.
@@ -397,11 +400,11 @@ public:
         ABT resultPath = translateFieldPath(
             source->getAsField(),
             make<PathConstant>(make<Variable>(foreignFoldedProjName)),
-            [](const std::string& fieldName, const bool isLastElement, ABT input) {
+            [](FieldNameType fieldName, const bool isLastElement, ABT input) {
                 if (!isLastElement) {
                     input = make<PathTraverse>(std::move(input), PathTraverse::kUnlimited);
                 }
-                return make<PathField>(fieldName, std::move(input));
+                return make<PathField>(std::move(fieldName), std::move(input));
             });
 
         const ProjectionName& resultProjName = _ctx.getNextId("result");
@@ -482,7 +485,7 @@ public:
                         "DocumentSource",
                         source->hasProjectionAST());
                 try {
-                    translateProjection(_ctx, source->getProjectionAST());
+                    translateProjection(_ctx, *source->getProjectionAST());
                     return;
                 } catch (const DBException& ex) {
                     if (ex.code() != ErrorCodes::InternalErrorNotSupported) {
@@ -517,6 +520,10 @@ public:
     }
 
     void visit(const DocumentSourceTeeConsumer* source) override {
+        unsupportedStage(source);
+    }
+
+    void visit(const DocumentSourceTelemetry* source) override {
         unsupportedStage(source);
     }
 
@@ -574,8 +581,8 @@ public:
         const FieldPath& unwindFieldPath = source->getUnwindPath();
         const bool preserveNullAndEmpty = source->preserveNullAndEmptyArrays();
 
-        const std::string pidProjName = _ctx.getNextId("unwoundPid");
-        const std::string unwoundProjName = _ctx.getNextId("unwoundProj");
+        const ProjectionName pidProjName{_ctx.getNextId("unwoundPid")};
+        const ProjectionName unwoundProjName{_ctx.getNextId("unwoundProj")};
 
         const auto generatePidGteZeroTest = [&pidProjName](ABT thenCond, ABT elseCond) {
             return make<If>(
@@ -586,7 +593,7 @@ public:
 
         ABT embedPath = make<Variable>(unwoundProjName);
         if (preserveNullAndEmpty) {
-            const std::string unwindLambdaVarName = _ctx.getNextId("unwoundLambdaVarName");
+            const ProjectionName unwindLambdaVarName{_ctx.getNextId("unwoundLambdaVarName")};
             embedPath = make<PathLambda>(make<LambdaAbstraction>(
                 unwindLambdaVarName,
                 generatePidGteZeroTest(std::move(embedPath), make<Variable>(unwindLambdaVarName))));
@@ -596,19 +603,19 @@ public:
         embedPath = translateFieldPath(
             unwindFieldPath,
             std::move(embedPath),
-            [](const std::string& fieldName, const bool isLastElement, ABT input) {
+            [](FieldNameType fieldName, const bool isLastElement, ABT input) {
                 return make<PathField>(
-                    fieldName,
+                    std::move(fieldName),
                     isLastElement ? std::move(input)
                                   : make<PathTraverse>(std::move(input), PathTraverse::kUnlimited));
             });
 
-        ABT unwoundPath = translateFieldPath(
-            unwindFieldPath,
-            make<PathIdentity>(),
-            [](const std::string& fieldName, const bool isLastElement, ABT input) {
-                return make<PathGet>(fieldName, std::move(input));
-            });
+        ABT unwoundPath =
+            translateFieldPath(unwindFieldPath,
+                               make<PathIdentity>(),
+                               [](FieldNameType fieldName, const bool isLastElement, ABT input) {
+                                   return make<PathGet>(std::move(fieldName), std::move(input));
+                               });
 
         auto entry = _ctx.getNode();
         _ctx.setNode<EvaluationNode>(
@@ -625,7 +632,7 @@ public:
                                  std::move(entry._node));
 
         entry = _ctx.getNode();
-        const std::string embedProjName = _ctx.getNextId("embedProj");
+        const ProjectionName embedProjName{_ctx.getNextId("embedProj")};
         _ctx.setNode<EvaluationNode>(
             embedProjName,
             embedProjName,
@@ -639,12 +646,12 @@ public:
                     indexFieldPath,
                     make<PathConstant>(
                         generatePidGteZeroTest(make<Variable>(pidProjName), Constant::null())),
-                    [](const std::string& fieldName, const bool isLastElement, ABT input) {
-                        return make<PathField>(fieldName, std::move(input));
+                    [](FieldNameType fieldName, const bool /*isLastElement*/, ABT input) {
+                        return make<PathField>(std::move(fieldName), std::move(input));
                     });
 
                 entry = _ctx.getNode();
-                const std::string embedPidProjName = _ctx.getNextId("embedPidProj");
+                const ProjectionName embedPidProjName{_ctx.getNextId("embedPidProj")};
                 _ctx.setNode<EvaluationNode>(
                     embedPidProjName,
                     embedPidProjName,

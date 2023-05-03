@@ -31,6 +31,8 @@
 
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/platform/decimal128.h"
+
 
 namespace mongo {
 class EncryptedField;
@@ -52,4 +54,7 @@ Value coerceValueToRangeIndexTypes(Value val, BSONType fieldType);
 
 void validateEncryptedField(const EncryptedField* field);
 void validateEncryptedFieldConfig(const EncryptedFieldConfig* config);
+
+bool validateDoublePrecisionRange(double d, uint32_t precision);
+bool validateDecimal128PrecisionRange(Decimal128& dec, uint32_t precision);
 }  // namespace mongo

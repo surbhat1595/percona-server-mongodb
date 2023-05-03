@@ -281,7 +281,7 @@ Balancer::Balancer()
           std::make_unique<BalancerChunkSelectionPolicyImpl>(_clusterStats.get(), _random)),
       _commandScheduler(std::make_unique<BalancerCommandsSchedulerImpl>()),
       _defragmentationPolicy(std::make_unique<BalancerDefragmentationPolicyImpl>(
-          _clusterStats.get(), _random, [this]() { _onActionsStreamPolicyStateUpdate(); })),
+          _clusterStats.get(), [this]() { _onActionsStreamPolicyStateUpdate(); })),
       _clusterChunksResizePolicy(std::make_unique<ClusterChunksResizePolicyImpl>(
           [this] { _onActionsStreamPolicyStateUpdate(); })) {}
 
@@ -783,13 +783,24 @@ void Balancer::_mainThread() {
                     LOGV2_DEBUG(21861, 1, "Done enforcing zone range boundaries.");
                 }
 
-                stdx::unordered_set<ShardId> usedShards;
+                const std::vector<ClusterStatistics::ShardStatistics> shardStats =
+                    uassertStatusOK(_clusterStats->getStats(opCtx.get()));
+
+                stdx::unordered_set<ShardId> availableShards;
+                std::transform(
+                    shardStats.begin(),
+                    shardStats.end(),
+                    std::inserter(availableShards, availableShards.end()),
+                    [](const ClusterStatistics::ShardStatistics& shardStatistics) -> ShardId {
+                        return shardStatistics.shardId;
+                    });
 
                 const auto chunksToDefragment =
-                    _defragmentationPolicy->selectChunksToMove(opCtx.get(), &usedShards);
+                    _defragmentationPolicy->selectChunksToMove(opCtx.get(), &availableShards);
 
-                const auto chunksToRebalance = uassertStatusOK(
-                    _chunkSelectionPolicy->selectChunksToMove(opCtx.get(), &usedShards));
+                const auto chunksToRebalance =
+                    uassertStatusOK(_chunkSelectionPolicy->selectChunksToMove(
+                        opCtx.get(), shardStats, &availableShards));
 
                 if (chunksToRebalance.empty() && chunksToDefragment.empty()) {
                     LOGV2_DEBUG(21862, 1, "No need to move any chunk");
@@ -1085,7 +1096,7 @@ int Balancer::_moveChunks(OperationContext* opCtx,
                 opCtx, migrateInfo.uuid, repl::ReadConcernLevel::kMajorityReadConcern);
 
             ShardingCatalogManager::get(opCtx)->splitOrMarkJumbo(
-                opCtx, collection.getNss(), migrateInfo.minKey);
+                opCtx, collection.getNss(), migrateInfo.minKey, migrateInfo.getMaxChunkSizeBytes());
             continue;
         }
 
@@ -1151,7 +1162,12 @@ BalancerCollectionStatusResponse Balancer::getBalancerStatusForNs(OperationConte
         uasserted(ErrorCodes::NamespaceNotSharded, "Collection unsharded or undefined");
     }
 
-    const auto maxChunkSizeMB = getMaxChunkSizeMB(opCtx, coll);
+
+    const auto maxChunkSizeBytes = getMaxChunkSizeBytes(opCtx, coll);
+    double maxChunkSizeMB = (double)maxChunkSizeBytes / (1024 * 1024);
+    // Keep only 2 decimal digits to return a readable value
+    maxChunkSizeMB = std::ceil(maxChunkSizeMB * 100.0) / 100.0;
+
     BalancerCollectionStatusResponse response(maxChunkSizeMB, true /*balancerCompliant*/);
     auto setViolationOnResponse = [&response](const StringData& reason,
                                               const boost::optional<BSONObj>& details =

@@ -55,6 +55,8 @@
 #include "mongo/db/storage/storage_repair_observer.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/priority_ticketholder.h"
+#include "mongo/util/concurrency/semaphore_ticketholder.h"
 #include "mongo/util/concurrency/ticketholder.h"
 #include "mongo/util/quick_exit.h"
 #include "mongo/util/str.h"
@@ -203,9 +205,12 @@ StorageEngine::LastShutdownState initializeStorageEngine(OperationContext* opCtx
         if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations.isEnabledAndIgnoreFCV()) {
             LOGV2_DEBUG(6902900, 1, "Using Priority Queue-based ticketing scheduler");
 
+            auto lowPriorityBypassThreshold = gLowPriorityAdmissionBypassThreshold.load();
             auto ticketHolderManager = std::make_unique<TicketHolderManager>(
-                std::make_unique<PriorityTicketHolder>(readTransactions, svcCtx),
-                std::make_unique<PriorityTicketHolder>(writeTransactions, svcCtx));
+                std::make_unique<PriorityTicketHolder>(
+                    readTransactions, lowPriorityBypassThreshold, svcCtx),
+                std::make_unique<PriorityTicketHolder>(
+                    writeTransactions, lowPriorityBypassThreshold, svcCtx));
             TicketHolderManager::use(svcCtx, std::move(ticketHolderManager));
         } else {
             auto ticketHolderManager = std::make_unique<TicketHolderManager>(

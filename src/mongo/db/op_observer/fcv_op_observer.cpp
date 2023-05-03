@@ -163,16 +163,16 @@ void FcvOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs
     if (args.updateArgs->update.isEmpty()) {
         return;
     }
-    if (args.nss.isServerConfigurationCollection()) {
+    if (args.coll->ns().isServerConfigurationCollection()) {
         _onInsertOrUpdate(opCtx, args.updateArgs->updatedDoc);
     }
 }
 
 void FcvOpObserver::onDelete(OperationContext* opCtx,
-                             const NamespaceString& nss,
-                             const UUID& uuid,
+                             const CollectionPtr& coll,
                              StmtId stmtId,
                              const OplogDeleteEntryArgs& args) {
+    const auto& nss = coll->ns();
     // documentKeyDecoration is set in OpObserverImpl::aboutToDelete. So the FcvOpObserver
     // relies on the OpObserverImpl also being in the opObserverRegistry.
     auto optDocKey = repl::documentKeyDecoration(opCtx);

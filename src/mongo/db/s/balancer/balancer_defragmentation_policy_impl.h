@@ -53,7 +53,7 @@ public:
         OperationContext* opCtx) = 0;
 
     virtual boost::optional<MigrateInfo> popNextMigration(
-        OperationContext* opCtx, stdx::unordered_set<ShardId>* usedShards) = 0;
+        OperationContext* opCtx, stdx::unordered_set<ShardId>* availableShards) = 0;
 
     virtual void applyActionResult(OperationContext* opCtx,
                                    const DefragmentationAction& action,
@@ -72,9 +72,10 @@ class BalancerDefragmentationPolicyImpl : public BalancerDefragmentationPolicy {
 
 public:
     BalancerDefragmentationPolicyImpl(ClusterStatistics* clusterStats,
-                                      BalancerRandomSource& random,
                                       const std::function<void()>& onStateUpdated)
-        : _clusterStats(clusterStats), _random(random), _onStateUpdated(onStateUpdated) {}
+        : _clusterStats(clusterStats),
+          _random(std::random_device{}()),
+          _onStateUpdated(onStateUpdated) {}
 
     ~BalancerDefragmentationPolicyImpl() {}
 
@@ -85,7 +86,7 @@ public:
     virtual BSONObj reportProgressOn(const UUID& uuid) override;
 
     MigrateInfoVector selectChunksToMove(OperationContext* opCtx,
-                                         stdx::unordered_set<ShardId>* usedShards) override;
+                                         stdx::unordered_set<ShardId>* availableShards) override;
 
     StringData getName() const override;
 
@@ -145,7 +146,7 @@ private:
 
     ClusterStatistics* const _clusterStats;
 
-    BalancerRandomSource& _random;
+    BalancerRandomSource _random;
 
     const std::function<void()> _onStateUpdated;
 

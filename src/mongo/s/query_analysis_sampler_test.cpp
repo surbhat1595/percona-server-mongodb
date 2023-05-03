@@ -470,6 +470,7 @@ public:
     void tearDown() override {
         ShardingTestFixture::tearDown();
         setMongos(_originalIsMongos);
+        serverGlobalParams.clusterRole = ClusterRole::None;
     }
 
 protected:
@@ -549,12 +550,12 @@ DEATH_TEST_F(QueryAnalysisSamplerTest, CannotGetIfFeatureFlagNotEnabled, "invari
     QueryAnalysisSampler::get(operationContext());
 }
 
-DEATH_TEST_F(QueryAnalysisSamplerTest, CannotGetIfNotMongos, "invariant") {
+DEATH_TEST_F(QueryAnalysisSamplerTest, CannotGetIfNotMongosOrShardServer, "invariant") {
     setMongos(false);
     QueryAnalysisSampler::get(operationContext());
 }
 
-TEST_F(QueryAnalysisSamplerTest, RefreshQueryStats_InitialCount) {
+TEST_F(QueryAnalysisSamplerTest, RefreshQueryStatsMongos_InitialCount) {
     auto& sampler = QueryAnalysisSampler::get(operationContext());
     sampler.refreshQueryStatsForTest();
 
@@ -565,7 +566,7 @@ TEST_F(QueryAnalysisSamplerTest, RefreshQueryStats_InitialCount) {
     ASSERT_EQ(*lastAvgCount, 0);
 }
 
-TEST_F(QueryAnalysisSamplerTest, RefreshQueryStats_CountQueries) {
+TEST_F(QueryAnalysisSamplerTest, RefreshQueryStatsMongos_CountQueries) {
     auto& sampler = QueryAnalysisSampler::get(operationContext());
     globalOpCounters.gotQuery();
     sampler.refreshQueryStatsForTest();
@@ -577,7 +578,7 @@ TEST_F(QueryAnalysisSamplerTest, RefreshQueryStats_CountQueries) {
     ASSERT_EQ(*lastAvgCount, 1);
 }
 
-TEST_F(QueryAnalysisSamplerTest, RefreshQueryStats_CountInserts) {
+TEST_F(QueryAnalysisSamplerTest, RefreshQueryStatsMongos_CountInserts) {
     auto& sampler = QueryAnalysisSampler::get(operationContext());
     auto numInserts = 3;
     globalOpCounters.gotInserts(numInserts);
@@ -590,7 +591,7 @@ TEST_F(QueryAnalysisSamplerTest, RefreshQueryStats_CountInserts) {
     ASSERT_EQ(*lastAvgCount, numInserts);
 }
 
-TEST_F(QueryAnalysisSamplerTest, RefreshQueryStats_CountUpdates) {
+TEST_F(QueryAnalysisSamplerTest, RefreshQueryStatsMongos_CountUpdates) {
     auto& sampler = QueryAnalysisSampler::get(operationContext());
     globalOpCounters.gotUpdate();
     sampler.refreshQueryStatsForTest();
@@ -602,7 +603,7 @@ TEST_F(QueryAnalysisSamplerTest, RefreshQueryStats_CountUpdates) {
     ASSERT_EQ(*lastAvgCount, 1);
 }
 
-TEST_F(QueryAnalysisSamplerTest, RefreshQueryStats_CountDeletes) {
+TEST_F(QueryAnalysisSamplerTest, RefreshQueryStatsMongos_CountDeletes) {
     auto& sampler = QueryAnalysisSampler::get(operationContext());
     globalOpCounters.gotDelete();
     sampler.refreshQueryStatsForTest();
@@ -614,9 +615,126 @@ TEST_F(QueryAnalysisSamplerTest, RefreshQueryStats_CountDeletes) {
     ASSERT_EQ(*lastAvgCount, 1);
 }
 
-TEST_F(QueryAnalysisSamplerTest, RefreshQueryStats_CountCommands) {
+TEST_F(QueryAnalysisSamplerTest, RefreshQueryStatsMongos_CountCommands) {
     auto& sampler = QueryAnalysisSampler::get(operationContext());
     globalOpCounters.gotCommand();
+    sampler.refreshQueryStatsForTest();
+
+    auto queryStats = sampler.getQueryStatsForTest();
+    ASSERT_EQ(queryStats.getLastTotalCount(), 1);
+    auto lastAvgCount = queryStats.getLastAvgCount();
+    ASSERT(lastAvgCount);
+    ASSERT_EQ(*lastAvgCount, 1);
+}
+
+TEST_F(QueryAnalysisSamplerTest, RefreshQueryStatsMongos_NotCountNestedAggregates) {
+    auto& sampler = QueryAnalysisSampler::get(operationContext());
+    globalOpCounters.gotNestedAggregate();
+    sampler.refreshQueryStatsForTest();
+
+    auto queryStats = sampler.getQueryStatsForTest();
+    ASSERT_EQ(queryStats.getLastTotalCount(), 0);
+    auto lastAvgCount = queryStats.getLastAvgCount();
+    ASSERT(lastAvgCount);
+    ASSERT_EQ(*lastAvgCount, 0);
+}
+
+TEST_F(QueryAnalysisSamplerTest, RefreshQueryStatsShardSvr_InitialCount) {
+    setMongos(false);
+    serverGlobalParams.clusterRole = ClusterRole::ShardServer;
+
+    auto& sampler = QueryAnalysisSampler::get(operationContext());
+    sampler.refreshQueryStatsForTest();
+
+    auto queryStats = sampler.getQueryStatsForTest();
+    ASSERT_EQ(queryStats.getLastTotalCount(), 0);
+    auto lastAvgCount = queryStats.getLastAvgCount();
+    ASSERT(lastAvgCount);
+    ASSERT_EQ(*lastAvgCount, 0);
+}
+
+TEST_F(QueryAnalysisSamplerTest, RefreshQueryStatsShardSvr_NotCountQueries) {
+    setMongos(false);
+    serverGlobalParams.clusterRole = ClusterRole::ShardServer;
+
+    auto& sampler = QueryAnalysisSampler::get(operationContext());
+    globalOpCounters.gotQuery();
+    sampler.refreshQueryStatsForTest();
+
+    auto queryStats = sampler.getQueryStatsForTest();
+    ASSERT_EQ(queryStats.getLastTotalCount(), 0);
+    auto lastAvgCount = queryStats.getLastAvgCount();
+    ASSERT(lastAvgCount);
+    ASSERT_EQ(*lastAvgCount, 0);
+}
+
+TEST_F(QueryAnalysisSamplerTest, RefreshQueryStatsShardSvr_NotCountInserts) {
+    setMongos(false);
+    serverGlobalParams.clusterRole = ClusterRole::ShardServer;
+
+    auto& sampler = QueryAnalysisSampler::get(operationContext());
+    auto numInserts = 3;
+    globalOpCounters.gotInserts(numInserts);
+    sampler.refreshQueryStatsForTest();
+
+    auto queryStats = sampler.getQueryStatsForTest();
+    ASSERT_EQ(queryStats.getLastTotalCount(), 0);
+    auto lastAvgCount = queryStats.getLastAvgCount();
+    ASSERT(lastAvgCount);
+    ASSERT_EQ(*lastAvgCount, 0);
+}
+
+TEST_F(QueryAnalysisSamplerTest, RefreshQueryStatsShardSvr_NotCountUpdates) {
+    setMongos(false);
+    serverGlobalParams.clusterRole = ClusterRole::ShardServer;
+
+    auto& sampler = QueryAnalysisSampler::get(operationContext());
+    globalOpCounters.gotUpdate();
+    sampler.refreshQueryStatsForTest();
+
+    auto queryStats = sampler.getQueryStatsForTest();
+    ASSERT_EQ(queryStats.getLastTotalCount(), 0);
+    auto lastAvgCount = queryStats.getLastAvgCount();
+    ASSERT(lastAvgCount);
+    ASSERT_EQ(*lastAvgCount, 0);
+}
+
+TEST_F(QueryAnalysisSamplerTest, RefreshQueryStatsShardSvr_NotCountDeletes) {
+    setMongos(false);
+    serverGlobalParams.clusterRole = ClusterRole::ShardServer;
+
+    auto& sampler = QueryAnalysisSampler::get(operationContext());
+    globalOpCounters.gotDelete();
+    sampler.refreshQueryStatsForTest();
+
+    auto queryStats = sampler.getQueryStatsForTest();
+    ASSERT_EQ(queryStats.getLastTotalCount(), 0);
+    auto lastAvgCount = queryStats.getLastAvgCount();
+    ASSERT(lastAvgCount);
+    ASSERT_EQ(*lastAvgCount, 0);
+}
+
+TEST_F(QueryAnalysisSamplerTest, RefreshQueryStatsShardSvr_NotCountCommands) {
+    setMongos(false);
+    serverGlobalParams.clusterRole = ClusterRole::ShardServer;
+
+    auto& sampler = QueryAnalysisSampler::get(operationContext());
+    globalOpCounters.gotCommand();
+    sampler.refreshQueryStatsForTest();
+
+    auto queryStats = sampler.getQueryStatsForTest();
+    ASSERT_EQ(queryStats.getLastTotalCount(), 0);
+    auto lastAvgCount = queryStats.getLastAvgCount();
+    ASSERT(lastAvgCount);
+    ASSERT_EQ(*lastAvgCount, 0);
+}
+
+TEST_F(QueryAnalysisSamplerTest, RefreshQueryStatsShardSvr_CountNestedAggregates) {
+    setMongos(false);
+    serverGlobalParams.clusterRole = ClusterRole::ShardServer;
+
+    auto& sampler = QueryAnalysisSampler::get(operationContext());
+    globalOpCounters.gotNestedAggregate();
     sampler.refreshQueryStatsForTest();
 
     auto queryStats = sampler.getQueryStatsForTest();
@@ -741,31 +859,31 @@ TEST_F(QueryAnalysisSamplerTest, ShouldSampleBasic) {
     setUpConfigurations(&sampler, configurations);
 
     // Cannot sample if time has not elapsed.
-    ASSERT_FALSE(sampler.shouldSample(nss0));
-    ASSERT_FALSE(sampler.shouldSample(nss1));
+    ASSERT_FALSE(sampler.tryGenerateSampleId(nss0));
+    ASSERT_FALSE(sampler.tryGenerateSampleId(nss1));
 
     advanceTime(Milliseconds(1000));
     // The number of tokens available in the bucket for rateLimiter0 right after the refill is 0
     // + 1.0.
-    ASSERT(sampler.shouldSample(nss0));
-    ASSERT_FALSE(sampler.shouldSample(nss0));
+    ASSERT(sampler.tryGenerateSampleId(nss0));
+    ASSERT_FALSE(sampler.tryGenerateSampleId(nss0));
     // The number of tokens available in the bucket for rateLimiter1 right after the refill is 0 +
     // 0.5.
-    ASSERT_FALSE(sampler.shouldSample(nss1));
+    ASSERT_FALSE(sampler.tryGenerateSampleId(nss1));
     // This collection doesn't have sampling enabled.
-    ASSERT_FALSE(sampler.shouldSample(nss2));
+    ASSERT_FALSE(sampler.tryGenerateSampleId(nss2));
 
     advanceTime(Milliseconds(1000));
     // The number of tokens available in the bucket for rateLimiter0 right after the refill is 0
     // + 1.0.
-    ASSERT(sampler.shouldSample(nss0));
-    ASSERT_FALSE(sampler.shouldSample(nss0));
+    ASSERT(sampler.tryGenerateSampleId(nss0));
+    ASSERT_FALSE(sampler.tryGenerateSampleId(nss0));
     // The number of tokens available in the bucket for rateLimiter1 right after the refill is 0.5 +
     // 0.5.
-    ASSERT(sampler.shouldSample(nss1));
-    ASSERT_FALSE(sampler.shouldSample(nss1));
+    ASSERT(sampler.tryGenerateSampleId(nss1));
+    ASSERT_FALSE(sampler.tryGenerateSampleId(nss1));
     // This collection doesn't have sampling enabled.
-    ASSERT_FALSE(sampler.shouldSample(nss2));
+    ASSERT_FALSE(sampler.tryGenerateSampleId(nss2));
 }
 
 TEST_F(QueryAnalysisSamplerTest, RefreshConfigurationsNewCollectionUuid) {
@@ -788,7 +906,7 @@ TEST_F(QueryAnalysisSamplerTest, RefreshConfigurationsNewCollectionUuid) {
 
     advanceTime(Milliseconds(1000));
     // The number of tokens available in the bucket right after the refill is 0 + 2.
-    ASSERT(sampler.shouldSample(nss0));
+    ASSERT(sampler.tryGenerateSampleId(nss0));
 
     // Force the sampler to refresh and return a different collection uuid and sample rate this
     // time.
@@ -812,7 +930,7 @@ TEST_F(QueryAnalysisSamplerTest, RefreshConfigurationsNewCollectionUuid) {
     // Cannot sample if time has not elapsed. There should be no tokens available in the bucket
     // right after the refill unless the one token from the previous configurations was
     // carried over, which is not the correct behavior.
-    ASSERT_FALSE(sampler.shouldSample(nss0));
+    ASSERT_FALSE(sampler.tryGenerateSampleId(nss0));
 }
 
 }  // namespace

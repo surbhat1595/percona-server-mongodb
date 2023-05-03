@@ -42,6 +42,7 @@
 #include "mongo/db/change_stream_change_collection_manager.h"
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
 #include "mongo/db/change_stream_serverless_helpers.h"
+#include "mongo/db/commands/external_data_source_scope_guard.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/cursor_manager.h"
 #include "mongo/db/db_raii.h"
@@ -75,12 +76,14 @@
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner_common.h"
+#include "mongo/db/query/telemetry.h"
 #include "mongo/db/read_concern.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/speculative_majority_read_info.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
@@ -605,9 +608,6 @@ std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> createLegacyEx
                                 request,
                                 hasGeoNearStage,
                                 liteParsedPipeline.hasChangeStream())) {
-        // Mark that this query does not use DocumentSource.
-        curOp->debug().documentSourceUsed = false;
-
         // This pipeline is currently empty, but once completed it will have only one source,
         // which is a DocumentSourceCursor. Instead of creating a whole pipeline to do nothing
         // more than forward the results of its cursor document source, we can use the
@@ -615,12 +615,8 @@ std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> createLegacyEx
         // have gotten from find command.
         execs.emplace_back(std::move(attachExecutorCallback.second));
     } else {
-        // Mark that this query uses DocumentSource.
-        curOp->debug().documentSourceUsed = true;
-
         getSearchHelpers(expCtx->opCtx->getServiceContext())
             ->injectSearchShardFiltererIfNeeded(pipeline.get());
-
         // Complete creation of the initial $cursor stage, if needed.
         PipelineD::attachInnerQueryExecutorToPipeline(collections,
                                                       attachExecutorCallback.first,
@@ -633,10 +629,12 @@ std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> createLegacyEx
             // There are separate ExpressionContexts for each exchange pipeline, so make sure to
             // pass the pipeline's ExpressionContext to the plan executor factory.
             auto pipelineExpCtx = pipelineIt->getContext();
-
+            auto planningTimeElapsed = pipelineExpCtx->opCtx->getElapsedQueryPlanningTime();
             execs.emplace_back(
                 plan_executor_factory::make(std::move(pipelineExpCtx),
                                             std::move(pipelineIt),
+                                            planningTimeElapsed, /* metric stored in PlanExplainer
+                                                                    via PlanExecutor construction*/
                                             aggregation_request_helper::getResumableScanType(
                                                 request, liteParsedPipeline.hasChangeStream())));
         }
@@ -659,7 +657,7 @@ Status runAggregate(OperationContext* opCtx,
                     const BSONObj& cmdObj,
                     const PrivilegeVector& privileges,
                     rpc::ReplyBuilderInterface* result) {
-    return runAggregate(opCtx, nss, request, {request}, cmdObj, privileges, result);
+    return runAggregate(opCtx, nss, request, {request}, cmdObj, privileges, result, {});
 }
 
 Status runAggregate(OperationContext* opCtx,
@@ -668,7 +666,8 @@ Status runAggregate(OperationContext* opCtx,
                     const LiteParsedPipeline& liteParsedPipeline,
                     const BSONObj& cmdObj,
                     const PrivilegeVector& privileges,
-                    rpc::ReplyBuilderInterface* result) {
+                    rpc::ReplyBuilderInterface* result,
+                    ExternalDataSourceScopeGuard externalDataSourceGuard) {
 
     // Perform some validations on the LiteParsedPipeline and request before continuing with the
     // aggregation command.
@@ -726,6 +725,12 @@ Status runAggregate(OperationContext* opCtx,
     boost::intrusive_ptr<ExpressionContext> expCtx;
     auto curOp = CurOp::get(opCtx);
     auto catalog = CollectionCatalog::get(opCtx);
+
+    telemetry::registerAggRequest(request, opCtx);
+
+    // Since we remove encryptionInformation after rewriting a FLE2 query, this boolean keeps track
+    // of whether the input query did originally have enryption information.
+    bool didDoFLERewrite = false;
 
     {
         // If we are in a transaction, check whether the parsed pipeline supports being in
@@ -913,7 +918,7 @@ Status runAggregate(OperationContext* opCtx,
                 // Set the namespace of the curop back to the view namespace so ctx records
                 // stats on this view namespace on destruction.
                 stdx::lock_guard<Client> lk(*opCtx->getClient());
-                curOp->setNS_inlock(nss.ns());
+                curOp->setNS_inlock(nss);
             }
 
             return status;
@@ -929,6 +934,7 @@ Status runAggregate(OperationContext* opCtx,
 
         expCtx->startExpressionCounters();
         auto pipeline = Pipeline::parse(request.getPipeline(), expCtx);
+        opCtx->beginPlanningTimer();
         expCtx->stopExpressionCounters();
 
         if (!request.getAllowDiskUse().value_or(true)) {
@@ -952,12 +958,22 @@ Status runAggregate(OperationContext* opCtx,
             pipeline = processFLEPipelineD(
                 opCtx, nss, request.getEncryptionInformation().value(), std::move(pipeline));
             request.setEncryptionInformation(boost::none);
+            didDoFLERewrite = true;
         }
 
         pipeline->optimizePipeline();
 
         constexpr bool alreadyOptimized = true;
         pipeline->validateCommon(alreadyOptimized);
+
+        if (analyze_shard_key::supportsPersistingSampledQueries() && request.getSampleId()) {
+            analyze_shard_key::QueryAnalysisWriter::get(opCtx)
+                .addAggregateQuery(*request.getSampleId(),
+                                   expCtx->ns,
+                                   pipeline->getInitialQuery(),
+                                   expCtx->getCollatorBSON())
+                .getAsync([](auto) {});
+        }
 
         if (isEligibleForBonsai(request, *pipeline, opCtx, collections.getMainCollection())) {
             uassert(6624344,
@@ -1004,6 +1020,7 @@ Status runAggregate(OperationContext* opCtx,
             auto planSummary = execs[0]->getPlanExplainer().getPlanSummary();
             stdx::lock_guard<Client> lk(*opCtx->getClient());
             curOp->setPlanSummary_inlock(std::move(planSummary));
+            curOp->debug().queryFramework = execs[0]->getQueryFramework();
         }
     }
 
@@ -1021,6 +1038,8 @@ Status runAggregate(OperationContext* opCtx,
             p.deleteUnderlying();
         }
     });
+    auto extDataSrcGuard =
+        std::make_shared<ExternalDataSourceScopeGuard>(std::move(externalDataSourceGuard));
     for (auto&& exec : execs) {
         ClientCursorParams cursorParams(
             std::move(exec),
@@ -1038,6 +1057,10 @@ Status runAggregate(OperationContext* opCtx,
 
         pin->incNBatches();
         cursors.emplace_back(pin.getCursor());
+        // All cursors share the ownership to 'extDataSrcGuard' and if the last cursor is destroyed,
+        // 'extDataSrcGuard' is also destroyed and created virtual collections are dropped by the
+        // destructor of ExternalDataSourceScopeGuard.
+        ExternalDataSourceScopeGuard::get(pin.getCursor()) = extDataSrcGuard;
         pins.emplace_back(std::move(pin));
     }
 
@@ -1079,6 +1102,8 @@ Status runAggregate(OperationContext* opCtx,
         curOp->debug().setPlanSummaryMetrics(stats);
         curOp->debug().nreturned = stats.nReturned;
 
+        telemetry::recordExecution(opCtx, curOp->debug(), didDoFLERewrite);
+
         // For an optimized away pipeline, signal the cache that a query operation has completed.
         // For normal pipelines this is done in DocumentSourceCursor.
         if (ctx) {
@@ -1112,7 +1137,7 @@ Status runAggregate(OperationContext* opCtx,
     // create a temp collection, changing the curop namespace to the name of this temp collection.
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
-        curOp->setNS_inlock(origNss.ns());
+        curOp->setNS_inlock(origNss);
     }
 
     return Status::OK();

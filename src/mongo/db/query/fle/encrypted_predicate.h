@@ -40,6 +40,7 @@
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/query/fle/query_rewriter_interface.h"
+#include "mongo/stdx/unordered_map.h"
 
 /**
  * This file contains an abstract class that describes rewrites on agg Expressions and
@@ -88,6 +89,16 @@ std::vector<Value> toValues(std::vector<PrfBlock>&& vec);
 std::unique_ptr<MatchExpression> makeTagDisjunction(BSONArray&& tagArray);
 
 void logTagsExceeded(const ExceptionFor<ErrorCodes::FLEMaxTagLimitExceeded>& ex);
+
+/**
+ * Returns true of the BSONElement contains BinData(6) with the specified sub-sub type.
+ */
+bool isPayloadOfType(EncryptedBinDataType ty, const BSONElement& elt);
+/**
+ * Returns true of the Value contains BinData(6) with the specified sub-sub type.
+ */
+bool isPayloadOfType(EncryptedBinDataType ty, const Value& elt);
+
 /**
  * Interface for implementing a server rewrite for an encrypted index. Each type of predicate
  * should have its own subclass that implements the virtual methods in this class.
@@ -125,32 +136,14 @@ protected:
      * Check if the passed-in payload is a FLE2 find payload for the right encrypted index type.
      */
     virtual bool isPayload(const BSONElement& elt) const {
-        if (!elt.isBinData(BinDataType::Encrypt)) {
-            return false;
-        }
-        int dataLen;
-        auto data = elt.binData(dataLen);
-
-        // Check that the BinData's subtype is 6, and its sub-subtype is equal to this predicate's
-        // encryptedBinDataType.
-        return dataLen >= 1 &&
-            static_cast<uint8_t>(data[0]) == static_cast<uint8_t>(encryptedBinDataType());
+        return isPayloadOfType(this->encryptedBinDataType(), elt);
     }
 
     /**
      * Check if the passed-in payload is a FLE2 find payload for the right encrypted index type.
      */
     virtual bool isPayload(const Value& v) const {
-        if (v.getType() != BSONType::BinData) {
-            return false;
-        }
-
-        auto binData = v.getBinData();
-        // Check that the BinData's subtype is 6, and its sub-subtype is equal to this predicate's
-        // encryptedBinDataType.
-        return binData.type == BinDataType::Encrypt && binData.length >= 1 &&
-            static_cast<uint8_t>(encryptedBinDataType()) ==
-            static_cast<const uint8_t*>(binData.data)[0];
+        return isPayloadOfType(this->encryptedBinDataType(), v);
     }
     /**
      * Generate tags from a FLE2 Find Payload. This function takes in a variant of BSONElement and
@@ -194,33 +187,37 @@ private:
  * are keyed on the dynamic type for the Expression subclass.
  */
 
-using ExpressionToRewriteMap = stdx::unordered_map<
-    std::type_index,
-    std::function<std::unique_ptr<Expression>(QueryRewriterInterface*, Expression*)>>;
+using ExpressionRewriteFunction =
+    std::function<std::unique_ptr<Expression>(QueryRewriterInterface*, Expression*)>;
+using ExpressionToRewriteMap =
+    stdx::unordered_map<std::type_index, std::vector<ExpressionRewriteFunction>>;
 
 extern ExpressionToRewriteMap aggPredicateRewriteMap;
 
-using MatchTypeToRewriteMap = stdx::unordered_map<
-    MatchExpression::MatchType,
-    std::function<std::unique_ptr<MatchExpression>(QueryRewriterInterface*, MatchExpression*)>>;
+using MatchRewriteFunction =
+    std::function<std::unique_ptr<MatchExpression>(QueryRewriterInterface*, MatchExpression*)>;
+using MatchTypeToRewriteMap =
+    stdx::unordered_map<MatchExpression::MatchType, std::vector<MatchRewriteFunction>>;
 
 extern MatchTypeToRewriteMap matchPredicateRewriteMap;
 
 /**
  * Register an agg rewrite if a condition is true at startup time.
  */
-#define REGISTER_ENCRYPTED_AGG_PREDICATE_REWRITE_GUARDED(className, rewriteClass, isEnabledExpr)   \
-    MONGO_INITIALIZER(encryptedAggPredicateRewriteFor_##className)(InitializerContext*) {          \
-                                                                                                   \
-        invariant(aggPredicateRewriteMap.find(typeid(className)) == aggPredicateRewriteMap.end()); \
-        aggPredicateRewriteMap[typeid(className)] = [&](auto* rewriter, auto* expr) {              \
-            if (isEnabledExpr) {                                                                   \
-                return rewriteClass{rewriter}.rewrite(expr);                                       \
-            } else {                                                                               \
-                return std::unique_ptr<Expression>(nullptr);                                       \
-            }                                                                                      \
-        };                                                                                         \
-    }
+#define REGISTER_ENCRYPTED_AGG_PREDICATE_REWRITE_GUARDED(className, rewriteClass, isEnabledExpr)  \
+    MONGO_INITIALIZER(encryptedAggPredicateRewriteFor_##className##_##rewriteClass)               \
+    (InitializerContext*) {                                                                       \
+        if (aggPredicateRewriteMap.find(typeid(className)) == aggPredicateRewriteMap.end()) {     \
+            aggPredicateRewriteMap[typeid(className)] = std::vector<ExpressionRewriteFunction>(); \
+        }                                                                                         \
+        aggPredicateRewriteMap[typeid(className)].push_back([](auto* rewriter, auto* expr) {      \
+            if (isEnabledExpr) {                                                                  \
+                return rewriteClass{rewriter}.rewrite(expr);                                      \
+            } else {                                                                              \
+                return std::unique_ptr<Expression>(nullptr);                                      \
+            }                                                                                     \
+        });                                                                                       \
+    };
 
 /**
  * Register an agg rewrite unconditionally.
@@ -239,17 +236,21 @@ extern MatchTypeToRewriteMap matchPredicateRewriteMap;
  * Register a MatchExpression rewrite if a condition is true at startup time.
  */
 #define REGISTER_ENCRYPTED_MATCH_PREDICATE_REWRITE_GUARDED(matchType, rewriteClass, isEnabledExpr) \
-    MONGO_INITIALIZER(encryptedMatchPredicateRewriteFor_##matchType)(InitializerContext*) {        \
-                                                                                                   \
-        invariant(matchPredicateRewriteMap.find(MatchExpression::matchType) ==                     \
-                  matchPredicateRewriteMap.end());                                                 \
-        matchPredicateRewriteMap[MatchExpression::matchType] = [&](auto* rewriter, auto* expr) {   \
-            if (isEnabledExpr) {                                                                   \
-                return rewriteClass{rewriter}.rewrite(expr);                                       \
-            } else {                                                                               \
-                return std::unique_ptr<MatchExpression>(nullptr);                                  \
-            }                                                                                      \
-        };                                                                                         \
+    MONGO_INITIALIZER(encryptedMatchPredicateRewriteFor_##matchType##_##rewriteClass)              \
+    (InitializerContext*) {                                                                        \
+        if (matchPredicateRewriteMap.find(MatchExpression::matchType) ==                           \
+            matchPredicateRewriteMap.end()) {                                                      \
+            matchPredicateRewriteMap[MatchExpression::matchType] =                                 \
+                std::vector<MatchRewriteFunction>();                                               \
+        }                                                                                          \
+        matchPredicateRewriteMap[MatchExpression::matchType].push_back(                            \
+            [](auto* rewriter, auto* expr) {                                                       \
+                if (isEnabledExpr) {                                                               \
+                    return rewriteClass{rewriter}.rewrite(expr);                                   \
+                } else {                                                                           \
+                    return std::unique_ptr<MatchExpression>(nullptr);                              \
+                }                                                                                  \
+            });                                                                                    \
     };
 /**
  * Register a MatchExpression rewrite unconditionally.

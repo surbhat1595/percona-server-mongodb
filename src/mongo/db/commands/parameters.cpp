@@ -238,6 +238,11 @@ public:
         h += "{ getParameter:'*' } or { getParameter:{allParameters: true} } to get everything\n";
         return h;
     }
+
+    bool allowedWithSecurityToken() const final {
+        return true;
+    }
+
     bool run(OperationContext* opCtx,
              const DatabaseName& dbName,
              const BSONObj& cmdObj,
@@ -462,9 +467,11 @@ void LogLevelServerParameter::append(OperationContext*,
 Status LogLevelServerParameter::set(const BSONElement& newValueElement,
                                     const boost::optional<TenantId>&) {
     int newValue;
-    if (!newValueElement.coerce(&newValue) || newValue < 0)
+    Status coercionStatus = newValueElement.tryCoerce(&newValue);
+    if (!coercionStatus.isOK() || newValue < 0) {
         return Status(ErrorCodes::BadValue,
                       str::stream() << "Invalid value for logLevel: " << newValueElement);
+    }
     LogSeverity newSeverity = (newValue > 0) ? LogSeverity::Debug(newValue) : LogSeverity::Log();
 
     logv2::LogManager::global().getGlobalSettings().setMinimumLoggedSeverity(

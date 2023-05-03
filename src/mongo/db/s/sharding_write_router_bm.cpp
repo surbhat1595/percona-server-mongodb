@@ -38,6 +38,7 @@
 #include "mongo/db/s/collection_metadata.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/collection_sharding_state_factory_shard.h"
+#include "mongo/db/s/collection_sharding_state_factory_standalone.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/sharding_write_router.h"
@@ -157,7 +158,8 @@ std::unique_ptr<CatalogCacheMock> createCatalogCacheMock(OperationContext* opCtx
 
     // Configuring the filtering metadata such that calls to getCollectionDescription return what we
     // want. Specifically the reshardingFields are what we use. Its specified by the chunkManager.
-    CollectionShardingRuntime::get(opCtx, kNss)
+    CollectionShardingRuntime::assertCollectionLockedAndAcquire(
+        opCtx, kNss, CSRAcquisitionMode::kExclusive)
         ->setFilteringMetadata(opCtx, CollectionMetadata(chunkManager, originatorShard));
 
     auto catalogCache = CatalogCacheMock::make();
@@ -212,6 +214,10 @@ void BM_UnshardedDestinedRecipient(benchmark::State& state) {
     const auto client = serviceContext->makeClient("test");
     serviceContext->registerClientObserver(std::make_unique<LockerNoopClientObserver>());
     const auto opCtx = client->makeOperationContext();
+
+    CollectionShardingStateFactory::set(
+        opCtx->getServiceContext(),
+        std::make_unique<CollectionShardingStateFactoryStandalone>(opCtx->getServiceContext()));
 
     const auto catalogCache = CatalogCacheMock::make();
 

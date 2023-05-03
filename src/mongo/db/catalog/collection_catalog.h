@@ -41,6 +41,7 @@
 #include "mongo/db/storage/durable_catalog_entry.h"
 #include "mongo/db/views/view.h"
 #include "mongo/stdx/unordered_map.h"
+#include "mongo/util/functional.h"
 #include "mongo/util/uuid.h"
 
 namespace mongo {
@@ -195,13 +196,16 @@ public:
     Status reloadViews(OperationContext* opCtx, const DatabaseName& dbName) const;
 
     /**
-     * Returns the collection instance representative of 'entry' at the provided read timestamp.
+     * Returns the collection pointer representative of 'nss' at the provided read timestamp. If no
+     * timestamp is provided, returns instance of the latest collection. The returned collection
+     * instance is only valid while the storage snapshot is open and becomes invalidated when the
+     * snapshot is closed.
      *
      * Returns nullptr when reading from a point-in-time where the collection did not exist.
      */
-    std::shared_ptr<Collection> openCollection(OperationContext* opCtx,
-                                               const NamespaceString& nss,
-                                               Timestamp readTimestamp) const;
+    CollectionPtr openCollection(OperationContext* opCtx,
+                                 const NamespaceString& nss,
+                                 boost::optional<Timestamp> readTimestamp) const;
 
     /**
      * Returns a shared_ptr to a drop pending index if it's found and not expired.
@@ -392,14 +396,22 @@ public:
 
     /**
      * Returns the CatalogId for a given 'nss' at timestamp 'ts'.
-     *
-     * Timestamp must be in the range [oldest_timestamp, now)
-     * If 'ts' is boost::none the latest CatalogId is returned.
-     *
-     * Returns boost::none if no namespace exist at the timestamp or if 'ts' is out of range.
      */
-    boost::optional<RecordId> lookupCatalogIdByNSS(
-        const NamespaceString& nss, boost::optional<Timestamp> ts = boost::none) const;
+    struct CatalogIdLookup {
+        enum NamespaceExistence {
+            // Namespace exists at time 'ts' and catalogId set in 'id'.
+            kExists,
+            // Namespace does not exist at time 'ts'.
+            kNotExists,
+            // Namespace existence at time 'ts' is unknown. The durable catalog must be scanned to
+            // determine.
+            kUnknown
+        };
+        RecordId id;
+        NamespaceExistence result;
+    };
+    CatalogIdLookup lookupCatalogIdByNSS(const NamespaceString& nss,
+                                         boost::optional<Timestamp> ts = boost::none) const;
 
     /**
      * Iterates through the views in the catalog associated with database `dbName`, applying
@@ -468,6 +480,8 @@ public:
      * This function gets all the database names. The result is sorted in alphabetical ascending
      * order.
      *
+     * Callers of this method must hold the global lock in at least MODE_IS.
+     *
      * Unlike DatabaseHolder::getNames(), this does not return databases that are empty.
      */
     std::vector<DatabaseName> getAllDbNames() const;
@@ -476,9 +490,20 @@ public:
      * This function gets all the database names associated with tenantId. The result is sorted in
      * alphabetical ascending order.
      *
+     * Callers of this method must hold the global lock in at least MODE_IS.
+     *
      * Unlike DatabaseHolder::getNames(), this does not return databases that are empty.
      */
     std::vector<DatabaseName> getAllDbNamesForTenant(boost::optional<TenantId> tenantId) const;
+
+    /**
+     * This function gets all tenantIds in the database in ascending order.
+     *
+     * Callers of this method must hold the global lock in at least MODE_IS.
+     *
+     * Only returns tenantIds which are attached to at least one non-empty database.
+     */
+    std::set<TenantId> getAllTenants() const;
 
     /**
      * Sets 'newProfileSettings' as the profiling settings for the database 'dbName'.
@@ -619,7 +644,9 @@ private:
      * Searches for a catalog entry at a point-in-time.
      */
     boost::optional<DurableCatalogEntry> _fetchPITCatalogEntry(
-        OperationContext* opCtx, const NamespaceString& nss, const Timestamp& readTimestamp) const;
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        boost::optional<Timestamp> readTimestamp) const;
 
     /**
      * Tries to create a Collection instance using existing shared collection state. Returns nullptr
@@ -628,7 +655,7 @@ private:
     std::shared_ptr<Collection> _createCompatibleCollection(
         OperationContext* opCtx,
         const std::shared_ptr<Collection>& latestCollection,
-        const Timestamp& readTimestamp,
+        boost::optional<Timestamp> readTimestamp,
         const DurableCatalogEntry& catalogEntry) const;
 
     /**
@@ -636,7 +663,7 @@ private:
      */
     std::shared_ptr<Collection> _createNewPITCollection(
         OperationContext* opCtx,
-        const Timestamp& readTimestamp,
+        boost::optional<Timestamp> readTimestamp,
         const DurableCatalogEntry& catalogEntry) const;
 
     /**
@@ -647,10 +674,18 @@ private:
                                                                   const DatabaseName& dbName) const;
 
     /**
-     * Returns all relevant dbNames using the firstDbName to construct an iterator pointing to the
-     * first desired dbName.
+     * Iterates over databases, and performs a callback on each database. If any callback fails,
+     * returns its error code. If tenantId is set, will iterate only over databases with that
+     * tenantId. nextUpperBound is a callback that controls how we iterate -- given the current
+     * database name, returns a <DatabaseName, UUID> pair which must be strictly less than the next
+     * entry we iterate to.
      */
-    std::vector<DatabaseName> _getAllDbNamesHelper(DatabaseName firstDbName) const;
+    Status _iterAllDbNamesHelper(
+        const boost::optional<TenantId>& tenantId,
+        const std::function<Status(const DatabaseName&)>& callback,
+        const std::function<std::pair<DatabaseName, UUID>(const DatabaseName&)>& nextLowerBound)
+        const;
+
     /**
      * Sets all namespaces used by views for a database. Will uassert if there is a conflicting
      * collection name in the catalog.
@@ -704,6 +739,12 @@ private:
                                  const NamespaceString& to,
                                  boost::optional<Timestamp> ts);
 
+    // Inserts a catalogId for namespace at given Timestamp. Used after scanning the durable catalog
+    // for a correct mapping at the given timestamp.
+    void _insertCatalogIdForNSSAfterScan(const NamespaceString& nss,
+                                         boost::optional<RecordId> catalogId,
+                                         Timestamp ts);
+
     // Helper to calculate if a namespace needs to be marked for cleanup for a set of timestamped
     // catalogIds
     void _markNamespaceForCatalogIdCleanupIfNeeded(const NamespaceString& nss,
@@ -743,6 +784,9 @@ private:
     // Point at which the oldest timestamp need to advance for there to be any catalogId namespace
     // that can be cleaned up
     Timestamp _lowestCatalogIdTimestampForCleanup = Timestamp::max();
+    // The oldest timestamp at which the catalog maintains catalogId mappings. Anything older than
+    // this is unknown and must be discovered by scanning the durable catalog.
+    Timestamp _oldestCatalogIdTimestampMaintained = Timestamp::max();
 
     // Map of database names to their corresponding views and other associated state.
     ViewsForDatabaseMap _viewsForDatabase;

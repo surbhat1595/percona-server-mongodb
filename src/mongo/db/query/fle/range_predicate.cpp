@@ -34,6 +34,7 @@
 #include "mongo/crypto/encryption_fields_gen.h"
 #include "mongo/crypto/fle_crypto.h"
 #include "mongo/crypto/fle_tags.h"
+#include "mongo/db/matcher/expression_always_boolean.h"
 #include "mongo/db/matcher/expression_expr.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/pipeline/expression.h"
@@ -41,17 +42,82 @@
 
 namespace mongo::fle {
 
-REGISTER_ENCRYPTED_MATCH_PREDICATE_REWRITE_WITH_FLAG(BETWEEN,
-                                                     RangePredicate,
-                                                     gFeatureFlagFLE2Range);
-REGISTER_ENCRYPTED_AGG_PREDICATE_REWRITE_WITH_FLAG(ExpressionBetween,
+REGISTER_ENCRYPTED_MATCH_PREDICATE_REWRITE_WITH_FLAG(GT, RangePredicate, gFeatureFlagFLE2Range);
+REGISTER_ENCRYPTED_MATCH_PREDICATE_REWRITE_WITH_FLAG(GTE, RangePredicate, gFeatureFlagFLE2Range);
+REGISTER_ENCRYPTED_MATCH_PREDICATE_REWRITE_WITH_FLAG(LT, RangePredicate, gFeatureFlagFLE2Range);
+REGISTER_ENCRYPTED_MATCH_PREDICATE_REWRITE_WITH_FLAG(LTE, RangePredicate, gFeatureFlagFLE2Range);
+
+REGISTER_ENCRYPTED_AGG_PREDICATE_REWRITE_WITH_FLAG(ExpressionCompare,
                                                    RangePredicate,
                                                    gFeatureFlagFLE2Range);
+
+namespace {
+// Validate the range operator passed in and return the fieldpath and payload for the rewrite. If
+// the passed-in expression is a comparison with $eq, $ne, or $cmp, none of which represent a range
+// predicate, then return null to the caller so that the rewrite can return null.
+std::pair<boost::intrusive_ptr<Expression>, Value> validateRangeOp(Expression* expr) {
+    auto children = [&]() {
+        auto cmpExpr = dynamic_cast<ExpressionCompare*>(expr);
+        tassert(
+            6720901, "Range rewrite should only be called with a comparison operator.", cmpExpr);
+        switch (cmpExpr->getOp()) {
+            case ExpressionCompare::GT:
+            case ExpressionCompare::GTE:
+            case ExpressionCompare::LT:
+            case ExpressionCompare::LTE:
+                return cmpExpr->getChildren();
+
+            case ExpressionCompare::EQ:
+            case ExpressionCompare::NE:
+            case ExpressionCompare::CMP:
+                return std::vector<boost::intrusive_ptr<Expression>>();
+        }
+        return std::vector<boost::intrusive_ptr<Expression>>();
+    }();
+    if (children.empty()) {
+        return {nullptr, Value()};
+    }
+    // ExpressionCompare has a fixed arity of 2.
+    auto fieldpath = dynamic_cast<ExpressionFieldPath*>(children[0].get());
+    uassert(6720903, "first argument should be a fieldpath", fieldpath);
+    auto secondArg = dynamic_cast<ExpressionConstant*>(children[1].get());
+    uassert(6720904, "second argument should be a constant", secondArg);
+    auto payload = secondArg->getValue();
+    return {children[0], payload};
+}
+}  // namespace
+
+std::unique_ptr<ExpressionInternalFLEBetween> RangePredicate::fleBetweenFromPayload(
+    StringData path, ParsedFindRangePayload payload) const {
+    auto* expCtx = _rewriter->getExpressionContext();
+    return fleBetweenFromPayload(ExpressionFieldPath::createPathFromString(
+                                     expCtx, path.toString(), expCtx->variablesParseState),
+                                 payload);
+}
+
+std::unique_ptr<ExpressionInternalFLEBetween> RangePredicate::fleBetweenFromPayload(
+    boost::intrusive_ptr<Expression> fieldpath, ParsedFindRangePayload payload) const {
+    tassert(7030501,
+            "$internalFleBetween can only be generated from a non-stub payload.",
+            !payload.isStub());
+    auto cm = payload.maxCounter;
+    ServerDataEncryptionLevel1Token serverToken = std::move(payload.serverToken);
+    std::vector<ConstDataRange> edcTokens;
+    std::transform(std::make_move_iterator(payload.edges.value().begin()),
+                   std::make_move_iterator(payload.edges.value().end()),
+                   std::back_inserter(edcTokens),
+                   [](FLEFindEdgeTokenSet&& edge) { return edge.edc.toCDR(); });
+
+    auto* expCtx = _rewriter->getExpressionContext();
+    return std::make_unique<ExpressionInternalFLEBetween>(
+        expCtx, fieldpath, serverToken.toCDR(), cm, std::move(edcTokens));
+}
 
 std::vector<PrfBlock> RangePredicate::generateTags(BSONValue payload) const {
     auto parsedPayload = parseFindPayload<ParsedFindRangePayload>(payload);
     std::vector<PrfBlock> tags;
-    for (auto& edge : parsedPayload.edges) {
+    tassert(7030500, "Must generate tags from a non-stub payload.", !parsedPayload.isStub());
+    for (auto& edge : parsedPayload.edges.value()) {
         auto tagsForEdge = readTags(*_rewriter->getEscReader(),
                                     *_rewriter->getEccReader(),
                                     edge.esc,
@@ -67,69 +133,58 @@ std::vector<PrfBlock> RangePredicate::generateTags(BSONValue payload) const {
 
 std::unique_ptr<MatchExpression> RangePredicate::rewriteToTagDisjunction(
     MatchExpression* expr) const {
-    tassert(6720900,
-            "Range rewrite should only be called with $between operator.",
-            expr->matchType() == MatchExpression::BETWEEN);
-    auto betExpr = static_cast<BetweenMatchExpression*>(expr);
-    auto payload = betExpr->rhs();
-
-    if (!isPayload(payload)) {
-        return nullptr;
+    if (auto compExpr = dynamic_cast<ComparisonMatchExpression*>(expr)) {
+        auto payload = compExpr->getData();
+        if (!isPayload(payload)) {
+            return nullptr;
+        }
+        // If this is a stub expression, replace expression with $alwaysTrue.
+        if (isStub(payload)) {
+            return std::make_unique<AlwaysTrueMatchExpression>();
+        }
+        return makeTagDisjunction(toBSONArray(generateTags(payload)));
     }
-    return makeTagDisjunction(toBSONArray(generateTags(payload)));
-}
-
-std::pair<boost::intrusive_ptr<Expression>, Value> validateBetween(Expression* expr) {
-    auto betweenExpr = dynamic_cast<ExpressionBetween*>(expr);
-    tassert(6720901, "Range rewrite should only be called with $between operator.", betweenExpr);
-    auto children = betweenExpr->getChildren();
-    uassert(6720902, "$between should have two children.", children.size() == 2);
-
-    auto fieldpath = dynamic_cast<ExpressionFieldPath*>(children[0].get());
-    uassert(6720903, "first argument should be a fieldpath", fieldpath);
-    auto secondArg = dynamic_cast<ExpressionConstant*>(children[1].get());
-    uassert(6720904, "second argument should be a constant", secondArg);
-    auto payload = secondArg->getValue();
-    return {children[0], payload};
+    MONGO_UNREACHABLE_TASSERT(6720900);
 }
 
 std::unique_ptr<Expression> RangePredicate::rewriteToTagDisjunction(Expression* expr) const {
-    auto [_, payload] = validateBetween(expr);
+    auto [fieldpath, payload] = validateRangeOp(expr);
+    if (!fieldpath) {
+        return nullptr;
+    }
     if (!isPayload(payload)) {
         return nullptr;
     }
+    if (isStub(std::ref(payload))) {
+        return std::make_unique<ExpressionConstant>(_rewriter->getExpressionContext(), Value(true));
+    }
+
     auto tags = toValues(generateTags(std::ref(payload)));
 
     return makeTagDisjunction(_rewriter->getExpressionContext(), std::move(tags));
 }
 
-std::unique_ptr<ExpressionInternalFLEBetween> RangePredicate::fleBetweenFromPayload(
-    StringData path, ParsedFindRangePayload payload) const {
-    auto* expCtx = _rewriter->getExpressionContext();
-    return fleBetweenFromPayload(ExpressionFieldPath::createPathFromString(
-                                     expCtx, path.toString(), expCtx->variablesParseState),
-                                 payload);
-}
-
-std::unique_ptr<ExpressionInternalFLEBetween> RangePredicate::fleBetweenFromPayload(
-    boost::intrusive_ptr<Expression> fieldpath, ParsedFindRangePayload payload) const {
-    auto cm = payload.maxCounter;
-    ServerDataEncryptionLevel1Token serverToken = std::move(payload.serverToken);
-    std::vector<ConstDataRange> edcTokens;
-    std::transform(std::make_move_iterator(payload.edges.begin()),
-                   std::make_move_iterator(payload.edges.end()),
-                   std::back_inserter(edcTokens),
-                   [](FLEFindEdgeTokenSet&& edge) { return edge.edc.toCDR(); });
-
-    auto* expCtx = _rewriter->getExpressionContext();
-    return std::make_unique<ExpressionInternalFLEBetween>(
-        expCtx, fieldpath, serverToken.toCDR(), cm, std::move(edcTokens));
-}
-
 std::unique_ptr<MatchExpression> RangePredicate::rewriteToRuntimeComparison(
     MatchExpression* expr) const {
-    auto between = static_cast<BetweenMatchExpression*>(expr);
-    auto ffp = between->rhs();
+    auto compExpr = dynamic_cast<ComparisonMatchExpression*>(expr);
+    tassert(7121400, "Reange rewrite can only operate on comparison match expression", compExpr);
+    switch (compExpr->matchType()) {
+        case MatchExpression::GT:
+        case MatchExpression::LT:
+        case MatchExpression::GTE:
+        case MatchExpression::LTE:
+            break;
+        default:
+            return nullptr;
+    }
+    auto ffp = compExpr->getData();
+    if (!isPayload(ffp)) {
+        return nullptr;
+    }
+    // If this is a stub expression, replace expression with $alwaysTrue.
+    if (isStub(ffp)) {
+        return std::make_unique<AlwaysTrueMatchExpression>();
+    }
 
     if (!isPayload(ffp)) {
         return nullptr;
@@ -143,11 +198,17 @@ std::unique_ptr<MatchExpression> RangePredicate::rewriteToRuntimeComparison(
 }
 
 std::unique_ptr<Expression> RangePredicate::rewriteToRuntimeComparison(Expression* expr) const {
-    auto [fieldpath, ffp] = validateBetween(expr);
+    auto [fieldpath, ffp] = validateRangeOp(expr);
+    if (!fieldpath) {
+        return nullptr;
+    }
     if (!isPayload(ffp)) {
         return nullptr;
     }
     auto payload = parseFindPayload<ParsedFindRangePayload>(ffp);
+    if (payload.isStub()) {
+        return std::make_unique<ExpressionConstant>(_rewriter->getExpressionContext(), Value(true));
+    }
     return fleBetweenFromPayload(fieldpath, payload);
 }
 }  // namespace mongo::fle

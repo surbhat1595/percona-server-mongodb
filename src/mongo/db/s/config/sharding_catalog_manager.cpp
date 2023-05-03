@@ -34,19 +34,22 @@
 #include <vector>
 
 #include "mongo/db/auth/authorization_session_impl.h"
+#include "mongo/db/catalog/coll_mod.h"
+#include "mongo/db/coll_mod_gen.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/error_labels.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/ops/write_ops_parsers.h"
 #include "mongo/db/query/query_request_helper.h"
+#include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/s/balancer/type_migration.h"
 #include "mongo/db/s/config/index_on_config.h"
 #include "mongo/db/s/sharding_util.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/logv2/log.h"
-#include "mongo/s/catalog/config_server_version.h"
+#include "mongo/s/balancer_configuration.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
@@ -346,6 +349,13 @@ Status ShardingCatalogManager::initializeConfigDatabaseIfNeeded(OperationContext
         return status;
     }
 
+    if (feature_flags::gConfigSettingsSchema.isEnabled(serverGlobalParams.featureCompatibility)) {
+        status = _initConfigSettings(opCtx);
+        if (!status.isOK()) {
+            return status;
+        }
+    }
+
     // Make sure to write config.version last since we detect rollbacks of config.version and
     // will re-run initializeConfigDatabaseIfNeeded if that happens, but we don't detect rollback
     // of the index builds.
@@ -360,6 +370,10 @@ Status ShardingCatalogManager::initializeConfigDatabaseIfNeeded(OperationContext
     return Status::OK();
 }
 
+Status ShardingCatalogManager::upgradeConfigSettings(OperationContext* opCtx) {
+    return _initConfigSettings(opCtx);
+}
+
 void ShardingCatalogManager::discardCachedConfigDatabaseInitializationState() {
     stdx::lock_guard<Latch> lk(_mutex);
     _configInitialized = false;
@@ -370,47 +384,21 @@ Status ShardingCatalogManager::_initConfigVersion(OperationContext* opCtx) {
 
     auto versionStatus =
         catalogClient->getConfigVersion(opCtx, repl::ReadConcernLevel::kLocalReadConcern);
-    if (!versionStatus.isOK()) {
+    if (versionStatus.isOK() || versionStatus != ErrorCodes::NoMatchingDocument) {
         return versionStatus.getStatus();
     }
 
-    const auto& versionInfo = versionStatus.getValue();
-    if (versionInfo.getMinCompatibleVersion() > CURRENT_CONFIG_VERSION) {
-        return {ErrorCodes::IncompatibleShardingConfigVersion,
-                str::stream() << "current version v" << CURRENT_CONFIG_VERSION
-                              << " is older than the cluster min compatible v"
-                              << versionInfo.getMinCompatibleVersion()};
+    VersionType newVersion;
+    newVersion.setClusterId(OID::gen());
+
+    if (!feature_flags::gStopUsingConfigVersion.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        newVersion.setCurrentVersion(VersionType::CURRENT_CONFIG_VERSION);
+        newVersion.setMinCompatibleVersion(VersionType::MIN_COMPATIBLE_CONFIG_VERSION);
     }
-
-    if (versionInfo.getCurrentVersion() == UpgradeHistory_EmptyVersion) {
-        VersionType newVersion;
-        newVersion.setClusterId(OID::gen());
-        newVersion.setMinCompatibleVersion(MIN_COMPATIBLE_CONFIG_VERSION);
-        newVersion.setCurrentVersion(CURRENT_CONFIG_VERSION);
-
-        BSONObj versionObj(newVersion.toBSON());
-        auto insertStatus = catalogClient->insertConfigDocument(
-            opCtx, VersionType::ConfigNS, versionObj, kNoWaitWriteConcern);
-
-        return insertStatus;
-    }
-
-    if (versionInfo.getCurrentVersion() == UpgradeHistory_UnreportedVersion) {
-        return {ErrorCodes::IncompatibleShardingConfigVersion,
-                "Assuming config data is old since the version document cannot be found in the "
-                "config server and it contains databases besides 'local' and 'admin'. "
-                "Please upgrade if this is the case. Otherwise, make sure that the config "
-                "server is clean."};
-    }
-
-    if (versionInfo.getCurrentVersion() < CURRENT_CONFIG_VERSION) {
-        return {ErrorCodes::IncompatibleShardingConfigVersion,
-                str::stream() << "need to upgrade current cluster version to v"
-                              << CURRENT_CONFIG_VERSION << "; currently at v"
-                              << versionInfo.getCurrentVersion()};
-    }
-
-    return Status::OK();
+    auto insertStatus = catalogClient->insertConfigDocument(
+        opCtx, VersionType::ConfigNS, newVersion.toBSON(), kNoWaitWriteConcern);
+    return insertStatus;
 }
 
 Status ShardingCatalogManager::_initConfigIndexes(OperationContext* opCtx) {
@@ -491,6 +479,59 @@ Status ShardingCatalogManager::_initConfigCollections(OperationContext* opCtx) {
         }
     }
     return Status::OK();
+}
+
+Status ShardingCatalogManager::_initConfigSettings(OperationContext* opCtx) {
+    DBDirectClient client(opCtx);
+
+    /**
+     * $jsonSchema: {
+     *   oneOf: [
+     *       {"properties": {_id: {enum: ["chunksize"]}},
+     *                      {value: {bsonType: "number", minimum: 1, maximum: 1024}}},
+     *       {"properties": {_id: {enum: ["balancer", "autosplit", "ReadWriteConcernDefaults",
+     *                                    "audit"]}}}
+     *   ]
+     * }
+     *
+     * Note: the schema uses "number" for the chunksize instead of "int" because "int" requires the
+     * user to pass NumberInt(x) as the value rather than x (as all of our docs recommend). Non-
+     * integer values will be handled as they were before the schema, by the balancer failing until
+     * a new value is set.
+     */
+    const auto chunkSizeValidator =
+        BSON("properties" << BSON("_id" << BSON("enum" << BSON_ARRAY(ChunkSizeSettingsType::kKey))
+                                        << "value"
+                                        << BSON("bsonType"
+                                                << "number"
+                                                << "minimum" << 1 << "maximum" << 1024))
+                          << "additionalProperties" << false);
+    const auto noopValidator =
+        BSON("properties" << BSON(
+                 "_id" << BSON("enum" << BSON_ARRAY(
+                                   BalancerSettingsType::kKey
+                                   << AutoSplitSettingsType::kKey
+                                   << ReadWriteConcernDefaults::kPersistedDocumentId << "audit"))));
+    const auto fullValidator =
+        BSON("$jsonSchema" << BSON("oneOf" << BSON_ARRAY(chunkSizeValidator << noopValidator)));
+
+    BSONObj cmd = BSON("create" << NamespaceString::kConfigSettingsNamespace.coll());
+    BSONObj result;
+    const bool ok =
+        client.runCommand(NamespaceString::kConfigSettingsNamespace.db().toString(), cmd, result);
+    if (!ok) {  // create returns error NamespaceExists if collection already exists
+        Status status = getStatusFromCommandResult(result);
+        if (status != ErrorCodes::NamespaceExists) {
+            return status.withContext("Could not create config.settings");
+        }
+    }
+
+    // Collection already exists, create validator on that collection
+    CollMod collModCmd{NamespaceString::kConfigSettingsNamespace};
+    collModCmd.getCollModRequest().setValidator(fullValidator);
+    BSONObjBuilder builder;
+    return processCollModCommand(
+        opCtx, {NamespaceString::kConfigSettingsNamespace}, collModCmd, &builder);
 }
 
 Status ShardingCatalogManager::setFeatureCompatibilityVersionOnShards(OperationContext* opCtx,

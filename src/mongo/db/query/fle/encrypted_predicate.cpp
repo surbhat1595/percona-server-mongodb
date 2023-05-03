@@ -50,7 +50,7 @@ std::unique_ptr<MatchExpression> makeTagDisjunction(BSONArray&& tagArray) {
     auto tagElems = std::vector<BSONElement>();
     tagArray.elems(tagElems);
 
-    auto newExpr = std::make_unique<InMatchExpression>(kSafeContent);
+    auto newExpr = std::make_unique<InMatchExpression>(StringData(kSafeContent));
     newExpr->setBackingBSON(std::move(tagArray));
     uassertStatusOK(newExpr->setEqualities(std::move(tagElems)));
 
@@ -86,6 +86,32 @@ std::unique_ptr<Expression> makeTagDisjunction(ExpressionContext* expCtx,
         orListElems.push_back(make_intrusive<ExpressionIn>(expCtx, std::move(inVec)));
     }
     return std::make_unique<ExpressionOr>(expCtx, std::move(orListElems));
+}
+
+
+bool isPayloadOfType(EncryptedBinDataType ty, const BSONElement& elt) {
+    if (!elt.isBinData(BinDataType::Encrypt)) {
+        return false;
+    }
+    int dataLen;
+    auto data = elt.binData(dataLen);
+
+    // Check that the BinData's subtype is 6, and its sub-subtype is equal to this predicate's
+    // encryptedBinDataType.
+    return dataLen >= 1 && static_cast<uint8_t>(data[0]) == static_cast<uint8_t>(ty);
+}
+
+
+bool isPayloadOfType(EncryptedBinDataType ty, const Value& v) {
+    if (v.getType() != BSONType::BinData) {
+        return false;
+    }
+
+    auto binData = v.getBinData();
+    // Check that the BinData's subtype is 6, and its sub-subtype is equal to this predicate's
+    // encryptedBinDataType.
+    return binData.type == BinDataType::Encrypt && binData.length >= 1 &&
+        static_cast<uint8_t>(ty) == static_cast<const uint8_t*>(binData.data)[0];
 }
 }  // namespace fle
 }  // namespace mongo

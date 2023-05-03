@@ -2414,7 +2414,7 @@ intrusive_ptr<ExpressionFieldPath> ExpressionFieldPath::createVarFromString(
 ExpressionFieldPath::ExpressionFieldPath(ExpressionContext* const expCtx,
                                          const string& theFieldPath,
                                          Variables::Id variable)
-    : Expression(expCtx), _fieldPath(theFieldPath), _variable(variable) {
+    : Expression(expCtx), _fieldPath(theFieldPath, true /*precomputeHashes*/), _variable(variable) {
     const auto varName = theFieldPath.substr(0, theFieldPath.find('.'));
     tassert(5943201,
             std::string{"Variable with $$ROOT's id is not $$CURRENT or $$ROOT as expected, "
@@ -7999,13 +7999,6 @@ Value ExpressionTsIncrement::evaluate(const Document& root, Variables* variables
 
 REGISTER_STABLE_EXPRESSION(tsIncrement, ExpressionTsIncrement::parse);
 
-/* ------------------------- ExpressionBetween ----------------------------- */
-
-Value ExpressionBetween::evaluate(const Document& root, Variables* variables) const {
-    tasserted(6882800, "$between does not have a runtime implementation.");
-}
-
-REGISTER_STABLE_EXPRESSION(between, ExpressionBetween::parse);
 
 MONGO_INITIALIZER_GROUP(BeginExpressionRegistration, ("default"), ("EndExpressionRegistration"))
 MONGO_INITIALIZER_GROUP(EndExpressionRegistration, ("BeginExpressionRegistration"), ())

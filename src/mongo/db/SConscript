@@ -205,6 +205,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/commands',
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
         '$BUILD_DIR/mongo/db/query/command_request_response',
+        '$BUILD_DIR/mongo/db/query/telemetry',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/db/stats/timer_stats',
         '$BUILD_DIR/mongo/db/storage/storage_engine_parameters',
@@ -221,6 +222,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/util/concurrency/admission_context',
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'auth/auth',
         'auth/user_acquisition_stats',
         'prepare_conflict_tracker',
@@ -565,6 +567,7 @@ env.Library(
         'change_stream_state.idl',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'server_base',
     ],
 )
@@ -816,6 +819,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/auth/authprivilege',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'server_base',
     ],
 )
@@ -827,7 +831,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/pipeline/document_sources_idl',
-        '$BUILD_DIR/mongo/util/namespace_string_util',
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'server_base',
     ],
 )
@@ -862,7 +866,7 @@ env.Library(
         '$BUILD_DIR/mongo/rpc/command_status',
         '$BUILD_DIR/mongo/rpc/rewrite_state_change_errors',
         '$BUILD_DIR/mongo/rpc/rpc',
-        '$BUILD_DIR/mongo/util/namespace_string_util',
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'audit',
         'coll_mod_command_idl',
         'index_commands_idl',
@@ -931,6 +935,7 @@ env.Library(
         'query/fle/equality_predicate.cpp',
         'query/fle/query_rewriter.cpp',
         'query/fle/range_predicate.cpp',
+        'query/fle/range_validator.cpp',
         'query/fle/server_rewrite.cpp',
     ],
     LIBDEPS=[
@@ -1030,6 +1035,7 @@ env.Library(
         'query_exec',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/catalog/collection_crud',
         '$BUILD_DIR/mongo/db/commands/server_status_core',
         '$BUILD_DIR/mongo/db/ops/write_ops',
         'record_id_helpers',
@@ -1075,17 +1081,6 @@ env.Library(
         's/sharding_runtime_d',
         'service_entry_point_common',
         'storage/storage_options',
-    ],
-)
-
-env.Library(
-    target="batched_write_context",
-    source=[
-        "batched_write_context.cpp",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/base",
-        "$BUILD_DIR/mongo/db/transaction/transaction_operations",
     ],
 )
 
@@ -1398,6 +1393,16 @@ env.Library(
 )
 
 env.Library(
+    target='shard_filterer',
+    source=[
+        'exec/shard_filterer_impl.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        's/sharding_api_d',
+    ],
+)
+
+env.Library(
     target='query_exec',
     source=[
         'clientcursor.cpp',
@@ -1436,7 +1441,6 @@ env.Library(
         'exec/return_key.cpp',
         'exec/sample_from_timeseries_bucket.cpp',
         'exec/shard_filter.cpp',
-        'exec/shard_filterer_impl.cpp',
         'exec/skip.cpp',
         'exec/sort.cpp',
         'exec/sort_key_generator.cpp',
@@ -1461,6 +1465,7 @@ env.Library(
         'pipeline/plan_explainer_pipeline.cpp',
         'query/all_indices_required_checker.cpp',
         'query/bind_input_params.cpp',
+        'query/cost_model/on_coefficients_change_updater_impl.cpp',
         'query/classic_stage_builder.cpp',
         'query/cqf_command_utils.cpp',
         'query/cqf_get_executor.cpp',
@@ -1538,6 +1543,7 @@ env.Library(
         'repl/repl_coordinator_interface',
         's/sharding_api_d',
         'session/logical_session_cache',
+        'shard_filterer',
         'shard_role',
         'shared_request_handling',
         'stats/latency_server_stats',
@@ -1757,6 +1763,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/auth/authprivilege',
         '$BUILD_DIR/mongo/db/catalog/commit_quorum_options',
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'server_base',
     ],
 )
@@ -2132,7 +2139,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/repl/optime',
-        '$BUILD_DIR/mongo/util/namespace_string_util',
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'server_base',
         'service_context',
     ],
@@ -2365,6 +2372,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/change_streams_cluster_parameter',
         '$BUILD_DIR/mongo/db/pipeline/change_stream_expired_pre_image_remover',
         '$BUILD_DIR/mongo/db/query/ce/query_ce_histogram',
+        '$BUILD_DIR/mongo/db/s/query_analysis_writer',
         '$BUILD_DIR/mongo/db/set_change_stream_state_coordinator',
         '$BUILD_DIR/mongo/idl/cluster_server_parameter',
         '$BUILD_DIR/mongo/idl/cluster_server_parameter_op_observer',
@@ -2580,6 +2588,7 @@ if wiredtiger:
             'persistent_task_store_test.cpp',
             'query/fle/equality_predicate_test.cpp',
             'query/fle/range_predicate_test.cpp',
+            'query/fle/range_validator_test.cpp',
             'query/fle/query_rewriter_test.cpp',
             'range_arithmetic_test.cpp',
             'read_write_concern_defaults_test.cpp',

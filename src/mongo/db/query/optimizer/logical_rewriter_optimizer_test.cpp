@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#include "mongo/db/query/optimizer/cascades/ce_heuristic.h"
 #include "mongo/db/query/optimizer/cascades/logical_props_derivation.h"
 #include "mongo/db/query/optimizer/cascades/rewriter_rules.h"
 #include "mongo/db/query/optimizer/explain.h"
@@ -74,10 +73,10 @@ TEST(LogicalRewriter, RootNodeMerge) {
         "            Source []\n",
         rootNode);
 
-    OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase},
-                                 prefixId,
-                                 {{{"test", createScanDef({}, {})}}},
-                                 DebugInfo::kDefaultForTests);
+    auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase},
+                                         prefixId,
+                                         {{{"test", createScanDef({}, {})}}},
+                                         DebugInfo::kDefaultForTests);
     ABT rewritten = std::move(rootNode);
     phaseManager.optimize(rewritten);
 
@@ -105,8 +104,8 @@ TEST(LogicalRewriter, Memo) {
     Metadata metadata{{{"test", {}}}};
     auto debugInfo = DebugInfo::kDefaultForTests;
     DefaultLogicalPropsDerivation lPropsDerivation;
-    HeuristicCE heuristicCE;
-    Memo::Context memoCtx{&metadata, &debugInfo, &lPropsDerivation, &heuristicCE};
+    auto ceDerivation = makeHeuristicCE();
+    Memo::Context memoCtx{&metadata, &debugInfo, &lPropsDerivation, ceDerivation.get()};
     Memo memo;
 
     ABT scanNode = make<ScanNode>("ptest", "test");
@@ -288,10 +287,10 @@ TEST(LogicalRewriter, FilterProjectRewrite) {
         "              Source []\n",
         rootNode);
 
-    OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase},
-                                 prefixId,
-                                 {{{"test", createScanDef({}, {})}}},
-                                 DebugInfo::kDefaultForTests);
+    auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase},
+                                         prefixId,
+                                         {{{"test", createScanDef({}, {})}}},
+                                         DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
@@ -399,10 +398,10 @@ TEST(LogicalRewriter, FilterProjectComplexRewrite) {
         "            Source []\n",
         rootNode);
 
-    OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase},
-                                 prefixId,
-                                 {{{"test", createScanDef({}, {})}}},
-                                 DebugInfo::kDefaultForTests);
+    auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase},
+                                         prefixId,
+                                         {{{"test", createScanDef({}, {})}}},
+                                         DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
@@ -477,10 +476,10 @@ TEST(LogicalRewriter, FilterProjectGroupRewrite) {
     ABT rootNode = make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{"c"}},
                                   std::move(filterANode));
 
-    OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase},
-                                 prefixId,
-                                 {{{"test", createScanDef({}, {})}}},
-                                 DebugInfo::kDefaultForTests);
+    auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase},
+                                         prefixId,
+                                         {{{"test", createScanDef({}, {})}}},
+                                         DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
@@ -547,10 +546,10 @@ TEST(LogicalRewriter, FilterProjectUnwindRewrite) {
     ABT rootNode = make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{"a", "b"}},
                                   std::move(filterBNode));
 
-    OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase},
-                                 prefixId,
-                                 {{{"test", createScanDef({}, {})}}},
-                                 DebugInfo::kDefaultForTests);
+    auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase},
+                                         prefixId,
+                                         {{{"test", createScanDef({}, {})}}},
+                                         DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
@@ -618,10 +617,10 @@ TEST(LogicalRewriter, FilterProjectExchangeRewrite) {
     ABT rootNode = make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{"a", "b"}},
                                   std::move(filterANode));
 
-    OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase},
-                                 prefixId,
-                                 {{{"test", createScanDef({}, {})}}},
-                                 DebugInfo::kDefaultForTests);
+    auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase},
+                                         prefixId,
+                                         {{{"test", createScanDef({}, {})}}},
+                                         DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
@@ -690,10 +689,10 @@ TEST(LogicalRewriter, UnwindCollationRewrite) {
     ABT rootNode = make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{"a", "b"}},
                                   std::move(unwindNode));
 
-    OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase},
-                                 prefixId,
-                                 {{{"test", createScanDef({}, {})}}},
-                                 DebugInfo::kDefaultForTests);
+    auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase},
+                                         prefixId,
+                                         {{{"test", createScanDef({}, {})}}},
+                                         DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
@@ -802,11 +801,11 @@ TEST(LogicalRewriter, FilterUnionReorderSingleProjection) {
         "            Source []\n",
         latest);
 
-    OptPhaseManager phaseManager(
-        {OptPhase::MemoSubstitutionPhase, OptPhase::MemoExplorationPhase},
-        prefixId,
-        {{{"test1", createScanDef({}, {})}, {"test2", createScanDef({}, {})}}},
-        DebugInfo::kDefaultForTests);
+    auto phaseManager =
+        makePhaseManager({OptPhase::MemoSubstitutionPhase, OptPhase::MemoExplorationPhase},
+                         prefixId,
+                         {{{"test1", createScanDef({}, {})}, {"test2", createScanDef({}, {})}}},
+                         DebugInfo::kDefaultForTests);
     phaseManager.optimize(latest);
 
     ASSERT_EXPLAIN_V2(
@@ -966,11 +965,11 @@ TEST(LogicalRewriter, MultipleFilterUnionReorder) {
         "            Source []\n",
         latest);
 
-    OptPhaseManager phaseManager(
-        {OptPhase::MemoSubstitutionPhase, OptPhase::MemoExplorationPhase},
-        prefixId,
-        {{{"test1", createScanDef({}, {})}, {"test2", createScanDef({}, {})}}},
-        DebugInfo::kDefaultForTests);
+    auto phaseManager =
+        makePhaseManager({OptPhase::MemoSubstitutionPhase, OptPhase::MemoExplorationPhase},
+                         prefixId,
+                         {{{"test1", createScanDef({}, {})}, {"test2", createScanDef({}, {})}}},
+                         DebugInfo::kDefaultForTests);
     phaseManager.optimize(latest);
 
     ASSERT_EXPLAIN_V2(
@@ -1070,12 +1069,12 @@ TEST(LogicalRewriter, FilterUnionUnionPushdown) {
     ABT rootNode = make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{"ptest"}},
                                   std::move(filter));
 
-    OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase},
-                                 prefixId,
-                                 {{{"test1", createScanDef({}, {})},
-                                   {"test2", createScanDef({}, {})},
-                                   {"test3", createScanDef({}, {})}}},
-                                 DebugInfo::kDefaultForTests);
+    auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase},
+                                         prefixId,
+                                         {{{"test1", createScanDef({}, {})},
+                                           {"test2", createScanDef({}, {})},
+                                           {"test3", createScanDef({}, {})}}},
+                                         DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
 
     ASSERT_EXPLAIN_V2(
@@ -1216,10 +1215,11 @@ TEST(LogicalRewriter, UnionPreservesCommonLogicalProps) {
 
     // Run the reordering rewrite such that the scan produces a hash partition.
     PrefixId prefixId;
-    OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase, OptPhase::MemoExplorationPhase},
-                                 prefixId,
-                                 metadata,
-                                 DebugInfo::kDefaultForTests);
+    auto phaseManager =
+        makePhaseManager({OptPhase::MemoSubstitutionPhase, OptPhase::MemoExplorationPhase},
+                         prefixId,
+                         metadata,
+                         DebugInfo::kDefaultForTests);
 
     ABT optimized = rootNode;
     phaseManager.optimize(optimized);
@@ -1432,10 +1432,11 @@ TEST(LogicalRewriter, SargableCE) {
 
     PrefixId prefixId;
     ABT rootNode = sargableCETestSetup();
-    OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase, OptPhase::MemoExplorationPhase},
-                                 prefixId,
-                                 {{{"test", createScanDef({}, {})}}},
-                                 DebugInfo::kDefaultForTests);
+    auto phaseManager =
+        makePhaseManager({OptPhase::MemoSubstitutionPhase, OptPhase::MemoExplorationPhase},
+                         prefixId,
+                         {{{"test", createScanDef({}, {})}}},
+                         DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
@@ -1474,7 +1475,8 @@ TEST(LogicalRewriter, SargableCE) {
         "    |   |       projections: \n"
         "    |   |           ptest\n"
         "    |   |       indexingAvailability: \n"
-        "    |   |           [groupId: 0, scanProjection: ptest, scanDefName: test, eqPredsOnly]\n"
+        "    |   |           [groupId: 0, scanProjection: ptest, scanDefName: test, eqPredsOnly, "
+        "hasProperInterval]\n"
         "    |   |       collectionAvailability: \n"
         "    |   |           test\n"
         "    |   |       distributionAvailability: \n"
@@ -1508,7 +1510,8 @@ TEST(LogicalRewriter, SargableCE) {
         "    |   |       projections: \n"
         "    |   |           ptest\n"
         "    |   |       indexingAvailability: \n"
-        "    |   |           [groupId: 0, scanProjection: ptest, scanDefName: test, eqPredsOnly]\n"
+        "    |   |           [groupId: 0, scanProjection: ptest, scanDefName: test, eqPredsOnly, "
+        "hasProperInterval]\n"
         "    |   |       collectionAvailability: \n"
         "    |   |           test\n"
         "    |   |       distributionAvailability: \n"
@@ -1540,10 +1543,10 @@ TEST(LogicalRewriter, RemoveNoopFilter) {
     ABT rootNode = make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{"ptest"}},
                                   std::move(filterANode));
 
-    OptPhaseManager phaseManager({OptPhase::MemoSubstitutionPhase},
-                                 prefixId,
-                                 {{{"test", createScanDef({}, {})}}},
-                                 DebugInfo::kDefaultForTests);
+    auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase},
+                                         prefixId,
+                                         {{{"test", createScanDef({}, {})}}},
+                                         DebugInfo::kDefaultForTests);
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 

@@ -28,6 +28,7 @@
  */
 
 #include "mongo/db/s/range_deleter_service.h"
+
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
@@ -58,7 +59,8 @@ BSONObj getShardKeyPattern(OperationContext* opCtx,
             AutoGetCollection collection(
                 opCtx, NamespaceStringOrUUID{dbName.toString(), collectionUuid}, MODE_IS);
 
-            auto optMetadata = CollectionShardingRuntime::get(opCtx, collection.getNss())
+            auto optMetadata = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
+                                   opCtx, collection.getNss(), CSRAcquisitionMode::kShared)
                                    ->getCurrentMetadataIfKnown();
             if (optMetadata && optMetadata->isSharded()) {
                 return optMetadata->getShardKeyPattern().toBSON();
@@ -84,6 +86,50 @@ RangeDeleterService* RangeDeleterService::get(OperationContext* opCtx) {
     return get(opCtx->getServiceContext());
 }
 
+RangeDeleterService::ReadyRangeDeletionsProcessor::ReadyRangeDeletionsProcessor(
+    OperationContext* opCtx)
+    : _thread([this] { _runRangeDeletions(); }) {}
+
+RangeDeleterService::ReadyRangeDeletionsProcessor::~ReadyRangeDeletionsProcessor() {
+    shutdown();
+    invariant(_thread.joinable());
+    _thread.join();
+    invariant(!_threadOpCtxHolder,
+              "Thread operation context is still alive after joining main thread");
+}
+
+void RangeDeleterService::ReadyRangeDeletionsProcessor::shutdown() {
+    stdx::lock_guard<Latch> lock(_mutex);
+    if (_state == kStopped)
+        return;
+
+    _state = kStopped;
+
+    if (_threadOpCtxHolder) {
+        stdx::lock_guard<Client> scopedClientLock(*_threadOpCtxHolder->getClient());
+        _threadOpCtxHolder->markKilled(ErrorCodes::Interrupted);
+    }
+}
+
+bool RangeDeleterService::ReadyRangeDeletionsProcessor::_stopRequested() const {
+    stdx::unique_lock<Latch> lock(_mutex);
+    return _state == kStopped;
+}
+
+void RangeDeleterService::ReadyRangeDeletionsProcessor::emplaceRangeDeletion(
+    const RangeDeletionTask& rdt) {
+    stdx::unique_lock<Latch> lock(_mutex);
+    invariant(_state == kRunning);
+    _queue.push(rdt);
+    _condVar.notify_all();
+}
+
+void RangeDeleterService::ReadyRangeDeletionsProcessor::_completedRangeDeletion() {
+    stdx::unique_lock<Latch> lock(_mutex);
+    dassert(!_queue.empty());
+    _queue.pop();
+}
+
 void RangeDeleterService::ReadyRangeDeletionsProcessor::_runRangeDeletions() {
     Client::initThread(kRangeDeletionThreadName);
     {
@@ -91,21 +137,22 @@ void RangeDeleterService::ReadyRangeDeletionsProcessor::_runRangeDeletions() {
         cc().setSystemOperationKillableByStepdown(lk);
     }
 
-    auto opCtx = [&] {
-        stdx::unique_lock<Latch> lock(_mutex);
+    {
+        stdx::lock_guard<Latch> lock(_mutex);
+        if (_state != kRunning) {
+            return;
+        }
         _threadOpCtxHolder = cc().makeOperationContext();
-        _condVar.notify_all();
-        return (*_threadOpCtxHolder).get();
-    }();
+    }
 
-    opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
+    auto opCtx = _threadOpCtxHolder.get();
 
     ON_BLOCK_EXIT([this]() {
-        stdx::unique_lock<Latch> lock(_mutex);
+        stdx::lock_guard<Latch> lock(_mutex);
         _threadOpCtxHolder.reset();
     });
 
-    while (opCtx->checkForInterruptNoAssert().isOK()) {
+    while (!_stopRequested()) {
         {
             stdx::unique_lock<Latch> lock(_mutex);
             try {
@@ -221,7 +268,7 @@ void RangeDeleterService::ReadyRangeDeletionsProcessor::_runRangeDeletions() {
                 // Release the thread only in case the operation context has been interrupted, as
                 // interruption only happens on shutdown/stepdown (this is fine because range
                 // deletions will be resumed on the next step up)
-                if (!opCtx->checkForInterruptNoAssert().isOK()) {
+                if (_stopRequested()) {
                     break;
                 }
 
@@ -233,6 +280,17 @@ void RangeDeleterService::ReadyRangeDeletionsProcessor::_runRangeDeletions() {
             _completedRangeDeletion();
         }
     }
+}
+
+void RangeDeleterService::onStartup(OperationContext* opCtx) {
+    if (disableResumableRangeDeleter.load() ||
+        !feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCV()) {
+        return;
+    }
+
+    auto opObserverRegistry =
+        checked_cast<OpObserverRegistry*>(opCtx->getServiceContext()->getOpObserver());
+    opObserverRegistry->addObserver(std::make_unique<RangeDeleterServiceOpObserver>());
 }
 
 void RangeDeleterService::onStepUpComplete(OperationContext* opCtx, long long term) {
@@ -247,21 +305,13 @@ void RangeDeleterService::onStepUpComplete(OperationContext* opCtx, long long te
         return;
     }
 
+    // Wait until all tasks and thread from previous term drain
+    _joinAndResetState();
+
     auto lock = _acquireMutexUnconditionally();
     dassert(_state == kDown, "Service expected to be down before stepping up");
 
     _state = kInitializing;
-
-    if (_executor) {
-        // Join previously shutted down executor before reinstantiating it
-        _executor->join();
-        _executor.reset();
-    } else {
-        // Initializing the op observer, only executed once at the first step-up
-        auto opObserverRegistry =
-            checked_cast<OpObserverRegistry*>(opCtx->getServiceContext()->getOpObserver());
-        opObserverRegistry->addObserver(std::make_unique<RangeDeleterServiceOpObserver>());
-    }
 
     const std::string kExecName("RangeDeleterServiceExecutor");
     auto net = executor::makeNetworkInterface(kExecName);
@@ -278,29 +328,37 @@ void RangeDeleterService::onStepUpComplete(OperationContext* opCtx, long long te
 }
 
 void RangeDeleterService::_recoverRangeDeletionsOnStepUp(OperationContext* opCtx) {
-    if (disableResumableRangeDeleter.load()) {
-        _state = kDown;
-        return;
-    }
-
-    LOGV2(6834800, "Resubmitting range deletion tasks");
-
-    ServiceContext* serviceContext = opCtx->getServiceContext();
 
     _stepUpCompletedFuture =
         ExecutorFuture<void>(_executor)
-            .then([serviceContext, this] {
+            .then([serviceContext = opCtx->getServiceContext(), this] {
                 ThreadClient tc("ResubmitRangeDeletionsOnStepUp", serviceContext);
+
                 {
-                    stdx::lock_guard<Client> lk(*tc.get());
-                    tc->setSystemOperationKillableByStepdown(lk);
+                    auto lock = _acquireMutexUnconditionally();
+                    if (_state != kInitializing) {
+                        return;
+                    }
+                    _initOpCtxHolder = tc->makeOperationContext();
                 }
-                auto opCtx = tc->makeOperationContext();
-                opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
 
-                ScopedRangeDeleterLock rangeDeleterLock(opCtx.get());
-                DBDirectClient client(opCtx.get());
+                ON_BLOCK_EXIT([this] {
+                    auto lock = _acquireMutexUnconditionally();
+                    _initOpCtxHolder.reset();
+                });
 
+                auto opCtx{_initOpCtxHolder.get()};
+
+                LOGV2(6834800, "Resubmitting range deletion tasks");
+
+                // The Scoped lock is needed to serialize with concurrent range deletions
+                ScopedRangeDeleterLock rangeDeleterLock(opCtx, MODE_S);
+                // The collection lock is needed to serialize with donors trying to
+                // schedule local range deletions by updating the 'pending' field
+                AutoGetCollection rangeDeletionLock(
+                    opCtx, NamespaceString::kRangeDeletionNamespace, MODE_S);
+
+                DBDirectClient client(opCtx);
                 int nRescheduledTasks = 0;
 
                 // (1) register range deletion tasks marked as "processing"
@@ -365,40 +423,55 @@ void RangeDeleterService::_recoverRangeDeletionsOnStepUp(OperationContext* opCtx
             .semi();
 }
 
-void RangeDeleterService::_stopService(bool joinExecutor) {
-    if (!feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCV()) {
-        return;
-    }
-
+void RangeDeleterService::_joinAndResetState() {
+    invariant(_state == kDown);
     // Join the thread spawned on step-up to resume range deletions
     _stepUpCompletedFuture.getNoThrow().ignore();
 
-    auto lock = _acquireMutexUnconditionally();
-
-    // It may happen for the `onStepDown` hook to be invoked on a SECONDARY node transitioning
-    // to ROLLBACK, hence the executor may have never been initialized
+    // Join and destruct the executor
     if (_executor) {
-        _executor->shutdown();
-        if (joinExecutor) {
-            _executor->join();
-        }
+        _executor->join();
+        _executor.reset();
     }
 
-    // Destroy the range deletion processor in order to stop range deletions
+    // Join and destruct the processor
     _readyRangeDeletionsProcessorPtr.reset();
+
+    // Clear range deletions potentially created during recovery
+    _rangeDeletionTasks.clear();
+}
+
+void RangeDeleterService::_stopService() {
+    auto lock = _acquireMutexUnconditionally();
+    if (_state == kDown)
+        return;
+
+    _state = kDown;
+    if (_initOpCtxHolder) {
+        stdx::lock_guard<Client> lk(*_initOpCtxHolder->getClient());
+        _initOpCtxHolder->markKilled(ErrorCodes::Interrupted);
+    }
+
+    if (_executor) {
+        _executor->shutdown();
+    }
+
+    // Shutdown the range deletion processor to interrupt range deletions
+    if (_readyRangeDeletionsProcessorPtr) {
+        _readyRangeDeletionsProcessorPtr->shutdown();
+    }
 
     // Clear range deletion tasks map in order to notify potential waiters on completion futures
     _rangeDeletionTasks.clear();
-
-    _state = kDown;
 }
 
 void RangeDeleterService::onStepDown() {
-    _stopService(false /* joinExecutor */);
+    _stopService();
 }
 
 void RangeDeleterService::onShutdown() {
-    _stopService(true /* joinExecutor */);
+    _stopService();
+    _joinAndResetState();
 }
 
 BSONObj RangeDeleterService::dumpState() {
@@ -460,10 +533,9 @@ SharedSemiFuture<void> RangeDeleterService::registerTask(
             .then([this, rdt = rdt]() {
                 // Step 3: schedule the actual range deletion task
                 auto lock = _acquireMutexUnconditionally();
-                invariant(
-                    _readyRangeDeletionsProcessorPtr || _state == kDown,
-                    "The range deletions processor must be instantiated if the state != kDown");
                 if (_state != kDown) {
+                    invariant(_readyRangeDeletionsProcessorPtr,
+                              "The range deletions processor is not initialized");
                     _readyRangeDeletionsProcessorPtr->emplaceRangeDeletion(rdt);
                 }
             });

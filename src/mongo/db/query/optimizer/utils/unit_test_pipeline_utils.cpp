@@ -31,10 +31,9 @@
 
 #include "mongo/db/pipeline/abt/document_source_visitor.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/query/optimizer/cascades/ce_heuristic.h"
-#include "mongo/db/query/optimizer/cascades/cost_derivation.h"
 #include "mongo/db/query/optimizer/explain.h"
 #include "mongo/db/query/optimizer/rewrites/const_eval.h"
+#include "mongo/db/query/optimizer/utils/unit_test_utils.h"
 #include "mongo/unittest/temp_dir.h"
 
 
@@ -191,11 +190,6 @@ void serializeMetadata(std::ostream& stream, Metadata metadata) {
             explainPreserveIndentation(stream, "\t\t\t\t\t", serializedReqMap);
         }
 
-        stream << "\t\t\tnon multi-key index paths: " << std::endl;
-        for (const auto& indexPath : scanDef.getNonMultiKeyPathSet()) {
-            explainPreserveIndentation(stream, "\t\t\t\t", ExplainGenerator::explainV2(indexPath));
-        }
-
         stream << "\t\t\tcollection exists: " << scanDef.exists() << std::endl;
         stream << "\t\t\tCE type: " << scanDef.getCE() << std::endl;
     }
@@ -217,15 +211,7 @@ ABT optimizeABT(ABT abt,
                 bool phaseManagerDisableScan) {
     PrefixId prefixId;
 
-    OptPhaseManager phaseManager(phaseSet,
-                                 prefixId,
-                                 false,
-                                 metadata,
-                                 std::make_unique<HeuristicCE>(),
-                                 std::make_unique<DefaultCosting>(),
-                                 pathToInterval,
-                                 ConstEval::constFold,
-                                 DebugInfo::kDefaultForTests);
+    auto phaseManager = makePhaseManager(phaseSet, prefixId, metadata, DebugInfo::kDefaultForTests);
     if (phaseManagerDisableScan) {
         phaseManager.getHints()._disableScan = true;
     }
@@ -235,7 +221,7 @@ ABT optimizeABT(ABT abt,
     return optimized;
 }
 
-void testABTTranslationAndOptimization(
+std::string testABTTranslationAndOptimization(
     unittest::GoldenTestContext& gctx,
     const std::string& variationName,
     const std::string& pipelineStr,
@@ -261,15 +247,17 @@ void testABTTranslationAndOptimization(
 
     ABT translated = translatetoABT(pipelineStr, scanDefName, metadata, involvedNss);
 
+    std::string explained;
     if (optimizePipeline) {
         ABT optimized =
             optimizeABT(translated, phaseSet, metadata, pathToInterval, phaseManagerDisableScan);
-        stream << ExplainGenerator::explainV2(optimized) << std::endl;
+        explained = ExplainGenerator::explainV2(optimized);
     } else {
-        stream << ExplainGenerator::explainV2(translated) << std::endl;
+        explained = ExplainGenerator::explainV2(translated);
     }
 
-    stream << std::endl;
+    stream << explained << std::endl << std::endl;
+    return explained;
 }
 
 }  // namespace mongo::optimizer

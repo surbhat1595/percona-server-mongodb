@@ -170,11 +170,25 @@ struct __wt_verbose_multi_category {
     __wt_verbose_level(session, category, WT_VERBOSE_INFO, fmt, __VA_ARGS__)
 
 /*
- * __wt_verbose_debug --
- *     Wrapper to __wt_verbose_level using the default verbosity level.
+ * __wt_verbose_debug1 --
+ *     Wrapper to __wt_verbose_level using the default (DEBUG_1) verbosity level.
  */
-#define __wt_verbose_debug(session, category, fmt, ...) \
+#define __wt_verbose_debug1(session, category, fmt, ...) \
     __wt_verbose_level(session, category, WT_VERBOSE_DEBUG_1, fmt, __VA_ARGS__)
+
+/*
+ * __wt_verbose_debug2 --
+ *     Wrapper to __wt_verbose_level using the DEBUG_2 level.
+ */
+#define __wt_verbose_debug2(session, category, fmt, ...) \
+    __wt_verbose_level(session, category, WT_VERBOSE_DEBUG_2, fmt, __VA_ARGS__)
+
+/*
+ * __wt_verbose_debug3 --
+ *     Wrapper to __wt_verbose_level using the DEBUG_3 level.
+ */
+#define __wt_verbose_debug3(session, category, fmt, ...) \
+    __wt_verbose_level(session, category, WT_VERBOSE_DEBUG_3, fmt, __VA_ARGS__)
 
 /*
  * __wt_verbose --

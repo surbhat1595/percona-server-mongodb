@@ -45,10 +45,10 @@
 namespace mongo {
 namespace {
 
-const BSONObj _createCmdObj(const BSONObj& writeCmd,
-                            const StringData& commandName,
-                            const BSONObj& targetDocId,
-                            const NamespaceString& nss) {
+BSONObj _createCmdObj(const BSONObj& writeCmd,
+                      const StringData& commandName,
+                      const BSONObj& targetDocId,
+                      const NamespaceString& nss) {
     // Drop collation and writeConcern as
     // targeting by _id uses default collation and writeConcern cannot be specified for
     // commands run in internal transactions. This object will be used to construct the command
@@ -100,7 +100,7 @@ public:
                     opCtx->inMultiDocumentTransaction());
 
             const auto writeCmd = request().getWriteCmd();
-            const auto shardId = request().getShardId();
+            const auto shardId = ShardId(request().getShardId().toString());
             LOGV2(6962400,
                   "Running write phase for a write without a shard key.",
                   "clientWriteRequest"_attr = writeCmd,

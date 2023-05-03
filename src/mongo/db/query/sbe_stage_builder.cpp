@@ -84,128 +84,8 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
-
 namespace mongo::stage_builder {
 namespace {
-/**
- * For covered projections, each of the projection field paths represent respective index key. To
- * rehydrate index keys into the result object, we first need to convert projection AST into
- * 'IndexKeyPatternTreeNode' structure. Context structure and visitors below are used for this
- * purpose.
- */
-struct IndexKeysBuilderContext {
-    // Contains resulting tree of index keys converted from projection AST.
-    IndexKeyPatternTreeNode root;
-
-    // Full field path of the currently visited projection node.
-    std::vector<StringData> currentFieldPath;
-
-    // Each projection node has a vector of field names. This stack contains indexes of the
-    // currently visited field names for each of the projection nodes.
-    std::vector<size_t> currentFieldIndex;
-};
-
-/**
- * Covered projections are always inclusion-only, so we ban all other operators.
- */
-class IndexKeysBuilder : public projection_ast::ProjectionASTConstVisitor {
-public:
-    using projection_ast::ProjectionASTConstVisitor::visit;
-
-    IndexKeysBuilder(IndexKeysBuilderContext* context) : _context{context} {}
-
-    void visit(const projection_ast::ProjectionPositionalASTNode* node) final {
-        tasserted(5474501, "Positional projection is not allowed in covered projection");
-    }
-
-    void visit(const projection_ast::ProjectionSliceASTNode* node) final {
-        tasserted(5474502, "$slice is not allowed in covered projection");
-    }
-
-    void visit(const projection_ast::ProjectionElemMatchASTNode* node) final {
-        tasserted(5474503, "$elemMatch is not allowed in covered projection");
-    }
-
-    void visit(const projection_ast::ExpressionASTNode* node) final {
-        tasserted(5474504, "Expressions are not allowed in covered projection");
-    }
-
-    void visit(const projection_ast::MatchExpressionASTNode* node) final {
-        tasserted(5474505,
-                  "$elemMatch and positional projection are not allowed in covered projection");
-    }
-
-    void visit(const projection_ast::BooleanConstantASTNode* node) override {}
-
-protected:
-    IndexKeysBuilderContext* _context;
-};
-
-class IndexKeysPreBuilder final : public IndexKeysBuilder {
-public:
-    using IndexKeysBuilder::IndexKeysBuilder;
-    using IndexKeysBuilder::visit;
-
-    void visit(const projection_ast::ProjectionPathASTNode* node) final {
-        _context->currentFieldIndex.push_back(0);
-        _context->currentFieldPath.emplace_back(node->fieldNames().front());
-    }
-};
-
-class IndexKeysInBuilder final : public IndexKeysBuilder {
-public:
-    using IndexKeysBuilder::IndexKeysBuilder;
-    using IndexKeysBuilder::visit;
-
-    void visit(const projection_ast::ProjectionPathASTNode* node) final {
-        auto& currentIndex = _context->currentFieldIndex.back();
-        currentIndex++;
-        _context->currentFieldPath.back() = node->fieldNames()[currentIndex];
-    }
-};
-
-class IndexKeysPostBuilder final : public IndexKeysBuilder {
-public:
-    using IndexKeysBuilder::IndexKeysBuilder;
-    using IndexKeysBuilder::visit;
-
-    void visit(const projection_ast::ProjectionPathASTNode* node) final {
-        _context->currentFieldIndex.pop_back();
-        _context->currentFieldPath.pop_back();
-    }
-
-    void visit(const projection_ast::BooleanConstantASTNode* constantNode) final {
-        if (!constantNode->value()) {
-            // Even though only inclusion is allowed in covered projection, there still can be
-            // {_id: 0} component. We do not need to generate any nodes for it.
-            return;
-        }
-
-        // Insert current field path into the index keys tree if it does not exist yet.
-        auto* node = &_context->root;
-        for (const auto& part : _context->currentFieldPath) {
-            if (auto it = node->children.find(part); it != node->children.end()) {
-                node = it->second.get();
-            } else {
-                node = node->emplace(part);
-            }
-        }
-    }
-};
-
-sbe::value::SlotVector getSlotsToForward(const PlanStageReqs& reqs, const PlanStageSlots& outputs) {
-    std::vector<std::pair<StringData, sbe::value::SlotId>> pairs;
-    outputs.forEachSlot(
-        reqs, [&](auto&& slot, const StringData& name) { pairs.emplace_back(name, slot); });
-    std::sort(pairs.begin(), pairs.end());
-
-    auto outputSlots = sbe::makeSV();
-    for (auto&& p : pairs) {
-        outputSlots.emplace_back(p.second);
-    }
-    return outputSlots;
-}
-
 /**
  * Generates an EOF plan. Note that even though this plan will return nothing, it will still define
  * the slots specified by 'reqs'.
@@ -269,6 +149,26 @@ std::unique_ptr<sbe::RuntimeEnvironment> makeRuntimeEnvironment(
     }
 
     return env;
+}
+
+sbe::value::SlotVector getSlotsToForward(const PlanStageReqs& reqs,
+                                         const PlanStageSlots& outputs,
+                                         const sbe::value::SlotVector& exclude) {
+    auto excludeSet = sbe::value::SlotSet{exclude.begin(), exclude.end()};
+
+    std::vector<std::pair<PlanStageSlots::Name, sbe::value::SlotId>> pairs;
+    outputs.forEachSlot(reqs, [&](auto&& slot, const PlanStageSlots::Name& name) {
+        if (!excludeSet.count(slot)) {
+            pairs.emplace_back(name, slot);
+        }
+    });
+    std::sort(pairs.begin(), pairs.end());
+
+    auto outputSlots = sbe::makeSV();
+    for (auto&& p : pairs) {
+        outputSlots.emplace_back(p.second);
+    }
+    return outputSlots;
 }
 
 void prepareSlotBasedExecutableTree(OperationContext* opCtx,
@@ -524,22 +424,22 @@ std::unique_ptr<sbe::PlanStage> SlotBasedStageBuilder::build(const QuerySolution
 
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildCollScan(
     const QuerySolutionNode* root, const PlanStageReqs& reqs) {
-    invariant(!reqs.getIndexKeyBitset());
+    tassert(6023400, "buildCollScan() does not support kKey", !reqs.hasKeys());
 
+    auto fields = reqs.getFields();
     auto csn = static_cast<const CollectionScanNode*>(root);
     auto [stage, outputs] = generateCollScan(_state,
                                              getCurrentCollection(reqs),
                                              csn,
+                                             fields,
                                              _yieldPolicy,
                                              reqs.getIsTailableCollScanResumeBranch());
 
     if (reqs.has(kReturnKey)) {
         // Assign the 'returnKeySlot' to be the empty object.
         outputs.set(kReturnKey, _slotIdGenerator.generate());
-        stage = sbe::makeProjectStage(std::move(stage),
-                                      root->nodeId(),
-                                      outputs.get(kReturnKey),
-                                      sbe::makeE<sbe::EFunction>("newObj", sbe::makeEs()));
+        stage = sbe::makeProjectStage(
+            std::move(stage), root->nodeId(), outputs.get(kReturnKey), makeFunction("newObj"_sd));
     }
     // Don't advertize the RecordId output if none of our ancestors are going to use it.
     if (!reqs.has(kRecordId)) {
@@ -552,12 +452,20 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildVirtualScan(
     const QuerySolutionNode* root, const PlanStageReqs& reqs) {
     using namespace std::literals;
+
     auto vsn = static_cast<const VirtualScanNode*>(root);
-    // The caller should only have requested components of the index key if the virtual scan is
-    // mocking an index scan.
-    if (vsn->scanType == VirtualScanNode::ScanType::kCollScan) {
-        invariant(!reqs.getIndexKeyBitset());
-    }
+    auto reqKeys = reqs.getKeys();
+
+    // The caller should only request kKey slots if the virtual scan is mocking an index scan.
+    tassert(6023401,
+            "buildVirtualScan() does not support kKey when 'scanType' is not ixscan",
+            vsn->scanType == VirtualScanNode::ScanType::kIxscan || reqKeys.empty());
+
+    tassert(6023423,
+            "buildVirtualScan() does not support dotted paths for kKey slots",
+            std::all_of(reqKeys.begin(), reqKeys.end(), [](auto&& s) {
+                return s.find('.') == std::string::npos;
+            }));
 
     auto [inputTag, inputVal] = sbe::value::makeNewArray();
     sbe::value::ValueGuard inputGuard{inputTag, inputVal};
@@ -572,7 +480,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     }
 
     inputGuard.reset();
-    auto [scanSlots, stage] =
+    auto [scanSlots, scanStage] =
         generateVirtualScanMulti(&_slotIdGenerator, vsn->hasRecordId ? 2 : 1, inputTag, inputVal);
 
     sbe::value::SlotId resultSlot;
@@ -586,39 +494,25 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
     PlanStageSlots outputs;
 
-    if (reqs.has(kResult)) {
+    if (reqs.has(kResult) || reqs.hasFields()) {
         outputs.set(kResult, resultSlot);
-    } else if (reqs.getIndexKeyBitset()) {
-        // The caller wanted individual slots for certain components of a mock index scan. Use a
-        // project stage to produce those slots. Since the test will represent index keys as BSON
-        // objects, we use 'getField' expressions to extract the necessary fields.
-        invariant(!vsn->indexKeyPattern.isEmpty());
-
-        sbe::value::SlotVector indexKeySlots;
-        sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>> projections;
-
-        size_t indexKeyPos = 0;
-        for (auto&& field : vsn->indexKeyPattern) {
-            if (reqs.getIndexKeyBitset()->test(indexKeyPos)) {
-                indexKeySlots.push_back(_slotIdGenerator.generate());
-                projections.emplace(indexKeySlots.back(),
-                                    makeFunction("getField"_sd,
-                                                 sbe::makeE<sbe::EVariable>(resultSlot),
-                                                 makeConstant(field.fieldName())));
-            }
-            ++indexKeyPos;
-        }
-
-        stage =
-            sbe::makeS<sbe::ProjectStage>(std::move(stage), std::move(projections), root->nodeId());
-
-        outputs.setIndexKeySlots(indexKeySlots);
     }
-
     if (reqs.has(kRecordId)) {
         invariant(vsn->hasRecordId);
         invariant(scanSlots.size() == 2);
         outputs.set(kRecordId, scanSlots[0]);
+    }
+
+    auto stage = std::move(scanStage);
+
+    // The caller wants individual slots for certain components of the mock index scan. Retrieve
+    // the values for these paths and project them to slots.
+    auto [projectStage, slots] = projectTopLevelFields(
+        std::move(stage), reqKeys, resultSlot, root->nodeId(), &_slotIdGenerator);
+    stage = std::move(projectStage);
+
+    for (size_t i = 0; i < reqKeys.size(); ++i) {
+        outputs.set(std::make_pair(PlanStageSlots::kKey, std::move(reqKeys[i])), slots[i]);
     }
 
     return {std::move(stage), std::move(outputs)};
@@ -629,17 +523,35 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     auto ixn = static_cast<const IndexScanNode*>(root);
     invariant(reqs.has(kReturnKey) || !ixn->addKeyMetadata);
 
-    sbe::IndexKeysInclusionSet indexKeyBitset;
+    auto reqKeys = reqs.getKeys();
+    auto reqKeysSet = StringDataSet{reqKeys.begin(), reqKeys.end()};
 
-    if (reqs.has(PlanStageSlots::kReturnKey) || reqs.has(PlanStageSlots::kResult)) {
-        // If either 'reqs.result' or 'reqs.returnKey' is true, we need to get all parts of the
-        // index key (regardless of what was requested by 'reqs.indexKeyBitset') so that we can
-        // create the inflated index key (keyExpr).
-        for (int i = 0; i < ixn->index.keyPattern.nFields(); ++i) {
-            indexKeyBitset.set(i);
+    std::vector<StringData> keys;
+    sbe::IndexKeysInclusionSet keysBitset;
+    StringDataSet indexKeyPatternSet;
+    size_t i = 0;
+    for (const auto& elt : ixn->index.keyPattern) {
+        StringData name = elt.fieldNameStringData();
+        indexKeyPatternSet.emplace(name);
+        if (reqKeysSet.count(name)) {
+            keysBitset.set(i);
+            keys.emplace_back(name);
         }
-    } else if (reqs.getIndexKeyBitset()) {
-        indexKeyBitset = *reqs.getIndexKeyBitset();
+        ++i;
+    }
+
+    auto additionalKeys =
+        filterVector(reqKeys, [&](const std::string& s) { return !indexKeyPatternSet.count(s); });
+
+    sbe::IndexKeysInclusionSet indexKeyBitset;
+    if (reqs.has(kReturnKey) || reqs.has(kResult) || reqs.hasFields()) {
+        // If either 'reqs.result' or 'reqs.returnKey' or 'reqs.hasFields()' is true, we need to
+        // get all parts of the index key so that we can create the inflated index key.
+        for (int j = 0; j < ixn->index.keyPattern.nFields(); ++j) {
+            indexKeyBitset.set(j);
+        }
+    } else {
+        indexKeyBitset = keysBitset;
     }
 
     // If the slots necessary for performing an index consistency check were not requested in
@@ -652,28 +564,32 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
     const auto generateIndexScanFunc =
         ixn->iets.empty() ? generateIndexScan : generateIndexScanWithDynamicBounds;
-    auto&& [stage, outputs] = generateIndexScanFunc(_state,
-                                                    getCurrentCollection(reqs),
-                                                    ixn,
-                                                    indexKeyBitset,
-                                                    _yieldPolicy,
-                                                    iamMap,
-                                                    reqs.has(kIndexKeyPattern));
+    auto&& [scanStage, scanOutputs] = generateIndexScanFunc(_state,
+                                                            getCurrentCollection(reqs),
+                                                            ixn,
+                                                            indexKeyBitset,
+                                                            _yieldPolicy,
+                                                            iamMap,
+                                                            reqs.has(kIndexKeyPattern));
+
+    auto stage = std::move(scanStage);
+    auto outputs = std::move(scanOutputs);
 
     // Remove the RecordId from the output if we were not requested to produce it.
     if (!reqs.has(PlanStageSlots::kRecordId) && outputs.has(kRecordId)) {
         outputs.clear(kRecordId);
     }
-    if (reqs.has(PlanStageSlots::kReturnKey)) {
-        sbe::EExpression::Vector mkObjArgs;
 
-        size_t i = 0;
+    if (reqs.has(PlanStageSlots::kReturnKey)) {
+        sbe::EExpression::Vector args;
         for (auto&& elem : ixn->index.keyPattern) {
-            mkObjArgs.emplace_back(sbe::makeE<sbe::EConstant>(elem.fieldNameStringData()));
-            mkObjArgs.emplace_back(sbe::makeE<sbe::EVariable>((*outputs.getIndexKeySlots())[i++]));
+            StringData name = elem.fieldNameStringData();
+            args.emplace_back(sbe::makeE<sbe::EConstant>(name));
+            args.emplace_back(
+                makeVariable(outputs.get(std::make_pair(PlanStageSlots::kKey, name))));
         }
 
-        auto rawKeyExpr = sbe::makeE<sbe::EFunction>("newObj", std::move(mkObjArgs));
+        auto rawKeyExpr = sbe::makeE<sbe::EFunction>("newObj"_sd, std::move(args));
         outputs.set(PlanStageSlots::kReturnKey, _slotIdGenerator.generate());
         stage = sbe::makeProjectStage(std::move(stage),
                                       ixn->nodeId(),
@@ -681,24 +597,29 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                       std::move(rawKeyExpr));
     }
 
-    if (reqs.has(PlanStageSlots::kResult)) {
-        outputs.set(PlanStageSlots::kResult, _slotIdGenerator.generate());
-        stage = rehydrateIndexKey(std::move(stage),
-                                  ixn->index.keyPattern,
-                                  ixn->nodeId(),
-                                  *outputs.getIndexKeySlots(),
-                                  outputs.get(PlanStageSlots::kResult));
+    if (reqs.has(kResult) || reqs.hasFields()) {
+        auto indexKeySlots = sbe::makeSV();
+        for (auto&& elem : ixn->index.keyPattern) {
+            StringData name = elem.fieldNameStringData();
+            indexKeySlots.emplace_back(outputs.get(std::make_pair(PlanStageSlots::kKey, name)));
+        }
+
+        auto resultSlot = _slotIdGenerator.generate();
+        outputs.set(kResult, resultSlot);
+
+        stage = rehydrateIndexKey(
+            std::move(stage), ixn->index.keyPattern, ixn->nodeId(), indexKeySlots, resultSlot);
     }
 
-    if (reqs.getIndexKeyBitset()) {
-        outputs.setIndexKeySlots(
-            makeIndexKeyOutputSlotsMatchingParentReqs(ixn->index.keyPattern,
-                                                      *reqs.getIndexKeyBitset(),
-                                                      indexKeyBitset,
-                                                      *outputs.getIndexKeySlots()));
-    } else {
-        outputs.setIndexKeySlots(boost::none);
+    auto [outStage, nothingSlots] = projectNothingToSlots(
+        std::move(stage), additionalKeys.size(), root->nodeId(), &_slotIdGenerator);
+    stage = std::move(outStage);
+    for (size_t i = 0; i < additionalKeys.size(); ++i) {
+        outputs.set(std::make_pair(PlanStageSlots::kKey, std::move(additionalKeys[i])),
+                    nothingSlots[i]);
     }
+
+    outputs.clearNonRequiredSlots(reqs);
 
     return {std::move(stage), std::move(outputs)};
 }
@@ -722,79 +643,93 @@ std::unique_ptr<sbe::EExpression> abtToExpr(optimizer::ABT& abt, optimizer::Slot
     return exprLower.optimize(abt);
 }
 
-EvalExpr generatePerColumnFilterExpr(StageBuilderState& state,
-                                     const MatchExpression* me,
-                                     sbe::value::SlotId inputSlot) {
-    auto inputVar = sbe::EVariable{inputSlot};
-
+std::unique_ptr<sbe::EExpression> generatePerColumnPredicate(StageBuilderState& state,
+                                                             const MatchExpression* me,
+                                                             const sbe::EVariable& inputVar) {
     switch (me->matchType()) {
         // These are always safe since they will never match documents missing their field, or where
         // the element is an object or array.
         case MatchExpression::REGEX:
-            return generateRegexExpr(
-                state, checked_cast<const RegexMatchExpression*>(me), inputVar);
+            return generateRegexExpr(state, checked_cast<const RegexMatchExpression*>(me), inputVar)
+                .extractExpr();
         case MatchExpression::MOD:
-            return generateModExpr(state, checked_cast<const ModMatchExpression*>(me), inputVar);
+            return generateModExpr(state, checked_cast<const ModMatchExpression*>(me), inputVar)
+                .extractExpr();
         case MatchExpression::BITS_ALL_SET:
             return generateBitTestExpr(state,
                                        checked_cast<const BitTestMatchExpression*>(me),
                                        sbe::BitTestBehavior::AllSet,
-                                       inputVar);
+                                       inputVar)
+                .extractExpr();
         case MatchExpression::BITS_ALL_CLEAR:
             return generateBitTestExpr(state,
                                        checked_cast<const BitTestMatchExpression*>(me),
                                        sbe::BitTestBehavior::AllClear,
-                                       inputVar);
+                                       inputVar)
+                .extractExpr();
         case MatchExpression::BITS_ANY_SET:
             return generateBitTestExpr(state,
                                        checked_cast<const BitTestMatchExpression*>(me),
                                        sbe::BitTestBehavior::AnySet,
-                                       inputVar);
+                                       inputVar)
+                .extractExpr();
         case MatchExpression::BITS_ANY_CLEAR:
             return generateBitTestExpr(state,
                                        checked_cast<const BitTestMatchExpression*>(me),
                                        sbe::BitTestBehavior::AnyClear,
-                                       inputVar);
-        case MatchExpression::EXISTS: {
-            uasserted(6733601, "(TODO SERVER-68743) need expr translation to enable $exists");
-        }
+                                       inputVar)
+                .extractExpr();
+        case MatchExpression::EXISTS:
+            return makeConstant(sbe::value::TypeTags::Boolean, true);
         case MatchExpression::LT:
             return generateComparisonExpr(state,
                                           checked_cast<const ComparisonMatchExpression*>(me),
                                           sbe::EPrimBinary::less,
-                                          inputVar);
+                                          inputVar)
+                .extractExpr();
         case MatchExpression::GT:
             return generateComparisonExpr(state,
                                           checked_cast<const ComparisonMatchExpression*>(me),
                                           sbe::EPrimBinary::greater,
-                                          inputVar);
+                                          inputVar)
+                .extractExpr();
         case MatchExpression::EQ:
             return generateComparisonExpr(state,
                                           checked_cast<const ComparisonMatchExpression*>(me),
                                           sbe::EPrimBinary::eq,
-                                          inputVar);
+                                          inputVar)
+                .extractExpr();
         case MatchExpression::LTE:
             return generateComparisonExpr(state,
                                           checked_cast<const ComparisonMatchExpression*>(me),
                                           sbe::EPrimBinary::lessEq,
-                                          inputVar);
+                                          inputVar)
+                .extractExpr();
         case MatchExpression::GTE:
             return generateComparisonExpr(state,
                                           checked_cast<const ComparisonMatchExpression*>(me),
                                           sbe::EPrimBinary::greaterEq,
-                                          inputVar);
+                                          inputVar)
+                .extractExpr();
         case MatchExpression::MATCH_IN: {
             auto expr = checked_cast<const InMatchExpression*>(me);
             tassert(6988583,
                     "Push-down of non-scalar values in $in is not supported.",
                     !expr->hasNonScalarOrNonEmptyValues());
-            return generateInExpr(state, expr, inputVar);
+            return generateInExpr(state, expr, inputVar).extractExpr();
         }
         case MatchExpression::TYPE_OPERATOR: {
-            uasserted(6733603, "(TODO SERVER-68743) need expr translation to enable $type");
+            const auto& expr = checked_cast<const TypeMatchExpression*>(me);
+            const MatcherTypeSet& ts = expr->typeSet();
+
+            return makeFunction(
+                "typeMatch",
+                inputVar.clone(),
+                makeConstant(sbe::value::TypeTags::NumberInt64,
+                             sbe::value::bitcastFrom<int64_t>(ts.getBSONTypeMask())));
         }
         case MatchExpression::NOT: {
-            uasserted(6733604, "(TODO SERVER-68743) need expr translation to enable $not");
+            uasserted(6733604, "(TODO SERVER-69610) need expr translation to enable $not");
         }
 
         default:
@@ -802,15 +737,63 @@ EvalExpr generatePerColumnFilterExpr(StageBuilderState& state,
                       std::string("Expression ") + me->serialize().toString() +
                           " should not be pushed down as a per-column filter");
     }
-    return {};
+    MONGO_UNREACHABLE;
+}
+
+std::unique_ptr<sbe::EExpression> generateLeafExpr(StageBuilderState& state,
+                                                   const MatchExpression* me,
+                                                   sbe::FrameId lambdaFrameId,
+                                                   sbe::value::SlotId inputSlot) {
+    sbe::EVariable lambdaParam = sbe::EVariable{lambdaFrameId, 0};
+
+    auto lambdaExpr = sbe::makeE<sbe::ELocalLambda>(
+        lambdaFrameId, generatePerColumnPredicate(state, me, lambdaParam));
+
+    const MatchExpression::MatchType mt = me->matchType();
+    auto traverserName = (mt == MatchExpression::EXISTS || mt == MatchExpression::TYPE_OPERATOR)
+        ? "traverseCsiCellTypes"
+        : "traverseCsiCellValues";
+    return makeFunction(traverserName, makeVariable(inputSlot), std::move(lambdaExpr));
+}
+
+std::unique_ptr<sbe::EExpression> generatePerColumnLogicalAndExpr(StageBuilderState& state,
+                                                                  const AndMatchExpression* me,
+                                                                  sbe::FrameId lambdaFrameId,
+                                                                  sbe::value::SlotId inputSlot) {
+    const auto cTerms = me->numChildren();
+    tassert(7072600, "AND should have at least one child", cTerms > 0);
+
+    auto logical = generateLeafExpr(state, me->getChild(cTerms - 1), lambdaFrameId, inputSlot);
+    if (cTerms == 1)
+        return logical;
+
+    // TODO SERVER-70110: Replace the right-handed tree with a folded AND node when it becomes
+    // available.
+    for (int i = cTerms - 2; i >= 0; i--) {
+        logical = makeBinaryOp(sbe::EPrimBinary::logicAnd,
+                               generateLeafExpr(state, me->getChild(i), lambdaFrameId, inputSlot),
+                               std::move(logical));
+    }
+    return logical;
+}
+
+std::unique_ptr<sbe::EExpression> generatePerColumnFilterExpr(StageBuilderState& state,
+                                                              const MatchExpression* me,
+                                                              sbe::value::SlotId inputSlot) {
+    auto lambdaFrameId = state.frameIdGenerator->generate();
+
+    if (me->matchType() == MatchExpression::AND) {
+        return generatePerColumnLogicalAndExpr(
+            state, checked_cast<const AndMatchExpression*>(me), lambdaFrameId, inputSlot);
+    }
+
+    return generateLeafExpr(state, me, lambdaFrameId, inputSlot);
 }
 }  // namespace
 
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildColumnScan(
     const QuerySolutionNode* root, const PlanStageReqs& reqs) {
-    tassert(6312404,
-            "Unexpected index key bitset provided for column scan stage",
-            !reqs.getIndexKeyBitset());
+    tassert(6023403, "buildColumnScan() does not support kKey", !reqs.hasKeys());
 
     auto csn = static_cast<const ColumnIndexScanNode*>(root);
     tassert(6312405,
@@ -854,9 +837,10 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         if (itFilter != csn->filtersByPath.end()) {
             auto filterInputSlot = _slotIdGenerator.generate();
 
-            auto expr = generatePerColumnFilterExpr(_state, itFilter->second.get(), filterInputSlot)
-                            .extractExpr();
-            filteredPaths.emplace_back(i, std::move(expr), filterInputSlot);
+            filteredPaths.emplace_back(
+                i,
+                generatePerColumnFilterExpr(_state, itFilter->second.get(), filterInputSlot),
+                filterInputSlot);
         }
     }
 
@@ -875,7 +859,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         }
     }
 
-    const std::string rootStr = "rowStoreRoot";
+    const optimizer::ProjectionName rootStr = "rowStoreRoot";
     optimizer::FieldMapBuilder builder(rootStr, true);
 
     // When building its output document (in 'recordSlot'), the 'ColumnStoreStage' should not try to
@@ -945,19 +929,22 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     const QuerySolutionNode* root, const PlanStageReqs& reqs) {
     auto fn = static_cast<const FetchNode*>(root);
 
-    // The child must produce all of the slots required by the parent of this FetchNode, except for
-    // 'resultSlot' which will be produced by the call to makeLoopJoinForFetch() below. In addition
-    // to that, the child must always produce a 'recordIdSlot' because it's needed for the call to
-    // makeLoopJoinForFetch() below.
+    // The child must produce a kRecordId slot, as well as all the kMeta and kKey slots required
+    // by the parent of this FetchNode except for 'resultSlot'. Note that the child does _not_
+    // need to produce any kField slots. Any kField requests by the parent will be handled by the
+    // logic below.
+    auto child = fn->children[0].get();
+
     auto childReqs = reqs.copy()
                          .clear(kResult)
+                         .clearAllFields()
                          .set(kRecordId)
                          .set(kSnapshotId)
                          .set(kIndexId)
                          .set(kIndexKey)
                          .set(kIndexKeyPattern);
 
-    auto [stage, outputs] = build(fn->children[0].get(), childReqs);
+    auto [stage, outputs] = build(child, childReqs);
 
     auto iamMap = _data.iamMap;
     uassert(4822880, "RecordId slot is not defined", outputs.has(kRecordId));
@@ -968,44 +955,48 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     uassert(5290711, "Index key slot is not defined", outputs.has(kIndexKey));
     uassert(5113713, "Index key pattern slot is not defined", outputs.has(kIndexKeyPattern));
 
-    auto forwardingReqs = reqs.copy().clear(kResult).clear(kRecordId);
+    auto forwardingReqs = reqs.copy().clear(kResult).clear(kRecordId).clearAllFields();
     auto relevantSlots = getSlotsToForward(forwardingReqs, outputs);
 
-    // Forward slots for components of the index key if our parent requested them.
-    if (auto indexKeySlots = outputs.getIndexKeySlots()) {
-        relevantSlots.insert(relevantSlots.end(), indexKeySlots->begin(), indexKeySlots->end());
-    }
+    auto fields = reqs.getFields();
 
-    sbe::value::SlotId fetchResultSlot, fetchRecordIdSlot;
-    std::tie(fetchResultSlot, fetchRecordIdSlot, stage) =
-        makeLoopJoinForFetch(std::move(stage),
-                             outputs.get(kRecordId),
-                             outputs.get(kSnapshotId),
-                             outputs.get(kIndexId),
-                             outputs.get(kIndexKey),
-                             outputs.get(kIndexKeyPattern),
-                             getCurrentCollection(reqs),
-                             std::move(iamMap),
-                             root->nodeId(),
-                             std::move(relevantSlots),
-                             _slotIdGenerator);
+    auto childRecordId = outputs.get(kRecordId);
+    auto fetchResultSlot = _slotIdGenerator.generate();
+    auto fetchRecordIdSlot = _slotIdGenerator.generate();
+    auto fieldSlots = _slotIdGenerator.generateMultiple(fields.size());
+
+    stage = makeLoopJoinForFetch(std::move(stage),
+                                 fetchResultSlot,
+                                 fetchRecordIdSlot,
+                                 fields,
+                                 fieldSlots,
+                                 childRecordId,
+                                 outputs.get(kSnapshotId),
+                                 outputs.get(kIndexId),
+                                 outputs.get(kIndexKey),
+                                 outputs.get(kIndexKeyPattern),
+                                 getCurrentCollection(reqs),
+                                 std::move(iamMap),
+                                 root->nodeId(),
+                                 std::move(relevantSlots));
 
     outputs.set(kResult, fetchResultSlot);
-    // Propagate the RecordId output only if requested.
+
+    // Only propagate kRecordId if requested.
     if (reqs.has(kRecordId)) {
         outputs.set(kRecordId, fetchRecordIdSlot);
     } else {
         outputs.clear(kRecordId);
     }
 
+    for (size_t i = 0; i < fields.size(); ++i) {
+        outputs.set(std::make_pair(PlanStageSlots::kField, fields[i]), fieldSlots[i]);
+    }
+
     if (fn->filter) {
         forwardingReqs = reqs.copy().set(kResult);
-        auto relevantSlots = getSlotsToForward(forwardingReqs, outputs);
 
-        // Forward slots for components of the index key if our parent requested them.
-        if (auto indexKeySlots = outputs.getIndexKeySlots()) {
-            relevantSlots.insert(relevantSlots.end(), indexKeySlots->begin(), indexKeySlots->end());
-        }
+        auto relevantSlots = getSlotsToForward(forwardingReqs, outputs);
 
         auto [_, outputStage] = generateFilter(_state,
                                                fn->filter.get(),
@@ -1014,6 +1005,8 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                                root->nodeId());
         stage = outputStage.extractStage(root->nodeId());
     }
+
+    outputs.clearNonRequiredSlots(reqs);
 
     return {std::move(stage), std::move(outputs)};
 }
@@ -1057,133 +1050,19 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 }
 
 namespace {
-using MakeSortKeyFn =
-    std::function<std::unique_ptr<sbe::EExpression>(sbe::value::SlotId inputSlot)>;
-
-/**
- * Given a field path, this function builds a plan stage tree that will produce the corresponding
- * sort key for that path. The 'makeSortKey' parameter is used to apply any transformations to the
- * leaf fields' values that are necessary (for example, calling collComparisonKey()).
- *
- * Note that when 'level' is 0, this function assumes that 'inputSlot' alrady contains the top-level
- * field value from the path, and thus it will forgo generating a call to getField(). When 'level'
- * is 1 or greater, this function will generate a call to getField() to read the field for that
- * level.
- */
-std::pair<sbe::value::SlotId, std::unique_ptr<sbe::PlanStage>> generateSortKeyTraversal(
-    std::unique_ptr<sbe::PlanStage> inputStage,
-    sbe::value::SlotId inputSlot,
-    const FieldPath& fp,
-    sbe::value::SortDirection direction,
-    FieldIndex level,
-    PlanNodeId planNodeId,
-    sbe::value::SlotIdGenerator* slotIdGenerator,
-    const MakeSortKeyFn& makeSortKey) {
-    invariant(level < fp.getPathLength());
-
-    const bool isLeafField = (level == fp.getPathLength() - 1u);
-
-    auto [fieldSlot, fromBranch] = [&]() {
-        if (level > 0) {
-            // Generate a call to getField() to read the field at the current level and bind it to
-            // 'fieldSlot'. According to MQL's sorting semantics, if the field doesn't exist we
-            // should use Null as the sort key.
-            auto getFieldExpr = makeFunction("getField"_sd,
-                                             sbe::makeE<sbe::EVariable>(inputSlot),
-                                             sbe::makeE<sbe::EConstant>(fp.getFieldName(level)));
-
-            if (isLeafField) {
-                // Wrapping the field access with makeFillEmptyNull() is only necessary for the
-                // leaf field. For non-leaf fields, if the field doesn't exist then Nothing will
-                // propagate through the TraverseStage and afterward it will be converted to Null
-                // by a projection (see below).
-                getFieldExpr = makeFillEmptyNull(std::move(getFieldExpr));
-            }
-
-            auto fieldSlot{slotIdGenerator->generate()};
-            return std::make_pair(
-                fieldSlot,
-                sbe::makeProjectStage(
-                    std::move(inputStage), planNodeId, fieldSlot, std::move(getFieldExpr)));
-        }
-
-        return std::make_pair(inputSlot, std::move(inputStage));
-    }();
-
-    // Generate the 'in' branch for the TraverseStage that we're about to construct.
-    auto [innerSlot, innerBranch] = [&, fieldSlot = fieldSlot, &fromBranch = fromBranch]() {
-        if (isLeafField) {
-            // Base case: Genereate a ProjectStage to evaluate the predicate.
-            auto innerSlot{slotIdGenerator->generate()};
-            return std::make_pair(innerSlot,
-                                  sbe::makeProjectStage(makeLimitCoScanTree(planNodeId),
-                                                        planNodeId,
-                                                        innerSlot,
-                                                        makeSortKey(fieldSlot)));
-        } else {
-            // Recursive case.
-            return generateSortKeyTraversal(makeLimitCoScanTree(planNodeId),
-                                            fieldSlot,
-                                            fp,
-                                            direction,
-                                            level + 1,
-                                            planNodeId,
-                                            slotIdGenerator,
-                                            makeSortKey);
-        }
-    }();
-
-    // Generate the traverse stage for the current nested level. The fold expression uses
-    // well-ordered comparison (cmp3w) to produce the minimum element (if 'direction' is
-    // Ascending) or the maximum element (if 'direction' is Descending).
-    auto traverseSlot{slotIdGenerator->generate()};
-    auto outputSlot{slotIdGenerator->generate()};
-    auto op = (direction == sbe::value::SortDirection::Ascending) ? sbe::EPrimBinary::less
-                                                                  : sbe::EPrimBinary::greater;
-
-    auto outputStage = sbe::makeS<sbe::TraverseStage>(
-        std::move(fromBranch),
-        std::move(innerBranch),
-        fieldSlot,
-        traverseSlot,
-        innerSlot,
-        sbe::makeSV(),
-        sbe::makeE<sbe::EIf>(makeBinaryOp(op,
-                                          makeBinaryOp(sbe::EPrimBinary::cmp3w,
-                                                       makeVariable(innerSlot),
-                                                       makeVariable(traverseSlot)),
-                                          makeConstant(sbe::value::TypeTags::NumberInt64,
-                                                       sbe::value::bitcastFrom<int64_t>(0))),
-                             makeVariable(innerSlot),
-                             makeVariable(traverseSlot)),
-        nullptr,
-        planNodeId,
-        1);
-
-    // According to MQL's sorting semantics, when a leaf field is an empty array we should use
-    // Undefined as the sort key, and when a non-leaf field is an empty array or doesn't exist
-    // we should use Null as the sort key.
-    return {outputSlot,
-            sbe::makeProjectStage(std::move(outputStage),
-                                  planNodeId,
-                                  outputSlot,
-                                  isLeafField ? makeFillEmptyUndefined(makeVariable(traverseSlot))
-                                              : makeFillEmptyNull(makeVariable(traverseSlot)))};
-}
-
 /**
  * Given a field path, this function will return an expression that will be true if evaluating the
  * field path involves array traversal at any level of the path (including the leaf field).
  */
-std::unique_ptr<sbe::EExpression> generateArrayCheckForSortHelper(
+std::unique_ptr<sbe::EExpression> generateArrayCheckForSort(
     std::unique_ptr<sbe::EExpression> inputExpr,
     const FieldPath& fp,
     FieldIndex level,
     sbe::value::FrameIdGenerator* frameIdGenerator) {
     invariant(level < fp.getPathLength());
 
-    auto fieldExpr = makeFillEmptyNull(makeFunction(
-        "getField"_sd, std::move(inputExpr), sbe::makeE<sbe::EConstant>(fp.getFieldName(level))));
+    auto fieldExpr = makeFillEmptyNull(
+        makeFunction("getField"_sd, std::move(inputExpr), makeConstant(fp.getFieldName(level))));
 
     if (level == fp.getPathLength() - 1u) {
         return makeFunction("isArray"_sd, std::move(fieldExpr));
@@ -1194,28 +1073,79 @@ std::unique_ptr<sbe::EExpression> generateArrayCheckForSortHelper(
             sbe::makeEs(std::move(fieldExpr)),
             makeBinaryOp(sbe::EPrimBinary::logicOr,
                          makeFunction("isArray"_sd, makeVariable(frameId, 0)),
-                         generateArrayCheckForSortHelper(
+                         generateArrayCheckForSort(
                              makeVariable(frameId, 0), fp, level + 1, frameIdGenerator)));
     }
 }
 
 /**
- * Given a field path and a slot that holds the top-level field's value from that path, this
- * function will return an expression that will be true if evaluating the field path involves array
- * traversal at any level of the path (including the leaf field).
+ * Given a field path, this function recursively builds an expression tree that will produce the
+ * corresponding sort key for that path.
  */
-std::unique_ptr<sbe::EExpression> generateArrayCheckForSort(
-    sbe::value::SlotId inputSlot,
+std::unique_ptr<sbe::EExpression> generateSortTraverse(
+    const sbe::EVariable& inputVar,
+    bool isAscending,
+    boost::optional<sbe::value::SlotId> collatorSlot,
     const FieldPath& fp,
+    size_t level,
     sbe::value::FrameIdGenerator* frameIdGenerator) {
-    if (fp.getPathLength() == 1) {
-        return makeFunction("isArray"_sd, makeVariable(inputSlot));
-    } else {
-        return makeBinaryOp(
-            sbe::EPrimBinary::logicOr,
-            makeFunction("isArray"_sd, makeVariable(inputSlot)),
-            generateArrayCheckForSortHelper(makeVariable(inputSlot), fp, 1, frameIdGenerator));
+    using namespace std::literals;
+
+    invariant(level < fp.getPathLength());
+
+    StringData helperFn = isAscending ? "_internalLeast"_sd : "_internalGreatest"_sd;
+    auto collatorArg =
+        collatorSlot ? makeVariable(*collatorSlot) : makeConstant(sbe::value::TypeTags::Nothing, 0);
+
+    // Generate an expression to read a sub-field at the current nested level.
+    auto fieldExpr =
+        makeFunction("getField"_sd, inputVar.clone(), makeConstant(fp.getFieldName(level)));
+
+    if (level == fp.getPathLength() - 1) {
+        // For the last level, we can just return the field slot without the need for a
+        // traverse expression.
+        auto frameId = frameIdGenerator->generate();
+        return sbe::makeE<sbe::ELocalBind>(
+            frameId,
+            sbe::makeEs(std::move(fieldExpr)),
+            sbe::makeE<sbe::EIf>(
+                makeFillEmptyFalse(makeFunction("isArray"_sd, makeVariable(frameId, 0))),
+                // According to MQL's sorting semantics, when a leaf field is an empty array we
+                // should use Undefined as the sort key.
+                makeFillEmptyUndefined(
+                    makeFunction(helperFn, makeMoveVariable(frameId, 0), std::move(collatorArg))),
+                makeFillEmptyNull(makeMoveVariable(frameId, 0))));
     }
+
+    // Prepare a lambda expression that will navigate to the next component of the field path.
+    auto lambdaFrameId = frameIdGenerator->generate();
+    auto lambdaExpr =
+        sbe::makeE<sbe::ELocalLambda>(lambdaFrameId,
+                                      generateSortTraverse(sbe::EVariable{lambdaFrameId, 0},
+                                                           isAscending,
+                                                           collatorSlot,
+                                                           fp,
+                                                           level + 1,
+                                                           frameIdGenerator));
+
+    // Generate the traverse expression for the current nested level.
+    // Be sure to invoke the least/greatest fold expression only if the current nested level is an
+    // array.
+    auto frameId = frameIdGenerator->generate();
+    return sbe::makeE<sbe::ELocalBind>(
+        frameId,
+        sbe::makeEs(
+            std::move(fieldExpr),
+            makeFunction("traverseP",
+                         makeVariable(frameId, 0),
+                         std::move(lambdaExpr),
+                         makeConstant(sbe::value::TypeTags::NumberInt32, 1) /* maxDepth */)),
+        // According to MQL's sorting semantics, when a non-leaf field is an empty array or
+        // doesn't exist we should use Null as the sort key.
+        makeFillEmptyNull(sbe::makeE<sbe::EIf>(
+            makeFillEmptyFalse(makeFunction("isArray"_sd, makeVariable(frameId, 0))),
+            makeFunction(helperFn, makeMoveVariable(frameId, 1), std::move(collatorArg)),
+            makeMoveVariable(frameId, 1))));
 }
 }  // namespace
 
@@ -1229,21 +1159,11 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             sortPattern.size() > 0);
 
     auto child = sn->children[0].get();
-    if (reqs.getIndexKeyBitset().has_value() ||
-        (!reqs.has(kResult) && child->getType() == STAGE_IXSCAN)) {
-        // We decide to IndexKeySlots when building the child if:
-        // 1) The query is covered; or
-        // 2) This is a SORT->IXSCAN and kResult wasn't requested.
+
+    if (auto [ixn, ct] = getFirstNodeByType(root, STAGE_IXSCAN);
+        !sn->fetched() && !reqs.has(kResult) && ixn && ct == 1) {
         return buildSortCovered(root, reqs);
     }
-
-    // The child must produce the kResult slot as well as all slots required by the parent of
-    // this SortNode.
-    auto childReqs = reqs.copy().set(kResult);
-
-    auto [stage, outputs] = build(child, childReqs);
-
-    auto collatorSlot = _data.env->getSlotIfExists("collator"_sd);
 
     StringDataSet prefixSet;
     bool hasPartsWithCommonPrefix = false;
@@ -1258,33 +1178,22 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         }
     }
 
+    auto childReqs = reqs.copy().set(kResult);
+    auto [stage, childOutputs] = build(child, childReqs);
+    auto outputs = std::move(childOutputs);
+
+    auto collatorSlot = _data.env->getSlotIfExists("collator"_sd);
+
     sbe::value::SlotVector orderBy;
     std::vector<sbe::value::SortDirection> direction;
+    sbe::value::SlotId outputSlotId = outputs.get(kResult);
 
     if (!hasPartsWithCommonPrefix) {
         // Handle the case where we are using kResult and there are no common prefixes.
-        sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>> projectMap;
-
         orderBy.reserve(sortPattern.size());
-        for (const auto& part : sortPattern) {
-            // Get the top-level field for this sort part. If the field doesn't exist, according to
-            // MQL's sorting semantics we should use Null.
-            auto getFieldExpr = makeFillEmptyNull(
-                makeFunction("getField"_sd,
-                             makeVariable(outputs.get(kResult)),
-                             sbe::makeE<sbe::EConstant>(part.fieldPath->getFieldName(0))));
 
-            auto fieldSlot{_slotIdGenerator.generate()};
-            projectMap.emplace(fieldSlot, std::move(getFieldExpr));
-
-            orderBy.push_back(fieldSlot);
-            direction.push_back(part.isAscending ? sbe::value::SortDirection::Ascending
-                                                 : sbe::value::SortDirection::Descending);
-        }
-
-        stage =
-            sbe::makeS<sbe::ProjectStage>(std::move(stage), std::move(projectMap), root->nodeId());
-
+        // Sorting has a limitation where only one of the sort patterns can involve arrays.
+        // If there are at least two sort patterns, check the data for this possibility.
         auto failOnParallelArrays = [&]() -> std::unique_ptr<mongo::sbe::EExpression> {
             auto parallelArraysError = sbe::makeE<sbe::EFail>(
                 ErrorCodes::BadValue, "cannot sort with keys that are parallel arrays");
@@ -1296,32 +1205,32 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             } else if (sortPattern.size() == 2) {
                 // If the sort pattern has two parts, we can generate a simpler expression to
                 // perform the "parallel arrays" check.
-                auto makeIsNotArrayCheck = [&](sbe::value::SlotId slot, const FieldPath& fp) {
-                    return makeNot(generateArrayCheckForSort(slot, fp, &_frameIdGenerator));
+                auto makeIsNotArrayCheck = [&](const FieldPath& fp) {
+                    return makeNot(generateArrayCheckForSort(
+                        makeVariable(outputSlotId), fp, 0 /* level */, &_frameIdGenerator));
                 };
 
-                return makeBinaryOp(
-                    sbe::EPrimBinary::logicOr,
-                    makeIsNotArrayCheck(orderBy[0], *sortPattern[0].fieldPath),
-                    makeBinaryOp(sbe::EPrimBinary::logicOr,
-                                 makeIsNotArrayCheck(orderBy[1], *sortPattern[1].fieldPath),
-                                 std::move(parallelArraysError)));
+                return makeBinaryOp(sbe::EPrimBinary::logicOr,
+                                    makeIsNotArrayCheck(*sortPattern[0].fieldPath),
+                                    makeBinaryOp(sbe::EPrimBinary::logicOr,
+                                                 makeIsNotArrayCheck(*sortPattern[1].fieldPath),
+                                                 std::move(parallelArraysError)));
             } else {
                 // If the sort pattern has three or more parts, we generate an expression to
                 // perform the "parallel arrays" check that works (and scales well) for an
                 // arbitrary number of sort pattern parts.
-                auto makeIsArrayCheck = [&](sbe::value::SlotId slot, const FieldPath& fp) {
+                auto makeIsArrayCheck = [&](const FieldPath& fp) {
                     return makeBinaryOp(sbe::EPrimBinary::cmp3w,
-                                        generateArrayCheckForSort(slot, fp, &_frameIdGenerator),
+                                        generateArrayCheckForSort(
+                                            makeVariable(outputSlotId), fp, 0, &_frameIdGenerator),
                                         makeConstant(sbe::value::TypeTags::Boolean, false));
                 };
 
-                auto numArraysExpr = makeIsArrayCheck(orderBy[0], *sortPattern[0].fieldPath);
+                auto numArraysExpr = makeIsArrayCheck(*sortPattern[0].fieldPath);
                 for (size_t idx = 1; idx < sortPattern.size(); ++idx) {
-                    numArraysExpr =
-                        makeBinaryOp(sbe::EPrimBinary::add,
-                                     std::move(numArraysExpr),
-                                     makeIsArrayCheck(orderBy[idx], *sortPattern[idx].fieldPath));
+                    numArraysExpr = makeBinaryOp(sbe::EPrimBinary::add,
+                                                 std::move(numArraysExpr),
+                                                 makeIsArrayCheck(*sortPattern[idx].fieldPath));
                 }
 
                 return makeBinaryOp(
@@ -1340,30 +1249,32 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                           std::move(failOnParallelArrays));
         }
 
-        for (size_t idx = 0; idx < orderBy.size(); ++idx) {
-            auto makeSortKey = [&](sbe::value::SlotId inputSlot) {
-                return !collatorSlot ? makeVariable(inputSlot)
-                                     : makeFunction("collComparisonKey"_sd,
-                                                    makeVariable(inputSlot),
-                                                    makeVariable(*collatorSlot));
-            };
+        sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>> sortExpressions;
 
-            // Call generateSortKeyTraversal() to build a series of TraverseStages that will
-            // traverse this part's field path and produce the corresponding sort key. We pass
-            // in the 'makeSortKey' lambda, which will be applied on each leaf field's value
-            // to apply the current collation (if there is one).
-            sbe::value::SlotId sortKeySlot;
-            std::tie(sortKeySlot, stage) = generateSortKeyTraversal(std::move(stage),
-                                                                    orderBy[idx],
-                                                                    *sortPattern[idx].fieldPath,
-                                                                    direction[idx],
-                                                                    0,
-                                                                    root->nodeId(),
-                                                                    &_slotIdGenerator,
-                                                                    makeSortKey);
+        for (const auto& part : sortPattern) {
+            std::unique_ptr<sbe::EExpression> sortExpr =
+                generateSortTraverse(sbe::EVariable{outputSlotId},
+                                     part.isAscending,
+                                     collatorSlot,
+                                     *part.fieldPath,
+                                     0,
+                                     &_frameIdGenerator);
 
-            orderBy[idx] = sortKeySlot;
+            // Apply the transformation required by the collation, if specified.
+            if (collatorSlot) {
+                sortExpr = makeFunction(
+                    "collComparisonKey"_sd, std::move(sortExpr), makeVariable(*collatorSlot));
+            }
+            sbe::value::SlotId sortKeySlot = _slotIdGenerator.generate();
+            sortExpressions.emplace(sortKeySlot, std::move(sortExpr));
+
+            orderBy.push_back(sortKeySlot);
+            direction.push_back(part.isAscending ? sbe::value::SortDirection::Ascending
+                                                 : sbe::value::SortDirection::Descending);
         }
+        stage = sbe::makeS<sbe::ProjectStage>(
+            std::move(stage), std::move(sortExpressions), root->nodeId());
+
     } else {
         // Handle the case where two or more parts of the sort pattern have a common prefix.
         orderBy = _slotIdGenerator.generateMultiple(1);
@@ -1374,26 +1285,23 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             makeConstant(sbe::value::TypeTags::sortSpec,
                          sbe::value::bitcastFrom<sbe::value::SortSpec*>(sortSpec.release()));
 
-        auto collatorSlot = _data.env->getSlotIfExists("collator"_sd);
-
         // generateSortKey() will handle the parallel arrays check and sort key traversal for us,
         // so we don't need to generate our own sort key traversal logic in the SBE plan.
-        stage =
-            sbe::makeProjectStage(std::move(stage),
-                                  root->nodeId(),
-                                  orderBy[0],
-                                  collatorSlot ? makeFunction("generateSortKey",
-                                                              std::move(sortSpecExpr),
-                                                              makeVariable(outputs.get(kResult)),
-                                                              makeVariable(*collatorSlot))
-                                               : makeFunction("generateSortKey",
-                                                              std::move(sortSpecExpr),
-                                                              makeVariable(outputs.get(kResult))));
+        stage = sbe::makeProjectStage(std::move(stage),
+                                      root->nodeId(),
+                                      orderBy[0],
+                                      collatorSlot ? makeFunction("generateSortKey",
+                                                                  std::move(sortSpecExpr),
+                                                                  makeVariable(outputSlotId),
+                                                                  makeVariable(*collatorSlot))
+                                                   : makeFunction("generateSortKey",
+                                                                  std::move(sortSpecExpr),
+                                                                  makeVariable(outputSlotId)));
     }
 
     // Slots for sort stage to forward to parent stage. Values in these slots are not used during
     // sorting.
-    auto forwardedSlots = getSlotsToForward(childReqs, outputs);
+    auto forwardedSlots = getSlotsToForward(childReqs, outputs, orderBy);
 
     stage =
         sbe::makeS<sbe::SortStage>(std::move(stage),
@@ -1405,52 +1313,40 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                    _cq.getExpCtx()->allowDiskUse,
                                    root->nodeId());
 
+    outputs.clearNonRequiredSlots(reqs);
+
     return {std::move(stage), std::move(outputs)};
 }
 
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildSortCovered(
     const QuerySolutionNode* root, const PlanStageReqs& reqs) {
+    tassert(6023404, "buildSortCovered() does not support kResult", !reqs.has(kResult));
+
     const auto sn = static_cast<const SortNode*>(root);
     auto sortPattern = SortPattern{sn->pattern, _cq.getExpCtx()};
 
     tassert(7047600,
             "QueryPlannerAnalysis should not produce a SortNode with an empty sort pattern",
             sortPattern.size() > 0);
+    tassert(6023422, "buildSortCovered() expected 'sn' to not be fetched", !sn->fetched());
+
+    auto child = sn->children[0].get();
+    auto indexScan = static_cast<const IndexScanNode*>(getLoneNodeByType(child, STAGE_IXSCAN));
+    tassert(7047601, "Expected index scan below sort", indexScan);
+    auto indexKeyPattern = indexScan->index.keyPattern;
 
     // The child must produce all of the slots required by the parent of this SortNode.
     auto childReqs = reqs.copy();
-    auto child = sn->children[0].get();
 
-    auto parentIndexKeyBitset = reqs.getIndexKeyBitset().get_value_or({});
-    BSONObj indexKeyPattern;
-    sbe::IndexKeysInclusionSet sortPatternKeyBitset;
-    StringMap<size_t> sortSlotPosMap;
-
-    // Set IndexKeyBitset to request each part of the index requested by the parent and to request
-    // each part of the sort pattern.
-    auto indexScan = static_cast<const IndexScanNode*>(getLoneNodeByType(child, STAGE_IXSCAN));
-    tassert(7047601, "Expected index scan below sort", indexScan);
-    indexKeyPattern = indexScan->index.keyPattern;
-
+    std::vector<std::string> keys;
     StringDataSet sortPathsSet;
     for (const auto& part : sortPattern) {
-        sortPathsSet.insert(part.fieldPath->fullPath());
+        const auto& key = part.fieldPath->fullPath();
+        keys.emplace_back(key);
+        sortPathsSet.emplace(key);
     }
 
-    // 'sortPatternKeyBitset' will contain a bit pattern indicating which parts of the index
-    // pattern are needed for sorting. 'sortPaths' will contain the field paths used in the
-    // sort pattern, ordered according to the index pattern.
-    std::vector<std::string> sortPaths;
-    std::tie(sortPatternKeyBitset, sortPaths) =
-        makeIndexKeyInclusionSet(indexKeyPattern, sortPathsSet);
-    childReqs.getIndexKeyBitset() = sortPatternKeyBitset | parentIndexKeyBitset;
-
-    // Build a map that maps each field path to its position in 'sortPaths'. This will help us
-    // later when we need to convert the output of makeIndexKeyOutputSlotsMatchingParentReqs()
-    // from the index pattern's order to sort pattern's order.
-    for (size_t i = 0; i < sortPaths.size(); ++i) {
-        sortSlotPosMap.emplace(std::move(sortPaths[i]), i);
-    }
+    childReqs.setKeys(std::move(keys));
 
     auto [stage, outputs] = build(child, childReqs);
 
@@ -1458,26 +1354,6 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
     sbe::value::SlotVector orderBy;
     std::vector<sbe::value::SortDirection> direction;
-
-    // Handle the case where we are using IndexKeySlots.
-    auto indexKeySlots = *outputs.extractIndexKeySlots();
-
-    // Currently, 'indexKeySlots' contains slots for two kinds of index keys:
-    //  1. Keys requested for sort pattern
-    //  2. Keys requested by parent (if any)
-    // The first category of slots needs to go into the 'orderBy' vector. The second category
-    // of slots goes into 'outputs' to be used by the parent.
-    auto& childIndexKeyBitset = *childReqs.getIndexKeyBitset();
-
-    // The query planner does not support covered queries or SORT->IXSCAN plans on array fields
-    // for multikey indexes. Therefore we don't have to generate the parallel arrays check or
-    // the sort key traversal logic.
-    auto sortIndexKeySlots = makeIndexKeyOutputSlotsMatchingParentReqs(
-        indexKeyPattern, sortPatternKeyBitset, childIndexKeyBitset, indexKeySlots);
-
-    // 'sortIndexKeySlots' is ordered according to the index pattern, but 'orderBy' needs to
-    // be ordered according to the sort pattern. We use 'sortIndexKeySlots' to convert from
-    // the index pattern's order to the sort pattern's order.
     orderBy.reserve(sortPattern.size());
     direction.reserve(sortPattern.size());
     for (const auto& part : sortPattern) {
@@ -1485,19 +1361,8 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         // contains $meta, so this assertion should always be true.
         tassert(7047602, "Sort with $meta is not supported in SBE", part.fieldPath);
 
-        auto it = sortSlotPosMap.find(part.fieldPath->fullPath());
-        tassert(6843200,
-                str::stream() << "Did not find sort path '" << part.fieldPath->fullPath()
-                              << "' in sort path map",
-                it != sortSlotPosMap.end());
-
-        auto slotPos = it->second;
-        tassert(6843201,
-                str::stream() << "Sort path map for '" << part.fieldPath->fullPath()
-                              << "' returned an index '" << slotPos << "' that is out of bounds",
-                slotPos < sortIndexKeySlots.size());
-
-        orderBy.push_back(sortIndexKeySlots[slotPos]);
+        orderBy.push_back(
+            outputs.get(std::make_pair(PlanStageSlots::kKey, part.fieldPath->fullPath())));
         direction.push_back(part.isAscending ? sbe::value::SortDirection::Ascending
                                              : sbe::value::SortDirection::Descending);
     }
@@ -1524,24 +1389,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
     // Slots for sort stage to forward to parent stage. Values in these slots are not used during
     // sorting.
-    auto forwardedSlots = getSlotsToForward(childReqs, outputs);
-
-    if (parentIndexKeyBitset.any()) {
-        auto parentIndexKeySlots = makeIndexKeyOutputSlotsMatchingParentReqs(
-            indexKeyPattern, parentIndexKeyBitset, childIndexKeyBitset, indexKeySlots);
-
-        // The 'forwardedSlots' vector should include all slots requested by parent excluding
-        // any slots that appear in the 'orderBy' vector.
-        sbe::value::SlotSet orderBySlotsSet(orderBy.begin(), orderBy.end());
-        for (auto slot : parentIndexKeySlots) {
-            if (!orderBySlotsSet.count(slot)) {
-                forwardedSlots.push_back(slot);
-            }
-        }
-
-        // Make sure to store all of the slots requested by the parent into 'outputs'.
-        outputs.setIndexKeySlots(std::move(parentIndexKeySlots));
-    }
+    auto forwardedSlots = getSlotsToForward(childReqs, outputs, orderBy);
 
     stage =
         sbe::makeS<sbe::SortStage>(std::move(stage),
@@ -1553,11 +1401,13 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                    _cq.getExpCtx()->allowDiskUse,
                                    root->nodeId());
 
+    outputs.clearNonRequiredSlots(reqs);
+
     return {std::move(stage), std::move(outputs)};
 }
 
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots>
-SlotBasedStageBuilder::buildSortKeyGeneraror(const QuerySolutionNode* root,
+SlotBasedStageBuilder::buildSortKeyGenerator(const QuerySolutionNode* root,
                                              const PlanStageReqs& reqs) {
     uasserted(4822883, "Sort key generator in not supported in SBE yet");
 }
@@ -1580,63 +1430,20 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     std::vector<sbe::value::SlotVector> inputKeys;
     std::vector<sbe::value::SlotVector> inputVals;
 
-    // Children must produce all of the slots required by the parent of this SortMergeNode. In
-    // addition, children must always produce a 'recordIdSlot' if the 'dedup' flag is true.
-    auto childReqs = reqs.copy().setIf(kRecordId, mergeSortNode->dedup);
+    std::vector<std::string> keys;
+    StringSet sortPatternSet;
+    for (auto&& sortPart : sortPattern) {
+        sortPatternSet.emplace(sortPart.fieldPath->fullPath());
+        keys.emplace_back(sortPart.fieldPath->fullPath());
+    }
 
-    // If a parent node has requested an index key bitset, then we will produce index keys
-    // corresponding to the sort pattern parts needed by said parent node.
-    bool parentRequestsIdxKeys = reqs.getIndexKeyBitset().has_value();
+    // Children must produce all of the slots required by the parent of this SortMergeNode. In
+    // addition, children must always produce a 'recordIdSlot' if the 'dedup' flag is true, and
+    // they must produce kKey slots for each part of the sort pattern.
+    auto childReqs = reqs.copy().setIf(kRecordId, mergeSortNode->dedup).setKeys(std::move(keys));
 
     for (auto&& child : mergeSortNode->children) {
         sbe::value::SlotVector inputKeysForChild;
-
-        // Retrieve the sort pattern provided by the subtree rooted at 'child'. In particular, if
-        // our child is a MERGE_SORT, it will provide the sort directly. If instead it's a tree
-        // containing a lone IXSCAN, we have to check the key pattern because 'providedSorts()' may
-        // or may not provide the baseSortPattern depending on the index bounds (in particular,
-        // if the bounds are fixed, the fields will be marked as 'ignored'). Otherwise, we attempt
-        // to retrieve it from 'providedSorts'.
-        auto childSortPattern = [&]() {
-            if (auto [msn, _] = getFirstNodeByType(child.get(), STAGE_SORT_MERGE); msn) {
-                auto node = static_cast<const MergeSortNode*>(msn);
-                return node->sort;
-            } else {
-                auto [ixn, ct] = getFirstNodeByType(child.get(), STAGE_IXSCAN);
-                if (ixn && ct == 1) {
-                    auto node = static_cast<const IndexScanNode*>(ixn);
-                    return node->index.keyPattern;
-                }
-            }
-            auto baseSort = child->providedSorts().getBaseSortPattern();
-            tassert(6149600,
-                    str::stream() << "Did not find sort pattern for child " << child->toString(),
-                    !baseSort.isEmpty());
-            return baseSort;
-        }();
-
-        // Map of field name to position within the index key. This is used to account for
-        // mismatches between the sort pattern and the index key pattern. For instance, suppose
-        // the requested sort is {a: 1, b: 1} and the index key pattern is {c: 1, b: 1, a: 1}.
-        // When the slots for the relevant components of the index key are generated (i.e.
-        // extract keys for 'b' and 'a'),  we wish to insert them into 'inputKeys' in the order
-        // that they appear in the sort pattern.
-        StringMap<size_t> indexKeyPositionMap;
-
-        sbe::IndexKeysInclusionSet indexKeyBitset;
-        size_t i = 0;
-        for (auto&& elt : childSortPattern) {
-            for (auto&& sortPart : sortPattern) {
-                auto path = sortPart.fieldPath->fullPath();
-                if (elt.fieldNameStringData() == path) {
-                    indexKeyBitset.set(i);
-                    indexKeyPositionMap.emplace(path, indexKeyPositionMap.size());
-                    break;
-                }
-            }
-            ++i;
-        }
-        childReqs.getIndexKeyBitset() = indexKeyBitset;
 
         // Children must produce a 'resultSlot' if they produce fetched results.
         auto [stage, outputs] = build(child.get(), childReqs);
@@ -1646,30 +1453,9 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                 " if the 'dedup' flag is set",
                 !mergeSortNode->dedup || outputs.has(kRecordId));
 
-        // Clear the index key bitset after building the child stage.
-        childReqs.getIndexKeyBitset() = boost::none;
-
-        // Insert the index key slots in the order of the sort pattern.
-        auto indexKeys = outputs.extractIndexKeySlots();
-        tassert(5184302,
-                "SORT_MERGE must receive index key slots as input from its child stages",
-                indexKeys);
-
         for (const auto& part : sortPattern) {
-            auto partPath = part.fieldPath->fullPath();
-            auto index = indexKeyPositionMap.find(partPath);
-            tassert(5184303,
-                    str::stream() << "Could not find index key position for sort key part "
-                                  << partPath,
-                    index != indexKeyPositionMap.end());
-            auto indexPos = index->second;
-            tassert(5184304,
-                    str::stream() << "Index position " << indexPos
-                                  << " is not less than number of index components "
-                                  << indexKeys->size(),
-                    indexPos < indexKeys->size());
-            auto indexKeyPart = indexKeys->at(indexPos);
-            inputKeysForChild.push_back(indexKeyPart);
+            inputKeysForChild.push_back(
+                outputs.get(std::make_pair(PlanStageSlots::kKey, part.fieldPath->fullPath())));
         }
 
         inputKeys.push_back(std::move(inputKeysForChild));
@@ -1677,32 +1463,12 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
         auto sv = getSlotsToForward(childReqs, outputs);
 
-        // If the parent of 'root' has requested index keys, then we need to pass along our input
-        // keys as input values, as they will be part of the output 'root' provides its parent.
-        if (parentRequestsIdxKeys) {
-            for (auto&& inputKey : inputKeys.back()) {
-                sv.push_back(inputKey);
-            }
-        }
         inputVals.push_back(std::move(sv));
     }
 
     PlanStageSlots outputs(childReqs, &_slotIdGenerator);
+
     auto outputVals = getSlotsToForward(childReqs, outputs);
-
-    // If the parent of 'root' has requested index keys, then we need to generate output slots to
-    // hold the index keys that will be used as input to the parent of 'root'.
-    if (parentRequestsIdxKeys) {
-        auto idxKeySv = sbe::makeSV();
-        for (int idx = 0; idx < mergeSortNode->sort.nFields(); ++idx) {
-            idxKeySv.emplace_back(_slotIdGenerator.generate());
-        }
-        outputs.setIndexKeySlots(idxKeySv);
-
-        for (auto keySlot : idxKeySv) {
-            outputVals.push_back(keySlot);
-        }
-    }
 
     auto stage = sbe::makeS<sbe::SortedMergeStage>(std::move(inputStages),
                                                    std::move(inputKeys),
@@ -1720,6 +1486,8 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         }
     }
 
+    outputs.clearNonRequiredSlots(reqs);
+
     return {std::move(stage), std::move(outputs)};
 }
 
@@ -1727,48 +1495,63 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots>
 SlotBasedStageBuilder::buildProjectionSimple(const QuerySolutionNode* root,
                                              const PlanStageReqs& reqs) {
     using namespace std::literals;
-    invariant(!reqs.getIndexKeyBitset());
+    tassert(6023405, "buildProjectionSimple() does not support kKey", !reqs.hasKeys());
 
     auto pn = static_cast<const ProjectionNodeSimple*>(root);
 
-    // The child must produce all of the slots required by the parent of this ProjectionNodeSimple.
-    // In addition to that, the child must always produce a 'resultSlot' because it's needed by the
-    // projection logic below.
-    auto childReqs = reqs.copy().set(kResult);
-    auto [inputStage, outputs] = build(pn->children[0].get(), childReqs);
+    auto [fields, additionalFields] = splitVector(reqs.getFields(), [&](const std::string& s) {
+        return pn->proj.type() == projection_ast::ProjectType::kInclusion
+            ? pn->proj.getRequiredFields().count(s)
+            : !pn->proj.getExcludedPaths().count(s);
+    });
 
-    const auto childResult = outputs.get(kResult);
+    auto childReqs = reqs.copy().clearAllFields().setFields(std::move(fields));
+    auto [stage, childOutputs] = build(pn->children[0].get(), childReqs);
+    auto outputs = std::move(childOutputs);
 
-    sbe::MakeBsonObjStage::FieldBehavior behaviour;
-    const OrderedPathSet* fields;
-    if (pn->proj.type() == projection_ast::ProjectType::kInclusion) {
-        behaviour = sbe::MakeBsonObjStage::FieldBehavior::keep;
-        fields = &pn->proj.getRequiredFields();
-    } else {
-        behaviour = sbe::MakeBsonObjStage::FieldBehavior::drop;
-        fields = &pn->proj.getExcludedPaths();
+    if (reqs.has(kResult)) {
+        const auto childResult = outputs.get(kResult);
+
+        sbe::MakeBsonObjStage::FieldBehavior behaviour;
+        const OrderedPathSet* fields;
+        if (pn->proj.type() == projection_ast::ProjectType::kInclusion) {
+            behaviour = sbe::MakeBsonObjStage::FieldBehavior::keep;
+            fields = &pn->proj.getRequiredFields();
+        } else {
+            behaviour = sbe::MakeBsonObjStage::FieldBehavior::drop;
+            fields = &pn->proj.getExcludedPaths();
+        }
+
+        outputs.set(kResult, _slotIdGenerator.generate());
+        stage = sbe::makeS<sbe::MakeBsonObjStage>(std::move(stage),
+                                                  outputs.get(kResult),
+                                                  childResult,
+                                                  behaviour,
+                                                  *fields,
+                                                  OrderedPathSet{},
+                                                  sbe::value::SlotVector{},
+                                                  true,
+                                                  false,
+                                                  root->nodeId());
     }
 
-    outputs.set(kResult, _slotIdGenerator.generate());
-    inputStage = sbe::makeS<sbe::MakeBsonObjStage>(std::move(inputStage),
-                                                   outputs.get(kResult),
-                                                   childResult,
-                                                   behaviour,
-                                                   *fields,
-                                                   OrderedPathSet{},
-                                                   sbe::value::SlotVector{},
-                                                   true,
-                                                   false,
-                                                   root->nodeId());
+    auto [outStage, nothingSlots] = projectNothingToSlots(
+        std::move(stage), additionalFields.size(), root->nodeId(), &_slotIdGenerator);
+    for (size_t i = 0; i < additionalFields.size(); ++i) {
+        outputs.set(std::make_pair(PlanStageSlots::kField, std::move(additionalFields[i])),
+                    nothingSlots[i]);
+    }
 
-    return {std::move(inputStage), std::move(outputs)};
+    outputs.clearNonRequiredSlots(reqs);
+
+    return {std::move(outStage), std::move(outputs)};
 }
 
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots>
 SlotBasedStageBuilder::buildProjectionCovered(const QuerySolutionNode* root,
                                               const PlanStageReqs& reqs) {
     using namespace std::literals;
-    invariant(!reqs.getIndexKeyBitset());
+    tassert(6023406, "buildProjectionCovered() does not support kKey", !reqs.hasKeys());
 
     auto pn = static_cast<const ProjectionNodeCovered*>(root);
     invariant(pn->proj.isSimple());
@@ -1779,51 +1562,86 @@ SlotBasedStageBuilder::buildProjectionCovered(const QuerySolutionNode* root,
             !pn->children[0]->fetched());
 
     // This is a ProjectionCoveredNode, so we will be pulling all the data we need from one index.
-    // Prepare a bitset to indicate which parts of the index key we need for the projection.
-    StringSet requiredFields = {pn->proj.getRequiredFields().begin(),
-                                pn->proj.getRequiredFields().end()};
-
-    // The child must produce all of the slots required by the parent of this ProjectionNodeSimple,
-    // except for 'resultSlot' which will be produced by the MakeBsonObjStage below. In addition to
-    // that, the child must produce the index key slots that are needed by this covered projection.
-    //
     // pn->coveredKeyObj is the "index.keyPattern" from the child (which is either an IndexScanNode
     // or DistinctNode). pn->coveredKeyObj lists all the fields that the index can provide, not the
-    // fields that the projection wants. requiredFields lists all of the fields that the projection
-    // needs. Since this is a covered projection, we're guaranteed that pn->coveredKeyObj contains
-    // all of the fields that the projection needs.
-    auto childReqs = reqs.copy().clear(kResult);
+    // fields that the projection wants. 'pn->proj.getRequiredFields()' lists all of the fields
+    // that the projection needs. Since this is a simple covered projection, we're guaranteed that
+    // 'pn->proj.getRequiredFields()' is a subset of pn->coveredKeyObj.
 
-    auto [indexKeyBitset, keyFieldNames] =
-        makeIndexKeyInclusionSet(pn->coveredKeyObj, requiredFields);
-    childReqs.getIndexKeyBitset() = std::move(indexKeyBitset);
+    // List out the projected fields in the order they appear in 'coveredKeyObj'.
+    std::vector<std::string> keys;
+    StringDataSet keysSet;
+    for (auto&& elt : pn->coveredKeyObj) {
+        std::string key(elt.fieldNameStringData());
+        if (pn->proj.getRequiredFields().count(key)) {
+            keys.emplace_back(std::move(key));
+            keysSet.emplace(elt.fieldNameStringData());
+        }
+    }
 
-    auto [inputStage, outputs] = build(pn->children[0].get(), childReqs);
+    // The child must produce all of the slots required by the parent of this ProjectionNodeSimple,
+    // except for 'resultSlot' which will be produced by the MakeBsonObjStage below if requested by
+    // the caller. In addition to that, the child must produce the index key slots that are needed
+    // by this covered projection.
+    auto childReqs = reqs.copy().clear(kResult).clearAllFields().setKeys(keys);
+    auto [stage, childOutputs] = build(pn->children[0].get(), childReqs);
+    auto outputs = std::move(childOutputs);
 
-    // Assert that the index scan produced index key slots for this covered projection.
-    auto indexKeySlots = *outputs.extractIndexKeySlots();
+    if (reqs.has(kResult)) {
+        auto indexKeySlots = sbe::makeSV();
+        std::vector<std::string> keyFieldNames;
 
-    outputs.set(kResult, _slotIdGenerator.generate());
-    inputStage = sbe::makeS<sbe::MakeBsonObjStage>(std::move(inputStage),
-                                                   outputs.get(kResult),
-                                                   boost::none,
-                                                   boost::none,
-                                                   std::vector<std::string>{},
-                                                   std::move(keyFieldNames),
-                                                   std::move(indexKeySlots),
-                                                   true,
-                                                   false,
-                                                   root->nodeId());
+        if (keysSet.count("_id"_sd)) {
+            keyFieldNames.emplace_back("_id"_sd);
+            indexKeySlots.emplace_back(outputs.get(std::make_pair(PlanStageSlots::kKey, "_id"_sd)));
+        }
 
-    return {std::move(inputStage), std::move(outputs)};
+        for (const auto& key : keys) {
+            if (key != "_id"_sd) {
+                keyFieldNames.emplace_back(key);
+                indexKeySlots.emplace_back(
+                    outputs.get(std::make_pair(PlanStageSlots::kKey, StringData(key))));
+            }
+        }
+
+        auto resultSlot = _slotIdGenerator.generate();
+        stage = sbe::makeS<sbe::MakeBsonObjStage>(std::move(stage),
+                                                  resultSlot,
+                                                  boost::none,
+                                                  boost::none,
+                                                  std::vector<std::string>{},
+                                                  std::move(keyFieldNames),
+                                                  std::move(indexKeySlots),
+                                                  true,
+                                                  false,
+                                                  root->nodeId());
+
+        outputs.set(kResult, resultSlot);
+    }
+
+    auto [fields, additionalFields] =
+        splitVector(reqs.getFields(), [&](const std::string& s) { return keysSet.count(s); });
+    for (size_t i = 0; i < fields.size(); ++i) {
+        auto slot = outputs.get(std::make_pair(PlanStageSlots::kKey, StringData(fields[i])));
+        outputs.set(std::make_pair(PlanStageSlots::kField, std::move(fields[i])), slot);
+    }
+
+    auto [outStage, nothingSlots] = projectNothingToSlots(
+        std::move(stage), additionalFields.size(), root->nodeId(), &_slotIdGenerator);
+    for (size_t i = 0; i < additionalFields.size(); ++i) {
+        outputs.set(std::make_pair(PlanStageSlots::kField, std::move(additionalFields[i])),
+                    nothingSlots[i]);
+    }
+
+    outputs.clearNonRequiredSlots(reqs);
+
+    return {std::move(outStage), std::move(outputs)};
 }
 
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots>
 SlotBasedStageBuilder::buildProjectionDefault(const QuerySolutionNode* root,
                                               const PlanStageReqs& reqs) {
-    tassert(7055400,
-            "buildProjectionDefault() does not support index key bitsets",
-            !reqs.getIndexKeyBitset());
+    tassert(6023407, "buildProjectionDefault() does not support kKey", !reqs.hasKeys());
 
     auto pn = static_cast<const ProjectionNodeDefault*>(root);
     const auto& projection = pn->proj;
@@ -1837,7 +1655,7 @@ SlotBasedStageBuilder::buildProjectionDefault(const QuerySolutionNode* root,
     // The child must produce all of the slots required by the parent of this ProjectionNodeDefault.
     // In addition to that, the child must always produce 'kResult' because it's needed by the
     // projection logic below.
-    auto childReqs = reqs.copy().set(kResult);
+    auto childReqs = reqs.copy().set(kResult).clearAllFields();
 
     auto [stage, outputs] = build(pn->children[0].get(), childReqs);
 
@@ -1851,8 +1669,10 @@ SlotBasedStageBuilder::buildProjectionDefault(const QuerySolutionNode* root,
                            root->nodeId());
 
     stage = resultStage.extractStage(root->nodeId());
-
     outputs.set(kResult, resultSlot);
+
+    outputs.clearNonRequiredSlots(reqs);
+
     return {std::move(stage), std::move(outputs)};
 }
 
@@ -1860,9 +1680,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots>
 SlotBasedStageBuilder::buildProjectionDefaultCovered(const QuerySolutionNode* root,
                                                      const PlanStageReqs& reqs,
                                                      const IndexScanNode* ixn) {
-    tassert(7055401,
-            "buildProjectionDefaultCovered() does not support index key bitsets",
-            !reqs.getIndexKeyBitset());
+    tassert(6023408, "buildProjectionDefaultCovered() does not support kKey", !reqs.hasKeys());
 
     auto pn = static_cast<const ProjectionNodeDefault*>(root);
     const auto& projection = pn->proj;
@@ -1873,64 +1691,60 @@ SlotBasedStageBuilder::buildProjectionDefaultCovered(const QuerySolutionNode* ro
     tassert(
         7055403, "buildProjectionDefaultCovered() expected 'pn' to not be fetched", !pn->fetched());
 
-    // Convert projection fieldpaths into the tree of 'IndexKeyPatternTreeNode'.
-    IndexKeysBuilderContext context;
-    IndexKeysPreBuilder preVisitor{&context};
-    IndexKeysInBuilder inVisitor{&context};
-    IndexKeysPostBuilder postVisitor{&context};
-    projection_ast::ProjectionASTConstWalker walker{&preVisitor, &inVisitor, &postVisitor};
-    tree_walker::walk<true, projection_ast::ASTNode>(projection.root(), &walker);
-
-    IndexKeyPatternTreeNode patternRoot = std::move(context.root);
-
-    // Construct a bitset requesting slots from the underlying index scan. These slots
-    // correspond to index keys for projection fieldpaths.
     if (!ixn) {
         ixn = static_cast<const IndexScanNode*>(getLoneNodeByType(root, STAGE_IXSCAN));
     }
+
     auto& indexKeyPattern = ixn->index.keyPattern;
-    sbe::IndexKeysInclusionSet patternBitSet;
+    auto patternRoot = buildPatternTree(pn->proj);
+    std::vector<std::string> keys;
+    StringDataSet keysSet;
     std::vector<IndexKeyPatternTreeNode*> patternNodesForSlots;
-    size_t i = 0;
     for (const auto& element : indexKeyPattern) {
         sbe::MatchPath fieldRef{element.fieldNameStringData()};
         // Projection field paths are always leaf nodes. In other words, projection like
         // {a: 1, 'a.b': 1} would produce a path collision error.
         if (auto node = patternRoot.findLeafNode(fieldRef); node) {
-            patternBitSet.set(i);
+            keys.emplace_back(element.fieldNameStringData());
+            keysSet.emplace(element.fieldNameStringData());
             patternNodesForSlots.push_back(node);
         }
-
-        ++i;
     }
 
-    // We do not need index scan to restore the entire object. Instead, we will restore only
-    // necessary parts of it below.
-    auto childReqs = reqs.copy().clear(kResult);
-    childReqs.getIndexKeyBitset() = patternBitSet;
+    auto childReqs = reqs.copy().clear(kResult).clearAllFields().setKeys(keys);
 
     auto [stage, outputs] = build(pn->children[0].get(), childReqs);
 
-    auto indexKeySlots = *outputs.extractIndexKeySlots();
-
-    // Extract slots corresponding to each of the projection fieldpaths.
-    invariant(indexKeySlots.size() == patternNodesForSlots.size());
-    for (size_t i = 0; i < indexKeySlots.size(); i++) {
-        patternNodesForSlots[i]->indexKeySlot = indexKeySlots[i];
+    auto [fields, additionalFields] =
+        splitVector(reqs.getFields(), [&](const std::string& s) { return keysSet.count(s); });
+    for (size_t i = 0; i < fields.size(); ++i) {
+        auto slot = outputs.get(std::make_pair(PlanStageSlots::kKey, StringData(fields[i])));
+        outputs.set(std::make_pair(PlanStageSlots::kField, std::move(fields[i])), slot);
     }
 
-    // Finally, build the expression to create object with requested projection fieldpaths.
-    auto resultSlot = _slotIdGenerator.generate();
-    stage = sbe::makeProjectStage(
-        std::move(stage), root->nodeId(), resultSlot, buildNewObjExpr(&patternRoot));
+    if (reqs.has(kResult) || !additionalFields.empty()) {
+        // Extract slots corresponding to each of the projection fieldpaths.
+        for (size_t i = 0; i < keys.size(); i++) {
+            patternNodesForSlots[i]->indexKeySlot =
+                outputs.get(std::make_pair(PlanStageSlots::kKey, StringData(keys[i])));
+        }
 
-    outputs.set(kResult, resultSlot);
+        // Finally, build the expression to create object with requested projection fieldpaths.
+        auto resultSlot = _slotIdGenerator.generate();
+        outputs.set(kResult, resultSlot);
+
+        stage = sbe::makeProjectStage(
+            std::move(stage), root->nodeId(), resultSlot, buildNewObjExpr(&patternRoot));
+    }
+
+    outputs.clearNonRequiredSlots(reqs);
+
     return {std::move(stage), std::move(outputs)};
 }
 
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildOr(
     const QuerySolutionNode* root, const PlanStageReqs& reqs) {
-    invariant(!reqs.getIndexKeyBitset());
+    tassert(6023409, "buildOr() does not support kKey", !reqs.hasKeys());
 
     sbe::PlanStage::Vector inputStages;
     std::vector<sbe::value::SlotVector> inputSlots;
@@ -1987,7 +1801,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     auto textNode = static_cast<const TextMatchNode*>(root);
     const auto& coll = getCurrentCollection(reqs);
     tassert(5432212, "no collection object", coll);
-    tassert(5432213, "index keys requested for text match node", !reqs.getIndexKeyBitset());
+    tassert(6023410, "buildTextMatch() does not support kKey", !reqs.hasKeys());
     tassert(5432215,
             str::stream() << "text match node must have one child, but got "
                           << root->children.size(),
@@ -2038,7 +1852,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildReturnKey(
     const QuerySolutionNode* root, const PlanStageReqs& reqs) {
-    invariant(!reqs.getIndexKeyBitset());
+    tassert(6023411, "buildReturnKey() does not support kKey", !reqs.hasKeys());
 
     // TODO SERVER-49509: If the projection includes {$meta: "sortKey"}, the result of this stage
     // should also include the sort key. Everything else in the projection is ignored.
@@ -2048,7 +1862,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     // for 'resultSlot'. In addition to that, the child must always produce a 'returnKeySlot'.
     // After build() returns, we take the 'returnKeySlot' produced by the child and store it into
     // 'resultSlot' for the parent of this ReturnKeyNode to consume.
-    auto childReqs = reqs.copy().clear(kResult).set(kReturnKey);
+    auto childReqs = reqs.copy().clear(kResult).clearAllFields().set(kReturnKey);
     auto [stage, outputs] = build(returnKeyNode->children[0].get(), childReqs);
 
     outputs.set(kResult, outputs.get(kReturnKey));
@@ -2066,9 +1880,10 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     const QuerySolutionNode* root, const PlanStageReqs& reqs) {
     auto andHashNode = static_cast<const AndHashNode*>(root);
 
+    tassert(6023412, "buildAndHash() does not support kKey", !reqs.hasKeys());
     tassert(5073711, "need at least two children for AND_HASH", andHashNode->children.size() >= 2);
 
-    auto childReqs = reqs.copy().set(kResult).set(kRecordId);
+    auto childReqs = reqs.copy().set(kResult).set(kRecordId).clearAllFields();
 
     auto outerChild = andHashNode->children[0].get();
     auto innerChild = andHashNode->children[1].get();
@@ -2095,12 +1910,12 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     auto collatorSlot = _data.env->getSlotIfExists("collator"_sd);
 
     // Designate outputs.
-    PlanStageSlots outputs(reqs, &_slotIdGenerator);
+    PlanStageSlots outputs;
+
+    outputs.set(kResult, innerResultSlot);
+
     if (reqs.has(kRecordId)) {
         outputs.set(kRecordId, innerIdSlot);
-    }
-    if (reqs.has(kResult)) {
-        outputs.set(kResult, innerResultSlot);
     }
     if (reqs.has(kSnapshotId) && innerSnapshotIdSlot) {
         auto slot = *innerSnapshotIdSlot;
@@ -2117,26 +1932,25 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         innerProjectSlots.push_back(slot);
         outputs.set(kIndexKey, slot);
     }
-
     if (reqs.has(kIndexKeyPattern) && innerIndexKeyPatternSlot) {
         auto slot = *innerIndexKeyPatternSlot;
         innerProjectSlots.push_back(slot);
         outputs.set(kIndexKeyPattern, slot);
     }
 
-    auto hashJoinStage = sbe::makeS<sbe::HashJoinStage>(std::move(outerStage),
-                                                        std::move(innerStage),
-                                                        outerCondSlots,
-                                                        outerProjectSlots,
-                                                        innerCondSlots,
-                                                        innerProjectSlots,
-                                                        collatorSlot,
-                                                        root->nodeId());
+    auto stage = sbe::makeS<sbe::HashJoinStage>(std::move(outerStage),
+                                                std::move(innerStage),
+                                                outerCondSlots,
+                                                outerProjectSlots,
+                                                innerCondSlots,
+                                                innerProjectSlots,
+                                                collatorSlot,
+                                                root->nodeId());
 
     // If there are more than 2 children, iterate all remaining children and hash
     // join together.
     for (size_t i = 2; i < andHashNode->children.size(); i++) {
-        auto [stage, outputs] = build(andHashNode->children[i].get(), childReqs);
+        auto [childStage, outputs] = build(andHashNode->children[i].get(), childReqs);
         tassert(5073714, "outputs must contain kRecordId slot", outputs.has(kRecordId));
         tassert(5073715, "outputs must contain kResult slot", outputs.has(kResult));
         auto idSlot = outputs.get(kRecordId);
@@ -2146,32 +1960,30 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
         // The previous HashJoinStage is always set as the inner stage, so that we can reuse the
         // innerIdSlot and innerResultSlot that have been designated as outputs.
-        hashJoinStage = sbe::makeS<sbe::HashJoinStage>(std::move(stage),
-                                                       std::move(hashJoinStage),
-                                                       condSlots,
-                                                       projectSlots,
-                                                       innerCondSlots,
-                                                       innerProjectSlots,
-                                                       collatorSlot,
-                                                       root->nodeId());
-    }
-    // Stop propagating the RecordId output if none of our ancestors are going to use it.
-    if (!reqs.has(kRecordId)) {
-        outputs.clear(kRecordId);
+        stage = sbe::makeS<sbe::HashJoinStage>(std::move(childStage),
+                                               std::move(stage),
+                                               condSlots,
+                                               projectSlots,
+                                               innerCondSlots,
+                                               innerProjectSlots,
+                                               collatorSlot,
+                                               root->nodeId());
     }
 
-    return {std::move(hashJoinStage), std::move(outputs)};
+    return {std::move(stage), std::move(outputs)};
 }
 
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildAndSorted(
     const QuerySolutionNode* root, const PlanStageReqs& reqs) {
+    tassert(6023413, "buildAndSorted() does not support kKey", !reqs.hasKeys());
+
     auto andSortedNode = static_cast<const AndSortedNode*>(root);
 
     // Need at least two children.
     tassert(
         5073706, "need at least two children for AND_SORTED", andSortedNode->children.size() >= 2);
 
-    auto childReqs = reqs.copy().set(kResult).set(kRecordId);
+    auto childReqs = reqs.copy().set(kResult).set(kRecordId).clearAllFields();
 
     auto outerChild = andSortedNode->children[0].get();
     auto innerChild = andSortedNode->children[1].get();
@@ -2207,12 +2019,13 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     auto innerKeySlots = sbe::makeSV(innerIdSlot);
     auto innerProjectSlots = sbe::makeSV(innerResultSlot);
 
-    PlanStageSlots outputs(reqs, &_slotIdGenerator);
+    // Designate outputs.
+    PlanStageSlots outputs;
+
+    outputs.set(kResult, innerResultSlot);
+
     if (reqs.has(kRecordId)) {
         outputs.set(kRecordId, innerIdSlot);
-    }
-    if (reqs.has(kResult)) {
-        outputs.set(kResult, innerResultSlot);
     }
     if (reqs.has(kSnapshotId)) {
         auto innerSnapshotSlot = innerOutputs.get(kSnapshotId);
@@ -2229,7 +2042,6 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         innerProjectSlots.push_back(innerIndexKeySlot);
         outputs.set(kIndexKey, innerIndexKeySlot);
     }
-
     if (reqs.has(kIndexKeyPattern)) {
         auto innerIndexKeyPatternSlot = innerOutputs.get(kIndexKeyPattern);
         innerProjectSlots.push_back(innerIndexKeyPatternSlot);
@@ -2239,19 +2051,19 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     std::vector<sbe::value::SortDirection> sortDirs(outerKeySlots.size(),
                                                     sbe::value::SortDirection::Ascending);
 
-    auto mergeJoinStage = sbe::makeS<sbe::MergeJoinStage>(std::move(outerStage),
-                                                          std::move(innerStage),
-                                                          outerKeySlots,
-                                                          outerProjectSlots,
-                                                          innerKeySlots,
-                                                          innerProjectSlots,
-                                                          sortDirs,
-                                                          root->nodeId());
+    auto stage = sbe::makeS<sbe::MergeJoinStage>(std::move(outerStage),
+                                                 std::move(innerStage),
+                                                 outerKeySlots,
+                                                 outerProjectSlots,
+                                                 innerKeySlots,
+                                                 innerProjectSlots,
+                                                 sortDirs,
+                                                 root->nodeId());
 
     // If there are more than 2 children, iterate all remaining children and merge
     // join together.
     for (size_t i = 2; i < andSortedNode->children.size(); i++) {
-        auto [stage, outputs] = build(andSortedNode->children[i].get(), childReqs);
+        auto [childStage, outputs] = build(andSortedNode->children[i].get(), childReqs);
         tassert(5073709, "outputs must contain kRecordId slot", outputs.has(kRecordId));
         tassert(5073710, "outputs must contain kResult slot", outputs.has(kResult));
         auto idSlot = outputs.get(kRecordId);
@@ -2259,21 +2071,17 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         auto keySlots = sbe::makeSV(idSlot);
         auto projectSlots = sbe::makeSV(resultSlot);
 
-        mergeJoinStage = sbe::makeS<sbe::MergeJoinStage>(std::move(stage),
-                                                         std::move(mergeJoinStage),
-                                                         keySlots,
-                                                         projectSlots,
-                                                         innerKeySlots,
-                                                         innerProjectSlots,
-                                                         sortDirs,
-                                                         root->nodeId());
-    }
-    // Stop propagating the RecordId output if none of our ancestors are going to use it.
-    if (!reqs.has(kRecordId)) {
-        outputs.clear(kRecordId);
+        stage = sbe::makeS<sbe::MergeJoinStage>(std::move(childStage),
+                                                std::move(stage),
+                                                keySlots,
+                                                projectSlots,
+                                                innerKeySlots,
+                                                innerProjectSlots,
+                                                sortDirs,
+                                                root->nodeId());
     }
 
-    return {std::move(mergeJoinStage), std::move(outputs)};
+    return {std::move(stage), std::move(outputs)};
 }
 
 namespace {
@@ -2359,39 +2167,6 @@ void walkAndActOnFieldPaths(Expression* expr, const F& fn) {
 }
 
 /**
- * Checks whether all field paths in 'idExpr' and all accumulator expressions are top-level ones.
- */
-bool areAllFieldPathsOptimizable(const boost::intrusive_ptr<Expression>& idExpr,
-                                 const std::vector<AccumulationStatement>& accStmts) {
-    auto areFieldPathsOptimizable = true;
-
-    auto checkFieldPath = [&](const ExpressionFieldPath* fieldExpr, int32_t nestedCondLevel) {
-        // We optimize neither a field path for the top-level document itself (getPathLength() == 1)
-        // nor a field path that refers to a variable. We can optimize only top-level fields
-        // (getPathLength() == 2).
-        //
-        // The 'nestedCondLevel' being > 0 means that a field path is refered to below conditional
-        // expressions at the parent $group node, when we cannot optimize field path access and
-        // therefore, cannot avoid materialization.
-        if (nestedCondLevel > 0 || fieldExpr->getFieldPath().getPathLength() != 2 ||
-            fieldExpr->isVariableReference()) {
-            areFieldPathsOptimizable = false;
-            return;
-        }
-    };
-
-    // Checks field paths from the group-by expression.
-    walkAndActOnFieldPaths(idExpr.get(), checkFieldPath);
-
-    // Checks field paths from the accumulator expressions.
-    for (auto&& accStmt : accStmts) {
-        walkAndActOnFieldPaths(accStmt.expr.argument.get(), checkFieldPath);
-    }
-
-    return areFieldPathsOptimizable;
-}
-
-/**
  * If there are adjacent $group stages in a pipeline and two $group stages are pushed down together,
  * the first $group becomes a child GROUP node and the second $group becomes a parent GROUP node in
  * a query solution tree. In the case that all field paths are top-level fields for the parent GROUP
@@ -2408,10 +2183,7 @@ EvalStage optimizeFieldPaths(StageBuilderState& state,
                              const PlanStageSlots& childOutputs,
                              PlanNodeId nodeId) {
     using namespace fmt::literals;
-    auto optionalRootSlot = childOutputs.getIfExists(SlotBasedStageBuilder::kResult);
-    // Absent root slot means that we optimized away mkbson stage and so, we need to search
-    // top-level field names in child outputs.
-    auto searchInChildOutputs = !optionalRootSlot.has_value();
+    auto rootSlot = childOutputs.getIfExists(PlanStageSlots::kResult);
     auto retEvalStage = std::move(childEvalStage);
 
     walkAndActOnFieldPaths(expr.get(), [&](const ExpressionFieldPath* fieldExpr, int32_t) {
@@ -2422,24 +2194,10 @@ EvalStage optimizeFieldPaths(StageBuilderState& state,
         }
 
         auto fieldPathStr = fieldExpr->getFieldPath().fullPath();
-        if (searchInChildOutputs) {
-            if (auto optionalFieldPathSlot = childOutputs.getIfExists(fieldPathStr);
-                optionalFieldPathSlot) {
-                state.preGeneratedExprs.emplace(fieldPathStr, *optionalFieldPathSlot);
-            } else {
-                // getField('fieldPathStr') on a slot containing a BSONObj would have produced
-                // 'Nothing' if mkbson stage removal optimization didn't occur. So, generates a
-                // 'Nothing' const expression to simulate such a result.
-                state.preGeneratedExprs.emplace(
-                    fieldPathStr, sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Nothing, 0));
-            }
-
-            return;
-        }
 
         if (!state.preGeneratedExprs.contains(fieldPathStr)) {
             auto [curEvalExpr, curEvalStage] = generateExpression(
-                state, fieldExpr, std::move(retEvalStage), optionalRootSlot, nodeId);
+                state, fieldExpr, std::move(retEvalStage), rootSlot, nodeId, &childOutputs);
 
             auto [slot, stage] = projectEvalExpr(
                 std::move(curEvalExpr), std::move(curEvalStage), nodeId, state.slotIdGenerator);
@@ -2464,7 +2222,7 @@ std::pair<EvalExpr, EvalStage> generateGroupByKeyImpl(
         optimizeFieldPaths(state, idExpr, std::move(childEvalStage), childOutputs, nodeId);
 
     auto [groupByEvalExpr, groupByEvalStage] = stage_builder::generateExpression(
-        state, idExpr.get(), std::move(evalStage), optionalRootSlot, nodeId);
+        state, idExpr.get(), std::move(evalStage), optionalRootSlot, nodeId, &childOutputs);
 
     return {std::move(groupByEvalExpr), std::move(groupByEvalStage)};
 }
@@ -2476,7 +2234,7 @@ std::tuple<sbe::value::SlotVector, EvalStage, std::unique_ptr<sbe::EExpression>>
     std::unique_ptr<sbe::PlanStage> childStage,
     PlanNodeId nodeId,
     sbe::value::SlotIdGenerator* slotIdGenerator) {
-    auto optionalRootSlot = childOutputs.getIfExists(SlotBasedStageBuilder::kResult);
+    auto optionalRootSlot = childOutputs.getIfExists(PlanStageSlots::kResult);
     EvalStage retEvalStage{std::move(childStage),
                            optionalRootSlot ? sbe::value::SlotVector{*optionalRootSlot}
                                             : sbe::value::SlotVector{}};
@@ -2556,10 +2314,10 @@ std::tuple<sbe::value::SlotVector, EvalStage> generateAccumulator(
     PlanNodeId nodeId,
     sbe::value::SlotIdGenerator* slotIdGenerator,
     sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>>& accSlotToExprMap) {
-    // Input fields may need field traversal which ends up being a complex tree.
+    // Input fields may need field traversal.
     auto evalStage = optimizeFieldPaths(
         state, accStmt.expr.argument, std::move(childEvalStage), childOutputs, nodeId);
-    auto optionalRootSlot = childOutputs.getIfExists(SlotBasedStageBuilder::kResult);
+    auto optionalRootSlot = childOutputs.getIfExists(PlanStageSlots::kResult);
     auto [argExpr, accArgEvalStage] = stage_builder::buildArgument(
         state, accStmt, std::move(evalStage), optionalRootSlot, nodeId);
 
@@ -2688,6 +2446,7 @@ sbe::value::SlotVector dedupGroupBySlots(const sbe::value::SlotVector& groupBySl
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildGroup(
     const QuerySolutionNode* root, const PlanStageReqs& reqs) {
     using namespace fmt::literals;
+    tassert(6023414, "buildGroup() does not support kKey", !reqs.hasKeys());
 
     auto groupNode = static_cast<const GroupNode*>(root);
     auto nodeId = groupNode->nodeId();
@@ -2703,14 +2462,20 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
     const auto& childNode = groupNode->children[0].get();
     const auto& accStmts = groupNode->accumulators;
-    auto childStageType = childNode->getType();
 
-    auto childReqs = reqs.copy();
-    if (childStageType == StageType::STAGE_GROUP && areAllFieldPathsOptimizable(idExpr, accStmts)) {
-        // Does not ask the GROUP child for the result slot to avoid unnecessary materialization if
-        // all fields are top-level fields. See the end of this function. For example, GROUP - GROUP
-        // - COLLSCAN case.
+    auto childReqs = reqs.copy().set(kResult).clearAllFields();
+
+    // Don't ask the GROUP child for the result slot to avoid unnecessary materialization if it's
+    // possible to get everything we need from top-level field slots.
+    if (childNode->getType() == StageType::STAGE_GROUP && !groupNode->needWholeDocument &&
+        !groupNode->needsAnyMetadata) {
         childReqs.clear(kResult);
+
+        for (auto&& pathStr : groupNode->requiredFields) {
+            auto path = sbe::MatchPath{pathStr};
+            const auto& topLevelField = path.getPart(0);
+            childReqs.set(std::make_pair(PlanStageSlots::kField, topLevelField));
+        }
     }
 
     // Builds the child and gets the child result slot.
@@ -2779,6 +2544,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                 aggSlotsVec,
                                 nodeId,
                                 &_slotIdGenerator);
+    auto stage = groupFinalEvalStage.extractStage(nodeId);
 
     tassert(5851605,
             "The number of final slots must be as 1 (the final group-by slot) + the number of acc "
@@ -2788,21 +2554,37 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     // Cleans up optimized expressions.
     _state.preGeneratedExprs.clear();
 
+    auto fieldNamesSet = StringDataSet{fieldNames.begin(), fieldNames.end()};
+    auto [fields, additionalFields] =
+        splitVector(reqs.getFields(), [&](const std::string& s) { return fieldNamesSet.count(s); });
+    auto fieldsSet = StringDataSet{fields.begin(), fields.end()};
+
     PlanStageSlots outputs;
-    std::unique_ptr<sbe::PlanStage> outStage;
-    // Builds a stage to create a result object out of a group-by slot and gathered accumulator
-    // result slots if the parent node requests so. Otherwise, returns field names and associated
-    // slots so that a parent stage above can directly refer to a slot by its name because there's
-    // no returned object.
+    for (size_t i = 0; i < fieldNames.size(); ++i) {
+        if (fieldsSet.count(fieldNames[i])) {
+            outputs.set(std::make_pair(PlanStageSlots::kField, fieldNames[i]), finalSlots[i]);
+        }
+    };
+
+    auto [outStage, nothingSlots] = projectNothingToSlots(
+        std::move(stage), additionalFields.size(), root->nodeId(), &_slotIdGenerator);
+    for (size_t i = 0; i < additionalFields.size(); ++i) {
+        outputs.set(std::make_pair(PlanStageSlots::kField, std::move(additionalFields[i])),
+                    nothingSlots[i]);
+    }
+
+    // Builds a outStage to create a result object out of a group-by slot and gathered accumulator
+    // result slots if the parent node requests so.
     if (reqs.has(kResult)) {
-        outputs.set(kResult, _slotIdGenerator.generate());
+        auto resultSlot = _slotIdGenerator.generate();
+        outputs.set(kResult, resultSlot);
         // This mkbson stage combines 'finalSlots' into a bsonObject result slot which has
         // 'fieldNames' fields.
         if (groupNode->shouldProduceBson) {
-            outStage = sbe::makeS<sbe::MakeBsonObjStage>(groupFinalEvalStage.extractStage(nodeId),
-                                                         outputs.get(kResult),  // objSlot
-                                                         boost::none,           // rootSlot
-                                                         boost::none,           // fieldBehavior
+            outStage = sbe::makeS<sbe::MakeBsonObjStage>(std::move(outStage),
+                                                         resultSlot,   // objSlot
+                                                         boost::none,  // rootSlot
+                                                         boost::none,  // fieldBehavior
                                                          std::vector<std::string>{},  // fields
                                                          std::move(fieldNames),  // projectFields
                                                          std::move(finalSlots),  // projectVars
@@ -2810,8 +2592,8 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                                          false,                  // returnOldObject
                                                          nodeId);
         } else {
-            outStage = sbe::makeS<sbe::MakeObjStage>(groupFinalEvalStage.extractStage(nodeId),
-                                                     outputs.get(kResult),        // objSlot
+            outStage = sbe::makeS<sbe::MakeObjStage>(std::move(outStage),
+                                                     resultSlot,                  // objSlot
                                                      boost::none,                 // rootSlot
                                                      boost::none,                 // fieldBehavior
                                                      std::vector<std::string>{},  // fields
@@ -2821,12 +2603,6 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                                      false,                       // returnOldObject
                                                      nodeId);
         }
-    } else {
-        for (size_t i = 0; i < finalSlots.size(); ++i) {
-            outputs.set("CURRENT." + fieldNames[i], finalSlots[i]);
-        };
-
-        outStage = groupFinalEvalStage.extractStage(nodeId);
     }
 
     return {std::move(outStage), std::move(outputs)};
@@ -2836,7 +2612,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots>
 SlotBasedStageBuilder::makeUnionForTailableCollScan(const QuerySolutionNode* root,
                                                     const PlanStageReqs& reqs) {
     using namespace std::literals;
-    invariant(!reqs.getIndexKeyBitset());
+    tassert(6023415, "makeUnionForTailableCollScan() does not support kKey", !reqs.hasKeys());
 
     // Register a SlotId in the global environment which would contain a recordId to resume a
     // tailable collection scan from. A PlanStage executor will track the last seen recordId and
@@ -2860,7 +2636,7 @@ SlotBasedStageBuilder::makeUnionForTailableCollScan(const QuerySolutionNode* roo
         childReqs.setIsTailableCollScanResumeBranch(isTailableCollScanResumeBranch);
         auto [branch, outputs] = build(root, childReqs);
 
-        auto branchSlots = getSlotsToForward(reqs, outputs);
+        auto branchSlots = getSlotsToForward(childReqs, outputs);
 
         return {std::move(branchSlots), std::move(branch)};
     };
@@ -2923,57 +2699,50 @@ auto buildShardFilterGivenShardKeySlot(sbe::value::SlotId shardKeySlot,
 }  // namespace
 
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots>
-SlotBasedStageBuilder::buildShardFilterCovered(const ShardingFilterNode* filterNode,
-                                               sbe::value::SlotId shardFiltererSlot,
-                                               BSONObj shardKeyPattern,
-                                               BSONObj indexKeyPattern,
-                                               const QuerySolutionNode* child,
-                                               PlanStageReqs childReqs) {
-    StringDataSet shardKeyFields;
+SlotBasedStageBuilder::buildShardFilterCovered(const QuerySolutionNode* root,
+                                               const PlanStageReqs& reqs) {
+    // Constructs an optimized SBE plan for 'filterNode' in the case that the fields of the
+    // 'shardKeyPattern' are provided by 'child'. In this case, the SBE tree for 'child' will
+    // fill out slots for the necessary components of the index key. These slots can be read
+    // directly in order to determine the shard key that should be passed to the
+    // 'shardFiltererSlot'.
+    const auto filterNode = static_cast<const ShardingFilterNode*>(root);
+    auto child = filterNode->children[0].get();
+    tassert(6023416,
+            "buildShardFilterCovered() expects ixscan below shard filter",
+            child->getType() == STAGE_IXSCAN || child->getType() == STAGE_VIRTUAL_SCAN);
+
+    // Extract the child's key pattern.
+    BSONObj indexKeyPattern = child->getType() == STAGE_IXSCAN
+        ? static_cast<const IndexScanNode*>(child)->index.keyPattern
+        : static_cast<const VirtualScanNode*>(child)->indexKeyPattern;
+
+    auto childReqs = reqs.copy();
+
+    // If we're sharded make sure that we don't return data that isn't owned by the shard. This
+    // situation can occur when pending documents from in-progress migrations are inserted and when
+    // there are orphaned documents from aborted migrations. To check if the document is owned by
+    // the shard, we need to own a 'ShardFilterer', and extract the document's shard key as a
+    // BSONObj.
+    auto shardKeyPattern = _collections.getMainCollection().getShardKeyPattern();
+    // We register the "shardFilterer" slot but we don't construct the ShardFilterer here, because
+    // once constructed the ShardFilterer will prevent orphaned documents from being deleted. We
+    // will construct the ShardFilterer later while preparing the SBE tree for execution.
+    auto shardFiltererSlot = _data.env->registerSlot(
+        "shardFilterer"_sd, sbe::value::TypeTags::Nothing, 0, false, &_slotIdGenerator);
+
     for (auto&& shardKeyElt : shardKeyPattern) {
-        shardKeyFields.insert(shardKeyElt.fieldNameStringData());
+        childReqs.set(std::make_pair(PlanStageSlots::kKey, shardKeyElt.fieldNameStringData()));
     }
 
-    // Save the bit vector describing the fields from the index that our parent requires. The shard
-    // filtering process may require additional fields that are not needed by the parent (for
-    // example, if the parent is projecting field "a" but the shard key is {a: 1, b: 1}). We will
-    // need the parent's reqs later on so that we can hand the correct slot vector for these fields
-    // back to our parent.
-    auto parentIndexKeyReqs = childReqs.getIndexKeyBitset();
-
-    // Determine the set of fields from the index required to obtain the shard key and union those
-    // with the set of fields from the index required by the parent stage.
-    auto [shardKeyIndexReqs, _] = makeIndexKeyInclusionSet(indexKeyPattern, shardKeyFields);
-    const auto ixKeyBitset =
-        parentIndexKeyReqs.value_or(sbe::IndexKeysInclusionSet{}) | shardKeyIndexReqs;
-    childReqs.getIndexKeyBitset() = ixKeyBitset;
-
     auto [stage, outputs] = build(child, childReqs);
-    tassert(5562302, "Expected child to produce index key slots", outputs.getIndexKeySlots());
 
-    // Maps from key name -> (index in outputs.getIndexKeySlots(), is hashed).
-    auto ixKeyPatternFieldToSlotIdx = [&, childOutputs = std::ref(outputs)]() {
-        StringDataMap<std::pair<sbe::value::SlotId, bool>> ret;
-
-        // Keeps track of which component we're reading in the index key pattern.
-        size_t i = 0;
-        // Keeps track of the index we are in the slot vector produced by the ix scan. The slot
-        // vector produced by the ix scan may be a subset of the key pattern.
-        size_t slotIdx = 0;
-        for (auto&& ixPatternElt : indexKeyPattern) {
-            if (shardKeyFields.count(ixPatternElt.fieldNameStringData())) {
-                const bool isHashed = ixPatternElt.valueStringData() == IndexNames::HASHED;
-                const auto slotId = (*childOutputs.get().getIndexKeySlots())[slotIdx];
-                ret.emplace(ixPatternElt.fieldNameStringData(), std::make_pair(slotId, isHashed));
-            }
-
-            if (ixKeyBitset[i]) {
-                ++slotIdx;
-            }
-            ++i;
-        }
-        return ret;
-    }();
+    // Maps from key name to a bool that indicates whether the key is hashed.
+    StringDataMap<bool> indexKeyPatternMap;
+    for (auto&& ixPatternElt : indexKeyPattern) {
+        indexKeyPatternMap.emplace(ixPatternElt.fieldNameStringData(),
+                                   ShardKeyPattern::isHashedPatternEl(ixPatternElt));
+    }
 
     // Build a project stage to deal with hashed shard keys. This step *could* be skipped if we're
     // dealing with non-hashed sharding, but it's done this way for sake of simplicity.
@@ -2981,33 +2750,28 @@ SlotBasedStageBuilder::buildShardFilterCovered(const ShardingFilterNode* filterN
     sbe::value::SlotVector fieldSlots;
     std::vector<std::string> projectFields;
     for (auto&& shardKeyPatternElt : shardKeyPattern) {
-        auto it = ixKeyPatternFieldToSlotIdx.find(shardKeyPatternElt.fieldNameStringData());
-        tassert(5562303, "Could not find element", it != ixKeyPatternFieldToSlotIdx.end());
-        auto [slotId, ixKeyEltHashed] = it->second;
+        auto it = indexKeyPatternMap.find(shardKeyPatternElt.fieldNameStringData());
+        tassert(5562303, "Could not find element", it != indexKeyPatternMap.end());
+        const auto ixKeyEltHashed = it->second;
+        const auto slotId = outputs.get(
+            std::make_pair(PlanStageSlots::kKey, shardKeyPatternElt.fieldNameStringData()));
 
         // Get the value stored in the index for this component of the shard key. We may have to
         // hash it.
         auto elem = makeVariable(slotId);
 
+        // Handle the case where the index key or shard key is hashed.
         const bool shardKeyEltHashed = ShardKeyPattern::isHashedPatternEl(shardKeyPatternElt);
-
-        if (shardKeyEltHashed) {
-            if (ixKeyEltHashed) {
-                // (1) The index stores hashed data and the shard key field is hashed.
-                // Nothing to do here. We can apply shard filtering with no other changes.
-            } else {
-                // (2) The shard key field is hashed but the index stores unhashed data. We must
-                // apply the hash function before passing this off to the shard filter.
-                elem = makeFunction("shardHash"_sd, std::move(elem));
-            }
-        } else {
-            if (ixKeyEltHashed) {
-                // (3) The index stores hashed data but the shard key is not hashed. This is a bug.
-                MONGO_UNREACHABLE_TASSERT(5562300);
-            } else {
-                // (4) The shard key field is not hashed, and the index does not store hashed data.
-                // Again, we do nothing here.
-            }
+        if (ixKeyEltHashed) {
+            // If the index stores hashed data, then we know the shard key field is hashed as
+            // well. Nothing to do here. We can apply shard filtering with no other changes.
+            tassert(6023421,
+                    "Index key is hashed, expected corresponding shard key to be hashed",
+                    shardKeyEltHashed);
+        } else if (shardKeyEltHashed) {
+            // The shard key field is hashed but the index stores unhashed data. We must apply
+            // the hash function before passing this off to the shard filter.
+            elem = makeFunction("shardHash"_sd, std::move(elem));
         }
 
         fieldSlots.push_back(_slotIdGenerator.generate());
@@ -3033,46 +2797,17 @@ SlotBasedStageBuilder::buildShardFilterCovered(const ShardingFilterNode* filterN
     auto filterStage = buildShardFilterGivenShardKeySlot(
         shardKeySlot, std::move(mkObjStage), shardFiltererSlot, filterNode->nodeId());
 
-    outputs.setIndexKeySlots(!parentIndexKeyReqs ? boost::none
-                                                 : boost::optional<sbe::value::SlotVector>{
-                                                       makeIndexKeyOutputSlotsMatchingParentReqs(
-                                                           indexKeyPattern,
-                                                           *parentIndexKeyReqs,
-                                                           *childReqs.getIndexKeyBitset(),
-                                                           *outputs.getIndexKeySlots())});
+    outputs.clearNonRequiredSlots(reqs);
 
     return {std::move(filterStage), std::move(outputs)};
 }
 
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildShardFilter(
     const QuerySolutionNode* root, const PlanStageReqs& reqs) {
-    const auto filterNode = static_cast<const ShardingFilterNode*>(root);
-
-    // If we're sharded make sure that we don't return data that isn't owned by the shard. This
-    // situation can occur when pending documents from in-progress migrations are inserted and when
-    // there are orphaned documents from aborted migrations. To check if the document is owned by
-    // the shard, we need to own a 'ShardFilterer', and extract the document's shard key as a
-    // BSONObj.
-    auto shardKeyPattern = _collections.getMainCollection().getShardKeyPattern();
-    // We register the "shardFilterer" slot but not construct the ShardFilterer here is because once
-    // constructed the ShardFilterer will prevent orphaned documents from being deleted. We will
-    // construct the 'ShardFiltered' later while preparing the SBE tree for execution.
-    auto shardFiltererSlot = _data.env->registerSlot(
-        "shardFilterer"_sd, sbe::value::TypeTags::Nothing, 0, false, &_slotIdGenerator);
-
-    // Determine if our child is an index scan and extract it's key pattern, or empty BSONObj if our
-    // child is not an IXSCAN node.
-    BSONObj indexKeyPattern = [&]() {
-        auto childNode = filterNode->children[0].get();
-        switch (childNode->getType()) {
-            case StageType::STAGE_IXSCAN:
-                return static_cast<const IndexScanNode*>(childNode)->index.keyPattern;
-            case StageType::STAGE_VIRTUAL_SCAN:
-                return static_cast<const VirtualScanNode*>(childNode)->indexKeyPattern;
-            default:
-                return BSONObj{};
-        }
-    }();
+    auto child = root->children[0].get();
+    bool childIsIndexScan = child->getType() == STAGE_IXSCAN ||
+        (child->getType() == STAGE_VIRTUAL_SCAN &&
+         !static_cast<const VirtualScanNode*>(child)->indexKeyPattern.isEmpty());
 
     // If we're not required to fill out the 'kResult' slot, then instead we can request a slot from
     // the child for each of the fields which constitute the shard key. This allows us to avoid
@@ -3082,17 +2817,25 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     // We only apply this optimization in the special case that the child QSN is an IXSCAN, since in
     // this case we can request exactly the fields we need according to their position in the index
     // key pattern.
-    auto childReqs = reqs.copy().setIf(kResult, indexKeyPattern.isEmpty());
-    if (!childReqs.has(kResult)) {
-        return buildShardFilterCovered(filterNode,
-                                       shardFiltererSlot,
-                                       shardKeyPattern,
-                                       std::move(indexKeyPattern),
-                                       filterNode->children[0].get(),
-                                       std::move(childReqs));
+    if (!reqs.has(kResult) && childIsIndexScan) {
+        return buildShardFilterCovered(root, reqs);
     }
 
-    auto [stage, outputs] = build(filterNode->children[0].get(), childReqs);
+    auto childReqs = reqs.copy().set(kResult);
+
+    // If we're sharded make sure that we don't return data that isn't owned by the shard. This
+    // situation can occur when pending documents from in-progress migrations are inserted and when
+    // there are orphaned documents from aborted migrations. To check if the document is owned by
+    // the shard, we need to own a 'ShardFilterer', and extract the document's shard key as a
+    // BSONObj.
+    auto shardKeyPattern = _collections.getMainCollection().getShardKeyPattern();
+    // We register the "shardFilterer" slot but we don't construct the ShardFilterer here, because
+    // once constructed the ShardFilterer will prevent orphaned documents from being deleted. We
+    // will construct the ShardFilterer later while preparing the SBE tree for execution.
+    auto shardFiltererSlot = _data.env->registerSlot(
+        "shardFilterer"_sd, sbe::value::TypeTags::Nothing, 0, false, &_slotIdGenerator);
+
+    auto [stage, outputs] = build(child, childReqs);
 
     // Build an expression to extract the shard key from the document based on the shard key
     // pattern. To do this, we iterate over the shard key pattern parts and build nested 'getField'
@@ -3182,7 +2925,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             {STAGE_SKIP, &SlotBasedStageBuilder::buildSkip},
             {STAGE_SORT_SIMPLE, &SlotBasedStageBuilder::buildSort},
             {STAGE_SORT_DEFAULT, &SlotBasedStageBuilder::buildSort},
-            {STAGE_SORT_KEY_GENERATOR, &SlotBasedStageBuilder::buildSortKeyGeneraror},
+            {STAGE_SORT_KEY_GENERATOR, &SlotBasedStageBuilder::buildSortKeyGenerator},
             {STAGE_PROJECTION_SIMPLE, &SlotBasedStageBuilder::buildProjectionSimple},
             {STAGE_PROJECTION_DEFAULT, &SlotBasedStageBuilder::buildProjectionDefault},
             {STAGE_PROJECTION_COVERED, &SlotBasedStageBuilder::buildProjectionCovered},
@@ -3224,6 +2967,29 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             break;
     }
 
-    return std::invoke(kStageBuilders.at(root->getType()), *this, root, reqs);
+    auto [stage, slots] = std::invoke(kStageBuilders.at(root->getType()), *this, root, reqs);
+    auto outputs = std::move(slots);
+
+    auto fields = filterVector(reqs.getFields(), [&](const std::string& s) {
+        return !outputs.has(std::make_pair(PlanStageSlots::kField, StringData(s)));
+    });
+
+    if (!fields.empty()) {
+        tassert(6023424,
+                str::stream() << "Expected build() for " << stageTypeToString(root->getType())
+                              << " to either produce a kResult slot or to satisfy all kField reqs",
+                outputs.has(PlanStageSlots::kResult));
+
+        auto resultSlot = outputs.get(PlanStageSlots::kResult);
+        auto [outStage, slots] = projectTopLevelFields(
+            std::move(stage), fields, resultSlot, root->nodeId(), &_slotIdGenerator);
+        stage = std::move(outStage);
+
+        for (size_t i = 0; i < fields.size(); ++i) {
+            outputs.set(std::make_pair(PlanStageSlots::kField, std::move(fields[i])), slots[i]);
+        }
+    }
+
+    return {std::move(stage), std::move(outputs)};
 }
 }  // namespace mongo::stage_builder

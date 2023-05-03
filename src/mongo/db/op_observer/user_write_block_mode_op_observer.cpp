@@ -89,10 +89,10 @@ void UserWriteBlockModeOpObserver::onInserts(OperationContext* opCtx,
 void UserWriteBlockModeOpObserver::onUpdate(OperationContext* opCtx,
                                             const OplogUpdateEntryArgs& args) {
     if (args.updateArgs->source != OperationSource::kFromMigrate) {
-        _checkWriteAllowed(opCtx, args.nss);
+        _checkWriteAllowed(opCtx, args.coll->ns());
     }
 
-    if (args.nss == NamespaceString::kUserWritesCriticalSectionsNamespace &&
+    if (args.coll->ns() == NamespaceString::kUserWritesCriticalSectionsNamespace &&
         !user_writes_recoverable_critical_section_util::inRecoveryMode(opCtx)) {
         const auto collCSDoc = UserWriteBlockingCriticalSectionDocument::parse(
             IDLParserContext("UserWriteBlockOpObserver"), args.updateArgs->updatedDoc);
@@ -125,19 +125,18 @@ void UserWriteBlockModeOpObserver::onUpdate(OperationContext* opCtx,
 }
 
 void UserWriteBlockModeOpObserver::aboutToDelete(OperationContext* opCtx,
-                                                 NamespaceString const& nss,
-                                                 const UUID& uuid,
+                                                 const CollectionPtr& coll,
                                                  BSONObj const& doc) {
-    if (nss == NamespaceString::kUserWritesCriticalSectionsNamespace) {
+    if (coll->ns() == NamespaceString::kUserWritesCriticalSectionsNamespace) {
         documentIdDecoration(opCtx) = doc;
     }
 }
 
 void UserWriteBlockModeOpObserver::onDelete(OperationContext* opCtx,
-                                            const NamespaceString& nss,
-                                            const UUID& uuid,
+                                            const CollectionPtr& coll,
                                             StmtId stmtId,
                                             const OplogDeleteEntryArgs& args) {
+    const auto& nss = coll->ns();
     if (!args.fromMigrate) {
         _checkWriteAllowed(opCtx, nss);
     }

@@ -59,6 +59,7 @@
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/sbe_plan_cache.h"
 #include "mongo/db/repl/primary_only_service.h"
+#include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/transaction_coordinator_curop.h"
 #include "mongo/db/s/transaction_coordinator_worker_curop_repository.h"
@@ -74,6 +75,7 @@
 #include "mongo/logv2/log.h"
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/query/document_source_merge_cursors.h"
+#include "mongo/s/query_analysis_sampler_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -349,11 +351,13 @@ void CommonMongodProcessInterface::appendLatencyStats(OperationContext* opCtx,
     Top::get(opCtx->getServiceContext()).appendLatencyStats(nss, includeHistograms, builder);
 }
 
-Status CommonMongodProcessInterface::appendStorageStats(OperationContext* opCtx,
-                                                        const NamespaceString& nss,
-                                                        const StorageStatsSpec& spec,
-                                                        BSONObjBuilder* builder) const {
-    return appendCollectionStorageStats(opCtx, nss, spec, builder);
+Status CommonMongodProcessInterface::appendStorageStats(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    const StorageStatsSpec& spec,
+    BSONObjBuilder* builder,
+    const boost::optional<BSONObj>& filterObj) const {
+    return appendCollectionStorageStats(opCtx, nss, spec, builder, filterObj);
 }
 
 Status CommonMongodProcessInterface::appendRecordCount(OperationContext* opCtx,
@@ -421,10 +425,18 @@ CommonMongodProcessInterface::attachCursorSourceToPipelineForLocalRead(Pipeline*
         return pipeline;
     }
 
+    if (expCtx->eligibleForSampling()) {
+        if (auto sampleId = analyze_shard_key::tryGenerateSampleId(expCtx->opCtx, expCtx->ns)) {
+            analyze_shard_key::QueryAnalysisWriter::get(expCtx->opCtx)
+                .addAggregateQuery(
+                    *sampleId, expCtx->ns, pipeline->getInitialQuery(), expCtx->getCollatorBSON())
+                .getAsync([](auto) {});
+        }
+    }
+
     boost::optional<AutoGetCollectionForReadCommandMaybeLockFree> autoColl;
-    const NamespaceStringOrUUID nsOrUUID = expCtx->uuid
-        ? NamespaceStringOrUUID{expCtx->ns.db().toString(), *expCtx->uuid}
-        : expCtx->ns;
+    const NamespaceStringOrUUID nsOrUUID =
+        expCtx->uuid ? NamespaceStringOrUUID{expCtx->ns.dbName(), *expCtx->uuid} : expCtx->ns;
 
     // Reparse 'pipeline' to discover whether there are secondary namespaces that we need to lock
     // when constructing our query executor.

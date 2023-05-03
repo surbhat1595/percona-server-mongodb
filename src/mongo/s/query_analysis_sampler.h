@@ -49,7 +49,8 @@ namespace analyze_shard_key {
  *   on this sampler.
  *
  * Currently, query sampling is only supported on a sharded cluster. So a sampler must be a mongos
- * and the coordinator must be the config server's primary mongod.
+ * or a shardsvr mongod (acting as a router), and the coordinator must be the config server's
+ * primary mongod.
  */
 class QueryAnalysisSampler final {
     QueryAnalysisSampler(const QueryAnalysisSampler&) = delete;
@@ -176,11 +177,13 @@ public:
     void onShutdown();
 
     /**
-     * Returns true if a query should be sampled, and false otherwise. Can only be invoked once on
-     * for each query since it decrements the number remaining queries to sample if this query
-     * should be sampled.
+     * Returns a unique sample id for a query if it should be sampled, and none otherwise. Can only
+     * be invoked once for each query since generating a sample id causes the number of remaining
+     * queries to sample to get decremented.
      */
-    bool shouldSample(const NamespaceString& nss);
+    boost::optional<UUID> tryGenerateSampleId(const NamespaceString& nss);
+
+    void appendInfoForServerStatus(BSONObjBuilder* bob) const;
 
     void refreshQueryStatsForTest() {
         _refreshQueryStats();
@@ -201,6 +204,8 @@ public:
     }
 
 private:
+    long long _getTotalQueriesCount() const;
+
     void _refreshQueryStats();
 
     void _refreshConfigurations(OperationContext* opCtx);

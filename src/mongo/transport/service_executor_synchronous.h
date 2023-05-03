@@ -42,6 +42,9 @@
 namespace mongo {
 namespace transport {
 
+/** Transitional for differential benchmarking of ServiceExecutorSynchronous refactor */
+#define TRANSITIONAL_SERVICE_EXECUTOR_SYNCHRONOUS_HAS_RESERVE 0
+
 /**
  * Creates a fresh worker thread for each top-level scheduled task. Any tasks
  * scheduled during the execution of that top-level task as it runs on such a
@@ -63,6 +66,15 @@ public:
     Status start() override;
     Status shutdown(Milliseconds timeout) override;
 
+    std::unique_ptr<TaskRunner> makeTaskRunner() override;
+
+    size_t getRunningThreads() const override;
+
+    void appendStats(BSONObjBuilder* bob) const override;
+
+private:
+    class SharedState;
+
     /**
      * The behavior of `schedule` depends on whether the calling thread is a
      * worker thread spawned by a previous `schedule` call.
@@ -73,16 +85,10 @@ public:
      * If a worker thread schedules a task, the task is pushed to the back of its
      * queue. The worker thread exits when the queue becomes empty.
      */
-    void schedule(Task task) override;
+    void _schedule(Task task);
 
-    size_t getRunningThreads() const override;
+    void _runOnDataAvailable(const SessionHandle& session, Task onCompletionCallback);
 
-    void runOnDataAvailable(const SessionHandle& session, Task onCompletionCallback) override;
-
-    void appendStats(BSONObjBuilder* bob) const override;
-
-private:
-    class SharedState;
 
     std::shared_ptr<SharedState> _sharedState;
 };

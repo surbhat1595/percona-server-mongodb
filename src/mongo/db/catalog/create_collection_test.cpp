@@ -324,10 +324,8 @@ TEST_F(CreateCollectionTest, ValidationDisabledForTemporaryReshardingCollection)
     ASSERT_OK(status);
 }
 
-const auto kValidUrl1 =
-    ExternalDataSourceMetadata::kDefaultFileUrlPrefix.toString() + "named_pipe1";
-const auto kValidUrl2 =
-    ExternalDataSourceMetadata::kDefaultFileUrlPrefix.toString() + "named_pipe2";
+const auto kValidUrl1 = ExternalDataSourceMetadata::kUrlProtocolFile + "named_pipe1"s;
+const auto kValidUrl2 = ExternalDataSourceMetadata::kUrlProtocolFile + "named_pipe2"s;
 
 TEST_F(CreateVirtualCollectionTest, VirtualCollectionOptionsWithOneSource) {
     NamespaceString vcollNss("myDb", "vcoll.name");
@@ -388,7 +386,7 @@ TEST_F(CreateVirtualCollectionTest, InvalidVirtualCollectionOptions) {
     {
         bool exceptionOccurred = false;
         VirtualCollectionOptions reqVcollOpts;
-        constexpr auto kInvalidUrl = "file:///abc/named_pipe"_sd;
+        constexpr auto kInvalidUrl = "fff://abc/named_pipe"_sd;
         try {
             reqVcollOpts.dataSources.emplace_back(
                 kInvalidUrl, StorageTypeEnum::pipe, FileTypeEnum::bson);

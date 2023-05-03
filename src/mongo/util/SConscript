@@ -228,8 +228,9 @@ env.Library(
 )
 
 env.Library(
-    target='namespace_string_util',
+    target='namespace_string_database_name_util',
     source=[
+        'database_name_util.cpp',
         'namespace_string_util.cpp',
     ],
     LIBDEPS=[
@@ -246,7 +247,17 @@ env.CppUnitTest(
         'namespace_string_util_test.cpp',
     ],
     LIBDEPS=[
-        'namespace_string_util',
+        'namespace_string_database_name_util',
+    ],
+)
+
+env.CppUnitTest(
+    target='database_name_util_test',
+    source=[
+        'database_name_util_test.cpp',
+    ],
+    LIBDEPS=[
+        'namespace_string_database_name_util',
     ],
 )
 
@@ -565,6 +576,14 @@ env.Benchmark(
     LIBDEPS=[],
 )
 
+env.Benchmark(
+    target='tick_source_bm',
+    source=[
+        'tick_source_bm.cpp',
+    ],
+    LIBDEPS=[],
+)
+
 env.Library(
     target='future_util',
     source=[
@@ -752,6 +771,7 @@ icuEnv.CppUnitTest(
         'registry_list_test.cpp',
         'represent_as_test.cpp',
         'safe_num_test.cpp',
+        'shared_buffer_test.cpp',
         'scoped_unlock_test.cpp',
         'secure_zero_memory_test.cpp',
         'signal_handlers_synchronous_test.cpp' if not env.TargetOSIs('windows') else [],

@@ -50,6 +50,7 @@ sbeEnv.Library(
         'values/slot_printer.cpp',
         'vm/arith.cpp',
         'vm/datetime.cpp',
+        'vm/vm_printer.cpp',
         'vm/vm.cpp',
     ],
     LIBDEPS=[
@@ -71,7 +72,6 @@ sbeEnv.Library(
     source=[
         'stages/branch.cpp',
         'stages/bson_scan.cpp',
-        'stages/check_bounds.cpp',
         'stages/co_scan.cpp',
         'stages/exchange.cpp',
         'stages/hash_agg.cpp',
@@ -137,6 +137,7 @@ env.Library(
         'abt/abt_lower.cpp',
     ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/db/query/ce/query_ce_heuristic',
         '$BUILD_DIR/mongo/db/query/optimizer/optimizer',
         'query_sbe',
         'query_sbe_stages',
@@ -182,6 +183,7 @@ env.CppUnitTest(
         'expressions/sbe_iso_date_to_parts_test.cpp',
         'expressions/sbe_ks_builtin_test.cpp',
         'expressions/sbe_lambda_test.cpp',
+        'expressions/sbe_local_bind_test.cpp',
         'expressions/sbe_mod_expression_test.cpp',
         'expressions/sbe_new_array_from_range_builtin_test.cpp',
         'expressions/sbe_regex_test.cpp',
@@ -213,6 +215,7 @@ env.CppUnitTest(
         'sbe_test.cpp',
         'sbe_trial_run_tracker_test.cpp',
         'sbe_unique_test.cpp',
+        'sbe_unittest.cpp',
         'util/stage_results_printer_test.cpp',
         'values/column_store_encoder_test.cpp',
         'values/columnar_test.cpp',
@@ -241,6 +244,7 @@ env.Library(
     ],
     LIBDEPS=[
         "$BUILD_DIR/mongo/db/auth/authmocks",
+        "$BUILD_DIR/mongo/db/query/optimizer/unit_test_utils",
         '$BUILD_DIR/mongo/db/query/query_test_service_context',
         '$BUILD_DIR/mongo/db/query_exec',
         '$BUILD_DIR/mongo/db/service_context_test_fixture',

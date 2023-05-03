@@ -116,7 +116,8 @@ public:
     void remove(const RecordId& recordId) {
         WriteUnitOfWork wunit(&_opCtx);
         OpDebug* const nullOpDebug = nullptr;
-        _coll->deleteDocument(&_opCtx, kUninitializedStmtId, recordId, nullOpDebug);
+        collection_internal::deleteDocument(
+            &_opCtx, _coll, kUninitializedStmtId, recordId, nullOpDebug);
         wunit.commit();
     }
 
@@ -124,13 +125,15 @@ public:
         WriteUnitOfWork wunit(&_opCtx);
         BSONObj oldDoc = _coll->getRecordStore()->dataFor(&_opCtx, oldrecordId).releaseToBson();
         CollectionUpdateArgs args;
-        _coll->updateDocument(&_opCtx,
-                              oldrecordId,
-                              Snapshotted<BSONObj>(_opCtx.recoveryUnit()->getSnapshotId(), oldDoc),
-                              newDoc,
-                              true,
-                              nullptr,
-                              &args);
+        collection_internal::updateDocument(
+            &_opCtx,
+            _coll,
+            oldrecordId,
+            Snapshotted<BSONObj>(_opCtx.recoveryUnit()->getSnapshotId(), oldDoc),
+            newDoc,
+            true,
+            nullptr,
+            &args);
         wunit.commit();
     }
 
@@ -323,12 +326,15 @@ public:
 class QueryStageCountUpdateDuringYield : public CountStageTest {
 public:
     void run() {
-        // expected count would be kDocuments-2 but we update the first and second records
-        // after doing the first unit of work so they wind up getting counted later on
         CountCommandRequest request((NamespaceString(ns())));
         request.setQuery(BSON("x" << GTE << 2));
 
-        testCount(request, kDocuments);
+        // We call 'interject' after first unit of work that skips the first document, so it is
+        // not counted.
+        testCount(request, kDocuments - 1);
+
+        // We call 'interject' after first unit of work and even if some documents are skipped,
+        // they are added to the end of the index on x so they are counted later.
         testCount(request, kDocuments, true);
     }
 

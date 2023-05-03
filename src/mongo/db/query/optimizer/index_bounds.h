@@ -80,12 +80,14 @@ private:
 };
 
 struct PartialSchemaKey {
+    PartialSchemaKey(ABT path);
     PartialSchemaKey(ProjectionName projectionName, ABT path);
+    PartialSchemaKey(boost::optional<ProjectionName> projectionName, ABT path);
 
     bool operator==(const PartialSchemaKey& other) const;
 
     // Referred, or input projection name.
-    ProjectionName _projectionName;
+    boost::optional<ProjectionName> _projectionName;
 
     // (Partially determined) path.
     ABT _path;
@@ -96,14 +98,13 @@ bool isIntervalReqFullyOpenDNF(const IntervalReqExpr::Node& n);
 
 class PartialSchemaRequirement {
 public:
-    PartialSchemaRequirement(ProjectionName boundProjectionName,
+    PartialSchemaRequirement(boost::optional<ProjectionName> boundProjectionName,
                              IntervalReqExpr::Node intervals,
                              bool isPerfOnly);
 
     bool operator==(const PartialSchemaRequirement& other) const;
 
-    bool hasBoundProjectionName() const;
-    const ProjectionName& getBoundProjectionName() const;
+    const boost::optional<ProjectionName>& getBoundProjectionName() const;
 
     const IntervalReqExpr::Node& getIntervals() const;
 
@@ -113,7 +114,7 @@ public:
 
 private:
     // Bound, or output projection name.
-    ProjectionName _boundProjectionName;
+    boost::optional<ProjectionName> _boundProjectionName;
 
     IntervalReqExpr::Node _intervals;
 
@@ -124,7 +125,7 @@ private:
 };
 
 /**
- * This comparator can only compare paths with Get, Traverse, and Id.
+ * This comparator is used to compare paths with Get, Traverse, and Id.
  */
 struct IndexPath3WComparator {
     bool operator()(const ABT& path1, const ABT& path2) const;

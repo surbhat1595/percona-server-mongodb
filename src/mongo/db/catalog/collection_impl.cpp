@@ -59,7 +59,6 @@
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/durable_catalog.h"
-#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_extended_range.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
@@ -101,7 +100,9 @@ Status checkValidatorCanBeUsedOnNs(const BSONObj& validator,
                               << " with UUID " << uuid};
     }
 
-    if (nss.isOnInternalDb()) {
+    // Allow schema on config.settings. This is created internally, and user changes to this
+    // validator are disallowed in the createCollection and collMod commands.
+    if (nss.isOnInternalDb() && nss != NamespaceString::kConfigSettingsNamespace) {
         return {ErrorCodes::InvalidOptions,
                 str::stream() << "Document validators are not allowed on collection " << nss.ns()
                               << " with UUID " << uuid << " in the " << nss.db()
@@ -173,24 +174,6 @@ bool isRetryableWrite(OperationContext* opCtx) {
         (!opCtx->inMultiDocumentTransaction() || txnParticipant.transactionIsOpen());
 }
 
-std::vector<OplogSlot> reserveOplogSlotsForRetryableFindAndModify(OperationContext* opCtx) {
-    invariant(isRetryableWrite(opCtx));
-
-    // For retryable findAndModify running in a multi-document transaction, we will reserve the
-    // oplog entries when the transaction prepares or commits without prepare.
-    if (opCtx->inMultiDocumentTransaction()) {
-        return {};
-    }
-
-    // We reserve oplog slots here, expecting the slot with the greatest timestmap (say TS) to be
-    // used as the oplog timestamp. Tenant migrations and resharding will forge no-op image oplog
-    // entries and set the timestamp for these synthetic entries to be TS - 1.
-    auto oplogInfo = LocalOplogInfo::get(opCtx);
-    auto slots = oplogInfo->getNextOpTimes(opCtx, 2);
-    uassertStatusOK(opCtx->recoveryUnit()->setTimestamp(slots.back().getTimestamp()));
-    return slots;
-}
-
 bool indexTypeSupportsPathLevelMultikeyTracking(StringData accessMethod) {
     return accessMethod == IndexNames::BTREE || accessMethod == IndexNames::GEO_2DSPHERE;
 }
@@ -228,9 +211,13 @@ bool doesMinMaxHaveMixedSchemaData(const BSONObj& min, const BSONObj& max) {
     return false;
 }
 
-bool isIndexCompatible(std::shared_ptr<IndexCatalogEntry> index, Timestamp readTimestamp) {
+bool isIndexCompatible(std::shared_ptr<IndexCatalogEntry> index,
+                       boost::optional<Timestamp> readTimestamp) {
     if (!index) {
         return false;
+    }
+    if (!readTimestamp) {
+        return true;
     }
 
     boost::optional<Timestamp> minVisibleSnapshot = index->getMinimumVisibleSnapshot();
@@ -380,7 +367,7 @@ void CollectionImpl::init(OperationContext* opCtx) {
 
 Status CollectionImpl::initFromExisting(OperationContext* opCtx,
                                         const std::shared_ptr<Collection>& collection,
-                                        Timestamp readTimestamp) {
+                                        boost::optional<Timestamp> readTimestamp) {
     LOGV2_DEBUG(
         6825402, 1, "Initializing collection using shared state", logAttrs(collection->ns()));
 
@@ -461,6 +448,7 @@ Status CollectionImpl::initFromExisting(OperationContext* opCtx,
     // Update the idents for the newly initialized indexes.
     for (const auto& sharedIdent : sharedIdents) {
         auto desc = getIndexCatalog()->findIndexByName(opCtx, sharedIdent.first);
+        invariant(desc);
         auto entry = getIndexCatalog()->getEntryShared(desc);
         entry->setIdent(sharedIdent.second);
     }
@@ -793,295 +781,11 @@ void CollectionImpl::setMinimumValidSnapshot(Timestamp newMinimumValidSnapshot) 
     }
 }
 
-void CollectionImpl::deleteDocument(OperationContext* opCtx,
-                                    StmtId stmtId,
-                                    const RecordId& loc,
-                                    OpDebug* opDebug,
-                                    bool fromMigrate,
-                                    bool noWarn,
-                                    Collection::StoreDeletedDoc storeDeletedDoc,
-                                    CheckRecordId checkRecordId) const {
-    Snapshotted<BSONObj> doc = docFor(opCtx, loc);
-    deleteDocument(
-        opCtx, doc, stmtId, loc, opDebug, fromMigrate, noWarn, storeDeletedDoc, checkRecordId);
-}
-
-void CollectionImpl::deleteDocument(OperationContext* opCtx,
-                                    Snapshotted<BSONObj> doc,
-                                    StmtId stmtId,
-                                    const RecordId& loc,
-                                    OpDebug* opDebug,
-                                    bool fromMigrate,
-                                    bool noWarn,
-                                    Collection::StoreDeletedDoc storeDeletedDoc,
-                                    CheckRecordId checkRecordId) const {
-    if (isCapped() && opCtx->inMultiDocumentTransaction()) {
-        uasserted(ErrorCodes::IllegalOperation,
-                  "Cannot remove from a capped collection in a multi-document transaction");
-    }
-
-    if (needsCappedLock()) {
-        Lock::ResourceLock heldUntilEndOfWUOW{opCtx, ResourceId(RESOURCE_METADATA, _ns), MODE_X};
-    }
-
-    std::vector<OplogSlot> oplogSlots;
-    auto retryableFindAndModifyLocation = RetryableFindAndModifyLocation::kNone;
-    if (storeDeletedDoc == Collection::StoreDeletedDoc::On && isRetryableWrite(opCtx)) {
-        retryableFindAndModifyLocation = RetryableFindAndModifyLocation::kSideCollection;
-        oplogSlots = reserveOplogSlotsForRetryableFindAndModify(opCtx);
-    }
-    OplogDeleteEntryArgs deleteArgs{nullptr /* deletedDoc */,
-                                    fromMigrate,
-                                    isChangeStreamPreAndPostImagesEnabled(),
-                                    retryableFindAndModifyLocation,
-                                    oplogSlots};
-
-    opCtx->getServiceContext()->getOpObserver()->aboutToDelete(opCtx, ns(), uuid(), doc.value());
-
-    boost::optional<BSONObj> deletedDoc;
-    const bool isRecordingPreImageForRetryableWrite =
-        retryableFindAndModifyLocation != RetryableFindAndModifyLocation::kNone;
-
-    if (isRecordingPreImageForRetryableWrite || isChangeStreamPreAndPostImagesEnabled()) {
-        deletedDoc.emplace(doc.value().getOwned());
-    }
-    int64_t keysDeleted = 0;
-    _indexCatalog->unindexRecord(opCtx,
-                                 CollectionPtr(this, CollectionPtr::NoYieldTag{}),
-                                 doc.value(),
-                                 loc,
-                                 noWarn,
-                                 &keysDeleted,
-                                 checkRecordId);
-    _shared->_recordStore->deleteRecord(opCtx, loc);
-    if (deletedDoc) {
-        deleteArgs.deletedDoc = &(deletedDoc.value());
-    }
-
-    opCtx->getServiceContext()->getOpObserver()->onDelete(opCtx, ns(), uuid(), stmtId, deleteArgs);
-
-    if (opDebug) {
-        opDebug->additiveMetrics.incrementKeysDeleted(keysDeleted);
-        // 'opDebug' may be deleted at rollback time in case of multi-document transaction.
-        if (!opCtx->inMultiDocumentTransaction()) {
-            opCtx->recoveryUnit()->onRollback([opDebug, keysDeleted]() {
-                opDebug->additiveMetrics.incrementKeysDeleted(-keysDeleted);
-            });
-        }
-    }
-}
-
-bool compareSafeContentElem(const BSONObj& oldDoc, const BSONObj& newDoc) {
-    if (newDoc.hasField(kSafeContent) != oldDoc.hasField(kSafeContent)) {
-        return false;
-    }
-    if (!newDoc.hasField(kSafeContent)) {
-        return true;
-    }
-
-    return newDoc.getField(kSafeContent).binaryEqual(oldDoc.getField(kSafeContent));
-}
-
-RecordId CollectionImpl::updateDocument(OperationContext* opCtx,
-                                        const RecordId& oldLocation,
-                                        const Snapshotted<BSONObj>& oldDoc,
-                                        const BSONObj& newDoc,
-                                        bool indexesAffected,
-                                        OpDebug* opDebug,
-                                        CollectionUpdateArgs* args) const {
-    {
-        auto status = checkValidationAndParseResult(opCtx, newDoc);
-        if (!status.isOK()) {
-            if (validationLevelOrDefault(_metadata->options.validationLevel) ==
-                ValidationLevelEnum::strict) {
-                uassertStatusOK(status);
-            }
-            // moderate means we have to check the old doc
-            auto oldDocStatus = checkValidationAndParseResult(opCtx, oldDoc.value());
-            if (oldDocStatus.isOK()) {
-                // transitioning from good -> bad is not ok
-                uassertStatusOK(status);
-            }
-            // bad -> bad is ok in moderate mode
-        }
-    }
-
-    auto& validationSettings = DocumentValidationSettings::get(opCtx);
-    if (getCollectionOptions().encryptedFieldConfig &&
-        !validationSettings.isSchemaValidationDisabled() &&
-        !validationSettings.isSafeContentValidationDisabled()) {
-
-        uassert(ErrorCodes::BadValue,
-                str::stream() << "New document and old document both need to have " << kSafeContent
-                              << " field.",
-                compareSafeContentElem(oldDoc.value(), newDoc));
-    }
-
-    dassert(opCtx->lockState()->isCollectionLockedForMode(ns(), MODE_IX));
-    invariant(oldDoc.snapshotId() == opCtx->recoveryUnit()->getSnapshotId());
-    invariant(newDoc.isOwned());
-
-    if (needsCappedLock()) {
-        Lock::ResourceLock heldUntilEndOfWUOW{opCtx, ResourceId(RESOURCE_METADATA, _ns), MODE_X};
-    }
-
-    SnapshotId sid = opCtx->recoveryUnit()->getSnapshotId();
-
-    BSONElement oldId = oldDoc.value()["_id"];
-    if (!oldId.eoo() && SimpleBSONElementComparator::kInstance.evaluate(oldId != newDoc["_id"]))
-        uasserted(13596, "in Collection::updateDocument _id mismatch");
-
-    // The preImageDoc may not be boost::none if this update was a retryable findAndModify or if
-    // the update may have changed the shard key. For non-in-place updates we always set the
-    // preImageDoc here to an owned copy of the pre-image.
-    if (!args->preImageDoc) {
-        args->preImageDoc = oldDoc.value().getOwned();
-    }
-    args->changeStreamPreAndPostImagesEnabledForCollection =
-        isChangeStreamPreAndPostImagesEnabled();
-
-    OplogUpdateEntryArgs onUpdateArgs(args, ns(), _uuid);
-    const bool setNeedsRetryImageOplogField =
-        args->storeDocOption != CollectionUpdateArgs::StoreDocOption::None;
-    if (args->oplogSlots.empty() && setNeedsRetryImageOplogField && isRetryableWrite(opCtx)) {
-        onUpdateArgs.retryableFindAndModifyLocation =
-            RetryableFindAndModifyLocation::kSideCollection;
-        // If the update is part of a retryable write and we expect to be storing the pre- or
-        // post-image in a side collection, then we must reserve oplog slots in advance. We
-        // expect to use the reserved oplog slots as follows, where TS is the greatest
-        // timestamp of 'oplogSlots':
-        // TS - 1: Tenant migrations and resharding will forge no-op image oplog entries and set
-        //         the entry timestamps to TS - 1.
-        // TS:     The timestamp given to the update oplog entry.
-        args->oplogSlots = reserveOplogSlotsForRetryableFindAndModify(opCtx);
-    } else {
-        // Retryable findAndModify commands should not reserve oplog slots before entering this
-        // function since tenant migrations and resharding rely on always being able to set
-        // timestamps of forged pre- and post- image entries to timestamp of findAndModify - 1.
-        invariant(!(isRetryableWrite(opCtx) && setNeedsRetryImageOplogField));
-    }
-
-    uassertStatusOK(_shared->_recordStore->updateRecord(
-        opCtx, oldLocation, newDoc.objdata(), newDoc.objsize()));
-
-    if (indexesAffected) {
-        int64_t keysInserted = 0;
-        int64_t keysDeleted = 0;
-
-        uassertStatusOK(_indexCatalog->updateRecord(opCtx,
-                                                    {this, CollectionPtr::NoYieldTag{}},
-                                                    *args->preImageDoc,
-                                                    newDoc,
-                                                    oldLocation,
-                                                    &keysInserted,
-                                                    &keysDeleted));
-
-        if (opDebug) {
-            opDebug->additiveMetrics.incrementKeysInserted(keysInserted);
-            opDebug->additiveMetrics.incrementKeysDeleted(keysDeleted);
-            // 'opDebug' may be deleted at rollback time in case of multi-document transaction.
-            if (!opCtx->inMultiDocumentTransaction()) {
-                opCtx->recoveryUnit()->onRollback([opDebug, keysInserted, keysDeleted]() {
-                    opDebug->additiveMetrics.incrementKeysInserted(-keysInserted);
-                    opDebug->additiveMetrics.incrementKeysDeleted(-keysDeleted);
-                });
-            }
-        }
-    }
-
-    invariant(sid == opCtx->recoveryUnit()->getSnapshotId());
-    args->updatedDoc = newDoc;
-
-    opCtx->getServiceContext()->getOpObserver()->onUpdate(opCtx, onUpdateArgs);
-
-    return oldLocation;
-}
-
 bool CollectionImpl::updateWithDamagesSupported() const {
     if (!_validator.isOK() || _validator.filter.getValue() != nullptr)
         return false;
 
     return _shared->_recordStore->updateWithDamagesSupported();
-}
-
-StatusWith<BSONObj> CollectionImpl::updateDocumentWithDamages(
-    OperationContext* opCtx,
-    const RecordId& loc,
-    const Snapshotted<BSONObj>& oldDoc,
-    const char* damageSource,
-    const mutablebson::DamageVector& damages,
-    bool indexesAffected,
-    OpDebug* opDebug,
-    CollectionUpdateArgs* args) const {
-    dassert(opCtx->lockState()->isCollectionLockedForMode(ns(), MODE_IX));
-    invariant(oldDoc.snapshotId() == opCtx->recoveryUnit()->getSnapshotId());
-    invariant(updateWithDamagesSupported());
-
-    // For in-place updates we need to grab an owned copy of the pre-image doc if pre-image
-    // recording is enabled and we haven't already set the pre-image due to this update being
-    // a retryable findAndModify or a possible update to the shard key.
-    if (!args->preImageDoc && isChangeStreamPreAndPostImagesEnabled()) {
-        args->preImageDoc = oldDoc.value().getOwned();
-    }
-    OplogUpdateEntryArgs onUpdateArgs(args, ns(), _uuid);
-    const bool setNeedsRetryImageOplogField =
-        args->storeDocOption != CollectionUpdateArgs::StoreDocOption::None;
-    if (args->oplogSlots.empty() && setNeedsRetryImageOplogField && isRetryableWrite(opCtx)) {
-        onUpdateArgs.retryableFindAndModifyLocation =
-            RetryableFindAndModifyLocation::kSideCollection;
-        // If the update is part of a retryable write and we expect to be storing the pre- or
-        // post-image in a side collection, then we must reserve oplog slots in advance. We
-        // expect to use the reserved oplog slots as follows, where TS is the greatest
-        // timestamp of 'oplogSlots':
-        // TS - 1: Tenant migrations and resharding will forge no-op image oplog entries and set
-        //         the entry timestamps to TS - 1.
-        // TS:     The timestamp given to the update oplog entry.
-        args->oplogSlots = reserveOplogSlotsForRetryableFindAndModify(opCtx);
-    } else {
-        // Retryable findAndModify commands should not reserve oplog slots before entering this
-        // function since tenant migrations and resharding rely on always being able to set
-        // timestamps of forged pre- and post- image entries to timestamp of findAndModify - 1.
-        invariant(!(isRetryableWrite(opCtx) && setNeedsRetryImageOplogField));
-    }
-
-    RecordData oldRecordData(oldDoc.value().objdata(), oldDoc.value().objsize());
-    StatusWith<RecordData> recordData =
-        _shared->_recordStore->updateWithDamages(opCtx, loc, oldRecordData, damageSource, damages);
-    if (!recordData.isOK())
-        return recordData.getStatus();
-    BSONObj newDoc = std::move(recordData.getValue()).releaseToBson().getOwned();
-
-    args->updatedDoc = newDoc;
-    args->changeStreamPreAndPostImagesEnabledForCollection =
-        isChangeStreamPreAndPostImagesEnabled();
-
-    if (indexesAffected) {
-        int64_t keysInserted = 0;
-        int64_t keysDeleted = 0;
-
-        uassertStatusOK(_indexCatalog->updateRecord(opCtx,
-                                                    {this, CollectionPtr::NoYieldTag{}},
-                                                    oldDoc.value(),
-                                                    args->updatedDoc,
-                                                    loc,
-                                                    &keysInserted,
-                                                    &keysDeleted));
-
-        if (opDebug) {
-            opDebug->additiveMetrics.incrementKeysInserted(keysInserted);
-            opDebug->additiveMetrics.incrementKeysDeleted(keysDeleted);
-            // 'opDebug' may be deleted at rollback time in case of multi-document transaction.
-            if (!opCtx->inMultiDocumentTransaction()) {
-                opCtx->recoveryUnit()->onRollback([opDebug, keysInserted, keysDeleted]() {
-                    opDebug->additiveMetrics.incrementKeysInserted(-keysInserted);
-                    opDebug->additiveMetrics.incrementKeysDeleted(-keysDeleted);
-                });
-            }
-        }
-    }
-
-    opCtx->getServiceContext()->getOpObserver()->onUpdate(opCtx, onUpdateArgs);
-    return newDoc;
 }
 
 bool CollectionImpl::isTemporary() const {
@@ -1718,44 +1422,65 @@ bool CollectionImpl::isIndexMultikey(OperationContext* opCtx,
                                      StringData indexName,
                                      MultikeyPaths* multikeyPaths,
                                      int indexOffset) const {
-    auto isMultikey = [this, multikeyPaths, indexName, indexOffset](
-                          const BSONCollectionCatalogEntry::MetaData& metadata) {
-        int offset = indexOffset;
-        if (offset < 0) {
-            offset = metadata.findIndexOffset(indexName);
-            invariant(offset >= 0,
-                      str::stream() << "cannot get multikey for index " << indexName << " @ "
-                                    << getCatalogId() << " : " << metadata.toBSON());
-        } else {
-            invariant(offset < int(metadata.indexes.size()),
-                      str::stream()
-                          << "out of bounds index offset for multikey info " << indexName << " @ "
-                          << getCatalogId() << " : " << metadata.toBSON() << "; offset : " << offset
-                          << " ; actual : " << metadata.findIndexOffset(indexName));
-            invariant(indexName == metadata.indexes[offset].nameStringData(),
-                      str::stream()
-                          << "invalid index offset for multikey info " << indexName << " @ "
-                          << getCatalogId() << " : " << metadata.toBSON() << "; offset : " << offset
-                          << " ; actual : " << metadata.findIndexOffset(indexName));
-        }
+    int offset = indexOffset;
+    if (offset < 0) {
+        offset = _metadata->findIndexOffset(indexName);
+        invariant(offset >= 0,
+                  str::stream() << "cannot get multikey for index " << indexName << " @ "
+                                << getCatalogId() << " : " << _metadata->toBSON());
+    } else {
+        invariant(offset < int(_metadata->indexes.size()),
+                  str::stream() << "out of bounds index offset for multikey info " << indexName
+                                << " @ " << getCatalogId() << " : " << _metadata->toBSON()
+                                << "; offset : " << offset
+                                << " ; actual : " << _metadata->findIndexOffset(indexName));
+        invariant(indexName == _metadata->indexes[offset].nameStringData(),
+                  str::stream() << "invalid index offset for multikey info " << indexName << " @ "
+                                << getCatalogId() << " : " << _metadata->toBSON()
+                                << "; offset : " << offset
+                                << " ; actual : " << _metadata->findIndexOffset(indexName));
+    }
 
-        const auto& index = metadata.indexes[offset];
-        stdx::lock_guard lock(index.multikeyMutex);
-        if (multikeyPaths && !index.multikeyPaths.empty()) {
-            *multikeyPaths = index.multikeyPaths;
-        }
-
-        return index.multikey;
-    };
-
+    // If we have uncommitted multikey writes we need to check here to read our own writes
     const auto& uncommittedMultikeys = UncommittedMultikey::get(opCtx).resources();
     if (uncommittedMultikeys) {
         if (auto it = uncommittedMultikeys->find(this); it != uncommittedMultikeys->end()) {
-            return isMultikey(it->second);
+            const auto& index = it->second.indexes[offset];
+            if (multikeyPaths && !index.multikeyPaths.empty()) {
+                *multikeyPaths = index.multikeyPaths;
+            }
+            return index.multikey;
         }
     }
 
-    return isMultikey(*_metadata);
+    // Otherwise read from the metadata cache if there are no concurrent multikey writers
+    {
+        const auto& index = _metadata->indexes[offset];
+        // Check for concurrent writers, this can race with writers where it can be set immediately
+        // after checking. This is fine we know that the reader in that case opened its snapshot
+        // before the writer and we do not need to observe its result.
+        if (index.concurrentWriters.load() == 0) {
+            stdx::lock_guard lock(index.multikeyMutex);
+            if (multikeyPaths && !index.multikeyPaths.empty()) {
+                *multikeyPaths = index.multikeyPaths;
+            }
+            return index.multikey;
+        }
+    }
+
+    // We need to read from the durable catalog if there are concurrent multikey writers to avoid
+    // reading between the multikey write committing in the storage engine but before its onCommit
+    // handler made the write visible for readers.
+    auto snapshotMetadata = DurableCatalog::get(opCtx)->getMetaData(opCtx, getCatalogId());
+    int snapshotOffset = snapshotMetadata->findIndexOffset(indexName);
+    invariant(snapshotOffset >= 0,
+              str::stream() << "cannot get multikey for index " << indexName << " @ "
+                            << getCatalogId() << " : " << _metadata->toBSON());
+    const auto& index = snapshotMetadata->indexes[snapshotOffset];
+    if (multikeyPaths && !index.multikeyPaths.empty()) {
+        *multikeyPaths = index.multikeyPaths;
+    }
+    return index.multikey;
 }
 
 bool CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
@@ -1763,31 +1488,31 @@ bool CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
                                         const MultikeyPaths& multikeyPaths,
                                         int indexOffset) const {
 
-    auto setMultikey = [this, indexName, multikeyPaths, indexOffset](
-                           const BSONCollectionCatalogEntry::MetaData& metadata) {
-        int offset = indexOffset;
-        if (offset < 0) {
-            offset = metadata.findIndexOffset(indexName);
-            invariant(offset >= 0,
-                      str::stream() << "cannot set multikey for index " << indexName << " @ "
-                                    << getCatalogId() << " : " << metadata.toBSON());
-        } else {
-            invariant(offset < int(metadata.indexes.size()),
-                      str::stream()
-                          << "out of bounds index offset for multikey update" << indexName << " @ "
-                          << getCatalogId() << " : " << metadata.toBSON() << "; offset : " << offset
-                          << " ; actual : " << metadata.findIndexOffset(indexName));
-            invariant(indexName == metadata.indexes[offset].nameStringData(),
-                      str::stream()
-                          << "invalid index offset for multikey update " << indexName << " @ "
-                          << getCatalogId() << " : " << metadata.toBSON() << "; offset : " << offset
-                          << " ; actual : " << metadata.findIndexOffset(indexName));
-        }
+    int offset = indexOffset;
+    if (offset < 0) {
+        offset = _metadata->findIndexOffset(indexName);
+        invariant(offset >= 0,
+                  str::stream() << "cannot set multikey for index " << indexName << " @ "
+                                << getCatalogId() << " : " << _metadata->toBSON());
+    } else {
+        invariant(offset < int(_metadata->indexes.size()),
+                  str::stream() << "out of bounds index offset for multikey update" << indexName
+                                << " @ " << getCatalogId() << " : " << _metadata->toBSON()
+                                << "; offset : " << offset
+                                << " ; actual : " << _metadata->findIndexOffset(indexName));
+        invariant(indexName == _metadata->indexes[offset].nameStringData(),
+                  str::stream() << "invalid index offset for multikey update " << indexName << " @ "
+                                << getCatalogId() << " : " << _metadata->toBSON()
+                                << "; offset : " << offset
+                                << " ; actual : " << _metadata->findIndexOffset(indexName));
+    }
 
+    auto setMultikey = [offset,
+                        multikeyPaths](const BSONCollectionCatalogEntry::MetaData& metadata) {
         auto* index = &metadata.indexes[offset];
         stdx::lock_guard lock(index->multikeyMutex);
 
-        auto tracksPathLevelMultikeyInfo = !metadata.indexes[offset].multikeyPaths.empty();
+        auto tracksPathLevelMultikeyInfo = !index->multikeyPaths.empty();
         if (!tracksPathLevelMultikeyInfo) {
             invariant(multikeyPaths.empty());
 
@@ -1803,7 +1528,7 @@ bool CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
 
         // We are tracking path-level multikey information for this index.
         invariant(!multikeyPaths.empty());
-        invariant(multikeyPaths.size() == metadata.indexes[offset].multikeyPaths.size());
+        invariant(multikeyPaths.size() == index->multikeyPaths.size());
 
         index->multikey = true;
 
@@ -1842,11 +1567,31 @@ bool CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
     }
     BSONCollectionCatalogEntry::MetaData* metadata = nullptr;
     bool hasSetMultikey = false;
+
     if (auto it = uncommittedMultikeys->find(this); it != uncommittedMultikeys->end()) {
         metadata = &it->second;
         hasSetMultikey = setMultikey(*metadata);
     } else {
-        BSONCollectionCatalogEntry::MetaData metadataLocal(*_metadata);
+        // First time this OperationContext needs to change multikey information for this
+        // collection. We cannot use the cached metadata in this collection as we may have just
+        // committed a multikey change concurrently to the storage engine without being able to
+        // observe it if its onCommit handlers haven't run yet.
+        auto metadataLocal = *DurableCatalog::get(opCtx)->getMetaData(opCtx, getCatalogId());
+        // When reading from the durable catalog the index offsets are different because when
+        // removing indexes in-memory just zeros out the slot instead of actually removing it. We
+        // must adjust the entries so they match how they are stored in _metadata so we can rely on
+        // the index offsets being stable. The order of valid indexes are the same, so we can
+        // iterate from the end and move them into the right positions.
+        int localIdx = metadataLocal.indexes.size() - 1;
+        metadataLocal.indexes.resize(_metadata->indexes.size());
+        for (int i = _metadata->indexes.size() - 1; i >= 0 && localIdx != i; --i) {
+            if (_metadata->indexes[i].isPresent()) {
+                metadataLocal.indexes[i] = std::move(metadataLocal.indexes[localIdx]);
+                metadataLocal.indexes[localIdx] = {};
+                --localIdx;
+            }
+        }
+
         hasSetMultikey = setMultikey(metadataLocal);
         if (hasSetMultikey) {
             metadata = &uncommittedMultikeys->emplace(this, std::move(metadataLocal)).first->second;
@@ -1861,8 +1606,44 @@ bool CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
 
     DurableCatalog::get(opCtx)->putMetaData(opCtx, getCatalogId(), *metadata);
 
+    // RAII Helper object to ensure we decrement the concurrent counter if and only if we
+    // incremented it in a preCommit handler.
+    class ConcurrentMultikeyWriteTracker {
+    public:
+        ConcurrentMultikeyWriteTracker(
+            std::shared_ptr<const BSONCollectionCatalogEntry::MetaData> meta, int indexOffset)
+            : metadata(std::move(meta)), offset(indexOffset) {}
+
+        ~ConcurrentMultikeyWriteTracker() {
+            if (hasIncremented) {
+                metadata->indexes[offset].concurrentWriters.fetchAndSubtract(1);
+            }
+        }
+
+        void preCommit() {
+            metadata->indexes[offset].concurrentWriters.fetchAndAdd(1);
+            hasIncremented = true;
+        }
+
+    private:
+        std::shared_ptr<const BSONCollectionCatalogEntry::MetaData> metadata;
+        int offset;
+        bool hasIncremented = false;
+    };
+
+    auto concurrentWriteTracker =
+        std::make_shared<ConcurrentMultikeyWriteTracker>(_metadata, offset);
+
+    // Mark this index that there is an ongoing multikey write. This forces readers to read from the
+    // durable catalog to determine if the index is multikey or not.
+    opCtx->recoveryUnit()->registerPreCommitHook(
+        [concurrentWriteTracker](OperationContext*) { concurrentWriteTracker->preCommit(); });
+
+    // Capture a reference to 'concurrentWriteTracker' to extend the lifetime of this object until
+    // commiting/rolling back the transaction is fully complete.
     opCtx->recoveryUnit()->onCommit(
-        [this, uncommittedMultikeys, setMultikey = std::move(setMultikey)](auto ts) {
+        [this, uncommittedMultikeys, setMultikey = std::move(setMultikey), concurrentWriteTracker](
+            auto ts) {
             // Merge in changes to this index, other indexes may have been updated since we made our
             // copy. Don't check for result as another thread could be setting multikey at the same
             // time

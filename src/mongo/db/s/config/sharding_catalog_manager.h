@@ -359,7 +359,8 @@ public:
      */
     void splitOrMarkJumbo(OperationContext* opCtx,
                           const NamespaceString& nss,
-                          const BSONObj& minKey);
+                          const BSONObj& minKey,
+                          boost::optional<int64_t> optMaxChunkSizeBytes);
 
     /**
      * In a transaction, sets the 'allowMigrations' to the requested state and bumps the collection
@@ -426,19 +427,6 @@ public:
     void refineCollectionShardKey(OperationContext* opCtx,
                                   const NamespaceString& nss,
                                   const ShardKeyPattern& newShardKey);
-
-    /**
-     * Runs a replacement update on config.collections for the collection entry for 'nss' in a
-     * transaction with 'txnNumber'. 'coll' is used as the replacement doc.
-     *
-     * Throws exception on errors.
-     */
-    void updateShardingCatalogEntryForCollectionInTxn(OperationContext* opCtx,
-                                                      const NamespaceString& nss,
-                                                      const CollectionType& coll,
-                                                      bool upsert,
-                                                      TxnNumber txnNumber);
-
 
     void configureCollectionBalancing(OperationContext* opCtx,
                                       const NamespaceString& nss,
@@ -545,6 +533,11 @@ public:
                               bool force,
                               const Timestamp& validAfter);
 
+    /**
+     * Creates config.settings (if needed) and adds a schema to the collection.
+     */
+    Status upgradeConfigSettings(OperationContext* opCtx);
+
 private:
     /**
      * Performs the necessary checks for version compatibility and creates a new config.version
@@ -556,6 +549,11 @@ private:
      * Builds all the expected indexes on the config server.
      */
     Status _initConfigIndexes(OperationContext* opCtx);
+
+    /**
+     * Creates config.settings (if needed) and adds a schema to the collection.
+     */
+    Status _initConfigSettings(OperationContext* opCtx);
 
     /**
      * Ensure that config.collections exists upon configsvr startup
@@ -661,28 +659,34 @@ private:
      * Given a vector of cluster parameters in disk format, sets them locally.
      */
     void _setClusterParametersLocally(OperationContext* opCtx,
+                                      const boost::optional<TenantId>& tenantId,
                                       const std::vector<BSONObj>& parameters);
 
     /**
      * Gets the cluster parameters set on the shard and then saves them locally.
      */
-    void _pullClusterParametersFromNewShard(OperationContext* opCtx,
-                                            RemoteCommandTargeter* targeter);
+    void _pullClusterParametersFromNewShard(OperationContext* opCtx, Shard* shard);
 
     /**
-     * Clean all possible leftover cluster parameters on the new added shard and sets the ones
-     * stored on the config server.
+     * Remove all existing cluster parameters set on the shard.
      */
-    void _pushClusterParametersToNewShard(OperationContext* opCtx,
-                                          RemoteCommandTargeter* targeter,
-                                          const std::vector<BSONObj>& clusterParameters);
+    void _removeAllClusterParametersFromShard(OperationContext* opCtx, Shard* shard);
+
+    /**
+     * Remove all existing cluster parameters on the new added shard and sets the ones stored on the
+     * config server.
+     */
+    void _pushClusterParametersToNewShard(
+        OperationContext* opCtx,
+        Shard* shard,
+        const TenantIdMap<std::vector<BSONObj>>& allClusterParameters);
 
     /**
      * Determines whether to absorb the cluster parameters on the newly added shard (if we're
      * converting from a replica set to a sharded cluster) or set the cluster parameters stored on
      * the config server in the newly added shard.
      */
-    void _standardizeClusterParameters(OperationContext* opCtx, RemoteCommandTargeter* targeter);
+    void _standardizeClusterParameters(OperationContext* opCtx, Shard* shard);
 
 
     /**
@@ -693,7 +697,8 @@ private:
         const NamespaceString& nss,
         std::shared_ptr<const ChunkType> migratedChunk,
         std::shared_ptr<const std::vector<ChunkType>> splitChunks,
-        std::shared_ptr<ChunkType> controlChunk);
+        std::shared_ptr<ChunkType> controlChunk,
+        const ShardId& donorShardId);
     /**
      * Use the internal transaction API to remove a shard.
      */

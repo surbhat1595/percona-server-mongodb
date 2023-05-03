@@ -34,6 +34,7 @@
 
 #include <fmt/format.h>
 
+#include "mongo/base/shim.h"
 #include "mongo/db/catalog/collection_write_path.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/index_catalog.h"
@@ -49,6 +50,7 @@
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/exec/write_stage_common.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/ops/update.h"
@@ -170,10 +172,6 @@ auto performReadWithNoTimestampDBDirectClient(OperationContext* opCtx, Callable&
     ReadSourceScope readSourceScope(opCtx, RecoveryUnit::ReadSource::kNoTimestamp);
 
     DBDirectClient client(opCtx);
-    // If the 'opCtx' is marked as "in multi document transaction", the read done by 'callable'
-    // would acquire the global lock in the IX mode. That upconvert would require a flow control
-    // ticket to be obtained.
-    FlowControl::Bypass flowControlBypass(opCtx);
     return callable(&client);
 }
 
@@ -201,11 +199,6 @@ struct ActiveTransactionHistory {
 ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
                                                        const LogicalSessionId& lsid,
                                                        bool fetchOplogEntries) {
-    // FlowControl is only impacted when a MODE_IX global lock is acquired. If we are in a
-    // multi-document transaction, we must acquire a MODE_IX global lock. Prevent obtaining a flow
-    // control ticket while in a mutli-document transaction.
-    FlowControl::Bypass flowControlBypass(opCtx);
-
     // Storage engine operations require at a least global MODE_IS lock. In multi-document
     // transactions, storage opeartions require at least a global MODE_IX lock. Prevent lock
     // upgrading in the case of a multi-document transaction.
@@ -460,13 +453,14 @@ void updateSessionEntry(OperationContext* opCtx,
 
     // Specify indexesAffected = false because the sessions collection has two indexes: {_id: 1} and
     // {parentLsid: 1, _id.txnNumber: 1, _id: 1}, and none of the fields are mutable.
-    collection->updateDocument(opCtx,
-                               recordId,
-                               Snapshotted<BSONObj>(startingSnapshotId, originalDoc),
-                               updateMod,
-                               false, /* indexesAffected */
-                               nullptr,
-                               &args);
+    collection_internal::updateDocument(opCtx,
+                                        *collection,
+                                        recordId,
+                                        Snapshotted<BSONObj>(startingSnapshotId, originalDoc),
+                                        updateMod,
+                                        false, /* indexesAffected */
+                                        nullptr,
+                                        &args);
 
     wuow.commit();
 }
@@ -479,6 +473,21 @@ void updateSessionEntry(OperationContext* opCtx,
 //      code will be thrown, which will cause the write to not commit; if not specified, the write
 //      will be allowed to commit.
 MONGO_FAIL_POINT_DEFINE(onPrimaryTransactionalWrite);
+
+/**
+ * Returns true if we are running retryable write or retryable internal multi-document transaction.
+ */
+bool writeStageCommonIsRetryableWriteImpl(OperationContext* opCtx) {
+    if (!opCtx->writesAreReplicated() || !opCtx->isRetryableWrite()) {
+        return false;
+    }
+    auto txnParticipant = TransactionParticipant::get(opCtx);
+    return txnParticipant &&
+        (!opCtx->inMultiDocumentTransaction() || txnParticipant.transactionIsOpen());
+}
+
+auto isRetryableWriteRegistration = MONGO_WEAK_FUNCTION_REGISTRATION(
+    write_stage_common::isRetryableWrite, writeStageCommonIsRetryableWriteImpl);
 
 }  // namespace
 

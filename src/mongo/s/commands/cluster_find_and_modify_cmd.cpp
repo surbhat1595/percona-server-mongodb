@@ -58,6 +58,7 @@
 #include "mongo/s/commands/strategy.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/multi_statement_transaction_requests_sender.h"
+#include "mongo/s/query_analysis_sampler_util.h"
 #include "mongo/s/session_catalog_router.h"
 #include "mongo/s/stale_exception.h"
 #include "mongo/s/transaction_router.h"
@@ -437,6 +438,7 @@ public:
                 boost::none,
                 nss,
                 applyReadWriteConcern(opCtx, false, false, explainCmd),
+                true /* isExplain */,
                 &bob);
         } else {
             _runCommand(opCtx,
@@ -445,6 +447,7 @@ public:
                         cm.dbVersion(),
                         nss,
                         applyReadWriteConcern(opCtx, false, false, explainCmd),
+                        true /* isExplain */,
                         &bob);
         }
 
@@ -516,6 +519,7 @@ public:
                 boost::none,
                 nss,
                 applyReadWriteConcern(opCtx, this, cmdObjForShard),
+                false /* isExplain */,
                 &result);
         } else {
             _runCommand(opCtx,
@@ -524,6 +528,7 @@ public:
                         cm.dbVersion(),
                         nss,
                         applyReadWriteConcern(opCtx, this, cmdObjForShard),
+                        false /* isExplain */,
                         &result);
         }
 
@@ -548,6 +553,7 @@ private:
                             const boost::optional<DatabaseVersion>& dbVersion,
                             const NamespaceString& nss,
                             const BSONObj& cmdObj,
+                            bool isExplain,
                             BSONObjBuilder* result) {
         auto txnRouter = TransactionRouter::get(opCtx);
         bool isRetryableWrite = opCtx->getTxnNumber() && !txnRouter;
@@ -555,6 +561,13 @@ private:
         const auto response = [&] {
             std::vector<AsyncRequestsSender::Request> requests;
             BSONObj filteredCmdObj = CommandHelpers::filterCommandRequestForPassthrough(cmdObj);
+            if (!isExplain) {
+                if (auto sampleId = analyze_shard_key::tryGenerateSampleId(opCtx, nss)) {
+                    filteredCmdObj = analyze_shard_key::appendSampleId(std::move(filteredCmdObj),
+                                                                       std::move(*sampleId));
+                }
+            }
+
             BSONObj cmdObjWithVersions(std::move(filteredCmdObj));
             if (dbVersion) {
                 cmdObjWithVersions = appendDbVersionIfPresent(cmdObjWithVersions, *dbVersion);
@@ -671,8 +684,14 @@ private:
             // cmdObj.  The transaction commit will still use the WC, because it uses the WC
             // from the opCtx (which has been set previously in Strategy).
             documentShardKeyUpdateUtil::startTransactionForShardKeyUpdate(opCtx);
-            _runCommand(
-                opCtx, shardId, shardVersion, dbVersion, nss, stripWriteConcern(cmdObj), result);
+            _runCommand(opCtx,
+                        shardId,
+                        shardVersion,
+                        dbVersion,
+                        nss,
+                        stripWriteConcern(cmdObj),
+                        false /* isExplain */,
+                        result);
             uassertStatusOK(getStatusFromCommandResult(result->asTempObj()));
             auto commitResponse =
                 documentShardKeyUpdateUtil::commitShardKeyUpdateTransaction(opCtx);

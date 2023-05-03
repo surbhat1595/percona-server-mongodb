@@ -46,7 +46,9 @@
 #include "mongo/db/profile_filter.h"
 #include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/query/plan_summary_stats.h"
+#include "mongo/db/query/telemetry.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/stats/timer_stats.h"
 #include "mongo/db/storage/storage_engine_parameters_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/metadata/client_metadata.h"
@@ -54,10 +56,10 @@
 #include "mongo/transport/service_executor.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/log_with_sampling.h"
+#include "mongo/util/namespace_string_util.h"
 #include "mongo/util/net/socket_utils.h"
 #include "mongo/util/str.h"
 #include "mongo/util/system_tick_source.h"
-#include <mongo/db/stats/timer_stats.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -66,6 +68,18 @@ namespace {
 
 auto& oplogGetMoreStats = makeServerStatusMetric<TimerStats>("repl.network.oplogGetMoresProcessed");
 
+BSONObj serializeDollarDbInOpDescription(boost::optional<TenantId> tenantId,
+                                         const BSONObj& cmdObj) {
+    auto db = cmdObj["$db"];
+    if (!db) {
+        return cmdObj;
+    }
+
+    auto dbName = DatabaseNameUtil::deserialize(tenantId, db.String());
+    auto newCmdObj =
+        cmdObj.addField(BSON("$db" << DatabaseNameUtil::serialize(dbName)).firstElement());
+    return newCmdObj;
+}
 }  // namespace
 
 /**
@@ -256,13 +270,17 @@ void CurOp::reportCurrentOpForClient(OperationContext* opCtx,
 #endif
 }
 
+void CurOp::setOpDescription_inlock(const BSONObj& opDescription) {
+    _opDescription = serializeDollarDbInOpDescription(_nss.tenantId(), opDescription);
+}
+
 void CurOp::setGenericCursor_inlock(GenericCursor gc) {
     _genericCursor = std::move(gc);
 }
 
 void CurOp::_finishInit(OperationContext* opCtx, CurOpStack* stack) {
     _stack = stack;
-    _tickSource = SystemTickSource::get();
+    _tickSource = globalSystemTickSource();
 
     if (opCtx) {
         _stack->push(opCtx, this);
@@ -292,7 +310,7 @@ CurOp::~CurOp() {
 }
 
 void CurOp::setGenericOpRequestDetails(OperationContext* opCtx,
-                                       const NamespaceString& nss,
+                                       NamespaceString nss,
                                        const Command* command,
                                        BSONObj cmdObj,
                                        NetworkOp op) {
@@ -306,9 +324,9 @@ void CurOp::setGenericOpRequestDetails(OperationContext* opCtx,
     _isCommand = _debug.iscommand = isCommand;
     _logicalOp = _debug.logicalOp = logicalOp;
     _networkOp = _debug.networkOp = op;
-    _opDescription = cmdObj;
+    _opDescription = serializeDollarDbInOpDescription(nss.tenantId(), cmdObj);
     _command = command;
-    _ns = nss.ns();
+    _nss = std::move(nss);
 }
 
 void CurOp::setMessage_inlock(StringData message) {
@@ -332,8 +350,12 @@ ProgressMeter& CurOp::setProgress_inlock(StringData message,
     return _progressMeter;
 }
 
-void CurOp::setNS_inlock(StringData ns) {
-    _ns = ns.toString();
+void CurOp::setNS_inlock(NamespaceString nss) {
+    _nss = std::move(nss);
+}
+
+void CurOp::setNS_inlock(const DatabaseName& dbName) {
+    _nss = NamespaceString(dbName);
 }
 
 TickSource::Tick CurOp::startTime() {
@@ -381,10 +403,14 @@ Microseconds CurOp::computeElapsedTimeTotal(TickSource::Tick startTime,
     return _tickSource->ticksTo<Microseconds>(endTime - startTime);
 }
 
-void CurOp::enter_inlock(const char* ns, int dbProfileLevel) {
+void CurOp::enter_inlock(NamespaceString nss, int dbProfileLevel) {
     ensureStarted();
-    _ns = ns;
+    _nss = std::move(nss);
     raiseDbProfileLevel(dbProfileLevel);
+}
+
+void CurOp::enter_inlock(const DatabaseName& dbName, int dbProfileLevel) {
+    enter_inlock(NamespaceString(dbName), dbProfileLevel);
 }
 
 void CurOp::raiseDbProfileLevel(int dbProfileLevel) {
@@ -409,8 +435,9 @@ bool CurOp::completeAndLogOperation(OperationContext* opCtx,
     // Obtain the total execution time of this operation.
     done();
     _debug.executionTime = duration_cast<Microseconds>(elapsedTimeExcludingPauses());
-
     const auto executionTimeMillis = durationCount<Milliseconds>(_debug.executionTime);
+
+    telemetry::collectTelemetry(opCtx, CurOp::get(opCtx)->debug());
 
     if (_debug.isReplOplogGetMore) {
         oplogGetMoreStats.recordMillis(executionTimeMillis);
@@ -494,6 +521,10 @@ bool CurOp::completeAndLogOperation(OperationContext* opCtx,
     if (_dbprofile <= 0)
         return false;
     return shouldProfileAtLevel1;
+}
+
+std::string CurOp::getNS() const {
+    return NamespaceStringUtil::serialize(_nss);
 }
 
 // Failpoints after commands are logged.
@@ -639,17 +670,31 @@ void CurOp::reportState(OperationContext* opCtx, BSONObjBuilder* builder, bool t
     }
 
     builder->append("op", logicalOpToString(_logicalOp));
-    builder->append("ns", _ns);
+    builder->append("ns", NamespaceStringUtil::serialize(_nss));
 
     // When the currentOp command is run, it returns a single response object containing all current
     // operations; this request will fail if the response exceeds the 16MB document limit. By
     // contrast, the $currentOp aggregation stage does not have this restriction. If 'truncateOps'
     // is true, limit the size of each op to 1000 bytes. Otherwise, do not truncate.
     const boost::optional<size_t> maxQuerySize{truncateOps, 1000};
-
     appendAsObjOrString(
         "command", appendCommentField(opCtx, _opDescription), maxQuerySize, builder);
 
+    switch (_debug.queryFramework) {
+        case PlanExecutor::QueryFramework::kClassicOnly:
+        case PlanExecutor::QueryFramework::kClassicHybrid:
+            builder->append("queryFramework", "classic");
+            break;
+        case PlanExecutor::QueryFramework::kSBEOnly:
+        case PlanExecutor::QueryFramework::kSBEHybrid:
+            builder->append("queryFramework", "sbe");
+            break;
+        case PlanExecutor::QueryFramework::kCQF:
+            builder->append("queryFramework", "cqf");
+            break;
+        case PlanExecutor::QueryFramework::kUnknown:
+            break;
+    }
 
     if (!_planSummary.empty()) {
         builder->append("planSummary", _planSummary);
@@ -892,10 +937,20 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->addDeepCopy("planCacheKey", zeroPaddedHex(*planCacheKey));
     }
 
-    if (classicEngineUsed) {
-        pAttrs->add("queryFramework", classicEngineUsed.value() ? "classic" : "sbe");
-    } else if (cqfUsed) {
-        pAttrs->add("queryFramework", "cqf");
+    switch (queryFramework) {
+        case PlanExecutor::QueryFramework::kClassicOnly:
+        case PlanExecutor::QueryFramework::kClassicHybrid:
+            pAttrs->add("queryFramework", "classic");
+            break;
+        case PlanExecutor::QueryFramework::kSBEOnly:
+        case PlanExecutor::QueryFramework::kSBEHybrid:
+            pAttrs->add("queryFramework", "sbe");
+            break;
+        case PlanExecutor::QueryFramework::kCQF:
+            pAttrs->add("queryFramework", "cqf");
+            break;
+        case PlanExecutor::QueryFramework::kUnknown:
+            break;
     }
 
     if (!errInfo.isOK()) {
@@ -981,6 +1036,7 @@ void OpDebug::report(OperationContext* opCtx,
     }
 
     pAttrs->add("durationMillis", durationCount<Milliseconds>(executionTime));
+    pAttrs->add("planningTimeMicros", durationCount<Microseconds>(planningTime));
 }
 
 #define OPDEBUG_APPEND_NUMBER2(b, x, y) \
@@ -1068,10 +1124,20 @@ void OpDebug::append(OperationContext* opCtx,
         b.append("planCacheKey", zeroPaddedHex(*planCacheKey));
     }
 
-    if (classicEngineUsed) {
-        b.append("queryFramework", classicEngineUsed.value() ? "classic" : "sbe");
-    } else if (cqfUsed) {
-        b.append("queryFramework", "cqf");
+    switch (queryFramework) {
+        case PlanExecutor::QueryFramework::kClassicOnly:
+        case PlanExecutor::QueryFramework::kClassicHybrid:
+            b.append("queryFramework", "classic");
+            break;
+        case PlanExecutor::QueryFramework::kSBEOnly:
+        case PlanExecutor::QueryFramework::kSBEHybrid:
+            b.append("queryFramework", "sbe");
+            break;
+        case PlanExecutor::QueryFramework::kCQF:
+            b.append("queryFramework", "cqf");
+            break;
+        case PlanExecutor::QueryFramework::kUnknown:
+            break;
     }
 
     {
@@ -1138,6 +1204,8 @@ void OpDebug::append(OperationContext* opCtx,
              durationCount<Milliseconds>(executionTime) >= serverGlobalParams.slowMS.load()
                  ? 1
                  : serverGlobalParams.rateLimit.load());
+    b.appendNumber("planningTimeMicros", durationCount<Microseconds>(planningTime));
+
     if (!curop.getPlanSummary().empty()) {
         b.append("planSummary", curop.getPlanSummary());
     }
@@ -1342,10 +1410,20 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
     });
 
     addIfNeeded("queryFramework", [](auto field, auto args, auto& b) {
-        if (args.op.classicEngineUsed) {
-            b.append("queryFramework", args.op.classicEngineUsed.value() ? "classic" : "sbe");
-        } else if (args.op.cqfUsed) {
-            b.append("queryFramework", "cqf");
+        switch (args.op.queryFramework) {
+            case PlanExecutor::QueryFramework::kClassicOnly:
+            case PlanExecutor::QueryFramework::kClassicHybrid:
+                b.append("queryFramework", "classic");
+                break;
+            case PlanExecutor::QueryFramework::kSBEOnly:
+            case PlanExecutor::QueryFramework::kSBEHybrid:
+                b.append("queryFramework", "sbe");
+                break;
+            case PlanExecutor::QueryFramework::kCQF:
+                b.append("queryFramework", "cqf");
+                break;
+            case PlanExecutor::QueryFramework::kUnknown:
+                break;
         }
     });
 
@@ -1445,6 +1523,10 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
                      : serverGlobalParams.rateLimit.load());
     });
 
+    addIfNeeded("planningTimeMicros", [](auto field, auto args, auto& b) {
+        b.appendNumber(field, durationCount<Microseconds>(args.op.planningTime));
+    });
+
     addIfNeeded("planSummary", [](auto field, auto args, auto& b) {
         if (!args.curop.getPlanSummary().empty()) {
             b.append(field, args.curop.getPlanSummary());
@@ -1495,6 +1577,7 @@ void OpDebug::setPlanSummaryMetrics(const PlanSummaryStats& planSummaryStats) {
     keysSorted = planSummaryStats.keysSorted;
     fromMultiPlanner = planSummaryStats.fromMultiPlanner;
     fromPlanCache = planSummaryStats.fromPlanCache;
+    planningTime = planSummaryStats.planningTimeMicros;
     replanReason = planSummaryStats.replanReason;
 }
 

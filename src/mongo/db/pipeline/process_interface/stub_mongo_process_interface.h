@@ -124,7 +124,8 @@ public:
     Status appendStorageStats(OperationContext* opCtx,
                               const NamespaceString& nss,
                               const StorageStatsSpec& spec,
-                              BSONObjBuilder* builder) const override {
+                              BSONObjBuilder* builder,
+                              const boost::optional<BSONObj>& filterObj) const override {
         MONGO_UNREACHABLE;
     }
 
@@ -184,11 +185,6 @@ public:
 
     std::unique_ptr<Pipeline, PipelineDeleter> attachCursorSourceToPipelineForLocalRead(
         Pipeline* pipeline) override {
-        MONGO_UNREACHABLE;
-    }
-
-    std::unique_ptr<ShardFilterer> getShardFilterer(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx) const override {
         MONGO_UNREACHABLE;
     }
 

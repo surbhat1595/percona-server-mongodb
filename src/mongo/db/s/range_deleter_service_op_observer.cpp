@@ -35,6 +35,9 @@
 #include "mongo/db/s/range_deleter_service.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
+#include "mongo/logv2/log.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kShardingRangeDeleter
 
 namespace mongo {
 namespace {
@@ -47,16 +50,22 @@ void registerTaskWithOngoingQueriesOnOpLogEntryCommit(OperationContext* opCtx,
         try {
             AutoGetCollection autoColl(opCtx, rdt.getNss(), MODE_IS);
             auto waitForActiveQueriesToComplete =
-                CollectionShardingRuntime::get(opCtx, rdt.getNss())
+                CollectionShardingRuntime::assertCollectionLockedAndAcquire(
+                    opCtx, rdt.getNss(), CSRAcquisitionMode::kShared)
                     ->getOngoingQueriesCompletionFuture(rdt.getCollectionUuid(), rdt.getRange())
                     .semi();
             (void)RangeDeleterService::get(opCtx)->registerTask(
                 rdt, std::move(waitForActiveQueriesToComplete));
         } catch (const DBException& ex) {
-            dassert(ex.code() == ErrorCodes::NotYetInitialized,
-                    str::stream() << "No error different from `NotYetInitialized` is expected "
-                                     "to be propagated to the range deleter observer. Got error: "
-                                  << ex.toStatus());
+            if (ex.code() != ErrorCodes::NotYetInitialized &&
+                !ErrorCodes::isA<ErrorCategory::NotPrimaryError>(ex.code())) {
+                LOGV2_WARNING(7092800,
+                              "No error different from `NotYetInitialized` or `NotPrimaryError` "
+                              "category is expected to be propagated to the range deleter "
+                              "observer. Range deletion task not registered.",
+                              "error"_attr = redact(ex),
+                              "task"_attr = rdt);
+            }
         }
     });
 }
@@ -84,7 +93,7 @@ void RangeDeleterServiceOpObserver::onInserts(OperationContext* opCtx,
 
 void RangeDeleterServiceOpObserver::onUpdate(OperationContext* opCtx,
                                              const OplogUpdateEntryArgs& args) {
-    if (args.nss == NamespaceString::kRangeDeletionNamespace) {
+    if (args.coll->ns() == NamespaceString::kRangeDeletionNamespace) {
         const bool pendingFieldIsRemoved = [&] {
             return update_oplog_entry::isFieldRemovedByUpdate(
                        args.updateArgs->update, RangeDeletionTask::kPendingFieldName) ==
@@ -106,20 +115,18 @@ void RangeDeleterServiceOpObserver::onUpdate(OperationContext* opCtx,
 }
 
 void RangeDeleterServiceOpObserver::aboutToDelete(OperationContext* opCtx,
-                                                  NamespaceString const& nss,
-                                                  const UUID& uuid,
+                                                  const CollectionPtr& coll,
                                                   BSONObj const& doc) {
-    if (nss == NamespaceString::kRangeDeletionNamespace) {
+    if (coll->ns() == NamespaceString::kRangeDeletionNamespace) {
         deletedDocumentDecoration(opCtx) = doc;
     }
 }
 
 void RangeDeleterServiceOpObserver::onDelete(OperationContext* opCtx,
-                                             const NamespaceString& nss,
-                                             const UUID& uuid,
+                                             const CollectionPtr& coll,
                                              StmtId stmtId,
                                              const OplogDeleteEntryArgs& args) {
-    if (nss == NamespaceString::kRangeDeletionNamespace) {
+    if (coll->ns() == NamespaceString::kRangeDeletionNamespace) {
         const auto& deletedDoc = deletedDocumentDecoration(opCtx);
 
         auto deletionTask =

@@ -131,6 +131,10 @@ assertNotSupportedByBonsai({find: coll.getName(), filter: {'a.0.b': 5}});
 assertNotSupportedByBonsai({find: coll.getName(), filter: {}, projection: {'a.0': 1}});
 assertNotSupportedByBonsai({find: coll.getName(), filter: {}, projection: {'a.5.c': 0}});
 
+// Positional projection is not supported. Note that this syntax is only possible in the projection
+// of a find command.
+assertNotSupportedByBonsai({find: coll.getName(), filter: {}, projection: {'a.$': 5}}, true);
+
 // Test for unsupported expressions within a branching expression such as $or.
 assertNotSupportedByBonsai({find: coll.getName(), filter: {$or: [{'a.0': 5}, {a: 1}]}});
 assertNotSupportedByBonsai({find: coll.getName(), filter: {$or: [{a: 5}, {a: {$mod: [4, 0]}}]}});
@@ -252,6 +256,12 @@ assert.commandWorked(coll.createIndex({"$**": 1}));
 assertNotSupportedByBonsai({find: coll.getName(), filter: {}});
 assertNotSupportedByBonsai({aggregate: coll.getName(), pipeline: [], cursor: {}});
 
+// TTL index is not supported.
+coll.drop();
+assert.commandWorked(coll.createIndex({a: 1}, {expireAfterSeconds: 50}));
+assertNotSupportedByBonsai({find: coll.getName(), filter: {}});
+assertNotSupportedByBonsai({aggregate: coll.getName(), pipeline: [], cursor: {}});
+
 // Unsupported index with non-simple collation.
 coll.drop();
 assert.commandWorked(coll.createIndex({a: 1}, {collation: {locale: "fr_CA"}}));
@@ -311,6 +321,12 @@ assert.commandWorked(db.createCollection(coll.getName(), {collation: {locale: "f
 assertNotSupportedByBonsai({find: coll.getName(), filter: {}}, false);
 assertNotSupportedByBonsai({aggregate: coll.getName(), pipeline: [], cursor: {}}, false);
 
+// Queries against capped collections are not supported.
+coll.drop();
+assert.commandWorked(db.createCollection(coll.getName(), {capped: true, size: 1000}));
+assertNotSupportedByBonsai({find: coll.getName(), filter: {}}, false);
+assertNotSupportedByBonsai({aggregate: coll.getName(), pipeline: [], cursor: {}}, false);
+
 // Queries over views are supported as long as the resolved pipeline is valid in CQF.
 coll.drop();
 assert.commandWorked(coll.insert({a: 1}));
@@ -338,10 +354,65 @@ assertNotSupportedByBonsai({find: "invalidView", filter: {b: 4}}, false);
 // Test only expression should also fail.
 assertNotSupportedByBonsai({find: "invalidView", filter: {$alwaysFalse: 1}}, true);
 
+// Unsupported commands.
+assertNotSupportedByBonsai({count: coll.getName()}, false);
+assertNotSupportedByBonsai({delete: coll.getName(), deletes: [{q: {}, limit: 1}]}, false);
+assertNotSupportedByBonsai({distinct: coll.getName(), key: "a"}, false);
+assertNotSupportedByBonsai({findAndModify: coll.getName(), update: {$inc: {a: 1}}}, false);
+assertNotSupportedByBonsai({
+    mapReduce: "c",
+    map: function() {
+        emit(this.a, this._id);
+    },
+    reduce: function(_key, vals) {
+        return Array.sum(vals);
+    },
+    out: coll.getName()
+},
+                           false);
+assertNotSupportedByBonsai({update: coll.getName(), updates: [{q: {}, u: {$inc: {a: 1}}}]}, false);
+
+// Pipeline with an ineligible stage and an eligible prefix that could be pushed down to the
+// find layer should not use Bonsai.
+assertNotSupportedByBonsai({
+    aggregate: coll.getName(),
+    pipeline: [{$match: {a: {$gt: 1}}}, {$bucketAuto: {groupBy: "$a", buckets: 5}}],
+    cursor: {}
+},
+                           false);
+
+// Pipeline with an CQF-eligible sub-pipeline.
+// Note: we have to use a failpoint to determine whether we used the CQF codepath because the
+// explain output does not have enough information to deduce the query framework for the
+// subpipeline.
+assert.commandWorked(
+    db.adminCommand({configureFailPoint: 'failConstructingBonsaiExecutor', 'mode': 'alwaysOn'}));
+assert.commandWorked(
+    db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "tryBonsai"}));
+assert.commandWorked(db.runCommand({
+    aggregate: coll.getName(),
+    pipeline: [{
+        $graphLookup: {
+            from: coll.getName(),
+            startWith: "$a",
+            connectFromField: "a",
+            connectToField: "b",
+            as: "c"
+        }
+    }],
+    cursor: {},
+}));
+assert.commandWorked(
+    db.adminCommand({configureFailPoint: 'failConstructingBonsaiExecutor', 'mode': 'off'}));
+
 MongoRunner.stopMongod(conn);
 
 // Restart the mongod and verify that we never use the bonsai optimizer if the feature flag is not
 // set.
+
+// To do this, we modify the TestData directly; this ensures we disable the feature flag even if
+// a variant has enabled it be default.
+TestData.setParameters.featureFlagCommonQueryFramework = false;
 conn = MongoRunner.runMongod();
 assert.neq(null, conn, "mongod was unable to start up");
 

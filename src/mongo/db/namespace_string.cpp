@@ -195,9 +195,15 @@ const NamespaceString NamespaceString::kGlobalIndexClonerNamespace(
 const NamespaceString NamespaceString::kConfigQueryAnalyzersNamespace(NamespaceString::kConfigDb,
                                                                       "queryAnalyzers");
 
+const NamespaceString NamespaceString::kConfigSampledQueriesNamespace(NamespaceString::kConfigDb,
+                                                                      "sampledQueries");
+
+const NamespaceString NamespaceString::kConfigSampledQueriesDiffNamespace(
+    NamespaceString::kConfigDb, "sampledQueriesDiff");
+
 NamespaceString NamespaceString::parseFromStringExpectTenantIdInMultitenancyMode(StringData ns) {
     if (!gMultitenancySupport) {
-        return NamespaceString(ns, boost::none);
+        return NamespaceString(boost::none, ns);
     }
 
     auto tenantDelim = ns.find('_');
@@ -205,11 +211,19 @@ NamespaceString NamespaceString::parseFromStringExpectTenantIdInMultitenancyMode
     // If the first '_' is after the '.' that separates the db and coll names, the '_' is part
     // of the coll name and is not a db prefix.
     if (tenantDelim == std::string::npos || collDelim < tenantDelim) {
-        return NamespaceString(ns, boost::none);
+        return NamespaceString(boost::none, ns);
     }
 
-    const TenantId tenantId(OID(ns.substr(0, tenantDelim)));
-    return NamespaceString(ns.substr(tenantDelim + 1, ns.size() - 1 - tenantDelim), tenantId);
+    auto swOID = OID::parse(ns.substr(0, tenantDelim));
+    if (swOID.getStatus() == ErrorCodes::BadValue) {
+        // If we fail to parse an OID, either the size of the substring is incorrect, or there is an
+        // invalid character. This indicates that the db has the "_" character, but it does not act
+        // as a delimeter for a tenantId prefix.
+        return NamespaceString(boost::none, ns);
+    }
+
+    const TenantId tenantId(swOID.getValue());
+    return NamespaceString(tenantId, ns.substr(tenantDelim + 1, ns.size() - 1 - tenantDelim));
 }
 
 bool NamespaceString::isListCollectionsCursorNS() const {
@@ -487,12 +501,12 @@ bool NamespaceString::isSystemStatsCollection() const {
 }
 
 NamespaceString NamespaceString::makeTimeseriesBucketsNamespace() const {
-    return {db(), kTimeseriesBucketsCollectionPrefix.toString() + coll()};
+    return {dbName(), kTimeseriesBucketsCollectionPrefix.toString() + coll()};
 }
 
 NamespaceString NamespaceString::getTimeseriesViewNamespace() const {
     invariant(isTimeseriesBucketsCollection(), ns());
-    return {db(), coll().substr(kTimeseriesBucketsCollectionPrefix.size())};
+    return {dbName(), coll().substr(kTimeseriesBucketsCollectionPrefix.size())};
 }
 
 bool NamespaceString::isImplicitlyReplicated() const {

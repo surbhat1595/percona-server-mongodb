@@ -92,6 +92,8 @@ Checksum
 Checksums
 CityHash
 CloseHandle
+CmP
+CmPTh
 Cmvz
 Collet
 Comparator
@@ -125,6 +127,7 @@ Decrypt
 DeleteFileW
 Destructor
 Deterministically
+Dxxx
 EACCES
 EAGAIN
 EB
@@ -154,6 +157,7 @@ Encryptors
 Enqueue
 Eron
 Exponentiate
+Exxx
 FALLOC
 FALLTHROUGH
 FH
@@ -350,6 +354,8 @@ PRId
 PRIu
 PRIuXX
 PRNG
+PSD
+PSE
 PTHREAD
 PTR
 PackInputStream
@@ -769,6 +775,7 @@ datalen
 datasets
 datasource
 datastore
+dbar
 dbc
 dbs
 dcalloc
@@ -1103,6 +1110,7 @@ llvm
 loadtext
 loc
 localTime
+localid
 localkey
 localtime
 localvalue
@@ -1434,7 +1442,6 @@ snprintf
 sp
 spinlock
 spinlocks
-sprintf
 src
 srch
 ss

@@ -45,6 +45,7 @@ void RangeDeleterServiceTest::setUp() {
     ShardServerTestFixture::setUp();
     WaitForMajorityService::get(getServiceContext()).startup(getServiceContext());
     opCtx = operationContext();
+    RangeDeleterService::get(opCtx)->onStartup(opCtx);
     RangeDeleterService::get(opCtx)->onStepUpComplete(opCtx, 0L);
     RangeDeleterService::get(opCtx)->_waitForRangeDeleterServiceUp_FOR_TESTING();
 
@@ -116,11 +117,9 @@ void RangeDeleterServiceTest::_setFilteringMetadataByUUID(OperationContext* opCt
     }();
 
     AutoGetCollection autoColl(opCtx, nss, LockMode::MODE_X);
-
-    CollectionShardingRuntime::get(opCtx, nss)->setFilteringMetadata(opCtx, metadata);
-    auto* css = CollectionShardingState::get(opCtx, nss);
-    auto& csr = *checked_cast<CollectionShardingRuntime*>(css);
-    csr.setFilteringMetadata(opCtx, metadata);
+    CollectionShardingRuntime::assertCollectionLockedAndAcquire(
+        opCtx, nss, CSRAcquisitionMode::kExclusive)
+        ->setFilteringMetadata(opCtx, metadata);
 }
 
 /**
@@ -277,12 +276,6 @@ TEST_F(RangeDeleterServiceTest, ScheduledTaskInvalidatedOnStepDown) {
 
     // Manually trigger disabling of the service
     rds->onStepDown();
-    ON_BLOCK_EXIT([&] {
-        // Re-enable the service for clean teardown
-        rds->onStepUpComplete(opCtx, 0L);
-        rds->_waitForRangeDeleterServiceUp_FOR_TESTING();
-    });
-
     try {
         completionFuture.get(opCtx);
     } catch (const ExceptionForCat<ErrorCategory::Interruption>&) {
@@ -295,12 +288,6 @@ TEST_F(RangeDeleterServiceTest, NoActionPossibleIfServiceIsDown) {
 
     // Manually trigger disabling of the service
     rds->onStepDown();
-    ON_BLOCK_EXIT([&] {
-        // Re-enable the service for clean teardown
-        rds->onStepUpComplete(opCtx, 0L);
-        rds->_waitForRangeDeleterServiceUp_FOR_TESTING();
-    });
-
     auto taskWithOngoingQueries = createRangeDeletionTaskWithOngoingQueries(
         uuidCollA, BSON(kShardKey << 0), BSON(kShardKey << 10), CleanWhenEnum::kDelayed);
 
@@ -888,10 +875,6 @@ TEST_F(RangeDeleterServiceTest, WaitForOngoingQueriesInvalidatedOnStepDown) {
 
     // Manually trigger disabling of the service
     rds->onStepDown();
-    ON_BLOCK_EXIT([&] {
-        rds->onStepUpComplete(opCtx, 0L);  // Re-enable the service
-    });
-
     try {
         completionFuture.get(opCtx);
     } catch (const ExceptionForCat<ErrorCategory::Interruption>&) {

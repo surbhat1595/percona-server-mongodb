@@ -35,6 +35,7 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_global_options.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_index_cursor_generic.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_index_util.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/testing_proctor.h"
 
@@ -297,32 +298,8 @@ void WiredTigerIndex::fullValidate(OperationContext* opCtx,
                                    long long* numKeysOut,
                                    IndexValidateResults* fullResults) const {
     dassert(opCtx->lockState()->isReadLocked());
-    if (fullResults && !WiredTigerRecoveryUnit::get(opCtx)->getSessionCache()->isEphemeral()) {
-        int err = WiredTigerUtil::verifyTable(opCtx, _uri, &(fullResults->errors));
-        if (err == EBUSY) {
-            std::string msg = str::stream()
-                << "Could not complete validation of " << _uri << ". "
-                << "This is a transient issue as the collection was actively "
-                   "in use by other operations.";
-
-            LOGV2_WARNING(51781,
-                          "Could not complete validation. This is a transient issue as "
-                          "the collection was actively in use by other operations",
-                          "uri"_attr = _uri);
-            fullResults->warnings.push_back(msg);
-        } else if (err) {
-            std::string msg = str::stream()
-                << "verify() returned " << wiredtiger_strerror(err) << ". "
-                << "This indicates structural damage. "
-                << "Not examining individual index entries.";
-            LOGV2_ERROR(51782,
-                        "verify() returned an error. This indicates structural damage. Not "
-                        "examining individual index entries.",
-                        "error"_attr = wiredtiger_strerror(err));
-            fullResults->errors.push_back(msg);
-            fullResults->valid = false;
-            return;
-        }
+    if (!WiredTigerIndexUtil::validateStructure(opCtx, _uri, fullResults)) {
+        return;
     }
 
     auto cursor = newCursor(opCtx);
@@ -524,6 +501,64 @@ boost::optional<RecordId> WiredTigerIndex::_keyExists(OperationContext* opCtx,
         : boost::none;
 }
 
+boost::optional<RecordId> WiredTigerIndex::_keyExistsBounded(OperationContext* opCtx,
+                                                             WT_CURSOR* c,
+                                                             const KeyString::Value& keyString,
+                                                             size_t sizeWithoutRecordId) {
+    // Given a KeyString KS with RecordId RID appended to the end, set the:
+    // 1. Lower bound (inclusive) to be KS without RID
+    // 2. Upper bound (inclusive) to be
+    //   a. KS with RecordId::maxLong() for KeyFormat::Long
+    //   b. KS with RecordId(FF00) for KeyFormat::String
+    //
+    // For example, KS = "key" and RID = "ABC123". The lower bound is "key" and the upper bound is
+    // "keyFF00".
+    WiredTigerItem prefixKeyItem(keyString.getBuffer(), sizeWithoutRecordId);
+    setKey(c, prefixKeyItem.Get());
+    invariantWTOK(c->bound(c, "bound=lower"), c->session);
+    _setUpperBound(c, keyString, sizeWithoutRecordId);
+    ON_BLOCK_EXIT([c] { invariantWTOK(c->bound(c, "action=clear"), c->session); });
+
+    // The cursor is bounded to a prefix. Doing a next on the un-positioned cursor will position on
+    // the first key that is equal to or more than the prefix.
+    int ret = wiredTigerPrepareConflictRetry(opCtx, [&] { return c->next(c); });
+
+    auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
+    metricsCollector.incrementOneCursorSeek(uri());
+
+    if (ret == WT_NOTFOUND)
+        return boost::none;
+    invariantWTOK(ret, c->session);
+
+    WT_ITEM key;
+    getKey(opCtx, c, &key);
+    if (key.size == sizeWithoutRecordId) {
+        invariant(_rsKeyFormat == KeyFormat::Long);
+
+        // The prefix key is in the index without a RecordId appended to the key, which means that
+        // the RecordId is instead stored in the value.
+        WT_ITEM value;
+        invariantWTOK(c->get_value(c, &value), c->session);
+
+        BufReader reader(value.data, value.size);
+        return KeyString::decodeRecordIdLong(&reader);
+    }
+
+    return _decodeRecordIdAtEnd(key.data, key.size);
+}
+
+void WiredTigerIndex::_setUpperBound(WT_CURSOR* c,
+                                     const KeyString::Value& keyString,
+                                     size_t sizeWithoutRecordId) {
+    KeyString::Builder builder(keyString.getVersion(), _ordering);
+    builder.resetFromBuffer(keyString.getBuffer(), sizeWithoutRecordId);
+    builder.appendRecordId(record_id_helpers::maxRecordId(_rsKeyFormat));
+
+    WiredTigerItem upperBoundItem(builder.getBuffer(), builder.getSize());
+    setKey(c, upperBoundItem.Get());
+    invariantWTOK(c->bound(c, "bound=upper"), c->session);
+}
+
 StatusWith<bool> WiredTigerIndex::_checkDups(OperationContext* opCtx,
                                              WT_CURSOR* c,
                                              const KeyString::Value& keyString) {
@@ -561,12 +596,10 @@ StatusWith<bool> WiredTigerIndex::_checkDups(OperationContext* opCtx,
                   c->session,
                   fmt::format("WiredTigerIndex::_insert: remove: {}; uri: {}", _indexName, _uri));
 
-    // Second phase looks up for existence of key to avoid insertion of duplicate key
-    // The usage of 'prefix_search=true' enables an optimization that allows this search to
-    // return more quickly. See SERVER-56509.
-    c->reconfigure(c, "prefix_search=true");
-    ON_BLOCK_EXIT([c] { c->reconfigure(c, "prefix_search=false"); });
-    auto rid = _keyExists(opCtx, c, keyString.getBuffer(), sizeWithoutRecordId);
+    // The second phase looks for the key to avoid insertion of a duplicate key. The range bounded
+    // cursor API restricts the key range we search within. This makes the search significantly
+    // faster.
+    auto rid = _keyExistsBounded(opCtx, c, keyString, sizeWithoutRecordId);
     if (!rid) {
         return false;
     } else if (*rid == _decodeRecordIdAtEnd(keyString.getBuffer(), keyString.getSize())) {
@@ -959,9 +992,9 @@ public:
             const WiredTigerItem searchKey(_key.getBuffer(), _key.getSize());
             setKey(c, searchKey.Get());
             if (_forward) {
-                c->bound(c, "bound=lower");
+                invariantWTOK(c->bound(c, "bound=lower"), c->session);
             } else {
-                c->bound(c, "bound=upper");
+                invariantWTOK(c->bound(c, "bound=upper"), c->session);
             }
 
             // Standard (non-unique) indices *do* include the record id in their KeyStrings. This
@@ -974,7 +1007,7 @@ public:
             LOGV2_TRACE_CURSOR(20099,
                                "restore _lastMoveSkippedKey: {lastMoveSkippedKey}",
                                "lastMoveSkippedKey"_attr = _lastMoveSkippedKey);
-            c->bound(c, "action=clear");
+            invariantWTOK(c->bound(c, "action=clear"), c->session);
         }
     }
 

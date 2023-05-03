@@ -90,6 +90,17 @@ env.Library(
 )
 
 env.Library(
+    target='memory_util',
+    source=[
+        'util/memory_util.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/util/pcre_wrapper',
+        '$BUILD_DIR/mongo/util/processinfo',
+    ],
+)
+
+env.Library(
     target="query_plan_cache",
     source=[
         "classic_plan_cache.cpp",
@@ -98,9 +109,8 @@ env.Library(
         "sbe_plan_cache.cpp",
     ],
     LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
-        "$BUILD_DIR/mongo/db/exec/sbe/query_sbe",
-        "canonical_query",
+        "$BUILD_DIR/mongo/base", "$BUILD_DIR/mongo/db/exec/sbe/query_sbe", "canonical_query",
+        "memory_util"
     ],
 )
 
@@ -192,7 +202,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/server_base',
-        '$BUILD_DIR/mongo/util/namespace_string_util',
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
     ],
 )
 
@@ -216,7 +226,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/repl/optime',
         '$BUILD_DIR/mongo/rpc/command_status',
         '$BUILD_DIR/mongo/rpc/rpc',
-        '$BUILD_DIR/mongo/util/namespace_string_util',
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'query_request',
     ],
     LIBDEPS_PRIVATE=[
@@ -243,6 +253,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
         '$BUILD_DIR/mongo/db/pipeline/runtime_constants_idl',
         '$BUILD_DIR/mongo/db/repl/read_concern_args',
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'hint_parser',
     ],
     LIBDEPS_PRIVATE=[
@@ -255,16 +266,18 @@ env.Library(
     target='query_knobs',
     source=[
         'ce_mode_parameter.cpp',
+        'cost_model/cost_model_on_update.cpp',
         'framework_control.cpp',
-        'plan_cache_size_parameter.cpp',
         'query_feature_flags.idl',
         'query_knobs.idl',
         'sbe_plan_cache_on_parameter_change.cpp',
+        'telemetry_util.cpp',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/util/pcre_wrapper',
+        'memory_util',
     ],
 )
 
@@ -343,6 +356,34 @@ env.Library(
     ],
 )
 
+env.Library(
+    target='rate_limiting',
+    source=[
+        'rate_limiting.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/util/clock_sources',
+    ],
+)
+
+env.Library(
+    target='telemetry',
+    source=[
+        'telemetry.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/concurrency/lock_manager',
+        "$BUILD_DIR/mongo/rpc/client_metadata",
+        '$BUILD_DIR/mongo/util/processinfo',
+        'command_request_response',
+        'memory_util',
+        'query_knobs',
+        'rate_limiting',
+    ],
+)
+
 env.CppUnitTest(
     target="db_query_test",
     source=[
@@ -369,9 +410,9 @@ env.CppUnitTest(
         "killcursors_request_test.cpp",
         "lru_key_value_test.cpp",
         'map_reduce_output_format_test.cpp',
+        "util/memory_util_test.cpp",
         "parsed_distinct_test.cpp",
         "plan_cache_indexability_test.cpp",
-        "plan_cache_size_parameter_test.cpp",
         "plan_cache_key_info_test.cpp",
         "plan_cache_test.cpp",
         "plan_ranker_test.cpp",
@@ -396,6 +437,7 @@ env.CppUnitTest(
         "query_request_test.cpp",
         "query_settings_test.cpp",
         "query_solution_test.cpp",
+        "rate_limiting_test.cpp",
         "sbe_and_hash_test.cpp",
         "sbe_and_sorted_test.cpp",
         "sbe_stage_builder_accumulator_test.cpp",
@@ -404,6 +446,7 @@ env.CppUnitTest(
         "sbe_stage_builder_test_fixture.cpp",
         "sbe_shard_filter_test.cpp",
         "shard_filterer_factory_mock.cpp",
+        "telemetry_store_test.cpp",
         "view_response_formatter_test.cpp",
     ],
     LIBDEPS=[
@@ -431,6 +474,7 @@ env.CppUnitTest(
         "query_planner_test_fixture",
         "query_request",
         "query_test_service_context",
+        "rate_limiting",
     ],
 )
 

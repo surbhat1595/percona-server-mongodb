@@ -1,7 +1,8 @@
 # IBM build variants.
 
 buildvariants:
-- name: enterprise-rhel-81-ppc64le
+- &enterprise-rhel-81-ppc64le-template
+  name: enterprise-rhel-81-ppc64le
   display_name: Enterprise RHEL 8.1 PPC64LE
   modules:
   - enterprise
@@ -36,6 +37,7 @@ buildvariants:
     multiversion_platform: rhel81
     multiversion_architecture: ppc64le
     multiversion_edition: enterprise
+    compile_variant: enterprise-rhel-81-ppc64le
   tasks:
   - name: compile_test_and_package_serial_no_unittests_TG
     distros:
@@ -59,12 +61,23 @@ buildvariants:
   - name: .crypt
   - name: test_packages
   - name: .publish_crypt
-    distros:
-    - rhel70-small
   - name: .publish
-    distros:
-    - rhel70-small
   - name: generate_buildid_to_debug_symbols_mapping
+
+- <<: *enterprise-rhel-81-ppc64le-template
+  name: enterprise-rhel-81-ppc64le-dynamic
+  display_name: Enterprise RHEL 8.1 PPC64LE Shared
+  expansions:
+    compile_flags: >-
+      --link-model=dynamic
+      --ssl
+      MONGO_DISTMOD=rhel81
+      -j$(echo "$(grep -c processor /proc/cpuinfo)/2" | bc)
+      --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+  tasks:
+  - name: compile_test_and_package_serial_TG
+    distros:
+    - rhel81-power8-large
 
 - name: enterprise-rhel-72-s390x
   display_name: Enterprise RHEL 7.2 s390x
@@ -101,6 +114,7 @@ buildvariants:
     multiversion_platform: rhel72
     multiversion_architecture: s390x
     multiversion_edition: enterprise
+    compile_variant: enterprise-rhel-72-s390x
   tasks:
   - name: compile_test_and_package_serial_no_unittests_TG
     distros:
@@ -124,11 +138,7 @@ buildvariants:
   - name: .crypt
   - name: test_packages
   - name: .publish_crypt
-    distros:
-    - rhel70-small
   - name: .publish
-    distros:
-    - rhel70-small
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-rhel-83-s390x
@@ -165,6 +175,7 @@ buildvariants:
     multiversion_platform: rhel83
     multiversion_architecture: s390x
     multiversion_edition: enterprise
+    compile_variant: enterprise-rhel-83-s390x
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
@@ -188,9 +199,5 @@ buildvariants:
   - name: .crypt
   - name: test_packages
   - name: .publish_crypt
-    distros:
-    - rhel80-small
   - name: .publish
-    distros:
-    - rhel80-small
   - name: generate_buildid_to_debug_symbols_mapping

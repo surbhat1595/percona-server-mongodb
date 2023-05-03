@@ -35,6 +35,7 @@
 
 #include "mongo/db/json.h"
 #include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/platform/decimal128.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -656,7 +657,7 @@ TEST(FLECollectionOptions, Range_AllowedTypes) {
                     "path": "firstName",
                     "keyId": { '$uuid': '5f34e99a-b214-451f-b6f6-d3d28e933d15' },
                     "bsonType": "int",
-                    "queries": {"queryType": "range", "sparsity" : 1, min : 1, max : 2}
+                    "queries": {"queryType": "rangePreview", "sparsity" : 1, min : 1, max : 2}
                 }
             ]
         }
@@ -670,7 +671,7 @@ TEST(FLECollectionOptions, Range_AllowedTypes) {
                     "path": "firstName",
                     "keyId": { '$uuid': '5f34e99a-b214-451f-b6f6-d3d28e933d15' },
                     "bsonType": "long",
-                    "queries": {"queryType": "range", "sparsity" : 1, min : {$numberLong: "1"}, max : {$numberLong: "2"}}
+                    "queries": {"queryType": "rangePreview", "sparsity" : 1, min : {$numberLong: "1"}, max : {$numberLong: "2"}}
                 }
             ]
         }
@@ -685,13 +686,46 @@ TEST(FLECollectionOptions, Range_AllowedTypes) {
                     "path": "firstName",
                     "keyId": { '$uuid': '5f34e99a-b214-451f-b6f6-d3d28e933d15' },
                     "bsonType": ")" << type << R"(",
-                    "queries": {"queryType": "range", "sparsity" : 1}
+                    "queries": {"queryType": "rangePreview", "sparsity" : 1}
                 }
             ]
         }
     }})"))
                       .getStatus());
     }
+
+    ASSERT_OK(CollectionOptions::parse(fromjson(str::stream() << R"({
+        encryptedFields: {
+            "fields": [
+                {
+                    "path": "firstName",
+                    "keyId": { '$uuid': '5f34e99a-b214-451f-b6f6-d3d28e933d15' },
+                    "bsonType": ")"
+                                                              << "double"
+                                                              << R"(",
+                    "queries": {"queryType": "rangePreview", "sparsity" : 1, min: 0.000, max: 1.000, precision: 3}
+                }
+            ]
+        }
+    }})"))
+                  .getStatus());
+
+    ASSERT_OK(CollectionOptions::parse(fromjson(str::stream() << R"({
+        encryptedFields: {
+            "fields": [
+                {
+                    "path": "firstName",
+                    "keyId": { '$uuid': '5f34e99a-b214-451f-b6f6-d3d28e933d15' },
+                    "bsonType": ")"
+                                                              << "decimal"
+                                                              << R"(",
+                    "queries": {"queryType": "rangePreview", "sparsity" : 1, min: NumberDecimal("0.000"), max: NumberDecimal("1.000"), precision: 3}
+                }
+            ]
+        }
+    }})"))
+                  .getStatus());
+
     // Validate date works
     ASSERT_OK(CollectionOptions::parse(fromjson(str::stream() << R"({
         encryptedFields: {
@@ -700,7 +734,7 @@ TEST(FLECollectionOptions, Range_AllowedTypes) {
                     "path": "firstName",
                     "keyId": { '$uuid': '5f34e99a-b214-451f-b6f6-d3d28e933d15' },
                     "bsonType": "date",
-                    "queries": {"queryType": "range", "sparsity" : 1, min : {"$date": {"$numberLong": "12344"}}, max : {"$date": {"$numberLong": "12345"}}}
+                    "queries": {"queryType": "rangePreview", "sparsity" : 1, min : {"$date": {"$numberLong": "12344"}}, max : {"$date": {"$numberLong": "12345"}}}
                 }
             ]
         }
@@ -739,7 +773,7 @@ TEST(FLECollectionOptions, Range_DisAllowedTypes) {
                     "path": "firstName",
                     "keyId": { '$uuid': '5f34e99a-b214-451f-b6f6-d3d28e933d15' },
                     "bsonType": ")" << type << R"(",
-                    "queries": {"queryType": "range"}
+                    "queries": {"queryType": "rangePreview"}
                 }
             ]
         }
@@ -758,7 +792,7 @@ TEST(FLECollectionOptions, Range_MissingFields) {
                     "path": "firstName",
                     "keyId": { '$uuid': '5f34e99a-b214-451f-b6f6-d3d28e933d15' },
                     "bsonType": "int",
-                    "queries": {"queryType": "range"}
+                    "queries": {"queryType": "rangePreview"}
                 }
             ]
         }
@@ -771,7 +805,7 @@ TEST(FLECollectionOptions, Range_MissingFields) {
                     "path": "firstName",
                     "keyId": { '$uuid': '5f34e99a-b214-451f-b6f6-d3d28e933d15' },
                     "bsonType": "int",
-                    "queries": {"queryType": "range", sparsity: 1}
+                    "queries": {"queryType": "rangePreview", sparsity: 1}
                 }
             ]
         }
@@ -784,7 +818,7 @@ TEST(FLECollectionOptions, Range_MissingFields) {
                     "path": "firstName",
                     "keyId": { '$uuid': '5f34e99a-b214-451f-b6f6-d3d28e933d15' },
                     "bsonType": "int",
-                    "queries": {"queryType": "range", sparsity: 1, min : 1}
+                    "queries": {"queryType": "rangePreview", sparsity: 1, min : 1}
                 }
             ]
         }
@@ -849,7 +883,7 @@ TEST(FLECollectionOptions, Range_MinMax) {
                                                             << "int"
                                                             << "queries"
                                                             << BSON("queryType"
-                                                                    << "range"
+                                                                    << "rangePreview"
                                                                     << "sparsity" << 1 << "min" << 2
                                                                     << "max" << 1)))));
 
@@ -864,30 +898,90 @@ TEST(FLECollectionOptions, Range_MinMax) {
                                                             << "long"
                                                             << "queries"
                                                             << BSON("queryType"
-                                                                    << "range"
+                                                                    << "rangePreview"
                                                                     << "sparsity" << 1 << "min"
                                                                     << 2LL << "max" << 1LL)))));
 
         ASSERT_STATUS_CODE(6720005, CollectionOptions::parse(doc));
     }
 
+    {
+        auto doc =
+            BSON("encryptedFields" << BSON(
+                     "fields" << BSON_ARRAY(BSON("path"
+                                                 << "firstName"
+                                                 << "keyId" << UUID::gen() << "bsonType"
+                                                 << "double"
+                                                 << "queries"
+                                                 << BSON("queryType"
+                                                         << "rangePreview"
+                                                         << "sparsity" << 1 << "min" << 2.0)))));
 
-    std::vector<std::pair<std::string, int>> typesWithoutMinMax{
-        {"double", 7006601},
-        {"decimal", 7006601},
-    };
+        ASSERT_STATUS_CODE(6967100, CollectionOptions::parse(doc));
 
-    for (auto const& tc : typesWithoutMinMax) {
-        auto doc = BSON("encryptedFields"
-                        << BSON("fields" << BSON_ARRAY(BSON(
-                                    "path"
+        doc = BSON("encryptedFields" << BSON(
+                       "fields" << BSON_ARRAY(BSON("path"
+                                                   << "firstName"
+                                                   << "keyId" << UUID::gen() << "bsonType"
+                                                   << "double"
+                                                   << "queries"
+                                                   << BSON("queryType"
+                                                           << "rangePreview"
+                                                           << "sparsity" << 1 << "max" << 2.0)))));
+
+        ASSERT_STATUS_CODE(6967100, CollectionOptions::parse(doc));
+
+        doc = BSON("encryptedFields"
+                   << BSON("fields"
+                           << BSON_ARRAY(BSON("path"
+                                              << "firstName"
+                                              << "keyId" << UUID::gen() << "bsonType"
+                                              << "double"
+                                              << "queries"
+                                              << BSON("queryType"
+                                                      << "rangePreview"
+                                                      << "sparsity" << 1 << "precision" << 2)))));
+
+        ASSERT_STATUS_CODE(6967100, CollectionOptions::parse(doc));
+
+        doc = BSON("encryptedFields"
+                   << BSON("fields" << BSON_ARRAY(
+                               BSON("path"
                                     << "firstName"
-                                    << "keyId" << UUID::gen() << "bsonType" << tc.first << "queries"
+                                    << "keyId" << UUID::gen() << "bsonType"
+                                    << "decimal"
+                                    << "queries"
                                     << BSON("queryType"
-                                            << "range"
-                                            << "sparsity" << 1 << "min" << 2 << "max" << 1)))));
+                                            << "rangePreview"
+                                            << "sparsity" << 1 << "min" << Decimal128(2.0))))));
 
-        ASSERT_STATUS_CODE(tc.second, CollectionOptions::parse(doc));
+        ASSERT_STATUS_CODE(6967100, CollectionOptions::parse(doc));
+
+        doc = BSON("encryptedFields"
+                   << BSON("fields" << BSON_ARRAY(
+                               BSON("path"
+                                    << "firstName"
+                                    << "keyId" << UUID::gen() << "bsonType"
+                                    << "decimal"
+                                    << "queries"
+                                    << BSON("queryType"
+                                            << "rangePreview"
+                                            << "sparsity" << 1 << "max" << Decimal128(2.0))))));
+
+        ASSERT_STATUS_CODE(6967100, CollectionOptions::parse(doc));
+
+        doc = BSON("encryptedFields"
+                   << BSON("fields"
+                           << BSON_ARRAY(BSON("path"
+                                              << "firstName"
+                                              << "keyId" << UUID::gen() << "bsonType"
+                                              << "decimal"
+                                              << "queries"
+                                              << BSON("queryType"
+                                                      << "rangePreview"
+                                                      << "sparsity" << 1 << "precision" << 2)))));
+
+        ASSERT_STATUS_CODE(6967100, CollectionOptions::parse(doc));
     }
 
 
@@ -901,7 +995,7 @@ TEST(FLECollectionOptions, Range_MinMax) {
                                                         << "date"
                                                         << "queries"
                                                         << BSON("queryType"
-                                                                << "range"
+                                                                << "rangePreview"
                                                                 << "sparsity" << 1 << "min" << end
                                                                 << "max" << start)))));
 
@@ -917,7 +1011,7 @@ TEST(FLECollectionOptions, Range_BoundTypeMismatch) {
                     "path": "firstName",
                     "keyId": { '$uuid': '5f34e99a-b214-451f-b6f6-d3d28e933d15' },
                     "bsonType": "int",
-                    "queries": {"queryType": "range", "sparsity" : 1, min: {"$numberLong": "12344"}, max: {"$numberLong": "123440"}}
+                    "queries": {"queryType": "rangePreview", "sparsity" : 1, min: {"$numberLong": "12344"}, max: {"$numberLong": "123440"}}
                 }
             ]
         }
@@ -930,7 +1024,7 @@ TEST(FLECollectionOptions, Range_BoundTypeMismatch) {
                     "path": "firstName",
                     "keyId": { '$uuid': '5f34e99a-b214-451f-b6f6-d3d28e933d15' },
                     "bsonType": "long",
-                    "queries": {"queryType": "range", "sparsity" : 1, min: 1, max: 2}
+                    "queries": {"queryType": "rangePreview", "sparsity" : 1, min: 1, max: 2}
                 }
             ]
         }
@@ -943,7 +1037,7 @@ TEST(FLECollectionOptions, Range_BoundTypeMismatch) {
                     "path": "firstName",
                     "keyId": { '$uuid': '5f34e99a-b214-451f-b6f6-d3d28e933d15' },
                     "bsonType": "long",
-                    "queries": {"queryType": "range", "sparsity" : 1, min: {$numberLong: "1"}, max: 2}
+                    "queries": {"queryType": "rangePreview", "sparsity" : 1, min: {$numberLong: "1"}, max: 2}
                 }
             ]
         }
@@ -955,7 +1049,7 @@ TEST(FLECollectionOptions, Range_BoundTypeMismatch) {
                     "path": "firstName",
                     "keyId": { '$uuid': '5f34e99a-b214-451f-b6f6-d3d28e933d15' },
                     "bsonType": "int",
-                    "queries": {"queryType": "range", "sparsity" : 1, min: 1, max: {"$numberLong": "123440"}}
+                    "queries": {"queryType": "rangePreview", "sparsity" : 1, min: 1, max: {"$numberLong": "123440"}}
                 }
             ]
         }

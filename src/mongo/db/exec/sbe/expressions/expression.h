@@ -455,6 +455,10 @@ public:
         return _var;
     }
 
+    bool isMoveFrom() const {
+        return _moveFrom;
+    }
+
 private:
     value::SlotId _var;
     boost::optional<FrameId> _frameId;
@@ -474,6 +478,10 @@ public:
         // Logical operations. These operations are short-circuiting.
         logicAnd,
         logicOr,
+
+        // Nothing-handling operation. This is short-circuiting like logicOr,
+        // but it checks Nothing / non-Nothing instead of false / true.
+        fillEmpty,
 
         // Math operations.
         add,

@@ -84,6 +84,7 @@
 #include "mongo/idl/cluster_server_parameter_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/s/catalog/type_config_version.h"
 #include "mongo/s/catalog/type_index_catalog_gen.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/stdx/unordered_set.h"
@@ -460,6 +461,10 @@ private:
                 ->waitForCoordinatorsOfGivenTypeToComplete(
                     opCtx, DDLCoordinatorTypeEnum::kCompactStructuredEncryptionData);
         }
+
+        if (requestedVersion > actualVersion) {
+            _createGlobalIndexesIndexes(opCtx, requestedVersion);
+        }
     }
 
     // This helper function is for any actions that should be done before taking the FCV full
@@ -492,11 +497,78 @@ private:
     void _completeUpgrade(OperationContext* opCtx,
                           const multiversion::FeatureCompatibilityVersion requestedVersion) {
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
-            _createGlobalIndexesIndexes(opCtx, requestedVersion);
+            _cleanupConfigVersionOnUpgrade(opCtx, requestedVersion);
+            _createSchemaOnConfigSettings(opCtx, requestedVersion);
         } else if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
-            _createGlobalIndexesIndexes(opCtx, requestedVersion);
         } else {
             return;
+        }
+    }
+
+    // TODO SERVER-68889 remove once 7.0 becomes last LTS
+    void _cleanupConfigVersionOnUpgrade(
+        OperationContext* opCtx, const multiversion::FeatureCompatibilityVersion requestedVersion) {
+        if (feature_flags::gStopUsingConfigVersion.isEnabledOnVersion(requestedVersion)) {
+            LOGV2(6888800, "Removing deprecated fields from config.version collection");
+            static const std::vector<StringData> deprecatedFields{
+                "excluding"_sd,
+                "upgradeId"_sd,
+                "upgradeState"_sd,
+                StringData{VersionType::currentVersion.name()},
+                StringData{VersionType::minCompatibleVersion.name()},
+            };
+
+            const auto updateObj = [&] {
+                BSONObjBuilder updateBuilder;
+                BSONObjBuilder unsetBuilder(updateBuilder.subobjStart("$unset"));
+                for (const auto deprecatedField : deprecatedFields) {
+                    unsetBuilder.append(deprecatedField.toString(), true);
+                }
+                unsetBuilder.doneFast();
+                return updateBuilder.obj();
+            }();
+
+            DBDirectClient client(opCtx);
+            write_ops::UpdateCommandRequest update(VersionType::ConfigNS);
+            update.setUpdates({[&]() {
+                write_ops::UpdateOpEntry entry;
+                entry.setQ({});
+                entry.setU(write_ops::UpdateModification::parseFromClassicUpdate(updateObj));
+                entry.setMulti(true);
+                entry.setUpsert(false);
+                return entry;
+            }()});
+            client.update(update);
+        }
+    }
+
+    // TODO SERVER-68889 remove once 7.0 becomes last LTS
+    void _updateConfigVersionOnDowngrade(
+        OperationContext* opCtx, const multiversion::FeatureCompatibilityVersion requestedVersion) {
+        if (!feature_flags::gStopUsingConfigVersion.isEnabledOnVersion(requestedVersion)) {
+            LOGV2(6888801, "Restoring removed fields in config.version collection");
+            const auto updateObj = [&] {
+                BSONObjBuilder updateBuilder;
+                BSONObjBuilder unsetBuilder(updateBuilder.subobjStart("$set"));
+                unsetBuilder.append(VersionType::minCompatibleVersion.name(),
+                                    VersionType::MIN_COMPATIBLE_CONFIG_VERSION);
+                unsetBuilder.append(VersionType::currentVersion.name(),
+                                    VersionType::CURRENT_CONFIG_VERSION);
+                unsetBuilder.doneFast();
+                return updateBuilder.obj();
+            }();
+
+            DBDirectClient client(opCtx);
+            write_ops::UpdateCommandRequest update(VersionType::ConfigNS);
+            update.setUpdates({[&]() {
+                write_ops::UpdateOpEntry entry;
+                entry.setQ({});
+                entry.setU(write_ops::UpdateModification::parseFromClassicUpdate(updateObj));
+                entry.setMulti(true);
+                entry.setUpsert(false);
+                return entry;
+            }()});
+            client.update(update);
         }
     }
 
@@ -511,6 +583,15 @@ private:
         }
     }
 
+    // TODO (SERVER-70763): Remove once FCV 7.0 becomes last-lts.
+    void _createSchemaOnConfigSettings(
+        OperationContext* opCtx, const multiversion::FeatureCompatibilityVersion requestedVersion) {
+        if (feature_flags::gConfigSettingsSchema.isEnabledOnVersion(requestedVersion)) {
+            LOGV2(6885200, "Creating schema on config.settings");
+            uassertStatusOK(ShardingCatalogManager::get(opCtx)->upgradeConfigSettings(opCtx));
+        }
+    }
+
     // _runUpgrade performs all the upgrade specific code for setFCV. Any new feature specific
     // upgrade code should be placed in the _runUpgrade helper functions:
     //  * _prepareForUpgrade: for any upgrade actions that should be done before taking the FCV full
@@ -518,8 +599,7 @@ private:
     //  * _userCollectionsWorkForUpgrade: for any user collections uasserts, creations, or deletions
     //    that need to happen during the upgrade. This happens after the FCV full transition lock.
     //  * _completeUpgrade: for updating metadata to make sure the new features in the upgraded
-    //  version
-    //    work for sharded and non-sharded clusters
+    //    version work for sharded and non-sharded clusters
     // Please read the comments on those helper functions for more details on what should be placed
     // in each function.
     void _runUpgrade(OperationContext* opCtx,
@@ -571,6 +651,8 @@ private:
 
             // TODO SERVER-68551: Remove once 7.0 becomes last-lts
             dropDistLockCollections(opCtx);
+
+            _createGlobalIndexesIndexes(opCtx, requestedVersion);
 
             // Tell the shards to enter phase-2 of setFCV (fully upgraded)
             _sendSetFCVRequestToShards(opCtx, request, changeTimestamp, SetFCVPhaseEnum::kComplete);
@@ -637,7 +719,8 @@ private:
                         dbName,
                         MODE_S,
                         [&](const CollectionPtr& collection) {
-                            invariant(collection->getTimeseriesOptions());
+                            auto tsOptions = collection->getTimeseriesOptions();
+                            invariant(tsOptions);
 
                             auto indexCatalog = collection->getIndexCatalog();
                             auto indexIt = indexCatalog->getIndexIterator(
@@ -645,10 +728,10 @@ private:
                                 IndexCatalog::InclusionPolicy::kReady |
                                     IndexCatalog::InclusionPolicy::kUnfinished);
 
+                            // Check and fail to downgrade if the time-series collection has a
+                            // partial, TTL index.
                             while (indexIt->more()) {
                                 auto indexEntry = indexIt->next();
-                                // Fail to downgrade if the time-series collection has a partial,
-                                // TTL index.
                                 if (indexEntry->descriptor()->isPartial()) {
                                     // TODO (SERVER-67659): Remove partial, TTL index check once
                                     // FCV 7.0 becomes last-lts.
@@ -668,6 +751,20 @@ private:
                                             IndexDescriptor::kExpireAfterSecondsFieldName));
                                 }
                             }
+
+                            // Check the time-series options for a default granularity. Fail the
+                            // downgrade if the bucketing parameters are custom values.
+                            uassert(
+                                ErrorCodes::CannotDowngrade,
+                                str::stream()
+                                    << "Cannot downgrade the cluster when there are time-series "
+                                       "collections with custom bucketing parameters. In order to "
+                                       "downgrade, the time-series collection(s) must be updated "
+                                       "with a granularity of 'seconds', 'minutes' or 'hours'. "
+                                       "First detected incompatible collection: '"
+                                    << collection->ns().getTimeseriesViewNamespace() << "'",
+                                tsOptions->getGranularity().has_value());
+
                             return true;
                         },
                         [&](const CollectionPtr& collection) {
@@ -684,12 +781,12 @@ private:
                     opCtx, dbName, MODE_X, [&](const CollectionPtr& collection) {
                         auto& efc = collection->getCollectionOptions().encryptedFieldConfig;
 
-                        uassert(
-                            ErrorCodes::CannotDowngrade,
-                            str::stream()
-                                << "Cannot downgrade the cluster as collection " << collection->ns()
-                                << " has 'encryptedFields' with range indexes",
-                            !(efc.has_value() && hasQueryType(efc.get(), QueryTypeEnum::Range)));
+                        uassert(ErrorCodes::CannotDowngrade,
+                                str::stream() << "Cannot downgrade the cluster as collection "
+                                              << collection->ns()
+                                              << " has 'encryptedFields' with range indexes",
+                                !(efc.has_value() &&
+                                  hasQueryType(efc.get(), QueryTypeEnum::RangePreview)));
                         return true;
                     });
             }
@@ -738,11 +835,12 @@ private:
         OperationContext* opCtx, const multiversion::FeatureCompatibilityVersion requestedVersion) {
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
             _dropInternalGlobalIndexesCollection(opCtx, requestedVersion);
-
+            _removeSchemaOnConfigSettings(opCtx, requestedVersion);
             // Always abort the reshardCollection regardless of version to ensure that it will
             // run on a consistent version from start to finish. This will ensure that it will
             // be able to apply the oplog entries correctly.
             abortAllReshardCollection(opCtx);
+            _updateConfigVersionOnDowngrade(opCtx, requestedVersion);
         } else if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
             // If we are downgrading to a version that doesn't support implicit translation of
             // Timeseries collection in sharding DDL Coordinators we need to drain all ongoing
@@ -812,8 +910,23 @@ private:
                     entry.setMulti(true);
                     return entry;
                 }()});
+                update.getWriteCommandRequestBase().setOrdered(false);
                 client.update(update);
             }
+        }
+    }
+
+    // TODO (SERVER-70763): Remove once FCV 7.0 becomes last-lts.
+    void _removeSchemaOnConfigSettings(
+        OperationContext* opCtx, const multiversion::FeatureCompatibilityVersion requestedVersion) {
+        if (!feature_flags::gGlobalIndexesShardingCatalog.isEnabledOnVersion(requestedVersion)) {
+            LOGV2(6885201, "Removing schema on config.settings");
+            CollMod collModCmd{NamespaceString::kConfigSettingsNamespace};
+            collModCmd.getCollModRequest().setValidator(BSONObj());
+            collModCmd.getCollModRequest().setValidationLevel(ValidationLevelEnum::off);
+            BSONObjBuilder builder;
+            uassertStatusOKIgnoreNSNotFound(processCollModCommand(
+                opCtx, {NamespaceString::kConfigSettingsNamespace}, collModCmd, &builder));
         }
     }
 

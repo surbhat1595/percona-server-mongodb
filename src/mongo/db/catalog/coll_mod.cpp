@@ -48,6 +48,7 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/database_sharding_state.h"
+#include "mongo/db/s/shard_key_index_util.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/recovery_unit.h"
@@ -75,9 +76,9 @@ void assertNoMovePrimaryInProgress(OperationContext* opCtx, NamespaceString cons
     try {
         auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
             opCtx, nss.dbName(), DSSAcquisitionMode::kShared);
+        auto scopedCss = CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss);
 
-        auto css = CollectionShardingState::get(opCtx, nss);
-        auto collDesc = css->getCollectionDescription(opCtx);
+        auto collDesc = scopedCss->getCollectionDescription(opCtx);
         collDesc.throwIfReshardingInProgress(nss);
 
         if (!collDesc.isSharded()) {
@@ -216,7 +217,7 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(Operati
                 serverGlobalParams.featureCompatibility)) {
             return {ErrorCodes::InvalidOptions,
                     "collMod does not support converting an index to 'unique' or to "
-                    "'prepareUnique' mode"};
+                    "'prepareUnique' mode in this FCV."};
         }
 
         if (cmdIndex.getUnique() && cmdIndex.getForceNonUnique()) {
@@ -288,6 +289,27 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(Operati
             }
 
             cmrIndex->idx = indexes[0];
+        }
+
+        if (cmdIndex.getHidden()) {
+            // Checks if it is possible to drop the shard key, so it could be possible to hide it
+            if (auto catalogClient = Grid::get(opCtx)->catalogClient()) {
+                try {
+                    auto shardedColl = catalogClient->getCollection(opCtx, nss);
+
+                    if (isLastNonHiddenShardKeyIndex(opCtx,
+                                                     coll,
+                                                     coll->getIndexCatalog(),
+                                                     indexName.toString(),
+                                                     shardedColl.getKeyPattern().toBSON())) {
+                        return {ErrorCodes::InvalidOptions,
+                                "Cannot hide the only compatible index for this collection's shard "
+                                "key"};
+                    }
+                } catch (ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
+                    // The collection is unsharded or doesn't exist.
+                }
+            }
         }
 
         if (cmdIndex.getExpireAfterSeconds()) {
@@ -757,7 +779,8 @@ Status _collModInternal(OperationContext* opCtx,
             // If a sharded time-series collection is dropped, it's possible that a stale mongos
             // sends the request on the buckets namespace instead of the view namespace. Ensure that
             // the shardVersion is upto date before throwing an error.
-            CollectionShardingState::get(opCtx, nss)->checkShardVersionOrThrow(opCtx);
+            CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
+                ->checkShardVersionOrThrow(opCtx);
         }
         checkCollectionUUIDMismatch(opCtx, nss, nullptr, cmd.getCollectionUUID());
         return Status(ErrorCodes::NamespaceNotFound, "ns does not exist");
@@ -909,6 +932,39 @@ Status _collModInternal(OperationContext* opCtx,
 }
 
 }  // namespace
+
+bool isCollModIndexUniqueConversion(const CollModRequest& request) {
+    auto index = request.getIndex();
+    if (!index) {
+        return false;
+    }
+    if (auto indexUnique = index->getUnique(); !indexUnique) {
+        return false;
+    }
+    // Checks if the request is an actual unique conversion instead of a dry run.
+    if (auto dryRun = request.getDryRun(); dryRun && *dryRun) {
+        return false;
+    }
+    return true;
+}
+
+CollModRequest makeCollModDryRunRequest(const CollModRequest& request) {
+    CollModRequest dryRunRequest;
+    CollModIndex dryRunIndex;
+    const auto& requestIndex = request.getIndex();
+    dryRunIndex.setUnique(true);
+    if (auto keyPattern = requestIndex->getKeyPattern()) {
+        dryRunIndex.setKeyPattern(keyPattern);
+    } else if (auto name = requestIndex->getName()) {
+        dryRunIndex.setName(name);
+    }
+    if (auto uuid = request.getCollectionUUID()) {
+        dryRunRequest.setCollectionUUID(uuid);
+    }
+    dryRunRequest.setIndex(dryRunIndex);
+    dryRunRequest.setDryRun(true);
+    return dryRunRequest;
+}
 
 Status processCollModCommand(OperationContext* opCtx,
                              const NamespaceStringOrUUID& nsOrUUID,

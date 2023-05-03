@@ -145,7 +145,8 @@ public:
                 ReadPreferenceSetting::get(opCtx),
                 Shard::RetryPolicy::kIdempotent,
                 countRequest.getQuery(),
-                collation);
+                collation,
+                true /* eligibleForSampling */);
         } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& ex) {
             // Rewrite the count command as an aggregation.
             auto countRequest = CountCommandRequest::parse(IDLParserContext("count"), cmdObj);
@@ -209,7 +210,7 @@ public:
                    const OpMsgRequest& request,
                    ExplainOptions::Verbosity verbosity,
                    rpc::ReplyBuilderInterface* result) const override {
-        Impl::checkCanRunHere(opCtx);
+        Impl::checkCanExplainHere(opCtx);
 
         const BSONObj& cmdObj = request.body;
 

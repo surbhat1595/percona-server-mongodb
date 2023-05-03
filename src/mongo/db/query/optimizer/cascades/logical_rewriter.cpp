@@ -319,7 +319,7 @@ ReorderDependencies computeDependencies(ABT::reference_type aboveNodeRef,
         env.hasDefinitions(belowChild) ? env.getDefinitions(belowChild) : DefinitionsMap{};
 
     ReorderDependencies dependencies;
-    for (const std::string& varName : aboveNodeVarNames) {
+    for (const ProjectionName& varName : aboveNodeVarNames) {
         auto it = belowNodeDefs.find(varName);
         // Variable is exclusively defined in the below node.
         const bool refersToNode = it != belowNodeDefs.cend() && it->second.definedBy == belowNode;
@@ -574,7 +574,7 @@ struct SubstituteMerge<LimitSkipNode, LimitSkipNode> {
 
 static boost::optional<ABT> mergeSargableNodes(
     const properties::IndexingAvailability& indexingAvailability,
-    const IndexPathSet& nonMultiKeyPaths,
+    const MultikeynessTrie& multikeynessTrie,
     const SargableNode& aboveNode,
     const SargableNode& belowNode,
     RewriteContext& ctx) {
@@ -593,7 +593,7 @@ static boost::optional<ABT> mergeSargableNodes(
 
     const ProjectionName& scanProjName = indexingAvailability.getScanProjection();
     bool hasEmptyInterval = simplifyPartialSchemaReqPaths(
-        scanProjName, nonMultiKeyPaths, mergedReqs, ctx.getConstFold());
+        scanProjName, multikeynessTrie, mergedReqs, ctx.getConstFold());
     if (hasEmptyInterval) {
         return createEmptyValueScanNode(ctx);
     }
@@ -643,7 +643,7 @@ struct SubstituteMerge<SargableNode, SargableNode> {
         tassert(6624171, "At this point the collection must exist", scanDef.exists());
 
         const auto& result = mergeSargableNodes(indexingAvailability,
-                                                scanDef.getNonMultiKeyPathSet(),
+                                                scanDef.getMultikeynessTrie(),
                                                 *aboveNode.cast<SargableNode>(),
                                                 *belowNode.cast<SargableNode>(),
                                                 ctx);
@@ -696,10 +696,10 @@ static void convertFilterToSargableNode(ABT::reference_type node,
     for (auto it = conversion->_reqMap.cbegin(); it != conversion->_reqMap.cend();) {
         uassert(6624111,
                 "Filter partial schema requirement must contain a variable name.",
-                !it->first._projectionName.empty());
+                it->first._projectionName);
         uassert(6624112,
                 "Filter partial schema requirement cannot bind.",
-                !it->second.hasBoundProjectionName());
+                !it->second.getBoundProjectionName());
         if (isIntervalReqFullyOpenDNF(it->second.getIntervals())) {
             it = conversion->_reqMap.erase(it);
         } else {
@@ -719,7 +719,7 @@ static void convertFilterToSargableNode(ABT::reference_type node,
 
     const ProjectionName& scanProjName = indexingAvailability.getScanProjection();
     bool hasEmptyInterval = simplifyPartialSchemaReqPaths(
-        scanProjName, scanDef.getNonMultiKeyPathSet(), conversion->_reqMap, ctx.getConstFold());
+        scanProjName, scanDef.getMultikeynessTrie(), conversion->_reqMap, ctx.getConstFold());
     if (hasEmptyInterval) {
         addEmptyValueScanNode(ctx);
         return;
@@ -844,12 +844,12 @@ struct SubstituteConvert<EvaluationNode> {
                     ABT result = evalNode.getChild();
                     ABT keepPath = make<PathIdentity>();
 
-                    std::set<std::string> orderedSet;
-                    for (const std::string& fieldName : pathKeepPtr->getNames()) {
+                    FieldNameOrderedSet orderedSet;
+                    for (const FieldNameType& fieldName : pathKeepPtr->getNames()) {
                         orderedSet.insert(fieldName);
                     }
-                    for (const std::string& fieldName : orderedSet) {
-                        ProjectionName projName = ctx.getPrefixId().getNextId("fieldProj");
+                    for (const FieldNameType& fieldName : orderedSet) {
+                        ProjectionName projName{ctx.getPrefixId().getNextId("fieldProj")};
                         result = make<EvaluationNode>(
                             projName,
                             make<EvalPath>(make<PathGet>(fieldName, make<PathIdentity>()),
@@ -892,7 +892,7 @@ struct SubstituteConvert<EvaluationNode> {
 
             uassert(6624114,
                     "Eval partial schema requirement must contain a variable name.",
-                    !key._projectionName.empty());
+                    key._projectionName);
             uassert(6624115,
                     "Eval partial schema requirement cannot have a range",
                     isIntervalReqFullyOpenDNF(req.getIntervals()));
@@ -941,8 +941,6 @@ struct SplitRequirementsResult {
     PartialSchemaRequirements _rightReqs;
 
     bool _hasFieldCoverage = true;
-    bool _hasLeftIntervals = false;
-    bool _hasRightIntervals = false;
 };
 
 /**
@@ -962,7 +960,7 @@ static SplitRequirementsResult splitRequirements(
     const bool disableYieldingTolerantPlans,
     const std::vector<bool>& isFullyOpen,
     const std::vector<bool>& mayReturnNull,
-    const boost::optional<opt::unordered_set<FieldNameType>>& indexFieldPrefixMapForScanDef,
+    const boost::optional<FieldNameSet>& indexFieldPrefixMapForScanDef,
     const PartialSchemaRequirements& reqMap) {
     SplitRequirementsResult result;
     auto& leftReqs = result._leftReqs;
@@ -970,17 +968,17 @@ static SplitRequirementsResult splitRequirements(
 
     const auto addRequirement = [](PartialSchemaRequirements& reqMap,
                                    PartialSchemaKey key,
-                                   ProjectionName projName,
+                                   boost::optional<ProjectionName> boundProjectionName,
                                    IntervalReqExpr::Node intervals) {
         // We always strip out the perf-only flag.
         reqMap.emplace(key,
-                       PartialSchemaRequirement{
-                           std::move(projName), std::move(intervals), false /*isPerfOnly*/});
+                       PartialSchemaRequirement{std::move(boundProjectionName),
+                                                std::move(intervals),
+                                                false /*isPerfOnly*/});
     };
 
     size_t index = 0;
     for (const auto& [key, req] : reqMap) {
-        const bool fullyOpenInterval = isFullyOpen.at(index);
 
         if (((1ull << index) & mask) != 0) {
             bool addedToLeft = false;
@@ -991,7 +989,8 @@ static SplitRequirementsResult splitRequirements(
                     addRequirement(leftReqs, key, req.getBoundProjectionName(), req.getIntervals());
                 } else {
                     // Insert a requirement on the right side too, left side is non-binding.
-                    addRequirement(leftReqs, key, "" /*boundProjectionName*/, req.getIntervals());
+                    addRequirement(
+                        leftReqs, key, boost::none /*boundProjectionName*/, req.getIntervals());
                     addRequirement(
                         rightReqs, key, req.getBoundProjectionName(), req.getIntervals());
                 }
@@ -1003,8 +1002,9 @@ static SplitRequirementsResult splitRequirements(
                 // We cannot return index values if our interval can possibly contain Null. Instead,
                 // we remove the output binding for the left side, and return the value from the
                 // right (seek) side.
-                if (!fullyOpenInterval) {
-                    addRequirement(leftReqs, key, "" /*boundProjectionName*/, req.getIntervals());
+                if (!isFullyOpen.at(index)) {
+                    addRequirement(
+                        leftReqs, key, boost::none /*boundProjectionName*/, req.getIntervals());
                     addedToLeft = true;
                 }
                 addRequirement(rightReqs,
@@ -1015,9 +1015,6 @@ static SplitRequirementsResult splitRequirements(
             }
 
             if (addedToLeft) {
-                if (!fullyOpenInterval) {
-                    result._hasLeftIntervals = true;
-                }
                 if (indexFieldPrefixMapForScanDef) {
                     if (auto pathPtr = key._path.cast<PathGet>(); pathPtr != nullptr &&
                         indexFieldPrefixMapForScanDef->count(pathPtr->name()) == 0) {
@@ -1030,9 +1027,6 @@ static SplitRequirementsResult splitRequirements(
             }
         } else if (isIndex || !req.getIsPerfOnly()) {
             addRequirement(rightReqs, key, req.getBoundProjectionName(), req.getIntervals());
-            if (!fullyOpenInterval) {
-                result._hasRightIntervals = true;
-            }
         }
         index++;
     }
@@ -1077,7 +1071,7 @@ struct ExploreConvert<SargableNode> {
         }
 
         const ProjectionName& scanProjectionName = indexingAvailability.getScanProjection();
-        if (collectVariableReferences(node) != VariableNameSetType{scanProjectionName}) {
+        if (collectVariableReferences(node) != ProjectionNameSet{scanProjectionName}) {
             // Rewrite not applicable if we refer projections other than the scan projection.
             return;
         }
@@ -1085,7 +1079,7 @@ struct ExploreConvert<SargableNode> {
         const bool isIndex = target == IndexReqTarget::Index;
 
         const auto& indexFieldPrefixMap = ctx.getIndexFieldPrefixMap();
-        boost::optional<opt::unordered_set<FieldNameType>> indexFieldPrefixMapForScanDef;
+        boost::optional<FieldNameSet> indexFieldPrefixMapForScanDef;
         if (auto it = indexFieldPrefixMap.find(scanDefName);
             it != indexFieldPrefixMap.cend() && !isIndex) {
             indexFieldPrefixMapForScanDef = it->second;
@@ -1138,10 +1132,13 @@ struct ExploreConvert<SargableNode> {
                 continue;
             }
 
-            if (isIndex && (!splitResult._hasLeftIntervals || !splitResult._hasRightIntervals)) {
-                // Reject. Must have at least one proper interval on either side.
+            // Reject. Must have at least one proper interval on either side.
+            if (isIndex &&
+                (!hasProperIntervals(splitResult._leftReqs) ||
+                 !hasProperIntervals(splitResult._rightReqs))) {
                 continue;
             }
+
             if (!splitResult._hasFieldCoverage) {
                 // Reject rewrite. No suitable indexes.
                 continue;
@@ -1193,11 +1190,8 @@ struct ExploreConvert<SargableNode> {
                                      isIndex ? IndexReqTarget::Index : IndexReqTarget::Seek,
                                      scanDelegator);
 
-            ABT newRoot = make<RIDIntersectNode>(scanProjectionName,
-                                                 splitResult._hasLeftIntervals,
-                                                 splitResult._hasRightIntervals,
-                                                 std::move(leftChild),
-                                                 std::move(rightChild));
+            ABT newRoot = make<RIDIntersectNode>(
+                scanProjectionName, std::move(leftChild), std::move(rightChild));
 
             const auto& result = ctx.addNode(newRoot, false /*substitute*/);
             for (const MemoLogicalNodeId nodeId : result.second) {
@@ -1287,14 +1281,27 @@ void reorderAgainstRIDIntersectNode(ABT::reference_type aboveNode,
     }
 
     const RIDIntersectNode& node = *belowNode.cast<RIDIntersectNode>();
-    if (node.hasLeftIntervals() && hasLeftRef) {
+    const GroupIdType groupIdLeft =
+        node.getLeftChild().cast<MemoLogicalDelegatorNode>()->getGroupId();
+    const bool hasProperIntervalLeft =
+        properties::getPropertyConst<properties::IndexingAvailability>(
+            ctx.getMemo().getLogicalProps(groupIdLeft))
+            .hasProperInterval();
+    if (hasProperIntervalLeft && hasLeftRef) {
         defaultReorder<AboveNode,
                        RIDIntersectNode,
                        DefaultChildAccessor,
                        LeftChildAccessor,
                        false /*substitute*/>(aboveNode, belowNode, ctx);
     }
-    if (node.hasRightIntervals() && hasRightRef) {
+
+    const GroupIdType groupIdRight =
+        node.getRightChild().cast<MemoLogicalDelegatorNode>()->getGroupId();
+    const bool hasProperIntervalRight =
+        properties::getPropertyConst<properties::IndexingAvailability>(
+            ctx.getMemo().getLogicalProps(groupIdRight))
+            .hasProperInterval();
+    if (hasProperIntervalRight && hasRightRef) {
         defaultReorder<AboveNode,
                        RIDIntersectNode,
                        DefaultChildAccessor,

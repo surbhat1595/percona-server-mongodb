@@ -67,6 +67,9 @@ struct CollectionUpdateArgs {
 
     std::vector<StmtId> stmtIds = {kUninitializedStmtId};
 
+    // The unique sample id for this update if it has been chosen for sampling.
+    boost::optional<UUID> sampleId;
+
     // The document before modifiers were applied.
     boost::optional<BSONObj> preImageDoc;
 
@@ -84,6 +87,8 @@ struct CollectionUpdateArgs {
 
     StoreDocOption storeDocOption = StoreDocOption::None;
     bool changeStreamPreAndPostImagesEnabledForCollection = false;
+
+    bool retryableWrite = false;
 
     // Set if OpTimes were reserved for the update ahead of time.
     std::vector<OplogSlot> oplogSlots;
@@ -105,8 +110,6 @@ public:
 
 class Collection : public Decorable<Collection> {
 public:
-    enum class StoreDeletedDoc { Off, On };
-
     /**
      * Direction of collection scan plan executor returned by makePlanExecutor().
      */
@@ -225,7 +228,7 @@ public:
      */
     virtual Status initFromExisting(OperationContext* opCtx,
                                     const std::shared_ptr<Collection>& collection,
-                                    Timestamp readTimestamp) = 0;
+                                    boost::optional<Timestamp> readTimestamp) = 0;
 
     virtual bool isCommitted() const {
         return true;
@@ -309,78 +312,8 @@ public:
     virtual std::unique_ptr<SeekableRecordCursor> getCursor(OperationContext* opCtx,
                                                             bool forward = true) const = 0;
 
-    /**
-     * Deletes the document with the given RecordId from the collection. For a description of the
-     * parameters, see the overloaded function below.
-     */
-    virtual void deleteDocument(OperationContext* opCtx,
-                                StmtId stmtId,
-                                const RecordId& loc,
-                                OpDebug* opDebug,
-                                bool fromMigrate = false,
-                                bool noWarn = false,
-                                StoreDeletedDoc storeDeletedDoc = StoreDeletedDoc::Off,
-                                CheckRecordId checkRecordId = CheckRecordId::Off) const = 0;
-
-    /**
-     * Deletes the document from the collection.
-     *
-     * 'doc' the document to be deleted.
-     * 'fromMigrate' indicates whether the delete was induced by a chunk migration, and
-     * so should be ignored by the user as an internal maintenance operation and not a
-     * real delete.
-     * 'loc' key to uniquely identify a record in a collection.
-     * 'opDebug' Optional argument. When not null, will be used to record operation statistics.
-     * 'noWarn' if unindexing the record causes an error, if noWarn is true the error
-     * will not be logged.
-     * 'storeDeletedDoc' whether to store the document deleted in the oplog.
-     * 'checkRecordId' whether to confirm the recordId matches the record we are removing when
-     * unindexing.
-     */
-    virtual void deleteDocument(OperationContext* opCtx,
-                                Snapshotted<BSONObj> doc,
-                                StmtId stmtId,
-                                const RecordId& loc,
-                                OpDebug* opDebug,
-                                bool fromMigrate = false,
-                                bool noWarn = false,
-                                StoreDeletedDoc storeDeletedDoc = StoreDeletedDoc::Off,
-                                CheckRecordId checkRecordId = CheckRecordId::Off) const = 0;
-
-    /**
-     * Updates the document @ oldLocation with newDoc.
-     *
-     * If the document fits in the old space, it is put there; if not, it is moved.
-     * Sets 'args.updatedDoc' to the updated version of the document with damages applied, on
-     * success.
-     * 'opDebug' Optional argument. When not null, will be used to record operation statistics.
-     * @return the post update location of the doc (may or may not be the same as oldLocation)
-     */
-    virtual RecordId updateDocument(OperationContext* opCtx,
-                                    const RecordId& oldLocation,
-                                    const Snapshotted<BSONObj>& oldDoc,
-                                    const BSONObj& newDoc,
-                                    bool indexesAffected,
-                                    OpDebug* opDebug,
-                                    CollectionUpdateArgs* args) const = 0;
-
     virtual bool updateWithDamagesSupported() const = 0;
 
-    /**
-     * Illegal to call if updateWithDamagesSupported() returns false.
-     * Sets 'args.updatedDoc' to the updated version of the document with damages applied, on
-     * success.
-     *
-     * Returns the contents of the updated document on success.
-     */
-    virtual StatusWith<BSONObj> updateDocumentWithDamages(OperationContext* opCtx,
-                                                          const RecordId& loc,
-                                                          const Snapshotted<BSONObj>& oldDoc,
-                                                          const char* damageSource,
-                                                          const mutablebson::DamageVector& damages,
-                                                          bool indexesAffected,
-                                                          OpDebug* opDebug,
-                                                          CollectionUpdateArgs* args) const = 0;
 
     // -----------
 

@@ -37,8 +37,8 @@ bool GlobalIndexesCache::empty() const {
     return _indexes.empty();
 }
 
-boost::optional<Timestamp> GlobalIndexesCache::getVersion() const {
-    return _indexVersion;
+CollectionIndexes GlobalIndexesCache::getCollectionIndexes() const {
+    return _collectionIndexes;
 }
 
 size_t GlobalIndexesCache::numIndexes() const {
@@ -49,52 +49,57 @@ bool GlobalIndexesCache::contains(const StringData& name) const {
     return _indexes.contains(name);
 }
 
-void GlobalIndexesCache::add(const IndexCatalogType& index, const Timestamp& indexVersion) {
-    _indexVersion.emplace(indexVersion);
+void GlobalIndexesCache::add(const IndexCatalogType& index,
+                             const CollectionIndexes& collectionIndexes) {
+    tassert(7019900,
+            str::stream()
+                << "Cannot add global index with different uuid than is in the GlobalIndexesCache.",
+            collectionIndexes.uuid() == _collectionIndexes.uuid());
+    _collectionIndexes = collectionIndexes;
     _indexes.emplace(index.getName(), index);
 }
 
-void GlobalIndexesCache::remove(const StringData& name, const Timestamp& indexVersion) {
-    _indexVersion.emplace(indexVersion);
+void GlobalIndexesCache::remove(const StringData& name,
+                                const CollectionIndexes& collectionIndexes) {
+    tassert(
+        7019901,
+        str::stream()
+            << "Cannot remove global index with different uuid than is in the GlobalIndexesCache.",
+        collectionIndexes.uuid() == _collectionIndexes.uuid());
+    _collectionIndexes = collectionIndexes;
     _indexes.erase(name);
 }
 
-void GlobalIndexesCache::clear() {
-    _indexVersion = boost::none;
-    _indexes.clear();
-}
-
-AtomicWord<uint64_t> ComparableIndexVersion::_epochDisambiguatingSequenceNumSource{1ULL};
+AtomicWord<uint64_t> ComparableIndexVersion::_disambiguatingSequenceNumSource{1ULL};
 AtomicWord<uint64_t> ComparableIndexVersion::_forcedRefreshSequenceNumSource{1ULL};
 
 ComparableIndexVersion ComparableIndexVersion::makeComparableIndexVersion(
-    const boost::optional<CollectionIndexes>& version) {
+    const boost::optional<Timestamp>& version) {
     return ComparableIndexVersion(_forcedRefreshSequenceNumSource.load(),
                                   version,
-                                  _epochDisambiguatingSequenceNumSource.fetchAndAdd(1));
+                                  _disambiguatingSequenceNumSource.fetchAndAdd(1));
 }
 
 ComparableIndexVersion ComparableIndexVersion::makeComparableIndexVersionForForcedRefresh() {
     return ComparableIndexVersion(_forcedRefreshSequenceNumSource.addAndFetch(2) - 1,
                                   boost::none,
-                                  _epochDisambiguatingSequenceNumSource.fetchAndAdd(1));
+                                  _disambiguatingSequenceNumSource.fetchAndAdd(1));
 }
 
-void ComparableIndexVersion::setCollectionIndexes(
-    const boost::optional<CollectionIndexes>& version) {
+void ComparableIndexVersion::setCollectionIndexes(const boost::optional<Timestamp>& version) {
     _indexVersion = version;
 }
 
 std::string ComparableIndexVersion::toString() const {
     BSONObjBuilder builder;
     if (_indexVersion)
-        builder.append("collectionIndexes"_sd, _indexVersion->toBSONForLogging());
+        builder.append("collectionIndexes"_sd, _indexVersion->toString());
     else
         builder.append("collectionIndexes"_sd, "None");
 
     builder.append("forcedRefreshSequenceNum"_sd, static_cast<int64_t>(_forcedRefreshSequenceNum));
-    builder.append("epochDisambiguatingSequenceNum"_sd,
-                   static_cast<int64_t>(_epochDisambiguatingSequenceNum));
+    builder.append("disambiguatingSequenceNum"_sd,
+                   static_cast<int64_t>(_disambiguatingSequenceNum));
 
     return builder.obj().toString();
 }
@@ -106,8 +111,7 @@ bool ComparableIndexVersion::operator==(const ComparableIndexVersion& other) con
     if (_forcedRefreshSequenceNum == 0)
         return true;  // Only default constructed values have _forcedRefreshSequenceNum == 0 and
                       // they are always equal
-
-    // Relying on the boost::optional<CollectionIndexes>::operator== comparison
+    // Relying on the boost::optional<Timestamp>::operator== comparison
     return _indexVersion == other._indexVersion;
 }
 
@@ -121,26 +125,13 @@ bool ComparableIndexVersion::operator<(const ComparableIndexVersion& other) cons
     if (_forcedRefreshSequenceNum == 0)
         return false;  // Only default constructed values have _forcedRefreshSequenceNum == 0 and
                        // they are always equal
-    if (_indexVersion.has_value() != other._indexVersion.has_value())
-        return _epochDisambiguatingSequenceNum <
-            other._epochDisambiguatingSequenceNum;  // One side is not initialised, but the other
-                                                    // is, which can only happen if one side is
-                                                    // ForForcedRefresh and the other is made from
-                                                    // makeComparableIndexVersion. In this case, use
-                                                    // the _epochDisambiguatingSequenceNum to see
-                                                    // which one is more recent.
-    if (!_indexVersion.has_value())
-        return _epochDisambiguatingSequenceNum <
-            other._epochDisambiguatingSequenceNum;  // Both sides are not initialised, which can
-                                                    // only happen if both were created from
-                                                    // ForForcedRefresh. In this case, use the
-                                                    // _epochDisambiguatingSequenceNum to see which
-                                                    // one is more recent.
 
-    if (_indexVersion->uuid() == other._indexVersion->uuid()) {
-        return _indexVersion->indexVersion() < other._indexVersion->indexVersion();
-    }
-    return _epochDisambiguatingSequenceNum < other._epochDisambiguatingSequenceNum;
+    if (_indexVersion.is_initialized() != other._indexVersion.is_initialized())
+        return _disambiguatingSequenceNum <
+            other._disambiguatingSequenceNum;  // If one value is set and the other is not, we must
+                                               // rely on the disambiguating sequence number
+
+    return _indexVersion < other._indexVersion;
 }
 
 }  // namespace mongo

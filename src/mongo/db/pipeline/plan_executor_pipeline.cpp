@@ -37,15 +37,17 @@
 #include "mongo/db/pipeline/plan_explainer_pipeline.h"
 #include "mongo/db/pipeline/resume_token.h"
 #include "mongo/db/repl/speculative_majority_read_info.h"
+#include "mongo/util/duration.h"
 
 namespace mongo {
 
 PlanExecutorPipeline::PlanExecutorPipeline(boost::intrusive_ptr<ExpressionContext> expCtx,
                                            std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
-                                           ResumableScanType resumableScanType)
+                                           ResumableScanType resumableScanType,
+                                           Microseconds timeElapsedPlanning)
     : _expCtx(std::move(expCtx)),
       _pipeline(std::move(pipeline)),
-      _planExplainer{_pipeline.get()},
+      _planExplainer{_pipeline.get(), timeElapsedPlanning, _expCtx->opCtx->getTelemetryKey()},
       _resumableScanType{resumableScanType} {
     // Pipeline plan executors must always have an ExpressionContext.
     invariant(_expCtx);
@@ -250,6 +252,24 @@ void PlanExecutorPipeline::markAsKilled(Status killStatus) {
     if (_killStatus.isOK()) {
         _killStatus = killStatus;
     }
+}
+
+PlanExecutor::QueryFramework PlanExecutorPipeline::getQueryFramework() const {
+    // If this executor has a $cursor source at the front, use the query framework of that executor
+    // backing the cursor stage in order to determine whether the current pipeline is a hybrid plan.
+    if (auto cursor = dynamic_cast<DocumentSourceCursor*>(_pipeline->peekFront())) {
+        switch (cursor->getQueryFramework()) {
+            case PlanExecutor::QueryFramework::kClassicOnly:
+                return PlanExecutor::QueryFramework::kClassicHybrid;
+            case PlanExecutor::QueryFramework::kSBEOnly:
+                return PlanExecutor::QueryFramework::kSBEHybrid;
+            default:
+                MONGO_UNREACHABLE_TASSERT(6884701);
+        }
+    }
+    // If this executor doesn't have a $cursor source, then return classicOnly as it cannot be a
+    // hybrid plan.
+    return PlanExecutor::QueryFramework::kClassicOnly;
 }
 
 }  // namespace mongo

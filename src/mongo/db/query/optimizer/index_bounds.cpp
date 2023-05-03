@@ -30,6 +30,7 @@
 #include "mongo/db/query/optimizer/index_bounds.h"
 
 #include "mongo/db/query/optimizer/node.h"
+#include "mongo/db/query/optimizer/utils/abt_compare.h"
 #include "mongo/db/query/optimizer/utils/utils.h"
 
 
@@ -44,7 +45,9 @@ BoundRequirement BoundRequirement::makePlusInf() {
 }
 
 BoundRequirement::BoundRequirement(bool inclusive, ABT bound)
-    : _inclusive(inclusive), _bound(std::move(bound)) {}
+    : _inclusive(inclusive), _bound(std::move(bound)) {
+    assertExprSort(_bound);
+}
 
 bool BoundRequirement::operator==(const BoundRequirement& other) const {
     return _inclusive == other._inclusive && _bound == other._bound;
@@ -104,7 +107,13 @@ void IntervalRequirement::reverse() {
     std::swap(_lowBound, _highBound);
 }
 
+PartialSchemaKey::PartialSchemaKey(ABT path) : PartialSchemaKey(boost::none, std::move(path)) {}
+
 PartialSchemaKey::PartialSchemaKey(ProjectionName projectionName, ABT path)
+    : PartialSchemaKey(boost::optional<ProjectionName>{std::move(projectionName)},
+                       std::move(path)) {}
+
+PartialSchemaKey::PartialSchemaKey(boost::optional<ProjectionName> projectionName, ABT path)
     : _projectionName(std::move(projectionName)), _path(std::move(path)) {
     assertPathSort(_path);
 }
@@ -120,15 +129,16 @@ bool isIntervalReqFullyOpenDNF(const IntervalReqExpr::Node& n) {
     return false;
 }
 
-PartialSchemaRequirement::PartialSchemaRequirement(ProjectionName boundProjectionName,
-                                                   IntervalReqExpr::Node intervals,
-                                                   const bool isPerfOnly)
+PartialSchemaRequirement::PartialSchemaRequirement(
+    boost::optional<ProjectionName> boundProjectionName,
+    IntervalReqExpr::Node intervals,
+    const bool isPerfOnly)
     : _boundProjectionName(std::move(boundProjectionName)),
       _intervals(std::move(intervals)),
       _isPerfOnly(isPerfOnly) {
     tassert(6624154,
             "Cannot have perf only requirement which also binds",
-            !_isPerfOnly || !hasBoundProjectionName());
+            !_isPerfOnly || !_boundProjectionName);
 }
 
 bool PartialSchemaRequirement::operator==(const PartialSchemaRequirement& other) const {
@@ -136,11 +146,7 @@ bool PartialSchemaRequirement::operator==(const PartialSchemaRequirement& other)
         _isPerfOnly == other._isPerfOnly;
 }
 
-bool PartialSchemaRequirement::hasBoundProjectionName() const {
-    return !_boundProjectionName.empty();
-}
-
-const ProjectionName& PartialSchemaRequirement::getBoundProjectionName() const {
+const boost::optional<ProjectionName>& PartialSchemaRequirement::getBoundProjectionName() const {
     return _boundProjectionName;
 }
 
@@ -153,64 +159,30 @@ bool PartialSchemaRequirement::getIsPerfOnly() const {
 }
 
 bool PartialSchemaRequirement::mayReturnNull(const ConstFoldFn& constFold) const {
-    return hasBoundProjectionName() && checkMaybeHasNull(getIntervals(), constFold);
-};
-
-/**
- * Helper class used to compare PartialSchemaKey objects.
- */
-class IndexPath3WCompare {
-public:
-    IndexPath3WCompare() {}
-
-    int compareTags(const ABT& n, const ABT& other) {
-        const auto t1 = n.tagOf();
-        const auto t2 = other.tagOf();
-        return (t1 == t2) ? 0 : ((t1 < t2) ? -1 : 1);
-    }
-
-    int operator()(const ABT& n, const PathGet& node, const ABT& other) {
-        if (auto otherGet = other.cast<PathGet>(); otherGet != nullptr) {
-            const int varCmp = node.name().compare(otherGet->name());
-            return (varCmp == 0) ? node.getPath().visit(*this, otherGet->getPath()) : varCmp;
-        }
-        return compareTags(n, other);
-    }
-
-    int operator()(const ABT& n, const PathTraverse& node, const ABT& other) {
-        if (auto otherTraverse = other.cast<PathTraverse>(); otherTraverse != nullptr) {
-            return node.getPath().visit(*this, otherTraverse->getPath());
-        }
-        return compareTags(n, other);
-    }
-
-    int operator()(const ABT& n, const PathIdentity& node, const ABT& other) {
-        return compareTags(n, other);
-    }
-
-    template <typename T, typename... Ts>
-    int operator()(const ABT& /*n*/, const T& /*node*/, Ts&&...) {
-        uasserted(6624079, "Unexpected node type");
-        return 0;
-    }
-
-    static int compare(const ABT& node, const ABT& other) {
-        IndexPath3WCompare instance;
-        return node.visit(instance, other);
-    }
+    return _boundProjectionName && checkMaybeHasNull(getIntervals(), constFold);
 };
 
 bool IndexPath3WComparator::operator()(const ABT& path1, const ABT& path2) const {
-    return IndexPath3WCompare::compare(path1, path2) < 0;
+    return compareExprAndPaths(path1, path2) < 0;
 }
 
 bool PartialSchemaKeyLessComparator::operator()(const PartialSchemaKey& k1,
                                                 const PartialSchemaKey& k2) const {
-    const int projCmp = k1._projectionName.compare(k2._projectionName);
-    if (projCmp != 0) {
-        return projCmp < 0;
+    if (const auto& p1 = k1._projectionName) {
+        if (const auto& p2 = k2._projectionName) {
+            const int projCmp = p1->compare(*p2);
+            if (projCmp != 0) {
+                return projCmp < 0;
+            }
+            // Fallthrough to comparison below.
+        } else {
+            return false;
+        }
+    } else if (k2._projectionName) {
+        return false;
     }
-    return IndexPath3WCompare::compare(k1._path, k2._path) < 0;
+
+    return compareExprAndPaths(k1._path, k2._path) < 0;
 }
 
 ResidualRequirement::ResidualRequirement(PartialSchemaKey key,

@@ -29,10 +29,7 @@
 
 #include "mongo/db/query/optimizer/opt_phase_manager.h"
 
-#include "mongo/db/query/optimizer/cascades/ce_heuristic.h"
-#include "mongo/db/query/optimizer/cascades/cost_derivation.h"
 #include "mongo/db/query/optimizer/cascades/logical_props_derivation.h"
-#include "mongo/db/query/optimizer/explain.h"
 #include "mongo/db/query/optimizer/rewrites/const_eval.h"
 #include "mongo/db/query/optimizer/rewrites/path.h"
 #include "mongo/db/query/optimizer/rewrites/path_lower.h"
@@ -50,25 +47,10 @@ OptPhaseManager::PhaseSet OptPhaseManager::_allRewrites = {OptPhase::ConstEvalPr
 
 OptPhaseManager::OptPhaseManager(OptPhaseManager::PhaseSet phaseSet,
                                  PrefixId& prefixId,
-                                 Metadata metadata,
-                                 DebugInfo debugInfo,
-                                 QueryHints queryHints)
-    : OptPhaseManager(std::move(phaseSet),
-                      prefixId,
-                      false /*requireRID*/,
-                      std::move(metadata),
-                      std::make_unique<HeuristicCE>(),
-                      std::make_unique<DefaultCosting>(),
-                      {} /*pathToInterval*/,
-                      ConstEval::constFold,
-                      std::move(debugInfo),
-                      std::move(queryHints)) {}
-
-OptPhaseManager::OptPhaseManager(OptPhaseManager::PhaseSet phaseSet,
-                                 PrefixId& prefixId,
                                  const bool requireRID,
                                  Metadata metadata,
-                                 std::unique_ptr<CEInterface> ceDerivation,
+                                 std::unique_ptr<CEInterface> explorationCE,
+                                 std::unique_ptr<CEInterface> substitutionCE,
                                  std::unique_ptr<CostingInterface> costDerivation,
                                  PathToIntervalFn pathToInterval,
                                  ConstFoldFn constFold,
@@ -80,7 +62,8 @@ OptPhaseManager::OptPhaseManager(OptPhaseManager::PhaseSet phaseSet,
       _metadata(std::move(metadata)),
       _memo(),
       _logicalPropsDerivation(std::make_unique<DefaultLogicalPropsDerivation>()),
-      _ceDerivation(std::move(ceDerivation)),
+      _explorationCE(std::move(explorationCE)),
+      _substitutionCE(std::move(substitutionCE)),
       _costDerivation(std::move(costDerivation)),
       _pathToInterval(std::move(pathToInterval)),
       _constFold(std::move(constFold)),
@@ -88,11 +71,27 @@ OptPhaseManager::OptPhaseManager(OptPhaseManager::PhaseSet phaseSet,
       _requireRID(requireRID),
       _ridProjections(),
       _prefixId(prefixId) {
-    uassert(6624093, "Empty Cost derivation", _costDerivation.get());
+    uassert(6624093, "Cost derivation is null", _costDerivation);
+    uassert(7088900, "Exploration CE is null", _explorationCE);
+    uassert(7088901, "Substitution CE is null", _substitutionCE);
 
     for (const auto& entry : _metadata._scanDefs) {
         _ridProjections.emplace(entry.first, _prefixId.getNextId("rid"));
     }
+}
+
+static std::string generateFreeVarsAssertMsg(const VariableEnvironment& env) {
+    str::stream os;
+    bool first = true;
+    for (const auto& name : env.freeVariableNames()) {
+        if (first) {
+            first = false;
+        } else {
+            os << ", ";
+        }
+        os << name;
+    }
+    return os;
 }
 
 template <OptPhase phase, class C>
@@ -108,7 +107,9 @@ void OptPhaseManager::runStructuralPhase(C instance, VariableEnvironment& env, A
                 !_debugInfo.exceedsIterationLimit(iterationCount));
     }
 
-    tassert(6808709, "Environment has free variables.", !env.hasFreeVariables());
+    if (env.hasFreeVariables()) {
+        tasserted(6808709, "Plan has free variables: " + generateFreeVarsAssertMsg(env));
+    }
 }
 
 template <OptPhase phase1, OptPhase phase2, class C1, class C2>
@@ -141,7 +142,9 @@ void OptPhaseManager::runStructuralPhases(C1 instance1,
         }
     }
 
-    tassert(6808701, "Environment has free variables.", !env.hasFreeVariables());
+    if (env.hasFreeVariables()) {
+        tasserted(6808701, "Plan has free variables: " + generateFreeVarsAssertMsg(env));
+    }
 }
 
 void OptPhaseManager::runMemoLogicalRewrite(const OptPhase phase,
@@ -156,8 +159,7 @@ void OptPhaseManager::runMemoLogicalRewrite(const OptPhase phase,
     }
 
     _memo.clear();
-    const bool useHeuristicCE = phase == OptPhase::MemoSubstitutionPhase;
-    HeuristicCE heuristicCE;
+    const bool useSubstitutionCE = phase == OptPhase::MemoSubstitutionPhase;
     logicalRewriter =
         std::make_unique<LogicalRewriter>(_metadata,
                                           _memo,
@@ -168,7 +170,7 @@ void OptPhaseManager::runMemoLogicalRewrite(const OptPhase phase,
                                           _pathToInterval,
                                           _constFold,
                                           *_logicalPropsDerivation,
-                                          useHeuristicCE ? heuristicCE : *_ceDerivation);
+                                          useSubstitutionCE ? *_substitutionCE : *_explorationCE);
     rootGroupId = logicalRewriter->addRootNode(input);
 
     if (runStandalone) {
@@ -179,7 +181,9 @@ void OptPhaseManager::runMemoLogicalRewrite(const OptPhase phase,
         env.rebuild(input);
     }
 
-    tassert(6808703, "Environment has free variables.", !env.hasFreeVariables());
+    if (env.hasFreeVariables()) {
+        tasserted(6808703, "Plan has free variables: " + generateFreeVarsAssertMsg(env));
+    }
 }
 
 void OptPhaseManager::runMemoPhysicalRewrite(const OptPhase phase,
@@ -202,7 +206,7 @@ void OptPhaseManager::runMemoPhysicalRewrite(const OptPhase phase,
     if (_requireRID) {
         const auto& rootLogicalProps = _memo.getLogicalProps(rootGroupId);
         tassert(6808705,
-                "We cannot optain rid for this query.",
+                "We cannot obtain rid for this query.",
                 hasProperty<IndexingAvailability>(rootLogicalProps));
 
         const auto& scanDefName =
@@ -232,8 +236,9 @@ void OptPhaseManager::runMemoPhysicalRewrite(const OptPhase phase,
     std::tie(input, _nodeToGroupPropsMap) = extractPhysicalPlan(_physicalNodeId, _metadata, _memo);
 
     env.rebuild(input);
-
-    tassert(6808707, "Environment has free variables.", !env.hasFreeVariables());
+    if (env.hasFreeVariables()) {
+        tasserted(6808707, "Plan has free variables: " + generateFreeVarsAssertMsg(env));
+    }
 }
 
 void OptPhaseManager::runMemoRewritePhases(VariableEnvironment& env, ABT& input) {
@@ -263,23 +268,9 @@ void OptPhaseManager::runMemoRewritePhases(VariableEnvironment& env, ABT& input)
 
 void OptPhaseManager::optimize(ABT& input) {
     VariableEnvironment env = VariableEnvironment::build(input);
-
-    std::string freeVariables = "";
     if (env.hasFreeVariables()) {
-        bool first = true;
-        for (auto& name : env.freeVariableNames()) {
-            if (first) {
-                first = false;
-            } else {
-                freeVariables += ", ";
-            }
-            freeVariables += name;
-        }
+        tasserted(6808711, "Plan has free variables: " + generateFreeVarsAssertMsg(env));
     }
-
-    tassert(6808711,
-            "Environment has the following free variables: " + freeVariables + ".",
-            !env.hasFreeVariables());
 
     const auto sargableCheckFn = [this](const ABT& expr) {
         return convertExprToPartialSchemaReq(expr, false /*isFilterContext*/, _pathToInterval)
@@ -314,7 +305,9 @@ void OptPhaseManager::optimize(ABT& input) {
     }
 
     env.rebuild(input);
-    tassert(6808710, "Environment has free variables.", !env.hasFreeVariables());
+    if (env.hasFreeVariables()) {
+        tasserted(6808710, "Plan has free variables: " + generateFreeVarsAssertMsg(env));
+    }
 }
 
 bool OptPhaseManager::hasPhase(const OptPhase phase) const {

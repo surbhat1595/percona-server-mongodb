@@ -246,7 +246,7 @@ StatusWith<ParsedDistinct> ParsedDistinct::parse(OperationContext* opCtx,
                                                  const ExtensionsCallback& extensionsCallback,
                                                  bool isExplain,
                                                  const CollatorInterface* defaultCollator) {
-    IDLParserContext ctx("distinct");
+    IDLParserContext ctx("distinct", false /* apiStrict */, nss.tenantId());
 
     DistinctCommandRequest parsedDistinct(nss);
     try {
@@ -322,7 +322,8 @@ StatusWith<ParsedDistinct> ParsedDistinct::parse(OperationContext* opCtx,
 
     return ParsedDistinct(std::move(cq.getValue()),
                           parsedDistinct.getKey().toString(),
-                          parsedDistinct.getMirrored().value_or(false));
+                          parsedDistinct.getMirrored().value_or(false),
+                          parsedDistinct.getSampleId());
 }
 
 }  // namespace mongo

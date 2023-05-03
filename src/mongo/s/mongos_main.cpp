@@ -807,10 +807,7 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
         return ExitCode::processHealthCheck;
     }
 
-    if (analyze_shard_key::isFeatureFlagEnabled()) {
-        LOGV2_OPTIONS(6973900, {LogComponent::kDefault}, "Starting the QueryAnalysisSampler");
-        analyze_shard_key::QueryAnalysisSampler::get(serviceContext).onStartup();
-    }
+    srand((unsigned)(curTimeMicros64()) ^ (unsigned(uintptr_t(&opCtx))));
 
     SessionKiller::set(serviceContext,
                        std::make_shared<SessionKiller>(serviceContext, killSessionsRemote));

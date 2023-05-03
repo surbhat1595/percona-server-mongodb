@@ -31,6 +31,7 @@
 
 #include <stack>
 
+#include "mongo/db/matcher/expression_path.h"
 #include "mongo/db/query/optimizer/node.h"
 #include "mongo/db/query/optimizer/utils/utils.h"
 
@@ -40,8 +41,8 @@ class ExpressionAlgebrizerContext {
 public:
     ExpressionAlgebrizerContext(bool assertExprSort,
                                 bool assertPathSort,
-                                const std::string& rootProjection,
-                                const std::string& uniqueIdPrefix);
+                                const ProjectionName& rootProjection,
+                                boost::optional<ProjectionName> uniqueIdPrefix);
 
     /**
      * Push an ABT onto the stack. Optionally perform a check on the type of the ABT based on
@@ -63,27 +64,47 @@ public:
      */
     void ensureArity(size_t arity);
 
-    const std::string& getRootProjection() const;
+    const ProjectionName& getRootProjection() const;
     const ABT& getRootProjVar() const;
 
-    const std::string& getUniqueIdPrefix() const;
+    const boost::optional<ProjectionName>& getUniqueIdPrefix() const;
 
     /**
-     * Returns a unique string for a new projection name. It will be prefixed by 'uniqueIdPrefix'.
+     * Returns a unique projection. It will be prefixed by 'uniqueIdPrefix'.
      */
-    std::string getNextId(const std::string& key);
+    ProjectionName getNextId(const std::string& prefix);
 
-    void enterElemMatch() {
-        _elemMatchCount++;
+    void enterElemMatch(const MatchExpression::MatchType matchType) {
+        _elemMatchStack.push_back(matchType);
     }
 
     void exitElemMatch() {
         tassert(6809501, "Attempting to exit out of elemMatch that was not entered", inElemMatch());
-        _elemMatchCount--;
+        _elemMatchStack.pop_back();
     }
 
     bool inElemMatch() {
-        return _elemMatchCount > 0;
+        return !_elemMatchStack.empty();
+    }
+
+    /**
+     * Returns whether the current $elemMatch should consider its path for translation. This
+     * function assumes that 'enterElemMatch' has been called before visiting the current
+     * expression.
+     */
+    bool shouldGeneratePathForElemMatch() const {
+        return _elemMatchStack.size() == 1 ||
+            _elemMatchStack[_elemMatchStack.size() - 2] ==
+            MatchExpression::MatchType::ELEM_MATCH_OBJECT;
+    }
+
+    /**
+     * Returns true if the current expression should consider its path for translation based on
+     * whether it's contained within an ElemMatchObjectExpression.
+     */
+    bool shouldGeneratePath() const {
+        return _elemMatchStack.empty() ||
+            _elemMatchStack.back() == MatchExpression::MatchType::ELEM_MATCH_OBJECT;
     }
 
 private:
@@ -91,11 +112,11 @@ private:
     const bool _assertPathSort;
 
     // The name of the input projection on which the top-level expression will be evaluated.
-    const std::string _rootProjection;
+    const ProjectionName _rootProjection;
     const ABT _rootProjVar;
 
     // Used to vend out unique strings for projection names.
-    const std::string _uniqueIdPrefix;
+    const boost::optional<ProjectionName> _uniqueIdPrefix;
     PrefixId _prefixId;
 
     // Used to track the parts of the expression tree that have so far been translated to ABT.
@@ -103,8 +124,9 @@ private:
     // child expressions.
     std::stack<ABT> _stack;
 
-    // Track whether the vistor is currently under an $elemMatch node.
-    int _elemMatchCount{0};
+    // Used to track expressions contained under an $elemMatch. Each entry is either an
+    // ELEM_MATCH_OBJECT or ELEM_MATCH_VALUE.
+    std::vector<MatchExpression::MatchType> _elemMatchStack;
 };
 
 }  // namespace mongo::optimizer

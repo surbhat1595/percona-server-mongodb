@@ -46,6 +46,8 @@
 #include "mongo/db/vector_clock.h"
 #include "mongo/s/catalog/sharding_catalog_client_mock.h"
 #include "mongo/s/catalog_cache_loader_mock.h"
+#include "mongo/stdx/chrono.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/util/fail_point.h"
 
 namespace mongo {
@@ -60,7 +62,12 @@ protected:
     static CollectionMetadata makeShardedMetadata(OperationContext* opCtx,
                                                   UUID uuid = UUID::gen()) {
         const OID epoch = OID::gen();
-        const Timestamp timestamp(1, 1);
+        const Timestamp timestamp(Date_t::now());
+
+        // Sleeping some time here to guarantee that any upcoming call to this function generates a
+        // different timestamp
+        stdx::this_thread::sleep_for(stdx::chrono::milliseconds(10));
+
         auto range = ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY));
         auto chunk = ChunkType(
             uuid, std::move(range), ChunkVersion({epoch, timestamp}, {1, 0}), ShardId("other"));
@@ -377,8 +384,10 @@ public:
         AutoGetCollection autoColl(operationContext(), kTestNss, MODE_IX);
         _uuid = autoColl.getCollection()->uuid();
 
-        RangeDeleterService::get(operationContext())->onStepUpComplete(operationContext(), 0L);
-        RangeDeleterService::get(operationContext())->_waitForRangeDeleterServiceUp_FOR_TESTING();
+        auto opCtx = operationContext();
+        RangeDeleterService::get(opCtx)->onStartup(opCtx);
+        RangeDeleterService::get(opCtx)->onStepUpComplete(opCtx, 0L);
+        RangeDeleterService::get(opCtx)->_waitForRangeDeleterServiceUp_FOR_TESTING();
     }
 
     void tearDown() override {
@@ -391,12 +400,10 @@ public:
         CollectionShardingRuntimeTest::tearDown();
     }
 
-    // Creates the CSR if it does not exist and stashes it in the CollectionShardingStateMap. This
-    // is required for waitForClean tests which use CollectionShardingRuntime::get().
-    CollectionShardingRuntime& csr() {
+    CollectionShardingRuntime::ScopedCollectionShardingRuntime csr() {
         AutoGetCollection autoColl(operationContext(), kTestNss, MODE_IX);
-        auto* css = CollectionShardingState::get(operationContext(), kTestNss);
-        return *checked_cast<CollectionShardingRuntime*>(css);
+        return CollectionShardingRuntime::assertCollectionLockedAndAcquire(
+            operationContext(), kTestNss, CSRAcquisitionMode::kShared);
     }
 
     const UUID& uuid() const {
@@ -442,7 +449,7 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
        WaitForCleanReturnsErrorIfCollectionUUIDDoesNotMatchFilteringMetadata) {
     OperationContext* opCtx = operationContext();
     auto metadata = makeShardedMetadata(opCtx, uuid());
-    csr().setFilteringMetadata(opCtx, metadata);
+    csr()->setFilteringMetadata(opCtx, metadata);
     auto randomUuid = UUID::gen();
 
     auto status = CollectionShardingRuntime::waitForClean(
@@ -458,7 +465,7 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
        WaitForCleanReturnsOKIfNoDeletionsAreScheduled) {
     OperationContext* opCtx = operationContext();
     auto metadata = makeShardedMetadata(opCtx, uuid());
-    csr().setFilteringMetadata(opCtx, metadata);
+    csr()->setFilteringMetadata(opCtx, metadata);
 
     auto status = CollectionShardingRuntime::waitForClean(
         opCtx,
@@ -480,7 +487,7 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
     OperationContext* opCtx = operationContext();
 
     auto metadata = makeShardedMetadata(opCtx, uuid());
-    csr().setFilteringMetadata(opCtx, metadata);
+    csr()->setFilteringMetadata(opCtx, metadata);
     const ChunkRange range = ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY));
 
     const auto task = createRangeDeletionTask(opCtx, kTestNss, uuid(), range, 0);
@@ -501,7 +508,7 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
        WaitForCleanBlocksBehindAllScheduledDeletions) {
     OperationContext* opCtx = operationContext();
     auto metadata = makeShardedMetadata(opCtx, uuid());
-    csr().setFilteringMetadata(opCtx, metadata);
+    csr()->setFilteringMetadata(opCtx, metadata);
 
     const auto middleKey = 5;
     const ChunkRange range1 = ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << middleKey));
@@ -535,7 +542,7 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
        WaitForCleanReturnsOKAfterSuccessfulDeletion) {
     OperationContext* opCtx = operationContext();
     auto metadata = makeShardedMetadata(opCtx, uuid());
-    csr().setFilteringMetadata(opCtx, metadata);
+    csr()->setFilteringMetadata(opCtx, metadata);
     const ChunkRange range = ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY));
     const auto task = createRangeDeletionTask(opCtx, kTestNss, uuid(), range, 0);
 
@@ -557,7 +564,7 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
 
     OperationContext* opCtx = operationContext();
     auto metadata = makeShardedMetadata(opCtx, uuid());
-    csr().setFilteringMetadata(opCtx, metadata);
+    csr()->setFilteringMetadata(opCtx, metadata);
     const ChunkRange range = ChunkRange(BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY));
     const auto task = createRangeDeletionTask(opCtx, kTestNss, uuid(), range, 0);
 
@@ -566,8 +573,8 @@ TEST_F(CollectionShardingRuntimeWithRangeDeleterTest,
         opCtx, task, SemiFuture<void>::makeReady() /* waitForActiveQueries */);
 
     // Clear and set again filtering metadata
-    csr().clearFilteringMetadata(opCtx);
-    csr().setFilteringMetadata(opCtx, metadata);
+    csr()->clearFilteringMetadata(opCtx);
+    csr()->setFilteringMetadata(opCtx, metadata);
 
     auto waitForCleanUp = [&](Date_t timeout) {
         return CollectionShardingRuntime::waitForClean(opCtx, kTestNss, uuid(), range, timeout);
@@ -606,15 +613,14 @@ public:
 TEST_F(CollectionShardingRuntimeWithCatalogTest, TestGlobalIndexesCache) {
     OperationContext* opCtx = operationContext();
 
-    ASSERT_EQ(true, csr().getIndexes(opCtx).empty());
+    ASSERT_EQ(false, csr()->getIndexes(opCtx).is_initialized());
 
     Timestamp indexVersion(1, 0);
     addGlobalIndexCatalogEntryToCollection(
         opCtx, kTestNss, "x_1", BSON("x" << 1), BSONObj(), uuid(), indexVersion, boost::none);
 
-    ASSERT_EQ(false, csr().getIndexes(opCtx).empty());
-    ASSERT_EQ(indexVersion, *csr().getIndexes(opCtx).getVersion());
-    ASSERT_EQ(indexVersion, *csr().getIndexVersion(opCtx));
+    ASSERT_EQ(true, csr()->getIndexes(opCtx).is_initialized());
+    ASSERT_EQ(CollectionIndexes(uuid(), indexVersion), *csr()->getCollectionIndexes(opCtx));
 }
 }  // namespace
 }  // namespace mongo

@@ -249,7 +249,6 @@ const allCommands = {
     getDefaultRWConcern: {skip: isNotAUserDataRead},
     getDiagnosticData: {skip: isNotAUserDataRead},
     getFreeMonitoringStatus: {skip: isNotAUserDataRead},
-    getLastError: {skip: isPrimaryOnly},
     getLog: {skip: isNotAUserDataRead},
     getMore: {
         command: {getMore: NumberLong(123), collection: collName},

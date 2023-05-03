@@ -96,7 +96,7 @@ variables:
   depends_on:
   - name: version_gen
     variant: generate-tasks-for-version
-  - name: archive_dist_test_debug
+  - name: archive_dist_test
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -109,7 +109,7 @@ variables:
     variant: generate-tasks-for-version
   - name: version_burn_in_gen
     variant: generate-tasks-for-version
-  - name: archive_dist_test_debug
+  - name: archive_dist_test
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -297,14 +297,11 @@ variables:
   - enterprise-macos
   - enterprise-macos-arm64
   - enterprise-rhel-70-64-bit
-  #  - enterprise-rhel-70-64-bit-kitchen-sink
   - enterprise-rhel-70-64-bit-no-libunwind
   - enterprise-rhel-81-ppc64le
   - enterprise-rhel-72-s390x
   - enterprise-rhel-80-64-bit
   - enterprise-rhel-80-64-bit-coverage
-  - enterprise-rhel-80-64-bit-inmem
-  - enterprise-rhel-80-64-bit-multiversion
   - enterprise-rhel-80-64-bit-suggested
   - enterprise-rhel-82-arm64
   - enterprise-rhel-83-s390x
@@ -320,7 +317,6 @@ variables:
   - enterprise-windows
   - enterprise-windows-debug-unoptimized
   - enterprise-windows-inmem
-  - enterprise-windows-required
   - enterprise-windows-wtdevelop
   - ubuntu1804-debug-asan
   - ubuntu1804-debug-ubsan
@@ -334,7 +330,7 @@ variables:
   - enterprise-macos
   - enterprise-macos-arm64
   - enterprise-rhel-80-64-bit
-  - enterprise-rhel-80-64-bit-dynamic-required
+  - enterprise-rhel-80-64-bit-dynamic-all-feature-flags-required
   - enterprise-rhel-70-64-bit
   - enterprise-rhel-82-arm64
   - enterprise-rhel-90-64-bit
@@ -344,7 +340,6 @@ variables:
   - enterprise-ubuntu2004-64
   - enterprise-ubuntu2204-64
   - enterprise-windows
-  - enterprise-windows-required
 
 # List of all variants that use the packages.tgz
 - package_variants: &package_variants
@@ -450,12 +445,20 @@ functions:
   - *git_get_project
   - *add_git_tag
 
+  "gen feature flags": &gen_feature_flags
+    command: subprocess.exec
+    type: test
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/gen_feature_flags.sh"
+
   "fetch artifacts": &fetch_artifacts
     command: s3.get
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
-      remote_file: ${project}/${build_variant}/${revision}/artifacts/${build_id}.tgz
+      remote_file: ${mongo_artifacts}
       bucket: mciuploads
       extract_to: src
 
@@ -464,7 +467,7 @@ functions:
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
-      remote_file: ${project}/${build_variant}/${revision}/venv/${build_id}.tgz
+      remote_file: ${mongo_venv}
       bucket: mciuploads
       extract_to: "."
 
@@ -776,23 +779,27 @@ functions:
     params:
       updates:
       - key: mongo_binaries
-        value: ${project}/${build_variant}/${revision}/binaries/mongo-${build_id}.${ext|tgz}
+        value: ${project}/${compile_variant}/${version_id}/binaries/mongo-${revision_order_id}.${ext|tgz}
       - key: mongo_cryptd
-        value: ${project}/${build_variant}/${revision}/binaries/mongo-cryptd-${build_id}.${ext|tgz}
+        value: ${project}/${compile_variant}/${version_id}/binaries/mongo-cryptd-${revision_order_id}.${ext|tgz}
       - key: mongo_cryptd_debugsymbols
-        value: ${project}/${build_variant}/${revision}/binaries/mongo-cryptd-debugsymbols-${build_id}.${ext|tgz}
+        value: ${project}/${compile_variant}/${version_id}/binaries/mongo-cryptd-debugsymbols-${revision_order_id}.${ext|tgz}
       - key: mh_archive
-        value: ${project}/${build_variant}/${revision}/binaries/mh-${build_id}.${ext|tgz}
+        value: ${project}/${compile_variant}/${version_id}/binaries/mh-${revision_order_id}.${ext|tgz}
       - key: mh_debugsymbols
-        value: ${project}/${build_variant}/${revision}/debugsymbols/mh-debugsymbols-${build_id}.${ext|tgz}
+        value: ${project}/${compile_variant}/${version_id}/debugsymbols/mh-debugsymbols-${revision_order_id}.${ext|tgz}
       - key: mongo_debugsymbols
-        value: ${project}/${build_variant}/${revision}/debugsymbols/debugsymbols-${build_id}.${ext|tgz}
+        value: ${project}/${compile_variant}/${version_id}/debugsymbols/debugsymbols-${revision_order_id}.${ext|tgz}
       - key: mongo_jstestshell
-        value: ${project}/${build_variant}/${revision}/binaries/mongo-jstestshell-${build_id}.${ext|tgz}
+        value: ${project}/${compile_variant}/${version_id}/binaries/mongo-jstestshell-${revision_order_id}.${ext|tgz}
       - key: mongo_jstestshell_debugsymbols
-        value: ${project}/${build_variant}/${revision}/binaries/mongo-jstestshell-debugsymbols-${build_id}.${ext|tgz}
+        value: ${project}/${compile_variant}/${version_id}/binaries/mongo-jstestshell-debugsymbols-${revision_order_id}.tgz
+      - key: mongo_artifacts
+        value: ${project}/${compile_variant}/${version_id}/artifacts/${revision_order_id}.tgz
+      - key: mongo_venv
+        value: ${project}/${compile_variant}/${version_id}/venv/${revision_order_id}.tgz
       - key: mongo_fuzzer_corpus_mciuploads
-        value: ${project}/${build_variant}/${revision}/libfuzzer-corpora/corpora-${build_id}.${ext|tgz}
+        value: ${project}/${build_variant}/${version_id}/libfuzzer-corpora/corpora-${revision_order_id}.${ext|tgz}
       - key: mongo_fuzzer_corpus
         value: corpora-${project}-${build_variant}.${ext|tgz}
       - key: skip_tests
@@ -813,7 +820,7 @@ functions:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
       local_file: pip-requirements.txt
-      remote_file: ${project}/${build_variant}/${revision}/pip-requirements-${task_id}-${execution}.txt
+      remote_file: ${project}/${build_variant}/${version_id}/pip-requirements-${task_id}-${execution}.txt
       bucket: mciuploads
       permissions: public-read
       content_type: text/plain
@@ -825,7 +832,7 @@ functions:
         aws_key: ${aws_key}
         aws_secret: ${aws_secret}
         local_file: src/clang_tidy_fixes.tgz
-        remote_file: ${project}/${build_variant}/${revision}/${task_id}/clang_tidy_fixes.tgz
+        remote_file: ${project}/${build_variant}/${version_id}/${task_id}/clang_tidy_fixes.tgz
         bucket: mciuploads
         permissions: public-read
         content_type: application/gzip
@@ -835,7 +842,7 @@ functions:
         aws_key: ${aws_key}
         aws_secret: ${aws_secret}
         local_file: src/clang_tidy_fixes/clang_tidy_fixes.json
-        remote_file: ${project}/${build_variant}/${revision}/${task_id}/clang_tidy_fixes.json
+        remote_file: ${project}/${build_variant}/${version_id}/${task_id}/clang_tidy_fixes.json
         bucket: mciuploads
         permissions: public-read
         content_type: application/json
@@ -1233,6 +1240,13 @@ functions:
   - *get_version_expansions
   - *apply_version_expansions
   - *f_expansions_write
+  - command: subprocess.exec
+    params:
+      background: true
+      continue_on_err: true
+      binary: bash
+      args:
+      - "./src/evergreen/scons_splunk.sh"
   - command: subprocess.exec
     type: test
     params:
@@ -2087,14 +2101,6 @@ functions:
       permissions: public-read
       display_name: SCons stdout log
 
-  - *f_expansions_write
-  - command: subprocess.exec
-    params:
-      continue_on_err: true
-      binary: bash
-      args:
-      - "./src/evergreen/scons_splunk.sh"
-
   "send scons cedar report":
     - command: subprocess.exec
       params:
@@ -2317,6 +2323,21 @@ tasks:
       content_type: application/tar
       display_name: Benchmarks
 
+- name: compile_venv_deps_check
+  commands:
+  - *f_expansions_write
+  - command: manifest.load
+  - func: "git get project and add git tag"
+  - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
+  - command: subprocess.exec
+    type: test
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/compile_venv_dependency_check.sh"
+
 - name: determine_patch_tests
   commands:
   - *f_expansions_write
@@ -2360,12 +2381,7 @@ tasks:
       display_name: Binaries
 
   - *f_expansions_write
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-      - "src/evergreen/gen_feature_flags.sh"
+  - *gen_feature_flags
 
   - *f_expansions_write
   - command: subprocess.exec
@@ -2416,7 +2432,7 @@ tasks:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
       local_file: artifacts.tgz
-      remote_file: ${project}/${build_variant}/${revision}/artifacts/${build_id}.tgz
+      remote_file: ${mongo_artifacts}
       bucket: mciuploads
       permissions: private
       visibility: signed
@@ -2436,7 +2452,7 @@ tasks:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
       local_file: venv.tgz
-      remote_file: ${project}/${build_variant}/${revision}/venv/${build_id}.tgz
+      remote_file: ${mongo_venv}
       bucket: mciuploads
       permissions: private
       visibility: signed
@@ -2662,8 +2678,15 @@ tasks:
   commands:
   - func: "scons compile"
     vars:
+      task_compile_flags: >-
+        --build-profile=compiledb
       targets: compiledb
       compiling_for_test: true
+      compile_flags: >-
+        --link-model=dynamic
+        -j$(grep -c ^processor /proc/cpuinfo)
+        --variables-files=etc/scons/mongodbtoolchain_${clang_tidy_toolchain}_clang.vars
+      show_scons_timings: false
   - command: subprocess.exec
     type: test
     timeout_secs: 7000 # 1 hour timeout for no output
@@ -2671,6 +2694,8 @@ tasks:
       binary: bash
       args:
       - "./src/evergreen/run_clang_tidy.sh"
+      env:
+        clang_tidy_file: ".clang-tidy"
 
 ## compile_unittests ##
 - &compile_unittests
@@ -3492,6 +3517,18 @@ tasks:
         resmoke_jobs_max: 1
     - func: "send benchmark results"
 
+- <<: *benchmark_template
+  name: benchmarks_abt
+  tags: ["benchmarks"]
+  commands:
+  - func: "do benchmark setup"
+  - func: "run tests"
+    vars:
+      suites: benchmarks_abt
+      exec_timeout_secs: 18000  # 5 hour timeout.
+      resmoke_jobs_max: 1
+  - func: "send benchmark results"
+
 - <<: *run_jepsen_template
   name: jepsen_register_findAndModify
   tags: ["jepsen"]
@@ -3780,7 +3817,7 @@ tasks:
       num_files: 5
       num_tasks: 5
       npm_command: update-fuzzer
-      suite: generational_fuzzer
+      suite: update_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
 
 ## jstestfuzz standalone update time-series generational fuzzer ##
@@ -3809,7 +3846,7 @@ tasks:
       num_files: 5
       num_tasks: 5
       npm_command: update-fuzzer
-      suite: generational_fuzzer_replication
+      suite: update_fuzzer_replication
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
 
 ## rollback multiversion fuzzer ##
@@ -4808,6 +4845,8 @@ tasks:
 - <<: *task_template
   name: integration_tests_standalone
   tags: ["integration", "standalone"]
+  depends_on:
+  - name: archive_dist_test
   commands:
   - command: manifest.load
   - func: "git get project and add git tag"
@@ -4826,6 +4865,8 @@ tasks:
 - <<: *task_template
   name: integration_tests_standalone_audit
   tags: ["integration", "audit"]
+  depends_on:
+  - name: archive_dist_test
   commands:
   - command: manifest.load
   - func: "git get project and add git tag"
@@ -4844,6 +4885,8 @@ tasks:
 - <<: *task_template
   name: integration_tests_replset
   tags: ["integration"]
+  depends_on:
+  - name: archive_dist_test
   commands:
   - command: manifest.load
   - func: "git get project and add git tag"
@@ -4862,6 +4905,8 @@ tasks:
 - <<: *task_template
   name: integration_tests_replset_ssl_auth
   tags: ["integration"]
+  depends_on:
+  - name: archive_dist_test
   commands:
   - command: manifest.load
   - func: "git get project and add git tag"
@@ -4880,6 +4925,8 @@ tasks:
 - <<: *task_template
   name: integration_tests_sharded
   tags: ["integration", "sharded"]
+  depends_on:
+  - name: archive_dist_test
   commands:
   - command: manifest.load
   - func: "git get project and add git tag"
@@ -6755,6 +6802,7 @@ tasks:
   - func: "set up remote credentials"
   - *f_expansions_write
   - func: "configure evergreen api credentials"
+  - *gen_feature_flags
   - func: "run tests"
     vars:
       resmoke_jobs_max: 1
@@ -6936,6 +6984,7 @@ tasks:
 
 
 - name: publish_packages
+  run_on: rhel80-small
   tags: ["publish"]
   # This should prevent this task from running in patch builds, where we
   # don't want to publish packages.
@@ -6970,7 +7019,44 @@ tasks:
       args:
       - "./src/evergreen/packages_publish.sh"
 
+- name: publish_packages_test
+  run_on: rhel80-small
+  tags: ["publish_test"]
+  # This should prevent this task from running in patch builds, where we
+  # don't want to publish packages.
+  patchable: false
+  stepback: false
+  # Same dependencies as "push" below
+  depends_on:
+  - name: package
+  - name: jsCore
+  - name: run_dbtest
+  - name: replica_sets_jscore_passthrough
+  commands:
+  - command: manifest.load
+  - func: "git get project and add git tag"
+  - func: "get and apply version expansions"
+  - func: "f_expansions_write"
+  - func: "kill processes"
+  - func: "cleanup environment"
+  - func: "set up venv"
+  - func: "fetch packages"
+  - func: "generate compile expansions"
+  - func: "apply compile expansions"
+  - func: "set up remote credentials"
+    vars:
+      aws_key_remote: ${repo_aws_key}
+      aws_secret_remote: ${repo_aws_secret}
+  - func: "set up notary client credentials"
+  - *f_expansions_write
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "./src/evergreen/packages_publish_test.sh"
+
 - name: push
+  run_on: rhel80-small
   tags: ["publish"]
   patchable: false
   depends_on:
@@ -7450,6 +7536,7 @@ tasks:
          'destination': {'path': '${push_path}/mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}.${ext|tgz}.md5', 'bucket': '${push_bucket}'}}
 
 - name: crypt_push
+  run_on: rhel80-small
   tags: ["publish_crypt"]
   patchable: false
   stepback: false
@@ -7727,7 +7814,7 @@ tasks:
       aws_secret: ${aws_secret}
       remote_file: ${mongo_debugsymbols}
       bucket: mciuploads
-      local_file: src/mongo-debugsymbols.tgz
+      local_file: src/mongo-debugsymbols.${ext|tgz}
   - command: subprocess.exec
     params:
       binary: bash
@@ -7791,17 +7878,19 @@ tasks:
     vars:
       suite: query_golden_cqf
 
-- name: vpc_connectivity
+- name: publish_metrics
+  patchable: false
   commands:
   - *f_expansions_write
   - func: "do non-compile setup"
+  - *configure_evergreen_api_credentials
   - command: subprocess.exec
     type: test
     params:
       binary: bash
       args:
       - "src/evergreen/run_python_script.sh"
-      - "evergreen/vpc_connectivity.py"
+      - "evergreen/publish_metrics.py"
 
 #######################################
 #             Task Groups             #

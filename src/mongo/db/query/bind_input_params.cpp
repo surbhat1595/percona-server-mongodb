@@ -244,7 +244,6 @@ public:
     void visit(const TextNoOpMatchExpression* expr) final {}
     void visit(const TwoDPtInAnnulusExpression* expr) final {}
     void visit(const WhereNoOpMatchExpression* expr) final {}
-    void visit(const BetweenMatchExpression* expr) final {}
 
 private:
     void visitComparisonMatchExpression(const ComparisonMatchExpressionBase* expr) {
@@ -404,31 +403,10 @@ void bindGenericPlanSlots(const stage_builder::IndexBoundsEvaluationInfo& indexB
                                   sbe::value::bitcastFrom<bool>(isGenericScan),
                                   /*owned*/ true);
     if (isGenericScan) {
-        IndexBoundsChecker checker{
-            bounds.get(), indexBoundsInfo.index.keyPattern, indexBoundsInfo.direction};
-        IndexSeekPoint seekPoint;
-        if (checker.getStartSeekPoint(&seekPoint)) {
-            auto startKey = std::make_unique<KeyString::Value>(
-                IndexEntryComparison::makeKeyStringFromSeekPointForSeek(
-                    seekPoint,
-                    indexBoundsInfo.keyStringVersion,
-                    indexBoundsInfo.ordering,
-                    indexBoundsInfo.direction == 1));
-            runtimeEnvironment->resetSlot(
-                indexSlots.initialStartKey,
-                sbe::value::TypeTags::ksValue,
-                sbe::value::bitcastFrom<KeyString::Value*>(startKey.release()),
-                /*owned*/ true);
-            runtimeEnvironment->resetSlot(indexSlots.indexBounds,
-                                          sbe::value::TypeTags::indexBounds,
-                                          sbe::value::bitcastFrom<IndexBounds*>(bounds.release()),
-                                          /*owned*/ true);
-        } else {
-            runtimeEnvironment->resetSlot(indexSlots.initialStartKey,
-                                          sbe::value::TypeTags::Nothing,
-                                          0,
-                                          /*owned*/ true);
-        }
+        runtimeEnvironment->resetSlot(indexSlots.indexBounds,
+                                      sbe::value::TypeTags::indexBounds,
+                                      sbe::value::bitcastFrom<IndexBounds*>(bounds.release()),
+                                      /*owned*/ true);
     } else {
         auto [boundsTag, boundsVal] =
             stage_builder::packIndexIntervalsInSbeArray(std::move(intervals));

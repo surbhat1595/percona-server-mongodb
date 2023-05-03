@@ -67,10 +67,6 @@ const ProjectionName& ScanNode::getProjectionName() const {
     return binder().names()[0];
 }
 
-const ProjectionType& ScanNode::getProjection() const {
-    return binder().exprs()[0];
-}
-
 const std::string& ScanNode::getScanDefName() const {
     return _scanDefName;
 }
@@ -83,11 +79,11 @@ static ProjectionNameVector extractProjectionNamesForScan(
     const FieldProjectionMap& fieldProjectionMap) {
     ProjectionNameVector result;
 
-    if (!fieldProjectionMap._ridProjection.empty()) {
-        result.push_back(fieldProjectionMap._ridProjection);
+    if (const auto& projName = fieldProjectionMap._ridProjection) {
+        result.push_back(*projName);
     }
-    if (!fieldProjectionMap._rootProjection.empty()) {
-        result.push_back(fieldProjectionMap._rootProjection);
+    if (const auto& projName = fieldProjectionMap._rootProjection) {
+        result.push_back(*projName);
     }
     for (const auto& entry : fieldProjectionMap._fieldProjections) {
         result.push_back(entry.second);
@@ -282,7 +278,6 @@ EvaluationNode::EvaluationNode(ProjectionName projectionName, ProjectionType pro
     : Base(std::move(child),
            make<ExpressionBinder>(std::move(projectionName), std::move(projection))) {
     assertNodeSort(getChild());
-    tassert(6684504, "Empty projection name", !getProjectionName().empty());
 }
 
 bool EvaluationNode::operator==(const EvaluationNode& other) const {
@@ -290,15 +285,9 @@ bool EvaluationNode::operator==(const EvaluationNode& other) const {
         getChild() == other.getChild();
 }
 
-RIDIntersectNode::RIDIntersectNode(ProjectionName scanProjectionName,
-                                   const bool hasLeftIntervals,
-                                   const bool hasRightIntervals,
-                                   ABT leftChild,
-                                   ABT rightChild)
+RIDIntersectNode::RIDIntersectNode(ProjectionName scanProjectionName, ABT leftChild, ABT rightChild)
     : Base(std::move(leftChild), std::move(rightChild)),
-      _scanProjectionName(std::move(scanProjectionName)),
-      _hasLeftIntervals(hasLeftIntervals),
-      _hasRightIntervals(hasRightIntervals) {
+      _scanProjectionName(std::move(scanProjectionName)) {
     assertNodeSort(getLeftChild());
     assertNodeSort(getRightChild());
 }
@@ -321,28 +310,50 @@ ABT& RIDIntersectNode::getRightChild() {
 
 bool RIDIntersectNode::operator==(const RIDIntersectNode& other) const {
     return _scanProjectionName == other._scanProjectionName &&
-        _hasLeftIntervals == other._hasLeftIntervals &&
-        _hasRightIntervals == other._hasRightIntervals && getLeftChild() == other.getLeftChild() &&
-        getRightChild() == other.getRightChild();
+        getLeftChild() == other.getLeftChild() && getRightChild() == other.getRightChild();
 }
 
 const ProjectionName& RIDIntersectNode::getScanProjectionName() const {
     return _scanProjectionName;
 }
 
-bool RIDIntersectNode::hasLeftIntervals() const {
-    return _hasLeftIntervals;
+RIDUnionNode::RIDUnionNode(ProjectionName scanProjectionName, ABT leftChild, ABT rightChild)
+    : Base(std::move(leftChild), std::move(rightChild)),
+      _scanProjectionName(std::move(scanProjectionName)) {
+    assertNodeSort(getLeftChild());
+    assertNodeSort(getRightChild());
 }
 
-bool RIDIntersectNode::hasRightIntervals() const {
-    return _hasRightIntervals;
+const ABT& RIDUnionNode::getLeftChild() const {
+    return get<0>();
+}
+
+ABT& RIDUnionNode::getLeftChild() {
+    return get<0>();
+}
+
+const ABT& RIDUnionNode::getRightChild() const {
+    return get<1>();
+}
+
+ABT& RIDUnionNode::getRightChild() {
+    return get<1>();
+}
+
+bool RIDUnionNode::operator==(const RIDUnionNode& other) const {
+    return _scanProjectionName == other._scanProjectionName &&
+        getLeftChild() == other.getLeftChild() && getRightChild() == other.getRightChild();
+}
+
+const ProjectionName& RIDUnionNode::getScanProjectionName() const {
+    return _scanProjectionName;
 }
 
 static ProjectionNameVector createSargableBindings(const PartialSchemaRequirements& reqMap) {
     ProjectionNameVector result;
     for (const auto& entry : reqMap) {
-        if (entry.second.hasBoundProjectionName()) {
-            result.push_back(entry.second.getBoundProjectionName());
+        if (const auto& boundProjName = entry.second.getBoundProjectionName()) {
+            result.push_back(*boundProjName);
         }
     }
     return result;
@@ -351,7 +362,7 @@ static ProjectionNameVector createSargableBindings(const PartialSchemaRequiremen
 static ProjectionNameVector createSargableReferences(const PartialSchemaRequirements& reqMap) {
     ProjectionNameOrderPreservingSet result;
     for (const auto& entry : reqMap) {
-        result.emplace_back(entry.first._projectionName);
+        result.emplace_back(*entry.first._projectionName);
     }
     return result.getVector();
 }
@@ -377,10 +388,7 @@ SargableNode::SargableNode(PartialSchemaRequirements reqMap,
     // Assert merged map does not contain duplicate bound projections.
     ProjectionNameSet boundsProjectionNameSet;
     for (const auto& [key, req] : _reqMap) {
-        const bool reqHasBoundProj = req.hasBoundProjectionName();
-        if (reqHasBoundProj) {
-            const ProjectionName& projName = req.getBoundProjectionName();
-
+        if (const auto& boundProjName = req.getBoundProjectionName()) {
             tassert(6624094,
                     "SargableNode has a multikey requirement with a non-trivial interval which "
                     "also binds",
@@ -389,9 +397,10 @@ SargableNode::SargableNode(PartialSchemaRequirements reqMap,
             tassert(
                 6624095, "SargableNode has a perf only binding requirement", !req.getIsPerfOnly());
 
-            const bool inserted = boundsProjectionNameSet.insert(projName).second;
+            const bool inserted = boundsProjectionNameSet.insert(*boundProjName).second;
             tassert(6624087,
-                    str::stream() << "SargableNode has duplicate bound projection: " << projName,
+                    str::stream() << "SargableNode has duplicate bound projection: "
+                                  << *boundProjName,
                     inserted);
         }
     }
@@ -400,7 +409,7 @@ SargableNode::SargableNode(PartialSchemaRequirements reqMap,
     for (const auto& [key, req] : _reqMap) {
         tassert(6624088,
                 "SargableNode cannot reference an internally bound projection",
-                boundsProjectionNameSet.count(key._projectionName) == 0);
+                boundsProjectionNameSet.count(*key._projectionName) == 0);
     }
 }
 

@@ -39,6 +39,7 @@
 #include "mongo/db/query/sbe_stage_builder.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/resharding/resume_token_gen.h"
+#include "mongo/util/duration.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -54,7 +55,9 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
                                  bool returnOwnedBson,
                                  NamespaceString nss,
                                  bool isOpen,
-                                 std::unique_ptr<PlanYieldPolicySBE> yieldPolicy)
+                                 Microseconds timeElapsedPlanning,
+                                 std::unique_ptr<PlanYieldPolicySBE> yieldPolicy,
+                                 bool generatedByBonsai)
     : _state{isOpen ? State::kOpened : State::kClosed},
       _opCtx(opCtx),
       _nss(std::move(nss)),
@@ -64,7 +67,8 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
       _solution{std::move(candidates.winner().solution)},
       _stash{std::move(candidates.winner().results)},
       _cq{std::move(cq)},
-      _yieldPolicy(std::move(yieldPolicy)) {
+      _yieldPolicy(std::move(yieldPolicy)),
+      _generatedByBonsai(generatedByBonsai) {
     invariant(!_nss.isEmpty());
     invariant(_root);
 
@@ -122,6 +126,8 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
                                                   std::move(candidates.plans),
                                                   isMultiPlan,
                                                   isCachedCandidate,
+                                                  timeElapsedPlanning,
+                                                  opCtx->getTelemetryKey(),
                                                   _rootData.debugInfo);
 }
 

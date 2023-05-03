@@ -57,7 +57,7 @@ StatsCatalog::StatsCatalog(ServiceContext* service,
           ThreadPool::Options options;
           options.poolName = "StatsCache";
           options.minThreads = 0;
-          options.maxThreads = 1;
+          options.maxThreads = 2;
           return options;
       }())),
       _statsCache(service, std::move(statsCacheLoader), *_executor, 1000) {
@@ -104,4 +104,12 @@ StatusWith<std::shared_ptr<ArrayHistogram>> StatsCatalog::getHistogram(Operation
     }
 }
 
+Status StatsCatalog::invalidatePath(const NamespaceString& nss, const std::string& path) {
+    try {
+        _statsCache.invalidateKey(std::make_pair(nss, path));
+        return Status::OK();
+    } catch (const DBException& ex) {
+        return ex.toStatus();
+    }
+}
 }  // namespace mongo

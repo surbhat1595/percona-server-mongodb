@@ -101,7 +101,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/concurrency/deferred_writer',
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/service_context',
-        '$BUILD_DIR/mongo/util/namespace_string_util',
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'collection_options',
     ],
 )
@@ -224,6 +224,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/record_id_helpers',
         '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
         '$BUILD_DIR/mongo/db/storage/record_store_base',
+        '$BUILD_DIR/mongo/db/storage/storage_options',
         '$BUILD_DIR/mongo/db/storage/write_unit_of_work',
         '$BUILD_DIR/mongo/util/fail_point',
         'collection',
@@ -309,7 +310,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/storage/storage_options',
         '$BUILD_DIR/mongo/db/views/util',
         '$BUILD_DIR/mongo/db/views/views',
-        '$BUILD_DIR/mongo/util/namespace_string_util',
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'collection',
     ],
 )
@@ -508,6 +509,7 @@ env.Library(
 env.Library(
     target='catalog_helpers',
     source=[
+        "$BUILD_DIR/mongo/db/commands/external_data_source_scope_guard.cpp",
         'capped_utils.cpp',
         'coll_mod_index.cpp',
         'coll_mod.cpp',
@@ -543,7 +545,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/ttl_collection_cache',
         '$BUILD_DIR/mongo/db/views/view_catalog_helpers',
         '$BUILD_DIR/mongo/db/views/views',
-        '$BUILD_DIR/mongo/util/namespace_string_util',
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'cannot_convert_index_to_unique_info',
         'clustered_collection_options',
         'collection_options',
@@ -589,7 +591,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/server_base',
-        '$BUILD_DIR/mongo/util/namespace_string_util',
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
     ],
 )
 
@@ -640,6 +642,7 @@ if wiredtiger:
             'collection_test.cpp',
             'collection_validation_test.cpp',
             'collection_writer_test.cpp',
+            'coll_mod_test.cpp',
             'commit_quorum_options_test.cpp',
             'create_collection_test.cpp',
             'database_test.cpp',

@@ -208,14 +208,14 @@ void BucketCatalogTest::_testMeasurementSchema(
             timestampedDoc.appendElements(doc);
 
             auto pre = _getExecutionStat(_ns1, kNumSchemaChanges);
-            auto result = _bucketCatalog
-                              ->insert(_opCtx,
-                                       _ns1,
-                                       _getCollator(_ns1),
-                                       _getTimeseriesOptions(_ns1),
-                                       timestampedDoc.obj(),
-                                       BucketCatalog::CombineWithInsertsFromOtherClients::kAllow)
-                              .getValue();
+            ASSERT(_bucketCatalog
+                       ->insert(_opCtx,
+                                _ns1,
+                                _getCollator(_ns1),
+                                _getTimeseriesOptions(_ns1),
+                                timestampedDoc.obj(),
+                                BucketCatalog::CombineWithInsertsFromOtherClients::kAllow)
+                       .isOK());
             auto post = _getExecutionStat(_ns1, kNumSchemaChanges);
 
             if (firstMember) {
@@ -730,7 +730,7 @@ TEST_F(BucketCatalogTest, ClearBucketWithPreparedBatchThrowsConflict) {
     ASSERT_EQ(batch->measurements().size(), 1);
     ASSERT_EQ(batch->numPreviouslyCommittedMeasurements(), 0);
 
-    ASSERT_THROWS(_bucketCatalog->clear(batch->bucket().id), WriteConflictException);
+    ASSERT_THROWS(_bucketCatalog->directWriteStart(batch->bucket().id), WriteConflictException);
 
     _bucketCatalog->abort(batch, {ErrorCodes::TimeseriesBucketCleared, ""});
     ASSERT(batch->finished());
@@ -766,7 +766,7 @@ TEST_F(BucketCatalogTest, PrepareCommitOnClearedBatchWithAlreadyPreparedBatch) {
     ASSERT_EQ(batch1->bucket().id, batch2->bucket().id);
 
     // Now clear the bucket. Since there's a prepared batch it should conflict.
-    ASSERT_THROWS(_bucketCatalog->clear(batch1->bucket().id), WriteConflictException);
+    ASSERT_THROWS(_bucketCatalog->directWriteStart(batch1->bucket().id), WriteConflictException);
 
     // Now try to prepare the second batch. Ensure it aborts the batch.
     ASSERT(batch2->claimCommitRights());
@@ -775,7 +775,7 @@ TEST_F(BucketCatalogTest, PrepareCommitOnClearedBatchWithAlreadyPreparedBatch) {
     ASSERT_EQ(batch2->getResult().getStatus(), ErrorCodes::TimeseriesBucketCleared);
 
     // Make sure we didn't clear the bucket state when we aborted the second batch.
-    ASSERT_THROWS(_bucketCatalog->clear(batch1->bucket().id), WriteConflictException);
+    ASSERT_THROWS(_bucketCatalog->directWriteStart(batch1->bucket().id), WriteConflictException);
 
     // Make sure a subsequent insert, which opens a new bucket, doesn't corrupt the old bucket
     // state and prevent us from finishing the first batch.
@@ -909,6 +909,73 @@ TEST_F(BucketCatalogTest, CannotConcurrentlyCommitBatchesForSameBucket) {
     _bucketCatalog->finish(batch1, {});
     task.future().wait();
     _bucketCatalog->finish(batch2, {});
+}
+
+TEST_F(BucketCatalogTest, AbortingBatchEnsuresBucketIsEventuallyClosed) {
+    auto batch1 = _bucketCatalog
+                      ->insert(_opCtx,
+                               _ns1,
+                               _getCollator(_ns1),
+                               _getTimeseriesOptions(_ns1),
+                               BSON(_timeField << Date_t::now()),
+                               BucketCatalog::CombineWithInsertsFromOtherClients::kDisallow)
+                      .getValue()
+                      .batch;
+
+    auto batch2 = _bucketCatalog
+                      ->insert(_makeOperationContext().second.get(),
+                               _ns1,
+                               _getCollator(_ns1),
+                               _getTimeseriesOptions(_ns1),
+                               BSON(_timeField << Date_t::now()),
+                               BucketCatalog::CombineWithInsertsFromOtherClients::kDisallow)
+                      .getValue()
+                      .batch;
+    auto batch3 = _bucketCatalog
+                      ->insert(_makeOperationContext().second.get(),
+                               _ns1,
+                               _getCollator(_ns1),
+                               _getTimeseriesOptions(_ns1),
+                               BSON(_timeField << Date_t::now()),
+                               BucketCatalog::CombineWithInsertsFromOtherClients::kDisallow)
+                      .getValue()
+                      .batch;
+    ASSERT_EQ(batch1->bucket().id, batch2->bucket().id);
+    ASSERT_EQ(batch1->bucket().id, batch3->bucket().id);
+
+    ASSERT(batch1->claimCommitRights());
+    ASSERT(batch2->claimCommitRights());
+    ASSERT(batch3->claimCommitRights());
+
+    // Batch 2 will not be able to commit until batch 1 has finished.
+    ASSERT_OK(_bucketCatalog->prepareCommit(batch1));
+    auto task = Task{[&]() { ASSERT_OK(_bucketCatalog->prepareCommit(batch2)); }};
+    // Add a little extra wait to make sure prepareCommit actually gets to the blocking point.
+    stdx::this_thread::sleep_for(stdx::chrono::milliseconds(10));
+    ASSERT(task.future().valid());
+    ASSERT(stdx::future_status::timeout == task.future().wait_for(stdx::chrono::microseconds(1)))
+        << "prepareCommit finished before expected";
+
+    // If we abort the third batch, it should abort the second one too, as it isn't prepared.
+    // However, since the first batch is prepared, we can't abort it or clean up the bucket. We can
+    // then finish the first batch, which will allow the second batch to proceed. It should
+    // recognize it has been aborted and clean up the bucket.
+    _bucketCatalog->abort(batch3, Status{ErrorCodes::TimeseriesBucketCleared, "cleared"});
+    _bucketCatalog->finish(batch1, {});
+    task.future().wait();
+    ASSERT(batch2->finished());
+
+    // Make sure a new batch ends up in a new bucket.
+    auto batch4 = _bucketCatalog
+                      ->insert(_opCtx,
+                               _ns1,
+                               _getCollator(_ns1),
+                               _getTimeseriesOptions(_ns1),
+                               BSON(_timeField << Date_t::now()),
+                               BucketCatalog::CombineWithInsertsFromOtherClients::kDisallow)
+                      .getValue()
+                      .batch;
+    ASSERT_NE(batch2->bucket().id, batch4->bucket().id);
 }
 
 TEST_F(BucketCatalogTest, DuplicateNewFieldNamesAcrossConcurrentBatches) {
@@ -1329,7 +1396,7 @@ TEST_F(BucketCatalogTest, ArchivingUnderMemoryPressure) {
         ASSERT_OK(_bucketCatalog->prepareCommit(batch));
         _bucketCatalog->finish(batch, {});
 
-        return result.getValue().closedBuckets;
+        return std::move(result.getValue().closedBuckets);
     };
 
     // Ensure we start out with no buckets archived or closed due to memory pressure.
@@ -1555,6 +1622,9 @@ TEST_F(BucketCatalogTest, InsertIntoReopenedBucket) {
         return autoColl->checkValidation(opCtx, bucketDoc);
     };
 
+    BucketCatalog::BucketFindResult findResult;
+    findResult.bucketToReopen = BucketCatalog::BucketToReopen{bucketDoc, validator};
+
     // We should be able to pass in a valid bucket and insert into it.
     result = _bucketCatalog->insert(
         _opCtx,
@@ -1563,7 +1633,7 @@ TEST_F(BucketCatalogTest, InsertIntoReopenedBucket) {
         _getTimeseriesOptions(_ns1),
         ::mongo::fromjson(R"({"time":{"$date":"2022-06-06T15:35:40.000Z"}})"),
         BucketCatalog::CombineWithInsertsFromOtherClients::kAllow,
-        BucketCatalog::BucketToReopen{bucketDoc, validator});
+        findResult);
     ASSERT_OK(result.getStatus());
     batch = result.getValue().batch;
     ASSERT(batch);
@@ -1628,7 +1698,13 @@ TEST_F(BucketCatalogTest, CannotInsertIntoOutdatedBucket) {
 
     // If we advance the catalog era, then we shouldn't use a bucket that was fetched during a
     // previous era.
-    _bucketCatalog->clear(OID());
+    const auto fakeId = OID();
+    _bucketCatalog->directWriteStart(fakeId);
+    _bucketCatalog->directWriteFinish(fakeId);
+
+    BucketCatalog::BucketFindResult findResult;
+    findResult.bucketToReopen =
+        BucketCatalog::BucketToReopen{bucketDoc, validator, result.getValue().catalogEra};
 
     // We should get an WriteConflict back if we pass in an outdated bucket.
     result = _bucketCatalog->insert(
@@ -1638,7 +1714,7 @@ TEST_F(BucketCatalogTest, CannotInsertIntoOutdatedBucket) {
         _getTimeseriesOptions(_ns1),
         ::mongo::fromjson(R"({"time":{"$date":"2022-06-06T15:35:40.000Z"}})"),
         BucketCatalog::CombineWithInsertsFromOtherClients::kAllow,
-        BucketCatalog::BucketToReopen{bucketDoc, validator, result.getValue().catalogEra});
+        findResult);
     ASSERT_NOT_OK(result.getStatus());
     ASSERT_EQ(result.getStatus().code(), ErrorCodes::WriteConflict);
 }

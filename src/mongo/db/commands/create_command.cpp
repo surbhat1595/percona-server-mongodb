@@ -196,7 +196,7 @@ public:
                         repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() ==
                             repl::ReplicationCoordinator::Mode::modeReplSet);
 
-                if (hasQueryType(cmd.getEncryptedFields().get(), QueryTypeEnum::Range)) {
+                if (hasQueryType(cmd.getEncryptedFields().get(), QueryTypeEnum::RangePreview)) {
                     uassert(
                         6775220,
                         "Queryable Encryption Range support is only supported when FCV supports "
@@ -321,6 +321,15 @@ public:
                 }
 
                 cmd.setIdIndex(idIndexSpec);
+            }
+
+            if (cmd.getValidator() || cmd.getValidationLevel() || cmd.getValidationAction()) {
+                // Check for config.settings in the user command since a validator is allowed
+                // internally on this collection but the user may not modify the validator.
+                uassert(ErrorCodes::InvalidOptions,
+                        str::stream()
+                            << "Document validators not allowed on system collection " << ns(),
+                        ns() != NamespaceString::kConfigSettingsNamespace);
             }
 
             OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE

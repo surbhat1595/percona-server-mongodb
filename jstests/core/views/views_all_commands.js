@@ -232,6 +232,7 @@ let viewsCommandTests = {
     balancerStatus: {skip: isUnrelated},
     balancerStop: {skip: isUnrelated},
     buildInfo: {skip: isUnrelated},
+    bulkWrite: {skip: isUnrelated},
     captrunc: {
         command: {captrunc: "view", n: 2, inc: false},
         expectFailure: true,
@@ -434,7 +435,7 @@ let viewsCommandTests = {
         isAdminCommand: true,
         skipSharded: true,  // mongos is tested in views/views_sharded.js
     },
-    getnonce: {skip: isUnrelated},
+    getnonce: {skip: "removed in v6.3"},
     godinsert: {skip: isAnInternalCommand},
     grantPrivilegesToRole: {skip: "tested in auth/commands_user_defined_roles.js"},
     grantRolesToRole: {skip: isUnrelated},

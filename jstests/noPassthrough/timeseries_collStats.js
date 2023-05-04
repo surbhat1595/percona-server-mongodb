@@ -22,8 +22,6 @@ const conn = MongoRunner.runMongod({
 
 const dbName = jsTestName();
 const testDB = conn.getDB(dbName);
-const isTimeseriesBucketCompressionEnabled =
-    TimeseriesTest.timeseriesBucketCompressionEnabled(testDB);
 const isTimeseriesScalabilityImprovementsEnabled =
     TimeseriesTest.timeseriesScalabilityImprovementsEnabled(testDB);
 
@@ -60,6 +58,7 @@ const clearCollection = function() {
         expectedStats.numBucketsClosedDueToMemoryThreshold = 0;
         if (isTimeseriesScalabilityImprovementsEnabled) {
             expectedStats.numBucketsArchivedDueToMemoryThreshold = 0;
+            expectedStats.numBucketsArchivedDueToTimeBackward = 0;
             expectedStats.numBucketsReopened = 0;
             expectedStats.numBucketsKeptOpenDueToLargeMeasurements = 0;
             expectedStats.numBucketsClosedDueToCachePressure = 0;
@@ -177,9 +176,13 @@ assert.commandWorked(coll.insert(
 expectedStats.bucketCount++;
 expectedStats.numBucketInserts++;
 expectedStats.numCommits++;
-expectedStats.numBucketsClosedDueToTimeBackward++;
+if (isTimeseriesScalabilityImprovementsEnabled) {
+    expectedStats.numBucketsArchivedDueToTimeBackward++;
+} else {
+    expectedStats.numBucketsClosedDueToTimeBackward++;
+}
 expectedStats.numMeasurementsCommitted++;
-if (isTimeseriesBucketCompressionEnabled) {
+if (!isTimeseriesScalabilityImprovementsEnabled) {
     expectedStats.numCompressedBuckets++;
 }
 if (isTimeseriesScalabilityImprovementsEnabled) {
@@ -200,9 +203,7 @@ expectedStats.numCommits += 2;
 expectedStats.numMeasurementsCommitted += numDocs;
 expectedStats.avgNumMeasurementsPerCommit =
     Math.floor(expectedStats.numMeasurementsCommitted / expectedStats.numCommits);
-if (isTimeseriesBucketCompressionEnabled) {
-    expectedStats.numCompressedBuckets++;
-}
+expectedStats.numCompressedBuckets++;
 if (isTimeseriesScalabilityImprovementsEnabled) {
     expectedStats.numBucketQueriesFailed++;
 }
@@ -225,10 +226,8 @@ expectedStats.numCommits += 2;
 expectedStats.numMeasurementsCommitted += 1001;
 expectedStats.avgNumMeasurementsPerCommit =
     Math.floor(expectedStats.numMeasurementsCommitted / expectedStats.numCommits);
-if (isTimeseriesBucketCompressionEnabled) {
-    expectedStats.numCompressedBuckets++;
-    expectedStats.numSubObjCompressionRestart += 2;
-}
+expectedStats.numCompressedBuckets++;
+expectedStats.numSubObjCompressionRestart += 2;
 if (isTimeseriesScalabilityImprovementsEnabled) {
     expectedStats.numBucketQueriesFailed++;
 }
@@ -278,7 +277,7 @@ expectedStats.numMeasurementsCommitted += numDocs;
 expectedStats.avgNumMeasurementsPerCommit =
     Math.floor(expectedStats.numMeasurementsCommitted / expectedStats.numCommits);
 if (isTimeseriesScalabilityImprovementsEnabled) {
-    expectedStats.numBucketQueriesFailed += 2;
+    expectedStats.numBucketQueriesFailed += 1;
 }
 checkCollStats();
 

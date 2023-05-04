@@ -32,6 +32,7 @@
 #include "mongo/db/query/optimizer/opt_phase_manager.h"
 #include "mongo/db/query/optimizer/rewrites/const_eval.h"
 #include "mongo/db/query/optimizer/syntax/syntax.h"
+#include "mongo/db/query/optimizer/utils/unit_test_abt_literals.h"
 #include "mongo/db/query/optimizer/utils/unit_test_utils.h"
 #include "mongo/db/query/optimizer/utils/utils.h"
 #include "mongo/unittest/death_test.h"
@@ -40,12 +41,13 @@
 
 namespace mongo::optimizer {
 namespace {
+using namespace unit_test_abt_literals;
 
 // Default selectivity of predicates used by HintedCE to force certain plans.
 constexpr double kDefaultSelectivity = 0.1;
 
 DEATH_TEST_REGEX(Optimizer, HitIterationLimitInrunStructuralPhases, "Tripwire assertion.*6808700") {
-    PrefixId prefixId;
+    auto prefixId = PrefixId::createForTests();
 
     ABT scanNode = make<ScanNode>("scanProjection", "testColl");
     ABT evalNode = make<EvaluationNode>("evalProj1", Constant::int64(5), std::move(scanNode));
@@ -65,7 +67,7 @@ DEATH_TEST_REGEX(Optimizer,
                  LogicalWriterFailedToRewriteFixPointMemSubPhase,
                  "Tripwire assertion.*6808702") {
     using namespace properties;
-    PrefixId prefixId;
+    auto prefixId = PrefixId::createForTests();
 
     ABT scanNode = make<ScanNode>("ptest", "test");
     ABT collationNode = make<CollationNode>(
@@ -93,7 +95,7 @@ DEATH_TEST_REGEX(Optimizer,
                  LogicalWriterFailedToRewriteFixPointMemExpPhase,
                  "Tripwire assertion.*6808702") {
     using namespace properties;
-    PrefixId prefixId;
+    auto prefixId = PrefixId::createForTests();
 
     ABT scanNode = make<ScanNode>("ptest", "test");
     ABT collationNode = make<CollationNode>(
@@ -119,7 +121,7 @@ DEATH_TEST_REGEX(Optimizer,
 
 DEATH_TEST_REGEX(Optimizer, BadGroupID, "Tripwire assertion.*6808704") {
     using namespace properties;
-    PrefixId prefixId;
+    auto prefixId = PrefixId::createForTests();
 
     ABT scanNode = make<ScanNode>("ptest", "test");
     ABT collationNode = make<CollationNode>(
@@ -145,23 +147,12 @@ DEATH_TEST_REGEX(Optimizer, BadGroupID, "Tripwire assertion.*6808704") {
 
 DEATH_TEST_REGEX(Optimizer, EnvHasFreeVariables, "Tripwire assertion.*6808711") {
     using namespace properties;
-    PrefixId prefixId;
+    auto prefixId = PrefixId::createForTests();
 
-    ABT scanNode = make<ScanNode>("p1", "test");
-
-    ABT projectionNode1 = make<EvaluationNode>(
-        "p2", make<EvalPath>(make<PathIdentity>(), make<Variable>("p1")), std::move(scanNode));
-
-    ABT filter1Node = make<FilterNode>(make<EvalFilter>(make<PathIdentity>(), make<Variable>("p1")),
-                                       std::move(projectionNode1));
-
-    ABT filter2Node = make<FilterNode>(
-        make<EvalFilter>(make<PathGet>("a", make<PathCompare>(Operations::Eq, Constant::int64(1))),
-                         make<Variable>("p2")),
-        std::move(filter1Node));
-
-    ABT rootNode =
-        make<RootNode>(ProjectionRequirement{ProjectionNameVector{"p3"}}, std::move(filter2Node));
+    auto rootNode = NodeBuilder{}
+                        .root("p1", "p2")
+                        .eval("p2", _evalp(_id(), "p3"_var))
+                        .finish(_scan("p1", "test"));
 
     auto phaseManager = makePhaseManager(
         {OptPhase::MemoSubstitutionPhase,
@@ -175,9 +166,30 @@ DEATH_TEST_REGEX(Optimizer, EnvHasFreeVariables, "Tripwire assertion.*6808711") 
     ASSERT_THROWS_CODE(phaseManager.optimize(rootNode), DBException, 6808711);
 }
 
+DEATH_TEST_REGEX(Optimizer, RootHasNonexistentProjection, "Tripwire assertion.*7088003") {
+    using namespace properties;
+    auto prefixId = PrefixId::createForTests();
+
+    auto rootNode = NodeBuilder{}
+                        .root("p1", "p2", "p3")
+                        .eval("p2", _evalp(_id(), "p1"_var))
+                        .finish(_scan("p1", "test"));
+
+    auto phaseManager = makePhaseManager(
+        {OptPhase::MemoSubstitutionPhase,
+         OptPhase::MemoExplorationPhase,
+         OptPhase::MemoImplementationPhase},
+        prefixId,
+        {{{"test", createScanDef({}, {})}}},
+        boost::none /*costModel*/,
+        DebugInfo(true, DebugInfo::kDefaultDebugLevelForTests, DebugInfo::kIterationLimitForTests));
+
+    ASSERT_THROWS_CODE(phaseManager.optimize(rootNode), DBException, 7088003);
+}
+
 DEATH_TEST_REGEX(Optimizer, FailedToRetrieveRID, "Tripwire assertion.*6808705") {
     using namespace properties;
-    PrefixId prefixId;
+    auto prefixId = PrefixId::createForTests();
 
     ABT scanNode = make<ScanNode>("root", "c1");
 

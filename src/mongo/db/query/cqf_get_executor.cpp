@@ -77,6 +77,7 @@ static opt::unordered_map<std::string, optimizer::IndexDefinition> buildIndexSpe
     const CollectionPtr& collection,
     const boost::optional<BSONObj>& indexHint,
     const optimizer::ProjectionName& scanProjName,
+    PrefixId& prefixId,
     const DisableIndexOptions disableIndexOptions,
     bool& disableScan) {
     using namespace optimizer;
@@ -209,10 +210,8 @@ static opt::unordered_map<std::string, optimizer::IndexDefinition> buildIndexSpe
                 MatchExpressionParser::kBanAllSpecialFeatures);
 
             // We need a non-empty root projection name.
-            ABT exprABT = generateMatchExpression(expr.get(),
-                                                  false /*allowAggExpression*/,
-                                                  "<root>" /*rootProjection*/,
-                                                  boost::none /*uniquePrefix*/);
+            ABT exprABT = generateMatchExpression(
+                expr.get(), false /*allowAggExpression*/, "<root>" /*rootProjection*/, prefixId);
             exprABT = make<EvalFilter>(std::move(exprABT), make<Variable>(scanProjName));
 
             // TODO SERVER-70315: simplify partial filter expression.
@@ -260,6 +259,8 @@ static QueryHints getHintsFromQueryKnobs() {
     hints._fastIndexNullHandling = internalCascadesOptimizerFastIndexNullHandling.load();
     hints._disableYieldingTolerantPlans =
         internalCascadesOptimizerDisableYieldingTolerantPlans.load();
+    hints._minIndexEqPrefixes = internalCascadesOptimizerMinIndexEqPrefixes.load();
+    hints._maxIndexEqPrefixes = internalCascadesOptimizerMaxIndexEqPrefixes.load();
 
     return hints;
 }
@@ -313,7 +314,6 @@ static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> optimizeAndCreateExe
                       ids,
                       phaseManager.getMetadata(),
                       phaseManager.getNodeToGroupPropsMap(),
-                      phaseManager.getRIDProjections(),
                       false /*randomScan*/};
     auto sbePlan = g.optimize(abt);
     tassert(6624262, "Unexpected rid slot", !requireRID || ridSlot);
@@ -402,6 +402,7 @@ static void populateAdditionalScanDefs(
                                                  collection,
                                                  indexHint,
                                                  scanProjName,
+                                                 prefixId,
                                                  disableIndexOptions,
                                                  disableScan);
         }
@@ -411,7 +412,7 @@ static void populateAdditionalScanDefs(
                                               ? DistributionType::Centralized
                                               : DistributionType::UnknownPartitioning};
 
-        const CEType collectionCE = collectionExists ? collection->numRecords(opCtx) : -1.0;
+        const CEType collectionCE{collectionExists ? collection->numRecords(opCtx) : -1.0};
         scanDefs.emplace(scanDefName,
                          createScanDef({{"type", "mongod"},
                                         {"database", involvedNss.db().toString()},
@@ -521,6 +522,7 @@ Metadata populateMetadata(boost::intrusive_ptr<ExpressionContext> expCtx,
                                              collection,
                                              indexHint,
                                              scanProjName,
+                                             prefixId,
                                              queryHints._disableIndexes,
                                              queryHints._disableScan);
     }
@@ -542,7 +544,7 @@ Metadata populateMetadata(boost::intrusive_ptr<ExpressionContext> expCtx,
                                    constFold,
                                    std::move(distribution),
                                    collectionExists,
-                                   static_cast<CEType>(numRecords)));
+                                   {static_cast<double>(numRecords)}));
 
     // Add a scan definition for all involved collections. Note that the base namespace has already
     // been accounted for above and isn't included here.
@@ -670,8 +672,12 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOp
     const std::string uuidStr = collectionExists ? collection->uuid().toString() : "<missing_uuid>";
     const std::string collNameStr = nss.coll().toString();
     const std::string scanDefName = collNameStr + "_" + uuidStr;
-    PrefixId prefixId;
+
+    // This is the instance we will use to generate variable names during translation and
+    // optimization.
+    auto prefixId = PrefixId::create(internalCascadesOptimizerUseDescriptiveVarNames.load());
     const ProjectionName& scanProjName = prefixId.getNextId("scan");
+
     QueryHints queryHints = getHintsFromQueryKnobs();
 
     ConstFoldFn constFold = ConstEval::constFold;

@@ -310,11 +310,16 @@ void replaceGlobalIndexesInShardIfNeeded(OperationContext* opCtx,
         return;
     }
 
-    auto [collection, indexes] = Grid::get(opCtx)->catalogClient()->getCollectionAndGlobalIndexes(
-        opCtx, nss, {repl::ReadConcernLevel::kSnapshotReadConcern});
-    if (collection.getIndexVersion()) {
+    auto optGii = Grid::get(opCtx)->catalogCache()->getCollectionIndexInfoWithRefresh(opCtx, nss);
+
+    if (optGii) {
+        std::vector<IndexCatalogType> indexes;
+        optGii->forEachGlobalIndex([&](const auto& index) {
+            indexes.push_back(index);
+            return true;
+        });
         replaceGlobalIndexes(
-            opCtx, nss, uuid, collection.getIndexVersion()->indexVersion(), indexes);
+            opCtx, nss, uuid, optGii->getCollectionIndexes().indexVersion(), indexes);
     } else {
         clearGlobalIndexes(opCtx, nss, uuid);
     }
@@ -455,14 +460,13 @@ BSONObj MigrationDestinationManager::getMigrationStatusReport(
     const CollectionShardingRuntime::ScopedCollectionShardingRuntime& scopedCsrLock) {
     stdx::lock_guard<Latch> lk(_mutex);
     if (_isActive(lk)) {
+        boost::optional<long long> sessionOplogEntriesMigrated;
+        if (_sessionMigration) {
+            sessionOplogEntriesMigrated = _sessionMigration->getSessionOplogEntriesMigrated();
+        }
+
         return migrationutil::makeMigrationStatusDocumentDestination(
-            _nss,
-            _fromShard,
-            _toShard,
-            false,
-            _min,
-            _max,
-            _sessionMigration->getSessionOplogEntriesMigrated());
+            _nss, _fromShard, _toShard, false, _min, _max, sessionOplogEntriesMigrated);
     } else {
         return BSONObj();
     }
@@ -1119,8 +1123,11 @@ void MigrationDestinationManager::_migrateThread(CancellationToken cancellationT
             // yield this session, but will verify the txnNumber has not changed before continuing,
             // preserving the guarantee that orphans cannot be created after the txnNumber is
             // advanced.
-            opCtx->setLogicalSessionId(_lsid);
-            opCtx->setTxnNumber(_txnNumber);
+            {
+                auto lk = stdx::lock_guard(*opCtx->getClient());
+                opCtx->setLogicalSessionId(_lsid);
+                opCtx->setTxnNumber(_txnNumber);
+            }
 
             auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
             auto sessionTxnState = mongoDSessionCatalog->checkOutSession(opCtx);

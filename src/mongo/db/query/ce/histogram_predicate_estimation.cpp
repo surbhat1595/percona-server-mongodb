@@ -266,16 +266,10 @@ double getTypeCard(const ArrayHistogram& ah, value::TypeTags tag, bool includeSc
     // estimate the nested array case as counting all arrays, regardless of whether or not they are
     // nested.
     if (includeScalar && tag != value::TypeTags::Array) {
-        auto typeIt = ah.getTypeCounts().find(tag);
-        if (typeIt != ah.getTypeCounts().end()) {
-            count += typeIt->second;
-        }
+        count += ah.getTypeCount(tag);
     }
     if (ah.isArray()) {
-        auto typeIt = ah.getArrayTypeCounts().find(tag);
-        if (typeIt != ah.getArrayTypeCounts().end()) {
-            count += typeIt->second;
-        }
+        count += ah.getArrayTypeCount(tag);
     }
     return count;
 }
@@ -283,7 +277,7 @@ double getTypeCard(const ArrayHistogram& ah, value::TypeTags tag, bool includeSc
 /**
  * Estimates equality to the given tag/value using histograms.
  */
-double estimateCardEq(const ArrayHistogram& ah,
+CEType estimateCardEq(const ArrayHistogram& ah,
                       value::TypeTags tag,
                       value::Value val,
                       bool includeScalar) {
@@ -294,7 +288,7 @@ double estimateCardEq(const ArrayHistogram& ah,
     if (ah.isArray()) {
         card += estimate(ah.getArrayUnique(), tag, val, EstimationType::kEqual).card;
     }
-    return card;
+    return {card};
 }
 
 static EstimationResult estimateRange(const ScalarHistogram& histogram,
@@ -338,7 +332,7 @@ static EstimationResult estimateRangeQueryOnArray(const ScalarHistogram& histogr
     return highEstimate - lowEstimate;
 }
 
-double estimateCardRange(const ArrayHistogram& ah,
+CEType estimateCardRange(const ArrayHistogram& ah,
                          /* Define lower bound. */
                          bool lowInclusive,
                          value::TypeTags tagLow,
@@ -421,10 +415,10 @@ double estimateCardRange(const ArrayHistogram& ah,
         result += scalarEst.card;
     }
 
-    return result;
+    return {result};
 }
 
-double estimateIntervalCardinality(const ArrayHistogram& ah,
+CEType estimateIntervalCardinality(const ArrayHistogram& ah,
                                    const IntervalRequirement& interval,
                                    CEType childResult,
                                    bool includeScalar) {
@@ -433,7 +427,7 @@ double estimateIntervalCardinality(const ArrayHistogram& ah,
     } else if (interval.isEquality()) {
         auto maybeConstBound = getBound(interval.getLowBound());
         if (!maybeConstBound) {
-            return kInvalidEstimate;
+            return {kInvalidEstimate};
         }
 
         auto [tag, val] = *maybeConstBound;
@@ -442,20 +436,20 @@ double estimateIntervalCardinality(const ArrayHistogram& ah,
         }
 
         // Otherwise, we return the cardinality for the type of the intervals.
-        return getTypeCard(ah, tag, includeScalar);
+        return {getTypeCard(ah, tag, includeScalar)};
     }
 
     // Otherwise, we have a range.
     auto lowBound = interval.getLowBound();
     auto maybeConstLowBound = getBound(lowBound);
     if (!maybeConstLowBound) {
-        return kInvalidEstimate;
+        return {kInvalidEstimate};
     }
 
     auto highBound = interval.getHighBound();
     auto maybeConstHighBound = getBound(highBound);
     if (!maybeConstHighBound) {
-        return kInvalidEstimate;
+        return {kInvalidEstimate};
     }
 
     auto [lowTag, lowVal] = *maybeConstLowBound;
@@ -482,15 +476,15 @@ double estimateIntervalCardinality(const ArrayHistogram& ah,
     // non-histogrammable types. Otherwise, we need to figure out which type(s) are included by this
     // range.
     if (lowTag == highTag || isIntervalSubsetOfType(interval, lowTag)) {
-        return getTypeCard(ah, lowTag, includeScalar);
+        return {getTypeCard(ah, lowTag, includeScalar)};
     } else if (isIntervalSubsetOfType(interval, highTag)) {
-        return getTypeCard(ah, highTag, includeScalar);
+        return {getTypeCard(ah, highTag, includeScalar)};
     }
 
     // If we reach here, we've given up estimating, because our interval intersected both high & low
     // type intervals (and possibly more types).
     // TODO: could we aggregate type counts across all intersected types here?
-    return 0.0;
+    return {0.0};
 }
 
 }  // namespace mongo::optimizer::ce

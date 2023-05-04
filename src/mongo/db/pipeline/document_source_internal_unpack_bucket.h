@@ -228,6 +228,13 @@ public:
         Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container);
 
     /**
+     * Helper method which checks if we can replace DocumentSourceGroup with
+     * DocumentSourceStreamingGroup. Returns true if the optimization is performed.
+     */
+    bool enableStreamingGroupIfPossible(Pipeline::SourceContainer::iterator itr,
+                                        Pipeline::SourceContainer* container);
+
+    /**
      * If the current aggregation is a lastpoint-type query (ie. with a $sort on meta and time
      * fields, and a $group with a meta _id and only $first or $last accumulators) we can rewrite
      * it to avoid unpacking all buckets.
@@ -253,7 +260,8 @@ public:
     GetModPathsReturn getModifiedPaths() const final override;
 
     DepsTracker getRestPipelineDependencies(Pipeline::SourceContainer::iterator itr,
-                                            Pipeline::SourceContainer* container) const;
+                                            Pipeline::SourceContainer* container,
+                                            bool includeEventFilter) const;
 
 private:
     GetNextResult doGetNext() final;
@@ -282,6 +290,8 @@ private:
     DepsTracker _eventFilterDeps;
     std::unique_ptr<MatchExpression> _wholeBucketFilter;
     BSONObj _wholeBucketFilterBson;
+
+    bool _unpackToBson = false;
 
     bool _optimizedEndOfPipeline = false;
     bool _triedInternalizeProject = false;

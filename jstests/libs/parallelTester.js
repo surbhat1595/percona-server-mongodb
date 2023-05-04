@@ -249,18 +249,13 @@ if (typeof _threadInject != "undefined") {
             "collmod_convert_to_unique_violations.js",
             "collmod_convert_to_unique_violations_size_limit.js",
 
+            // The parallel tester does not respect test tags, compact cannot run against the
+            // inMemory storage engine.
+            "timeseries/timeseries_compact.js",
+
             // TODO (SERVER-63228): Remove this exclusion once the feature flag is enabled by
             // default.
             "timeseries/timeseries_index_ttl_partial.js",
-
-            // TODO SERVER-61644: Remove this exclusion once the feature flag is enabled by default.
-            "columnstore_eligibility.js",
-            "columnstore_index.js",
-            "columnstore_index_correctness.js",
-            "columnstore_index_per_path_filters.js",
-            "columnstore_large_array_index_correctness.js",
-            "columnstore_validindex.js",
-            "column_scan_skip_row_store_projection.js",
         ]);
 
         // Get files, including files in subdirectories.

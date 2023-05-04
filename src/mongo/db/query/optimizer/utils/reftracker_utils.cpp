@@ -128,6 +128,13 @@ public:
         return extractFromABT(refs);
     }
 
+    ProjectionNameSet walk(const SortedMergeNode& /*node*/,
+                           const ABTVector& /*children*/,
+                           const ABT& /*binder*/,
+                           const ABT& refs) {
+        return extractFromABT(refs);
+    }
+
     ProjectionNameSet walk(const NestedLoopJoinNode& /*node*/,
                            const ABT& /*leftChild*/,
                            const ABT& /*rightChild*/,
@@ -163,6 +170,18 @@ public:
 
     ProjectionNameSet walk(const UniqueNode& /*node*/, const ABT& /*child*/, const ABT& refs) {
         return extractFromABT(refs);
+    }
+
+    ProjectionNameSet walk(const SpoolProducerNode& /*node*/,
+                           const ABT& /*child*/,
+                           const ABT& /*filter*/,
+                           const ABT& /*binds*/,
+                           const ABT& refs) {
+        return extractFromABT(refs);
+    }
+
+    ProjectionNameSet walk(const SpoolConsumerNode& /*node*/, const ABT& /*binds*/) {
+        return {};
     }
 
     ProjectionNameSet walk(const CollationNode& /*node*/, const ABT& /*child*/, const ABT& refs) {

@@ -35,11 +35,15 @@
 #include "mongo/db/query/optimizer/opt_phase_manager.h"
 #include "mongo/db/query/optimizer/rewrites/const_eval.h"
 #include "mongo/db/query/optimizer/rewrites/path_lower.h"
+#include "mongo/db/query/optimizer/utils/unit_test_abt_literals.h"
 #include "mongo/db/query/optimizer/utils/unit_test_utils.h"
 #include "mongo/unittest/unittest.h"
 
+
 namespace mongo::optimizer {
 namespace {
+
+using namespace unit_test_abt_literals;
 
 TEST_F(ABTSBE, Lower1) {
     auto tree = Constant::int64(100);
@@ -141,7 +145,7 @@ TEST_F(ABTSBE, Lower5) {
 }
 
 TEST_F(ABTSBE, Lower6) {
-    PrefixId prefixId;
+    auto prefixId = PrefixId::createForTests();
 
     auto [tagObj, valObj] = sbe::value::makeNewObject();
     auto obj = sbe::value::getObjectView(valObj);
@@ -180,8 +184,6 @@ TEST_F(ABTSBE, Lower6) {
         }
     } while (changed);
 
-    // std::cout << ExplainGenerator::explain(tree);
-
     auto expr = SBEExpressionLowering{env, map}.optimize(tree);
 
     ASSERT(expr);
@@ -190,13 +192,11 @@ TEST_F(ABTSBE, Lower6) {
     auto [resultTag, resultVal] = runCompiledExpression(compiledExpr.get());
     sbe::value::ValueGuard guard(resultTag, resultVal);
 
-    // std::cout << std::pair{resultTag, resultVal} << "\n";
-
     ASSERT_EQ(sbe::value::TypeTags::Object, resultTag);
 }
 
 TEST_F(ABTSBE, Lower7) {
-    PrefixId prefixId;
+    auto prefixId = PrefixId::createForTests();
 
     auto [tagArr, valArr] = sbe::value::makeNewArray();
     auto arr = sbe::value::getArrayView(valArr);
@@ -343,7 +343,7 @@ TEST_F(ABTSBE, LowerFunctionCallTypeMatch) {
 }
 
 TEST_F(NodeSBE, Lower1) {
-    PrefixId prefixId;
+    auto prefixId = PrefixId::createForTests();
     Metadata metadata{{}};
 
     OperationContextNoop noop;
@@ -396,7 +396,6 @@ TEST_F(NodeSBE, Lower1) {
                       ids,
                       phaseManager.getMetadata(),
                       phaseManager.getNodeToGroupPropsMap(),
-                      phaseManager.getRIDProjections(),
                       false /*randomScan*/};
     auto sbePlan = g.optimize(tree);
     ASSERT_EQ(1, map.size());
@@ -424,8 +423,170 @@ TEST_F(NodeSBE, Lower1) {
     sbePlan->close();
 }
 
+
+TEST_F(NodeSBE, Lower2) {
+    using namespace properties;
+
+    // Since we don't have rewrites for SortedMerge yet, we create a plan that will merge join RIDs
+    // from two equality index scans (which will produce sorted RIDs). Then we substitute in a
+    // SortedMerge for the MergeJoin in this plan, and lower that to SBE. We assert on this SBE
+    // plan.
+    // Eventually we will have rewrites for SortedMerge, so this test can be changed.
+    // TODO SERVER-70298: Remove manual swap of SortedMerge. We should be able to naturally rewrite
+    // to SortedMerge after this ticket is done.
+
+    auto scanNode = _scan("root", "test");
+    auto evalNode = _eval("pa", _evalp(_get("a", _id()), "root"_var), scanNode);
+    auto filterNode1 = _filter(_evalf(_traverse1(_cmp("Eq", "1"_cint64)), "pa"_var), evalNode);
+    auto filterNode2 =
+        _filter(_evalf(_get("b", _traverse1(_cmp("Eq", "2"_cint64))), "root"_var), filterNode1);
+    auto root = _root("pa")(std::move(filterNode2));
+
+    // Optimize the logical plan.
+    // We have to fake some metadata for this to work.
+    ScanDefOptions scanDefOptions = {
+        {"type", "mongod"}, {"database", "test"}, {"uuid", "11111111-1111-1111-1111-111111111111"}};
+    auto prefixId = PrefixId::createForTests();
+    auto phaseManager = makePhaseManager(
+        {OptPhase::MemoSubstitutionPhase,
+         OptPhase::MemoExplorationPhase,
+         OptPhase::MemoImplementationPhase},
+        prefixId,
+        {{{"test",
+           createScanDef(std::move(scanDefOptions),
+                         {{"index1", makeIndexDefinition("a", CollationOp::Ascending, false)},
+                          {"index2", makeIndexDefinition("b", CollationOp::Ascending, false)}})}}},
+        boost::none,
+        {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
+    phaseManager.optimize(root);
+
+    ASSERT_EXPLAIN_V2(
+        "Root []\n"
+        "|   |   projections: \n"
+        "|   |       pa\n"
+        "|   RefBlock: \n"
+        "|       Variable [pa]\n"
+        "MergeJoin []\n"
+        "|   |   |   Condition\n"
+        "|   |   |       rid_0 = rid_1\n"
+        "|   |   Collation\n"
+        "|   |       Ascending\n"
+        "|   Union []\n"
+        "|   |   BindBlock:\n"
+        "|   |       [rid_1]\n"
+        "|   |           Source []\n"
+        "|   Evaluation []\n"
+        "|   |   BindBlock:\n"
+        "|   |       [rid_1]\n"
+        "|   |           Variable [rid_0]\n"
+        "|   IndexScan [{'<rid>': rid_0}, scanDefName: test, indexDefName: index2, interval: "
+        "{=Const [2]}]\n"
+        "|       BindBlock:\n"
+        "|           [rid_0]\n"
+        "|               Source []\n"
+        "IndexScan [{'<indexKey> 0': pa, '<rid>': rid_0}, scanDefName: test, indexDefName: index1, "
+        "interval: {=Const [1]}]\n"
+        "    BindBlock:\n"
+        "        [pa]\n"
+        "            Source []\n"
+        "        [rid_0]\n"
+        "            Source []\n",
+        root);
+
+    // Find the MergeJoin, replace it with SortedMerge. To do this we need to remove the Union and
+    // Evaluation on the right side.
+    {
+        ABT& mergeJoinABT = root.cast<RootNode>()->getChild();
+        MergeJoinNode* mergeJoinNode = mergeJoinABT.cast<MergeJoinNode>();
+
+        // Remove the Union and Evaluation.
+        ABT& unionABT = mergeJoinNode->getRightChild();
+        UnionNode* unionNode = unionABT.cast<UnionNode>();
+        ABT& ixScanABT = unionNode->nodes().front().cast<EvaluationNode>()->getChild();
+        std::swap(unionABT, ixScanABT);
+        // Swap the right leaf of the MergeJoin with Blackhole, so that it can be deleted. Without
+        // this it points to the IndexScan and cannot delete, since the IndexScan still exists under
+        // the new SortedMerge.
+        ABT blackHole = make<Blackhole>();
+        std::swap(unionNode->nodes().front().cast<EvaluationNode>()->getChild(), blackHole);
+
+        // Swap out the MergeJoin for SortedMerge.
+        ABT sortedMergeABT =
+            make<SortedMergeNode>(CollationRequirement({{"rid_0", CollationOp::Ascending}}),
+                                  ABTVector{std::move(mergeJoinNode->getLeftChild()),
+                                            std::move(mergeJoinNode->getRightChild())});
+        std::swap(mergeJoinABT, sortedMergeABT);
+
+        // mergeJoinABT now contains the SortedMerge.
+        SortedMergeNode* sortedMergeNode = mergeJoinABT.cast<SortedMergeNode>();
+
+        // Update nodeToGroupProps data.
+        auto& nodeToGroupProps = phaseManager.getNodeToGroupPropsMap();
+        // Make the metadata for the old MergeJoin use the SortedMerge now.
+        nodeToGroupProps.emplace(sortedMergeNode, nodeToGroupProps.find(mergeJoinNode)->second);
+        nodeToGroupProps.erase(mergeJoinNode);
+        // Update for the SortedMerge children.
+        auto unionProps = nodeToGroupProps.find(unionNode);
+        nodeToGroupProps.emplace(sortedMergeNode->nodes().back().cast<Node>(), unionProps->second);
+        nodeToGroupProps.emplace(sortedMergeNode->nodes().front().cast<Node>(), unionProps->second);
+    }
+
+    // Now we should have a plan with a SortedMerge in it.
+    ASSERT_EXPLAIN_V2(
+        "Root []\n"
+        "|   |   projections: \n"
+        "|   |       pa\n"
+        "|   RefBlock: \n"
+        "|       Variable [pa]\n"
+        "SortedMerge []\n"
+        "|   |   |   collation: \n"
+        "|   |   |       rid_0: Ascending\n"
+        "|   |   BindBlock:\n"
+        "|   |       [rid_0]\n"
+        "|   |           Source []\n"
+        "|   IndexScan [{'<rid>': rid_0}, scanDefName: test, indexDefName: index2, interval: "
+        "{=Const [2]}]\n"
+        "|       BindBlock:\n"
+        "|           [rid_0]\n"
+        "|               Source []\n"
+        "IndexScan [{'<indexKey> 0': pa, '<rid>': rid_0}, scanDefName: test, indexDefName: index1, "
+        "interval: {=Const [1]}]\n"
+        "    BindBlock:\n"
+        "        [pa]\n"
+        "            Source []\n"
+        "        [rid_0]\n"
+        "            Source []\n",
+        root);
+
+    // TODO SERVER-72010 fix test or SortedMergeNode logic so building VariableEnvironment succeeds
+
+    // Lower to SBE.
+    // auto env = VariableEnvironment::build(root);
+    // SlotVarMap map;
+    // boost::optional<sbe::value::SlotId> ridSlot;
+    // sbe::value::SlotIdGenerator ids;
+    // SBENodeLowering g{env,
+    //                   map,
+    //                   ridSlot,
+    //                   ids,
+    //                   phaseManager.getMetadata(),
+    //                   phaseManager.getNodeToGroupPropsMap(),
+    //                   false /*randomScan*/};
+    // auto sbePlan = g.optimize(root);
+
+    // ASSERT_EQ(
+    //     "[4] smerge [s4] [asc] [\n"
+    //     "    [s1] [s1] [3] ixseek ks(2ll, 0, 1ll, 1ll) ks(2ll, 0, 1ll, 2ll) none s1 none [s2 = 0]
+    //     "
+    //     "@\"11111111-1111-1111-1111-111111111111\" @\"index1\" true , \n"
+    //     "    [s3] [s3] [3] ixseek ks(2ll, 0, 2ll, 1ll) ks(2ll, 0, 2ll, 2ll) none s3 none [] "
+    //     "@\"11111111-1111-1111-1111-111111111111\" @\"index2\" true \n"
+    //     "] ",
+    //     sbe::DebugPrinter().print(*sbePlan.get()));
+}
+
 TEST_F(NodeSBE, RequireRID) {
-    PrefixId prefixId;
+    auto prefixId = PrefixId::createForTests();
     Metadata metadata{{}};
 
     OperationContextNoop noop;
@@ -484,7 +645,6 @@ TEST_F(NodeSBE, RequireRID) {
                       ids,
                       phaseManager.getMetadata(),
                       phaseManager.getNodeToGroupPropsMap(),
-                      phaseManager.getRIDProjections(),
                       false /*randomScan*/};
     auto sbePlan = g.optimize(tree);
     ASSERT_EQ(1, map.size());
@@ -524,6 +684,175 @@ TEST_F(NodeSBE, RequireRID) {
     sbePlan->close();
 
     ASSERT_EQ(1, resultSize);
+}
+
+/**
+ * This transport is used to populate default values into the NodeToGroupProps map to get around the
+ * fact that the plan was not obtained from the memo. At this point we are interested only in the
+ * planNodeIds being distinct.
+ */
+class PropsTransport {
+public:
+    template <typename T, typename... Ts>
+    void transport(const T& node, NodeToGroupPropsMap& propMap, Ts&&...) {
+        if constexpr (std::is_base_of_v<Node, T>) {
+            propMap.emplace(&node,
+                            NodeProps{_planNodeId++,
+                                      {-1, 0} /*groupId*/,
+                                      {} /*logicalProps*/,
+                                      {} /*physicalProps*/,
+                                      boost::none /*ridProjName*/,
+                                      CostType::kZero /*cost*/,
+                                      CostType::kZero /*localCost*/,
+                                      0.0 /*adjustedCE*/});
+        }
+    }
+
+    void updatePropsMap(const ABT& n, NodeToGroupPropsMap& propMap) {
+        algebra::transport<false>(n, *this, propMap);
+    }
+
+private:
+    int32_t _planNodeId = 0;
+};
+
+TEST_F(NodeSBE, SpoolFibonacci) {
+    using namespace unit_test_abt_literals;
+
+    auto prefixId = PrefixId::createForTests();
+    Metadata metadata{{}};
+
+    // Construct a spool-based recursive plan to compute the first 10 Fibonacci numbers. The main
+    // plan (first child of the union) sets up the initial conditions (val = 1, prev = 0, and it =
+    // 1), and the recursive subplan is computing the actual Fibonacci sequence and ensures we
+    // terminate after 10 numbers.
+    auto recursion =
+        NodeBuilder{}
+            .eval("val", _binary("Add", "valIn"_var, "valIn_prev"_var))
+            .eval("val_prev", "valIn"_var)
+            .eval("it", _binary("Add", "itIn"_var, "1"_cint64))
+            .filter(_binary("Lt", "itIn"_var, "10"_cint64))
+            .finish(_spoolc("Stack", 1 /*spoolId*/, _varnames("valIn", "valIn_prev", "itIn")));
+
+    auto tree = NodeBuilder{}
+                    .root("val")
+                    .spoolp("Lazy", 1 /*spoolId*/, _varnames("val", "val_prev", "it"), _cbool(true))
+                    .un(_varnames("val", "val_prev", "it"), {NodeHolder{std::move(recursion)}})
+                    .eval("val", "1"_cint64)
+                    .eval("val_prev", "0"_cint64)
+                    .eval("it", "1"_cint64)
+                    .ls(1, 0)
+                    .finish(_coscan());
+
+    ASSERT_EXPLAIN_V2_AUTO(
+        "Root []\n"
+        "|   |   projections: \n"
+        "|   |       val\n"
+        "|   RefBlock: \n"
+        "|       Variable [val]\n"
+        "SpoolProducer [Lazy, id: 1]\n"
+        "|   |   Const [true]\n"
+        "|   BindBlock:\n"
+        "|       [it]\n"
+        "|           Source []\n"
+        "|       [val]\n"
+        "|           Source []\n"
+        "|       [val_prev]\n"
+        "|           Source []\n"
+        "Union []\n"
+        "|   |   BindBlock:\n"
+        "|   |       [it]\n"
+        "|   |           Source []\n"
+        "|   |       [val]\n"
+        "|   |           Source []\n"
+        "|   |       [val_prev]\n"
+        "|   |           Source []\n"
+        "|   Evaluation []\n"
+        "|   |   BindBlock:\n"
+        "|   |       [val]\n"
+        "|   |           BinaryOp [Add]\n"
+        "|   |           |   Variable [valIn_prev]\n"
+        "|   |           Variable [valIn]\n"
+        "|   Evaluation []\n"
+        "|   |   BindBlock:\n"
+        "|   |       [val_prev]\n"
+        "|   |           Variable [valIn]\n"
+        "|   Evaluation []\n"
+        "|   |   BindBlock:\n"
+        "|   |       [it]\n"
+        "|   |           BinaryOp [Add]\n"
+        "|   |           |   Const [1]\n"
+        "|   |           Variable [itIn]\n"
+        "|   Filter []\n"
+        "|   |   BinaryOp [Lt]\n"
+        "|   |   |   Const [10]\n"
+        "|   |   Variable [itIn]\n"
+        "|   SpoolConsumer [Stack, id: 1]\n"
+        "|       BindBlock:\n"
+        "|           [itIn]\n"
+        "|               Source []\n"
+        "|           [valIn]\n"
+        "|               Source []\n"
+        "|           [valIn_prev]\n"
+        "|               Source []\n"
+        "Evaluation []\n"
+        "|   BindBlock:\n"
+        "|       [val]\n"
+        "|           Const [1]\n"
+        "Evaluation []\n"
+        "|   BindBlock:\n"
+        "|       [val_prev]\n"
+        "|           Const [0]\n"
+        "Evaluation []\n"
+        "|   BindBlock:\n"
+        "|       [it]\n"
+        "|           Const [1]\n"
+        "LimitSkip []\n"
+        "|   limitSkip:\n"
+        "|       limit: 1\n"
+        "|       skip: 0\n"
+        "CoScan []\n",
+        tree);
+
+    NodeToGroupPropsMap props;
+    PropsTransport{}.updatePropsMap(tree, props);
+
+    auto env = VariableEnvironment::build(tree);
+    SlotVarMap map;
+    boost::optional<sbe::value::SlotId> ridSlot;
+    sbe::value::SlotIdGenerator ids;
+    SBENodeLowering g{env, map, ridSlot, ids, metadata, props, false /*randomScan*/};
+    auto sbePlan = g.optimize(tree);
+    ASSERT_EQ(1, map.size());
+
+    auto opCtx = makeOperationContext();
+    sbe::CompileCtx ctx(std::make_unique<sbe::RuntimeEnvironment>());
+    sbePlan->prepare(ctx);
+
+    std::vector<sbe::value::SlotAccessor*> accessors;
+    for (auto& [name, slot] : map) {
+        accessors.emplace_back(sbePlan->getAccessor(ctx, slot));
+    }
+
+    sbePlan->attachToOperationContext(opCtx.get());
+    sbePlan->open(false);
+
+    std::vector<int64_t> results;
+    while (sbePlan->getNext() != sbe::PlanState::IS_EOF) {
+        const auto [resultTag, resultVal] = accessors.front()->getViewOfValue();
+        ASSERT_EQ(sbe::value::TypeTags::NumberInt64, resultTag);
+        results.push_back(resultVal);
+    };
+    sbePlan->close();
+
+    // Verify we are getting 10 Fibonacci numbers.
+    ASSERT_EQ(10, results.size());
+
+    ASSERT_EQ(1, results.at(0));
+    ASSERT_EQ(1, results.at(1));
+    for (size_t i = 2; i < 10; i++) {
+        ASSERT_EQ(results.at(i), results.at(i - 1) + results.at(i - 2));
+    }
 }
 
 }  // namespace

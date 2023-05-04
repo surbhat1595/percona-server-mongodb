@@ -102,13 +102,13 @@ public:
     std::unique_ptr<OpObserver::ApplyOpsOplogSlotAndOperationAssignment> preTransactionPrepare(
         OperationContext* opCtx,
         const std::vector<OplogSlot>& reservedSlots,
-        Date_t wallClockTime,
-        TransactionOperations* transactionOperations) override;
+        const TransactionOperations& transactionOperations,
+        Date_t wallClockTime) override;
 
     void onTransactionPrepare(
         OperationContext* opCtx,
         const std::vector<OplogSlot>& reservedSlots,
-        const std::vector<repl::ReplOperation>& statements,
+        const TransactionOperations& transactionOperations,
         const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
         size_t numberOfPrePostImagesToWrite,
         Date_t wallClockTime) override;
@@ -118,7 +118,7 @@ public:
     std::function<void()> onTransactionPrepareFn = []() {};
 
     void onUnpreparedTransactionCommit(OperationContext* opCtx,
-                                       TransactionOperations* transactionOperations) override;
+                                       const TransactionOperations& transactionOperations) override;
     bool onUnpreparedTransactionCommitThrowsException = false;
     bool unpreparedTransactionCommitted = false;
     std::function<void(const std::vector<repl::ReplOperation>&)> onUnpreparedTransactionCommitFn =
@@ -155,22 +155,22 @@ public:
 std::unique_ptr<OpObserver::ApplyOpsOplogSlotAndOperationAssignment>
 OpObserverMock::preTransactionPrepare(OperationContext* opCtx,
                                       const std::vector<OplogSlot>& reservedSlots,
-                                      Date_t wallClockTime,
-                                      TransactionOperations* transactionOperations) {
+                                      const TransactionOperations& transactionOperations,
+                                      Date_t wallClockTime) {
     return std::make_unique<OpObserver::ApplyOpsOplogSlotAndOperationAssignment>(/*prepare=*/true);
 }
 
 void OpObserverMock::onTransactionPrepare(
     OperationContext* opCtx,
     const std::vector<OplogSlot>& reservedSlots,
-    const std::vector<repl::ReplOperation>& statements,
+    const TransactionOperations& transactionOperations,
     const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
     size_t numberOfPrePostImagesToWrite,
     Date_t wallClockTime) {
     ASSERT_TRUE(opCtx->lockState()->inAWriteUnitOfWork());
     OpObserverNoop::onTransactionPrepare(opCtx,
                                          reservedSlots,
-                                         statements,
+                                         transactionOperations,
                                          applyOpsOperationAssignment,
                                          numberOfPrePostImagesToWrite,
                                          wallClockTime);
@@ -182,8 +182,8 @@ void OpObserverMock::onTransactionPrepare(
     onTransactionPrepareFn();
 }
 
-void OpObserverMock::onUnpreparedTransactionCommit(OperationContext* opCtx,
-                                                   TransactionOperations* transactionOperations) {
+void OpObserverMock::onUnpreparedTransactionCommit(
+    OperationContext* opCtx, const TransactionOperations& transactionOperations) {
     ASSERT(opCtx->lockState()->inAWriteUnitOfWork());
 
     OpObserverNoop::onUnpreparedTransactionCommit(opCtx, transactionOperations);
@@ -193,8 +193,8 @@ void OpObserverMock::onUnpreparedTransactionCommit(OperationContext* opCtx,
             !onUnpreparedTransactionCommitThrowsException);
 
     unpreparedTransactionCommitted = true;
-    auto statements = transactionOperations->getMutableOperationsForOpObserver();
-    onUnpreparedTransactionCommitFn(*statements);
+    const auto& statements = transactionOperations.getOperationsForOpObserver();
+    onUnpreparedTransactionCommitFn(statements);
 }
 
 void OpObserverMock::onPreparedTransactionCommit(

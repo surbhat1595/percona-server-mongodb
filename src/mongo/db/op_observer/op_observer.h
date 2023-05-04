@@ -407,6 +407,12 @@ public:
                                const UUID& uuid) = 0;
 
     /**
+     * The onTransaction Start method is called at the beginning of a multi-document transaction.
+     * It must not be called when the transaction is already in progress.
+     */
+    virtual void onTransactionStart(OperationContext* opCtx) = 0;
+
+    /**
      * The onUnpreparedTransactionCommit method is called on the commit of an unprepared
      * transaction, before the RecoveryUnit onCommit() is called.  It must not be called when no
      * transaction is active.
@@ -414,8 +420,8 @@ public:
      * The 'transactionOperations' contains the list of CRUD operations (formerly 'statements') to
      * be applied in this transaction.
      */
-    virtual void onUnpreparedTransactionCommit(OperationContext* opCtx,
-                                               TransactionOperations* transactionOperations) = 0;
+    virtual void onUnpreparedTransactionCommit(
+        OperationContext* opCtx, const TransactionOperations& transactionOperations) = 0;
     /**
      * The onPreparedTransactionCommit method is called on the commit of a prepared transaction,
      * after the RecoveryUnit onCommit() is called.  It must not be called when no transaction is
@@ -475,8 +481,8 @@ public:
     virtual std::unique_ptr<ApplyOpsOplogSlotAndOperationAssignment> preTransactionPrepare(
         OperationContext* opCtx,
         const std::vector<OplogSlot>& reservedSlots,
-        Date_t wallClockTime,
-        TransactionOperations* transactionOperations) = 0;
+        const TransactionOperations& transactionOperations,
+        Date_t wallClockTime) = 0;
 
     /**
      * The onTransactionPrepare method is called when an atomic transaction is prepared. It must be
@@ -485,7 +491,8 @@ public:
      * 'reservedSlots' is a list of oplog slots reserved for the oplog entries in a transaction. The
      * last reserved slot represents the prepareOpTime used for the prepare oplog entry.
      *
-     * The 'statements' are the list of CRUD operations to be applied in this transaction.
+     * The 'transactionOperations' contains the list of CRUD operations to be applied in
+     * this transaction.
      *
      * The 'applyOpsOperationAssignment' contains a representation of "applyOps" entries and oplog
      * slots to be used for writing pre- and post- image oplog entries for a transaction. A value
@@ -501,7 +508,7 @@ public:
     virtual void onTransactionPrepare(
         OperationContext* opCtx,
         const std::vector<OplogSlot>& reservedSlots,
-        const std::vector<repl::ReplOperation>& statements,
+        const TransactionOperations& transactionOperations,
         const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
         size_t numberOfPrePostImagesToWrite,
         Date_t wallClockTime) = 0;

@@ -199,17 +199,27 @@ ResidualRequirementWithCE::ResidualRequirementWithCE(PartialSchemaKey key,
                                                      CEType ce)
     : _key(std::move(key)), _req(std::move(req)), _ce(ce) {}
 
+EqualityPrefixEntry::EqualityPrefixEntry(const size_t startPos)
+    : _startPos(startPos), _interval(CompoundIntervalReqExpr::makeSingularDNF()), _predPosSet() {}
+
+bool EqualityPrefixEntry::operator==(const EqualityPrefixEntry& other) const {
+    return _startPos == other._startPos && _interval == other._interval &&
+        _predPosSet == other._predPosSet;
+}
+
 CandidateIndexEntry::CandidateIndexEntry(std::string indexDefName)
     : _indexDefName(std::move(indexDefName)),
       _fieldProjectionMap(),
-      _intervals(),
+      _eqPrefixes(),
+      _correlatedProjNames(),
       _residualRequirements(),
       _fieldsToCollate(),
       _intervalPrefixSize(0) {}
 
 bool CandidateIndexEntry::operator==(const CandidateIndexEntry& other) const {
     return _indexDefName == other._indexDefName &&
-        _fieldProjectionMap == other._fieldProjectionMap && _intervals == other._intervals &&
+        _fieldProjectionMap == other._fieldProjectionMap && _eqPrefixes == other._eqPrefixes &&
+        _correlatedProjNames == other._correlatedProjNames &&
         _residualRequirements == other._residualRequirements &&
         _fieldsToCollate == other._fieldsToCollate &&
         _intervalPrefixSize == other._intervalPrefixSize;
@@ -218,36 +228,6 @@ bool CandidateIndexEntry::operator==(const CandidateIndexEntry& other) const {
 bool ScanParams::operator==(const ScanParams& other) const {
     return _fieldProjectionMap == other._fieldProjectionMap &&
         _residualRequirements == other._residualRequirements;
-}
-
-IndexSpecification::IndexSpecification(std::string scanDefName,
-                                       std::string indexDefName,
-                                       CompoundIntervalRequirement interval,
-                                       bool reverseOrder)
-    : _scanDefName(std::move(scanDefName)),
-      _indexDefName(std::move(indexDefName)),
-      _interval(std::move(interval)),
-      _reverseOrder(reverseOrder) {}
-
-bool IndexSpecification::operator==(const IndexSpecification& other) const {
-    return _scanDefName == other._scanDefName && _indexDefName == other._indexDefName &&
-        _interval == other._interval && _reverseOrder == other._reverseOrder;
-}
-
-const std::string& IndexSpecification::getScanDefName() const {
-    return _scanDefName;
-}
-
-const std::string& IndexSpecification::getIndexDefName() const {
-    return _indexDefName;
-}
-
-const CompoundIntervalRequirement& IndexSpecification::getInterval() const {
-    return _interval;
-}
-
-bool IndexSpecification::isReverseOrder() const {
-    return _reverseOrder;
 }
 
 }  // namespace mongo::optimizer

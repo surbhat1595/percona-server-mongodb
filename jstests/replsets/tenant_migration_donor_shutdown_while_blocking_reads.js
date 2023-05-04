@@ -22,7 +22,7 @@ load("jstests/replsets/libs/tenant_migration_util.js");
 
 const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
 
-const kTenantId = "testTenantId";
+const kTenantId = ObjectId().str;
 const kDbName = kTenantId + "_testDb";
 const kCollName = "testColl";
 
@@ -56,8 +56,8 @@ let readThread = new Thread((host, dbName, collName, afterClusterTime) => {
     // In some cases (ASAN builds) we could end up closing the connection before stopping the
     // worker thread. This race condition would result in HostUnreachable instead of
     // InterruptedDueToReplStateChange.
-    assert.commandFailedWithCode(
-        res, ErrorCodes.InterruptedDueToReplStateChange || ErrorCodes.HostUnreachable);
+    assert(res.code == ErrorCodes.InterruptedAtShutdown || res.code == ErrorCodes.HostUnreachable,
+           tojson(res.code));
 }, donorPrimary.host, kDbName, kCollName, donorDoc.blockTimestamp);
 readThread.start();
 

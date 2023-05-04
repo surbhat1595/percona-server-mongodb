@@ -39,6 +39,7 @@
 #include "mongo/db/transaction/transaction_api.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/platform/mutex.h"
+#include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_database_gen.h"
@@ -88,7 +89,9 @@ class ShardingCatalogManager {
 
 public:
     ShardingCatalogManager(ServiceContext* serviceContext,
-                           std::unique_ptr<executor::TaskExecutor> addShardExecutor);
+                           std::unique_ptr<executor::TaskExecutor> addShardExecutor,
+                           std::shared_ptr<Shard> localConfigShard,
+                           std::unique_ptr<ShardingCatalogClient> localCatalogClient);
     ~ShardingCatalogManager();
 
     struct ShardAndCollectionVersion {
@@ -102,7 +105,9 @@ public:
      * is starting.
      */
     static void create(ServiceContext* serviceContext,
-                       std::unique_ptr<executor::TaskExecutor> addShardExecutor);
+                       std::unique_ptr<executor::TaskExecutor> addShardExecutor,
+                       std::shared_ptr<Shard> localConfigShard,
+                       std::unique_ptr<ShardingCatalogClient> localCatalogClient);
 
     /**
      * Retrieves the per-service instance of the ShardingCatalogManager. This instance is only
@@ -280,8 +285,7 @@ public:
         const boost::optional<Timestamp>& timestamp,
         const UUID& requestCollectionUUID,
         const ChunkRange& chunkRange,
-        const ShardId& shardId,
-        const boost::optional<Timestamp>& validAfter);
+        const ShardId& shardId);
 
     /**
      * Updates metadata in config.chunks collection to show the given chunk in its new shard.
@@ -412,7 +416,7 @@ public:
     void commitMovePrimary(OperationContext* opCtx,
                            const DatabaseName& dbName,
                            const DatabaseVersion& expectedDbVersion,
-                           const ShardId& toShard);
+                           const ShardId& toShardId);
 
     //
     // Collection Operations
@@ -537,6 +541,12 @@ public:
      * Creates config.settings (if needed) and adds a schema to the collection.
      */
     Status upgradeConfigSettings(OperationContext* opCtx);
+
+    /**
+     * Returns a catalog client that will always run commands locally. Can only be used on a config
+     * server node.
+     */
+    ShardingCatalogClient* localCatalogClient();
 
 private:
     /**
@@ -714,7 +724,7 @@ private:
                                    const NamespaceString& nss,
                                    const UUID& collectionUUID,
                                    const ChunkVersion& mergeVersion,
-                                   const boost::optional<Timestamp>& validAfter,
+                                   const Timestamp& validAfter,
                                    const ChunkRange& chunkRange,
                                    const ShardId& shardId,
                                    std::shared_ptr<std::vector<ChunkType>> chunksToMerge);
@@ -746,6 +756,10 @@ private:
     // added as shards. Does not have any connection hook set on it, thus it can be used to talk to
     // servers that are not yet in the ShardRegistry.
     const std::unique_ptr<executor::TaskExecutor> _executorForAddShard;
+
+    // A ShardLocal and ShardingCatalogClient with a ShardLocal used for local connections.
+    const std::shared_ptr<Shard> _localConfigShard;
+    const std::unique_ptr<ShardingCatalogClient> _localCatalogClient;
 
     //
     // All member variables are labeled with one of the following codes indicating the

@@ -1,11 +1,9 @@
 /**
  * Testing of just the query layer's integration for columnar index.
  * @tags: [
+ *   requires_fcv_63,
  *   # Runs explain on an aggregate command which is only compatible with readConcern local.
  *   assumes_read_concern_unchanged,
- *   # column store indexes are still under a feature flag and require full sbe
- *   featureFlagColumnstoreIndexes,
- *   featureFlagSbeFull,
  *   # Columnstore tests set server parameters to disable columnstore query planning heuristics -
  *   # 1) server parameters are stored in-memory only so are not transferred onto the recipient,
  *   # 2) server parameters may not be set in stepdown passthroughs because it is a command that may
@@ -235,7 +233,7 @@ assert.commandWorked(coll.createIndex({"$**": "columnstore"}));
     for (let res of results) {
         const trueResult = coll.find({num: res.num}, kProjection).hint({$natural: 1}).toArray()[0];
         const originalDoc = coll.findOne({num: res.num});
-        assert.eq(res, trueResult, "Mismatched projection of " + tojson(originalDoc));
+        assert.docEq(res, trueResult, "Mismatched projection of " + tojson(originalDoc));
     }
 })();
 
@@ -383,5 +381,36 @@ assert.commandWorked(coll.createIndex({"$**": "columnstore"}));
         let actualResults = c.aggregate(pipeline).toArray();
         assert(resultsEq(expectedResults[i], actualResults), explain);
     }
+})();
+
+// Test column store queries with collations.
+(function testCollation() {
+    const c = db.columnstore_index_correctness_collation;
+    c.drop();
+    assert.commandWorked(c.createIndex({"$**": "columnstore"}));
+    // Insert case sensitive values.
+    assert.commandWorked(c.insert([{x: "hello"}, {x: "Hello"}, {x: "HELLO"}]));
+
+    function runTest(collation, expectedMatches) {
+        const explain = c.find({x: "hello"}, {_id: 0, x: 1}).collation(collation).explain();
+        const columnScanPlanStages = getPlanStages(explain, "COLUMN_SCAN");
+        assert.gte(columnScanPlanStages.length,
+                   1,
+                   `Could not find 'COLUMN_SCAN' stage: ${tojson(explain)}`);
+        // Ensure that the filter actually got pushed down.
+        assert(columnScanPlanStages[0].hasOwnProperty("filtersByPath") &&
+                   columnScanPlanStages[0]["filtersByPath"].hasOwnProperty("x"),
+               tojson(columnScanPlanStages));
+
+        const actualMatches = c.find({x: "hello"}, {_id: 0, x: 1}).collation(collation).itcount();
+        assert.eq(actualMatches,
+                  expectedMatches,
+                  `Expected to find ${expectedMatches} doc(s) using collation ${
+                      tojson(collation)} but found ${actualMatches}`);
+    }
+
+    runTest({}, 1);                           // no collation
+    runTest({locale: "en", strength: 3}, 1);  // case sensitive
+    runTest({locale: "en", strength: 2}, 3);  // case insensitive
 })();
 })();

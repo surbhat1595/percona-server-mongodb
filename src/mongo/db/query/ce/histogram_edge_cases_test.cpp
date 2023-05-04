@@ -411,57 +411,60 @@ TEST(EstimatorTest, TwoBucketsTimestampHistogram) {
     ASSERT_EQ(100.0, getTotals(hist).card);
 
     const auto valueBefore = value::bitcastFrom<int64_t>(startTs.asULL() - 1);
-    double expectedCard =
-        estimate(hist, value::TypeTags::Timestamp, valueBefore, EstimationType::kEqual).card;
-    ASSERT_EQ(0.0, expectedCard);
-    expectedCard =
-        estimate(hist, value::TypeTags::Timestamp, valueBefore, EstimationType::kLess).card;
-    ASSERT_EQ(0.0, expectedCard);
-    expectedCard =
-        estimate(hist, value::TypeTags::Timestamp, valueBefore, EstimationType::kGreater).card;
-    ASSERT_EQ(100.0, expectedCard);
+    CEType expectedCard = {
+        estimate(hist, value::TypeTags::Timestamp, valueBefore, EstimationType::kEqual).card};
+    ASSERT_EQ(0.0, expectedCard._value);
+    expectedCard = {
+        estimate(hist, value::TypeTags::Timestamp, valueBefore, EstimationType::kLess).card};
+    ASSERT_EQ(0.0, expectedCard._value);
+    expectedCard = {
+        estimate(hist, value::TypeTags::Timestamp, valueBefore, EstimationType::kGreater).card};
+    ASSERT_EQ(100.0, expectedCard._value);
 
     const auto valueStart = value::bitcastFrom<int64_t>(
         startTs.asULL());  // NB: startTs.asInt64() produces different value.
-    expectedCard =
-        estimate(hist, value::TypeTags::Timestamp, valueStart, EstimationType::kEqual).card;
-    ASSERT_EQ(3.0, expectedCard);
-    expectedCard =
-        estimate(hist, value::TypeTags::Timestamp, valueStart, EstimationType::kLess).card;
-    ASSERT_EQ(0.0, expectedCard);
-    expectedCard =
-        estimate(hist, value::TypeTags::Timestamp, valueStart, EstimationType::kGreater).card;
-    ASSERT_EQ(97.0, expectedCard);
+    expectedCard = {
+        estimate(hist, value::TypeTags::Timestamp, valueStart, EstimationType::kEqual).card};
+    ASSERT_EQ(3.0, expectedCard._value);
+    expectedCard = {
+        estimate(hist, value::TypeTags::Timestamp, valueStart, EstimationType::kLess).card};
+    ASSERT_EQ(0.0, expectedCard._value);
+    expectedCard = {
+        estimate(hist, value::TypeTags::Timestamp, valueStart, EstimationType::kGreater).card};
+    ASSERT_EQ(97.0, expectedCard._value);
 
     const auto valueEnd = value::bitcastFrom<int64_t>(endTs.asULL());
-    expectedCard =
-        estimate(hist, value::TypeTags::Timestamp, valueEnd, EstimationType::kEqual).card;
-    ASSERT_EQ(1.0, expectedCard);
-    expectedCard = estimate(hist, value::TypeTags::Timestamp, valueEnd, EstimationType::kLess).card;
-    ASSERT_EQ(99.0, expectedCard);
-    expectedCard =
-        estimate(hist, value::TypeTags::Timestamp, valueEnd, EstimationType::kGreater).card;
-    ASSERT_EQ(0.0, expectedCard);
+    expectedCard = {
+        estimate(hist, value::TypeTags::Timestamp, valueEnd, EstimationType::kEqual).card};
+    ASSERT_EQ(1.0, expectedCard._value);
+    expectedCard = {
+        estimate(hist, value::TypeTags::Timestamp, valueEnd, EstimationType::kLess).card};
+    ASSERT_EQ(99.0, expectedCard._value);
+    expectedCard = {
+        estimate(hist, value::TypeTags::Timestamp, valueEnd, EstimationType::kGreater).card};
+    ASSERT_EQ(0.0, expectedCard._value);
 
     const auto valueIn = value::bitcastFrom<int64_t>((startTs.asULL() + endTs.asULL()) / 2);
-    expectedCard = estimate(hist, value::TypeTags::Timestamp, valueIn, EstimationType::kEqual).card;
-    ASSERT_EQ(2.0, expectedCard);
-    expectedCard = estimate(hist, value::TypeTags::Timestamp, valueIn, EstimationType::kLess).card;
-    ASSERT_APPROX_EQUAL(49.0, expectedCard, kErrorBound);
-    expectedCard =
-        estimate(hist, value::TypeTags::Timestamp, valueIn, EstimationType::kGreater).card;
-    ASSERT_APPROX_EQUAL(49.0, expectedCard, kErrorBound);
+    expectedCard = {
+        estimate(hist, value::TypeTags::Timestamp, valueIn, EstimationType::kEqual).card};
+    ASSERT_EQ(2.0, expectedCard._value);
+    expectedCard = {
+        estimate(hist, value::TypeTags::Timestamp, valueIn, EstimationType::kLess).card};
+    ASSERT_CE_APPROX_EQUAL(49.0, expectedCard, kErrorBound);
+    expectedCard = {
+        estimate(hist, value::TypeTags::Timestamp, valueIn, EstimationType::kGreater).card};
+    ASSERT_CE_APPROX_EQUAL(49.0, expectedCard, kErrorBound);
 
     const auto valueAfter = value::bitcastFrom<int64_t>(endTs.asULL() + 100);
-    expectedCard =
-        estimate(hist, value::TypeTags::Timestamp, valueAfter, EstimationType::kEqual).card;
-    ASSERT_EQ(0.0, expectedCard);
-    expectedCard =
-        estimate(hist, value::TypeTags::Timestamp, valueAfter, EstimationType::kLess).card;
-    ASSERT_EQ(100.0, expectedCard);
-    expectedCard =
-        estimate(hist, value::TypeTags::Timestamp, valueAfter, EstimationType::kGreater).card;
-    ASSERT_EQ(0.0, expectedCard);
+    expectedCard = {
+        estimate(hist, value::TypeTags::Timestamp, valueAfter, EstimationType::kEqual).card};
+    ASSERT_EQ(0.0, expectedCard._value);
+    expectedCard = {
+        estimate(hist, value::TypeTags::Timestamp, valueAfter, EstimationType::kLess).card};
+    ASSERT_EQ(100.0, expectedCard._value);
+    expectedCard = {
+        estimate(hist, value::TypeTags::Timestamp, valueAfter, EstimationType::kGreater).card};
+    ASSERT_EQ(0.0, expectedCard._value);
 }
 
 TEST(EstimatorTest, TwoBucketsObjectIdHistogram) {
@@ -532,7 +535,7 @@ TEST(EstimatorTest, TwoExclusiveBucketsMixedHistogram) {
     // Data set of mixed data types: 3 integers and 5 strings.
     std::vector<BucketData> data{{1, 3.0, 0.0, 0.0}, {"abc", 5.0, 0.0, 0.0}};
     const ScalarHistogram hist = createHistogram(data);
-    const ArrayHistogram arrHist(
+    const auto arrHist = ArrayHistogram::make(
         hist, TypeCounts{{value::TypeTags::NumberInt64, 3}, {value::TypeTags::StringSmall, 5}});
 
     const auto [tagLowDbl, valLowDbl] =
@@ -540,7 +543,7 @@ TEST(EstimatorTest, TwoExclusiveBucketsMixedHistogram) {
                        value::bitcastFrom<double>(std::numeric_limits<double>::quiet_NaN()));
 
     // (NaN, 1).
-    double expectedCard = estimateCardRange(arrHist,
+    CEType expectedCard = estimateCardRange(*arrHist,
                                             false /* lowInclusive */,
                                             tagLowDbl,
                                             valLowDbl,
@@ -548,10 +551,10 @@ TEST(EstimatorTest, TwoExclusiveBucketsMixedHistogram) {
                                             value::TypeTags::NumberInt32,
                                             value::bitcastFrom<int64_t>(1),
                                             true /* includeScalar */);
-    ASSERT_APPROX_EQUAL(0.0, expectedCard, kErrorBound);
+    ASSERT_CE_APPROX_EQUAL(0.0, expectedCard, kErrorBound);
 
     // (NaN, 5).
-    expectedCard = estimateCardRange(arrHist,
+    expectedCard = estimateCardRange(*arrHist,
                                      false /* lowInclusive */,
                                      tagLowDbl,
                                      valLowDbl,
@@ -559,7 +562,7 @@ TEST(EstimatorTest, TwoExclusiveBucketsMixedHistogram) {
                                      value::TypeTags::NumberInt32,
                                      value::bitcastFrom<int64_t>(5),
                                      true /* includeScalar */);
-    ASSERT_APPROX_EQUAL(3.0, expectedCard, kErrorBound);
+    ASSERT_CE_APPROX_EQUAL(3.0, expectedCard, kErrorBound);
 
     const auto [tagLowStr, valLowStr] = value::makeNewString(""_sd);
     value::ValueGuard vgLowStr(tagLowStr, valLowStr);
@@ -567,7 +570,7 @@ TEST(EstimatorTest, TwoExclusiveBucketsMixedHistogram) {
     value::ValueGuard vg(tag, value);
 
     // [0, "").
-    expectedCard = estimateCardRange(arrHist,
+    expectedCard = estimateCardRange(*arrHist,
                                      true /* lowInclusive */,
                                      value::TypeTags::NumberInt32,
                                      value::bitcastFrom<int64_t>(0),
@@ -575,10 +578,10 @@ TEST(EstimatorTest, TwoExclusiveBucketsMixedHistogram) {
                                      tagLowStr,
                                      valLowStr,
                                      true /* includeScalar */);
-    ASSERT_APPROX_EQUAL(3.0, expectedCard, kErrorBound);
+    ASSERT_CE_APPROX_EQUAL(3.0, expectedCard, kErrorBound);
 
     // ["", "a"].
-    expectedCard = estimateCardRange(arrHist,
+    expectedCard = estimateCardRange(*arrHist,
                                      true /* lowInclusive */,
                                      tagLowStr,
                                      valLowStr,
@@ -587,11 +590,11 @@ TEST(EstimatorTest, TwoExclusiveBucketsMixedHistogram) {
                                      value,
                                      true /* includeScalar */);
 
-    ASSERT_APPROX_EQUAL(0.0, expectedCard, kErrorBound);
+    ASSERT_CE_APPROX_EQUAL(0.0, expectedCard, kErrorBound);
 
     std::tie(tag, value) = value::makeNewString("xyz"_sd);
     // ["", "xyz"].
-    expectedCard = estimateCardRange(arrHist,
+    expectedCard = estimateCardRange(*arrHist,
                                      true /* lowInclusive */,
                                      tagLowStr,
                                      valLowStr,
@@ -600,7 +603,7 @@ TEST(EstimatorTest, TwoExclusiveBucketsMixedHistogram) {
                                      value,
                                      true /* includeScalar */);
 
-    ASSERT_APPROX_EQUAL(5.0, expectedCard, kErrorBound);
+    ASSERT_CE_APPROX_EQUAL(5.0, expectedCard, kErrorBound);
 }
 
 TEST(EstimatorTest, TwoBucketsMixedHistogram) {
@@ -608,7 +611,7 @@ TEST(EstimatorTest, TwoBucketsMixedHistogram) {
     // Histogram with one bucket per data type.
     std::vector<BucketData> data{{100, 3.0, 17.0, 9.0}, {"pqr", 5.0, 75.0, 25.0}};
     const ScalarHistogram hist = createHistogram(data);
-    const ArrayHistogram arrHist(
+    const auto arrHist = ArrayHistogram::make(
         hist, TypeCounts{{value::TypeTags::NumberInt64, 20}, {value::TypeTags::StringSmall, 80}});
 
     ASSERT_EQ(100.0, getTotals(hist).card);
@@ -620,12 +623,12 @@ TEST(EstimatorTest, TwoBucketsMixedHistogram) {
 
     auto [tag, value] = value::makeNewString("pqr"_sd);
     value::ValueGuard vg(tag, value);
-    double expectedCard = estimate(hist, tag, value, EstimationType::kEqual).card;
-    ASSERT_EQ(5.0, expectedCard);
-    expectedCard = estimate(hist, tag, value, EstimationType::kLess).card;
-    ASSERT_EQ(95.0, expectedCard);
-    expectedCard = estimate(hist, tag, value, EstimationType::kGreater).card;
-    ASSERT_EQ(0.0, expectedCard);
+    CEType expectedCard{estimate(hist, tag, value, EstimationType::kEqual).card};
+    ASSERT_EQ(5.0, expectedCard._value);
+    expectedCard = {estimate(hist, tag, value, EstimationType::kLess).card};
+    ASSERT_EQ(95.0, expectedCard._value);
+    expectedCard = {estimate(hist, tag, value, EstimationType::kGreater).card};
+    ASSERT_EQ(0.0, expectedCard._value);
 
     // Estimates for a value smaller than the first bucket bound.
     ASSERT_APPROX_EQUAL(1.88, estimateIntValCard(hist, 50, EstimationType::kEqual), kErrorBound);
@@ -640,16 +643,16 @@ TEST(EstimatorTest, TwoBucketsMixedHistogram) {
     ASSERT_EQ(0.0, estimateIntValCard(hist, 105, EstimationType::kEqual));
 
     std::tie(tag, value) = value::makeNewString("a"_sd);
-    expectedCard = estimate(hist, tag, value, EstimationType::kEqual).card;
-    ASSERT_APPROX_EQUAL(3.0, expectedCard, kErrorBound);
-    expectedCard = estimate(hist, tag, value, EstimationType::kLess).card;
-    ASSERT_APPROX_EQUAL(54.5, expectedCard, kErrorBound);
-    expectedCard = estimate(hist, tag, value, EstimationType::kLessOrEqual).card;
-    ASSERT_APPROX_EQUAL(57.5, expectedCard, kErrorBound);
-    expectedCard = estimate(hist, tag, value, EstimationType::kGreater).card;
-    ASSERT_APPROX_EQUAL(42.5, expectedCard, kErrorBound);
-    expectedCard = estimate(hist, tag, value, EstimationType::kGreaterOrEqual).card;
-    ASSERT_APPROX_EQUAL(45.5, expectedCard, kErrorBound);
+    expectedCard = {estimate(hist, tag, value, EstimationType::kEqual).card};
+    ASSERT_CE_APPROX_EQUAL(3.0, expectedCard, kErrorBound);
+    expectedCard = {estimate(hist, tag, value, EstimationType::kLess).card};
+    ASSERT_CE_APPROX_EQUAL(54.5, expectedCard, kErrorBound);
+    expectedCard = {estimate(hist, tag, value, EstimationType::kLessOrEqual).card};
+    ASSERT_CE_APPROX_EQUAL(57.5, expectedCard, kErrorBound);
+    expectedCard = {estimate(hist, tag, value, EstimationType::kGreater).card};
+    ASSERT_CE_APPROX_EQUAL(42.5, expectedCard, kErrorBound);
+    expectedCard = {estimate(hist, tag, value, EstimationType::kGreaterOrEqual).card};
+    ASSERT_CE_APPROX_EQUAL(45.5, expectedCard, kErrorBound);
 
     // Range estimates, including min/max values per data type.
     const auto [tagLowDbl, valLowDbl] =
@@ -659,7 +662,7 @@ TEST(EstimatorTest, TwoBucketsMixedHistogram) {
         std::make_pair(value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(1000000));
 
     // [NaN, 25].
-    expectedCard = estimateCardRange(arrHist,
+    expectedCard = estimateCardRange(*arrHist,
                                      true /* lowInclusive */,
                                      tagLowDbl,
                                      valLowDbl,
@@ -667,10 +670,10 @@ TEST(EstimatorTest, TwoBucketsMixedHistogram) {
                                      value::TypeTags::NumberInt32,
                                      value::bitcastFrom<int64_t>(25),
                                      true /* includeScalar */);
-    ASSERT_APPROX_EQUAL(8.49, expectedCard, kErrorBound);
+    ASSERT_CE_APPROX_EQUAL(8.49, expectedCard, kErrorBound);
 
     // [25, 1000000].
-    expectedCard = estimateCardRange(arrHist,
+    expectedCard = estimateCardRange(*arrHist,
                                      true /* lowInclusive */,
                                      value::TypeTags::NumberInt32,
                                      value::bitcastFrom<int64_t>(25),
@@ -678,10 +681,10 @@ TEST(EstimatorTest, TwoBucketsMixedHistogram) {
                                      tagHighInt,
                                      valHighInt,
                                      true /* includeScalar */);
-    ASSERT_APPROX_EQUAL(13.38, expectedCard, kErrorBound);
+    ASSERT_CE_APPROX_EQUAL(13.38, expectedCard, kErrorBound);
 
     // [NaN, 1000000].
-    expectedCard = estimateCardRange(arrHist,
+    expectedCard = estimateCardRange(*arrHist,
                                      true /* lowInclusive */,
                                      tagLowDbl,
                                      valLowDbl,
@@ -689,13 +692,13 @@ TEST(EstimatorTest, TwoBucketsMixedHistogram) {
                                      tagHighInt,
                                      valHighInt,
                                      true /* includeScalar */);
-    ASSERT_APPROX_EQUAL(20.0, expectedCard, kErrorBound);
+    ASSERT_CE_APPROX_EQUAL(20.0, expectedCard, kErrorBound);
 
     const auto [tagLowStr, valLowStr] = value::makeNewString(""_sd);
     value::ValueGuard vgLowStr(tagLowStr, valLowStr);
 
     // [NaN, "").
-    expectedCard = estimateCardRange(arrHist,
+    expectedCard = estimateCardRange(*arrHist,
                                      true /* lowInclusive */,
                                      tagLowDbl,
                                      valLowDbl,
@@ -703,10 +706,10 @@ TEST(EstimatorTest, TwoBucketsMixedHistogram) {
                                      tagLowStr,
                                      valLowStr,
                                      true /* includeScalar */);
-    ASSERT_APPROX_EQUAL(20.0, expectedCard, kErrorBound);
+    ASSERT_CE_APPROX_EQUAL(20.0, expectedCard, kErrorBound);
 
     // [25, "").
-    expectedCard = estimateCardRange(arrHist,
+    expectedCard = estimateCardRange(*arrHist,
                                      true /* lowInclusive */,
                                      value::TypeTags::NumberInt32,
                                      value::bitcastFrom<int64_t>(25),
@@ -714,10 +717,10 @@ TEST(EstimatorTest, TwoBucketsMixedHistogram) {
                                      tagLowStr,
                                      valLowStr,
                                      true /* includeScalar */);
-    ASSERT_APPROX_EQUAL(13.39, expectedCard, kErrorBound);
+    ASSERT_CE_APPROX_EQUAL(13.39, expectedCard, kErrorBound);
 
     // ["", "a"].
-    expectedCard = estimateCardRange(arrHist,
+    expectedCard = estimateCardRange(*arrHist,
                                      true /* lowInclusive */,
                                      tagLowStr,
                                      valLowStr,
@@ -726,12 +729,12 @@ TEST(EstimatorTest, TwoBucketsMixedHistogram) {
                                      value,
                                      true /* includeScalar */);
 
-    ASSERT_APPROX_EQUAL(37.49, expectedCard, kErrorBound);
+    ASSERT_CE_APPROX_EQUAL(37.49, expectedCard, kErrorBound);
 
     // ["", {}).
     auto [tagObj, valObj] = value::makeNewObject();
     value::ValueGuard vgObj(tagObj, valObj);
-    expectedCard = estimateCardRange(arrHist,
+    expectedCard = estimateCardRange(*arrHist,
                                      true /* lowInclusive */,
                                      tagLowStr,
                                      valLowStr,
@@ -739,10 +742,10 @@ TEST(EstimatorTest, TwoBucketsMixedHistogram) {
                                      tagObj,
                                      valObj,
                                      true /* includeScalar */);
-    ASSERT_APPROX_EQUAL(80.0, expectedCard, kErrorBound);
+    ASSERT_CE_APPROX_EQUAL(80.0, expectedCard, kErrorBound);
 
     // ["a", {}).
-    expectedCard = estimateCardRange(arrHist,
+    expectedCard = estimateCardRange(*arrHist,
                                      true /* lowInclusive */,
                                      tag,
                                      value,
@@ -751,7 +754,7 @@ TEST(EstimatorTest, TwoBucketsMixedHistogram) {
                                      valObj,
                                      true /* includeScalar */);
 
-    ASSERT_APPROX_EQUAL(45.5, expectedCard, kErrorBound);
+    ASSERT_CE_APPROX_EQUAL(45.5, expectedCard, kErrorBound);
 }
 
 /**
@@ -866,20 +869,20 @@ TEST(EstimatorTest, MinValueMixedHistogramFromData) {
     // Minimum ObjectId.
     auto&& [minOid, inclOid] = getMinMaxBoundForType(true /*isMin*/, value::TypeTags::ObjectId);
     auto [minOidTag, minOidVal] = minOid->cast<mongo::optimizer::Constant>()->get();
-    double expectedCard = estimate(hist, minOidTag, minOidVal, EstimationType::kEqual).card;
-    ASSERT_EQ(1.0, expectedCard);
+    CEType expectedCard = {estimate(hist, minOidTag, minOidVal, EstimationType::kEqual).card};
+    ASSERT_EQ(1.0, expectedCard._value);
 
     // Minimum date.
     const auto&& [minDate, inclDate] = getMinMaxBoundForType(true /*isMin*/, value::TypeTags::Date);
     const auto [minDateTag, minDateVal] = minDate->cast<mongo::optimizer::Constant>()->get();
-    expectedCard = estimate(hist, minDateTag, minDateVal, EstimationType::kEqual).card;
-    ASSERT_EQ(1.0, expectedCard);
+    expectedCard = {estimate(hist, minDateTag, minDateVal, EstimationType::kEqual).card};
+    ASSERT_EQ(1.0, expectedCard._value);
 
     // Minimum timestamp.
     auto&& [minTs, inclTs] = getMinMaxBoundForType(true /*isMin*/, value::TypeTags::Timestamp);
     auto [minTsTag, minTsVal] = minTs->cast<mongo::optimizer::Constant>()->get();
-    expectedCard = estimate(hist, minTsTag, minTsVal, EstimationType::kEqual).card;
-    ASSERT_EQ(1.0, expectedCard);
+    expectedCard = {estimate(hist, minTsTag, minTsVal, EstimationType::kEqual).card};
+    ASSERT_EQ(1.0, expectedCard._value);
 
     // Add minimum values to the data set and create another histogram.
     const auto [tagLowStr, valLowStr] = value::makeNewString(""_sd);
@@ -897,25 +900,25 @@ TEST(EstimatorTest, MinValueMixedHistogramFromData) {
     }
 
     // Precise estimate for equality to empty string, it is a bucket boundary.
-    expectedCard = estimate(hist2, tagLowStr, valLowStr, EstimationType::kEqual).card;
-    ASSERT_EQ(1.0, expectedCard);
+    expectedCard = {estimate(hist2, tagLowStr, valLowStr, EstimationType::kEqual).card};
+    ASSERT_EQ(1.0, expectedCard._value);
     // Equality to the minimum date/ts value is estimated by range_frequency/NDV.
-    expectedCard = estimate(hist2, minDateTag, minDateVal, EstimationType::kEqual).card;
-    ASSERT_EQ(1.0, expectedCard);
-    expectedCard = estimate(hist2, minTsTag, minTsVal, EstimationType::kEqual).card;
-    ASSERT_EQ(1.0, expectedCard);
+    expectedCard = {estimate(hist2, minDateTag, minDateVal, EstimationType::kEqual).card};
+    ASSERT_EQ(1.0, expectedCard._value);
+    expectedCard = {estimate(hist2, minTsTag, minTsVal, EstimationType::kEqual).card};
+    ASSERT_EQ(1.0, expectedCard._value);
 
     // Inequality predicates using min values.
-    const ArrayHistogram arrHist(hist2,
-                                 TypeCounts{
-                                     {value::TypeTags::NumberInt64, 2},
-                                     {value::TypeTags::StringSmall, 3},
-                                     {value::TypeTags::ObjectId, 1},
-                                     {value::TypeTags::Date, 3},
-                                     {value::TypeTags::Timestamp, 3},
-                                 });
+    const auto arrHist = ArrayHistogram::make(hist2,
+                                              TypeCounts{
+                                                  {value::TypeTags::NumberInt64, 2},
+                                                  {value::TypeTags::StringSmall, 3},
+                                                  {value::TypeTags::ObjectId, 2},
+                                                  {value::TypeTags::Date, 3},
+                                                  {value::TypeTags::Timestamp, 3},
+                                              });
     // [minDate, startInstant], estimated by the half of the date bucket.
-    expectedCard = estimateCardRange(arrHist,
+    expectedCard = estimateCardRange(*arrHist,
                                      true /* lowInclusive */,
                                      minDateTag,
                                      minDateVal,
@@ -923,10 +926,10 @@ TEST(EstimatorTest, MinValueMixedHistogramFromData) {
                                      value::TypeTags::Date,
                                      value::bitcastFrom<int64_t>(startInstant),
                                      true /* includeScalar */);
-    ASSERT_EQ(1.0, expectedCard);
+    ASSERT_EQ(1.0, expectedCard._value);
 
     // [minDate, endInstant], estimated by the entire date bucket.
-    expectedCard = estimateCardRange(arrHist,
+    expectedCard = estimateCardRange(*arrHist,
                                      true /* lowInclusive */,
                                      minDateTag,
                                      minDateVal,
@@ -934,11 +937,11 @@ TEST(EstimatorTest, MinValueMixedHistogramFromData) {
                                      value::TypeTags::Date,
                                      value::bitcastFrom<int64_t>(endInstant),
                                      true /* includeScalar */);
-    ASSERT_EQ(3.0, expectedCard);
+    ASSERT_EQ(3.0, expectedCard._value);
 
     // [minDate, minTs), estimated by the entire date bucket.
     // (is this interval possible or is it better to have maxDate upper bound?).
-    expectedCard = estimateCardRange(arrHist,
+    expectedCard = estimateCardRange(*arrHist,
                                      true /* lowInclusive */,
                                      minDateTag,
                                      minDateVal,
@@ -946,10 +949,10 @@ TEST(EstimatorTest, MinValueMixedHistogramFromData) {
                                      minTsTag,
                                      minTsVal,
                                      true /* includeScalar */);
-    ASSERT_EQ(3.0, expectedCard);
+    ASSERT_EQ(3.0, expectedCard._value);
 
     // [minTs, startTs], estimated by the half of the timestamp bucket.
-    expectedCard = estimateCardRange(arrHist,
+    expectedCard = estimateCardRange(*arrHist,
                                      true /* lowInclusive */,
                                      minTsTag,
                                      minTsVal,
@@ -957,10 +960,10 @@ TEST(EstimatorTest, MinValueMixedHistogramFromData) {
                                      value::TypeTags::Timestamp,
                                      value::bitcastFrom<int64_t>(startTs.asULL()),
                                      true /* includeScalar */);
-    ASSERT_EQ(1.0, expectedCard);
+    ASSERT_EQ(1.0, expectedCard._value);
 
     // [minTs, endTs], estimated by the entire timestamp bucket.
-    expectedCard = estimateCardRange(arrHist,
+    expectedCard = estimateCardRange(*arrHist,
                                      true /* lowInclusive */,
                                      minTsTag,
                                      minTsVal,
@@ -968,12 +971,12 @@ TEST(EstimatorTest, MinValueMixedHistogramFromData) {
                                      value::TypeTags::Timestamp,
                                      value::bitcastFrom<int64_t>(endTs.asULL()),
                                      true /* includeScalar */);
-    ASSERT_EQ(3.0, expectedCard);
+    ASSERT_EQ(3.0, expectedCard._value);
 
     // [minTs, maxTs], estimated by the entire timestamp bucket.
     auto&& [maxTs, inclMaxTs] = getMinMaxBoundForType(false /*isMin*/, value::TypeTags::Timestamp);
     const auto [maxTsTag, maxTsVal] = maxTs->cast<mongo::optimizer::Constant>()->get();
-    expectedCard = estimateCardRange(arrHist,
+    expectedCard = estimateCardRange(*arrHist,
                                      true /* lowInclusive */,
                                      minTsTag,
                                      minTsVal,
@@ -981,7 +984,7 @@ TEST(EstimatorTest, MinValueMixedHistogramFromData) {
                                      maxTsTag,
                                      maxTsVal,
                                      true /* includeScalar */);
-    ASSERT_EQ(3.0, expectedCard);
+    ASSERT_EQ(3.0, expectedCard._value);
 }
 
 TEST(EstimatorTest, MinValueMixedHistogramFromBuckets) {
@@ -1006,33 +1009,33 @@ TEST(EstimatorTest, MinValueMixedHistogramFromBuckets) {
     // Minimum ObjectId.
     auto&& [minOid, inclOid] = getMinMaxBoundForType(true /*isMin*/, value::TypeTags::ObjectId);
     auto [minOidTag, minOidVal] = minOid->cast<mongo::optimizer::Constant>()->get();
-    double expectedCard = estimate(hist, minOidTag, minOidVal, EstimationType::kEqual).card;
-    ASSERT_APPROX_EQUAL(1.9, expectedCard, kErrorBound);
+    CEType expectedCard{estimate(hist, minOidTag, minOidVal, EstimationType::kEqual).card};
+    ASSERT_CE_APPROX_EQUAL(1.9, expectedCard, kErrorBound);
 
     // Minimum date.
     const auto&& [minDate, inclDate] = getMinMaxBoundForType(true /*isMin*/, value::TypeTags::Date);
     const auto [minDateTag, minDateVal] = minDate->cast<mongo::optimizer::Constant>()->get();
-    expectedCard = estimate(hist, minDateTag, minDateVal, EstimationType::kEqual).card;
-    ASSERT_EQ(4.0, expectedCard);
+    expectedCard = {estimate(hist, minDateTag, minDateVal, EstimationType::kEqual).card};
+    ASSERT_EQ(4.0, expectedCard._value);
 
     // Minimum timestamp.
     auto&& [minTs, inclTs] = getMinMaxBoundForType(true /*isMin*/, value::TypeTags::Timestamp);
     auto [minTsTag, minTsVal] = minTs->cast<mongo::optimizer::Constant>()->get();
-    expectedCard = estimate(hist, minTsTag, minTsVal, EstimationType::kEqual).card;
-    ASSERT_APPROX_EQUAL(1.9, expectedCard, kErrorBound);
+    expectedCard = {estimate(hist, minTsTag, minTsVal, EstimationType::kEqual).card};
+    ASSERT_CE_APPROX_EQUAL(1.9, expectedCard, kErrorBound);
 
     // Inequality predicates using min values.
-    const ArrayHistogram arrHist(hist,
-                                 TypeCounts{
-                                     {value::TypeTags::NumberInt64, 100},
-                                     {value::TypeTags::StringSmall, 100},
-                                     {value::TypeTags::ObjectId, 100},
-                                     {value::TypeTags::Date, 100},
-                                     {value::TypeTags::Timestamp, 100},
-                                 });
+    const auto arrHist = ArrayHistogram::make(hist,
+                                              TypeCounts{
+                                                  {value::TypeTags::NumberInt64, 100},
+                                                  {value::TypeTags::StringSmall, 100},
+                                                  {value::TypeTags::ObjectId, 100},
+                                                  {value::TypeTags::Date, 100},
+                                                  {value::TypeTags::Timestamp, 100},
+                                              });
     // [minDate, innerDate], estimated by the half of the date bucket.
     const int64_t innerDate = 1516864323000LL;
-    expectedCard = estimateCardRange(arrHist,
+    expectedCard = estimateCardRange(*arrHist,
                                      true /* lowInclusive */,
                                      minDateTag,
                                      minDateVal,
@@ -1040,11 +1043,11 @@ TEST(EstimatorTest, MinValueMixedHistogramFromBuckets) {
                                      value::TypeTags::Date,
                                      value::bitcastFrom<int64_t>(innerDate),
                                      true /* includeScalar */);
-    ASSERT_APPROX_EQUAL(48.0, expectedCard, kErrorBound);
+    ASSERT_CE_APPROX_EQUAL(48.0, expectedCard, kErrorBound);
 
     // [minTs, innerTs], estimated by the half of the timestamp bucket.
     const Timestamp innerTs{Seconds(1516864323LL), 0};
-    expectedCard = estimateCardRange(arrHist,
+    expectedCard = estimateCardRange(*arrHist,
                                      true /* lowInclusive */,
                                      minTsTag,
                                      minTsVal,
@@ -1052,7 +1055,7 @@ TEST(EstimatorTest, MinValueMixedHistogramFromBuckets) {
                                      value::TypeTags::Timestamp,
                                      value::bitcastFrom<int64_t>(innerTs.asULL()),
                                      true /* includeScalar */);
-    ASSERT_APPROX_EQUAL(47.5, expectedCard, kErrorBound);
+    ASSERT_CE_APPROX_EQUAL(47.5, expectedCard, kErrorBound);
 }
 }  // namespace
 }  // namespace mongo::optimizer::ce

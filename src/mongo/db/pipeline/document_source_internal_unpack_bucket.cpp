@@ -56,6 +56,7 @@
 #include "mongo/db/pipeline/document_source_sample.h"
 #include "mongo/db/pipeline/document_source_single_document_transformation.h"
 #include "mongo/db/pipeline/document_source_sort.h"
+#include "mongo/db/pipeline/document_source_streaming_group.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/query/query_planner_common.h"
@@ -544,18 +545,27 @@ void DocumentSourceInternalUnpackBucket::serializeToArray(
 
 boost::optional<Document> DocumentSourceInternalUnpackBucket::getNextMatchingMeasure() {
     while (_bucketUnpacker.hasNext()) {
-        auto measure = _bucketUnpacker.getNext();
         if (_eventFilter) {
-            // MatchExpression only takes BSON documents, so we have to make one. As an
-            // optimization, only serialize the fields we need to do the match.
-            BSONObj measureBson = _eventFilterDeps.needWholeDocument
-                ? measure.toBson()
-                : document_path_support::documentToBsonWithPaths(measure, _eventFilterDeps.fields);
-            if (_bucketUnpacker.bucketMatchedQuery() || _eventFilter->matchesBSON(measureBson)) {
-                return measure;
+            if (_unpackToBson) {
+                auto measure = _bucketUnpacker.getNextBson();
+                if (_bucketUnpacker.bucketMatchedQuery() || _eventFilter->matchesBSON(measure)) {
+                    return Document(measure);
+                }
+            } else {
+                auto measure = _bucketUnpacker.getNext();
+                // MatchExpression only takes BSON documents, so we have to make one. As an
+                // optimization, only serialize the fields we need to do the match.
+                BSONObj measureBson = _eventFilterDeps.needWholeDocument
+                    ? measure.toBson()
+                    : document_path_support::documentToBsonWithPaths(measure,
+                                                                     _eventFilterDeps.fields);
+                if (_bucketUnpacker.bucketMatchedQuery() ||
+                    _eventFilter->matchesBSON(measureBson)) {
+                    return measure;
+                }
             }
         } else {
-            return measure;
+            return _bucketUnpacker.getNext();
         }
     }
     return {};
@@ -670,7 +680,7 @@ std::pair<BSONObj, bool> DocumentSourceInternalUnpackBucket::extractOrBuildProje
     // Attempt to get an inclusion $project representing the root-level dependencies of the pipeline
     // after the $_internalUnpackBucket. If this $project is not empty, then the dependency set was
     // finite.
-    auto deps = getRestPipelineDependencies(itr, container);
+    auto deps = getRestPipelineDependencies(itr, container, true /* includeEventFilter */);
     if (auto dependencyProj =
             deps.toProjectionWithoutMetadata(DepsTracker::TruncateToRootLevel::yes);
         !dependencyProj.isEmpty()) {
@@ -825,6 +835,68 @@ bool DocumentSourceInternalUnpackBucket::haveComputedMetaField() const {
     return _bucketUnpacker.bucketSpec().metaField() &&
         _bucketUnpacker.bucketSpec().fieldIsComputed(
             _bucketUnpacker.bucketSpec().metaField().value());
+}
+
+bool DocumentSourceInternalUnpackBucket::enableStreamingGroupIfPossible(
+    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+    // skip unpack stage
+    itr = std::next(itr);
+
+    FieldPath timeField = _bucketUnpacker.bucketSpec().timeField();
+    DocumentSourceGroup* groupStage = nullptr;
+    bool isSortedOnTime = false;
+    for (; itr != container->end(); ++itr) {
+        if (auto groupStagePtr = dynamic_cast<DocumentSourceGroup*>(itr->get())) {
+            groupStage = groupStagePtr;
+            break;
+        }
+        if (auto sortStagePtr = dynamic_cast<DocumentSourceSort*>(itr->get())) {
+            isSortedOnTime = sortStagePtr->getSortKeyPattern().front().fieldPath == timeField;
+        } else if (!itr->get()->constraints().preservesOrderAndMetadata) {
+            // If this is after the sort, the sort is invalidated. If it's before the sort, there's
+            // no harm in keeping the boolean false.
+            isSortedOnTime = false;
+        }
+        // We modify time field, so we can't proceed with optimization. It may be possible to
+        // proceed in some cases if the modification happens before the sort, but we won't worry
+        // about or bother with those - in large part because it is risky that it will change the
+        // type away from a date into something with more difficult/subtle semantics.
+        if (itr->get()->getModifiedPaths().canModify(timeField)) {
+            return false;
+        }
+    }
+
+    if (groupStage == nullptr || !isSortedOnTime) {
+        return false;
+    }
+
+    const auto& idFields = groupStage->getMutableIdFields();
+    std::vector<size_t> monotonicIdFields;
+    for (size_t i = 0; i < idFields.size(); ++i) {
+        // To enable streaming, we need id field expression to be clustered, so that all documents
+        // with the same value of this id field are in a single continious cluster. However this
+        // property is hard to check for, so we check for monotonicity instead, which is stronger.
+        idFields[i]->optimize();  // We optimize here to make use of constant folding.
+        auto monotonicState = idFields[i]->getMonotonicState(timeField);
+
+        // We don't add monotonic::State::Constant id fields, because they are useless when
+        // determining if a group batch is finished.
+        if (monotonicState == monotonic::State::Increasing ||
+            monotonicState == monotonic::State::Decreasing) {
+            monotonicIdFields.push_back(i);
+        }
+    }
+    if (monotonicIdFields.empty()) {
+        return false;
+    }
+
+    *itr =
+        DocumentSourceStreamingGroup::create(pExpCtx,
+                                             groupStage->getIdExpression(),
+                                             std::move(monotonicIdFields),
+                                             std::move(groupStage->getMutableAccumulatedFields()),
+                                             groupStage->getMaxMemoryUsageBytes());
+    return true;
 }
 
 template <TopBottomSense sense, bool single>
@@ -1079,10 +1151,12 @@ bool findSequentialDocumentCache(Pipeline::SourceContainer::iterator start,
 }
 
 DepsTracker DocumentSourceInternalUnpackBucket::getRestPipelineDependencies(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) const {
+    Pipeline::SourceContainer::iterator itr,
+    Pipeline::SourceContainer* container,
+    bool includeEventFilter) const {
     auto deps = Pipeline::getDependenciesForContainer(
         pExpCtx, Pipeline::SourceContainer{std::next(itr), container->end()}, boost::none);
-    if (_eventFilter) {
+    if (_eventFilter && includeEventFilter) {
         match_expression::addDependencies(_eventFilter.get(), &deps);
     }
     return deps;
@@ -1215,7 +1289,7 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
     {
         // Check if the rest of the pipeline needs any fields. For example we might only be
         // interested in $count.
-        auto deps = getRestPipelineDependencies(itr, container);
+        auto deps = getRestPipelineDependencies(itr, container, true /* includeEventFilter */);
         if (deps.hasNoRequirements()) {
             _bucketUnpacker.setBucketSpec({_bucketUnpacker.bucketSpec().timeField(),
                                            _bucketUnpacker.bucketSpec().metaField(),
@@ -1277,6 +1351,13 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
         match_expression::addDependencies(_eventFilter.get(), &_eventFilterDeps);
         container->erase(std::next(itr));
 
+        // If the $match is not followed by other stages referencing fields (e.g. $count), we can
+        // unpack directly to BSON so that data doesn't need to be materialized to Document.
+        auto deps = getRestPipelineDependencies(itr, container, false /* includeEventFilter */);
+        if (deps.fields.empty()) {
+            _unpackToBson = true;
+        }
+
         // Create a loose bucket predicate and push it before the unpacking stage.
         if (predicates.loosePredicate) {
             BSONObjBuilder bob;
@@ -1330,6 +1411,8 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
             return itr;
         }
     }
+
+    enableStreamingGroupIfPossible(itr, container);
 
     return container->end();
 }

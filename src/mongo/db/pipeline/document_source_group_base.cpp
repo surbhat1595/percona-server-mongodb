@@ -63,6 +63,17 @@ std::string nextFileName() {
     return "extsort-doc-group." + std::to_string(documentSourceGroupFileCounter.fetchAndAdd(1));
 }
 
+/**
+ * Helper to check if all accumulated fields need the same document.
+ */
+bool accsNeedSameDoc(const std::vector<AccumulationStatement>& accumulatedFields,
+                     AccumulatorDocumentsNeeded docNeeded) {
+    return std::all_of(accumulatedFields.begin(), accumulatedFields.end(), [&](auto&& accumulator) {
+        const auto& doc = accumulator.makeAccumulator()->documentsNeeded();
+        return doc == docNeeded;
+    });
+}
+
 }  // namespace
 
 using boost::intrusive_ptr;
@@ -118,6 +129,9 @@ Value DocumentSourceGroupBase::serialize(boost::optional<ExplainOptions::Verbosi
             Value(static_cast<long long>(_stats.totalOutputDataSizeBytes));
         out["usedDisk"] = Value(_stats.spills > 0);
         out["spills"] = Value(static_cast<long long>(_stats.spills));
+        out["spillFileSizeBytes"] = Value(static_cast<long long>(_stats.spillFileSizeBytes));
+        out["numBytesSpilledEstimate"] =
+            Value(static_cast<long long>(_stats.numBytesSpilledEstimate));
     }
 
     return out.freezeToValue();
@@ -137,7 +151,6 @@ bool DocumentSourceGroupBase::shouldSpillWithAttemptToSaveMemory() {
                 "Exceeded memory limit for $group, but didn't allow external sort."
                 " Pass allowDiskUse:true to opt in.",
                 _memoryTracker._allowDiskUse);
-        _memoryTracker.resetCurrent();
         return true;
     }
     return false;
@@ -576,6 +589,7 @@ void DocumentSourceGroupBase::resetReadyGroups() {
 
 void DocumentSourceGroupBase::spill() {
     _stats.spills++;
+    _stats.numBytesSpilledEstimate += _memoryTracker.currentMemoryBytes();
 
     vector<const GroupsMap::value_type*> ptrs;  // using pointers to speed sorting
     ptrs.reserve(_groups->size());
@@ -587,8 +601,11 @@ void DocumentSourceGroupBase::spill() {
 
     // Initialize '_file' in a lazy manner only when it is needed.
     if (!_file) {
-        _file =
-            std::make_shared<Sorter<Value, Value>::File>(pExpCtx->tempDir + "/" + nextFileName());
+        if (pExpCtx->explain && *pExpCtx->explain >= ExplainOptions::Verbosity::kExecStats) {
+            _spillStats = std::make_unique<SorterFileStats>(nullptr /* sorterTracker */);
+        }
+        _file = std::make_shared<Sorter<Value, Value>::File>(
+            pExpCtx->tempDir + "/" + nextFileName(), _spillStats.get());
     }
     SortedFileWriter<Value, Value> writer(SortOptions().TempDir(pExpCtx->tempDir), _file);
     switch (_accumulatedFields.size()) {  // same as ptrs[i]->second.size() for all i.
@@ -623,11 +640,12 @@ void DocumentSourceGroupBase::spill() {
     _groups->clear();
     // Zero out the current per-accumulation statement memory consumption, as the memory has been
     // freed by spilling.
-    for (const auto& accum : _accumulatedFields) {
-        _memoryTracker.set(accum.fieldName, 0);
-    }
+    _memoryTracker.resetCurrent();
 
     _sortedFiles.emplace_back(writer.done());
+    if (_spillStats) {
+        _stats.spillFileSizeBytes = _spillStats->bytesSpilled();
+    }
 }
 
 Value DocumentSourceGroupBase::computeId(const Document& root) {
@@ -751,12 +769,14 @@ DocumentSourceGroupBase::rewriteGroupAsTransformOnFirstDocument() const {
 
     const auto groupId = fieldPath.tail().fullPath();
 
-    // We can't do this transformation if there are any non-$first accumulators.
-    for (auto&& accumulator : _accumulatedFields) {
-        if (AccumulatorDocumentsNeeded::kFirstDocument !=
-            accumulator.makeAccumulator()->documentsNeeded()) {
-            return nullptr;
-        }
+    // We do this transformation only if there are all $first, all $last, or no accumulators.
+    GroupFromFirstDocumentTransformation::ExpectedInput expectedInput;
+    if (accsNeedSameDoc(_accumulatedFields, AccumulatorDocumentsNeeded::kFirstDocument)) {
+        expectedInput = GroupFromFirstDocumentTransformation::ExpectedInput::kFirstDocument;
+    } else if (accsNeedSameDoc(_accumulatedFields, AccumulatorDocumentsNeeded::kLastDocument)) {
+        expectedInput = GroupFromFirstDocumentTransformation::ExpectedInput::kLastDocument;
+    } else {
+        return nullptr;
     }
 
     std::vector<std::pair<std::string, boost::intrusive_ptr<Expression>>> fields;
@@ -771,17 +791,17 @@ DocumentSourceGroupBase::rewriteGroupAsTransformOnFirstDocument() const {
         idField = ExpressionObject::create(pExpCtx.get(),
                                            {{_idFieldNames.front(), _idExpressions.front()}});
     }
-    fields.push_back(std::make_pair("_id", idField));
+    fields.emplace_back("_id", idField);
 
     for (auto&& accumulator : _accumulatedFields) {
-        fields.push_back(std::make_pair(accumulator.fieldName, accumulator.expr.argument));
+        fields.emplace_back(accumulator.fieldName, accumulator.expr.argument);
 
-        // Since we don't attempt this transformation for non-$first accumulators,
+        // Since we don't attempt this transformation for non-$first/$last accumulators,
         // the initializer should always be trivial.
     }
 
     return GroupFromFirstDocumentTransformation::create(
-        pExpCtx, groupId, getSourceName(), std::move(fields));
+        pExpCtx, groupId, getSourceName(), std::move(fields), expectedInput);
 }
 
 size_t DocumentSourceGroupBase::getMaxMemoryUsageBytes() const {

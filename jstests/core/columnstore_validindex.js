@@ -1,11 +1,9 @@
 /**
  * Tests parsing and validation of columnstore indexes.
  * @tags: [
+ *   requires_fcv_63,
  *   # Uses index building in background.
  *   requires_background_index,
- *   # column store indexes are still under a feature flag and require full sbe
- *   featureFlagColumnstoreIndexes,
- *   featureFlagSbeFull,
  *   # Columnstore tests set server parameters to disable columnstore query planning heuristics -
  *   # 1) server parameters are stored in-memory only so are not transferred onto the recipient,
  *   # 2) server parameters may not be set in stepdown passthroughs because it is a command that may
@@ -40,10 +38,18 @@ IndexCatalogHelpers.createIndexAndVerifyWithDrop(
 IndexCatalogHelpers.createIndexAndVerifyWithDrop(
     coll, {"$**": "columnstore"}, {background: true, name: kIndexName});
 
-// TODO SERVER-64365 Can create a columnstore index with index level collation.
+// Test that you cannot create a columnstore index with a collation - either with the argument or
+// because the collection has a default collation specified.
 assert.commandFailedWithCode(
     coll.createIndex({"$**": "columnstore"}, {collation: {locale: "fr"}, name: kIndexName}),
     ErrorCodes.CannotCreateIndex);
+
+const collationCollName = "columnstore_collation";
+const collationColl = db[collationCollName];
+assertDropCollection(db, collationCollName);
+assert.commandWorked(db.createCollection(collationCollName, {collation: {locale: "fr"}}));
+assert.commandFailedWithCode(collationColl.createIndex({"$**": "columnstore"}),
+                             ErrorCodes.CannotCreateIndex);
 
 // Can create a valid columnstore index with subpaths.
 IndexCatalogHelpers.createIndexAndVerifyWithDrop(

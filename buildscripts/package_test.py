@@ -17,6 +17,10 @@ import docker
 import docker.errors
 import requests
 
+from docker.client import DockerClient
+from docker.models.containers import Container
+from docker.models.images import Image
+
 from simple_report import Result, Report
 
 root = logging.getLogger()
@@ -30,8 +34,8 @@ root.addHandler(handler)
 
 PACKAGE_MANAGER_COMMANDS = {
     "apt": {
-        "update": "export DEBIAN_FRONTEND=noninteractive; apt-get update -y",
-        "install": "export DEBIAN_FRONTEND=noninteractive; apt-get install -y {}",
+        "update": "export DEBIAN_FRONTEND=noninteractive && apt-get update -y",
+        "install": "export DEBIAN_FRONTEND=noninteractive && apt-get install -y {}",
     },
     "yum": {
         "update": "yum update -y",
@@ -43,18 +47,11 @@ PACKAGE_MANAGER_COMMANDS = {
     },
 }
 
-DOCKER_SYSTEMCTL_REPO = "https://raw.githubusercontent.com/gdraheim/docker-systemctl-replacement"
-SYSTEMCTL_URL = f"{DOCKER_SYSTEMCTL_REPO}/master/files/docker/systemctl3.py"
-JOURNALCTL_URL = f"{DOCKER_SYSTEMCTL_REPO}/master/files/docker/journalctl3.py"
-
 # Lookup table used when building and running containers
 # os_name, Optional[(base_image, package_manager, frozenset(base_packages), python_command)]
 OS_DOCKER_LOOKUP = {
     'amazon': None,
     'amzn64': None,
-    # TODO(SERVER-69982) This can be re-enabled when the ticket is fixed
-    # 'amazon': ('amazonlinux:1', "yum", frozenset(["python38", "wget", "pkgconfig", "systemd"]), "python3"),
-    # 'amzn64': ('amazonlinux:1', "yum", frozenset(["python38", "wget", "pkgconfig", "systemd"]), "python3"),
     'amazon2': ('amazonlinux:2', "yum", frozenset(["python3", "wget", "pkgconfig", "systemd"]),
                 "python3"),
     'amazon2022': ('amazonlinux:2022', "yum", frozenset(["python3", "wget", "pkgconfig",
@@ -142,7 +139,7 @@ class Test:
     package_manager: str = dataclasses.field(default="", repr=False)
     update_command: str = dataclasses.field(default="", repr=False)
     install_command: str = dataclasses.field(default="", repr=False)
-    base_packages: str = dataclasses.field(default="", repr=False)
+    base_packages: List[str] = dataclasses.field(default_factory=list)
     python_command: str = dataclasses.field(default="", repr=False)
     packages_urls: List[str] = dataclasses.field(default_factory=list)
     packages_paths: List[Path] = dataclasses.field(default_factory=list)
@@ -152,7 +149,7 @@ class Test:
 
         self.base_image = OS_DOCKER_LOOKUP[self.os_name][0]
         self.package_manager = OS_DOCKER_LOOKUP[self.os_name][1]
-        self.base_packages = OS_DOCKER_LOOKUP[self.os_name][2]
+        self.base_packages = list(OS_DOCKER_LOOKUP[self.os_name][2])
         self.python_command = OS_DOCKER_LOOKUP[self.os_name][3]
 
         self.update_command = PACKAGE_MANAGER_COMMANDS[self.package_manager]["update"]
@@ -170,38 +167,30 @@ class Test:
         return self.os_name + "-" + self.version
 
 
-def build_image(test: Test) -> str:
-    commands: List[str] = [
-        test.update_command,
-        test.install_command.format(" ".join(test.base_packages)),
-        "mkdir -p /run/systemd/system",
-        "mkdir -p $(pkg-config systemd --variable=systemdsystempresetdir)",
-        "echo 'disable *' > $(pkg-config systemd --variable=systemdsystempresetdir)/00-test.preset",
-        f"wget -P /usr/bin {SYSTEMCTL_URL}",
-        f"wget -P /usr/bin {JOURNALCTL_URL}",
-        "chmod +x /usr/bin/systemctl3.py /usr/bin/journalctl3.py",
-        "ln -sf /usr/bin/systemctl3.py /bin/systemd",
-        "ln -sf /usr/bin/systemctl3.py /usr/bin/systemd",
-    ]
-
-    if test.python_command != 'python3':
-        commands.append(f"ln -s {test.python_command} /usr/bin/python3")
-
-    logging.info("Building base image for %s: %s", test.os_name, test.base_image)
-
-    client = docker.from_env()
-    container = client.containers.run(
-        test.base_image, ["/bin/bash", "-x", "-c", " && ".join(commands)], detach=True, tty=True)
-
-    # Wait for the container to finish and exit (timeout is in seconds)
-    container.wait(timeout=120)
-    logging.debug(container.logs().decode('utf-8'))
-    return container.commit(repository=f"localhost/{test.os_name}", changes="CMD /bin/systemd")
+def get_image(test: Test, client: DockerClient) -> Image:
+    tries = 1
+    while True:
+        try:
+            logging.info("Pulling base image for %s: %s, try %s", test.os_name, test.base_image,
+                         tries)
+            base_image = client.images.pull(test.base_image)
+        except docker.errors.ImageNotFound as exc:
+            if tries >= 5:
+                logging.error("Base image %s not found after %s tries", test.base_image, tries)
+                raise exc
+        else:
+            return base_image
+        finally:
+            tries += 1
+            time.sleep(1)
 
 
-def run_test(test: Test) -> Result:
+def join_commands(commands: List[str], sep: str = ' && ') -> str:
+    return sep.join(commands)
+
+
+def run_test(test: Test, client: DockerClient) -> Result:
     result = Result(status="pass", test_file=test.name(), start=time.time(), log_raw="")
-    client = docker.from_env()
 
     log_name = f"logs/{test.os_name}_{test.version}_{uuid.uuid4().hex}.log"
     test_docker_root = Path("/mnt/package_test").resolve()
@@ -210,15 +199,28 @@ def run_test(test: Test) -> Result:
     logging.debug(test_external_root)
     log_external_path = Path.joinpath(test_external_root, log_name)
 
-    os.makedirs(log_external_path.parent, exist_ok=True)
-    command = f"bash -c \"{test.python_command} /mnt/package_test/package_test_internal.py {log_docker_path} {' '.join(test.packages_urls)}\""
-    logging.debug("Attempting to run the following docker command: %s", command)
+    commands = [
+        test.update_command,
+        test.install_command.format(" ".join(test.base_packages)),
+    ]
 
+    if test.python_command != 'python3':
+        commands.append(f"ln -s {test.python_command} /usr/bin/python3")
+
+    os.makedirs(log_external_path.parent, exist_ok=True)
+    commands.append(
+        f"python3 /mnt/package_test/package_test_internal.py {log_docker_path} {' '.join(test.packages_urls)}"
+    )
+    logging.debug("Attempting to run the following docker commands:\n\t%s",
+                  join_commands(commands, sep='\n\t'))
+
+    image: Image | None = None
+    container: Container | None = None
     try:
-        image = build_image(test)
-        container: docker.Container = client.containers.run(
-            image, command=command, auto_remove=True, detach=True,
-            volumes=[f'{test_external_root}:{test_docker_root}'])
+        image = get_image(test, client)
+        container = client.containers.run(image, command=f"bash -c \"{join_commands(commands)}\"",
+                                          auto_remove=True, detach=True,
+                                          volumes=[f'{test_external_root}:{test_docker_root}'])
         for log in container.logs(stream=True):
             result["log_raw"] += log.decode('UTF-8')
             # This is pretty verbose, lets run this way for a while and we can delete this if it ends up being too much
@@ -227,7 +229,7 @@ def run_test(test: Test) -> Result:
         result["exit_code"] = exit_code['StatusCode']
     except docker.errors.APIError as exc:
         traceback.print_exception(type(exc), exc, exc.__traceback__)
-        logging.error("Failed to start docker container")
+        logging.error("Failed to start test")
         result["end"] = time.time()
         result['status'] = 'fail'
         result["exit_code"] = 1
@@ -376,7 +378,7 @@ if mongo_os != "none":
             continue
 
         # amd64 and x86_64 should be treated as aliases of each other
-        if dl["arch"] not in get_arch_aliases(dl["arch"]):
+        if dl["arch"] not in get_arch_aliases(arch):
             continue
 
         if not OS_DOCKER_LOOKUP[dl["target"]]:
@@ -397,9 +399,19 @@ if mongo_os != "none":
         tests.append(
             Test(os_name=dl["target"], packages_urls=dl["packages"], version=dl["version"]))
 
+docker_client = docker.client.from_env()
+docker_username = os.environ.get('docker_username')
+docker_password = os.environ.get('docker_password')
+if all((docker_username, docker_password)):
+    logging.info("Logging into docker.io")
+    response = docker_client.login(username=docker_username, password=docker_password)
+    logging.debug("Login response: %s", response)
+else:
+    logging.warning("Skipping docker login")
+
 report = Report(results=[], failures=0)
 with futures.ThreadPoolExecutor() as tpe:
-    test_futures = [tpe.submit(run_test, test) for test in tests]
+    test_futures = [tpe.submit(run_test, test, docker_client) for test in tests]
     completed_tests = 0  # pylint: disable=invalid-name
     for f in futures.as_completed(test_futures):
         completed_tests += 1

@@ -96,7 +96,6 @@ public:
                     sbe::value::SlotIdGenerator& ids,
                     const Metadata& metadata,
                     const NodeToGroupPropsMap& nodeToGroupPropsMap,
-                    const RIDProjectionsMap& ridProjections,
                     const bool randomScan)
         : _env(env),
           _slotMap(slotMap),
@@ -104,15 +103,16 @@ public:
           _slotIdGenerator(ids),
           _metadata(metadata),
           _nodeToGroupPropsMap(nodeToGroupPropsMap),
-          _ridProjections(ridProjections),
           _randomScan(randomScan) {}
 
     // The default noop transport.
     template <typename T, typename... Ts>
     std::unique_ptr<sbe::PlanStage> walk(const T&, Ts&&...) {
-        if constexpr (std::is_base_of_v<ExclusivelyLogicalNode, T>) {
-            uasserted(6624238, "A physical plan should not contain exclusively logical nodes.");
-        }
+        // We should not be seeing a physical delegator node here.
+        static_assert(!canBePhysicalNode<T>() || std::is_same_v<MemoPhysicalDelegatorNode, T>,
+                      "Physical nodes need to implement lowering");
+
+        uasserted(6624238, "Unexpected node type.");
         return nullptr;
     }
 
@@ -128,6 +128,13 @@ public:
     std::unique_ptr<sbe::PlanStage> walk(const CollationNode& n, const ABT& child, const ABT& refs);
 
     std::unique_ptr<sbe::PlanStage> walk(const UniqueNode& n, const ABT& child, const ABT& refs);
+
+    std::unique_ptr<sbe::PlanStage> walk(const SpoolProducerNode& n,
+                                         const ABT& child,
+                                         const ABT& filter,
+                                         const ABT& binder,
+                                         const ABT& refs);
+    std::unique_ptr<sbe::PlanStage> walk(const SpoolConsumerNode& n, const ABT& binder);
 
     std::unique_ptr<sbe::PlanStage> walk(const GroupByNode& n,
                                          const ABT& child,
@@ -147,6 +154,11 @@ public:
     std::unique_ptr<sbe::PlanStage> walk(const MergeJoinNode& n,
                                          const ABT& leftChild,
                                          const ABT& rightChild,
+                                         const ABT& refs);
+
+    std::unique_ptr<sbe::PlanStage> walk(const SortedMergeNode& n,
+                                         const ABTVector& children,
+                                         const ABT& binder,
                                          const ABT& refs);
 
     std::unique_ptr<sbe::PlanStage> walk(const UnionNode& n,
@@ -199,7 +211,6 @@ private:
 
     const Metadata& _metadata;
     const NodeToGroupPropsMap& _nodeToGroupPropsMap;
-    const RIDProjectionsMap& _ridProjections;
 
     // If true, will create scan nodes using a random cursor to support sampling.
     // Currently only supported for single-threaded (non parallel-scanned) mongod collections.

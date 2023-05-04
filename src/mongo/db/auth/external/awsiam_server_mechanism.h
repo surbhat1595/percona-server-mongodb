@@ -63,6 +63,14 @@ public:
 
     ~ServerMechanism() final = default;
 
+    boost::optional<unsigned int> currentStep() const override {
+        return _step;
+    }
+
+    boost::optional<unsigned int> totalSteps() const override {
+        return 2;
+    }
+
 private:
     std::uint32_t _step{0};
 

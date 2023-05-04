@@ -208,8 +208,10 @@ private:
                        const NamespaceString& collectionName,
                        const UUID& uuid) override {}
 
-    void onUnpreparedTransactionCommit(OperationContext* opCtx,
-                                       TransactionOperations* transactionOperations) override {}
+    void onTransactionStart(OperationContext* opCtx) override {}
+
+    void onUnpreparedTransactionCommit(
+        OperationContext* opCtx, const TransactionOperations& transactionOperations) override {}
 
     void onPreparedTransactionCommit(
         OperationContext* opCtx,
@@ -220,15 +222,15 @@ private:
     std::unique_ptr<ApplyOpsOplogSlotAndOperationAssignment> preTransactionPrepare(
         OperationContext* opCtx,
         const std::vector<OplogSlot>& reservedSlots,
-        Date_t wallClockTime,
-        TransactionOperations* transactionOperations) override {
+        const TransactionOperations& transactionOperations,
+        Date_t wallClockTime) override {
         return nullptr;
     }
 
     void onTransactionPrepare(
         OperationContext* opCtx,
         const std::vector<OplogSlot>& reservedSlots,
-        const std::vector<repl::ReplOperation>& statements,
+        const TransactionOperations& transactionOperations,
         const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
         size_t numberOfPrePostImagesToWrite,
         Date_t wallClockTime) override {}

@@ -113,14 +113,105 @@ inline void maybeComposePaths(ABTVector& paths) {
 }
 
 /**
- * Used to vend out fresh projection names.
+ * Used to access and manipulate the child of a unary node.
+ */
+template <class NodeType>
+struct DefaultChildAccessor {
+    const ABT& operator()(const ABT& node) const {
+        return node.cast<NodeType>()->getChild();
+    }
+
+    ABT& operator()(ABT& node) const {
+        return node.cast<NodeType>()->getChild();
+    }
+};
+
+/**
+ * Used to access and manipulate the left child of a binary node.
+ */
+template <class NodeType>
+struct LeftChildAccessor {
+    const ABT& operator()(const ABT& node) const {
+        return node.cast<NodeType>()->getLeftChild();
+    }
+
+    ABT& operator()(ABT& node) const {
+        return node.cast<NodeType>()->getLeftChild();
+    }
+};
+
+/**
+ * Used to access and manipulate the right child of a binary node.
+ */
+template <class NodeType>
+struct RightChildAccessor {
+    const ABT& operator()(const ABT& node) const {
+        return node.cast<NodeType>()->getRightChild();
+    }
+
+    ABT& operator()(ABT& node) const {
+        return node.cast<NodeType>()->getRightChild();
+    }
+};
+
+/**
+ * Used to access and manipulate the first child of a n-ary node.
+ */
+template <class NodeType>
+struct FirstChildAccessor {
+    const ABT& operator()(const ABT& node) const {
+        return node.cast<NodeType>()->nodes().front();
+    }
+
+    ABT& operator()(ABT& node) {
+        return node.cast<NodeType>()->nodes().front();
+    }
+};
+
+/**
+ * Used to vend out fresh projection names. The method getNextId receives an optional prefix. If we
+ * are generating descriptive names, the variable name we return starts with the prefix and includes
+ * a prefix-specific counter. If we are not generating descriptive variable names, the prefix is
+ * ignored and instead we use a global counter instead and ignore the prefix.
  */
 class PrefixId {
+    using IdType = uint64_t;
+    using PrefixMapType = opt::unordered_map<std::string, IdType>;
+
 public:
-    ProjectionName getNextId(const StringData& prefix);
+    static PrefixId create(const bool useDescriptiveVarNames) {
+        return {useDescriptiveVarNames};
+    }
+    static PrefixId createForTests() {
+        return {true /*useDescripriveVarNames*/};
+    }
+
+    template <size_t N>
+    ProjectionName getNextId(const char (&prefix)[N]) {
+        if (std::holds_alternative<IdType>(_ids)) {
+            return ProjectionName{str::stream() << "p" << std::get<IdType>(_ids)++};
+        } else {
+            return ProjectionName{str::stream()
+                                  << prefix << "_" << std::get<PrefixMapType>(_ids)[prefix]++};
+        }
+    }
+
+    PrefixId(const PrefixId& other) = delete;
+    PrefixId(PrefixId&& other) = default;
+
+    PrefixId& operator=(const PrefixId& other) = delete;
+    PrefixId& operator=(PrefixId&& other) = default;
 
 private:
-    opt::unordered_map<std::string, uint64_t> _idCounterPerPrefix;
+    PrefixId(const bool useDescriptiveVarNames) {
+        if (useDescriptiveVarNames) {
+            _ids = {PrefixMapType{}};
+        } else {
+            _ids = {uint64_t{}};
+        }
+    }
+
+    std::variant<IdType, PrefixMapType> _ids;
 };
 
 ProjectionNameOrderedSet convertToOrderedSet(ProjectionNameSet unordered);
@@ -137,11 +228,6 @@ properties::LogicalProps createInitialScanProps(const ProjectionName& projection
  * Used to track references originating from a set of physical properties.
  */
 ProjectionNameSet extractReferencedColumns(const properties::PhysProps& properties);
-
-/**
- * Returns true if all components of the compound interval are equalities.
- */
-bool areCompoundIntervalsEqualities(const CompoundIntervalRequirement& intervals);
 
 struct CollationSplitResult {
     bool _validSplit = false;
@@ -267,8 +353,7 @@ CandidateIndexes computeCandidateIndexes(PrefixId& prefixId,
                                          const ProjectionName& scanProjectionName,
                                          const PartialSchemaRequirements& reqMap,
                                          const ScanDefinition& scanDef,
-                                         bool fastNullHandling,
-                                         size_t maxIndexEqPrefixes,
+                                         const QueryHints& hints,
                                          bool& hasEmptyInterval,
                                          const ConstFoldFn& constFold);
 
@@ -311,6 +396,7 @@ void applyProjectionRenames(ProjectionRenames projectionRenames,
                             });
 
 void removeRedundantResidualPredicates(const ProjectionNameOrderPreservingSet& requiredProjections,
+                                       const ProjectionNameOrderPreservingSet& correlatedProjNames,
                                        ResidualRequirements& residualReqs,
                                        FieldProjectionMap& fieldProjectionMap);
 
@@ -357,16 +443,23 @@ ABT lowerRIDIntersectMergeJoin(PrefixId& prefixId,
                                NodeCEMap& nodeCEMap,
                                ChildPropsType& childProps);
 
-ABT lowerIntervals(PrefixId& prefixId,
-                   const ProjectionName& ridProjName,
-                   FieldProjectionMap indexProjectionMap,
-                   const std::string& scanDefName,
-                   const std::string& indexDefName,
-                   const CompoundIntervalReqExpr::Node& intervals,
-                   bool reverseOrder,
-                   CEType indexCE,
-                   CEType scanGroupCE,
-                   NodeCEMap& nodeCEMap);
+/**
+ * Lowers a plan consisting of one or several equality prefixes. The subplans for each equality
+ * prefix are connected using correlated joins. The subplans for each prefix in turn are implemented
+ * as one or more index scans depending on the shape of the interval expression.
+ */
+ABT lowerEqPrefixes(PrefixId& prefixId,
+                    const ProjectionName& ridProjName,
+                    FieldProjectionMap indexProjectionMap,
+                    const std::string& scanDefName,
+                    const std::string& indexDefName,
+                    const std::vector<EqualityPrefixEntry>& eqPrefixes,
+                    const std::vector<bool>& reverseOrder,
+                    const ProjectionNameVector& correlatedProjNames,
+                    const std::map<size_t, SelectivityType>& indexPredSelMap,
+                    CEType currentGroupCE,
+                    CEType scanGroupCE,
+                    NodeCEMap& nodeCEMap);
 
 /**
  * This helper checks to see if we have a PathTraverse + PathId at the end of the path.

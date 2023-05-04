@@ -226,8 +226,10 @@ public:
                        const NamespaceString& collectionName,
                        const UUID& uuid) final {}
 
+    void onTransactionStart(OperationContext* opCtx) final {}
+
     void onUnpreparedTransactionCommit(OperationContext* opCtx,
-                                       TransactionOperations* transactionOperations) final {}
+                                       const TransactionOperations& transactionOperations) final {}
 
     void onPreparedTransactionCommit(
         OperationContext* opCtx,
@@ -238,15 +240,15 @@ public:
     std::unique_ptr<ApplyOpsOplogSlotAndOperationAssignment> preTransactionPrepare(
         OperationContext* opCtx,
         const std::vector<OplogSlot>& reservedSlots,
-        Date_t wallClockTime,
-        TransactionOperations* transactionOperations) final {
+        const TransactionOperations& transactionOperations,
+        Date_t wallClockTime) final {
         return nullptr;
     }
 
     void onTransactionPrepare(
         OperationContext* opCtx,
         const std::vector<OplogSlot>& reservedSlots,
-        const std::vector<repl::ReplOperation>& statements,
+        const TransactionOperations& transactionOperations,
         const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
         size_t numberOfPrePostImagesToWrite,
         Date_t wallClockTime) final {}

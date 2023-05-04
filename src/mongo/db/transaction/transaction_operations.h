@@ -41,6 +41,8 @@
 
 namespace mongo {
 
+extern FailPoint hangAfterLoggingApplyOpsForTransaction;
+
 /**
  * Container for ReplOperation used in multi-doc transactions and batched writer context.
  * Includes statistics on operations held in this container.
@@ -51,6 +53,32 @@ class TransactionOperations {
 public:
     using TransactionOperation = repl::ReplOperation;
     using CollectionUUIDs = stdx::unordered_set<UUID, UUID::Hash>;
+
+    /**
+     * Function type used by logOplogEntries() to write a formatted applyOps oplog entry
+     * to the oplog.
+     *
+     * The 'oplogEntry' holds the current applyOps oplog entry formatted by logOplogEntries()
+     * and is passed in as a pointer because downstream functions in the oplog generation code
+     * may append additional information.
+     *
+     * The booleans 'firstOp' and 'lastOp' indicate where this entry is within the chain of
+     * generated applyOps oplog entries. One use for these booleans is to determine if we have
+     * a singleton oplog chain (firstOp == lastOp).
+     *
+     * The 'stmtIdsWritten' holds the complete list of statement ids extracted from the entire
+     * chain of applyOps oplog entries. It will be empty for each entry in the chain except for
+     * the last entry ('lastOp' == true). It may also be empty if there are no statement ids
+     * contained in any of the replicated operations.
+     *
+     * This is based on the signature of the logApplyOps() function within the OpObserverImpl
+     * implementation, which takes a few more arguments that can be derived from the caller's
+     * context.
+     */
+    using LogApplyOpsFn = std::function<repl::OpTime(repl::MutableOplogEntry* oplogEntry,
+                                                     bool firstOp,
+                                                     bool lastOp,
+                                                     std::vector<StmtId> stmtIdsWritten)>;
 
     /**
      * Contains "applyOps" oplog entries for a transaction. "applyOps" entries are not actual
@@ -69,19 +97,27 @@ public:
 
         ApplyOpsInfo(std::vector<ApplyOpsEntry> applyOpsEntries,
                      std::size_t numberOfOplogSlotsUsed,
+                     std::size_t numOperationsWithNeedsRetryImage,
                      bool prepare)
             : applyOpsEntries(std::move(applyOpsEntries)),
               numberOfOplogSlotsUsed(numberOfOplogSlotsUsed),
+              numOperationsWithNeedsRetryImage(numOperationsWithNeedsRetryImage),
               prepare(prepare) {}
 
         explicit ApplyOpsInfo(bool prepare)
-            : applyOpsEntries(), numberOfOplogSlotsUsed(0), prepare(prepare) {}
+            : applyOpsEntries(),
+              numberOfOplogSlotsUsed(0),
+              numOperationsWithNeedsRetryImage(0),
+              prepare(prepare) {}
 
         // Representation of "applyOps" oplog entries.
         std::vector<ApplyOpsEntry> applyOpsEntries;
 
         // Number of oplog slots utilized.
         std::size_t numberOfOplogSlotsUsed;
+
+        // Number of operations with 'needsRetryImage' set.
+        std::size_t numOperationsWithNeedsRetryImage;
 
         // Indicates if we are generating "applyOps" oplog entries for a prepared transaction.
         // This is derived from the 'prepared' parameter passed to the getApplyOpsInfo() function.
@@ -94,6 +130,9 @@ public:
      * statements are represented as range ['stmtBegin', 'stmtEnd') and BSON serialized objects
      * 'operations'. If any of the statements has a pre-image or post-image that needs to be
      * stored in the image collection, stores it to 'imageToWrite'.
+     *
+     * Throws TransactionTooLarge if the size of the resulting oplog entry exceeds the BSON limit.
+     * See BSONObjMaxUserSize (currently set to 16 MB).
      *
      * Used to implement logOplogEntries().
      */
@@ -168,17 +207,51 @@ public:
                                  bool prepare) const;
 
     /**
-     * Returns pointer to vector of operations for integrating with
+     * Logs applyOps oplog entries for preparing a transaction, committing an unprepared
+     * transaction, or committing a WUOW that is not necessarily related to a multi-document
+     * transaction. This includes the in-progress 'partialTxn' oplog entries followed by the
+     * implicit prepare or commit entry. If the 'prepare' argument is true, it will log entries
+     * for a prepared transaction. Otherwise, it logs entries for an unprepared transaction.
+     * The total number of oplog entries written will be <= the number of the operations in the
+     * '_transactionOperations' vector, and will depend on how many transaction statements
+     * are given, the data size of each statement, and the 'oplogEntryCountLimit' parameter
+     * given to getApplyOpsInfo().
+     *
+     * This function expects that the size of 'oplogSlots' be at least as big as the size of
+     * '_transactionOperations' in the worst case, where each operation requires an applyOps
+     * entry of its own. If there are more oplog slots than applyOps operations are written, the
+     * number of oplog slots corresponding to the number of applyOps written will be used.
+     * It also expects that the vector of given statements is non-empty.
+     *
+     * The 'applyOpsOperationAssignment' contains BSON serialized transaction statements, their
+     * assignment to "applyOps" oplog entries for a transaction.
+     *
+     * In the case of writing entries for a prepared transaction, the last oplog entry
+     * (i.e. the implicit prepare) will always be written using the last oplog slot given,
+     * even if this means skipping over some reserved slots.
+     *
+     * The number of oplog entries written is returned.
+     *
+     * Throws TransactionTooLarge if the size of any resulting applyOps oplog entry exceeds the
+     * BSON limit.
+     * See packTransactionStatementsForApplyOps() and BSONObjMaxUserSize (currently set to 16 MB).
+     */
+    std::size_t logOplogEntries(const std::vector<OplogSlot>& oplogSlots,
+                                const ApplyOpsInfo& applyOpsOperationAssignment,
+                                Date_t wallClockTime,
+                                LogApplyOpsFn logApplyOpsFn,
+                                boost::optional<TransactionOperation::ImageBundle>*
+                                    prePostImageToWriteToImageCollection) const;
+
+    /**
+     * Returns const reference to vector of operations for integrating with
      * BatchedWriteContext, TransactionParticipant, and OpObserver interfaces
      * for multi-doc transactions.
-     *
-     * Caller assumes responsibility for keeping contents referenced by the pointer
-     * in sync with statistics maintained in this container.
      *
      * This function can be removed when we have migrated callers of BatchedWriteContext
      * and TransactionParticipant to use the methods on this class directly.
      */
-    std::vector<TransactionOperation>* getMutableOperationsForOpObserver();
+    const std::vector<TransactionOperation>& getOperationsForOpObserver() const;
 
     /**
      * Returns copy of operations for TransactionParticipant testing.

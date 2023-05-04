@@ -8,7 +8,7 @@ const commandsRemovedFromMongosSinceLastLTS = [
     // last-continuos
     "availableQueryOptions",  // TODO SERVER-67689: remove this once 7.0 becomes last-lts
     "getLastError",
-
+    "getnonce",
 ];
 // These commands were added in mongos since the last LTS version, so will not appear in the
 // listCommands output of a last LTS version mongos. We will allow these commands to have a test
@@ -20,6 +20,7 @@ const commandsAddedToMongosSinceLastLTS = [
     "analyze",
     "analyzeShardKey",  // TODO (SERVER-68977): Remove upgrade/downgrade for PM-1858.
     "appendOplogNote",
+    "bulkWrite",
     "cleanupReshardCollection",
     "commitReshardCollection",
     "compactStructuredEncryptionData",

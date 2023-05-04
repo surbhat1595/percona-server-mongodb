@@ -58,6 +58,13 @@ struct CellViewForPath {
     CellView value;
 };
 
+/**
+ * This is a base class for column store index storage access, similar to RecordStore and
+ * SortedDataInterface.
+ *
+ * Whereas RecordStore maps RecordId to RecordData and SDI maps KeyString to RecordId, ColumnStore
+ * stores tuples of Path, RecordId and Value in a separate format.
+ */
 class ColumnStore {
 protected:
     class Cursor;
@@ -71,9 +78,14 @@ public:
         virtual void update(PathView, RowId, CellView) = 0;
     };
 
-    class CursorForPath {
+    /**
+     * Wrapper around a regular storage cursor to return results only for a specific data column in
+     * a column store index. Only returns documents matching the path specified in the constructor.
+     * Considers non-path matching documents EOF and returns boost::none.
+     */
+    class ColumnCursor {
     public:
-        CursorForPath(StringData path, std::unique_ptr<Cursor> cursor)
+        ColumnCursor(StringData path, std::unique_ptr<Cursor> cursor)
             : _path(path.toString()),
               _numPathParts(FieldRef{_path}.numParts()),
               _cursor(std::move(cursor)) {}
@@ -281,8 +293,8 @@ public:
     virtual void remove(OperationContext*, PathView, RowId) = 0;
     virtual void update(OperationContext*, PathView, RowId, CellView) = 0;
     virtual std::unique_ptr<Cursor> newCursor(OperationContext*) const = 0;
-    std::unique_ptr<CursorForPath> newCursor(OperationContext* opCtx, PathView path) const {
-        return std::make_unique<CursorForPath>(path, newCursor(opCtx));
+    std::unique_ptr<ColumnCursor> newCursor(OperationContext* opCtx, PathView path) const {
+        return std::make_unique<ColumnCursor>(path, newCursor(opCtx));
     }
 
     bool haveAnyWithPath(OperationContext* opCtx, PathView path) const {

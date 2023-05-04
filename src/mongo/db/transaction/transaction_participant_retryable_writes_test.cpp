@@ -95,14 +95,14 @@ public:
     void onTransactionPrepare(
         OperationContext* opCtx,
         const std::vector<OplogSlot>& reservedSlots,
-        const std::vector<repl::ReplOperation>& statements,
+        const TransactionOperations& transactionOperations,
         const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
         size_t numberOfPrePostImagesToWrite,
         Date_t wallClockTime) override {
         ASSERT_TRUE(opCtx->lockState()->inAWriteUnitOfWork());
         OpObserverNoop::onTransactionPrepare(opCtx,
                                              reservedSlots,
-                                             statements,
+                                             transactionOperations,
                                              applyOpsOperationAssignment,
                                              numberOfPrePostImagesToWrite,
                                              Date_t::now());
@@ -118,8 +118,8 @@ public:
     bool transactionPrepared = false;
     std::function<void()> onTransactionPrepareFn = [this]() { transactionPrepared = true; };
 
-    void onUnpreparedTransactionCommit(OperationContext* opCtx,
-                                       TransactionOperations* transactionOperations) override {
+    void onUnpreparedTransactionCommit(
+        OperationContext* opCtx, const TransactionOperations& transactionOperations) override {
         ASSERT_TRUE(opCtx->lockState()->inAWriteUnitOfWork());
         OpObserverNoop::onUnpreparedTransactionCommit(opCtx, transactionOperations);
 

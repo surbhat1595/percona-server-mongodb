@@ -583,6 +583,9 @@ Status storeMongodOptions(const moe::Environment& params) {
                           str::stream() << "Cannot specify both --repair and --restore");
         }
     }
+    if (params.count("magicRestore") && params["magicRestore"].as<bool>() == true) {
+        storageGlobalParams.magicRestore = 1;
+    }
 
     repl::ReplSettings replSettings;
     if (params.count("replication.serverless")) {
@@ -804,6 +807,17 @@ Status storeMongodOptions(const moe::Environment& params) {
 
     setGlobalReplSettings(replSettings);
     return Status::OK();
+}
+
+namespace {
+std::function<ExitCode(ServiceContext* svcCtx)> _magicRestoreMainFn = nullptr;
+}
+
+void setMagicRestoreMain(std::function<ExitCode(ServiceContext* svcCtx)> magicRestoreMainFn) {
+    _magicRestoreMainFn = magicRestoreMainFn;
+}
+std::function<ExitCode(ServiceContext* svcCtx)> getMagicRestoreMain() {
+    return _magicRestoreMainFn;
 }
 
 }  // namespace mongo

@@ -183,22 +183,43 @@ bool CoScanNode::operator==(const CoScanNode& other) const {
     return true;
 }
 
-IndexScanNode::IndexScanNode(FieldProjectionMap fieldProjectionMap, IndexSpecification indexSpec)
+IndexScanNode::IndexScanNode(FieldProjectionMap fieldProjectionMap,
+                             std::string scanDefName,
+                             std::string indexDefName,
+                             CompoundIntervalRequirement indexInterval,
+                             bool isIndexReverseOrder)
     : Base(buildSimpleBinder(extractProjectionNamesForScan(fieldProjectionMap))),
       _fieldProjectionMap(std::move(fieldProjectionMap)),
-      _indexSpec(std::move(indexSpec)) {}
+      _scanDefName(std::move(scanDefName)),
+      _indexDefName(std::move(indexDefName)),
+      _indexInterval(std::move(indexInterval)),
+      _isIndexReverseOrder(isIndexReverseOrder) {}
 
 bool IndexScanNode::operator==(const IndexScanNode& other) const {
     // Scan spec does not participate, the indexSpec by itself should determine equality.
-    return _fieldProjectionMap == other._fieldProjectionMap && _indexSpec == other._indexSpec;
+    return _fieldProjectionMap == other._fieldProjectionMap && _scanDefName == other._scanDefName &&
+        _indexDefName == other._indexDefName && _indexInterval == other._indexInterval &&
+        _isIndexReverseOrder == other._isIndexReverseOrder;
 }
 
 const FieldProjectionMap& IndexScanNode::getFieldProjectionMap() const {
     return _fieldProjectionMap;
 }
 
-const IndexSpecification& IndexScanNode::getIndexSpecification() const {
-    return _indexSpec;
+const std::string& IndexScanNode::getScanDefName() const {
+    return _scanDefName;
+}
+
+const std::string& IndexScanNode::getIndexDefName() const {
+    return _indexDefName;
+}
+
+const CompoundIntervalRequirement& IndexScanNode::getIndexInterval() const {
+    return _indexInterval;
+}
+
+bool IndexScanNode::isIndexReverseOrder() const {
+    return _isIndexReverseOrder;
 }
 
 SeekNode::SeekNode(ProjectionName ridProjectionName,
@@ -565,6 +586,11 @@ MergeJoinNode::MergeJoinNode(ProjectionNameVector leftKeys,
         6624091, "Mismatched collation and join key size", _collation.size() == _leftKeys.size());
     assertNodeSort(getLeftChild());
     assertNodeSort(getRightChild());
+    for (const auto& collReq : _collation) {
+        tassert(7063704,
+                "MergeJoin collation requirement must be ascending or descending",
+                collReq == CollationOp::Ascending || collReq == CollationOp::Descending);
+    }
 }
 
 bool MergeJoinNode::operator==(const MergeJoinNode& other) const {
@@ -649,12 +675,13 @@ const ABT& NestedLoopJoinNode::getFilter() const {
 }
 
 /**
- * A helper that builds References object of UnionNode for reference tracking purposes.
+ * A helper that builds References object of UnionNode or SortedMergeNode for reference tracking
+ * purposes.
  *
  * Example: union outputs 3 projections: A,B,C and it has 4 children. Then the References object is
  * a vector of variables A,B,C,A,B,C,A,B,C,A,B,C. One group of variables per child.
  */
-static ABT buildUnionReferences(const ProjectionNameVector& names, const size_t numOfChildren) {
+static ABT buildUnionTypeReferences(const ProjectionNameVector& names, const size_t numOfChildren) {
     ABTVector variables;
     for (size_t outerIdx = 0; outerIdx < numOfChildren; ++outerIdx) {
         for (size_t idx = 0; idx < names.size(); ++idx) {
@@ -665,13 +692,54 @@ static ABT buildUnionReferences(const ProjectionNameVector& names, const size_t 
     return make<References>(std::move(variables));
 }
 
-UnionNode::UnionNode(ProjectionNameVector unionProjectionNames, ABTVector children)
-    : UnionNode(std::move(unionProjectionNames), UnionNodeChildren{std::move(children)}) {}
+// Helper function to get the projection names from a CollationRequirement as a vector instead of a
+// set, since we would like to keep the order.
+static ProjectionNameVector getAffectedProjectionNamesOrdered(
+    const properties::CollationRequirement& collReq) {
+    ProjectionNameVector result;
+    for (const auto& entry : collReq.getCollationSpec()) {
+        result.push_back(entry.first);
+    }
+    return result;
+}
 
-UnionNode::UnionNode(ProjectionNameVector unionProjectionNames, UnionNodeChildren children)
+SortedMergeNode::SortedMergeNode(properties::CollationRequirement collReq, ABTVector children)
+    : SortedMergeNode(std::move(collReq), NodeChildrenHolder{std::move(children)}) {}
+
+SortedMergeNode::SortedMergeNode(properties::CollationRequirement collReq,
+                                 NodeChildrenHolder children)
+    : Base(std::move(children._nodes),
+           buildSimpleBinder(getAffectedProjectionNamesOrdered(collReq)),
+           buildUnionTypeReferences(getAffectedProjectionNamesOrdered(collReq),
+                                    children._numOfNodes)),
+      _collationReq(collReq) {
+    for (auto& n : nodes()) {
+        assertNodeSort(n);
+    }
+    for (const auto& collReq : _collationReq.getCollationSpec()) {
+        tassert(7063703,
+                "SortedMerge collation requirement must be ascending or descending",
+                collReq.second == CollationOp::Ascending ||
+                    collReq.second == CollationOp::Descending);
+    }
+}
+
+const properties::CollationRequirement& SortedMergeNode::getCollationReq() const {
+    return _collationReq;
+}
+
+bool SortedMergeNode::operator==(const SortedMergeNode& other) const {
+    return _collationReq == other._collationReq && binder() == other.binder() &&
+        nodes() == other.nodes();
+}
+
+UnionNode::UnionNode(ProjectionNameVector unionProjectionNames, ABTVector children)
+    : UnionNode(std::move(unionProjectionNames), NodeChildrenHolder{std::move(children)}) {}
+
+UnionNode::UnionNode(ProjectionNameVector unionProjectionNames, NodeChildrenHolder children)
     : Base(std::move(children._nodes),
            buildSimpleBinder(unionProjectionNames),
-           buildUnionReferences(unionProjectionNames, children._numOfNodes)) {
+           buildUnionTypeReferences(unionProjectionNames, children._numOfNodes)) {
     tassert(
         6624007, "UnionNode must have a non-empty projection list", !unionProjectionNames.empty());
 
@@ -779,6 +847,71 @@ const ProjectionNameVector& UniqueNode::getProjections() const {
 
 const ABT& UniqueNode::getChild() const {
     return get<0>();
+}
+
+SpoolProducerNode::SpoolProducerNode(const SpoolProducerType type,
+                                     const int64_t spoolId,
+                                     ProjectionNameVector projections,
+                                     ABT filter,
+                                     ABT child)
+    : Base(std::move(child),
+           std::move(filter),
+           buildSimpleBinder(projections),
+           make<References>(projections)),
+      _type(type),
+      _spoolId(spoolId) {
+    assertNodeSort(getChild());
+    assertExprSort(getFilter());
+    tassert(
+        6624155, "Spool producer must have a non-empty projection list", !binder().names().empty());
+    tassert(6624120,
+            "Invalid combination of spool producer type and spool filter",
+            _type == SpoolProducerType::Lazy || filter == Constant::boolean(true));
+}
+
+bool SpoolProducerNode::operator==(const SpoolProducerNode& other) const {
+    return _type == other._type && _spoolId == other._spoolId && getFilter() == other.getFilter() &&
+        binder() == other.binder();
+}
+
+SpoolProducerType SpoolProducerNode::getType() const {
+    return _type;
+}
+
+int64_t SpoolProducerNode::getSpoolId() const {
+    return _spoolId;
+}
+
+const ABT& SpoolProducerNode::getFilter() const {
+    return get<1>();
+}
+
+const ABT& SpoolProducerNode::getChild() const {
+    return get<0>();
+}
+
+ABT& SpoolProducerNode::getChild() {
+    return get<0>();
+}
+
+SpoolConsumerNode::SpoolConsumerNode(const SpoolConsumerType type,
+                                     const int64_t spoolId,
+                                     ProjectionNameVector projections)
+    : Base(buildSimpleBinder(projections)), _type(type), _spoolId(spoolId) {
+    tassert(
+        6624125, "Spool consumer must have a non-empty projection list", !binder().names().empty());
+}
+
+bool SpoolConsumerNode::operator==(const SpoolConsumerNode& other) const {
+    return _type == other._type && _spoolId == other._spoolId && binder() == other.binder();
+}
+
+SpoolConsumerType SpoolConsumerNode::getType() const {
+    return _type;
+}
+
+int64_t SpoolConsumerNode::getSpoolId() const {
+    return _spoolId;
 }
 
 CollationNode::CollationNode(properties::CollationRequirement property, ABT child)

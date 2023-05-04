@@ -221,6 +221,7 @@ const allCommands = {
         command: {buildInfo: 1},
         isAdminCommand: true,
     },
+    bulkWrite: {skip: isNotImplementedYet},
     captrunc: {
         // TODO SERVER-69753: Uncomment/unskip and fix the command. Currently it is failing with the
         // same seg fault error as BF-26123.
@@ -691,9 +692,6 @@ const allCommands = {
         //         assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
         //     },
         //     isShardedOnly: true,
-    },
-    getnonce: {
-        command: {getnonce: 1},
     },
     godinsert: {
         setUp: function(conn) {

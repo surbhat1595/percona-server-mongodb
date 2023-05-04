@@ -31,6 +31,7 @@
 
 #include "mongo/db/storage/named_pipe.h"
 
+#include <cstdio>
 #include <fmt/format.h>
 #include <string>
 #include <sys/stat.h>
@@ -47,9 +48,23 @@
 namespace mongo {
 using namespace fmt::literals;
 
+namespace {
+// Removes the named pipe and logs an info message if there's an error. The info message should be
+// fine since this is a test-only implementation.
+void removeAndLog(const char* pipeAbsolutePath) {
+    if (remove(pipeAbsolutePath) < 0) {
+        LOGV2_INFO(7097000,
+                   "Failed to remove",
+                   "error"_attr = getErrorMessage("remove", pipeAbsolutePath));
+    }
+}
+}  // namespace
+
 NamedPipeOutput::NamedPipeOutput(const std::string& pipeDir, const std::string& pipeRelativePath)
     : _pipeAbsolutePath(pipeDir + pipeRelativePath), _ofs() {
-    remove(_pipeAbsolutePath.c_str());
+    // Just in case that uncleaned-up named pipe is still there. This is a test-only implementation
+    // and so, it should be fine to just remove it.
+    removeAndLog(_pipeAbsolutePath.c_str());
     uassert(7005005,
             "Failed to create a named pipe, error: {}"_format(
                 getErrorMessage("mkfifo", _pipeAbsolutePath)),
@@ -58,7 +73,8 @@ NamedPipeOutput::NamedPipeOutput(const std::string& pipeDir, const std::string& 
 
 NamedPipeOutput::~NamedPipeOutput() {
     close();
-    remove(_pipeAbsolutePath.c_str());
+    // Makes sure that the named pipe is removed.
+    removeAndLog(_pipeAbsolutePath.c_str());
 }
 
 void NamedPipeOutput::open() {
@@ -107,25 +123,25 @@ void NamedPipeInput::doOpen() {
     // IOs due to MBSC's assembly buffer algorithm.
     _ifs.rdbuf()->pubsetbuf(0, 0);
 
-    // Retry open every 1 ms for up to 1 sec in case writer has not created the pipe yet.
+    // Retry the open every {1, 2, 4, 8, 16} ms for 1,000 reps each (allowing up to 31 seconds of
+    // retry) in case the pipe writer has not finished creating the pipe yet.
     int retries = 0;
+    int sleepMs = 1;
     do {
         _ifs.open(_pipeAbsolutePath.c_str(), std::ios::binary | std::ios::in);
         if (!_ifs.is_open()) {
-            stdx::this_thread::sleep_for(stdx::chrono::milliseconds(1));
+            stdx::this_thread::sleep_for(stdx::chrono::milliseconds(sleepMs));
             ++retries;
+            if (retries % 1000 == 0) {
+                sleepMs *= 2;
+            }
         }
-    } while (!_ifs.is_open() && retries <= 1000);
-
-    // Makes sure that the file is a named pipe.
-    struct stat pipeInfo;
-    uassert(ErrorCodes::FileNotOpen,
-            "Failed to get info on a named pipe, error: {}"_format(
-                getErrorMessage("stat", _pipeAbsolutePath)),
-            stat(_pipeAbsolutePath.c_str(), &pipeInfo) == 0);
-    uassert(ErrorCodes::FileNotOpen,
-            "{} is not a named pipe"_format(_pipeAbsolutePath),
-            S_ISFIFO(pipeInfo.st_mode));
+    } while (!_ifs.is_open() && retries <= 5000);
+    if (retries > 1000) {
+        LOGV2_WARNING(7184900,
+                      "NamedPipeInput::doOpen() waited for pipe longer than 1 sec",
+                      "_pipeAbsolutePath"_attr = _pipeAbsolutePath);
+    }
 }
 
 int NamedPipeInput::doRead(char* data, int size) {

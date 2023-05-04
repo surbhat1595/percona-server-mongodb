@@ -2,7 +2,7 @@
  * Tests that the analyzeShardKey command returns monotonicity metrics for non-compound shard keys
  * that use range sharding.
  *
- * @tags: [requires_fcv_62, featureFlagAnalyzeShardKey]
+ * @tags: [requires_fcv_63, featureFlagAnalyzeShardKey]
  */
 (function() {
 "use strict";
@@ -51,7 +51,7 @@ for (let orderType0 of kOrderTypes) {
 // This test requires the collection to contain at least a few thousands of documents to smooth out
 // the noise in the insertion order caused by the oplog application batching on secondaries.
 const numDocsRange = {
-    min: 5000,
+    min: 7500,
     max: 10000
 };
 

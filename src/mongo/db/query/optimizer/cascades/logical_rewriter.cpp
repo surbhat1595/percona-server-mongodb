@@ -266,39 +266,6 @@ struct ReorderDependencies {
     bool _hasNodeAndChildRef = false;
 };
 
-template <class NodeType>
-struct DefaultChildAccessor {
-    const ABT& operator()(const ABT& node) const {
-        return node.cast<NodeType>()->getChild();
-    }
-
-    ABT& operator()(ABT& node) const {
-        return node.cast<NodeType>()->getChild();
-    }
-};
-
-template <class NodeType>
-struct LeftChildAccessor {
-    const ABT& operator()(const ABT& node) const {
-        return node.cast<NodeType>()->getLeftChild();
-    }
-
-    ABT& operator()(ABT& node) const {
-        return node.cast<NodeType>()->getLeftChild();
-    }
-};
-
-template <class NodeType>
-struct RightChildAccessor {
-    const ABT& operator()(const ABT& node) const {
-        return node.cast<NodeType>()->getRightChild();
-    }
-
-    ABT& operator()(ABT& node) const {
-        return node.cast<NodeType>()->getRightChild();
-    }
-};
-
 template <class AboveType,
           class BelowType,
           template <class> class BelowChildAccessor = DefaultChildAccessor>
@@ -602,15 +569,13 @@ static boost::optional<ABT> mergeSargableNodes(
         return {};
     }
 
-    const auto& hints = ctx.getHints();
     const ScanDefinition& scanDef =
         ctx.getMetadata()._scanDefs.at(indexingAvailability.getScanDefName());
     auto candidateIndexes = computeCandidateIndexes(ctx.getPrefixId(),
                                                     scanProjName,
                                                     mergedReqs,
                                                     scanDef,
-                                                    hints._fastIndexNullHandling,
-                                                    hints._maxIndexEqPrefixes,
+                                                    ctx.getHints(),
                                                     hasEmptyInterval,
                                                     ctx.getConstFold());
     if (hasEmptyInterval) {
@@ -730,13 +695,11 @@ static void convertFilterToSargableNode(ABT::reference_type node,
         return;
     }
 
-    const auto& hints = ctx.getHints();
     auto candidateIndexes = computeCandidateIndexes(ctx.getPrefixId(),
                                                     scanProjName,
                                                     conversion->_reqMap,
                                                     scanDef,
-                                                    hints._fastIndexNullHandling,
-                                                    hints._maxIndexEqPrefixes,
+                                                    ctx.getHints(),
                                                     hasEmptyInterval,
                                                     ctx.getConstFold());
 
@@ -1182,14 +1145,12 @@ struct SubstituteConvert<EvaluationNode> {
                     isIntervalReqFullyOpenDNF(req.getIntervals()));
         }
 
-        const auto& hints = ctx.getHints();
         bool hasEmptyInterval = false;
         auto candidateIndexes = computeCandidateIndexes(ctx.getPrefixId(),
                                                         scanProjName,
                                                         conversion->_reqMap,
                                                         scanDef,
-                                                        hints._fastIndexNullHandling,
-                                                        hints._maxIndexEqPrefixes,
+                                                        ctx.getHints(),
                                                         hasEmptyInterval,
                                                         ctx.getConstFold());
 
@@ -1242,8 +1203,7 @@ struct SplitRequirementsResult {
 static SplitRequirementsResult splitRequirements(
     const size_t mask,
     const bool isIndex,
-    const bool fastIndexNullHandling,
-    const bool disableYieldingTolerantPlans,
+    const QueryHints& hints,
     const std::vector<bool>& isFullyOpen,
     const std::vector<bool>& mayReturnNull,
     const boost::optional<FieldNameSet>& indexFieldPrefixMapForScanDef,
@@ -1268,9 +1228,9 @@ static SplitRequirementsResult splitRequirements(
 
         if (((1ull << index) & mask) != 0) {
             bool addedToLeft = false;
-            if (isIndex || fastIndexNullHandling || !mayReturnNull.at(index)) {
+            if (isIndex || hints._fastIndexNullHandling || !mayReturnNull.at(index)) {
                 // We can never return Null values from the requirement.
-                if (isIndex || disableYieldingTolerantPlans || req.getIsPerfOnly()) {
+                if (isIndex || hints._disableYieldingTolerantPlans || req.getIsPerfOnly()) {
                     // Insert into left side unchanged.
                     addRequirement(leftReqs, key, req.getBoundProjectionName(), req.getIntervals());
                 } else {
@@ -1296,8 +1256,9 @@ static SplitRequirementsResult splitRequirements(
                 addRequirement(rightReqs,
                                key,
                                req.getBoundProjectionName(),
-                               disableYieldingTolerantPlans ? IntervalReqExpr::makeSingularDNF()
-                                                            : req.getIntervals());
+                               hints._disableYieldingTolerantPlans
+                                   ? IntervalReqExpr::makeSingularDNF()
+                                   : req.getIntervals());
             }
 
             if (addedToLeft) {
@@ -1372,11 +1333,7 @@ struct ExploreConvert<SargableNode> {
         }
 
         const auto& reqMap = sargableNode.getReqMap();
-
         const auto& hints = ctx.getHints();
-        const bool fastIndexNullHandling = hints._fastIndexNullHandling;
-        const size_t maxIndexEqPrefixes = hints._maxIndexEqPrefixes;
-        const bool disableYieldingTolerantPlans = hints._disableYieldingTolerantPlans;
 
         std::vector<bool> isFullyOpen;
         std::vector<bool> mayReturnNull;
@@ -1387,7 +1344,7 @@ struct ExploreConvert<SargableNode> {
                 isFullyOpen.push_back(isIntervalReqFullyOpenDNF(req.getIntervals()));
             }
 
-            if (!fastIndexNullHandling && !isIndex) {
+            if (!hints._fastIndexNullHandling && !isIndex) {
                 // Pre-compute if a requirement's interval may contain nulls, and also has an output
                 // binding.
                 mayReturnNull.reserve(reqMap.size());
@@ -1407,8 +1364,7 @@ struct ExploreConvert<SargableNode> {
         for (size_t mask = 1; mask < highMask; mask++) {
             SplitRequirementsResult splitResult = splitRequirements(mask,
                                                                     isIndex,
-                                                                    fastIndexNullHandling,
-                                                                    disableYieldingTolerantPlans,
+                                                                    hints,
                                                                     isFullyOpen,
                                                                     mayReturnNull,
                                                                     indexFieldPrefixMapForScanDef,
@@ -1416,7 +1372,7 @@ struct ExploreConvert<SargableNode> {
 
             if (splitResult._leftReqs.empty()) {
                 // Can happen if we have intervals containing null.
-                invariant(!fastIndexNullHandling && !isIndex);
+                invariant(!hints._fastIndexNullHandling && !isIndex);
                 continue;
             }
 
@@ -1437,8 +1393,7 @@ struct ExploreConvert<SargableNode> {
                                                                 scanProjectionName,
                                                                 splitResult._leftReqs,
                                                                 scanDef,
-                                                                fastIndexNullHandling,
-                                                                maxIndexEqPrefixes,
+                                                                hints,
                                                                 hasEmptyLeftInterval,
                                                                 ctx.getConstFold());
             if (isIndex && leftCandidateIndexes.empty()) {
@@ -1451,8 +1406,7 @@ struct ExploreConvert<SargableNode> {
                                                                  scanProjectionName,
                                                                  splitResult._rightReqs,
                                                                  scanDef,
-                                                                 fastIndexNullHandling,
-                                                                 maxIndexEqPrefixes,
+                                                                 hints,
                                                                  hasEmptyRightInterval,
                                                                  ctx.getConstFold());
             if (isIndex && rightCandidateIndexes.empty()) {

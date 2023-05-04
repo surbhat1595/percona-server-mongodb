@@ -562,6 +562,7 @@ TEST_F(MongodbCAPITest, RunListCommands) {
                                           "aggregate",
                                           "analyze",
                                           "buildInfo",
+                                          "bulkWrite",
                                           "collMod",
                                           "collStats",
                                           "configureFailPoint",

@@ -410,8 +410,15 @@ public:
             o->onEmptyCapped(opCtx, collectionName, uuid);
     }
 
-    void onUnpreparedTransactionCommit(OperationContext* opCtx,
-                                       TransactionOperations* transactionOperations) override {
+    void onTransactionStart(OperationContext* opCtx) override {
+        ReservedTimes times{opCtx};
+        for (auto& o : _observers) {
+            o->onTransactionStart(opCtx);
+        }
+    }
+
+    void onUnpreparedTransactionCommit(
+        OperationContext* opCtx, const TransactionOperations& transactionOperations) override {
         ReservedTimes times{opCtx};
         for (auto& o : _observers)
             o->onUnpreparedTransactionCommit(opCtx, transactionOperations);
@@ -431,13 +438,13 @@ public:
     std::unique_ptr<ApplyOpsOplogSlotAndOperationAssignment> preTransactionPrepare(
         OperationContext* opCtx,
         const std::vector<OplogSlot>& reservedSlots,
-        Date_t wallClockTime,
-        TransactionOperations* transactionOperations) override {
+        const TransactionOperations& transactionOperations,
+        Date_t wallClockTime) override {
         std::unique_ptr<ApplyOpsOplogSlotAndOperationAssignment>
             applyOpsOplogSlotAndOperationAssignment;
         for (auto&& observer : _observers) {
             auto applyOpsAssignment = observer->preTransactionPrepare(
-                opCtx, reservedSlots, wallClockTime, transactionOperations);
+                opCtx, reservedSlots, transactionOperations, wallClockTime);
             tassert(6278501,
                     "More than one OpObserver returned operation to \"applyOps\" assignment",
                     !(applyOpsAssignment && applyOpsOplogSlotAndOperationAssignment));
@@ -451,7 +458,7 @@ public:
     void onTransactionPrepare(
         OperationContext* opCtx,
         const std::vector<OplogSlot>& reservedSlots,
-        const std::vector<repl::ReplOperation>& statements,
+        const TransactionOperations& transactionOperations,
         const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
         size_t numberOfPrePostImagesToWrite,
         Date_t wallClockTime) override {
@@ -459,7 +466,7 @@ public:
         for (auto& observer : _observers) {
             observer->onTransactionPrepare(opCtx,
                                            reservedSlots,
-                                           statements,
+                                           transactionOperations,
                                            applyOpsOperationAssignment,
                                            numberOfPrePostImagesToWrite,
                                            wallClockTime);

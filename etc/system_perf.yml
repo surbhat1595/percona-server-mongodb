@@ -72,7 +72,6 @@ variables:
     - tsbs
     - mongo-perf
     - YCSB
-    - benchmarks
     - py-tpcc
     - PrivateWorkloads
 
@@ -172,7 +171,6 @@ functions:
           workloads: ${workloads_rev}
           mongo-perf: ${mongo-perf_rev}
           YCSB: ${YCSB_rev}
-          benchmarks: ${benchmarks_rev}
           py-tpcc: ${py-tpcc_rev}
           # mongo: ${mongo_rev}
           PrivateWorkloads: ${PrivateWorkloads_rev}
@@ -245,7 +243,7 @@ functions:
             # these default values in the distro config in evergreen.
 
             if [ -d "${scons_cache_path}" ]; then
-                /opt/mongodbtoolchain/v3/bin/python3 buildscripts/scons_cache_prune.py --cache-dir ${scons_cache_path} --cache-size ${scons_cache_size|200} --prune-ratio ${scons_prune_ratio|0.8}
+                /opt/mongodbtoolchain/v4/bin/python3 buildscripts/scons_cache_prune.py --cache-dir ${scons_cache_path} --cache-size ${scons_cache_size|200} --prune-ratio ${scons_prune_ratio|0.8}
             fi
   f_other_pre_ops:
     - &f_other_pre_ops
@@ -275,7 +273,7 @@ functions:
 
           mkdir -p mongodb/bin
 
-          /opt/mongodbtoolchain/v3/bin/virtualenv --python /opt/mongodbtoolchain/v3/bin/python3 "${workdir}/compile_venv"
+          /opt/mongodbtoolchain/v4/bin/virtualenv --python /opt/mongodbtoolchain/v4/bin/python3 "${workdir}/compile_venv"
           source "${workdir}/compile_venv/bin/activate"
 
           python -m pip install -r etc/pip/compile-requirements.txt
@@ -436,7 +434,6 @@ functions:
           workloads: ${workloads_rev}
           mongo-perf: ${mongo-perf_rev}
           YCSB: ${YCSB_rev}
-          benchmarks: ${benchmarks_rev}
           py-tpcc: ${py-tpcc_rev}
           PrivateWorkloads: ${PrivateWorkloads_rev}
     - command: expansions.write
@@ -1154,7 +1151,7 @@ tasks:
 buildvariants:
   - name: task_generation
     display_name: Task Generation
-    cron: "0 0 1 1 *" # Every year starting 1/1 at 00:00
+    cron: "0 0 1 1 *"  # Every year starting 1/1 at 00:00
     modules: *modules
     expansions:
       platform: linux
@@ -1168,7 +1165,7 @@ buildvariants:
     name: compile-amazon2
     display_name: Compile
     modules: *modules
-    cron: "0 0 * * *" # Everyday at 00:00
+    cron: "0 0 * * *"  # Everyday at 00:00
     expansions: &compile-expansions
       platform: linux
       project_dir: &project_dir dsi
@@ -1180,7 +1177,7 @@ buildvariants:
         MONGO_DISTMOD=amazon2
         -j$(grep -c ^processor /proc/cpuinfo)
         --release
-        --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+        --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
         install-mongocryptd
     run_on:
       - "amazon2-xlarge"
@@ -1191,7 +1188,7 @@ buildvariants:
     name: compile-amazon-linux2-arm64
     display_name: Compile for Amazon Linux 2 arm64
     modules: *modules
-    cron: "0 0 * * *" # Everyday at 00:00
+    cron: "0 0 * * *"  # Everyday at 00:00
     expansions:
       <<: *compile-expansions
       compile-variant: -arm64
@@ -1203,7 +1200,7 @@ buildvariants:
   - name: compile-amazon-linux2-arm64-mongocrypt-shlib
     display_name: Compile mongo_crypt_v1.so for Amazon Linux 2 arm64
     modules: *modules
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     expansions:
       <<: *compile-expansions
       compile-variant: -arm64
@@ -1212,7 +1209,7 @@ buildvariants:
         MONGO_DISTMOD=amazon2
         -j$(grep -c ^processor /proc/cpuinfo)
         --release
-        --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+        --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
         --allocator=system
         --enable-free-mon=off
         --enterprise-features=fle,search
@@ -1229,7 +1226,7 @@ buildvariants:
 
   - name: linux-standalone
     display_name: Linux Standalone Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: standalone
@@ -1268,7 +1265,7 @@ buildvariants:
 
   - name: linux-standalone-all-feature-flags
     display_name: Linux Standalone (all feature flags) Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: standalone-all-feature-flags
@@ -1307,7 +1304,7 @@ buildvariants:
   - name: linux-standalone-classic-query-engine
     display_name: Linux Standalone (Classic Query Engine) Legacy
     # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
+    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
     modules: *modules
     expansions:
       mongodb_setup: standalone-classic-query-engine
@@ -1342,7 +1339,7 @@ buildvariants:
   - name: linux-standalone-sbe
     display_name: Linux Standalone (SBE) Legacy
     # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
+    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
     modules: *modules
     expansions:
       mongodb_setup: standalone-sbe
@@ -1359,7 +1356,7 @@ buildvariants:
   - name: linux-1-node-replSet-classic-query-engine
     display_name: Linux 1-Node ReplSet (Classic Query Engine) Legacy
     # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
+    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
     modules: *modules
     expansions:
       mongodb_setup: single-replica-classic-query-engine
@@ -1381,7 +1378,7 @@ buildvariants:
   - name: linux-1-node-replSet-sbe
     display_name: Linux 1-Node ReplSet (SBE) Legacy
     # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
+    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
     modules: *modules
     expansions:
       mongodb_setup: single-replica-sbe
@@ -1397,7 +1394,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-all-feature-flags
     display_name: Linux 1-Node ReplSet (all feature flags) Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-all-feature-flags
@@ -1416,7 +1413,7 @@ buildvariants:
   - name: compile-rhel70
     display_name: Compile for Atlas-like
     modules: *modules
-    cron: "0 0 * * *" # Everyday at 00:00
+    cron: "0 0 * * *"  # Everyday at 00:00
     expansions:
       <<: *compile-expansions
       compile_flags: >-
@@ -1425,7 +1422,7 @@ buildvariants:
         MONGO_DISTMOD=rhel70
         -j$(grep -c ^processor /proc/cpuinfo)
         --release
-        --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+        --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
       compile-variant: -rhel70
     run_on:
       - rhel70-large
@@ -1434,7 +1431,7 @@ buildvariants:
 
   - name: linux-1-node-replSet
     display_name: Linux 1-Node ReplSet Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica
@@ -1483,7 +1480,7 @@ buildvariants:
 
   - name: linux-standalone-audit
     display_name: Linux Standalone Audit Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: standalone-audit
@@ -1504,7 +1501,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-audit-log-encryption-no-compression
     display_name: Linux Single-node Replica Set Audit w/ At-Rest Log Encryption (No compression) Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-audit-log-encryption-no-compression
@@ -1520,7 +1517,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-audit
     display_name: Linux Single-node Replica Set Audit Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-audit
@@ -1536,7 +1533,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-audit-log-encryption-compression
     display_name: Linux Single-node Replica Set Audit w/ At-Rest Log Encryption (With compression) Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-audit-log-encryption-compression
@@ -1552,7 +1549,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-fle
     display_name: Linux 1-Node ReplSet FLE Legacy
-    cron: "0 0 * * 0,4" # 00:00 on Sunday,Thursday
+    cron: "0 0 * * 0,4"  # 00:00 on Sunday,Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-fle
@@ -1571,7 +1568,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-cwrwc
     display_name: Linux 1-Node ReplSet CWRWC Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-cwrwc
@@ -1591,7 +1588,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-ese-cbc
     display_name: Linux 1-Node ReplSet ESE CBC Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-ese-cbc
@@ -1613,7 +1610,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-ese-gcm
     display_name: Linux 1-Node ReplSet ESE GCM Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 1 * *"  # 00:00 on the first of each month
     modules: *modules
     expansions:
       mongodb_setup: single-replica-ese-gcm
@@ -1635,7 +1632,7 @@ buildvariants:
 
   - name: linux-1-node-15gbwtcache
     display_name: Linux 1-Node ReplSet 15 GB WiredTiger Cache Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-15gbwtcache
@@ -1657,7 +1654,7 @@ buildvariants:
 
   - name: linux-3-node-1dayhistory-15gbwtcache
     display_name: Linux 3-Node ReplSet 1 Day History 15 GB WiredTiger Cache Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-1dayhistory-15gbwtcache
@@ -1680,7 +1677,7 @@ buildvariants:
 
   - name: linux-3-shard
     display_name: Linux 3-Shard Cluster Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: shard
@@ -1715,7 +1712,7 @@ buildvariants:
 
   - name: linux-shard-lite-audit
     display_name: Linux Shard Lite Cluster Audit Legacy
-    cron: "0 0 * * 0,4" # 00:00 on Sunday,Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: shard-lite-audit
@@ -1732,7 +1729,7 @@ buildvariants:
 
   - name: linux-shard-lite
     display_name: Linux Shard Lite Cluster Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: shard-lite
@@ -1776,7 +1773,7 @@ buildvariants:
 
   - name: linux-shard-lite-cwrwc
     display_name: Linux Shard Lite Cluster CWRWC Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: shard-lite-cwrwc
@@ -1796,7 +1793,7 @@ buildvariants:
 
   - name: linux-shard-lite-read-concern-available
     display_name: Linux Shard Lite ReadConcern Available Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: shard-lite-read-concern-available
@@ -1816,7 +1813,7 @@ buildvariants:
 
   - name: linux-shard-lite-all-feature-flags
     display_name: Linux Shard Lite (all feature flags) Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: shard-lite-all-feature-flags
@@ -1840,7 +1837,7 @@ buildvariants:
 
   - name: linux-shard-single
     display_name: Linux Shard Single Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: shard-single
@@ -1858,7 +1855,7 @@ buildvariants:
 
   - name: linux-3-node-replSet
     display_name: Linux 3-Node ReplSet Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica
@@ -1916,7 +1913,7 @@ buildvariants:
 
   - name: linux-3-node-replSet-last-continuous-fcv
     display_name: Linux 3-Node ReplSet (Last Continuous FCV) Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-last-continuous-fcv
@@ -1971,7 +1968,7 @@ buildvariants:
 
   - name: linux-3-node-replSet-last-lts-fcv
     display_name: Linux 3-Node ReplSet (Last LTS FCV) Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-last-lts-fcv
@@ -2028,7 +2025,7 @@ buildvariants:
   # history even though the display name is "all feature flags"
   - name: linux-3-node-replSet-disabled-feature-flags
     display_name: Linux 3-Node ReplSet (all feature flags) Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-all-feature-flags
@@ -2085,7 +2082,7 @@ buildvariants:
 
   - name: linux-3-node-replSet-noflowcontrol
     display_name: Linux 3-Node ReplSet (Flow Control off) Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-noflowcontrol
@@ -2116,7 +2113,7 @@ buildvariants:
 
   - name: linux-3-node-replSet-ssl
     display_name: Linux 3-Node ReplSet (SSL) Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-ssl
@@ -2136,7 +2133,7 @@ buildvariants:
 
   - name: linux-3-node-replSet-maintenance-events
     display_name: Linux 3-Node ReplSet (Maintenance Events) Legacy
-    cron: "0 0 * * 0,4" # 00:00 on Sunday,Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-maintenance-events
@@ -2164,7 +2161,7 @@ buildvariants:
 
   - name: linux-3-node-replSet-initialsync
     display_name: Linux 3-Node ReplSet Initial Sync Legacy
-    cron: "0 0 * * 2,4" # 00:00 on Tuesday,Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-2node
@@ -2179,16 +2176,12 @@ buildvariants:
     tasks:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
-      - name: initialsync
-      - name: initialsync-fcbis
-      - name: initialsync-logkeeper-short
-      - name: initialsync-logkeeper-short-fcbis
       - name: initialsync-large
       - name: initialsync-large-fcbis
 
   - name: linux-replSet-initialsync-logkeeper
     display_name: Linux ReplSet Initial Sync LogKeeper Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: initialsync-logkeeper
@@ -2210,7 +2203,7 @@ buildvariants:
 
   - name: linux-replSet-audit
     display_name: Linux 3-Node ReplSet Audit Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-audit
@@ -2229,7 +2222,7 @@ buildvariants:
 
   - name: linux-replSet-auth-delay
     display_name: Linux 3-Node ReplSet (Auth Delay) Legacy
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-auth-cluster-delay
@@ -2247,7 +2240,7 @@ buildvariants:
 
   - name: atlas-like-M60
     display_name: M60-Like-old 3-Node ReplSet
-    cron: "0 0 * * 0,4" # 00:00 on Sunday,Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: atlas-like-replica
@@ -2292,11 +2285,13 @@ buildvariants:
 
   - name: atlas-like-replica.2022-10
     display_name: M60-like-replica.2022-10 3-Node ReplSet
-    cron: "0 0 * * 0,4" # 00:00 on Sunday,Thursday
+    cron: "0 0 * * 0,4"  # 00:00 on Sunday,Thursday
     modules: *modules
     expansions:
       mongodb_setup: atlas-like-replica.2022-10
       infrastructure_provisioning: M60-like-replica.2022-10
+      infrastructure_provisioning_release: 2022-11
+      workload_setup: 2022-11
       platform: linux
       project_dir: *project_dir
       authentication: enabled
@@ -2317,7 +2312,7 @@ buildvariants:
 
   - name: atlas-M60-real
     display_name: M60-Atlas ReplSet AWS
-    cron: "0 0 * * 0,4" # 00:00 on Sunday, Thursday
+    cron: "0 0 * * 0,4"  # 00:00 on Sunday, Thursday
     modules: *modules
     expansions:
       mongodb_setup: atlas
@@ -2329,7 +2324,7 @@ buildvariants:
       project_dir: *project_dir
       storageEngine: wiredTiger
       compile_variant: "-arm64"
-      client_compile_variant: "" # Explicitly set this. Otherwise it will use the server version
+      client_compile_variant: ""  # Explicitly set this. Otherwise it will use the server version
     run_on:
       - "rhel70-perf-atlas-large"
     depends_on:
@@ -2352,7 +2347,7 @@ buildvariants:
 
   - name: atlas-M60-real-azure
     display_name: M60-Atlas ReplSet Azure
-    cron: "0 0 * * 0,4" # 00:00 on Sunday, Thursday
+    cron: "0 0 * * 0,4"  # 00:00 on Sunday, Thursday
     modules: *modules
     expansions:
       mongodb_setup: atlas
@@ -2387,7 +2382,7 @@ buildvariants:
 
   - name: renew-ssl-cert
     display_name: Renew SSL Cert
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     run_on:  # Certbot with route53 plugin is installed on Ubuntu 20.04
       - "ubuntu2004-small"
@@ -2396,7 +2391,7 @@ buildvariants:
 
   - name: linux-standalone.2022-11
     display_name: Linux Standalone 2022-11
-    cron: "0 0 * * 2,4,6" # Tuesday, Thursday and Saturday at 00:00
+    cron: "0 0 * * 2,4,6"  # Tuesday, Thursday and Saturday at 00:00
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2439,7 +2434,7 @@ buildvariants:
 
   - name: linux-standalone-all-feature-flags.2022-11
     display_name: Linux Standalone (all feature flags) 2022-11
-    cron: "0 0 * * 2,4,6" # Tuesday, Thursday and Saturday at 00:00
+    cron: "0 0 * * 2,4,6"  # Tuesday, Thursday and Saturday at 00:00
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2466,6 +2461,8 @@ buildvariants:
       - name: bestbuy_agg_merge_different_db
       - name: bestbuy_agg_merge_same_db
       - name: bestbuy_agg_merge_wordcount
+      - name: bestbuy_4_analytics
+      - name: bestbuy_4_analytics_columnstore
       - name: bestbuy_query
       - name: cursor_manager
       - name: map_reduce_workloads
@@ -2475,11 +2472,12 @@ buildvariants:
       - name: tpch_10_normalized
       - name: tpch_10_denormalized
       - name: column_store_index_charts_events_1G
+      - name: ssb_column_store_comparison
 
   - name: linux-standalone-classic-query-engine.2022-11
     display_name: Linux Standalone (Classic Query Engine) 2022-11
     # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
+    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2518,7 +2516,7 @@ buildvariants:
   - name: linux-standalone-sbe.2022-11
     display_name: Linux Standalone (SBE) 2022-11
     # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
+    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2539,7 +2537,7 @@ buildvariants:
   - name: linux-1-node-replSet-classic-query-engine.2022-11
     display_name: Linux 1-Node ReplSet (Classic Query Engine) 2022-11
     # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
+    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2565,7 +2563,7 @@ buildvariants:
   - name: linux-1-node-replSet-sbe.2022-11
     display_name: Linux 1-Node ReplSet (SBE) 2022-11
     # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
+    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2585,7 +2583,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-all-feature-flags.2022-11
     display_name: Linux 1-Node ReplSet (all feature flags) 2022-11
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2607,7 +2605,7 @@ buildvariants:
 
   - name: linux-1-node-replSet.2022-11
     display_name: Linux 1-Node ReplSet 2022-11
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2646,10 +2644,10 @@ buildvariants:
       - name: snapshot_reads
       - name: linkbench
       - name: linkbench2
-      # - name: tsbs_load
-      # - name: tsbs_query
-      # - name: tsbs_query_finance
-      # - name: tsbs_query_manual_bucketing
+      - name: tsbs_load
+      - name: tsbs_query
+      - name: tsbs_query_finance
+      - name: tsbs_query_manual_bucketing
       - name: tpcc
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
@@ -2658,8 +2656,7 @@ buildvariants:
 
   - name: linux-standalone-audit.2022-11
     display_name: Linux Standalone Audit 2022-11
-    cron: "0 0 * * *"  # Everyday at 00:00 to build up history
-    #    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2684,8 +2681,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-audit-log-encryption-no-compression.2022-11
     display_name: Linux Single-node Replica Set Audit w/ At-Rest Log Encryption (No compression) 2022-11
-    cron: "0 0 * * *"  # Everyday at 00:00 to build up history
-    #    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2705,8 +2701,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-audit.2022-11
     display_name: Linux Single-node Replica Set Audit 2022-11
-    cron: "0 0 * * *"  # Everyday at 00:00 to build up history
-    #    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2726,8 +2721,7 @@ buildvariants:
 
   - name: linux-shard-lite-fle.2022-11
     display_name: Linux Shard Lite FLE 2022-11
-    cron: "0 0 * * *"  # Everyday at 00:00 to build up history
-    #    cron: "0 0 * * 0,4" # 00:00 on Sunday,Thursday
+    cron: "0 0 * * 0,4"  # 00:00 on Sunday,Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2750,8 +2744,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-audit-log-encryption-compression.2022-11
     display_name: Linux Single-node Replica Set Audit w/ At-Rest Log Encryption (With compression) 2022-11
-    cron: "0 0 * * *"  # Everyday at 00:00 to build up history
-    #    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2771,8 +2764,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-fle.2022-11
     display_name: Linux 1-Node ReplSet FLE 2022-11
-    cron: "0 0 * * *"  # Everyday at 00:00 to build up history
-    #    cron: "0 0 * * 0,4" # 00:00 on Sunday,Thursday
+    cron: "0 0 * * 0,4"  # 00:00 on Sunday,Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2798,8 +2790,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-ese-cbc.2022-11
     display_name: Linux 1-Node ReplSet ESE CBC 2022-11
-    cron: "0 0 * * *"  # Everyday at 00:00 to build up history
-    #    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2825,8 +2816,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-ese-gcm.2022-11
     display_name: Linux 1-Node ReplSet ESE GCM 2022-11
-    cron: "0 0 * * *"  # Everyday at 00:00 to build up history
-    #    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 1 * *"  # 00:00 on the first of each month
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2852,7 +2842,7 @@ buildvariants:
 
   - name: linux-1-node-15gbwtcache.2022-11
     display_name: Linux 1-Node ReplSet 15 GB WiredTiger Cache 2022-11
-    cron: "0 0 * * 2,4" # 00:00 on Tuesday,Thursday
+    cron: "0 0 * * 2,4"  # 00:00 on Tuesday,Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2878,7 +2868,7 @@ buildvariants:
 
   - name: linux-3-node-1dayhistory-15gbwtcache.2022-11
     display_name: Linux 3-Node ReplSet 1 Day History 15 GB WiredTiger Cache 2022-11
-    cron: "0 0 * * 0,4" # 00:00 on Sunday,Thursday
+    cron: "0 0 * * 0,4"  # 00:00 on Sunday,Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2904,7 +2894,7 @@ buildvariants:
 
   - name: linux-3-shard.2022-11
     display_name: Linux 3-Shard Cluster 2022-11
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2936,14 +2926,13 @@ buildvariants:
       - name: change_streams_listen_throughput
       - name: change_streams_multi_mongos
       # - name: tsbs_query_sharded
-      # - name: tsbs_query_finance_sharded
+      - name: tsbs_query_finance_sharded
       # - name: tsbs_query_sharded_balancer
-      # - name: tsbs_query_finance_sharded_balancer
+      - name: tsbs_query_finance_sharded_balancer
 
   - name: linux-shard-lite-audit.2022-11
     display_name: Linux Shard Lite Cluster Audit 2022-11
-    cron: "0 0 * * *"  # Everyday at 00:00 to build up history
-    #    cron: "0 0 * * 0,4" # 00:00 on Sunday,Thursday
+    cron: "0 0 * * 0,4"  # 00:00 on Sunday,Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2964,7 +2953,7 @@ buildvariants:
 
   - name: linux-shard-lite.2022-11
     display_name: Linux Shard Lite Cluster 2022-11
-    cron: "0 0 * * 0,4" # 00:00 on Sunday,Thursday
+    cron: "0 0 * * 0,4"  # 00:00 on Sunday,Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -3004,14 +2993,13 @@ buildvariants:
       - name: move_chunk_waiting_workloads
       - name: smoke_test
       # - name: tsbs_query_sharded
-      # - name: tsbs_query_finance_sharded
+      - name: tsbs_query_finance_sharded
       # - name: tsbs_query_sharded_balancer
-      # - name: tsbs_query_finance_sharded_balancer
+      - name: tsbs_query_finance_sharded_balancer
 
   - name: linux-shard-lite-intel.2022-11
     display_name: Linux Shard Lite Cluster Intel 2022-11
-    cron: "0 0 * * *"  # Everyday at 00:00 to build up history
-    #    cron: "0 0 * * 0,4" # 00:00 on Sunday,Thursday
+    cron: "0 0 * * 0,4"  # 00:00 on Sunday,Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -3038,8 +3026,7 @@ buildvariants:
 
   - name: linux-shard-lite-read-concern-available.2022-11
     display_name: Linux Shard Lite ReadConcern Available 2022-11
-    cron: "0 0 * * *"  # Everyday at 00:00 to build up history
-    #    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -3063,8 +3050,7 @@ buildvariants:
 
   - name: linux-shard-lite-all-feature-flags.2022-11
     display_name: Linux Shard Lite (all feature flags) 2022-11
-    cron: "0 0 * * *"  # Everyday at 00:00 to build up history
-    #    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -3086,13 +3072,13 @@ buildvariants:
       - name: change_streams_preimage_throughput
       - name: change_streams_preimage_latency
       # - name: tsbs_query_sharded
-      # - name: tsbs_query_finance_sharded
+      - name: tsbs_query_finance_sharded
       # - name: tsbs_query_sharded_balancer
-      # - name: tsbs_query_finance_sharded_balancer
+      - name: tsbs_query_finance_sharded_balancer
 
   - name: linux-shard-single.2022-11
     display_name: Linux Shard Single 2022-11
-    cron: "0 0 * * 2,4" # 00:00 on Tuesday,Thursday
+    cron: "0 0 * * 2,4"  # 00:00 on Tuesday,Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -3114,7 +3100,7 @@ buildvariants:
 
   - name: linux-3-node-replSet.2022-11
     display_name: Linux 3-Node ReplSet 2022-11
-    cron: "0 0 * * 1,2,3,4,5,6" # Everyday except Sunday at 00:00
+    cron: "0 0 * * 1,2,3,4,5,6"  # Everyday except Sunday at 00:00
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -3143,7 +3129,7 @@ buildvariants:
       - name: map_reduce_workloads
       - name: refine_shard_key_transaction_stress
       - name: smoke_test
-      - name: secondary_performance # Uses a special 2 node mongodb setup
+      - name: secondary_performance  # Uses a special 2 node mongodb setup
       - name: non_sharded_workloads
       - name: bestbuy_agg
       - name: bestbuy_agg_merge_different_db
@@ -3165,16 +3151,15 @@ buildvariants:
       # - name: tpch_10_denormalized
       - name: linkbench
       - name: linkbench2
-      # - name: tsbs_load
-      # - name: tsbs_query
-      # - name: tsbs_query_finance
-      # - name: tsbs_query_manual_bucketing
-      # - name: big_update_10k
+      - name: tsbs_load
+      - name: tsbs_query
+      - name: tsbs_query_finance
+      - name: tsbs_query_manual_bucketing
+      - name: big_update_10k
 
   - name: linux-3-node-replSet-intel.2022-11
     display_name: Linux 3-Node ReplSet Intel 2022-11
-    cron: "0 0 * * *"  # Everyday at 00:00 to build up history
-    #    cron: "0 0 * * 1,2,3,4,5,6" # Everyday except Sunday at 00:00
+    cron: "0 0 * * 1,2,3,4,5,6"  # Everyday except Sunday at 00:00
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -3202,8 +3187,7 @@ buildvariants:
 
   - name: linux-3-node-replSet-last-continuous-fcv.2022-11
     display_name: Linux 3-Node ReplSet (Last Continuous FCV) 2022-11
-    cron: "0 0 * * *"  # Everyday at 00:00 to build up history
-    #    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -3252,15 +3236,14 @@ buildvariants:
       # - name: tpch_10_denormalized
       - name: linkbench
       - name: linkbench2
-      # - name: tsbs_load
-      # - name: tsbs_query
-      # - name: tsbs_query_finance
-      # - name: tsbs_query_manual_bucketing
+      - name: tsbs_load
+      - name: tsbs_query
+      - name: tsbs_query_finance
+      - name: tsbs_query_manual_bucketing
 
   - name: linux-3-node-replSet-last-lts-fcv.2022-11
     display_name: Linux 3-Node ReplSet (Last LTS FCV) 2022-11
-    cron: "0 0 * * *"  # Everyday at 00:00 to build up history
-    #    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -3309,14 +3292,14 @@ buildvariants:
       # - name: tpch_10_denormalized
       - name: linkbench
       - name: linkbench2
-      # - name: tsbs_load
-      # - name: tsbs_query
-      # - name: tsbs_query_finance
-      # - name: tsbs_query_manual_bucketing
+      - name: tsbs_load
+      - name: tsbs_query
+      - name: tsbs_query_finance
+      - name: tsbs_query_manual_bucketing
 
   - name: linux-3-node-replSet-all-feature-flags.2022-11
     display_name: Linux 3-Node ReplSet (all feature flags) 2022-11
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -3367,14 +3350,14 @@ buildvariants:
       # - name: tpch_10_denormalized
       - name: linkbench
       - name: linkbench2
-      # - name: tsbs_load
-      # - name: tsbs_query
-      # - name: tsbs_query_finance
-      # - name: tsbs_query_manual_bucketing
+      - name: tsbs_load
+      - name: tsbs_query
+      - name: tsbs_query_finance
+      - name: tsbs_query_manual_bucketing
 
   - name: linux-3-node-replSet-notls.2022-11
     display_name: Linux 3-Node ReplSet (No TLS) 2022-11
-    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-tls-disabled
@@ -3399,8 +3382,7 @@ buildvariants:
 
   - name: linux-3-node-replSet-maintenance-events.2022-11
     display_name: Linux 3-Node ReplSet (Maintenance Events) 2022-11
-    cron: "0 0 * * *"  # Everyday at 00:00 to build up history
-    #    cron: "0 0 * * 0,4" # 00:00 on Sunday,Thursday
+    cron: "0 0 * * 0,4"  # 00:00 on Sunday,Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -3432,8 +3414,7 @@ buildvariants:
 
   - name: linux-3-node-replSet-initialsync.2022-11
     display_name: Linux 3-Node ReplSet Initial Sync 2022-11
-    cron: "0 0 * * *"  # Everyday at 00:00 to build up history
-    #    cron: "0 0 * * 2,4" # 00:00 on Tuesday,Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -3452,17 +3433,12 @@ buildvariants:
     tasks:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
-      - name: initialsync
-      - name: initialsync-fcbis
-      - name: initialsync-logkeeper-short
-      - name: initialsync-logkeeper-short-fcbis
       - name: initialsync-large
       - name: initialsync-large-fcbis
 
   - name: linux-replSet-initialsync-logkeeper.2022-11
     display_name: Linux ReplSet Initial Sync LogKeeper 2022-11
-    cron: "0 0 * * *"  # Everyday at 00:00 to build up history
-    #    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -3490,7 +3466,7 @@ buildvariants:
   # patch builds.
   #- name: linux-replSet-initialsync-logkeeper-snapshot-update
   #  display_name: Linux ReplSet Initial Sync LogKeeper Snapshot Update
-  #  cron: "0 0 * * 4" # 00:00 on Thursday
+  #  cron: "0 0 * * 4"  # 00:00 on Thursday
   #  modules: *modules
   #  expansions:
   #    mongodb_setup: initialsync-logkeeper-snapshot-update
@@ -3512,8 +3488,7 @@ buildvariants:
 
   - name: linux-replSet-audit.2022-11
     display_name: Linux 3-Node ReplSet Audit 2022-11
-    cron: "0 0 * * *"  # Everyday at 00:00 to build up history
-    #    cron: "0 0 * * 4" # 00:00 on Thursday
+    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -3534,25 +3509,24 @@ buildvariants:
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
 
-  # - name: linux-replSet-auth-delay.2022-11
-  #   display_name: Linux 3-Node ReplSet (Auth Delay) 2022-11
-  #   cron: "0 0 * * *"  # Everyday at 00:00 to build up history
-  #   #    cron: "0 0 * * 4" # 00:00 on Thursday
-  #   modules: *modules
-  #   expansions:
-  #     mongodb_setup_release: 2022-11
-  #     mongodb_setup: replica-auth-cluster-delay
-  #     infrastructure_provisioning_release: 2022-11
-  #     infrastructure_provisioning: replica
-  #     workload_setup: 2022-11
-  #     platform: linux
-  #     project_dir: *project_dir
-  #     authentication: enabled
-  #     storageEngine: wiredTiger
-  #     compile_variant: "-arm64"
-  #   run_on:
-  #     - "rhel70-perf-replset"
-  #   depends_on: *_compile_amazon_linux2_arm64
-  #   tasks:
-  #     - name: schedule_patch_auto_tasks
-  #     - name: schedule_variant_auto_tasks
+  - name: linux-replSet-auth-delay.2022-11
+    display_name: Linux 3-Node ReplSet (Auth Delay) 2022-11
+    cron: "0 0 * * 4"  # 00:00 on Thursday
+    modules: *modules
+    expansions:
+      mongodb_setup_release: 2022-11
+      mongodb_setup: replica-auth-cluster-delay
+      infrastructure_provisioning_release: 2022-11
+      infrastructure_provisioning: replica
+      workload_setup: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+      compile_variant: "-arm64"
+    run_on:
+      - "rhel70-perf-replset"
+    depends_on: *_compile_amazon_linux2_arm64
+    tasks:
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks

@@ -1,13 +1,20 @@
 /**
  * Tests ingress connection metrics.
  *
- * @tags: [requires_fcv_61, featureFlagConnHealthMetrics]
+ * @tags: [requires_fcv_63]
  */
 
 "use strict";
 
 (function() {
 load("jstests/ssl/libs/ssl_helpers.js");
+
+// Short circuits for system configurations that do not support this setParameter, (i.e. OpenSSL
+// versions that don't support TLS 1.3)
+if (determineSSLProvider() === "openssl" && detectDefaultTLSProtocol() !== "TLS1_3") {
+    jsTestLog("Platform does not support TLS 1.3; skipping test.");
+    return;
+}
 
 // We use 'opensslCipherSuiteConfig' to deterministically set the cipher suite negotiated when
 // openSSL is being used. This can be different on Windows/OSX implementations.

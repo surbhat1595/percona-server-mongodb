@@ -86,11 +86,18 @@ public:
     void visit(const ExpressionArrayElemAt* expr) override final {
         unsupportedExpression(expr->getOpName());
     }
-
+    void visit(const ExpressionBitAnd* expr) override final {
+        unsupportedExpression("bitAnd");
+    }
+    void visit(const ExpressionBitOr* expr) override final {
+        unsupportedExpression("bitOr");
+    }
+    void visit(const ExpressionBitXor* expr) override final {
+        unsupportedExpression("bitXor");
+    }
     void visit(const ExpressionBitNot* expr) override final {
         unsupportedExpression(expr->getOpName());
     }
-
     void visit(const ExpressionFirst* expr) override final {
         unsupportedExpression(expr->getOpName());
     }
@@ -861,12 +868,7 @@ private:
     }
 
     ProjectionName generateVariableName(const Variables::Id varId) {
-        str::stream os;
-        if (const auto& projName = _ctx.getUniqueIdPrefix()) {
-            os << *projName << "_";
-        }
-        os << "var_" << varId;
-        return ProjectionName{os};
+        return ProjectionName{str::stream() << "var_" << varId};
     }
 
     void unsupportedExpression(const char* op) const {
@@ -892,11 +894,9 @@ private:
 
 ABT generateAggExpression(const Expression* expr,
                           const ProjectionName& rootProjection,
-                          boost::optional<ProjectionName> uniqueIdPrefix) {
-    ExpressionAlgebrizerContext ctx(true /*assertExprSort*/,
-                                    false /*assertPathSort*/,
-                                    rootProjection,
-                                    std::move(uniqueIdPrefix));
+                          PrefixId& prefixId) {
+    ExpressionAlgebrizerContext ctx(
+        true /*assertExprSort*/, false /*assertPathSort*/, rootProjection, prefixId);
     ABTAggExpressionVisitor visitor(ctx);
 
     AggExpressionWalker walker(&visitor);

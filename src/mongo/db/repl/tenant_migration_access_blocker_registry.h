@@ -112,8 +112,10 @@ public:
     /**
      * Adds an entry for mtab with the provided tenantId as the key. There must not be
      * a blocker of the same type (donor or recipient) for this tenantId already.
+     * TODO (SERVER-72081) Remove this method since we now use TenantId object type for tenantId.
      */
     void add(StringData tenantId, std::shared_ptr<TenantMigrationAccessBlocker> mtab);
+    void add(const TenantId& tenantId, std::shared_ptr<TenantMigrationAccessBlocker> mtab);
 
     /**
      * Add one access blocker and associate it with many tenant_id objects.
@@ -128,8 +130,10 @@ public:
 
     /**
      * Removes the entry for (tenantId, mtab)
+     * TODO (SERVER-72081) Remove this method since we now use TenantId object type for tenantId.
      */
     void remove(StringData tenantId, TenantMigrationAccessBlocker::BlockerType type);
+    void remove(const TenantId& tenantId, TenantMigrationAccessBlocker::BlockerType type);
 
     /**
      * Remove all access blockers of the provided type for a migration.
@@ -146,7 +150,8 @@ public:
      * Returns the first 'DonorRecipientAccessBlockerPair' it finds whose 'tenantId' is a prefix for
      * 'dbName'.
      */
-    boost::optional<DonorRecipientAccessBlockerPair> getAccessBlockersForDbName(StringData dbName);
+    boost::optional<DonorRecipientAccessBlockerPair> getAccessBlockersForDbName(
+        const DatabaseName& dbName);
 
 
     /**
@@ -161,14 +166,18 @@ public:
      * 'dbName' and is of the requested type.
      */
     std::shared_ptr<TenantMigrationAccessBlocker> getTenantMigrationAccessBlockerForDbName(
-        StringData dbName, TenantMigrationAccessBlocker::BlockerType type);
+        const DatabaseName& dbName, TenantMigrationAccessBlocker::BlockerType type);
 
     /**
      * Searches through TenantMigrationAccessBlockers and
      * returns the TenantMigrationAccessBlocker that matches tenantId.
+     * TODO (SERVER-72081) Remove this method since we now use TenantId object type for tenantId.
      */
     std::shared_ptr<TenantMigrationAccessBlocker> getTenantMigrationAccessBlockerForTenantId(
         StringData tenantId, TenantMigrationAccessBlocker::BlockerType type);
+
+    std::shared_ptr<TenantMigrationAccessBlocker> getTenantMigrationAccessBlockerForTenantId(
+        const TenantId& tenantId, TenantMigrationAccessBlocker::BlockerType type);
 
     using applyAllCallback = std::function<void(
         std::string tenantId, std::shared_ptr<TenantMigrationAccessBlocker>& mtab)>;
@@ -221,7 +230,7 @@ private:
         WithLock) const;
 
     std::shared_ptr<TenantMigrationDonorAccessBlocker> _getAllTenantDonorAccessBlocker(
-        WithLock, StringData dbName) const;
+        WithLock, const DatabaseName& dbName) const;
 
     mutable Mutex _mutex = MONGO_MAKE_LATCH("TenantMigrationAccessBlockerRegistry::_mutex");
 

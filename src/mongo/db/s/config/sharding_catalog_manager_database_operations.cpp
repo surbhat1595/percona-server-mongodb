@@ -161,7 +161,6 @@ DatabaseType ShardingCatalogManager::createDatabase(
     }
 
     // Expensive createDatabase code path
-    const auto catalogClient = Grid::get(opCtx)->catalogClient();
 
     // Check if a database already exists with the same name (case insensitive), and if so, return
     // the existing entry.
@@ -243,7 +242,7 @@ DatabaseType ShardingCatalogManager::createDatabase(
             } else {
                 // Do this write with majority writeConcern to guarantee that the shard sees the
                 // write when it receives the _flushDatabaseCacheUpdates.
-                uassertStatusOK(catalogClient->insertConfigDocument(
+                uassertStatusOK(_localCatalogClient->insertConfigDocument(
                     opCtx,
                     NamespaceString::kConfigDatabasesNamespace,
                     db.toBSON(),
@@ -289,11 +288,25 @@ DatabaseType ShardingCatalogManager::createDatabase(
 void ShardingCatalogManager::commitMovePrimary(OperationContext* opCtx,
                                                const DatabaseName& dbName,
                                                const DatabaseVersion& expectedDbVersion,
-                                               const ShardId& toShard) {
+                                               const ShardId& toShardId) {
     // Hold the shard lock until the entire commit finishes to serialize with removeShard.
     Lock::SharedLock shardLock(opCtx, _kShardMembershipLock);
 
-    const auto transactionChain = [opCtx, dbName, expectedDbVersion, toShard](
+    const auto toShardDoc = [&] {
+        DBDirectClient dbClient(opCtx);
+        return dbClient.findOne(NamespaceString::kConfigsvrShardsNamespace,
+                                BSON(ShardType::name << toShardId));
+    }();
+    uassert(ErrorCodes::ShardNotFound,
+            "Requested primary shard {} does not exist"_format(toShardId.toString()),
+            !toShardDoc.isEmpty());
+
+    const auto toShardEntry = uassertStatusOK(ShardType::fromBSON(toShardDoc));
+    uassert(ErrorCodes::ShardNotFound,
+            "Requested primary shard {} is draining"_format(toShardId.toString()),
+            !toShardEntry.getDraining());
+
+    const auto transactionChain = [opCtx, dbName, expectedDbVersion, toShardId](
                                       const txn_api::TransactionClient& txnClient,
                                       ExecutorPtr txnExec) {
         const auto updateDatabaseEntryOp = [&] {
@@ -313,7 +326,7 @@ void ShardingCatalogManager::commitMovePrimary(OperationContext* opCtx,
                 const auto newDbVersion = expectedDbVersion.makeUpdated();
 
                 BSONObjBuilder bsonBuilder;
-                bsonBuilder.append(DatabaseType::kPrimaryFieldName, toShard);
+                bsonBuilder.append(DatabaseType::kPrimaryFieldName, toShardId);
                 bsonBuilder.append(DatabaseType::kVersionFieldName, newDbVersion.toBSON());
                 return BSON("$set" << bsonBuilder.obj());
             }();
@@ -331,7 +344,7 @@ void ShardingCatalogManager::commitMovePrimary(OperationContext* opCtx,
 
         return txnClient.runCRUDOp(updateDatabaseEntryOp, {})
             .thenRunOn(txnExec)
-            .then([&txnClient, &txnExec, opCtx, &dbName, toShard](
+            .then([&txnClient, &txnExec, opCtx, &dbName, toShardId](
                       const BatchedCommandResponse& updateCatalogDatabaseEntryResponse) {
                 uassertStatusOK(updateCatalogDatabaseEntryResponse.toStatus());
 
@@ -352,7 +365,7 @@ void ShardingCatalogManager::commitMovePrimary(OperationContext* opCtx,
                 const auto clusterTime = now.clusterTime().asTimestamp();
 
                 NamespacePlacementType placementInfo(
-                    NamespaceString(dbName), clusterTime, std::vector<mongo::ShardId>{toShard});
+                    NamespaceString(dbName), clusterTime, std::vector<mongo::ShardId>{toShardId});
 
                 write_ops::InsertCommandRequest insertPlacementHistoryOp(
                     NamespaceString::kConfigsvrPlacementHistoryNamespace);

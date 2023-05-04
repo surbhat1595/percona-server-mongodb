@@ -1073,10 +1073,14 @@ public:
 class ExpressionArrayElemAt final : public ExpressionFixedArity<ExpressionArrayElemAt, 2> {
 public:
     explicit ExpressionArrayElemAt(ExpressionContext* const expCtx)
-        : ExpressionFixedArity<ExpressionArrayElemAt, 2>(expCtx) {}
+        : ExpressionFixedArity<ExpressionArrayElemAt, 2>(expCtx) {
+        expCtx->sbeCompatible = false;
+    }
 
     ExpressionArrayElemAt(ExpressionContext* const expCtx, ExpressionVector&& children)
-        : ExpressionFixedArity<ExpressionArrayElemAt, 2>(expCtx, std::move(children)) {}
+        : ExpressionFixedArity<ExpressionArrayElemAt, 2>(expCtx, std::move(children)) {
+        expCtx->sbeCompatible = false;
+    }
 
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
@@ -1093,10 +1097,14 @@ public:
 class ExpressionFirst final : public ExpressionFixedArity<ExpressionFirst, 1> {
 public:
     explicit ExpressionFirst(ExpressionContext* const expCtx)
-        : ExpressionFixedArity<ExpressionFirst, 1>(expCtx) {}
+        : ExpressionFixedArity<ExpressionFirst, 1>(expCtx) {
+        expCtx->sbeCompatible = false;
+    }
 
     ExpressionFirst(ExpressionContext* const expCtx, ExpressionVector&& children)
-        : ExpressionFixedArity<ExpressionFirst, 1>(expCtx, std::move(children)) {}
+        : ExpressionFixedArity<ExpressionFirst, 1>(expCtx, std::move(children)) {
+        expCtx->sbeCompatible = false;
+    }
 
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
@@ -1113,7 +1121,9 @@ public:
 class ExpressionLast final : public ExpressionFixedArity<ExpressionLast, 1> {
 public:
     explicit ExpressionLast(ExpressionContext* const expCtx)
-        : ExpressionFixedArity<ExpressionLast, 1>(expCtx) {}
+        : ExpressionFixedArity<ExpressionLast, 1>(expCtx) {
+        expCtx->sbeCompatible = false;
+    }
 
     Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
@@ -4350,6 +4360,151 @@ public:
     }
 };
 
+template <typename SubClass>
+class ExpressionBitwise : public ExpressionVariadic<SubClass> {
+public:
+    explicit ExpressionBitwise(ExpressionContext* const expCtx)
+        : ExpressionVariadic<SubClass>(expCtx) {}
+
+    ExpressionBitwise(ExpressionContext* const expCtx, Expression::ExpressionVector&& children)
+        : ExpressionVariadic<SubClass>(expCtx, std::move(children)) {}
+
+    ExpressionNary::Associativity getAssociativity() const final {
+        return ExpressionNary::Associativity::kFull;
+    }
+
+    bool isCommutative() const final {
+        return true;
+    }
+
+    Value evaluate(const Document& root, Variables* variables) const final {
+        auto result = this->getIdentity();
+        for (auto&& child : this->_children) {
+            Value val = child->evaluate(root, variables);
+            if (val.nullish()) {
+                return Value(BSONNULL);
+            }
+            auto valNum = uassertStatusOK(safeNumFromValue(val));
+            result = doOperation(result, valNum);
+        }
+        return Value(result);
+    }
+
+private:
+    StatusWith<SafeNum> safeNumFromValue(const Value& val) const {
+        switch (val.getType()) {
+            case NumberInt:
+                return val.getInt();
+            case NumberLong:
+                return (int64_t)val.getLong();
+            default:
+                return Status(ErrorCodes::TypeMismatch,
+                              str::stream()
+                                  << this->getOpName() << " only supports int and long operands.");
+        }
+    }
+
+    virtual SafeNum doOperation(const SafeNum& a, const SafeNum& b) const = 0;
+    virtual SafeNum getIdentity() const = 0;
+};
+
+class ExpressionBitAnd final : public ExpressionBitwise<ExpressionBitAnd> {
+public:
+    SafeNum doOperation(const SafeNum& a, const SafeNum& b) const final {
+        return a.bitAnd(b);
+    }
+
+    SafeNum getIdentity() const final {
+        return -1;  // In two's complement, this is all 1's.
+    }
+
+    const char* getOpName() const final {
+        return "$bitAnd";
+    };
+
+    explicit ExpressionBitAnd(ExpressionContext* const expCtx)
+        : ExpressionBitwise<ExpressionBitAnd>(expCtx) {
+        expCtx->sbeCompatible = false;
+    }
+
+    ExpressionBitAnd(ExpressionContext* const expCtx, ExpressionVector&& children)
+        : ExpressionBitwise<ExpressionBitAnd>(expCtx, std::move(children)) {
+        expCtx->sbeCompatible = false;
+    }
+
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
+        return visitor->visit(this);
+    }
+};
+
+class ExpressionBitOr final : public ExpressionBitwise<ExpressionBitOr> {
+public:
+    SafeNum doOperation(const SafeNum& a, const SafeNum& b) const final {
+        return a.bitOr(b);
+    }
+
+    SafeNum getIdentity() const final {
+        return 0;
+    }
+
+    const char* getOpName() const final {
+        return "$bitOr";
+    };
+
+    explicit ExpressionBitOr(ExpressionContext* const expCtx)
+        : ExpressionBitwise<ExpressionBitOr>(expCtx) {
+        expCtx->sbeCompatible = false;
+    }
+
+    ExpressionBitOr(ExpressionContext* const expCtx, ExpressionVector&& children)
+        : ExpressionBitwise<ExpressionBitOr>(expCtx, std::move(children)) {
+        expCtx->sbeCompatible = false;
+    }
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
+        return visitor->visit(this);
+    }
+};
+
+class ExpressionBitXor final : public ExpressionBitwise<ExpressionBitXor> {
+public:
+    SafeNum doOperation(const SafeNum& a, const SafeNum& b) const final {
+        return a.bitXor(b);
+    }
+
+    SafeNum getIdentity() const final {
+        return 0;
+    }
+
+    const char* getOpName() const final {
+        return "$bitXor";
+    };
+
+    explicit ExpressionBitXor(ExpressionContext* const expCtx)
+        : ExpressionBitwise<ExpressionBitXor>(expCtx) {
+        expCtx->sbeCompatible = false;
+    }
+
+    ExpressionBitXor(ExpressionContext* const expCtx, ExpressionVector&& children)
+        : ExpressionBitwise<ExpressionBitXor>(expCtx, std::move(children)) {
+        expCtx->sbeCompatible = false;
+    }
+
+    void acceptVisitor(ExpressionMutableVisitor* visitor) final {
+        return visitor->visit(this);
+    }
+
+    void acceptVisitor(ExpressionConstVisitor* visitor) const final {
+        return visitor->visit(this);
+    }
+};
 class ExpressionBitNot final : public ExpressionSingleNumericArg<ExpressionBitNot> {
 public:
     explicit ExpressionBitNot(ExpressionContext* const expCtx)
@@ -4372,5 +4527,4 @@ public:
         return visitor->visit(this);
     }
 };
-
 }  // namespace mongo

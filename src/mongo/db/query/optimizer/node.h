@@ -221,7 +221,11 @@ class IndexScanNode final : public ABTOpFixedArity<1>, public ExclusivelyPhysica
     using Base = ABTOpFixedArity<1>;
 
 public:
-    IndexScanNode(FieldProjectionMap fieldProjectionMap, IndexSpecification indexSpec);
+    IndexScanNode(FieldProjectionMap fieldProjectionMap,
+                  std::string scanDefName,
+                  std::string indexDefName,
+                  CompoundIntervalRequirement indexInterval,
+                  bool isIndexReverseOrder);
 
     bool operator==(const IndexScanNode& other) const;
 
@@ -232,11 +236,29 @@ public:
     }
 
     const FieldProjectionMap& getFieldProjectionMap() const;
-    const IndexSpecification& getIndexSpecification() const;
+
+    const std::string& getScanDefName() const;
+
+    const std::string& getIndexDefName() const;
+
+    const CompoundIntervalRequirement& getIndexInterval() const;
+
+    bool isIndexReverseOrder() const;
 
 private:
     const FieldProjectionMap _fieldProjectionMap;
-    const IndexSpecification _indexSpec;
+
+    // Name of the collection.
+    const std::string _scanDefName;
+
+    // The name of the index.
+    const std::string _indexDefName;
+
+    // The index interval.
+    const CompoundIntervalRequirement _indexInterval;
+
+    // Do we reverse the index order.
+    const bool _isIndexReverseOrder;
 };
 
 /**
@@ -610,6 +632,48 @@ private:
     const ProjectionNameVector _rightKeys;
 };
 
+// This struct is a workaround to avoid a use-after-move problem while initializing the base
+// class and passing constructor arguments. Due to the way how the base class is designed, we
+// need to std::move the children vector as the first argument to the Base vector, but then
+// obtain the size of the moved vector while computing the last argument. So, we'll preserve
+// the children's vector size in this struct to avoid this situation. Used by SortedMergeNode and
+// UnionNode.
+struct NodeChildrenHolder {
+    NodeChildrenHolder(ABTVector children) : _nodes(std::move(children)) {
+        _numOfNodes = _nodes.size();
+    }
+
+    ABTVector _nodes;
+    size_t _numOfNodes;
+};
+
+/**
+ * Sorted Merge node.
+ * Used to merge an arbitrary number of sorted input streams.
+ */
+class SortedMergeNode final : public ABTOpDynamicArity<2>, public ExclusivelyPhysicalNode {
+    using Base = ABTOpDynamicArity<2>;
+
+public:
+    SortedMergeNode(properties::CollationRequirement collReq, ABTVector children);
+
+    const ExpressionBinder& binder() const {
+        const ABT& result = get<0>();
+        tassert(7063702, "Invalid binder type", result.is<ExpressionBinder>());
+        return *result.cast<ExpressionBinder>();
+    }
+
+    const properties::CollationRequirement& getCollationReq() const;
+
+    bool operator==(const SortedMergeNode& other) const;
+
+private:
+    SortedMergeNode(properties::CollationRequirement collReq, NodeChildrenHolder children);
+
+    // Describes how to merge the sorted streams.
+    properties::CollationRequirement _collationReq;
+};
+
 /**
  * Physical nested loop join (NLJ). Can express inner and outer joins, with an associated join
  * predicate.
@@ -670,21 +734,7 @@ public:
     }
 
 private:
-    // This struct is a workaround to avoid a use-after-move problem while initializing the base
-    // class and passing constructor arguments. Due to the way how the base class is designed, we
-    // need to std::move the children vector as the first argument to the Base ctor, but then
-    // obtain the size of the moved vector while computing the last argument. So, we'll preserve
-    // the children's vector size in this struct to avoid this situation.
-    struct UnionNodeChildren {
-        UnionNodeChildren(ABTVector children) : _nodes(std::move(children)) {
-            _numOfNodes = _nodes.size();
-        }
-
-        ABTVector _nodes;
-        size_t _numOfNodes;
-    };
-
-    UnionNode(ProjectionNameVector unionProjectionNames, UnionNodeChildren children);
+    UnionNode(ProjectionNameVector unionProjectionNames, NodeChildrenHolder children);
 };
 
 #define GROUPNODETYPE_OPNAMES(F) \
@@ -694,7 +744,7 @@ private:
 
 MAKE_PRINTABLE_ENUM(GroupNodeType, GROUPNODETYPE_OPNAMES);
 MAKE_PRINTABLE_ENUM_STRING_ARRAY(GroupNodeTypeEnum, GroupNodeType, GROUPNODETYPE_OPNAMES);
-#undef PATHSYNTAX_OPNAMES
+#undef GROUPNODETYPE_OPNAMES
 
 /**
  * Group-by node.
@@ -811,7 +861,7 @@ private:
 /**
  * Unique node.
  *
- * This is a physical node. It encodes an operation which will duplicate the child input using a
+ * This is a physical node. It encodes an operation which will deduplicate the child input using a
  * sequence of given projection names. It is similar to GroupBy using the given projections as a
  * compound grouping key.
  */
@@ -829,6 +879,105 @@ public:
 
 private:
     ProjectionNameVector _projections;
+};
+
+#define SPOOL_PRODUCER_TYPE_OPNAMES(F) \
+    F(Eager)                           \
+    F(Lazy)
+
+MAKE_PRINTABLE_ENUM(SpoolProducerType, SPOOL_PRODUCER_TYPE_OPNAMES);
+MAKE_PRINTABLE_ENUM_STRING_ARRAY(SpoolProducerTypeEnum,
+                                 SpoolProducerType,
+                                 SPOOL_PRODUCER_TYPE_OPNAMES);
+#undef SPOOL_PRODUCER_TYPE_OPNAMES
+
+/**
+ * Spool producer node.
+ *
+ * This is a physical node. It buffers the values coming from its child in a shared buffer indexed
+ * by the "spoolId" field. This buffer in turn is accessed via a corresponding SpoolConsumer node.
+ * It can be used to implement recursive plans.
+ *
+ * We have two different modes of operation:
+ *    1. Eager: on startup it will read and store the entire input from its child into the buffer
+ * identified by the "spoolId" parameter. Then when asked for more data, it will return data from
+ * the buffer.
+ *    2. Lazy: by contrast to "eager", it will request each value from its child incrementally
+ * and store it into the shared buffer, and immediately propagate it to the parent.
+ */
+class SpoolProducerNode final : public ABTOpFixedArity<4>, public ExclusivelyPhysicalNode {
+    using Base = ABTOpFixedArity<4>;
+
+public:
+    SpoolProducerNode(SpoolProducerType type,
+                      int64_t spoolId,
+                      ProjectionNameVector projections,
+                      ABT filter,
+                      ABT child);
+
+    bool operator==(const SpoolProducerNode& other) const;
+
+    const ExpressionBinder& binder() const {
+        const ABT& result = get<2>();
+        tassert(6624126, "Invalid binder type", result.is<ExpressionBinder>());
+        return *result.cast<ExpressionBinder>();
+    }
+
+    SpoolProducerType getType() const;
+    int64_t getSpoolId() const;
+
+    const ABT& getFilter() const;
+
+    const ABT& getChild() const;
+    ABT& getChild();
+
+private:
+    const SpoolProducerType _type;
+    const int64_t _spoolId;
+};
+
+#define SPOOL_CONSUMER_TYPE_OPNAMES(F) \
+    F(Stack)                           \
+    F(Regular)
+
+MAKE_PRINTABLE_ENUM(SpoolConsumerType, SPOOL_CONSUMER_TYPE_OPNAMES);
+MAKE_PRINTABLE_ENUM_STRING_ARRAY(SpoolConsumerTypeEnum,
+                                 SpoolConsumerType,
+                                 SPOOL_CONSUMER_TYPE_OPNAMES);
+#undef SPOOL_CONSUMER_TYPE_OPNAMES
+
+/**
+ * Spool consumer node.
+ *
+ * This is a physical node. It delivers incoming values from a shared buffer (indexed by "spoolId").
+ * This shared buffer is populated by a corresponding SpoolProducer node.
+ *
+ * It has two modes of operation:
+ *   1. Stack: the consumer removes each value from the buffer as it is returned. The values are
+ * returned in reverse order (hence "stack") of insertion in the shared buffer.
+ *   2. Regular: the node will return the values in the same order in which they were inserted. The
+ * values are not removed from the buffer.
+ */
+class SpoolConsumerNode final : public ABTOpFixedArity<1>, public ExclusivelyPhysicalNode {
+    using Base = ABTOpFixedArity<1>;
+
+public:
+    SpoolConsumerNode(SpoolConsumerType type, int64_t spoolId, ProjectionNameVector projections);
+
+    bool operator==(const SpoolConsumerNode& other) const;
+
+    const ExpressionBinder& binder() const {
+        const ABT& result = get<0>();
+        tassert(6624135, "Invalid binder type", result.is<ExpressionBinder>());
+        return *result.cast<ExpressionBinder>();
+    }
+
+    SpoolConsumerType getType() const;
+    int64_t getSpoolId() const;
+
+private:
+    const SpoolConsumerType _type;
+    const int64_t _spoolId;
 };
 
 /**

@@ -45,6 +45,14 @@ public:
 
     virtual ~GSSAPIServerMechanism();
 
+    boost::optional<unsigned int> currentStep() const override {
+        return (unsigned int)1;
+    }
+
+    boost::optional<unsigned int> totalSteps() const override {
+        return (unsigned int)1;
+    }
+
 private:
     CyrusSASLServerSession _sess;
 

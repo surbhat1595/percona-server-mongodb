@@ -109,6 +109,7 @@
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/scripting/engine.h"
+#include "mongo/util/processinfo.h"
 #include "mongo/util/str.h"
 #include "mongo/util/timer.h"
 
@@ -418,7 +419,14 @@ void fillOutPlannerParams(OperationContext* opCtx,
         plannerParams->clusteredCollectionCollator = collection->getDefaultCollator();
     }
 
-    plannerParams->collectionStats = fillOutCollectionStats(opCtx, collection);
+    if (!plannerParams->columnStoreIndexes.empty()) {
+        // Fill out statistics needed for column scan query planning.
+        plannerParams->collectionStats = fillOutCollectionStats(opCtx, collection);
+
+        const auto kMB = 1024 * 1024;
+        plannerParams->availableMemoryBytes =
+            static_cast<long long>(ProcessInfo::getMemSizeMB()) * kMB;
+    }
 }
 
 std::map<NamespaceString, SecondaryCollectionInfo> fillOutSecondaryCollectionsInformation(
@@ -1413,21 +1421,73 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
 /**
  * Checks if the result of query planning is SBE compatible.
  */
-bool isPlanSbeCompatible(const SlotBasedPrepareExecutionResult& planningResult) {
+bool shouldPlanningResultUseSbe(bool sbeFull,
+                                bool columnIndexPresent,
+                                bool aggSpecificStagesPushedDown,
+                                const SlotBasedPrepareExecutionResult& planningResult) {
+    // For now this function assumes one of these is true. If all are false, we should not use
+    // SBE.
+    tassert(6164401,
+            "Expected sbeFull, or a CSI present, or agg specific stages pushed down",
+            sbeFull || columnIndexPresent || aggSpecificStagesPushedDown);
+
     const auto& solutions = planningResult.solutions();
     if (solutions.empty()) {
         // Query needs subplanning (plans are generated later, we don't have access yet).
-        // This is *currently* fine because subplans will never be turned into COUNT_SCANs.
         invariant(planningResult.needsSubplanning());
-        return true;
+
+        // TODO: SERVER-71798 if the below conditions are not met, a column index will not be used
+        // even if it could be.
+        return sbeFull || aggSpecificStagesPushedDown;
     }
 
     // Check that the query solution is SBE compatible.
-    return std::all_of(solutions.begin(), solutions.end(), [](const auto& solution) {
-        return solution->root() ==
-            nullptr /* we won't have a query solution if we pulled it from the cache */
-            || isQueryPlanSbeCompatible(solution.get());
-    });
+    const bool allStagesCompatible =
+        std::all_of(solutions.begin(), solutions.end(), [](const auto& solution) {
+            return solution->root() ==
+                nullptr /* we won't have a query solution if we pulled it from the cache */
+                || isQueryPlanSbeCompatible(solution.get());
+        });
+
+    if (!allStagesCompatible) {
+        return false;
+    }
+
+    if (sbeFull || aggSpecificStagesPushedDown) {
+        return true;
+    }
+
+    // If no pipeline is pushed down and SBE full is off, the only other case we'll use SBE for
+    // is when a column index plan was constructed.
+    tassert(6164400, "Expected CSI to be present", columnIndexPresent);
+
+    // The only time a query solution is not available is when the plan comes from the SBE plan
+    // cache. The plan cache is gated by sbeFull, which was already checked earlier. So, at this
+    // point we're guaranteed sbeFull is off, and this further implies that the returned plan(s)
+    // did not come from the cache.
+    tassert(6164402,
+            "Did not expect a plan from the plan cache",
+            !sbeFull && solutions.front()->root());
+
+    return solutions.size() == 1 &&
+        solutions.front()->root()->hasNode(StageType::STAGE_COLUMN_SCAN);
+}
+
+/**
+ * Checks the index catalog for the main collection and returns true if a non-hidden column store
+ * index is found.
+ */
+bool isColumnStoreIndexPresent(OperationContext* opCtx,
+                               const MultipleCollectionAccessor& collections) {
+    if (const auto& mainColl = collections.getMainCollection()) {
+        std::vector<const IndexDescriptor*> csiIndexes;
+        mainColl->getIndexCatalog()->findIndexByType(opCtx, IndexNames::COLUMN, csiIndexes);
+        return std::any_of(csiIndexes.begin(), csiIndexes.end(), [](const auto* descriptor) {
+            return !descriptor->hidden();
+        });
+    }
+
+    return false;
 }
 
 /**
@@ -1455,25 +1515,30 @@ attemptToGetSlotBasedExecutor(
         extractAndAttachPipelineStages(canonicalQuery.get(), true /* attachOnly */);
     }
 
-    // Use SBE if we find any $group/$lookup stages eligible for execution in SBE or if SBE
-    // is fully enabled. Otherwise, fallback to the classic engine.
-    if (canonicalQuery->pipeline().empty() &&
-        !feature_flags::gFeatureFlagSbeFull.isEnabledAndIgnoreFCV()) {
-        canonicalQuery->setSbeCompatible(false);
-    } else {
-        // Construct the SBE query solution - this will be our final decision stage to determine
-        // whether SBE should be used.
-        auto sbeYieldPolicy = makeSbeYieldPolicy(
-            opCtx, yieldPolicy, &collections.getMainCollection(), canonicalQuery->nss());
+    // Create the SBE prepare execution helper and initialize the params for the planner. Our
+    // decision about using SBE will depend on whether there is a column index present.
+    auto sbeYieldPolicy = makeSbeYieldPolicy(
+        opCtx, yieldPolicy, &collections.getMainCollection(), canonicalQuery->nss());
+    SlotBasedPrepareExecutionHelper helper{
+        opCtx, collections, canonicalQuery.get(), sbeYieldPolicy.get(), plannerParams.options};
 
-        SlotBasedPrepareExecutionHelper helper{
-            opCtx, collections, canonicalQuery.get(), sbeYieldPolicy.get(), plannerParams.options};
+    const bool csiPresent = isColumnStoreIndexPresent(opCtx, collections);
+    const bool sbeFull = feature_flags::gFeatureFlagSbeFull.isEnabledAndIgnoreFCV();
+    const bool aggSpecificStagesPushedDown = !canonicalQuery->pipeline().empty();
+
+    // Attempt to use SBE if we find any $group/$lookup stages eligible for execution in SBE, if a
+    // column index is present or if SBE is fully enabled. Otherwise, fallback to the classic
+    // engine right away.
+    if (aggSpecificStagesPushedDown || csiPresent || sbeFull) {
         auto planningResultWithStatus = helper.prepare();
         if (!planningResultWithStatus.isOK()) {
             return planningResultWithStatus.getStatus();
         }
 
-        if (isPlanSbeCompatible(*planningResultWithStatus.getValue())) {
+        if (shouldPlanningResultUseSbe(sbeFull,
+                                       csiPresent,
+                                       aggSpecificStagesPushedDown,
+                                       *planningResultWithStatus.getValue())) {
             if (extractAndAttachPipelineStages) {
                 // We know now that we will use SBE, so we need to remove the pushed-down stages
                 // from the original pipeline object.
@@ -1492,14 +1557,16 @@ attemptToGetSlotBasedExecutor(
                 return statusWithExecutor.getStatus();
             }
         }
-
         // Query plan was not SBE compatible - reset any fields that may have been modified, and
         // fall back to classic engine.
-        canonicalQuery->setSbeCompatible(false);
         canonicalQuery->setPipeline({});
+
+        // Fall through to below.
     }
 
-    // Return ownership of the canonical query to the caller.
+    // Either we did not meet the criteria for attempting SBE, or we attempted query planning and
+    // determined that SBE should not be used.
+    canonicalQuery->setSbeCompatible(false);
     return std::move(canonicalQuery);
 }
 
@@ -2409,7 +2476,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorCoun
 
 bool turnIxscanIntoDistinctIxscan(QuerySolution* soln,
                                   const std::string& field,
-                                  bool strictDistinctOnly) {
+                                  bool strictDistinctOnly,
+                                  bool flipDistinctScanDirection) {
     auto root = soln->root();
 
     // We can attempt to convert a plan if it follows one of these patterns (starting from the
@@ -2530,8 +2598,10 @@ bool turnIxscanIntoDistinctIxscan(QuerySolution* soln,
 
     // Make a new DistinctNode. We will swap this for the ixscan in the provided solution.
     auto distinctNode = std::make_unique<DistinctNode>(indexScanNode->index);
-    distinctNode->direction = indexScanNode->direction;
-    distinctNode->bounds = indexScanNode->bounds;
+    distinctNode->direction =
+        flipDistinctScanDirection ? -indexScanNode->direction : indexScanNode->direction;
+    distinctNode->bounds =
+        flipDistinctScanDirection ? indexScanNode->bounds.reverse() : indexScanNode->bounds;
     distinctNode->queryCollator = indexScanNode->queryCollator;
     distinctNode->fieldNo = fieldNo;
 
@@ -2567,7 +2637,8 @@ namespace {
 QueryPlannerParams fillOutPlannerParamsForDistinct(OperationContext* opCtx,
                                                    const CollectionPtr& collection,
                                                    size_t plannerOptions,
-                                                   const ParsedDistinct& parsedDistinct) {
+                                                   const ParsedDistinct& parsedDistinct,
+                                                   bool flipDistinctScanDirection) {
     QueryPlannerParams plannerParams;
     plannerParams.options = QueryPlannerParams::NO_TABLE_SCAN | plannerOptions;
 
@@ -2585,6 +2656,18 @@ QueryPlannerParams fillOutPlannerParamsForDistinct(OperationContext* opCtx,
         if (desc->hidden())
             continue;
         if (desc->keyPattern().hasField(parsedDistinct.getKey())) {
+            if (flipDistinctScanDirection && ice->isMultikey(opCtx, collection)) {
+                // This ParsedDistinct was generated as a result of transforming a $group with $last
+                // accumulators using the GroupFromFirstTransformation. We cannot use a
+                // DISTINCT_SCAN if $last is being applied to an indexed field which is multikey,
+                // even if the 'parsedDistinct' key does not include multikey paths. This is because
+                // changing the sort direction also changes the comparison semantics for arrays,
+                // which means that flipping the scan may not exactly flip the order that we see
+                // documents in. In the case of using DISTINCT_SCAN for $group, that would mean that
+                // $first of the flipped scan may not be the same document as $last from the user's
+                // requested sort order.
+                continue;
+            }
             if (!mayUnwindArrays &&
                 isAnyComponentOfPathMultikey(desc->keyPattern(),
                                              ice->isMultikey(opCtx, collection),
@@ -2733,14 +2816,17 @@ getExecutorDistinctFromIndexSolutions(OperationContext* opCtx,
                                       std::vector<std::unique_ptr<QuerySolution>> solutions,
                                       PlanYieldPolicy::YieldPolicy yieldPolicy,
                                       ParsedDistinct* parsedDistinct,
+                                      bool flipDistinctScanDirection,
                                       size_t plannerOptions) {
     const auto& collection = *coll;
     const bool strictDistinctOnly = (plannerOptions & QueryPlannerParams::STRICT_DISTINCT_ONLY);
 
     // We look for a solution that has an ixscan we can turn into a distinctixscan
     for (size_t i = 0; i < solutions.size(); ++i) {
-        if (turnIxscanIntoDistinctIxscan(
-                solutions[i].get(), parsedDistinct->getKey(), strictDistinctOnly)) {
+        if (turnIxscanIntoDistinctIxscan(solutions[i].get(),
+                                         parsedDistinct->getKey(),
+                                         strictDistinctOnly,
+                                         flipDistinctScanDirection)) {
             // Build and return the SSR over solutions[i].
             std::unique_ptr<WorkingSet> ws = std::make_unique<WorkingSet>();
             std::unique_ptr<QuerySolution> currentSolution = std::move(solutions[i]);
@@ -2808,7 +2894,10 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorWith
 }  // namespace
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDistinct(
-    const CollectionPtr* coll, size_t plannerOptions, ParsedDistinct* parsedDistinct) {
+    const CollectionPtr* coll,
+    size_t plannerOptions,
+    ParsedDistinct* parsedDistinct,
+    bool flipDistinctScanDirection) {
     const auto& collection = *coll;
 
     auto expCtx = parsedDistinct->getQuery()->getExpCtx();
@@ -2843,8 +2932,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDist
     // We go through normal planning (with limited parameters) to see if we can produce
     // a soln with the above properties.
 
-    auto plannerParams =
-        fillOutPlannerParamsForDistinct(opCtx, collection, plannerOptions, *parsedDistinct);
+    auto plannerParams = fillOutPlannerParamsForDistinct(
+        opCtx, collection, plannerOptions, *parsedDistinct, flipDistinctScanDirection);
 
     // If there are no suitable indices for the distinct hack bail out now into regular planning
     // with no projection.
@@ -2897,8 +2986,13 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDist
     // STRICT_DISTINCT_ONLY flag is not set, we may get a DISTINCT_SCAN plan that filters out some
     // but not all duplicate values of the distinct field, meaning that the output from this
     // executor will still need deduplication.
-    executorWithStatus = getExecutorDistinctFromIndexSolutions(
-        opCtx, coll, std::move(solutions), yieldPolicy, parsedDistinct, plannerOptions);
+    executorWithStatus = getExecutorDistinctFromIndexSolutions(opCtx,
+                                                               coll,
+                                                               std::move(solutions),
+                                                               yieldPolicy,
+                                                               parsedDistinct,
+                                                               flipDistinctScanDirection,
+                                                               plannerOptions);
     if (!executorWithStatus.isOK() || executorWithStatus.getValue()) {
         // We either got a DISTINCT plan or a fatal error.
         return executorWithStatus;

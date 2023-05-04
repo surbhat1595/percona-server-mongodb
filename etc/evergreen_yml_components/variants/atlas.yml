@@ -21,7 +21,7 @@ buildvariants:
     compile_flags: >-
       --ssl MONGO_DISTMOD=rhel70
       -j$(grep -c ^processor /proc/cpuinfo)
-      --variables-files=etc/scons/mongodbtoolchain_v3_gcc.vars
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
     crypt_task_compile_flags: >-
       SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique"
       CCFLAGS="-fno-gnu-unique"
@@ -41,7 +41,7 @@ buildvariants:
   - name: compile_build_tools_next_TG
     distros:
     - rhel70
-  - name: .aggfuzzer !.feature_flag_guarded
+  - name: .aggfuzzer
   - name: audit
   - name: auth_audit_gen
   - name: auth_gen
@@ -60,7 +60,7 @@ buildvariants:
   - name: .encrypt !.sharding !.replica_sets !.aggregation !.jscore
   - name: external_auth
   - name: external_auth_aws
-  - name: .jscore .common !.decimal !.sharding !.feature_flag_guarded
+  - name: .jscore .common !.decimal !.sharding
   - name: jsCore_txns_large_txns_format
   - name: .jstestfuzz .common
   - name: libunwind_tests

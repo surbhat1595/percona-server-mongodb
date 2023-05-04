@@ -2652,7 +2652,11 @@ ExpressionFilter::ExpressionFilter(ExpressionContext* const expCtx,
       _cond(_children[1]),
       _limit(_children.size() == 3
                  ? _children[2]
-                 : boost::optional<boost::intrusive_ptr<Expression>&>(boost::none)) {}
+                 : boost::optional<boost::intrusive_ptr<Expression>&>(boost::none)) {
+    if (_limit) {
+        expCtx->sbeCompatible = false;
+    }
+}
 
 intrusive_ptr<Expression> ExpressionFilter::optimize() {
     // TODO handle when _input is constant.
@@ -8065,11 +8069,33 @@ Value ExpressionBitNot::evaluateNumericArg(const Value& numericArg) const {
     }
 }
 
-REGISTER_STABLE_EXPRESSION(bitNot, ExpressionBitNot::parse);
+REGISTER_EXPRESSION_WITH_FEATURE_FLAG(bitNot,
+                                      ExpressionBitNot::parse,
+                                      AllowedWithApiStrict::kNeverInVersion1,
+                                      AllowedWithClientType::kAny,
+                                      feature_flags::gFeatureFlagBitwise);
+
 const char* ExpressionBitNot::getOpName() const {
     return "$bitNot";
 }
 
+/* ------------------------- $bitAnd, $bitOr, and $bitXor ------------------------ */
+
+REGISTER_EXPRESSION_WITH_FEATURE_FLAG(bitAnd,
+                                      ExpressionBitAnd::parse,
+                                      AllowedWithApiStrict::kNeverInVersion1,
+                                      AllowedWithClientType::kAny,
+                                      feature_flags::gFeatureFlagBitwise);
+REGISTER_EXPRESSION_WITH_FEATURE_FLAG(bitOr,
+                                      ExpressionBitOr::parse,
+                                      AllowedWithApiStrict::kNeverInVersion1,
+                                      AllowedWithClientType::kAny,
+                                      feature_flags::gFeatureFlagBitwise);
+REGISTER_EXPRESSION_WITH_FEATURE_FLAG(bitXor,
+                                      ExpressionBitXor::parse,
+                                      AllowedWithApiStrict::kNeverInVersion1,
+                                      AllowedWithClientType::kAny,
+                                      feature_flags::gFeatureFlagBitwise);
 
 MONGO_INITIALIZER_GROUP(BeginExpressionRegistration, ("default"), ("EndExpressionRegistration"))
 MONGO_INITIALIZER_GROUP(EndExpressionRegistration, ("BeginExpressionRegistration"), ())

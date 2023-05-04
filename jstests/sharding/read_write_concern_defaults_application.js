@@ -235,6 +235,7 @@ let testCases = {
     balancerStatus: {skip: "does not accept read or write concern"},
     balancerStop: {skip: "does not accept read or write concern"},
     buildInfo: {skip: "does not accept read or write concern"},
+    bulkWrite: {skip: "not yet implemented"},
     captrunc: {skip: "test command"},
     checkShardingIndex: {skip: "does not accept read or write concern"},
     cleanupOrphaned: {skip: "only on shard server"},
@@ -488,7 +489,7 @@ let testCases = {
     getParameter: {skip: "does not accept read or write concern"},
     getShardMap: {skip: "internal command"},
     getShardVersion: {skip: "internal command"},
-    getnonce: {skip: "does not accept read or write concern"},
+    getnonce: {skip: "removed in v6.3"},
     godinsert: {skip: "for testing only"},
     grantPrivilegesToRole: {
         setUp: function(conn) {
@@ -1042,9 +1043,6 @@ function runTests(conn, regularCheckConn, configSvrCheckConn) {
                 configSvrCheckConn,
                 {explicitRWC: true, explicitProvenance: true});
 }
-
-// TODO SERVER-45052: Move the main code into jstests/lib, and then call it from jstests/replsets
-// and jstests/sharding.
 
 let rst = new ReplSetTest({nodes: 1});
 rst.startSet();

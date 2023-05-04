@@ -51,6 +51,14 @@ public:
 
     virtual ~SaslExternalLDAPServerMechanism();
 
+    boost::optional<unsigned int> currentStep() const override {
+        return _step;
+    }
+
+    boost::optional<unsigned int> totalSteps() const override {
+        return 2;
+    }
+
 private:
     int _step{0};
     sasl_conn_t * _saslConnection{nullptr};
@@ -88,6 +96,14 @@ public:
         : MakeServerMechanism<PLAINPolicy>(std::move(authenticationDatabase)) {}
 
     virtual ~OpenLDAPServerMechanism();
+
+    boost::optional<unsigned int> currentStep() const override {
+        return _step;
+    }
+
+    boost::optional<unsigned int> totalSteps() const override {
+        return 1;
+    }
 
 private:
     int _step{0};

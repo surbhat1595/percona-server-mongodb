@@ -33,6 +33,7 @@
 #include "mongo/db/query/optimizer/utils/unit_test_utils.h"
 #include "mongo/db/query/sbe_stage_builder_helpers.h"
 #include "mongo/db/query/stats/collection_statistics_mock.h"
+#include "mongo/db/query/stats/max_diff.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo::optimizer::ce {
@@ -50,10 +51,10 @@ std::string collName("test");
 
 class CEHistogramTester : public CETester {
 public:
-    CEHistogramTester(std::string collName, double numRecords)
-        : CETester(collName, numRecords), _stats{new CollectionStatisticsMock(numRecords)} {}
+    CEHistogramTester(std::string collName, CEType collCard)
+        : CETester(collName, collCard), _stats{new CollectionStatisticsMock(collCard._value)} {}
 
-    void addHistogram(const std::string& path, std::shared_ptr<ArrayHistogram> histogram) {
+    void addHistogram(const std::string& path, std::shared_ptr<const ArrayHistogram> histogram) {
         _stats->addHistogram(path, histogram);
     }
 
@@ -97,7 +98,7 @@ ScalarHistogram getHistogramFromData(TestBuckets testBuckets) {
                              cumulativeNDV);
     }
 
-    return ScalarHistogram(std::move(bounds), std::move(buckets));
+    return ScalarHistogram::make(std::move(bounds), std::move(buckets));
 }
 
 TypeCounts getTypeCountsFromData(TestBuckets testBuckets) {
@@ -117,22 +118,22 @@ TypeCounts getTypeCountsFromData(TestBuckets testBuckets) {
     return typeCounts;
 }
 
-std::unique_ptr<ArrayHistogram> getArrayHistogramFromData(TestBuckets testBuckets,
-                                                          TypeCounts additionalScalarData = {}) {
+std::shared_ptr<const ArrayHistogram> getArrayHistogramFromData(
+    TestBuckets testBuckets, TypeCounts additionalScalarData = {}) {
     TypeCounts dataTypeCounts = getTypeCountsFromData(testBuckets);
     dataTypeCounts.merge(additionalScalarData);
-    return std::make_unique<ArrayHistogram>(getHistogramFromData(testBuckets),
-                                            std::move(dataTypeCounts));
+    return ArrayHistogram::make(getHistogramFromData(testBuckets), std::move(dataTypeCounts));
 }
 
-std::unique_ptr<ArrayHistogram> getArrayHistogramFromData(TestBuckets scalarBuckets,
-                                                          TestBuckets arrayUniqueBuckets,
-                                                          TestBuckets arrayMinBuckets,
-                                                          TestBuckets arrayMaxBuckets,
-                                                          TypeCounts arrayTypeCounts,
-                                                          double totalArrayCount,
-                                                          double emptyArrayCount = 0,
-                                                          TypeCounts additionalScalarData = {}) {
+std::shared_ptr<const ArrayHistogram> getArrayHistogramFromData(
+    TestBuckets scalarBuckets,
+    TestBuckets arrayUniqueBuckets,
+    TestBuckets arrayMinBuckets,
+    TestBuckets arrayMaxBuckets,
+    TypeCounts arrayTypeCounts,
+    double totalArrayCount,
+    double emptyArrayCount = 0,
+    TypeCounts additionalScalarData = {}) {
 
     // Set up scalar type counts.
     TypeCounts dataTypeCounts = getTypeCountsFromData(scalarBuckets);
@@ -142,17 +143,17 @@ std::unique_ptr<ArrayHistogram> getArrayHistogramFromData(TestBuckets scalarBuck
     // Set up histograms.
     auto arrayMinHist = getHistogramFromData(arrayMinBuckets);
     auto arrayMaxHist = getHistogramFromData(arrayMaxBuckets);
-    return std::make_unique<ArrayHistogram>(getHistogramFromData(scalarBuckets),
-                                            std::move(dataTypeCounts),
-                                            getHistogramFromData(arrayUniqueBuckets),
-                                            std::move(arrayMinHist),
-                                            std::move(arrayMaxHist),
-                                            std::move(arrayTypeCounts),
-                                            emptyArrayCount);
+    return ArrayHistogram::make(getHistogramFromData(scalarBuckets),
+                                std::move(dataTypeCounts),
+                                getHistogramFromData(arrayUniqueBuckets),
+                                std::move(arrayMinHist),
+                                std::move(arrayMaxHist),
+                                std::move(arrayTypeCounts),
+                                emptyArrayCount);
 }
 
 TEST(CEHistogramTest, AssertSmallMaxDiffHistogramEstimatesAtomicPredicates) {
-    constexpr auto kCollCard = 8;
+    constexpr CEType kCollCard{8.0};
     CEHistogramTester t(collName, kCollCard);
 
     // Construct a histogram with two buckets: one for 3 ints equal to 1, another for 5 strings
@@ -207,7 +208,7 @@ TEST(CEHistogramTest, AssertSmallMaxDiffHistogramEstimatesAtomicPredicates) {
 }
 
 TEST(CEHistogramTest, AssertSmallHistogramEstimatesComplexPredicates) {
-    constexpr auto kCollCard = 9;
+    constexpr CEType kCollCard{9.0};
     CEHistogramTester t(collName, kCollCard);
 
     // Construct a histogram with three int buckets for field 'a'.
@@ -256,9 +257,9 @@ TEST(CEHistogramTest, AssertSmallHistogramEstimatesComplexPredicates) {
 }
 
 TEST(CEHistogramTest, SanityTestEmptyHistogram) {
-    constexpr auto kCollCard = 0;
+    constexpr CEType kCollCard{0.0};
     CEHistogramTester t(collName, kCollCard);
-    t.addHistogram("empty", std::make_unique<ArrayHistogram>());
+    t.addHistogram("empty", ArrayHistogram::make());
 
     ASSERT_MATCH_CE(t, "{empty: {$eq: 1.0}}", 0.0);
     ASSERT_MATCH_CE(t, "{empty: {$lt: 1.0}, empty: {$gt: 0.0}}", 0.0);
@@ -267,14 +268,14 @@ TEST(CEHistogramTest, SanityTestEmptyHistogram) {
 }
 
 TEST(CEHistogramTest, TestOneBucketOneIntHistogram) {
-    constexpr auto kCollCard = 50;
+    constexpr CEType kCollCard{50.0};
     CEHistogramTester t(collName, kCollCard);
 
     // Create a histogram with a single bucket that contains exactly one int (42) with a frequency
     // of 50 (equal to the collection cardinality).
     t.addHistogram("soloInt",
                    getArrayHistogramFromData({
-                       {Value(42), kCollCard /* frequency */},
+                       {Value(42), kCollCard._value /* frequency */},
                    }));
 
     // Check against a variety of intervals that include 42 as a bound.
@@ -318,7 +319,7 @@ TEST(CEHistogramTest, TestOneBucketOneIntHistogram) {
 }
 
 TEST(CEHistogramTest, TestOneBoundIntRangeHistogram) {
-    constexpr auto kCollCard = 51;
+    constexpr CEType kCollCard{51.0};
     CEHistogramTester t(collName, kCollCard);
     t.addHistogram("intRange",
                    getArrayHistogramFromData({
@@ -415,18 +416,18 @@ TEST(CEHistogramTest, TestOneBoundIntRangeHistogram) {
 }
 
 TEST(CEHistogramTest, TestHistogramOnNestedPaths) {
-    constexpr auto kCollCard = 50;
+    constexpr CEType kCollCard{50.0};
     CEHistogramTester t(collName, kCollCard);
 
     // Create a histogram with a single bucket that contains exactly one int (42) with a frequency
     // of 50 (equal to the collection cardinality).
     t.addHistogram("path",
                    getArrayHistogramFromData({
-                       {Value(42), kCollCard /* frequency */},
+                       {Value(42), kCollCard._value /* frequency */},
                    }));
     t.addHistogram("a.histogram.path",
                    getArrayHistogramFromData({
-                       {Value(42), kCollCard /* frequency */},
+                       {Value(42), kCollCard._value /* frequency */},
                    }));
 
     ASSERT_MATCH_CE(t, "{\"not.a.histogram.path\": {$eq: 42}}", 7.071 /* heuristic */);
@@ -466,7 +467,7 @@ TEST(CEHistogramTest, TestHistogramOnNestedPaths) {
 }
 
 TEST(CEHistogramTest, TestArrayHistogramOnAtomicPredicates) {
-    constexpr auto kCollCard = 6;
+    constexpr CEType kCollCard{6.0};
     CEHistogramTester t(collName, kCollCard);
     t.addHistogram(
         "a",
@@ -504,7 +505,7 @@ TEST(CEHistogramTest, TestArrayHistogramOnAtomicPredicates) {
                 {Value(10), 1 /* frequency */},
             },
             {{sbe::value::TypeTags::NumberInt32, 13}},  // Array type counts.
-            3,                                          // 3 arrays total.
+            4,                                          // 4 arrays (including []).
             1                                           // 1 empty array.
             ));
 
@@ -529,24 +530,24 @@ TEST(CEHistogramTest, TestArrayHistogramOnAtomicPredicates) {
     ASSERT_EQ_ELEMMATCH_CE(t, 0.0 /* CE */, 0.0 /* $elemMatch CE */, "a", "{$gt: 10}");
     ASSERT_EQ_ELEMMATCH_CE(t, 1.0 /* CE */, 1.0 /* $elemMatch CE */, "a", "{$gte: 10}");
 
-    ASSERT_EQ_ELEMMATCH_CE(t, 5.0 /* CE */, 3.0 /* $elemMatch CE */, "a", "{$lte: 10}");
-    ASSERT_EQ_ELEMMATCH_CE(t, 4.0 /* CE */, 3.0 /* $elemMatch CE */, "a", "{$lt: 10}");
-    ASSERT_EQ_ELEMMATCH_CE(t, 4.0 /* CE */, 3.0 /* $elemMatch CE */, "a", "{$gt: 1}");
-    ASSERT_EQ_ELEMMATCH_CE(t, 5.0 /* CE */, 3.0 /* $elemMatch CE */, "a", "{$gte: 1}");
+    ASSERT_EQ_ELEMMATCH_CE(t, 5.0 /* CE */, 4.0 /* $elemMatch CE */, "a", "{$lte: 10}");
+    ASSERT_EQ_ELEMMATCH_CE(t, 4.0 /* CE */, 4.0 /* $elemMatch CE */, "a", "{$lt: 10}");
+    ASSERT_EQ_ELEMMATCH_CE(t, 4.0 /* CE */, 4.0 /* $elemMatch CE */, "a", "{$gt: 1}");
+    ASSERT_EQ_ELEMMATCH_CE(t, 5.0 /* CE */, 4.0 /* $elemMatch CE */, "a", "{$gte: 1}");
 
-    ASSERT_EQ_ELEMMATCH_CE(t, 4.0 /* CE */, 3.0 /* $elemMatch CE */, "a", "{$lte: 5}");
-    ASSERT_EQ_ELEMMATCH_CE(t, 4.0 /* CE */, 3.0 /* $elemMatch CE */, "a", "{$lt: 5}");
+    ASSERT_EQ_ELEMMATCH_CE(t, 4.0 /* CE */, 4.0 /* $elemMatch CE */, "a", "{$lte: 5}");
+    ASSERT_EQ_ELEMMATCH_CE(t, 4.0 /* CE */, 4.0 /* $elemMatch CE */, "a", "{$lt: 5}");
     ASSERT_EQ_ELEMMATCH_CE(t, 2.0 /* CE */, 2.0 /* $elemMatch CE */, "a", "{$gt: 5}");
-    ASSERT_EQ_ELEMMATCH_CE(t, 2.0 /* CE */, 2.40822 /* $elemMatch CE */, "a", "{$gte: 5}");
+    ASSERT_EQ_ELEMMATCH_CE(t, 2.0 /* CE */, 2.55085 /* $elemMatch CE */, "a", "{$gte: 5}");
 
-    ASSERT_EQ_ELEMMATCH_CE(t, 2.45 /* CE */, 2.40822 /* $elemMatch CE */, "a", "{$gt: 2, $lt: 5}");
-    ASSERT_EQ_ELEMMATCH_CE(t, 3.27 /* CE */, 3.0 /* $elemMatch CE */, "a", "{$gte: 2, $lt: 5}");
-    ASSERT_EQ_ELEMMATCH_CE(t, 2.45 /* CE */, 3.0 /* $elemMatch CE */, "a", "{$gt: 2, $lte: 5}");
-    ASSERT_EQ_ELEMMATCH_CE(t, 3.27 /* CE */, 3.0 /* $elemMatch CE */, "a", "{$gte: 2, $lte: 5}");
+    ASSERT_EQ_ELEMMATCH_CE(t, 2.45 /* CE */, 2.55085 /* $elemMatch CE */, "a", "{$gt: 2, $lt: 5}");
+    ASSERT_EQ_ELEMMATCH_CE(t, 3.27 /* CE */, 4.0 /* $elemMatch CE */, "a", "{$gte: 2, $lt: 5}");
+    ASSERT_EQ_ELEMMATCH_CE(t, 2.45 /* CE */, 3.40113 /* $elemMatch CE */, "a", "{$gt: 2, $lte: 5}");
+    ASSERT_EQ_ELEMMATCH_CE(t, 3.27 /* CE */, 4.0 /* $elemMatch CE */, "a", "{$gte: 2, $lte: 5}");
 }
 
 TEST(CEHistogramTest, TestArrayHistogramOnCompositePredicates) {
-    constexpr auto kCollCard = 175;
+    constexpr CEType kCollCard{175.0};
     CEHistogramTester t(collName, kCollCard);
 
     // A scalar histogram with values in the range [1,10], most of which are in the middle bucket.
@@ -586,7 +587,7 @@ TEST(CEHistogramTest, TestArrayHistogramOnCompositePredicates) {
                 {Value(10), 35 /* frequency */},
             },
             {{sbe::value::TypeTags::NumberInt32, 420}},  // Array type count = 3*35+5*35+1*35+3*35.
-            kCollCard,                                   // kCollCard arrays total.
+            kCollCard._value,                            // kCollCard arrays total.
             35                                           // 35 empty arrays
             ));
 
@@ -733,7 +734,7 @@ TEST(CEHistogramTest, TestArrayHistogramOnCompositePredicates) {
 }
 
 TEST(CEHistogramTest, TestMixedElemMatchAndNonElemMatch) {
-    constexpr auto kCollCard = 1;
+    constexpr CEType kCollCard{1.0};
     CEHistogramTester t(collName, kCollCard);
 
     // A very simple histogram encoding a collection with one document {a: [3, 10]}.
@@ -777,7 +778,7 @@ TEST(CEHistogramTest, TestMixedElemMatchAndNonElemMatch) {
 }
 
 TEST(CEHistogramTest, TestTypeCounters) {
-    constexpr double kCollCard = 1000.0;
+    constexpr CEType kCollCard{1000.0};
     CEHistogramTester t(collName, kCollCard);
 
     // This test is designed such that for each document, we have the following fields:
@@ -797,7 +798,7 @@ TEST(CEHistogramTest, TestTypeCounters) {
                                              {/* No array max buckets. */},
                                              {{sbe::value::TypeTags::Object, kNumObj},
                                               {sbe::value::TypeTags::Null, kNumNull}},
-                                             kCollCard));
+                                             kCollCard._value));
 
     // Count of each type in array type counters for field "mixed".
     constexpr double kNumObjMA = 50.0;
@@ -1031,7 +1032,7 @@ TEST(CEHistogramTest, TestTypeCounters) {
 TEST(CEHistogramTest, TestNestedArrayTypeCounterPredicates) {
     // This test validates the correct behaviour of both the nested-array type counter as well as
     // combinations of type counters and histogram estimates.
-    constexpr double kCollCard = 1000.0;
+    constexpr CEType kCollCard{1000.0};
     constexpr double kNumArr = 600.0;      // Total number of arrays.
     constexpr double kNumNestArr = 500.0;  // Frequency of nested arrays, e.g. [[1, 2, 3]].
     constexpr double kNumNonNestArr = 100.0;
@@ -1046,7 +1047,7 @@ TEST(CEHistogramTest, TestNestedArrayTypeCounterPredicates) {
     // Sanity test numbers.
     ASSERT_EQ(kNumArr1 + kNumArr2, kNumArr3);
     ASSERT_EQ(kNumNonNestArr + kNumNestArr, kNumArr);
-    ASSERT_EQ(kNumObj + kNumArr + kNum1 + kNum2 + kNum3, kCollCard);
+    ASSERT_EQ(kNumObj + kNumArr + kNum1 + kNum2 + kNum3, kCollCard._value);
 
     // Define histogram buckets.
     TestBuckets scalarBuckets{{Value(1), kNum1}, {Value(2), kNum2}, {Value(3), kNum3}};
@@ -1148,14 +1149,91 @@ TEST(CEHistogramTest, TestFallbackForNonConstIntervals) {
         BoundRequirement(true /*inclusive*/, make<Variable>("v3"))};
 
     const auto estInterval = [](const auto& interval) {
-        ArrayHistogram ah;
+        const auto ah = ArrayHistogram::make();
         return estimateIntervalCardinality(
-            ah, interval, 100 /* inputCardinality */, true /* includeScalar */);
+            *ah, interval, {100} /* inputCardinality */, true /* includeScalar */);
     };
 
-    ASSERT_EQ(estInterval(intervalLowNonConst), -1.0);
-    ASSERT_EQ(estInterval(intervalHighNonConst), -1.0);
-    ASSERT_EQ(estInterval(intervalEqNonConst), -1.0);
+    ASSERT_EQ(estInterval(intervalLowNonConst)._value, -1.0);
+    ASSERT_EQ(estInterval(intervalHighNonConst)._value, -1.0);
+    ASSERT_EQ(estInterval(intervalEqNonConst)._value, -1.0);
+}
+
+TEST(CEHistogramTest, TestHistogramNeq) {
+    constexpr double collCard = 10.0;
+
+    CEHistogramTester t("test", {collCard});
+    {
+        std::vector<stats::SBEValue> values;
+        for (double v = 0; v < collCard; v++) {
+            values.push_back(stage_builder::makeValue(Value(v)));
+            values.push_back(stage_builder::makeValue(Value(BSON_ARRAY(v))));
+        }
+
+        auto ah = stats::createArrayEstimator(values, collCard /* Number of buckets. */);
+        t.addHistogram("a", ah);
+        t.setIndexes(
+            {{"indexA", makeIndexDefinition("a", CollationOp::Ascending, /* isMultiKey */ true)}});
+
+        if (kCETestLogOnly) {
+            std::cout << ah->serialize() << std::endl;
+        }
+    }
+
+    {
+        std::vector<stats::SBEValue> values;
+        std::string s = "charA";
+        for (double v = 0; v < collCard; v++) {
+            s[4] += (char)v;
+            values.push_back(stage_builder::makeValue(Value(s)));
+            values.push_back(stage_builder::makeValue(Value(BSON_ARRAY(s))));
+        }
+
+        auto ah = stats::createArrayEstimator(values, collCard /* Number of buckets. */);
+        t.addHistogram("b", ah);
+        t.setIndexes(
+            {{"indexB", makeIndexDefinition("b", CollationOp::Ascending, /* isMultiKey */ true)}});
+
+        if (kCETestLogOnly) {
+            std::cout << ah->serialize() << std::endl;
+        }
+    }
+
+    // In the scalar case, we generate 10 buckets, with each unique value as a boundary value with
+    // cardinality 1. In the array case, we do the same for min/max/unique. Unfortunately, we are
+    // not always able to generate sargable nodes, so we generally fall back to heuristic
+    // estimation.
+
+    CEType eqCE{2.0};
+    CEType eqElemCE{1.0};
+    CEType eqHeu{6.83772};
+    CEType eqHeuNotNe{3.16228};
+    ASSERT_EQ_ELEMMATCH_CE(t, eqCE, eqElemCE, "a", "{$eq: 5}");
+    ASSERT_EQ_ELEMMATCH_CE(t, eqHeu, eqHeu, "a", "{$not: {$eq: 5}}");
+    ASSERT_EQ_ELEMMATCH_CE(t, eqHeuNotNe, eqElemCE, "a", "{$not: {$ne: 5}}");
+    ASSERT_EQ_ELEMMATCH_CE(t, eqHeu, eqHeu, "a", "{$ne: 5}");
+
+    ASSERT_EQ_ELEMMATCH_CE(t, eqCE, eqElemCE, "b", "{$eq: 'charB'}");
+    ASSERT_EQ_ELEMMATCH_CE(t, eqHeu, eqHeu, "b", "{$not: {$eq: 'charB'}}");
+    ASSERT_EQ_ELEMMATCH_CE(t, eqHeuNotNe, eqElemCE, "b", "{$not: {$ne: 'charB'}}");
+    ASSERT_EQ_ELEMMATCH_CE(t, eqHeu, eqHeu, "b", "{$ne: 'charB'}");
+
+    // Test conjunctions where both fields have histograms. Note that when both ops are $ne, we
+    // never use histogram estimation because the optimizer only generates filetr nodes (no sargable
+    // nodes).
+    CEType neNeCE{4.22282};
+    CEType neEqCE{0.585786};
+    ASSERT_MATCH_CE(t, "{$and: [{a: {$ne: 7}}, {b: {$ne: 'charB'}}]}", neNeCE);
+    ASSERT_MATCH_CE(t, "{$and: [{a: {$ne: 7}}, {b: {$eq: 'charB'}}]}", neEqCE);
+    ASSERT_MATCH_CE(t, "{$and: [{a: {$ne: 7}}, {b: {$ne: 'charB'}}]}", neNeCE);
+    ASSERT_MATCH_CE(t, "{$and: [{a: {$ne: 7}}, {b: {$eq: 'charB'}}]}", neEqCE);
+
+    // Test conjunctions where only one field has a histogram (fallback to heuristics).
+    neEqCE = {1.384};
+    ASSERT_MATCH_CE(t, "{$and: [{a: {$ne: 7}}, {noHist: {$ne: 'charB'}}]}", neNeCE);
+    ASSERT_MATCH_CE(t, "{$and: [{a: {$ne: 7}}, {noHist: {$eq: 'charB'}}]}", neEqCE);
+    ASSERT_MATCH_CE(t, "{$and: [{a: {$ne: 7}}, {noHist: {$ne: 'charB'}}]}", neNeCE);
+    ASSERT_MATCH_CE(t, "{$and: [{a: {$ne: 7}}, {noHist: {$eq: 'charB'}}]}", neEqCE);
 }
 }  // namespace
 }  // namespace mongo::optimizer::ce

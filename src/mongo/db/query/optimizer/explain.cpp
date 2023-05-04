@@ -130,6 +130,12 @@ public:
         return *this;
     }
 
+    template <class TagType>
+    ExplainPrinterImpl& print(const StrongDoubleAlias<TagType>& t) {
+        print(t._value);
+        return *this;
+    }
+
     /**
      * Here and below: "other" printer(s) may be siphoned out.
      */
@@ -428,6 +434,11 @@ public:
     ExplainPrinterImpl& print(const StrongStringAlias<TagType>& s) {
         printStringInternal(s.value().toString());
         return *this;
+    }
+
+    template <class TagType>
+    ExplainPrinterImpl& print(const StrongDoubleAlias<TagType>& v) {
+        return print(v._value);
     }
 
     ExplainPrinterImpl& print(const char* s) {
@@ -1038,19 +1049,18 @@ public:
         printFieldProjectionMap(printer, node.getFieldProjectionMap());
         printer.separator("}, ");
 
-        const auto& spec = node.getIndexSpecification();
         printer.fieldName("scanDefName")
-            .print(spec.getScanDefName())
+            .print(node.getScanDefName())
             .separator(", ")
             .fieldName("indexDefName")
-            .print(spec.getIndexDefName())
+            .print(node.getIndexDefName())
             .separator(", ");
 
         printer.fieldName("interval").separator("{");
-        printInterval(printer, spec.getInterval());
+        printInterval(printer, node.getIndexInterval());
         printer.separator("}");
 
-        printBooleanFlag(printer, "reversed", spec.isReverseOrder());
+        printBooleanFlag(printer, "reversed", node.isIndexReverseOrder());
 
         printer.separator("]");
         nodeCEPropsPrint(printer, n, node);
@@ -1312,29 +1322,30 @@ public:
                 local.separator("}, ");
                 {
                     IntervalPrinter<CompoundIntervalReqExpr> intervalPrinter(*this);
-                    if (candidateIndexEntry._intervals.size() == 1) {
+                    if (candidateIndexEntry._eqPrefixes.size() == 1) {
                         local.fieldName("intervals", ExplainVersion::V3);
 
-                        ExplainPrinter intervals =
-                            intervalPrinter.print(candidateIndexEntry._intervals.front());
+                        ExplainPrinter intervals = intervalPrinter.print(
+                            candidateIndexEntry._eqPrefixes.front()._interval);
                         local.printSingleLevel(intervals, "" /*singleLevelSpacer*/);
                     } else {
-                        local.fieldName("intervals", ExplainVersion::V3);
+                        std::vector<ExplainPrinter> eqPrefixPrinters;
+                        for (const auto& entry : candidateIndexEntry._eqPrefixes) {
+                            ExplainPrinter eqPrefixPrinter;
+                            eqPrefixPrinter.fieldName("startPos", ExplainVersion::V3)
+                                .print(entry._startPos)
+                                .separator(", ");
 
-                        ExplainPrinter intervalVector;
-                        intervalVector.separator(" [");
-                        for (size_t i = 0; i < candidateIndexEntry._intervals.size(); i++) {
-                            const auto& entry = candidateIndexEntry._intervals.at(i);
-                            if (i > 0) {
-                                intervalVector.separator(", ");
-                            }
-                            ExplainPrinter intervals = intervalPrinter.print(entry);
-                            intervalVector
-                                .fieldName(str::stream() << "interval" << i, ExplainVersion::V3)
-                                .printSingleLevel(intervals, "" /*singleLevelSpacer*/);
+                            ExplainPrinter intervals = intervalPrinter.print(entry._interval);
+                            eqPrefixPrinter.separator("[")
+                                .fieldName("interval", ExplainVersion::V3)
+                                .printSingleLevel(intervals, "" /*singleLevelSpacer*/)
+                                .separator("]");
+
+                            eqPrefixPrinters.push_back(std::move(eqPrefixPrinter));
                         }
 
-                        local.printSingleLevel(intervalVector).separator("]");
+                        local.print(eqPrefixPrinters);
                     }
                 }
 
@@ -1559,6 +1570,22 @@ public:
     }
 
     ExplainPrinter transport(const ABT& n,
+                             const SortedMergeNode& node,
+                             std::vector<ExplainPrinter> childResults,
+                             ExplainPrinter bindResult,
+                             ExplainPrinter /*refsResult*/) {
+        ExplainPrinter printer("SortedMerge");
+        maybePrintProps(printer, node);
+        printer.separator(" []");
+        nodeCEPropsPrint(printer, n, node);
+        printer.setChildCount(childResults.size() + 2);
+        printCollationProperty(printer, node.getCollationReq(), false /*directToParent*/);
+        printer.fieldName("bindings", ExplainVersion::V3).print(bindResult);
+        printer.maybeReverse().fieldName("children", ExplainVersion::V3).print(childResults);
+        return printer;
+    }
+
+    ExplainPrinter transport(const ABT& n,
                              const NestedLoopJoinNode& node,
                              ExplainPrinter leftChildResult,
                              ExplainPrinter rightChildResult,
@@ -1702,6 +1729,52 @@ public:
         printer.setChildCount(2);
         printPropertyProjections(printer, node.getProjections(), false /*directToParent*/);
         printer.fieldName("child", ExplainVersion::V3).print(childResult);
+
+        return printer;
+    }
+
+    ExplainPrinter transport(const ABT& n,
+                             const SpoolProducerNode& node,
+                             ExplainPrinter childResult,
+                             ExplainPrinter filterResult,
+                             ExplainPrinter bindResult,
+                             ExplainPrinter refsResult) {
+        ExplainPrinter printer("SpoolProducer");
+        maybePrintProps(printer, node);
+
+        printer.separator(" [")
+            .fieldName("type", ExplainVersion::V3)
+            .print(SpoolProducerTypeEnum::toString[static_cast<int>(node.getType())])
+            .separator(", ")
+            .fieldName("id")
+            .print(node.getSpoolId())
+            .separator("]");
+
+        nodeCEPropsPrint(printer, n, node);
+        printer.setChildCount(3);
+        printer.fieldName("filter", ExplainVersion::V3).print(filterResult);
+        printer.fieldName("bindings", ExplainVersion::V3).print(bindResult);
+        printer.fieldName("child", ExplainVersion::V3).print(childResult);
+
+        return printer;
+    }
+
+    ExplainPrinter transport(const ABT& n,
+                             const SpoolConsumerNode& node,
+                             ExplainPrinter bindResult) {
+        ExplainPrinter printer("SpoolConsumer");
+        maybePrintProps(printer, node);
+
+        printer.separator(" [")
+            .fieldName("type", ExplainVersion::V3)
+            .print(SpoolConsumerTypeEnum::toString[static_cast<int>(node.getType())])
+            .separator(", ")
+            .fieldName("id")
+            .print(node.getSpoolId())
+            .separator("]");
+
+        nodeCEPropsPrint(printer, n, node);
+        printer.fieldName("bindings", ExplainVersion::V3).print(bindResult);
 
         return printer;
     }

@@ -65,30 +65,22 @@ env.SConscript(
 # all the server binaries. It must not depend on anything other than utilities that are outside of
 # the server codebase.
 env.Library(
-    target='server_base', source=[
-        'basic_types.idl',
+    target='server_base',
+    source=[
         'database_name.cpp',
-        'feature_compatibility_version_parser.cpp',
-        'feature_compatibility_version_document.idl',
-        'feature_flag.cpp',
         'index_names.cpp',
         'keypattern.cpp',
-        'logical_time.cpp',
-        'multitenancy.idl',
-        'namespace_string.cpp',
-        'server_parameter_with_storage.cpp',
-        'server_parameter.cpp',
-        'server_parameter.idl',
         'shard_id.cpp',
         'shutdown_in_progress_quiesce_info.cpp',
         'tenant_id.cpp',
-    ], LIBDEPS=[
+    ],
+    LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/idl/idl_parser',
         '$BUILD_DIR/mongo/util/options_parser/options_parser',
-    ], LIBDEPS_PRIVATE=[
         'server_options_core',
-    ])
+    ],
+)
 
 #
 # The db/'common' lib has the abstractions that are shared by components of the
@@ -321,11 +313,24 @@ env.Library(
 env.Library(
     target="server_options_core",
     source=[
+        'basic_types.idl',
         "server_options.cpp",
+        "catalog_shard_feature_flag.idl",
+        "cluster_role.cpp",
+        'feature_compatibility_version_parser.cpp',
+        'feature_compatibility_version_document.idl',
+        "feature_flag.cpp",
+        'logical_time.cpp',
+        'multitenancy.idl',
+        'namespace_string.cpp',
+        'server_parameter_with_storage.cpp',
+        'server_parameter.cpp',
+        'server_parameter.idl',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/bson/bson_validate',
+        '$BUILD_DIR/mongo/idl/idl_parser',
     ],
 )
 
@@ -1493,8 +1498,10 @@ env.Library(
         'query/sbe_stage_builder.cpp',
         'query/sbe_stage_builder_accumulator.cpp',
         'query/sbe_stage_builder_coll_scan.cpp',
+        'query/sbe_stage_builder_eval_frame.cpp',
         'query/sbe_stage_builder_expression.cpp',
         'query/sbe_stage_builder_filter.cpp',
+        'query/sbe_stage_builder_helpers.cpp',
         'query/sbe_stage_builder_index_scan.cpp',
         'query/sbe_stage_builder_lookup.cpp',
         'query/sbe_stage_builder_projection.cpp',
@@ -1525,6 +1532,7 @@ env.Library(
         'cursor_server_params',
         'dbdirectclient',
         'exec/projection_executor',
+        'exec/sbe/query_sbe_stages',
         'exec/sbe/query_sbe_storage',
         'exec/scoped_timer',
         'exec/sort_executor',
@@ -1540,7 +1548,6 @@ env.Library(
         'query/query_common',
         'query/query_plan_cache',
         'query/query_planner',
-        'query/sbe_stage_builder_helpers',
         'repl/repl_coordinator_interface',
         's/sharding_api_d',
         'session/logical_session_cache',
@@ -2380,6 +2387,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/set_change_stream_state_coordinator',
         '$BUILD_DIR/mongo/idl/cluster_server_parameter',
         '$BUILD_DIR/mongo/idl/cluster_server_parameter_op_observer',
+        '$BUILD_DIR/mongo/s/catalog/sharding_catalog_client_impl',
         '$BUILD_DIR/mongo/s/grid',
         '$BUILD_DIR/mongo/s/sessions_collection_sharded',
         '$BUILD_DIR/mongo/scripting/scripting',
@@ -2619,6 +2627,7 @@ if wiredtiger:
         LIBDEPS=[
             '$BUILD_DIR/mongo/bson/util/bson_extract',
             '$BUILD_DIR/mongo/client/read_preference',
+            '$BUILD_DIR/mongo/crypto/aead_encryption',
             '$BUILD_DIR/mongo/crypto/encrypted_field_config',
             '$BUILD_DIR/mongo/crypto/fle_crypto',
             '$BUILD_DIR/mongo/db/auth/auth',
@@ -2656,6 +2665,7 @@ if wiredtiger:
             '$BUILD_DIR/mongo/executor/async_timer_mock',
             '$BUILD_DIR/mongo/rpc/command_status',
             '$BUILD_DIR/mongo/rpc/rpc',
+            '$BUILD_DIR/mongo/shell/kms_idl',
             '$BUILD_DIR/mongo/transport/transport_layer_mock',
             '$BUILD_DIR/mongo/util/clock_source_mock',
             '$BUILD_DIR/mongo/util/net/network',

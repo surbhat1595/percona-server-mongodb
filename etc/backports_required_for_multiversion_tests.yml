@@ -280,12 +280,16 @@ last-continuous:
     ticket: SERVER-56186
   - test_file: jstests/replsets/apply_ops_strips_hash.js
     ticket: SERVER-70841
+  - test_file: jstests/replsets/wtimeout_too_large.js
+    ticket: SERVER-70360
   - test_file: jstests/sharding/all_collection_stats.js
     ticket: SERVER-71477
   - test_file: jstests/sharding/timeseries_sharding_admin_commands.js
     ticket: SERVER-70790
   - test_file: jstests/sharding/invalid_system_views_sharded_collection.js
     ticket: SERVER-71667
+  - test_file: jstests/sharding/drop_collection.js
+    ticket: SERVER-71689
   suites: null
 last-lts:
   all:
@@ -641,10 +645,14 @@ last-lts:
     ticket: SERVER-56186
   - test_file: jstests/replsets/apply_ops_strips_hash.js
     ticket: SERVER-70841
+  - test_file: jstests/replsets/wtimeout_too_large.js
+    ticket: SERVER-70360
   - test_file: jstests/sharding/all_collection_stats.js
     ticket: SERVER-71477
   - test_file: jstests/sharding/timeseries_sharding_admin_commands.js
     ticket: SERVER-70790
   - test_file: jstests/sharding/invalid_system_views_sharded_collection.js
     ticket: SERVER-71667
+  - test_file: jstests/sharding/drop_collection.js
+    ticket: SERVER-71689
   suites: null

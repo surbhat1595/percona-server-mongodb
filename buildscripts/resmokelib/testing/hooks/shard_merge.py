@@ -10,6 +10,8 @@ import uuid
 import bson
 import pymongo.errors
 
+from bson.objectid import ObjectId
+
 from buildscripts.resmokelib import errors
 from buildscripts.resmokelib.testing.fixtures import interface as fixture_interface
 from buildscripts.resmokelib.testing.fixtures import shard_merge
@@ -377,7 +379,7 @@ class _ShardMergeThread(threading.Thread):  # pylint: disable=too-many-instance-
                                   self.logger, donor_rs_index, recipient_rs_index)
 
     def _create_client(self, node):
-        return fixture_interface.authenticate(node.mongo_client(), self._auth_options)
+        return fixture_interface.build_client(node, self._auth_options)
 
     def _check_tenant_migration_dbhash(self, migration_opts):
         # Set the donor connection string, recipient connection string, and migration uuid string
@@ -459,7 +461,7 @@ class _ShardMergeThread(threading.Thread):  # pylint: disable=too-many-instance-
                     bson.SON([("configureFailPoint",
                                "abortTenantMigrationBeforeLeavingBlockingState"), ("mode", "off")]))
                 return
-            except (pymongo.errors.AutoReconnect, pymongo.errors.NotMasterError):
+            except (pymongo.errors.AutoReconnect, pymongo.errors.NotPrimaryError):
                 self.logger.info(
                     "Retrying connection to donor primary in order to disable abort failpoint for shard merge."
                 )
@@ -472,16 +474,20 @@ class _ShardMergeThread(threading.Thread):  # pylint: disable=too-many-instance-
         """
         cmd_obj = {
             "donorStartMigration":
-                1, "migrationId":
-                    bson.Binary(migration_opts.migration_id.bytes, 4), "recipientConnectionString":
-                        migration_opts.recipient_rs.get_driver_connection_url(), "readPreference":
-                            migration_opts.read_preference,
+                1,
+            "migrationId":
+                bson.Binary(migration_opts.migration_id.bytes, 4),
+            "recipientConnectionString":
+                migration_opts.recipient_rs.get_driver_connection_url(),
+            "readPreference":
+                migration_opts.read_preference,
             "donorCertificateForRecipient":
                 get_certificate_and_private_key("jstests/libs/tenant_migration_donor.pem"),
             "recipientCertificateForDonor":
                 get_certificate_and_private_key("jstests/libs/tenant_migration_recipient.pem"),
             "protocol":
-                "shard merge"
+                "shard merge",
+            "tenantIds": [ObjectId(migration_opts.tenant_id)],
         }
         donor_primary = migration_opts.get_donor_primary()
         # TODO(SERVER-68643) We no longer need to override the failpoint once milestone 3 is done
@@ -508,7 +514,7 @@ class _ShardMergeThread(threading.Thread):  # pylint: disable=too-many-instance-
                 res = donor_primary_client.admin.command(
                     cmd_obj,
                     bson.codec_options.CodecOptions(uuid_representation=bson.binary.UUID_SUBTYPE))
-            except (pymongo.errors.AutoReconnect, pymongo.errors.NotMasterError):
+            except (pymongo.errors.AutoReconnect, pymongo.errors.NotPrimaryError):
                 donor_primary = migration_opts.get_donor_primary()
                 self.logger.info(
                     "Retrying shard merge '%s' against donor primary on port %d of" +
@@ -556,7 +562,7 @@ class _ShardMergeThread(threading.Thread):  # pylint: disable=too-many-instance-
                     cmd_obj,
                     bson.codec_options.CodecOptions(uuid_representation=bson.binary.UUID_SUBTYPE))
                 return
-            except (pymongo.errors.AutoReconnect, pymongo.errors.NotMasterError):
+            except (pymongo.errors.AutoReconnect, pymongo.errors.NotPrimaryError):
                 donor_primary = migration_opts.get_donor_primary()
                 self.logger.info(
                     "Retrying forgetting shard merge '%s' against donor primary on port %d of " +
@@ -600,8 +606,8 @@ class _ShardMergeThread(threading.Thread):  # pylint: disable=too-many-instance-
                         })
                         if res["n"] == 0:
                             break
-                    except (pymongo.errors.AutoReconnect, pymongo.errors.NotMasterError):
-                        # Ignore NotMasterErrors because it's possible to fail with
+                    except (pymongo.errors.AutoReconnect, pymongo.errors.NotPrimaryError):
+                        # Ignore NotPrimaryErrors because it's possible to fail with
                         # InterruptedDueToReplStateChange if the donor primary steps down or shuts
                         # down during the garbage collection check.
                         self.logger.info(
@@ -628,8 +634,8 @@ class _ShardMergeThread(threading.Thread):  # pylint: disable=too-many-instance-
                         })
                         if res["n"] == 0:
                             break
-                    except (pymongo.errors.AutoReconnect, pymongo.errors.NotMasterError):
-                        # Ignore NotMasterErrors because it's possible to fail with
+                    except (pymongo.errors.AutoReconnect, pymongo.errors.NotPrimaryError):
+                        # Ignore NotPrimaryErrors because it's possible to fail with
                         # InterruptedDueToReplStateChange if the recipient primary steps down or
                         # shuts down during the garbage collection check.
                         self.logger.info(
@@ -663,7 +669,7 @@ class _ShardMergeThread(threading.Thread):  # pylint: disable=too-many-instance-
                     {"_id": bson.Binary(migration_opts.migration_id.bytes, 4)})
                 if doc is not None:
                     return
-            except (pymongo.errors.AutoReconnect, pymongo.errors.NotMasterError):
+            except (pymongo.errors.AutoReconnect, pymongo.errors.NotPrimaryError):
                 donor_primary = migration_opts.get_donor_primary()
                 self.logger.info(
                     "Retrying waiting for donor primary on port '%d' of replica set '%s' for " +
@@ -698,7 +704,7 @@ class _ShardMergeThread(threading.Thread):  # pylint: disable=too-many-instance-
                 return
             # We retry on all write concern errors because we assume the only reason waiting for
             # write concern should fail is because of a failover.
-            except (pymongo.errors.AutoReconnect, pymongo.errors.NotMasterError,
+            except (pymongo.errors.AutoReconnect, pymongo.errors.NotPrimaryError,
                     pymongo.errors.WriteConcernError) as err:
                 primary = get_primary(rs, self.logger)
                 self.logger.info(
@@ -725,7 +731,7 @@ class _ShardMergeThread(threading.Thread):  # pylint: disable=too-many-instance-
                 server_status = client.admin.command({"serverStatus": 1})
                 pending_drop_idents = server_status["storageEngine"]["dropPendingIdents"]
                 break
-            except (pymongo.errors.AutoReconnect, pymongo.errors.NotMasterError,
+            except (pymongo.errors.AutoReconnect, pymongo.errors.NotPrimaryError,
                     pymongo.errors.WriteConcernError) as err:
                 self.logger.info(
                     "Retrying getting dropPendingIdents against primary on port %d after error %s.",

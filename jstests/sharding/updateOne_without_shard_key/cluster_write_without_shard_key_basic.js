@@ -2,7 +2,7 @@
  * Tests the internal command _clusterWriteWithoutShardKey. The command must be run in a
  * transaction.
  *
- * @tags: [requires_fcv_62, featureFlagUpdateOneWithoutShardKey]
+ * @tags: [requires_fcv_63, featureFlagUpdateOneWithoutShardKey]
  */
 (function() {
 "use strict";
@@ -46,6 +46,7 @@ function runAndVerifyCommand(testCase) {
     switch (Object.keys(testCase.cmdObj.writeCmd)[0]) {
         case "update":
             assert.eq(1, res.response.nModified, res.response);
+            assert.eq(res.shardId, testCase.cmdObj.shardId);
             assert.eq(testCase.expectedResultDoc,
                       mongosConn.getCollection(collName).findOne(testCase.expectedResultDoc));
 
@@ -56,12 +57,14 @@ function runAndVerifyCommand(testCase) {
             break;
         case "delete":
             assert.eq(1, res.response.n, res.response);
+            assert.eq(res.shardId, testCase.cmdObj.shardId);
             assert.eq(null,
                       mongosConn.getCollection(collName).findOne(testCase.cmdObj.targetDocId));
             break;
         case "findAndModify":
         case "findandmodify":
             assert.eq(1, res.response.lastErrorObject.n, res.response);
+            assert.eq(res.shardId, testCase.cmdObj.shardId);
             assert.eq(testCase.expectedModifiedDoc,
                       mongosConn.getCollection(collName).findOne(testCase.cmdObj.targetDocId));
 

@@ -200,6 +200,7 @@ public:
 
 private:
     void onStartup(OperationContext* opCtx) override {}
+    void onSetCurrentConfig(OperationContext* opCtx) override {}
     void onInitialDataAvailable(OperationContext* opCtx, bool isMajorityDataAvailable) override {}
     void onShutdown() override {}
     void onStepUpBegin(OperationContext* opCtx, long long term) override {}
@@ -438,8 +439,8 @@ bool TTLMonitor::_doTTLIndexDelete(OperationContext* opCtx,
         if (coll.getDb() &&
             nullptr !=
                 (mtab = TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext())
-                            .getTenantMigrationAccessBlockerForDbName(
-                                coll.getDb()->name().toString(), MtabType::kRecipient)) &&
+                            .getTenantMigrationAccessBlockerForDbName(coll.getDb()->name(),
+                                                                      MtabType::kRecipient)) &&
             mtab->checkIfShouldBlockTTL()) {
             LOGV2_DEBUG(53768,
                         1,

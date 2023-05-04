@@ -819,6 +819,16 @@ void IndexBuildsCoordinator::abortTenantIndexBuilds(OperationContext* opCtx,
         return activeIndexBuilds.filterIndexBuilds(indexBuildFilter);
     }();
 
+    _abortTenantIndexBuilds(opCtx, builds, protocol, tenantId, reason);
+}
+
+void IndexBuildsCoordinator::_abortTenantIndexBuilds(
+    OperationContext* opCtx,
+    const std::vector<std::shared_ptr<ReplIndexBuildState>>& builds,
+    MigrationProtocolEnum protocol,
+    StringData tenantId,
+    const std::string& reason) {
+
     std::vector<std::shared_ptr<ReplIndexBuildState>> buildsWaitingToFinish;
     buildsWaitingToFinish.reserve(builds.size());
     const auto indexBuildActionStr =
@@ -848,6 +858,27 @@ void IndexBuildsCoordinator::abortTenantIndexBuilds(OperationContext* opCtx,
         awaitNoIndexBuildInProgressForCollection(
             opCtx, replState->collectionUUID, replState->protocol);
     }
+}
+
+void IndexBuildsCoordinator::abortTenantIndexBuilds(OperationContext* opCtx,
+                                                    MigrationProtocolEnum protocol,
+                                                    const boost::optional<TenantId>& tenantId,
+                                                    const std::string& reason) {
+    const auto tenantIdStr = tenantId ? tenantId->toString() : "";
+    LOGV2(4886205,
+          "About to abort all index builders running for collections belonging to the given tenant",
+          "tenantId"_attr = tenantIdStr,
+          "reason"_attr = reason);
+
+    auto builds = [&]() -> std::vector<std::shared_ptr<ReplIndexBuildState>> {
+        auto indexBuildFilter = [=](const auto& replState) {
+            // Abort *all* index builds at the start of shard merge.
+            return repl::ClonerUtils::isDatabaseForTenant(replState.dbName, tenantId, protocol);
+        };
+        return activeIndexBuilds.filterIndexBuilds(indexBuildFilter);
+    }();
+
+    _abortTenantIndexBuilds(opCtx, builds, protocol, tenantIdStr, reason);
 }
 
 void IndexBuildsCoordinator::abortAllIndexBuildsForInitialSync(OperationContext* opCtx,
@@ -3091,8 +3122,23 @@ std::vector<BSONObj> IndexBuildsCoordinator::prepareSpecListForCreate(
 
     // During secondary oplog application, the index specs have already been normalized in the
     // oplog entries read from the primary. We should not be modifying the specs any further.
+    auto indexCatalog = collection->getIndexCatalog();
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     if (!replCoord->canAcceptWritesFor(opCtx, nss)) {
+        // A secondary node with a subset of the indexes already built will not vote for the commit
+        // quorum, which can stall the index build indefinitely on a replica set.
+        auto specsToBuild = indexCatalog->removeExistingIndexes(
+            opCtx, collection, indexSpecs, /*removeIndexBuildsToo=*/true);
+        if (indexSpecs.size() != specsToBuild.size()) {
+            LOGV2_WARNING(7176900,
+                          "Secondary node already has a subset of indexes built and will not "
+                          "participate in voting towards the commit quorum. Use the "
+                          "'setIndexCommitQuorum' command to adjust the commit quorum accordingly",
+                          logAttrs(nss),
+                          logAttrs(collection->uuid()),
+                          "requestedSpecs"_attr = indexSpecs,
+                          "specsToBuild"_attr = specsToBuild);
+        }
         return indexSpecs;
     }
 
@@ -3100,7 +3146,6 @@ std::vector<BSONObj> IndexBuildsCoordinator::prepareSpecListForCreate(
     auto normalSpecs = normalizeIndexSpecs(opCtx, collection, indexSpecs);
 
     // Remove any index specifications which already exist in the catalog.
-    auto indexCatalog = collection->getIndexCatalog();
     auto resultSpecs = indexCatalog->removeExistingIndexes(
         opCtx, collection, normalSpecs, true /*removeIndexBuildsToo*/);
 

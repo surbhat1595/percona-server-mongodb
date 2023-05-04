@@ -94,6 +94,9 @@ const ReadPreferenceSetting kPrimaryOnlyReadPreference(ReadPreference::PrimaryOn
 
 const int kMaxRecipientKeyDocsFindAttempts = 10;
 
+using RecipientForgetMigrationRPCOptions = async_rpc::AsyncRPCOptions<RecipientForgetMigration>;
+using RecipientSyncDataRPCOptions = async_rpc::AsyncRPCOptions<RecipientSyncData>;
+
 /**
  * Encapsulates the retry logic for sending the ForgetMigration command.
  */
@@ -804,8 +807,9 @@ ExecutorFuture<void> TenantMigrationDonorService::Instance::_sendRecipientSyncDa
         kPrimaryOnlyReadPreference, recipientTargeterRS);
     auto retryPolicy =
         std::make_shared<RecipientSyncDataRetryPolicy>(getProtocol(), kExponentialBackoff);
-    auto cmdRes = async_rpc::sendCommand(
-        request, _serviceContext, std::move(asyncTargeter), **exec, token, retryPolicy);
+    auto options =
+        std::make_shared<RecipientSyncDataRPCOptions>(request, **exec, token, retryPolicy);
+    auto cmdRes = async_rpc::sendCommand(options, _serviceContext, std::move(asyncTargeter));
     return std::move(cmdRes).ignoreValue().onError([](Status status) {
         return async_rpc::unpackRPCStatusIgnoringWriteConcernAndWriteErrors(status).addContext(
             "Tenant migration recipient command failed");
@@ -836,8 +840,9 @@ ExecutorFuture<void> TenantMigrationDonorService::Instance::_sendRecipientForget
     auto asyncTargeter = std::make_unique<async_rpc::AsyncRemoteCommandTargeterAdapter>(
         kPrimaryOnlyReadPreference, recipientTargeterRS);
     auto retryPolicy = std::make_shared<RecipientForgetMigrationRetryPolicy>(kExponentialBackoff);
-    auto cmdRes = async_rpc::sendCommand(
-        request, _serviceContext, std::move(asyncTargeter), **exec, token, retryPolicy);
+    auto options =
+        std::make_shared<RecipientForgetMigrationRPCOptions>(request, **exec, token, retryPolicy);
+    auto cmdRes = async_rpc::sendCommand(options, _serviceContext, std::move(asyncTargeter));
     return std::move(cmdRes).ignoreValue().onError([](Status status) {
         return async_rpc::unpackRPCStatusIgnoringWriteConcernAndWriteErrors(status).addContext(
             "Tenant migration recipient command failed");
@@ -974,6 +979,11 @@ SemiFuture<void> TenantMigrationDonorService::Instance::run(
                 executor, recipientTargeterRS, token);
         })
         .then([this, self = shared_from_this(), executor, token] {
+            pauseTenantMigrationDonorAfterMarkingStateGarbageCollectable.pauseWhileSet();
+            {
+                stdx::lock_guard<Latch> lg(_mutex);
+                setPromiseOkIfNotReady(lg, _forgetMigrationDurablePromise);
+            }
             return _waitForGarbageCollectionDelayThenDeleteStateDoc(executor, token);
         })
         .onCompletion([this,
@@ -1525,11 +1535,6 @@ TenantMigrationDonorService::Instance::_waitForForgetMigrationThenMarkMigrationG
         })
         .then([this, self = shared_from_this(), executor, token](repl::OpTime opTime) {
             return _waitForMajorityWriteConcern(executor, std::move(opTime), token);
-        })
-        .then([this, self = shared_from_this()] {
-            pauseTenantMigrationDonorAfterMarkingStateGarbageCollectable.pauseWhileSet();
-            stdx::lock_guard<Latch> lg(_mutex);
-            setPromiseOkIfNotReady(lg, _forgetMigrationDurablePromise);
         });
 }
 

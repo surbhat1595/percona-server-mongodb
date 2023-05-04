@@ -1,14 +1,12 @@
 /**
  * Tests the eligibility of certain queries to use a columnstore index.
  * @tags: [
+ *   requires_fcv_63,
  *   # Refusing to run a test that issues an aggregation command with explain because it may return
  *   # incomplete results if interrupted by a stepdown.
  *   does_not_support_stepdowns,
  *   # Cannot run aggregate with explain in a transaction.
  *   does_not_support_transactions,
- *   # column store indexes are still under a feature flag and require full sbe
- *   featureFlagColumnstoreIndexes,
- *   featureFlagSbeFull,
  *   # Columnstore tests set server parameters to disable columnstore query planning heuristics -
  *   # server parameters are stored in-memory only so are not transferred onto the recipient.
  *   tenant_migration_incompatible,
@@ -20,10 +18,14 @@
 
 load("jstests/libs/analyze_plan.js");
 load("jstests/libs/columnstore_util.js");  // For setUpServerForColumnStoreIndexTest.
+load("jstests/libs/fixture_helpers.js");   // For FixtureHelpers.isMongos.
+load("jstests/libs/sbe_util.js");          // For checkSBEEnabled.
 
 if (!setUpServerForColumnStoreIndexTest(db)) {
     return;
 }
+
+const sbeFull = checkSBEEnabled(db, ["featureFlagSbeFull"]);
 
 const coll = db.columnstore_eligibility;
 coll.drop();
@@ -63,7 +65,14 @@ assert(planHasStage(db, explain, "COLUMN_SCAN"), explain);
 // Filter is not eligible for use during column scan, but set of fields is limited enough. Filter
 // will be applied after assembling an intermediate result containing both "a" and "b".
 explain = coll.find({$or: [{a: 2}, {b: 2}]}, {_id: 0, a: 1}).explain();
-assert(planHasStage(db, explain, "COLUMN_SCAN"), explain);
+
+// For top-level $or queries, COLUMN_SCAN is only used when sbeFull is also enabled due to a
+// quirk in the engine selection logic. TODO: SERVER-XYZ.
+if (sbeFull) {
+    assert(planHasStage(db, explain, "COLUMN_SCAN"), explain);
+} else {
+    assert(planHasStage(db, explain, "COLLSCAN"), explain);
+}
 
 // Simplest case: just scan "a" column.
 explain = coll.find({a: {$exists: true}}, {_id: 0, a: 1}).explain();
@@ -174,4 +183,66 @@ assert.commandWorked(coll.createIndex({a: 1}));
 explain = coll.explain().aggregate([{$match: {a: 1}}, {$count: "count"}]);
 assert(aggPlanHasStage(explain, "COUNT_SCAN") || aggPlanHasStage(explain, "IXSCAN"), explain);
 assert.commandWorked(coll.dropIndex({a: 1}));
+
+// CSI Can never be used for a filter/$match on numeric components because that represents a
+// filter over 2^k columns, where k is the number of numeric components. E.g.
+// find({a.0.b.1: 123}) represents 4 paths:
+//
+// {a: {0: {b: {1: 123}}}}
+// {a: [{b: {1: 123}}]}
+// {a: {0: {b: [<anything>, 123]}}}
+// {a: [{b: [<anything>, 123]}]}
+//
+// Today we're guaranteed CSI will never be used when numeric components are present in a
+// filter because SBE does not support querying on such paths.
+explain = coll.find({'a.0': 2}, {_id: 0, 'a.b': 1}).explain();
+assert(!planHasStage(db, explain, "COLUMN_SCAN"), explain);
+
+explain = coll.find({'a.0.b.1': 2}, {_id: 0, 'a.b': 1}).explain();
+assert(!planHasStage(db, explain, "COLUMN_SCAN"), explain);
+
+// CSI _can_ be used when there's a numeric path component used in a projection. This
+// is because MQL projection treats numeric components only as object keys, not array indexes.
+explain = coll.find({'a.b': 2}, {_id: 0, 'a.0': 1}).explain();
+assert(planHasStage(db, explain, "COLUMN_SCAN"), explain);
+
+explain = coll.find({'a.b': 2}, {_id: 0, 'a.0.b.123': 1}).explain();
+assert(planHasStage(db, explain, "COLUMN_SCAN"), explain);
+
+// Test that a column store index on a subpath can be used and hinted when it covers the query.
+const subpath_idx_coll = db.columnstore_eligibility_subpath;
+subpath_idx_coll.drop();
+assert.commandWorked(subpath_idx_coll.insert({_id: 0, a: 1, b: 2}));
+assert.commandWorked(subpath_idx_coll.createIndex({"a.$**": "columnstore"}));
+
+// Index covers query, can be used.
+// Note that this is only applicable in non-sharded environments, as the index will not be able to
+// cover the query if we need the shard key.
+explain = subpath_idx_coll.find({a: 1}, {_id: 0, a: 1}).explain();
+assert(planHasStage(db, explain, "COLUMN_SCAN") || FixtureHelpers.isMongos(db), explain);
+
+// Index does not cover query.
+explain = subpath_idx_coll.find({b: 1}, {_id: 0, b: 1}).explain();
+assert(!planHasStage(db, explain, "COLUMN_SCAN"), explain);
+
+// Test hinting the subpath index. Sanity check - should use a traditional index without a hint.
+assert.commandWorked(subpath_idx_coll.createIndex({a: 1}));
+explain = subpath_idx_coll.find({a: 1}, {_id: 0, a: 1}).explain();
+assert(!planHasStage(db, explain, "COLUMN_SCAN"), explain);
+
+// Hint the subpath index.
+if (!FixtureHelpers.isMongos(db)) {
+    explain =
+        subpath_idx_coll.find({a: 1}, {_id: 0, a: 1}).hint({"a.$**": "columnstore"}).explain();
+    assert(planHasStage(db, explain, "COLUMN_SCAN"), explain);
+}
+
+// Hint when subpath index doesn't cover query.
+assert.commandFailedWithCode(db.runCommand({
+    find: subpath_idx_coll.getName(),
+    filter: {b: 1},
+    projection: {_id: 0, b: 1},
+    hint: {"a.$**": "columnstore"}
+}),
+                             6714002);
 }());

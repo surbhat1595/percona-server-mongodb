@@ -102,11 +102,15 @@ void TenantMigrationAccessBlockerRegistry::add(StringData tenantId,
     _tenantMigrationAccessBlockers.emplace(tenantId, mtabPair);
 }
 
+void TenantMigrationAccessBlockerRegistry::add(const TenantId& tenantId,
+                                               std::shared_ptr<TenantMigrationAccessBlocker> mtab) {
+    add(tenantId.toString(), mtab);
+}
+
 void TenantMigrationAccessBlockerRegistry::add(const std::vector<TenantId>& tenantIds,
                                                std::shared_ptr<TenantMigrationAccessBlocker> mtab) {
-    // TODO SERVER-71186 use tenantId directly instead of a string conversion.
     for (auto&& tenantId : tenantIds) {
-        add(tenantId.toString(), mtab);
+        add(tenantId, mtab);
     }
 }
 
@@ -162,6 +166,10 @@ void TenantMigrationAccessBlockerRegistry::remove(StringData tenantId, MtabType 
     _remove(lg, tenantId, type);
 }
 
+void TenantMigrationAccessBlockerRegistry::remove(const TenantId& tenantId, MtabType type) {
+    remove(tenantId.toString(), type);
+}
+
 void TenantMigrationAccessBlockerRegistry::removeAccessBlockersForMigration(
     const UUID& migrationId, TenantMigrationAccessBlocker::BlockerType type) {
     stdx::lock_guard<Latch> lg(_mutex);
@@ -210,10 +218,11 @@ void TenantMigrationAccessBlockerRegistry::removeAll(MtabType type) {
 }
 
 boost::optional<MtabPair> TenantMigrationAccessBlockerRegistry::getAccessBlockersForDbName(
-    StringData dbName) {
+    const DatabaseName& dbName) {
     stdx::lock_guard<Latch> lg(_mutex);
     auto donorAccessBlocker = _getAllTenantDonorAccessBlocker(lg, dbName);
-    auto tenantId = tenant_migration_access_blocker::parseTenantIdFromDB(dbName);
+    const auto tenantId =
+        tenant_migration_access_blocker::parseTenantIdFromDB(dbName.toStringWithTenantId());
 
     if (!tenantId && donorAccessBlocker) {
         return MtabPair{donorAccessBlocker};
@@ -243,8 +252,8 @@ boost::optional<MtabPair> TenantMigrationAccessBlockerRegistry::getAccessBlocker
 }
 
 std::shared_ptr<TenantMigrationAccessBlocker>
-TenantMigrationAccessBlockerRegistry::getTenantMigrationAccessBlockerForDbName(StringData dbName,
-                                                                               MtabType type) {
+TenantMigrationAccessBlockerRegistry::getTenantMigrationAccessBlockerForDbName(
+    const DatabaseName& dbName, MtabType type) {
     auto mtabPair = getAccessBlockersForDbName(dbName);
     if (!mtabPair) {
         return nullptr;
@@ -283,10 +292,10 @@ TenantMigrationAccessBlockerRegistry::getAccessBlockerForMigration(
 }
 
 std::shared_ptr<TenantMigrationDonorAccessBlocker>
-TenantMigrationAccessBlockerRegistry::_getAllTenantDonorAccessBlocker(WithLock lk,
-                                                                      StringData dbName) const {
+TenantMigrationAccessBlockerRegistry::_getAllTenantDonorAccessBlocker(
+    WithLock lk, const DatabaseName& dbName) const {
     // No-op oplog entries, e.g. for linearizable reads, use namespace "".
-    bool isInternal = (dbName == "" || NamespaceString(dbName).isOnInternalDb());
+    bool isInternal = (dbName.db() == "" || NamespaceString(dbName).isOnInternalDb());
     if (isInternal) {
         return nullptr;
     }
@@ -308,6 +317,12 @@ TenantMigrationAccessBlockerRegistry::getTenantMigrationAccessBlockerForTenantId
         return it->second.getAccessBlocker(type);
     }
     return nullptr;
+}
+
+std::shared_ptr<TenantMigrationAccessBlocker>
+TenantMigrationAccessBlockerRegistry::getTenantMigrationAccessBlockerForTenantId(
+    const TenantId& tenantId, MtabType type) {
+    return getTenantMigrationAccessBlockerForTenantId(tenantId.toString(), type);
 }
 
 void TenantMigrationAccessBlockerRegistry::applyAll(TenantMigrationAccessBlocker::BlockerType type,

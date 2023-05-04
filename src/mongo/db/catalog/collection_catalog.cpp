@@ -447,6 +447,14 @@ std::shared_ptr<const CollectionCatalog> CollectionCatalog::latest(ServiceContex
 }
 
 std::shared_ptr<const CollectionCatalog> CollectionCatalog::get(OperationContext* opCtx) {
+    const auto& stashed = stashedCatalog(opCtx->recoveryUnit()->getSnapshot());
+    if (stashed)
+        return stashed;
+
+    return latest(opCtx);
+}
+
+std::shared_ptr<const CollectionCatalog> CollectionCatalog::latest(OperationContext* opCtx) {
     // If there is a batched catalog write ongoing and we are the one doing it return this instance
     // so we can observe our own writes. There may be other callers that reads the CollectionCatalog
     // without any locks, they must see the immutable regular instance.
@@ -454,9 +462,6 @@ std::shared_ptr<const CollectionCatalog> CollectionCatalog::get(OperationContext
         return batchedCatalogWriteInstance;
     }
 
-    const auto& stashed = stashedCatalog(opCtx->recoveryUnit()->getSnapshot());
-    if (stashed)
-        return stashed;
     return latest(opCtx->getServiceContext());
 }
 
@@ -793,22 +798,31 @@ CollectionPtr CollectionCatalog::openCollection(OperationContext* opCtx,
             catalogId = lookupResult.id;
         }
 
-        auto catalogEntry = DurableCatalog::get(opCtx)->getParsedCatalogEntry(opCtx, catalogId);
-        if (!catalogEntry || nss != catalogEntry->metadata->nss) {
+        auto catalogEntry = DurableCatalog::get(opCtx)->getCatalogEntry(opCtx, catalogId);
+        if (catalogEntry.isEmpty() ||
+            nss != DurableCatalog::getNamespaceFromCatalogEntry(catalogEntry)) {
             return CollectionPtr();
         }
-        auto latestCollection = _lookupCollectionByUUID(*catalogEntry->metadata->options.uuid);
+
+        auto latestCollection = lookupCollectionByNamespaceForRead(opCtx, nss);
+        auto metadata = DurableCatalog::getMetadataFromCatalogEntry(catalogEntry);
 
         // Use the pendingCollection if there is no latestCollection or if the metadata of the
         // latestCollection doesn't match the durable catalogEntry.
-        if (!latestCollection || !latestCollection->isMetadataEqual(*catalogEntry->metadata)) {
-            invariant(pendingCollection->isMetadataEqual(*catalogEntry->metadata));
+        if (!latestCollection || !latestCollection->isMetadataEqual(metadata)) {
+            // If the latest collection doesn't exist then the pending collection must exist as it's
+            // being created in this snapshot. Otherwise, if the latest collection is incompatible
+            // with this snapshot, then the change came from an uncommitted update by an operation
+            // operating on this snapshot.
+            invariant(pendingCollection && pendingCollection->isMetadataEqual(metadata));
             uncommittedCatalogUpdates.openCollection(opCtx, pendingCollection);
             return CollectionPtr(pendingCollection.get(), CollectionPtr::NoYieldTag{});
         }
 
-        invariant(latestCollection->isMetadataEqual(*catalogEntry->metadata));
-        uncommittedCatalogUpdates.openCollection(opCtx, latestCollection);
+        invariant(latestCollection->isMetadataEqual(metadata));
+        // TODO SERVER-71817 remove const cast
+        uncommittedCatalogUpdates.openCollection(
+            opCtx, std::const_pointer_cast<Collection>(latestCollection));
         return CollectionPtr(latestCollection.get(), CollectionPtr::NoYieldTag{});
     }
 
@@ -1318,6 +1332,29 @@ boost::optional<UUID> CollectionCatalog::lookupUUIDByNSS(OperationContext* opCtx
         return it->second->isCommitted() ? uuid : boost::none;
     }
     return boost::none;
+}
+
+bool CollectionCatalog::containsCollection(OperationContext* opCtx,
+                                           const CollectionPtr& collection) const {
+    // Any writable Collection instance created under MODE_X lock is considered to belong to this
+    // catalog instance
+    auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
+    const auto& entries = uncommittedCatalogUpdates.entries();
+    auto entriesIt = std::find_if(entries.begin(),
+                                  entries.end(),
+                                  [&collection](const UncommittedCatalogUpdates::Entry& entry) {
+                                      return entry.collection.get() == collection.get();
+                                  });
+    if (entriesIt != entries.end() &&
+        entriesIt->action != UncommittedCatalogUpdates::Entry::Action::kOpenedCollection)
+        return true;
+
+    // Verify that we store the same instance in this catalog
+    auto it = _catalog.find(collection->uuid());
+    if (it == _catalog.end())
+        return false;
+
+    return it->second.get() == collection.get();
 }
 
 CollectionCatalog::CatalogIdLookup CollectionCatalog::lookupCatalogIdByNSS(
@@ -1838,14 +1875,24 @@ void CollectionCatalog::_pushCatalogIdForRename(const NamespaceString& from,
         return;
     }
 
-    if (!ts)
-        return;
-
     // Get 'toIds' first, it may need to instantiate in the container which invalidates all
     // references.
     auto& toIds = _catalogIds[to];
     auto& fromIds = _catalogIds.at(from);
     invariant(!fromIds.empty());
+
+    // Make sure untimestamped writes have a single entry in mapping. We move the single entry from
+    // 'from' to 'to'. We do not have to worry about mixing timestamped and untimestamped like
+    // _pushCatalogIdForNSS.
+    if (!ts) {
+        // We should never perform rename in a mixed-mode environment. 'from' should contain a
+        // single entry and there should be nothing in 'to' .
+        invariant(fromIds.size() == 1);
+        invariant(toIds.empty());
+        toIds.push_back(TimestampedCatalogId{fromIds.back().id, Timestamp::min()});
+        _catalogIds.erase(from);
+        return;
+    }
 
     // An entry could exist already if concurrent writes are performed, keep the latest change in
     // that case.

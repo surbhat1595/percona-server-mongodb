@@ -324,8 +324,11 @@ void insertChunks(OperationContext* opCtx,
             Grid::get(opCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();
         auto newOpCtx = CancelableOperationContext(
             cc().makeOperationContext(), opCtx->getCancellationToken(), executor);
-        newOpCtx->setLogicalSessionId(*osi.getSessionId());
-        newOpCtx->setTxnNumber(*osi.getTxnNumber());
+        {
+            auto lk = stdx::lock_guard(*newOpCtx->getClient());
+            newOpCtx->setLogicalSessionId(*osi.getSessionId());
+            newOpCtx->setTxnNumber(*osi.getTxnNumber());
+        }
 
         BatchedCommandResponse response;
         BatchWriteExecStats stats;
@@ -531,6 +534,14 @@ ExecutorFuture<void> CreateCollectionCoordinator::_runImpl(
 
                             // A previous request already created and committed the collection
                             // but there was a stepdown after the commit.
+
+                            // Ensure that the change stream event gets emitted at least once.
+                            notifyChangeStreamsOnShardCollection(
+                                opCtx,
+                                nss(),
+                                *createCollectionResponseOpt->getCollectionUUID(),
+                                _request.toBSON());
+
                             // The critical section might have been taken by a migration, we force
                             // to skip the invariant check and we do nothing in case it was taken.
                             _releaseCriticalSections(opCtx, false /* throwIfReasonDiffers */);
@@ -574,7 +585,15 @@ ExecutorFuture<void> CreateCollectionCoordinator::_runImpl(
                             _request.getUnique().value_or(false))) {
 
                     // A previous request already created and committed the collection
-                    // but there was a stepdown after the commit.
+                    // but there was a stepdown before completing the execution of the coordinator.
+                    // Ensure that the change stream event gets emitted at least once.
+                    notifyChangeStreamsOnShardCollection(
+                        opCtx,
+                        nss(),
+                        *createCollectionResponseOpt->getCollectionUUID(),
+                        _request.toBSON());
+
+                    // Return any previously acquired resource.
                     _releaseCriticalSections(opCtx);
 
                     _result = createCollectionResponseOpt;
@@ -953,11 +972,7 @@ void CreateCollectionCoordinator::_acquireCriticalSections(OperationContext* opC
     // TODO SERVER-68084 call ShardingRecoveryService without the try/catch block
     try {
         ShardingRecoveryService::get(opCtx)->acquireRecoverableCriticalSectionBlockWrites(
-            opCtx,
-            originalNss(),
-            _critSecReason,
-            ShardingCatalogClient::kMajorityWriteConcern,
-            boost::none);
+            opCtx, originalNss(), _critSecReason, ShardingCatalogClient::kMajorityWriteConcern);
     } catch (const ExceptionFor<ErrorCodes::CommandNotSupportedOnView>&) {
         if (_timeseriesNssResolvedByCommandHandler()) {
             throw;

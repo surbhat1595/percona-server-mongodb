@@ -96,7 +96,7 @@ variables:
   depends_on:
   - name: version_gen
     variant: generate-tasks-for-version
-  - name: archive_dist_test
+  - name: archive_dist_test_debug
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -109,7 +109,7 @@ variables:
     variant: generate-tasks-for-version
   - name: version_burn_in_gen
     variant: generate-tasks-for-version
-  - name: archive_dist_test
+  - name: archive_dist_test_debug
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -306,6 +306,7 @@ variables:
   - enterprise-rhel-82-arm64
   - enterprise-rhel-83-s390x
   - enterprise-rhel-90-64-bit
+  - enterprise-rhel-90-arm64
   - enterprise-suse12-64
   - enterprise-suse15-64
   - enterprise-ubuntu1804-64
@@ -334,6 +335,7 @@ variables:
   - enterprise-rhel-70-64-bit
   - enterprise-rhel-82-arm64
   - enterprise-rhel-90-64-bit
+  - enterprise-rhel-90-arm64
   - enterprise-amazon2-arm64
   - enterprise-amazon2022-arm64
   - enterprise-ubuntu1804-64
@@ -363,11 +365,13 @@ variables:
   - rhel80
   - rhel-82-arm64
   - rhel90
+  - rhel90-arm64
   - enterprise-rhel-80-64-bit
   - enterprise-rhel-80-64-bit-suggested  # For testing selinux.
   - enterprise-rhel-82-arm64
   - enterprise-rhel-83-s390x
   - enterprise-rhel-90-64-bit
+  - enterprise-rhel-90-arm64
   - suse12
   - enterprise-suse12-64
   - suse15
@@ -1294,6 +1298,50 @@ functions:
   - *generate_version_expansions
   - *upload_version_expansions
 
+  "generate resmoke constants": &generate_resmoke_constants
+    command: subprocess.exec
+    type: test
+    params:
+      binary: bash
+      args:
+        - "src/evergreen/get_bin_and_fcv_versions.sh"
+
+  "archive resmoke constants": &archive_resmoke_constants
+    command: archive.targz_pack
+    params:
+      target: resmoke_constants.tgz
+      source_dir: "src"
+      include:
+        - ".resmoke_mongo_version.yml"
+        - ".resmoke_mongo_release_values.yml"
+
+  "upload resmoke constants": &upload_remoske_constants
+    command: s3.put
+    params:
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: resmoke_constants.tgz
+      remote_file: ${project}/${version_id}/${bv_future_git_tag|version}-resmoke-constants.tgz
+      bucket: mciuploads
+      permissions: private
+      visibility: signed
+      content_type: application/tar
+      display_name: resmoke constants
+
+  "generate and upload resmoke constants":
+    - *generate_resmoke_constants
+    - *archive_resmoke_constants
+    - *upload_remoske_constants
+
+  "fetch resmoke constants": &fetch_resmoke_constants
+    command: s3.get
+    params:
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      remote_file: ${project}/${version_id}/${bv_future_git_tag|version}-resmoke-constants.tgz
+      bucket: mciuploads
+      extract_to: src
+
   "generate compile expansions":
   - *f_expansions_write
   - command: subprocess.exec
@@ -1576,6 +1624,8 @@ functions:
       - "./src/evergreen/do_watchdog_setup.sh"
 
   "run package test":
+  - *get_version_expansions
+  - *apply_version_expansions
   - *f_expansions_write
   - command: subprocess.exec
     type: test
@@ -1585,13 +1635,17 @@ functions:
       args:
       - "src/evergreen/run_python_script.sh"
       - "buildscripts/package_test.py"
-      - "--os=none"
       - "--arch=${packager_arch}"
-      - "--extra-test"
+      - "branch"
+      - "--test"
       - "${packager_distro}"
       - "https://s3.amazonaws.com/mciuploads/${project}/${build_variant}/${revision}/artifacts/${build_id}-packages.tgz"
+      - "--edition"
+      - "${repo_edition}"
+      - "--server-version"
+      - "${version}"
 
-  "run complete package test":
+  "run release package test":
   - *f_expansions_write
   - command: subprocess.exec
     type: test
@@ -1601,6 +1655,7 @@ functions:
       args:
       - "src/evergreen/run_python_script.sh"
       - "buildscripts/package_test.py"
+      - "release"
 
   "set up EC2 instance": &set_up_ec2_instance
 
@@ -2381,14 +2436,7 @@ tasks:
 
   - *f_expansions_write
   - *gen_feature_flags
-
-  - *f_expansions_write
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-      - "src/evergreen/get_bin_and_fcv_versions.sh"
+  - *fetch_resmoke_constants
 
   - command: archive.targz_pack
     params:
@@ -3565,6 +3613,18 @@ tasks:
       resmoke_jobs_max: 1
   - func: "send benchmark results"
 
+- <<: *benchmark_template
+  name: benchmarks_abt_lowering
+  tags: ["benchmarks"]
+  commands:
+  - func: "do benchmark setup"
+  - func: "run tests"
+    vars:
+      suites: benchmarks_abt_lowering
+      exec_timeout_secs: 18000  # 5 hour timeout.
+      resmoke_jobs_max: 1
+  - func: "send benchmark results"
+
 - <<: *run_jepsen_template
   name: jepsen_register_findAndModify
   tags: ["jepsen"]
@@ -4634,6 +4694,7 @@ tasks:
   - func: "set up venv"
   - func: "upload pip requirements"
   - func: "generate and upload version expansions"
+  - func: "generate and upload resmoke constants"
 
 - <<: *gen_task_template
   name: auth_audit_gen
@@ -4850,14 +4911,14 @@ tasks:
 
 - <<: *task_template
   name: change_streams_multitenant_passthrough
-  tags: [] # TODO SERVER-67543 Add 'change_streams' tag.
+  tags: ["change_streams"]
   commands:
   - func: "do setup"
   - func: "run tests"
 
 - <<: *task_template
   name: change_streams_multitenant_sharded_collections_passthrough
-  tags: [] # TODO SERVER-67543 Add 'change_streams' tag.
+  tags: ["change_streams"]
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -5050,15 +5111,6 @@ tasks:
       suite: core
 
 - <<: *task_template
-  name: jsCore_repeat_queries
-  tags: ["jscore"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      suite: core_repeat_queries
-
-- <<: *task_template
   name: config_fuzzer_jsCore
   tags: []
   commands:
@@ -5128,13 +5180,13 @@ tasks:
       suite: core_ese
 
 - <<: *task_template
-  name: jsCore_ese_gcm
+  name: jsCore_min_batch_repeat_queries_ese_gsm
   tags: ["jscore", "encrypt", "gcm"]
   commands:
   - func: "do setup"
   - func: "run tests"
     vars:
-      suite: core_ese_gcm
+      suite: core_min_batch_repeat_queries_ese_gsm
 
 - <<: *task_template
   name: jsCore_auth
@@ -5144,15 +5196,6 @@ tasks:
   - func: "run tests"
     vars:
       suite: core_auth
-
-- <<: *task_template
-  name: jsCore_minimum_batch_size
-  tags: ["jscore"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      suite: core_minimum_batch_size
 
 - <<: *task_template
   name: jsCore_txns
@@ -5616,6 +5659,13 @@ tasks:
     vars:
       use_large_distro: "true"
 
+- <<: *task_template
+  name: telemetry_passthrough
+  tags: []
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
 - <<: *gen_task_template
   name: tenant_migration_jscore_passthrough_gen
   tags: ["serverless"]
@@ -5749,7 +5799,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_compute_mode_gen
-  tags: ["concurrency", "no_passthrough", "compute_mode"]
+  tags: ["concurrency", "no_passthrough", "compute_mode", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5937,7 +5987,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_initial_sync_gen
-  tags: ["concurrency", "stepdowns", "initsync", "large", "sharded", "no_debug_mode"]
+  tags: ["concurrency", "stepdowns", "initsync", "large", "sharded", "no_debug_mode", "requires_wt"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -6271,6 +6321,33 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       use_large_distro: "true"
+
+- <<: *gen_task_template
+  name: analyze_shard_key_jscore_passthrough_gen
+  tags: ["sharding"]
+  commands:
+  - func: "generate resmoke tasks"
+
+- <<: *task_template
+  name: analyze_shard_key_stepdown_jscore_passthrough
+  tags: ["sharding"]
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
+- <<: *task_template
+  name: analyze_shard_key_kill_primary_jscore_passthrough
+  tags: ["sharding"]
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
+- <<: *task_template
+  name: analyze_shard_key_terminate_primary_jscore_passthrough
+  tags: ["sharding"]
+  commands:
+  - func: "do setup"
+  - func: "run tests"
 
 - <<: *gen_task_template
   name: ssl_gen
@@ -6922,10 +6999,11 @@ tasks:
       docker_username: ${dockerhub_username}
       docker_password: ${dockerhub_password}
 
-- name: test_packages_complete
+- name: test_packages_release
   tags: []
   depends_on:
-  - name: package
+  - name: version_expansions_gen
+    variant: generate-tasks-for-version
   commands:
   - command: manifest.load
   - func: "git get project and add git tag"
@@ -6933,7 +7011,7 @@ tasks:
   - *kill_processes
   - *cleanup_environment
   - *set_up_venv
-  - func: "run complete package test"
+  - func: "run release package test"
     vars:
       docker_username: ${dockerhub_username}
       docker_password: ${dockerhub_password}
@@ -6955,6 +7033,14 @@ tasks:
         ${additional_package_targets|}
       task_compile_flags: >-
         --legacy-tarball
+  - command: subprocess.exec
+    params:
+      binary: bash
+      add_expansions_to_env: true
+      args:
+      - "src/evergreen/run_python_script.sh"
+      - "evergreen/macos_notary.py"
+      - "mongodb-dist.${ext|tgz}"
   - func: "f_expansions_write"
   - command: subprocess.exec
     params:
@@ -7116,42 +7202,6 @@ tasks:
       binary: bash
       args:
       - "./src/evergreen/packages_publish.sh"
-
-- name: publish_packages_test
-  run_on: rhel80-small
-  tags: ["publish_test"]
-  # This should prevent this task from running in patch builds, where we
-  # don't want to publish packages.
-  patchable: false
-  stepback: false
-  # Same dependencies as "push" below
-  depends_on:
-  - name: package
-  - name: jsCore
-  - name: run_dbtest
-  - name: replica_sets_jscore_passthrough
-  commands:
-  - command: manifest.load
-  - func: "git get project and add git tag"
-  - func: "get and apply version expansions"
-  - func: "f_expansions_write"
-  - func: "kill processes"
-  - func: "cleanup environment"
-  - func: "set up venv"
-  - func: "fetch packages"
-  - func: "generate compile expansions"
-  - func: "apply compile expansions"
-  - func: "set up remote credentials"
-    vars:
-      aws_key_remote: ${repo_aws_key}
-      aws_secret_remote: ${repo_aws_secret}
-  - func: "set up notary client credentials"
-  - *f_expansions_write
-  - command: subprocess.exec
-    params:
-      binary: bash
-      args:
-      - "./src/evergreen/packages_publish_test.sh"
 
 - name: push
   run_on: rhel80-small
@@ -7989,6 +8039,19 @@ tasks:
       args:
       - "src/evergreen/run_python_script.sh"
       - "evergreen/publish_metrics.py"
+
+- name: tooling_metrics_test
+  tags: []
+  depends_on: []
+  commands:
+  - *f_expansions_write
+  - func: "do non-compile setup"
+  - func: "set up remote credentials"
+  - *f_expansions_write
+  - func: "configure evergreen api credentials"
+  - func: "run tests"
+    vars:
+      resmoke_jobs_max: 1
 
 #######################################
 #             Task Groups             #

@@ -307,6 +307,11 @@ void insertChunks(OperationContext* opCtx,
             entries.push_back(chunk.toConfigBSON());
         }
         insertOp.setDocuments(entries);
+        insertOp.setWriteCommandRequestBase([] {
+            write_ops::WriteCommandRequestBase wcb;
+            wcb.setOrdered(false);
+            return wcb;
+        }());
         return insertOp;
     }());
 
@@ -1089,7 +1094,7 @@ void CreateCollectionCoordinator::_createCollectionAndIndexes(
 
         BSONObj createRes;
         DBDirectClient localClient(opCtx);
-        localClient.runCommand(nss().db().toString(), createCmd, createRes);
+        localClient.runCommand(nss().dbName(), createCmd, createRes);
         auto createStatus = getStatusFromCommandResult(createRes);
 
         if (!createStatus.isOK() && createStatus.code() == ErrorCodes::NamespaceExists) {
@@ -1309,8 +1314,7 @@ void CreateCollectionCoordinator::_commit(OperationContext* opCtx,
         // TODO (SERVER-71444): Fix to be interruptible or document exception.
         UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
         AutoGetCollection autoColl(opCtx, nss(), MODE_IX);
-        CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-            opCtx, nss(), CSRAcquisitionMode::kExclusive)
+        CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, nss())
             ->clearFilteringMetadata(opCtx);
 
         throw;

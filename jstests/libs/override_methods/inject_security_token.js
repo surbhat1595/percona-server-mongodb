@@ -98,7 +98,6 @@ const kCmdsAllowedWithSecurityToken = new Set([
     `availableQueryOptions`,
     `buildinfo`,
     `buildinfo`,
-    `bulkWrite`,
     `collMod`,
     `collStats`,
     `collstats`,
@@ -149,7 +148,7 @@ const kCmdsAllowedWithSecurityToken = new Set([
     // `connectionStatus`,
     // `connPoolStats`,
     // `top`,
-    // `killop`,
+    `killop`,
     // `endSessions`,
 ]);
 

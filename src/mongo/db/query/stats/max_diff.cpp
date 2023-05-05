@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <fmt/format.h>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -64,9 +65,11 @@ double valueSpread(value::TypeTags tag1,
                    value::Value val2) {
     double doubleVal1 = valueToDouble(tag1, val1);
     double doubleVal2 = valueToDouble(tag2, val2);
-    uassert(6660502,
-            "Data distribution values must be monotonically increasing.",
-            doubleVal2 >= doubleVal1);
+    uassert(
+        6660502,
+        "Data distribution values must be monotonically increasing, however enocuntered {} before {}"_format(
+            doubleVal1, doubleVal2),
+        doubleVal2 >= doubleVal1);
     return doubleVal2 - doubleVal1;
 }
 
@@ -280,7 +283,8 @@ ScalarHistogram genMaxDiffHistogram(const DataDistribution& dataDistrib, size_t 
 }
 
 std::shared_ptr<const ArrayHistogram> createArrayEstimator(const std::vector<SBEValue>& arrayData,
-                                                           size_t nBuckets) {
+                                                           size_t nBuckets,
+                                                           double sampleRate) {
     uassert(7120500, "A histogram must have at least one bucket.", nBuckets > 0);
 
     // Values that will be used as inputs to histogram generation code.
@@ -325,25 +329,30 @@ std::shared_ptr<const ArrayHistogram> createArrayEstimator(const std::vector<SBE
                 continue;
             }
 
-            // TODO SERVER-71057: Only count types once per array for histogram CE.
+            // We only count types once per occurrence per array for histogram CE.
+            std::set<value::TypeTags> perArrayTags;
             for (size_t i = 0; i < arrSize; i++) {
-                const auto [tag, val] = arr->getAt(i);
+                const auto [elemTag, elemVal] = arr->getAt(i);
 
-                // Increment array type tag counts.
-                auto arrTagCount = arrayTypeCounts.insert({tag, 1});
-                if (!arrTagCount.second) {
-                    ++arrTagCount.first->second;
-                }
-
-                if (!canEstimateTypeViaHistogram(tag)) {
+                perArrayTags.insert(elemTag);
+                if (!canEstimateTypeViaHistogram(elemTag)) {
                     // If the elements of this array are not histogrammable, then we can only update
-                    // the array type counters
+                    // the array type counters; we cannot add this value to the histogram.
                     continue;
                 }
 
-                const auto [tagCopy, valCopy] = value::copyValue(tag, val);
+                const auto [tagCopy, valCopy] = value::copyValue(elemTag, elemVal);
                 arrayElements.emplace_back(tagCopy, valCopy);
             }
+
+            // Increment array type tag counts.
+            for (auto elemTag : perArrayTags) {
+                auto arrTagCount = arrayTypeCounts.insert({elemTag, 1});
+                if (!arrTagCount.second) {
+                    ++arrTagCount.first->second;
+                }
+            }
+
             updateMinMaxUniqArrayVals(arrayElements, arrayMinData, arrayMaxData, arrayUniqueData);
 
         } else if (tag == value::TypeTags::Boolean) {
@@ -376,7 +385,7 @@ std::shared_ptr<const ArrayHistogram> createArrayEstimator(const std::vector<SBE
     if (isScalar) {
         // If we don't have array elements, we don't include array fields in the final histogram.
         return ArrayHistogram::make(
-            makeHistogram(scalarData), std::move(typeCounts), trueCount, falseCount);
+            makeHistogram(scalarData), std::move(typeCounts), trueCount, falseCount, sampleRate);
     }
 
     return ArrayHistogram::make(makeHistogram(scalarData),
@@ -387,7 +396,8 @@ std::shared_ptr<const ArrayHistogram> createArrayEstimator(const std::vector<SBE
                                 std::move(arrayTypeCounts),
                                 emptyArrayCount,
                                 trueCount,
-                                falseCount);
+                                falseCount,
+                                sampleRate);
 }
 
 }  // namespace mongo::stats

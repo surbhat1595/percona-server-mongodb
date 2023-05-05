@@ -10,7 +10,7 @@ buildvariants:
   - rhel81-power8-small
   cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
   stepback: false
-  expansions:
+  expansions: &enterprise-rhel-81-ppc64le-expansions-template
     additional_package_targets: >-
       archive-mongocryptd
       archive-mongocryptd-debug
@@ -59,7 +59,6 @@ buildvariants:
   - name: .sharding .common !.multiversion
   - name: .stitch
   - name: .crypt
-  - name: test_packages
   - name: .publish_crypt
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
@@ -68,6 +67,7 @@ buildvariants:
   name: enterprise-rhel-81-ppc64le-dynamic
   display_name: Enterprise RHEL 8.1 PPC64LE Shared
   expansions:
+    <<: *enterprise-rhel-81-ppc64le-expansions-template
     compile_flags: >-
       --link-model=dynamic
       --ssl
@@ -97,6 +97,8 @@ buildvariants:
       MONGO_DISTMOD=rhel72
       -j3
       --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+      --linker=gold
+    test_flags: --excludeWithAnyTags=requires_external_data_source
     crypt_task_compile_flags: >-
       SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic
       -Wl,--no-gnu-unique"
@@ -136,7 +138,6 @@ buildvariants:
   - name: .sharding .common !.multiversion
   - name: .stitch
   - name: .crypt
-  - name: test_packages
   - name: .publish_crypt
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
@@ -159,6 +160,7 @@ buildvariants:
       MONGO_DISTMOD=rhel83
       -j3
       --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+      --linker=gold
     crypt_task_compile_flags: >-
       SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique"
       CCFLAGS="-fno-gnu-unique"
@@ -197,7 +199,6 @@ buildvariants:
   - name: .sharding .common !.multiversion
   - name: .stitch
   - name: .crypt
-  - name: test_packages
   - name: .publish_crypt
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping

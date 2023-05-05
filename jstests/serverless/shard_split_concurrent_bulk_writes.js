@@ -15,20 +15,9 @@
  * ]
  */
 
-function assertAsyncCommitted(splitThread) {
-    const data = splitThread.returnData();
-
-    assert.commandWorked(data);
-    assert.eq(data.state, "committed");
-}
-
-(function() {
-'use strict';
-
+import {assertMigrationState, ShardSplitTest} from "jstests/serverless/libs/shard_split_test.js";
 load("jstests/libs/fail_point_util.js");
 load("jstests/libs/parallelTester.js");
-load("jstests/libs/uuid_util.js");
-load("jstests/serverless/libs/shard_split_test.js");
 
 const kMaxBatchSize = 2;
 const kCollName = "testColl";
@@ -226,7 +215,7 @@ function bulkMultiUpdateDocsUnordered(primaryHost, dbName, collName, numDocs) {
     bulkWriteThread.join();
     splitThread.join();
 
-    assertAsyncCommitted(splitThread);
+    assert.commandWorked(splitThread.returnData());
 
     let bulkWriteRes = bulkWriteThread.returnData();
     let writeErrors = bulkWriteRes.res.writeErrors;
@@ -388,7 +377,7 @@ function bulkMultiUpdateDocsUnordered(primaryHost, dbName, collName, numDocs) {
     bulkWriteThread.join();
     splitThread.join();
 
-    assertAsyncCommitted(splitThread);
+    assert.commandWorked(splitThread.returnData());
 
     const bulkWriteRes = bulkWriteThread.returnData();
     const writeErrors = bulkWriteRes.res.writeErrors;
@@ -499,7 +488,7 @@ function bulkMultiUpdateDocsUnordered(primaryHost, dbName, collName, numDocs) {
     bulkWriteThread.join();
     splitThread.join();
 
-    assertAsyncCommitted(splitThread);
+    assert.commandWorked(splitThread.returnData());
 
     let bulkWriteRes = bulkWriteThread.returnData();
     assert.eq(bulkWriteRes.res.code, ErrorCodes.Interrupted, tojson(bulkWriteRes));
@@ -546,9 +535,9 @@ function bulkMultiUpdateDocsUnordered(primaryHost, dbName, collName, numDocs) {
     bulkWriteThread.join();
     splitThread.join();
 
-    assertAsyncCommitted(splitThread);
+    assert.commandWorked(splitThread.returnData());
 
-    let bulkWriteRes = bulkWriteThread.returnData();
+    const bulkWriteRes = bulkWriteThread.returnData();
     assert.eq(bulkWriteRes.res.code, ErrorCodes.Interrupted, tojson(bulkWriteRes));
     assert.eq(
         bulkWriteRes.res.errmsg,
@@ -625,5 +614,4 @@ function bulkMultiUpdateDocsUnordered(primaryHost, dbName, collName, numDocs) {
         "Operation interrupted by an internal data migration and could not be automatically retried",
         tojson(bulkWriteRes));
     test.stop();
-})();
 })();

@@ -1,7 +1,11 @@
 /**
  * Test that the telemetry metrics are updated correctly across getMores.
+ * @tags: [
+ *   #TODO SERVER-72406 Unblock this from the telemetry passthrough
+ *   exclude_from_telemetry_passthrough,
+ * ]
  */
-load("jstests/libs/profiler.js");  // For getLatestProfilerEntry.
+load("jstests/libs/feature_flag_util.js");  // For FeatureFlagUtil.
 
 (function() {
 "use strict";
@@ -21,39 +25,42 @@ var coll = testDB[jsTestName()];
 var collTwo = db[jsTestName() + 'Two'];
 coll.drop();
 
-// Make it easier to extract correct telemetry store entry for purposes of this test.
-assert.commandWorked(testDB.adminCommand(
-    {setParameter: 1, internalQueryConfigureTelemetryFieldNameRedactionStrategy: "none"}));
-
 function verifyMetrics(batch) {
     batch.forEach(element => {
-        assert(element.metrics.docsScanned.sum > element.metrics.docsScanned.min);
-        assert(element.metrics.docsScanned.sum >= element.metrics.docsScanned.max);
-        assert(element.metrics.docsScanned.min <= element.metrics.docsScanned.max);
+        assert.gt(element.metrics.docsScanned.sum, element.metrics.docsScanned.min);
+        assert.gte(element.metrics.docsScanned.sum, element.metrics.docsScanned.max);
+        assert.lte(element.metrics.docsScanned.min, element.metrics.docsScanned.max);
 
         // Ensure execution count does not increase with subsequent getMore() calls.
         assert.eq(element.metrics.execCount.sum,
                   element.metrics.execCount.min,
                   element.metrics.execCount.max);
 
-        if (element.metrics.execCount === 1) {
+        if (element.metrics.execCount == 1) {
             // Ensure planning time is > 0 after first batch and does not change with subsequent
             // getMore() calls.
-            assert(queryOptMicros.min > 0);
-            assert.eq(queryOptMicros.sum, queryOptMicros.min, queryOptMicros.max);
+            assert.gt(element.metrics.queryOptMicros.min, 0);
+            assert.eq(element.metrics.queryOptMicros.sum,
+                      element.metrics.queryOptMicros.min,
+                      element.metrics.queryOptMicros.max);
         }
         // Confirm that execution time increases with getMore() calls
-        assert(element.metrics.queryExecMicros.sum > element.metrics.queryExecMicros.min);
-        assert(element.metrics.queryExecMicros.sum > element.metrics.queryExecMicros.max);
-        assert(element.metrics.queryExecMicros.min <= element.metrics.queryExecMicros.max);
+        assert.gt(element.metrics.queryExecMicros.sum, element.metrics.queryExecMicros.min);
+        assert.gt(element.metrics.queryExecMicros.sum, element.metrics.queryExecMicros.max);
+        assert.lte(element.metrics.queryExecMicros.min, element.metrics.queryExecMicros.max);
     });
 }
 
-for (var i = 0; i < 200; i++) {
-    coll.insert({foo: 0, bar: Math.floor(Math.random() * 3)});
-    coll.insert({foo: 1, bar: Math.floor(Math.random() * -2)});
-    collTwo.insert({foo: Math.floor(Math.random() * 2), bar: Math.floor(Math.random() * 2)});
+// Bulk insert documents to reduces roundtrips and make timeout on a slow machine less likely.
+const bulk = coll.initializeUnorderedBulkOp();
+const bulkTwo = collTwo.initializeUnorderedBulkOp();
+for (let i = 0; i < 200; ++i) {
+    bulk.insert({foo: 0, bar: Math.floor(Math.random() * 3)});
+    bulk.insert({foo: 1, bar: Math.floor(Math.random() * -2)});
+    bulkTwo.insert({foo: Math.floor(Math.random() * 2), bar: Math.floor(Math.random() * 2)});
 }
+assert.commandWorked(bulk.execute());
+assert.commandWorked(bulkTwo.execute());
 
 // Assert that two queries with identical structures are represented by the same key
 coll.aggregate([{$match: {foo: 1}}], {cursor: {batchSize: 2}});
@@ -90,7 +97,7 @@ telStore = testDB.adminCommand({
     ],
     cursor: {}
 });
-assert(telStore.cursor.firstBatch[0].metrics.keysScanned.sum > 0);
+assert.gt(telStore.cursor.firstBatch[0].metrics.keysScanned.sum, 0);
 
 MongoRunner.stopMongod(conn);
 }());

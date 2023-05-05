@@ -36,7 +36,6 @@
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/delete_stage.h"
 #include "mongo/db/exec/working_set_common.h"
@@ -330,8 +329,6 @@ Status deleteRangeInBatches(OperationContext* opCtx,
                             const ChunkRange& range) {
     suspendRangeDeletion.pauseWhileSet(opCtx);
 
-    SetAdmissionPriorityForLock priority(opCtx, AdmissionContext::Priority::kLow);
-
     bool allDocsRemoved = false;
     // Delete all batches in this range unless a stepdown error occurs. Do not yield the
     // executor to ensure that this range is fully deleted before another range is
@@ -459,11 +456,6 @@ void restoreRangeDeletionTasksForRename(OperationContext* opCtx, const Namespace
 void deleteRangeDeletionTasksForRename(OperationContext* opCtx,
                                        const NamespaceString& fromNss,
                                        const NamespaceString& toNss) {
-    // Delete range deletion tasks associated to the source collection
-    PersistentTaskStore<RangeDeletionTask> rangeDeletionsStore(
-        NamespaceString::kRangeDeletionNamespace);
-    rangeDeletionsStore.remove(opCtx, BSON(RangeDeletionTask::kNssFieldName << fromNss.ns()));
-
     // Delete already restored snapshots associated to the target collection
     PersistentTaskStore<RangeDeletionTask> rangeDeletionsForRenameStore(
         NamespaceString::kRangeDeletionForRenameNamespace);

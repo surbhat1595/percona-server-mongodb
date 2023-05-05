@@ -12,12 +12,9 @@
  * ]
  */
 
-(function() {
-"use strict";
+import {findSplitOperation, ShardSplitTest} from "jstests/serverless/libs/shard_split_test.js";
 
 load("jstests/libs/fail_point_util.js");
-load("jstests/libs/uuid_util.js");
-load("jstests/serverless/libs/shard_split_test.js");
 
 TestData.skipCheckDBHashes = true;
 
@@ -59,10 +56,7 @@ function testDroppingStateDocCollections(
     const operation2 =
         retryWithDifferentMigrationId ? test.createSplitOperation(tenantIds) : operation;
     migrationId = operation2.migrationId;
-    const runMigrationRes = operation2.commit();
-
-    assert.commandWorked(runMigrationRes);
-    assert.eq(runMigrationRes.state, "committed");
+    assert.commandWorked(operation2.commit());
 
     operation2.forget();
 
@@ -80,4 +74,3 @@ testDroppingStateDocCollections(
     test, fpName, {dropDonorsCollection: true, retryWithDifferentMigrationId: true});
 
 test.stop();
-})();

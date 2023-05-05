@@ -203,7 +203,7 @@ physical_scan = create_physical_scan_collection_template('physical_scan', 2000)
 
 # Data Generator settings
 data_generator = config.DataGeneratorConfig(
-    enabled=True, batch_size=10000,
+    enabled=True, create_indexes=True, batch_size=10000,
     collection_templates=[index_scan, physical_scan, c_int_05, c_arr_01],
     write_mode=config.WriteMode.REPLACE, collection_name_with_card=True)
 

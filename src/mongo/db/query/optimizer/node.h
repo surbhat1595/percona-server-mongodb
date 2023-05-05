@@ -343,6 +343,9 @@ private:
  * It applies a filter over its input.
  *
  * This node is both logical and physical.
+ *
+ * The Filter node evaluates its Expression child. If the expression evaluates to false or is not a
+ * boolean, the value is filtered out, otherwise it's retained.
  */
 class FilterNode final : public ABTOpFixedArity<2>, public Node {
     using Base = ABTOpFixedArity<2>;
@@ -755,6 +758,12 @@ class GroupByNode : public ABTOpFixedArity<5>, public Node {
     using Base = ABTOpFixedArity<5>;
 
 public:
+    /**
+     * groupByProjectionNames: The group keys for the group operation. These bindings are also
+     * accessible to parents of this node. aggregationProjectionNames: The output bindings for each
+     * aggregation function. aggregationExpressions: The aggregation functions to compute the values
+     * for the groups.
+     */
     GroupByNode(ProjectionNameVector groupByProjectionNames,
                 ProjectionNameVector aggregationProjectionNames,
                 ABTVector aggregationExpressions,
@@ -876,6 +885,7 @@ public:
     const ProjectionNameVector& getProjections() const;
 
     const ABT& getChild() const;
+    ABT& getChild();
 
 private:
     ProjectionNameVector _projections;

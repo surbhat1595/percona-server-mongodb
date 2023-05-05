@@ -34,6 +34,7 @@
 #include <string>
 #include <wiredtiger.h>
 
+#include "mongo/db/catalog/capped_visibility.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_cursor.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
@@ -186,9 +187,7 @@ public:
 
     Status doCompact(OperationContext* opCtx) final;
 
-    virtual void validate(OperationContext* opCtx,
-                          ValidateResults* results,
-                          BSONObjBuilder* output);
+    virtual void validate(OperationContext* opCtx, bool full, ValidateResults* results);
 
     virtual void appendNumericCustomStats(OperationContext* opCtx,
                                           BSONObjBuilder* result,
@@ -263,6 +262,10 @@ public:
     };
 
     typedef stdx::variant<int64_t, WiredTigerItem> CursorKey;
+
+    void reserveRecordIds(OperationContext* opCtx,
+                          std::vector<RecordId>* out,
+                          size_t nRecords) final;
 
 protected:
     virtual RecordId getKey(WT_CURSOR* cursor) const = 0;
@@ -421,7 +424,7 @@ protected:
 
 private:
     bool isVisible(const RecordId& id);
-    void initOplogVisibility(OperationContext* opCtx);
+    void initCappedVisibility(OperationContext* opCtx);
 
     /**
      * This value is used for visibility calculations on what oplog entries can be returned to a
@@ -429,6 +432,7 @@ private:
      * established.
      */
     boost::optional<std::int64_t> _oplogVisibleTs = boost::none;
+    boost::optional<CappedVisibilitySnapshot> _cappedSnapshot;
 
     /**
      * With WT-8601, WiredTiger no longer maintains commit_timestamp information on writes to logged

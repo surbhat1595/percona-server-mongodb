@@ -10,19 +10,16 @@
  * ]
  */
 
-(function() {
-"use strict";
-
+import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
 load("jstests/libs/fail_point_util.js");
 load("jstests/libs/uuid_util.js");
-load("jstests/replsets/libs/tenant_migration_test.js");
 
 const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
 const tenantId = ObjectId().str;
 
 const dbNames = ["db0", "db1", "db2"];
 const tenantDBs = dbNames.map(dbName => tenantMigrationTest.tenantDB(tenantId, dbName));
-const nonTenantDBs = dbNames.map(dbName => tenantMigrationTest.nonTenantDB(tenantId, dbName));
+const nonTenantDBs = dbNames.map(dbName => tenantMigrationTest.tenantDB(ObjectId().str, dbName));
 const collNames = ["coll0", "coll1"];
 
 for (const db of [...tenantDBs, ...nonTenantDBs]) {
@@ -47,4 +44,3 @@ for (const db of [...tenantDBs, ...nonTenantDBs]) {
 }
 
 tenantMigrationTest.stop();
-})();

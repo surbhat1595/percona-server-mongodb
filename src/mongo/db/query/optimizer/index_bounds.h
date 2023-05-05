@@ -68,6 +68,7 @@ public:
     bool isFullyOpen() const;
     bool isEquality() const;
     void reverse();
+    bool isConstant() const;
 
     const BoundRequirement& getLowBound() const;
     BoundRequirement& getLowBound();
@@ -85,6 +86,9 @@ struct PartialSchemaKey {
     PartialSchemaKey(boost::optional<ProjectionName> projectionName, ABT path);
 
     bool operator==(const PartialSchemaKey& other) const;
+    bool operator!=(const PartialSchemaKey& other) const {
+        return !(*this == other);
+    }
 
     // Referred, or input projection name.
     boost::optional<ProjectionName> _projectionName;
@@ -138,13 +142,122 @@ struct PartialSchemaKeyLessComparator {
 };
 
 /**
- * Map from referred (or input) projection name to list of requirements for that projection.
+ * Represents a set of predicates and projections. Cannot represent all predicates/projections:
+ * only those that can typically be answered efficiently with an index.
+ *
  * Only one instance of a path without Traverse elements (non-multikey) is allowed. By contrast
  * several instances of paths with Traverse elements (multikey) are allowed. For example: Get "a"
  * Get "b" Id is allowed just once while Get "a" Traverse Get "b" Id is allowed multiple times.
+ *
+ * The default / empty state represents a conjunction of zero predicates, which means always true.
  */
-using PartialSchemaRequirements =
-    std::multimap<PartialSchemaKey, PartialSchemaRequirement, PartialSchemaKeyLessComparator>;
+class PartialSchemaRequirements {
+public:
+    using Entry = std::pair<PartialSchemaKey, PartialSchemaRequirement>;
+    struct ConstIter {
+        auto begin() const {
+            return _begin;
+        }
+        auto end() const {
+            return _end;
+        }
+        auto cbegin() const {
+            return _begin;
+        }
+        auto cend() const {
+            return _end;
+        }
+
+        std::vector<Entry>::const_iterator _begin;
+        std::vector<Entry>::const_iterator _end;
+    };
+
+    struct Iter {
+        auto begin() const {
+            return _begin;
+        }
+        auto end() const {
+            return _end;
+        }
+        auto cbegin() const {
+            return _begin;
+        }
+        auto cend() const {
+            return _end;
+        }
+
+        std::vector<Entry>::iterator _begin;
+        std::vector<Entry>::iterator _end;
+    };
+
+    PartialSchemaRequirements() = default;
+    PartialSchemaRequirements(std::vector<Entry>);
+    PartialSchemaRequirements(std::initializer_list<Entry> entries)
+        : PartialSchemaRequirements(std::vector<Entry>(entries)) {}
+
+    bool operator==(const PartialSchemaRequirements& other) const;
+
+    /**
+     * Return true if there are zero predicates and zero projections.
+     */
+    bool empty() const;
+
+    size_t numLeaves() const;
+    size_t numConjuncts() const;
+
+    std::set<ProjectionName> getBoundNames() const;
+
+    boost::optional<ProjectionName> findProjection(const PartialSchemaKey&) const;
+
+    /**
+     * Picks the first top-level conjunct matching the given key.
+     *
+     * Result includes the index of the top-level conjunct.
+     */
+    boost::optional<std::pair<size_t, PartialSchemaRequirement>> findFirstConjunct(
+        const PartialSchemaKey&) const;
+
+    ConstIter conjuncts() const {
+        return {_repr.begin(), _repr.end()};
+    }
+
+    Iter conjuncts() {
+        return {_repr.begin(), _repr.end()};
+    }
+
+    using Bindings = std::vector<std::pair<PartialSchemaKey, ProjectionName>>;
+    Bindings iterateBindings() const;
+
+    void add(PartialSchemaKey, PartialSchemaRequirement);
+
+    /**
+     * Apply an in-place transformation to each PartialSchemaRequirement.
+     *
+     * Since the key is only exposed read-only to the callback, we don't need to
+     * worry about restoring the no-Traverseless-duplicates invariant.
+     */
+    void transform(std::function<void(const PartialSchemaKey&, PartialSchemaRequirement&)>);
+
+    /**
+     * Apply a simplification to each PartialSchemaRequirement.
+     *
+     * The callback can return false if an individual PartialSchemaRequirement
+     * simplifies to an always-false predicate.
+     *
+     * This method returns false if the overall result is an always-false predicate.
+     *
+     * This method will also remove any predicates that are trivially true (those will
+     * a fully open DNF interval).
+     */
+    bool simplify(std::function<bool(const PartialSchemaKey&, PartialSchemaRequirement&)>);
+
+private:
+    // Restore the invariant that the entries are sorted by key.
+    void normalize();
+
+    using Repr = std::vector<Entry>;
+    Repr _repr;
+};
 
 /**
  * Used to track cardinality estimates per predicate inside a PartialSchemaRequirement. The order of
@@ -186,6 +299,7 @@ using ResidualRequirementsWithCE = std::vector<ResidualRequirementWithCE>;
 // for the entire compound interval, and we do so by determining if there are ANY exclusive simple
 // low bounds or high bounds. In this case the compound bound is exclusive (on the low or the high
 // side respectively).
+// TODO: SERVER-72784: Update representation of compound index bounds.
 using CompoundIntervalRequirement = std::vector<IntervalRequirement>;
 
 // Unions and conjunctions of individual compound intervals.
@@ -203,6 +317,24 @@ struct EqualityPrefixEntry {
     // Set of positions of predicates (in the requirements map) which we encode with this prefix.
     opt::unordered_set<size_t> _predPosSet;
 };
+
+/**
+ * Specifies type of query predicate which is being answered using a particular field on a candidate
+ * index. This is used to determine if we can (or should) attempt to satisfy collation requirements
+ * during the implementation phase. For example if we have a query (a = 1) and (b > 2) and (c = 3 or
+ * c > 10) the entries will be SimpleEquality, SimpleInequality, and Compound.
+ */
+#define INDEXFIELD_PREDTYPE_OPNAMES(F) \
+    F(SimpleEquality)                  \
+    F(SimpleInequality)                \
+    F(Compound)                        \
+    F(Unbound)
+
+MAKE_PRINTABLE_ENUM(IndexFieldPredType, INDEXFIELD_PREDTYPE_OPNAMES);
+MAKE_PRINTABLE_ENUM_STRING_ARRAY(IndexFieldPredTypeEnum,
+                                 IndexFieldPredType,
+                                 INDEXFIELD_PREDTYPE_OPNAMES);
+#undef INDEXFIELD_PREDTYPE_OPNAMES
 
 /**
  * Used to pre-compute candidate indexes for SargableNodes.
@@ -226,9 +358,10 @@ struct EqualityPrefixEntry {
  * prefix, we would create compound index bound [{0, MinKey}, {MaxKey, MaxKey}] effectively encoding
  * the interval over the first field into the bound, the binding _field2 to a temporary variable,
  * and applying a filter encoding [1, MaxKey] over the index scan.
- *  5. Fields to collate. We keep track of which fields need collation. This is needed during the
- * physical rewrite phase where we need to match the collation requirements with the collation of
- * the index. Essentially, we may ignore collation requirements for fields which are equalities.
+ *  5. List of the predicate types applied to each field in the candidate index. This is needed
+ * during the physical rewrite phase where we need to match the collation requirements with the
+ * collation of the index. One use is to ignore collation requirements for fields which are
+ * equalities.
  */
 struct CandidateIndexEntry {
     CandidateIndexEntry(std::string indexDefName);
@@ -249,9 +382,9 @@ struct CandidateIndexEntry {
     // sorted in their containing vector from most to least selective.
     ResidualRequirements _residualRequirements;
 
-    // We have equalities on those index fields, and thus do not consider for collation
-    // requirements.
-    opt::unordered_set<size_t> _fieldsToCollate;
+    // Types of the predicates which we will answer using a field at a given position in the
+    // candidate index.
+    std::vector<IndexFieldPredType> _predTypes;
 
     // Length of prefix of fields with applied intervals.
     size_t _intervalPrefixSize;

@@ -30,6 +30,8 @@
 #include "mongo/db/query/ce/sampling_estimator.h"
 
 #include "mongo/db/exec/sbe/abt/abt_lower.h"
+#include "mongo/db/exec/sbe/expressions/compile_ctx.h"
+#include "mongo/db/exec/sbe/expressions/runtime_environment.h"
 #include "mongo/db/query/cqf_command_utils.h"
 #include "mongo/db/query/optimizer/explain.h"
 #include "mongo/db/query/optimizer/index_bounds.h"
@@ -73,7 +75,7 @@ public:
     void transport(ABT& n, const SargableNode& node, ABT& childResult, ABT& refs, ABT& binds) {
         ABT result = childResult;
         // Retain only output bindings without applying filters.
-        for (const auto& [key, req] : node.getReqMap()) {
+        for (const auto& [key, req] : node.getReqMap().conjuncts()) {
             if (const auto& boundProjName = req.getBoundProjectionName()) {
                 lowerPartialSchemaRequirement(
                     key,
@@ -159,7 +161,7 @@ public:
         // Here we assume that each requirement is independent.
         // TODO: consider estimating together the entire set of requirements (but caching!)
         CEType result = childResult;
-        for (const auto& [key, req] : node.getReqMap()) {
+        for (const auto& [key, req] : node.getReqMap().conjuncts()) {
             if (req.getIsPerfOnly()) {
                 // Ignore perf-only requirements.
                 continue;
@@ -256,15 +258,17 @@ private:
 
         auto env = VariableEnvironment::build(abtTree);
         SlotVarMap slotMap;
+        auto runtimeEnvironment = std::make_unique<sbe::RuntimeEnvironment>();  // TODO Use factory
         boost::optional<sbe::value::SlotId> ridSlot;
         sbe::value::SlotIdGenerator ids;
         SBENodeLowering g{env,
                           slotMap,
+                          *runtimeEnvironment,
                           ridSlot,
                           ids,
                           _phaseManager.getMetadata(),
                           _phaseManager.getNodeToGroupPropsMap(),
-                          true /*randomScan*/};
+                          ScanOrder::Random};
         auto sbePlan = g.optimize(abtTree);
         tassert(6624261, "Unexpected rid slot", !ridSlot);
 
@@ -273,7 +277,7 @@ private:
         uassert(6624245, "Invalid slot map size", slotMap.size() == 1);
 
         sbePlan->attachToOperationContext(_opCtx);
-        sbe::CompileCtx ctx(std::make_unique<sbe::RuntimeEnvironment>());
+        sbe::CompileCtx ctx(std::move(runtimeEnvironment));
         sbePlan->prepare(ctx);
 
         std::vector<sbe::value::SlotAccessor*> accessors;

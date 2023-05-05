@@ -47,8 +47,9 @@ public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec);
 
-        LiteParsed(std::string parseTimeName)
-            : LiteParsedDocumentSource(std::move(parseTimeName)) {}
+        LiteParsed(std::string parseTimeName, bool redactFieldNames)
+            : LiteParsedDocumentSource(std::move(parseTimeName)),
+              _redactFieldNames(redactFieldNames) {}
 
         stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const override {
             return stdx::unordered_set<NamespaceString>();
@@ -56,7 +57,8 @@ public:
 
         PrivilegeVector requiredPrivileges(bool isMongos,
                                            bool bypassDocumentValidation) const override {
-            return {};
+            return {Privilege(ResourcePattern::forClusterResource(), ActionType::telemetryRead)};
+            ;
         }
 
         bool allowedToPassthroughFromMongos() const final {
@@ -71,6 +73,8 @@ public:
         void assertSupportsMultiDocumentTransaction() const {
             transactionNotSupported(kStageName);
         }
+
+        bool _redactFieldNames;
     };
 
     static boost::intrusive_ptr<DocumentSource> createFromBson(
@@ -108,79 +112,26 @@ public:
     void addVariableRefs(std::set<Variables::Id>* refs) const final {}
 
 private:
-    /**
-     * A wrapper around the producer/consumer queue which allows waiting for it to be empty.
-     */
-    class QueueWrapper {
-
-    public:
-        void push(Document doc) {
-            _queue.push(std::move(doc));
-        }
-
-        boost::optional<Document> pop() {
-            try {
-                // First, wait for the queue be non-empty. We do this before locking the queue's
-                // mutation mutex.
-                _queue.waitForNonEmpty(Interruptible::notInterruptible());
-
-                // Now, pop() will succeed. Obtain the lock before popping.
-                stdx::unique_lock lk{_mutex};
-                Document d = _queue.pop();
-                // Notify the cv since we've popped.
-                _waitForEmpty.notify_one();
-                return d;
-            } catch (const ExceptionFor<ErrorCodes::ProducerConsumerQueueConsumed>&) {
-                _waitForEmpty.notify_one();
-                return {};
-            }
-        }
-
-        void closeProducerEnd() {
-            _queue.closeProducerEnd();
-        }
-
-        /**
-         * Wait for the queue to be empty.
-         */
-        void waitForEmpty() {
-            stdx::unique_lock lk{_mutex};
-            _waitForEmpty.wait(lk, [&] { return _queue.getStats().queueDepth == 0; });
-        }
-
-    private:
-        /**
-         * Underlying queue implementation.
-         */
-        SingleProducerSingleConsumerQueue<Document> _queue;
-
-        /**
-         * Mutex to synchronize pop() and waitForEmpty().
-         */
-        mongo::Mutex _mutex;
-
-        /**
-         * Condition variable used to wait for the queue to be empty.
-         */
-        stdx::condition_variable _waitForEmpty;
-    };
-
-    DocumentSourceTelemetry(const boost::intrusive_ptr<ExpressionContext>& expCtx)
-        : DocumentSource(kStageName, expCtx) {}
+    DocumentSourceTelemetry(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                            bool redactFieldNames = false)
+        : DocumentSource(kStageName, expCtx), _redactFieldNames(redactFieldNames) {}
 
     GetNextResult doGetNext() final;
 
-    void buildTelemetryStoreIterator();
-
-    bool _initialized = false;
+    /**
+     * The current partition materialized as a set of Document instances. We pop from the queue and
+     * return DocumentSource results.
+     */
+    std::deque<Document> _materializedPartition;
 
     /**
-     * Instance of TelemetryStore which will be deleted when the document source is deleted. This
-     * non-null only when _clearEntries is true.
+     * Iterator over all telemetry partitions. This is incremented when we exhaust the current
+     * _materializedPartition.
      */
-    boost::optional<std::unique_ptr<TelemetryStore>> _telemetryStore;
+    TelemetryStore::PartitionId _currentPartition = -1;
 
-    QueueWrapper _queue;
+    // When true, redact field names from returned query shapes.
+    bool _redactFieldNames;
 };
 
 }  // namespace mongo

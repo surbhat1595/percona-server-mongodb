@@ -48,6 +48,10 @@ public:
 
     ColumnStoreAccessMethod(IndexCatalogEntry* ice, std::unique_ptr<ColumnStore>);
 
+    const column_keygen::ColumnKeyGenerator& getKeyGen() const {
+        return _keyGen;
+    }
+
     /**
      * Returns a pointer to the ColumnstoreProjection owned by the underlying ColumnKeyGenerator.
      */
@@ -86,17 +90,19 @@ public:
                   int64_t* keysInsertedOut,
                   int64_t* keysDeletedOut) final;
 
-    void applyColumnDataSideWrite(OperationContext* opCtx,
-                                  const CollectionPtr& coll,
-                                  const BSONObj& operation,
-                                  int64_t* keysInserted,
-                                  int64_t* keysDeleted) final;
+    Status applyIndexBuildSideWrite(OperationContext* opCtx,
+                                    const CollectionPtr& coll,
+                                    const BSONObj& operation,
+                                    const InsertDeleteOptions& unusedOptions,
+                                    KeyHandlerFn&& unusedFn,
+                                    int64_t* keysInserted,
+                                    int64_t* keysDeleted) final;
 
     Status initializeAsEmpty(OperationContext* opCtx) final;
 
-    void validate(OperationContext* opCtx,
-                  int64_t* numKeys,
-                  IndexValidateResults* fullResults) const final;
+    IndexValidateResults validate(OperationContext* opCtx, bool full) const final;
+
+    int64_t numKeys(OperationContext* opCtx) const final;
 
     bool appendCustomStats(OperationContext* opCtx,
                            BSONObjBuilder* result,
@@ -121,7 +127,15 @@ public:
         return _store.get();
     }
 
+    ColumnStore* writableStorage() const {
+        return _store.get();
+    }
+
     class BulkBuilder;
+
+    const std::string& indexName() const {
+        return _descriptor->indexName();
+    }
 
     /**
      * Returns true iff 'compressor' is a recognized name of a block compression module that is

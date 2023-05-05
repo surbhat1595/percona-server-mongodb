@@ -27,20 +27,25 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/query/sbe_stage_builder_eval_frame.h"
-#include "mongo/db/query/sbe_stage_builder_helpers.h"
+#include "mongo/db/query/optimizer/node.h"
+#include "mongo/db/query/optimizer/syntax/syntax.h"
+#include "mongo/db/query/sbe_stage_builder.h"
+#include "mongo/db/query/sbe_stage_builder_abt_helpers.h"
+#include "mongo/db/query/sbe_stage_builder_abt_holder_impl.h"
 
 namespace mongo::stage_builder {
 
-std::unique_ptr<sbe::EExpression> EvalExpr::extractExpr(optimizer::SlotVarMap& varMap) {
+EvalExpr::EvalExpr(const abt::HolderPtr& a) : _storage(abt::wrap(a->_value)) {}
+
+std::unique_ptr<sbe::EExpression> EvalExpr::extractExpr(optimizer::SlotVarMap& varMap,
+                                                        const sbe::RuntimeEnvironment& runtimeEnv) {
     if (hasSlot()) {
         return sbe::makeE<sbe::EVariable>(stdx::get<sbe::value::SlotId>(_storage));
     }
 
     if (hasABT()) {
-        return abtToExpr(stdx::get<optimizer::ABT>(_storage), varMap);
+        return abtToExpr(stdx::get<abt::HolderPtr>(_storage)->_value, varMap, runtimeEnv);
     }
 
     if (stdx::holds_alternative<bool>(_storage)) {
@@ -50,19 +55,23 @@ std::unique_ptr<sbe::EExpression> EvalExpr::extractExpr(optimizer::SlotVarMap& v
     return std::move(stdx::get<std::unique_ptr<sbe::EExpression>>(_storage));
 }
 
-optimizer::ABT EvalExpr::extractABT(optimizer::SlotVarMap& varMap) {
+std::unique_ptr<sbe::EExpression> EvalExpr::extractExpr(StageBuilderState& state) {
+    return extractExpr(state.slotVarMap, *state.data->env);
+}
+
+abt::HolderPtr EvalExpr::extractABT(optimizer::SlotVarMap& varMap) {
     if (hasSlot()) {
         auto slotId = stdx::get<sbe::value::SlotId>(_storage);
         auto varName = makeVariableName(slotId);
         varMap.emplace(varName, slotId);
-        return optimizer::make<optimizer::Variable>(varName);
+        return abt::wrap(optimizer::make<optimizer::Variable>(varName));
     }
 
     tassert(6950800,
             "Unexpected: extractABT() method invoked on an EExpression object",
-            stdx::holds_alternative<optimizer::ABT>(_storage));
+            stdx::holds_alternative<abt::HolderPtr>(_storage));
 
-    return std::move(stdx::get<optimizer::ABT>(_storage));
+    return std::move(stdx::get<abt::HolderPtr>(_storage));
 }
 
 }  // namespace mongo::stage_builder

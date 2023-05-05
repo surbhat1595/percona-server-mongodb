@@ -1176,7 +1176,7 @@ void WiredTigerKVEngine::cleanShutdown() {
 
     const Timestamp stableTimestamp = getStableTimestamp();
     const Timestamp initialDataTimestamp = getInitialDataTimestamp();
-    if (gTakeUnstableCheckpointOnShutdown) {
+    if (gTakeUnstableCheckpointOnShutdown || initialDataTimestamp.asULL() <= 1) {
         closeConfig += "use_timestamp=false,";
     } else if (!serverGlobalParams.enableMajorityReadConcern &&
                stableTimestamp < initialDataTimestamp) {
@@ -3098,19 +3098,35 @@ std::unique_ptr<SortedDataInterface> WiredTigerKVEngine::getSortedDataInterface(
     const CollectionOptions& collOptions,
     StringData ident,
     const IndexDescriptor* desc) {
+    invariant(collOptions.uuid);
+
     if (desc->isIdIndex()) {
         invariant(!collOptions.clusteredIndex);
-        return std::make_unique<WiredTigerIdIndex>(
-            opCtx, _uri(ident), ident, desc, WiredTigerUtil::useTableLogging(nss));
+        return std::make_unique<WiredTigerIdIndex>(opCtx,
+                                                   _uri(ident),
+                                                   *collOptions.uuid,
+                                                   ident,
+                                                   desc,
+                                                   WiredTigerUtil::useTableLogging(nss));
     }
     auto keyFormat = (collOptions.clusteredIndex) ? KeyFormat::String : KeyFormat::Long;
     if (desc->unique()) {
-        return std::make_unique<WiredTigerIndexUnique>(
-            opCtx, _uri(ident), ident, keyFormat, desc, WiredTigerUtil::useTableLogging(nss));
+        return std::make_unique<WiredTigerIndexUnique>(opCtx,
+                                                       _uri(ident),
+                                                       *collOptions.uuid,
+                                                       ident,
+                                                       keyFormat,
+                                                       desc,
+                                                       WiredTigerUtil::useTableLogging(nss));
     }
 
-    return std::make_unique<WiredTigerIndexStandard>(
-        opCtx, _uri(ident), ident, keyFormat, desc, WiredTigerUtil::useTableLogging(nss));
+    return std::make_unique<WiredTigerIndexStandard>(opCtx,
+                                                     _uri(ident),
+                                                     *collOptions.uuid,
+                                                     ident,
+                                                     keyFormat,
+                                                     desc,
+                                                     WiredTigerUtil::useTableLogging(nss));
 }
 
 Status WiredTigerKVEngine::createColumnStore(OperationContext* opCtx,
@@ -3121,8 +3137,8 @@ Status WiredTigerKVEngine::createColumnStore(OperationContext* opCtx,
     _ensureIdentPath(ident);
     invariant(desc->getIndexType() == IndexType::INDEX_COLUMN);
 
-    StatusWith<std::string> result =
-        WiredTigerColumnStore::generateCreateString(_canonicalName, ns, *desc);
+    StatusWith<std::string> result = WiredTigerColumnStore::generateCreateString(
+        _canonicalName, ns, *desc, WiredTigerUtil::useTableLogging(ns));
     if (!result.isOK()) {
         return result.getStatus();
     }
@@ -3144,7 +3160,8 @@ std::unique_ptr<ColumnStore> WiredTigerKVEngine::getColumnStore(
     const CollectionOptions& collOptions,
     StringData ident,
     const IndexDescriptor* descriptor) {
-    return std::make_unique<WiredTigerColumnStore>(opCtx, _uri(ident), ident, descriptor);
+    return std::make_unique<WiredTigerColumnStore>(
+        opCtx, _uri(ident), ident, descriptor, WiredTigerUtil::useTableLogging(nss));
 }
 
 std::unique_ptr<RecordStore> WiredTigerKVEngine::makeTemporaryRecordStore(OperationContext* opCtx,
@@ -4102,6 +4119,33 @@ KeyFormat WiredTigerKVEngine::getKeyFormat(OperationContext* opCtx, StringData i
 
 size_t WiredTigerKVEngine::getCacheSizeMB() const {
     return _cacheSizeMB;
+}
+
+StatusWith<BSONObj> WiredTigerKVEngine::getSanitizedStorageOptionsForSecondaryReplication(
+    const BSONObj& options) const {
+
+    // Skip inMemory storage engine, encryption at rest only applies to storage backed engine.
+    if (_ephemeral || options.isEmpty()) {
+        return options;
+    }
+
+    auto firstElem = options.firstElement();
+    if (firstElem.fieldName() != kWiredTigerEngineName) {
+        return Status(ErrorCodes::InvalidOptions,
+                      str::stream() << "Expected \"" << kWiredTigerEngineName
+                                    << "\" field, but got: " << firstElem.fieldName());
+    }
+
+    BSONObj wtObj = firstElem.Obj();
+    if (auto configStringElem = wtObj.getField(WiredTigerUtil::kConfigStringField)) {
+        auto configString = configStringElem.String();
+        WiredTigerUtil::removeEncryptionFromConfigString(&configString);
+        // Return a new BSONObj with the configString field sanitized.
+        return options.addFields(BSON(kWiredTigerEngineName << wtObj.addFields(BSON(
+                                          WiredTigerUtil::kConfigStringField << configString))));
+    }
+
+    return options;
 }
 
 }  // namespace mongo

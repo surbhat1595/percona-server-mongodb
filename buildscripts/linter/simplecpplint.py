@@ -62,6 +62,7 @@ _RE_STD_OPTIONAL = re.compile(r'\bstd::optional\b')
 _RE_TRACING_SUPPORT = re.compile(r'\bTracerProvider::(get|initialize)\b')
 _RE_COLLECTION_SHARDING_RUNTIME = re.compile(r'\bCollectionShardingRuntime\b')
 _RE_UNINTERRUPTIBLE_LOCK_GUARD = re.compile(r'\bUninterruptibleLockGuard\s+.+\s*;')
+_RE_RAND = re.compile(r'\b(srand\(|rand\(\))')
 
 _RE_GENERIC_FCV_COMMENT = re.compile(r'\(Generic FCV reference\):')
 GENERIC_FCV = [
@@ -78,6 +79,16 @@ GENERIC_FCV = [
 ]
 _RE_GENERIC_FCV_REF = re.compile(r'(' + '|'.join(GENERIC_FCV) + r')\b')
 _RE_HEADER = re.compile(r'\.(h|hpp)$')
+
+_CXX_COMPAT_HEADERS = [
+    "assert", "ctype", "errno", "fenv", "float", "inttypes", "limits", "locale", "math", "setjmp",
+    "signal", "stdarg", "stddef", "stdint", "stdio", "stdlib", "string", "time", "uchar", "wchar",
+    "wctype"
+]
+
+# Successful matches `m` have a `m["base"]`, the basename of the file that was included.
+_RE_CXX_COMPAT_HEADERS = re.compile(
+    rf'# *include *((<)|("))(?P<base>{"|".join(_CXX_COMPAT_HEADERS)})\.h(?(2)>|")')
 
 
 class Linter:
@@ -157,6 +168,8 @@ class Linter:
             self._check_for_tracing_support(linenum)
             self._check_for_collection_sharding_runtime(linenum)
             self._check_for_uninterruptible_lock_guard(linenum)
+            self._check_for_rand(linenum)
+            self._check_for_c_stdlib_headers(linenum)
 
             # Relax the rule of commenting generic FCV references for files directly related to FCV
             # implementations.
@@ -296,7 +309,8 @@ class Linter:
     def _check_for_collection_sharding_runtime(self, linenum):
         line = self.clean_lines[linenum]
         if _RE_COLLECTION_SHARDING_RUNTIME.search(
-                line) and "/src/mongo/db/s/" not in self.file_name:
+                line
+        ) and "/src/mongo/db/s/" not in self.file_name and "_test.cpp" not in self.file_name:
             self._error(
                 linenum, 'mongodb/collection_sharding_runtime', 'Illegal use of '
                 'CollectionShardingRuntime outside of mongo/db/s/; use CollectionShardingState '
@@ -311,6 +325,12 @@ class Linter:
                 'the programming model inside MongoDB requires that all operations be interruptible. '
                 'Review with care and if the use is warranted, add NOLINT and a comment explaining why.'
             )
+
+    def _check_for_rand(self, linenum):
+        line = self.clean_lines[linenum]
+        if _RE_RAND.search(line):
+            self._error(linenum, 'mongodb/rand',
+                        'Use of rand or srand, use <random> or PseudoRandom instead.')
 
     def _license_error(self, linenum, msg, category='legal/license'):
         style_url = 'https://github.com/mongodb/mongo/wiki/Server-Code-Style'
@@ -365,6 +385,15 @@ class Linter:
                     linenum, 'mongodb/fcv',
                     'Please add a comment containing "(Generic FCV reference):" within 10 lines ' +
                     'before the generic FCV reference.')
+
+    def _check_for_c_stdlib_headers(self, linenum):
+        line = self.clean_lines[linenum]
+
+        if match := _RE_CXX_COMPAT_HEADERS.match(line):
+            self._error(
+                linenum, 'mongodb/headers',
+                f"Prohibited include of C header '<{match['base']}.h>'. " \
+                f"Include C++ header '<c{match['base']}>' instead.")
 
     def _error(self, linenum, category, message):
         if linenum in self.nolint_suppression:

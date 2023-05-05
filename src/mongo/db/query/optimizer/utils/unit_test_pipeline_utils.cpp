@@ -38,11 +38,21 @@
 
 
 namespace mongo::optimizer {
+namespace {
+std::unique_ptr<unittest::TempDir> tempDir;
+
+MONGO_INITIALIZER_WITH_PREREQUISITES(ABTPipelineTestInitTempDir, ("SetTempDirDefaultRoot"))
+(InitializerContext*) {
+    if (!tempDir) {
+        tempDir = std::make_unique<unittest::TempDir>("ABTPipelineTest");
+    }
+}
+}  // namespace
 
 std::unique_ptr<mongo::Pipeline, mongo::PipelineDeleter> parsePipeline(
     const NamespaceString& nss,
     const std::string& inputPipeline,
-    OperationContextNoop& opCtx,
+    OperationContext& opCtx,
     const std::vector<ExpressionContext::ResolvedNamespace>& involvedNss) {
     const BSONObj inputBson = fromjson("{pipeline: " + inputPipeline + "}");
 
@@ -61,8 +71,7 @@ std::unique_ptr<mongo::Pipeline, mongo::PipelineDeleter> parsePipeline(
         ctx->setResolvedNamespace(resolvedNss.ns, resolvedNss);
     }
 
-    unittest::TempDir tempDir("ABTPipelineTest");
-    ctx->tempDir = tempDir.path();
+    ctx->tempDir = tempDir->path();
 
     return Pipeline::parse(request.getPipeline(), ctx);
 }
@@ -73,9 +82,9 @@ ABT translatePipeline(const Metadata& metadata,
                       std::string scanDefName,
                       PrefixId& prefixId,
                       const std::vector<ExpressionContext::ResolvedNamespace>& involvedNss) {
-    OperationContextNoop opCtx;
+    auto opCtx = cc().makeOperationContext();
     auto pipeline =
-        parsePipeline(NamespaceString("a." + scanDefName), pipelineStr, opCtx, involvedNss);
+        parsePipeline(NamespaceString("a." + scanDefName), pipelineStr, *opCtx, involvedNss);
     return translatePipelineToABT(metadata,
                                   *pipeline.get(),
                                   scanProjName,

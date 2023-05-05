@@ -57,7 +57,6 @@ buildvariants:
     distros:
     - ubuntu2004-package
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-amazon2
@@ -73,7 +72,7 @@ buildvariants:
       archive-mongocryptd-debug
     # TODO BUILD-13887 should fix uses_pykmip incompatibility.
     test_flags: >-
-      --excludeWithAnyTags=SERVER-34286,incompatible_with_amazon_linux,uses_pykmip
+      --excludeWithAnyTags=SERVER-34286,incompatible_with_amazon_linux,uses_pykmip,requires_external_data_source
     push_path: linux
     push_bucket: downloads.10gen.com
     push_name: linux
@@ -124,7 +123,6 @@ buildvariants:
     distros:
     - ubuntu2004-package
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: amazon2-arm64
@@ -178,7 +176,6 @@ buildvariants:
     distros:
     - ubuntu1804-arm64-build
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-amazon2-arm64
@@ -207,7 +204,7 @@ buildvariants:
       SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique"
       CCFLAGS="-fno-gnu-unique"
     # TODO BUILD-13887 should fix uses_pykmip incompatibility.
-    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_ldap_pool,uses_pykmip,requires_v4_0
+    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_ldap_pool,uses_pykmip,requires_v4_0,requires_external_data_source
     has_packages: true
     multiversion_platform: amazon2
     multiversion_edition: enterprise
@@ -257,7 +254,7 @@ buildvariants:
     distros:
     - amazon2-arm64-large
   - name: .jscore .common !jsCore
-  - name: jsCore_minimum_batch_size
+  - name: jsCore_min_batch_repeat_queries_ese_gsm
   - name: jsCore_txns_large_txns_format
   - name: json_schema
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
@@ -307,7 +304,6 @@ buildvariants:
     distros:
     - ubuntu1804-arm64-build
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: amazon2022-arm64
@@ -321,7 +317,7 @@ buildvariants:
     push_name: linux
     push_arch: aarch64-amazon2022
     compile_flags: --ssl MONGO_DISTMOD=amazon2022 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux
+    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_external_data_source
     has_packages: true
     packager_script: packager.py
     packager_arch: aarch64
@@ -357,7 +353,6 @@ buildvariants:
     distros:
     - ubuntu2204-arm64-large
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-amazon2022-arm64
@@ -376,7 +371,7 @@ buildvariants:
     compile_flags: --ssl MONGO_DISTMOD=amazon2022 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
     crypt_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     # TODO BUILD-13887 should fix uses_pykmip incompatibility.
-    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_ldap_pool,uses_pykmip,requires_v4_0
+    test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_ldap_pool,uses_pykmip,requires_v4_0,requires_external_data_source
     has_packages: true
     multiversion_platform: amazon2022
     multiversion_edition: enterprise
@@ -432,7 +427,7 @@ buildvariants:
     distros:
     - amazon2022-arm64-large
   - name: .jscore .common !jsCore
-  - name: jsCore_minimum_batch_size
+  - name: jsCore_min_batch_repeat_queries_ese_gsm
   - name: jsCore_txns_large_txns_format
   - name: json_schema
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
@@ -482,7 +477,6 @@ buildvariants:
     distros:
     - ubuntu2204-arm64-large
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: debian10
@@ -538,7 +532,6 @@ buildvariants:
     distros:
     - ubuntu2004-package
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-debian10-64
@@ -602,7 +595,6 @@ buildvariants:
     distros:
     - ubuntu2004-package
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: debian11
@@ -658,7 +650,6 @@ buildvariants:
     distros:
     - ubuntu2204-large
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-debian11-64
@@ -720,7 +711,6 @@ buildvariants:
     distros:
     - ubuntu2204-large
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: rhel70
@@ -776,7 +766,6 @@ buildvariants:
     - ubuntu2004-package
   - name: selinux_rhel7_org
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
   # This variant compiles on RHEL 7.0 and runs tests on RHEL 7.6
@@ -877,7 +866,6 @@ buildvariants:
     distros:
     - ubuntu2004-package
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-rhel-80-64-bit
@@ -943,7 +931,7 @@ buildvariants:
     distros:
     - rhel80-medium
   - name: .jscore .common
-  - name: jsCore_minimum_batch_size
+  - name: jsCore_min_batch_repeat_queries_ese_gsm
   - name: jsCore_txns_large_txns_format
   - name: json_schema
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
@@ -1003,7 +991,6 @@ buildvariants:
     - ubuntu2004-package
   - name: selinux_rhel8_enterprise
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: rhel-82-arm64
@@ -1055,7 +1042,6 @@ buildvariants:
     distros:
     - ubuntu1804-arm64-build
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-rhel-82-arm64
@@ -1124,7 +1110,6 @@ buildvariants:
     distros:
     - ubuntu1804-arm64-build
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: rhel90
@@ -1176,7 +1161,6 @@ buildvariants:
     - ubuntu2204-large
   - name: selinux_rhel9_org
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-rhel-90-64-bit
@@ -1253,7 +1237,132 @@ buildvariants:
     - ubuntu2204-large
   - name: selinux_rhel9_enterprise
   - name: .publish
-  - name: .publish_test
+  - name: generate_buildid_to_debug_symbols_mapping
+
+
+- name: rhel90-arm64
+  display_name: RHEL 9.0 arm64
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  run_on:
+  - rhel90-arm64-small
+  expansions:
+    push_path: linux
+    push_bucket: downloads.mongodb.org
+    push_name: linux
+    push_arch: aarch64-rhel90
+    compile_flags: >-
+      --ssl MONGO_DISTMOD=rhel90
+      -j$(grep -c ^processor /proc/cpuinfo)
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+    test_flags: --excludeWithAnyTags=requires_external_data_source
+    has_packages: true
+    packager_script: packager.py
+    packager_arch: aarch64
+    packager_distro: rhel90
+    repo_edition: org
+    scons_cache_scope: shared
+    large_distro_name: rhel90-arm64-large
+    compile_variant: rhel90-arm64
+  tasks:
+  - name: compile_test_and_package_serial_no_unittests_TG
+    distros:
+    - rhel90-arm64-large
+  - name: aggregation
+  - name: .auth !.audit !.multiversion
+  - name: causally_consistent_jscore_txns_passthrough
+  - name: .misc_js
+  - name: .concurrency .common
+    distros:
+    - rhel90-arm64-large
+  - name: concurrency_replication_causal_consistency_gen
+  - name: disk_wiredtiger
+  - name: free_monitoring
+  - name: .jscore .common
+  - name: .jstestfuzz .common
+  - name: .logical_session_cache .one_sec
+  - name: replica_sets_gen
+  - name: .replica_sets .common
+  - name: .sharding .txns
+  - name: .sharding .common !.csrs !.multiversion
+  - name: .ssl
+  - name: .stitch
+  - name: test_packages
+    distros:
+    - ubuntu2204-arm64-small
+  - name: .publish
+    distros:
+    - rhel80-small
+  - name: generate_buildid_to_debug_symbols_mapping
+
+- name: enterprise-rhel90-arm64
+  display_name: "Enterprise RHEL 9.0 arm64"
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  modules:
+  - enterprise
+  run_on:
+  - rhel90-arm64-small
+  expansions:
+    additional_package_targets: >-
+      archive-mongocryptd
+      archive-mongocryptd-debug
+      archive-mh
+      archive-mh-debug
+    push_path: linux
+    push_bucket: downloads.10gen.com
+    push_name: linux
+    push_arch: aarch64-enterprise-rhel90
+    compile_flags: >-
+      --ssl MONGO_DISTMOD=rhel90
+      -j$(grep -c ^processor /proc/cpuinfo)
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+    crypt_task_compile_flags: >-
+      SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic
+      -Wl,--no-gnu-unique"
+      CCFLAGS="-fno-gnu-unique"
+    has_packages: true
+    packager_script: packager_enterprise.py
+    packager_arch: aarch64
+    packager_distro: rhel90
+    repo_edition: enterprise
+    scons_cache_scope: shared
+    large_distro_name: rhel90-arm64-large
+    compile_variant: enterprise-rhel90-arm64
+  tasks:
+  - name: compile_test_and_package_serial_no_unittests_TG
+    distros:
+    - rhel90-arm64-large
+  - name: .aggfuzzer !.multiversion
+  - name: audit
+  - name: auth_audit_gen
+  - name: auth_gen
+  - name: causally_consistent_jscore_txns_passthrough
+  - name: .encrypt !.sharding !.replica_sets !.aggregation !.jscore
+  - name: external_auth
+  - name: external_auth_aws
+  - name: .jscore .common !.decimal !.sharding
+  - name: jsCore_txns_large_txns_format
+  - name: .jstestfuzz .common
+  - name: .logical_session_cache .one_sec
+  - name: replica_sets_auth_gen
+  - name: replica_sets_jscore_passthrough
+  - name: .replica_sets .multi_oplog
+  - name: sasl
+  - name: search
+  - name: search_auth
+  - name: search_ssl
+  - name: sharding_auth_audit_gen
+  - name: sharding_auth_gen
+  - name: .stitch
+  - name: .crypt
+    distros:
+    - rhel90-arm64-large
+  - name: .publish_crypt
+  - name: test_packages
+    distros:
+    - ubuntu2204-arm64-small
+  - name: .publish
+    distros:
+    - rhel80-small
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: suse12
@@ -1266,12 +1375,15 @@ buildvariants:
     push_bucket: downloads.mongodb.org
     push_name: linux
     push_arch: x86_64-suse12
+    # TODO: BUILD-16601
+    # Below we are switching to gold linker because suse12 does not have
+    # a llvm deployment in the toolchain because of issue in BUILD-16601
     compile_flags: >-
       --ssl
       MONGO_DISTMOD=suse12
-      -j$(grep -c ^processor /proc/cpuinfo)
+      -j$(echo $(grep -c ^processor /proc/cpuinfo) / 2 | bc)
       --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-      DWARF_WIDTH=32
+      --linker=gold
     multiversion_platform: suse12
     multiversion_edition: targeted
     has_packages: true
@@ -1312,7 +1424,6 @@ buildvariants:
     distros:
     - ubuntu2004-package
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-suse12-64
@@ -1330,12 +1441,15 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: x86_64-enterprise-suse12
+    # TODO: BUILD-16601
+    # Below we are switching to gold linker because suse12 does not have
+    # a llvm deployment in the toolchain because of issue in BUILD-16601
     compile_flags: >-
       --ssl
       MONGO_DISTMOD=suse12
-      -j$(grep -c ^processor /proc/cpuinfo)
+      -j$(echo $(grep -c ^processor /proc/cpuinfo) / 2 | bc)
       --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-      DWARF_WIDTH=32
+      --linker=gold
     crypt_task_compile_flags: >-
       SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique"
       CCFLAGS="-fno-gnu-unique"
@@ -1372,7 +1486,6 @@ buildvariants:
     distros:
     - ubuntu2004-package
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-suse15-64
@@ -1395,7 +1508,6 @@ buildvariants:
       MONGO_DISTMOD=suse15
       -j$(grep -c ^processor /proc/cpuinfo)
       --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-      DWARF_WIDTH=32
     crypt_task_compile_flags: >-
       SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique"
       CCFLAGS="-fno-gnu-unique"
@@ -1425,7 +1537,6 @@ buildvariants:
   - name: .crypt
   - name: .publish_crypt
   - name: .publish
-  - name: .publish_test
   - name: test_packages
     distros:
     - ubuntu2004-package
@@ -1446,7 +1557,6 @@ buildvariants:
       MONGO_DISTMOD=suse15
       -j$(grep -c ^processor /proc/cpuinfo)
       --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-      DWARF_WIDTH=32
     multiversion_platform: suse15
     multiversion_edition: targeted
     has_packages: true
@@ -1481,7 +1591,6 @@ buildvariants:
   - name: .ssl
   - name: .stitch
   - name: .publish
-  - name: .publish_test
   - name: test_packages
     distros:
     - ubuntu2004-package
@@ -1548,7 +1657,6 @@ buildvariants:
     distros:
     - ubuntu2004-package
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-ubuntu1804-64
@@ -1631,7 +1739,6 @@ buildvariants:
     distros:
     - ubuntu2004-package
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-ubuntu1804-arm64
@@ -1659,7 +1766,7 @@ buildvariants:
       SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic
       -Wl,--no-gnu-unique"
       CCFLAGS="-fno-gnu-unique"
-    test_flags: --excludeWithAnyTags=requires_ocsp_stapling
+    test_flags: --excludeWithAnyTags=requires_ocsp_stapling,requires_external_data_source
     resmoke_jobs_max: 4 # Avoid starting too many mongod's on ARM test servers
     has_packages: true
     packager_script: packager_enterprise.py
@@ -1697,7 +1804,6 @@ buildvariants:
     distros:
     - ubuntu1804-arm64-build
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: ubuntu1804-arm64
@@ -1737,7 +1843,6 @@ buildvariants:
     distros:
     - ubuntu1804-arm64-build
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: ubuntu2204
@@ -1793,7 +1898,6 @@ buildvariants:
     distros:
     - ubuntu2204-large
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: ubuntu2004
@@ -1849,7 +1953,6 @@ buildvariants:
     distros:
     - ubuntu2004-package
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-ubuntu2004-64
@@ -1915,7 +2018,6 @@ buildvariants:
     distros:
     - ubuntu2004-package
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-ubuntu2204-64
@@ -1981,11 +2083,10 @@ buildvariants:
   - name: test_packages
     distros:
     - ubuntu2204-large
-  - name: test_packages_complete
+  - name: test_packages_release
     distros:
     - ubuntu2204-large
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-ubuntu2004-arm64
@@ -2047,7 +2148,6 @@ buildvariants:
     distros:
     - ubuntu1804-arm64-build
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: ubuntu2004-arm64
@@ -2085,7 +2185,6 @@ buildvariants:
     distros:
     - ubuntu1804-arm64-build
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 
@@ -2101,7 +2200,7 @@ buildvariants:
     push_path: linux
     push_bucket: downloads.10gen.com
     push_name: linux
-    push_arch: arm64-enterprise-ubuntu2204
+    push_arch: aarch64-enterprise-ubuntu2204
     compile_flags: --ssl MONGO_DISTMOD=ubuntu2204 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
     crypt_task_compile_flags: SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique" CCFLAGS="-fno-gnu-unique"
     resmoke_jobs_max: 4 # Avoid starting too many mongod's on ARM test servers
@@ -2140,11 +2239,10 @@ buildvariants:
   - name: test_packages
     distros:
     - ubuntu2204-arm64-large
-  - name: test_packages_complete
+  - name: test_packages_release
     distros:
     - ubuntu2204-arm64-large
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: ubuntu2204-arm64
@@ -2156,7 +2254,7 @@ buildvariants:
     push_path: linux
     push_bucket: downloads.mongodb.org
     push_name: linux
-    push_arch: arm64-ubuntu2204
+    push_arch: aarch64-ubuntu2204
     compile_flags: --ssl MONGO_DISTMOD=ubuntu2204 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
     resmoke_jobs_max: 8 # Avoid starting too many mongod's on ARM test servers
     has_packages: true
@@ -2178,7 +2276,6 @@ buildvariants:
     distros:
     - ubuntu2204-arm64-large
   - name: .publish
-  - name: .publish_test
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: windows

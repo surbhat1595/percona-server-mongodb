@@ -84,6 +84,7 @@ BSONObj createAggregateCmdObj(OperationContext* opCtx,
                                       {BSON("$match" << parsedInfo.query),
                                        BSON("$limit" << 1),
                                        BSON("$project" << BSON("_id" << 1))});
+    aggregate.setCollation(parsedInfo.collation);
     return aggregate.toBSON({});
 }
 
@@ -103,8 +104,7 @@ public:
 
             LOGV2(6962300,
                   "Running read phase for a write without a shard key.",
-                  "clientWriteRequest"_attr = request().getWriteCmd(),
-                  "stmtIdInBatch"_attr = request().getStmtId());
+                  "clientWriteRequest"_attr = request().getWriteCmd());
 
             // Get all shard ids for shards that have chunks in the desired namespace.
             const NamespaceString nss(
@@ -208,7 +208,7 @@ public:
     }
 
     bool supportsRetryableWrite() const final {
-        return true;
+        return false;
     }
 
     bool allowedInTransactions() const final {

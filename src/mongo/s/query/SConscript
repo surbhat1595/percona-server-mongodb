@@ -12,8 +12,8 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/commands',
-        '$BUILD_DIR/mongo/db/curop',
         '$BUILD_DIR/mongo/db/curop_failpoint_helpers',
+        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/db/query/query_common',
         '$BUILD_DIR/mongo/s/sharding_router_api',
         'cluster_client_cursor',
@@ -45,6 +45,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/catalog/collection_uuid_mismatch_info',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
+        'cqf_utils',
     ],
 )
 
@@ -76,6 +77,17 @@ env.Library(
 )
 
 env.Library(
+    target='cqf_utils',
+    source=[
+        'cqf_utils.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/pipeline/pipeline',
+        'router_exec_stage',
+    ],
+)
+
+env.Library(
     target='async_results_merger',
     source=[
         'async_results_merger.cpp',
@@ -102,8 +114,8 @@ env.Library(
     ],
     LIBDEPS=[
         "$BUILD_DIR/mongo/base",
-        "$BUILD_DIR/mongo/db/curop",
         "$BUILD_DIR/mongo/db/query/command_request_response",
+        "$BUILD_DIR/mongo/db/query/op_metrics",
         "cluster_client_cursor",
         "cluster_cursor_manager",
     ],
@@ -118,8 +130,8 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/auth/auth',
         '$BUILD_DIR/mongo/db/auth/authprivilege',
-        '$BUILD_DIR/mongo/db/curop',
         '$BUILD_DIR/mongo/db/generic_cursor',
+        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/db/query/query_knobs',
         '$BUILD_DIR/mongo/db/session/kill_sessions',
         '$BUILD_DIR/mongo/db/session/logical_session_cache',

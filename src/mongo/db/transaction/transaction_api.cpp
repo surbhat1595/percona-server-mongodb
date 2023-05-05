@@ -50,6 +50,7 @@
 #include "mongo/db/session/internal_session_pool.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/session/session_catalog.h"
+#include "mongo/db/transaction/internal_transaction_metrics.h"
 #include "mongo/db/transaction_validation.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/task_executor.h"
@@ -116,10 +117,13 @@ StatusWith<CommitResult> SyncTransactionWithRetries::runNoThrow(OperationContext
     repl::ReplClientInfo::forClient(opCtx->getClient())
         .setLastProxyWriteTimestampForward(_txn->getOperationTime().asTimestamp());
 
-    // Schedule cleanup tasks after the caller has finished waiting so the caller can't be blocked.
+    // Run cleanup tasks after the caller has finished waiting so the caller can't be blocked.
+    // Attempt to wait for cleanup so it appears synchronous for most callers, but allow
+    // interruptions so we return immediately if the opCtx has been cancelled.
+    //
     // Also schedule after getting the transaction's operation time so the best effort abort can't
     // unnecessarily advance it.
-    _txn->scheduleCleanupIfNecessary();
+    _txn->cleanUpIfNecessary().getNoThrow(opCtx).ignore();
 
     auto unyieldStatus = _resourceYielder ? _resourceYielder->unyieldNoThrow(opCtx) : Status::OK();
 
@@ -250,6 +254,7 @@ void logNextStep(Transaction::ErrorHandlingStep nextStep, const BSONObj& txnInfo
 }
 
 SemiFuture<CommitResult> TransactionWithRetries::run(Callback callback) noexcept {
+    InternalTransactionMetrics::get(_internalTxn->getParentServiceContext())->incrementStarted();
     _internalTxn->setCallback(std::move(callback));
 
     return AsyncTry([this, bodyAttempts = 0]() mutable {
@@ -261,6 +266,7 @@ SemiFuture<CommitResult> TransactionWithRetries::run(Callback callback) noexcept
         .until([](StatusOrStatusWith<CommitResult> txnStatus) {
             // Commit retries should be handled within _runCommitWithRetries().
             invariant(txnStatus != ErrorCodes::TransactionAPIMustRetryCommit);
+
             return txnStatus.isOK() || txnStatus != ErrorCodes::TransactionAPIMustRetryTransaction;
         })
         .withBackoffBetweenIterations(kExponentialBackoff)
@@ -284,6 +290,8 @@ ExecutorFuture<void> TransactionWithRetries::_runBodyHandleErrors(int bodyAttemp
                 iassert(bodyStatus);
             } else if (nextStep == Transaction::ErrorHandlingStep::kRetryTransaction) {
                 return _bestEffortAbort().then([this, bodyStatus] {
+                    InternalTransactionMetrics::get(_internalTxn->getParentServiceContext())
+                        ->incrementRetriedTransactions();
                     _internalTxn->primeForTransactionRetry();
                     iassert(Status(ErrorCodes::TransactionAPIMustRetryTransaction,
                                    str::stream() << "Must retry body loop on internal body error: "
@@ -298,6 +306,8 @@ ExecutorFuture<CommitResult> TransactionWithRetries::_runCommitHandleErrors(int 
     return _internalTxn->commit().thenRunOn(_executor).onCompletion(
         [this, commitAttempts](StatusWith<CommitResult> swCommitResult) {
             if (swCommitResult.isOK() && swCommitResult.getValue().getEffectiveStatus().isOK()) {
+                InternalTransactionMetrics::get(_internalTxn->getParentServiceContext())
+                    ->incrementSucceeded();
                 // Commit succeeded so return to the caller.
                 return ExecutorFuture<CommitResult>(_executor, swCommitResult);
             }
@@ -310,11 +320,15 @@ ExecutorFuture<CommitResult> TransactionWithRetries::_runCommitHandleErrors(int 
             } else if (nextStep == Transaction::ErrorHandlingStep::kAbortAndDoNotRetry) {
                 MONGO_UNREACHABLE;
             } else if (nextStep == Transaction::ErrorHandlingStep::kRetryTransaction) {
+                InternalTransactionMetrics::get(_internalTxn->getParentServiceContext())
+                    ->incrementRetriedTransactions();
                 _internalTxn->primeForTransactionRetry();
                 iassert(Status(ErrorCodes::TransactionAPIMustRetryTransaction,
                                str::stream() << "Must retry body loop on commit error: "
                                              << swCommitResult.getStatus()));
             } else if (nextStep == Transaction::ErrorHandlingStep::kRetryCommit) {
+                InternalTransactionMetrics::get(_internalTxn->getParentServiceContext())
+                    ->incrementRetriedCommits();
                 _internalTxn->primeForCommitRetry();
                 iassert(Status(ErrorCodes::TransactionAPIMustRetryCommit,
                                str::stream() << "Must retry commit loop on internal commit error: "
@@ -425,11 +439,13 @@ SemiFuture<std::vector<BSONObj>> SEPTransactionClient::exhaustiveFind(
     const FindCommandRequest& cmd) const {
     return runCommand(cmd.getDbName().db(), cmd.toBSON({}))
         .thenRunOn(_executor)
-        .then([this, batchSize = cmd.getBatchSize()](BSONObj reply) {
+        .then([this, batchSize = cmd.getBatchSize(), tenantId = cmd.getDbName().tenantId()](
+                  BSONObj reply) {
             auto cursorResponse = std::make_shared<CursorResponse>(
-                uassertStatusOK(CursorResponse::parseFromBSON(reply)));
+                uassertStatusOK(CursorResponse::parseFromBSON(reply, nullptr, tenantId)));
             auto response = std::make_shared<std::vector<BSONObj>>();
             return AsyncTry([this,
+                             tenantId,
                              batchSize = batchSize,
                              cursorResponse = std::move(cursorResponse),
                              response]() mutable {
@@ -450,11 +466,11 @@ SemiFuture<std::vector<BSONObj>> SEPTransactionClient::exhaustiveFind(
 
                        return runCommand(cursorResponse->getNSS().db(), getMoreRequest.toBSON({}))
                            .thenRunOn(_executor)
-                           .then([response, cursorResponse](BSONObj reply) {
+                           .then([response, cursorResponse, tenantId](BSONObj reply) {
                                // We keep the state of cursorResponse to be able to check the
                                // cursorId in the next iteration.
-                               *cursorResponse =
-                                   uassertStatusOK(CursorResponse::parseFromBSON(reply));
+                               *cursorResponse = uassertStatusOK(
+                                   CursorResponse::parseFromBSON(reply, nullptr, tenantId));
                                uasserted(ErrorCodes::InternalTransactionsExhaustiveFindHasMore,
                                          "More documents to fetch");
                            })
@@ -553,7 +569,7 @@ SemiFuture<BSONObj> Transaction::_commitOrAbort(StringData dbName, StringData cm
     }
 
     return ExecutorFuture<void>(_executor)
-        .then([this, dbNameCopy = dbName.toString(), cmdObj = cmdBuilder.obj()] {
+        .then([this, dbNameCopy = dbName, cmdObj = cmdBuilder.obj()] {
             return _txnClient->runCommand(dbNameCopy, cmdObj);
         })
         // Safe to inline because the continuation only holds state.
@@ -676,12 +692,16 @@ Transaction::ErrorHandlingStep Transaction::handleError(const StatusWith<CommitR
     return ErrorHandlingStep::kAbortAndDoNotRetry;
 }
 
-void TransactionWithRetries::scheduleCleanupIfNecessary() {
+SemiFuture<void> TransactionWithRetries::cleanUpIfNecessary() {
     if (!_internalTxn->needsCleanup()) {
-        return;
+        return SemiFuture<void>(Status::OK());
     }
 
-    _bestEffortAbort().getAsync([anchor = shared_from_this()](auto&&) {});
+    return _bestEffortAbort()
+        // Safe to inline because the continuation only holds state.
+        .unsafeToInlineFuture()
+        .tapAll([anchor = shared_from_this()](auto&&) {})
+        .semi();
 }
 
 void Transaction::prepareRequest(BSONObjBuilder* cmdBuilder) {

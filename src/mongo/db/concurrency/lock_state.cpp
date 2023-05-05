@@ -50,6 +50,7 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
+#include "mongo/util/testing_proctor.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -375,7 +376,7 @@ bool LockerImpl::_acquireTicket(OperationContext* opCtx, LockMode mode, Date_t d
     const bool reader = isSharedLockMode(mode);
 
     if (!shouldWaitForTicket() && holder) {
-        _ticket = holder->acquireImmediateTicket(&_admCtx);
+        holder->reportImmediatePriorityAdmission();
     } else if (mode != MODE_X && mode != MODE_NONE && holder) {
         // MODE_X is exclusive of all other locks, thus acquiring a ticket is unnecessary.
         _clientState.store(reader ? kQueuedReader : kQueuedWriter);
@@ -424,6 +425,13 @@ void LockerImpl::lockGlobal(OperationContext* opCtx, LockMode mode, Date_t deadl
                     _acquireTicket(opCtx, mode, deadline));
         }
         _modeForTicket = mode;
+    } else if (TestingProctor::instance().isEnabled() && !isModeCovered(mode, _modeForTicket)) {
+        LOGV2_FATAL(
+            6614500,
+            "Ticket held does not cover requested mode for global lock. Global lock upgrades are "
+            "not allowed",
+            "held"_attr = modeName(_modeForTicket),
+            "requested"_attr = modeName(mode));
     }
 
     const LockResult result = _lockBegin(opCtx, resourceIdGlobal, mode);
@@ -432,7 +440,7 @@ void LockerImpl::lockGlobal(OperationContext* opCtx, LockMode mode, Date_t deadl
         return;
 
     invariant(result == LOCK_WAITING);
-    _lockComplete(opCtx, resourceIdGlobal, mode, deadline);
+    _lockComplete(opCtx, resourceIdGlobal, mode, deadline, nullptr);
 }
 
 bool LockerImpl::unlockGlobal() {
@@ -567,7 +575,7 @@ void LockerImpl::lock(OperationContext* opCtx, ResourceId resId, LockMode mode, 
         return;
 
     invariant(result == LOCK_WAITING);
-    _lockComplete(opCtx, resId, mode, deadline);
+    _lockComplete(opCtx, resId, mode, deadline, nullptr);
 }
 
 void LockerImpl::downgrade(ResourceId resId, LockMode newMode) {
@@ -946,7 +954,8 @@ LockResult LockerImpl::_lockBegin(OperationContext* opCtx, ResourceId resId, Loc
 void LockerImpl::_lockComplete(OperationContext* opCtx,
                                ResourceId resId,
                                LockMode mode,
-                               Date_t deadline) {
+                               Date_t deadline,
+                               const LockTimeoutCallback& onTimeout) {
     // Operations which are holding open an oplog hole cannot block when acquiring locks. Lock
     // requests entering this function have been queued up and will be granted the lock as soon as
     // the lock is released, which is a blocking operation.
@@ -1032,6 +1041,9 @@ void LockerImpl::_lockComplete(OperationContext* opCtx,
         // Check if the lock acquisition has timed out. If we have an operation context and client
         // we can provide additional diagnostics data.
         if (waitTime == Milliseconds(0)) {
+            if (onTimeout) {
+                onTimeout();
+            }
             std::string timeoutMessage = str::stream()
                 << "Unable to acquire " << modeName(mode) << " lock on '" << resId.toString()
                 << "' within " << timeout << ".";
@@ -1080,8 +1092,11 @@ LockResult LockerImpl::lockRSTLBegin(OperationContext* opCtx, LockMode mode) {
     return _lockBegin(opCtx, resourceIdReplicationStateTransitionLock, mode);
 }
 
-void LockerImpl::lockRSTLComplete(OperationContext* opCtx, LockMode mode, Date_t deadline) {
-    _lockComplete(opCtx, resourceIdReplicationStateTransitionLock, mode, deadline);
+void LockerImpl::lockRSTLComplete(OperationContext* opCtx,
+                                  LockMode mode,
+                                  Date_t deadline,
+                                  const LockTimeoutCallback& onTimeout) {
+    _lockComplete(opCtx, resourceIdReplicationStateTransitionLock, mode, deadline, onTimeout);
 }
 
 void LockerImpl::releaseTicket() {

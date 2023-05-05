@@ -41,6 +41,8 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/update/path_support.h"
+#include "mongo/db/update/produce_document_for_upsert.h"
+#include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
@@ -59,12 +61,6 @@ MONGO_FAIL_POINT_DEFINE(hangBeforeThrowWouldChangeOwningShard);
 
 const char idFieldName[] = "_id";
 const FieldRef idFieldRef(idFieldName);
-
-void addObjectIDIdField(mb::Document* doc) {
-    const auto idElem = doc->makeElementNewOID(idFieldName);
-    uassert(17268, "Could not create new ObjectId '_id' field.", idElem.ok());
-    uassertStatusOK(doc->root().pushFront(idElem));
-}
 
 /**
  * Returns true if we should throw a WriteConflictException in order to retry the operation in the
@@ -215,7 +211,7 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj,
     const auto createIdField = !collection()->isCapped();
 
     // Ensure _id is first if it exists, and generate a new OID if appropriate.
-    _ensureIdFieldIsFirst(&_doc, createIdField);
+    update::ensureIdFieldIsFirst(&_doc, createIdField);
 
     // See if the changes were applied in place
     const char* source = nullptr;
@@ -273,17 +269,18 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj,
                     checkUpdateChangesShardKeyFields(boost::none /* newObj */, oldObj);
                 }
 
+                auto diff = update_oplog_entry::extractDiffFromOplogEntry(logObj);
                 WriteUnitOfWork wunit(opCtx());
-                newObj = uassertStatusOK(
-                    collection_internal::updateDocumentWithDamages(opCtx(),
-                                                                   collection(),
-                                                                   recordId,
-                                                                   oldObj,
-                                                                   source,
-                                                                   _damages,
-                                                                   driver->modsAffectIndices(),
-                                                                   _params.opDebug,
-                                                                   &args));
+                newObj = uassertStatusOK(collection_internal::updateDocumentWithDamages(
+                    opCtx(),
+                    collection(),
+                    recordId,
+                    oldObj,
+                    source,
+                    _damages,
+                    diff.has_value() ? &*diff : collection_internal::kUpdateAllIndexes,
+                    _params.opDebug,
+                    &args));
                 invariant(oldObj.snapshotId() == opCtx()->recoveryUnit()->getSnapshotId());
                 wunit.commit();
             }
@@ -304,15 +301,18 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj,
                 if (_isUserInitiatedWrite) {
                     checkUpdateChangesShardKeyFields(newObj, oldObj);
                 }
+
+                auto diff = update_oplog_entry::extractDiffFromOplogEntry(logObj);
                 WriteUnitOfWork wunit(opCtx());
-                newRecordId = collection_internal::updateDocument(opCtx(),
-                                                                  collection(),
-                                                                  recordId,
-                                                                  oldObj,
-                                                                  newObj,
-                                                                  driver->modsAffectIndices(),
-                                                                  _params.opDebug,
-                                                                  &args);
+                newRecordId = collection_internal::updateDocument(
+                    opCtx(),
+                    collection(),
+                    recordId,
+                    oldObj,
+                    newObj,
+                    diff.has_value() ? &*diff : collection_internal::kUpdateAllIndexes,
+                    _params.opDebug,
+                    &args);
                 invariant(oldObj.snapshotId() == opCtx()->recoveryUnit()->getSnapshotId());
                 wunit.commit();
             }
@@ -345,21 +345,6 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj,
     invariant(!newObj.isEmpty());
 
     return newObj;
-}
-
-void UpdateStage::_assertPathsNotArray(const mb::Document& document, const FieldRefSet& paths) {
-    for (const auto& path : paths) {
-        auto elem = document.root();
-        // If any path component does not exist, we stop checking for arrays along the path.
-        for (size_t i = 0; elem.ok() && i < (*path).numParts(); ++i) {
-            elem = elem[(*path).getPart(i)];
-            uassert(ErrorCodes::NotSingleValueField,
-                    str::stream() << "After applying the update to the document, the field '"
-                                  << (*path).dottedField()
-                                  << "' was found to be an array or array descendant.",
-                    !elem.ok() || elem.getType() != BSONType::Array);
-        }
-    }
 }
 
 bool UpdateStage::isEOF() {
@@ -628,19 +613,6 @@ PlanStage::StageState UpdateStage::doWork(WorkingSetID* out) {
     return status;
 }
 
-void UpdateStage::_ensureIdFieldIsFirst(mb::Document* doc, bool generateOIDIfMissing) {
-    mb::Element idElem = mb::findFirstChildNamed(doc->root(), idFieldName);
-
-    // If the document has no _id and the caller has requested that we generate one, do so.
-    if (!idElem.ok() && generateOIDIfMissing) {
-        addObjectIDIdField(doc);
-    } else if (idElem.ok() && idElem.leftSibling().ok()) {
-        // If the document does have an _id but it is not the first element, move it to the front.
-        uassertStatusOK(idElem.remove());
-        uassertStatusOK(doc->root().pushFront(idElem));
-    }
-}
-
 void UpdateStage::doRestoreStateRequiresCollection() {
     const UpdateRequest& request = *_params.request;
     const NamespaceString& nsString(request.getNamespaceString());
@@ -691,13 +663,28 @@ void UpdateStage::_checkRestrictionsOnUpdatingShardKeyAreNotViolated(
     // shard key fields.
     const auto& shardKeyPathsVector = collDesc.getKeyPatternFields();
     pathsupport::EqualityMatches equalities;
+
+    // We can now update a document shard key without needing to specify the full shard key in the
+    // query. The protocol to perform the write uses _id with a proper shardVersion to target the
+    // specific document, but due to current constraints that _id writes are manually broadcast with
+    // ShardVersion::Ignored, we differentiate user queries that originally only contained _id and
+    // the protocol's use of _id in its queries by the shardVersion set.
+    auto sentShardVersion =
+        OperationShardingState::get(opCtx()).getShardVersion(_params.request->getNamespaceString());
+    bool allowShardKeyUpdatesWithoutFullShardKeyInQuery =
+        feature_flags::gFeatureFlagUpdateOneWithoutShardKey.isEnabled(
+            serverGlobalParams.featureCompatibility) &&
+        sentShardVersion && !ShardVersion::isIgnoredVersion(*sentShardVersion);
+
     uassert(31025,
-            "Shard key update is not allowed without specifying the full shard key in the query",
-            _params.canonicalQuery &&
-                pathsupport::extractFullEqualityMatches(
-                    *(_params.canonicalQuery->root()), shardKeyPaths, &equalities)
-                    .isOK() &&
-                equalities.size() == shardKeyPathsVector.size());
+            "Shard key update is not allowed without specifying the full shard key in the "
+            "query",
+            (_params.canonicalQuery &&
+             pathsupport::extractFullEqualityMatches(
+                 *(_params.canonicalQuery->root()), shardKeyPaths, &equalities)
+                 .isOK() &&
+             equalities.size() == shardKeyPathsVector.size()) ||
+                allowShardKeyUpdatesWithoutFullShardKeyInQuery);
 
     // We do not allow updates to the shard key when 'multi' is true.
     uassert(ErrorCodes::InvalidOptions,
@@ -796,7 +783,7 @@ void UpdateStage::checkUpdateChangesExistingShardKey(const ShardingWriteRouter& 
     FieldRefSet shardKeyPaths(collDesc->getKeyPatternFields());
 
     // Assert that the updated doc has no arrays or array descendants for the shard key fields.
-    _assertPathsNotArray(_doc, shardKeyPaths);
+    update::assertPathsNotArray(_doc, shardKeyPaths);
 
     _checkRestrictionsOnUpdatingShardKeyAreNotViolated(*collDesc, shardKeyPaths);
 

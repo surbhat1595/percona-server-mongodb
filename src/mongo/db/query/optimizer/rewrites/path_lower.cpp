@@ -73,7 +73,7 @@ void EvalPathLowering::transport(ABT& n, const PathDefault&, ABT& c) {
 }
 
 void EvalPathLowering::transport(ABT& n, const PathCompare&, ABT& c) {
-    uasserted(6624132, "cannot lower compare in projection");
+    tasserted(6624132, "cannot lower compare in projection");
 }
 
 void EvalPathLowering::transport(ABT& n, const PathGet& p, ABT& inner) {
@@ -206,7 +206,7 @@ void EvalPathLowering::transport(ABT& n, const PathComposeM&, ABT& p1, ABT& p2) 
 }
 
 void EvalPathLowering::transport(ABT& n, const PathComposeA&, ABT& p1, ABT& p2) {
-    uasserted(6624133, "cannot lower additive composite in projection");
+    tasserted(6624133, "cannot lower additive composite in projection");
 }
 
 void EvalPathLowering::transport(ABT& n, const EvalPath&, ABT& path, ABT& input) {
@@ -238,11 +238,7 @@ void EvalFilterLowering::transport(ABT& n, const PathConstant&, ABT& c) {
 }
 
 void EvalFilterLowering::transport(ABT& n, const PathIdentity&) {
-    n = make<LambdaAbstraction>(_prefixId.getNextId("_"), Constant::boolean(true));
-    _changed = true;
-
-    // TODO - do we need an identity element for the additive composition? i.e. false constant
-    // Or should Identity be left undefined and removed by the PathFuse?
+    tasserted(6893500, "PathIdentity not allowed in EvalFilter (match) context");
 }
 
 void EvalFilterLowering::transport(ABT& n, const PathLambda&, ABT& lam) {
@@ -266,6 +262,8 @@ void EvalFilterLowering::transport(ABT& n, const PathCompare& cmp, ABT& c) {
     const ProjectionName name{_prefixId.getNextId("valCmp")};
 
     if (cmp.op() == Operations::Eq) {
+        // ABT Eq matches the semantics of SBE eq exactly, so lower the expression directly without
+        // dealing with cross-type comparisons.
         n = make<LambdaAbstraction>(
             name,
             make<BinaryOp>(cmp.op(), make<Variable>(name), std::exchange(c, make<Blackhole>())));
@@ -276,6 +274,11 @@ void EvalFilterLowering::transport(ABT& n, const PathCompare& cmp, ABT& c) {
                      make<FunctionCall>("isMember", makeSeq(make<Variable>(name), c)),
                      make<BinaryOp>(Operations::Eq, make<Variable>(name), c)));
     } else {
+        // ABT gt/lt/gte/lte and neq operators work across types, but SBE equivalents will return
+        // Nothing if the types do not match. We can express a type-agnostic comparison in an SBE
+        // compatible way using cmp3w (<=>), which works with any two values of any types in SBE.
+        // cmp(X, Y) is equivalent to cmp(X <=> Y, 0) in ABT, but will return a boolean rather than
+        // Nothing in SBE.
         n = make<LambdaAbstraction>(
             name,
             make<BinaryOp>(cmp.op(),
@@ -303,11 +306,11 @@ void EvalFilterLowering::transport(ABT& n, const PathGet& p, ABT& inner) {
 }
 
 void EvalFilterLowering::transport(ABT& n, const PathDrop& drop) {
-    uasserted(6624136, "cannot lower drop in filter");
+    tasserted(6624136, "cannot lower drop in filter");
 }
 
 void EvalFilterLowering::transport(ABT& n, const PathKeep& keep) {
-    uasserted(6624137, "cannot lower keep in filter");
+    tasserted(6624137, "cannot lower keep in filter");
 }
 
 void EvalFilterLowering::transport(ABT& n, const PathObj&) {
@@ -356,7 +359,7 @@ void EvalFilterLowering::transport(ABT& n, const PathTraverse& p, ABT& inner) {
 }
 
 void EvalFilterLowering::transport(ABT& n, const PathField& p, ABT& inner) {
-    uasserted(6624140, "cannot lower field in filter");
+    tasserted(6624140, "cannot lower field in filter");
 }
 
 void EvalFilterLowering::transport(ABT& n, const PathComposeM&, ABT& p1, ABT& p2) {
@@ -365,10 +368,9 @@ void EvalFilterLowering::transport(ABT& n, const PathComposeM&, ABT& p1, ABT& p2
     n = make<LambdaAbstraction>(
         name,
         make<If>(
-            make<BinaryOp>(
-                Operations::FillEmpty,
-                make<LambdaApplication>(std::exchange(p1, make<Blackhole>()), make<Variable>(name)),
-                Constant::boolean(false)),
+            // If p1 is Nothing, then the expression will short-circuit and Nothing will be
+            // propagated to this operator's parent, and eventually coerced to false.
+            make<LambdaApplication>(std::exchange(p1, make<Blackhole>()), make<Variable>(name)),
             make<LambdaApplication>(std::exchange(p2, make<Blackhole>()), make<Variable>(name)),
             Constant::boolean(false)));
 

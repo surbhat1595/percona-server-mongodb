@@ -162,8 +162,8 @@ public:
         };
 
         const auto addEvalFilterFn = [&](ABT path, ABT expr, const Operations op) {
-            PathAppender appender(make<PathCompare>(op, std::move(expr)));
-            appender.append(path);
+            PathAppender::appendInPlace(path, make<PathCompare>(op, std::move(expr)));
+
             _ctx.push<EvalFilter>(std::move(path), _ctx.getRootProjVar());
         };
 
@@ -183,7 +183,7 @@ public:
                 isSimplePath(rightPtr->getPath()) &&
                 rightPtr->getInput() == _ctx.getRootProjVar()) {
                 addEvalFilterFn(
-                    std::move(rightPtr->getPath()), std::move(left), reverseComparisonOp(op));
+                    std::move(rightPtr->getPath()), std::move(left), flipComparisonOp(op));
                 return;
             }
         }
@@ -265,7 +265,7 @@ public:
             make<PathIdentity>(),
             [](FieldNameType fieldName, const bool isLastElement, ABT input) {
                 if (!isLastElement) {
-                    input = make<PathTraverse>(std::move(input), PathTraverse::kUnlimited);
+                    input = make<PathTraverse>(PathTraverse::kUnlimited, std::move(input));
                 }
                 return make<PathGet>(std::move(fieldName), std::move(input));
             },
@@ -287,10 +287,10 @@ public:
 
         _ctx.push<EvalPath>(
             make<PathTraverse>(
+                PathTraverse::kUnlimited,
                 make<PathLambda>(make<LambdaAbstraction>(
                     varName,
-                    make<If>(std::move(filter), make<Variable>(varName), Constant::nothing()))),
-                PathTraverse::kUnlimited),
+                    make<If>(std::move(filter), make<Variable>(varName), Constant::nothing())))),
             std::move(input));
     }
 
@@ -777,6 +777,10 @@ public:
 
     void visit(const ExpressionInternalOwningShard* expr) override final {
         unsupportedExpression("$_internalOwningShard");
+    }
+
+    void visit(const ExpressionInternalIndexKey* expr) override final {
+        unsupportedExpression("$_internalIndexKey");
     }
 
 private:

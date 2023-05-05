@@ -31,7 +31,14 @@
 
 #include "mongo/db/query/optimizer/index_bounds.h"
 
+#include "mongo/db/query/optimizer/utils/utils.h"
+
 namespace mongo::optimizer {
+
+/**
+ * Constant fold the bounds of a DNF interval.
+ */
+void constFoldInterval(IntervalRequirement& interval, const ConstFoldFn& constFold);
 
 /**
  * Intersects or unions two intervals without simplification which might depend on multi-keyness.
@@ -41,6 +48,20 @@ namespace mongo::optimizer {
 void combineIntervalsDNF(bool intersect,
                          IntervalReqExpr::Node& target,
                          const IntervalReqExpr::Node& source);
+
+/**
+ * Simplifies two unioned intervals, variable or constant.
+ */
+std::vector<IntervalRequirement> unionTwoIntervals(const IntervalRequirement& int1,
+                                                   const IntervalRequirement& int2,
+                                                   const ConstFoldFn& constFold);
+
+/**
+ * Union DNF intervals. Analyzes constant intervals, and merges them if possible. Requires interval
+ * to be normalized, as well as intersection simplification to be run before this is called.
+ */
+boost::optional<IntervalReqExpr::Node> unionDNFIntervals(const IntervalReqExpr::Node& interval,
+                                                         const ConstFoldFn& constFold);
 
 /**
  * Intersect all intervals within each conjunction of intervals in a disjunction of intervals.
@@ -54,6 +75,14 @@ boost::optional<IntervalReqExpr::Node> intersectDNFIntervals(
     const IntervalReqExpr::Node& intervalDNF, const ConstFoldFn& constFold);
 
 /**
+ * Simplify DNF intervals by analyzing intervals within each conjunction to intersect, and also
+ * combining conjunctions with one child, to simplify unions. Returns boost::none if result is
+ * empty.
+ */
+boost::optional<IntervalReqExpr::Node> simplifyDNFIntervals(const IntervalReqExpr::Node& interval,
+                                                            const ConstFoldFn& constFold);
+
+/**
  * Combines a source interval over a single path with a target multi-component interval. The
  * multi-component interval is extended to contain an extra field. The resulting multi-component
  * interval defined the boundaries over the index component used by the index access execution
@@ -62,11 +91,19 @@ boost::optional<IntervalReqExpr::Node> intersectDNFIntervals(
  * inequality, and trailing open intervals.
  * reverseSource flag indicates the sourceInterval corresponds to a descending index, so the bounds
  * are flipped before combining with the target.
- * TODO: support Recursive Index Navigation.
  */
 bool combineCompoundIntervalsDNF(CompoundIntervalReqExpr::Node& targetIntervals,
                                  const IntervalReqExpr::Node& sourceIntervals,
-                                 bool reverseSource = false);
+                                 bool reverseSource);
+
+/**
+ * Similar to combineCompoundIntervalsDNF in the sense that the source interval can be considered a
+ * fully open one. We want to extend the target multi-component interval with one more entry, such
+ * that do not constrain the result. If the last entry's lower bound was inclusive, then we append
+ * MinKey, otherwise MaxKey. We do the opposite for the high bound. We also reverse high and low if
+ * the reverseSource flag is set.
+ */
+void padCompoundIntervalsDNF(CompoundIntervalReqExpr::Node& targetIntervals, bool reverseSource);
 
 /**
  * Converts intervals into a normal form. Atoms are compared using the ABT comparison order. Atoms

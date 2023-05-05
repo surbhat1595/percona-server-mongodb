@@ -305,6 +305,8 @@ roles:
                   - resync # clusterManager gets this also
                   - trafficRecord
                   - rotateCertificates
+                  - oidcListKeys
+                  - oidcRefreshKeys
             - matchType: any_normal
               actions: &hostManagerRoleDatabaseActions
                   - killCursors
@@ -339,6 +341,7 @@ roles:
                   - getClusterParameter
                   - setChangeStreamState
                   - getChangeStreamState
+                  - telemetryRead
 
             - matchType: any_normal
               actions: &clusterManagerRoleDatabaseActions

@@ -44,6 +44,7 @@
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
 #include "mongo/rpc/topology_version_gen.h"
 #include "mongo/unittest/bson_test_util.h"
+#include "mongo/unittest/thread_assertion_monitor.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/future.h"
@@ -87,6 +88,72 @@ TEST_F(AsyncRPCTestFixture, SuccessfulHello) {
 
     ASSERT_BSONOBJ_EQ(res.response.toBSON(), helloReply.toBSON());
     ASSERT_EQ(HostAndPort("localhost", serverGlobalParams.port), res.targetUsed);
+}
+
+/*
+ * Verify that generic command arguments are correctly serialized into the BSON builder of a
+ * command, and that generic reply fields are correctly parsed from the network response.
+ */
+TEST_F(AsyncRPCTestFixture, SuccessfulHelloWithGenericFields) {
+    std::unique_ptr<Targeter> targeter = std::make_unique<LocalHostTargeter>();
+    HelloCommandReply helloReply = HelloCommandReply(TopologyVersion(OID::gen(), 0));
+    HelloCommand helloCmd;
+    initializeCommand(helloCmd);
+
+    // Populate structs for generic arguments to be passed along when the command is converted
+    // to BSON.
+    GenericArgsAPIV1 genericArgsApiV1;
+    GenericArgsAPIV1Unstable genericArgsUnstable;
+
+    genericArgsApiV1.setAutocommit(false);
+    const UUID clientOpKey = UUID::gen();
+    genericArgsApiV1.setClientOperationKey(clientOpKey);
+
+    // Populate structs for generic reply fields that are expected to be parsed from the
+    // response object.
+    GenericReplyFieldsWithTypesV1 genericReplyApiV1;
+    GenericReplyFieldsWithTypesUnstableV1 genericReplyUnstable;
+    genericReplyUnstable.setOk(1);
+    genericReplyUnstable.setDollarConfigTime(Timestamp(1, 1));
+    const LogicalTime clusterTime = LogicalTime(Timestamp(2, 3));
+    genericReplyApiV1.setDollarClusterTime(clusterTime);
+    auto configTime = Timestamp(1, 1);
+    genericArgsUnstable.setDollarConfigTime(configTime);
+
+    auto opCtxHolder = makeOperationContext();
+    auto options = std::make_shared<AsyncRPCOptions<HelloCommand>>(
+        helloCmd,
+        getExecutorPtr(),
+        _cancellationToken,
+        std::make_shared<NeverRetryPolicy>(),
+        GenericArgs(genericArgsApiV1, genericArgsUnstable));
+    ExecutorFuture<AsyncRPCResponse<HelloCommandReply>> resultFuture =
+        sendCommand(options, opCtxHolder.get(), std::move(targeter));
+
+    onCommand([&](const auto& request) {
+        ASSERT(request.cmdObj["hello"]);
+        ASSERT_EQ(HostAndPort("localhost", serverGlobalParams.port), request.target);
+
+        // Confirm that the generic arguments are present in the BSON command object.
+        ASSERT_EQ(request.cmdObj["autocommit"].booleanSafe(), false);
+        ASSERT_EQ(UUID::fromCDR(request.cmdObj["clientOperationKey"].uuid()), clientOpKey);
+        ASSERT_EQ(request.cmdObj["$configTime"].timestamp(), configTime);
+
+        // Append generic reply fields to the reply object.
+        BSONObjBuilder reply = BSONObjBuilder(helloReply.toBSON());
+        reply.append("ok", 1);
+        reply.append("$configTime", Timestamp(1, 1));
+        clusterTime.serializeToBSON("$clusterTime", &reply);
+
+        return reply.obj();
+    });
+
+    AsyncRPCResponse res = resultFuture.get();
+
+    ASSERT_BSONOBJ_EQ(res.response.toBSON(), helloReply.toBSON());
+    ASSERT_EQ(HostAndPort("localhost", serverGlobalParams.port), res.targetUsed);
+    ASSERT_BSONOBJ_EQ(genericReplyApiV1.toBSON(), res.genericReplyFields.stable.toBSON());
+    ASSERT_BSONOBJ_EQ(genericReplyUnstable.toBSON(), res.genericReplyFields.unstable.toBSON());
 }
 
 /*
@@ -274,6 +341,53 @@ TEST_F(AsyncRPCTestFixture, RemoteError) {
     ASSERT_EQ(remoteError.getRemoteCommandFirstWriteError(), Status::OK());
 }
 
+/*
+ * Test that remote errors with generic reply fields are properly parsed.
+ */
+TEST_F(AsyncRPCTestFixture, RemoteErrorWithGenericReplyFields) {
+    std::unique_ptr<Targeter> targeter = std::make_unique<LocalHostTargeter>();
+    HelloCommand helloCmd;
+    initializeCommand(helloCmd);
+
+    auto opCtxHolder = makeOperationContext();
+    auto options = std::make_shared<AsyncRPCOptions<HelloCommand>>(
+        helloCmd, getExecutorPtr(), _cancellationToken);
+    auto resultFuture = sendCommand(options, opCtxHolder.get(), std::move(targeter));
+
+    GenericReplyFieldsWithTypesV1 stableFields;
+    stableFields.setDollarClusterTime(LogicalTime(Timestamp(2, 3)));
+    GenericReplyFieldsWithTypesUnstableV1 unstableFields;
+    unstableFields.setDollarConfigTime(Timestamp(1, 1));
+    unstableFields.setOk(false);
+
+    onCommand([&, stableFields, unstableFields](const auto& request) {
+        ASSERT(request.cmdObj["hello"]);
+        ASSERT_EQ(HostAndPort("localhost", serverGlobalParams.port), request.target);
+        auto remoteErrorBson = createErrorResponse(Status(ErrorCodes::BadValue, "mock"));
+        auto ret = remoteErrorBson.addFields(stableFields.toBSON());
+        return ret.addFields(unstableFields.toBSON());
+    });
+
+    auto error = resultFuture.getNoThrow().getStatus();
+    ASSERT_EQ(error.code(), ErrorCodes::RemoteCommandExecutionError);
+
+    auto extraInfo = error.extraInfo<AsyncRPCErrorInfo>();
+    ASSERT(extraInfo);
+
+    ASSERT(extraInfo->isRemote());
+    auto remoteError = extraInfo->asRemote();
+    ASSERT_EQ(remoteError.getRemoteCommandResult(), Status(ErrorCodes::BadValue, "mock"));
+
+    // No write concern or write errors expected
+    ASSERT_EQ(Status::OK(), remoteError.getRemoteCommandWriteConcernError());
+    ASSERT_EQ(Status::OK(), remoteError.getRemoteCommandFirstWriteError());
+
+    // Check generic reply fields.
+    auto replyFields = remoteError.getGenericReplyFields();
+    ASSERT_BSONOBJ_EQ(stableFields.toBSON(), replyFields.stable.toBSON());
+    ASSERT_BSONOBJ_EQ(unstableFields.toBSON(), replyFields.unstable.toBSON());
+}
+
 TEST_F(AsyncRPCTestFixture, SuccessfulFind) {
     std::unique_ptr<Targeter> targeter = std::make_unique<LocalHostTargeter>();
     auto opCtxHolder = makeOperationContext();
@@ -412,6 +526,44 @@ TEST_F(AsyncRPCTestFixture, ExecutorShutdown) {
     ASSERT(ErrorCodes::isA<ErrorCategory::CancellationError>(extraInfo->asLocal()));
 }
 
+TEST_F(AsyncRPCTestFixture, BatonTest) {
+    std::unique_ptr<Targeter> targeter = std::make_unique<LocalHostTargeter>();
+    auto retryPolicy = std::make_shared<NeverRetryPolicy>();
+    HelloCommand helloCmd;
+    HelloCommandReply helloReply = HelloCommandReply(TopologyVersion(OID::gen(), 0));
+    initializeCommand(helloCmd);
+    auto opCtxHolder = makeOperationContext();
+    auto baton = opCtxHolder->getBaton();
+    auto options = std::make_shared<AsyncRPCOptions<HelloCommand>>(
+        helloCmd, getExecutorPtr(), _cancellationToken);
+    options->baton = baton;
+    auto resultFuture = sendCommand(options, opCtxHolder.get(), std::move(targeter));
+
+    Notification<void> seenNetworkRequest;
+    unittest::ThreadAssertionMonitor monitor;
+    // This thread will respond to the request we sent via sendCommand above.
+    auto networkResponder = monitor.spawn([&] {
+        onCommand([&](const auto& request) {
+            ASSERT(request.cmdObj["hello"]);
+            seenNetworkRequest.set();
+            monitor.notifyDone();
+            return helloReply.toBSON();
+        });
+    });
+    // Wait on the opCtx until networkResponder has observed the network request.
+    // While we block on the opCtx, the current thread should run jobs scheduled
+    // on the baton, including enqueuing the network request via `sendCommand` above.
+    seenNetworkRequest.get(opCtxHolder.get());
+
+    networkResponder.join();
+    // Wait on the opCtx again to allow the current thread, via the baton, to propogate
+    // the network response up into the resultFuture.
+    AsyncRPCResponse res = resultFuture.get(opCtxHolder.get());
+
+    ASSERT_BSONOBJ_EQ(res.response.toBSON(), helloReply.toBSON());
+    ASSERT_EQ(HostAndPort("localhost", serverGlobalParams.port), res.targetUsed);
+}
+
 /*
  * Basic Targeter that returns the host that invoked it.
  */
@@ -506,6 +658,42 @@ TEST_F(AsyncRPCTestFixture, FailedTargeting) {
     // local error (which is just a Status) has the correct code.
     ASSERT(extraInfo->isLocal());
     ASSERT_EQ(extraInfo->asLocal(), targeterFailStatus);
+}
+TEST_F(AsyncRPCTestFixture, BatonShutdownExecutorAlive) {
+    std::unique_ptr<Targeter> targeter = std::make_unique<LocalHostTargeter>();
+    auto retryPolicy = std::make_shared<TestRetryPolicy>();
+    const auto maxNumRetries = 5;
+    const auto retryDelay = Milliseconds(10);
+    retryPolicy->setMaxNumRetries(maxNumRetries);
+    for (int i = 0; i < maxNumRetries; ++i)
+        retryPolicy->pushRetryDelay(retryDelay);
+    HelloCommand helloCmd;
+    HelloCommandReply helloReply = HelloCommandReply(TopologyVersion(OID::gen(), 0));
+    initializeCommand(helloCmd);
+    auto opCtxHolder = makeOperationContext();
+    auto subBaton = opCtxHolder->getBaton()->makeSubBaton();
+    auto options = std::make_shared<AsyncRPCOptions<HelloCommand>>(
+        helloCmd, getExecutorPtr(), _cancellationToken);
+    options->baton = *subBaton;
+    auto resultFuture = sendCommand(options, opCtxHolder.get(), std::move(targeter));
+
+    subBaton.shutdown();
+
+    auto error = resultFuture.getNoThrow().getStatus();
+    auto expectedDetachError = Status(ErrorCodes::ShutdownInProgress, "Baton detached");
+    auto expectedOuterReason = "Remote command execution failed due to executor shutdown";
+
+    ASSERT_EQ(error.code(), ErrorCodes::RemoteCommandExecutionError);
+    ASSERT_EQ(error.reason(), expectedOuterReason);
+
+    auto extraInfo = error.extraInfo<AsyncRPCErrorInfo>();
+    ASSERT(extraInfo);
+
+    ASSERT(extraInfo->isLocal());
+    auto localError = extraInfo->asLocal();
+    ASSERT_EQ(localError, expectedDetachError);
+
+    ASSERT_EQ(0, retryPolicy->getNumRetriesPerformed());
 }
 
 TEST_F(AsyncRPCTestFixture, SendTxnCommandWithoutTxnRouterAppendsNoTxnFields) {
@@ -602,6 +790,72 @@ TEST_F(AsyncRPCTxnTestFixture, MultipleSendTxnCommand) {
 
     CursorInitialReply secondRes = std::move(secondResultFuture).get().response;
     ASSERT_BSONOBJ_EQ(secondRes.getCursor()->getFirstBatch()[0], BSON("x" << 2));
+}
+
+
+TEST_F(AsyncRPCTxnTestFixture, SendTxnCommandWithGenericArgs) {
+    ShardId shardId("shard");
+    ReadPreferenceSetting readPref;
+    std::vector<HostAndPort> testHost = {kTestShardHosts[0]};
+    // Use a mock ShardIdTargeter to avoid calling into the ShardRegistry to get a target shard.
+    auto targeter = std::make_unique<ShardIdTargeterForTest>(
+        shardId, getOpCtx(), readPref, getExecutorPtr(), testHost);
+    DatabaseName testDbName = DatabaseName("testdb", boost::none);
+    NamespaceString nss(testDbName);
+
+    // Set up the transaction metadata.
+    TxnNumber txnNum{3};
+    getOpCtx()->setTxnNumber(txnNum);
+    auto txnRouter = TransactionRouter::get(getOpCtx());
+    txnRouter.beginOrContinueTxn(getOpCtx(), txnNum, TransactionRouter::TransactionActions::kStart);
+    txnRouter.setDefaultAtClusterTime(getOpCtx());
+
+    FindCommandRequest findCmd(nss);
+
+    // Populate structs for generic arguments to be passed along when the command is converted
+    // to BSON. This is simply to test that generic args are passed properly and they should not
+    // contribute to any other behaviors of this test.
+    GenericArgsAPIV1 genericArgsApiV1;
+    GenericArgsAPIV1Unstable genericArgsUnstable;
+    const UUID clientOpKey = UUID::gen();
+    genericArgsApiV1.setClientOperationKey(clientOpKey);
+    auto configTime = Timestamp(1, 1);
+    genericArgsUnstable.setDollarConfigTime(configTime);
+    auto expectedShardVersion = ShardVersion();
+    genericArgsUnstable.setShardVersion(expectedShardVersion);
+
+    auto options = std::make_shared<AsyncRPCOptions<FindCommandRequest>>(
+        findCmd,
+        getExecutorPtr(),
+        _cancellationToken,
+        std::make_shared<NeverRetryPolicy>(),
+        GenericArgs(genericArgsApiV1, genericArgsUnstable));
+    auto resultFuture = sendTxnCommand(options, getOpCtx(), std::move(targeter));
+
+    onCommand([&](const auto& request) {
+        ASSERT(request.cmdObj["find"]);
+        ASSERT(request.cmdObj["startTransaction"].Bool());
+        ASSERT(request.cmdObj["coordinator"].Bool());
+        ASSERT(!request.cmdObj["autocommit"].Bool());
+
+        ASSERT(request.cmdObj["shardVersion"]);
+        auto shardVersion = ShardVersion::parse(request.cmdObj["shardVersion"]);
+        ASSERT_EQUALS(expectedShardVersion, shardVersion);
+        ASSERT_EQUALS(request.cmdObj["txnNumber"].numberLong(), 3LL);
+        // Confirm that the generic arguments are present in the BSON command object.
+        ASSERT_EQ(UUID::fromCDR(request.cmdObj["clientOperationKey"].uuid()), clientOpKey);
+        ASSERT_EQ(request.cmdObj["$configTime"].timestamp(), configTime);
+
+        // The BSON documents in this cursor response are created here.
+        // When async_rpc::sendCommand parses the response, it participates
+        // in ownership of the underlying data, so it will participate in
+        // owning the data in the cursor response.
+        return CursorResponse(nss, 0LL, {BSON("x" << 1)})
+            .toBSON(CursorResponse::ResponseType::InitialResponse);
+    });
+
+    CursorInitialReply res = std::move(resultFuture).get().response;
+    ASSERT_BSONOBJ_EQ(res.getCursor()->getFirstBatch()[0], BSON("x" << 1));
 }
 
 TEST_F(AsyncRPCTxnTestFixture, SendTxnCommandReturnsRemoteError) {

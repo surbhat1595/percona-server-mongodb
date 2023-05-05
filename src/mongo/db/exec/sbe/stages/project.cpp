@@ -31,6 +31,7 @@
 
 #include "mongo/db/exec/sbe/stages/project.h"
 
+#include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
 
 namespace mongo {
@@ -159,13 +160,13 @@ size_t ProjectStage::estimateCompileTimeSize() const {
 }
 
 void ProjectStage::doSaveState(bool relinquishCursor) {
-    if (!slotsAccessible() || !relinquishCursor) {
+    if (!relinquishCursor) {
         return;
     }
 
     for (auto& [slotId, codeAndAccessor] : _fields) {
         auto& [code, accessor] = codeAndAccessor;
-        prepareForYielding(accessor);
+        prepareForYielding(accessor, slotsAccessible());
     }
 }
 

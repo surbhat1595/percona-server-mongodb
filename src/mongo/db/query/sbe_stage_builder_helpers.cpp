@@ -49,7 +49,6 @@
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/matcher/matcher_type_set.h"
-#include "mongo/db/query/optimizer/rewrites/const_eval.h"
 #include "mongo/db/query/optimizer/rewrites/path_lower.h"
 #include "mongo/db/query/sbe_stage_builder.h"
 #include "mongo/db/storage/execution_context.h"
@@ -142,8 +141,17 @@ std::unique_ptr<sbe::EExpression> generateNullOrMissing(std::unique_ptr<sbe::EEx
     return generateNullOrMissingExpr(*arg);
 }
 
+std::unique_ptr<sbe::EExpression> generateNullOrMissing(EvalExpr arg, StageBuilderState& state) {
+    auto expr = arg.extractExpr(state.slotVarMap, *state.data->env);
+    return generateNullOrMissingExpr(*expr);
+}
+
 std::unique_ptr<sbe::EExpression> generateNonNumericCheck(const sbe::EVariable& var) {
     return makeNot(makeFunction("isNumber", var.clone()));
+}
+
+std::unique_ptr<sbe::EExpression> generateNonNumericCheck(EvalExpr expr, StageBuilderState& state) {
+    return makeNot(makeFunction("isNumber", expr.extractExpr(state.slotVarMap, *state.data->env)));
 }
 
 std::unique_ptr<sbe::EExpression> generateLongLongMinCheck(const sbe::EVariable& var) {
@@ -165,8 +173,16 @@ std::unique_ptr<sbe::EExpression> generateNaNCheck(const sbe::EVariable& var) {
     return makeFunction("isNaN", var.clone());
 }
 
+std::unique_ptr<sbe::EExpression> generateNaNCheck(EvalExpr expr, StageBuilderState& state) {
+    return makeFunction("isNaN", expr.extractExpr(state.slotVarMap, *state.data->env));
+}
+
 std::unique_ptr<sbe::EExpression> generateInfinityCheck(const sbe::EVariable& var) {
     return makeFunction("isInfinity"_sd, var.clone());
+}
+
+std::unique_ptr<sbe::EExpression> generateInfinityCheck(EvalExpr expr, StageBuilderState& state) {
+    return makeFunction("isInfinity"_sd, expr.extractExpr(state.slotVarMap, *state.data->env));
 }
 
 std::unique_ptr<sbe::EExpression> generateNonPositiveCheck(const sbe::EVariable& var) {
@@ -323,7 +339,7 @@ std::pair<sbe::value::SlotId, EvalStage> projectEvalExpr(
     EvalStage stage,
     PlanNodeId planNodeId,
     sbe::value::SlotIdGenerator* slotIdGenerator,
-    optimizer::SlotVarMap& slotVarMap) {
+    StageBuilderState& state) {
     // If expr's value is already in a slot, return the slot.
     if (expr.hasSlot()) {
         return {*expr.getSlot(), std::move(stage)};
@@ -332,7 +348,8 @@ std::pair<sbe::value::SlotId, EvalStage> projectEvalExpr(
     // If expr's value is an expression, create a ProjectStage to evaluate the expression
     // into a slot.
     auto slot = slotIdGenerator->generate();
-    stage = makeProject(std::move(stage), planNodeId, slot, expr.extractExpr(slotVarMap));
+    stage = makeProject(
+        std::move(stage), planNodeId, slot, expr.extractExpr(state.slotVarMap, *state.data->env));
     return {slot, std::move(stage)};
 }
 
@@ -537,194 +554,11 @@ std::unique_ptr<sbe::EExpression> makeIfNullExpr(
     return expr;
 }
 
-EvalExprStagePair generateUnion(std::vector<EvalExprStagePair> branches,
-                                BranchFn branchFn,
-                                PlanNodeId planNodeId,
-                                sbe::value::SlotIdGenerator* slotIdGenerator,
-                                optimizer::SlotVarMap& slotVarMap) {
-    sbe::PlanStage::Vector stages;
-    std::vector<sbe::value::SlotVector> inputs;
-    stages.reserve(branches.size());
-    inputs.reserve(branches.size());
-
-    for (size_t i = 0; i < branches.size(); i++) {
-        auto [slot, stage] = [&]() {
-            auto& [expr, stage] = branches[i];
-
-            if (!branchFn || i + 1 == branches.size()) {
-                return projectEvalExpr(
-                    std::move(expr), std::move(stage), planNodeId, slotIdGenerator, slotVarMap);
-            }
-
-            return branchFn(
-                std::move(expr), std::move(stage), planNodeId, slotIdGenerator, slotVarMap);
-        }();
-
-        stages.emplace_back(stage.extractStage(planNodeId));
-        inputs.emplace_back(sbe::makeSV(slot));
-    }
-
-    auto outputSlot = slotIdGenerator->generate();
-    auto unionStage = sbe::makeS<sbe::UnionStage>(
-        std::move(stages), std::move(inputs), sbe::makeSV(outputSlot), planNodeId);
-    EvalStage outputStage{std::move(unionStage), sbe::makeSV(outputSlot)};
-
-    return {outputSlot, std::move(outputStage)};
-}
-
-EvalExprStagePair generateSingleResultUnion(std::vector<EvalExprStagePair> branches,
-                                            BranchFn branchFn,
-                                            PlanNodeId planNodeId,
-                                            sbe::value::SlotIdGenerator* slotIdGenerator,
-                                            optimizer::SlotVarMap& slotVarMap) {
-    auto [unionEvalExpr, unionEvalStage] = generateUnion(
-        std::move(branches), std::move(branchFn), planNodeId, slotIdGenerator, slotVarMap);
-    return {std::move(unionEvalExpr),
-            EvalStage{makeLimitTree(unionEvalStage.extractStage(planNodeId), planNodeId),
-                      unionEvalStage.extractOutSlots()}};
-}
-
-optimizer::ABT makeBalancedBooleanOpTreeImpl(optimizer::Operations logicOp,
-                                             std::vector<optimizer::ABT>& leaves,
-                                             size_t from,
-                                             size_t until) {
-    invariant(from < until);
-    if (from + 1 == until) {
-        return std::move(leaves[from]);
-    } else {
-        size_t mid = (from + until) / 2;
-        auto lhs = makeBalancedBooleanOpTreeImpl(logicOp, leaves, from, mid);
-        auto rhs = makeBalancedBooleanOpTreeImpl(logicOp, leaves, mid, until);
-        return optimizer::make<optimizer::BinaryOp>(logicOp, std::move(lhs), std::move(rhs));
-    }
-}
-
-optimizer::ABT makeBalancedBooleanOpTree(optimizer::Operations logicOp,
-                                         std::vector<optimizer::ABT> leaves) {
-    return makeBalancedBooleanOpTreeImpl(logicOp, leaves, 0, leaves.size());
-}
-
-std::unique_ptr<sbe::EExpression> makeBalancedBooleanOpTreeImpl(
-    sbe::EPrimBinary::Op logicOp,
-    std::vector<std::unique_ptr<sbe::EExpression>>& leaves,
-    size_t from,
-    size_t until) {
-    invariant(from < until);
-    if (from + 1 == until) {
-        return std::move(leaves[from]);
-    } else {
-        size_t mid = (from + until) / 2;
-        auto lhs = makeBalancedBooleanOpTreeImpl(logicOp, leaves, from, mid);
-        auto rhs = makeBalancedBooleanOpTreeImpl(logicOp, leaves, mid, until);
-        return makeBinaryOp(logicOp, std::move(lhs), std::move(rhs));
-    }
-}
-
-std::unique_ptr<sbe::EExpression> makeBalancedBooleanOpTree(
-    sbe::EPrimBinary::Op logicOp, std::vector<std::unique_ptr<sbe::EExpression>> leaves) {
-    return makeBalancedBooleanOpTreeImpl(logicOp, leaves, 0, leaves.size());
-}
-
-EvalExprStagePair generateShortCircuitingLogicalOp(sbe::EPrimBinary::Op logicOp,
-                                                   std::vector<EvalExprStagePair> branches,
-                                                   PlanNodeId planNodeId,
-                                                   sbe::value::SlotIdGenerator* slotIdGenerator,
-                                                   optimizer::SlotVarMap& slotVarMap,
-                                                   const FilterStateHelper& stateHelper) {
-    invariant(logicOp == sbe::EPrimBinary::logicAnd || logicOp == sbe::EPrimBinary::logicOr);
-
-    if (!branches.empty() && logicOp == sbe::EPrimBinary::logicOr) {
-        // OR does not support index tracking, so we must ensure that state from the last branch
-        // holds only boolean value.
-        // NOTE: There is no technical reason for that. We could support index tracking for OR
-        // expression, but this would differ from the existing behaviour.
-        auto& [expr, _] = branches.back();
-        if (expr.hasExpr()) {
-            expr = stateHelper.makeState(stateHelper.getBool(expr.extractExpr(slotVarMap)));
-        } else {
-            expr = stateHelper.makeState(stateHelper.getBool(expr.extractABT(slotVarMap)));
-        }
-    }
-
-    // For AND and OR, if 'branches' only has one element, we can just return branches[0].
-    if (branches.size() == 1) {
-        return std::move(branches[0]);
-    }
-
-    bool exprOnlyBranches = true, allAbtEligibleBranches = true;
-    for (const auto& [expr, stage] : branches) {
-        exprOnlyBranches &= stage.isNull();
-        allAbtEligibleBranches &= expr.hasABT() || expr.hasSlot();
-    }
-
-    if (exprOnlyBranches) {
-        if (allAbtEligibleBranches) {
-            std::vector<optimizer::ABT> leaves;
-            leaves.reserve(branches.size());
-            for (auto& branch : branches) {
-                auto& [expr, _] = branch;
-                leaves.emplace_back(stateHelper.getBool(expr.extractABT(slotVarMap)));
-            }
-            // Create the balanced binary tree to keep the tree shallow and safe for recursion.
-            auto exprOnlyOp = makeBalancedBooleanOpTree(logicOp == sbe::EPrimBinary::logicAnd
-                                                            ? optimizer::Operations::And
-                                                            : optimizer::Operations::Or,
-                                                        std::move(leaves));
-            return {EvalExpr{std::move(exprOnlyOp)}, EvalStage{}};
-        }
-        // Fallback to generate an SBE EExpression node.
-
-        std::vector<std::unique_ptr<sbe::EExpression>> leaves;
-        leaves.reserve(branches.size());
-        for (auto& branch : branches) {
-            auto& [expr, _] = branch;
-            leaves.push_back(stateHelper.getBool(expr.extractExpr(slotVarMap)));
-        }
-        // Create the balanced binary tree to keep the tree shallow and safe for recursion.
-        auto exprOnlyOp = makeBalancedBooleanOpTree(logicOp, std::move(leaves));
-        return {EvalExpr{std::move(exprOnlyOp)}, EvalStage{}};
-    }
-
-    // Prepare to create limit-1/union with N branches (where N is the number of operands). Each
-    // branch will be evaluated from left to right until one of the branches produces a value. The
-    // first N-1 branches have a FilterStage to control whether they produce a value. If a branch's
-    // filter condition is true, the branch will produce a value and the remaining branches will not
-    // be evaluated. In other words, the evaluation process will "short-circuit". If a branch's
-    // filter condition is false, the branch will not produce a value and the evaluation process
-    // will continue. The last branch doesn't have a FilterStage and will always produce a value.
-    auto branchFn = [logicOp, &stateHelper](EvalExpr expr,
-                                            EvalStage stage,
-                                            PlanNodeId planNodeId,
-                                            sbe::value::SlotIdGenerator* slotIdGenerator,
-                                            optimizer::SlotVarMap& slotVarMap) {
-        // Create a FilterStage for each branch (except the last one). If a branch's filter
-        // condition is true, it will "short-circuit" the evaluation process. For AND, short-
-        // circuiting should happen if an operand evalautes to false. For OR, short-circuiting
-        // should happen if an operand evaluates to true.
-        // Set up an output value to be returned if short-circuiting occurs. For AND, when
-        // short-circuiting occurs, the output returned should be false. For OR, when short-
-        // circuiting occurs, the output returned should be true.
-        auto filterExpr = stateHelper.getBool(expr.extractExpr(slotVarMap));
-        if (logicOp == sbe::EPrimBinary::logicAnd) {
-            filterExpr = makeNot(std::move(filterExpr));
-        }
-        stage = makeFilter<false>(std::move(stage), std::move(filterExpr), planNodeId);
-
-        auto resultSlot = slotIdGenerator->generate();
-        auto resultValue = stateHelper.makeState(logicOp == sbe::EPrimBinary::logicOr);
-        stage = makeProject(std::move(stage), planNodeId, resultSlot, std::move(resultValue));
-
-        return std::make_pair(resultSlot, std::move(stage));
-    };
-
-    return generateSingleResultUnion(
-        std::move(branches), branchFn, planNodeId, slotIdGenerator, slotVarMap);
-}
-
 std::pair<sbe::value::SlotId, std::unique_ptr<sbe::PlanStage>> generateVirtualScan(
     sbe::value::SlotIdGenerator* slotIdGenerator,
     sbe::value::TypeTags arrTag,
-    sbe::value::Value arrVal) {
+    sbe::value::Value arrVal,
+    PlanYieldPolicy* yieldPolicy) {
     // The value passed in must be an array.
     invariant(sbe::value::isArray(arrTag));
 
@@ -743,7 +577,8 @@ std::pair<sbe::value::SlotId, std::unique_ptr<sbe::PlanStage>> generateVirtualSc
         unwindSlot,
         slotIdGenerator->generate(),  // We don't need an index slot but must to provide it.
         false,                        // Don't preserve null and empty arrays.
-        kEmptyPlanNodeId);
+        kEmptyPlanNodeId,
+        yieldPolicy);
 
     // Return the UnwindStage and its output slot. The UnwindStage can be used as an input
     // to other PlanStages.
@@ -754,13 +589,14 @@ std::pair<sbe::value::SlotVector, std::unique_ptr<sbe::PlanStage>> generateVirtu
     sbe::value::SlotIdGenerator* slotIdGenerator,
     int numSlots,
     sbe::value::TypeTags arrTag,
-    sbe::value::Value arrVal) {
+    sbe::value::Value arrVal,
+    PlanYieldPolicy* yieldPolicy) {
     using namespace std::literals;
 
     invariant(numSlots >= 1);
 
     // Generate a mock scan with a single output slot.
-    auto [scanSlot, scanStage] = generateVirtualScan(slotIdGenerator, arrTag, arrVal);
+    auto [scanSlot, scanStage] = generateVirtualScan(slotIdGenerator, arrTag, arrVal, yieldPolicy);
 
     // Create a ProjectStage that will read the data from 'scanStage' and split it up
     // across multiple output slots.
@@ -808,66 +644,6 @@ uint32_t dateTypeMask() {
             getBSONTypeMask(sbe::value::TypeTags::Timestamp) |
             getBSONTypeMask(sbe::value::TypeTags::ObjectId) |
             getBSONTypeMask(sbe::value::TypeTags::bsonObjectId));
-}
-
-EvalStage IndexStateHelper::makeTraverseCombinator(
-    EvalStage outer,
-    EvalStage inner,
-    sbe::value::SlotId inputSlot,
-    sbe::value::SlotId outputSlot,
-    sbe::value::SlotId innerOutputSlot,
-    PlanNodeId planNodeId,
-    sbe::value::FrameIdGenerator* frameIdGenerator) const {
-    // Fold expression is executed only when array has more then 1 element. It increments index
-    // value on each iteration. During this process index is paired with false value. Once the
-    // predicate evaluates to true, false value of index is changed to true. Final expression of
-    // traverse stage detects that now index is paired with true value and it means that we have
-    // found an index of array element where predicate evaluates to true.
-    //
-    // First step is to increment index. Fold expression is always executed when index stored in
-    // 'outputSlot' is encoded as a false value. This means that to increment index, we should
-    // subtract 1 from it.
-    auto frameId = frameIdGenerator->generate();
-    auto advancedIndex = sbe::makeE<sbe::EPrimBinary>(
-        sbe::EPrimBinary::sub, sbe::makeE<sbe::EVariable>(outputSlot), makeConstant(ValueType, 1));
-    auto binds = sbe::makeEs(std::move(advancedIndex));
-    sbe::EVariable advancedIndexVar{frameId, 0};
-
-    // In case the predicate in the inner branch of traverse returns true, we want pair
-    // incremented index with true value. This will tell final expression of traverse that we
-    // have found a matching element and iteration can be stopped.
-    // The expression below express the following function: f(x) = abs(x) - 1. This function
-    // converts false value to a true value because f(- index - 2) = index + 1 (take a look at
-    // the comment for the 'IndexStateHelper' class for encoding description).
-    auto indexWithTrueValue =
-        sbe::makeE<sbe::EPrimBinary>(sbe::EPrimBinary::sub,
-                                     makeFunction("abs", advancedIndexVar.clone()),
-                                     makeConstant(ValueType, 1));
-
-    // Finally, we check if the predicate in the inner branch returned true. If that's the case,
-    // we pair incremented index with true value. Otherwise, it stays paired with false value.
-    auto foldExpr = sbe::makeE<sbe::EIf>(FilterStateHelper::getBool(innerOutputSlot),
-                                         std::move(indexWithTrueValue),
-                                         advancedIndexVar.clone());
-
-    foldExpr = sbe::makeE<sbe::ELocalBind>(frameId, std::move(binds), std::move(foldExpr));
-
-    return makeTraverse(std::move(outer),
-                        std::move(inner),
-                        inputSlot,
-                        outputSlot,
-                        innerOutputSlot,
-                        std::move(foldExpr),
-                        FilterStateHelper::getBool(outputSlot),
-                        planNodeId,
-                        1);
-}
-
-std::unique_ptr<FilterStateHelper> makeFilterStateHelper(bool trackIndex) {
-    if (trackIndex) {
-        return std::make_unique<IndexStateHelper>();
-    }
-    return std::make_unique<BooleanStateHelper>();
 }
 
 sbe::value::SlotId StageBuilderState::getGlobalVariableSlot(Variables::Id variableId) {
@@ -1315,7 +1091,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, sbe::value::SlotVector> projectFields
     sbe::value::SlotId resultSlot,
     PlanNodeId nodeId,
     sbe::value::SlotIdGenerator* slotIdGenerator,
-    optimizer::SlotVarMap& slotVarMap,
+    StageBuilderState& state,
     const PlanStageSlots* slots) {
     // 'outputSlots' will match the order of 'fields'. Bail out early if 'fields' is empty.
     auto outputSlots = sbe::makeSV();
@@ -1412,11 +1188,12 @@ std::pair<std::unique_ptr<sbe::PlanStage>, sbe::value::SlotVector> projectFields
                 tassert(7182002, "Expected DfsState to have at least 2 entries", dfs.size() >= 2);
 
                 auto parent = dfs[dfs.size() - 2].first;
-                auto getFieldExpr =
-                    makeFunction("getField"_sd,
-                                 parent->value.hasSlot() ? makeVariable(*parent->value.getSlot())
-                                                         : parent->value.extractExpr(slotVarMap),
-                                 makeConstant(node->name));
+                auto getFieldExpr = makeFunction(
+                    "getField"_sd,
+                    parent->value.hasSlot()
+                        ? makeVariable(*parent->value.getSlot())
+                        : parent->value.extractExpr(state.slotVarMap, *state.data->env),
+                    makeConstant(node->name));
 
                 auto hasOneChildToVisit = [&] {
                     size_t count = 0;
@@ -1471,45 +1248,6 @@ std::pair<std::unique_ptr<sbe::PlanStage>, sbe::value::SlotVector> projectFields
     }
 
     return {std::move(stage), std::move(outputSlots)};
-}
-
-std::unique_ptr<sbe::EExpression> abtToExpr(optimizer::ABT& abt, optimizer::SlotVarMap& slotMap) {
-    auto env = optimizer::VariableEnvironment::build(abt);
-
-    // Do not use descriptive names here.
-    auto prefixId = optimizer::PrefixId::create(false /*useDescriptiveNames*/);
-    // Convert paths into ABT expressions.
-    optimizer::EvalPathLowering pathLower{prefixId, env};
-    pathLower.optimize(abt);
-
-    // Run the constant folding to eliminate lambda applications as they are not directly
-    // supported by the SBE VM.
-    optimizer::ConstEval constEval{env};
-    constEval.optimize(abt);
-
-    // And finally convert to the SBE expression.
-    optimizer::SBEExpressionLowering exprLower{env, slotMap};
-    return exprLower.optimize(abt);
-}
-
-optimizer::ABT makeFillEmptyFalse(optimizer::ABT e) {
-    using namespace std::literals;
-    return optimizer::make<optimizer::BinaryOp>(
-        optimizer::Operations::FillEmpty, std::move(e), optimizer::Constant::boolean(false));
-}
-
-optimizer::ProjectionName makeVariableName(sbe::value::SlotId slotId) {
-    // Use a naming scheme that reduces that chances of clashing into a user-created variable name.
-    str::stream varName;
-    varName << "__s" << slotId;
-    return optimizer::ProjectionName{varName};
-}
-
-optimizer::ProjectionName makeLocalVariableName(sbe::FrameId frameId, sbe::value::SlotId slotId) {
-    // Use a naming scheme that reduces that chances of clashing into a user-created variable name.
-    str::stream varName;
-    varName << "__l" << frameId << "." << slotId;
-    return optimizer::ProjectionName{varName};
 }
 
 }  // namespace mongo::stage_builder

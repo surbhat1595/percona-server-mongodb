@@ -387,7 +387,7 @@ public:
         auto opCtx = operationContext();
         RangeDeleterService::get(opCtx)->onStartup(opCtx);
         RangeDeleterService::get(opCtx)->onStepUpComplete(opCtx, 0L);
-        RangeDeleterService::get(opCtx)->_waitForRangeDeleterServiceUp_FOR_TESTING();
+        RangeDeleterService::get(opCtx)->getRangeDeleterServiceInitializationFuture().get(opCtx);
     }
 
     void tearDown() override {
@@ -400,10 +400,10 @@ public:
         CollectionShardingRuntimeTest::tearDown();
     }
 
-    CollectionShardingRuntime::ScopedCollectionShardingRuntime csr() {
+    CollectionShardingRuntime::ScopedExclusiveCollectionShardingRuntime csr() {
         AutoGetCollection autoColl(operationContext(), kTestNss, MODE_IX);
-        return CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-            operationContext(), kTestNss, CSRAcquisitionMode::kShared);
+        return CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
+            operationContext(), kTestNss);
     }
 
     const UUID& uuid() const {

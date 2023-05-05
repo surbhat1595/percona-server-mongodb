@@ -184,10 +184,7 @@ class _InitialSyncThread(threading.Thread):
                     for fixture in self._rs_fixtures:
                         self._await_initial_sync_done(fixture)
 
-                    # Coinflip whether to give the nodes some time as a secondaries or to
-                    # transition them to primary immediately.
-                    stage = random.choice(
-                        [SyncerStage.RUN_AS_SECONDARY, SyncerStage.INITSYNC_PRIMARY])
+                    stage = SyncerStage.RUN_AS_SECONDARY
                     wait_secs = 0
 
                 # Nothing to be done. Just let the nodes stay as secondaries for the duration.
@@ -510,6 +507,10 @@ class _InitialSyncThread(threading.Thread):
                             break
                         except pymongo.errors.NotPrimaryError:
                             pass
+                        except pymongo.errors.OperationFailure as ex:
+                            if ex.code == 166:  # CommandNotSupportedOnView
+                                # listCollections return also views and collStats is not supported on views
+                                break
                         retarget_time = time.time() - start_time
                         if retarget_time >= 60:
                             raise RuntimeError(

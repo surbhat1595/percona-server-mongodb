@@ -32,6 +32,7 @@
 #include "mongo/db/exec/sbe/stages/scan.h"
 
 #include "mongo/config.h"
+#include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/trial_run_tracker.h"
@@ -183,8 +184,8 @@ value::SlotAccessor* ScanStage::getAccessor(CompileCtx& ctx, value::SlotId slot)
 }
 
 void ScanStage::doSaveState(bool relinquishCursor) {
-    if (slotsAccessible()) {
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
+    if (slotsAccessible()) {
         if (_recordAccessor &&
             _recordAccessor->getViewOfValue().first != value::TypeTags::Nothing) {
             auto [tag, val] = _recordAccessor->getViewOfValue();
@@ -195,18 +196,22 @@ void ScanStage::doSaveState(bool relinquishCursor) {
             _lastReturned.clear();
             _lastReturned.assign(raw, raw + size);
         }
+    }
 #endif
 
-        if (relinquishCursor) {
-            if (_recordAccessor) {
-                prepareForYielding(*_recordAccessor);
-            }
-            if (_recordIdAccessor) {
-                prepareForYielding(*_recordIdAccessor);
-            }
-            for (auto& [fieldName, accessor] : _fieldAccessors) {
-                prepareForYielding(*accessor);
-            }
+    if (relinquishCursor) {
+        if (_recordAccessor) {
+            prepareForYielding(*_recordAccessor, slotsAccessible());
+        }
+        if (_recordIdAccessor) {
+            // TODO: SERVER-72054
+            // RecordId are currently (incorrectly) accessed after EOF, therefore
+            // we must treat them as always accessible ratther invalidate them when slots are
+            // disabled. We should use slotsAccessible() instead of true, once the bug is fixed.
+            prepareForYielding(*_recordIdAccessor, true);
+        }
+        for (auto& [fieldName, accessor] : _fieldAccessors) {
+            prepareForYielding(*accessor, slotsAccessible());
         }
     }
 
@@ -215,7 +220,6 @@ void ScanStage::doSaveState(bool relinquishCursor) {
         _lastReturned.clear();
     }
 #endif
-
 
     if (auto cursor = getActiveCursor(); cursor != nullptr && relinquishCursor) {
         cursor->save();
@@ -765,8 +769,8 @@ value::SlotAccessor* ParallelScanStage::getAccessor(CompileCtx& ctx, value::Slot
 }
 
 void ParallelScanStage::doSaveState(bool relinquishCursor) {
-    if (slotsAccessible()) {
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
+    if (slotsAccessible()) {
         if (_recordAccessor &&
             _recordAccessor->getViewOfValue().first != value::TypeTags::Nothing) {
             auto [tag, val] = _recordAccessor->getViewOfValue();
@@ -777,17 +781,21 @@ void ParallelScanStage::doSaveState(bool relinquishCursor) {
             _lastReturned.clear();
             _lastReturned.assign(raw, raw + size);
         }
+    }
 #endif
 
-        if (_recordAccessor) {
-            prepareForYielding(*_recordAccessor);
-        }
-        if (_recordIdAccessor) {
-            prepareForYielding(*_recordIdAccessor);
-        }
-        for (auto& [fieldName, accessor] : _fieldAccessors) {
-            prepareForYielding(*accessor);
-        }
+    if (_recordAccessor) {
+        prepareForYielding(*_recordAccessor, slotsAccessible());
+    }
+    if (_recordIdAccessor) {
+        // TODO: SERVER-72054
+        // RecordId are currently (incorrectly) accessed after EOF, therefore
+        // we must treat them as always accessible ratther invalidate them when slots are
+        // disabled. We should use slotsAccessible() instead of true, once the bug is fixed.
+        prepareForYielding(*_recordIdAccessor, true);
+    }
+    for (auto& [fieldName, accessor] : _fieldAccessors) {
+        prepareForYielding(*accessor, slotsAccessible());
     }
 
 #if defined(MONGO_CONFIG_DEBUG_BUILD)

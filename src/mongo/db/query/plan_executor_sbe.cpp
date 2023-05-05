@@ -55,7 +55,6 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
                                  bool returnOwnedBson,
                                  NamespaceString nss,
                                  bool isOpen,
-                                 Microseconds timeElapsedPlanning,
                                  std::unique_ptr<PlanYieldPolicySBE> yieldPolicy,
                                  bool generatedByBonsai)
     : _state{isOpen ? State::kOpened : State::kClosed},
@@ -126,8 +125,6 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
                                                   std::move(candidates.plans),
                                                   isMultiPlan,
                                                   isCachedCandidate,
-                                                  timeElapsedPlanning,
-                                                  opCtx->getTelemetryKey(),
                                                   _rootData.debugInfo);
 }
 
@@ -142,7 +139,11 @@ void PlanExecutorSBE::saveState() {
         _opCtx->recoveryUnit()->setAbandonSnapshotMode(RecoveryUnit::AbandonSnapshotMode::kCommit);
         _opCtx->recoveryUnit()->abandonSnapshot();
     } else {
-        _root->saveState(true /* relinquish cursor */);
+        // Discard the slots as we won't access them before subsequent PlanExecutorSBE::getNext()
+        // method call.
+        const bool relinquishCursor = true;
+        const bool discardSlotState = true;
+        _root->saveState(relinquishCursor, discardSlotState);
     }
 
     _yieldPolicy->setYieldable(nullptr);

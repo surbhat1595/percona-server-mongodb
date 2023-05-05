@@ -29,24 +29,29 @@
 
 #pragma once
 
+#include "mongo/db/exec/sbe/abt/abt_lower_defs.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/query/optimizer/node_defs.h"
 #include "mongo/db/query/optimizer/reference_tracker.h"
 #include "mongo/db/query/optimizer/utils/utils.h"
+#include "mongo/stdx/unordered_map.h"
 
 namespace mongo::optimizer {
-using SlotVarMap = stdx::unordered_map<ProjectionName, sbe::value::SlotId, ProjectionName::Hasher>;
 
 class SBEExpressionLowering {
 public:
-    SBEExpressionLowering(const VariableEnvironment& env, SlotVarMap& slotMap)
-        : _env(env), _slotMap(slotMap) {}
+    SBEExpressionLowering(const VariableEnvironment& env,
+                          SlotVarMap& slotMap,
+                          const NamedSlotsProvider& namedSlots)
+        : _env(env), _slotMap(slotMap), _namedSlots(namedSlots) {}
 
     // The default noop transport.
     template <typename T, typename... Ts>
     std::unique_ptr<sbe::EExpression> transport(const T&, Ts&&...) {
-        uasserted(6624237, "abt tree is not lowered correctly");
+        uasserted(6624237,
+                  "ABT expression lowering encountered operator which cannot be directly lowered "
+                  "to an SBE expression.");
         return nullptr;
     }
 
@@ -81,10 +86,17 @@ public:
 private:
     const VariableEnvironment& _env;
     SlotVarMap& _slotMap;
+    const NamedSlotsProvider& _namedSlots;
 
     sbe::FrameId _frameCounter{100};
     stdx::unordered_map<const Let*, sbe::FrameId> _letMap;
     stdx::unordered_map<const LambdaAbstraction*, sbe::FrameId> _lambdaMap;
+};
+
+enum class ScanOrder {
+    Forward,
+    Reverse,
+    Random  // Uses a random cursor.
 };
 
 class SBENodeLowering {
@@ -92,18 +104,20 @@ public:
     // TODO: SERVER-69540. Consider avoiding a mutable slotMap argument here.
     SBENodeLowering(const VariableEnvironment& env,
                     SlotVarMap& slotMap,
+                    const NamedSlotsProvider& namedSlots,
                     boost::optional<sbe::value::SlotId>& ridSlot,
                     sbe::value::SlotIdGenerator& ids,
                     const Metadata& metadata,
                     const NodeToGroupPropsMap& nodeToGroupPropsMap,
-                    const bool randomScan)
+                    const ScanOrder scanOrder)
         : _env(env),
           _slotMap(slotMap),
+          _namedSlots(namedSlots),
           _ridSlot(ridSlot),
           _slotIdGenerator(ids),
           _metadata(metadata),
           _nodeToGroupPropsMap(nodeToGroupPropsMap),
-          _randomScan(randomScan) {}
+          _scanOrder(scanOrder) {}
 
     // The default noop transport.
     template <typename T, typename... Ts>
@@ -171,7 +185,6 @@ public:
                                          const ABT& pidBind,
                                          const ABT& refs);
 
-    std::unique_ptr<sbe::PlanStage> walk(const ScanNode& n, const ABT& /*binds*/);
     std::unique_ptr<sbe::PlanStage> walk(const PhysicalScanNode& n, const ABT& /*binds*/);
     std::unique_ptr<sbe::PlanStage> walk(const CoScanNode& n);
 
@@ -183,10 +196,6 @@ public:
     std::unique_ptr<sbe::PlanStage> optimize(const ABT& n);
 
 private:
-    std::unique_ptr<sbe::PlanStage> lowerScanNode(const Node& n,
-                                                  const std::string& scanDefName,
-                                                  const FieldProjectionMap& fieldProjectionMap,
-                                                  bool useParallelScan);
     void generateSlots(const FieldProjectionMap& fieldProjectionMap,
                        boost::optional<sbe::value::SlotId>& ridSlot,
                        boost::optional<sbe::value::SlotId>& rootSlot,
@@ -195,27 +204,39 @@ private:
 
     sbe::value::SlotVector convertProjectionsToSlots(const ProjectionNameVector& projectionNames);
     sbe::value::SlotVector convertRequiredProjectionsToSlots(
-        const NodeProps& props,
-        bool removeRIDProjection,
-        const sbe::value::SlotVector& toExclude = {});
+        const NodeProps& props, const sbe::value::SlotVector& toExclude = {});
 
     std::unique_ptr<sbe::EExpression> convertBoundsToExpr(
         bool isLower, const IndexDefinition& indexDef, const CompoundIntervalRequirement& interval);
 
     std::unique_ptr<sbe::PlanStage> generateInternal(const ABT& n);
 
+    /**
+     * Maps a projection name to a slot by updating _slotMap field.
+     * By default it will tassert rather than overwrite an existing entry--it's the caller's
+     * responsibility not to call this twice with the same projName. With 'canOverwrite = true' it
+     * is allowed to overwrite an existing entry. This is useful for nodes that intentionally use
+     * the same projName for two different values. For example, two independent index scans could
+     * both use the same projName for RID. Or, Unwind uses the same projName both for the original
+     * array, and the unwound elements.
+     */
+    void mapProjToSlot(const ProjectionName& projName,
+                       sbe::value::SlotId slot,
+                       bool canOverwrite = false);
+
     const VariableEnvironment& _env;
     SlotVarMap& _slotMap;
+    const NamedSlotsProvider& _namedSlots;
     boost::optional<sbe::value::SlotId>& _ridSlot;
     sbe::value::SlotIdGenerator& _slotIdGenerator;
 
     const Metadata& _metadata;
     const NodeToGroupPropsMap& _nodeToGroupPropsMap;
 
-    // If true, will create scan nodes using a random cursor to support sampling.
-    // Currently only supported for single-threaded (non parallel-scanned) mongod collections.
-    // TODO: handle cases where we have more than one collection scan.
-    const bool _randomScan;
+    // Specifies the order for any ScanStages. Currently only supported for single-threaded
+    // (non parallel-scanned) mongod collections.
+    // TODO SERVER-73010: handle cases where we have more than one collection scan.
+    const ScanOrder _scanOrder;
 };
 
 }  // namespace mongo::optimizer

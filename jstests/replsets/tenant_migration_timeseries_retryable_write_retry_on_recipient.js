@@ -16,21 +16,20 @@
  * ]
  */
 
-(function() {
-"use strict";
+import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
+import {runMigrationAsync} from "jstests/replsets/libs/tenant_migration_util.js";
 
-load("jstests/replsets/libs/tenant_migration_test.js");
-load("jstests/replsets/libs/tenant_migration_util.js");
 load("jstests/libs/fail_point_util.js");
 load("jstests/libs/parallelTester.js");  // for 'Thread'
 load("jstests/libs/uuid_util.js");
+load("jstests/replsets/rslib.js");  // 'createRstArgs'
 
 function testRetryOnRecipient(ordered) {
     const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
 
     const donorPrimary = tenantMigrationTest.getDonorPrimary();
 
-    const kTenantId = "testTenantId";
+    const kTenantId = ObjectId().str;
     const kDbName = tenantMigrationTest.tenantDB(kTenantId, "tsDb");
     const kCollNameBefore = "tsCollBefore";
     const kCollNameDuring = "tsCollDuring";
@@ -93,9 +92,8 @@ function testRetryOnRecipient(ordered) {
     jsTestLog("Run retryable writes before the migration");
     assert.commandWorked(donorDb.runCommand(beforeWrites.retryableInsertCommand));
 
-    const donorRstArgs = TenantMigrationUtil.createRstArgs(tenantMigrationTest.getDonorRst());
-    const migrationThread =
-        new Thread(TenantMigrationUtil.runMigrationAsync, migrationOpts, donorRstArgs);
+    const donorRstArgs = createRstArgs(tenantMigrationTest.getDonorRst());
+    const migrationThread = new Thread(runMigrationAsync, migrationOpts, donorRstArgs);
     migrationThread.start();
 
     pauseTenantMigrationBeforeLeavingDataSyncState.wait();
@@ -165,4 +163,3 @@ function testRetryOnRecipient(ordered) {
 
 testRetryOnRecipient(true);
 testRetryOnRecipient(false);
-})();

@@ -43,7 +43,7 @@ a notice will be included in
 | [schemastore.org]          | Apache-2.0        | 6847cfc3a1        |                      |                                 |
 | [scons]                    | MIT               | 3.1.2             |                      |                                 |
 | [Snappy]                   | BSD-3-Clause      | 1.1.7             |          ✗           |                ✗                |
-| [timelib]                  | MIT               | 2021.06           |                      |                ✗                |
+| [timelib]                  | MIT               | 2022.04           |                      |                ✗                |
 | [TomCrypt]                 | Public Domain     | 1.18.2            |          ✗           |                ✗                |
 | [Unicode]                  | Unicode-DFS-2015  | 8.0.0             |          ✗           |                ✗                |
 | [libunwind]                | MIT               | 1.6.2 + changes   |                      |                ✗                |
@@ -51,7 +51,7 @@ a notice will be included in
 | [variant]                  | BSL-1.0           | 1.4.0             |                      |                ✗                |
 | [wiredtiger]               |                   | <sup>\[<a href="#note_wt" id="ref_wt">2</a>]</sup> | ✗ |  ✗                |
 | [yaml-cpp]                 | MIT               | 0.6.2             |                      |                ✗                |
-| [Zlib]                     | Zlib              | 1.2.12            |          ✗           |                ✗                |
+| [Zlib]                     | Zlib              | 1.2.13            |          ✗           |                ✗                |
 | [Zstandard]                | BSD-3-Clause      | 1.5.2             |          ✗           |                ✗                |
 
 [abseil-cpp]: https://github.com/abseil/abseil-cpp

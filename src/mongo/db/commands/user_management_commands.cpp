@@ -139,7 +139,7 @@ Status getCurrentUserRoles(OperationContext* opCtx,
                            AuthorizationManager* authzManager,
                            const UserName& userName,
                            stdx::unordered_set<RoleName>* roles) {
-    auto swUser = authzManager->acquireUser(opCtx, userName);
+    auto swUser = authzManager->acquireUser(opCtx, UserRequest(userName, boost::none));
     if (!swUser.isOK()) {
         return swUser.getStatus();
     }
@@ -1385,7 +1385,8 @@ UsersInfoReply CmdUMCTyped<UsersInfoCommand, UMCInfoParams>::Invocation::typedRu
             } else {
                 // Custom data is not required in the output, so it can be generated from a cached
                 // user object.
-                auto swUserHandle = authzManager->acquireUser(opCtx, userName);
+                auto swUserHandle =
+                    authzManager->acquireUser(opCtx, UserRequest(userName, boost::none));
                 if (swUserHandle.getStatus().code() == ErrorCodes::UserNotFound) {
                     continue;
                 }
@@ -1467,7 +1468,8 @@ UsersInfoReply CmdUMCTyped<UsersInfoCommand, UMCInfoParams>::Invocation::typedRu
         auto bodyBuilder = replyBuilder.getBodyBuilder();
         CommandHelpers::appendSimpleCommandStatus(bodyBuilder, true);
         bodyBuilder.doneFast();
-        auto response = CursorResponse::parseFromBSONThrowing(replyBuilder.releaseBody());
+        auto response =
+            CursorResponse::parseFromBSONThrowing(dbname.tenantId(), replyBuilder.releaseBody());
         DBClientCursor cursor(&client,
                               response.getNSS(),
                               response.getCursorId(),

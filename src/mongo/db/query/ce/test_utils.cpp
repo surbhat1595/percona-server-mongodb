@@ -88,14 +88,14 @@ CEType CETester::getCE(ABT& abt, std::function<bool(const ABT&)> nodePredicate) 
                                  ConstEval::constFold,
                                  DebugInfo::kDefaultForTests,
                                  _hints};
-    phaseManager.optimize(abt);
+    optimize(phaseManager, abt);
 
     const auto& memo = phaseManager.getMemo();
     if constexpr (kCETestLogOnly) {
         std::cout << ExplainGenerator::explainMemo(memo) << std::endl;
     }
 
-    auto cht = getEstimator();
+    auto cht = getEstimator(true /* forValidation */);
 
     // If we are running no optimization phases, we are ensuring that we get the correct estimate on
     // the original ABT (usually testing the CE for FilterNodes). The memo won't have any groups for
@@ -112,40 +112,11 @@ CEType CETester::getCE(ABT& abt, std::function<bool(const ABT&)> nodePredicate) 
 
     CEType outCard = kInvalidCardinality;
     for (size_t groupId = 0; groupId < memo.getGroupCount(); groupId++) {
-        // Note that we always verify CE for MemoLogicalDelegatorNodes when calling getCE().
-
-        // If the 'optPhases' either ends with the MemoSubstitutionPhase or the
-        // MemoImplementationPhase, we should have exactly one logical node per group. However, if
-        // we have indexes, or a $group, we may have multiple logical nodes. In this case, we still
-        // want to pick the first node.
-        const auto& node = memo.getLogicalNodes(groupId).front();
-
-        // This gets the cardinality estimate actually produced during optimization.
-        const auto& logicalProps = memo.getLogicalProps(groupId);
-        auto memoCE = properties::getPropertyConst<properties::CardinalityEstimate>(logicalProps)
+        // We only want to return the cardinality for the memo group matching the 'nodePredicate'.
+        if (const auto& node = memo.getLogicalNodes(groupId).front(); nodePredicate(node)) {
+            const auto& logicalProps = memo.getLogicalProps(groupId);
+            outCard = properties::getPropertyConst<properties::CardinalityEstimate>(logicalProps)
                           .getEstimate();
-
-        // Conversely, here we call deriveCE() on the ABT produced by the optimization phases, which
-        // has all its delegators dereferenced.
-        auto card = cht->deriveCE(_metadata, memo, logicalProps, node.ref());
-
-        if constexpr (!kCETestLogOnly) {
-            // Ensure that the CE stored for the logical nodes of each group is what we would expect
-            // when estimating that node directly. Note that this check will fail if we are testing
-            // histogram estimation and only using the MemoSubstitutionPhase because the memo always
-            // uses heuristic estimation in this case.
-            ASSERT_CE_APPROX_EQUAL(card, memoCE, kMaxCEError);
-        } else {
-            if (absCEDiff(memoCE, card) > kMaxCEError) {
-                std::cout << "ERROR: CE Group(" << groupId << ") " << card << " vs. " << memoCE
-                          << std::endl;
-                std::cout << ExplainGenerator::explainV2(node) << std::endl;
-            }
-        }
-
-        if (nodePredicate(node)) {
-            // We want to return the cardinality for the memo group matching the 'nodePredicate'.
-            outCard = memoCE;
         }
     }
 
@@ -156,6 +127,10 @@ CEType CETester::getCE(ABT& abt, std::function<bool(const ABT&)> nodePredicate) 
     }
 
     return outCard;
+}
+
+void CETester::optimize(OptPhaseManager& phaseManager, ABT& abt) const {
+    phaseManager.optimize(abt);
 }
 
 ScanDefinition& CETester::getCollScanDefinition() {

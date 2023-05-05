@@ -55,6 +55,7 @@
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/concurrency/thread_pool.h"
+#include "mongo/util/database_name_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTenantMigration
 
@@ -64,6 +65,21 @@ namespace repl {
 
 MONGO_FAIL_POINT_DEFINE(hangInTenantOplogApplication);
 MONGO_FAIL_POINT_DEFINE(fpBeforeTenantOplogApplyingBatch);
+
+bool shouldIgnore(const MigrationProtocolEnum& protocol, const OplogEntry& entry) {
+    const auto ns = entry.getNss();
+    if (protocol == MigrationProtocolEnum::kMultitenantMigrations) {
+        return ns.isOnInternalDb();
+    }
+
+    const auto tenantId = DatabaseNameUtil::parseTenantIdFromDatabaseName(ns.dbName());
+
+    // TODO SERVER-62491: Return false if tenantId is TenantId::kSystemTenantId
+    const auto ignore = !tenantId.has_value();
+
+    invariant(!ignore || ns.isOnInternalDb());
+    return ignore;
+}
 
 TenantOplogApplier::TenantOplogApplier(const UUID& migrationUuid,
                                        const MigrationProtocolEnum& protocol,
@@ -641,9 +657,10 @@ void TenantOplogApplier::_writeSessionNoOpsForRange(
             // Write a fake applyOps with the tenantId as the namespace so that this will be picked
             // up by the committed transaction prefetch pipeline in subsequent migrations.
             //
-            // Unlike MT migration, shard merge protocol fetches all oplog entries, so not setting
-            // the namespace for shard merge, will still ensure that this will be picked up by the
-            // committed transaction prefetch pipeline in subsequent migrations.
+            // Unlike MTM, shard merge copies all tenants from the donor. This means that merge does
+            // not need to filter prefetched committed transactions by tenantId. As a result,
+            // setting a nss containing the tenantId for the fake transaction applyOps entry isn't
+            // necessary.
             if (_protocol != MigrationProtocolEnum::kShardMerge) {
                 noopEntry.setObject(BSON(
                     "applyOps" << BSON_ARRAY(BSON(OplogEntry::kNssFieldName
@@ -928,9 +945,9 @@ void TenantOplogApplier::_writeNoOpsForRange(OpObserver* opObserver,
         });
 }
 
-std::vector<std::vector<const OplogEntry*>> TenantOplogApplier::_fillWriterVectors(
+std::vector<std::vector<ApplierOperation>> TenantOplogApplier::_fillWriterVectors(
     OperationContext* opCtx, TenantOplogBatch* batch) {
-    std::vector<std::vector<const OplogEntry*>> writerVectors(
+    std::vector<std::vector<ApplierOperation>> writerVectors(
         _writerPool->getStats().options.maxThreads);
     CachedCollectionProperties collPropertiesCache;
 
@@ -957,7 +974,7 @@ std::vector<std::vector<const OplogEntry*>> TenantOplogApplier::_fillWriterVecto
             auto expansions = &batch->expansions[op.expansionsEntry];
             bool tenantOp = false;
             for (auto&& entry : *expansions) {
-                if (entry.getNss().isOnInternalDb()) {
+                if (shouldIgnore(_protocol, entry)) {
                     uassert(6114521,
                             "Can't have a transaction with operations on both tenant and internal "
                             "collections.",
@@ -986,7 +1003,7 @@ std::vector<std::vector<const OplogEntry*>> TenantOplogApplier::_fillWriterVecto
                                              &collPropertiesCache,
                                              isTransactionWithCommand /* serial */);
         } else {
-            if (op.entry.getNss().isOnInternalDb()) {
+            if (shouldIgnore(_protocol, op.entry)) {
                 op.ignore = true;
                 continue;
             }
@@ -1062,7 +1079,7 @@ Status TenantOplogApplier::_applyOplogEntryOrGroupedInserts(
     return status;
 }
 
-Status TenantOplogApplier::_applyOplogBatchPerWorker(std::vector<const OplogEntry*>* ops) {
+Status TenantOplogApplier::_applyOplogBatchPerWorker(std::vector<ApplierOperation>* ops) {
     auto opCtx = cc().makeOperationContext();
     opCtx->setEnforceConstraints(false);
     tenantMigrationInfo(opCtx.get()) = boost::make_optional<TenantMigrationInfo>(_migrationUuid);

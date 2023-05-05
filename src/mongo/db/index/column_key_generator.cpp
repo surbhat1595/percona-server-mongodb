@@ -311,6 +311,13 @@ private:
         bool hasDoubleNestedArrays = false;
         bool hasDuplicateFields = false;
 
+        // Used to detect duplicate fields in BSON objects. As the DFS in 'walkObj()' iterates the
+        // fields in a target object (the "visitor" object), it remembers each field it observed by
+        // marking this '_previousVisitor' with the visitor object's identifier. If the object
+        // iterator encounters the same field name twice, it will descend into the resulting path a
+        // second time and see that it already visited the corresponding RawCellValue.
+        size_t _previousVisitor = 0;
+
         bool operator==(const RawCellValue& rhs) const {
             const RawCellValue& lhs = *this;
 
@@ -384,6 +391,9 @@ private:
         if (_pathsAndCells && !isRoot)
             _currentArrayInfo += '{';
 
+        // As 'walkObj()' traverses the BSONObj graph, it uses an integer index as a unique
+        // identifier for each object it visits.
+        const auto objectIdentifier = ++_nextObjectIdentifier;
         for (auto [name, elem] : obj) {
             // We skip fields in some edge cases such as dots in the field name. This may also throw
             // if the field name contains invalid UTF-8 in a way that would break the index.
@@ -406,6 +416,21 @@ private:
             if (belowProjLeaf || static_cast<bool>(childNode) == _projTree->isInclusion() ||
                 (childNode && !childNode->isLeaf())) {
                 auto& subCell = _paths[_currentPath];
+
+                // Detect cases where 'obj' has two fields with the same name. We avoid a separate
+                // duplicate-detection loop by marking the '_previousVisitor' member of each
+                // RawCellValue that we visit in _this_ loop. If we re-visit a RawCellValue, it
+                // means we followed the same path twice and therefore the same field of this
+                // BSONObj.
+                if (objectIdentifier == subCell._previousVisitor || cell.hasDuplicateFields) {
+                    // Objects with duplicate fields are possible but are not present in most user
+                    // data. Instead of trying to store their array info, we force projections to
+                    // fall back to the document store.
+                    subCell.arrayInfoBuf.clear();
+                    subCell.hasDuplicateFields = true;
+                }
+                subCell._previousVisitor = objectIdentifier;
+
                 subCell.nSeen++;
                 if (_inDoubleNestedArray)
                     subCell.hasDoubleNestedArrays = true;
@@ -490,11 +515,6 @@ private:
     void appendToArrayInfo(RawCellValue& rcd, char finalByte) {
         dassert(finalByte == '|' || finalByte == 'o');
 
-        auto foundDuplicateField = [&] {
-            rcd.arrayInfoBuf.clear();
-            rcd.hasDuplicateFields = true;
-        };
-
         if (rcd.hasDuplicateFields) {
             // arrayInfo should be left empty in this case.
             invariant(rcd.arrayInfoBuf.empty());
@@ -517,40 +537,27 @@ private:
         // Make better names for symmetry (and to prevent accidental modifications):
         StringData oldPosition = rcd.lastPosition;
         StringData newPosition = _currentArrayInfo;
-
-        if (MONGO_unlikely(oldPosition.empty() || newPosition.empty())) {
-            // This can only happen if there is a duplicate field at the top level.
-            return foundDuplicateField();
-        }
+        invariant(!oldPosition.empty() && !newPosition.empty());
 
         auto [oldIt, newIt] = std::mismatch(oldPosition.begin(),  //
                                             oldPosition.end(),
                                             newPosition.begin(),
                                             newPosition.end());
-        if (MONGO_unlikely(newIt == newPosition.end())) {
-            // This can only happen if there is a duplicate field in an array, because otherwise
-            // the raw array infos must differ by an index in some array.
-            return foundDuplicateField();
-        }
+        invariant(newIt != newPosition.end());
+        invariant(*newIt != '[');
 
         // Walk back to start of differing elem. Important to use newIt here because if they are
         // in the same array, oldIt may have an implicitly encoded 0 index, while newIt must
         // have a higher index.
         while (*newIt != '[') {
-            if (MONGO_unlikely(!(*newIt >= '0' && *newIt <= '9'))) {
-                // Non-index difference can only happen if there are duplicate fields in an array.
-                return foundDuplicateField();
-            }
+            invariant(*newIt >= '0' && *newIt <= '9');
             invariant(newIt > newPosition.begin());
             dassert(oldIt > oldPosition.begin());  // oldIt and newIt are at same index.
             --newIt;
             --oldIt;
         }
         invariant(oldIt < oldPosition.end());
-        if (MONGO_unlikely(*oldIt != '[')) {
-            // This is another type of non-index difference.
-            return foundDuplicateField();
-        }
+        invariant(*oldIt == '[');
 
         // Close out arrays past the first mismatch in LIFO order.
         for (auto revOldIt = oldPosition.end() - 1; revOldIt != oldIt; --revOldIt) {
@@ -562,17 +569,13 @@ private:
         }
 
         // Now process the mismatch. It must be a difference in array index (checked above).
-        dassert(*oldIt == '[' && *newIt == '[');
+        invariant(*oldIt == '[' && *newIt == '[');
         ++oldIt;
         ++newIt;
         const auto oldIx = ColumnStore::readArrInfoNumber(&oldIt, oldPosition.end());
         const auto newIx = ColumnStore::readArrInfoNumber(&newIt, newPosition.end());
 
-        if (MONGO_unlikely(newIx <= oldIx)) {
-            // If this element is at a same or lower index, we must have hit a duplicate field
-            // above and restarted the array indexing.
-            return foundDuplicateField();
-        }
+        invariant(newIx > oldIx);
         const auto delta = newIx - oldIx;
         const auto skips = delta - 1;
         if (skips == 0) {
@@ -711,6 +714,10 @@ private:
     const PathsAndCells _pathsAndCells = kPathsAndCells;
 
     const ColumnProjectionTree* _projTree;
+
+    // This count gets used by the depth-first search in 'walkObj()' to choose a unique integer
+    // identifier for each BSONObj that it visits.
+    size_t _nextObjectIdentifier = 0;
 };
 }  // namespace
 

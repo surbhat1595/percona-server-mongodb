@@ -270,8 +270,6 @@ public:
     /**
      * Updates metadata in the config.chunks collection so the chunks within the specified key range
      * are seen merged into a single larger chunk.
-     * If 'validAfter' is not set, this means the commit request came from an older server version,
-     * which is not history-aware.
      *
      * Returns a ShardAndCollectionVersion object with the newly produced chunk versions after the
      * migration:
@@ -286,6 +284,19 @@ public:
         const UUID& requestCollectionUUID,
         const ChunkRange& chunkRange,
         const ShardId& shardId);
+
+    /**
+     * Updates metadata in the config.chunks collection so that all mergeable chunks belonging to
+     * the specified shard for the given collection are merged within one transaction.
+     *
+     * Returns a ShardAndCollectionVersion object containing the new collection version produced by
+     * the merge(s).
+     *
+     * TODO SERVER-72283 add definition of "mergeable" related to `onCurrentShardSince`
+     */
+    StatusWith<ShardingCatalogManager::ShardAndCollectionVersion> commitMergeAllChunksOnShard(
+        OperationContext* opCtx, const NamespaceString& nss, const ShardId& shardId);
+
 
     /**
      * Updates metadata in config.chunks collection to show the given chunk in its new shard.
@@ -543,8 +554,16 @@ public:
     Status upgradeConfigSettings(OperationContext* opCtx);
 
     /**
-     * Returns a catalog client that will always run commands locally. Can only be used on a config
-     * server node.
+     * Set `onCurrentShardSince` to the same value as `history[0].validAfter` for all config.chunks
+     * entries.
+     * Only called on the FCV upgrade
+     * TODO (SERVER-72791): Remove the method once FCV 7.0 becomes last-lts.
+     */
+    Status setOnCurrentShardSinceFieldOnChunks(OperationContext* opCtx);
+
+    /**
+     * Returns a catalog client that will always run commands locally. Can only be used on a
+     * config server node.
      */
     ShardingCatalogClient* localCatalogClient();
 

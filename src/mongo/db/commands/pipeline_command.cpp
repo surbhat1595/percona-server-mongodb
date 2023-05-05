@@ -27,16 +27,14 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include <algorithm>
 
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/create_collection.h"
+#include "mongo/db/catalog/external_data_source_scope_guard.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/external_data_source_scope_guard.h"
 #include "mongo/db/commands/run_aggregate.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
@@ -169,6 +167,15 @@ public:
                         externalDataSourcesIter != externalDataSources->end());
                 _usedExternalDataSources.emplace_back(involvedNamespace,
                                                       externalDataSourcesIter->getDataSources());
+            }
+
+            if (auto&& pipeline = _aggregationRequest.getPipeline(); !pipeline.empty()) {
+                // An external data source does not support writes and thus cannot be used as a
+                // target for $merge / $out stages.
+                auto&& lastStage = pipeline.back();
+                uassert(7239302,
+                        "The external data source cannot be used for $merge or $out stage",
+                        !lastStage.hasField("$out"_sd) && !lastStage.hasField("$merge"_sd));
             }
         }
 

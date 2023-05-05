@@ -268,13 +268,41 @@ void createIndexForApplyOps(OperationContext* opCtx,
                             << "; original index spec: " << indexSpec);
     const auto constraints = IndexBuildsManager::IndexConstraints::kRelax;
 
-    // Run single-phase builds synchronously with oplog batch application. This enables them to
-    // stop using ghost timestamps. Single phase builds are only used for empty collections, and
-    // to rebuild indexes admin.system collections. See SERVER-47439.
+    // Run single-phase builds synchronously with oplog batch application. For tenant migrations,
+    // the recipient needs to build the index on empty collections to completion within the same
+    // storage transaction. This is in order to eliminate a window of time where we can reload the
+    // catalog through startup or rollback and detect the index in an incomplete state. Before
+    // SERVER-72618 this was possible and would require us to remove the index from the catalog to
+    // allow replication recovery to rebuild it. The result of this was an untimestamped write to
+    // the catalog. This only applies to empty collection index builds during tenant migration and
+    // is resolved by calling `createIndexesOnEmptyCollection` on empty collections.
+    //
+    // Single phase builds are only used for empty collections, and to rebuild indexes admin.system
+    // collections. See SERVER-47439.
     IndexBuildsCoordinator::updateCurOpOpDescription(opCtx, indexNss, {indexSpec});
     auto collUUID = indexCollection->uuid();
     auto fromMigrate = false;
-    indexBuildsCoordinator->createIndex(opCtx, collUUID, indexSpec, constraints, fromMigrate);
+    if (indexCollection->isEmpty(opCtx)) {
+        WriteUnitOfWork wuow(opCtx);
+        CollectionWriter coll(opCtx, indexNss);
+
+        try {
+            indexBuildsCoordinator->createIndexesOnEmptyCollection(
+                opCtx, coll, {indexSpec}, fromMigrate);
+        } catch (const ExceptionFor<ErrorCodes::IndexAlreadyExists>& e) {
+            // Ignore the "IndexAlreadyExists" error during oplog application.
+            LOGV2_DEBUG(7261800,
+                        1,
+                        "Ignoring indexing error",
+                        "error"_attr = redact(e.toStatus()),
+                        logAttrs(indexCollection->ns()),
+                        logAttrs(indexCollection->uuid()),
+                        "spec"_attr = indexSpec);
+        }
+        wuow.commit();
+    } else {
+        indexBuildsCoordinator->createIndex(opCtx, collUUID, indexSpec, constraints, fromMigrate);
+    }
 
     opCtx->recoveryUnit()->abandonSnapshot();
 }
@@ -813,6 +841,26 @@ NamespaceString extractNsFromUUIDorNs(OperationContext* opCtx,
     return ui ? extractNsFromUUID(opCtx, ui.value()) : extractNs(ns.dbName(), cmd);
 }
 
+StatusWith<BSONObj> getObjWithSanitizedStorageEngineOptions(OperationContext* opCtx,
+                                                            const BSONObj& cmd) {
+    static_assert(
+        CreateCommand::kStorageEngineFieldName == IndexDescriptor::kStorageEngineFieldName,
+        "Expected storage engine options field to be the same for collections and indexes.");
+
+    if (auto storageEngineElem = cmd[IndexDescriptor::kStorageEngineFieldName]) {
+        auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+        auto engineObj = storageEngineElem.embeddedObject();
+        auto sanitizedObj =
+            storageEngine->getSanitizedStorageOptionsForSecondaryReplication(engineObj);
+        if (!sanitizedObj.isOK()) {
+            return sanitizedObj.getStatus();
+        }
+        return cmd.addFields(
+            BSON(IndexDescriptor::kStorageEngineFieldName << sanitizedObj.getValue()));
+    }
+    return cmd;
+}
+
 using OpApplyFn = std::function<Status(
     OperationContext* opCtx, const OplogEntry& entry, OplogApplication::Mode mode)>;
 
@@ -837,14 +885,15 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
     {"create",
      {[](OperationContext* opCtx, const OplogEntry& entry, OplogApplication::Mode mode) -> Status {
           const auto& ui = entry.getUuid();
-          const auto& cmd = entry.getObject();
-
-          const NamespaceString nss(extractNs(entry.getNss().dbName(), cmd));
-
-          const auto& migrationId = entry.getFromTenantMigration();
-          if (migrationId) {
-              tenantMigrationInfo(opCtx) = boost::optional<TenantMigrationInfo>(migrationId);
+          // Sanitize storage engine options to remove options which might not apply to this node.
+          // See SERVER-68122.
+          const auto sanitizedCmdOrStatus =
+              getObjWithSanitizedStorageEngineOptions(opCtx, entry.getObject());
+          if (!sanitizedCmdOrStatus.isOK()) {
+              return sanitizedCmdOrStatus.getStatus();
           }
+          const auto& cmd = sanitizedCmdOrStatus.getValue();
+          const NamespaceString nss(extractNs(entry.getNss().dbName(), cmd));
 
           // Mode SECONDARY steady state replication should not allow create collection to rename an
           // existing collection out of the way. This leaves a collection orphaned and is a bug.
@@ -883,7 +932,15 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
       {ErrorCodes::NamespaceExists}}},
     {"createIndexes",
      {[](OperationContext* opCtx, const OplogEntry& entry, OplogApplication::Mode mode) -> Status {
-          const auto& cmd = entry.getObject();
+          // Sanitize storage engine options to remove options which might not apply to this node.
+          // See SERVER-68122.
+          const auto sanitizedCmdOrStatus =
+              getObjWithSanitizedStorageEngineOptions(opCtx, entry.getObject());
+          if (!sanitizedCmdOrStatus.isOK()) {
+              return sanitizedCmdOrStatus.getStatus();
+          }
+          const auto& cmd = sanitizedCmdOrStatus.getValue();
+
           if (OplogApplication::Mode::kApplyOpsCmd == mode) {
               return {ErrorCodes::CommandNotSupported,
                       "The createIndexes operation is not supported in applyOps mode"};
@@ -916,6 +973,16 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
           if (!swOplogEntry.isOK()) {
               return swOplogEntry.getStatus().withContext(
                   "Error parsing 'startIndexBuild' oplog entry");
+          }
+
+          // Sanitize storage engine options to remove options which might not apply to this node.
+          // See SERVER-68122.
+          for (auto& spec : swOplogEntry.getValue().indexSpecs) {
+              auto sanitizedObj = getObjWithSanitizedStorageEngineOptions(opCtx, spec);
+              if (!sanitizedObj.isOK()) {
+                  return swOplogEntry.getStatus();
+              }
+              spec = sanitizedObj.getValue();
           }
 
           IndexBuildsCoordinator::ApplicationMode applicationMode =
@@ -1123,7 +1190,8 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
                                                             indexEntry.getCollectionUUID(),
                                                             indexEntry.getLastmod(),
                                                             indexEntry.getIndexCollectionUUID());
-                 } break;
+                     break;
+                 }
                  case 'd':
                      removeGlobalIndexCatalogEntryFromCollection(
                          opCtx,
@@ -1147,7 +1215,8 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
                              entryObj["entry"][IndexCatalogType::kCollectionUUIDFieldName])),
                          indexVersion,
                          indexes);
-                 } break;
+                     break;
+                 }
                  case 'c':
                      clearGlobalIndexes(
                          opCtx,
@@ -1155,6 +1224,16 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
                          uassertStatusOK(UUID::parse(
                              entryObj["entry"][IndexCatalogType::kCollectionUUIDFieldName])));
                      break;
+                 case 'm': {
+                     auto fromNss = NamespaceString(entryObj["entry"]["fromNss"].String());
+                     auto toNss = NamespaceString(entryObj["entry"]["toNss"].String());
+                     renameGlobalIndexesMetadata(
+                         opCtx,
+                         fromNss,
+                         toNss,
+                         entryObj["entry"][IndexCatalogType::kLastmodFieldName].timestamp());
+                     break;
+                 }
                  default:
                      MONGO_UNREACHABLE;
              }
@@ -1382,7 +1461,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                 const auto insertOps = opOrGroupedInserts.getGroupedInserts();
                 WriteUnitOfWork wuow(opCtx);
                 if (!opCtx->writesAreReplicated()) {
-                    for (const auto iOp : insertOps) {
+                    for (const auto& iOp : insertOps) {
                         invariant(iOp->getTerm());
                         insertObjs.emplace_back(
                             iOp->getObject(), iOp->getTimestamp(), iOp->getTerm().value());
@@ -1393,7 +1472,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                     // the recipient.
                     std::vector<OplogSlot> slots = getNextOpTimes(opCtx, insertOps.size());
                     auto slotIter = slots.begin();
-                    for (const auto iOp : insertOps) {
+                    for (const auto& iOp : insertOps) {
                         insertObjs.emplace_back(
                             iOp->getObject(), slotIter->getTimestamp(), slotIter->getTerm());
                         slotIter++;
@@ -2077,6 +2156,10 @@ Status applyCommand_inlock(OperationContext* opCtx,
             }
             case ErrorCodes::BackgroundOperationInProgressForDatabase: {
                 invariant(mode == OplogApplication::Mode::kInitialSync);
+
+                // Aborting an index build involves writing to the catalog. This write needs to be
+                // timestamped. It will be given 'writeTime' as the commit timestamp.
+                TimestampBlock tsBlock(opCtx, writeTime);
                 abortIndexBuilds(opCtx,
                                  entry.getCommandType(),
                                  nss,
@@ -2096,6 +2179,10 @@ Status applyCommand_inlock(OperationContext* opCtx,
 
                 // This error is only possible during initial sync mode.
                 invariant(mode == OplogApplication::Mode::kInitialSync);
+
+                // Aborting an index build involves writing to the catalog. This write needs to be
+                // timestamped. It will be given 'writeTime' as the commit timestamp.
+                TimestampBlock tsBlock(opCtx, writeTime);
                 abortIndexBuilds(
                     opCtx, entry.getCommandType(), ns, "Aborting index builds during initial sync");
                 LOGV2_DEBUG(4665901,

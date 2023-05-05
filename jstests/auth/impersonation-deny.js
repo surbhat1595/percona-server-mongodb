@@ -18,7 +18,7 @@ function testMongod(mongod, systemuserpwd = undefined) {
 
     // Localhost authbypass is disabled, and we haven't logged in,
     // so normal auth-required commands should fail.
-    assertUnauthorized({usersInfo: 1}, 'command usersInfo requires authentication');
+    assertUnauthorized({usersInfo: 1}, 'Command usersInfo requires authentication');
 
     // Hello command requires no auth, so it works fine.
     assert.commandWorked(admin.runCommand({hello: 1}));
@@ -29,11 +29,21 @@ function testMongod(mongod, systemuserpwd = undefined) {
     const kImpersonatedHello = {
         hello: 1,
         "$audit": {
-            "$impersonatedUsers": [{user: 'admin', db: 'admin'}],
+            "$impersonatedUser": {user: 'admin', db: 'admin'},
             "$impersonatedRoles": [{role: 'root', db: 'admin'}],
         }
     };
     assertUnauthorized(kImpersonatedHello, 'Unauthorized use of impersonation metadata');
+
+    // TODO SERVER-72448: Remove
+    const kImpersonatedHelloLegacy = {
+        hello: 1,
+        "$audit": {
+            "$impersonatedUsers": [{user: 'admin', db: 'admin'}],
+            "$impersonatedRoles": [{role: 'root', db: 'admin'}],
+        }
+    };
+    assertUnauthorized(kImpersonatedHelloLegacy, 'Unauthorized use of impersonation metadata');
 
     // Try as admin (root role), should still fail.
     admin.auth('admin', 'admin');

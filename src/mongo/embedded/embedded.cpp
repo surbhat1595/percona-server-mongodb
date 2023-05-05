@@ -46,7 +46,6 @@
 #include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/global_settings.h"
-#include "mongo/db/index/index_access_method_factory_impl.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/repl/storage_interface_impl.h"
@@ -106,7 +105,6 @@ MONGO_INITIALIZER_GENERAL(ForkServer, ("EndStartupOptionHandling"), ("default"))
 
 void setUpCatalog(ServiceContext* serviceContext) {
     DatabaseHolder::set(serviceContext, std::make_unique<DatabaseHolderImpl>());
-    IndexAccessMethodFactory::set(serviceContext, std::make_unique<IndexAccessMethodFactoryImpl>());
     Collection::Factory::set(serviceContext, std::make_unique<CollectionImpl::FactoryImpl>());
 }
 
@@ -192,7 +190,7 @@ void shutdown(ServiceContext* srvContext) {
 
 
 ServiceContext* initialize(const char* yaml_config) {
-    srand(static_cast<unsigned>(curTimeMicros64()));
+    srand(static_cast<unsigned>(curTimeMicros64()));  // NOLINT
 
     if (yaml_config)
         embedded::EmbeddedOptionsConfig::instance().set(yaml_config);
@@ -324,7 +322,7 @@ ServiceContext* initialize(const char* yaml_config) {
     }
 
     // This is for security on certain platforms (nonce generation)
-    srand((unsigned)(curTimeMicros64()) ^ (unsigned(uintptr_t(&startupOpCtx))));
+    srand((unsigned)(curTimeMicros64()) ^ (unsigned(uintptr_t(&startupOpCtx))));  // NOLINT
 
     // Set up the logical session cache
     LogicalSessionCache::set(serviceContext,

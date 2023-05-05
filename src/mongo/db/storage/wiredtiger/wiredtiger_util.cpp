@@ -43,6 +43,7 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_parameters_gen.h"
 #include "mongo/logv2/log.h"
+#include "mongo/util/pcre.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/testing_proctor.h"
 
@@ -455,7 +456,7 @@ StatusWith<int64_t> WiredTigerUtil::checkApplicationMetadataFormatVersion(Operat
 
 // static
 Status WiredTigerUtil::checkTableCreationOptions(const BSONElement& configElem) {
-    invariant(configElem.fieldNameStringData() == "configString");
+    invariant(configElem.fieldNameStringData() == WiredTigerUtil::kConfigStringField);
 
     if (configElem.type() != String) {
         return {ErrorCodes::TypeMismatch, "'configString' must be a string."};
@@ -877,6 +878,43 @@ int WiredTigerUtil::verifyTable(OperationContext* opCtx,
     return (session->verify)(session, uri.c_str(), nullptr);
 }
 
+void WiredTigerUtil::validateTableLogging(OperationContext* opCtx,
+                                          StringData uri,
+                                          bool isLogged,
+                                          boost::optional<StringData> indexName,
+                                          bool& valid,
+                                          std::vector<std::string>& errors,
+                                          std::vector<std::string>& warnings) {
+    logv2::DynamicAttributes attrs;
+    if (indexName) {
+        attrs.add("index", indexName);
+    }
+    attrs.add("uri", uri);
+
+    auto metadata = WiredTigerUtil::getMetadataCreate(opCtx, uri);
+    if (!metadata.isOK()) {
+        attrs.add("error", metadata.getStatus());
+        LOGV2_WARNING(6898100, "Failed to check WT table logging setting", attrs);
+
+        warnings.push_back(fmt::format("Failed to check WT table logging setting for {}",
+                                       indexName ? fmt::format("index '{}'", indexName->toString())
+                                                 : "collection"));
+
+        return;
+    }
+
+    if (metadata.getValue().find(fmt::format("log=(enabled={})", isLogged ? "true" : "false")) ==
+        std::string::npos) {
+        attrs.add("expected", isLogged);
+        LOGV2_ERROR(6898101, "Detected incorrect WT table logging setting", attrs);
+
+        errors.push_back(fmt::format("Detected incorrect table logging setting for {}",
+                                     indexName ? fmt::format("index '{}'", indexName->toString())
+                                               : "collection"));
+        valid = false;
+    }
+}
+
 void WiredTigerUtil::notifyStartupComplete() {
     removeTableChecksFile();
 }
@@ -1248,5 +1286,9 @@ std::string WiredTigerUtil::generateWTVerboseConfiguration() {
     return cfg;
 }
 
+void WiredTigerUtil::removeEncryptionFromConfigString(std::string* configString) {
+    static StaticImmortal<pcre::Regex> encryptionOptsRegex(R"re(encryption=\([^\)]*\),?)re");
+    encryptionOptsRegex->substitute("", configString, pcre::SUBSTITUTE_GLOBAL);
+}
 
 }  // namespace mongo

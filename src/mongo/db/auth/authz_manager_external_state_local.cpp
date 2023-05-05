@@ -335,7 +335,7 @@ StatusWith<User> AuthzManagerExternalStateLocal::getUserObject(OperationContext*
                                                                const UserRequest& userReq) try {
     const UserName& userName = userReq.name;
     std::vector<RoleName> directRoles;
-    User user(userReq.name);
+    User user(userReq);
 
     std::set<RoleName> externalRoles;
     auto rolesStatus = _userRoles(opCtx, userReq, externalRoles);

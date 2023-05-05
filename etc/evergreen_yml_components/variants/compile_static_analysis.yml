@@ -17,6 +17,15 @@ variables:
   scons_cache_mode: all
   has_packages: false
 
+# If you add anything to san_options, make sure the appropriate changes are
+# also made to SConstruct.
+# and also to the san_options in evergreen.yml
+- aubsan_options: &aubsan_options
+  >-
+    UBSAN_OPTIONS="print_stacktrace=1:external_symbolizer_path=/opt/mongodbtoolchain/v4/bin/llvm-symbolizer"
+    LSAN_OPTIONS="suppressions=etc/lsan.suppressions:report_objects=1"
+    ASAN_OPTIONS="detect_leaks=1:check_initialization_order=true:strict_init_order=true:abort_on_error=1:disable_coredump=0:handle_abort=1:strict_string_checks=true:detect_invalid_pointer_pairs=1:external_symbolizer_path=/opt/mongodbtoolchain/v4/bin/llvm-symbolizer"
+
 
 buildvariants:
 
@@ -105,17 +114,7 @@ buildvariants:
   expansions:
     <<: *generic_linux_compile_expansions
     separate_debug: off
-    # TODO(SERVER-49515): The addition of `--linker=lld` under
-    # `compile_flags` below is to Work around
-    # https://sourceware.org/bugzilla/show_bug.cgi?id=25975 by forcing
-    # use of `lld`. Normally we would not select `lld` here because it
-    # is a dynamic builder and we suppress `lld` in
-    # `--link-model=dynamic` builds to work around
-    # https://bugs.llvm.org/show_bug.cgi?id=44842. That issue is in
-    # fact fixed in v4 `lld`, so we can use `lld` here. We are opting
-    # to do that instead of rolling over to `lld` everywhere just to
-    # unblock the toolchain. Once `lld` is default, this override can
-    # and should be removed.
+    san_options: *aubsan_options
     compile_flags: >-
       --variables-files=etc/scons/mongodbtoolchain_stable_clang.vars
       --dbg=on
@@ -126,7 +125,6 @@ buildvariants:
       --ocsp-stapling=off
       -j$(grep -c ^processor /proc/cpuinfo)
       --link-model=dynamic
-      --linker=lld
     compile_variant: *linux-debug-aubsan-compile-required
 
 - name: &windows-compile-required windows-compile-required

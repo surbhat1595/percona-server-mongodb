@@ -113,8 +113,8 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/concurrency/exception_util',
-        '$BUILD_DIR/mongo/db/curop',
         '$BUILD_DIR/mongo/db/index/index_access_method',
+        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/db/shard_role',
         '$BUILD_DIR/mongo/db/storage/key_string',
         'collection_crud',
@@ -130,7 +130,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/concurrency/exception_util',
-        '$BUILD_DIR/mongo/db/curop',
+        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/db/query/query_knobs',
         '$BUILD_DIR/mongo/db/shard_role',
         '$BUILD_DIR/mongo/db/storage/record_store_base',
@@ -143,13 +143,13 @@ env.Library(
 env.Library(
     target='index_build_oplog_entry',
     source=[
-        "index_build_oplog_entry.cpp",
+        'index_build_oplog_entry.cpp',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
-        "$BUILD_DIR/mongo/bson/util/bson_extract",
-        "$BUILD_DIR/mongo/db/repl/oplog_entry",
-        "$BUILD_DIR/mongo/rpc/command_status",
+        '$BUILD_DIR/mongo/bson/util/bson_extract',
+        '$BUILD_DIR/mongo/db/repl/oplog_entry',
+        '$BUILD_DIR/mongo/rpc/command_status',
         'commit_quorum_options',
     ],
 )
@@ -161,9 +161,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/common',
-        '$BUILD_DIR/mongo/db/index/index_access_methods',
-        '$BUILD_DIR/mongo/db/index/index_descriptor',
-        '$BUILD_DIR/mongo/db/index/key_generator',
+        '$BUILD_DIR/mongo/db/index/index_access_method',
         '$BUILD_DIR/mongo/db/query/collation/collator_factory_interface',
         '$BUILD_DIR/mongo/db/query_expressions',
         '$BUILD_DIR/mongo/db/server_base',
@@ -174,7 +172,7 @@ env.Library(
 env.Library(
     target='index_catalog',
     source=[
-        "index_catalog.cpp",
+        'index_catalog.cpp',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
@@ -185,7 +183,7 @@ env.Library(
 env.Library(
     target='index_catalog_entry',
     source=[
-        "index_catalog_entry.cpp",
+        'index_catalog_entry.cpp',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
@@ -202,11 +200,11 @@ env.Library(
         '$BUILD_DIR/mongo/db/collection_index_usage_tracker',
         '$BUILD_DIR/mongo/db/common',
         '$BUILD_DIR/mongo/db/index/index_access_method',
-        '$BUILD_DIR/mongo/db/index/index_descriptor',
         '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/ttl_collection_cache',
         '$BUILD_DIR/mongo/db/vector_clock',
+        'collection',
         'collection_catalog',
         'collection_query_info',
         'index_key_validate',
@@ -221,9 +219,10 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
-        '$BUILD_DIR/mongo/db/curop',
+        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/db/record_id_helpers',
         '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
+        '$BUILD_DIR/mongo/db/storage/capped_snapshots',
         '$BUILD_DIR/mongo/db/storage/record_store_base',
         '$BUILD_DIR/mongo/db/storage/storage_options',
         '$BUILD_DIR/mongo/db/storage/write_unit_of_work',
@@ -241,7 +240,7 @@ env.Library(
         'collection_operation_source.cpp',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/server_base',
     ],
 )
 
@@ -266,8 +265,9 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/concurrency/exception_util',
-        '$BUILD_DIR/mongo/db/curop',
         '$BUILD_DIR/mongo/db/index/index_access_method',
+        '$BUILD_DIR/mongo/db/query/op_metrics',
+        '$BUILD_DIR/mongo/db/query_exec',
         '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
         '$BUILD_DIR/mongo/db/resumable_index_builds_idl',
         '$BUILD_DIR/mongo/db/server_base',
@@ -297,22 +297,23 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/audit',
-        '$BUILD_DIR/mongo/db/catalog/collection_crud',
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
-        '$BUILD_DIR/mongo/db/curop',
         '$BUILD_DIR/mongo/db/index/index_access_method',
         '$BUILD_DIR/mongo/db/profile_filter',
         '$BUILD_DIR/mongo/db/query/collation/collator_factory_interface',
+        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/server_options_core',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/db/storage/bson_collection_catalog_entry',
+        '$BUILD_DIR/mongo/db/storage/capped_snapshots',
         '$BUILD_DIR/mongo/db/storage/snapshot_helper',
         '$BUILD_DIR/mongo/db/storage/storage_options',
         '$BUILD_DIR/mongo/db/views/util',
         '$BUILD_DIR/mongo/db/views/views',
         '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'collection',
+        'collection_crud',
     ],
 )
 
@@ -373,6 +374,7 @@ env.Library(
     target='catalog_impl',
     source=[
         'collection_impl.cpp',
+        'column_index_consistency.cpp',
         'database_holder_impl.cpp',
         'database_impl.cpp',
         'index_catalog_entry_impl.cpp',
@@ -382,17 +384,16 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/audit',
         '$BUILD_DIR/mongo/db/collection_index_usage_tracker',
         '$BUILD_DIR/mongo/db/commands/server_status_core',
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
-        '$BUILD_DIR/mongo/db/curop',
         '$BUILD_DIR/mongo/db/dbcommands_idl',
+        '$BUILD_DIR/mongo/db/index/column_store_index',
         '$BUILD_DIR/mongo/db/index/index_access_method',
-        '$BUILD_DIR/mongo/db/index/index_access_method_factory',
-        '$BUILD_DIR/mongo/db/index/index_access_methods',
         '$BUILD_DIR/mongo/db/multitenancy',
         '$BUILD_DIR/mongo/db/op_observer/op_observer',
-        '$BUILD_DIR/mongo/db/query_exec',
+        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/db/record_id_helpers',
         '$BUILD_DIR/mongo/db/repl/drop_pending_collection_reaper',
         '$BUILD_DIR/mongo/db/repl/oplog',
@@ -401,10 +402,12 @@ env.Library(
         '$BUILD_DIR/mongo/db/server_options_core',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/db/shard_role',
+        '$BUILD_DIR/mongo/db/storage/capped_snapshots',
         '$BUILD_DIR/mongo/db/storage/durable_catalog_impl',
         '$BUILD_DIR/mongo/db/storage/execution_context',
         '$BUILD_DIR/mongo/db/storage/historical_ident_tracker',
         '$BUILD_DIR/mongo/db/storage/key_string',
+        '$BUILD_DIR/mongo/db/storage/record_store_base',
         '$BUILD_DIR/mongo/db/storage/storage_engine_common',
         '$BUILD_DIR/mongo/db/storage/storage_engine_impl',
         '$BUILD_DIR/mongo/db/storage/storage_util',
@@ -415,11 +418,14 @@ env.Library(
         '$BUILD_DIR/mongo/db/ttl_collection_cache',
         '$BUILD_DIR/mongo/db/vector_clock',
         '$BUILD_DIR/mongo/db/views/view_catalog_helpers',
+        'capped_visibility',
         'catalog_helpers',
         'catalog_stats',
         'clustered_collection_options',
         'collection_crud',
         'collection_options',
+        'collection_query_info',
+        'document_validation',
         'health_log',
         'index_build_block',
         'index_catalog',
@@ -457,9 +463,9 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/bson/util/bson_column',
         '$BUILD_DIR/mongo/db/concurrency/exception_util',
-        '$BUILD_DIR/mongo/db/curop',
         '$BUILD_DIR/mongo/db/index/index_access_method',
         '$BUILD_DIR/mongo/db/multi_key_path_tracker',
+        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/db/record_id_helpers',
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/service_context',
@@ -467,7 +473,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/storage/execution_context',
         '$BUILD_DIR/mongo/db/storage/key_string',
         '$BUILD_DIR/mongo/db/storage/record_store_base',
-        '$BUILD_DIR/mongo/db/timeseries/bucket_catalog',
+        '$BUILD_DIR/mongo/db/timeseries/bucket_catalog/bucket_catalog',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         'catalog_impl',
         'collection_options',
@@ -484,10 +490,21 @@ env.Library(
         'throttle_cursor.cpp',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/curop',
         '$BUILD_DIR/mongo/db/index/index_access_method',
+        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/util/fail_point',
         'validate_idl',
+    ],
+)
+
+env.Library(
+    target='capped_visibility',
+    source=[
+        'capped_visibility.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/storage/recovery_unit_base',
     ],
 )
 
@@ -510,23 +527,23 @@ env.Library(
 env.Library(
     target='catalog_helpers',
     source=[
-        "$BUILD_DIR/mongo/db/commands/external_data_source_scope_guard.cpp",
         'capped_utils.cpp',
-        'coll_mod_index.cpp',
         'coll_mod.cpp',
+        'coll_mod_index.cpp',
         'collection_catalog_helper.cpp',
         'collection_compact.cpp',
         'create_collection.cpp',
         'drop_collection.cpp',
         'drop_database.cpp',
         'drop_indexes.cpp',
+        'external_data_source_scope_guard.cpp',
         'list_indexes.cpp',
         'rename_collection.cpp',
         'unique_collection_name.cpp',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/db/catalog/collection_crud',
+        '$BUILD_DIR/mongo/db/audit',
         '$BUILD_DIR/mongo/db/concurrency/exception_util',
         '$BUILD_DIR/mongo/db/index/index_access_method',
         '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
@@ -542,6 +559,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/stats/top',
         '$BUILD_DIR/mongo/db/storage/index_entry_comparison',
         '$BUILD_DIR/mongo/db/storage/key_string',
+        '$BUILD_DIR/mongo/db/storage/record_store_base',
         '$BUILD_DIR/mongo/db/timeseries/catalog_helper',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_conversion_util',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
@@ -551,8 +569,10 @@ env.Library(
         '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'cannot_convert_index_to_unique_info',
         'clustered_collection_options',
+        'collection_crud',
         'collection_options',
         'collection_uuid_mismatch_info',
+        'document_validation',
         'index_catalog',
         'index_key_validate',
         'local_oplog_info',
@@ -562,27 +582,27 @@ env.Library(
 )
 
 env.Library(
-    target="collection_query_info",
+    target='collection_query_info',
     source=[
-        "$BUILD_DIR/mongo/db/query/collection_query_info.cpp",
-        "$BUILD_DIR/mongo/db/query/collection_index_usage_tracker_decoration.cpp",
-        "$BUILD_DIR/mongo/db/query/plan_cache_key_factory.cpp",
-        "$BUILD_DIR/mongo/db/query/query_settings_decoration.cpp",
+        '$BUILD_DIR/mongo/db/query/collection_query_info.cpp',
+        '$BUILD_DIR/mongo/db/query/collection_index_usage_tracker_decoration.cpp',
+        '$BUILD_DIR/mongo/db/query/plan_cache_key_factory.cpp',
+        '$BUILD_DIR/mongo/db/query/query_settings_decoration.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/query/query_plan_cache',
-        '$BUILD_DIR/mongo/db/query/query_planner',
         '$BUILD_DIR/mongo/db/update_index_data',
-        'collection',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/collection_index_usage_tracker',
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
-        '$BUILD_DIR/mongo/db/curop',
         '$BUILD_DIR/mongo/db/fts/base_fts',
+        '$BUILD_DIR/mongo/db/query/op_metrics',
+        '$BUILD_DIR/mongo/db/query/query_planner',
         '$BUILD_DIR/mongo/db/s/sharding_api_d',
         '$BUILD_DIR/mongo/db/service_context',
+        'collection',
         'index_catalog',
     ],
 )
@@ -634,10 +654,21 @@ env.Library(
     ],
 )
 
+env.CppUnitTest(
+    target='db_collection_query_info_test', source=[
+        '$BUILD_DIR/mongo/db/query/collection_query_info_test.cpp',
+    ], LIBDEPS=[
+        '$BUILD_DIR/mongo/db/index/index_access_method',
+        '$BUILD_DIR/mongo/db/storage/devnull/storage_devnull_core',
+        'collection_query_info',
+    ])
+
 if wiredtiger:
     env.CppUnitTest(
         target='db_catalog_test',
         source=[
+            'capped_collection_test.cpp',
+            'capped_visibility_test.cpp',
             'capped_utils_test.cpp',
             'catalog_control_test.cpp',
             'collection_catalog_test.cpp',
@@ -646,6 +677,7 @@ if wiredtiger:
             'collection_validation_test.cpp',
             'collection_writer_test.cpp',
             'coll_mod_test.cpp',
+            'column_index_consistency_test.cpp',
             'commit_quorum_options_test.cpp',
             'create_collection_test.cpp',
             'database_test.cpp',
@@ -662,7 +694,6 @@ if wiredtiger:
         ],
         LIBDEPS=[
             '$BUILD_DIR/mongo/db/auth/authmocks',
-            '$BUILD_DIR/mongo/db/catalog/collection_crud',
             '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
             '$BUILD_DIR/mongo/db/index/index_access_method',
             '$BUILD_DIR/mongo/db/index_builds_coordinator_mongod',
@@ -689,12 +720,14 @@ if wiredtiger:
             '$BUILD_DIR/mongo/util/clock_source_mock',
             '$BUILD_DIR/mongo/util/fail_point',
             '$BUILD_DIR/mongo/util/pcre_wrapper',
+            'capped_visibility',
             'catalog_control',
             'catalog_helpers',
             'catalog_impl',
             'catalog_test_fixture',
             'collection',
             'collection_catalog',
+            'collection_crud',
             'collection_options',
             'collection_query_info',
             'collection_validation',

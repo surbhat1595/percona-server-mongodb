@@ -75,7 +75,8 @@ feature_flags:
   featureFlagConcurrencyInChunkMigration:
     description: "Feature flag for enabling concurrency within a chunk migration"
     cpp_varname: feature_flags::gConcurrencyInChunkMigration
-    default: false
+    default: true
+    version: 6.3
   featureFlagStopUsingConfigVersion:
   # TODO SERVER-68889 remove once 7.0 becomes last LTS
     description: "Stop using deprecated config version fields to check metadata compatibility between different version"
@@ -85,7 +86,7 @@ feature_flags:
   # TODO (SERVER-71309): Remove once 7.0 becomes last LTS.
   featureFlagResilientMovePrimary:
     description: "Enable the resilient coordinator for the movePrimary command in order to improve
-                  the tolerance in case of a failure on donor and recipient nodes"
+                 the tolerance in case of a failure on donor and recipient nodes"
     cpp_varname: feature_flags::gResilientMovePrimary
     default: false
   featureFlagConfigSettingsSchema:
@@ -96,4 +97,8 @@ feature_flags:
   featureFlagAutoMerger:
     description: "Feature flag for enabling auto-merging of contiguous chunks belonging to the same shard"
     cpp_varname: feature_flags::gAutoMerger
+    default: false
+  featureFlagCheckMetadataConsistency:
+    description: "Feature flag for checking metadata consistency in the cluster, database or collection"
+    cpp_varname: feature_flags::gCheckMetadataConsistency
     default: false

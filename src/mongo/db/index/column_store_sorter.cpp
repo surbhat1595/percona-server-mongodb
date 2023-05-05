@@ -120,7 +120,7 @@ void ColumnStoreSorter::add(PathView path, RowId rowId, CellView cellContents) {
     auto& cellListAtPath = _dataByPath[path];
     if (cellListAtPath.empty()) {
         // Track memory usage of this new path.
-        _memUsed += sizeof(StringMap<CellVector>::value_type) + path.size();
+        _stats.incrementMemUsage(sizeof(StringMap<CellVector>::value_type) + path.size());
     }
 
     // The sorter assumes that RecordIds are added in sorted order.
@@ -129,8 +129,13 @@ void ColumnStoreSorter::add(PathView path, RowId rowId, CellView cellContents) {
             cellListAtPath.empty() || cellListAtPath.back().first < rowId);
 
     cellListAtPath.emplace_back(rowId, CellValue(cellContents.rawData(), cellContents.size()));
-    _memUsed += sizeof(RowId) + sizeof(CellValue) + cellListAtPath.back().second.size();
-    if (_memUsed > _maxMemoryUsageBytes) {
+
+    auto memUsage = sizeof(RowId) + sizeof(CellValue) + cellListAtPath.back().second.size();
+    _stats.incrementMemUsage(memUsage);
+    _stats.incrementBytesSorted(memUsage);
+    _stats.incrementNumSorted();
+
+    if (_stats.memUsage() > _maxMemoryUsageBytes) {
         spill();
     }
 }
@@ -237,7 +242,7 @@ void ColumnStoreSorter::spill() {
     _spilledFileIterators.emplace_back(writer.done());
 
     _dataByPath.clear();
-    _memUsed = 0;
+    _stats.resetMemUsage();
 }
 
 ColumnStoreSorter::Iterator* ColumnStoreSorter::done() {

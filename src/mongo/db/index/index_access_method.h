@@ -74,6 +74,12 @@ public:
     IndexAccessMethod() = default;
     virtual ~IndexAccessMethod() = default;
 
+    static std::unique_ptr<IndexAccessMethod> make(OperationContext* opCtx,
+                                                   const NamespaceString& nss,
+                                                   const CollectionOptions& collectionOptions,
+                                                   IndexCatalogEntry* entry,
+                                                   StringData ident);
+
     /**
      * Equivalent to (but shorter and faster than): dynamic_cast<SortedDataIndexAccessMethod*>(this)
      */
@@ -129,12 +135,16 @@ public:
     virtual Status initializeAsEmpty(OperationContext* opCtx) = 0;
 
     /**
-     * Walk the entire index, checking the internal structure for consistency.
-     * Set numKeys to the number of keys in the index.
+     * Validates the index. If 'full' is false, only performs checks which do not traverse the
+     * index. If 'full' is true, additionally traverses the index and validates its internal
+     * structure.
      */
-    virtual void validate(OperationContext* opCtx,
-                          int64_t* numKeys,
-                          IndexValidateResults* fullResults) const = 0;
+    virtual IndexValidateResults validate(OperationContext* opCtx, bool full) const = 0;
+
+    /**
+     * Returns the number of keys in the index, traversing the index to do so.
+     */
+    virtual int64_t numKeys(OperationContext* opCtx) const = 0;
 
     /**
      * Add custom statistics about this index to BSON object builder, for display.
@@ -174,23 +184,13 @@ public:
      */
     virtual void setIdent(std::shared_ptr<Ident> newIdent) = 0;
 
-    virtual Status applySortedDataSideWrite(OperationContext* opCtx,
+    virtual Status applyIndexBuildSideWrite(OperationContext* opCtx,
                                             const CollectionPtr& coll,
                                             const BSONObj& operation,
                                             const InsertDeleteOptions& options,
                                             KeyHandlerFn&& onDuplicateKey,
-                                            int64_t* const keysInserted,
-                                            int64_t* const keysDeleted) {
-        MONGO_UNREACHABLE;
-    };
-
-    virtual void applyColumnDataSideWrite(OperationContext* opCtx,
-                                          const CollectionPtr& coll,
-                                          const BSONObj& operation,
-                                          int64_t* keysInserted,
-                                          int64_t* keysDeleted) {
-        MONGO_UNREACHABLE;
-    };
+                                            int64_t* keysInserted,
+                                            int64_t* keysDeleted) = 0;
 
     //
     // Bulk operations support
@@ -278,27 +278,6 @@ public:
         size_t maxMemoryUsageBytes,
         const boost::optional<IndexStateInfo>& stateInfo,
         StringData dbName) = 0;
-};
-
-/**
- * Factory class that constructs an IndexAccessMethod depending on the type of index.
- */
-class IndexAccessMethodFactory {
-public:
-    IndexAccessMethodFactory() = default;
-    virtual ~IndexAccessMethodFactory() = default;
-
-    static IndexAccessMethodFactory* get(ServiceContext* service);
-    static IndexAccessMethodFactory* get(OperationContext* opCtx);
-    static void set(ServiceContext* service,
-                    std::unique_ptr<IndexAccessMethodFactory> collectionFactory);
-
-
-    virtual std::unique_ptr<IndexAccessMethod> make(OperationContext* opCtx,
-                                                    const NamespaceString& nss,
-                                                    const CollectionOptions& collectionOptions,
-                                                    IndexCatalogEntry* entry,
-                                                    StringData ident) = 0;
 };
 
 /**
@@ -564,9 +543,9 @@ public:
 
     Status initializeAsEmpty(OperationContext* opCtx) final;
 
-    void validate(OperationContext* opCtx,
-                  int64_t* numKeys,
-                  IndexValidateResults* fullResults) const final;
+    IndexValidateResults validate(OperationContext* opCtx, bool full) const final;
+
+    int64_t numKeys(OperationContext* opCtx) const final;
 
     bool appendCustomStats(OperationContext* opCtx,
                            BSONObjBuilder* result,
@@ -582,7 +561,7 @@ public:
 
     void setIdent(std::shared_ptr<Ident> newIdent) final;
 
-    Status applySortedDataSideWrite(OperationContext* opCtx,
+    Status applyIndexBuildSideWrite(OperationContext* opCtx,
                                     const CollectionPtr& coll,
                                     const BSONObj& operation,
                                     const InsertDeleteOptions& options,

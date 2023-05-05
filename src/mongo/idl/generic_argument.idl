@@ -35,6 +35,8 @@ imports:
 
 # This file lists the generic arguments accepted by all commands, and generic
 # reply fields that all commands may return.
+#
+# New fields added to this file should also be added to '..idl/generic_args_with_types.idl'.
 
 structs:
     generic_args_api_v1:

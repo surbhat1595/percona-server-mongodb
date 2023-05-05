@@ -211,9 +211,9 @@ public:
      *
      * Callers must re-fetch the catalog to observe changes.
      *
-     * Requires an IS lock on the 'system.views' collection'.
+     * Requires an X lock on the 'system.views' collection'.
      */
-    Status reloadViews(OperationContext* opCtx, const DatabaseName& dbName) const;
+    void reloadViews(OperationContext* opCtx, const DatabaseName& dbName) const;
 
     /**
      * Returns the collection pointer representative of 'nss' at the provided read timestamp. If no
@@ -644,6 +644,7 @@ public:
      */
     static void invariantHasExclusiveAccessToCollection(OperationContext* opCtx,
                                                         const NamespaceString& nss);
+    static bool hasExclusiveAccessToCollection(OperationContext* opCtx, const NamespaceString& nss);
 
 private:
     friend class CollectionCatalog::iterator;

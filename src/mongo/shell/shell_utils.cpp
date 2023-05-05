@@ -34,9 +34,9 @@
 
 #include <algorithm>
 #include <boost/filesystem.hpp>
+#include <cstdlib>
 #include <memory>
 #include <set>
-#include <stdlib.h>
 #include <string>
 #include <vector>
 
@@ -709,8 +709,9 @@ void initScope(Scope& scope) {
 
     initializeEnterpriseScope(scope);
 
-    scope.injectNative("benchRun", BenchRunner::benchRunSync);
+    scope.injectNative("benchRun", BenchRunner::benchRunSync);  // alias
     scope.injectNative("benchRunSync", BenchRunner::benchRunSync);
+    scope.injectNative("benchRunOnce", BenchRunner::benchRunOnce);
     scope.injectNative("benchStart", BenchRunner::benchStart);
     scope.injectNative("benchFinish", BenchRunner::benchFinish);
 
@@ -749,7 +750,7 @@ void ConnectionRegistry::registerConnection(DBClientBase& client, StringData uri
         command = BSON("whatsmyuri" << 1);
     }
 
-    if (client.runCommand("admin", command, info)) {
+    if (client.runCommand({boost::none, "admin"}, command, info)) {
         stdx::lock_guard<Latch> lk(_mutex);
         _connectionUris[uri.toString()].insert(info["you"].str());
     }
@@ -770,7 +771,7 @@ void ConnectionRegistry::killOperationsOnAllConnections(bool withPrompt) const {
         const std::set<std::string>& uris = connection.second;
 
         BSONObj currentOpRes;
-        conn->runCommand("admin", BSON("currentOp" << 1), currentOpRes);
+        conn->runCommand({boost::none, "admin"}, BSON("currentOp" << 1), currentOpRes);
         if (!currentOpRes["inprog"].isABSONObj()) {
             // We don't have permissions (or the call didn't succeed) - go to the next connection.
             continue;
@@ -806,7 +807,8 @@ void ConnectionRegistry::killOperationsOnAllConnections(bool withPrompt) const {
             if (uris.count(client)) {
                 if (!withPrompt || prompter.confirm()) {
                     BSONObj info;
-                    conn->runCommand("admin", BSON("killOp" << 1 << "op" << op["opid"]), info);
+                    conn->runCommand(
+                        {boost::none, "admin"}, BSON("killOp" << 1 << "op" << op["opid"]), info);
                 } else {
                     return;
                 }
@@ -838,7 +840,5 @@ bool fileExists(const std::string& file) {
     }
 }
 
-
-Mutex& mongoProgramOutputMutex(*(new Mutex()));
 }  // namespace shell_utils
 }  // namespace mongo

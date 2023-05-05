@@ -127,6 +127,7 @@ function verifyCEForNDV(ndv) {
                 emptyArrayCount: 0.0,
                 trueCount: 0.0,
                 falseCount: 0.0,
+                sampleRate: 1.0,
                 typeCount: [{typeName, count: 0.0}],
             }
         };
@@ -249,6 +250,6 @@ runHistogramsTest(function testScalarHistograms() {
     verifyCEForNDV(1);
     verifyCEForNDV(2);
     verifyCEForNDV(3);
-    verifyCEForNDV(10);
+    verifyCEForNDV(4);
 });
 }());

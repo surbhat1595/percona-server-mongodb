@@ -316,6 +316,15 @@ public:
             // Set the client's last opTime to the system last opTime so no-ops wait for
             // writeConcern.
             repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
+
+            // TODO SERVER-72796: Remove once gGlobalIndexesShardingCatalog is enabled.
+            if (serverGlobalParams.clusterRole == ClusterRole::ShardServer &&
+                feature_flags::gGlobalIndexesShardingCatalog.isEnabledOnVersion(requestedVersion)) {
+                ShardingDDLCoordinatorService::getService(opCtx)
+                    ->waitForCoordinatorsOfGivenTypeToComplete(
+                        opCtx, DDLCoordinatorTypeEnum::kRenameCollectionPre63Compatible);
+            }
+
             return true;
         }
 
@@ -420,6 +429,15 @@ public:
                 false /* setTargetVersion */);
         }
 
+        // TODO SERVER-72796: Remove once gGlobalIndexesShardingCatalog is enabled.
+        if (serverGlobalParams.clusterRole == ClusterRole::ShardServer &&
+            requestedVersion > actualVersion &&
+            feature_flags::gGlobalIndexesShardingCatalog.isEnabledOnVersion(requestedVersion)) {
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(
+                    opCtx, DDLCoordinatorTypeEnum::kRenameCollectionPre63Compatible);
+        }
+
         LOGV2(6744302,
               "setFeatureCompatibilityVersion succeeded",
               "upgradeOrDowngrade"_attr = upgradeOrDowngrade,
@@ -444,6 +462,14 @@ private:
     void _shardServerPhase1Tasks(OperationContext* opCtx,
                                  multiversion::FeatureCompatibilityVersion actualVersion,
                                  multiversion::FeatureCompatibilityVersion requestedVersion) {
+        // TODO (SERVER-71309): Remove once 7.0 becomes last LTS.
+        if (actualVersion > requestedVersion &&
+            !feature_flags::gResilientMovePrimary.isEnabledOnVersion(requestedVersion)) {
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(opCtx,
+                                                           DDLCoordinatorTypeEnum::kMovePrimary);
+        }
+
         // TODO SERVER-68008: Remove collMod draining mechanism after 7.0 becomes last LTS.
         if (actualVersion > requestedVersion &&
             !feature_flags::gCollModCoordinatorV3.isEnabledOnVersion(requestedVersion)) {
@@ -451,6 +477,14 @@ private:
             // incompatible on disk metadata
             ShardingDDLCoordinatorService::getService(opCtx)
                 ->waitForCoordinatorsOfGivenTypeToComplete(opCtx, DDLCoordinatorTypeEnum::kCollMod);
+        }
+
+        // TODO SERVER-72796: Remove once gGlobalIndexesShardingCatalog is enabled.
+        if (actualVersion > requestedVersion &&
+            !feature_flags::gGlobalIndexesShardingCatalog.isEnabledOnVersion(requestedVersion)) {
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(
+                    opCtx, DDLCoordinatorTypeEnum::kRenameCollection);
         }
 
         // TODO SERVER-68373 remove once 7.0 becomes last LTS
@@ -499,6 +533,7 @@ private:
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
             _cleanupConfigVersionOnUpgrade(opCtx, requestedVersion);
             _createSchemaOnConfigSettings(opCtx, requestedVersion);
+            _setOnCurrentShardSinceFieldOnChunks(opCtx, requestedVersion);
         } else if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
         } else {
             return;
@@ -589,6 +624,15 @@ private:
         if (feature_flags::gConfigSettingsSchema.isEnabledOnVersion(requestedVersion)) {
             LOGV2(6885200, "Creating schema on config.settings");
             uassertStatusOK(ShardingCatalogManager::get(opCtx)->upgradeConfigSettings(opCtx));
+        }
+    }
+
+    // TODO (SERVER-72791): Remove once FCV 7.0 becomes last-lts.
+    void _setOnCurrentShardSinceFieldOnChunks(
+        OperationContext* opCtx, const multiversion::FeatureCompatibilityVersion requestedVersion) {
+        if (feature_flags::gAutoMerger.isEnabledOnVersion(requestedVersion)) {
+            uassertStatusOK(
+                ShardingCatalogManager::get(opCtx)->setOnCurrentShardSinceFieldOnChunks(opCtx));
         }
     }
 
@@ -822,15 +866,6 @@ private:
     // requestedVersion.
     void _cleanUpClusterParameters(
         OperationContext* opCtx, const multiversion::FeatureCompatibilityVersion requestedVersion) {
-        std::set<TenantId> tenantIds;
-        if (gMultitenancySupport) {
-            auto catalog = CollectionCatalog::get(opCtx);
-            {
-                Lock::GlobalLock lk(opCtx, MODE_IS);
-                tenantIds = catalog->getAllTenants();
-            }
-        }
-
         invariant(serverGlobalParams.featureCompatibility.isUpgradingOrDowngrading());
         const auto& [fromVersion, _] =
             getTransitionFCVFromAndTo(serverGlobalParams.featureCompatibility.getVersion());
@@ -845,13 +880,7 @@ private:
         }
         if (deletes.size() > 0) {
             DBDirectClient client(opCtx);
-            // Delete disabled parameters' values from all cluster parameter collections.
-            for (const auto& tenantId : tenantIds) {
-                write_ops::DeleteCommandRequest deleteOp(
-                    NamespaceString::makeClusterParametersNSS(tenantId));
-                deleteOp.setDeletes(deletes);
-                write_ops::checkWriteErrors(client.remove(deleteOp));
-            }
+            // We never downgrade with multitenancy enabled, so assume we have just the none tenant.
             write_ops::DeleteCommandRequest deleteOp(NamespaceString::kClusterParametersNamespace);
             deleteOp.setDeletes(deletes);
             write_ops::checkWriteErrors(client.remove(deleteOp));

@@ -40,6 +40,7 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
+#include "mongo/db/transaction/internal_transaction_metrics.h"
 #include "mongo/db/transaction/transaction_api.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
@@ -148,6 +149,7 @@ public:
     }
 
     virtual SemiFuture<BSONObj> runCommand(StringData dbName, BSONObj cmd) const override {
+        stdx::unique_lock<Latch> ul(_mutex);
         [&]() {
             StringData cmdName = cmd.firstElementFieldNameStringData();
             if (cmdName != AbortTransaction::kCommandName) {
@@ -155,7 +157,11 @@ public:
                 return;
             }
 
-            stdx::unique_lock<Latch> ul(_hangNextAbortCommandMutex);
+            if (_hangNextAbortCommand) {
+                // Tests that expect to hang an abort must use the barrier to synchronize since the
+                // abort runs on a different thread.
+                _hitHungAbort.countDownAndWait();
+            }
             _hangNextAbortCommandCV.wait(ul, [&] { return !_hangNextAbortCommand; });
         }();
 
@@ -198,6 +204,7 @@ public:
     }
 
     BSONObj getLastSentRequest() {
+        stdx::lock_guard<Latch> lg(_mutex);
         if (_sentRequests.empty()) {
             return BSONObj();
         }
@@ -205,19 +212,25 @@ public:
     }
 
     const std::vector<BSONObj>& getSentRequests() {
+        stdx::lock_guard<Latch> lg(_mutex);
         return _sentRequests;
     }
 
     void setNextCommandResponse(StatusWith<BSONObj> res) {
+        stdx::lock_guard<Latch> lg(_mutex);
         _responses.push(res);
     }
 
     void setHangNextAbortCommand(bool enable) {
-        stdx::lock_guard<Latch> lg(_hangNextAbortCommandMutex);
+        stdx::lock_guard<Latch> lg(_mutex);
         _hangNextAbortCommand = enable;
 
         // Wake up any waiting threads.
         _hangNextAbortCommandCV.notify_all();
+    }
+
+    void waitForHungAbortWaiter() {
+        _hitHungAbort.countDownAndWait();
     }
 
 private:
@@ -227,9 +240,10 @@ private:
     mutable std::vector<BSONObj> _sentRequests;
     bool _runningLocalTransaction{false};
 
-    mutable Mutex _hangNextAbortCommandMutex = MONGO_MAKE_LATCH("MockTransactionClient");
+    mutable Mutex _mutex = MONGO_MAKE_LATCH("MockTransactionClient");
     mutable stdx::condition_variable _hangNextAbortCommandCV;
     bool _hangNextAbortCommand{false};
+    mutable unittest::Barrier _hitHungAbort{2};
 };
 
 }  // namespace txn_api::details
@@ -256,23 +270,23 @@ void assertSessionIdMetadata(BSONObj obj,
 
     switch (lsidAssert) {
         case LsidAssertion::kStandalone:
-            ASSERT(!getParentSessionId(lsid));
+            ASSERT(!getParentSessionId(lsid)) << obj;
             break;
         case LsidAssertion::kNonRetryableChild:
             invariant(parentLsid);
 
-            ASSERT(getParentSessionId(lsid));
-            ASSERT_EQ(*getParentSessionId(lsid), *parentLsid);
-            ASSERT(isInternalSessionForNonRetryableWrite(lsid));
+            ASSERT(getParentSessionId(lsid)) << obj;
+            ASSERT_EQ(*getParentSessionId(lsid), *parentLsid) << obj;
+            ASSERT(isInternalSessionForNonRetryableWrite(lsid)) << obj;
             break;
         case LsidAssertion::kRetryableChild:
             invariant(parentTxnNumber);
 
-            ASSERT(getParentSessionId(lsid));
-            ASSERT_EQ(*getParentSessionId(lsid), *parentLsid);
-            ASSERT(isInternalSessionForRetryableWrite(lsid));
-            ASSERT(lsid.getTxnNumber());
-            ASSERT_EQ(*lsid.getTxnNumber(), *parentTxnNumber);
+            ASSERT(getParentSessionId(lsid)) << obj;
+            ASSERT_EQ(*getParentSessionId(lsid), *parentLsid) << obj;
+            ASSERT(isInternalSessionForRetryableWrite(lsid)) << obj;
+            ASSERT(lsid.getTxnNumber()) << obj;
+            ASSERT_EQ(*lsid.getTxnNumber(), *parentTxnNumber) << obj;
             break;
     }
 }
@@ -281,15 +295,18 @@ void assertSessionIdMetadata(BSONObj obj,
 void assertAPIParameters(BSONObj obj, boost::optional<APIParameters> expectedParams) {
     if (expectedParams) {
         ASSERT_EQ(obj[APIParametersFromClient::kApiVersionFieldName].String(),
-                  expectedParams->getAPIVersion().value());
+                  expectedParams->getAPIVersion().value())
+            << obj;
         ASSERT_EQ(obj[APIParametersFromClient::kApiStrictFieldName].Bool(),
-                  expectedParams->getAPIStrict().value());
+                  expectedParams->getAPIStrict().value())
+            << obj;
         ASSERT_EQ(obj[APIParametersFromClient::kApiDeprecationErrorsFieldName].Bool(),
-                  expectedParams->getAPIDeprecationErrors().value());
+                  expectedParams->getAPIDeprecationErrors().value())
+            << obj;
     } else {
-        ASSERT(obj[APIParametersFromClient::kApiVersionFieldName].eoo());
-        ASSERT(obj[APIParametersFromClient::kApiStrictFieldName].eoo());
-        ASSERT(obj[APIParametersFromClient::kApiDeprecationErrorsFieldName].eoo());
+        ASSERT(obj[APIParametersFromClient::kApiVersionFieldName].eoo()) << obj;
+        ASSERT(obj[APIParametersFromClient::kApiStrictFieldName].eoo()) << obj;
+        ASSERT(obj[APIParametersFromClient::kApiDeprecationErrorsFieldName].eoo()) << obj;
     }
 }
 
@@ -299,14 +316,14 @@ void assertTxnMetadata(BSONObj obj,
                        boost::optional<BSONObj> readConcern = boost::none,
                        boost::optional<BSONObj> writeConcern = boost::none,
                        boost::optional<int> maxTimeMS = boost::none) {
-    ASSERT_EQ(obj["lsid"].type(), BSONType::Object);
-    ASSERT_EQ(obj["autocommit"].Bool(), false);
-    ASSERT_EQ(obj["txnNumber"].Long(), txnNumber);
+    ASSERT_EQ(obj["lsid"].type(), BSONType::Object) << obj;
+    ASSERT_EQ(obj["autocommit"].Bool(), false) << obj;
+    ASSERT_EQ(obj["txnNumber"].Long(), txnNumber) << obj;
 
     if (startTransaction) {
-        ASSERT_EQ(obj["startTransaction"].Bool(), *startTransaction);
+        ASSERT_EQ(obj["startTransaction"].Bool(), *startTransaction) << obj;
     } else {
-        ASSERT(obj["startTransaction"].eoo());
+        ASSERT(obj["startTransaction"].eoo()) << obj;
     }
 
     if (readConcern) {
@@ -316,19 +333,19 @@ void assertTxnMetadata(BSONObj obj,
         // send the implicit default read concern.
         ASSERT_BSONOBJ_EQ(obj["readConcern"].Obj(), repl::ReadConcernArgs::kImplicitDefault);
     } else {
-        ASSERT(obj["readConcern"].eoo());
+        ASSERT(obj["readConcern"].eoo()) << obj;
     }
 
     if (writeConcern) {
         ASSERT_BSONOBJ_EQ(obj["writeConcern"].Obj(), *writeConcern);
     } else {
-        ASSERT(obj["writeConcern"].eoo());
+        ASSERT(obj["writeConcern"].eoo()) << obj;
     }
 
     if (maxTimeMS) {
-        ASSERT_EQ(obj["maxTimeMS"].numberInt(), *maxTimeMS);
+        ASSERT_EQ(obj["maxTimeMS"].numberInt(), *maxTimeMS) << obj;
     } else {
-        ASSERT(obj["maxTimeMS"].eoo());
+        ASSERT(obj["maxTimeMS"].eoo()) << obj;
     }
 }
 
@@ -879,6 +896,11 @@ TEST_F(TxnAPITest, OwnSession_RetriesOnTransientError) {
     ASSERT(swResult.getStatus().isOK());
     ASSERT(swResult.getValue().getEffectiveStatus().isOK());
 
+    ASSERT_EQ(1, InternalTransactionMetrics::get(opCtx())->getStarted());
+    ASSERT_EQ(1, InternalTransactionMetrics::get(opCtx())->getRetriedTransactions());
+    ASSERT_EQ(0, InternalTransactionMetrics::get(opCtx())->getRetriedCommits());
+    ASSERT_EQ(1, InternalTransactionMetrics::get(opCtx())->getSucceeded());
+
     auto lastRequest = mockClient()->getLastSentRequest();
     assertTxnMetadata(lastRequest,
                       attempt /* txnNumber */,
@@ -922,6 +944,11 @@ TEST_F(TxnAPITest, OwnSession_RetriesOnTransientClientError) {
     ASSERT(swResult.getStatus().isOK());
     ASSERT(swResult.getValue().getEffectiveStatus().isOK());
 
+    ASSERT_EQ(1, InternalTransactionMetrics::get(opCtx())->getStarted());
+    ASSERT_EQ(1, InternalTransactionMetrics::get(opCtx())->getRetriedTransactions());
+    ASSERT_EQ(0, InternalTransactionMetrics::get(opCtx())->getRetriedCommits());
+    ASSERT_EQ(1, InternalTransactionMetrics::get(opCtx())->getSucceeded());
+
     auto lastRequest = mockClient()->getLastSentRequest();
     assertTxnMetadata(lastRequest,
                       attempt /* txnNumber */,
@@ -959,6 +986,11 @@ TEST_F(TxnAPITest, OwnSession_CommitError) {
     ASSERT_EQ(swResult.getValue().cmdStatus, ErrorCodes::InternalError);
     ASSERT(swResult.getValue().wcError.toStatus().isOK());
     ASSERT_EQ(swResult.getValue().getEffectiveStatus(), ErrorCodes::InternalError);
+
+    ASSERT_EQ(1, InternalTransactionMetrics::get(opCtx())->getStarted());
+    ASSERT_EQ(0, InternalTransactionMetrics::get(opCtx())->getRetriedTransactions());
+    ASSERT_EQ(0, InternalTransactionMetrics::get(opCtx())->getRetriedCommits());
+    ASSERT_EQ(0, InternalTransactionMetrics::get(opCtx())->getSucceeded());
 
     auto lastRequest = mockClient()->getLastSentRequest();
     assertTxnMetadata(lastRequest,
@@ -1001,6 +1033,11 @@ TEST_F(TxnAPITest, OwnSession_TransientCommitError) {
     ASSERT(swResult.getStatus().isOK());
     ASSERT(swResult.getValue().getEffectiveStatus().isOK());
 
+    ASSERT_EQ(1, InternalTransactionMetrics::get(opCtx())->getStarted());
+    ASSERT_EQ(1, InternalTransactionMetrics::get(opCtx())->getRetriedTransactions());
+    ASSERT_EQ(0, InternalTransactionMetrics::get(opCtx())->getRetriedCommits());
+    ASSERT_EQ(1, InternalTransactionMetrics::get(opCtx())->getSucceeded());
+
     auto lastRequest = mockClient()->getLastSentRequest();
     assertTxnMetadata(lastRequest,
                       attempt /* txnNumber */,
@@ -1036,6 +1073,12 @@ TEST_F(TxnAPITest, OwnSession_RetryableCommitError) {
         });
     ASSERT(swResult.getStatus().isOK());
     ASSERT(swResult.getValue().getEffectiveStatus().isOK());
+
+    ASSERT_EQ(1, InternalTransactionMetrics::get(opCtx())->getStarted());
+    ASSERT_EQ(0, InternalTransactionMetrics::get(opCtx())->getRetriedTransactions());
+    ASSERT_EQ(1, InternalTransactionMetrics::get(opCtx())->getRetriedCommits());
+    ASSERT_EQ(1, InternalTransactionMetrics::get(opCtx())->getSucceeded());
+
 
     auto lastRequest = mockClient()->getLastSentRequest();
     assertTxnMetadata(lastRequest,
@@ -1073,6 +1116,11 @@ TEST_F(TxnAPITest, OwnSession_NonRetryableCommitWCError) {
     ASSERT_EQ(swResult.getValue().wcError.toStatus(), ErrorCodes::WriteConcernFailed);
     ASSERT_EQ(swResult.getValue().getEffectiveStatus(), ErrorCodes::WriteConcernFailed);
 
+    ASSERT_EQ(1, InternalTransactionMetrics::get(opCtx())->getStarted());
+    ASSERT_EQ(0, InternalTransactionMetrics::get(opCtx())->getRetriedTransactions());
+    ASSERT_EQ(0, InternalTransactionMetrics::get(opCtx())->getRetriedCommits());
+    ASSERT_EQ(0, InternalTransactionMetrics::get(opCtx())->getSucceeded());
+
     auto lastRequest = mockClient()->getLastSentRequest();
     assertTxnMetadata(lastRequest,
                       0 /* txnNumber */,
@@ -1106,6 +1154,11 @@ TEST_F(TxnAPITest, OwnSession_RetryableCommitWCError) {
         });
     ASSERT(swResult.getStatus().isOK());
     ASSERT(swResult.getValue().getEffectiveStatus().isOK());
+
+    ASSERT_EQ(1, InternalTransactionMetrics::get(opCtx())->getStarted());
+    ASSERT_EQ(0, InternalTransactionMetrics::get(opCtx())->getRetriedTransactions());
+    ASSERT_EQ(1, InternalTransactionMetrics::get(opCtx())->getRetriedCommits());
+    ASSERT_EQ(1, InternalTransactionMetrics::get(opCtx())->getSucceeded());
 
     auto lastRequest = mockClient()->getLastSentRequest();
     assertTxnMetadata(lastRequest,
@@ -1924,7 +1977,8 @@ TEST_F(TxnAPITest, MaxTimeMSIsSetIfOperationContextHasDeadlineAndIgnoresDefaultR
     const std::shared_ptr<ClockSourceMock> mockClock = std::make_shared<ClockSourceMock>();
     mockClock->reset(getServiceContext()->getFastClockSource()->now());
     getServiceContext()->setFastClockSource(std::make_unique<SharedClockSourceAdapter>(mockClock));
-    int maxTimeMS = 2000;
+    int maxTimeMS = 1000 * 60 * 60 * 24;        // 1 day.
+    int advanceTimeByMS = 1000 * 60 * 60 * 23;  // 23 hours.
     opCtx()->setDeadlineByDate(mockClock->now() + Milliseconds(maxTimeMS),
                                ErrorCodes::MaxTimeMSExpired);
 
@@ -1956,7 +2010,7 @@ TEST_F(TxnAPITest, MaxTimeMSIsSetIfOperationContextHasDeadlineAndIgnoresDefaultR
             // is disabled when a deadline is set.
             uassert(ErrorCodes::HostUnreachable, "Host unreachable error", attempt > 3);
 
-            mockClock->advance(Milliseconds(1000));
+            mockClock->advance(Milliseconds(advanceTimeByMS));
 
             // The commit response.
             mockClient()->setNextCommandResponse(kOKCommandResponse);
@@ -1971,7 +2025,7 @@ TEST_F(TxnAPITest, MaxTimeMSIsSetIfOperationContextHasDeadlineAndIgnoresDefaultR
                       boost::none /* startTransaction */,
                       boost::none /* readConcern */,
                       WriteConcernOptions().toBSON() /* writeConcern */,
-                      1000 /* maxTimeMS */);
+                      maxTimeMS - advanceTimeByMS /* maxTimeMS */);
     assertSessionIdMetadata(mockClient()->getLastSentRequest(), LsidAssertion::kStandalone);
     ASSERT_EQ(lastRequest.firstElementFieldNameStringData(), "commitTransaction"_sd);
 }
@@ -2184,16 +2238,12 @@ TEST_F(TxnAPITest, FailoverAndShutdownErrorsAreFatalForLocalTransactionWCError) 
     runTest(true, Status(ErrorCodes::HostUnreachable, "mock retriable error"));
 }
 
-TEST_F(TxnAPITest, DoesNotWaitForBestEffortAbortOnNonTransientError) {
+TEST_F(TxnAPITest, DoesNotWaitForBestEffortAbortIfCancelled) {
     // Start the transaction with an insert.
     mockClient()->setNextCommandResponse(kOKInsertResponse);
 
     // Hang the best effort abort that will be triggered after giving up on the transaction.
     mockClient()->setHangNextAbortCommand(true);
-    mockClient()->setNextCommandResponse(kOKCommandResponse);
-
-    // Second attempt's insert and successful commit response.
-    mockClient()->setNextCommandResponse(kOKInsertResponse);
     mockClient()->setNextCommandResponse(kOKCommandResponse);
 
     auto swResult = txnWithRetries().runNoThrow(
@@ -2205,12 +2255,17 @@ TEST_F(TxnAPITest, DoesNotWaitForBestEffortAbortOnNonTransientError) {
                                  << "documents" << BSON_ARRAY(BSON("x" << 1))))
                 .get();
 
-            uasserted(ErrorCodes::InternalError, "Mock error");
+            // Interrupting the caller's opCtx prevents waiting for the best effort abort.
+            opCtx()->markKilled();
+            uasserted(ErrorCodes::InternalError, "Mock non-transient error");
             return SemiFuture<void>::makeReady();
         });
-    ASSERT_EQ(swResult.getStatus(), ErrorCodes::InternalError);
+    // The API isn't guaranteed to return the thrown error or an interruption error, but either way
+    // it should return a non-ok status.
+    ASSERT_FALSE(swResult.getStatus().isOK());
 
-    // The abort should be hung and not have been processed yet.
+    // The abort should get hung and not have been processed yet.
+    mockClient()->waitForHungAbortWaiter();
     auto lastRequest = mockClient()->getLastSentRequest();
     ASSERT_NE(lastRequest.firstElementFieldNameStringData(), "abortTransaction"_sd);
 
@@ -2218,6 +2273,61 @@ TEST_F(TxnAPITest, DoesNotWaitForBestEffortAbortOnNonTransientError) {
     mockClient()->setHangNextAbortCommand(false);
     waitForAllEarlierTasksToComplete();
     expectSentAbort(0 /* txnNumber */, WriteConcernOptions().toBSON());
+}
+
+TEST_F(TxnAPITest, WaitsForBestEffortAbortOnNonTransientErrorIfNotCancelled) {
+    // Use an executor with higher max threads so a best effort abort could actually run
+    // concurrently within the API. Otherwise the API would always wait for the best effort abort
+    // even if the wait wasn't explicit.
+    ThreadPool::Options options;
+    options.poolName = "TxnAPITest-WaitsForBestEffortAbortOnNonTransientErrorIfNotCancelled";
+    options.minThreads = 1;
+    options.maxThreads = 8;
+    auto executor = std::make_shared<executor::ThreadPoolTaskExecutor>(
+        std::make_unique<ThreadPool>(std::move(options)),
+        executor::makeNetworkInterface("TxnAPITestNetwork"));
+    executor->startup();
+    resetTxnWithRetries(nullptr /* resourceYielder */, executor);
+
+    // Start the transaction with an insert.
+    mockClient()->setNextCommandResponse(kOKInsertResponse);
+
+    // Hang the best effort abort that will be triggered before retrying after we throw an error.
+    mockClient()->setHangNextAbortCommand(true);
+    mockClient()->setNextCommandResponse(kOKCommandResponse);
+
+    auto future = stdx::async(stdx::launch::async, [&] {
+        auto swResult = txnWithRetries().runNoThrow(
+            opCtx(), [&](const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
+                txnClient
+                    .runCommand("user"_sd,
+                                BSON("insert"
+                                     << "foo"
+                                     << "documents" << BSON_ARRAY(BSON("x" << 1))))
+                    .get();
+
+                // Throw a non-transient error once to trigger a best effort abort with no retry.
+                uasserted(ErrorCodes::BadValue, "Mock non-transient error");
+
+                return SemiFuture<void>::makeReady();
+            });
+        ASSERT_EQ(swResult.getStatus(), ErrorCodes::BadValue);
+    });
+
+    // The future should time out since it's blocked waiting for the best effort abort to finish.
+    ASSERT(stdx::future_status::ready != future.wait_for(Milliseconds(10).toSystemDuration()));
+
+    // The abort should get hung and not have been processed yet.
+    mockClient()->waitForHungAbortWaiter();
+    auto lastRequest = mockClient()->getLastSentRequest();
+    ASSERT_NE(lastRequest.firstElementFieldNameStringData(), "abortTransaction"_sd);
+
+    // Allow the abort to finish and it should unblock the API.
+    mockClient()->setHangNextAbortCommand(false);
+    future.get();
+
+    // After the abort finishes, the API should not have retried.
+    expectSentAbort(1 /* txnNumber */, WriteConcernOptions().toBSON());
 }
 
 TEST_F(TxnAPITest, WaitsForBestEffortAbortOnTransientError) {
@@ -2268,7 +2378,8 @@ TEST_F(TxnAPITest, WaitsForBestEffortAbortOnTransientError) {
     // The future should time out since it's blocked waiting for the best effort abort to finish.
     ASSERT(stdx::future_status::ready != future.wait_for(Milliseconds(10).toSystemDuration()));
 
-    // The abort should be hung and not have been processed yet.
+    // The abort should get hung and not have been processed yet.
+    mockClient()->waitForHungAbortWaiter();
     auto lastRequest = mockClient()->getLastSentRequest();
     ASSERT_NE(lastRequest.firstElementFieldNameStringData(), "abortTransaction"_sd);
 

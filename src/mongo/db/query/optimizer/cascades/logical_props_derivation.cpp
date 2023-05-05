@@ -62,6 +62,13 @@ static void populateInitialDistributions(const DistributionAndPaths& distributio
     }
 }
 
+/**
+ * If the projections in 'req' cover every path of 'distributionAndPaths',
+ * then add a new 'DistributionAndProjections' entry to 'distributions'.
+ *
+ * This is used to populate metadata in a SargableNode, so we know what distributions
+ * it can provide, and what projection names matter for each one.
+ */
 static void populateDistributionPaths(const PartialSchemaRequirements& req,
                                       const ProjectionName& scanProjectionName,
                                       const DistributionAndPaths& distributionAndPaths,
@@ -72,12 +79,10 @@ static void populateDistributionPaths(const PartialSchemaRequirements& req,
             ProjectionNameVector distributionProjections;
 
             for (const ABT& path : distributionAndPaths._paths) {
-                auto it = req.find(PartialSchemaKey{scanProjectionName, path});
-                if (it == req.cend()) {
+                if (auto binding = req.findProjection({scanProjectionName, path})) {
+                    distributionProjections.push_back(*binding);
+                } else {
                     break;
-                }
-                if (const auto& boundProjName = it->second.getBoundProjectionName()) {
-                    distributionProjections.push_back(*boundProjName);
                 }
             }
 
@@ -93,17 +98,20 @@ static void populateDistributionPaths(const PartialSchemaRequirements& req,
     }
 }
 
+/**
+ * Check that every predicate in 'reqMap' is either an equality predicate, or fully open.
+ */
 static bool computeEqPredsOnly(const PartialSchemaRequirements& reqMap) {
-    PartialSchemaRequirements equalitiesReqMap;
-    PartialSchemaRequirements fullyOpenReqMap;
+    PartialSchemaKeySet equalityKeys;
+    PartialSchemaKeySet fullyOpenKeys;
 
-    for (const auto& [key, req] : reqMap) {
+    for (const auto& [key, req] : reqMap.conjuncts()) {
         const auto& intervals = req.getIntervals();
         if (auto singularInterval = IntervalReqExpr::getSingularDNF(intervals)) {
             if (singularInterval->isFullyOpen()) {
-                fullyOpenReqMap.emplace(key, req);
+                fullyOpenKeys.insert(key);
             } else if (singularInterval->isEquality()) {
-                equalitiesReqMap.emplace(key, req);
+                equalityKeys.insert(key);
             } else {
                 // Encountered a non-equality and not-fully-open interval.
                 return false;
@@ -114,8 +122,8 @@ static bool computeEqPredsOnly(const PartialSchemaRequirements& reqMap) {
         }
     }
 
-    for (const auto& [key, req] : fullyOpenReqMap) {
-        if (equalitiesReqMap.count(key) == 0) {
+    for (const auto& key : fullyOpenKeys) {
+        if (equalityKeys.count(key) == 0) {
             // No possible match for fully open requirement.
             return false;
         }
@@ -225,12 +233,7 @@ public:
         auto& satisfiedPartialIndexes = indexingAvailability.getSatisfiedPartialIndexes();
         for (const auto& [indexDefName, indexDef] : scanDef.getIndexDefs()) {
             if (!indexDef.getPartialReqMap().empty()) {
-                auto intersection = node.getReqMap();
-                // We specifically ignore projectionRenames here.
-                ProjectionRenames projectionRenames_unused;
-                if (intersectPartialSchemaReq(
-                        intersection, indexDef.getPartialReqMap(), projectionRenames_unused) &&
-                    intersection == node.getReqMap()) {
+                if (isSubsetOfPartialSchemaReq(node.getReqMap(), indexDef.getPartialReqMap())) {
                     satisfiedPartialIndexes.insert(indexDefName);
                 }
             }

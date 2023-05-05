@@ -215,18 +215,14 @@ void DBClientCursor::dataReceived(const Message& reply, bool& retry, string& hos
 
     const auto replyObj = commandDataReceived(reply);
     _cursorId = 0;  // Don't try to kill cursor if we get back an error.
-    // TODO SERVER-70067: pass in the tenant id to parseFromBSON.
-    auto cr = uassertStatusOK(CursorResponse::parseFromBSON(replyObj));
+
+    auto cr = uassertStatusOK(CursorResponse::parseFromBSON(replyObj, nullptr, _ns.tenantId()));
     _cursorId = cr.getCursorId();
     uassert(50935,
             "Received a getMore response with a cursor id of 0 and the moreToCome flag set.",
             !(_connectionHasPendingReplies && _cursorId == 0));
 
-    // TODO SERVER-70067: Get nss from the parsed cursor directly as it already has the tenant
-    // information.
-    _ns = NamespaceString(
-        _ns.tenantId(),  // always reuse the request's tenant in case no tenant in the response.
-        cr.getNSS().toString());  // find command can change the ns to use for getMores.
+    _ns = cr.getNSS();  // find command can change the ns to use for getMores.
     // Store the resume token, if we got one.
     _postBatchResumeToken = cr.getPostBatchResumeToken();
     _batch.objs = cr.releaseBatch();
@@ -375,7 +371,7 @@ StatusWith<std::unique_ptr<DBClientCursor>> DBClientCursor::fromAggregationReque
     DBClientBase* client, AggregateCommandRequest aggRequest, bool secondaryOk, bool useExhaust) {
     BSONObj ret;
     try {
-        if (!client->runCommand(aggRequest.getNamespace().db().toString(),
+        if (!client->runCommand(aggRequest.getNamespace().dbName(),
                                 aggregation_request_helper::serializeToCommandObj(aggRequest),
                                 ret,
                                 secondaryOk ? QueryOption_SecondaryOk : 0)) {

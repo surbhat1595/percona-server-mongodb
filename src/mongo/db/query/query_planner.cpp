@@ -196,14 +196,14 @@ bool hintMatchesColumnStoreIndex(const BSONObj& hintObj, const ColumnIndexEntry&
 
 /**
  * Returns the dependencies for the CanonicalQuery, split by those needed to answer the filter,
- * and those needed for "everything else" which is the project and sort.
+ * and those needed for "everything else", e.g. project, sort and shard filter.
  */
-std::pair<DepsTracker, DepsTracker> computeDeps(const QueryPlannerParams& params,
-                                                const CanonicalQuery& query) {
+std::pair<DepsTracker /* filter */, DepsTracker /* other */> computeDeps(
+    const QueryPlannerParams& params, const CanonicalQuery& query) {
     DepsTracker filterDeps;
     match_expression::addDependencies(query.root(), &filterDeps);
     DepsTracker outputDeps;
-    if ((!query.getProj() || query.getProj()->requiresDocument()) && !query.isCount()) {
+    if ((!query.getProj() || query.getProj()->requiresDocument()) && !query.isCountLike()) {
         outputDeps.needWholeDocument = true;
         return {std::move(filterDeps), std::move(outputDeps)};
     }
@@ -212,7 +212,7 @@ std::pair<DepsTracker, DepsTracker> computeDeps(const QueryPlannerParams& params
             outputDeps.fields.emplace(field.fieldNameStringData());
         }
     }
-    if (query.isCount()) {
+    if (query.isCountLike()) {
         // If this is a count, we won't have required projections, but may still need to output the
         // shard filter.
         return {std::move(filterDeps), std::move(outputDeps)};
@@ -448,6 +448,15 @@ StatusWith<std::unique_ptr<QuerySolution>> tryToBuildColumnScan(
     if (heuristicsStatus.isOK() || hintedIndex) {
         // We have a hint, or collection stats and dependencies that indicate a column scan is
         // likely better than a collection scan. Build it and return it.
+
+        // Since the residual predicate must be applied after the column scan, we need to include
+        // the dependencies among the output fields.
+        DepsTracker residualDeps;
+        if (residualPredicate) {
+            match_expression::addDependencies(residualPredicate.get(), &residualDeps);
+            outputDeps.fields = set_util::setUnion(outputDeps.fields, residualDeps.fields);
+        }
+
         return makeColumnScanPlan(query,
                                   params,
                                   columnStoreIndex,
@@ -1649,7 +1658,7 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
                     "This $lookup stage should be compatible with SBE",
                     lookupStage->sbeCompatible());
             auto [strategy, idxEntry] = QueryPlannerAnalysis::determineLookupStrategy(
-                lookupStage->getFromNs().toString(),
+                lookupStage->getFromNs(),
                 lookupStage->getForeignField()->fullPath(),
                 secondaryCollInfos,
                 query.getExpCtx()->allowDiskUse,

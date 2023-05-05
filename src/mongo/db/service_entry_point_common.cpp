@@ -58,6 +58,7 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/not_primary_error_tracker.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/ops/write_ops_exec.h"
 #include "mongo/db/query/find.h"
@@ -1013,6 +1014,8 @@ void CheckoutSessionAndInvokeCommand::_checkOutSession() {
         // transaction on that session.
         while (!beganOrContinuedTxn) {
             try {
+                auto opObserver = opCtx->getServiceContext()->getOpObserver();
+                opObserver->onTransactionStart(opCtx);
                 txnParticipant.beginOrContinue(
                     opCtx,
                     {*sessionOptions.getTxnNumber(), sessionOptions.getTxnRetryCounter()},
@@ -1708,12 +1711,10 @@ void ExecCommandDatabase::_initiateCommand() {
         // possible that a stale mongos may send the request over a view namespace. In this case, we
         // initialize the 'OperationShardingState' with buckets namespace.
         auto bucketNss = _invocation->ns().makeTimeseriesBucketsNamespace();
-        auto namespaceForSharding = CollectionCatalog::get(opCtx)
-                                        ->lookupCollectionByNamespaceForRead(opCtx, bucketNss)
-                                        .get()
-            ? bucketNss
-            : _invocation->ns();
-
+        auto coll =
+            CollectionCatalog::get(opCtx)->lookupCollectionByNamespaceForRead(opCtx, bucketNss);
+        auto namespaceForSharding =
+            (coll && coll->getTimeseriesOptions()) ? bucketNss : _invocation->ns();
         boost::optional<ShardVersion> shardVersion;
         if (auto shardVersionElem = request.body[ShardVersion::kShardVersionField]) {
             shardVersion = ShardVersion::parse(shardVersionElem);
@@ -1790,7 +1791,7 @@ Future<void> ExecCommandDatabase::_commandExec() {
             auto opCtx = _execContext->getOpCtx();
 
             if (!opCtx->getClient()->isInDirectClient() &&
-                serverGlobalParams.clusterRole != ClusterRole::ConfigServer &&
+                !serverGlobalParams.clusterRole.isExclusivelyConfigSvrRole() &&
                 !_refreshedDatabase) {
                 auto sce = s.extraInfo<StaleDbRoutingVersion>();
                 invariant(sce);
@@ -1822,7 +1823,7 @@ Future<void> ExecCommandDatabase::_commandExec() {
             ShardingStatistics::get(opCtx).countStaleConfigErrors.addAndFetch(1);
 
             if (!opCtx->getClient()->isInDirectClient() &&
-                serverGlobalParams.clusterRole != ClusterRole::ConfigServer &&
+                !serverGlobalParams.clusterRole.isExclusivelyConfigSvrRole() &&
                 !_refreshedCollection) {
                 if (auto sce = s.extraInfo<StaleConfigInfo>()) {
                     bool inCriticalSection = sce->getCriticalSectionSignal().has_value();
@@ -1870,7 +1871,7 @@ Future<void> ExecCommandDatabase::_commandExec() {
         .onError<ErrorCodes::ShardCannotRefreshDueToLocksHeld>([this](Status s) -> Future<void> {
             // This exception can never happen on the config server. Config servers can't receive
             // SSV either, because they never have commands with shardVersion sent.
-            invariant(serverGlobalParams.clusterRole != ClusterRole::ConfigServer);
+            invariant(!serverGlobalParams.clusterRole.isExclusivelyConfigSvrRole());
 
             auto opCtx = _execContext->getOpCtx();
             if (!opCtx->getClient()->isInDirectClient() && !_refreshedCatalogCache) {

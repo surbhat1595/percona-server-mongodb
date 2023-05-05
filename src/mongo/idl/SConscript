@@ -36,6 +36,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/dbdirectclient',
         '$BUILD_DIR/mongo/db/repl/replica_set_aware_service',
         '$BUILD_DIR/mongo/db/server_base',
+        '$BUILD_DIR/mongo/db/shard_role',
     ],
 )
 
@@ -107,6 +108,24 @@ env.CppUnitTest(
         'cluster_server_parameter_common',
         'cluster_server_parameter_initializer',
         'cluster_server_parameter_op_observer',
+    ],
+)
+
+env.Library(
+    target='generic_args_with_types_idl',
+    source=[
+        'generic_args_with_types.idl',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/client/read_preference',
+        '$BUILD_DIR/mongo/db/s/forwardable_operation_metadata',
+        '$BUILD_DIR/mongo/db/session/logical_session_id',
+        '$BUILD_DIR/mongo/rpc/client_metadata',
+        '$BUILD_DIR/mongo/s/common_s',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/server_base',
     ],
 )
 

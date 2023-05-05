@@ -64,30 +64,42 @@ ParsedToken parseSignedToken(StringData token) {
 }
 }  // namespace
 
-Status JWSValidatedToken::validate(const JWKManager& keyMgr) const {
-    const auto nowEpoch = Date_t::now().toMillisSinceEpoch() / 1000;
-    if (_body.getExpirationEpoch() < nowEpoch) {
-        return Status{ErrorCodes::BadValue, "Token is expired"};
+Status JWSValidatedToken::validate(JWKManager* keyMgr) const {
+    const auto now = Date_t::now();
+
+    // Clock times across the network may differ and `nbf` is likely to be
+    // at or near the issue time, so provide a reasonable skew allowance.
+    constexpr Seconds kNotBeforeSkewMax{60};
+    if (_body.getNotBefore().get_value_or(Date_t::min()) > (now + kNotBeforeSkewMax)) {
+        return Status{ErrorCodes::BadValue, "Token not yet valid"};
     }
 
-    if (_body.getIssuedAtEpoch() > nowEpoch) {
-        return Status{ErrorCodes::BadValue, "Token not yet valid"};
+    // Expiration we choose not to skew, as the client can be prompted to
+    // create a new token for reauth, and indeed would since the token expiration
+    // mechanism would immediately reject this token before the command dispatch
+    // would have an opportunity to kick in.
+    if (_body.getExpiration() < now) {
+        return Status{ErrorCodes::BadValue, "Token is expired"};
     }
 
     auto tokenSplit = parseSignedToken(_originalToken);
     auto signature = base64url::decode(tokenSplit.token[2]);
     auto payload = tokenSplit.payload;
 
-    auto sValidator = keyMgr.getValidator(_header.getKeyId());
-    if (!sValidator) {
-        return Status{ErrorCodes::BadValue,
-                      str::stream() << "Unknown JWT keyId << '" << _header.getKeyId() << "'"};
+    auto swValidator = keyMgr->getValidator(_header.getKeyId());
+    if (!swValidator.isOK()) {
+        auto status = swValidator.getStatus();
+        if (status.code() == ErrorCodes::NoSuchKey) {
+            return Status{ErrorCodes::BadValue,
+                          str::stream() << "Unknown JWT keyId << '" << _header.getKeyId() << "'"};
+        }
+        return status;
     }
 
-    return sValidator.get()->validate(_header.getAlgorithm(), payload, signature);
+    return swValidator.getValue().get()->validate(_header.getAlgorithm(), payload, signature);
 }
 
-JWSValidatedToken::JWSValidatedToken(const JWKManager& keyMgr, StringData token)
+JWSValidatedToken::JWSValidatedToken(JWKManager* keyMgr, StringData token)
     : _originalToken(token.toString()) {
     auto tokenSplit = parseSignedToken(token);
 
@@ -102,5 +114,14 @@ JWSValidatedToken::JWSValidatedToken(const JWKManager& keyMgr, StringData token)
 
     uassertStatusOK(validate(keyMgr));
 };
+
+StatusWith<std::string> JWSValidatedToken::extractIssuerFromCompactSerialization(
+    StringData token) try {
+    auto tokenSplit = parseSignedToken(token);
+    auto payload = fromjson(base64url::decode(tokenSplit.token[1]));
+    return JWT::parse(IDLParserContext{"JWT"}, payload).getIssuer().toString();
+} catch (const DBException& ex) {
+    return ex.toStatus();
+}
 
 }  // namespace mongo::crypto

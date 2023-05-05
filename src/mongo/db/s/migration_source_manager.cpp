@@ -48,7 +48,7 @@
 #include "mongo/db/s/sharding_state_recovery.h"
 #include "mongo/db/s/sharding_statistics.h"
 #include "mongo/db/s/type_shard_collection.h"
-#include "mongo/db/timeseries/bucket_catalog.h"
+#include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/db/vector_clock_mutable.h"
 #include "mongo/logv2/log.h"
@@ -112,12 +112,12 @@ MONGO_FAIL_POINT_DEFINE(hangBeforePostMigrationCommitRefresh);
 
 }  // namespace
 
-MigrationSourceManager* MigrationSourceManager::get(CollectionShardingRuntime& csr) {
+MigrationSourceManager* MigrationSourceManager::get(const CollectionShardingRuntime& csr) {
     return msmForCsr(csr);
 }
 
 std::shared_ptr<MigrationChunkClonerSource> MigrationSourceManager::getCurrentCloner(
-    CollectionShardingRuntime& csr) {
+    const CollectionShardingRuntime& csr) {
     auto msm = get(csr);
     if (!msm)
         return nullptr;
@@ -183,8 +183,8 @@ MigrationSourceManager::MigrationSourceManager(OperationContext* opCtx,
         // TODO (SERVER-71444): Fix to be interruptible or document exception.
         UninterruptibleLockGuard noInterrupt(_opCtx->lockState());  // NOLINT.
         AutoGetCollection autoColl(_opCtx, nss(), MODE_IS);
-        auto scopedCsr = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-            opCtx, nss(), CSRAcquisitionMode::kExclusive);
+        auto scopedCsr =
+            CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, nss());
 
         const auto [metadata, indexInfo] =
             checkCollectionIdentity(_opCtx, nss(), _args.getEpoch(), boost::none);
@@ -280,8 +280,8 @@ void MigrationSourceManager::startClone() {
                                        _opCtx->getServiceContext()->getPreciseClockSource()->now() +
                                        Milliseconds(migrationLockAcquisitionMaxWaitMS.load())));
 
-        auto scopedCsr = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-            _opCtx, nss(), CSRAcquisitionMode::kExclusive);
+        auto scopedCsr =
+            CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(_opCtx, nss());
 
         // Having the metadata manager registered on the collection sharding state is what indicates
         // that a chunk on that collection is being migrated to the OpObservers. With an active
@@ -484,8 +484,7 @@ void MigrationSourceManager::commitChunkMetadataOnConfig() {
             // TODO (SERVER-71444): Fix to be interruptible or document exception.
             UninterruptibleLockGuard noInterrupt(_opCtx->lockState());  // NOLINT.
             AutoGetCollection autoColl(_opCtx, nss(), MODE_IX);
-            CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-                _opCtx, nss(), CSRAcquisitionMode::kExclusive)
+            CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(_opCtx, nss())
                 ->clearFilteringMetadata(_opCtx);
         }
         scopedGuard.dismiss();
@@ -524,8 +523,7 @@ void MigrationSourceManager::commitChunkMetadataOnConfig() {
             // TODO (SERVER-71444): Fix to be interruptible or document exception.
             UninterruptibleLockGuard noInterrupt(_opCtx->lockState());  // NOLINT.
             AutoGetCollection autoColl(_opCtx, nss(), MODE_IX);
-            CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-                _opCtx, nss(), CSRAcquisitionMode::kExclusive)
+            CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(_opCtx, nss())
                 ->clearFilteringMetadata(_opCtx);
         }
         scopedGuard.dismiss();
@@ -555,7 +553,7 @@ void MigrationSourceManager::commitChunkMetadataOnConfig() {
     // If the migration has succeeded, clear the BucketCatalog so that the buckets that got migrated
     // out are no longer updatable.
     if (nss().isTimeseriesBucketsCollection()) {
-        auto& bucketCatalog = BucketCatalog::get(_opCtx);
+        auto& bucketCatalog = timeseries::bucket_catalog::BucketCatalog::get(_opCtx);
         bucketCatalog.clear(nss().getTimeseriesViewNamespace());
     }
 
@@ -643,8 +641,8 @@ CollectionMetadata MigrationSourceManager::_getCurrentMetadataAndCheckEpoch() {
         // TODO (SERVER-71444): Fix to be interruptible or document exception.
         UninterruptibleLockGuard noInterrupt(_opCtx->lockState());  // NOLINT.
         AutoGetCollection autoColl(_opCtx, _args.getCommandParameter(), MODE_IS);
-        auto scopedCsr = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-            _opCtx, _args.getCommandParameter(), CSRAcquisitionMode::kShared);
+        const auto scopedCsr = CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(
+            _opCtx, _args.getCommandParameter());
 
         const auto optMetadata = scopedCsr->getCurrentMetadataIfKnown();
         uassert(ErrorCodes::ConflictingOperationInProgress,
@@ -672,8 +670,8 @@ void MigrationSourceManager::_cleanup(bool completeMigration) noexcept {
         // TODO (SERVER-71444): Fix to be interruptible or document exception.
         UninterruptibleLockGuard noInterrupt(_opCtx->lockState());  // NOLINT.
         AutoGetCollection autoColl(_opCtx, nss(), MODE_IX);
-        auto scopedCsr = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-            _opCtx, nss(), CSRAcquisitionMode::kExclusive);
+        auto scopedCsr =
+            CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(_opCtx, nss());
 
         if (_state != kCreated) {
             invariant(_cloneDriver);
@@ -740,10 +738,6 @@ void MigrationSourceManager::_cleanup(bool completeMigration) noexcept {
                 // shard becomes a primary, it won't have to recover the config server optime.
                 // TODO (SERVER-60110): Remove once 7.0 becomes last LTS.
                 ShardingStateRecovery_DEPRECATED::endMetadataOp(newOpCtx);
-
-                // Checkpoint the vector clock to ensure causality in the event of a crash or
-                // shutdown.
-                VectorClockMutable::get(newOpCtx)->waitForDurableConfigTime().get(newOpCtx);
             }
             if (completeMigration) {
                 // This can be called on an exception path after the OperationContext has been
@@ -767,14 +761,13 @@ void MigrationSourceManager::_cleanup(bool completeMigration) noexcept {
         // TODO (SERVER-71444): Fix to be interruptible or document exception.
         UninterruptibleLockGuard noInterrupt(_opCtx->lockState());  // NOLINT.
         AutoGetCollection autoColl(_opCtx, nss(), MODE_IX);
-        CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-            _opCtx, nss(), CSRAcquisitionMode::kExclusive)
+        CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(_opCtx, nss())
             ->clearFilteringMetadata(_opCtx);
     }
 }
 
 BSONObj MigrationSourceManager::getMigrationStatusReport(
-    const CollectionShardingRuntime::ScopedCollectionShardingRuntime& scopedCsrLock) const {
+    const CollectionShardingRuntime::ScopedSharedCollectionShardingRuntime& scopedCsrLock) const {
     boost::optional<long long> sessionOplogEntriesToBeMigratedSoFar;
     boost::optional<long long> sessionOplogEntriesSkippedSoFarLowerBound;
 
@@ -807,8 +800,8 @@ MigrationSourceManager::ScopedRegisterer::~ScopedRegisterer() {
     // TODO (SERVER-71444): Fix to be interruptible or document exception.
     UninterruptibleLockGuard noInterrupt(_msm->_opCtx->lockState());  // NOLINT.
     AutoGetCollection autoColl(_msm->_opCtx, _msm->_args.getCommandParameter(), MODE_IX);
-    auto scopedCsr = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-        _msm->_opCtx, _msm->_args.getCommandParameter(), CSRAcquisitionMode::kExclusive);
+    auto scopedCsr = CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
+        _msm->_opCtx, _msm->_args.getCommandParameter());
     invariant(_msm == std::exchange(msmForCsr(*scopedCsr), nullptr));
 }
 

@@ -61,7 +61,7 @@ public:
      * Synthesize a user with the useTenant privilege and add them to the authorization session.
      */
     static void grantUseTenant(Client& client) {
-        User user(UserName("useTenant", "admin"));
+        User user(UserRequest(UserName("useTenant", "admin"), boost::none));
         user.setPrivileges(
             {Privilege(ResourcePattern::forClusterResource(), ActionType::useTenant)});
         auto* as = dynamic_cast<AuthorizationSessionImpl*>(AuthorizationSession::get(client));
@@ -951,6 +951,22 @@ TEST(OpMsgRequestBuilder, WithSameTenantInBody) {
     OpMsgRequest msg = OpMsgRequestBuilder::create({tenantId, "testDb"}, body);
     ASSERT_EQ(msg.body.getField("$tenant").eoo(), false);
     ASSERT_EQ(TenantId::parseFromBSON(msg.body.getField("$tenant")), tenantId);
+}
+
+TEST(OpMsgRequestBuilder, WithVTS) {
+    const TenantId tenantId(OID::gen());
+    auto const body = fromjson("{ping: 1}");
+
+    using VTS = auth::ValidatedTenancyScope;
+    VTS vts = VTS(tenantId, VTS::TenantForTestingTag{});
+    OpMsgRequest msg =
+        OpMsgRequestBuilder::createWithValidatedTenancyScope({tenantId, "testDb"}, vts, body);
+    ASSERT(msg.validatedTenancyScope);
+    ASSERT_EQ(msg.validatedTenancyScope->tenantId(), tenantId);
+    // Verify $tenant is added to the msg body, as the vts does not come from security token.
+    ASSERT_EQ(msg.body.getField("$tenant").eoo(), false);
+    ASSERT_EQ(TenantId::parseFromBSON(msg.body.getField("$tenant")), tenantId);
+    ASSERT_EQ(msg.getDatabase(), "testDb");
 }
 
 TEST(OpMsgRequestBuilder, FailWithDiffTenantInBody) {

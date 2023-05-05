@@ -115,6 +115,11 @@ inline auto _cbool(const bool val) {
     return ExprHolder{Constant::boolean(val)};
 }
 
+// Empty array constant.
+inline auto _cemptyarr() {
+    return ExprHolder{Constant::emptyArray()};
+}
+
 // Variable.
 inline auto operator"" _var(const char* c, size_t len) {
     return ExprHolder{make<Variable>(ProjectionName{{c, len}})};
@@ -215,11 +220,11 @@ inline auto _arr() {
 }
 
 inline auto _traverse1(PathHolder input) {
-    return PathHolder{make<PathTraverse>(std::move(input._n), PathTraverse::kSingleLevel)};
+    return PathHolder{make<PathTraverse>(PathTraverse::kSingleLevel, std::move(input._n))};
 }
 
 inline auto _traverseN(PathHolder input) {
-    return PathHolder{make<PathTraverse>(std::move(input._n), PathTraverse::kUnlimited)};
+    return PathHolder{make<PathTraverse>(PathTraverse::kUnlimited, std::move(input._n))};
 }
 
 inline auto _field(StringData fn, PathHolder input) {
@@ -419,18 +424,26 @@ private:
 /**
  * Interval expressions.
  */
+inline auto _disj(IntervalReqExpr::NodeVector v) {
+    return IntervalReqExpr::make<IntervalReqExpr::Disjunction>(std::move(v));
+}
+
 template <typename... Ts>
 inline auto _disj(Ts&&... pack) {
     IntervalReqExpr::NodeVector v;
     (v.push_back(std::forward<Ts>(pack)), ...);
-    return IntervalReqExpr::make<IntervalReqExpr::Disjunction>(std::move(v));
+    return _disj(std::move(v));
+}
+
+inline auto _conj(IntervalReqExpr::NodeVector v) {
+    return IntervalReqExpr::make<IntervalReqExpr::Conjunction>(std::move(v));
 }
 
 template <typename... Ts>
 inline auto _conj(Ts&&... pack) {
     IntervalReqExpr::NodeVector v;
     (v.push_back(std::forward<Ts>(pack)), ...);
-    return IntervalReqExpr::make<IntervalReqExpr::Conjunction>(std::move(v));
+    return _conj(std::move(v));
 }
 
 inline auto _interval(IntervalRequirement req) {

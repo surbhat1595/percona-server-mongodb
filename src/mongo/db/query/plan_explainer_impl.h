@@ -46,15 +46,8 @@ namespace mongo {
  */
 class PlanExplainerImpl final : public PlanExplainer {
 public:
-    PlanExplainerImpl(PlanStage* root,
-                      const PlanEnumeratorExplainInfo& explainInfo,
-                      Microseconds timeElapsedPlanning,
-                      BSONObj telemetryKey)
-        : PlanExplainer{explainInfo, timeElapsedPlanning, telemetryKey}, _root{root} {}
     PlanExplainerImpl(PlanStage* root, const PlanEnumeratorExplainInfo& explainInfo)
         : PlanExplainer{explainInfo}, _root{root} {}
-    PlanExplainerImpl(PlanStage* root, Microseconds timeElapsedPlanning, BSONObj telemetryKey)
-        : PlanExplainer{timeElapsedPlanning, telemetryKey}, _root{root} {}
     PlanExplainerImpl(PlanStage* root) : _root{root} {}
     const ExplainVersion& getVersion() const final;
     bool isMultiPlan() const final;

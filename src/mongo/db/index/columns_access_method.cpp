@@ -68,15 +68,7 @@ ColumnStoreAccessMethod::ColumnStoreAccessMethod(IndexCatalogEntry* ice,
     : _store(std::move(store)),
       _indexCatalogEntry(ice),
       _descriptor(ice->descriptor()),
-      _keyGen(_descriptor->keyPattern(), _descriptor->pathProjection()) {
-    // Normalize the 'columnstoreProjection' index option to facilitate its comparison as part of
-    // index signature.
-    if (!_descriptor->pathProjection().isEmpty()) {
-        auto* projExec = getColumnstoreProjection()->exec();
-        ice->descriptor()->_setNormalizedPathProjection(
-            projExec->serializeTransformation(boost::none).toBson());
-    }
-}
+      _keyGen(_descriptor->keyPattern(), _descriptor->pathProjection()) {}
 
 class ColumnStoreAccessMethod::BulkBuilder final
     : public BulkBuilderCommon<ColumnStoreAccessMethod::BulkBuilder> {
@@ -265,7 +257,6 @@ Status ColumnStoreAccessMethod::BulkBuilder::keyCommitted(
     return Status::OK();
 }
 
-
 void ColumnStoreAccessMethod::_visitCellsForIndexInsert(
     OperationContext* opCtx,
     PooledFragmentBuilder& buf,
@@ -296,20 +287,25 @@ Status ColumnStoreAccessMethod::insert(OperationContext* opCtx,
         // We cannot write to the index during its initial build phase, so we defer this insert as a
         // "side write" to be applied after the build completes.
         if (_indexCatalogEntry->isHybridBuilding()) {
-            auto columnKeys = StorageExecutionContext::get(opCtx).columnKeys();
+            auto columnChanges = StorageExecutionContext::get(opCtx).columnChanges();
             _visitCellsForIndexInsert(
                 opCtx, buf, bsonRecords, [&](StringData path, const BsonRecord& rec) {
-                    columnKeys->emplace_back(
-                        path.toString(), CellView{buf.buf(), size_t(buf.len())}.toString(), rec.id);
+                    columnChanges->emplace_back(
+                        path.toString(),
+                        CellView{buf.buf(), size_t(buf.len())}.toString(),
+                        rec.id,
+                        column_keygen::ColumnKeyGenerator::DiffAction::kInsert);
                 });
             int64_t inserted = 0;
-            ON_BLOCK_EXIT([keysInsertedOut, inserted] {
+            int64_t deleted = 0;
+            ON_BLOCK_EXIT([keysInsertedOut, inserted, deleted] {
                 if (keysInsertedOut) {
                     *keysInsertedOut += inserted;
                 }
+                invariant(deleted == 0);
             });
             uassertStatusOK(_indexCatalogEntry->indexBuildInterceptor()->sideWrite(
-                opCtx, *columnKeys, IndexBuildInterceptor::Op::kInsert, &inserted));
+                opCtx, *columnChanges, &inserted, &deleted));
             return Status::OK();
         } else {
             auto cursor = _store->newWriteCursor(opCtx);
@@ -335,17 +331,22 @@ void ColumnStoreAccessMethod::remove(OperationContext* opCtx,
                                      int64_t* keysDeletedOut,
                                      CheckRecordId checkRecordId) {
     if (_indexCatalogEntry->isHybridBuilding()) {
-        auto columnKeys = StorageExecutionContext::get(opCtx).columnKeys();
+        auto columnChanges = StorageExecutionContext::get(opCtx).columnChanges();
         _keyGen.visitPathsForDelete(obj, [&](StringData path) {
-            columnKeys->emplace_back(std::make_tuple(path.toString(), "", rid));
+            columnChanges->emplace_back(path.toString(),
+                                        "",  // No cell content is necessary to describe a deletion.
+                                        rid,
+                                        column_keygen::ColumnKeyGenerator::DiffAction::kDelete);
         });
+        int64_t inserted = 0;
         int64_t removed = 0;
         fassert(6597801,
                 _indexCatalogEntry->indexBuildInterceptor()->sideWrite(
-                    opCtx, *columnKeys, IndexBuildInterceptor::Op::kDelete, &removed));
+                    opCtx, *columnChanges, &inserted, &removed));
         if (keysDeletedOut) {
             *keysDeletedOut += removed;
         }
+        invariant(inserted == 0);
     } else {
         auto cursor = _store->newWriteCursor(opCtx);
         _keyGen.visitPathsForDelete(obj, [&](PathView path) {
@@ -368,7 +369,7 @@ Status ColumnStoreAccessMethod::update(OperationContext* opCtx,
     PooledFragmentBuilder buf(pooledBufferBuilder);
 
     if (_indexCatalogEntry->isHybridBuilding()) {
-        auto columnKeys = StorageExecutionContext::get(opCtx).columnKeys();
+        auto columnChanges = StorageExecutionContext::get(opCtx).columnChanges();
         _keyGen.visitDiffForUpdate(
             oldDoc,
             newDoc,
@@ -376,15 +377,11 @@ Status ColumnStoreAccessMethod::update(OperationContext* opCtx,
                 StringData path,
                 const column_keygen::UnencodedCellView* cell) {
                 if (diffAction == column_keygen::ColumnKeyGenerator::DiffAction::kDelete) {
-                    columnKeys->emplace_back(std::make_tuple(path.toString(), "", rid));
-                    int64_t removed = 0;
-                    fassert(6597802,
-                            _indexCatalogEntry->indexBuildInterceptor()->sideWrite(
-                                opCtx, *columnKeys, IndexBuildInterceptor::Op::kDelete, &removed));
-
-                    if (keysDeletedOut) {
-                        *keysDeletedOut += removed;
-                    }
+                    columnChanges->emplace_back(
+                        path.toString(),
+                        "",  // No cell content is necessary to describe a deletion.
+                        rid,
+                        diffAction);
                     return;
                 }
 
@@ -395,22 +392,22 @@ Status ColumnStoreAccessMethod::update(OperationContext* opCtx,
                 buf.reset();
                 column_keygen::writeEncodedCell(*cell, &buf);
 
-                const auto method =
-                    diffAction == column_keygen::ColumnKeyGenerator::DiffAction::kInsert
-                    ? IndexBuildInterceptor::Op::kInsert
-                    : IndexBuildInterceptor::Op::kUpdate;
-
-                columnKeys->emplace_back(std::make_tuple(
-                    path.toString(), CellView{buf.buf(), size_t(buf.len())}.toString(), rid));
-
-                int64_t inserted = 0;
-                Status status = _indexCatalogEntry->indexBuildInterceptor()->sideWrite(
-                    opCtx, *columnKeys, method, &inserted);
-                if (keysInsertedOut) {
-                    *keysInsertedOut += inserted;
-                }
+                columnChanges->emplace_back(path.toString(),
+                                            CellView{buf.buf(), size_t(buf.len())}.toString(),
+                                            rid,
+                                            diffAction);
             });
 
+        int64_t inserted = 0;
+        int64_t deleted = 0;
+        Status status = _indexCatalogEntry->indexBuildInterceptor()->sideWrite(
+            opCtx, *columnChanges, &inserted, &deleted);
+        if (keysInsertedOut) {
+            *keysInsertedOut += inserted;
+        }
+        if (keysDeletedOut) {
+            *keysDeletedOut += deleted;
+        }
     } else {
         auto cursor = _store->newWriteCursor(opCtx);
         _keyGen.visitDiffForUpdate(
@@ -453,10 +450,12 @@ Status ColumnStoreAccessMethod::initializeAsEmpty(OperationContext* opCtx) {
     return Status::OK();
 }
 
-void ColumnStoreAccessMethod::validate(OperationContext* opCtx,
-                                       int64_t* numKeys,
-                                       IndexValidateResults* fullResults) const {
-    _store->fullValidate(opCtx, numKeys, fullResults);
+IndexValidateResults ColumnStoreAccessMethod::validate(OperationContext* opCtx, bool full) const {
+    return _store->validate(opCtx, full);
+}
+
+int64_t ColumnStoreAccessMethod::numKeys(OperationContext* opCtx) const {
+    return _store->numEntries(opCtx);
 }
 
 bool ColumnStoreAccessMethod::appendCustomStats(OperationContext* opCtx,
@@ -495,11 +494,13 @@ void ColumnStoreAccessMethod::setIdent(std::shared_ptr<Ident> ident) {
     _store->setIdent(std::move(ident));
 }
 
-void ColumnStoreAccessMethod::applyColumnDataSideWrite(OperationContext* opCtx,
-                                                       const CollectionPtr& coll,
-                                                       const BSONObj& operation,
-                                                       int64_t* keysInserted,
-                                                       int64_t* keysDeleted) {
+Status ColumnStoreAccessMethod::applyIndexBuildSideWrite(OperationContext* opCtx,
+                                                         const CollectionPtr& coll,
+                                                         const BSONObj& operation,
+                                                         const InsertDeleteOptions& unusedOptions,
+                                                         KeyHandlerFn&& unusedFn,
+                                                         int64_t* keysInserted,
+                                                         int64_t* keysDeleted) {
     const IndexBuildInterceptor::Op opType = operation.getStringField("op") == "i"_sd
         ? IndexBuildInterceptor::Op::kInsert
         : operation.getStringField("op") == "d"_sd ? IndexBuildInterceptor::Op::kDelete
@@ -530,6 +531,8 @@ void ColumnStoreAccessMethod::applyColumnDataSideWrite(OperationContext* opCtx,
             opCtx->recoveryUnit()->onRollback([keysInserted] { dec(keysInserted); });
             break;
     }
+
+    return Status::OK();
 }
 
 // static

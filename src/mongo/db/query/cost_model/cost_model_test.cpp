@@ -45,11 +45,11 @@ TEST(CostModel, IncreaseIndexScanCost) {
     ABT scanNode = make<ScanNode>("root", "c1");
 
     ABT filterNode = make<FilterNode>(
-        make<EvalFilter>(
-            make<PathGet>("a",
-                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)),
-                                             PathTraverse::kSingleLevel)),
-            make<Variable>("root")),
+        make<EvalFilter>(make<PathGet>("a",
+                                       make<PathTraverse>(
+                                           PathTraverse::kSingleLevel,
+                                           make<PathCompare>(Operations::Eq, Constant::int64(1)))),
+                         make<Variable>("root")),
         std::move(scanNode));
 
     ABT rootNode =
@@ -72,7 +72,7 @@ TEST(CostModel, IncreaseIndexScanCost) {
         ABT optimized = rootNode;
         phaseManager.optimize(optimized);
 
-        ASSERT_EXPLAIN_V2(
+        ASSERT_EXPLAIN_V2_AUTO(
             "Root []\n"
             "|   |   projections: \n"
             "|   |       root\n"
@@ -85,16 +85,10 @@ TEST(CostModel, IncreaseIndexScanCost) {
             "|   |       limit: 1\n"
             "|   |       skip: 0\n"
             "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-            "|   |   BindBlock:\n"
-            "|   |       [root]\n"
-            "|   |           Source []\n"
             "|   RefBlock: \n"
             "|       Variable [rid_0]\n"
-            "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: "
-            "{=Const [1]}]\n"
-            "    BindBlock:\n"
-            "        [rid_0]\n"
-            "            Source []\n",
+            "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {=Const "
+            "[1]}]\n",
             optimized);
     }
 
@@ -118,7 +112,7 @@ TEST(CostModel, IncreaseIndexScanCost) {
         ABT optimized = rootNode;
         phaseManager.optimize(optimized);
 
-        ASSERT_EXPLAIN_V2(
+        ASSERT_EXPLAIN_V2_AUTO(
             "Root []\n"
             "|   |   projections: \n"
             "|   |       root\n"
@@ -130,12 +124,7 @@ TEST(CostModel, IncreaseIndexScanCost) {
             "|   PathTraverse [1]\n"
             "|   PathCompare [Eq]\n"
             "|   Const [1]\n"
-            "PhysicalScan [{'<root>': root, 'a': evalTemp_0}, c1]\n"
-            "    BindBlock:\n"
-            "        [evalTemp_0]\n"
-            "            Source []\n"
-            "        [root]\n"
-            "            Source []\n",
+            "PhysicalScan [{'<root>': root, 'a': evalTemp_0}, c1]\n",
             optimized);
     }
 }
@@ -148,17 +137,17 @@ TEST(CostModel, IncreaseJoinsCost) {
         make<EvalPath>(make<PathGet>("a", make<PathIdentity>()), make<Variable>("root")),
         std::move(scanNode));
     ABT filterNode1 = make<FilterNode>(
-        make<EvalFilter>(make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(1)),
-                                            PathTraverse::kSingleLevel),
+        make<EvalFilter>(make<PathTraverse>(PathTraverse::kSingleLevel,
+                                            make<PathCompare>(Operations::Eq, Constant::int64(1))),
                          make<Variable>("pa")),
         std::move(evalNode));
 
     ABT filterNode2 = make<FilterNode>(
-        make<EvalFilter>(
-            make<PathGet>("b",
-                          make<PathTraverse>(make<PathCompare>(Operations::Eq, Constant::int64(2)),
-                                             PathTraverse::kSingleLevel)),
-            make<Variable>("root")),
+        make<EvalFilter>(make<PathGet>("b",
+                                       make<PathTraverse>(
+                                           PathTraverse::kSingleLevel,
+                                           make<PathCompare>(Operations::Eq, Constant::int64(2)))),
+                         make<Variable>("root")),
         std::move(filterNode1));
 
     ABT rootNode =
@@ -185,7 +174,7 @@ TEST(CostModel, IncreaseJoinsCost) {
 
         ABT optimized = rootNode;
         phaseManager.optimize(optimized);
-        ASSERT_EXPLAIN_V2(
+        ASSERT_EXPLAIN_V2_AUTO(
             "Root []\n"
             "|   |   projections: \n"
             "|   |       pa\n"
@@ -196,26 +185,13 @@ TEST(CostModel, IncreaseJoinsCost) {
             "|   |   |       rid_0 = rid_1\n"
             "|   |   Collation\n"
             "|   |       Ascending\n"
-            "|   Union []\n"
-            "|   |   BindBlock:\n"
-            "|   |       [rid_1]\n"
-            "|   |           Source []\n"
-            "|   Evaluation []\n"
-            "|   |   BindBlock:\n"
-            "|   |       [rid_1]\n"
-            "|   |           Variable [rid_0]\n"
+            "|   Union [{rid_1}]\n"
+            "|   Evaluation [{rid_1}]\n"
+            "|   |   Variable [rid_0]\n"
             "|   IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index2, interval: "
             "{=Const [2]}]\n"
-            "|       BindBlock:\n"
-            "|           [rid_0]\n"
-            "|               Source []\n"
             "IndexScan [{'<indexKey> 0': pa, '<rid>': rid_0}, scanDefName: c1, indexDefName: "
-            "index1, interval: {=Const [1]}]\n"
-            "    BindBlock:\n"
-            "        [pa]\n"
-            "            Source []\n"
-            "        [rid_0]\n"
-            "            Source []\n",
+            "index1, interval: {=Const [1]}]\n",
             optimized);
     }
 
@@ -278,7 +254,7 @@ TEST(CostModel, IncreaseJoinsCost) {
         ABT optimized = rootNode;
         phaseManager.optimize(optimized);
 
-        ASSERT_EXPLAIN_V2(
+        ASSERT_EXPLAIN_V2_AUTO(
             "Root []\n"
             "|   |   projections: \n"
             "|   |       pa\n"
@@ -294,12 +270,7 @@ TEST(CostModel, IncreaseJoinsCost) {
             "|   |   Variable [pa]\n"
             "|   PathCompare [Eq]\n"
             "|   Const [1]\n"
-            "PhysicalScan [{'a': pa, 'b': evalTemp_1}, c1]\n"
-            "    BindBlock:\n"
-            "        [evalTemp_1]\n"
-            "            Source []\n"
-            "        [pa]\n"
-            "            Source []\n",
+            "PhysicalScan [{'a': pa, 'b': evalTemp_1}, c1]\n",
             optimized);
     }
 }

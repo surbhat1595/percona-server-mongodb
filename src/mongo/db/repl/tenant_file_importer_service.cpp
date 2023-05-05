@@ -95,29 +95,10 @@ void importCopiedFiles(OperationContext* opCtx, const UUID& migrationId) {
     });
 
     auto metadatas = wiredTigerRollbackToStableAndGetMetadata(opCtx, tempWTDirectory.string());
-    for (auto&& m : metadatas) {
-        const auto tenantId = parseTenantIdFromDB(m.ns.toStringWithTenantId());
-        if (tenantId == boost::none) {
-            continue;
-        }
-
-        LOGV2_DEBUG(6114100, 1, "Create recipient access blocker", "tenantId"_attr = tenantId);
-        addTenantMigrationRecipientAccessBlocker(
-            opCtx->getServiceContext(), *tenantId, migrationId);
-    }
-
-    wiredTigerImportFromBackupCursor(opCtx, metadatas, tempWTDirectory.string());
-
-    auto catalog = CollectionCatalog::get(opCtx);
-    for (auto&& m : metadatas) {
-        AutoGetDb dbLock(opCtx, m.ns.dbName(), MODE_IX);
-        Lock::CollectionLock systemViewsLock(
-            opCtx,
-            NamespaceString(m.ns.dbName(), NamespaceString::kSystemDotViewsCollectionName),
-            MODE_X);
-        uassertStatusOK(catalog->reloadViews(opCtx, m.ns.dbName()));
-    }
+    wiredTigerImportFromBackupCursor(
+        opCtx, migrationId, tempWTDirectory.string(), std::move(metadatas));
 }
+
 }  // namespace
 
 TenantFileImporterService* TenantFileImporterService::get(ServiceContext* serviceContext) {

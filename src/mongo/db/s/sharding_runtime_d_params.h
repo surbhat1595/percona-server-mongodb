@@ -31,24 +31,27 @@
 
 #include "fmt/core.h"
 #include "mongo/base/status.h"
+#include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/util/processinfo.h"
 
 namespace mongo {
 
-inline Status validateMigrationConcurrency(const int& migrationConcurrency,
-                                           const boost::optional<TenantId>&) {
+inline Status validateChunkMigrationConcurrency(const int& chunkMigrationConcurrency,
+                                                const boost::optional<TenantId>&) {
+    const int maxConcurrency = 500;
     if (!mongo::feature_flags::gConcurrencyInChunkMigration.isEnabledAndIgnoreFCV()) {
         return Status{ErrorCodes::InvalidOptions,
                       "Cannot set migration concurrency number without enabling migration "
                       "concurrency feature flag"};
     }
-    int maxConcurrency = ProcessInfo::getNumCores();
-    if (migrationConcurrency <= 0 || migrationConcurrency > maxConcurrency) {
+
+    if (chunkMigrationConcurrency <= 0 ||
+        (chunkMigrationConcurrency > maxConcurrency && !getTestCommandsEnabled())) {
         return Status{
             ErrorCodes::InvalidOptions,
-            fmt::format(
-                "Migration concurrency level must be positive and less than the number of cores.")};
+            fmt::format("Chunk migration concurrency level must be positive and less than {}.",
+                        maxConcurrency)};
     }
     return Status::OK();
 }

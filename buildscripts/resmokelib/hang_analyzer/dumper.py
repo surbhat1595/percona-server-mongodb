@@ -5,12 +5,14 @@ import logging
 import os
 import sys
 import tempfile
+from datetime import datetime
 from abc import ABCMeta, abstractmethod
 from collections import namedtuple
 from distutils import spawn
 
 from buildscripts.resmokelib.hang_analyzer.process import call, callo, find_program
 from buildscripts.resmokelib.hang_analyzer.process_list import Pinfo
+from buildscripts.resmokelib import config as resmoke_config
 
 Dumpers = namedtuple('Dumpers', ['dbg', 'jstack'])
 
@@ -329,6 +331,20 @@ class LLDBDumper(Dumper):
 class GDBDumper(Dumper):
     """GDBDumper class."""
 
+    def __init__(self, root_logger: logging.Logger, dbg_output: str,
+                 timeout_seconds_for_gdb_process=720):
+        """Initialize GDBDumper."""
+        if resmoke_config.EVERGREEN_TASK_ID is None:
+            # Set 24 hours time out for hang analyzer being run in locally
+            timeout_seconds_for_gdb_process = 86400
+        #Timeout for hang analyzer, default timeout is 12mins(out of total 15mins) in Evergreen
+        self._timeout_seconds_for_gdb_process = timeout_seconds_for_gdb_process
+        super().__init__(root_logger, dbg_output)
+
+    def _reduce_timeout_for_gdb_process(self, timeout_period: int):
+        """Reduce timeout for remaining gdb processes."""
+        self._timeout_seconds_for_gdb_process -= timeout_period
+
     def _find_debugger(self, debugger):
         """Find the installed debugger."""
         return find_program(debugger, ['/opt/mongodbtoolchain/v4/bin', '/usr/bin'])
@@ -443,10 +459,17 @@ class GDBDumper(Dumper):
         debugger = "gdb"
         dbg = self._find_debugger(debugger)
         logger = _get_process_logger(self._dbg_output, pinfo.name)
+        _start_time = datetime.now()
 
         if dbg is None:
             self._root_logger.warning("Debugger %s not found, skipping dumping of %s", debugger,
                                       str(pinfo.pidv))
+            return
+
+        if self._timeout_seconds_for_gdb_process <= 0:
+            self._root_logger.warning(
+                "Skipping dumping of %s processes with PIDs %s because the time limit expired",
+                pinfo.name, str(pinfo.pidv))
             return
 
         self._root_logger.info("Debugger %s, analyzing %s processes with PIDs %s", dbg, pinfo.name,
@@ -456,9 +479,20 @@ class GDBDumper(Dumper):
 
         cmds = self._prefix() + self._process_specific(pinfo, take_dump, logger) + self._postfix()
 
-        call([dbg, "--quiet", "--nx"] + list(
-            itertools.chain.from_iterable([['-ex', b] for b in cmds])), logger)
+        # gcore is both a command within GDB and a script packaged alongside gdb. The gcore script
+        # invokes the gdb binary with --readnever to avoid spending time loading the debug symbols
+        # prior to taking the core dump. The debug symbols are unneeded to generate the core dump.
+        #
+        # For reference:
+        # https://sourceware.org/git/?p=binutils-gdb.git;a=blob;f=gdb/gcore.in;h=34860de630cf0ee766e102eb82f7a3fddba6b368#l101
+        skip_reading_symbols_on_take_dump = ["--readnever"] if take_dump else []
 
+        call([dbg, "--quiet", "--nx"] + skip_reading_symbols_on_take_dump + list(
+            itertools.chain.from_iterable([['-ex', b] for b in cmds])), logger,
+             self._timeout_seconds_for_gdb_process, pinfo)
+
+        time_period = (datetime.now() - _start_time).total_seconds()
+        self._reduce_timeout_for_gdb_process(time_period)
         self._root_logger.info("Done analyzing %s processes with PIDs %s", pinfo.name,
                                str(pinfo.pidv))
 

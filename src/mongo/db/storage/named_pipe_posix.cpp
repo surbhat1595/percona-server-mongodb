@@ -31,6 +31,7 @@
 
 #include "mongo/db/storage/named_pipe.h"
 
+#include <cerrno>
 #include <cstdio>
 #include <fmt/format.h>
 #include <string>
@@ -41,21 +42,32 @@
 #include "mongo/db/storage/io_error_message.h"
 #include "mongo/logv2/log.h"
 #include "mongo/stdx/thread.h"
-
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
-
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 using namespace fmt::literals;
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
+
 namespace {
-// Removes the named pipe and logs an info message if there's an error. The info message should be
-// fine since this is a test-only implementation.
-void removeAndLog(const char* pipeAbsolutePath) {
-    if (remove(pipeAbsolutePath) < 0) {
-        LOGV2_INFO(7097000,
-                   "Failed to remove",
-                   "error"_attr = getErrorMessage("remove", pipeAbsolutePath));
+// 'rc' must be the return code from POSIX-like OS I/O APIs.
+inline bool hasSucceeded(int rc) {
+    // POSIX-like I/O APIs return 0 for the successful operation.
+    return rc == 0;
+}
+
+// Removes the named pipe and logs an error message when
+// - either 'ignoreNoEntError' == true and there's an error other than the ENOENT error
+// - or 'ignoreNoEntError' == false and there's any error
+void removeNamedPipe(bool ignoreNoEntError, const char* pipeAbsolutePath) {
+    if (!hasSucceeded(remove(pipeAbsolutePath))) {
+        if (ignoreNoEntError && errno == ENOENT) {
+            return;
+        }
+
+        LOGV2_ERROR(7097000,
+                    "Failed to remove",
+                    "error"_attr = getErrorMessage("remove", pipeAbsolutePath));
     }
 }
 }  // namespace
@@ -63,18 +75,18 @@ void removeAndLog(const char* pipeAbsolutePath) {
 NamedPipeOutput::NamedPipeOutput(const std::string& pipeDir, const std::string& pipeRelativePath)
     : _pipeAbsolutePath(pipeDir + pipeRelativePath), _ofs() {
     // Just in case that uncleaned-up named pipe is still there. This is a test-only implementation
-    // and so, it should be fine to just remove it.
-    removeAndLog(_pipeAbsolutePath.c_str());
+    // and so, it should be fine to just remove it and ignore the ENOENT error.
+    removeNamedPipe(true /*ignoreNoEntError*/, _pipeAbsolutePath.c_str());
     uassert(7005005,
             "Failed to create a named pipe, error: {}"_format(
                 getErrorMessage("mkfifo", _pipeAbsolutePath)),
-            mkfifo(_pipeAbsolutePath.c_str(), 0664) == 0);
+            hasSucceeded(mkfifo(_pipeAbsolutePath.c_str(), 0664)));
 }
 
 NamedPipeOutput::~NamedPipeOutput() {
     close();
     // Makes sure that the named pipe is removed.
-    removeAndLog(_pipeAbsolutePath.c_str());
+    removeNamedPipe(false /*ignoreNoEntError*/, _pipeAbsolutePath.c_str());
 }
 
 void NamedPipeOutput::open() {
@@ -90,6 +102,9 @@ int NamedPipeOutput::write(const char* data, int size) {
     uassert(7005011, "Output must have been opened before writing", _ofs.is_open());
     _ofs.write(data, size);
     if (_ofs.fail()) {
+        uasserted(7239300,
+                  "Failed to write to a named pipe, error: {}"_format(
+                      getErrorMessage("write", _pipeAbsolutePath)));
         return -1;
     }
     return size;
@@ -100,6 +115,9 @@ void NamedPipeOutput::close() {
         _ofs.close();
     }
 }
+
+#undef MONGO_LOGV2_DEFAULT_COMPONENT
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 NamedPipeInput::NamedPipeInput(const std::string& pipeRelativePath)
     : _pipeAbsolutePath((externalPipeDir == "" ? kDefaultPipePath : externalPipeDir) +
@@ -127,16 +145,21 @@ void NamedPipeInput::doOpen() {
     // retry) in case the pipe writer has not finished creating the pipe yet.
     int retries = 0;
     int sleepMs = 1;
+    bool opened;
     do {
         _ifs.open(_pipeAbsolutePath.c_str(), std::ios::binary | std::ios::in);
-        if (!_ifs.is_open()) {
+        opened = _ifs.is_open();
+        if (!opened) {
+            uassert(ErrorCodes::FileNotOpen,
+                    "error = {}"_format(getErrorMessage("open", _pipeAbsolutePath)),
+                    errno == ENOENT);
             stdx::this_thread::sleep_for(stdx::chrono::milliseconds(sleepMs));
             ++retries;
             if (retries % 1000 == 0) {
                 sleepMs *= 2;
             }
         }
-    } while (!_ifs.is_open() && retries <= 5000);
+    } while (!opened && retries <= 5000);
     if (retries > 1000) {
         LOGV2_WARNING(7184900,
                       "NamedPipeInput::doOpen() waited for pipe longer than 1 sec",

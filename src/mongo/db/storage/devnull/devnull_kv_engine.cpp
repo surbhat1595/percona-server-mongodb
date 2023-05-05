@@ -159,6 +159,14 @@ public:
                                         long long numRecords,
                                         long long dataSize) {}
 
+    virtual void reserveRecordIds(OperationContext* opCtx,
+                                  std::vector<RecordId>* out,
+                                  size_t nRecords) final {
+        for (size_t i = 0; i < nRecords; i++) {
+            out->push_back(RecordId(i));
+        }
+    };
+
 protected:
     void waitForAllEarlierOplogWritesToBeVisibleImpl(OperationContext* opCtx) const override {}
 
@@ -216,9 +224,9 @@ public:
         return boost::none;
     }
 
-    virtual void fullValidate(OperationContext* opCtx,
-                              long long* numKeysOut,
-                              IndexValidateResults* fullResults) const {}
+    virtual IndexValidateResults validate(OperationContext* opCtx, bool full) const {
+        return IndexValidateResults{};
+    }
 
     virtual bool appendCustomStats(OperationContext* opCtx,
                                    BSONObjBuilder* output,
@@ -236,6 +244,10 @@ public:
 
     virtual bool isEmpty(OperationContext* opCtx) {
         return true;
+    }
+
+    virtual int64_t numEntries(OperationContext* opCtx) const {
+        return 0;
     }
 
     virtual void printIndexEntryMetadata(OperationContext* opCtx,

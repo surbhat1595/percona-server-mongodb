@@ -414,19 +414,6 @@ public:
                 MONGO_UNREACHABLE;
         }
 
-        const auto& requiredProjections =
-            getPropertyConst<ProjectionRequirement>(_physProps).getProjections();
-        const ProjectionName& ridProjName = _ridProjections.at(scanDefName);
-        const bool needsRID = requiredProjections.find(ridProjName).has_value();
-
-        const ProjectionName& scanProjectionName = indexingAvailability.getScanProjection();
-        const GroupIdType scanGroupId = indexingAvailability.getScanGroupId();
-        const LogicalProps& scanLogicalProps = _memo.getLogicalProps(scanGroupId);
-        const CEType scanGroupCE =
-            getPropertyConst<CardinalityEstimate>(scanLogicalProps).getEstimate();
-
-        const PartialSchemaRequirements& reqMap = node.getReqMap();
-
         if (indexReqTarget != IndexReqTarget::Index &&
             hasProperty<CollationRequirement>(_physProps)) {
             // PhysicalScan or Seek cannot satisfy any collation requirement.
@@ -434,25 +421,30 @@ public:
             return;
         }
 
-        for (const auto& [key, req] : reqMap) {
+        const ProjectionName& scanProjectionName = indexingAvailability.getScanProjection();
+        const PartialSchemaRequirements& reqMap = node.getReqMap();
+        for (const auto& [key, req] : reqMap.conjuncts()) {
             if (key._projectionName != scanProjectionName) {
                 // We can only satisfy partial schema requirements using our root projection.
                 return;
             }
         }
 
+        const auto& requiredProjections =
+            getPropertyConst<ProjectionRequirement>(_physProps).getProjections();
+        const ProjectionName& ridProjName = _ridProjections.at(scanDefName);
+
+        bool needsRID = false;
         bool requiresRootProjection = false;
         {
             auto projectionsLeftToSatisfy = requiredProjections;
-            if (needsRID) {
-                projectionsLeftToSatisfy.erase(ridProjName);
-            }
+            needsRID = projectionsLeftToSatisfy.erase(ridProjName);
             if (indexReqTarget != IndexReqTarget::Index) {
                 // Deliver root projection if required.
                 requiresRootProjection = projectionsLeftToSatisfy.erase(scanProjectionName);
             }
 
-            for (const auto& entry : reqMap) {
+            for (const auto& entry : reqMap.conjuncts()) {
                 if (const auto& boundProjName = entry.second.getBoundProjectionName()) {
                     // Project field only if it required.
                     projectionsLeftToSatisfy.erase(*boundProjName);
@@ -463,6 +455,11 @@ public:
                 return;
             }
         }
+
+        const GroupIdType scanGroupId = indexingAvailability.getScanGroupId();
+        const LogicalProps& scanLogicalProps = _memo.getLogicalProps(scanGroupId);
+        const CEType scanGroupCE =
+            getPropertyConst<CardinalityEstimate>(scanLogicalProps).getEstimate();
 
         const auto& ceProperty = getPropertyConst<CardinalityEstimate>(_logicalProps);
         const CEType currentGroupCE = ceProperty.getEstimate();
@@ -529,8 +526,10 @@ public:
                 {
                     PartialSchemaKeySet residualQueryKeySet;
                     for (const auto& [residualKey, residualReq, entryIndex] : residualReqs) {
-                        auto entryIt = reqMap.cbegin();
+                        // Find the indexed requirement this residual requirement refers to.
+                        auto entryIt = reqMap.conjuncts().cbegin();
                         std::advance(entryIt, entryIndex);
+
                         residualQueryKeySet.emplace(entryIt->first);
                         residualReqsWithCE.emplace_back(
                             residualKey, residualReq, partialSchemaKeyCE.at(entryIndex).second);
@@ -538,7 +537,7 @@ public:
 
                     if (scanGroupCE > 0.0) {
                         size_t entryIndex = 0;
-                        for (const auto& [key, req] : reqMap) {
+                        for (const auto& [key, req] : reqMap.conjuncts()) {
                             if (residualQueryKeySet.count(key) == 0) {
                                 const SelectivityType sel =
                                     partialSchemaKeyCE.at(entryIndex).second / scanGroupCE;
@@ -1140,10 +1139,9 @@ public:
                 const ABT& aggExpr = node.getAggregationExpressions().at(aggIndex);
                 aggregationProjections.push_back(aggExpr);
 
-                for (const Variable& var : VariableEnvironment::getVariables(aggExpr)._variables) {
-                    // Add all references this expression requires.
-                    projectionsToAdd.insert(var.name());
-                }
+                // Add all references this expression requires.
+                VariableEnvironment::walkVariables(
+                    aggExpr, [&](const Variable& var) { projectionsToAdd.insert(var.name()); });
             }
         }
 
@@ -1341,13 +1339,12 @@ private:
             const auto& [reqProjName, reqOp] = requiredCollationSpec.at(collationSpecIndex);
 
             if (indexField < indexCollationSpec.size()) {
-                const bool needsCollation =
-                    candidateIndexEntry._fieldsToCollate.count(indexField) > 0;
+                const auto predType = candidateIndexEntry._predTypes.at(indexField);
 
                 auto it = fieldProjections.find(FieldNameType{encodeIndexKeyName(indexField)});
                 if (it == fieldProjections.cend()) {
                     // No bound projection for this index field.
-                    if (needsCollation) {
+                    if (predType != IndexFieldPredType::SimpleEquality) {
                         // We cannot satisfy the rest of the collation requirements.
                         indexSuitable = false;
                         break;
@@ -1356,23 +1353,34 @@ private:
                 }
                 const ProjectionName& projName = it->second;
 
-                if (!needsCollation) {
-                    // We do not need to collate this field because of equality.
-                    if (requiredCollationSpec.at(collationSpecIndex).first == projName) {
-                        // We can satisfy the next collation requirement independent of collation
-                        // op.
-                        if (++collationSpecIndex >= requiredCollationSpec.size()) {
-                            break;
+                switch (predType) {
+                    case IndexFieldPredType::SimpleEquality:
+                        // We do not need to collate this field because of equality.
+                        if (reqProjName == projName) {
+                            // We can satisfy the next collation requirement independent of
+                            // collation op.
+                            if (++collationSpecIndex >= requiredCollationSpec.size()) {
+                                break;
+                            }
                         }
-                    }
-                    continue;
-                }
+                        continue;
 
-                if (reqProjName != projName) {
-                    indexSuitable = false;
+                    case IndexFieldPredType::Compound:
+                        // Cannot satisfy collation if we have a compound predicate on this field.
+                        indexSuitable = false;
+                        break;
+
+                    case IndexFieldPredType::SimpleInequality:
+                    case IndexFieldPredType::Unbound:
+                        if (reqProjName != projName) {
+                            indexSuitable = false;
+                        }
+                        updateDirectionsFn(indexCollationSpec.at(indexField)._op, reqOp);
+                        break;
+                }
+                if (!indexSuitable) {
                     break;
                 }
-                updateDirectionsFn(indexCollationSpec.at(indexField)._op, reqOp);
             } else {
                 // If we fall through here, we are trying to satisfy a trailing collation
                 // requirement on rid.
@@ -1470,16 +1478,13 @@ private:
                     distribAndProjections._projectionNames;
 
                 for (const ABT& partitioningPath : distributionAndPaths._paths) {
-                    auto it = reqMap.find(PartialSchemaKey{scanProjection, partitioningPath});
-                    if (it == reqMap.cend()) {
+                    if (auto proj = reqMap.findProjection(
+                            PartialSchemaKey{scanProjection, partitioningPath});
+                        proj && *proj == requiredProjections.at(distributionPartitionIndex)) {
+                        distributionPartitionIndex++;
+                    } else {
                         return false;
                     }
-
-                    if (it->second.getBoundProjectionName() !=
-                        requiredProjections.at(distributionPartitionIndex)) {
-                        return false;
-                    }
-                    distributionPartitionIndex++;
                 }
 
                 return distributionPartitionIndex == requiredProjections.size();

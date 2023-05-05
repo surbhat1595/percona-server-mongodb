@@ -109,7 +109,7 @@ public:
     /**
      * Redact a given telemetry key.
      */
-    const BSONObj& redactKey(const BSONObj& key) const;
+    const BSONObj& redactKey(const BSONObj& key, bool redactFieldNames) const;
 
     /**
      * Timestamp for when this query shape was added to the store. Set on construction.
@@ -170,37 +170,9 @@ using TelemetryStore = PartitionedCache<BSONObj,
                                         SimpleBSONObjComparator::EqualTo>;
 
 /**
- * Shared instance of the telemetry store which holds a read-lock while in use. The read-lock
- * prevents the telemetry store as a whole from being replaced. The telemetry store itself is
- * mutable.
- */
-class SharedTelemetryStore {
-public:
-    SharedTelemetryStore(TelemetryStore* telemetryStore, Lock::SharedLock lock)
-        : _telemetryStore(telemetryStore), _lock(std::move(lock)) {}
-
-    SharedTelemetryStore(SharedTelemetryStore&& other)
-        : _telemetryStore(other._telemetryStore), _lock(std::move(other._lock)) {}
-
-    SharedTelemetryStore(const SharedTelemetryStore&) = delete;
-    SharedTelemetryStore& operator=(const SharedTelemetryStore&) = delete;
-
-    TelemetryStore* operator->() const {
-        return _telemetryStore;
-    }
-
-private:
-    TelemetryStore* _telemetryStore;
-
-    Lock::SharedLock _lock;
-};
-
-/**
  * Acquire a reference to the global telemetry store.
  */
-SharedTelemetryStore getTelemetryStoreForRead(OperationContext* opCtx);
-
-std::unique_ptr<TelemetryStore> resetTelemetryStore(OperationContext* opCtx);
+TelemetryStore& getTelemetryStore(OperationContext* opCtx);
 
 /**
  * Register a request for telemetry collection. The telemetry machinery may decide not to collect
@@ -219,9 +191,13 @@ void registerFindRequest(const FindCommandRequest& request,
                          const NamespaceString& collection,
                          OperationContext* opCtx);
 
-void registerGetMoreRequest(OperationContext* opCtx, const PlanExplainer& planExplainer);
+void registerGetMoreRequest(OperationContext* opCtx);
 
-void recordExecution(OperationContext* opCtx, const OpDebug& opDebug, bool isFle);
+// recordExecution is called between registering the query and collecting metrics post execution.
+// Its purpose is to track the number of times a given query shape has been ran. The execution count
+// is incremented outside of registering the command because the originating command could be an
+// explain request and therefore the query is not actually executed.
+void recordExecution(OperationContext* opCtx, bool isFle);
 
 /**
  * Collect telemetry for the operation identified by `key`. The `isExec` flag should be set if it's

@@ -37,7 +37,6 @@
 #include <iomanip>
 #include <iterator>
 #include <limits>
-#include <math.h>
 #include <memory>
 #include <stack>
 #include <string>
@@ -75,6 +74,7 @@ extern "C" {
 #include "mongo/crypto/fle_data_frames.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
 #include "mongo/crypto/fle_fields_util.h"
+#include "mongo/crypto/fle_stats.h"
 #include "mongo/crypto/sha256_block.h"
 #include "mongo/crypto/symmetric_key.h"
 #include "mongo/db/basic_types_gen.h"
@@ -108,7 +108,7 @@ namespace mongo {
 namespace {
 
 constexpr uint64_t kLevel1Collection = 1;
-constexpr uint64_t kLevel1ClientUserDataEncryption = 2;
+constexpr uint64_t kLevel1ServerTokenDerivation = 2;
 constexpr uint64_t kLevelServerDataEncryption = 3;
 
 
@@ -123,6 +123,9 @@ constexpr uint64_t kTwiceDerivedTokenFromESCTag = 1;
 constexpr uint64_t kTwiceDerivedTokenFromESCValue = 2;
 constexpr uint64_t kTwiceDerivedTokenFromECCTag = 1;
 constexpr uint64_t kTwiceDerivedTokenFromECCValue = 2;
+
+constexpr uint64_t kServerCountAndContentionFactorEncryption = 1;
+constexpr uint64_t kServerZerosEncryption = 2;
 
 constexpr int32_t kEncryptionInformationSchemaVersion = 1;
 
@@ -659,6 +662,8 @@ boost::optional<uint64_t> emuBinaryCommon(const FLEStateCollectionReader& reader
                                           tagTokenT tagToken,
                                           valueTokenT valueToken) {
 
+    auto tracker = FLEStatusSection::get().makeEmuBinaryTracker();
+
     // Default search parameters
     uint64_t lambda = 0;
     boost::optional<uint64_t> i = 0;
@@ -725,6 +730,7 @@ boost::optional<uint64_t> emuBinaryCommon(const FLEStateCollectionReader& reader
 #endif
 
     for (uint64_t j = 1; j <= maxIterations; j++) {
+        tracker.recordSuboperation();
         // 9a
         median = ceil(static_cast<double>(max - min) / 2) + min;
 
@@ -1971,6 +1977,11 @@ CollectionsLevel1Token FLELevel1TokenGenerator::generateCollectionsLevel1Token(
     return prf(hmacKey(indexKey.data), kLevel1Collection);
 }
 
+ServerTokenDerivationLevel1Token FLELevel1TokenGenerator::generateServerTokenDerivationLevel1Token(
+    FLEIndexKey indexKey) {
+    return prf(hmacKey(indexKey.data), kLevel1ServerTokenDerivation);
+}
+
 ServerDataEncryptionLevel1Token FLELevel1TokenGenerator::generateServerDataEncryptionLevel1Token(
     FLEIndexKey indexKey) {
     return prf(hmacKey(indexKey.data), kLevelServerDataEncryption);
@@ -2009,6 +2020,10 @@ ECCDerivedFromDataToken FLEDerivedFromDataTokenGenerator::generateECCDerivedFrom
     return prf(token.data, value);
 }
 
+ServerDerivedFromDataToken FLEDerivedFromDataTokenGenerator::generateServerDerivedFromDataToken(
+    ServerTokenDerivationLevel1Token token, ConstDataRange value) {
+    return prf(token.data, value);
+}
 
 EDCDerivedFromDataTokenAndContentionFactorToken
 FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
@@ -2055,6 +2070,18 @@ ECCTwiceDerivedTagToken FLETwiceDerivedTokenGenerator::generateECCTwiceDerivedTa
 ECCTwiceDerivedValueToken FLETwiceDerivedTokenGenerator::generateECCTwiceDerivedValueToken(
     ECCDerivedFromDataTokenAndContentionFactorToken token) {
     return prf(token.data, kTwiceDerivedTokenFromECCValue);
+}
+
+ServerCountAndContentionFactorEncryptionToken
+FLEServerMetadataEncryptionTokenGenerator::generateServerCountAndContentionFactorEncryptionToken(
+    ServerDerivedFromDataToken token) {
+    return prf(token.data, kServerCountAndContentionFactorEncryption);
+}
+
+ServerZerosEncryptionToken
+FLEServerMetadataEncryptionTokenGenerator::generateServerZerosEncryptionToken(
+    ServerDerivedFromDataToken token) {
+    return prf(token.data, kServerZerosEncryption);
 }
 
 StatusWith<EncryptedStateCollectionTokens> EncryptedStateCollectionTokens::decryptAndParse(
@@ -4000,6 +4027,11 @@ OSTType_Decimal128 getTypeInfoDecimal128(Decimal128 value,
         //
         // Returns 3141.0
         Decimal128 v_prime2 = v_prime.subtract(min.get()).scale(precision.get());
+        // Round the number down again. min may have a fractional value with more decimal places
+        // than the precision (e.g. .001). Subtracting min may have resulted in v_prime2 with
+        // a non-zero fraction. v_prime2 is expected to have no fractional value when
+        // converting to int128.
+        v_prime2 = v_prime2.round(Decimal128::kRoundTowardZero);
 
         invariant(v_prime2.logarithm(Decimal128(2)).isLess(Decimal128(128)));
 

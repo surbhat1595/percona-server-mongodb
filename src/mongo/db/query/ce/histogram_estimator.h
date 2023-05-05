@@ -34,6 +34,18 @@
 
 namespace mongo::optimizer::ce {
 
+enum IntervalEstimationMode { kUseHistogram, kUseTypeCounts, kFallback };
+using IntervalEstimation =
+    std::tuple<IntervalEstimationMode,
+               boost::optional<std::reference_wrapper<const BoundRequirement>>,
+               boost::optional<std::reference_wrapper<const BoundRequirement>>>;
+
+/**
+ * Analyzes an interval to define an estimation mode and summarize the bounds. This method is in the
+ * header for unit tests to use.
+ */
+IntervalEstimation analyzeIntervalEstimationMode(const IntervalRequirement& interval);
+
 class HistogramTransport;
 
 class HistogramEstimator : public cascades::CardinalityEstimator {

@@ -98,11 +98,12 @@ runHistogramsTest(function testTypeCounts() {
                         }],
                         bounds: [3]
                     },
-                    typeCount: [{typeName: "NumberDouble", count: 3}],
+                    typeCount: [{typeName: "NumberDouble", count: 1}],
                 },
                 emptyArrayCount: 4,
                 trueCount: 1,
                 falseCount: 2,
+                sampleRate: 1.0,
                 documents: 16,
             }
         }
@@ -112,15 +113,10 @@ runHistogramsTest(function testTypeCounts() {
     forceCE("histogram");
     let hint = {a: 1};
 
-    // TODO SERVER-70936: estimate boolean counts.
-    // verifyCEForMatch({coll, predicate: {a: true}, expected: [{_id: 0, a: true}], ce: 1, hint});
-    // verifyCEForMatch({
-    //     coll,
-    //     predicate: {a: false},
-    //     expected: [{_id: 1, a: false}, {_id: 2, a: false}],
-    //     ce: 2,
-    //     hint
-    // });
+    // Estimate boolean counts.
+    verifyCEForMatch({coll, predicate: {a: true}, expected: [{_id: 0, a: true}], hint});
+    verifyCEForMatch(
+        {coll, predicate: {a: false}, expected: [{_id: 1, a: false}, {_id: 2, a: false}], hint});
 
     // If we hint the index {a: 1} for this query, we don't get an IndexScan plan; instead, we fail
     // to optimize. It looks like we can't test CE for this case because we only generate a
@@ -201,14 +197,19 @@ runHistogramsTest(function testTypeCounts() {
     verifyCEForMatch({coll, predicate: {a: {$elemMatch: {$eq: [1, 2, 3]}}}, expected: [], hint});
     verifyCEForMatch({coll, predicate: {a: {$elemMatch: {$eq: [1, 2]}}}, expected: [], hint});
 
-    // Currently, we always estimate any object predicate as the total count of objects.
-    verifyCEForMatch(
-        {coll, predicate: {a: {a: 1, b: 2}}, expected: [{_id: 8, a: {a: 1, b: 2}}], ce: 3, hint});
-    verifyCEForMatch({coll, predicate: {a: {}}, expected: [{_id: 9, a: {}}], ce: 3, hint});
-    verifyCEForMatch({coll, predicate: {a: {c: 3}}, expected: [{_id: 10, a: {c: 3}}], ce: 3, hint});
-    verifyCEForMatch({coll, predicate: {a: {notInColl: 1}}, expected: [], ce: 3, hint});
+    // We estimate an object equality predicate heuristically as the square root of the total count
+    // of objects.
+    {
+        const ce = 1.73205;
+        verifyCEForMatch(
+            {coll, predicate: {a: {a: 1, b: 2}}, expected: [{_id: 8, a: {a: 1, b: 2}}], ce, hint});
+        verifyCEForMatch({coll, predicate: {a: {}}, expected: [{_id: 9, a: {}}], ce, hint});
+        verifyCEForMatch(
+            {coll, predicate: {a: {c: 3}}, expected: [{_id: 10, a: {c: 3}}], ce, hint});
+        verifyCEForMatch({coll, predicate: {a: {notInColl: 1}}, expected: [], ce, hint});
+    }
 
-    // Test null predicate match. TODO SERVER-71377: make estimate include missing values.
+    // Test null predicate match.
     verifyCEForMatch({
         coll,
         predicate: {a: null},
@@ -219,7 +220,6 @@ runHistogramsTest(function testTypeCounts() {
             {_id: 6, b: 2},
             {_id: 7},
         ],
-        ce: 3,
         hint
     });
 
@@ -341,11 +341,12 @@ runHistogramsTest(function testTypeCounts() {
                         ],
                         bounds: [2, 3]
                     },
-                    typeCount: [{typeName: "NumberDouble", count: 5}],
+                    typeCount: [{typeName: "NumberDouble", count: 2}],
                 },
                 emptyArrayCount: 1,
                 trueCount: 2,
                 falseCount: 1,
+                sampleRate: 1.0,
                 documents: 19,
             }
         }
@@ -402,16 +403,36 @@ runHistogramsTest(function testTypeCounts() {
         hint
     });
 
-    // TODO SERVER-70936: estimate boolean counts.
+    verifyCEForMatch({
+        coll,
+        predicate: {"a.b": true},
+        expected: [
+            {_id: 0, a: {b: true}},
+            {_id: 1, a: {b: true}},
+        ],
+        hint
+    });
+    verifyCEForMatch({
+        coll,
+        predicate: {"a.b": false},
+        expected: [
+            {_id: 2, a: {b: false}},
+        ],
+        hint
+    });
 
-    // Currently, we always estimate any object predicate as the total count of objects.
-    verifyCEForMatch(
-        {coll, predicate: {"a.b": {}}, expected: [{_id: 14, a: {b: {}}}], ce: 2, hint});
-    verifyCEForMatch(
-        {coll, predicate: {"a.b": {c: 1}}, expected: [{_id: 15, a: {b: {c: 1}}}], ce: 2, hint});
-    verifyCEForMatch({coll, predicate: {"a.b": {c: 2}}, expected: [], ce: 2, hint});
+    // We estimate an object equality predicate heuristically as the square root of the total count
+    // of objects.
+    {
+        const ce = 1.4142;
+        verifyCEForMatch(
+            {coll, predicate: {"a.b": {}}, expected: [{_id: 14, a: {b: {}}}], ce, hint});
+        verifyCEForMatch(
+            {coll, predicate: {"a.b": {c: 1}}, expected: [{_id: 15, a: {b: {c: 1}}}], ce, hint});
+        verifyCEForMatch({coll, predicate: {"a.b": {c: 2}}, expected: [], ce, hint});
+    }
 
-    // Test null predicate match. TODO SERVER-71377: make estimate include missing values.
+    // Test null predicate match.
     verifyCEForMatch({
         coll,
         predicate: {"a.b": null},
@@ -426,14 +447,13 @@ runHistogramsTest(function testTypeCounts() {
             {_id: 10, "a.b": 1},
             {_id: 11, "a.b.c": 1},
         ],
-        ce: 1,
         hint
     });
 
     // Set up a collection to test CE for nested arrays and non-histogrammable types in arrays.
     coll.drop();
     assert.commandWorked(coll.createIndex({a: 1}));
-    assert.commandWorked(coll.insertMany([
+    const docs = [
         /* Booleans. */
         {_id: 0, a: true},
         {_id: 1, a: false},
@@ -467,9 +487,9 @@ runHistogramsTest(function testTypeCounts() {
         {_id: 26, a: [[null]]},
         /* Mixed array type-counts. */
         {_id: 27, a: [null, true, false, [], [1, 2, 3], ["a", "b", "c"], {a: 1}, {}]},
-    ]));
+    ];
+    assert.commandWorked(coll.insertMany(docs));
 
-    // TODO SERVER-71057: Only count types once per array.
     createAndValidateHistogram({
         coll,
         expectedHistogram: {
@@ -533,106 +553,151 @@ runHistogramsTest(function testTypeCounts() {
                         bounds: ["c"]
                     },
                     typeCount: [
-                        {typeName: "StringSmall", count: 3},
-                        {typeName: "Boolean", count: 10},
-                        {typeName: "Null", count: 5},
-                        {typeName: "Object", count: 6},
-                        {typeName: "Array", count: 13},
+                        {typeName: "StringSmall", count: 1},
+                        {typeName: "Boolean", count: 6},
+                        {typeName: "Null", count: 3},
+                        {typeName: "Object", count: 4},
+                        {typeName: "Array", count: 11},
                     ],
                 },
                 emptyArrayCount: 1,
                 trueCount: 1,
                 falseCount: 1,
+                sampleRate: 1.0,
                 documents: 28,
             }
         }
     });
 
-    // Verify type count CE. Note that for non-$elemMatch preidcates, we include both array and
+    // Verify type count CE. Note that for non-$elemMatch predicates, we include both array and
     // scalar type-counts, while for $elemMatch predicates, we include only array type counts in
     // our estimate.
     forceCE("histogram");
     hint = {a: 1};
 
-    // TODO SERVER-70936: estimate boolean counts.
+    // Estimate boolean counts. Note that we have 6 boolean arrays; because we don't have an exact
+    // count of nested true/false values in nested arrays, we estimate this as 0.5* number of arrays
+    // with booleans.
+    {
+        const ce = 4;  // 0.5*6 + 1
+        verifyCEForMatch({
+            coll,
+            predicate: {"a": true},
+            expected: [
+                {_id: 0, a: true},
+                {_id: 2, a: [true]},
+                {_id: 4, a: [true, false]},
+                {_id: 6, a: [[false, false], true]},
+                {_id: 27, a: [null, true, false, [], [1, 2, 3], ["a", "b", "c"], {a: 1}, {}]},
+            ],
+            ce,
+            hint
+        });
+        verifyCEForMatch({
+            coll,
+            predicate: {"a": false},
+            expected: [
+                {_id: 1, a: false},
+                {_id: 3, a: [false]},
+                {_id: 4, a: [true, false]},
+                {_id: 5, a: [false, false, false]},
+                {_id: 27, a: [null, true, false, [], [1, 2, 3], ["a", "b", "c"], {a: 1}, {}]},
+            ],
+            ce,
+            hint
+        });
+    }
 
-    // Currently, we always estimate any object predicate as the total count of objects.
-    verifyCEForMatch({
-        coll,
-        predicate: {a: {}},
-        expected: [
-            {_id: 9, a: {}},
-            {_id: 10, a: [{}]},
-            {_id: 27, a: [null, true, false, [], [1, 2, 3], ["a", "b", "c"], {a: 1}, {}]},
-        ],
-        ce: 8,
-        hint
-    });
-    verifyCEForMatch({
-        coll,
-        predicate: {a: {a: 1}},
-        expected: [{_id: 27, a: [null, true, false, [], [1, 2, 3], ["a", "b", "c"], {a: 1}, {}]}],
-        ce: 8,
-        hint
-    });
-    verifyCEForMatch({coll, predicate: {a: {b: 1}}, expected: [{_id: 12, a: {b: 1}}], ce: 8, hint});
+    // We estimate an object equality predicate heuristically as the square root of the total count
+    // of objects.
+    {
+        const ce = 3.4142;
+        verifyCEForMatch({
+            coll,
+            predicate: {a: {}},
+            expected: [
+                {_id: 9, a: {}},
+                {_id: 10, a: [{}]},
+                {_id: 27, a: [null, true, false, [], [1, 2, 3], ["a", "b", "c"], {a: 1}, {}]},
+            ],
+            ce,
+            hint
+        });
+        verifyCEForMatch({
+            coll,
+            predicate: {a: {a: 1}},
+            expected:
+                [{_id: 27, a: [null, true, false, [], [1, 2, 3], ["a", "b", "c"], {a: 1}, {}]}],
+            ce,
+            hint
+        });
+        verifyCEForMatch(
+            {coll, predicate: {a: {b: 1}}, expected: [{_id: 12, a: {b: 1}}], ce, hint});
+    }
 
-    // In the $elemMatch case for object predicates, we only include the array object counter value
-    // in our estimate.
-    verifyCEForMatch({
-        coll,
-        predicate: {a: {$elemMatch: {$eq: {}}}},
-        expected: [
-            {_id: 10, a: [{}]},
-            {_id: 27, a: [null, true, false, [], [1, 2, 3], ["a", "b", "c"], {a: 1}, {}]},
-        ],
-        ce: 6,
-        hint
-    });
-    verifyCEForMatch({
-        coll,
-        predicate: {a: {$elemMatch: {$eq: {a: 1}}}},
-        expected: [{_id: 27, a: [null, true, false, [], [1, 2, 3], ["a", "b", "c"], {a: 1}, {}]}],
-        ce: 6,
-        hint
-    });
-    verifyCEForMatch(
-        {coll, predicate: {a: {$elemMatch: {$eq: {b: 1}}}}, expected: [], ce: 6, hint});
+    // We estimate an object equality predicate heuristically as the square root of the total count
+    // of objects.
+    {
+        const ce = 2.0;
+        verifyCEForMatch({
+            coll,
+            predicate: {a: {$elemMatch: {$eq: {}}}},
+            expected: [
+                {_id: 10, a: [{}]},
+                {_id: 27, a: [null, true, false, [], [1, 2, 3], ["a", "b", "c"], {a: 1}, {}]},
+            ],
+            ce,
+            hint
+        });
+        verifyCEForMatch({
+            coll,
+            predicate: {a: {$elemMatch: {$eq: {a: 1}}}},
+            expected:
+                [{_id: 27, a: [null, true, false, [], [1, 2, 3], ["a", "b", "c"], {a: 1}, {}]}],
+            ce,
+            hint
+        });
+        verifyCEForMatch(
+            {coll, predicate: {a: {$elemMatch: {$eq: {b: 1}}}}, expected: [], ce, hint});
+    }
 
-    // We are estimating the following predicates as two intervals joined by a conjunction:
-    //  1. [{}, {}] - estimated as the sum of scalar and array type counts 6 + 2 = 8.
-    //  2. [[{}], [{}]] - estimated as the count of nested arrays, 13.
+    // We are estimating the following predicates as two equality intervals joined by a conjunction:
+    //  1. [{}, {}] - estimated as the square root of the sum of scalar and array type counts.
+    //  2. [[{}], [{}]] - estimated as the square root of the count of nested arrays.
     // The disjunction selectivities are then combined via exponential backoff. This estimate can be
     // found at the union of the two index scan nodes in the plan. However, the root node estimate
     // differs due to the filter node & group by node above the union, so we directly verify the
     // estimate of the sargable nodes together.
-    verifyCEForMatchNodes({
-        coll,
-        predicate: {a: [{}]},
-        expected: [
-            {_id: 10, a: [{}]},
-            {_id: 11, a: [[{}]]},
-        ],
-        getNodeCEs: getUnionNodeCE,
-        CEs: [15.323],
-        hint
-    });
-    verifyCEForMatchNodes({
-        coll,
-        predicate: {a: [{c: 1}]},
-        expected: [{_id: 13, a: [{c: 1}]}],
-        getNodeCEs: getUnionNodeCE,
-        CEs: [15.323],
-        hint
-    });
-    verifyCEForMatchNodes({
-        coll,
-        predicate: {a: [{d: 1}]},
-        expected: [{_id: 15, a: [[{d: 1}]]}],
-        getNodeCEs: getUnionNodeCE,
-        CEs: [15.323],
-        hint
-    });
+    {
+        const CEs = [4.9162];
+        verifyCEForMatchNodes({
+            coll,
+            predicate: {a: [{}]},
+            expected: [
+                {_id: 10, a: [{}]},
+                {_id: 11, a: [[{}]]},
+            ],
+            getNodeCEs: getUnionNodeCE,
+            CEs,
+            hint
+        });
+        verifyCEForMatchNodes({
+            coll,
+            predicate: {a: [{c: 1}]},
+            expected: [{_id: 13, a: [{c: 1}]}],
+            getNodeCEs: getUnionNodeCE,
+            CEs,
+            hint
+        });
+        verifyCEForMatchNodes({
+            coll,
+            predicate: {a: [{d: 1}]},
+            expected: [{_id: 15, a: [[{d: 1}]]}],
+            getNodeCEs: getUnionNodeCE,
+            CEs,
+            hint
+        });
+    }
 
     // Verify CE using array histogram.
     verifyCEForMatch({coll, predicate: {a: ""}, expected: [], hint});
@@ -641,74 +706,77 @@ runHistogramsTest(function testTypeCounts() {
     verifyCEForMatch({coll, predicate: {a: "c"}, expected: [{_id: 19, a: ["a", "b", "c"]}], hint});
     verifyCEForMatch({coll, predicate: {a: "d"}, expected: [], hint});
 
-    // We estimate nested arrays as the total count of nested arrays.
-    verifyCEForMatch({coll, predicate: {a: [""]}, expected: [], ce: /*13,*/ 9.583, hint});
-    verifyCEForMatch({
-        coll,
-        predicate: {a: {$elemMatch: {$eq: ["a", "b", "c"]}}},
-        expected: [
-            {_id: 20, a: [["a", "b", "c"]]},
-            {_id: 27, a: [null, true, false, [], [1, 2, 3], ["a", "b", "c"], {a: 1}, {}]},
-        ],
-        ce: 13,
-        hint
-    });
-    verifyCEForMatch({
-        coll,
-        predicate: {a: {$elemMatch: {$eq: [["a", "b", "c"]]}}},
-        expected: [{_id: 21, a: [[["a", "b", "c"]]]}],
-        ce: 13,
-        hint
-    });
+    verifyCEForMatch({coll, predicate: {a: [""]}, expected: [], ce: 9.583, hint});
+
+    // We estimate equality to nested arrays as the square root of the total count of nested arrays.
+    {
+        const ce = 3.3166;
+        verifyCEForMatch({
+            coll,
+            predicate: {a: {$elemMatch: {$eq: ["a", "b", "c"]}}},
+            expected: [
+                {_id: 20, a: [["a", "b", "c"]]},
+                {_id: 27, a: [null, true, false, [], [1, 2, 3], ["a", "b", "c"], {a: 1}, {}]},
+            ],
+            ce,
+            hint
+        });
+        verifyCEForMatch({
+            coll,
+            predicate: {a: {$elemMatch: {$eq: [["a", "b", "c"]]}}},
+            expected: [{_id: 21, a: [[["a", "b", "c"]]]}],
+            ce,
+            hint
+        });
+    }
 
     // In the following cases, we have two intervals:
     //  1. ["a", "a"] - This is estimated as 1 based on the array buckets.
-    //  2. [["a", "b", "c"], ["a", "b", "c"]] - this is estimated as the count of nested arrays: 13.
+    //  2. [["a", "b", "c"], ["a", "b", "c"]] - this is estimated as sqrt(count of nested arrays).
     // The selectivities are then combined by disjunctive exponential backoff. Once again, we can
     // find this estimate in the Union node.
-    verifyCEForMatchNodes({
-        coll,
-        predicate: {a: ["a", "b", "c"]},
-        expected: [
-            {_id: 19, a: ["a", "b", "c"]},
-            {_id: 20, a: [["a", "b", "c"]]},
-            {_id: 27, a: [null, true, false, [], [1, 2, 3], ["a", "b", "c"], {a: 1}, {}]},
-        ],
-        getNodeCEs: getUnionNodeCE,
-        CEs: [13.270],
-        hint
-    });
-    verifyCEForMatchNodes({
-        coll,
-        predicate: {a: ["a"]},
-        expected: [],
-        getNodeCEs: getUnionNodeCE,
-        CEs: [13.270],
-        hint
-    });
+    {
+        const CEs = [3.7614];
+        verifyCEForMatchNodes({
+            coll,
+            predicate: {a: ["a", "b", "c"]},
+            expected: [
+                {_id: 19, a: ["a", "b", "c"]},
+                {_id: 20, a: [["a", "b", "c"]]},
+                {_id: 27, a: [null, true, false, [], [1, 2, 3], ["a", "b", "c"], {a: 1}, {}]},
+            ],
+            getNodeCEs: getUnionNodeCE,
+            CEs,
+            hint
+        });
+        verifyCEForMatchNodes(
+            {coll, predicate: {a: ["a"]}, expected: [], getNodeCEs: getUnionNodeCE, CEs, hint});
+    }
 
-    // In the following cases, we have two array intervals, each estimated as the count of nested
-    // arrays, with the selectivities combined by disjunctive exponential backoff. Once again, we
-    // can find this estimate in the Union node.
-    verifyCEForMatchNodes({
-        coll,
-        predicate: {a: [["a", "b", "c"]]},
-        expected: [{_id: 20, a: [["a", "b", "c"]]}, {_id: 21, a: [[["a", "b", "c"]]]}],
-        getNodeCEs: getUnionNodeCE,
-        CEs: [17.021],
-        hint
-    });
-    verifyCEForMatchNodes({
-        coll,
-        predicate: {a: [[["a", "b", "c"]]]},
-        expected: [{_id: 21, a: [[["a", "b", "c"]]]}],
-        getNodeCEs: getUnionNodeCE,
-        CEs: [17.021],
-        hint
-    });
+    // In the following cases, we have two array intervals, each estimated as sqrt(count of nested
+    // arrays), with the selectivities combined by disjunctive exponential backoff. Once again,
+    // we can find this estimate in the Union node.
+    {
+        const CEs = [4.8246];
+        verifyCEForMatchNodes({
+            coll,
+            predicate: {a: [["a", "b", "c"]]},
+            expected: [{_id: 20, a: [["a", "b", "c"]]}, {_id: 21, a: [[["a", "b", "c"]]]}],
+            getNodeCEs: getUnionNodeCE,
+            CEs,
+            hint
+        });
+        verifyCEForMatchNodes({
+            coll,
+            predicate: {a: [[["a", "b", "c"]]]},
+            expected: [{_id: 21, a: [[["a", "b", "c"]]]}],
+            getNodeCEs: getUnionNodeCE,
+            CEs,
+            hint
+        });
+    }
 
-    // Verify null CE. TODO SERVER-71377: make estimate include missing values.
-    // TODO SERVER-71057: Only count each null once per array.
+    // Verify null CE.
     verifyCEForMatch({
         coll,
         predicate: {a: null},
@@ -719,7 +787,6 @@ runHistogramsTest(function testTypeCounts() {
             {_id: 25, a: [null, null, null]},
             {_id: 27, a: [null, true, false, [], [1, 2, 3], ["a", "b", "c"], {a: 1}, {}]},
         ],
-        ce: 6,
         hint
     });
     verifyCEForMatch({
@@ -730,7 +797,7 @@ runHistogramsTest(function testTypeCounts() {
             {_id: 25, a: [null, null, null]},
             {_id: 27, a: [null, true, false, [], [1, 2, 3], ["a", "b", "c"], {a: 1}, {}]},
         ],
-        ce: 5,
+        ce: 3,
         hint
     });
 
@@ -743,7 +810,8 @@ runHistogramsTest(function testTypeCounts() {
     //     {_id: 27, a: [null, true, false, [], [1, 2, 3], ["a", "b", "c"], {a: 1}, {}]},
     // ], ce: 14, hint});
 
-    // In the following case, we expect to count only nested empty arrays.
+    // In the following case, we expect to count only nested empty arrays (so we estimate it as the
+    // square root of the count of all nested arrays).
     verifyCEForMatch({
         coll,
         predicate: {a: {$elemMatch: {$eq: []}}},
@@ -751,8 +819,45 @@ runHistogramsTest(function testTypeCounts() {
             {_id: 17, a: [[]]},
             {_id: 27, a: [null, true, false, [], [1, 2, 3], ["a", "b", "c"], {a: 1}, {}]},
         ],
-        ce: 13,
+        ce: 3.3166,
         hint
+    });
+
+    // Now create histograms on the same collection for paths that don't exist on any documents.
+    const statistics = {
+        typeCount: [
+            {typeName: "Nothing", count: 28},
+        ],
+        scalarHistogram: {buckets: [], bounds: []},
+        emptyArrayCount: 0,
+        trueCount: 0,
+        falseCount: 0,
+        sampleRate: 1.0,
+        documents: 28,
+    };
+    createAndValidateHistogram({coll, expectedHistogram: {_id: "notAPath", statistics}});
+    createAndValidateHistogram({coll, expectedHistogram: {_id: "notAPathEither", statistics}});
+
+    // Verify type count CE. Note that for non-$elemMatch preidcates, we include both array and
+    // scalar type-counts, while for $elemMatch predicates, we include only array type counts in
+    // our estimate.
+    forceCE("histogram");
+
+    // Note: the hint is omitted because if we hint on a 'notAPath' index, optimization fails by
+    // running out of memory.
+    verifyCEForMatch({coll, predicate: {notAPath: {$eq: null}}, expected: docs});
+    verifyCEForMatch({coll, predicate: {notAPath: {$elemMatch: {$eq: null}}}, expected: []});
+    verifyCEForMatch({coll, predicate: {notAPathEither: {$eq: 1}}, expected: []});
+    verifyCEForMatch({coll, predicate: {notAPathEither: {$elemMatch: {$eq: 1}}}, expected: []});
+    verifyCEForMatch({
+        coll,
+        predicate: {$and: [{notAPath: {$eq: null}}, {notAPathEither: {$eq: null}}]},
+        expected: docs
+    });
+    verifyCEForMatch({
+        coll,
+        predicate: {$and: [{notAPath: {$eq: 1}}, {notAPathEither: {$eq: 1}}]},
+        expected: []
     });
 });
 }());

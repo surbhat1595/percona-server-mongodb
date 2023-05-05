@@ -40,6 +40,33 @@ REGISTER_DOCUMENT_SOURCE_WITH_FEATURE_FLAG(telemetry,
                                            AllowedWithApiStrict::kNeverInVersion1,
                                            feature_flags::gFeatureFlagTelemetry);
 
+bool parseTelemetryEmbeddedObject(BSONObj embeddedObj) {
+    auto fieldNameRedaction = false;
+    if (!embeddedObj.isEmpty()) {
+        uassert(ErrorCodes::FailedToParse,
+                str::stream()
+                    << DocumentSourceTelemetry::kStageName
+                    << " parameters object may only contain one field, 'redactFieldNames'. Found: "
+                    << embeddedObj.toString(),
+                embeddedObj.nFields() == 1);
+
+        uassert(ErrorCodes::FailedToParse,
+                str::stream()
+                    << DocumentSourceTelemetry::kStageName
+                    << " parameters object may only contain 'redactFieldNames' option. Found: "
+                    << embeddedObj.firstElementFieldName(),
+                embeddedObj.hasField("redactFieldNames"));
+
+        uassert(ErrorCodes::FailedToParse,
+                str::stream() << DocumentSourceTelemetry::kStageName
+                              << " redactFieldNames parameter must be boolean. Found type: "
+                              << typeName(embeddedObj.firstElementType()),
+                embeddedObj.firstElementType() == BSONType::Bool);
+        fieldNameRedaction = embeddedObj["redactFieldNames"].trueValue();
+    }
+    return fieldNameRedaction;
+}
+
 std::unique_ptr<DocumentSourceTelemetry::LiteParsed> DocumentSourceTelemetry::LiteParsed::parse(
     const NamespaceString& nss, const BSONElement& spec) {
     uassert(ErrorCodes::FailedToParse,
@@ -47,12 +74,8 @@ std::unique_ptr<DocumentSourceTelemetry::LiteParsed> DocumentSourceTelemetry::Li
                           << " value must be an object. Found: " << typeName(spec.type()),
             spec.type() == BSONType::Object);
 
-    uassert(ErrorCodes::FailedToParse,
-            str::stream() << kStageName
-                          << " parameters object must be empty. Found: " << typeName(spec.type()),
-            spec.embeddedObject().isEmpty());
-
-    return std::make_unique<DocumentSourceTelemetry::LiteParsed>(spec.fieldName());
+    return std::make_unique<DocumentSourceTelemetry::LiteParsed>(
+        spec.fieldName(), parseTelemetryEmbeddedObject(spec.embeddedObject()));
 }
 
 boost::intrusive_ptr<DocumentSource> DocumentSourceTelemetry::createFromBson(
@@ -62,66 +85,64 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceTelemetry::createFromBson(
                           << " value must be an object. Found: " << typeName(spec.type()),
             spec.type() == BSONType::Object);
 
-    uassert(ErrorCodes::FailedToParse,
-            str::stream() << kStageName
-                          << " parameters object must be empty. Found: " << typeName(spec.type()),
-            spec.embeddedObject().isEmpty());
-
     const NamespaceString& nss = pExpCtx->ns;
 
     uassert(ErrorCodes::InvalidNamespace,
             "$telemetry must be run against the 'admin' database with {aggregate: 1}",
             nss.db() == NamespaceString::kAdminDb && nss.isCollectionlessAggregateNS());
 
-    return new DocumentSourceTelemetry(pExpCtx);
+    return new DocumentSourceTelemetry(pExpCtx,
+                                       parseTelemetryEmbeddedObject(spec.embeddedObject()));
 }
 
 Value DocumentSourceTelemetry::serialize(boost::optional<ExplainOptions::Verbosity> explain) const {
     return Value{Document{{kStageName, Document{}}}};
 }
 
-void DocumentSourceTelemetry::buildTelemetryStoreIterator() {
-    auto&& sharedTelemetryStore = [&]() { return getTelemetryStoreForRead(getContext()->opCtx); }();
-
-    // Here we start a new thread which runs until the document source finishes iterating the
-    // telemetry store.
-    stdx::thread producer([&, sharedTelemetryStore = std::move(sharedTelemetryStore)] {
-        sharedTelemetryStore->forEachPartition(
-            [&](const std::function<TelemetryStore::Partition()>& getPartition) {
-                // Block here waiting for the queue to be empty. Locking the partition will block
-                // telemetry writers. We want to delay lock acquisition as long as possible.
-                _queue.waitForEmpty();
-
-                // Now get the locked partition.
-                auto partition = getPartition();
-
-                // Capture the time at which reading the partition begins to indicate to the caller
-                // when the snapshot began.
-                const auto partitionReadTime =
-                    Timestamp{Timestamp(Date_t::now().toMillisSinceEpoch() / 1000, 0)};
-                for (auto&& [key, metrics] : *partition) {
-                    Document d{{{"key", metrics.redactKey(key)},
-                                {"metrics", metrics.toBSON()},
-                                {"asOf", partitionReadTime}}};
-                    _queue.push(std::move(d));
-                }
-            });
-        _queue.closeProducerEnd();
-    });
-    producer.detach();
-}
-
 DocumentSource::GetNextResult DocumentSourceTelemetry::doGetNext() {
-    if (!_initialized) {
-        buildTelemetryStoreIterator();
-        _initialized = true;
-    }
+    /**
+     * We maintain nested iterators:
+     * - Outer one over the set of partitions.
+     * - Inner one over the set of entries in a "materialized" partition.
+     *
+     * When an inner iterator is present and contains more elements, we can return the next element.
+     * When the inner iterator is exhausted, we move to the next element in the outer iterator and
+     * create a new inner iterator. When the outer iterator is exhausted, we have finished iterating
+     * over the telemetry store entries.
+     *
+     * The inner iterator iterates over a materialized container of all entries in the partition.
+     * This is done to reduce the time under which the partition lock is held.
+     */
+    while (true) {
+        // First, attempt to exhaust all elements in the materialized partition.
+        if (!_materializedPartition.empty()) {
+            // Move out of the container reference.
+            auto doc = std::move(_materializedPartition.front());
+            _materializedPartition.pop_front();
+            return {std::move(doc)};
+        }
 
-    auto maybeResult = _queue.pop();
-    if (maybeResult) {
-        return {std::move(*maybeResult)};
-    } else {
-        return DocumentSource::GetNextResult::makeEOF();
+        TelemetryStore& _telemetryStore = getTelemetryStore(getContext()->opCtx);
+
+        // Materialized partition is exhausted, move to the next.
+        _currentPartition++;
+        if (_currentPartition >= _telemetryStore.numPartitions()) {
+            return DocumentSource::GetNextResult::makeEOF();
+        }
+
+        // We only keep the partition (which holds a lock) for the time needed to materialize it to
+        // a set of Document instances.
+        auto&& partition = _telemetryStore.getPartition(_currentPartition);
+
+        // Capture the time at which reading the partition begins to indicate to the caller
+        // when the snapshot began.
+        const auto partitionReadTime =
+            Timestamp{Timestamp(Date_t::now().toMillisSinceEpoch() / 1000, 0)};
+        for (auto&& [key, metrics] : *partition) {
+            _materializedPartition.push_back({{"key", metrics.redactKey(key, _redactFieldNames)},
+                                              {"metrics", metrics.toBSON()},
+                                              {"asOf", partitionReadTime}});
+        }
     }
 }
 

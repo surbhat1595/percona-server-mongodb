@@ -239,7 +239,8 @@ function runGetClusterParameterReplicaSet(
 // the config server replica set.
 function runGetClusterParameterSharded(
     st, getClusterParameterArgs, expectedClusterParameters, tenantId) {
-    runGetClusterParameterNode(st.s0, getClusterParameterArgs, expectedClusterParameters, tenantId);
+    assert(runGetClusterParameterNode(
+        st.s0, getClusterParameterArgs, expectedClusterParameters, tenantId));
 
     runGetClusterParameterReplicaSet(
         st.configRS, getClusterParameterArgs, expectedClusterParameters, tenantId);
@@ -395,7 +396,7 @@ function testDisabledClusterParameters(conn, tenantId) {
         assert.commandFailedWithCode(
             adminDB.runCommand(tenantCommand(
                 {setClusterParameter: {testIntClusterParameter: {intData: 5}}}, tenantId)),
-            ErrorCodes.BadValue);
+            ErrorCodes.IllegalOperation);
 
         // Assert that explicitly getting a disabled cluster server parameter fails on the primary.
         testExplicitDisabledGetClusterParameter(conn.getPrimary(), tenantId);

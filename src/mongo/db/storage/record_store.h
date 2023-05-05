@@ -578,9 +578,7 @@ public:
      * Performs record store specific validation to ensure consistency of underlying data
      * structures. If corruption is found, details of the errors will be in the results parameter.
      */
-    virtual void validate(OperationContext* opCtx,
-                          ValidateResults* results,
-                          BSONObjBuilder* output) {}
+    virtual void validate(OperationContext* opCtx, bool full, ValidateResults* results) {}
 
     /**
      * @param scaleSize - amount by which to scale size metrics
@@ -627,6 +625,14 @@ public:
      * WriteUnitOfWork.
      */
     void waitForAllEarlierOplogWritesToBeVisible(OperationContext* opCtx) const;
+
+    /**
+     * Reserve a range of contiguous RecordIds. Returns the first valid RecordId in the range. Must
+     * only be called on a RecordStore with KeyFormat::Long.
+     */
+    virtual void reserveRecordIds(OperationContext* opCtx,
+                                  std::vector<RecordId>* out,
+                                  size_t nRecords) = 0;
 
     /**
      * Called after a repair operation is run with the recomputed numRecords and dataSize.

@@ -91,9 +91,6 @@ static opt::unordered_map<std::string, optimizer::IndexDefinition> buildIndexSpe
         const BSONElement element = indexHint->firstElement();
         const StringData fieldName = element.fieldNameStringData();
         if (fieldName == "$natural"_sd) {
-            if (!element.isNumber() || element.numberInt() != 1) {
-                uasserted(6624255, "Unsupported hint option");
-            }
             // Do not add indexes.
             return {};
         } else if (fieldName == "$hint"_sd && element.type() == BSONType::String) {
@@ -189,7 +186,7 @@ static opt::unordered_map<std::string, optimizer::IndexDefinition> buildIndexSpe
             for (size_t i = fieldPath.size(); i-- > 0;) {
                 if (isMultiKey && elementMultiKeyInfo.find(i) != elementMultiKeyInfo.cend()) {
                     // This is a multikey element of the path.
-                    abtPath = make<PathTraverse>(std::move(abtPath), PathTraverse::kSingleLevel);
+                    abtPath = make<PathTraverse>(PathTraverse::kSingleLevel, std::move(abtPath));
                 }
                 abtPath = make<PathGet>(fieldPath.at(i), std::move(abtPath));
             }
@@ -273,7 +270,8 @@ static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> optimizeAndCreateExe
     const NamespaceString& nss,
     const CollectionPtr& collection,
     std::unique_ptr<CanonicalQuery> cq,
-    const bool requireRID) {
+    const bool requireRID,
+    const ScanOrder scanOrder) {
 
     phaseManager.optimize(abt);
 
@@ -306,15 +304,17 @@ static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> optimizeAndCreateExe
 
     auto env = VariableEnvironment::build(abt);
     SlotVarMap slotMap;
+    auto runtimeEnvironment = std::make_unique<sbe::RuntimeEnvironment>();  // TODO use factory
     sbe::value::SlotIdGenerator ids;
     boost::optional<sbe::value::SlotId> ridSlot;
     SBENodeLowering g{env,
                       slotMap,
+                      *runtimeEnvironment,
                       ridSlot,
                       ids,
                       phaseManager.getMetadata(),
                       phaseManager.getNodeToGroupPropsMap(),
-                      false /*randomScan*/};
+                      scanOrder};
     auto sbePlan = g.optimize(abt);
     tassert(6624262, "Unexpected rid slot", !requireRID || ridSlot);
 
@@ -326,7 +326,7 @@ static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> optimizeAndCreateExe
         OPTIMIZER_DEBUG_LOG(6264802, 5, "Lowered SBE plan", "plan"_attr = p.print(*sbePlan.get()));
     }
 
-    stage_builder::PlanStageData data{std::make_unique<sbe::RuntimeEnvironment>()};
+    stage_builder::PlanStageData data{std::move(runtimeEnvironment)};
     data.outputs.set(stage_builder::PlanStageSlots::kResult, slotMap.begin()->second);
     if (requireRID) {
         data.outputs.set(stage_builder::PlanStageSlots::kRecordId, *ridSlot);
@@ -346,25 +346,19 @@ static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> optimizeAndCreateExe
                                              std::make_unique<YieldPolicyCallbacksImpl>(nss));
 
     sbePlan->prepare(data.ctx);
-    auto
-        planExec = uassertStatusOK(plan_executor_factory::make(opCtx,
-                                                               std::move(cq),
-                                                               nullptr /*solution*/,
-                                                               {std::move(sbePlan),
-                                                                std::move(data)},
-                                                               std::make_unique<ABTPrinter>(
-                                                                   std::move(abt),
-                                                                   phaseManager
-                                                                       .getNodeToGroupPropsMap()),
-                                                               MultipleCollectionAccessor(
-                                                                   collection),
-                                                               QueryPlannerParams::Options::DEFAULT,
-                                                               nss,
-                                                               std::move(yieldPolicy),
-                                                               false /*isFromPlanCache*/,
-                                                               true /* generatedByBonsai */,
-                                                               opCtx
-                                                                   ->getElapsedQueryPlanningTime() /* metric stored in PlanExplainer via PlanExecutor construction*/));
+    CurOp::get(opCtx)->stopQueryPlanningTimer();
+    auto planExec = uassertStatusOK(plan_executor_factory::make(
+        opCtx,
+        std::move(cq),
+        nullptr /*solution*/,
+        {std::move(sbePlan), std::move(data)},
+        std::make_unique<ABTPrinter>(std::move(abt), phaseManager.getNodeToGroupPropsMap()),
+        MultipleCollectionAccessor(collection),
+        QueryPlannerParams::Options::DEFAULT,
+        nss,
+        std::move(yieldPolicy),
+        false /*isFromPlanCache*/,
+        true /* generatedByBonsai */));
     return planExec;
 }
 
@@ -692,6 +686,11 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOp
                                      constFold,
                                      queryHints,
                                      prefixId);
+    auto scanOrder = ScanOrder::Forward;
+    if (indexHint && indexHint->firstElementFieldNameStringData() == "$natural"_sd &&
+        indexHint->firstElement().safeNumberInt() < 0) {
+        scanOrder = ScanOrder::Reverse;
+    }
 
     ABT abt = collectionExists
         ? make<ScanNode>(scanProjName, scanDefName)
@@ -745,7 +744,8 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOp
                                      nss,
                                      collection,
                                      std::move(canonicalQuery),
-                                     requireRID);
+                                     requireRID,
+                                     scanOrder);
 }
 
 std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOptimizer(

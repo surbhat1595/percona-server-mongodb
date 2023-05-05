@@ -31,11 +31,11 @@
 
 #include <boost/filesystem/operations.hpp>
 #include <boost/optional.hpp>
+#include <csignal>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
-#include <signal.h>
 #include <string>
 
 #include "mongo/base/init.h"
@@ -86,7 +86,6 @@
 #include "mongo/db/ftdc/ftdc_mongod.h"
 #include "mongo/db/ftdc/util.h"
 #include "mongo/db/global_settings.h"
-#include "mongo/db/index/index_access_method_factory_impl.h"
 #include "mongo/db/index_builds_coordinator_mongod.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/initialize_server_global_state.h"
@@ -405,6 +404,11 @@ void registerPrimaryOnlyServices(ServiceContext* serviceContext) {
 
 MONGO_FAIL_POINT_DEFINE(shutdownAtStartup);
 
+// Important:
+// _initAndListen among its other tasks initializes the storage subsystem.
+// File Copy Based Initial Sync will restart the storage subsystem and may need to repeat some
+// of the initialization steps within.  If you add or change any of these steps, make sure
+// any necessary changes are also made to File Copy Based Initial Sync.
 ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     Client::initThread("initandlisten");
 
@@ -625,7 +629,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     }
 
     // This is for security on certain platforms (nonce generation)
-    srand((unsigned)(curTimeMicros64()) ^ (unsigned(uintptr_t(&startupOpCtx))));
+    srand((unsigned)(curTimeMicros64()) ^ (unsigned(uintptr_t(&startupOpCtx))));  // NOLINT
 
     if (globalAuthzManager->shouldValidateAuthSchemaOnStartup()) {
         Status status = verifySystemIndexes(startupOpCtx.get());
@@ -691,16 +695,11 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
 
     WaitForMajorityService::get(serviceContext).startup(serviceContext);
 
-    // This function may take the global lock.
-    auto shardingInitialized = ShardingInitializationMongoD::get(startupOpCtx.get())
-                                   ->initializeShardingAwarenessIfNeeded(startupOpCtx.get());
-    if (shardingInitialized) {
-        auto status = loadGlobalSettingsFromConfigServer(startupOpCtx.get());
-        if (!status.isOK()) {
-            LOGV2(20545,
-                  "Error loading global settings from config server at startup",
-                  "error"_attr = redact(status));
-        }
+    if (serverGlobalParams.clusterRole != ClusterRole::ConfigServer) {
+        // A catalog shard initializes sharding awareness after setting up its config server state.
+
+        // This function may take the global lock.
+        initializeShardingAwarenessIfNeededAndLoadGlobalSettings(startupOpCtx.get());
     }
 
     try {
@@ -764,23 +763,10 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         }
 
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
-            initializeGlobalShardingStateForMongoD(
-                startupOpCtx.get(), ShardId::kConfigServerId, ConnectionString::forLocal());
+            initializeGlobalShardingStateForConfigServerIfNeeded(startupOpCtx.get());
 
-            // ShardLocal to use for explicitly local commands on the config server.
-            auto localConfigShard =
-                Grid::get(serviceContext)->shardRegistry()->createLocalConfigShard();
-            auto localCatalogClient = std::make_unique<ShardingCatalogClientImpl>(localConfigShard);
-
-            ShardingCatalogManager::create(
-                startupOpCtx->getServiceContext(),
-                makeShardingTaskExecutor(executor::makeNetworkInterface("AddShard-TaskExecutor")),
-                std::move(localConfigShard),
-                std::move(localCatalogClient));
-
-            if (!gFeatureFlagCatalogShard.isEnabledAndIgnoreFCV()) {
-                Grid::get(startupOpCtx.get())->setShardingInitialized();
-            }
+            // This function may take the global lock.
+            initializeShardingAwarenessIfNeededAndLoadGlobalSettings(startupOpCtx.get());
         }
 
         if (serverGlobalParams.clusterRole == ClusterRole::None &&
@@ -1164,7 +1150,6 @@ void setUpCollectionShardingState(ServiceContext* serviceContext) {
 
 void setUpCatalog(ServiceContext* serviceContext) {
     DatabaseHolder::set(serviceContext, std::make_unique<DatabaseHolderImpl>());
-    IndexAccessMethodFactory::set(serviceContext, std::make_unique<IndexAccessMethodFactoryImpl>());
     Collection::Factory::set(serviceContext, std::make_unique<CollectionImpl::FactoryImpl>());
 }
 
@@ -1638,7 +1623,7 @@ int mongod_main(int argc, char* argv[]) {
 
     setupSignalHandlers();
 
-    srand(static_cast<unsigned>(curTimeMicros64()));
+    srand(static_cast<unsigned>(curTimeMicros64()));  // NOLINT
 
     Status status = mongo::runGlobalInitializers(std::vector<std::string>(argv, argv + argc));
     if (!status.isOK()) {

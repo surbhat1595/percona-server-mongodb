@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-
 #include "mongo/db/commands/run_aggregate.h"
 
 #include <boost/optional.hpp>
@@ -39,10 +38,10 @@
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
+#include "mongo/db/catalog/external_data_source_scope_guard.h"
 #include "mongo/db/change_stream_change_collection_manager.h"
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
 #include "mongo/db/change_stream_serverless_helpers.h"
-#include "mongo/db/commands/external_data_source_scope_guard.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/cursor_manager.h"
 #include "mongo/db/db_raii.h"
@@ -372,7 +371,8 @@ StatusWith<StringMap<ExpressionContext::ResolvedNamespace>> resolveInvolvedNames
                 // collection name references a view on the aggregation request's database. Note
                 // that the inverse scenario (mistaking a view for a collection) is not an issue
                 // because $merge/$out cannot target a view.
-                auto nssToCheck = NamespaceString(request.getNamespace().db(), involvedNs.coll());
+                auto nssToCheck =
+                    NamespaceString(request.getNamespace().dbName(), involvedNs.coll());
                 if (catalog->lookupView(opCtx, nssToCheck)) {
                     auto status = resolveViewDefinition(nssToCheck);
                     if (!status.isOK()) {
@@ -434,7 +434,8 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
     const AggregateCommandRequest& request,
     std::unique_ptr<CollatorInterface> collator,
     boost::optional<UUID> uuid,
-    ExpressionContext::CollationMatchesDefault collationMatchesDefault) {
+    ExpressionContext::CollationMatchesDefault collationMatchesDefault,
+    boost::optional<CollectionOptions> collectionOptions = boost::none) {
     boost::intrusive_ptr<ExpressionContext> expCtx =
         new ExpressionContext(opCtx,
                               request,
@@ -629,12 +630,9 @@ std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> createLegacyEx
             // There are separate ExpressionContexts for each exchange pipeline, so make sure to
             // pass the pipeline's ExpressionContext to the plan executor factory.
             auto pipelineExpCtx = pipelineIt->getContext();
-            auto planningTimeElapsed = pipelineExpCtx->opCtx->getElapsedQueryPlanningTime();
             execs.emplace_back(
                 plan_executor_factory::make(std::move(pipelineExpCtx),
                                             std::move(pipelineIt),
-                                            planningTimeElapsed, /* metric stored in PlanExplainer
-                                                                    via PlanExecutor construction*/
                                             aggregation_request_helper::getResumableScanType(
                                                 request, liteParsedPipeline.hasChangeStream())));
         }
@@ -689,6 +687,14 @@ Status runAggregate(OperationContext* opCtx,
     // The UUID of the collection for the execution namespace of this aggregation.
     boost::optional<UUID> uuid;
 
+    // All cursors share the ownership to 'extDataSrcGuard'. Once all cursors are destroyed,
+    // 'extDataSrcGuard' will also be destroyed and any virtual collections will be dropped by
+    // the destructor of ExternalDataSourceScopeGuard. We obtain a reference before taking locks so
+    // that the virtual collections will be dropped after releasing our read locks, avoiding a lock
+    // upgrade.
+    std::shared_ptr<ExternalDataSourceScopeGuard> extDataSrcGuard =
+        std::make_shared<ExternalDataSourceScopeGuard>(std::move(externalDataSourceGuard));
+
     // If emplaced, AutoGetCollectionForReadCommand will throw if the sharding version for this
     // connection is out of date. If the namespace is a view, the lock will be released before
     // re-running the expanded aggregation.
@@ -721,15 +727,22 @@ Status runAggregate(OperationContext* opCtx,
         collections.clear();
     };
 
+    auto collectTelemetry = [&]() -> void {
+        // Collect telemetry. Exclude queries against collections with encrypted fields.
+        // We still collect telemetry on collection-less aggregations.
+        if (!(ctx && ctx->getCollection() &&
+              ctx->getCollection()->getCollectionOptions().encryptedFieldConfig)) {
+            telemetry::registerAggRequest(request, opCtx);
+        }
+    };
+
     std::vector<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> execs;
     boost::intrusive_ptr<ExpressionContext> expCtx;
     auto curOp = CurOp::get(opCtx);
     auto catalog = CollectionCatalog::get(opCtx);
 
-    telemetry::registerAggRequest(request, opCtx);
-
     // Since we remove encryptionInformation after rewriting a FLE2 query, this boolean keeps track
-    // of whether the input query did originally have enryption information.
+    // of whether the input query did originally have encryption information.
     bool didDoFLERewrite = false;
 
     {
@@ -806,6 +819,7 @@ Status runAggregate(OperationContext* opCtx,
 
             // Obtain collection locks on the execution namespace; that is, the oplog.
             initContext(auto_get_collection::ViewMode::kViewsForbidden);
+            collectTelemetry();
         } else if (nss.isCollectionlessAggregateNS() && pipelineInvolvedNamespaces.empty()) {
             uassert(4928901,
                     str::stream() << AggregateCommandRequest::kCollectionUUIDFieldName
@@ -825,9 +839,11 @@ Status runAggregate(OperationContext* opCtx,
             tassert(6235101,
                     "A collection-less aggregate should not take any locks",
                     ctx == boost::none);
+            collectTelemetry();
         } else {
             // This is a regular aggregation. Lock the collection or view.
             initContext(auto_get_collection::ViewMode::kViewsPermitted);
+            collectTelemetry();
             auto [collator, match] =
                 PipelineD::resolveCollator(opCtx,
                                            request.getCollation().get_value_or(BSONObj()),
@@ -929,12 +945,18 @@ Status runAggregate(OperationContext* opCtx,
             opCtx, nss, collections.getMainCollection(), request.getCollectionUUID());
 
         invariant(collatorToUse);
-        expCtx = makeExpressionContext(
-            opCtx, request, std::move(*collatorToUse), uuid, collatorToUseMatchesDefault);
+        expCtx = makeExpressionContext(opCtx,
+                                       request,
+                                       std::move(*collatorToUse),
+                                       uuid,
+                                       collatorToUseMatchesDefault,
+                                       collections.getMainCollection()
+                                           ? collections.getMainCollection()->getCollectionOptions()
+                                           : boost::optional<CollectionOptions>(boost::none));
 
         expCtx->startExpressionCounters();
         auto pipeline = Pipeline::parse(request.getPipeline(), expCtx);
-        opCtx->beginPlanningTimer();
+        curOp->beginQueryPlanningTimer();
         expCtx->stopExpressionCounters();
 
         if (!request.getAllowDiskUse().value_or(true)) {
@@ -1038,8 +1060,6 @@ Status runAggregate(OperationContext* opCtx,
             p.deleteUnderlying();
         }
     });
-    auto extDataSrcGuard =
-        std::make_shared<ExternalDataSourceScopeGuard>(std::move(externalDataSourceGuard));
     for (auto&& exec : execs) {
         ClientCursorParams cursorParams(
             std::move(exec),
@@ -1057,9 +1077,6 @@ Status runAggregate(OperationContext* opCtx,
 
         pin->incNBatches();
         cursors.emplace_back(pin.getCursor());
-        // All cursors share the ownership to 'extDataSrcGuard' and if the last cursor is destroyed,
-        // 'extDataSrcGuard' is also destroyed and created virtual collections are dropped by the
-        // destructor of ExternalDataSourceScopeGuard.
         ExternalDataSourceScopeGuard::get(pin.getCursor()) = extDataSrcGuard;
         pins.emplace_back(std::move(pin));
     }
@@ -1102,7 +1119,7 @@ Status runAggregate(OperationContext* opCtx,
         curOp->debug().setPlanSummaryMetrics(stats);
         curOp->debug().nreturned = stats.nReturned;
 
-        telemetry::recordExecution(opCtx, curOp->debug(), didDoFLERewrite);
+        telemetry::recordExecution(opCtx, didDoFLERewrite);
 
         // For an optimized away pipeline, signal the cache that a query operation has completed.
         // For normal pipelines this is done in DocumentSourceCursor.

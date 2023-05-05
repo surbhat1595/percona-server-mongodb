@@ -128,22 +128,24 @@ std::vector<BSONObj> runSBEAST(OperationContext* opCtx,
 
     SlotVarMap map;
     boost::optional<sbe::value::SlotId> ridSlot;
+    auto runtimeEnv = std::make_unique<sbe::RuntimeEnvironment>();
     sbe::value::SlotIdGenerator ids;
 
     auto env = VariableEnvironment::build(tree);
     SBENodeLowering g{env,
                       map,
+                      *runtimeEnv,
                       ridSlot,
                       ids,
                       phaseManager.getMetadata(),
                       phaseManager.getNodeToGroupPropsMap(),
-                      false /*randomScan*/};
+                      ScanOrder::Forward};
     auto sbePlan = g.optimize(tree);
     ASSERT_EQ(1, map.size());
     tassert(6624260, "Unexpected rid slot", !ridSlot);
     uassert(6624249, "Cannot optimize SBE plan", sbePlan != nullptr);
 
-    sbe::CompileCtx ctx(std::make_unique<sbe::RuntimeEnvironment>());
+    sbe::CompileCtx ctx(std::move(runtimeEnv));
     sbePlan->prepare(ctx);
 
     std::vector<sbe::value::SlotAccessor*> accessors;

@@ -14,12 +14,8 @@
  * ]
  */
 
-(function() {
-"use strict";
-
+import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
 load("jstests/core/txns/libs/prepare_helpers.js");
-load("jstests/replsets/libs/tenant_migration_test.js");
-load("jstests/replsets/libs/tenant_migration_util.js");
 load("jstests/replsets/rslib.js");
 load("jstests/libs/uuid_util.js");
 
@@ -29,7 +25,7 @@ const collName = "testColl";
 
 const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
 const tenantDB = tenantMigrationTest.tenantDB(tenantId, "testDB");
-const nonTenantDB = tenantMigrationTest.nonTenantDB(tenantId, "testDB");
+const nonTenantDB = tenantMigrationTest.tenantDB(ObjectId().str, "testDB");
 const tenantNS = `${tenantDB}.${collName}`;
 
 const donorPrimary = tenantMigrationTest.getDonorPrimary();
@@ -139,4 +135,3 @@ TenantMigrationTest.assertCommitted(tenantMigrationTest.waitForMigrationToComple
 validateTransactionEntryonRecipient(sessionIdBeforeMigration);
 
 tenantMigrationTest.stop();
-})();

@@ -11,20 +11,21 @@
  * ]
  */
 
-(function() {
-"use strict";
+import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
+import {
+    checkTenantDBHashes,
+    makeX509OptionsForTest,
+} from "jstests/replsets/libs/tenant_migration_util.js";
+
+load("jstests/libs/fail_point_util.js");
+load("jstests/libs/uuid_util.js");  // for 'extractUUIDFromObject'
 
 const tenantMigrationFailoverTest = function(isTimeSeries, createCollFn, docs) {
-    load("jstests/libs/fail_point_util.js");
-    load("jstests/libs/uuid_util.js");  // for 'extractUUIDFromObject'
-    load("jstests/replsets/libs/tenant_migration_test.js");
-    load("jstests/replsets/libs/tenant_migration_util.js");
-
     const batchSize = 2;
     const recipientRst = new ReplSetTest({
         nodes: 2,
         name: jsTestName() + "_recipient",
-        nodeOptions: Object.assign(TenantMigrationUtil.makeX509OptionsForTest().recipient, {
+        nodeOptions: Object.assign(makeX509OptionsForTest().recipient, {
             setParameter: {
                 // Use a batch size of 2 so that collection cloner requires more than a single
                 // batch to complete.
@@ -42,7 +43,7 @@ const tenantMigrationFailoverTest = function(isTimeSeries, createCollFn, docs) {
         new TenantMigrationTest({name: jsTestName(), recipientRst: recipientRst});
     const donorPrimary = tenantMigrationTest.getDonorPrimary();
 
-    const tenantId = "testTenantId";
+    const tenantId = ObjectId().str;
     const dbName = tenantMigrationTest.tenantDB(tenantId, "testDB");
     const donorDB = donorPrimary.getDB(dbName);
     const collName = "testColl";
@@ -58,7 +59,7 @@ const tenantMigrationFailoverTest = function(isTimeSeries, createCollFn, docs) {
     const migrationOpts = {
         migrationIdString: migrationIdString,
         recipientConnString: tenantMigrationTest.getRecipientConnString(),
-        tenantId: tenantId,
+        tenantId,
     };
 
     // Configure a fail point to have the recipient primary hang after cloning 2 documents.
@@ -100,8 +101,8 @@ const tenantMigrationFailoverTest = function(isTimeSeries, createCollFn, docs) {
     // Check that recipient has cloned all documents in the collection.
     recipientColl = newRecipientPrimary.getDB(dbName).getCollection(collName);
     assert.eq(docs.length, recipientColl.find().itcount());
-    assert.docEq(recipientColl.find().sort({_id: 1}).toArray(), docs);
-    TenantMigrationUtil.checkTenantDBHashes({
+    assert.docEq(docs, recipientColl.find().sort({_id: 1}).toArray());
+    checkTenantDBHashes({
         donorRst: tenantMigrationTest.getDonorRst(),
         recipientRst: tenantMigrationTest.getRecipientRst(),
         tenantId
@@ -128,4 +129,3 @@ jsTestLog("Running tenant migration test for regular collection");
 tenantMigrationFailoverTest(false,
                             (db, collName) => db.createCollection(collName),
                             [{_id: 0}, {_id: "string"}, {_id: UUID()}, {_id: new Date()}]);
-})();

@@ -887,7 +887,7 @@ tasks:
           test_control: "bestbuy_analytics"
           test_control_params: |
             {scale: 4,
-             columnstore: False}
+             columnstore: false}
 
   - name: bestbuy_4_analytics_columnstore
     priority: 5
@@ -897,7 +897,26 @@ tasks:
           test_control: "bestbuy_analytics"
           test_control_params: |
             {scale: 4,
-             columnstore: True}
+             columnstore: true}
+
+  # Named Pipes single concurrent query benchmarks
+  - name: external_data_source_1
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          mongodb_setup: "external_data_source"
+          test_control: "external_data_source_1"
+
+  # Named Pipes four concurrent query benchmarks
+  - name: external_data_source_4
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          mongodb_setup: "external_data_source"
+          test_control: "external_data_source_4"
+
 
   - name: tpch_1_normalized
     priority: 5
@@ -949,14 +968,55 @@ tasks:
           test_control: "ssb_column_store_index"
           test_control_params: |
             {scale: 5}
+  - name: column_store_tpch_10_denormalized
+    priority: 5
+    exec_timeout_secs: 43200 # 12 hours
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "column_store_tpch"
+          test_control_params: |
+            {scale: 10,
+             schema: denormalized,
+             columnstore: true}
+  - name: column_store_tpch_10_denormalized_unindexed
+    priority: 5
+    exec_timeout_secs: 43200 # 12 hours
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "column_store_tpch"
+          test_control_params: |
+            {scale: 10,
+             schema: denormalized,
+             columnstore: false}
 
-# TODO PERF-3094: Remove this task.
+# TODO PERF-3094: Remove these charts_events tasks.
   - name: column_store_index_charts_events_1G
     priority: 5
     commands:
       - func: f_run_dsi_workload
         vars:
-          test_control: "charts_events_1G"
+          test_control: "charts_events"
+          test_control_params: |
+            {scale: 1}
+
+  - name: column_store_index_charts_events_10G
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "charts_events"
+          test_control_params: |
+            {scale: 10}
+
+# TODO PERF-3094: Remove this task.
+  - name: bestbuy_4_inserts
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "bestbuy_4_inserts"
 
   - name: non_sharded_workloads
     priority: 5
@@ -1039,7 +1099,7 @@ tasks:
           test_control: "initialsync-logkeeper"
           mongodb_setup: "initialsync-logkeeper-short"
           # Logkeeper dataset with FCV set to 6.0
-          mongodb_dataset: "https://dsi-donot-remove.s3-us-west-2.amazonaws.com/InitialSyncLogKeeper/logkeeper-slice-data-mongodb-6.1.tgz"
+          mongodb_dataset: "https://dsi-donot-remove.s3-us-west-2.amazonaws.com/InitialSyncLogKeeper/logkeeper-slice-data-mongodb-6.2.tgz"
 
   - name: initialsync-logkeeper-short-fcbis
     priority: 5
@@ -1049,7 +1109,7 @@ tasks:
           test_control: "initialsync-logkeeper"
           mongodb_setup: "initialsync-logkeeper-short-fcbis"
           # Logkeeper dataset with FCV set to 6.0
-          mongodb_dataset: "https://dsi-donot-remove.s3-us-west-2.amazonaws.com/InitialSyncLogKeeper/logkeeper-slice-data-mongodb-6.1.tgz"
+          mongodb_dataset: "https://dsi-donot-remove.s3-us-west-2.amazonaws.com/InitialSyncLogKeeper/logkeeper-slice-data-mongodb-6.2.tgz"
 
   - name: initialsync-logkeeper
     priority: 5
@@ -1081,7 +1141,7 @@ tasks:
           test_control: "initialsync-logkeeper-short-s3-update"
           mongodb_setup: "initialsync-logkeeper-short-s3-update"
           # Update this to Logkeeper dataset with FCV set to latest after each LTS release.
-          mongodb_dataset: "https://dsi-donot-remove.s3-us-west-2.amazonaws.com/InitialSyncLogKeeper/logkeeper-slice-data-mongodb-6.1.tgz"
+          mongodb_dataset: "https://dsi-donot-remove.s3-us-west-2.amazonaws.com/InitialSyncLogKeeper/logkeeper-slice-data-mongodb-6.2.tgz"
 
   - name: initialsync-logkeeper-snapshot-update
     priority: 5
@@ -1147,6 +1207,279 @@ tasks:
       - func: f_run_dsi_workload
         vars:
           test_control: "change_streams_multi_mongos"
+
+  - name: genny_execution_UserAcquisition
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: auto_genny_workload
+          auto_workload_path: ./src/genny/dist/etc/genny/workloads/execution/UserAcquisition.yml
+  - name: genny_scale_InsertRemove
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: auto_genny_workload
+          auto_workload_path: ./src/genny/dist/etc/genny/workloads/scale/InsertRemove.yml
+  - name: query_read_commands
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          test_control_params: |
+            {include_filter_1: query,
+             include_filter_2: core regression,
+             exclude_filter: single_threaded,
+             threads: "1 2 4 8",
+             read_cmd: 'true'}
+  - name: query_read_commands_large_dataset
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          test_control_params: |
+            {include_filter_1: query_large_dataset,
+             include_filter_2: regression,
+             exclude_filter: none,
+             threads: "1 4",
+             read_cmd: 'true',
+             share_dataset: 'true'}
+  - name: big_collection
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          test_control_params: |
+            {include_filter_1: query,
+             include_filter_2: getmore,
+             exclude_filter: none,
+             threads: "1 2 4 8",
+             read_cmd: 'true'}
+  - name: views-query
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          test_control_params: |
+            {include_filter_1: query_identityview,
+             include_filter_2: core regression,
+             exclude_filter: single_threaded,
+             threads: "1 2 4 8",
+             read_cmd: 'true'}
+  - name: views-aggregation
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          test_control_params: |
+            {include_filter_1: aggregation_identityview,
+             include_filter_2: regression,
+             exclude_filter: none,
+             threads: "1",
+             read_cmd: 'true'}
+  - name: where_read_commands
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          test_control_params: |
+            {include_filter_1: where,
+             include_filter_2: core regression,
+             exclude_filter: single_threaded,
+             threads: "1 2 4 8",
+             read_cmd: 'true'}
+  - name: update_read_commands
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          test_control_params: |
+            {include_filter_1: update,
+             include_filter_2: core regression,
+             exclude_filter: single_threaded,
+             threads: "1 2 4 8",
+             read_cmd: 'true'}
+  - name: insert_read_commands
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          test_control_params: |
+            {include_filter_1: insert,
+             include_filter_2: core regression,
+             exclude_filter: single_threaded,
+             threads: "1 2 4 8",
+             read_cmd: 'true'}
+  - name: wildcard-index-read_read_commands
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          test_control_params: |
+            {include_filter_1: wildcard_read,
+             include_filter_2: core regression,
+             exclude_filter: single_threaded,
+             threads: "1 2 4 8",
+             read_cmd: 'true'}
+  - name: wildcard-index-write_read_commands
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          test_control_params: |
+            {include_filter_1: wildcard_write,
+             include_filter_2: core regression,
+             exclude_filter: single_threaded,
+             threads: "1 2 4 8",
+             read_cmd: 'true'}
+  - name: geo_read_commands
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          test_control_params: |
+            {include_filter_1: geo,
+             include_filter_2: core regression,
+             exclude_filter: single_threaded,
+             threads: "1 2 4 8",
+             read_cmd: 'true'}
+  - name: misc_read_commands
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          test_control_params: |
+            {include_filter_1: command multi remove mixed,
+             include_filter_2: core regression,
+             exclude_filter: single_threaded,
+             threads: "1 2 4 8",
+             read_cmd: 'true'}
+  - name: misc_custom_filter_default_read_commands
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          mongodb_setup: microbenchmarks_standalone_custom_filter_default.2023-01
+          test_control_params: |
+            {include_filter_1: command multi remove mixed,
+             include_filter_2: core regression,
+             exclude_filter: single_threaded,
+             threads: "1 2 4 8",
+             read_cmd: 'true'}
+  - name: misc_custom_filter_slow_or_sample_read_commands
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          mongodb_setup: microbenchmarks_standalone_custom_filter_slow_or_sample.2023-01
+          test_control_params: |
+            {include_filter_1: command multi remove mixed,
+             include_filter_2: core regression,
+             exclude_filter: single_threaded,
+             threads: "1 2 4 8",
+             read_cmd: 'true'}
+  - name: misc_custom_filter_complex_read_commands
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          mongodb_setup: microbenchmarks_standalone_custom_filter_complex.2023-01
+          test_control_params: |
+            {include_filter_1: command multi remove mixed,
+             include_filter_2: core regression,
+             exclude_filter: single_threaded,
+             threads: "1 2 4 8",
+             read_cmd: 'true'}
+  - name: misc_custom_filter_whole_doc_read_commands
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          mongodb_setup: microbenchmarks_standalone_custom_filter_whole_doc.2023-01
+          test_control_params: |
+            {include_filter_1: command multi remove mixed,
+             include_filter_2: core regression,
+             exclude_filter: single_threaded,
+             threads: "1 2 4 8",
+             read_cmd: 'true'}
+  - name: misc_slowms_everything_read_commands
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          mongodb_setup: microbenchmarks_standalone_slowms_everything.2023-01
+          test_control_params: |
+            {include_filter_1: command multi remove mixed,
+             include_filter_2: core regression,
+             exclude_filter: single_threaded,
+             threads: "1 2 4 8",
+             read_cmd: 'true'}
+  - name: singleThreaded_read_commands
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          test_control_params: |
+            {include_filter_1: single_threaded,
+             include_filter_2: core regression,
+             exclude_filter: none,
+             threads: "1",
+             read_cmd: 'true'}
+  - name: aggregation_read_commands
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          test_control_params: |
+            {include_filter_1: aggregation,
+             include_filter_2: regression,
+             exclude_filter: js,
+             threads: "1",
+             read_cmd: 'true'}
+  - name: aggregation_read_commands_large_dataset
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          test_control_params: |
+            {include_filter_1: aggregation_large_dataset,
+             include_filter_2: regression,
+             exclude_filter: js,
+             threads: "1 4",
+             read_cmd: 'true',
+             share_dataset: 'true'}
+  - name: agg-query-comparison_read_commands
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          test_control_params: |
+            {include_filter_1: agg_query_comparison,
+             include_filter_2: core regression,
+             exclude_filter: single_threaded,
+             threads: "1 2 4 8",
+             read_cmd: 'true'}
+  - name: pipeline-updates
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          test_control_params: |
+            {include_filter_1: pipeline-updates,
+             include_filter_2: regression,
+             exclude_filter: none,
+             threads: "1 2 4 8",
+             read_cmd: 'true'}
+  - name: javascript
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: microbenchmarks
+          test_control_params: |
+            {include_filter_1: js,
+             include_filter_2: aggregation,
+             exclude_filter: none,
+             threads: "1 2 4 8",
+             read_cmd: 'true'}
 
 buildvariants:
   - name: task_generation
@@ -1226,7 +1559,6 @@ buildvariants:
 
   - name: linux-standalone
     display_name: Linux Standalone Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: standalone
@@ -1265,7 +1597,6 @@ buildvariants:
 
   - name: linux-standalone-all-feature-flags
     display_name: Linux Standalone (all feature flags) Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: standalone-all-feature-flags
@@ -1290,7 +1621,10 @@ buildvariants:
       - name: bestbuy_agg_merge_wordcount
       - name: bestbuy_4_analytics
       - name: bestbuy_4_analytics_columnstore
+      - name: bestbuy_4_inserts
       - name: bestbuy_query
+      - name: external_data_source_1
+      - name: external_data_source_4
       - name: cursor_manager
       - name: map_reduce_workloads
       - name: tpcc
@@ -1298,6 +1632,8 @@ buildvariants:
       - name: tpch_1_denormalized
       - name: tpch_10_normalized
       - name: tpch_10_denormalized
+      - name: column_store_tpch_10_denormalized
+      - name: column_store_tpch_10_denormalized_unindexed
       - name: column_store_index_charts_events_1G
       - name: ssb_column_store_comparison
 
@@ -1392,9 +1728,40 @@ buildvariants:
     depends_on: *_compile_amazon2
     tasks: *classic_engine_1nodereplset_tasks
 
+  - name: linux-standalone-telemetry
+    display_name: Linux Standalone (Telemetry)
+    cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
+    modules: *modules
+    expansions:
+      mongodb_setup: standalone-telemetry
+      infrastructure_provisioning: single
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+    run_on:
+      - "rhel70-perf-single"
+    depends_on: *_compile_amazon2
+    tasks: *classic_engine_tasks
+
+  - name: linux-1-node-replSet-telemetry
+    display_name: Linux 1-Node ReplSet (Telemetry)
+    cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
+    modules: *modules
+    expansions:
+      mongodb_setup: single-replica-telemetry
+      infrastructure_provisioning: single
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+    run_on:
+      - "rhel70-perf-single"
+    depends_on: *_compile_amazon2
+    tasks: *classic_engine_1nodereplset_tasks
+
   - name: linux-1-node-replSet-all-feature-flags
     display_name: Linux 1-Node ReplSet (all feature flags) Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-all-feature-flags
@@ -1409,6 +1776,37 @@ buildvariants:
     tasks:
       - name: linkbench
       - name: linkbench2
+
+  - name: linux-1-node-replSet-lite-all-feature-flags.2022-11
+    display_name: Linux 1-Node ReplSet (graviton lite, all FF) 2022-11
+    # TODO SERVER-70644: Will make it less frequent when the columnstore index project is finished.
+    cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
+    modules: *modules
+    expansions:
+      mongodb_setup_release: 2022-11
+      workload_setup: 2022-11
+      mongodb_setup: single-replica-all-feature-flags
+      infrastructure_provisioning: graviton-single-lite.2022-11
+      infrastructure_provisioning_release: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+      compile-variant: -arm64
+    run_on:
+      - "rhel70-perf-single"
+    depends_on: *_compile_amazon_linux2_arm64
+    tasks:
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
+      - name: bestbuy_4_analytics
+      - name: bestbuy_4_analytics_columnstore
+      - name: bestbuy_4_inserts
+      - name: column_store_index_charts_events_1G
+      - name: column_store_index_charts_events_10G
+      - name: column_store_tpch_10_denormalized
+      - name: column_store_tpch_10_denormalized_unindexed
+      - name: ssb_column_store_comparison
 
   - name: compile-rhel70
     display_name: Compile for Atlas-like
@@ -1431,7 +1829,6 @@ buildvariants:
 
   - name: linux-1-node-replSet
     display_name: Linux 1-Node ReplSet Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica
@@ -1480,7 +1877,6 @@ buildvariants:
 
   - name: linux-standalone-audit
     display_name: Linux Standalone Audit Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: standalone-audit
@@ -1501,7 +1897,6 @@ buildvariants:
 
   - name: linux-1-node-replSet-audit-log-encryption-no-compression
     display_name: Linux Single-node Replica Set Audit w/ At-Rest Log Encryption (No compression) Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-audit-log-encryption-no-compression
@@ -1517,7 +1912,6 @@ buildvariants:
 
   - name: linux-1-node-replSet-audit
     display_name: Linux Single-node Replica Set Audit Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-audit
@@ -1533,7 +1927,6 @@ buildvariants:
 
   - name: linux-1-node-replSet-audit-log-encryption-compression
     display_name: Linux Single-node Replica Set Audit w/ At-Rest Log Encryption (With compression) Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-audit-log-encryption-compression
@@ -1549,7 +1942,6 @@ buildvariants:
 
   - name: linux-1-node-replSet-fle
     display_name: Linux 1-Node ReplSet FLE Legacy
-    cron: "0 0 * * 0,4"  # 00:00 on Sunday,Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-fle
@@ -1568,7 +1960,6 @@ buildvariants:
 
   - name: linux-1-node-replSet-cwrwc
     display_name: Linux 1-Node ReplSet CWRWC Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-cwrwc
@@ -1588,7 +1979,6 @@ buildvariants:
 
   - name: linux-1-node-replSet-ese-cbc
     display_name: Linux 1-Node ReplSet ESE CBC Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-ese-cbc
@@ -1610,7 +2000,6 @@ buildvariants:
 
   - name: linux-1-node-replSet-ese-gcm
     display_name: Linux 1-Node ReplSet ESE GCM Legacy
-    cron: "0 0 1 * *"  # 00:00 on the first of each month
     modules: *modules
     expansions:
       mongodb_setup: single-replica-ese-gcm
@@ -1632,7 +2021,6 @@ buildvariants:
 
   - name: linux-1-node-15gbwtcache
     display_name: Linux 1-Node ReplSet 15 GB WiredTiger Cache Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: single-replica-15gbwtcache
@@ -1654,7 +2042,6 @@ buildvariants:
 
   - name: linux-3-node-1dayhistory-15gbwtcache
     display_name: Linux 3-Node ReplSet 1 Day History 15 GB WiredTiger Cache Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-1dayhistory-15gbwtcache
@@ -1677,7 +2064,6 @@ buildvariants:
 
   - name: linux-3-shard
     display_name: Linux 3-Shard Cluster Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: shard
@@ -1712,7 +2098,6 @@ buildvariants:
 
   - name: linux-shard-lite-audit
     display_name: Linux Shard Lite Cluster Audit Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: shard-lite-audit
@@ -1729,7 +2114,6 @@ buildvariants:
 
   - name: linux-shard-lite
     display_name: Linux Shard Lite Cluster Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: shard-lite
@@ -1773,7 +2157,6 @@ buildvariants:
 
   - name: linux-shard-lite-cwrwc
     display_name: Linux Shard Lite Cluster CWRWC Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: shard-lite-cwrwc
@@ -1793,7 +2176,6 @@ buildvariants:
 
   - name: linux-shard-lite-read-concern-available
     display_name: Linux Shard Lite ReadConcern Available Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: shard-lite-read-concern-available
@@ -1813,7 +2195,6 @@ buildvariants:
 
   - name: linux-shard-lite-all-feature-flags
     display_name: Linux Shard Lite (all feature flags) Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: shard-lite-all-feature-flags
@@ -1837,7 +2218,6 @@ buildvariants:
 
   - name: linux-shard-single
     display_name: Linux Shard Single Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: shard-single
@@ -1855,7 +2235,6 @@ buildvariants:
 
   - name: linux-3-node-replSet
     display_name: Linux 3-Node ReplSet Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica
@@ -1913,7 +2292,6 @@ buildvariants:
 
   - name: linux-3-node-replSet-last-continuous-fcv
     display_name: Linux 3-Node ReplSet (Last Continuous FCV) Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-last-continuous-fcv
@@ -1968,7 +2346,6 @@ buildvariants:
 
   - name: linux-3-node-replSet-last-lts-fcv
     display_name: Linux 3-Node ReplSet (Last LTS FCV) Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-last-lts-fcv
@@ -2025,7 +2402,6 @@ buildvariants:
   # history even though the display name is "all feature flags"
   - name: linux-3-node-replSet-disabled-feature-flags
     display_name: Linux 3-Node ReplSet (all feature flags) Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-all-feature-flags
@@ -2082,7 +2458,6 @@ buildvariants:
 
   - name: linux-3-node-replSet-noflowcontrol
     display_name: Linux 3-Node ReplSet (Flow Control off) Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-noflowcontrol
@@ -2113,7 +2488,6 @@ buildvariants:
 
   - name: linux-3-node-replSet-ssl
     display_name: Linux 3-Node ReplSet (SSL) Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-ssl
@@ -2133,7 +2507,6 @@ buildvariants:
 
   - name: linux-3-node-replSet-maintenance-events
     display_name: Linux 3-Node ReplSet (Maintenance Events) Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-maintenance-events
@@ -2161,7 +2534,6 @@ buildvariants:
 
   - name: linux-3-node-replSet-initialsync
     display_name: Linux 3-Node ReplSet Initial Sync Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-2node
@@ -2181,13 +2553,12 @@ buildvariants:
 
   - name: linux-replSet-initialsync-logkeeper
     display_name: Linux ReplSet Initial Sync LogKeeper Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: initialsync-logkeeper
       infrastructure_provisioning: initialsync-logkeeper
       # EBS logkeeper snapshot with FCV set to 6.0
-      snapshotId: snap-0716ed59d18225693
+      snapshotId: snap-0a7bca6322ef8b844
       platform: linux
       authentication: disabled
       storageEngine: wiredTiger
@@ -2203,7 +2574,6 @@ buildvariants:
 
   - name: linux-replSet-audit
     display_name: Linux 3-Node ReplSet Audit Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-audit
@@ -2222,7 +2592,6 @@ buildvariants:
 
   - name: linux-replSet-auth-delay
     display_name: Linux 3-Node ReplSet (Auth Delay) Legacy
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: replica-auth-cluster-delay
@@ -2240,7 +2609,6 @@ buildvariants:
 
   - name: atlas-like-M60
     display_name: M60-Like-old 3-Node ReplSet
-    cron: "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup: atlas-like-replica
@@ -2463,6 +2831,7 @@ buildvariants:
       - name: bestbuy_agg_merge_wordcount
       - name: bestbuy_4_analytics
       - name: bestbuy_4_analytics_columnstore
+      - name: bestbuy_4_inserts
       - name: bestbuy_query
       - name: cursor_manager
       - name: map_reduce_workloads
@@ -2472,6 +2841,8 @@ buildvariants:
       - name: tpch_10_normalized
       - name: tpch_10_denormalized
       - name: column_store_index_charts_events_1G
+      - name: column_store_tpch_10_denormalized
+      - name: column_store_tpch_10_denormalized_unindexed
       - name: ssb_column_store_comparison
 
   - name: linux-standalone-classic-query-engine.2022-11
@@ -2600,6 +2971,8 @@ buildvariants:
       - "rhel70-perf-single"
     depends_on: *_compile_amazon_linux2_arm64
     tasks:
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
       - name: linkbench
       - name: linkbench2
 
@@ -2925,9 +3298,9 @@ buildvariants:
       - name: change_streams_latency
       - name: change_streams_listen_throughput
       - name: change_streams_multi_mongos
-      # - name: tsbs_query_sharded
+      - name: tsbs_query_sharded
       - name: tsbs_query_finance_sharded
-      # - name: tsbs_query_sharded_balancer
+      - name: tsbs_query_sharded_balancer
       - name: tsbs_query_finance_sharded_balancer
 
   - name: linux-shard-lite-audit.2022-11
@@ -2992,9 +3365,9 @@ buildvariants:
       - name: move_chunk_workloads
       - name: move_chunk_waiting_workloads
       - name: smoke_test
-      # - name: tsbs_query_sharded
+      - name: tsbs_query_sharded
       - name: tsbs_query_finance_sharded
-      # - name: tsbs_query_sharded_balancer
+      - name: tsbs_query_sharded_balancer
       - name: tsbs_query_finance_sharded_balancer
 
   - name: linux-shard-lite-intel.2022-11
@@ -3071,9 +3444,9 @@ buildvariants:
       - name: schedule_variant_auto_tasks
       - name: change_streams_preimage_throughput
       - name: change_streams_preimage_latency
-      # - name: tsbs_query_sharded
+      - name: tsbs_query_sharded
       - name: tsbs_query_finance_sharded
-      # - name: tsbs_query_sharded_balancer
+      - name: tsbs_query_sharded_balancer
       - name: tsbs_query_finance_sharded_balancer
 
   - name: linux-shard-single.2022-11
@@ -3447,7 +3820,7 @@ buildvariants:
       infrastructure_provisioning: initialsync-logkeeper
       workload_setup: 2022-11
       # EBS logkeeper snapshot with FCV set to 6.0
-      snapshotId: snap-0716ed59d18225693
+      snapshotId: snap-0a7bca6322ef8b844
       platform: linux
       authentication: disabled
       storageEngine: wiredTiger
@@ -3472,7 +3845,7 @@ buildvariants:
   #    mongodb_setup: initialsync-logkeeper-snapshot-update
   #    infrastructure_provisioning: initialsync-logkeeper-snapshot-update
   #    # Update this to latest snapshot after each LTS release.
-  #    snapshotId: snap-0716ed59d18225693
+  #    snapshotId: snap-0a7bca6322ef8b844
   #    platform: linux
   #    authentication: disabled
   #    storageEngine: wiredTiger
@@ -3530,3 +3903,163 @@ buildvariants:
     tasks:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
+
+  - &linux-microbenchmarks-standalone-arm
+    name: linux-microbenchmarks-standalone-arm.2023-01
+    display_name: MicroBenchmarks Arm Standalone inMemory.2023-01
+    cron: "0 */4 * * *" # Every 4 hours starting at midnight
+    modules: *modules
+    expansions:
+      mongodb_setup_release: 2022-11
+      mongodb_setup: microbenchmarks_standalone.2023-01
+      infrastructure_provisioning_release: 2022-11
+      infrastructure_provisioning: workload_client_mongod_combined.2023-01
+      workload_setup: 2022-11
+      use_scons_cache: true
+      platform: linux
+      canaries: none
+      storageEngine: inMemory
+      project_dir: *project_dir
+      compile_variant: "-arm64"
+    run_on:
+    - "rhel70-perf-single"
+    depends_on: *_compile_amazon_linux2_arm64
+    tasks:
+    - name: big_collection
+    - name: genny_scale_InsertRemove
+    - name: genny_execution_UserAcquisition
+    - name: aggregation_read_commands
+    - name: aggregation_read_commands_large_dataset
+    - name: agg-query-comparison_read_commands
+    - name: query_read_commands
+    - name: query_read_commands_large_dataset
+    - name: views-aggregation
+    - name: views-query
+    - name: where_read_commands
+    - name: update_read_commands
+    - name: insert_read_commands
+    - name: wildcard-index-read_read_commands
+    - name: wildcard-index-write_read_commands
+    - name: geo_read_commands
+    - name: misc_read_commands
+    - name: misc_custom_filter_default_read_commands
+    - name: misc_custom_filter_slow_or_sample_read_commands
+    - name: misc_custom_filter_complex_read_commands
+    - name: misc_custom_filter_whole_doc_read_commands
+    - name: misc_slowms_everything_read_commands
+    - name: singleThreaded_read_commands
+    - name: pipeline-updates
+    - name: javascript
+
+  - &linux-microbenchmarks-repl-arm
+    name: linux-microbenchmarks-repl-arm.2023-01
+    display_name: MicroBenchmarks Arm 1-Node ReplSet inMemory.2023-01
+    cron: "0 */4 * * *" # Every 4 hours starting at midnight
+    modules: *modules
+    expansions:
+      mongodb_setup_release: 2022-11
+      mongodb_setup: microbenchmarks_replica.2023-01
+      infrastructure_provisioning_release: 2022-11
+      infrastructure_provisioning: workload_client_mongod_combined.2023-01
+      workload_setup: 2022-11
+      use_scons_cache: true
+      platform: linux
+      canaries: none
+      storageEngine: inMemory
+      project_dir: *project_dir
+      compile_variant: "-arm64"
+    run_on:
+    - "rhel70-perf-single"
+    depends_on: *_compile_amazon_linux2_arm64
+    tasks:
+    - name: genny_scale_InsertRemove
+    - name: update_read_commands
+    - name: insert_read_commands
+    - name: misc_read_commands
+    - name: singleThreaded_read_commands
+    - name: wildcard-index-write_read_commands
+    - name: pipeline-updates
+
+  - <<: *linux-microbenchmarks-standalone-arm
+    name: linux-microbenchmarks-standalone-all-feature-flags-arm.2023-01
+    display_name: MicroBenchmarks Arm Standalone inMemory (all feature flags).2023-01
+    cron: "0 */4 * * *" # Every 4 hours starting at midnight
+    expansions:
+      mongodb_setup: microbenchmarks_standalone-all-feature-flags.2023-01
+
+  - <<: *linux-microbenchmarks-standalone-arm
+    name: linux-microbenchmarks-standalone-classic-query-engine-arm.2023-01
+    display_name: MicroBenchmarks Arm Standalone inMemory (Classic Query Engine).2023-01
+    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
+    cron: "0 */4 * * *" # Every 4 hours starting at midnight
+    expansions:
+      mongodb_setup: microbenchmarks_standalone-classic-query-engine.2023-01
+
+  - <<: *linux-microbenchmarks-standalone-arm
+    name: linux-microbenchmarks-standalone-sbe-arm.2023-01
+    display_name: MicroBenchmarks Arm Standalone inMemory (SBE).2023-01
+    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
+    cron: "0 */4 * * *" # Every 4 hours starting at midnight
+    expansions:
+      mongodb_setup: microbenchmarks_standalone-sbe.2023-01
+
+  - <<: *linux-microbenchmarks-repl-arm
+    name: linux-microbenchmarks-repl-all-feature-flags-arm.2023-01
+    display_name: MicroBenchmarks Arm 1-Node ReplSet inMemory (all feature flags).2023-01
+    cron: "0 */4 * * *" # Every 4 hours starting at midnight
+    expansions:
+      mongodb_setup: microbenchmarks_replica-all-feature-flags.2023-01
+
+  - &linux-microbenchmarks-standalone-intel
+    <<: *linux-microbenchmarks-standalone-arm
+    name: linux-microbenchmarks-standalone-intel.2023-01
+    display_name: MicroBenchmarks Intel Standalone inMemory.2023-01
+    cron: "0 */4 * * *" # Every 4 hours starting at midnight
+    expansions:
+      infrastructure_provisioning: workload_client_mongod_combined_intel.2023-01
+      compile_variant: ""
+    run_on:
+    - "rhel70-perf-single"
+    depends_on: *_compile_amazon2
+
+  - &linux-microbenchmarks-repl-intel
+    <<: *linux-microbenchmarks-repl-arm
+    name: linux-microbenchmarks-repl-intel.2023-01
+    display_name: MicroBenchmarks Intel 1-Node ReplSet inMemory.2023-01
+    cron: "0 */4 * * *" # Every 4 hours starting at midnight
+    expansions:
+      infrastructure_provisioning: workload_client_mongod_combined_intel.2023-01
+      compile_variant: ""
+    run_on:
+    - "rhel70-perf-single"
+    depends_on: *_compile_amazon2
+
+  - <<: *linux-microbenchmarks-standalone-intel
+    name: linux-microbenchmarks-standalone-all-feature-flags.2023-01
+    display_name: MicroBenchmarks Intel Standalone inMemory (all feature flags).2023-01
+    cron: "0 */4 * * *" # Every 4 hours starting at midnight
+    expansions:
+      mongodb_setup: microbenchmarks_standalone-all-feature-flags.2023-01
+
+  - <<: *linux-microbenchmarks-standalone-intel
+    name: linux-microbenchmarks-standalone-classic-query-engine.2023-01
+    display_name: MicroBenchmarks Intel Standalone inMemory (Classic Query Engine).2023-01
+    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
+    cron: "0 */4 * * *" # Every 4 hours starting at midnight
+    expansions:
+      mongodb_setup: microbenchmarks_standalone-classic-query-engine.2023-01
+
+  - <<: *linux-microbenchmarks-standalone-intel
+    name: linux-microbenchmarks-standalone-sbe.2023-01
+    display_name: MicroBenchmarks Intel Standalone inMemory (SBE).2023-01
+    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
+    cron: "0 */4 * * *" # Every 4 hours starting at midnight
+    expansions:
+      mongodb_setup: microbenchmarks_standalone-sbe.2023-01
+
+  - <<: *linux-microbenchmarks-repl-intel
+    name: linux-microbenchmarks-repl-all-feature-flags.2023-01
+    display_name: MicroBenchmarks Intel 1-Node ReplSet inMemory (all feature flags).2023-01
+    cron: "0 */4 * * *" # Every 4 hours starting at midnight
+    expansions:
+      mongodb_setup: microbenchmarks_replica-all-feature-flags.2023-01

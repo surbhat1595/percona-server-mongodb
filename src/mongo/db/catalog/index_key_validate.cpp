@@ -44,6 +44,7 @@
 #include "mongo/db/index/columns_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/wildcard_key_generator.h"
+#include "mongo/db/index/wildcard_validation.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression_parser.h"
@@ -211,6 +212,14 @@ Status validateKeyPattern(const BSONObj& key, IndexDescriptor::IndexVersion inde
             }
         }
 
+        if (pluginName == IndexNames::WILDCARD &&
+            feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabledAndIgnoreFCV()) {
+            auto status = validateWildcardIndex(key);
+            if (!status.isOK()) {
+                return status;
+            }
+        }
+
         // Ensure that the fields on which we are building the index are valid: a field must not
         // begin with a '$' unless it is part of a wildcard, DBRef or text index, and a field path
         // cannot contain an empty field. If a field cannot be created or updated, it should not be
@@ -354,7 +363,7 @@ StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx, const BSONObj& in
             }
 
             indexType = IndexNames::findPluginName(keyPattern);
-            if (apiStrict && indexType == IndexNames::TEXT) {
+            if (apiStrict && (indexType == IndexNames::TEXT || indexType == IndexNames::COLUMN)) {
                 return {ErrorCodes::APIStrictError,
                         str::stream()
                             << indexType << " indexes cannot be created with apiStrict: true"};
@@ -514,8 +523,18 @@ StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx, const BSONObj& in
                                       << "' field can't be an empty object"};
             }
             try {
-                // We use createProjectionExecutor to parse and validate the path projection spec.
                 if (isWildcard) {
+                    if (key.nFields() > 1 &&
+                        feature_flags::gFeatureFlagCompoundWildcardIndexes
+                            .isEnabledAndIgnoreFCV()) {
+                        auto validationStatus =
+                            validateWildcardProjection(key, indexSpecElem.embeddedObject());
+                        if (!validationStatus.isOK()) {
+                            return validationStatus;
+                        }
+                    }
+                    // We use createProjectionExecutor to parse and validate the path projection
+                    // spec. call here
                     WildcardKeyGenerator::createProjectionExecutor(key,
                                                                    indexSpecElem.embeddedObject());
                 } else {
@@ -947,6 +966,38 @@ bool isIndexAllowedInAPIVersion1(const IndexDescriptor& indexDesc) {
     return indexName != IndexNames::TEXT && indexName != IndexNames::GEO_HAYSTACK &&
         !indexDesc.isSparse();
 }
+
+BSONObj parseAndValidateIndexSpecs(OperationContext* opCtx, const BSONObj& indexSpecObj) {
+    constexpr auto k_id_ = "_id_"_sd;
+    constexpr auto kStar = "*"_sd;
+
+    BSONObj parsedIndexSpec = indexSpecObj;
+
+    auto indexSpecStatus = index_key_validate::validateIndexSpec(opCtx, parsedIndexSpec);
+    uassertStatusOK(indexSpecStatus.getStatus().withContext(
+        str::stream() << "Error in specification " << parsedIndexSpec.toString()));
+
+    auto indexSpec = indexSpecStatus.getValue();
+    if (IndexDescriptor::isIdIndexPattern(indexSpec[IndexDescriptor::kKeyPatternFieldName].Obj())) {
+        uassertStatusOK(index_key_validate::validateIdIndexSpec(indexSpec));
+    } else {
+        uassert(ErrorCodes::BadValue,
+                str::stream() << "The index name '_id_' is reserved for the _id index, "
+                                 "which must have key pattern {_id: 1}, found "
+                              << indexSpec[IndexDescriptor::kKeyPatternFieldName],
+                indexSpec[IndexDescriptor::kIndexNameFieldName].String() != k_id_);
+
+        // An index named '*' cannot be dropped on its own, because a dropIndex oplog
+        // entry with a '*' as an index name means "drop all indexes in this
+        // collection".  We disallow creation of such indexes to avoid this conflict.
+        uassert(ErrorCodes::BadValue,
+                "The index name '*' is not valid.",
+                indexSpec[IndexDescriptor::kIndexNameFieldName].String() != kStar);
+    }
+
+    return indexSpec;
+}
+
 
 GlobalInitializerRegisterer filterAllowedIndexFieldNamesInitializer(
     "FilterAllowedIndexFieldNames", [](InitializerContext* service) {

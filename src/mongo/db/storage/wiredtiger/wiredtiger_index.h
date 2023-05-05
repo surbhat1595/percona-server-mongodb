@@ -123,6 +123,7 @@ public:
      */
     WiredTigerIndex(OperationContext* ctx,
                     const std::string& uri,
+                    const UUID& collectionUUID,
                     StringData ident,
                     KeyFormat rsKeyFormat,
                     const IndexDescriptor* desc,
@@ -141,15 +142,16 @@ public:
     virtual boost::optional<RecordId> findLoc(OperationContext* opCtx,
                                               const KeyString::Value& keyString) const override;
 
-    virtual void fullValidate(OperationContext* opCtx,
-                              long long* numKeysOut,
-                              IndexValidateResults* fullResults) const;
+    virtual IndexValidateResults validate(OperationContext* opCtx, bool full) const;
+
     virtual bool appendCustomStats(OperationContext* opCtx,
                                    BSONObjBuilder* output,
                                    double scale) const;
     virtual Status dupKeyCheck(OperationContext* opCtx, const KeyString::Value& keyString);
 
     virtual bool isEmpty(OperationContext* opCtx);
+
+    virtual int64_t numEntries(OperationContext* opCtx) const;
 
     virtual long long getSpaceUsedBytes(OperationContext* opCtx) const;
 
@@ -184,6 +186,10 @@ public:
 
     virtual bool isIdIndex() const {
         return false;
+    }
+
+    virtual UUID getCollectionUUID() const {
+        return _collectionUUID;
     }
 
     virtual bool isDup(OperationContext* opCtx,
@@ -283,7 +289,7 @@ protected:
     int _dataFormatVersion;
     std::string _uri;
     uint64_t _tableId;
-    const IndexDescriptor* _desc;
+    const UUID _collectionUUID;
     const std::string _indexName;
     const BSONObj _keyPattern;
     const BSONObj _collation;
@@ -294,6 +300,7 @@ class WiredTigerIndexUnique : public WiredTigerIndex {
 public:
     WiredTigerIndexUnique(OperationContext* ctx,
                           const std::string& uri,
+                          const UUID& collectionUUID,
                           StringData ident,
                           KeyFormat rsKeyFormat,
                           const IndexDescriptor* desc,
@@ -338,6 +345,7 @@ class WiredTigerIdIndex : public WiredTigerIndex {
 public:
     WiredTigerIdIndex(OperationContext* ctx,
                       const std::string& uri,
+                      const UUID& collectionUUID,
                       StringData ident,
                       const IndexDescriptor* desc,
                       bool isLogged);
@@ -391,6 +399,7 @@ class WiredTigerIndexStandard : public WiredTigerIndex {
 public:
     WiredTigerIndexStandard(OperationContext* ctx,
                             const std::string& uri,
+                            const UUID& collectionUUID,
                             StringData ident,
                             KeyFormat rsKeyFormat,
                             const IndexDescriptor* desc,

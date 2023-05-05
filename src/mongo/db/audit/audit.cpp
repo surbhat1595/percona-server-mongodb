@@ -670,9 +670,11 @@ namespace audit {
     ImpersonatedClientAttrs::ImpersonatedClientAttrs(Client* client) {
         if (auto optAttrs = rpc::getImpersonatedUserMetadata(client->getOperationContext());
             optAttrs) {
-            if (auto users = optAttrs->getUsers(); !users.empty()) {
-                userName = users.front();
-                roleNames = optAttrs->getRoles();
+            if (auto optUsers = optAttrs->getUsers(); optUsers) {
+                if (auto users = optUsers.get(); !users.empty()) {
+                    userName = users.front();
+                    roleNames = optAttrs->getRoles();
+                }
             }
         }
     }

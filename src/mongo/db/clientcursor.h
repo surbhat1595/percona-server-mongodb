@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include "mongo/bson/bsonobj.h"
 #include <boost/optional.hpp>
 #include <functional>
 
@@ -299,6 +300,22 @@ public:
         _stashedRecoveryUnit = std::move(ru);
     }
 
+    /**
+     * Returns true if a client has requested that this cursor can be killed.
+     */
+    bool isKillPending() const {
+        return _killPending;
+    }
+
+    /**
+     * Sets 'killPending' flag of this client cursor. This indicates to the cursor that a client
+     * has requested that it be killed while it was pinned, and it can proactively clean up its
+     * resources upon unpinning.
+     */
+    void setKillPending(bool newValue) {
+        _killPending = newValue;
+    }
+
 private:
     friend class CursorManager;
     friend class ClientCursorPin;
@@ -330,12 +347,6 @@ private:
      * destroyed.
      */
     ~ClientCursor();
-
-    /**
-     * Marks this cursor as killed, so any future uses will return 'killStatus'. It is an error to
-     * call this method with Status::OK.
-     */
-    void markAsKilled(Status killStatus);
 
     /**
      * Disposes this ClientCursor's PlanExecutor. Must be called before deleting a ClientCursor to
@@ -436,9 +447,13 @@ private:
     // requests.
     boost::optional<uint32_t> _planCacheKey;
     boost::optional<uint32_t> _queryHash;
-
+    // The shape of the original query serialized with readConcern, application name, and namespace.
+    BSONObj _telemetryStoreKey;
     // The client OperationKey associated with this cursor.
     boost::optional<OperationKey> _opKey;
+
+    // Flag indicating that a client has requested to kill the cursor.
+    bool _killPending = false;
 };
 
 /**

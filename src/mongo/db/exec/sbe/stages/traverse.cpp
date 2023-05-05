@@ -29,6 +29,7 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/stages/traverse.h"
 
@@ -290,11 +291,11 @@ void TraverseStage::doSaveState(bool relinquishCursor) {
         _outFieldOutputAccessor.reset();
     }
 
-    if (!slotsAccessible() || !relinquishCursor) {
+    if (!relinquishCursor) {
         return;
     }
 
-    prepareForYielding(_outFieldOutputAccessor);
+    prepareForYielding(_outFieldOutputAccessor, slotsAccessible());
 }
 
 void TraverseStage::doRestoreState(bool relinquishCursor) {

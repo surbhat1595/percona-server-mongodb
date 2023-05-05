@@ -4,10 +4,7 @@
  * @tags: [requires_fcv_62, serverless]
  */
 
-load("jstests/serverless/libs/shard_split_test.js");
-
-(function() {
-"use strict";
+import {doWriteOperations, ShardSplitTest} from "jstests/serverless/libs/shard_split_test.js";
 
 const test = new ShardSplitTest();
 test.addAndAwaitRecipientNodes();
@@ -43,7 +40,6 @@ blockingFP.off();
 splitThread.join();
 const result = splitThread.returnData();
 assert.eq(result.ok, 1);
-assert.eq(result.state, "committed");
 
 writeThread.join();
 const writeResults = writeThread.returnData();
@@ -54,4 +50,3 @@ writeResults.forEach(res => {
 TestData.skipCheckDBHashes = true;
 
 test.stop();
-})();

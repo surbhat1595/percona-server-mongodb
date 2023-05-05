@@ -35,10 +35,12 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/cursor_response.h"
+#include "mongo/db/service_context.h"
 #include "mongo/executor/async_rpc.h"
 #include "mongo/executor/async_rpc_error_info.h"
 #include "mongo/executor/async_rpc_targeter.h"
 #include "mongo/executor/hedge_options_util.h"
+#include "mongo/executor/hedging_metrics.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -55,7 +57,7 @@
 namespace mongo {
 namespace async_rpc {
 
-namespace {
+namespace hedging_rpc_details {
 /**
  * Given a vector of input Futures, whenAnyThat returns a Future which holds the value
  * of the first of those futures to resolve with a status, value, and index that
@@ -95,7 +97,13 @@ Future<SingleResponse> whenAnyThat(std::vector<ExecutorFuture<SingleResponse>>&&
 
     return future;
 }
-}  // namespace
+
+HedgingMetrics* getHedgingMetrics(ServiceContext* svcCtx) {
+    auto hm = HedgingMetrics::get(svcCtx);
+    invariant(hm);
+    return hm;
+}
+}  // namespace hedging_rpc_details
 
 /**
  * sendHedgedCommand is a hedged version of the sendCommand function. It asynchronously executes a
@@ -115,27 +123,33 @@ SemiFuture<AsyncRPCResponse<typename CommandType::Reply>> sendHedgedCommand(
     std::shared_ptr<executor::TaskExecutor> exec,
     CancellationToken token,
     std::shared_ptr<RetryPolicy> retryPolicy = std::make_shared<NeverRetryPolicy>(),
-    ReadPreferenceSetting readPref = ReadPreferenceSetting(ReadPreference::PrimaryOnly)) {
+    ReadPreferenceSetting readPref = ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+    GenericArgs genericArgs = GenericArgs(),
+    BatonHandle baton = nullptr) {
     using SingleResponse = AsyncRPCResponse<typename CommandType::Reply>;
 
     // Set up cancellation token to cancel remaining hedged operations.
     CancellationSource hedgeCancellationToken{token};
     auto targetsAttempted = std::make_shared<std::vector<HostAndPort>>();
+    auto proxyExec = std::make_shared<detail::ProxyingExecutor>(baton, exec);
     auto tryBody = [=, targeter = std::move(targeter)] {
         return targeter->resolve(token)
-            .thenRunOn(exec)
+            .thenRunOn(proxyExec)
             .onError([](Status status) -> StatusWith<std::vector<HostAndPort>> {
                 // Targeting error; rewrite it to a RemoteCommandExecutionError and skip
                 // command execution body. We'll retry if the policy indicates to.
                 return Status{AsyncRPCErrorInfo(status), status.reason()};
             })
-            .then([cmd, opCtx, exec, token, hedgeCancellationToken, readPref, targetsAttempted](
-                      std::vector<HostAndPort> targets) {
+            .then([=](std::vector<HostAndPort> targets) {
                 invariant(targets.size(),
                           "Successful targeting implies there are hosts to target.");
                 *targetsAttempted = targets;
 
                 HedgeOptions opts = getHedgeOptions(CommandType::kCommandName, readPref);
+                auto hm = hedging_rpc_details::getHedgingMetrics(getGlobalServiceContext());
+                if (opts.isHedgeEnabled) {
+                    hm->incrementNumTotalOperations();
+                }
 
                 std::vector<ExecutorFuture<SingleResponse>> requests;
 
@@ -144,10 +158,21 @@ SemiFuture<AsyncRPCResponse<typename CommandType::Reply>> sendHedgedCommand(
 
                 for (size_t i = 0; i < hostsToTarget; i++) {
                     std::unique_ptr<Targeter> t = std::make_unique<FixedTargeter>(targets[i]);
+                    // We explicitly pass "NeverRetryPolicy" here because the retry mechanism
+                    // is implemented at the hedged command runner level and not at the
+                    // 'sendCommand' level.
                     auto options = std::make_shared<AsyncRPCOptions<CommandType>>(
-                        cmd, exec, hedgeCancellationToken.token());
-                    requests.emplace_back(
-                        sendCommand(options, opCtx, std::move(t)).thenRunOn(exec));
+                        cmd,
+                        exec,
+                        hedgeCancellationToken.token(),
+                        std::make_shared<NeverRetryPolicy>(),
+                        genericArgs);
+                    options->baton = baton;
+                    requests.push_back(
+                        sendCommand(options, opCtx, std::move(t)).thenRunOn(proxyExec));
+                    if (i > 0) {
+                        hm->incrementNumTotalHedgedOperations();
+                    }
                 }
 
                 /**
@@ -156,14 +181,17 @@ SemiFuture<AsyncRPCResponse<typename CommandType::Reply>> sendHedgedCommand(
                  * "authoritative" request. This is the codepath followed when we are not
                  * hedging or there is only 1 target provided.
                  */
-                return whenAnyThat(
-                    std::move(requests), [](StatusWith<SingleResponse> response, size_t index) {
+                return hedging_rpc_details::whenAnyThat(
+                    std::move(requests), [&](StatusWith<SingleResponse> response, size_t index) {
                         Status commandStatus = response.getStatus();
 
                         if (index == 0) {
                             return true;
                         }
+
                         if (commandStatus.code() == Status::OK()) {
+                            hedging_rpc_details::getHedgingMetrics(getGlobalServiceContext())
+                                ->incrementNumAdvantageouslyHedgedOperations();
                             return true;
                         }
 
@@ -179,6 +207,9 @@ SemiFuture<AsyncRPCResponse<typename CommandType::Reply>> sendHedgedCommand(
                         if (remoteErr && isIgnorableAsHedgeResult(*remoteErr)) {
                             return false;
                         }
+
+                        hedging_rpc_details::getHedgingMetrics(getGlobalServiceContext())
+                            ->incrementNumAdvantageouslyHedgedOperations();
                         return true;
                     });
             });
@@ -189,7 +220,7 @@ SemiFuture<AsyncRPCResponse<typename CommandType::Reply>> sendHedgedCommand(
                 !retryPolicy->recordAndEvaluateRetry(swResponse.getStatus());
         })
         .withBackoffBetweenIterations(detail::RetryDelayAsBackoff(retryPolicy.get()))
-        .on(exec, CancellationToken::uncancelable())
+        .on(proxyExec, CancellationToken::uncancelable())
         // We go inline here to intercept executor-shutdown errors and re-write them
         // so that the API always returns RemoteCommandExecutionError. Additionally,
         // we need to make sure we cancel outstanding requests.

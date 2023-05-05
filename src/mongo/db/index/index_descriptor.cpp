@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/index/index_descriptor.h"
@@ -37,6 +36,9 @@
 #include "mongo/bson/simple_bsonelement_comparator.h"
 #include "mongo/bson/unordered_fields_bsonobj_comparator.h"
 #include "mongo/db/catalog/index_catalog_entry.h"
+#include "mongo/db/exec/index_path_projection.h"
+#include "mongo/db/index/column_key_generator.h"
+#include "mongo/db/index/wildcard_key_generator.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/server_options.h"
@@ -115,6 +117,11 @@ constexpr StringData IndexDescriptor::kWeightsFieldName;
 constexpr StringData IndexDescriptor::kPrepareUniqueFieldName;
 constexpr StringData IndexDescriptor::kColumnStoreCompressorFieldName;
 
+/**
+ * Constructs an IndexDescriptor object. Arguments:
+ *   accessMethodName - one of the 'IndexNames::XXX' constants from index_names.cpp
+ *   infoObj          - options information
+ */
 IndexDescriptor::IndexDescriptor(const std::string& accessMethodName, BSONObj infoObj)
     : _accessMethodName(accessMethodName),
       _indexType(IndexNames::nameToType(accessMethodName)),
@@ -156,6 +163,27 @@ IndexDescriptor::IndexDescriptor(const std::string& accessMethodName, BSONObj in
     } else {
         _compressor = boost::none;
     }
+
+    // If there is a wildcardProjection or columnstoreProjection, compute and store the normalized
+    // version in '_normalizedProjection'.
+    BSONElement wildcardProjection = infoObj[IndexDescriptor::kWildcardProjectionFieldName];
+    BSONElement columnStoreProjection = infoObj[IndexDescriptor::kColumnStoreProjectionFieldName];
+    tassert(6744600,
+            "Can't enable both wildcardProjection and columnstoreProjection",
+            !(wildcardProjection && columnStoreProjection));
+    if (wildcardProjection) {
+        IndexPathProjection indexPathProjection =
+            static_cast<IndexPathProjection>(WildcardKeyGenerator::createProjectionExecutor(
+                BSON("$**" << 1), wildcardProjection.Obj()));
+        _normalizedProjection =
+            indexPathProjection.exec()->serializeTransformation(boost::none).toBson();
+    } else if (columnStoreProjection) {
+        IndexPathProjection indexPathProjection = static_cast<IndexPathProjection>(
+            column_keygen::ColumnKeyGenerator::createProjectionExecutor(
+                BSON("$**" << IndexNames::COLUMN), columnStoreProjection.Obj()));
+        _normalizedProjection =
+            indexPathProjection.exec()->serializeTransformation(boost::none).toBson();
+    }
 }
 
 bool IndexDescriptor::isIndexVersionSupported(IndexVersion indexVersion) {
@@ -175,10 +203,6 @@ IndexDescriptor::Comparison IndexDescriptor::compareIndexOptions(
     OperationContext* opCtx,
     const NamespaceString& ns,
     const IndexCatalogEntry* existingIndex) const {
-    // The compareIndexOptions method can only be reliably called on a candidate index which is
-    // being compared against an index that already exists in the catalog.
-    tassert(4765900, "This object must be a candidate index", !getEntry());
-
     auto existingIndexDesc = existingIndex->descriptor();
 
     // We first check whether the key pattern is identical for both indexes.
@@ -187,8 +211,15 @@ IndexDescriptor::Comparison IndexDescriptor::compareIndexOptions(
         return Comparison::kDifferent;
     }
 
+    // If the candidate has a wildcardProjection or columnstoreProjection, we must compare the
+    // normalized versions, not the versions from the catalog which are kept as the user gave them
+    // and thus may be semantically identical to but syntactically different from the normalized
+    // form. There are no other types of index projections. Thus, if there is no projection, both
+    // the original and normalized projections will be empty BSON objects, so we can still do the
+    // comparison based on the normalized projection.
     static const UnorderedFieldsBSONObjComparator kUnorderedBSONCmp;
-    if (kUnorderedBSONCmp.evaluate(_projection != existingIndexDesc->_normalizedProjection)) {
+    if (kUnorderedBSONCmp.evaluate(_normalizedProjection !=
+                                   existingIndexDesc->_normalizedProjection)) {
         return Comparison::kDifferent;
     }
 
@@ -249,6 +280,53 @@ IndexDescriptor::Comparison IndexDescriptor::compareIndexOptions(
     // If all non-identifying options also match, the descriptors are identical. Otherwise, we
     // consider them equivalent; two indexes with these options and the same key cannot coexist.
     return optsIdentical ? Comparison::kIdentical : Comparison::kEquivalent;
+}
+
+std::vector<const char*> IndexDescriptor::getFieldNames() const {
+    constexpr auto kFTSTerm = "term"_sd;
+    constexpr auto kFTSWeight = "weight"_sd;
+    constexpr auto kFTSFieldName = "_fts"_sd;
+    constexpr auto kFTSXFieldName = "_ftsx"_sd;
+
+    std::vector<const char*> fieldNames;
+
+    // This field is only applicable for the text index and if set to true, then the 'term' and the
+    // 'weight' field names have already been added to the 'fieldNames'.
+    bool hasSeenFtsOrFtsxFields = false;
+
+    // Appends the 'term' and 'weight' fields to the 'fieldNames' vector if 'hasSeenFtsOrFtsxFields'
+    // is set to false.
+    auto maybeAppendFtsIndexField = [&]() {
+        if (!hasSeenFtsOrFtsxFields) {
+            fieldNames.push_back(kFTSTerm.rawData());
+            fieldNames.push_back(kFTSWeight.rawData());
+            hasSeenFtsOrFtsxFields = true;
+        }
+    };
+
+    // Iterate over the key pattern and add the field names to the 'fieldNames' vector.
+    BSONObjIterator keyPatternIter(_keyPattern);
+    while (keyPatternIter.more()) {
+        BSONElement KeyPatternElem = keyPatternIter.next();
+        auto fieldName = KeyPatternElem.fieldNameStringData();
+
+        // If the index type is text and the field name is either '_fts' or '_ftsx', then append the
+        // index fields to the field names, otherwise add the field name from the key pattern.
+        if ((_indexType == IndexType::INDEX_TEXT) &&
+            (fieldName == kFTSFieldName || fieldName == kFTSXFieldName)) {
+            maybeAppendFtsIndexField();
+        } else {
+            fieldNames.push_back(fieldName.rawData());
+        }
+    }
+
+    // If the index type is text and the 'hasSeenFtsOrFtsxFields' is set to false, then append the
+    // index fields.
+    if (_indexType == IndexType::INDEX_TEXT) {
+        maybeAppendFtsIndexField();
+    }
+
+    return fieldNames;
 }
 
 }  // namespace mongo

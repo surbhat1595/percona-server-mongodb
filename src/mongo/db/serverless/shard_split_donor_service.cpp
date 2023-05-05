@@ -290,7 +290,10 @@ SemiFuture<void> ShardSplitDonorService::DonorStateMachine::run(
                     return _cleanRecipientStateDoc(executor, primaryToken);
                 })
                 .then([this, executor, migrationId = _migrationId]() {
-                    return DurableState{ShardSplitDonorStateEnum::kCommitted};
+                    stdx::lock_guard<Latch> lg(_mutex);
+                    return DurableState{ShardSplitDonorStateEnum::kCommitted,
+                                        boost::none,
+                                        _stateDoc.getBlockOpTime()};
                 })
                 .unsafeToInlineFuture();
         }
@@ -383,7 +386,10 @@ SemiFuture<void> ShardSplitDonorService::DonorStateMachine::run(
                       "id"_attr = _migrationId,
                       "state"_attr = ShardSplitDonorState_serializer(_stateDoc.getState()));
 
-                return ExecutorFuture(**executor, DurableState{_stateDoc.getState(), _abortReason});
+                stdx::lock_guard<Latch> lg(_mutex);
+                return ExecutorFuture(
+                    **executor,
+                    DurableState{_stateDoc.getState(), _abortReason, _stateDoc.getBlockOpTime()});
             })
             .unsafeToInlineFuture();
     });
@@ -722,7 +728,7 @@ ExecutorFuture<void> ShardSplitDonorService::DonorStateMachine::_applySplitConfi
                DBDirectClient client(opCtxHolder.get());
                BSONObj result;
                const bool returnValue =
-                   client.runCommand(NamespaceString::kAdminDb.toString(),
+                   client.runCommand(DatabaseName(boost::none, NamespaceString::kAdminDb),
                                      BSON("replSetReconfig" << splitConfig.toBSON()),
                                      result);
                uassert(ErrorCodes::BadValue,
@@ -969,14 +975,15 @@ ExecutorFuture<repl::OpTime> ShardSplitDonorService::DonorStateMachine::_updateS
                            args.oplogSlots = {oplogSlot};
                            args.update = updatedStateDocBson;
 
-                           collection_internal::updateDocument(opCtx,
-                                                               *collection,
-                                                               originalRecordId,
-                                                               originalSnapshot,
-                                                               updatedStateDocBson,
-                                                               false,
-                                                               nullptr /* OpDebug* */,
-                                                               &args);
+                           collection_internal::updateDocument(
+                               opCtx,
+                               *collection,
+                               originalRecordId,
+                               originalSnapshot,
+                               updatedStateDocBson,
+                               collection_internal::kUpdateNoIndexes,
+                               nullptr /* OpDebug* */,
+                               &args);
 
                            return oplogSlot;
                        }();
@@ -1060,7 +1067,9 @@ ShardSplitDonorService::DonorStateMachine::_handleErrorOrEnterAbortedState(
                   "abortReason"_attr = _abortReason.value());
 
             return ExecutorFuture(**executor,
-                                  DurableState{ShardSplitDonorStateEnum::kAborted, _abortReason});
+                                  DurableState{ShardSplitDonorStateEnum::kAborted,
+                                               _abortReason,
+                                               _stateDoc.getBlockOpTime()});
         }
     }
 
@@ -1103,7 +1112,7 @@ ShardSplitDonorService::DonorStateMachine::_handleErrorOrEnterAbortedState(
         })
         .then([this, executor] {
             stdx::lock_guard<Latch> lg(_mutex);
-            return DurableState{_stateDoc.getState(), _abortReason};
+            return DurableState{_stateDoc.getState(), _abortReason, _stateDoc.getBlockOpTime()};
         });
 }
 
@@ -1210,7 +1219,7 @@ ExecutorFuture<void> ShardSplitDonorService::DonorStateMachine::_removeSplitConf
 
                BSONObj result;
                const bool returnValue =
-                   client.runCommand(NamespaceString::kAdminDb.toString(),
+                   client.runCommand(DatabaseName(boost::none, NamespaceString::kAdminDb),
                                      BSON("replSetReconfig" << newConfigBob.obj()),
                                      result);
                uassert(

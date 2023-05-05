@@ -91,7 +91,16 @@ one argument, the connection object.
 
 */
 
-load("jstests/replsets/libs/tenant_migration_util.js");
+// Cannot run the filtering metadata check on tests that run refineCollectionShardKey.
+TestData.skipCheckShardFilteringMetadata = true;
+
+// Cannot run the filtering metadata check on tests that run refineCollectionShardKey.
+TestData.skipCheckShardFilteringMetadata = true;
+
+import {
+    isShardMergeEnabled,
+    makeMigrationCertificatesForTest
+} from "jstests/replsets/libs/tenant_migration_util.js";
 
 // constants
 
@@ -99,13 +108,13 @@ load("jstests/replsets/libs/tenant_migration_util.js");
 // when using the roles in 'roles_read', the 'read' role will only be granted on 'firstDbName'. In
 // particular, this means that when 'runOnDb' is 'secondDbName', the test user with the 'read' role
 // should not be able to perform read operations.
-var firstDbName = "roles_commands_1";
-var secondDbName = "roles_commands_2";
-var adminDbName = "admin";
-var authErrCode = 13;
-var commandNotSupportedCode = 115;
-var shard0name = "shard0000";
-const migrationCertificates = TenantMigrationUtil.makeMigrationCertificatesForTest();
+export const firstDbName = "roles_commands_1";
+export const secondDbName = "roles_commands_2";
+export const adminDbName = "admin";
+export const authErrCode = 13;
+export const commandNotSupportedCode = 115;
+let shard0name = "shard0000";
+const migrationCertificates = makeMigrationCertificatesForTest();
 
 function buildTenantMigrationCmd(cmd, state) {
     const {isShardMergeEnabled} = state;
@@ -203,7 +212,7 @@ load("jstests/libs/uuid_util.js");
 // For isReplSet
 load("jstests/libs/fixture_helpers.js");
 
-var authCommandsLib = {
+export const authCommandsLib = {
 
     /************* TEST CASES ****************/
 
@@ -432,7 +441,6 @@ var authCommandsLib = {
               roles: roles_clusterManager,
           }]
         },
-
         {
           testname: "applyOps_empty",
           command: {applyOps: []},
@@ -2221,6 +2229,47 @@ var authCommandsLib = {
           ]
         },
         {
+          testname: "bulkWrite_insert",
+          command: {
+            bulkWrite: 1,
+            ops: [
+              {insert: 0, document: {skey: "MongoDB"}},
+              {insert: 1, document: {skey: "MongoDB"}}],
+            nsInfo: [{ns: firstDbName + ".coll"}, {ns: secondDbName + ".coll1"}]
+          },
+          skipSharded: true,
+          testcases: [{
+            runOnDb: adminDbName,
+            privileges: [{resource: {db: firstDbName, collection: "coll"}, actions: ['insert']},
+                         {resource: {db: secondDbName, collection: "coll1"}, actions: ['insert']}]
+          }]
+        },
+        {
+          testname: "bulkWrite_insertBypassDocumentValidation",
+          command: {
+            bulkWrite: 1,
+            ops: [
+              {insert: 0, document: {skey: "MongoDB"}},
+              {insert: 1, document: {skey: "MongoDB"}}],
+            nsInfo: [{ns: firstDbName + ".coll"}, {ns: secondDbName + ".coll1"}],
+            bypassDocumentValidation: true,
+          },
+          skipSharded: true,
+          testcases: [{
+            runOnDb: adminDbName,
+            privileges: [
+              {
+                resource: {db: firstDbName, collection: "coll"},
+                actions: ['insert', 'bypassDocumentValidation']
+              },
+              {
+                resource: {db: secondDbName, collection: "coll1"},
+                actions: ['insert', 'bypassDocumentValidation']
+              }
+            ]
+          }]
+        },
+        {
           testname: "checkShardingIndex_firstDb",
           command: {checkShardingIndex: firstDbName + ".x", keyPattern: {_id: 1}},
           skipSharded: true,
@@ -3777,7 +3826,7 @@ var authCommandsLib = {
         {
           testname: "donorStartMigration",
           setup: (db) => {
-              return {isShardMergeEnabled: TenantMigrationUtil.isShardMergeEnabled(db)};
+              return {isShardMergeEnabled: isShardMergeEnabled(db)};
           },
           command: (state) => {
               return buildTenantMigrationCmd({
@@ -3805,7 +3854,7 @@ var authCommandsLib = {
         {
           testname: "recipientSyncData",
           setup: (db) => {
-              return {isShardMergeEnabled: TenantMigrationUtil.isShardMergeEnabled(db)};
+              return {isShardMergeEnabled: isShardMergeEnabled(db)};
           },
           command: (state) => {
               return buildTenantMigrationCmd({
@@ -3833,7 +3882,7 @@ var authCommandsLib = {
         {
           testname: "recipientForgetMigration",
           setup: (db) => {
-              return {isShardMergeEnabled: TenantMigrationUtil.isShardMergeEnabled(db)};
+              return {isShardMergeEnabled: isShardMergeEnabled(db)};
           },
           command: (state) => {
               return buildTenantMigrationCmd({
@@ -5239,6 +5288,42 @@ var authCommandsLib = {
           ]
         },
         {
+          testname: "oidcListKeys",
+          command: {oidcListKeys: 1},
+          // Only enterprise knows of this command.
+          skipTest:
+              (conn) => {
+                return !getBuildInfo().modules.includes("enterprise") 
+                        || !TestData.setParameters.featureFlagOIDC;
+              },
+          testcases: [
+            {
+              runOnDb: adminDbName,
+              roles: roles_hostManager,
+              privileges: [{resource: {cluster: true}, actions: ["oidcListKeys"]}],
+              expectFail: true, // Server isn't configured for MONGODB-OIDC as an auth mechanism.
+            }
+          ]
+        },
+        {
+          testname: "oidcRefreshKeys",
+          command: {oidcRefreshKeys: 1},
+          // Only enterprise knows of this command.
+          skipTest:
+              (conn) => {
+                return !getBuildInfo().modules.includes("enterprise") 
+                    || !TestData.setParameters.featureFlagOIDC;
+              },
+          testcases: [
+            {
+              runOnDb: adminDbName,
+              roles: roles_hostManager,
+              privileges: [{resource: {cluster: true}, actions: ["oidcRefreshKeys"]}],
+              expectFail: true, // Server isn't figured for MONGODB-OIDC as an auth mechanism.
+            }
+          ]
+        },
+        {
           testname: "planCacheIndexFilter",
           command: {planCacheClearFilters: "x"},
           skipSharded: true,
@@ -6048,6 +6133,16 @@ var authCommandsLib = {
                     ]
                 }, */
         {
+            // Test that only clusterManager has permission to run $telemetry
+            testname: "testTelemetryReadPrivilege",
+            command: {aggregate: 1, pipeline: [{$telemetry: {}}], cursor: {}},
+            skipSharded: false,
+            skipTest: (conn) => {
+                return !TestData.setParameters.featureFlagTelemetry;
+            },
+            testcases: [{runOnDb: adminDbName, roles: roles_clusterManager}]
+        },
+        {
           testname: "top",
           command: {top: 1},
           skipSharded: true,
@@ -6651,7 +6746,14 @@ var authCommandsLib = {
      *  An array of strings. Each string in the array reports
      *  a particular test error.
      */
-    runOneTest: function(conn, t, impls, isMongos) {
+    runOneTest: function(conn, t, impls, options) {
+        options = options || {};
+
+        const isMongos = !!options.isMongos || this.isMongos(conn);
+        if (options.shard0Name) {
+          shard0name = options.shard0Name;
+        }
+
         jsTest.log("Running test: " + t.testname);
 
         if (t.skipTest && t.skipTest(conn)) {
@@ -6703,7 +6805,9 @@ var authCommandsLib = {
     /**
      * Top-level test runner
      */
-    runTests: function(conn, impls) {
+    runTests: function(conn, impls, options) {
+      options = options || {};
+      options.isMongos = options.isMongos || this.isMongos(conn);
 
         // impls must provide implementations of a few functions
         assert("createUsers" in impls);
@@ -6713,9 +6817,9 @@ var authCommandsLib = {
 
         var failures = [];
 
-        const isMongos = this.isMongos(conn);
+
         for (var i = 0; i < this.tests.length; i++) {
-            res = this.runOneTest(conn, this.tests[i], impls, isMongos);
+            const res = this.runOneTest(conn, this.tests[i], impls, options);
             failures = failures.concat(res);
         }
 
@@ -6724,5 +6828,4 @@ var authCommandsLib = {
         });
         assert.eq(0, failures.length);
     }
-
 };

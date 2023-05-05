@@ -954,14 +954,16 @@ public:
                                                  expectedNumIndexes);
     }
 
-    void concurrentRenameCollectionAndOpenCollection(OperationContext* opCtx,
-                                                     const NamespaceString& from,
-                                                     const NamespaceString& to,
-                                                     const NamespaceString& lookupNss,
-                                                     Timestamp timestamp,
-                                                     bool openSnapshotBeforeCommit,
-                                                     bool expectedExistence,
-                                                     int expectedNumIndexes) {
+    void concurrentRenameCollectionAndOpenCollection(
+        OperationContext* opCtx,
+        const NamespaceString& from,
+        const NamespaceString& to,
+        const NamespaceString& lookupNss,
+        Timestamp timestamp,
+        bool openSnapshotBeforeCommit,
+        bool expectedExistence,
+        int expectedNumIndexes,
+        std::function<void()> verifyStateCallback = {}) {
         _concurrentDDLOperationAndOpenCollection(
             opCtx,
             lookupNss,
@@ -971,7 +973,8 @@ public:
             },
             openSnapshotBeforeCommit,
             expectedExistence,
-            expectedNumIndexes);
+            expectedNumIndexes,
+            std::move(verifyStateCallback));
     }
 
     void concurrentCreateIndexAndOpenCollection(OperationContext* opCtx,
@@ -1143,7 +1146,8 @@ private:
                                                   Callable&& ddlOperation,
                                                   bool openSnapshotBeforeCommit,
                                                   bool expectedExistence,
-                                                  int expectedNumIndexes) {
+                                                  int expectedNumIndexes,
+                                                  std::function<void()> verifyStateCallback = {}) {
         mongo::Mutex mutex;
         stdx::condition_variable cv;
         int numCalls = 0;
@@ -1196,6 +1200,9 @@ private:
         // Perform the openCollection lookup.
         OneOffRead oor(opCtx, Timestamp());
         Lock::GlobalLock globalLock(opCtx, MODE_IS);
+        // Stash the catalog so we may perform multiple lookups that will be in sync with our
+        // snapshot
+        CollectionCatalog::stash(opCtx, CollectionCatalog::get(opCtx));
         CollectionPtr coll = CollectionCatalog::get(opCtx)->openCollection(opCtx, nss, boost::none);
 
         // Notify the thread that our openCollection lookup is done.
@@ -1206,10 +1213,19 @@ private:
         }
         t.join();
 
+
         if (expectedExistence) {
             ASSERT(coll);
 
             ASSERT_EQ(coll->ns(), nss);
+            // Check that lookup returns the same instance as openCollection above
+            ASSERT_EQ(
+                CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, coll->ns()).get(),
+                coll.get());
+            ASSERT_EQ(
+                CollectionCatalog::get(opCtx)->lookupCollectionByUUID(opCtx, coll->uuid()).get(),
+                coll.get());
+            ASSERT_EQ(CollectionCatalog::get(opCtx)->lookupNSSByUUID(opCtx, coll->uuid()), nss);
             ASSERT_EQ(coll->getIndexCatalog()->numIndexesTotal(), expectedNumIndexes);
 
             auto catalogEntry =
@@ -1217,10 +1233,30 @@ private:
             ASSERT(!catalogEntry.isEmpty());
             ASSERT(
                 coll->isMetadataEqual(DurableCatalog::getMetadataFromCatalogEntry(catalogEntry)));
+
+            // Lookups from the catalog should return the newly opened collection.
+            ASSERT_EQ(CollectionCatalog::get(opCtx)
+                          ->lookupCollectionByNamespaceForRead(opCtx, coll->ns())
+                          .get(),
+                      coll.get());
+            ASSERT_EQ(CollectionCatalog::get(opCtx)
+                          ->lookupCollectionByUUIDForRead(opCtx, coll->uuid())
+                          .get(),
+                      coll.get());
         } else {
             ASSERT(!coll);
             auto catalogEntry = DurableCatalog::get(opCtx)->scanForCatalogEntryByNss(opCtx, nss);
             ASSERT(!catalogEntry);
+
+            // Lookups from the catalog should return the newly opened collection (in this case
+            // nullptr).
+            ASSERT_EQ(
+                CollectionCatalog::get(opCtx)->lookupCollectionByNamespaceForRead(opCtx, nss).get(),
+                coll.get());
+        }
+
+        if (verifyStateCallback) {
+            verifyStateCallback();
         }
     }
 };
@@ -1292,6 +1328,12 @@ TEST_F(CollectionCatalogTimestampTest, OpenCollectionBeforeCreateTimestamp) {
     auto coll =
         CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, readTimestamp);
     ASSERT(!coll);
+
+    // Lookups from the catalog should return the newly opened collection (in this case nullptr).
+    ASSERT_EQ(CollectionCatalog::get(opCtx.get())
+                  ->lookupCollectionByNamespaceForRead(opCtx.get(), nss)
+                  .get(),
+              coll.get());
 }
 
 TEST_F(CollectionCatalogTimestampTest, OpenEarlierCollection) {
@@ -1870,7 +1912,7 @@ TEST_F(CollectionCatalogTimestampTest, OpenExistingCollectionAndIndexesWithReape
         // Open the collection using shared state after a single index was dropped.
         OneOffRead oor(opCtx.get(), dropXIndexTs);
 
-        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IX);
         auto openedColl =
             CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, dropXIndexTs);
         ASSERT(openedColl);
@@ -1967,7 +2009,7 @@ TEST_F(CollectionCatalogTimestampTest, OpenNewCollectionAndIndexesWithReaper) {
         // Open the collection before any index drops.
         OneOffRead oor(opCtx.get(), createIndexTs);
 
-        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IX);
         auto openedColl =
             CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, createIndexTs);
         ASSERT(openedColl);
@@ -1982,7 +2024,7 @@ TEST_F(CollectionCatalogTimestampTest, OpenNewCollectionAndIndexesWithReaper) {
         // Open the collection after the 'x' index was dropped.
         OneOffRead oor(opCtx.get(), dropXIndexTs);
 
-        Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+        Lock::GlobalLock globalLock(opCtx.get(), MODE_IX);
         auto openedColl =
             CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, dropXIndexTs);
         ASSERT(openedColl);
@@ -2696,71 +2738,73 @@ TEST_F(CollectionCatalogTimestampTest, CollectionLifetimeTiedToStorageTransactio
                 createIndexTs);
 
     const Timestamp readTimestamp(15, 15);
-    auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx.get());
 
     {
         // Test that the collection is released when the storage snapshot is abandoned.
         OneOffRead oor(opCtx.get(), readTimestamp);
         Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+
         auto coll =
             CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, readTimestamp);
         ASSERT(coll);
 
-        std::shared_ptr<Collection> fetchedColl =
-            uncommittedCatalogUpdates.lookupCollection(opCtx.get(), nss).collection;
+        std::shared_ptr<const Collection> fetchedColl =
+            OpenedCollections::get(opCtx.get()).lookupByNamespace(nss).value();
         ASSERT(fetchedColl);
         ASSERT_EQ(coll.get(), fetchedColl.get());
         ASSERT_EQ(coll->getSharedIdent(), fetchedColl->getSharedIdent());
 
         opCtx->recoveryUnit()->abandonSnapshot();
-        ASSERT(!uncommittedCatalogUpdates.lookupCollection(opCtx.get(), nss).collection);
+        ASSERT(!OpenedCollections::get(opCtx.get()).lookupByNamespace(nss));
     }
 
     {
         // Test that the collection is released when the storage snapshot is committed.
         OneOffRead oor(opCtx.get(), readTimestamp);
         Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+
         auto coll =
             CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, readTimestamp);
         ASSERT(coll);
 
         WriteUnitOfWork wuow(opCtx.get());
 
-        std::shared_ptr<Collection> fetchedColl =
-            uncommittedCatalogUpdates.lookupCollection(opCtx.get(), nss).collection;
+        std::shared_ptr<const Collection> fetchedColl =
+            OpenedCollections::get(opCtx.get()).lookupByNamespace(nss).value();
         ASSERT(fetchedColl);
         ASSERT_EQ(coll.get(), fetchedColl.get());
         ASSERT_EQ(coll->getSharedIdent(), fetchedColl->getSharedIdent());
 
         wuow.commit();
-        ASSERT(!uncommittedCatalogUpdates.lookupCollection(opCtx.get(), nss).collection);
+        ASSERT(!OpenedCollections::get(opCtx.get()).lookupByNamespace(nss));
 
         opCtx->recoveryUnit()->abandonSnapshot();
-        ASSERT(!uncommittedCatalogUpdates.lookupCollection(opCtx.get(), nss).collection);
+        ASSERT(!OpenedCollections::get(opCtx.get()).lookupByNamespace(nss));
     }
 
     {
         // Test that the collection is released when the storage snapshot is aborted.
         OneOffRead oor(opCtx.get(), readTimestamp);
         Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+
         auto coll =
             CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, readTimestamp);
         ASSERT(coll);
 
         boost::optional<WriteUnitOfWork> wuow(opCtx.get());
 
-        std::shared_ptr<Collection> fetchedColl =
-            uncommittedCatalogUpdates.lookupCollection(opCtx.get(), nss).collection;
+        std::shared_ptr<const Collection> fetchedColl =
+            OpenedCollections::get(opCtx.get()).lookupByNamespace(nss).value();
         ASSERT(fetchedColl);
         ASSERT_EQ(coll.get(), fetchedColl.get());
         ASSERT_EQ(coll->getSharedIdent(), fetchedColl->getSharedIdent());
 
         // The storage snapshot is aborted when the WriteUnitOfWork destructor runs.
         wuow.reset();
-        ASSERT(!uncommittedCatalogUpdates.lookupCollection(opCtx.get(), nss).collection);
+        ASSERT(!OpenedCollections::get(opCtx.get()).lookupByNamespace(nss));
 
         opCtx->recoveryUnit()->abandonSnapshot();
-        ASSERT(!uncommittedCatalogUpdates.lookupCollection(opCtx.get(), nss).collection);
+        ASSERT(!OpenedCollections::get(opCtx.get()).lookupByNamespace(nss));
     }
 }
 
@@ -2953,11 +2997,25 @@ TEST_F(CollectionCatalogTimestampTest,
     const Timestamp renameCollectionTs = Timestamp(20, 20);
 
     createCollection(opCtx.get(), originalNss, createCollectionTs);
+    UUID uuid = CollectionCatalog::get(opCtx.get())
+                    ->lookupCollectionByNamespace(opCtx.get(), originalNss)
+                    ->uuid();
 
     // When the snapshot is opened right after the rename is committed to the durable catalog, and
     // the openCollection looks for the originalNss, no collection instance should be returned.
     concurrentRenameCollectionAndOpenCollection(
-        opCtx.get(), originalNss, newNss, originalNss, renameCollectionTs, false, false, 0);
+        opCtx.get(), originalNss, newNss, originalNss, renameCollectionTs, false, false, 0, [&]() {
+            // Verify that we can find the Collection when we search by UUID when the setup occured
+            // during concurrent rename (rename is not affecting UUID), even if we can't find it by
+            // namespace.
+            auto coll =
+                CollectionCatalog::get(opCtx.get())->lookupCollectionByUUID(opCtx.get(), uuid);
+            ASSERT(coll);
+            ASSERT_EQ(coll->ns(), newNss);
+
+            ASSERT_EQ(CollectionCatalog::get(opCtx.get())->lookupNSSByUUID(opCtx.get(), uuid),
+                      newNss);
+        });
 }
 
 TEST_F(CollectionCatalogTimestampTest,
@@ -2971,11 +3029,25 @@ TEST_F(CollectionCatalogTimestampTest,
     const Timestamp renameCollectionTs = Timestamp(20, 20);
 
     createCollection(opCtx.get(), originalNss, createCollectionTs);
+    UUID uuid = CollectionCatalog::get(opCtx.get())
+                    ->lookupCollectionByNamespace(opCtx.get(), originalNss)
+                    ->uuid();
 
     // When the snapshot is opened right before the rename is committed to the durable catalog, and
     // the openCollection looks for the newNss, no collection instance should be returned.
     concurrentRenameCollectionAndOpenCollection(
-        opCtx.get(), originalNss, newNss, newNss, renameCollectionTs, true, false, 0);
+        opCtx.get(), originalNss, newNss, newNss, renameCollectionTs, true, false, 0, [&]() {
+            // Verify that we can find the Collection when we search by UUID when the setup occured
+            // during concurrent rename (rename is not affecting UUID), even if we can't find it by
+            // namespace.
+            auto coll =
+                CollectionCatalog::get(opCtx.get())->lookupCollectionByUUID(opCtx.get(), uuid);
+            ASSERT(coll);
+            ASSERT_EQ(coll->ns(), originalNss);
+
+            ASSERT_EQ(CollectionCatalog::get(opCtx.get())->lookupNSSByUUID(opCtx.get(), uuid),
+                      originalNss);
+        });
 }
 
 TEST_F(CollectionCatalogTimestampTest,
@@ -3139,6 +3211,16 @@ TEST_F(CollectionCatalogTimestampTest, OpenCollectionBetweenIndexBuildInProgress
                         ->openCollection(opCtx.get(), nss, createCollectionTs);
         ASSERT(coll);
         ASSERT_EQ(coll->getIndexCatalog()->numIndexesReady(), 0);
+
+        // Lookups from the catalog should return the newly opened collection.
+        ASSERT_EQ(CollectionCatalog::get(opCtx.get())
+                      ->lookupCollectionByNamespaceForRead(opCtx.get(), coll->ns())
+                      .get(),
+                  coll.get());
+        ASSERT_EQ(CollectionCatalog::get(opCtx.get())
+                      ->lookupCollectionByUUIDForRead(opCtx.get(), coll->uuid())
+                      .get(),
+                  coll.get());
     }
 
     finishIndexBuild(opCtx.get(), nss, std::move(indexBuildBlock), indexReadyTs);
@@ -3153,6 +3235,16 @@ TEST_F(CollectionCatalogTimestampTest, OpenCollectionBetweenIndexBuildInProgress
             CollectionCatalog::get(opCtx.get())->openCollection(opCtx.get(), nss, createIndexTs);
         ASSERT(coll);
         ASSERT_EQ(coll->getIndexCatalog()->numIndexesReady(), 0);
+
+        // Lookups from the catalog should return the newly opened collection.
+        ASSERT_EQ(CollectionCatalog::get(opCtx.get())
+                      ->lookupCollectionByNamespaceForRead(opCtx.get(), coll->ns())
+                      .get(),
+                  coll.get());
+        ASSERT_EQ(CollectionCatalog::get(opCtx.get())
+                      ->lookupCollectionByUUIDForRead(opCtx.get(), coll->uuid())
+                      .get(),
+                  coll.get());
     }
 }
 }  // namespace

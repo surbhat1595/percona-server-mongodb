@@ -60,6 +60,7 @@ const BSONField<bool> ChunkType::jumbo("jumbo");
 const BSONField<Date_t> ChunkType::lastmod("lastmod");
 const BSONField<BSONObj> ChunkType::history("history");
 const BSONField<int64_t> ChunkType::estimatedSizeBytes("estimatedDataSizeBytes");
+const BSONField<Timestamp> ChunkType::onCurrentShardSince("onCurrentShardSince");
 const BSONField<bool> ChunkType::historyIsAt40("historyIsAt40");
 
 namespace {
@@ -246,10 +247,32 @@ StatusWith<ChunkType> ChunkType::_parseChunkBase(const BSONObj& source) {
                 return history.getStatus();
 
             chunk._history = std::move(history.getValue());
+
         } else if (status == ErrorCodes::NoSuchKey) {
             // History is missing, so it will be presumed empty
         } else {
             return status;
+        }
+    }
+
+    {
+        if (!chunk._history.empty()) {
+            Timestamp onCurrentShardSinceValue;
+            Status status = bsonExtractTimestampField(
+                source, onCurrentShardSince.name(), &onCurrentShardSinceValue);
+            if (status.isOK()) {
+                chunk._onCurrentShardSince = onCurrentShardSinceValue;
+                if (chunk._history.front().getValidAfter() != onCurrentShardSinceValue) {
+                    return {ErrorCodes::BadValue,
+                            str::stream()
+                                << "The first `validAfter` in the chunk's history is not "
+                                   "consistent with `onCurrentShardSince`: validAfter is "
+                                << chunk._history.front().getValidAfter()
+                                << " while onCurrentShardSince is " << *chunk._onCurrentShardSince};
+                }
+            } else {
+                chunk._onCurrentShardSince = boost::none;
+            }
         }
     }
 
@@ -532,12 +555,27 @@ void ChunkType::setJumbo(bool jumbo) {
     _jumbo = jumbo;
 }
 
+void ChunkType::setOnCurrentShardSince(const Timestamp& onCurrentShardSince) {
+    _onCurrentShardSince = onCurrentShardSince;
+}
+
 void ChunkType::addHistoryToBSON(BSONObjBuilder& builder) const {
     if (_history.size()) {
-        BSONArrayBuilder arrayBuilder(builder.subarrayStart(history.name()));
-        for (const auto& item : _history) {
-            BSONObjBuilder subObjBuilder(arrayBuilder.subobjStart());
-            item.serialize(&subObjBuilder);
+        if (_onCurrentShardSince.has_value()) {
+            uassert(ErrorCodes::BadValue,
+                    str::stream() << "The first `validAfter` in the chunk's history is not "
+                                     "consistent with `onCurrentShardSince`: validAfter is "
+                                  << _history.front().getValidAfter()
+                                  << " while onCurrentShardSince is " << *_onCurrentShardSince,
+                    _history.front().getValidAfter() == *_onCurrentShardSince);
+            builder.append(onCurrentShardSince.name(), *_onCurrentShardSince);
+        }
+        {
+            BSONArrayBuilder arrayBuilder(builder.subarrayStart(history.name()));
+            for (const auto& item : _history) {
+                BSONObjBuilder subObjBuilder(arrayBuilder.subobjStart());
+                item.serialize(&subObjBuilder);
+            }
         }
     }
 }
@@ -589,6 +627,14 @@ Status ChunkType::validate() const {
             return {ErrorCodes::BadValue,
                     str::stream() << "History contains an invalid shard "
                                   << _history.front().getShard()};
+        }
+        if (_onCurrentShardSince.has_value() &&
+            _history.front().getValidAfter() != *_onCurrentShardSince) {
+            return {ErrorCodes::BadValue,
+                    str::stream() << "The first `validAfter` in the chunk's `history` is not "
+                                     "consistent with `onCurrentShardSince`: validAfter is "
+                                  << _history.front().getValidAfter()
+                                  << " while onCurrentShardSince is " << *_onCurrentShardSince};
         }
     }
 

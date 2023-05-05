@@ -218,8 +218,13 @@ void CurOp::reportCurrentOpForClient(OperationContext* opCtx,
     auto maybeImpersonationData = rpc::getImpersonatedUserMetadata(clientOpCtx);
     if (maybeImpersonationData) {
         BSONArrayBuilder users(infoBuilder->subarrayStart("effectiveUsers"));
-        for (const auto& user : maybeImpersonationData->getUsers()) {
-            user.serializeToBSON(&users);
+
+        if (maybeImpersonationData->getUser()) {
+            maybeImpersonationData->getUser()->serializeToBSON(&users);
+        } else if (maybeImpersonationData->getUsers()) {
+            for (const auto& user : maybeImpersonationData->getUsers().get()) {
+                user.serializeToBSON(&users);
+            }
         }
 
         users.doneFast();
@@ -745,7 +750,10 @@ void CurOp::reportState(OperationContext* opCtx, BSONObjBuilder* builder, bool t
     }
 
     if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations.isEnabledAndIgnoreFCV()) {
-        builder->append("admissionPriority", toString(opCtx->lockState()->getAdmissionPriority()));
+        auto admissionPriority = opCtx->lockState()->getAdmissionPriority();
+        if (admissionPriority < AdmissionContext::Priority::kNormal) {
+            builder->append("admissionPriority", toString(admissionPriority));
+        }
     }
 }
 
@@ -864,6 +872,10 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->addDeepCopy("planSummary", curop.getPlanSummary().toString());
     }
 
+    if (planningTime > Microseconds::zero()) {
+        pAttrs->add("planningTimeMicros", durationCount<Microseconds>(planningTime));
+    }
+
     if (prepareConflictDurationMillis > Milliseconds::zero()) {
         pAttrs->add("prepareConflictDuration", prepareConflictDurationMillis);
     }
@@ -968,7 +980,10 @@ void OpDebug::report(OperationContext* opCtx,
     }
 
     if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations.isEnabledAndIgnoreFCV()) {
-        pAttrs->add("admissionPriority", opCtx->lockState()->getAdmissionPriority());
+        auto admissionPriority = opCtx->lockState()->getAdmissionPriority();
+        if (admissionPriority < AdmissionContext::Priority::kNormal) {
+            pAttrs->add("admissionPriority", admissionPriority);
+        }
     }
 
     if (lockStats) {
@@ -1037,7 +1052,6 @@ void OpDebug::report(OperationContext* opCtx,
     }
 
     pAttrs->add("durationMillis", durationCount<Milliseconds>(executionTime));
-    pAttrs->add("planningTimeMicros", durationCount<Microseconds>(planningTime));
 }
 
 #define OPDEBUG_APPEND_NUMBER2(b, x, y) \
@@ -1205,10 +1219,13 @@ void OpDebug::append(OperationContext* opCtx,
              durationCount<Milliseconds>(executionTime) >= serverGlobalParams.slowMS.load()
                  ? 1
                  : serverGlobalParams.rateLimit.load());
-    b.appendNumber("planningTimeMicros", durationCount<Microseconds>(planningTime));
 
     if (!curop.getPlanSummary().empty()) {
         b.append("planSummary", curop.getPlanSummary());
+    }
+
+    if (planningTime > Microseconds::zero()) {
+        b.appendNumber("planningTimeMicros", durationCount<Microseconds>(planningTime));
     }
 
     if (!execStats.isEmpty()) {
@@ -1524,14 +1541,14 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
                      : serverGlobalParams.rateLimit.load());
     });
 
-    addIfNeeded("planningTimeMicros", [](auto field, auto args, auto& b) {
-        b.appendNumber(field, durationCount<Microseconds>(args.op.planningTime));
-    });
-
     addIfNeeded("planSummary", [](auto field, auto args, auto& b) {
         if (!args.curop.getPlanSummary().empty()) {
             b.append(field, args.curop.getPlanSummary());
         }
+    });
+
+    addIfNeeded("planningTimeMicros", [](auto field, auto args, auto& b) {
+        b.appendNumber(field, durationCount<Microseconds>(args.op.planningTime));
     });
 
     addIfNeeded("execStats", [](auto field, auto args, auto& b) {
@@ -1578,7 +1595,6 @@ void OpDebug::setPlanSummaryMetrics(const PlanSummaryStats& planSummaryStats) {
     keysSorted = planSummaryStats.keysSorted;
     fromMultiPlanner = planSummaryStats.fromMultiPlanner;
     fromPlanCache = planSummaryStats.fromPlanCache;
-    planningTime = planSummaryStats.planningTimeMicros;
     replanReason = planSummaryStats.replanReason;
 }
 

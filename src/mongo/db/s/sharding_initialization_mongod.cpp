@@ -38,6 +38,7 @@
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/catalog_raii.h"
+#include "mongo/db/catalog_shard_feature_flag_gen.h"
 #include "mongo/db/client_metadata_propagation_egress_hook.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/dbhelpers.h"
@@ -48,6 +49,7 @@
 #include "mongo/db/ops/update.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/chunk_splitter.h"
+#include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/periodic_balancer_config_refresher.h"
 #include "mongo/db/s/read_only_catalog_cache_loader.h"
 #include "mongo/db/s/shard_local.h"
@@ -55,9 +57,11 @@
 #include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/vector_clock_metadata_hook.h"
+#include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
+#include "mongo/s/catalog/sharding_catalog_client_impl.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/client/shard_factory.h"
 #include "mongo/s/client/shard_remote.h"
@@ -116,6 +120,15 @@ public:
                                      ShardRegistry::ConnectionStringUpdateType::kConfirmed);
         } catch (const ExceptionForCat<ErrorCategory::ShutdownError>& e) {
             LOGV2(471692, "Unable to update the shard registry", "error"_attr = e);
+        }
+
+        auto const shardingState = ShardingState::get(_serviceContext);
+        if (!shardingState->enabled()) {
+            // If our sharding state isn't enabled, we don't have a shard identity document, so
+            // there's nothing to update. Note technically this may race with the config server
+            // being added as a shard, but that shouldn't be a problem since addShard will use a
+            // valid connection string and should serialize with a replica set reconfig.
+            return;
         }
 
         auto setName = connStr.getSetName();
@@ -295,7 +308,7 @@ bool ShardingInitializationMongoD::initializeShardingAwarenessIfNeeded(Operation
     // In sharded queryableBackupMode mode, we ignore the shardIdentity document on disk and instead
     // *require* a shardIdentity document to be passed through --overrideShardIdentity
     if (storageGlobalParams.queryableBackupMode) {
-        if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+        if (serverGlobalParams.clusterRole.isExclusivelyShardRole()) {
             uassert(ErrorCodes::InvalidOptions,
                     "If started with --shardsvr in queryableBackupMode, a shardIdentity document "
                     "must be provided through --overrideShardIdentity",
@@ -413,14 +426,25 @@ void ShardingInitializationMongoD::initializeFromShardIdentity(
     stdx::unique_lock<Latch> ul(_initSynchronizationMutex);
 
     if (shardingState->enabled()) {
-        uassert(40371, "", shardingState->shardId() == shardIdentity.getShardName());
-        uassert(40372, "", shardingState->clusterId() == shardIdentity.getClusterId());
+        uassert(40371,
+                "Existing shard id does not match shard identity shard id",
+                shardingState->shardId() == shardIdentity.getShardName());
+        uassert(40372,
+                "Existing cluster id does not match shard identity cluster id",
+                shardingState->clusterId() == shardIdentity.getClusterId());
 
-        auto prevConfigsvrConnStr = shardRegistry->getConfigServerConnectionString();
-        uassert(40373,
-                "",
+        // If run on a config server, we may not know our connection string yet.
+        if (serverGlobalParams.clusterRole != ClusterRole::ConfigServer) {
+            auto prevConfigsvrConnStr = shardRegistry->getConfigServerConnectionString();
+            uassert(
+                40373,
+                "Existing config server connection string is unexpectedly not for a replica set",
                 prevConfigsvrConnStr.type() == ConnectionString::ConnectionType::kReplicaSet);
-        uassert(40374, "", prevConfigsvrConnStr.getSetName() == configSvrConnStr.getSetName());
+            uassert(40374,
+                    "Existing config server connection string set name does not match shard "
+                    "identity config server connection string set name",
+                    prevConfigsvrConnStr.getSetName() == configSvrConnStr.getSetName());
+        }
 
         return;
     }
@@ -440,7 +464,12 @@ void ShardingInitializationMongoD::initializeFromShardIdentity(
         shardingState->setInitialized(ex.toStatus());
     }
 
-    Grid::get(opCtx)->setShardingInitialized();
+    if (serverGlobalParams.clusterRole != ClusterRole::ConfigServer) {
+        Grid::get(opCtx)->setShardingInitialized();
+    } else {
+        // A config server always initializes sharding at startup.
+        invariant(Grid::get(opCtx)->isShardingInitialized());
+    }
 
     if (audit::initializeSynchronizeJob) {
         audit::initializeSynchronizeJob(opCtx->getServiceContext());
@@ -489,28 +518,67 @@ void ShardingInitializationMongoD::updateShardIdentityConfigString(
 }
 
 void ShardingInitializationMongoD::onSetCurrentConfig(OperationContext* opCtx) {
-    // TODO SERVER-72088: Use the connection string from the config to construct a ShardRemote for
-    // the config server when in catalog shard mode.
+    if (serverGlobalParams.clusterRole != ClusterRole::ConfigServer ||
+        !gFeatureFlagConfigServerAlwaysShardRemote.isEnabledAndIgnoreFCV()) {
+        // Only config servers capable of acting as a shard set up the config shard in their shard
+        // registry with a real connection string.
+        return;
+    }
+
+    auto myConnectionString = repl::ReplicationCoordinator::get(opCtx)->getConfigConnectionString();
+    Grid::get(opCtx)->shardRegistry()->initConfigShardIfNecessary(myConnectionString);
 }
 
 void ShardingInitializationMongoD::onInitialDataAvailable(OperationContext* opCtx,
                                                           bool isMajorityDataAvailable) {
-    // This function may take the global lock.
-    auto shardingInitialized = initializeShardingAwarenessIfNeeded(opCtx);
-    if (shardingInitialized) {
-        auto status = loadGlobalSettingsFromConfigServer(opCtx);
-        if (!status.isOK()) {
-            LOGV2(6460100,
-                  "Error loading global settings from config server at startup",
-                  "error"_attr = redact(status));
-        }
+    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+        initializeGlobalShardingStateForConfigServerIfNeeded(opCtx);
     }
+
+    // This function may take the global lock.
+    initializeShardingAwarenessIfNeededAndLoadGlobalSettings(opCtx);
+}
+
+void initializeGlobalShardingStateForConfigServerIfNeeded(OperationContext* opCtx) {
+    if (Grid::get(opCtx)->isShardingInitialized()) {
+        return;
+    }
+
+    const auto service = opCtx->getServiceContext();
+
+    ShardingInitializationMongoD::get(opCtx)->installReplicaSetChangeListener(service);
+
+    auto configCS = []() -> boost::optional<ConnectionString> {
+        if (gFeatureFlagConfigServerAlwaysShardRemote.isEnabledAndIgnoreFCV()) {
+            // When the config server can operate as a shard, it sets up a ShardRemote for the
+            // config shard, which is created later after loading the local replica set config.
+            return boost::none;
+        }
+        return {ConnectionString::forLocal()};
+    }();
+
+    CatalogCacheLoader::set(service, std::make_unique<ConfigServerCatalogCacheLoader>());
+
+    initializeGlobalShardingStateForMongoD(opCtx, configCS);
+
+    // ShardLocal to use for explicitly local commands on the config server.
+    auto localConfigShard = Grid::get(opCtx)->shardRegistry()->createLocalConfigShard();
+    auto localCatalogClient = std::make_unique<ShardingCatalogClientImpl>(localConfigShard);
+
+    ShardingCatalogManager::create(
+        service,
+        makeShardingTaskExecutor(executor::makeNetworkInterface("AddShard-TaskExecutor")),
+        std::move(localConfigShard),
+        std::move(localCatalogClient));
+
+    Grid::get(opCtx)->setShardingInitialized();
 }
 
 void initializeGlobalShardingStateForMongoD(OperationContext* opCtx,
-                                            const ShardId& shardId,
-                                            const ConnectionString& configCS) {
-    uassert(ErrorCodes::BadValue, "Unrecognized connection string.", configCS);
+                                            const boost::optional<ConnectionString>& configCS) {
+    if (configCS) {
+        uassert(ErrorCodes::BadValue, "Unrecognized connection string.", *configCS);
+    }
 
     auto targeterFactory = std::make_unique<RemoteCommandTargeterFactoryImpl>();
     auto targeterFactoryPtr = targeterFactory.get();
@@ -536,20 +604,6 @@ void initializeGlobalShardingStateForMongoD(OperationContext* opCtx,
         std::make_unique<ShardFactory>(std::move(buildersMap), std::move(targeterFactory));
 
     auto const service = opCtx->getServiceContext();
-
-    if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
-        if (storageGlobalParams.queryableBackupMode) {
-            CatalogCacheLoader::set(service, std::make_unique<ReadOnlyCatalogCacheLoader>());
-        } else {
-            CatalogCacheLoader::set(service,
-                                    std::make_unique<ShardServerCatalogCacheLoader>(
-                                        std::make_unique<ConfigServerCatalogCacheLoader>()));
-        }
-    } else if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
-        CatalogCacheLoader::set(service, std::make_unique<ConfigServerCatalogCacheLoader>());
-    } else {
-        MONGO_UNREACHABLE;
-    }
 
     auto validator = LogicalTimeValidator::get(service);
     if (validator) {  // The keyManager may be existing if the node was a part of a standalone RS.
@@ -602,16 +656,17 @@ void initializeGlobalShardingStateForMongoD(OperationContext* opCtx,
     }
 }
 
+
+void ShardingInitializationMongoD::installReplicaSetChangeListener(ServiceContext* service) {
+    _replicaSetChangeListener =
+        ReplicaSetMonitor::getNotifier().makeListener<ShardingReplicaSetChangeListener>(service);
+}
+
 void ShardingInitializationMongoD::_initializeShardingEnvironmentOnShardServer(
     OperationContext* opCtx, const ShardIdentity& shardIdentity) {
+    auto const service = opCtx->getServiceContext();
 
-    _replicaSetChangeListener =
-        ReplicaSetMonitor::getNotifier().makeListener<ShardingReplicaSetChangeListener>(
-            opCtx->getServiceContext());
-
-    initializeGlobalShardingStateForMongoD(opCtx,
-                                           shardIdentity.getShardName().toString(),
-                                           shardIdentity.getConfigsvrConnectionString());
+    installReplicaSetChangeListener(service);
 
     // Determine primary/secondary/standalone state in order to properly initialize sharding
     // components.
@@ -620,19 +675,52 @@ void ShardingInitializationMongoD::_initializeShardingEnvironmentOnShardServer(
     bool isStandaloneOrPrimary =
         !isReplSet || (replCoord->getMemberState() == repl::MemberState::RS_PRIMARY);
 
-    CatalogCacheLoader::get(opCtx).initializeReplicaSetRole(isStandaloneOrPrimary);
-    ChunkSplitter::get(opCtx).onShardingInitialization(isStandaloneOrPrimary);
-    PeriodicBalancerConfigRefresher::get(opCtx).onShardingInitialization(opCtx->getServiceContext(),
-                                                                         isStandaloneOrPrimary);
+    if (serverGlobalParams.clusterRole.isExclusivelyShardRole()) {
+        // A config server added as a shard would have already set this up at startup.
+        if (storageGlobalParams.queryableBackupMode) {
+            CatalogCacheLoader::set(service, std::make_unique<ReadOnlyCatalogCacheLoader>());
+        } else {
+            CatalogCacheLoader::set(service,
+                                    std::make_unique<ShardServerCatalogCacheLoader>(
+                                        std::make_unique<ConfigServerCatalogCacheLoader>()));
+        }
 
-    // Start the transaction coordinator service only if the node is the primary of a replica set
-    TransactionCoordinatorService::get(opCtx)->onShardingInitialization(
-        opCtx, isReplSet && isStandaloneOrPrimary);
+        initializeGlobalShardingStateForMongoD(opCtx,
+                                               {shardIdentity.getConfigsvrConnectionString()});
+
+        CatalogCacheLoader::get(opCtx).initializeReplicaSetRole(isStandaloneOrPrimary);
+
+        // Start transaction coordinator service only if the node is the primary of a replica set.
+        TransactionCoordinatorService::get(opCtx)->onShardingInitialization(
+            opCtx, isReplSet && isStandaloneOrPrimary);
+    }
+
+    // These only exist on a shard, so always set them up whether we're a config server or not.
+    ChunkSplitter::get(opCtx).onShardingInitialization(isStandaloneOrPrimary);
+    PeriodicBalancerConfigRefresher::get(opCtx).onShardingInitialization(service,
+                                                                         isStandaloneOrPrimary);
 
     LOGV2(22071,
           "Finished initializing sharding components for {memberState} node.",
           "Finished initializing sharding components",
           "memberState"_attr = (isStandaloneOrPrimary ? "primary" : "secondary"));
+}
+
+void initializeShardingAwarenessIfNeededAndLoadGlobalSettings(OperationContext* opCtx) {
+    auto shardingInitialized =
+        ShardingInitializationMongoD::get(opCtx)->initializeShardingAwarenessIfNeeded(opCtx);
+    if (shardingInitialized) {
+        // Config servers can't always perform remote reads here, so they use a local client.
+        auto catalogClient = serverGlobalParams.clusterRole == ClusterRole::ConfigServer
+            ? ShardingCatalogManager::get(opCtx)->localCatalogClient()
+            : Grid::get(opCtx)->catalogClient();
+        auto status = loadGlobalSettingsFromConfigServer(opCtx, catalogClient);
+        if (!status.isOK()) {
+            LOGV2_ERROR(20545,
+                        "Error loading global settings from config server at startup",
+                        "error"_attr = redact(status));
+        }
+    }
 }
 
 }  // namespace mongo

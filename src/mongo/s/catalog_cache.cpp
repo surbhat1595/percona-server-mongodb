@@ -32,6 +32,7 @@
 #include <fmt/format.h>
 
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/catalog_shard_feature_flag_gen.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/repl/optime_with.h"
@@ -44,6 +45,7 @@
 #include "mongo/s/is_mongos.h"
 #include "mongo/s/mongod_and_mongos_server_parameters_gen.h"
 #include "mongo/s/shard_cannot_refresh_due_to_locks_held_exception.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/s/stale_exception.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/scopeguard.h"
@@ -448,6 +450,11 @@ boost::optional<GlobalIndexesCache> CatalogCache::_getCollectionIndexInfoAt(
     const NamespaceString& nss,
     boost::optional<Timestamp> atClusterTime,
     bool allowLocks) {
+
+    if (!feature_flags::gGlobalIndexesShardingCatalog.isEnabledAndIgnoreFCV()) {
+        return boost::none;
+    }
+
     if (!allowLocks) {
         invariant(!opCtx->lockState() || !opCtx->lockState()->isLocked(),
                   "Do not hold a lock while refreshing the catalog cache. Doing so would "
@@ -498,7 +505,8 @@ boost::optional<GlobalIndexesCache> CatalogCache::_getCollectionIndexInfoAt(
         } catch (const DBException& ex) {
             bool isCatalogCacheRetriableError = ex.isA<ErrorCategory::SnapshotError>() ||
                 ex.code() == ErrorCodes::ConflictingOperationInProgress ||
-                ex.code() == ErrorCodes::QueryPlanKilled;
+                ex.code() == ErrorCodes::QueryPlanKilled ||
+                ex.code() == ErrorCodes::ReadThroughCacheLookupCanceled;
             if (!isCatalogCacheRetriableError) {
                 throw;
             }
@@ -1005,7 +1013,10 @@ CatalogCache::IndexCache::LookupResult CatalogCache::IndexCache::_lookupIndexes(
                                   "timeInStore"_attr = previousVersion);
 
         const auto readConcern = [&]() -> repl::ReadConcernArgs {
-            if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+            if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&
+                !gFeatureFlagConfigServerAlwaysShardRemote.isEnabledAndIgnoreFCV()) {
+                // When the feature flag is on, the config server may read from a secondary which
+                // may need to wait for replication, so we should use afterClusterTime.
                 return {repl::ReadConcernLevel::kSnapshotReadConcern};
             } else {
                 const auto vcTime = VectorClock::get(opCtx)->getTime();

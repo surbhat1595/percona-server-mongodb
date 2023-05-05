@@ -38,6 +38,7 @@ for (let i = 0; i < numDocs; i++) {
     }));
 }
 
+jsTestLog("Creating index 'a'");
 assert.commandWorked(coll.createIndex({a: 1}));
 
 let serverStatus = testDB.serverStatus();
@@ -55,37 +56,49 @@ assert.between(expectedSpilledRanges,
                indexBulkBuilderSection.spilledRanges,
                1 + expectedSpilledRanges,
                tojson(indexBulkBuilderSection),
-               true /* inclusive */);
+               /*inclusive=*/true);
 assert.between(0,
                indexBulkBuilderSection.bytesSpilled,
                approxMemoryUsage,
                tojson(indexBulkBuilderSection),
-               true);
+               /*inclusive=*/true);
 // We write out a single byte for every spilled doc, which is included in the uncompressed size.
 assert.between(0,
                indexBulkBuilderSection.bytesSpilledUncompressed,
                approxMemoryUsage + spillOverhead,
                tojson(indexBulkBuilderSection),
-               true);
+               /*inclusive=*/true);
+assert.eq(indexBulkBuilderSection.numSorted, numDocs, tojson(indexBulkBuilderSection));
+// Expect total bytes sorted to be greater than approxMemoryUsage because of the additional field in
+// the documents inserted which accounts for more bytes than in the rough calculation.
+assert.gte(indexBulkBuilderSection.bytesSorted, approxMemoryUsage, tojson(indexBulkBuilderSection));
+assert.between(0,
+               indexBulkBuilderSection.memUsage,
+               approxMemoryUsage,
+               tojson(indexBulkBuilderSection),
+               /*inclusive=*/true);
 
-// Shut down server during an index to verify 'resumable' value on restart.
-IndexBuildTest.pauseIndexBuilds(primary);
-const createIdx = IndexBuildTest.startIndexBuild(primary,
-                                                 coll.getFullName(),
-                                                 {b: 1},
-                                                 /*options=*/{},
-                                                 [ErrorCodes.InterruptedDueToReplStateChange]);
-IndexBuildTest.waitForIndexBuildToScanCollection(testDB, coll.getName(), 'b_1');
-const buildUUID = extractUUIDFromObject(
-    IndexBuildTest
-        .assertIndexes(coll, 3, ['_id_', 'a_1'], ['b_1'], {includeBuildUUIDs: true})['b_1']
-        .buildUUID);
-replSet.restart(/*nodeId=*/0);
-createIdx();
-primary = replSet.getPrimary();
-testDB = primary.getDB('test');
-coll = testDB.getCollection('t');
-ResumableIndexBuildTest.assertCompleted(primary, coll, [buildUUID], ['a_1', 'b_1']);
+(function resumeIndexBuild() {
+    jsTestLog(
+        "Shutting down server during index build for 'b' to verify 'resumable' value on restart.");
+    IndexBuildTest.pauseIndexBuilds(primary);
+    const createIdx = IndexBuildTest.startIndexBuild(primary,
+                                                     coll.getFullName(),
+                                                     {b: 1},
+                                                     /*options=*/{},
+                                                     [ErrorCodes.InterruptedDueToReplStateChange]);
+    IndexBuildTest.waitForIndexBuildToScanCollection(testDB, coll.getName(), 'b_1');
+    const buildUUID = extractUUIDFromObject(
+        IndexBuildTest
+            .assertIndexes(coll, 3, ['_id_', 'a_1'], ['b_1'], {includeBuildUUIDs: true})['b_1']
+            .buildUUID);
+    replSet.restart(/*nodeId=*/0);
+    createIdx();
+    primary = replSet.getPrimary();
+    testDB = primary.getDB('test');
+    coll = testDB.getCollection('t');
+    ResumableIndexBuildTest.assertCompleted(primary, coll, [buildUUID], ['a_1', 'b_1']);
+})();
 indexBulkBuilderSection = testDB.serverStatus().indexBulkBuilder;
 assert.eq(indexBulkBuilderSection.count, 1, tojson(indexBulkBuilderSection));
 assert.eq(indexBulkBuilderSection.resumed, 1, tojson(indexBulkBuilderSection));
@@ -99,24 +112,31 @@ assert.between(0,
                indexBulkBuilderSection.bytesSpilled,
                approxMemoryUsage,
                tojson(indexBulkBuilderSection),
-               true);
+               /*inclusive=*/true);
 assert.between(0,
                indexBulkBuilderSection.bytesSpilledUncompressed,
                // We write out some extra data for every spilled doc, which is included in the
                // uncompressed size.
                approxMemoryUsage + spillOverhead,
-               tojson(indexBulkBuilderSection));
+               tojson(indexBulkBuilderSection),
+               /*inclusive=*/true);
+assert.eq(indexBulkBuilderSection.numSorted, 0, tojson(indexBulkBuilderSection));
+assert.eq(indexBulkBuilderSection.bytesSorted, 0, tojson(indexBulkBuilderSection));
+assert.eq(indexBulkBuilderSection.memUsage, 0, tojson(indexBulkBuilderSection));
 
-// Confirm that metrics are updated during initial sync.
-const newNode =
-    replSet.add({setParameter: {maxIndexBuildMemoryUsageMegabytes: maxMemUsageMegabytes}});
-replSet.reInitiate();
-replSet.waitForState(newNode, ReplSetTest.State.SECONDARY);
-replSet.awaitReplication();
-let newNodeTestDB = newNode.getDB(testDB.getName());
-let newNodeColl = newNodeTestDB.getCollection(coll.getName());
-IndexBuildTest.assertIndexes(newNodeColl, 3, ['_id_', 'a_1', 'b_1']);
-indexBulkBuilderSection = newNodeTestDB.serverStatus().indexBulkBuilder;
+(function initialSyncNewNode() {
+    jsTestLog("Adding new node and initial syncing");
+    const newNode =
+        replSet.add({setParameter: {maxIndexBuildMemoryUsageMegabytes: maxMemUsageMegabytes}});
+    replSet.reInitiate();
+    replSet.waitForState(newNode, ReplSetTest.State.SECONDARY);
+    replSet.awaitReplication();
+    let newNodeTestDB = newNode.getDB(testDB.getName());
+    let newNodeColl = newNodeTestDB.getCollection(coll.getName());
+    IndexBuildTest.assertIndexes(newNodeColl, 3, ['_id_', 'a_1', 'b_1']);
+    assert.eq(newNodeColl.find().hint({a: 1}).count(), 10);
+    indexBulkBuilderSection = newNodeTestDB.serverStatus().indexBulkBuilder;
+})();
 // We expect initial sync to build at least three indexes for the test collection in addition
 // to indexes for internal collections required for the proper running of the server.
 // The test collection has the only index that will cause the external sorter to spill to disk,
@@ -134,18 +154,32 @@ assert.between(expectedSpilledRanges,
                indexBulkBuilderSection.spilledRanges,
                1 + expectedSpilledRanges,
                tojson(indexBulkBuilderSection),
-               true /* inclusive */);
+               /*inclusive=*/true);
 assert.between(0,
                indexBulkBuilderSection.bytesSpilled,
                approxMemoryUsage,
                tojson(indexBulkBuilderSection),
-               true);
+               /*inclusive=*/true);
 assert.between(0,
                indexBulkBuilderSection.bytesSpilledUncompressed,
                // We write out some extra data for every spilled doc, which is included in the
                // uncompressed size.
                approxMemoryUsage + spillOverhead,
-               tojson(indexBulkBuilderSection));
+               tojson(indexBulkBuilderSection),
+               /*inclusive=*/true);
+// Expect at least all documents in the collection are sorted for three indexes but there may also
+// be internal indexes with additional sorts.
+assert.gte(indexBulkBuilderSection.numSorted, numDocs * 3, tojson(indexBulkBuilderSection));
+// We are sorting on index keys and keystring sizes are encoded to its necessary bytes so we are
+// approximating that _id and b will be at least 3 bytes each to account for the integer value, the
+// end byte, and the record id.
+let dataUsage = approxMemoryUsage + (3 * numDocs) + (3 * numDocs);
+assert.gte(indexBulkBuilderSection.bytesSorted, dataUsage, tojson(indexBulkBuilderSection));
+assert.between(0,
+               indexBulkBuilderSection.memUsage,
+               approxMemoryUsage,
+               tojson(indexBulkBuilderSection),
+               /*inclusive=*/true);
 
 // Building multiple indexes in a single createIndex command increases count by the number of
 // indexes requested.
@@ -165,18 +199,30 @@ assert.between(expectedSpilledRanges,
                indexBulkBuilderSection.spilledRanges,
                1 + expectedSpilledRanges,
                tojson(indexBulkBuilderSection),
-               true /* inclusive */);
+               /*inclusive=*/true);
 assert.between(0,
                indexBulkBuilderSection.bytesSpilled,
                approxMemoryUsage,
                tojson(indexBulkBuilderSection),
-               true);
+               /*inclusive=*/true);
 assert.between(0,
                indexBulkBuilderSection.bytesSpilledUncompressed,
                // We write out some extra data for every spilled doc, which is included in the
                // uncompressed size.
                approxMemoryUsage + spillOverhead,
-               tojson(indexBulkBuilderSection));
+               tojson(indexBulkBuilderSection),
+               /*inclusive=*/true);
+assert.eq(indexBulkBuilderSection.numSorted, numDocs * 3, tojson(indexBulkBuilderSection));
+// We are sorting on index keys and keystring sizes are encoded to its necessary bytes so we are
+// approximating that _id and b will be at least 3 bytes each to account for the integer value, the
+// end byte, and the record id.
+dataUsage = approxMemoryUsage + (3 * numDocs) + (3 * numDocs);
+assert.gte(indexBulkBuilderSection.bytesSorted, dataUsage, tojson(indexBulkBuilderSection));
+assert.between(0,
+               indexBulkBuilderSection.memUsage,
+               approxMemoryUsage,
+               tojson(indexBulkBuilderSection),
+               /*inclusive=*/true);
 
 replSet.stopSet();
 })();

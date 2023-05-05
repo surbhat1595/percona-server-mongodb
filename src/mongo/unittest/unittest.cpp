@@ -266,14 +266,19 @@ void CaptureLogs::startCapturingLogMessages() {
             logv2::AllLogsFilter(logv2::LogManager::global().getGlobalDomain()));
         _captureBSONSink->set_formatter(logv2::BSONFormatter());
     }
+    _captureSink->locked_backend()->setEnabled(true);
+    _captureBSONSink->locked_backend()->setEnabled(true);
     boost::log::core::get()->add_sink(_captureSink);
     boost::log::core::get()->add_sink(_captureBSONSink);
-
     _isCapturingLogMessages = true;
 }
 
 void CaptureLogs::stopCapturingLogMessages() {
     invariant(_isCapturingLogMessages);
+    // These sinks can still emit messages after they are detached
+    // from the log core. Disable them first to prevent that race.
+    _captureSink->locked_backend()->setEnabled(false);
+    _captureBSONSink->locked_backend()->setEnabled(false);
     boost::log::core::get()->remove_sink(_captureSink);
     boost::log::core::get()->remove_sink(_captureBSONSink);
 
@@ -525,8 +530,9 @@ int Suite::run(const std::vector<std::string>& suites,
         tests += r->_tests;
         if (!r->_fails.empty()) {
             failedSuites.push_back(r->toBSON());
-            for (const std::string& failedTest : r->_fails) {
-                totals._fails.push_back(r->_name + "/" + failedTest);
+            for (size_t i = 0; i < r->_fails.size(); i++) {
+                totals._fails.push_back(r->_name + "/" + r->_fails[i]);
+                totals._messages.push_back(r->_messages[i]);
             }
         }
         asserts += r->_asserts;
@@ -544,6 +550,15 @@ int Suite::run(const std::vector<std::string>& suites,
         }
     }
     LOGV2(23065, "Totals", "totals"_attr = totals.toBSON());
+
+    std::size_t failCount = totals._fails.size();
+    for (std::size_t i = 0; i < failCount; i++) {
+        LOGV2(8423378,
+              "Test Failed",
+              "testName"_attr = totals._fails[i],
+              "exception"_attr = totals._messages[i].type,
+              "error"_attr = totals._messages[i].error);
+    }
 
     // summary
     if (!totals._fails.empty()) {

@@ -31,6 +31,7 @@
 
 #include "mongo/db/exec/sbe/stages/sort.h"
 
+#include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/trial_run_tracker.h"
@@ -209,12 +210,12 @@ void SortStage::open(bool reOpen) {
         }
     }
 
-    _specificStats.totalDataSizeBytes += _sorter->totalDataSizeSorted();
+    _specificStats.totalDataSizeBytes += _sorter->stats().bytesSorted();
     _mergeIt.reset(_sorter->done());
     _specificStats.spills += _sorter->stats().spilledRanges();
-    _specificStats.keysSorted += _sorter->numSorted();
+    _specificStats.keysSorted += _sorter->stats().numSorted();
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(_opCtx);
-    metricsCollector.incrementKeysSorted(_sorter->numSorted());
+    metricsCollector.incrementKeysSorted(_sorter->stats().numSorted());
     metricsCollector.incrementSorterSpills(_sorter->stats().spilledRanges());
 
     _children[0]->close();

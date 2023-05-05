@@ -41,7 +41,9 @@ namespace mongo {
 namespace {
 constexpr auto kDiagnosticLogLevel = 3;
 
-Status crossVerifyUserNames(const UserName& oldUser, const UserName& newUser) noexcept {
+Status crossVerifyUserNames(const UserName& oldUser,
+                            const UserName& newUser,
+                            const bool isMechX509) noexcept {
     if (oldUser.empty()) {
         return Status::OK();
     }
@@ -63,7 +65,11 @@ Status crossVerifyUserNames(const UserName& oldUser, const UserName& newUser) no
         return Status::OK();
     }
 
-    if (oldUser.getUser() != newUser.getUser()) {
+    // In the case where we are executing X509 authentication, we want to allow the user to change
+    // from __system (which, if this is the case, means that the initial hello command specified
+    // the saslSupportedMechs field) to the user specified in the certificate for X509.
+    bool isSystemX509BypassingNameConstraints = oldUser.getUser() == "__system" && isMechX509;
+    if (oldUser.getUser() != newUser.getUser() && !isSystemX509BypassingNameConstraints) {
         return {ErrorCodes::ProtocolError,
                 str::stream() << "Attempt to switch user during SASL authentication from "
                               << oldUser << " to " << newUser};
@@ -148,12 +154,13 @@ AuthenticationSession::StepGuard::StepGuard(OperationContext* opCtx, StepType cu
         maybeSession.emplace(client);
     };
 
-    auto startActiveSession = [&] {
+    auto startActiveSession = [&](const std::vector<StepType>& allowedLastSteps) {
         if (maybeSession) {
             invariant(maybeSession->_lastStep);
             auto lastStep = *maybeSession->_lastStep;
-            if (lastStep == StepType::kSaslSupportedMechanisms) {
-                // We can follow saslSupportedMechanisms with saslStart or authenticate.
+
+            if (std::find(allowedLastSteps.begin(), allowedLastSteps.end(), lastStep) !=
+                allowedLastSteps.end()) {
                 return;
             }
         }
@@ -168,12 +175,27 @@ AuthenticationSession::StepGuard::StepGuard(OperationContext* opCtx, StepType cu
         } break;
         case StepType::kSpeculativeAuthenticate:
         case StepType::kSpeculativeSaslStart: {
-            startActiveSession();
+            std::vector<StepType> allowedLastSteps{StepType::kSaslSupportedMechanisms};
+            startActiveSession(allowedLastSteps);
             maybeSession->_isSpeculative = true;
         } break;
         case StepType::kAuthenticate:
         case StepType::kSaslStart: {
-            startActiveSession();
+            std::vector<StepType> allowedLastSteps{StepType::kSaslSupportedMechanisms,
+                                                   StepType::kSpeculativeAuthenticate,
+                                                   StepType::kSpeculativeSaslStart};
+            startActiveSession(allowedLastSteps);
+
+            // If the last step was speculative auth, then we reset the session such that it
+            // persists from a failed speculative auth to the conclusion of a normal authentication.
+            bool lastStepWasSpec = maybeSession->_lastStep &&
+                (*maybeSession->_lastStep == StepType::kSpeculativeAuthenticate ||
+                 *maybeSession->_lastStep == StepType::kSpeculativeSaslStart);
+            if (lastStepWasSpec) {
+                maybeSession->_isSpeculative = false;
+                maybeSession->_mechName = "";
+                maybeSession->_mech = nullptr;
+            }
         } break;
         case StepType::kSaslContinue: {
             uassert(ErrorCodes::ProtocolError, "No SASL session state found", maybeSession);
@@ -220,8 +242,9 @@ void AuthenticationSession::setMechanismName(StringData mechanismName) {
     }
 }
 
-void AuthenticationSession::_verifyUserNameFromSaslSupportedMechanisms(const UserName& userName) {
-    if (auto status = crossVerifyUserNames(_ssmUserName, userName); !status.isOK()) {
+void AuthenticationSession::_verifyUserNameFromSaslSupportedMechanisms(const UserName& userName,
+                                                                       const bool isMechX509) {
+    if (auto status = crossVerifyUserNames(_ssmUserName, userName, isMechX509); !status.isOK()) {
         LOGV2(5286202,
               "Different user name was supplied to saslSupportedMechs",
               "error"_attr = status);
@@ -243,20 +266,20 @@ void AuthenticationSession::setUserNameForSaslSupportedMechanisms(UserName userN
                 "Set user name for session",
                 "userName"_attr = userName,
                 "oldName"_attr = _userName);
-    _verifyUserNameFromSaslSupportedMechanisms(userName);
+    _verifyUserNameFromSaslSupportedMechanisms(userName, false /* isMechX509 */);
 
     _ssmUserName = userName;
 }
 
-void AuthenticationSession::updateUserName(UserName userName) {
+void AuthenticationSession::updateUserName(UserName userName, bool isMechX509) {
     LOGV2_DEBUG(5286203,
                 kDiagnosticLogLevel,
                 "Updating user name for session",
                 "userName"_attr = userName,
                 "oldName"_attr = _userName);
 
-    _verifyUserNameFromSaslSupportedMechanisms(userName);
-    uassertStatusOK(crossVerifyUserNames(_userName, userName));
+    _verifyUserNameFromSaslSupportedMechanisms(userName, isMechX509);
+    uassertStatusOK(crossVerifyUserNames(_userName, userName, isMechX509));
     _userName = userName;
 }
 
@@ -291,7 +314,8 @@ void AuthenticationSession::_finish() {
         if (_mech->isClusterMember()) {
             setAsClusterMember();
         }
-        updateUserName({_mech->getPrincipalName(), _mech->getAuthenticationDatabase()});
+        updateUserName({_mech->getPrincipalName(), _mech->getAuthenticationDatabase()},
+                       _mechName == auth::kMechanismMongoX509);
     }
 }
 

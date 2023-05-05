@@ -21,6 +21,7 @@ const commandsAddedToMongosSinceLastLTS = [
     "analyzeShardKey",  // TODO (SERVER-68977): Remove upgrade/downgrade for PM-1858.
     "appendOplogNote",
     "bulkWrite",
+    "checkMetadataConsistency",
     "cleanupReshardCollection",
     "commitReshardCollection",
     "compactStructuredEncryptionData",
@@ -28,7 +29,10 @@ const commandsAddedToMongosSinceLastLTS = [
     "configureQueryAnalyzer",  // TODO (SERVER-68977): Remove upgrade/downgrade for PM-1858.
     "coordinateCommitTransaction",
     "getClusterParameter",
+    "mergeAllChunksOnShard",
     "moveRange",
+    "oidcListKeys",
+    "oidcRefreshKeys",
     "reshardCollection",
     "rotateCertificates",
     "setAllowMigrations",

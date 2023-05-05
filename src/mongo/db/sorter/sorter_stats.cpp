@@ -32,6 +32,21 @@
 #include "mongo/util/assert_util_core.h"
 
 namespace mongo {
+SorterFileStats::SorterFileStats(SorterTracker* sorterTracker) : _sorterTracker(sorterTracker){};
+
+void SorterFileStats::addSpilledDataSize(long long data) {
+    _bytesSpilled += data;
+    if (_sorterTracker) {
+        _sorterTracker->bytesSpilled.fetchAndAdd(data);
+    }
+}
+
+void SorterFileStats::addSpilledDataSizeUncompressed(long long data) {
+    if (_sorterTracker) {
+        _sorterTracker->bytesSpilledUncompressed.fetchAndAdd(data);
+    }
+}
+
 SorterStats::SorterStats(SorterTracker* sorterTracker) : _sorterTracker(sorterTracker){};
 
 void SorterStats::incrementSpilledRanges() {
@@ -41,7 +56,7 @@ void SorterStats::incrementSpilledRanges() {
     }
 }
 
-void SorterStats::setSpilledRanges(long long spills) {
+void SorterStats::setSpilledRanges(uint64_t spills) {
     invariant(_spilledRanges == 0);
     _spilledRanges = spills;
     if (_sorterTracker) {
@@ -49,17 +64,67 @@ void SorterStats::setSpilledRanges(long long spills) {
     }
 }
 
-SorterFileStats::SorterFileStats(SorterTracker* sorterTracker) : _sorterTracker(sorterTracker){};
+uint64_t SorterStats::spilledRanges() const {
+    return _spilledRanges;
+}
 
-void SorterFileStats::addSpilledDataSize(long long data) {
-    _bytesSpilled += data;
+void SorterStats::incrementNumSorted(uint64_t sortedKeys) {
+    _numSorted += sortedKeys;
     if (_sorterTracker) {
-        _sorterTracker->bytesSpilled.fetchAndAdd(data);
+        _sorterTracker->numSorted.fetchAndAdd(sortedKeys);
     }
 }
-void SorterFileStats::addSpilledDataSizeUncompressed(long long data) {
+
+uint64_t SorterStats::numSorted() const {
+    return _numSorted;
+}
+
+void SorterStats::incrementBytesSorted(uint64_t bytes) {
+    _bytesSorted += bytes;
     if (_sorterTracker) {
-        _sorterTracker->bytesSpilledUncompressed.fetchAndAdd(data);
+        _sorterTracker->bytesSorted.fetchAndAdd(bytes);
     }
+}
+
+uint64_t SorterStats::bytesSorted() const {
+    return _bytesSorted;
+}
+
+void SorterStats::incrementMemUsage(uint64_t memUsage) {
+    _memUsage += memUsage;
+    if (_sorterTracker) {
+        _sorterTracker->memUsage.fetchAndAdd(memUsage);
+    }
+}
+
+void SorterStats::decrementMemUsage(uint64_t memUsage) {
+    invariant(memUsage <= _memUsage);
+    _memUsage -= memUsage;
+    if (_sorterTracker) {
+        _sorterTracker->memUsage.fetchAndSubtract(memUsage);
+    }
+}
+
+void SorterStats::resetMemUsage() {
+    setMemUsage(0);
+}
+
+void SorterStats::setMemUsage(uint64_t memUsage) {
+    if (memUsage == _memUsage) {
+        return;
+    }
+
+    if (_sorterTracker) {
+        if (memUsage > _memUsage) {
+            _sorterTracker->memUsage.fetchAndAdd(memUsage - _memUsage);
+        } else {
+            _sorterTracker->memUsage.fetchAndSubtract(_memUsage - memUsage);
+        }
+    }
+    _memUsage = memUsage;
+}
+
+uint64_t SorterStats::memUsage() const {
+    return _memUsage;
 }
 }  // namespace mongo

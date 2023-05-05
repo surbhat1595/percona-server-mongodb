@@ -176,7 +176,9 @@ public:
             }
 
             auto viewAggCmd =
-                OpMsgRequest::fromDBAndBody(nss.db(), viewAggregation.getValue()).body;
+                OpMsgRequestBuilder::createWithValidatedTenancyScope(
+                    nss.dbName(), opMsgRequest.validatedTenancyScope, viewAggregation.getValue())
+                    .body;
             auto viewAggRequest = aggregation_request_helper::parseFromBSON(
                 opCtx,
                 nss,
@@ -242,7 +244,8 @@ public:
 
         auto request = CountCommandRequest::parse(
             IDLParserContext("count", false /* apiStrict */, dbName.tenantId()), cmdObj);
-        opCtx->beginPlanningTimer();
+        auto curOp = CurOp::get(opCtx);
+        curOp->beginQueryPlanningTimer();
         if (shouldDoFLERewrite(request)) {
             processFLECountD(opCtx, nss, &request);
         }
@@ -267,12 +270,18 @@ public:
             ctx.reset();
 
             uassertStatusOK(viewAggregation.getStatus());
+            using VTS = auth::ValidatedTenancyScope;
+            boost::optional<VTS> vts = boost::none;
+            if (dbName.tenantId()) {
+                vts = VTS(dbName.tenantId().value(), VTS::TrustedForInnerOpMsgRequestTag{});
+            }
+            auto aggRequest = OpMsgRequestBuilder::createWithValidatedTenancyScope(
+                dbName, vts, std::move(viewAggregation.getValue()));
 
-            BSONObj aggResult = CommandHelpers::runCommandDirectly(
-                opCtx,
-                OpMsgRequest::fromDBAndBody(dbName.db(), std::move(viewAggregation.getValue())));
+            BSONObj aggResult = CommandHelpers::runCommandDirectly(opCtx, aggRequest);
 
-            uassertStatusOK(ViewResponseFormatter(aggResult).appendAsCountResponse(&result));
+            uassertStatusOK(
+                ViewResponseFormatter(aggResult).appendAsCountResponse(&result, dbName.tenantId()));
             return true;
         }
 
@@ -306,7 +315,6 @@ public:
         auto exec = std::move(statusWithPlanExecutor.getValue());
 
         // Store the plan summary string in CurOp.
-        auto curOp = CurOp::get(opCtx);
         {
             stdx::lock_guard<Client> lk(*opCtx->getClient());
             curOp->setPlanSummary_inlock(exec->getPlanExplainer().getPlanSummary());

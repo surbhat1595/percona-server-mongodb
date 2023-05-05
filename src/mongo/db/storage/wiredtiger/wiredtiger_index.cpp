@@ -44,11 +44,14 @@
 
 #define TRACING_ENABLED 0
 
-#define LOGV2_TRACE_CURSOR(ID, NAME, ...)                   \
-    if (TRACING_ENABLED)                                    \
-    LOGV2(ID,                                               \
-          "WT index ({index}) " #NAME,                      \
-          "index"_attr = reinterpret_cast<uint64_t>(&_idx), \
+#define LOGV2_TRACE_CURSOR(ID, NAME, ...)                  \
+    if (TRACING_ENABLED)                                   \
+    LOGV2(ID,                                              \
+          "WT index ({index}) " #NAME,                     \
+          "index"_attr = reinterpret_cast<uint64_t>(this), \
+          "indexName"_attr = _indexName,                   \
+          "uri"_attr = _uri,                               \
+          "collectionUUID"_attr = _collectionUUID,         \
           ##__VA_ARGS__)
 
 #define LOGV2_TRACE_INDEX(ID, NAME, ...)                   \
@@ -81,7 +84,7 @@ void WiredTigerIndex::getKey(OperationContext* opCtx, WT_CURSOR* cursor, WT_ITEM
 StatusWith<std::string> WiredTigerIndex::parseIndexOptions(const BSONObj& options) {
     StringBuilder ss;
     BSONForEach(elem, options) {
-        if (elem.fieldNameStringData() == "configString") {
+        if (elem.fieldNameStringData() == WiredTigerUtil::kConfigStringField) {
             Status status = WiredTigerUtil::checkTableCreationOptions(elem);
             if (!status.isOK()) {
                 return status;
@@ -204,6 +207,7 @@ Status WiredTigerIndex::Drop(OperationContext* opCtx, const std::string& uri) {
 
 WiredTigerIndex::WiredTigerIndex(OperationContext* ctx,
                                  const std::string& uri,
+                                 const UUID& collectionUUID,
                                  StringData ident,
                                  KeyFormat rsKeyFormat,
                                  const IndexDescriptor* desc,
@@ -214,14 +218,20 @@ WiredTigerIndex::WiredTigerIndex(OperationContext* ctx,
                           rsKeyFormat),
       _uri(uri),
       _tableId(WiredTigerSession::genTableId()),
-      _desc(desc),
+      _collectionUUID(collectionUUID),
       _indexName(desc->indexName()),
       _keyPattern(desc->keyPattern()),
       _collation(desc->collation()),
       _isLogged(isLogged) {}
 
 NamespaceString WiredTigerIndex::getCollectionNamespace(OperationContext* opCtx) const {
-    return _desc->getEntry()->getNSSFromCatalog(opCtx);
+    // TODO SERVER-73111: Remove CollectionCatalog usage.
+    auto nss = CollectionCatalog::get(opCtx)->lookupNSSByUUID(opCtx, _collectionUUID);
+
+    // In testing this may be boost::none.
+    if (!nss)
+        return NamespaceString();
+    return *nss;
 }
 
 namespace {
@@ -295,20 +305,37 @@ boost::optional<RecordId> WiredTigerIndex::findLoc(OperationContext* opCtx,
     return boost::none;
 }
 
-void WiredTigerIndex::fullValidate(OperationContext* opCtx,
-                                   long long* numKeysOut,
-                                   IndexValidateResults* fullResults) const {
+IndexValidateResults WiredTigerIndex::validate(OperationContext* opCtx, bool full) const {
     dassert(opCtx->lockState()->isReadLocked());
-    if (!WiredTigerIndexUtil::validateStructure(opCtx, _uri, fullResults)) {
-        return;
+
+    IndexValidateResults results;
+
+    WiredTigerUtil::validateTableLogging(opCtx,
+                                         _uri,
+                                         _isLogged,
+                                         StringData{_indexName},
+                                         results.valid,
+                                         results.errors,
+                                         results.warnings);
+
+    if (!full) {
+        return results;
     }
 
-    auto cursor = newCursor(opCtx);
-    long long count = 0;
-    LOGV2_TRACE_INDEX(20094, "fullValidate");
+    WiredTigerIndexUtil::validateStructure(opCtx, _uri, results);
+    if (results.valid) {
+        results.keysTraversedFromFullValidate = numEntries(opCtx);
+    }
 
-    const auto requestedInfo = TRACING_ENABLED ? Cursor::kKeyAndLoc : Cursor::kJustExistance;
+    return results;
+}
 
+int64_t WiredTigerIndex::numEntries(OperationContext* opCtx) const {
+    int64_t count = 0;
+
+    LOGV2_TRACE_INDEX(20094, "numEntries");
+
+    auto requestedInfo = TRACING_ENABLED ? Cursor::kKeyAndLoc : Cursor::kJustExistance;
     KeyString::Value keyStringForSeek =
         IndexEntryComparison::makeKeyStringFromBSONKeyForSeek(BSONObj(),
                                                               getKeyStringVersion(),
@@ -317,13 +344,13 @@ void WiredTigerIndex::fullValidate(OperationContext* opCtx,
                                                               true  /* inclusive */
         );
 
+    auto cursor = newCursor(opCtx);
     for (auto kv = cursor->seek(keyStringForSeek, requestedInfo); kv; kv = cursor->next()) {
-        LOGV2_TRACE_INDEX(20095, "fullValidate {kv}", "kv"_attr = kv);
+        LOGV2_TRACE_INDEX(20095, "numEntries", "kv"_attr = kv);
         count++;
     }
-    if (numKeysOut) {
-        *numKeysOut = count;
-    }
+
+    return count;
 }
 
 bool WiredTigerIndex::appendCustomStats(OperationContext* opCtx,
@@ -339,9 +366,8 @@ Status WiredTigerIndex::dupKeyCheck(OperationContext* opCtx, const KeyString::Va
     WT_CURSOR* c = curwrap.get();
 
     if (isDup(opCtx, c, key)) {
-        auto entry = _desc->getEntry();
-        auto nss = entry ? entry->getNSSFromCatalog(opCtx) : NamespaceString();
-        return buildDupKeyErrorStatus(key, nss, _indexName, _keyPattern, _collation, _ordering);
+        return buildDupKeyErrorStatus(
+            key, getCollectionNamespace(opCtx), _indexName, _keyPattern, _collation, _ordering);
     }
     return Status::OK();
 }
@@ -583,7 +609,7 @@ StatusWith<bool> WiredTigerIndex::_checkDups(OperationContext* opCtx,
         auto key = KeyString::toBson(
             keyString.getBuffer(), sizeWithoutRecordId, _ordering, keyString.getTypeBits());
         return buildDupKeyErrorStatus(
-            key, _desc->getEntry()->getNSSFromCatalog(opCtx), _indexName, _keyPattern, _collation);
+            key, getCollectionNamespace(opCtx), _indexName, _keyPattern, _collation);
     }
     invariantWTOK(ret,
                   c->session,
@@ -616,7 +642,7 @@ StatusWith<bool> WiredTigerIndex::_checkDups(OperationContext* opCtx,
     return buildDupKeyErrorStatus(
         KeyString::toBson(
             keyString.getBuffer(), sizeWithoutRecordId, _ordering, keyString.getTypeBits()),
-        _desc->getEntry() ? _desc->getEntry()->getNSSFromCatalog(opCtx) : NamespaceString(),
+        getCollectionNamespace(opCtx),
         _indexName,
         _keyPattern,
         _collation,
@@ -800,10 +826,8 @@ public:
             if (cmp == 0) {
                 // Duplicate found!
                 auto newKey = KeyString::toBson(newKeyString, _idx->_ordering);
-                auto entry = _idx->_desc->getEntry();
                 return buildDupKeyErrorStatus(newKey,
-                                              entry ? entry->getNSSFromCatalog(_opCtx)
-                                                    : NamespaceString(),
+                                              _idx->getCollectionNamespace(_opCtx),
                                               _idx->indexName(),
                                               _idx->keyPattern(),
                                               _idx->_collation);
@@ -909,11 +933,19 @@ class WiredTigerIndexCursorBase : public SortedDataInterface::Cursor,
 public:
     WiredTigerIndexCursorBase(const WiredTigerIndex& idx, OperationContext* opCtx, bool forward)
         : WiredTigerIndexCursorGeneric(opCtx, forward),
-          _idx(idx),
+          _ordering(idx.getOrdering()),
+          _version(idx.getKeyStringVersion()),
+          _rsKeyFormat(idx.rsKeyFormat()),
+          _uri(idx.uri()),
+          _tableId(idx.tableId()),
+          _unique(idx.unique()),
+          _isIdIndex(idx.isIdIndex()),
+          _indexName(idx.indexName()),
+          _collectionUUID(idx.getCollectionUUID()),
           _key(idx.getKeyStringVersion()),
           _typeBits(idx.getKeyStringVersion()),
           _query(idx.getKeyStringVersion()) {
-        _cursor.emplace(_idx.uri(), _idx.tableId(), false, _opCtx);
+        _cursor.emplace(_uri, _tableId, false, _opCtx);
     }
 
     boost::optional<IndexKeyEntry> next(RequestedInfo parts) override {
@@ -950,8 +982,8 @@ public:
         const auto discriminator = _forward == inclusive
             ? KeyString::Discriminator::kExclusiveAfter
             : KeyString::Discriminator::kExclusiveBefore;
-        _endPosition = std::make_unique<KeyString::Builder>(_idx.getKeyStringVersion());
-        _endPosition->resetToKey(BSONObj::stripFieldNames(key), _idx.getOrdering(), discriminator);
+        _endPosition = std::make_unique<KeyString::Builder>(_version);
+        _endPosition->resetToKey(BSONObj::stripFieldNames(key), _ordering, discriminator);
     }
 
     boost::optional<IndexKeyEntry> seek(const KeyString::Value& keyString,
@@ -982,7 +1014,7 @@ public:
 
     void restore() override {
         if (!_cursor) {
-            _cursor.emplace(_idx.uri(), _idx.tableId(), false, _opCtx);
+            _cursor.emplace(_uri, _tableId, false, _opCtx);
         }
 
         // Ensure an active session exists, so any restored cursors will bind to it
@@ -1043,10 +1075,10 @@ protected:
     // Must not throw WriteConflictException, throwing a WriteConflictException will retry the
     // operation effectively skipping over this key.
     virtual void updateIdAndTypeBits() {
-        if (_idx.rsKeyFormat() == KeyFormat::Long) {
+        if (_rsKeyFormat == KeyFormat::Long) {
             _id = KeyString::decodeRecordIdLongAtEnd(_key.getBuffer(), _key.getSize());
         } else {
-            invariant(_idx.rsKeyFormat() == KeyFormat::String);
+            invariant(_rsKeyFormat == KeyFormat::String);
             _id = KeyString::decodeRecordIdStrAtEnd(_key.getBuffer(), _key.getSize());
         }
 
@@ -1070,8 +1102,7 @@ protected:
 
         BSONObj bson;
         if (TRACING_ENABLED || (parts & kWantKey)) {
-            bson =
-                KeyString::toBson(_key.getBuffer(), _key.getSize(), _idx.getOrdering(), _typeBits);
+            bson = KeyString::toBson(_key.getBuffer(), _key.getSize(), _ordering, _typeBits);
 
             LOGV2_TRACE_CURSOR(20000, "returning {bson} {id}", "bson"_attr = bson, "id"_attr = _id);
         }
@@ -1139,7 +1170,7 @@ protected:
                 LOGV2(5683901, "hanging after search_near");
                 WTIndexPauseAfterSearchNear.pauseWhileSet();
             },
-            [&](const BSONObj& data) { return data["indexName"].str() == _idx.indexName(); });
+            [&](const BSONObj& data) { return data["indexName"].str() == _indexName; });
 
         if (cmp == 0) {
             // Found it!
@@ -1274,11 +1305,10 @@ protected:
         // Most keys will have a RecordId appended to the end, with the exception of the _id index
         // and timestamp unsafe unique indexes. The contract of this function is to always return a
         // KeyString with a RecordId, so append one if it does not exists already.
-        if (_idx.unique() &&
-            (_idx.isIdIndex() ||
+        if (_unique &&
+            (_isIdIndex ||
              _key.getSize() ==
-                 KeyString::getKeySize(
-                     _key.getBuffer(), _key.getSize(), _idx.getOrdering(), _typeBits))) {
+                 KeyString::getKeySize(_key.getBuffer(), _key.getSize(), _ordering, _typeBits))) {
             // Create a copy of _key with a RecordId. Because _key is used during cursor restore(),
             // appending the RecordId would cause the cursor to be repositioned incorrectly.
             KeyString::Builder keyWithRecordId(_key);
@@ -1298,7 +1328,24 @@ protected:
         return KeyStringEntry(_key.getValueCopy(), _id);
     }
 
-    const WiredTigerIndex& _idx;  // not owned
+    NamespaceString getCollectionNamespace(OperationContext* opCtx) const {
+        // TODO SERVER-73111: Remove CollectionCatalog usage.
+        auto nss = CollectionCatalog::get(opCtx)->lookupNSSByUUID(opCtx, _collectionUUID);
+        invariant(nss,
+                  str::stream() << "Cannot find namespace for collection with UUID "
+                                << _collectionUUID);
+        return *nss;
+    }
+
+    const Ordering _ordering;
+    const KeyString::Version _version;
+    const KeyFormat _rsKeyFormat;
+    const std::string _uri;
+    const uint64_t _tableId;
+    const bool _unique;
+    const bool _isIdIndex;
+    const std::string _indexName;
+    const UUID _collectionUUID;
 
     // These are where this cursor instance is. They are not changed in the face of a failing
     // next().
@@ -1343,7 +1390,7 @@ public:
         // id. _id indexes remain at the old format. When KeyString contains just the key, the
         // RecordId is in value.
         auto keySize =
-            KeyString::getKeySize(_key.getBuffer(), _key.getSize(), _idx.getOrdering(), _typeBits);
+            KeyString::getKeySize(_key.getBuffer(), _key.getSize(), _ordering, _typeBits);
 
         if (_key.getSize() == keySize) {
             _updateIdAndTypeBitsFromValue();
@@ -1373,8 +1420,8 @@ public:
             getKey(c, &item);
 
             // Get the size of the prefix key
-            auto keySize = KeyString::getKeySize(
-                _key.getBuffer(), _key.getSize(), _idx.getOrdering(), _typeBits);
+            auto keySize =
+                KeyString::getKeySize(_key.getBuffer(), _key.getSize(), _ordering, _typeBits);
 
             // This check is only to avoid returning the same key again after a restore. Keys
             // shorter than _key cannot have "prefix key" same as _key. Therefore we care only about
@@ -1388,7 +1435,7 @@ public:
 
     bool isRecordIdAtEndOfKeyString() const override {
         return _key.getSize() !=
-            KeyString::getKeySize(_key.getBuffer(), _key.getSize(), _idx.getOrdering(), _typeBits);
+            KeyString::getKeySize(_key.getBuffer(), _key.getSize(), _ordering, _typeBits);
     }
 
 private:
@@ -1397,7 +1444,7 @@ private:
     // operation effectively skipping over this key.
     void _updateIdAndTypeBitsFromValue() {
         // Old-format unique index keys always use the Long format.
-        invariant(_idx.rsKeyFormat() == KeyFormat::Long);
+        invariant(_rsKeyFormat == KeyFormat::Long);
 
         // We assume that cursors can only ever see unique indexes in their "pristine" state,
         // where no duplicates are possible. The cases where dups are allowed should hold
@@ -1420,9 +1467,9 @@ private:
                         "{index} ({uri}) belonging to collection {collection}",
                         "Unique index cursor seeing multiple records for key in index",
                         "key"_attr = redact(curr(kWantKey)->key),
-                        "index"_attr = _idx.indexName(),
-                        "uri"_attr = _idx.uri(),
-                        "collection"_attr = _idx.getCollectionNamespace(_opCtx));
+                        "index"_attr = _indexName,
+                        "uri"_attr = _uri,
+                        logAttrs(getCollectionNamespace(_opCtx)));
         }
     }
 };
@@ -1437,7 +1484,7 @@ public:
     // operation effectively skipping over this key.
     void updateIdAndTypeBits() override {
         // _id index keys always use the Long format.
-        invariant(_idx.rsKeyFormat() == KeyFormat::Long);
+        invariant(_rsKeyFormat == KeyFormat::Long);
 
         WT_CURSOR* c = _cursor->get();
         WT_ITEM item;
@@ -1453,9 +1500,9 @@ public:
             LOGV2_FATAL(5176200,
                         "Index cursor seeing multiple records for key in _id index",
                         "key"_attr = redact(curr(kWantKey)->key),
-                        "index"_attr = _idx.indexName(),
-                        "uri"_attr = _idx.uri(),
-                        "collection"_attr = _idx.getCollectionNamespace(_opCtx));
+                        "index"_attr = _indexName,
+                        "uri"_attr = _uri,
+                        logAttrs(getCollectionNamespace(_opCtx)));
         }
     }
 };
@@ -1463,11 +1510,13 @@ public:
 
 WiredTigerIndexUnique::WiredTigerIndexUnique(OperationContext* ctx,
                                              const std::string& uri,
+                                             const UUID& collectionUUID,
                                              StringData ident,
                                              KeyFormat rsKeyFormat,
                                              const IndexDescriptor* desc,
                                              bool isLogged)
-    : WiredTigerIndex(ctx, uri, ident, rsKeyFormat, desc, isLogged), _partial(desc->isPartial()) {
+    : WiredTigerIndex(ctx, uri, collectionUUID, ident, rsKeyFormat, desc, isLogged),
+      _partial(desc->isPartial()) {
     // _id indexes must use WiredTigerIdIndex
     invariant(!isIdIndex());
     // All unique indexes should be in the timestamp-safe format version as of version 4.2.
@@ -1550,10 +1599,11 @@ void WiredTigerIndexUnique::insertWithRecordIdInValue_forTest(OperationContext* 
 
 WiredTigerIdIndex::WiredTigerIdIndex(OperationContext* ctx,
                                      const std::string& uri,
+                                     const UUID& collectionUUID,
                                      StringData ident,
                                      const IndexDescriptor* desc,
                                      bool isLogged)
-    : WiredTigerIndex(ctx, uri, ident, KeyFormat::Long, desc, isLogged) {
+    : WiredTigerIndex(ctx, uri, collectionUUID, ident, KeyFormat::Long, desc, isLogged) {
     invariant(isIdIndex());
 }
 
@@ -1610,7 +1660,7 @@ Status WiredTigerIdIndex::_insert(OperationContext* opCtx,
 
     auto key = KeyString::toBson(keyString, _ordering);
     return buildDupKeyErrorStatus(key,
-                                  _desc->getEntry()->getNSSFromCatalog(opCtx),
+                                  getCollectionNamespace(opCtx),
                                   _indexName,
                                   _keyPattern,
                                   _collation,
@@ -1719,9 +1769,9 @@ void WiredTigerIdIndex::_unindex(OperationContext* opCtx,
         LOGV2_FATAL(5176201,
                     "Un-index seeing multiple records for key",
                     "key"_attr = bsonKey,
-                    "index"_attr = _desc->indexName(),
+                    "index"_attr = _indexName,
                     "uri"_attr = _uri,
-                    "collection"_attr = getCollectionNamespace(opCtx));
+                    logAttrs(getCollectionNamespace(opCtx)));
     }
 
     // The RecordId matches, so remove the entry.
@@ -1734,7 +1784,7 @@ void WiredTigerIdIndex::_unindex(OperationContext* opCtx,
     auto key = KeyString::toBson(keyString, _ordering);
     LOGV2_WARNING(51797,
                   "Associated record not found in collection while removing index entry",
-                  "collection"_attr = getCollectionNamespace(opCtx),
+                  logAttrs(getCollectionNamespace(opCtx)),
                   "index"_attr = _indexName,
                   "key"_attr = redact(key),
                   "recordId"_attr = id);
@@ -1786,11 +1836,12 @@ void WiredTigerIndexUnique::_unindex(OperationContext* opCtx,
 
 WiredTigerIndexStandard::WiredTigerIndexStandard(OperationContext* ctx,
                                                  const std::string& uri,
+                                                 const UUID& collectionUUID,
                                                  StringData ident,
                                                  KeyFormat rsKeyFormat,
                                                  const IndexDescriptor* desc,
                                                  bool isLogged)
-    : WiredTigerIndex(ctx, uri, ident, rsKeyFormat, desc, isLogged) {}
+    : WiredTigerIndex(ctx, uri, collectionUUID, ident, rsKeyFormat, desc, isLogged) {}
 
 std::unique_ptr<SortedDataInterface::Cursor> WiredTigerIndexStandard::newCursor(
     OperationContext* opCtx, bool forward) const {

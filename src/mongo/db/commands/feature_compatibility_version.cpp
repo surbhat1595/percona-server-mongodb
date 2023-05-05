@@ -252,7 +252,7 @@ void runUpdateCommand(OperationContext* opCtx, const FeatureCompatibilityVersion
     // Update the featureCompatibilityVersion document stored in the server configuration
     // collection.
     BSONObj updateResult;
-    client.runCommand(nss.db().toString(), updateCmd.obj(), updateResult);
+    client.runCommand(nss.dbName(), updateCmd.obj(), updateResult);
     uassertStatusOK(getStatusFromWriteCommandReply(updateResult));
 }
 
@@ -366,7 +366,7 @@ void FeatureCompatibilityVersion::setIfCleanStartup(OperationContext* opCtx,
     // featureCompatibilityVersion is the downgrade version, so that it can be safely added to a
     // downgrade version cluster. The config server will run setFeatureCompatibilityVersion as part
     // of addShard.
-    const bool storeUpgradeVersion = serverGlobalParams.clusterRole != ClusterRole::ShardServer;
+    const bool storeUpgradeVersion = !serverGlobalParams.clusterRole.isExclusivelyShardRole();
 
     UnreplicatedWritesBlock unreplicatedWritesBlock(opCtx);
     NamespaceString nss(NamespaceString::kServerConfigurationNamespace);

@@ -1,5 +1,11 @@
 /**
  * Tests $_externalDataSources aggregate command option.
+ *
+ * @tags: [
+ * # This test file requires multi-threading for writers and tends to fail on small machines due to
+ * # thread resource shortage
+ * requires_external_data_source
+ * ]
  */
 (function() {
 "use strict";
@@ -113,22 +119,6 @@ assert.throwsWithCode(() => {
     });
 }, 7039003);
 
-// $lookup's 'from' collection is not an external data source
-assert.throwsWithCode(() => {
-    db.coll.aggregate(
-        [
-            {$match: {a: 1}},
-            {$lookup: {from: "unknown2", localField: "a", foreignField: "b", as: "out"}}
-        ],
-        {
-            $_externalDataSources: [{
-                collName: "coll",
-                dataSources:
-                    [{url: kUrlProtocolFile + pipeName1, storageType: "pipe", fileType: "bson"}]
-            }]
-        });
-}, 7039004);
-
 (function testSampleStageOverExternalDataSourceNotOptimized() {
     const explain = db.coll.explain().aggregate([{$sample: {size: 10}}], {
         $_externalDataSources: [{
@@ -140,6 +130,34 @@ assert.throwsWithCode(() => {
     assert(aggPlanHasStage(explain, "$sample"),
            `Expected $sample is not optimized into $sampleFromRandomCursor but got ${
                tojson(explain)}`);
+})();
+
+// Verifies that an external data source cannot be used for the $merge / $out pipeline stages.
+(function testMergeOrOutStageToExternalDataSource() {
+    [{$out: "out"}, {$merge: "out"}].forEach(stage => {
+        assert.throwsWithCode(() => {
+            db.coll.aggregate([stage], {
+                $_externalDataSources: [
+                    {
+                        collName: "coll",
+                        dataSources: [{
+                            url: kUrlProtocolFile + pipeName1,
+                            storageType: "pipe",
+                            fileType: "bson"
+                        }]
+                    },
+                    {
+                        collName: "out",
+                        dataSources: [{
+                            url: kUrlProtocolFile + pipeName2,
+                            storageType: "pipe",
+                            fileType: "bson"
+                        }]
+                    }
+                ]
+            });
+        }, 7239302);
+    });
 })();
 
 //
@@ -240,76 +258,6 @@ function testSimpleAggregationsOverExternalDataSource(pipeDir) {
                       kObjsToWrite[objIdx % kNumObjs],
                       "Object read from pipe does not match expected.");
         }
-    }
-
-    ////////////////////////////////////////////////////////////////////////////////////////////////
-    // Test successful lookup between two external data sources.
-    ////////////////////////////////////////////////////////////////////////////////////////////////
-    const kObjsToWrite1 = [{"localKey": 0}, {"localKey": 1}, {"localKey": 2}];
-    const kObjsToWrite2 =
-        [{"foreignKey": 0, "foreignVal": "Zero"}, {"foreignKey": 2, "foreignVal": "Two"}];
-    const kExpectedLookup = [
-        {"localKey": 0, "out": [{"foreignKey": 0, "foreignVal": "Zero"}]},
-        {"localKey": 1, "out": []},
-        {"localKey": 2, "out": [{"foreignKey": 2, "foreignVal": "Two"}]}
-    ];
-
-    // $_externalDataSources specified in order (local, foreign).
-    _writeTestPipeObjects(pipeName1, kObjsToWrite1.length, kObjsToWrite1, pipeDir);  // local
-    _writeTestPipeObjects(pipeName2, kObjsToWrite2.length, kObjsToWrite2, pipeDir);  // foreign
-    cursor = db.local.aggregate(
-        [{
-            $lookup:
-                {from: "foreign", localField: "localKey", foreignField: "foreignKey", as: "out"}
-        }],
-        {
-            $_externalDataSources: [
-                {
-                    collName: "local",
-                    dataSources:
-                        [{url: kUrlProtocolFile + pipeName1, storageType: "pipe", fileType: "bson"}]
-                },
-                {
-                    collName: "foreign",
-                    dataSources:
-                        [{url: kUrlProtocolFile + pipeName2, storageType: "pipe", fileType: "bson"}]
-                }
-            ]
-        });
-    // Verify the $lookup result.
-    for (let expected = 0; expected < kExpectedLookup.length; ++expected) {
-        assert.eq(cursor.next(),
-                  kExpectedLookup[expected],
-                  "Lookup result " + expected + " does not match expected.");
-    }
-
-    // $_externalDataSources specified in order (foreign, local).
-    _writeTestPipeObjects(pipeName1, kObjsToWrite1.length, kObjsToWrite1, pipeDir);  // local
-    _writeTestPipeObjects(pipeName2, kObjsToWrite2.length, kObjsToWrite2, pipeDir);  // foreign
-    cursor = db.local.aggregate(
-        [{
-            $lookup:
-                {from: "foreign", localField: "localKey", foreignField: "foreignKey", as: "out"}
-        }],
-        {
-            $_externalDataSources: [
-                {
-                    collName: "foreign",
-                    dataSources:
-                        [{url: kUrlProtocolFile + pipeName2, storageType: "pipe", fileType: "bson"}]
-                },
-                {
-                    collName: "local",
-                    dataSources:
-                        [{url: kUrlProtocolFile + pipeName1, storageType: "pipe", fileType: "bson"}]
-                }
-            ]
-        });
-    // Verify the $lookup result.
-    for (let expected = 0; expected < kExpectedLookup.length; ++expected) {
-        assert.eq(cursor.next(),
-                  kExpectedLookup[expected],
-                  "Lookup result " + expected + " does not match expected.");
     }
 
     // Prepares data for $match / $group / $unionWith / spill test cases.
@@ -455,72 +403,52 @@ function testSimpleAggregationsOverExternalDataSource(pipeDir) {
         }));
     })();
 
-    (function testSpillingLookupOverExternalDataSource() {
-        // Makes sure that SBE $lookup spill data.
-        const oldSbeLookupMaxMemory =
-            assert
-                .commandWorked(db.adminCommand({
-                    setParameter: 1,
-                    internalQuerySlotBasedExecutionHashLookupApproxMemoryUseInBytesBeforeSpill: 1,
-                }))
-                .was;
-
-        let foreignCollObjs = [];
-        for (let i = 0; i < kNumGroups; ++i) {
-            foreignCollObjs.push({
+    // Verifies that 'killCursors' command works over external data sources while the server keeps
+    // reading data from a named pipe. Reading external data sources should be interruptible.
+    (function testKillCursorOverExternalDataSource() {
+        // Prepares a large dataset.
+        const largeCollObjs = [];
+        const kManyDocs = 250000;
+        for (let i = 0; i < kManyDocs; ++i) {
+            largeCollObjs.push({
                 _id: i,
-                desc1: "description_" + Random.randInt(kNumGroups),
-                desc2: "description_" + Random.randInt(kNumGroups),
+                g: Random.randInt(10),  // 10 groups
+                str1: "strdata_" + Random.randInt(100000000),
             });
         }
 
-        _writeTestPipeObjects(pipeName2, foreignCollObjs.length, foreignCollObjs, pipeDir);
-        _writeTestPipeObjects(pipeName1, collObjs.length, collObjs, pipeDir);
+        // We read 2 collections using $unionWith so that the result set cannot be fit into one
+        // result batch for the 'getMore' request.
+        const collName1 = "coll1";
+        const collName2 = "coll2";
 
-        const lookupTable = [];
-        foreignCollObjs.forEach(obj => {
-            lookupTable[obj._id] = obj;
-        });
-        const expectedRes = collObjs.map(obj => {
-            let clone = Object.assign({}, obj);
-            clone.out = [lookupTable[obj.g]];
-            return clone;
+        // 250K docs almost reaches 16MB BSONObj size limit.
+        _writeTestPipeObjects(pipeName1, largeCollObjs.length, largeCollObjs, pipeDir);
+        _writeTestPipeObjects(pipeName2, largeCollObjs.length, largeCollObjs, pipeDir);
+
+        let cursor = db[collName1].aggregate([{$unionWith: collName2}], {
+            $_externalDataSources: [
+                {
+                    collName: collName1,
+                    dataSources:
+                        [{url: kUrlProtocolFile + pipeName1, storageType: "pipe", fileType: "bson"}]
+                },
+                {
+                    collName: collName2,
+                    dataSources:
+                        [{url: kUrlProtocolFile + pipeName2, storageType: "pipe", fileType: "bson"}]
+                },
+            ]
         });
 
-        const cursor = db.coll.aggregate(
-            [{$lookup: {from: "foreign", localField: "g", foreignField: "_id", as: "out"}}], {
-                $_externalDataSources: [
-                    {
-                        collName: "coll",
-                        dataSources: [{
-                            url: kUrlProtocolFile + pipeName1,
-                            storageType: "pipe",
-                            fileType: "bson"
-                        }]
-                    },
-                    {
-                        collName: "foreign",
-                        dataSources: [{
-                            url: kUrlProtocolFile + pipeName2,
-                            storageType: "pipe",
-                            fileType: "bson"
-                        }]
-                    }
-                ]
-            });
-        const resArr = cursor.toArray();
-        assert.eq(resArr.length, expectedRes.length);
-        for (let i = 0; i < expectedRes.length; ++i) {
-            assert.eq(resArr[i],
-                      expectedRes[i],
-                      `Expected ${tojson(expectedRes[i])} but got ${tojson(resArr[i])}`);
+        // Has 'getMore' command issued to the server since the default batch size is 101 documents.
+        for (let i = 0; i < 102; ++i) {
+            cursor.next();
         }
 
-        assert.commandWorked(db.adminCommand({
-            setParameter: 1,
-            internalQuerySlotBasedExecutionHashLookupApproxMemoryUseInBytesBeforeSpill:
-                oldSbeLookupMaxMemory,
-        }));
+        // Has 'killCursors' command issued to the server while the server is reading more data from
+        // named pipes to send the next batch. If this fails, an exception will be thrown.
+        cursor.close();
     })();
 }
 

@@ -53,6 +53,18 @@ struct FullCellView {
     CellView value;
 };
 
+/**
+ * An owned representation of a column-store index entry cell.
+ */
+struct FullCellValue {
+    PathValue path;
+    RowId rid;
+    CellValue value;
+
+    FullCellValue(FullCellView fcv) : path(fcv.path), rid(fcv.rid), value(fcv.value) {}
+    FullCellValue(PathView p, RowId r, CellView v) : path(p), rid(r), value(v) {}
+};
+
 struct CellViewForPath {
     RowId rid;
     CellView value;
@@ -66,10 +78,8 @@ struct CellViewForPath {
  * stores tuples of Path, RecordId and Value in a separate format.
  */
 class ColumnStore {
-protected:
-    class Cursor;
-
 public:
+    class Cursor;
     class WriteCursor {
     public:
         virtual ~WriteCursor() = default;
@@ -237,7 +247,6 @@ public:
         static constexpr uint8_t kArrInfoSizeTinyMax = 0xec;
 
         // N bytes of ArrInfo at end of Cell.
-        // TODO prove there can never be more than 16MB of arrInfo, and use 3 rather than 4 bytes.
         static constexpr uint8_t kArrInfoSize1 = 0xed;
         static constexpr uint8_t kArrInfoSize2 = 0xee;
         static constexpr uint8_t kArrInfoSize4 = 0xef;
@@ -297,11 +306,6 @@ public:
         return std::make_unique<ColumnCursor>(path, newCursor(opCtx));
     }
 
-    bool haveAnyWithPath(OperationContext* opCtx, PathView path) const {
-        // TODO could avoid extra allocation. May also be more efficient to do a different way.
-        return bool(newCursor(opCtx, path)->seekAtOrPast(kNullRowId));
-    }
-
     std::vector<PathValue> uniquePaths(OperationContext* opCtx) const {
         std::vector<PathValue> out;
         PathValue nextPath = "";
@@ -320,9 +324,7 @@ public:
     // Whole ColumnStore ops
     //
     virtual Status compact(OperationContext* opCtx) = 0;
-    virtual void fullValidate(OperationContext* opCtx,
-                              int64_t* numKeysOut,
-                              IndexValidateResults* fullResults) const = 0;
+    virtual IndexValidateResults validate(OperationContext* opCtx, bool full) const = 0;
 
     virtual bool appendCustomStats(OperationContext* opCtx,
                                    BSONObjBuilder* output,
@@ -332,11 +334,7 @@ public:
     virtual long long getFreeStorageBytes(OperationContext* opCtx) const = 0;
 
     virtual bool isEmpty(OperationContext* opCtx) = 0;
-    virtual long long numEntries(OperationContext* opCtx) const {
-        int64_t x = -1;
-        fullValidate(opCtx, &x, nullptr);
-        return x;
-    }
+    virtual int64_t numEntries(OperationContext* opCtx) const = 0;
 
     /**
      * If the range [*itPtr, end) begins with a number, returns it and positions *itPtr after the
@@ -382,7 +380,10 @@ public:
         _ident = std::move(newIdent);
     }
 
-protected:
+    /**
+     * The Cursor class is for raw access to the index. Except for unusual use cases (e.g., index
+     * validation) you'll want to use CursorForPath instead.
+     */
     class Cursor {
     public:
         virtual ~Cursor() = default;
@@ -711,9 +712,6 @@ struct SplitCellView {
                 uint8_t(*it) <= Bytes::kLastArrInfoSize) {
                 const auto format = uint8_t(*it++);  // Consume size-kind byte.
 
-                // TODO SERVER-63284: This check for the tiny array info case would be more
-                // concisely expressed using the case range syntax and being added to the switch
-                // statement below.
                 if (Bytes::kArrInfoSizeTinyMin <= format && format <= Bytes::kArrInfoSizeTinyMax) {
                     arrInfoSize = format - TinySize::kArrInfoZero;
                 } else {
@@ -767,7 +765,6 @@ struct SplitCellView {
             return encoder(elem);
         }
 
-        // TODO SERVER-63284: This would be more concisely expressed using the case range syntax.
         if (byte >= Bytes::kTinyIntMin && byte <= Bytes::kTinyIntMax) {
             return encoder(int32_t(int8_t(byte - TinyNum::kTinyIntZero)));
         } else if (byte >= Bytes::kTinyLongMin && byte <= Bytes::kTinyLongMax) {
@@ -879,6 +876,4 @@ struct SplitCellView {
         }
     }
 };
-
-using PathCellSet = std::vector<std::tuple<std::string, std::string, RecordId>>;
 }  // namespace mongo

@@ -70,8 +70,8 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
-#include "mongo/db/timeseries/bucket_catalog.h"
-#include "mongo/db/timeseries/bucket_catalog_helpers.h"
+#include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
+#include "mongo/db/timeseries/bucket_catalog/bucket_catalog_helpers.h"
 #include "mongo/db/timeseries/timeseries_extended_range.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction/transaction_participant_gen.h"
@@ -647,17 +647,14 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
         onWriteOpCompleted(opCtx, stmtIdsWritten, sessionTxnRecord);
     }
 
-    size_t index = 0;
-    for (auto it = first; it != last; it++, index++) {
-        auto opTime = opTimeList.empty() ? repl::OpTime() : opTimeList[index];
-        shardObserveInsertOp(opCtx,
-                             nss,
-                             it->doc,
-                             opTime,
-                             shardingWriteRouter,
-                             fromMigrate,
-                             inMultiDocumentTransaction);
-    }
+    shardObserveInsertsOp(opCtx,
+                          nss,
+                          first,
+                          last,
+                          opTimeList,
+                          shardingWriteRouter,
+                          fromMigrate,
+                          inMultiDocumentTransaction);
 
     if (nss.coll() == "system.js") {
         Scope::storedFuncMod(opCtx);
@@ -679,7 +676,7 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
         } catch (const DBException&) {
             // If a previous operation left the view catalog in an invalid state, our inserts can
             // fail even if all the definitions are valid. Reloading may help us reset the state.
-            CollectionCatalog::get(opCtx)->reloadViews(opCtx, nss.dbName()).ignore();
+            CollectionCatalog::get(opCtx)->reloadViews(opCtx, nss.dbName());
         }
     } else if (nss == NamespaceString::kSessionTransactionsTableNamespace && !lastOpTime.isNull()) {
         for (auto it = first; it != last; it++) {
@@ -936,7 +933,7 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
     if (args.coll->ns().coll() == "system.js") {
         Scope::storedFuncMod(opCtx);
     } else if (args.coll->ns().isSystemDotViews()) {
-        CollectionCatalog::get(opCtx)->reloadViews(opCtx, args.coll->ns().dbName()).ignore();
+        CollectionCatalog::get(opCtx)->reloadViews(opCtx, args.coll->ns().dbName());
     } else if (args.coll->ns() == NamespaceString::kSessionTransactionsTableNamespace &&
                !opTime.writeOpTime.isNull()) {
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
@@ -948,7 +945,7 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArg
     } else if (args.coll->ns().isTimeseriesBucketsCollection()) {
         if (args.updateArgs->source != OperationSource::kTimeseriesInsert) {
             OID bucketId = args.updateArgs->updatedDoc["_id"].OID();
-            timeseries::handleDirectWrite(opCtx, args.coll->ns(), bucketId);
+            timeseries::bucket_catalog::handleDirectWrite(opCtx, args.coll->ns(), bucketId);
         }
     }
 }
@@ -968,7 +965,7 @@ void OpObserverImpl::aboutToDelete(OperationContext* opCtx,
 
     if (coll->ns().isTimeseriesBucketsCollection()) {
         OID bucketId = doc["_id"].OID();
-        timeseries::handleDirectWrite(opCtx, coll->ns(), bucketId);
+        timeseries::bucket_catalog::handleDirectWrite(opCtx, coll->ns(), bucketId);
     }
 }
 
@@ -1110,7 +1107,7 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
     if (nss.coll() == "system.js") {
         Scope::storedFuncMod(opCtx);
     } else if (nss.isSystemDotViews()) {
-        CollectionCatalog::get(opCtx)->reloadViews(opCtx, nss.dbName()).ignore();
+        CollectionCatalog::get(opCtx)->reloadViews(opCtx, nss.dbName());
     } else if (nss == NamespaceString::kSessionTransactionsTableNamespace &&
                !opTime.writeOpTime.isNull()) {
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
@@ -1257,7 +1254,7 @@ void OpObserverImpl::onDropDatabase(OperationContext* opCtx, const DatabaseName&
         mongoDSessionCatalog->invalidateAllSessions(opCtx);
     }
 
-    BucketCatalog::get(opCtx).clear(dbName.db());
+    timeseries::bucket_catalog::BucketCatalog::get(opCtx).clear(dbName.db());
 }
 
 repl::OpTime OpObserverImpl::onDropCollection(OperationContext* opCtx,
@@ -1317,7 +1314,8 @@ repl::OpTime OpObserverImpl::onDropCollection(OperationContext* opCtx,
     } else if (collectionName == NamespaceString::kConfigSettingsNamespace) {
         ReadWriteConcernDefaults::get(opCtx).invalidate();
     } else if (collectionName.isTimeseriesBucketsCollection()) {
-        BucketCatalog::get(opCtx).clear(collectionName.getTimeseriesViewNamespace());
+        timeseries::bucket_catalog::BucketCatalog::get(opCtx).clear(
+            collectionName.getTimeseriesViewNamespace());
     } else if (collectionName.isSystemDotJavascript()) {
         // Inform the JavaScript engine of the change to system.js.
         Scope::storedFuncMod(opCtx);
@@ -1398,9 +1396,9 @@ void OpObserverImpl::postRenameCollection(OperationContext* const opCtx,
                                           const boost::optional<UUID>& dropTargetUUID,
                                           bool stayTemp) {
     if (fromCollection.isSystemDotViews())
-        CollectionCatalog::get(opCtx)->reloadViews(opCtx, fromCollection.dbName()).ignore();
+        CollectionCatalog::get(opCtx)->reloadViews(opCtx, fromCollection.dbName());
     if (toCollection.isSystemDotViews())
-        CollectionCatalog::get(opCtx)->reloadViews(opCtx, toCollection.dbName()).ignore();
+        CollectionCatalog::get(opCtx)->reloadViews(opCtx, toCollection.dbName());
 }
 
 void OpObserverImpl::onRenameCollection(OperationContext* const opCtx,
@@ -1860,15 +1858,25 @@ void OpObserverImpl::onBatchedWriteCommit(OperationContext* opCtx) {
                                     getMaxSizeOfBatchedOperationsInSingleOplogEntryBytes(),
                                     /*prepare=*/false);
 
-    // TODO(SERVER-70572): Remove this restriction once multi-oplog batched writes are supported.
-    // Before SERVER-70765, we relied on packTransactionStatementsForApplyOps() to check if the
-    // batch of operations could fit in a single applyOps entry. Now, we pass the size limit to
-    // TransactionOperations::getApplyOpsInfo() and are now able to return an error earlier.
-    // Previously, this used to be a tripwire assertion (tassert). This is now a uassert to be
-    // consistent with packTransactionStatementsForApplyOps().
-    uassert(ErrorCodes::TransactionTooLarge,
-            "batched writes must generate a single applyOps entry",
-            applyOpsOplogSlotAndOperationAssignment.applyOpsEntries.size() == 1);
+    if (!gFeatureFlagInternalWritesAreReplicatedTransactionally.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        // Before SERVER-70765, we relied on packTransactionStatementsForApplyOps() to check if the
+        // batch of operations could fit in a single applyOps entry. Now, we pass the size limit to
+        // TransactionOperations::getApplyOpsInfo() and are now able to return an error earlier.
+        // Previously, this used to be a tripwire assertion (tassert). This is now a uassert to be
+        // consistent with packTransactionStatementsForApplyOps().
+        uassert(ErrorCodes::TransactionTooLarge,
+                "batched writes must generate a single applyOps entry",
+                applyOpsOplogSlotAndOperationAssignment.applyOpsEntries.size() == 1);
+    } else if (applyOpsOplogSlotAndOperationAssignment.applyOpsEntries.size() > 1) {
+        // Batched writes spanning multiple oplog entries create/reserve multiple oplog entries in
+        // the same WriteUnitOfWork. Because of this, such batched writes will set multiple
+        // timestamps, violating the multi timestamp constraint. It's safe to ignore the multi
+        // timestamp constraints here.
+        // TODO(SERVER-72723): implement rollback logic for batched writes spanning multiple
+        // entries.
+        opCtx->recoveryUnit()->ignoreAllMultiTimestampConstraints();
+    }
 
     // Storage transaction commit is the last place inside a transaction that can throw an
     // exception. In order to safely allow exceptions to be thrown at that point, this function must
@@ -1895,12 +1903,17 @@ void OpObserverImpl::onBatchedWriteCommit(OperationContext* opCtx) {
                                                   bool firstOp,
                                                   bool lastOp,
                                                   std::vector<StmtId> stmtIdsWritten) {
-            // 'prevOpTime' is not allowed during oplog application because this field
-            // is not part of the the legacy atomic applyOps oplog entry format that
-            // we use to replicate batched writes.
+            // Remove 'prevOpTime' when replicating as a single applyOps oplog entry.
+            // This preserves backwards compatibility with the legacy atomic applyOps oplog
+            // entry format that we use to replicate batched writes.
             // OplogApplierImpl::_deriveOpsAndFillWriterVectors() enforces this restriction
             // using an invariant added in SERVER-43651.
-            oplogEntry->setPrevWriteOpTimeInTransaction(boost::none);
+            // For batched writes that replicate over a chain of applyOps oplog entries, we include
+            // 'prevOpTime' so that oplog application is able to consume all the linked operations,
+            // similar to large multi-document transactions. See SERVER-70572.
+            if (firstOp && lastOp) {
+                oplogEntry->setPrevWriteOpTimeInTransaction(boost::none);
+            }
             return logApplyOps(opCtx,
                                oplogEntry,
                                /*txnState=*/DurableTxnStateEnum::kCommitted,  // unused
@@ -2160,7 +2173,7 @@ void OpObserverImpl::_onReplicationRollback(OperationContext* opCtx,
             timeseriesNamespaces.insert(ns.getTimeseriesViewNamespace());
         }
     }
-    BucketCatalog::get(opCtx).clear(
+    timeseries::bucket_catalog::BucketCatalog::get(opCtx).clear(
         [timeseriesNamespaces = std::move(timeseriesNamespaces)](const NamespaceString& bucketNs) {
             return timeseriesNamespaces.contains(bucketNs);
         });

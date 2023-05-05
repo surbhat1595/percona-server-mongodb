@@ -92,8 +92,8 @@ public:
         // synchronize with any work happening on the primary (e.g., migration critical section).
         // TODO (SERVER-71444): Fix to be interruptible or document exception.
         UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
-        auto scopedCss = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-            opCtx, _nss, CSRAcquisitionMode::kExclusive);
+        auto scopedCss =
+            CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, _nss);
         if (_droppingCollection)
             scopedCss->clearFilteringMetadataForDroppedCollection(opCtx);
         else
@@ -219,8 +219,8 @@ void incrementChunkOnInsertOrUpdate(OperationContext* opCtx,
  * index operations.
  */
 void abortOngoingMigrationIfNeeded(OperationContext* opCtx, const NamespaceString& nss) {
-    auto scopedCsr = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-        opCtx, nss, CSRAcquisitionMode::kShared);
+    const auto scopedCsr =
+        CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, nss);
     if (auto msm = MigrationSourceManager::get(*scopedCsr)) {
         // Only interrupt the migration, but don't actually join
         (void)msm->abort();
@@ -239,9 +239,6 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
                                       std::vector<InsertStatement>::const_iterator end,
                                       bool fromMigrate) {
     const auto& nss = coll->ns();
-    auto metadata = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-                        opCtx, nss, CSRAcquisitionMode::kShared)
-                        ->getCurrentMetadataIfKnown();
 
     for (auto it = begin; it != end; ++it) {
         const auto& insertedDoc = it->doc;
@@ -293,48 +290,55 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
             const auto collCSDoc = CollectionCriticalSectionDocument::parse(
                 IDLParserContext("ShardServerOpObserver"), insertedDoc);
             invariant(!collCSDoc.getBlockReads());
+            opCtx->recoveryUnit()->onCommit(
+                [opCtx,
+                 insertedNss = collCSDoc.getNss(),
+                 reason = collCSDoc.getReason().getOwned()](boost::optional<Timestamp>) {
+                    if (nsIsDbOnly(insertedNss.ns())) {
+                        boost::optional<AutoGetDb> lockDbIfNotPrimary;
+                        if (!isStandaloneOrPrimary(opCtx)) {
+                            lockDbIfNotPrimary.emplace(opCtx, insertedNss.dbName(), MODE_IX);
+                        }
+                        // TODO (SERVER-71444): Fix to be interruptible or document exception.
+                        UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
+                        auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
+                            opCtx, insertedNss.dbName(), DSSAcquisitionMode::kExclusive);
+                        scopedDss->enterCriticalSectionCatchUpPhase(opCtx, reason);
+                    } else {
+                        boost::optional<AutoGetCollection> lockCollectionIfNotPrimary;
+                        if (!isStandaloneOrPrimary(opCtx)) {
+                            lockCollectionIfNotPrimary.emplace(
+                                opCtx,
+                                insertedNss,
+                                MODE_IX,
+                                AutoGetCollection::Options{}.viewMode(
+                                    auto_get_collection::ViewMode::kViewsPermitted));
+                        }
 
-            opCtx->recoveryUnit()->onCommit([opCtx,
-                                             insertedNss = collCSDoc.getNss(),
-                                             reason = collCSDoc.getReason().getOwned()](
-                                                boost::optional<Timestamp>) {
-                if (nsIsDbOnly(insertedNss.ns())) {
-                    boost::optional<AutoGetDb> lockDbIfNotPrimary;
-                    if (!isStandaloneOrPrimary(opCtx)) {
-                        lockDbIfNotPrimary.emplace(opCtx, insertedNss.dbName(), MODE_IX);
+                        // TODO (SERVER-71444): Fix to be interruptible or document exception.
+                        UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
+                        auto scopedCsr =
+                            CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
+                                opCtx, insertedNss);
+                        scopedCsr->enterCriticalSectionCatchUpPhase(reason);
                     }
-                    // TODO (SERVER-71444): Fix to be interruptible or document exception.
-                    UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
-                    auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
-                        opCtx, insertedNss.dbName(), DSSAcquisitionMode::kExclusive);
-                    scopedDss->enterCriticalSectionCatchUpPhase(opCtx, reason);
-                } else {
-                    boost::optional<AutoGetCollection> lockCollectionIfNotPrimary;
-                    if (!isStandaloneOrPrimary(opCtx)) {
-                        lockCollectionIfNotPrimary.emplace(
-                            opCtx,
-                            insertedNss,
-                            MODE_IX,
-                            AutoGetCollection::Options{}.viewMode(
-                                auto_get_collection::ViewMode::kViewsPermitted));
-                    }
-
-                    // TODO (SERVER-71444): Fix to be interruptible or document exception.
-                    UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
-                    auto scopedCsr = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-                        opCtx, insertedNss, CSRAcquisitionMode::kExclusive);
-                    scopedCsr->enterCriticalSectionCatchUpPhase(reason);
-                }
-            });
+                });
         }
 
-        if (metadata && metadata->isSharded()) {
-            incrementChunkOnInsertOrUpdate(opCtx,
-                                           nss,
-                                           *metadata->getChunkManager(),
-                                           insertedDoc,
-                                           insertedDoc.objsize(),
-                                           fromMigrate);
+        if (!nss.isNamespaceAlwaysUnsharded() &&
+            !feature_flags::gNoMoreAutoSplitter.isEnabled(
+                serverGlobalParams.featureCompatibility)) {
+            auto metadata =
+                CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, nss)
+                    ->getCurrentMetadataIfKnown();
+            if (metadata && metadata->isSharded()) {
+                incrementChunkOnInsertOrUpdate(opCtx,
+                                               nss,
+                                               *metadata->getChunkManager(),
+                                               insertedDoc,
+                                               insertedDoc.objsize(),
+                                               fromMigrate);
+            }
         }
     }
 }
@@ -394,8 +398,7 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
             // Force subsequent uses of the namespace to refresh the filtering metadata so they
             // can synchronize with any work happening on the primary (e.g., migration critical
             // section).
-            CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-                opCtx, updatedNss, CSRAcquisitionMode::kExclusive)
+            CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, updatedNss)
                 ->clearFilteringMetadata(opCtx);
         }
     }
@@ -493,23 +496,28 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
 
                     // TODO (SERVER-71444): Fix to be interruptible or document exception.
                     UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
-                    auto scopedCsr = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-                        opCtx, updatedNss, CSRAcquisitionMode::kExclusive);
+                    auto scopedCsr =
+                        CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
+                            opCtx, updatedNss);
                     scopedCsr->enterCriticalSectionCommitPhase(reason);
                 }
             });
     }
 
-    auto metadata = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-                        opCtx, args.coll->ns(), CSRAcquisitionMode::kShared)
-                        ->getCurrentMetadataIfKnown();
-    if (metadata && metadata->isSharded()) {
-        incrementChunkOnInsertOrUpdate(opCtx,
-                                       args.coll->ns(),
-                                       *metadata->getChunkManager(),
-                                       args.updateArgs->updatedDoc,
-                                       args.updateArgs->updatedDoc.objsize(),
-                                       args.updateArgs->source == OperationSource::kFromMigrate);
+    if (!args.coll->ns().isNamespaceAlwaysUnsharded() &&
+        !feature_flags::gNoMoreAutoSplitter.isEnabled(serverGlobalParams.featureCompatibility)) {
+        auto metadata = CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(
+                            opCtx, args.coll->ns())
+                            ->getCurrentMetadataIfKnown();
+        if (metadata && metadata->isSharded()) {
+            incrementChunkOnInsertOrUpdate(opCtx,
+                                           args.coll->ns(),
+                                           *metadata->getChunkManager(),
+                                           args.updateArgs->updatedDoc,
+                                           args.updateArgs->updatedDoc.objsize(),
+                                           args.updateArgs->source ==
+                                               OperationSource::kFromMigrate);
+        }
     }
 }
 
@@ -547,8 +555,9 @@ void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
             opCtx->recoveryUnit()->onCommit(
                 [opCtx, nss, collUuid, indexVersion, indexEntry](auto _) {
                     AutoGetCollection autoColl(opCtx, nss, MODE_IX);
-                    auto scsr = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-                        opCtx, nss, CSRAcquisitionMode::kExclusive);
+                    auto scsr =
+                        CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx,
+                                                                                             nss);
                     scsr->addIndex(opCtx, indexEntry, {collUuid, indexVersion});
                 });
             break;
@@ -561,8 +570,9 @@ void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
             opCtx->recoveryUnit()->onCommit(
                 [opCtx, nss, indexName, indexVersion, collUuid](auto _) {
                     AutoGetCollection autoColl(opCtx, nss, MODE_IX);
-                    auto scsr = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-                        opCtx, nss, CSRAcquisitionMode::kExclusive);
+                    auto scsr =
+                        CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx,
+                                                                                             nss);
                     scsr->removeIndex(opCtx, indexName, {collUuid, indexVersion});
                 });
             break;
@@ -575,13 +585,13 @@ void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
                 indexes.push_back(indexEntry);
             }
 
-            auto indexVersion = indexDoc["entry"][IndexCatalogType::kLastmodFieldName].timestamp();
+            auto indexVersion = indexDoc["entry"]["v"].timestamp();
             auto collUuid = uassertStatusOK(
                 UUID::parse(indexDoc["entry"][IndexCatalogType::kCollectionUUIDFieldName]));
             opCtx->recoveryUnit()->onCommit([opCtx, nss, collUuid, indexVersion, indexes](auto _) {
                 AutoGetCollection autoColl(opCtx, nss, MODE_IX);
-                auto scsr = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-                    opCtx, nss, CSRAcquisitionMode::kExclusive);
+                auto scsr = CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
+                    opCtx, nss);
                 scsr->replaceIndexes(opCtx, indexes, {collUuid, indexVersion});
             });
             break;
@@ -589,12 +599,56 @@ void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
         case 'c':
             opCtx->recoveryUnit()->onCommit([opCtx, nss](auto _) {
                 AutoGetCollection autoColl(opCtx, nss, MODE_IX);
-                auto scsr = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-                    opCtx, nss, CSRAcquisitionMode::kExclusive);
+                auto scsr = CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
+                    opCtx, nss);
                 scsr->clearIndexes(opCtx);
             });
 
             break;
+        case 'm': {
+            auto indexVersion = indexDoc["entry"][IndexCatalogType::kLastmodFieldName].timestamp();
+            auto fromNss = NamespaceString(indexDoc["entry"]["fromNss"].String());
+            auto toNss = NamespaceString(indexDoc["entry"]["toNss"].String());
+            opCtx->recoveryUnit()->onCommit([opCtx, fromNss, toNss, indexVersion](auto _) {
+                AutoGetCollection autoCollFrom(
+                    opCtx,
+                    fromNss,
+                    MODE_IX,
+                    AutoGetCollection::Options{}.secondaryNssOrUUIDs({toNss}));
+                std::vector<IndexCatalogType> fromIndexes;
+                boost::optional<UUID> uuid;
+                {
+                    auto fromCSR =
+                        CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
+                            opCtx, fromNss);
+                    uassert(
+                        7079504,
+                        format(FMT_STRING("The critical section for collection {} must be taken in "
+                                          "order to execute this command"),
+                               fromNss.toString()),
+                        fromCSR->getCriticalSectionSignal(
+                            opCtx, ShardingMigrationCriticalSection::kWrite));
+                    auto indexCache = fromCSR->getIndexes(opCtx, true);
+                    indexCache->forEachGlobalIndex([&](const auto& index) {
+                        fromIndexes.push_back(index);
+                        return true;
+                    });
+                    uuid.emplace(indexCache->getCollectionIndexes().uuid());
+
+                    fromCSR->clearIndexes(opCtx);
+                }
+                auto toCSR = CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
+                    opCtx, toNss);
+                uassert(7079505,
+                        format(FMT_STRING("The critical section for collection {} must be taken in "
+                                          "order to execute this command"),
+                               toNss.toString()),
+                        toCSR->getCriticalSectionSignal(opCtx,
+                                                        ShardingMigrationCriticalSection::kWrite));
+                toCSR->replaceIndexes(opCtx, fromIndexes, {*uuid, indexVersion});
+            });
+            break;
+        }
         default:
             MONGO_UNREACHABLE;
     }
@@ -694,8 +748,9 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
 
                     // TODO (SERVER-71444): Fix to be interruptible or document exception.
                     UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
-                    auto scopedCsr = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-                        opCtx, deletedNss, CSRAcquisitionMode::kExclusive);
+                    auto scopedCsr =
+                        CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
+                            opCtx, deletedNss);
 
                     // Secondary nodes must clear the collection filtering metadata before releasing
                     // the in-memory critical section.
@@ -752,8 +807,7 @@ void ShardServerOpObserver::onCreateCollection(OperationContext* opCtx,
 
     // Temp collections are always UNSHARDED
     if (options.temp) {
-        CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-            opCtx, collectionName, CSRAcquisitionMode::kExclusive)
+        CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, collectionName)
             ->setFilteringMetadata(opCtx, CollectionMetadata());
         return;
     }
@@ -766,8 +820,8 @@ void ShardServerOpObserver::onCreateCollection(OperationContext* opCtx,
 
     // If the check above passes, this means the collection doesn't exist and is being created and
     // that the caller will be responsible to eventially set the proper shard version
-    auto scopedCsr = CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-        opCtx, collectionName, CSRAcquisitionMode::kExclusive);
+    auto scopedCsr =
+        CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, collectionName);
     if (!scopedCsr->getCurrentMetadataIfKnown()) {
         scopedCsr->setFilteringMetadata(opCtx, CollectionMetadata());
     }

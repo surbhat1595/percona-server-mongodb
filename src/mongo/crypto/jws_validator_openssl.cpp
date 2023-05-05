@@ -84,12 +84,15 @@ namespace {
 using UniqueRSA = std::unique_ptr<RSA, OpenSSLDeleter<decltype(RSA_free), RSA_free>>;
 using UniqueEVPPKey =
     std::unique_ptr<EVP_PKEY, OpenSSLDeleter<decltype(EVP_PKEY_free), EVP_PKEY_free>>;
+using UniqueEVPMDCtx =
+    std::unique_ptr<EVP_MD_CTX, OpenSSLDeleter<decltype(EVP_MD_CTX_free), ::EVP_MD_CTX_free>>;
 using UniqueBIGNUM = std::unique_ptr<BIGNUM, OpenSSLDeleter<decltype(BN_free), BN_free>>;
 
 class JWSValidatorOpenSSLRSA : public JWSValidator {
 public:
-    JWSValidatorOpenSSLRSA(StringData algorithm, const BSONObj& key)
-        : _verificationCtx(EVP_MD_CTX_new()) {
+    JWSValidatorOpenSSLRSA(StringData algorithm, const BSONObj& key) : _key(EVP_PKEY_new()) {
+        uassert(7095402, "Unknown hashing algorithm", algorithm == "RSA");
+
         auto RSAKey = JWKRSA::parse(IDLParserContext("JWKRSA"), key);
 
         const auto* pubKeyNData =
@@ -109,32 +112,29 @@ public:
         n.release();  // Now owned by rsa
         e.release();  // Now owned by rsa
 
-        UniqueEVPPKey evpKey(EVP_PKEY_new());
-        uassertOpenSSL("Failed creating EVP_PKey", evpKey.get() != nullptr);
+        uassertOpenSSL("Failed creating EVP_PKey", _key.get() != nullptr);
         uassertOpenSSL("EVP_PKEY assignment failed",
-                       EVP_PKEY_assign_RSA(evpKey.get(), rsa.get()) == 1);
-        rsa.release();  // Now owned by evpKey
-
-        uassert(7095402, "Unknown hashing algorithm", algorithm == "RSA");
-        uassertOpenSSL("DigestVerifyInit failed",
-                       EVP_DigestVerifyInit(
-                           _verificationCtx.get(), nullptr, EVP_sha256(), nullptr, evpKey.get()) ==
-                           1);
+                       EVP_PKEY_assign_RSA(_key.get(), rsa.get()) == 1);
+        rsa.release();  // Now owned by _key
     }
 
     Status validate(StringData algorithm, StringData payload, StringData signature) const final {
-        uassert(7095403, "Unknown hashing algorithm", algorithm == "RSA" || algorithm == "RS256");
+        const EVP_MD* alg = getHashingAlg(algorithm);
+        uassert(7095403, str::stream() << "Unknown hashing algorithm: '" << algorithm << "'", alg);
 
+        UniqueEVPMDCtx ctx(EVP_MD_CTX_new());
+        uassertOpenSSL("DigestVerifyInit failed",
+                       EVP_DigestVerifyInit(ctx.get(), nullptr, alg, nullptr, _key.get()) == 1);
         uassertOpenSSL(
             "DigestVerifyUpdate failed",
-            EVP_DigestVerifyUpdate(_verificationCtx.get(),
+            EVP_DigestVerifyUpdate(ctx.get(),
                                    reinterpret_cast<const unsigned char*>(payload.rawData()),
                                    payload.size()) == 1);
 
-        int verifyRes =
-            EVP_DigestVerifyFinal(_verificationCtx.get(),
-                                  reinterpret_cast<const unsigned char*>(signature.rawData()),
-                                  signature.size());
+        int verifyRes = EVP_DigestVerifyFinal(
+            ctx.get(),
+            const_cast<unsigned char*>(reinterpret_cast<const unsigned char*>(signature.rawData())),
+            signature.size());
         if (verifyRes == 0) {
             return {ErrorCodes::InvalidSignature, "OpenSSL: Signature is invalid"};
         } else if (verifyRes != 1) {
@@ -145,8 +145,21 @@ public:
     }
 
 private:
-    std::unique_ptr<EVP_MD_CTX, OpenSSLDeleter<decltype(EVP_MD_CTX_free), ::EVP_MD_CTX_free>>
-        _verificationCtx;
+    static constexpr auto kRS256 = "RS256"_sd;
+    static constexpr auto kRS384 = "RS384"_sd;
+    static constexpr auto kRS512 = "RS512"_sd;
+    static const EVP_MD* getHashingAlg(StringData alg) {
+        if (alg == kRS256) {
+            return EVP_sha256();
+        }
+        if (alg == kRS384) {
+            return EVP_sha384();
+        }
+        if (alg == kRS512) {
+            return EVP_sha512();
+        }
+        return nullptr;
+    }
 
     static void uassertOpenSSL(StringData context, bool success) {
         uassert(ErrorCodes::OperationFailed,
@@ -154,6 +167,8 @@ private:
                               << SSLManagerInterface::getSSLErrorMessage(ERR_get_error()),
                 success);
     }
+
+    UniqueEVPPKey _key;
 };
 }  // namespace
 

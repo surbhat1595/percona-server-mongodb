@@ -37,11 +37,11 @@
 #include <boost/log/attributes/value_extraction.hpp>
 #include <boost/log/core.hpp>
 #include <boost/log/sinks.hpp>
+#include <csignal>
+#include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <iostream>
-#include <signal.h>
-#include <stdio.h>
-#include <string.h>
 
 #include "mongo/base/init.h"
 #include "mongo/base/initializer.h"
@@ -66,11 +66,12 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/shell/linenoise.h"
+#include "mongo/shell/program_runner.h"
 #include "mongo/shell/shell_options.h"
 #include "mongo/shell/shell_utils.h"
 #include "mongo/shell/shell_utils_launcher.h"
 #include "mongo/stdx/utility.h"
-#include "mongo/transport/transport_layer_asio.h"
+#include "mongo/transport/asio_transport_layer.h"
 #include "mongo/util/ctype.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/exit.h"
@@ -728,13 +729,14 @@ int mongo_main(int argc, char* argv[]) {
 #ifdef MONGO_CONFIG_SSL
         OCSPManager::start(serviceContext);
 #endif
+        shell_utils::ProgramRegistry::create(serviceContext);
 
-        transport::TransportLayerASIO::Options opts;
+        transport::AsioTransportLayer::Options opts;
         opts.enableIPv6 = shellGlobalParams.enableIPv6;
-        opts.mode = transport::TransportLayerASIO::Options::kEgress;
+        opts.mode = transport::AsioTransportLayer::Options::kEgress;
 
         serviceContext->setTransportLayer(
-            std::make_unique<transport::TransportLayerASIO>(opts, nullptr));
+            std::make_unique<transport::AsioTransportLayer>(opts, nullptr));
         auto tlPtr = serviceContext->getTransportLayer();
         uassertStatusOK(tlPtr->setup());
         uassertStatusOK(tlPtr->start());
@@ -847,6 +849,15 @@ int mongo_main(int argc, char* argv[]) {
         mongo::getGlobalScriptEngine()->enableJIT(!shellGlobalParams.nojit);
         mongo::getGlobalScriptEngine()->enableJavaScriptProtection(
             shellGlobalParams.javascriptProtection);
+
+        if (shellGlobalParams.files.size() > 0) {
+            boost::system::error_code ec;
+            auto loadPath =
+                boost::filesystem::canonical(shellGlobalParams.files[0], ec).parent_path().string();
+            if (!ec) {
+                mongo::getGlobalScriptEngine()->setLoadPath(loadPath);
+            }
+        }
 
         ScopeGuard poolGuard([] { ScriptEngine::dropScopeCache(); });
 

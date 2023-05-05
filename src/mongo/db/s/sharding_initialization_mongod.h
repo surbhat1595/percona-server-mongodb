@@ -61,8 +61,8 @@ public:
     static ShardingInitializationMongoD* get(ServiceContext* service);
 
     /**
-     * If started with --shardsvr, initializes sharding awareness from the shardIdentity document on
-     * disk, if there is one.
+     * If on a node capabale of serving as a shard, initializes sharding awareness from the
+     * shardIdentity document on disk, if there is one.
      *
      * If started with --shardsvr in queryableBackupMode, initializes sharding awareness from the
      * shardIdentity document passed through the --overrideShardIdentity startup parameter.
@@ -106,6 +106,11 @@ public:
         _initFunc = std::move(func);
     }
 
+    /**
+     * Installs a listener for RSM change notifications.
+     */
+    void installReplicaSetChangeListener(ServiceContext* service);
+
 private:
     void _initializeShardingEnvironmentOnShardServer(OperationContext* opCtx,
                                                      const ShardIdentity& shardIdentity);
@@ -140,7 +145,18 @@ private:
  * NOTE: This does not initialize ShardingState, which should only be done for shard servers.
  */
 void initializeGlobalShardingStateForMongoD(OperationContext* opCtx,
-                                            const ShardId& shardId,
-                                            const ConnectionString& configCS);
+                                            const boost::optional<ConnectionString>& configCS);
+
+/**
+ * Initialize the sharding components for a config server, if they haven't already been set up.
+ */
+void initializeGlobalShardingStateForConfigServerIfNeeded(OperationContext* opCtx);
+
+/**
+ * Helper method to initialize sharding awareness from the shard identity document if it can be
+ * found and load global sharding settings awareness was initialized. See
+ * ShardingInitializationMongoD::initializeShardingAwarenessIfNeeded() above for more details.
+ */
+void initializeShardingAwarenessIfNeededAndLoadGlobalSettings(OperationContext* opCtx);
 
 }  // namespace mongo

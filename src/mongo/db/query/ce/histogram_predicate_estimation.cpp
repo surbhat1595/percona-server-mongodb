@@ -32,10 +32,9 @@
 #include "mongo/db/exec/sbe/abt/abt_lower.h"
 #include "mongo/db/pipeline/abt/utils.h"
 
-#include "mongo/db/query/optimizer/rewrites/const_eval.h"
+#include "mongo/db/query/ce/bound_utils.h"
 #include "mongo/db/query/optimizer/syntax/expr.h"
 #include "mongo/db/query/optimizer/utils/ce_math.h"
-#include "mongo/db/query/optimizer/utils/interval_utils.h"
 #include "mongo/db/query/stats/value_utils.h"
 
 namespace mongo::optimizer::ce {
@@ -47,48 +46,6 @@ using stats::compareValues;
 using stats::sameTypeBracket;
 using stats::ScalarHistogram;
 using stats::valueToDouble;
-
-std::pair<value::TypeTags, value::Value> getConstTypeVal(const ABT& abt) {
-    const auto* constant = abt.cast<Constant>();
-    tassert(7051102, "Interval ABTs passed in for estimation must have Constant bounds.", constant);
-    return constant->get();
-};
-
-boost::optional<std::pair<value::TypeTags, value::Value>> getBound(
-    const BoundRequirement& boundReq) {
-    const ABT& bound = boundReq.getBound();
-    if (bound.is<Constant>()) {
-        return getConstTypeVal(bound);
-    }
-    return boost::none;
-};
-
-IntervalRequirement getMinMaxIntervalForType(value::TypeTags type) {
-    // Note: This function works based on the assumption that there are no intervals that include
-    // values from more than one type. That is why the MinMax interval of a type will include all
-    // possible intervals over that type.
-
-    auto&& [min, minInclusive] = getMinMaxBoundForType(true /*isMin*/, type);
-    tassert(7051103, str::stream() << "Type " << type << " has no minimum", min);
-
-    auto&& [max, maxInclusive] = getMinMaxBoundForType(false /*isMin*/, type);
-    tassert(7051104, str::stream() << "Type " << type << " has no maximum", max);
-
-    return IntervalRequirement{BoundRequirement(minInclusive, *min),
-                               BoundRequirement(maxInclusive, *max)};
-}
-
-bool isIntervalSubsetOfType(const IntervalRequirement& interval, value::TypeTags type) {
-    // Create a conjunction of the interval and the min-max interval for the type as input for the
-    // intersection function.
-    auto intervals =
-        IntervalReqExpr::make<IntervalReqExpr::Disjunction>(IntervalReqExpr::NodeVector{
-            IntervalReqExpr::make<IntervalReqExpr::Conjunction>(IntervalReqExpr::NodeVector{
-                IntervalReqExpr::make<IntervalReqExpr::Atom>(interval),
-                IntervalReqExpr::make<IntervalReqExpr::Atom>(getMinMaxIntervalForType(type))})});
-
-    return intersectDNFIntervals(intervals, ConstEval::constFold).has_value();
-}
 
 EstimationResult getTotals(const ScalarHistogram& h) {
     if (h.empty()) {
@@ -139,7 +96,7 @@ EstimationResult interpolateEstimateInBucket(const ScalarHistogram& h,
     // If the value is minimal for its type, and the operation is $lt or $lte return cardinality up
     // to the previous bucket.
     auto&& [minConstant, inclusive] = getMinMaxBoundForType(true /*isMin*/, tag);
-    auto [minTag, minVal] = getConstTypeVal(*minConstant);
+    auto [minTag, minVal] = *getConstTypeVal(*minConstant);
     if (compareValues(minTag, minVal, tag, val) == 0) {
         return {resultCard, resultNDV};
     }
@@ -250,31 +207,6 @@ EstimationResult estimate(const ScalarHistogram& h,
 }
 
 /**
- * Returns how many values of the given type are known by the array histogram.
- */
-double getTypeCard(const ArrayHistogram& ah, value::TypeTags tag, bool includeScalar) {
-    double count = 0.0;
-
-    // TODO SERVER-70936: booleans are estimated by different type counters (unless in arrays).
-    if (tag == sbe::value::TypeTags::Boolean) {
-        uasserted(7051101, "Cannot estimate boolean types yet with histogram CE.");
-    }
-
-    // Note that if we are asked by the optimizer to estimate an interval whose bounds are  arrays,
-    // this means we are trying to estimate equality on nested arrays. In this case, we do not want
-    // to include the "scalar" type counter for the array type, because this will cause us to
-    // estimate the nested array case as counting all arrays, regardless of whether or not they are
-    // nested.
-    if (includeScalar && tag != value::TypeTags::Array) {
-        count += ah.getTypeCount(tag);
-    }
-    if (ah.isArray()) {
-        count += ah.getArrayTypeCount(tag);
-    }
-    return count;
-}
-
-/**
  * Estimates equality to the given tag/value using histograms.
  */
 CEType estimateCardEq(const ArrayHistogram& ah,
@@ -298,15 +230,21 @@ static EstimationResult estimateRange(const ScalarHistogram& histogram,
                                       bool highInclusive,
                                       value::TypeTags tagHigh,
                                       value::Value valHigh) {
-    const EstimationType highType =
-        highInclusive ? EstimationType::kLessOrEqual : EstimationType::kLess;
-    const EstimationResult highEstimate = estimate(histogram, tagHigh, valHigh, highType);
+    const auto highType = highInclusive ? EstimationType::kLessOrEqual : EstimationType::kLess;
+    const auto highEstimate = estimate(histogram, tagHigh, valHigh, highType);
 
-    const EstimationType lowType =
-        lowInclusive ? EstimationType::kLess : EstimationType::kLessOrEqual;
-    const EstimationResult lowEstimate = estimate(histogram, tagLow, valLow, lowType);
+    const auto lowType = lowInclusive ? EstimationType::kLess : EstimationType::kLessOrEqual;
+    const auto lowEstimate = estimate(histogram, tagLow, valLow, lowType);
 
-    return highEstimate - lowEstimate;
+    const auto est = highEstimate - lowEstimate;
+
+    // There is a case where we estimate an interval (l, u) that falls entirely in a bucket. In this
+    // case, we estimate it as: card(<u) - card(<=l) = card(<=u) - card(=u) - card(<=l)
+    // where our estimate for equality within the bucket, card(=u) = rangeFreq/ndv, is larger than
+    // card(<=high) - card(<=low).
+    // This is problematic, because we will obtain a negative value for 'est'. For now, we solve
+    // this by clamping this result to a minimum of 0.0.
+    return {std::max(0.0, est.card), std::max(0.0, est.ndv)};
 }
 
 /**
@@ -416,75 +354,6 @@ CEType estimateCardRange(const ArrayHistogram& ah,
     }
 
     return {result};
-}
-
-CEType estimateIntervalCardinality(const ArrayHistogram& ah,
-                                   const IntervalRequirement& interval,
-                                   CEType childResult,
-                                   bool includeScalar) {
-    if (interval.isFullyOpen()) {
-        return childResult;
-    } else if (interval.isEquality()) {
-        auto maybeConstBound = getBound(interval.getLowBound());
-        if (!maybeConstBound) {
-            return {kInvalidEstimate};
-        }
-
-        auto [tag, val] = *maybeConstBound;
-        if (stats::canEstimateTypeViaHistogram(tag)) {
-            return estimateCardEq(ah, tag, val, includeScalar);
-        }
-
-        // Otherwise, we return the cardinality for the type of the intervals.
-        return {getTypeCard(ah, tag, includeScalar)};
-    }
-
-    // Otherwise, we have a range.
-    auto lowBound = interval.getLowBound();
-    auto maybeConstLowBound = getBound(lowBound);
-    if (!maybeConstLowBound) {
-        return {kInvalidEstimate};
-    }
-
-    auto highBound = interval.getHighBound();
-    auto maybeConstHighBound = getBound(highBound);
-    if (!maybeConstHighBound) {
-        return {kInvalidEstimate};
-    }
-
-    auto [lowTag, lowVal] = *maybeConstLowBound;
-    auto [highTag, highVal] = *maybeConstHighBound;
-
-    // Check if we estimated this interval using histograms. One of the tags may not be of a type we
-    // know how to estimate using histograms; however, it should still be possible to estimate the
-    // interval if the other one is of the appropriate type.
-    if (stats::canEstimateTypeViaHistogram(lowTag) || stats::canEstimateTypeViaHistogram(highTag)) {
-        return estimateCardRange(ah,
-                                 lowBound.isInclusive(),
-                                 lowTag,
-                                 lowVal,
-                                 highBound.isInclusive(),
-                                 highTag,
-                                 highVal,
-                                 includeScalar);
-    }
-
-    // Otherwise, this interval was not in our histogram. We may be able to estimate this interval
-    // via type counts- if so, we just return the total count for the type.
-
-    // If the bound tags are equal, we can estimate this in the same way that we do equalities on
-    // non-histogrammable types. Otherwise, we need to figure out which type(s) are included by this
-    // range.
-    if (lowTag == highTag || isIntervalSubsetOfType(interval, lowTag)) {
-        return {getTypeCard(ah, lowTag, includeScalar)};
-    } else if (isIntervalSubsetOfType(interval, highTag)) {
-        return {getTypeCard(ah, highTag, includeScalar)};
-    }
-
-    // If we reach here, we've given up estimating, because our interval intersected both high & low
-    // type intervals (and possibly more types).
-    // TODO: could we aggregate type counts across all intersected types here?
-    return {0.0};
 }
 
 }  // namespace mongo::optimizer::ce

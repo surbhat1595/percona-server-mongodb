@@ -271,6 +271,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/idl/generic_args_with_types_idl',
         '$BUILD_DIR/mongo/rpc/command_status',
         'async_rpc_error_info',
         'hedge_options_util',
@@ -361,6 +362,7 @@ env.CppUnitTest(
         'connection_pool_executor',
         'egress_tag_closer_manager',
         'hedge_options_util',
+        'hedging_metrics',
         'network_interface_mock',
         'network_interface_tl',
         'network_test_env',

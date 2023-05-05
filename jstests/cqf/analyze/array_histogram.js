@@ -100,11 +100,12 @@ runHistogramsTest(function verifyArrayHistograms() {
                     ],
                     bounds: ["array", "mixed"]
                 },
-                typeCount: [{typeName: "StringSmall", count: 5}],
+                typeCount: [{typeName: "StringSmall", count: 3}],
             },
             emptyArrayCount: 1,
             trueCount: 0,
             falseCount: 0,
+            sampleRate: 1.0,
             documents: 6,
         }
     };

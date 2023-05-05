@@ -31,6 +31,7 @@
 
 #include "mongo/db/exec/sbe/stages/merge_join.h"
 
+#include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/util/str.h"
@@ -325,13 +326,13 @@ void MergeJoinStage::close() {
 }
 
 void MergeJoinStage::doSaveState(bool relinquishCursor) {
-    if (!slotsAccessible() || !relinquishCursor) {
+    if (!relinquishCursor) {
         return;
     }
 
     // We only have to save shallow non-owning materialized rows.
-    prepareForYielding(_currentOuterKey);
-    prepareForYielding(_currentInnerKey);
+    prepareForYielding(_currentOuterKey, true);
+    prepareForYielding(_currentInnerKey, true);
 }
 
 std::unique_ptr<PlanStageStats> MergeJoinStage::getStats(bool includeDebugInfo) const {

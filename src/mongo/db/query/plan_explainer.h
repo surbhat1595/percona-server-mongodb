@@ -59,22 +59,10 @@ public:
     using PlanStatsDetails = std::pair<BSONObj, boost::optional<PlanSummaryStats>>;
 
     PlanExplainer() {}
-    PlanExplainer(const QuerySolution* solution,
-                  Microseconds timeElapsedPlanning,
-                  BSONObj telemetryKey)
+    PlanExplainer(const QuerySolution* solution)
         : _enumeratorExplainInfo{solution ? solution->_enumeratorExplainInfo
-                                          : PlanEnumeratorExplainInfo{}},
-          _timeElapsedPlanning{timeElapsedPlanning},
-          _telemetryKey{telemetryKey} {}
-    PlanExplainer(Microseconds timeElapsedPlanning, BSONObj telemetryKey)
-        : _timeElapsedPlanning{timeElapsedPlanning}, _telemetryKey{telemetryKey} {}
+                                          : PlanEnumeratorExplainInfo{}} {}
     PlanExplainer(const PlanEnumeratorExplainInfo& info) : _enumeratorExplainInfo{info} {}
-    PlanExplainer(const PlanEnumeratorExplainInfo& info,
-                  Microseconds timeElapsedPlanning,
-                  BSONObj telemetryKey)
-        : _enumeratorExplainInfo{info},
-          _timeElapsedPlanning{timeElapsedPlanning},
-          _telemetryKey{telemetryKey} {}
 
     virtual ~PlanExplainer() = default;
 
@@ -153,16 +141,8 @@ public:
     void updateEnumeratorExplainInfo(const PlanEnumeratorExplainInfo& other) {
         _enumeratorExplainInfo.merge(other);
     }
-    Microseconds getTimeElapsedPlanning() const {
-        return _timeElapsedPlanning;
-    }
-    BSONObj getTelemetryKey() const {
-        return _telemetryKey;
-    }
 
 protected:
     PlanEnumeratorExplainInfo _enumeratorExplainInfo;
-    Microseconds _timeElapsedPlanning{0};
-    BSONObj _telemetryKey;
 };
 }  // namespace mongo

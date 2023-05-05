@@ -68,8 +68,10 @@ constexpr StringData WildcardKeyGenerator::kSubtreeSuffix;
 
 WildcardProjection WildcardKeyGenerator::createProjectionExecutor(BSONObj keyPattern,
                                                                   BSONObj pathProjection) {
-    // We should never have a key pattern that contains more than a single element.
-    invariant(keyPattern.nFields() == 1);
+    if (!feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabledAndIgnoreFCV()) {
+        // We should never have a key pattern that contains more than a single element.
+        invariant(keyPattern.nFields() == 1);
+    }
 
     // The _keyPattern is either { "$**": ±1 } for all paths or { "path.$**": ±1 } for a single
     // subtree. If we are indexing a single subtree, then we will project just that path.
@@ -102,7 +104,7 @@ WildcardKeyGenerator::WildcardKeyGenerator(BSONObj keyPattern,
                                            const CollatorInterface* collator,
                                            KeyString::Version keyStringVersion,
                                            Ordering ordering,
-                                           KeyFormat rsKeyFormat)
+                                           boost::optional<KeyFormat> rsKeyFormat)
     : _proj(createProjectionExecutor(keyPattern, pathProjection)),
       _collator(collator),
       _keyPattern(keyPattern),
@@ -115,6 +117,11 @@ void WildcardKeyGenerator::generateKeys(SharedBufferFragmentBuilder& pooledBuffe
                                         KeyStringSet* keys,
                                         KeyStringSet* multikeyPaths,
                                         const boost::optional<RecordId>& id) const {
+    tassert(6868511,
+            "To add multi keys to 'multikeyPaths', the key format 'rsKeyFormat' must be provided "
+            "at the constructor",
+            !multikeyPaths || _rsKeyFormat);
+
     FieldRef rootPath;
     auto keysSequence = keys->extract_sequence();
     // multikeyPaths is allowed to be nullptr
@@ -251,7 +258,7 @@ void WildcardKeyGenerator::_addMultiKey(SharedBufferFragmentBuilder& pooledBuffe
             key,
             _ordering,
             record_id_helpers::reservedIdFor(
-                record_id_helpers::ReservationId::kWildcardMultikeyMetadataId, _rsKeyFormat));
+                record_id_helpers::ReservationId::kWildcardMultikeyMetadataId, *_rsKeyFormat));
         multikeyPaths->push_back(keyString.release());
     }
 }

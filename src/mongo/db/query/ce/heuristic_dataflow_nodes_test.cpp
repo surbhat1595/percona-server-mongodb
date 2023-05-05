@@ -27,6 +27,7 @@
  *    it in the license file.
  */
 
+#include "mongo/db/concurrency/locker_noop_service_context_test_fixture.h"
 #include "mongo/db/query/ce/heuristic_estimator.h"
 #include "mongo/db/query/ce/test_utils.h"
 #include "mongo/db/query/optimizer/props.h"
@@ -50,7 +51,8 @@ public:
     DataflowCETester() : CETester(kCollName, kCollCard, kDefaultCETestPhaseSet) {}
 
 protected:
-    std::unique_ptr<cascades::CardinalityEstimator> getEstimator() const override {
+    std::unique_ptr<cascades::CardinalityEstimator> getEstimator(
+        bool /*forValidation*/) const override {
         return std::make_unique<HeuristicEstimator>();
     }
 };
@@ -59,7 +61,9 @@ bool isRootNodeFn(const ABT& node) {
     return node.is<RootNode>();
 }
 
-TEST(CEDataflowTest, EstimateTrivialNodes) {
+class CEDataflowTest : public LockerNoopServiceContextTest {};
+
+TEST_F(CEDataflowTest, EstimateTrivialNodes) {
     DataflowCETester t;
     const auto matchCard = t.getMatchCE("{a: 1}", isRootNodeFn);
 
@@ -73,7 +77,7 @@ TEST(CEDataflowTest, EstimateTrivialNodes) {
     ASSERT_CE(t, "[{$match: {a: 1}}, {$project: {a: {$add: [\"$a\", 1]}}}]", matchCard);
 }
 
-TEST(CEDataflowTest, EstimateUnionNode) {
+TEST_F(CEDataflowTest, EstimateUnionNode) {
     auto makeUnionBranch = [](const std::string& collName) {
         ProjectionName scanVar{"scan_" + collName};
         auto scanNode = make<ScanNode>(scanVar, collName);
@@ -130,7 +134,7 @@ TEST(CEDataflowTest, EstimateUnionNode) {
     }
 }
 
-TEST(CEDataflowTest, EstimateLimitSkipNode) {
+TEST_F(CEDataflowTest, EstimateLimitSkipNode) {
     DataflowCETester t;
     const CEType matchCard = t.getMatchCE("{a: 1}", isRootNodeFn);
 
@@ -202,7 +206,7 @@ TEST(CEDataflowTest, EstimateLimitSkipNode) {
     ASSERT_CE(t, "[{$skip: 1000}, {$match: {a: 1}}, {$limit: 1000}]", 0.0);
 }
 
-TEST(CEDataflowTest, EstimateUnwindNode) {
+TEST_F(CEDataflowTest, EstimateUnwindNode) {
     DataflowCETester t;
     const CEType matchCard = t.getMatchCE("{a: 1}", isRootNodeFn);
 

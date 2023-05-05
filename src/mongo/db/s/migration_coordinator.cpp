@@ -169,6 +169,11 @@ boost::optional<SharedSemiFuture<void>> MigrationCoordinator::completeMigration(
         launchReleaseRecipientCriticalSection(opCtx);
     }
 
+    // Persist the config time before the migration decision to ensure that in case of stepdown
+    // next filtering metadata refresh on the new primary will always include the effect of this
+    // migration.
+    VectorClockMutable::get(opCtx)->waitForDurableConfigTime().get(opCtx);
+
     boost::optional<SharedSemiFuture<void>> cleanupCompleteFuture = boost::none;
 
     switch (*decision) {
@@ -267,19 +272,22 @@ SharedSemiFuture<void> MigrationCoordinator::_commitMigrationOnDonorAndRecipient
 
     auto waitForActiveQueriesToComplete = [&]() {
         AutoGetCollection autoColl(opCtx, deletionTask.getNss(), MODE_IS);
-        return CollectionShardingRuntime::assertCollectionLockedAndAcquire(
-                   opCtx, deletionTask.getNss(), CSRAcquisitionMode::kShared)
+        return CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(
+                   opCtx, deletionTask.getNss())
             ->getOngoingQueriesCompletionFuture(deletionTask.getCollectionUuid(),
                                                 deletionTask.getRange())
             .semi();
     }();
 
+
     // Register the range deletion task as pending in order to get the completion future
+    const auto rangeDeleterService = RangeDeleterService::get(opCtx);
+    rangeDeleterService->getRangeDeleterServiceInitializationFuture().get(opCtx);
     auto rangeDeletionCompletionFuture =
-        RangeDeleterService::get(opCtx)->registerTask(deletionTask,
-                                                      std::move(waitForActiveQueriesToComplete),
-                                                      false /* fromStepUp*/,
-                                                      true /* pending */);
+        rangeDeleterService->registerTask(deletionTask,
+                                          std::move(waitForActiveQueriesToComplete),
+                                          false /* fromStepUp*/,
+                                          true /* pending */);
 
     LOGV2_DEBUG(6555800,
                 2,
@@ -358,11 +366,6 @@ void MigrationCoordinator::forgetMigration(OperationContext* opCtx) {
                 2,
                 "Deleting migration coordinator document",
                 "migrationId"_attr = _migrationInfo.getId());
-
-    // Before deleting the migration coordinator document, ensure that in the case of a crash, the
-    // node will start-up from at least the configTime, which it obtained as part of recovery of the
-    // shardVersion, which will ensure that it will see at least the same shardVersion.
-    VectorClockMutable::get(opCtx)->waitForDurableConfigTime().get(opCtx);
 
     PersistentTaskStore<MigrationCoordinatorDocument> store(
         NamespaceString::kMigrationCoordinatorsNamespace);

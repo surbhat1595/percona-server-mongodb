@@ -2,6 +2,9 @@
 // Basic tests for refineCollectionShardKey.
 //
 
+// Cannot run the filtering metadata check on tests that run refineCollectionShardKey.
+TestData.skipCheckShardFilteringMetadata = true;
+
 (function() {
 'use strict';
 load('jstests/libs/fail_point_util.js');
@@ -9,6 +12,7 @@ load('jstests/libs/profiler.js');
 load('jstests/sharding/libs/shard_versioning_util.js');
 load('jstests/sharding/libs/sharded_transactions_helpers.js');
 load("jstests/sharding/libs/find_chunks_util.js");
+load("jstests/sharding/updateOne_without_shard_key/libs/write_without_shard_key_test_util.js");
 
 const st = new ShardingTest({
     mongos: 2,
@@ -107,29 +111,54 @@ function validateCRUDAfterRefine() {
     assert.commandWorked(sessionDB.getCollection(kCollName).insert({a: 1, b: 1, c: 1, d: 1}));
     assert.commandWorked(sessionDB.getCollection(kCollName).insert({a: -1, b: -1, c: -1, d: -1}));
 
-    // The full shard key is not required in the resulting document when updating. The full shard
-    // key is still required in the query, however.
-    assert.commandFailedWithCode(
-        sessionDB.getCollection(kCollName).update({a: 1, b: 1, c: 1}, {$set: {b: 2}}), 31025);
-    assert.commandWorked(
-        sessionDB.getCollection(kCollName).update({a: 1, b: 1, c: 1, d: 1}, {$set: {b: 2}}));
-    assert.commandWorked(
-        sessionDB.getCollection(kCollName).update({a: -1, b: -1, c: -1, d: -1}, {$set: {b: 4}}));
+    // This enables the feature allows writes to omit the shard key in their queries.
+    if (WriteWithoutShardKeyTestUtil.isWriteWithoutShardKeyFeatureEnabled(sessionDB)) {
+        assert.commandWorked(
+            sessionDB.getCollection(kCollName).update({a: 1, b: 1, c: 1}, {$set: {x: 2}}));
+        assert.commandWorked(
+            sessionDB.getCollection(kCollName).update({a: 1, b: 1, c: 1, d: 1}, {$set: {b: 2}}));
+        assert.commandWorked(sessionDB.getCollection(kCollName).update({a: -1, b: -1, c: -1, d: -1},
+                                                                       {$set: {b: 4}}));
 
-    assert.eq(2, sessionDB.getCollection(kCollName).findOne({c: 1}).b);
-    assert.eq(4, sessionDB.getCollection(kCollName).findOne({c: -1}).b);
+        assert.eq(2, sessionDB.getCollection(kCollName).findOne({c: 1}).x);
+        assert.eq(2, sessionDB.getCollection(kCollName).findOne({c: 1}).b);
+        assert.eq(4, sessionDB.getCollection(kCollName).findOne({c: -1}).b);
 
-    // Versioned reads against secondaries should work as expected.
-    mongos.setReadPref("secondary");
-    assert.eq(2, sessionDB.getCollection(kCollName).findOne({c: 1}).b);
-    assert.eq(4, sessionDB.getCollection(kCollName).findOne({c: -1}).b);
-    mongos.setReadPref(null);
+        // Versioned reads against secondaries should work as expected.
+        mongos.setReadPref("secondary");
+        assert.eq(2, sessionDB.getCollection(kCollName).findOne({c: 1}).x);
+        assert.eq(2, sessionDB.getCollection(kCollName).findOne({c: 1}).b);
+        assert.eq(4, sessionDB.getCollection(kCollName).findOne({c: -1}).b);
+        mongos.setReadPref(null);
 
-    // The full shard key is required when removing documents.
-    assert.writeErrorWithCode(sessionDB.getCollection(kCollName).remove({a: 1, b: 1}, true),
-                              ErrorCodes.ShardKeyNotFound);
-    assert.writeErrorWithCode(sessionDB.getCollection(kCollName).remove({a: -1, b: -1}, true),
-                              ErrorCodes.ShardKeyNotFound);
+        assert.commandWorked(sessionDB.getCollection(kCollName).remove({a: 1, b: 1}, true));
+        assert.commandWorked(sessionDB.getCollection(kCollName).remove({a: -1, b: -1}, true));
+    } else {
+        // The full shard key is not required in the resulting document when updating. The full
+        // shard key is still required in the query, however.
+        assert.commandFailedWithCode(
+            sessionDB.getCollection(kCollName).update({a: 1, b: 1, c: 1}, {$set: {b: 2}}), 31025);
+        assert.commandWorked(
+            sessionDB.getCollection(kCollName).update({a: 1, b: 1, c: 1, d: 1}, {$set: {b: 2}}));
+        assert.commandWorked(sessionDB.getCollection(kCollName).update({a: -1, b: -1, c: -1, d: -1},
+                                                                       {$set: {b: 4}}));
+
+        assert.eq(2, sessionDB.getCollection(kCollName).findOne({c: 1}).b);
+        assert.eq(4, sessionDB.getCollection(kCollName).findOne({c: -1}).b);
+
+        // Versioned reads against secondaries should work as expected.
+        mongos.setReadPref("secondary");
+        assert.eq(2, sessionDB.getCollection(kCollName).findOne({c: 1}).b);
+        assert.eq(4, sessionDB.getCollection(kCollName).findOne({c: -1}).b);
+        mongos.setReadPref(null);
+
+        // The full shard key is required when removing documents.
+        assert.writeErrorWithCode(sessionDB.getCollection(kCollName).remove({a: 1, b: 1}, true),
+                                  ErrorCodes.ShardKeyNotFound);
+        assert.writeErrorWithCode(sessionDB.getCollection(kCollName).remove({a: -1, b: -1}, true),
+                                  ErrorCodes.ShardKeyNotFound);
+    }
+
     assert.commandWorked(sessionDB.getCollection(kCollName).remove({a: 1, b: 2, c: 1, d: 1}, true));
     assert.commandWorked(
         sessionDB.getCollection(kCollName).remove({a: -1, b: 4, c: -1, d: -1}, true));
@@ -712,67 +741,73 @@ if (!isStepdownSuite) {
                         .metadata.shardVersionEpoch.toString());
 }
 
-(() => {
-    //
-    // Verify listIndexes and checkShardingIndexes are retried on shard version errors and are sent
-    // with shard versions.
-    //
+// TODO SERVER-72515: remove once 7.0 becomes last-lts.
+const fcvDoc = assert.commandWorked(
+    st.configRS.getPrimary().adminCommand({getParameter: 1, featureCompatibilityVersion: 1}));
+if (fcvDoc.featureCompatibilityVersion.version == lastLTSFCV &&
+    !jsTestOptions().shardMixedBinVersions) {
+    (() => {
+        //
+        // Verify listIndexes and checkShardingIndexes are retried on shard version errors and are
+        // sent with shard versions.
+        //
 
-    // Create a sharded collection with one chunk on shard0.
-    const dbName = "testShardVersions";
-    const collName = "fooShardVersions";
-    const ns = dbName + "." + collName;
-    assert.commandWorked(st.s.adminCommand({enableSharding: dbName}));
-    st.ensurePrimaryShard(dbName, st.shard0.shardName);
-    assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: {x: 1}}));
+        // Create a sharded collection with one chunk on shard0.
+        const dbName = "testShardVersions";
+        const collName = "fooShardVersions";
+        const ns = dbName + "." + collName;
+        assert.commandWorked(st.s.adminCommand({enableSharding: dbName}));
+        st.ensurePrimaryShard(dbName, st.shard0.shardName);
+        assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: {x: 1}}));
 
-    const minKeyShardDB = st.rs0.getPrimary().getDB(dbName);
-    assert.commandWorked(minKeyShardDB.setProfilingLevel(2));
+        const minKeyShardDB = st.rs0.getPrimary().getDB(dbName);
+        assert.commandWorked(minKeyShardDB.setProfilingLevel(2));
 
-    // Refining the shard key should internally retry on a stale epoch error for listIndexes and
-    // succeed.
-    assert.commandWorked(minKeyShardDB.adminCommand({
-        configureFailPoint: "failCommand",
-        mode: {times: 5},
-        data: {
-            errorCode: ErrorCodes.StaleEpoch,
-            failCommands: ["listIndexes"],
-            failInternalCommands: true
-        }
-    }));
-    assert.commandWorked(st.s.getCollection(ns).createIndex({x: 1, y: 1}));
-    assert.commandWorked(st.s.adminCommand({refineCollectionShardKey: ns, key: {x: 1, y: 1}}));
+        // Refining the shard key should internally retry on a stale epoch error for listIndexes and
+        // succeed.
+        assert.commandWorked(minKeyShardDB.adminCommand({
+            configureFailPoint: "failCommand",
+            mode: {times: 5},
+            data: {
+                errorCode: ErrorCodes.StaleEpoch,
+                failCommands: ["listIndexes"],
+                failInternalCommands: true
+            }
+        }));
+        assert.commandWorked(st.s.getCollection(ns).createIndex({x: 1, y: 1}));
+        assert.commandWorked(st.s.adminCommand({refineCollectionShardKey: ns, key: {x: 1, y: 1}}));
 
-    // Refining the shard key should internally retry on a stale epoch error for checkShardingIndex
-    // and succeed.
-    assert.commandWorked(minKeyShardDB.adminCommand({
-        configureFailPoint: "failCommand",
-        mode: {times: 5},
-        data: {
-            errorCode: ErrorCodes.StaleEpoch,
-            failCommands: ["checkShardingIndex"],
-            failInternalCommands: true
-        }
-    }));
-    assert.commandWorked(st.s.getCollection(ns).createIndex({x: 1, y: 1, z: 1}));
-    assert.commandWorked(
-        st.s.adminCommand({refineCollectionShardKey: ns, key: {x: 1, y: 1, z: 1}}));
+        // Refining the shard key should internally retry on a stale epoch error for
+        // checkShardingIndex and succeed.
+        assert.commandWorked(minKeyShardDB.adminCommand({
+            configureFailPoint: "failCommand",
+            mode: {times: 5},
+            data: {
+                errorCode: ErrorCodes.StaleEpoch,
+                failCommands: ["checkShardingIndex"],
+                failInternalCommands: true
+            }
+        }));
+        assert.commandWorked(st.s.getCollection(ns).createIndex({x: 1, y: 1, z: 1}));
+        assert.commandWorked(
+            st.s.adminCommand({refineCollectionShardKey: ns, key: {x: 1, y: 1, z: 1}}));
 
-    // Verify both commands were sent with shard versions through the profiler.
-    profilerHasAtLeastOneMatchingEntryOrThrow({
-        profileDB: minKeyShardDB,
-        filter: {"command.listIndexes": collName, "command.shardVersion": {"$exists": true}}
-    });
+        // Verify both commands were sent with shard versions through the profiler.
+        profilerHasAtLeastOneMatchingEntryOrThrow({
+            profileDB: minKeyShardDB,
+            filter: {"command.listIndexes": collName, "command.shardVersion": {"$exists": true}}
+        });
 
-    profilerHasAtLeastOneMatchingEntryOrThrow({
-        profileDB: minKeyShardDB,
-        filter: {"command.checkShardingIndex": ns, "command.shardVersion": {"$exists": true}}
-    });
+        profilerHasAtLeastOneMatchingEntryOrThrow({
+            profileDB: minKeyShardDB,
+            filter: {"command.checkShardingIndex": ns, "command.shardVersion": {"$exists": true}}
+        });
 
-    // Clean up.
-    assert.commandWorked(minKeyShardDB.setProfilingLevel(0));
-    assert(minKeyShardDB.system.profile.drop());
-})();
+        // Clean up.
+        assert.commandWorked(minKeyShardDB.setProfilingLevel(0));
+        assert(minKeyShardDB.system.profile.drop());
+    })();
+}
 
 // Assumes the given arrays are sorted by the max field.
 function compareMinAndMaxFields(shardedArr, refinedArr) {

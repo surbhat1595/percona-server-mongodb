@@ -461,7 +461,7 @@ Status initializeSharding(OperationContext* opCtx) {
         return status;
     }
 
-    status = loadGlobalSettingsFromConfigServer(opCtx);
+    status = loadGlobalSettingsFromConfigServer(opCtx, Grid::get(opCtx)->catalogClient());
     if (!status.isOK()) {
         return status;
     }
@@ -814,7 +814,7 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
         return ExitCode::processHealthCheck;
     }
 
-    srand((unsigned)(curTimeMicros64()) ^ (unsigned(uintptr_t(&opCtx))));
+    srand((unsigned)(curTimeMicros64()) ^ (unsigned(uintptr_t(&opCtx))));  // NOLINT
 
     SessionKiller::set(serviceContext,
                        std::make_shared<SessionKiller>(serviceContext, killSessionsRemote));

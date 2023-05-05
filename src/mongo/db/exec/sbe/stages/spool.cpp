@@ -29,6 +29,7 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/stages/spool.h"
 
 namespace mongo::sbe {
@@ -285,12 +286,12 @@ PlanState SpoolLazyProducerStage::getNext() {
 }
 
 void SpoolLazyProducerStage::doSaveState(bool relinquishCursor) {
-    if (!slotsAccessible() || !relinquishCursor) {
+    if (!relinquishCursor) {
         return;
     }
 
     for (auto& [slot, accessor] : _outAccessors) {
-        prepareForYielding(accessor);
+        prepareForYielding(accessor, slotsAccessible());
     }
 }
 

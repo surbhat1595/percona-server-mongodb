@@ -876,7 +876,7 @@ TEST_F(StorageTimestampTest, SecondaryArrayInsertTimes) {
 
     std::vector<repl::OplogEntry> oplogEntries;
     oplogEntries.reserve(docsToInsert);
-    std::vector<const repl::OplogEntry*> opPtrs;
+    std::vector<repl::ApplierOperation> opPtrs;
     BSONObjBuilder oplogEntryBuilders[docsToInsert];
     for (std::int32_t idx = 0; idx < docsToInsert; ++idx) {
         auto o = BSON("_id" << idx);
@@ -892,7 +892,7 @@ TEST_F(StorageTimestampTest, SecondaryArrayInsertTimes) {
         oplogEntryBuilders[idx].appendElementsUnique(oplogCommon);
         // Insert ops to be applied.
         oplogEntries.push_back(repl::OplogEntry(oplogEntryBuilders[idx].done()));
-        opPtrs.push_back(&(oplogEntries.back()));
+        opPtrs.emplace_back(&(oplogEntries.back()));
     }
 
     repl::OplogEntryOrGroupedInserts groupedInserts(opPtrs.cbegin(), opPtrs.cend());
@@ -2073,7 +2073,7 @@ TEST_F(StorageTimestampTest, TimestampMultiIndexBuilds) {
             BSON("createIndexes" << nss.coll() << "indexes" << BSON_ARRAY(index1 << index2)
                                  << "commitQuorum" << 0);
         BSONObj result;
-        ASSERT(client.runCommand(nss.db().toString(), createIndexesCmdObj, result)) << result;
+        ASSERT(client.runCommand(nss.dbName(), createIndexesCmdObj, result)) << result;
     }
 
     auto indexCreateInitTs = queryOplog(BSON("op"
@@ -2172,7 +2172,7 @@ TEST_F(StorageTimestampTest, TimestampMultiIndexBuildsDuringRename) {
             BSON("createIndexes" << nss.coll() << "indexes" << BSON_ARRAY(index1 << index2)
                                  << "commitQuorum" << 0);
         BSONObj result;
-        ASSERT(client.runCommand(nss.db().toString(), createIndexesCmdObj, result)) << result;
+        ASSERT(client.runCommand(nss.dbName(), createIndexesCmdObj, result)) << result;
     }
 
     AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_X);
@@ -2187,7 +2187,7 @@ TEST_F(StorageTimestampTest, TimestampMultiIndexBuildsDuringRename) {
     // Rename collection.
     BSONObj renameResult;
     ASSERT(client.runCommand(
-        "admin",
+        DatabaseName(boost::none, "admin"),
         BSON("renameCollection" << nss.ns() << "to" << renamedNss.ns() << "dropTarget" << true),
         renameResult))
         << renameResult;
@@ -2298,7 +2298,7 @@ TEST_F(StorageTimestampTest, TimestampAbortIndexBuild) {
 
         DBDirectClient client(_opCtx);
         BSONObj result;
-        ASSERT_FALSE(client.runCommand(nss.db().toString(), createIndexesCmdObj, result));
+        ASSERT_FALSE(client.runCommand(nss.dbName(), createIndexesCmdObj, result));
         ASSERT_EQUALS(ErrorCodes::DuplicateKey, getStatusFromCommandResult(result));
     }
 
@@ -2524,7 +2524,7 @@ public:
           _taskFuture(taskFuture) {}
 
     Status applyOplogBatchPerWorker(OperationContext* opCtx,
-                                    std::vector<const repl::OplogEntry*>* operationsToApply,
+                                    std::vector<repl::ApplierOperation>* operationsToApply,
                                     WorkerMultikeyPathInfo* pathInfo,
                                     bool isDataConsistent) override;
 
@@ -2542,7 +2542,7 @@ private:
 // and this test case fails without crashing the entire suite.
 Status SecondaryReadsDuringBatchApplicationAreAllowedApplier::applyOplogBatchPerWorker(
     OperationContext* opCtx,
-    std::vector<const repl::OplogEntry*>* operationsToApply,
+    std::vector<repl::ApplierOperation>* operationsToApply,
     WorkerMultikeyPathInfo* pathInfo,
     const bool isDataConsistent) {
     if (!_testOpCtx->lockState()->isLockHeldForMode(resourceIdParallelBatchWriterMode, MODE_X)) {
@@ -2874,8 +2874,11 @@ TEST_F(StorageTimestampTest, TimestampIndexOplogApplicationOnPrimary) {
             auto start = repl::makeStartIndexBuildOplogEntry(
                 startBuildOpTime, nss, "field_1", keyPattern, collUUID, indexBuildUUID);
             const bool dataIsConsistent = true;
-            ASSERT_OK(repl::applyOplogEntryOrGroupedInserts(
-                _opCtx, &start, repl::OplogApplication::Mode::kSecondary, dataIsConsistent));
+            ASSERT_OK(
+                repl::applyOplogEntryOrGroupedInserts(_opCtx,
+                                                      repl::ApplierOperation{&start},
+                                                      repl::OplogApplication::Mode::kSecondary,
+                                                      dataIsConsistent));
 
             // We cannot use the OperationContext to wait for the thread to reach the fail point
             // because it also uses the ClockSourceMock.
@@ -2901,8 +2904,10 @@ TEST_F(StorageTimestampTest, TimestampIndexOplogApplicationOnPrimary) {
         auto commit = repl::makeCommitIndexBuildOplogEntry(
             startBuildOpTime, nss, "field_1", keyPattern, collUUID, indexBuildUUID);
         const bool dataIsConsistent = true;
-        ASSERT_OK(repl::applyOplogEntryOrGroupedInserts(
-            _opCtx, &commit, repl::OplogApplication::Mode::kSecondary, dataIsConsistent));
+        ASSERT_OK(repl::applyOplogEntryOrGroupedInserts(_opCtx,
+                                                        repl::ApplierOperation{&commit},
+                                                        repl::OplogApplication::Mode::kSecondary,
+                                                        dataIsConsistent));
 
         // Reacquire read lock to check index metadata.
         AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_IS);
@@ -3071,7 +3076,7 @@ TEST_F(StorageTimestampTest, MultipleTimestampsForMultikeyWrites) {
             BSON("createIndexes" << nss.coll() << "indexes" << BSON_ARRAY(index1 << index2)
                                  << "commitQuorum" << 0);
         BSONObj result;
-        ASSERT(client.runCommand(nss.db().toString(), createIndexesCmdObj, result)) << result;
+        ASSERT(client.runCommand(nss.dbName(), createIndexesCmdObj, result)) << result;
     }
 
     AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_IX);
@@ -3205,7 +3210,7 @@ TEST_F(RetryableFindAndModifyTest, RetryableFindAndModifyUpdate) {
             record->id,
             Snapshotted<BSONObj>(_opCtx->recoveryUnit()->getSnapshotId(), oldObj),
             newObj,
-            false,
+            collection_internal::kUpdateNoIndexes,
             nullptr,
             &args);
         wuow.commit();
@@ -3258,8 +3263,16 @@ TEST_F(RetryableFindAndModifyTest, RetryableFindAndModifyUpdateWithDamages) {
         auto record = cursor->next();
         invariant(record);
         WriteUnitOfWork wuow(_opCtx);
-        const auto statusWith = collection_internal::updateDocumentWithDamages(
-            _opCtx, *autoColl, record->id, objSnapshot, source, damages, false, nullptr, &args);
+        const auto statusWith =
+            collection_internal::updateDocumentWithDamages(_opCtx,
+                                                           *autoColl,
+                                                           record->id,
+                                                           objSnapshot,
+                                                           source,
+                                                           damages,
+                                                           collection_internal::kUpdateNoIndexes,
+                                                           nullptr,
+                                                           &args);
         wuow.commit();
         ASSERT_OK(statusWith.getStatus());
     }

@@ -116,7 +116,7 @@ bool isSargableNode(const ABT& n) {
     // for a SargableNode with a specific number of predicates. For tests, we only care about
     // verifying the cardinality of that one.
     if (auto* sargable = n.cast<optimizer::SargableNode>()) {
-        return sargable->getReqMap().size() == NumReq;
+        return sargable->getReqMap().numLeaves() == NumReq;
     }
     return false;
 }
@@ -140,6 +140,8 @@ public:
     CETester(std::string collName,
              CEType collCard,
              const OptPhaseManager::PhaseSet& optPhases = kDefaultCETestPhaseSet);
+
+    virtual ~CETester() = default;
 
     /**
      * Returns the estimated cardinality of a given 'matchPredicate'.
@@ -188,12 +190,29 @@ public:
         _hints._disableScan = disableScan;
     }
 
+    /**
+     * Returns the name of the collection tests will be executed against.
+     */
+    const std::string& getCollName() const {
+        return _collName;
+    }
+
 protected:
     /**
      * Subclasses need to override this method to initialize the cardinality estimators they are
      * testing.
+     *
+     * A 'forValidation' hint can be set to 'true' to indicate that an estimator will be used for
+     * validation purpose rather than by the optimizer. Some implementations may need to know about
+     * it.
      */
-    virtual std::unique_ptr<cascades::CardinalityEstimator> getEstimator() const = 0;
+    virtual std::unique_ptr<cascades::CardinalityEstimator> getEstimator(
+        bool forValidation = false) const = 0;
+
+    /**
+     * Optimizes the given ABT using the provided OptPhaseManager. Can be overridden by sub-classes.
+     */
+    virtual void optimize(OptPhaseManager& phaseManager, ABT& abt) const;
 
 private:
     /**

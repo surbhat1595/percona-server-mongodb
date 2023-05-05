@@ -94,6 +94,7 @@ let testCases = {
     _configsvrCommitChunkMigration: {skip: "internal command"},
     _configsvrCommitChunkSplit: {skip: "internal command"},
     _configsvrCommitIndex: {skip: "internal command"},
+    _configsvrCommitMergeAllChunksOnShard: {skip: "internal command"},
     _configsvrCommitMovePrimary: {skip: "internal command"},  // Can be removed once 6.0 is last LTS
     _configsvrCommitReshardCollection: {skip: "internal command"},
     _configsvrConfigureCollectionBalancing: {skip: "internal command"},
@@ -140,6 +141,8 @@ let testCases = {
     _shardsvrCleanupReshardCollection: {skip: "internal command"},
     _shardsvrCloneCatalogData: {skip: "internal command"},
     _shardsvrRegisterIndex: {skip: "internal command"},
+    _shardsvrCheckMetadataConsistency: {skip: "internal command"},
+    _shardsvrCheckMetadataConsistencyParticipant: {skip: "internal command"},
     _shardsvrCommitIndexParticipant: {skip: "internal command"},
     _shardsvrCommitReshardCollection: {skip: "internal command"},
     _shardsvrCompactStructuredEncryptionData: {skip: "internal command"},
@@ -160,6 +163,7 @@ let testCases = {
     _shardsvrDeleteGlobalIndexKey: {skip: "internal command"},
     _shardsvrWriteGlobalIndexKeys: {skip: "internal command"},
     _shardsvrJoinMigrations: {skip: "internal command"},
+    _shardsvrMergeAllChunksOnShard: {skip: "internal command"},
     _shardsvrMovePrimary: {skip: "internal command"},
     _shardsvrMoveRange: {
         skip:
@@ -169,11 +173,13 @@ let testCases = {
     _shardsvrRenameCollection: {skip: "internal command"},
     _shardsvrRenameCollectionParticipant: {skip: "internal command"},
     _shardsvrRenameCollectionParticipantUnblock: {skip: "internal command"},
+    _shardsvrRenameIndexMetadata: {skip: "internal command"},
     _shardsvrReshardCollection: {skip: "internal command"},
     _shardsvrReshardingOperationTime: {skip: "internal command"},
     _shardsvrSetAllowMigrations: {skip: "internal command"},
     _shardsvrSetClusterParameter: {skip: "internal command"},
     _shardsvrSetUserWriteBlockMode: {skip: "internal command"},
+    _shardsvrValidateShardKeyCandidate: {skip: "internal command"},
     _shardsvrCollMod: {skip: "internal command"},
     _shardsvrCollModParticipant: {skip: "internal command"},
     _shardsvrParticipantBlock: {skip: "internal command"},
@@ -237,6 +243,7 @@ let testCases = {
     buildInfo: {skip: "does not accept read or write concern"},
     bulkWrite: {skip: "not yet implemented"},
     captrunc: {skip: "test command"},
+    checkMetadataConsistency: {skip: "does not accept read or write concern"},
     checkShardingIndex: {skip: "does not accept read or write concern"},
     cleanupOrphaned: {skip: "only on shard server"},
     cleanupReshardCollection: {skip: "does not accept read or write concern"},
@@ -567,6 +574,7 @@ let testCases = {
     logout: {skip: "does not accept read or write concern"},
     makeSnapshot: {skip: "does not accept read or write concern"},
     mapReduce: {skip: "does not accept read or write concern"},
+    mergeAllChunksOnShard: {skip: "does not accept read or write concern"},
     mergeChunks: {skip: "does not accept read or write concern"},
     moveChunk: {
         skip:
@@ -579,6 +587,8 @@ let testCases = {
     },
     multicast: {skip: "does not accept read or write concern"},
     netstat: {skip: "internal command"},
+    oidcListKeys: {skip: "does not accept read or write concern"},
+    oidcRefreshKeys: {skip: "does not accept read or write concern"},
     pinHistoryReplicated: {skip: "internal command"},
     ping: {skip: "does not accept read or write concern"},
     planCacheClear: {skip: "does not accept read or write concern"},

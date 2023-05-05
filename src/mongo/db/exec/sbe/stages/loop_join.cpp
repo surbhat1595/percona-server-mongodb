@@ -29,6 +29,7 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/stages/loop_join.h"
 #include "mongo/db/exec/sbe/stages/stage_visitors.h"
 
@@ -191,6 +192,13 @@ PlanState LoopJoinStage::getNext() {
     }
 }
 
+void LoopJoinStage::saveChildrenState(bool relinquishCursor, bool disableSlotAccess) {
+    // LoopJoinStage::getNext() only guarantees that the inner child's getNext() was called. Thus,
+    // it is safe to propagate disableSlotAccess to the inner child, but not to the outer child.
+    _children[1]->saveState(relinquishCursor, disableSlotAccess);
+    _children[0]->saveState(relinquishCursor, false);
+}
+
 void LoopJoinStage::close() {
     auto optTimer(getOptTimer(_opCtx));
 
@@ -207,7 +215,7 @@ void LoopJoinStage::close() {
 }
 
 void LoopJoinStage::doSaveState(bool relinquishCursor) {
-    if (_isReadingLeftSide || _outerGetNext) {
+    if (_isReadingLeftSide) {
         // If we yield while reading the left side, there is no need to prepareForYielding() data
         // held in the right side, since we will have to re-open it anyway.
         const bool recursive = true;
@@ -243,6 +251,18 @@ const SpecificStats* LoopJoinStage::getSpecificStats() const {
 
 std::vector<DebugPrinter::Block> LoopJoinStage::debugPrint() const {
     auto ret = PlanStage::debugPrint();
+
+    switch (_joinType) {
+        case JoinType::Inner:
+            ret.emplace_back(DebugPrinter::Block("inner"));
+            break;
+        case JoinType::Left:
+            ret.emplace_back(DebugPrinter::Block("left"));
+            break;
+        case JoinType::Right:
+            ret.emplace_back(DebugPrinter::Block("right"));
+            break;
+    }
 
     ret.emplace_back(DebugPrinter::Block("[`"));
     for (size_t idx = 0; idx < _outerProjects.size(); ++idx) {

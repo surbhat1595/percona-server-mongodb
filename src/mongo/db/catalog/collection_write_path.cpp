@@ -137,7 +137,13 @@ Status insertDocumentsImpl(OperationContext* opCtx,
     std::vector<Timestamp> timestamps;
     timestamps.reserve(count);
 
-    for (auto it = begin; it != end; it++) {
+    std::vector<RecordId> cappedRecordIds;
+    if (collection->usesCappedSnapshots()) {
+        cappedRecordIds = collection->reserveCappedRecordIds(opCtx, count);
+    }
+
+    size_t i = 0;
+    for (auto it = begin; it != end; it++, i++) {
         const auto& doc = it->doc;
 
         RecordId recordId;
@@ -147,6 +153,12 @@ Status insertDocumentsImpl(OperationContext* opCtx,
                 record_id_helpers::keyForDoc(doc,
                                              collection->getClusteredInfo()->getIndexSpec(),
                                              collection->getDefaultCollator()));
+        } else if (!it->recordId.isNull()) {
+            // This case would only normally be called in a testing circumstance to avoid
+            // automatically generating record ids for capped collections.
+            recordId = it->recordId;
+        } else if (cappedRecordIds.size()) {
+            recordId = std::move(cappedRecordIds[i]);
         }
 
         if (MONGO_unlikely(corruptDocumentOnInsert.shouldFail())) {
@@ -400,7 +412,7 @@ RecordId updateDocument(OperationContext* opCtx,
                         const RecordId& oldLocation,
                         const Snapshotted<BSONObj>& oldDoc,
                         const BSONObj& newDoc,
-                        bool indexesAffected,
+                        const BSONObj* opDiff,
                         OpDebug* opDebug,
                         CollectionUpdateArgs* args) {
     {
@@ -473,7 +485,8 @@ RecordId updateDocument(OperationContext* opCtx,
     uassertStatusOK(collection->getRecordStore()->updateRecord(
         opCtx, oldLocation, newDoc.objdata(), newDoc.objsize()));
 
-    if (indexesAffected) {
+    // don't update the indexes if kUpdateNoIndexes has been specified.
+    if (opDiff != kUpdateNoIndexes) {
         int64_t keysInserted = 0;
         int64_t keysDeleted = 0;
 
@@ -481,6 +494,7 @@ RecordId updateDocument(OperationContext* opCtx,
                                                                     collection,
                                                                     args->preImageDoc,
                                                                     newDoc,
+                                                                    opDiff,
                                                                     oldLocation,
                                                                     &keysInserted,
                                                                     &keysDeleted));
@@ -512,7 +526,7 @@ StatusWith<BSONObj> updateDocumentWithDamages(OperationContext* opCtx,
                                               const Snapshotted<BSONObj>& oldDoc,
                                               const char* damageSource,
                                               const mutablebson::DamageVector& damages,
-                                              bool indexesAffected,
+                                              const BSONObj* opDiff,
                                               OpDebug* opDebug,
                                               CollectionUpdateArgs* args) {
     dassert(opCtx->lockState()->isCollectionLockedForMode(collection->ns(), MODE_IX));
@@ -551,12 +565,19 @@ StatusWith<BSONObj> updateDocumentWithDamages(OperationContext* opCtx,
     args->changeStreamPreAndPostImagesEnabledForCollection =
         collection->isChangeStreamPreAndPostImagesEnabled();
 
-    if (indexesAffected) {
+    // don't update the indexes if kUpdateNoIndexes has been specified.
+    if (opDiff != kUpdateNoIndexes) {
         int64_t keysInserted = 0;
         int64_t keysDeleted = 0;
 
-        uassertStatusOK(collection->getIndexCatalog()->updateRecord(
-            opCtx, collection, oldDoc.value(), args->updatedDoc, loc, &keysInserted, &keysDeleted));
+        uassertStatusOK(collection->getIndexCatalog()->updateRecord(opCtx,
+                                                                    collection,
+                                                                    oldDoc.value(),
+                                                                    args->updatedDoc,
+                                                                    opDiff,
+                                                                    loc,
+                                                                    &keysInserted,
+                                                                    &keysDeleted));
 
         if (opDebug) {
             opDebug->additiveMetrics.incrementKeysInserted(keysInserted);

@@ -149,38 +149,57 @@ using resharding_metrics::getIntervalStartFieldName;
 using DocT = ReshardingCoordinatorDocument;
 const auto metricsPrefix = resharding_metrics::getMetricsPrefix<DocT>();
 
-void buildStateDocumentCloneMetricsForUpdate(BSONObjBuilder& bob, ReshardingMetrics* metrics) {
+void buildStateDocumentCloneMetricsForUpdate(BSONObjBuilder& bob, Date_t timestamp) {
     bob.append(getIntervalStartFieldName<DocT>(ReshardingRecipientMetrics::kDocumentCopyFieldName),
-               metrics->getCopyingBegin());
+               timestamp);
 }
 
-void buildStateDocumentApplyMetricsForUpdate(BSONObjBuilder& bob, ReshardingMetrics* metrics) {
+void buildStateDocumentApplyMetricsForUpdate(BSONObjBuilder& bob, Date_t timestamp) {
     bob.append(getIntervalEndFieldName<DocT>(ReshardingRecipientMetrics::kDocumentCopyFieldName),
-               metrics->getCopyingEnd());
+               timestamp);
+
     bob.append(
         getIntervalEndFieldName<DocT>(ReshardingRecipientMetrics::kOplogApplicationFieldName),
-        metrics->getApplyingBegin());
+        timestamp);
 }
 
-void buildStateDocumentBlockingWritesMetricsForUpdate(BSONObjBuilder& bob,
-                                                      ReshardingMetrics* metrics) {
+void buildStateDocumentBlockingWritesMetricsForUpdate(BSONObjBuilder& bob, Date_t timestamp) {
     bob.append(
         getIntervalEndFieldName<DocT>(ReshardingRecipientMetrics::kOplogApplicationFieldName),
-        metrics->getApplyingEnd());
+        timestamp);
 }
 
 void buildStateDocumentMetricsForUpdate(BSONObjBuilder& bob,
-                                        ReshardingMetrics* metrics,
-                                        CoordinatorStateEnum newState) {
+                                        CoordinatorStateEnum newState,
+                                        Date_t timestamp) {
     switch (newState) {
         case CoordinatorStateEnum::kCloning:
-            buildStateDocumentCloneMetricsForUpdate(bob, metrics);
+            buildStateDocumentCloneMetricsForUpdate(bob, timestamp);
             return;
         case CoordinatorStateEnum::kApplying:
-            buildStateDocumentApplyMetricsForUpdate(bob, metrics);
+            buildStateDocumentApplyMetricsForUpdate(bob, timestamp);
             return;
         case CoordinatorStateEnum::kBlockingWrites:
-            buildStateDocumentBlockingWritesMetricsForUpdate(bob, metrics);
+            buildStateDocumentBlockingWritesMetricsForUpdate(bob, timestamp);
+            return;
+        default:
+            return;
+    }
+}
+
+void setMeticsAfterWrite(ReshardingMetrics* metrics,
+                         CoordinatorStateEnum newState,
+                         Date_t timestamp) {
+    switch (newState) {
+        case CoordinatorStateEnum::kCloning:
+            metrics->setCopyingBegin(timestamp);
+            return;
+        case CoordinatorStateEnum::kApplying:
+            metrics->setCopyingEnd(timestamp);
+            metrics->setApplyingBegin(timestamp);
+            return;
+        case CoordinatorStateEnum::kBlockingWrites:
+            metrics->setApplyingEnd(timestamp);
             return;
         default:
             return;
@@ -191,8 +210,9 @@ void writeToCoordinatorStateNss(OperationContext* opCtx,
                                 ReshardingMetrics* metrics,
                                 const ReshardingCoordinatorDocument& coordinatorDoc,
                                 TxnNumber txnNumber) {
+    Date_t timestamp = getCurrentTime();
+    auto nextState = coordinatorDoc.getState();
     BatchedCommandRequest request([&] {
-        auto nextState = coordinatorDoc.getState();
         switch (nextState) {
             case CoordinatorStateEnum::kInitializing:
                 // Insert the new coordinator document.
@@ -242,7 +262,7 @@ void writeToCoordinatorStateNss(OperationContext* opCtx,
                             *approxDocumentsToCopy);
                     }
 
-                    buildStateDocumentMetricsForUpdate(setBuilder, metrics, nextState);
+                    buildStateDocumentMetricsForUpdate(setBuilder, nextState, timestamp);
 
                     if (nextState == CoordinatorStateEnum::kPreparingToDonate) {
                         appendShardEntriesToSetBuilder(coordinatorDoc, setBuilder);
@@ -272,6 +292,8 @@ void writeToCoordinatorStateNss(OperationContext* opCtx,
     if (expectedNumModified) {
         assertNumDocsModifiedMatchesExpected(request, res, *expectedNumModified);
     }
+
+    setMeticsAfterWrite(metrics, nextState, timestamp);
 }
 
 /**
@@ -589,7 +611,7 @@ void removeChunkAndTagsDocs(OperationContext* opCtx,
     const auto chunksQuery = BSON(ChunkType::collectionUUID() << collUUID);
     const auto tagDeleteOperationHint = BSON(TagsType::ns() << 1 << TagsType::min() << 1);
 
-    const auto catalogClient = Grid::get(opCtx)->catalogClient();
+    const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
 
     uassertStatusOK(catalogClient->removeConfigDocuments(
         opCtx, ChunkType::ConfigNS, chunksQuery, kMajorityWriteConcern));
@@ -718,7 +740,7 @@ void updateTagsDocsForTempNss(OperationContext* opCtx,
     // currently have 'ns' as the temporary collection namespace.
     DBDirectClient client(opCtx);
     BSONObj tagsRes;
-    client.runCommand(tagsRequest.getNS().db().toString(), tagsRequest.toBSON(), tagsRes);
+    client.runCommand(tagsRequest.getNS().dbName(), tagsRequest.toBSON(), tagsRes);
     uassertStatusOK(getStatusFromWriteCommandReply(tagsRes));
 }
 
@@ -844,7 +866,7 @@ void removeCoordinatorDocAndReshardingFields(OperationContext* opCtx,
     // collection. So don't try to call remove as it will end up removing the metadata
     // for the real collection.
     if (!wasDecisionPersisted) {
-        const auto catalogClient = Grid::get(opCtx)->catalogClient();
+        const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
 
         uassertStatusOK(catalogClient->removeConfigDocuments(
             opCtx,
@@ -960,12 +982,11 @@ ReshardingCoordinatorExternalStateImpl::calculateParticipantShardsAndChunks(
             }
         }
 
-        auto initialSplitter = ReshardingSplitPolicy::make(opCtx,
-                                                           coordinatorDoc.getSourceNss(),
-                                                           tempNs,
-                                                           shardKey,
-                                                           numInitialChunks,
-                                                           std::move(parsedZones));
+        auto initialSplitter = SamplingBasedSplitPolicy::make(opCtx,
+                                                              coordinatorDoc.getSourceNss(),
+                                                              shardKey,
+                                                              numInitialChunks,
+                                                              std::move(parsedZones));
 
         // Note: The resharding initial split policy doesn't care about what is the real primary
         // shard, so just pass in a random shard.
@@ -1050,7 +1071,7 @@ ExecutorFuture<void> ReshardingCoordinatorService::_rebuildService(
                DBDirectClient client(opCtx);
                BSONObj result;
                client.runCommand(
-                   nss.db().toString(),
+                   nss.dbName(),
                    BSON("createIndexes"
                         << nss.coll().toString() << "indexes"
                         << BSON_ARRAY(BSON("key" << BSON("active" << 1) << "name"
@@ -1797,12 +1818,12 @@ ExecutorFuture<void> ReshardingCoordinator::_awaitAllDonorsReadyToDonate(
 
             auto highestMinFetchTimestamp = resharding::getHighestMinFetchTimestamp(
                 coordinatorDocChangedOnDisk.getDonorShards());
+
             _updateCoordinatorDocStateAndCatalogEntries(
                 CoordinatorStateEnum::kCloning,
                 coordinatorDocChangedOnDisk,
                 highestMinFetchTimestamp,
                 computeApproxCopySize(coordinatorDocChangedOnDisk));
-            _metrics->onCopyingBegin();
         })
         .then([this] { return _waitForMajority(_ctHolder->getAbortToken()); });
 }
@@ -1820,8 +1841,6 @@ ExecutorFuture<void> ReshardingCoordinator::_awaitAllRecipientsFinishedCloning(
         .then([this](ReshardingCoordinatorDocument coordinatorDocChangedOnDisk) {
             this->_updateCoordinatorDocStateAndCatalogEntries(CoordinatorStateEnum::kApplying,
                                                               coordinatorDocChangedOnDisk);
-            _metrics->onCopyingEnd();
-            _metrics->onApplyingBegin();
         })
         .then([this] { return _waitForMajority(_ctHolder->getAbortToken()); });
 }
@@ -1892,7 +1911,6 @@ ExecutorFuture<void> ReshardingCoordinator::_awaitAllRecipientsFinishedApplying(
 
             this->_updateCoordinatorDocStateAndCatalogEntries(CoordinatorStateEnum::kBlockingWrites,
                                                               _coordinatorDoc);
-            _metrics->onApplyingEnd();
             _metrics->onCriticalSectionBegin();
         })
         .then([this] { return _waitForMajority(_ctHolder->getAbortToken()); })
@@ -2146,8 +2164,9 @@ void ReshardingCoordinator::_updateChunkImbalanceMetrics(const NamespaceString& 
             Grid::get(opCtx)->catalogCache()->getShardedCollectionPlacementInfoWithRefresh(opCtx,
                                                                                            nss));
 
+        const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
         const auto collectionZones =
-            uassertStatusOK(Grid::get(opCtx)->catalogClient()->getTagsForCollection(opCtx, nss));
+            uassertStatusOK(catalogClient->getTagsForCollection(opCtx, nss));
 
         const auto& keyPattern = routingInfo.getShardKeyPattern().getKeyPattern();
 
@@ -2159,9 +2178,8 @@ void ReshardingCoordinator::_updateChunkImbalanceMetrics(const NamespaceString& 
                           tag.getTag())));
         }
 
-        const auto allShardsWithOpTime =
-            uassertStatusOK(Grid::get(opCtx)->catalogClient()->getAllShards(
-                opCtx, repl::ReadConcernLevel::kLocalReadConcern));
+        const auto allShardsWithOpTime = uassertStatusOK(
+            catalogClient->getAllShards(opCtx, repl::ReadConcernLevel::kLocalReadConcern));
 
         auto imbalanceCount =
             getMaxChunkImbalanceCount(routingInfo, allShardsWithOpTime.value, zoneInfo);

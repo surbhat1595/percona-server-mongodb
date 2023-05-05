@@ -29,8 +29,8 @@
 
 #include "mongo/db/clientcursor.h"
 
+#include <ctime>
 #include <string>
-#include <time.h>
 #include <vector>
 
 #include "mongo/db/audit.h"
@@ -38,9 +38,9 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
+#include "mongo/db/catalog/external_data_source_scope_guard.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/external_data_source_scope_guard.h"
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/curop.h"
@@ -94,6 +94,7 @@ ClientCursor::ClientCursor(ClientCursorParams params,
       _planSummary(_exec->getPlanExplainer().getPlanSummary()),
       _planCacheKey(CurOp::get(operationUsingCursor)->debug().planCacheKey),
       _queryHash(CurOp::get(operationUsingCursor)->debug().queryHash),
+      _telemetryStoreKey(CurOp::get(operationUsingCursor)->debug().telemetryStoreKey),
       _opKey(operationUsingCursor->getOperationKey()) {
     invariant(_exec);
     invariant(_operationUsingCursor);
@@ -126,10 +127,6 @@ ClientCursor::~ClientCursor() {
 
     if (_nBatchesReturned > 1)
         cursorStatsMoreThanOneBatch.increment();
-}
-
-void ClientCursor::markAsKilled(Status killStatus) {
-    _exec->markAsKilled(killStatus);
 }
 
 void ClientCursor::dispose(OperationContext* opCtx) {

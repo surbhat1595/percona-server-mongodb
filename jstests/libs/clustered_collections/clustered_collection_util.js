@@ -70,7 +70,7 @@ var ClusteredCollectionUtil = class {
             assert.commandWorked(db.runCommand({listCollections: 1, filter: {name: collName}}));
         const listCollsOptions = listColls.cursor.firstBatch[0].options;
         assert(listCollsOptions.clusteredIndex);
-        assert.docEq(listCollsOptions.clusteredIndex, fullCreateOptions.clusteredIndex);
+        assert.docEq(fullCreateOptions.clusteredIndex, listCollsOptions.clusteredIndex);
     }
 
     // The clusteredIndex should appear in listIndexes with additional "clustered" field.
@@ -79,7 +79,7 @@ var ClusteredCollectionUtil = class {
         const listIndexes = assert.commandWorked(db[collName].runCommand("listIndexes"));
         const expectedListIndexesOutput =
             Object.extend({clustered: true}, fullCreateOptions.clusteredIndex);
-        assert.docEq(listIndexes.cursor.firstBatch[0], expectedListIndexesOutput);
+        assert.docEq(expectedListIndexesOutput, listIndexes.cursor.firstBatch[0]);
     }
 
     static testBasicClusteredCollection(db, collName, clusterKey) {
@@ -195,15 +195,5 @@ var ClusteredCollectionUtil = class {
         assert.eq(1, coll.find({[clusterKey]: 42}).itcount());
         assert.eq(1, coll.find({[clusterKey]: NumberLong("42")}).itcount());
         coll.drop();
-    }
-
-    static waitForTTL(db) {
-        // The 'ttl.passes' metric is incremented when the TTL monitor starts processing the
-        // indexes, so we wait for it to be incremented twice to know that the TTL monitor finished
-        // processing the indexes at least once.
-        const ttlPasses = db.serverStatus().metrics.ttl.passes;
-        assert.soon(function() {
-            return db.serverStatus().metrics.ttl.passes > ttlPasses + 1;
-        });
     }
 };

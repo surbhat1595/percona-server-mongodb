@@ -41,14 +41,20 @@ namespace mozjs {
 
 class ModuleLoader {
 public:
-    bool init(JSContext* ctx, const boost::filesystem::path& loadPath);
+    bool init(JSContext* ctx, const std::string& loadPath);
     JSObject* loadRootModuleFromPath(JSContext* cx, const std::string& path);
     JSObject* loadRootModuleFromSource(JSContext* cx, const std::string& path, StringData source);
 
 private:
+    static std::string resolveBaseUrl(JSContext* cx, const std::string& loadPath);
+    static JSString* fileAsString(JSContext* cx, JS::HandleString pathnameStr);
     static JSObject* moduleResolveHook(JSContext* cx,
                                        JS::HandleValue referencingPrivate,
                                        JS::HandleObject moduleRequest);
+    static bool dynamicModuleImportHook(JSContext* cx,
+                                        JS::HandleValue referencingPrivate,
+                                        JS::HandleObject moduleRequest,
+                                        JS::HandleObject promise);
 
     JSObject* loadRootModule(JSContext* cx,
                              const std::string& path,
@@ -56,6 +62,10 @@ private:
     JSObject* resolveImportedModule(JSContext* cx,
                                     JS::HandleValue referencingPrivate,
                                     JS::HandleObject moduleRequest);
+    bool importModuleDynamically(JSContext* cx,
+                                 JS::HandleValue referencingPrivate,
+                                 JS::HandleObject moduleRequest,
+                                 JS::HandleObject promise);
     JSObject* loadAndParse(JSContext* cx,
                            JS::HandleString path,
                            JS::HandleValue referencingPrivate);
@@ -72,12 +82,11 @@ private:
                        JS::HandleValue privateValue,
                        JS::MutableHandleString pathOut);
 
-    JSString* fileAsString(JSContext* cx, JS::HandleString pathnameStr);
     JSObject* createScriptPrivateInfo(JSContext* cx,
                                       JS::Handle<JSString*> path,
                                       JS::Handle<JSString*> source);
 
-    std::string _loadPath;
+    std::string _baseUrl;
 };
 
 }  // namespace mozjs

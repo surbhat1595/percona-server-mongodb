@@ -35,19 +35,15 @@
 #include <fmt/format.h>
 
 #include "mongo/db/catalog/collection.h"
-#include "mongo/db/exec/sbe/abt/abt_lower.h"
 #include "mongo/db/exec/sbe/match_path.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
 #include "mongo/db/exec/sbe/stages/column_scan.h"
 #include "mongo/db/exec/sbe/stages/filter.h"
-#include "mongo/db/exec/sbe/stages/hash_agg.h"
 #include "mongo/db/exec/sbe/stages/hash_join.h"
 #include "mongo/db/exec/sbe/stages/limit_skip.h"
-#include "mongo/db/exec/sbe/stages/loop_join.h"
 #include "mongo/db/exec/sbe/stages/makeobj.h"
 #include "mongo/db/exec/sbe/stages/merge_join.h"
 #include "mongo/db/exec/sbe/stages/project.h"
-#include "mongo/db/exec/sbe/stages/scan.h"
 #include "mongo/db/exec/sbe/stages/sort.h"
 #include "mongo/db/exec/sbe/stages/sorted_merge.h"
 #include "mongo/db/exec/sbe/stages/traverse.h"
@@ -57,7 +53,6 @@
 #include "mongo/db/exec/shard_filterer.h"
 #include "mongo/db/fts/fts_index_format.h"
 #include "mongo/db/fts/fts_query_impl.h"
-#include "mongo/db/fts/fts_spec.h"
 #include "mongo/db/index/fts_access_method.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/matcher/match_expression_dependencies.h"
@@ -68,8 +63,7 @@
 #include "mongo/db/query/expression_walker.h"
 #include "mongo/db/query/index_bounds_builder.h"
 #include "mongo/db/query/optimizer/rewrites/const_eval.h"
-#include "mongo/db/query/optimizer/rewrites/path_lower.h"
-#include "mongo/db/query/query_utils.h"
+#include "mongo/db/query/sbe_stage_builder_abt_helpers.h"
 #include "mongo/db/query/sbe_stage_builder_accumulator.h"
 #include "mongo/db/query/sbe_stage_builder_coll_scan.h"
 #include "mongo/db/query/sbe_stage_builder_expression.h"
@@ -79,9 +73,7 @@
 #include "mongo/db/query/sbe_stage_builder_projection.h"
 #include "mongo/db/query/shard_filterer_factory_impl.h"
 #include "mongo/db/query/util/make_data_structure.h"
-#include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/storage/execution_context.h"
-#include "mongo/logv2/log.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -460,8 +452,8 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     }
 
     inputGuard.reset();
-    auto [scanSlots, scanStage] =
-        generateVirtualScanMulti(&_slotIdGenerator, vsn->hasRecordId ? 2 : 1, inputTag, inputVal);
+    auto [scanSlots, scanStage] = generateVirtualScanMulti(
+        &_slotIdGenerator, vsn->hasRecordId ? 2 : 1, inputTag, inputVal, _yieldPolicy);
 
     sbe::value::SlotId resultSlot;
     if (vsn->hasRecordId) {
@@ -596,89 +588,92 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 namespace {
 std::unique_ptr<sbe::EExpression> generatePerColumnPredicate(StageBuilderState& state,
                                                              const MatchExpression* me,
-                                                             const sbe::EVariable& inputVar) {
+                                                             EvalExpr expr) {
     switch (me->matchType()) {
         // These are always safe since they will never match documents missing their field, or where
         // the element is an object or array.
         case MatchExpression::REGEX:
-            return generateRegexExpr(state, checked_cast<const RegexMatchExpression*>(me), inputVar)
-                .extractExpr(state.slotVarMap);
+            return generateRegexExpr(
+                       state, checked_cast<const RegexMatchExpression*>(me), std::move(expr))
+                .extractExpr(state);
         case MatchExpression::MOD:
-            return generateModExpr(state, checked_cast<const ModMatchExpression*>(me), inputVar)
-                .extractExpr(state.slotVarMap);
+            return generateModExpr(
+                       state, checked_cast<const ModMatchExpression*>(me), std::move(expr))
+                .extractExpr(state);
         case MatchExpression::BITS_ALL_SET:
             return generateBitTestExpr(state,
                                        checked_cast<const BitTestMatchExpression*>(me),
                                        sbe::BitTestBehavior::AllSet,
-                                       inputVar)
-                .extractExpr(state.slotVarMap);
+                                       std::move(expr))
+                .extractExpr(state);
         case MatchExpression::BITS_ALL_CLEAR:
             return generateBitTestExpr(state,
                                        checked_cast<const BitTestMatchExpression*>(me),
                                        sbe::BitTestBehavior::AllClear,
-                                       inputVar)
-                .extractExpr(state.slotVarMap);
+                                       std::move(expr))
+                .extractExpr(state);
         case MatchExpression::BITS_ANY_SET:
             return generateBitTestExpr(state,
                                        checked_cast<const BitTestMatchExpression*>(me),
                                        sbe::BitTestBehavior::AnySet,
-                                       inputVar)
-                .extractExpr(state.slotVarMap);
+                                       std::move(expr))
+                .extractExpr(state);
         case MatchExpression::BITS_ANY_CLEAR:
             return generateBitTestExpr(state,
                                        checked_cast<const BitTestMatchExpression*>(me),
                                        sbe::BitTestBehavior::AnyClear,
-                                       inputVar)
-                .extractExpr(state.slotVarMap);
+                                       std::move(expr))
+                .extractExpr(state);
         case MatchExpression::EXISTS:
             return makeConstant(sbe::value::TypeTags::Boolean, true);
         case MatchExpression::LT:
             return generateComparisonExpr(state,
                                           checked_cast<const ComparisonMatchExpression*>(me),
                                           sbe::EPrimBinary::less,
-                                          inputVar)
-                .extractExpr(state.slotVarMap);
+                                          std::move(expr))
+                .extractExpr(state);
         case MatchExpression::GT:
             return generateComparisonExpr(state,
                                           checked_cast<const ComparisonMatchExpression*>(me),
                                           sbe::EPrimBinary::greater,
-                                          inputVar)
-                .extractExpr(state.slotVarMap);
+                                          std::move(expr))
+                .extractExpr(state);
         case MatchExpression::EQ:
             return generateComparisonExpr(state,
                                           checked_cast<const ComparisonMatchExpression*>(me),
                                           sbe::EPrimBinary::eq,
-                                          inputVar)
-                .extractExpr(state.slotVarMap);
+                                          std::move(expr))
+                .extractExpr(state);
         case MatchExpression::LTE:
             return generateComparisonExpr(state,
                                           checked_cast<const ComparisonMatchExpression*>(me),
                                           sbe::EPrimBinary::lessEq,
-                                          inputVar)
-                .extractExpr(state.slotVarMap);
+                                          std::move(expr))
+                .extractExpr(state);
         case MatchExpression::GTE:
             return generateComparisonExpr(state,
                                           checked_cast<const ComparisonMatchExpression*>(me),
                                           sbe::EPrimBinary::greaterEq,
-                                          inputVar)
-                .extractExpr(state.slotVarMap);
+                                          std::move(expr))
+                .extractExpr(state);
         case MatchExpression::MATCH_IN: {
-            auto expr = checked_cast<const InMatchExpression*>(me);
+            const auto* ime = checked_cast<const InMatchExpression*>(me);
             tassert(6988583,
                     "Push-down of non-scalar values in $in is not supported.",
-                    !expr->hasNonScalarOrNonEmptyValues());
-            return generateInExpr(state, expr, inputVar).extractExpr(state.slotVarMap);
+                    !ime->hasNonScalarOrNonEmptyValues());
+            return generateInExpr(state, ime, std::move(expr)).extractExpr(state);
         }
         case MatchExpression::TYPE_OPERATOR: {
-            const auto& expr = checked_cast<const TypeMatchExpression*>(me);
-            const MatcherTypeSet& ts = expr->typeSet();
+            const auto* tme = checked_cast<const TypeMatchExpression*>(me);
+            const MatcherTypeSet& ts = tme->typeSet();
 
             return makeFunction(
                 "typeMatch",
-                inputVar.clone(),
+                expr.extractExpr(state),
                 makeConstant(sbe::value::TypeTags::NumberInt64,
                              sbe::value::bitcastFrom<int64_t>(ts.getBSONTypeMask())));
         }
+
         default:
             uasserted(6733605,
                       std::string("Expression ") + me->serialize().toString() +
@@ -691,16 +686,34 @@ std::unique_ptr<sbe::EExpression> generateLeafExpr(StageBuilderState& state,
                                                    const MatchExpression* me,
                                                    sbe::FrameId lambdaFrameId,
                                                    sbe::value::SlotId inputSlot) {
-    sbe::EVariable lambdaParam = sbe::EVariable{lambdaFrameId, 0};
-
-    auto lambdaExpr = sbe::makeE<sbe::ELocalLambda>(
-        lambdaFrameId, generatePerColumnPredicate(state, me, lambdaParam));
-
+    auto lambdaParam = makeVariable(lambdaFrameId, 0);
     const MatchExpression::MatchType mt = me->matchType();
-    auto traverserName = (mt == MatchExpression::EXISTS || mt == MatchExpression::TYPE_OPERATOR)
-        ? "traverseCsiCellTypes"
-        : "traverseCsiCellValues";
-    return makeFunction(traverserName, makeVariable(inputSlot), std::move(lambdaExpr));
+
+    if (mt == MatchExpression::NOT) {
+        // NOT cannot be pushed into the cell traversal because for arrays, it should behave as
+        // conjunction of negated child predicate on each element of the aray, but if we pushed it
+        // into the traversal it would become a disjunction.
+        const auto& notMe = checked_cast<const NotMatchExpression*>(me);
+        uassert(7040601, "Should have exactly one child under $not", notMe->numChildren() == 1);
+        const auto child = notMe->getChild(0);
+        auto lambdaExpr = sbe::makeE<sbe::ELocalLambda>(
+            lambdaFrameId, generatePerColumnPredicate(state, child, std::move(lambdaParam)));
+
+        const MatchExpression::MatchType mtChild = child->matchType();
+        auto traverserName =
+            (mtChild == MatchExpression::EXISTS || mtChild == MatchExpression::TYPE_OPERATOR)
+            ? "traverseCsiCellTypes"
+            : "traverseCsiCellValues";
+        return makeNot(makeFunction(traverserName, makeVariable(inputSlot), std::move(lambdaExpr)));
+    } else {
+        auto lambdaExpr = sbe::makeE<sbe::ELocalLambda>(
+            lambdaFrameId, generatePerColumnPredicate(state, me, std::move(lambdaParam)));
+
+        auto traverserName = (mt == MatchExpression::EXISTS || mt == MatchExpression::TYPE_OPERATOR)
+            ? "traverseCsiCellTypes"
+            : "traverseCsiCellValues";
+        return makeFunction(traverserName, makeVariable(inputSlot), std::move(lambdaExpr));
+    }
 }
 
 std::unique_ptr<sbe::EExpression> generatePerColumnLogicalAndExpr(StageBuilderState& state,
@@ -763,8 +776,10 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     // column_scan stage defines the order of fields in the reconstructed record).
     std::vector<std::string> paths;
     paths.reserve(csn->allFields.size());
+    bool densePathIncludeInFields = false;
     if (csn->allFields.find("_id") != csn->allFields.end()) {
         paths.push_back("_id");
+        densePathIncludeInFields = true;
     }
     for (const auto& path : csn->allFields) {
         if (path != "_id") {
@@ -788,15 +803,10 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     }
 
     // Tag which of the paths should be included into the output.
-    DepsTracker residual;
-    if (csn->postAssemblyFilter) {
-        match_expression::addDependencies(csn->postAssemblyFilter.get(), &residual);
-    }
     std::vector<bool> includeInOutput(paths.size(), false);
     OrderedPathSet fieldsToProject;  // projection when falling back to the row store
     for (size_t i = 0; i < paths.size(); i++) {
-        if (csn->outputFields.find(paths[i]) != csn->outputFields.end() ||
-            residual.fields.find(paths[i]) != residual.fields.end()) {
+        if (csn->outputFields.find(paths[i]) != csn->outputFields.end()) {
             includeInOutput[i] = true;
             fieldsToProject.insert(paths[i]);
         }
@@ -833,7 +843,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             6935000, "ABT must be valid if have fields to project", fieldsToProject.empty() || abt);
         optimizer::SlotVarMap slotMap{};
         slotMap[rootStr] = rowStoreSlot;
-        rowStoreExpr = abt ? abtToExpr(*abt, slotMap)
+        rowStoreExpr = abt ? abtToExpr(*abt, slotMap, *_data.env)
                            : sbe::makeE<sbe::EFunction>("newObj", sbe::EExpression::Vector{});
     }
 
@@ -841,6 +851,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         std::make_unique<sbe::ColumnScanStage>(getCurrentCollection(reqs)->uuid(),
                                                csn->indexEntry.identifier.catalogName,
                                                std::move(paths),
+                                               densePathIncludeInFields,
                                                std::move(includeInOutput),
                                                ridSlot,
                                                reconstructedRecordSlot,
@@ -852,18 +863,13 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
     // Generate post assembly filter.
     if (csn->postAssemblyFilter) {
-        auto relevantSlots = sbe::makeSV(reconstructedRecordSlot);
-        if (ridSlot) {
-            relevantSlots.push_back(*ridSlot);
-        }
+        auto filterExpr = generateFilter(
+            _state, csn->postAssemblyFilter.get(), reconstructedRecordSlot, &outputs);
 
-        auto [_, outputStage] = generateFilter(_state,
-                                               csn->postAssemblyFilter.get(),
-                                               {std::move(stage), std::move(relevantSlots)},
-                                               reconstructedRecordSlot,
-                                               &outputs,
-                                               csn->nodeId());
-        stage = outputStage.extractStage(csn->nodeId());
+        if (!filterExpr.isNull()) {
+            stage = sbe::makeS<sbe::FilterStage<false>>(
+                std::move(stage), filterExpr.extractExpr(_state), csn->nodeId());
+        }
     }
 
     return {std::move(stage), std::move(outputs)};
@@ -965,21 +971,16 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     }
 
     for (size_t i = 0; i < topLevelFields.size(); ++i) {
-        outputs.set(std::make_pair(PlanStageSlots::kField, topLevelFields[i]),
+        outputs.set(std::make_pair(PlanStageSlots::kField, std::move(topLevelFields[i])),
                     topLevelFieldSlots[i]);
     }
 
     if (fn->filter) {
-        auto forwardingReqs = reqs.copy().set(kResult).setFields(std::move(topLevelFields));
-        auto relevantSlots = getSlotsToForward(forwardingReqs, outputs);
-
-        auto [_, outputStage] = generateFilter(_state,
-                                               fn->filter.get(),
-                                               {std::move(stage), std::move(relevantSlots)},
-                                               resultSlot,
-                                               &outputs,
-                                               root->nodeId());
-        stage = outputStage.extractStage(root->nodeId());
+        auto filterExpr = generateFilter(_state, fn->filter.get(), resultSlot, &outputs);
+        if (!filterExpr.isNull()) {
+            stage = sbe::makeS<sbe::FilterStage<false>>(
+                std::move(stage), filterExpr.extractExpr(_state), root->nodeId());
+        }
     }
 
     auto fieldsSet = StringSet{fields.begin(), fields.end()};
@@ -991,7 +992,8 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                                      resultSlot,
                                                      root->nodeId(),
                                                      &_slotIdGenerator,
-                                                     _state.slotVarMap);
+                                                     _state,
+                                                     &outputs);
     stage = std::move(outStage);
 
     auto collatorSlot = _data.env->getSlotIfExists("collator"_sd);
@@ -1726,14 +1728,12 @@ SlotBasedStageBuilder::buildProjectionDefault(const QuerySolutionNode* root,
 
     auto [stage, outputs] = build(pn->children[0].get(), childReqs);
 
-    auto relevantSlots = getSlotsToForward(childReqs, outputs);
-
     auto projectionExpr = generateProjection(_state, &projection, outputs.get(kResult), &outputs);
     auto [resultSlot, resultStage] = projectEvalExpr(std::move(projectionExpr),
                                                      EvalStage{std::move(stage), {}},
                                                      root->nodeId(),
                                                      &_slotIdGenerator,
-                                                     _state.slotVarMap);
+                                                     _state);
 
     stage = resultStage.extractStage(root->nodeId());
     outputs.set(kResult, resultSlot);
@@ -1826,7 +1826,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         }
     }
 
-    childReqs.setFields(fields);
+    childReqs.setFields(std::move(fields));
 
     sbe::PlanStage::Vector inputStages;
     std::vector<sbe::value::SlotVector> inputSlots;
@@ -1854,16 +1854,12 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     }
 
     if (orn->filter) {
-        auto forwardingReqs = reqs.copy().set(kResult).setFields(std::move(fields));
-        auto relevantSlots = getSlotsToForward(forwardingReqs, outputs);
-
-        auto [_, outputStage] = generateFilter(_state,
-                                               orn->filter.get(),
-                                               {std::move(stage), std::move(relevantSlots)},
-                                               outputs.get(kResult),
-                                               &outputs,
-                                               root->nodeId());
-        stage = outputStage.extractStage(root->nodeId());
+        auto resultSlot = outputs.get(kResult);
+        auto filterExpr = generateFilter(_state, orn->filter.get(), resultSlot, &outputs);
+        if (!filterExpr.isNull()) {
+            stage = sbe::makeS<sbe::FilterStage<false>>(
+                std::move(stage), filterExpr.extractExpr(_state), root->nodeId());
+        }
     }
 
     outputs.clearNonRequiredSlots(reqs);
@@ -2165,139 +2161,33 @@ struct FieldPathAndCondPreVisitor : public SelectiveConstExpressionVisitorBase {
     // To avoid overloaded-virtual warnings.
     using SelectiveConstExpressionVisitorBase::visit;
 
-    FieldPathAndCondPreVisitor(const F& fn, int32_t& nestedCondLevel)
-        : _fn(fn), _nestedCondLevel(nestedCondLevel) {}
+    explicit FieldPathAndCondPreVisitor(const F& fn) : _fn(fn) {}
 
     void visit(const ExpressionFieldPath* expr) final {
-        _fn(expr, _nestedCondLevel);
-    }
-
-    void visit(const ExpressionCond* expr) final {
-        ++_nestedCondLevel;
-    }
-
-    void visit(const ExpressionSwitch* expr) final {
-        ++_nestedCondLevel;
-    }
-
-    void visit(const ExpressionIfNull* expr) final {
-        ++_nestedCondLevel;
-    }
-
-    void visit(const ExpressionAnd* expr) final {
-        ++_nestedCondLevel;
-    }
-
-    void visit(const ExpressionOr* expr) final {
-        ++_nestedCondLevel;
+        _fn(expr);
     }
 
     F _fn;
-    // Tracks the number of conditional expressions like $cond or $ifNull that are above us in the
-    // tree.
-    int32_t& _nestedCondLevel;
-};
-
-struct CondPostVisitor : public SelectiveConstExpressionVisitorBase {
-    // To avoid overloaded-virtual warnings.
-    using SelectiveConstExpressionVisitorBase::visit;
-
-    CondPostVisitor(int32_t& nestedCondLevel) : _nestedCondLevel(nestedCondLevel) {}
-
-    void visit(const ExpressionCond* expr) final {
-        --_nestedCondLevel;
-    }
-
-    void visit(const ExpressionSwitch* expr) final {
-        --_nestedCondLevel;
-    }
-
-    void visit(const ExpressionIfNull* expr) final {
-        --_nestedCondLevel;
-    }
-
-    void visit(const ExpressionAnd* expr) final {
-        --_nestedCondLevel;
-    }
-
-    void visit(const ExpressionOr* expr) final {
-        --_nestedCondLevel;
-    }
-
-    int32_t& _nestedCondLevel;
 };
 
 /**
  * Walks through the 'expr' expression tree and whenever finds an 'ExpressionFieldPath', calls
  * the 'fn' function. Type requirement for 'fn' is it must have a const 'ExpressionFieldPath'
- * pointer parameter and 'nestedCondLevel' parameter.
+ * pointer parameter.
  */
 template <typename F>
 void walkAndActOnFieldPaths(Expression* expr, const F& fn) {
-    int32_t nestedCondLevel = 0;
-    FieldPathAndCondPreVisitor<F> preVisitor(fn, nestedCondLevel);
-    CondPostVisitor postVisitor(nestedCondLevel);
-    ExpressionWalker walker(&preVisitor, nullptr /*inVisitor*/, &postVisitor);
+    FieldPathAndCondPreVisitor<F> preVisitor(fn);
+    ExpressionWalker walker(&preVisitor, nullptr /*inVisitor*/, nullptr /*postVisitor*/);
     expression_walker::walk(expr, &walker);
 }
 
-/**
- * If there are adjacent $group stages in a pipeline and two $group stages are pushed down together,
- * the first $group becomes a child GROUP node and the second $group becomes a parent GROUP node in
- * a query solution tree. In the case that all field paths are top-level fields for the parent GROUP
- * node, we can skip the mkbson stage of the child GROUP node and instead, the child GROUP node
- * returns top-level fields and their associated slots. If a field path is found in child outputs,
- * we should replace getField() by the associated slot because there's no object on which we can
- * call getField().
- *
- * Also deduplicates field lookups for a field path which is accessed multiple times.
- */
-EvalStage optimizeFieldPaths(StageBuilderState& state,
-                             const boost::intrusive_ptr<Expression>& expr,
-                             EvalStage stage,
-                             const PlanStageSlots& outputs,
-                             PlanNodeId nodeId) {
-    using namespace fmt::literals;
-    auto rootSlot = outputs.getIfExists(PlanStageSlots::kResult);
-
-    walkAndActOnFieldPaths(expr.get(), [&](const ExpressionFieldPath* fieldExpr, int32_t) {
-        // We optimize neither a field path for the top-level document itself nor a field path that
-        // refers to a variable instead of calling getField().
-        if (fieldExpr->getFieldPath().getPathLength() == 1 || fieldExpr->isVariableReference()) {
-            return;
-        }
-
-        auto fieldPathStr = fieldExpr->getFieldPath().fullPath();
-
-        if (!state.preGeneratedExprs.contains(fieldPathStr)) {
-            auto rootExpr = rootSlot.has_value() ? EvalExpr{*rootSlot} : EvalExpr{};
-            auto expr = generateExpression(state, fieldExpr, std::move(rootExpr), &outputs);
-
-            auto [slot, projectStage] = projectEvalExpr(
-                std::move(expr), std::move(stage), nodeId, state.slotIdGenerator, state.slotVarMap);
-
-            state.preGeneratedExprs.emplace(fieldPathStr, slot);
-            stage = std::move(projectStage);
-        }
-    });
-
-    return stage;
-}
-
-EvalExprStagePair generateGroupByKeyImpl(StageBuilderState& state,
-                                         const boost::intrusive_ptr<Expression>& idExpr,
-                                         const PlanStageSlots& outputs,
-                                         const boost::optional<sbe::value::SlotId>& rootSlot,
-                                         EvalStage stage,
-                                         PlanNodeId nodeId,
-                                         sbe::value::SlotIdGenerator* slotIdGenerator) {
-    // Optimize field paths before generating the expression.
-    stage = optimizeFieldPaths(state, idExpr, std::move(stage), outputs, nodeId);
-
+EvalExpr generateGroupByKeyImpl(StageBuilderState& state,
+                                const boost::intrusive_ptr<Expression>& idExpr,
+                                const PlanStageSlots& outputs,
+                                const boost::optional<sbe::value::SlotId>& rootSlot) {
     auto rootExpr = rootSlot.has_value() ? EvalExpr{*rootSlot} : EvalExpr{};
-    auto expr = generateExpression(state, idExpr.get(), std::move(rootExpr), &outputs);
-
-    return {std::move(expr), std::move(stage)};
+    return generateExpression(state, idExpr.get(), std::move(rootExpr), &outputs);
 }
 
 std::tuple<sbe::value::SlotVector, EvalStage, std::unique_ptr<sbe::EExpression>> generateGroupByKey(
@@ -2314,21 +2204,17 @@ std::tuple<sbe::value::SlotVector, EvalStage, std::unique_ptr<sbe::EExpression>>
         sbe::EExpression::Vector exprs;
 
         for (auto&& [fieldName, fieldExpr] : idExprObj->getChildExpressions()) {
-            auto [groupByEvalExpr, groupByEvalStage] = generateGroupByKeyImpl(
-                state, fieldExpr, outputs, rootSlot, std::move(stage), nodeId, slotIdGenerator);
+            auto groupByEvalExpr = generateGroupByKeyImpl(state, fieldExpr, outputs, rootSlot);
 
-            auto [slot, projectStage] = projectEvalExpr(std::move(groupByEvalExpr),
-                                                        std::move(groupByEvalStage),
-                                                        nodeId,
-                                                        slotIdGenerator,
-                                                        state.slotVarMap);
+            auto [slot, projectStage] = projectEvalExpr(
+                std::move(groupByEvalExpr), std::move(stage), nodeId, slotIdGenerator, state);
 
             slots.push_back(slot);
             groupByEvalExpr = slot;
             stage = std::move(projectStage);
 
             exprs.emplace_back(makeConstant(fieldName));
-            exprs.emplace_back(groupByEvalExpr.extractExpr(state.slotVarMap));
+            exprs.emplace_back(groupByEvalExpr.extractExpr(state));
         }
 
         // When there's only one field in the document _id expression, 'Nothing' is converted to
@@ -2342,7 +2228,7 @@ std::tuple<sbe::value::SlotVector, EvalStage, std::unique_ptr<sbe::EExpression>>
                                                         std::move(stage),
                                                         nodeId,
                                                         slotIdGenerator,
-                                                        state.slotVarMap);
+                                                        state);
             slots[0] = slot;
             exprs[1] = makeVariable(slots[0]);
             stage = std::move(projectStage);
@@ -2354,34 +2240,26 @@ std::tuple<sbe::value::SlotVector, EvalStage, std::unique_ptr<sbe::EExpression>>
         return {slots, std::move(stage), sbe::makeE<sbe::EFunction>("newObj"_sd, std::move(exprs))};
     }
 
-    auto [groupByEvalExpr, groupByEvalStage] = generateGroupByKeyImpl(
-        state, idExpr, outputs, rootSlot, std::move(stage), nodeId, slotIdGenerator);
+    auto groupByEvalExpr = generateGroupByKeyImpl(state, idExpr, outputs, rootSlot);
 
     // The group-by field may end up being 'Nothing' and in that case _id: null will be
     // returned. Calling 'makeFillEmptyNull' for the group-by field takes care of that.
-    auto fillEmptyNullExpr = makeFillEmptyNull(groupByEvalExpr.extractExpr(state.slotVarMap));
-    auto [slot, projectStage] = projectEvalExpr(std::move(fillEmptyNullExpr),
-                                                std::move(groupByEvalStage),
-                                                nodeId,
-                                                slotIdGenerator,
-                                                state.slotVarMap);
+    auto fillEmptyNullExpr = makeFillEmptyNull(groupByEvalExpr.extractExpr(state));
+    auto [slot, projectStage] = projectEvalExpr(
+        std::move(fillEmptyNullExpr), std::move(stage), nodeId, slotIdGenerator, state);
     stage = std::move(projectStage);
 
     return {sbe::value::SlotVector{slot}, std::move(stage), nullptr};
 }
 
-std::tuple<sbe::value::SlotVector, EvalStage> generateAccumulator(
+sbe::value::SlotVector generateAccumulator(
     StageBuilderState& state,
     const AccumulationStatement& accStmt,
-    EvalStage stage,
     const PlanStageSlots& outputs,
-    PlanNodeId nodeId,
     sbe::value::SlotIdGenerator* slotIdGenerator,
     sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>>& accSlotToExprMap) {
     auto rootSlot = outputs.getIfExists(PlanStageSlots::kResult);
 
-    // Input fields may need field traversal.
-    stage = optimizeFieldPaths(state, accStmt.expr.argument, std::move(stage), outputs, nodeId);
     auto rootExpr = rootSlot.has_value() ? EvalExpr{*rootSlot} : EvalExpr{};
     auto argExpr =
         generateExpression(state, accStmt.expr.argument.get(), std::move(rootExpr), &outputs);
@@ -2391,7 +2269,7 @@ std::tuple<sbe::value::SlotVector, EvalStage> generateAccumulator(
     // as sum(1).
     auto collatorSlot = state.data->env->getSlotIfExists("collator"_sd);
     auto accExprs = stage_builder::buildAccumulator(
-        accStmt, argExpr.extractExpr(state.slotVarMap), collatorSlot, *state.frameIdGenerator);
+        accStmt, argExpr.extractExpr(state), collatorSlot, *state.frameIdGenerator);
 
     sbe::value::SlotVector aggSlots;
     for (auto& accExpr : accExprs) {
@@ -2400,7 +2278,7 @@ std::tuple<sbe::value::SlotVector, EvalStage> generateAccumulator(
         accSlotToExprMap.emplace(slot, std::move(accExpr));
     }
 
-    return {std::move(aggSlots), std::move(stage)};
+    return aggSlots;
 }
 
 std::tuple<std::vector<std::string>, sbe::value::SlotVector, EvalStage> generateGroupFinalStage(
@@ -2488,26 +2366,26 @@ sbe::value::SlotVector dedupGroupBySlots(const sbe::value::SlotVector& groupBySl
  * must return 'BSONObject'. The returned 'BSONObject' will always have an "_id" field for the group
  * key and zero or more field(s) for accumulators.
  *
- * For example, a QSN tree: GroupNode(nodeId=2) over a VirtualScanNode(nodeId=1), we would have the
- * following translated sbe::PlanStage tree. In this example, we assume that the $group pipeline
+ * For example, a QSN tree: GroupNode(nodeId=2) over a CollectionScanNode(nodeId=1), we would have
+ * the following translated sbe::PlanStage tree. In this example, we assume that the $group pipeline
  * spec is {"_id": "$a", "x": {"$min": "$b"}, "y": {"$first": "$b"}}.
  *
- * [2] mkbson s14 [_id = s9, x = s14, y = s13] true false
- * [2] project [s14 = fillEmpty (s11, null)]
- * [2] group [s9] [s12 = min (if (! exists (s9) || typeMatch (s9, 0x00000440), Nothing, s9)),
- *                 s13 = first (fillEmpty (s10, null))]
- * [2] project [s11 = getField (s7, "b")]
- * [2] project [s10 = getField (s7, "b")]
- * [2] project [s9 = fillEmpty (s8, null)]
- * [2] project [s8 = getField (s7, "a")]
- * [1] project [s7 = getElement (s5, 0)]
- * [1] unwind s5 s6 s4 false
- * [1] project [s4 = [[{"a" : 1, "b" : 1}], [{"a" : 1, "b" : 2}], [{"a" : 2, "b" : 3}]]]
- * [1] limit 1 [1] coscan
+ * [2] mkbson s12 [_id = s8, x = s11, y = s10] true false
+ * [2] project [s11 = (s9 ?: null)]
+ * [2] group [s8] [s9 = min(
+ *   let [
+ *      l1.0 = s5
+ *  ]
+ *  in
+ *      if (typeMatch(l1.0, 1088ll) ?: true)
+ *      then Nothing
+ *      else l1.0
+ * ), s10 = first((s5 ?: null))]
+ * [2] project [s8 = (s4 ?: null)]
+ * [1] scan s6 s7 none none none none [s4 = a, s5 = b] @<collUuid> true false
  */
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildGroup(
     const QuerySolutionNode* root, const PlanStageReqs& reqs) {
-    using namespace fmt::literals;
     tassert(6023414, "buildGroup() does not support kSortKey", !reqs.hasSortKeys());
 
     auto groupNode = static_cast<const GroupNode*>(root);
@@ -2527,25 +2405,109 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
     auto childReqs = reqs.copy().set(kResult).clearAllFields();
 
-    // If the group node doesn't need the whole document, then we take all the top-level fields
-    // referenced by the group node and we add them to 'childReqs'.
-    if (!groupNode->needWholeDocument) {
-        childReqs.setFields(getTopLevelFields(groupNode->requiredFields));
+    // If the group node references any top level fields, we take all of them and add them to
+    // 'childReqs'. Note that this happens regardless of whether we need the whole document because
+    // it can be the case that this stage references '$$ROOT' as well as some top level fields.
+    auto topLevelFields = getTopLevelFields(groupNode->requiredFields);
+    if (!topLevelFields.empty()) {
+        childReqs.setFields(topLevelFields);
     }
 
-    // If the child is a GROUP and we can get everything we need from top-level field slots, then
-    // we can avoid unnecessary materialization and not request the kResult slot from the child.
-    if (childNode->getType() == StageType::STAGE_GROUP && !groupNode->needWholeDocument &&
-        !containsPoisonTopLevelField(groupNode->requiredFields)) {
-        childReqs.clear(kResult);
+    if (!groupNode->needWholeDocument) {
+        // Tracks whether we need to request kResult. One such case is lookup of the '$$POISON'
+        // field.
+        bool rootDocIsNeeded = containsPoisonTopLevelField(groupNode->requiredFields);
+        auto referencesRoot = [&](const ExpressionFieldPath* fieldExpr) {
+            rootDocIsNeeded = rootDocIsNeeded || fieldExpr->isROOT();
+        };
+
+        // Walk over all field paths involved in this $group stage.
+        walkAndActOnFieldPaths(idExpr.get(), referencesRoot);
+        for (const auto& accStmt : accStmts) {
+            walkAndActOnFieldPaths(accStmt.expr.argument.get(), referencesRoot);
+        }
+
+        // If the group node doesn't have any dependency (e.g. $count) or if the dependency can be
+        // satisfied by the child node (e.g. covered index scan), we can clear the kResult
+        // requirement for the child.
+        if (groupNode->requiredFields.empty() || !rootDocIsNeeded) {
+            childReqs.clear(kResult);
+        } else if (childNode->getType() == StageType::STAGE_PROJECTION_COVERED) {
+            auto pn = static_cast<const ProjectionNodeCovered*>(childNode);
+            std::set<std::string> providedFieldSet;
+            for (auto&& elt : pn->coveredKeyObj) {
+                providedFieldSet.emplace(elt.fieldNameStringData());
+            }
+            if (std::all_of(groupNode->requiredFields.begin(),
+                            groupNode->requiredFields.end(),
+                            [&](const std::string& f) { return providedFieldSet.count(f); })) {
+                childReqs.clear(kResult);
+            }
+        }
     }
 
     // Builds the child and gets the child result slot.
     auto [childStage, childOutputs] = build(childNode, childReqs);
+    auto maybeRootSlot = childOutputs.getIfExists(kResult);
+    auto rootExpr = maybeRootSlot.has_value() ? EvalExpr{*maybeRootSlot} : EvalExpr{};
+    auto* childOutputsPtr = &childOutputs;
 
-    tassert(6075900,
-            "Expected no optimized expressions but got: {}"_format(_state.preGeneratedExprs.size()),
-            _state.preGeneratedExprs.empty());
+    // Set of field paths referenced by group. Useful for de-duplicating fields and clearing the
+    // slots corresponding to fields in 'childOutputs' so that they are not mistakenly referenced by
+    // parent stages.
+    StringSet groupFieldSet;
+
+    // Slot to EExpression map that tracks path traversal expressions. Note that this only contains
+    // expressions corresponding to paths which require traversals (that is, if there exists a
+    // top level field slot corresponding to a field, we take care not to add it to 'fpMap' to
+    // avoid rebinding a slot).
+    sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>> fpMap;
+
+    // Lambda which populates 'fpMap' and 'childOutputs' with an expression and/or a slot,
+    // respectively, corresponding to the value of 'fieldExpr'.
+    auto accumulateFieldPaths = [&](const ExpressionFieldPath* fieldExpr) {
+        // We optimize neither a field path for the top-level document itself nor a field path
+        // that refers to a variable instead.
+        if (fieldExpr->getFieldPath().getPathLength() == 1 || fieldExpr->isVariableReference()) {
+            return;
+        }
+
+        // Don't generate an expression if we have one already.
+        const std::string fp = fieldExpr->getFieldPathWithoutCurrentPrefix().fullPath();
+        if (groupFieldSet.count(fp)) {
+            return;
+        }
+
+        // Mark 'fp' as being seen and either find a slot corresponding to it or generate an
+        // expression for it and bind it to a slot.
+        groupFieldSet.insert(fp);
+        sbe::value::SlotId slot = [&]() -> sbe::value::SlotId {
+            // Special case: top level fields which already have a slot.
+            if (fieldExpr->getFieldPath().getPathLength() == 2) {
+                return childOutputsPtr->get({PlanStageSlots::kField, StringData(fp)});
+            } else {
+                // General case: we need to generate a path traversal expression.
+                auto result = stage_builder::generateExpression(
+                    _state, fieldExpr, rootExpr.clone(), childOutputsPtr);
+
+                if (result.hasSlot()) {
+                    return *result.getSlot();
+                } else {
+                    auto newSlot = _slotIdGenerator.generate();
+                    fpMap.emplace(newSlot, result.extractExpr(_state));
+                    return newSlot;
+                }
+            }
+        }();
+
+        childOutputsPtr->set(std::make_pair(PlanStageSlots::kPathExpr, std::move(fp)), slot);
+    };
+
+    // Walk over all field paths involved in this $group stage.
+    walkAndActOnFieldPaths(idExpr.get(), accumulateFieldPaths);
+    for (const auto& accStmt : accStmts) {
+        walkAndActOnFieldPaths(accStmt.expr.argument.get(), accumulateFieldPaths);
+    }
 
     // Translates the group-by expression and wraps it with 'fillEmpty(..., null)' because the
     // missing field value for _id should be mapped to 'Null'.
@@ -2553,24 +2515,21 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     auto childEvalStage =
         EvalStage{std::move(childStage), getSlotsToForward(forwardingReqs, childOutputs)};
 
+    if (!fpMap.empty()) {
+        childEvalStage = makeProject(std::move(childEvalStage), std::move(fpMap), nodeId);
+    }
+
     auto [groupBySlots, groupByEvalStage, idDocExpr] = generateGroupByKey(
         _state, idExpr, childOutputs, std::move(childEvalStage), nodeId, &_slotIdGenerator);
 
     // Translates accumulators which are executed inside the group stage and gets slots for
     // accumulators.
-    stage_builder::EvalStage accProjEvalStage = std::move(groupByEvalStage);
+    stage_builder::EvalStage currentStage = std::move(groupByEvalStage);
     sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>> accSlotToExprMap;
     std::vector<sbe::value::SlotVector> aggSlotsVec;
     for (const auto& accStmt : accStmts) {
-        auto [aggSlots, tempEvalStage] = generateAccumulator(_state,
-                                                             accStmt,
-                                                             std::move(accProjEvalStage),
-                                                             childOutputs,
-                                                             nodeId,
-                                                             &_slotIdGenerator,
-                                                             accSlotToExprMap);
-        aggSlotsVec.emplace_back(std::move(aggSlots));
-        accProjEvalStage = std::move(tempEvalStage);
+        aggSlotsVec.emplace_back(generateAccumulator(
+            _state, accStmt, childOutputs, &_slotIdGenerator, accSlotToExprMap));
     }
 
     // There might be duplicated expressions and slots. Dedup them before creating a HashAgg
@@ -2578,7 +2537,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     // reasonable because duplicated expressions would not contribute to grouping.
     auto dedupedGroupBySlots = dedupGroupBySlots(groupBySlots);
     // Builds a group stage with accumulator expressions and group-by slot(s).
-    auto groupEvalStage = makeHashAgg(std::move(accProjEvalStage),
+    auto groupEvalStage = makeHashAgg(std::move(currentStage),
                                       dedupedGroupBySlots,
                                       std::move(accSlotToExprMap),
                                       _state.data->env->getSlotIfExists("collator"_sd),
@@ -2617,8 +2576,11 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             "slots",
             finalSlots.size() == 1 + accStmts.size());
 
-    // Cleans up optimized expressions.
-    _state.preGeneratedExprs.clear();
+    // Clear all fields needed by this group stage from 'childOutputs' to avoid references to
+    // ExpressionFieldPath values that are no longer visible.
+    for (const auto& groupField : groupFieldSet) {
+        childOutputs.clear({PlanStageSlots::kPathExpr, StringData(groupField)});
+    }
 
     auto fieldNamesSet = StringDataSet{fieldNames.begin(), fieldNames.end()};
     auto [fields, additionalFields] =
@@ -3046,7 +3008,8 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                                          resultSlot,
                                                          root->nodeId(),
                                                          &_slotIdGenerator,
-                                                         _state.slotVarMap);
+                                                         _state,
+                                                         &outputs);
         stage = std::move(outStage);
 
         for (size_t i = 0; i < fields.size(); ++i) {

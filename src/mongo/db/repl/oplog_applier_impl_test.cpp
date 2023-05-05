@@ -58,6 +58,7 @@
 #include "mongo/db/repl/idempotency_test_fixture.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_applier.h"
+#include "mongo/db/repl/oplog_batcher.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_test_helpers.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
@@ -125,7 +126,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsInsertDocumentDataba
     NamespaceString nss("test.t");
     auto op = makeOplogEntry(OpTypeEnum::kInsert, nss, {});
     ASSERT_THROWS(_applyOplogEntryOrGroupedInsertsWrapper(
-                      _opCtx.get(), &op, OplogApplication::Mode::kSecondary),
+                      _opCtx.get(), ApplierOperation{&op}, OplogApplication::Mode::kSecondary),
                   ExceptionFor<ErrorCodes::NamespaceNotFound>);
 }
 
@@ -152,7 +153,7 @@ TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
     NamespaceString otherNss("test.othername");
     auto op = makeOplogEntry(OpTypeEnum::kDelete, otherNss, {});
     ASSERT_THROWS(_applyOplogEntryOrGroupedInsertsWrapper(
-                      _opCtx.get(), &op, OplogApplication::Mode::kSecondary),
+                      _opCtx.get(), ApplierOperation{&op}, OplogApplication::Mode::kSecondary),
                   ExceptionFor<ErrorCodes::NamespaceNotFound>);
 }
 
@@ -163,7 +164,7 @@ TEST_F(OplogApplierImplTest,
     NamespaceString otherNss(nss.getSisterNS("othername"));
     auto op = makeOplogEntry(OpTypeEnum::kInsert, otherNss, kUuid);
     ASSERT_THROWS(_applyOplogEntryOrGroupedInsertsWrapper(
-                      _opCtx.get(), &op, OplogApplication::Mode::kSecondary),
+                      _opCtx.get(), ApplierOperation{&op}, OplogApplication::Mode::kSecondary),
                   ExceptionFor<ErrorCodes::NamespaceNotFound>);
 }
 
@@ -192,7 +193,7 @@ TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
     NamespaceString otherNss(nss.getSisterNS("othername"));
     auto op = makeOplogEntry(OpTypeEnum::kDelete, otherNss, kUuid);
     ASSERT_THROWS(_applyOplogEntryOrGroupedInsertsWrapper(
-                      _opCtx.get(), &op, OplogApplication::Mode::kSecondary),
+                      _opCtx.get(), ApplierOperation{&op}, OplogApplication::Mode::kSecondary),
                   ExceptionFor<ErrorCodes::NamespaceNotFound>);
 }
 
@@ -204,7 +205,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsInsertDocumentCollec
     // implicitly create the collection.
     auto op = makeOplogEntry(OpTypeEnum::kInsert, nss, {});
     ASSERT_THROWS(_applyOplogEntryOrGroupedInsertsWrapper(
-                      _opCtx.get(), &op, OplogApplication::Mode::kSecondary),
+                      _opCtx.get(), ApplierOperation{&op}, OplogApplication::Mode::kSecondary),
                   ExceptionFor<ErrorCodes::NamespaceNotFound>);
     ASSERT_FALSE(collectionExists(_opCtx.get(), nss));
 }
@@ -238,7 +239,7 @@ TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
     // error.
     auto op = makeOplogEntry(OpTypeEnum::kDelete, nss, {});
     ASSERT_THROWS(_applyOplogEntryOrGroupedInsertsWrapper(
-                      _opCtx.get(), &op, OplogApplication::Mode::kSecondary),
+                      _opCtx.get(), ApplierOperation{&op}, OplogApplication::Mode::kSecondary),
                   ExceptionFor<ErrorCodes::NamespaceNotFound>);
 }
 
@@ -272,7 +273,7 @@ TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
     repl::createCollection(_opCtx.get(), nss, {});
     auto op = makeOplogEntry(OpTypeEnum::kDelete, nss, {});
     ASSERT_THROWS(_applyOplogEntryOrGroupedInsertsWrapper(
-                      _opCtx.get(), &op, OplogApplication::Mode::kSecondary),
+                      _opCtx.get(), ApplierOperation{&op}, OplogApplication::Mode::kSecondary),
                   ExceptionFor<ErrorCodes::NoSuchKey>);
 }
 
@@ -392,7 +393,7 @@ TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
     NamespaceString otherNss(nss.getSisterNS("othername"));
     auto op = makeOplogEntry(OpTypeEnum::kDelete, otherNss, options.uuid);
     ASSERT_THROWS(_applyOplogEntryOrGroupedInsertsWrapper(
-                      _opCtx.get(), &op, OplogApplication::Mode::kSecondary),
+                      _opCtx.get(), ApplierOperation{&op}, OplogApplication::Mode::kSecondary),
                   ExceptionFor<ErrorCodes::NoSuchKey>);
 }
 
@@ -476,8 +477,8 @@ TEST_F(OplogApplierImplTest, applyOplogEntryToRecordChangeStreamPreImages) {
             testCase.fromMigrate);
 
         // Apply the oplog entry.
-        ASSERT_OK(
-            _applyOplogEntryOrGroupedInsertsWrapper(_opCtx.get(), &op, testCase.applicationMode));
+        ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
+            _opCtx.get(), ApplierOperation{&op}, testCase.applicationMode));
 
         // Load pre-image and cleanup the state.
         WriteUnitOfWork wuow{_opCtx.get()};
@@ -534,7 +535,7 @@ TEST_F(OplogApplierImplTest, CreateCollectionCommand) {
     };
     auto entry = OplogEntry(op);
     ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
-        _opCtx.get(), &entry, OplogApplication::Mode::kInitialSync));
+        _opCtx.get(), ApplierOperation{&entry}, OplogApplication::Mode::kInitialSync));
     ASSERT_TRUE(applyCmdCalled);
 }
 
@@ -563,7 +564,7 @@ TEST_F(OplogApplierImplTest, CreateCollectionCommandMultitenant) {
 
     auto entry = makeCommandOplogEntry(nextOpTime(), nss, op, UUID::gen());
     ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
-        _opCtx.get(), &entry, OplogApplication::Mode::kSecondary));
+        _opCtx.get(), ApplierOperation{&entry}, OplogApplication::Mode::kSecondary));
     ASSERT_TRUE(applyCmdCalled);
 }
 
@@ -598,7 +599,7 @@ TEST_F(OplogApplierImplTest, CreateCollectionCommandMultitenantRequireTenantIDFa
 
     auto entry = OplogEntry(op);
     ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
-        _opCtx.get(), &entry, OplogApplication::Mode::kSecondary));
+        _opCtx.get(), ApplierOperation{&entry}, OplogApplication::Mode::kSecondary));
     ASSERT_TRUE(applyCmdCalled);
 }
 
@@ -646,14 +647,14 @@ TEST_F(OplogApplierImplTest, CreateCollectionCommandMultitenantAlreadyExists) {
     // This fails silently so we won't see any indication of a collision, but we can also assert
     // that the opObserver event above won't be called in the event of a collision.
     ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
-        _opCtx.get(), &entry1, OplogApplication::Mode::kSecondary));
+        _opCtx.get(), ApplierOperation{&entry1}, OplogApplication::Mode::kSecondary));
     ASSERT_FALSE(applyCmdCalled);
 
     ASSERT_TRUE(collectionExists(_opCtx.get(), nssTenant1));
     ASSERT_FALSE(collectionExists(_opCtx.get(), nssTenant2));
 
     ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
-        _opCtx.get(), &entry2, OplogApplication::Mode::kSecondary));
+        _opCtx.get(), ApplierOperation{&entry2}, OplogApplication::Mode::kSecondary));
     ASSERT_TRUE(applyCmdCalled);
 
     ASSERT_TRUE(collectionExists(_opCtx.get(), nssTenant1));
@@ -681,7 +682,7 @@ TEST_F(OplogApplierImplTest, RenameCollectionCommandMultitenant) {
     auto op = makeCommandOplogEntry(opTime, sourceNss, oRename, {});
 
     ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
-        _opCtx.get(), &op, OplogApplication::Mode::kSecondary));
+        _opCtx.get(), ApplierOperation{&op}, OplogApplication::Mode::kSecondary));
     ASSERT_FALSE(collectionExists(_opCtx.get(), sourceNss));
     ASSERT_TRUE(collectionExists(_opCtx.get(), targetNss));
 }
@@ -707,7 +708,7 @@ TEST_F(OplogApplierImplTest, RenameCollectionCommandMultitenantRequireTenantIDFa
     auto op = makeCommandOplogEntry(opTime, sourceNss, oRename, {});
 
     ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
-        _opCtx.get(), &op, OplogApplication::Mode::kSecondary));
+        _opCtx.get(), ApplierOperation{&op}, OplogApplication::Mode::kSecondary));
     ASSERT_FALSE(collectionExists(_opCtx.get(), sourceNss));
     ASSERT_TRUE(collectionExists(_opCtx.get(), targetNss));
 }
@@ -738,7 +739,7 @@ TEST_F(OplogApplierImplTest, RenameCollectionCommandMultitenantAcrossTenantsRequ
 
     ASSERT_EQ(ErrorCodes::IllegalOperation,
               _applyOplogEntryOrGroupedInsertsWrapper(
-                  _opCtx.get(), &op, OplogApplication::Mode::kSecondary));
+                  _opCtx.get(), ApplierOperation{&op}, OplogApplication::Mode::kSecondary));
     ASSERT_TRUE(collectionExists(_opCtx.get(), sourceNss));
     ASSERT_FALSE(collectionExists(_opCtx.get(), targetNss));
     ASSERT_FALSE(collectionExists(_opCtx.get(), wrongTargetNss));
@@ -778,7 +779,7 @@ TEST_F(IdempotencyTest, CollModCommandMultitenant) {
     auto op = makeCommandOplogEntry(nextOpTime(), nss, collModCmd, kUuid);
 
     ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
-        _opCtx.get(), &op, OplogApplication::Mode::kSecondary));
+        _opCtx.get(), ApplierOperation{&op}, OplogApplication::Mode::kSecondary));
     ASSERT_TRUE(applyCmdCalled);
 }
 
@@ -819,7 +820,7 @@ TEST_F(IdempotencyTest, CollModCommandMultitenantWrongTenant) {
     // A NamespaceNotFound error is absorbed by the applier, but we can still determine the
     // op_observer callback was never called
     ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
-        _opCtx.get(), &op, OplogApplication::Mode::kSecondary));
+        _opCtx.get(), ApplierOperation{&op}, OplogApplication::Mode::kSecondary));
     ASSERT_FALSE(applyCmdCalled);
 }
 
@@ -834,7 +835,7 @@ public:
     using OplogApplierImpl::OplogApplierImpl;
 
     Status applyOplogBatchPerWorker(OperationContext* opCtx,
-                                    std::vector<const OplogEntry*>* ops,
+                                    std::vector<ApplierOperation>* ops,
                                     WorkerMultikeyPathInfo* workerMultikeyPathInfo,
                                     bool isDataConsistent) override;
 
@@ -851,7 +852,7 @@ private:
 
 Status TrackOpsAppliedApplier::applyOplogBatchPerWorker(
     OperationContext* opCtx,
-    std::vector<const OplogEntry*>* ops,
+    std::vector<ApplierOperation>* ops,
     WorkerMultikeyPathInfo* workerMultikeyPathInfo,
     const bool isDataConsistent) {
     stdx::lock_guard lk(_mutex);
@@ -937,7 +938,7 @@ TEST_F(OplogApplierImplTest,
     NamespaceString nss("local." + _agent.getSuiteName() + "_" + _agent.getTestName());
     auto op = makeCreateCollectionOplogEntry({Timestamp(Seconds(1), 0), 1LL}, nss);
 
-    std::vector<const OplogEntry*> ops = {&op};
+    std::vector<ApplierOperation> ops = {ApplierOperation{&op}};
     WorkerMultikeyPathInfo pathInfo;
 
     TestApplyOplogGroupApplier oplogApplier(
@@ -977,7 +978,7 @@ TEST_F(OplogApplierImplTest,
         repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary),
         writerPool.get());
 
-    std::vector<std::vector<const OplogEntry*>> writerVectors(
+    std::vector<std::vector<ApplierOperation>> writerVectors(
         writerPool->getStats().options.maxThreads);
     std::vector<std::vector<OplogEntry>> derivedOps;
     std::vector<OplogEntry> ops{firstRetryableOp, secondRetryableOp};
@@ -1965,6 +1966,35 @@ TEST_F(MultiOplogEntryPreparedTransactionTest, MultiApplyAbortPreparedTransactio
                   DurableTxnStateEnum::kAborted);
 }
 
+DEATH_TEST_REGEX_F(MultiOplogEntryPreparedTransactionTest,
+                   MultiApplyAbortPreparedTransactionCheckTxnTableSingleBatch,
+                   "Invariant.*partialTxnOps.*abortTransaction") {
+    NoopOplogApplierObserver observer;
+    OplogApplierImpl oplogApplier(
+        nullptr,  // executor
+        nullptr,  // oplogBuffer
+        &observer,
+        ReplicationCoordinator::get(_opCtx.get()),
+        getConsistencyMarkers(),
+        getStorageInterface(),
+        repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary),
+        _writerPool.get());
+
+    // Apply a batch with the entire lifecyle of the prepared transaction - this includes the
+    // insert operations with the subsequent commands to prepare and abort the transaction.
+    // Note that this combination of operations (applyOps, commitTransaction, and abortTransaction)
+    // in the same batch is not permissible under current oplog batching rules.
+    // See OplogBatcher::mustProcessIndividually().
+    ASSERT_FALSE(OplogBatcher::mustProcessIndividually(*_insertOp1));
+    ASSERT_FALSE(OplogBatcher::mustProcessIndividually(*_insertOp2));
+    ASSERT(OplogBatcher::mustProcessIndividually(*_prepareWithPrevOp));
+    ASSERT(OplogBatcher::mustProcessIndividually(*_abortPrepareWithPrevOp));
+    getStorageInterface()->oplogDiskLocRegister(
+        _opCtx.get(), _abortPrepareWithPrevOp->getTimestamp(), true);
+    (void)oplogApplier.applyOplogBatch(
+        _opCtx.get(), {*_insertOp1, *_insertOp2, *_prepareWithPrevOp, *_abortPrepareWithPrevOp});
+}
+
 TEST_F(MultiOplogEntryPreparedTransactionTest, MultiApplyPreparedTransactionInitialSync) {
     NoopOplogApplierObserver observer;
     OplogApplierImpl oplogApplier(
@@ -2344,7 +2374,7 @@ void testWorkerMultikeyPaths(OperationContext* opCtx,
     TestApplyOplogGroupApplier oplogApplier(
         nullptr, nullptr, OplogApplier::Options(OplogApplication::Mode::kSecondary));
     WorkerMultikeyPathInfo pathInfo;
-    std::vector<const OplogEntry*> ops = {&op};
+    std::vector<ApplierOperation> ops = {ApplierOperation{&op}};
     const bool dataIsConsistent = true;
     ASSERT_OK(oplogApplier.applyOplogBatchPerWorker(opCtx, &ops, &pathInfo, dataIsConsistent));
     ASSERT_EQ(pathInfo.size(), numPaths);
@@ -2411,7 +2441,7 @@ TEST_F(OplogApplierImplTest, OplogApplicationThreadFuncAddsMultipleWorkerMultike
         TestApplyOplogGroupApplier oplogApplier(
             nullptr, nullptr, OplogApplier::Options(OplogApplication::Mode::kSecondary));
         WorkerMultikeyPathInfo pathInfo;
-        std::vector<const OplogEntry*> ops = {&opA, &opB};
+        std::vector<ApplierOperation> ops = {ApplierOperation{&opA}, ApplierOperation{&opB}};
         const bool dataIsConsistent = true;
         ASSERT_OK(
             oplogApplier.applyOplogBatchPerWorker(_opCtx.get(), &ops, &pathInfo, dataIsConsistent));
@@ -2460,7 +2490,7 @@ TEST_F(OplogApplierImplTest, OplogApplicationThreadFuncFailsWhenCollectionCreati
 
     TestApplyOplogGroupApplier oplogApplier(
         nullptr, nullptr, OplogApplier::Options(OplogApplication::Mode::kSecondary));
-    std::vector<const OplogEntry*> ops = {&op};
+    std::vector<ApplierOperation> ops = {ApplierOperation{&op}};
     const bool dataIsConsistent = true;
     ASSERT_EQUALS(
         ErrorCodes::InvalidOptions,
@@ -2846,7 +2876,7 @@ TEST_F(OplogApplierImplTest, ApplyGroupIgnoresUpdateOperationIfDocumentIsMissing
     }
     auto op = makeUpdateDocumentOplogEntry(
         {Timestamp(Seconds(1), 0), 1LL}, nss, BSON("_id" << 0), BSON("_id" << 0 << "x" << 2));
-    std::vector<const OplogEntry*> ops = {&op};
+    std::vector<ApplierOperation> ops = {ApplierOperation{&op}};
     WorkerMultikeyPathInfo pathInfo;
     const bool dataIsConsistent = true;
     ASSERT_OK(
@@ -2871,7 +2901,10 @@ TEST_F(OplogApplierImplTest,
     auto op1 = makeInsertDocumentOplogEntry({Timestamp(Seconds(2), 0), 1LL}, nss, doc1);
     auto op2 = makeInsertDocumentOplogEntry({Timestamp(Seconds(3), 0), 1LL}, badNss, doc2);
     auto op3 = makeInsertDocumentOplogEntry({Timestamp(Seconds(4), 0), 1LL}, nss, doc3);
-    std::vector<const OplogEntry*> ops = {&op0, &op1, &op2, &op3};
+    std::vector<ApplierOperation> ops = {ApplierOperation{&op0},
+                                         ApplierOperation{&op1},
+                                         ApplierOperation{&op2},
+                                         ApplierOperation{&op3}};
     WorkerMultikeyPathInfo pathInfo;
     const bool dataIsConsistent = true;
     ASSERT_OK(
@@ -2901,7 +2934,10 @@ TEST_F(OplogApplierImplTest,
     auto op2 = makeCreateIndexOplogEntry(
         {Timestamp(Seconds(3), 0), 1LL}, badNss, "a_1", keyPattern, kUuid);
     auto op3 = makeInsertDocumentOplogEntry({Timestamp(Seconds(4), 0), 1LL}, nss, doc3);
-    std::vector<const OplogEntry*> ops = {&op0, &op1, &op2, &op3};
+    std::vector<ApplierOperation> ops = {ApplierOperation{&op0},
+                                         ApplierOperation{&op1},
+                                         ApplierOperation{&op2},
+                                         ApplierOperation{&op3}};
     WorkerMultikeyPathInfo pathInfo;
     const bool dataIsConsistent = true;
     ASSERT_OK(
@@ -3310,7 +3346,7 @@ TEST_F(OplogApplierImplWithFastAutoAdvancingClockTest, LogSlowOpApplicationWhenS
 
     startCapturingLogMessages();
     ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
-        _opCtx.get(), &entry, OplogApplication::Mode::kSecondary));
+        _opCtx.get(), ApplierOperation{&entry}, OplogApplication::Mode::kSecondary));
 
     ASSERT_EQUALS(
         1,
@@ -3333,7 +3369,7 @@ TEST_F(OplogApplierImplWithFastAutoAdvancingClockTest, DoNotLogSlowOpApplication
 
     startCapturingLogMessages();
     ASSERT_THROWS(_applyOplogEntryOrGroupedInsertsWrapper(
-                      _opCtx.get(), &entry, OplogApplication::Mode::kSecondary),
+                      _opCtx.get(), ApplierOperation{&entry}, OplogApplication::Mode::kSecondary),
                   ExceptionFor<ErrorCodes::NamespaceNotFound>);
 
     // Use a builder for easier escaping. We expect the operation to *not* be logged
@@ -3356,7 +3392,7 @@ TEST_F(OplogApplierImplWithSlowAutoAdvancingClockTest, DoNotLogNonSlowOpApplicat
 
     startCapturingLogMessages();
     ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
-        _opCtx.get(), &entry, OplogApplication::Mode::kSecondary));
+        _opCtx.get(), ApplierOperation{&entry}, OplogApplication::Mode::kSecondary));
 
     // Use a builder for easier escaping. We expect the operation to *not* be logged,
     // since it wasn't slow to apply.
@@ -3387,7 +3423,7 @@ public:
 
         DBDirectClient client(_opCtx.get());
         BSONObj result;
-        ASSERT(client.runCommand(kNs.db().toString(), BSON("create" << kNs.coll()), result));
+        ASSERT(client.runCommand(kNs.dbName(), BSON("create" << kNs.coll()), result));
     }
 
     /**
@@ -3797,10 +3833,10 @@ TEST_F(OplogApplierImplTxnTableTest, MultiApplyUpdatesTheTransactionTable) {
 
     DBDirectClient client(_opCtx.get());
     BSONObj result;
-    ASSERT(client.runCommand(ns0.db().toString(), BSON("create" << ns0.coll()), result));
-    ASSERT(client.runCommand(ns1.db().toString(), BSON("create" << ns1.coll()), result));
-    ASSERT(client.runCommand(ns2.db().toString(), BSON("create" << ns2.coll()), result));
-    ASSERT(client.runCommand(ns3.db().toString(), BSON("create" << ns3.coll()), result));
+    ASSERT(client.runCommand(ns0.dbName(), BSON("create" << ns0.coll()), result));
+    ASSERT(client.runCommand(ns1.dbName(), BSON("create" << ns1.coll()), result));
+    ASSERT(client.runCommand(ns2.dbName(), BSON("create" << ns2.coll()), result));
+    ASSERT(client.runCommand(ns3.dbName(), BSON("create" << ns3.coll()), result));
     auto uuid0 = [&] {
         return AutoGetCollectionForRead(_opCtx.get(), ns0).getCollection()->uuid();
     }();
@@ -4709,7 +4745,7 @@ TEST_F(IdempotencyTestTxns, CommitPreparedTransactionIgnoresNamespaceNotFoundErr
 
 class GlobalIndexTest : public OplogApplierImplTest {
 protected:
-    using WriterVectors = std::vector<std::vector<const OplogEntry*>>;
+    using WriterVectors = std::vector<std::vector<ApplierOperation>>;
 
     void setUp() override {
         OplogApplierImplTest::setUp();

@@ -43,6 +43,31 @@
 namespace mongo {
 namespace {
 
+// This function requires the definition of MigrationDecision. It cannot be moved to
+// tenant_migration_util.h as this would cause a dependency cycle.
+inline void protocolCheckRecipientForgetDecision(
+    const MigrationProtocolEnum protocol, const boost::optional<MigrationDecisionEnum>& committed) {
+    switch (protocol) {
+        case MigrationProtocolEnum::kShardMerge: {
+            uassert(ErrorCodes::InvalidOptions,
+                    str::stream() << "'decision' is required for protocol '"
+                                  << MigrationProtocol_serializer(protocol) << "'",
+                    committed.has_value());
+            break;
+        }
+        case MigrationProtocolEnum::kMultitenantMigrations: {
+            uassert(ErrorCodes::InvalidOptions,
+                    str::stream() << "'decision' must be empty for protocol '"
+                                  << MigrationProtocol_serializer(protocol) << "'",
+                    !committed.has_value());
+            break;
+        }
+        default:
+            MONGO_UNREACHABLE;
+    }
+}
+
+
 MONGO_FAIL_POINT_DEFINE(returnResponseOkForRecipientSyncDataCmd);
 MONGO_FAIL_POINT_DEFINE(returnResponseOkForRecipientForgetMigrationCmd);
 
@@ -75,8 +100,11 @@ public:
             const auto& cmd = request();
             const auto migrationProtocol = cmd.getProtocol().value_or(kDefaultMigrationProtocol);
             const auto& tenantId = cmd.getTenantId();
+            const auto& tenantIds = cmd.getTenantIds();
 
             tenant_migration_util::protocolTenantIdCompatibilityCheck(migrationProtocol, tenantId);
+            tenant_migration_util::protocolTenantIdsCompatibilityCheck(migrationProtocol,
+                                                                       tenantIds);
             tenant_migration_util::protocolStorageOptionsCompatibilityCheck(opCtx,
                                                                             migrationProtocol);
             tenant_migration_util::protocolReadPreferenceCompatibilityCheck(
@@ -88,7 +116,7 @@ public:
                                                       tenantId.value_or("").toString(),
                                                       cmd.getStartMigrationDonorTimestamp(),
                                                       cmd.getReadPreference());
-
+            stateDoc.setTenantIds(tenantIds);
 
             if (!repl::tenantMigrationDisableX509Auth) {
                 uassert(ErrorCodes::InvalidOptions,
@@ -247,8 +275,12 @@ public:
             const auto& cmd = request();
             const auto migrationProtocol = cmd.getProtocol().value_or(kDefaultMigrationProtocol);
             const auto& tenantId = cmd.getTenantId();
+            const auto& tenantIds = cmd.getTenantIds();
 
             tenant_migration_util::protocolTenantIdCompatibilityCheck(migrationProtocol, tenantId);
+            tenant_migration_util::protocolTenantIdsCompatibilityCheck(migrationProtocol,
+                                                                       tenantIds);
+            protocolCheckRecipientForgetDecision(migrationProtocol, cmd.getDecision());
 
             opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
             auto recipientService =
@@ -268,6 +300,7 @@ public:
                                                       tenantId.value_or("").toString(),
                                                       kUnusedStartMigrationTimestamp,
                                                       cmd.getReadPreference());
+            stateDoc.setTenantIds(tenantIds);
             if (!repl::tenantMigrationDisableX509Auth) {
                 uassert(ErrorCodes::InvalidOptions,
                         str::stream() << "'" << Request::kRecipientCertificateForDonorFieldName

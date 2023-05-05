@@ -28,7 +28,6 @@
  */
 
 #include <fmt/format.h>
-#include <memory>
 #include <string>
 
 #include "mongo/bson/util/bson_extract.h"
@@ -37,10 +36,10 @@
 #include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/external_data_source_scope_guard.h"
 #include "mongo/db/client.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/external_data_source_scope_guard.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/cursor_manager.h"
@@ -458,6 +457,11 @@ public:
                                           rpc::ReplyBuilderInterface* reply,
                                           ClientCursorPin& cursorPin,
                                           CurOp* curOp) {
+            // Get a reference to the shared_ptr so that we drop the virtual collections (via the
+            // destructor) after deleting our cursors and releasing our read locks.
+            std::shared_ptr<ExternalDataSourceScopeGuard> extDataSourceScopeGuard =
+                ExternalDataSourceScopeGuard::get(cursorPin.getCursor());
+
             // Cursors come in one of two flavors:
             //
             // - Cursors which read from a single collection, such as those generated via the
@@ -561,7 +565,7 @@ public:
             exec->reattachToOperationContext(opCtx);
             exec->restoreState(readLock ? &readLock->getCollection() : nullptr);
 
-            telemetry::registerGetMoreRequest(opCtx, exec->getPlanExplainer());
+            telemetry::registerGetMoreRequest(opCtx);
 
             auto planSummary = exec->getPlanExplainer().getPlanSummary();
             {
@@ -604,7 +608,6 @@ public:
                 options.atClusterTime = repl::ReadConcernArgs::get(opCtx).getArgsAtClusterTime();
             }
             CursorResponseBuilder nextBatch(reply, options);
-            BSONObj obj;
             std::uint64_t numResults = 0;
             ResourceConsumption::DocumentUnitCounter docUnitsReturned;
 

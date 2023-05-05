@@ -33,15 +33,52 @@
 
 namespace mongo {
 namespace {
-TEST(SorterStatsTest, Basic) {
+TEST(SorterStatsTest, Basics) {
     SorterTracker sorterTracker;
     SorterStats sorterStats(&sorterTracker);
 
     sorterStats.incrementSpilledRanges();
+    ASSERT_EQ(sorterStats.spilledRanges(), 1);
     ASSERT_EQ(sorterTracker.spilledRanges.load(), 1);
+
+    sorterStats.incrementNumSorted();
+    ASSERT_EQ(sorterStats.numSorted(), 1);
+    ASSERT_EQ(sorterTracker.numSorted.load(), 1);
+
+    sorterStats.incrementBytesSorted(1);
+    ASSERT_EQ(sorterStats.bytesSorted(), 1);
+    ASSERT_EQ(sorterTracker.bytesSorted.load(), 1);
 }
 
-TEST(SorterStatsTest, MultipleSorters) {
+TEST(SorterStatsTest, SingleSorterMemUsage) {
+    SorterTracker sorterTracker;
+    SorterStats sorterStats(&sorterTracker);
+
+    sorterStats.incrementMemUsage(2);
+    ASSERT_EQ(sorterStats.memUsage(), 2);
+    ASSERT_EQ(sorterTracker.memUsage.load(), 2);
+
+    sorterStats.decrementMemUsage(1);
+    ASSERT_EQ(sorterStats.memUsage(), 1);
+    ASSERT_EQ(sorterTracker.memUsage.load(), 1);
+
+    sorterStats.resetMemUsage();
+    ASSERT_EQ(sorterStats.memUsage(), 0);
+    ASSERT_EQ(sorterTracker.memUsage.load(), 0);
+
+    // Simulate increasing memUsage
+    sorterStats.setMemUsage(3);
+    ASSERT_EQ(sorterStats.memUsage(), 3);
+    ASSERT_EQ(sorterTracker.memUsage.load(), 3);
+
+    // Simulate decreasing memUsage
+    sorterStats.setMemUsage(1);
+    ASSERT_EQ(sorterStats.memUsage(), 1);
+    ASSERT_EQ(sorterTracker.memUsage.load(), 1);
+}
+
+
+TEST(SorterStatsTest, MultipleSortersSpilledRanges) {
     SorterTracker sorterTracker;
     SorterStats sorterStats1(&sorterTracker);
     SorterStats sorterStats2(&sorterTracker);
@@ -49,10 +86,83 @@ TEST(SorterStatsTest, MultipleSorters) {
 
     sorterStats1.incrementSpilledRanges();
     sorterStats2.incrementSpilledRanges();
+    ASSERT_EQ(sorterStats1.spilledRanges(), 1);
+    ASSERT_EQ(sorterStats2.spilledRanges(), 1);
     ASSERT_EQ(sorterTracker.spilledRanges.load(), 2);
 
     sorterStats3.setSpilledRanges(10);
+    ASSERT_EQ(sorterStats3.spilledRanges(), 10);
     ASSERT_EQ(sorterTracker.spilledRanges.load(), 12);
+}
+
+TEST(SorterStatsTest, MultipleSortersNumSorted) {
+    SorterTracker sorterTracker;
+    SorterStats sorterStats1(&sorterTracker);
+    SorterStats sorterStats2(&sorterTracker);
+
+    sorterStats1.incrementNumSorted();
+    sorterStats2.incrementNumSorted(2);
+    ASSERT_EQ(sorterStats1.numSorted(), 1);
+    ASSERT_EQ(sorterStats2.numSorted(), 2);
+    ASSERT_EQ(sorterTracker.numSorted.load(), 3);
+}
+
+TEST(SorterStatsTest, MultipleSortersBytesSorted) {
+    SorterTracker sorterTracker;
+    SorterStats sorterStats1(&sorterTracker);
+    SorterStats sorterStats2(&sorterTracker);
+
+    sorterStats1.incrementBytesSorted(1);
+    sorterStats2.incrementBytesSorted(2);
+    ASSERT_EQ(sorterStats1.bytesSorted(), 1);
+    ASSERT_EQ(sorterStats2.bytesSorted(), 2);
+    ASSERT_EQ(sorterTracker.bytesSorted.load(), 3);
+}
+
+TEST(SorterStatsTest, MultipleSortersMemUsage) {
+    SorterTracker sorterTracker;
+    SorterStats sorterStats1(&sorterTracker);
+    SorterStats sorterStats2(&sorterTracker);
+    SorterStats sorterStats3(&sorterTracker);
+
+    sorterStats1.incrementMemUsage(1);
+    ASSERT_EQ(sorterStats1.memUsage(), 1);
+    ASSERT_EQ(sorterTracker.memUsage.load(), 1);
+
+    sorterStats2.incrementMemUsage(2);
+    ASSERT_EQ(sorterStats2.memUsage(), 2);
+    ASSERT_EQ(sorterTracker.memUsage.load(), 3);
+
+    sorterStats1.resetMemUsage();
+    ASSERT_EQ(sorterStats1.memUsage(), 0);
+    ASSERT_EQ(sorterTracker.memUsage.load(), 2);
+
+    sorterStats2.decrementMemUsage(1);
+    ASSERT_EQ(sorterStats2.memUsage(), 1);
+    ASSERT_EQ(sorterTracker.memUsage.load(), 1);
+
+    sorterStats3.incrementMemUsage(3);
+    ASSERT_EQ(sorterStats3.memUsage(), 3);
+    ASSERT_EQ(sorterTracker.memUsage.load(), 4);
+
+    // Simulate increasing memUsage
+    sorterStats1.setMemUsage(4);
+    ASSERT_EQ(sorterStats1.memUsage(), 4);
+    ASSERT_EQ(sorterTracker.memUsage.load(), 8);
+
+    // Simulate decreasing memUsage
+    sorterStats2.setMemUsage(0);
+    ASSERT_EQ(sorterStats2.memUsage(), 0);
+    ASSERT_EQ(sorterTracker.memUsage.load(), 7);
+
+    sorterStats3.setMemUsage(5);
+    ASSERT_EQ(sorterStats3.memUsage(), 5);
+    ASSERT_EQ(sorterTracker.memUsage.load(), 9);
+
+    // Simulate sorter spilling.
+    sorterStats3.resetMemUsage();
+    ASSERT_EQ(sorterStats3.memUsage(), 0);
+    ASSERT_EQ(sorterTracker.memUsage.load(), 4);
 }
 
 DEATH_TEST(SorterStatsTest, SetNonZeroNumSpilledRanges, "invariant") {

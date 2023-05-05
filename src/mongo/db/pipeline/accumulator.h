@@ -43,6 +43,7 @@
 #include "mongo/db/exec/document_value/value_comparator.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/query/stats/stats_gen.h"
 #include "mongo/db/query/stats/value_utils.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/summation.h"
@@ -236,20 +237,23 @@ public:
         return kName.rawData();
     }
 
-    explicit AccumulatorInternalConstructStats(ExpressionContext* expCtx);
+    explicit AccumulatorInternalConstructStats(ExpressionContext* expCtx,
+                                               InternalConstructStatsAccumulatorParams);
 
     void processInternal(const Value& input, bool merging) final;
     Value getValue(bool toBeMerged) final;
     void reset() final;
 
-    static boost::intrusive_ptr<AccumulatorState> create(ExpressionContext* expCtx);
+    static boost::intrusive_ptr<AccumulatorState> create(ExpressionContext* expCtx,
+                                                         InternalConstructStatsAccumulatorParams);
 
     bool isCommutative() const final {
         return true;
     }
 
 private:
-    double _count;
+    double _count;  // Can't this be an int?
+    InternalConstructStatsAccumulatorParams _params;
     std::vector<stats::SBEValue> _values;
 };
 

@@ -30,6 +30,7 @@
 
 #include "mongo/unittest/unittest.h"
 
+#include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/sbe_unittest.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
@@ -57,17 +58,32 @@ namespace mongo::sbe {
  * After setting up the compiled expression in steps 1--3, the test can run it multiple times with
  * different values, repeating steps 3--5.
  */
-class EExpressionTestFixture : public mongo::unittest::Test {
+class EExpressionTestFixture : public virtual SBETestFixture {
 protected:
-    EExpressionTestFixture() : _ctx{std::make_unique<sbe::RuntimeEnvironment>()} {
+    EExpressionTestFixture(std::unique_ptr<sbe::RuntimeEnvironment> runtimeEnv)
+        : _runtimeEnv(runtimeEnv.get()), _ctx(std::move(runtimeEnv)) {
         _ctx.root = &_emptyStage;
     }
+
+    EExpressionTestFixture()
+        : EExpressionTestFixture(std::make_unique<sbe::RuntimeEnvironment>()) {}
 
     value::SlotId bindAccessor(value::SlotAccessor* accessor) {
         auto slot = _slotIdGenerator.generate();
         _ctx.pushCorrelated(slot, accessor);
         boundAccessors.push_back(std::make_pair(slot, accessor));
         return slot;
+    }
+
+    const RuntimeEnvironment* runtimeEnv() const {
+        return _runtimeEnv;
+    }
+
+    sbe::value::SlotId registerSlot(StringData name,
+                                    value::TypeTags tag,
+                                    value::Value val,
+                                    bool owned) {
+        return _runtimeEnv->registerSlot(name, tag, val, owned, &_slotIdGenerator);
     }
 
     std::unique_ptr<vm::CodeFragment> compileExpression(const EExpression& expr) {
@@ -113,7 +129,6 @@ protected:
     bool runCompiledExpressionPredicate(const vm::CodeFragment* compiledExpr) {
         return _vm.runPredicate(compiledExpr);
     }
-
 
     void printInputExpression(std::ostream& os, const EExpression& expr) {
         os << "-- INPUT EXPRESSION:" << std::endl;
@@ -280,52 +295,16 @@ protected:
         return makeC(p.first, p.second);
     }
 
-    template <typename Stream>
-    value::ValuePrinter<Stream> makeValuePrinter(Stream& stream) {
-        return value::ValuePrinters::make(
-            stream, PrintOptions().useTagForAmbiguousValues(true).normalizeOutput(true));
-    }
-
-private:
+protected:
     value::SlotIdGenerator _slotIdGenerator;
     CoScanStage _emptyStage{kEmptyPlanNodeId};
+    RuntimeEnvironment* _runtimeEnv;
     CompileCtx _ctx;
     vm::ByteCode _vm;
     std::vector<std::pair<value::SlotId, value::SlotAccessor*>> boundAccessors;
 };
 
 
-class GoldenEExpressionTestFixture : public EExpressionTestFixture {
-public:
-    GoldenEExpressionTestFixture() {}
-
-    void run() {
-        GoldenTestContext ctx(&goldenTestConfigSbe);
-        auto guard = ScopeGuard([&] { gctx = nullptr; });
-        gctx = &ctx;
-        gctx->printTestHeader(GoldenTestContext::HeaderFormat::Text);
-        Test::run();
-    }
-
-protected:
-    GoldenTestContext* gctx;
-};
-
-class ValueVectorGuard {
-    ValueVectorGuard() = delete;
-    ValueVectorGuard& operator=(const ValueVectorGuard&) = delete;
-
-public:
-    ValueVectorGuard(std::vector<TypedValue>& values) : _values(values) {}
-
-    ~ValueVectorGuard() {
-        for (auto p : _values) {
-            value::releaseValue(p.first, p.second);
-        }
-    }
-
-private:
-    std::vector<TypedValue>& _values;
-};
+class GoldenEExpressionTestFixture : public EExpressionTestFixture, public GoldenSBETestFixture {};
 
 }  // namespace mongo::sbe

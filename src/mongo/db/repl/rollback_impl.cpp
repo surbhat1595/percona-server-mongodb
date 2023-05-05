@@ -48,6 +48,7 @@
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/query/get_executor.h"
 #include "mongo/db/repl/apply_ops.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -417,8 +418,10 @@ StatusWith<std::set<NamespaceString>> RollbackImpl::_namespacesForOp(const Oplog
         switch (oplogEntry.getCommandType()) {
             case OplogEntry::CommandType::kRenameCollection: {
                 // Add both the 'from' and 'to' namespaces.
-                namespaces.insert(NamespaceString(firstElem.valueStringDataSafe()));
-                namespaces.insert(NamespaceString(obj.getStringField("to")));
+                namespaces.insert(NamespaceStringUtil::deserialize(
+                    opNss.tenantId(), firstElem.valueStringDataSafe()));
+                namespaces.insert(
+                    NamespaceStringUtil::deserialize(opNss.tenantId(), obj.getStringField("to")));
                 break;
             }
             case OplogEntry::CommandType::kDropDatabase: {
@@ -715,10 +718,10 @@ void RollbackImpl::_correctRecordStoreCounts(OperationContext* opCtx) {
             invariant(coll == collToScan.getCollection(),
                       str::stream() << "Catalog returned invalid collection: " << nss.ns() << " ("
                                     << uuid.toString() << ")");
-            auto exec = collToScan->makePlanExecutor(opCtx,
-                                                     collToScan.getCollection(),
-                                                     PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
-                                                     Collection::ScanDirection::kForward);
+            auto exec = getCollectionScanExecutor(opCtx,
+                                                  collToScan.getCollection(),
+                                                  PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
+                                                  CollectionScanDirection::kForward);
             long long countFromScan = 0;
             PlanExecutor::ExecState state;
             while (PlanExecutor::ADVANCED ==
@@ -1041,7 +1044,8 @@ Status RollbackImpl::_processRollbackOp(OperationContext* opCtx, const OplogEntr
             if (auto countResult = _parseDroppedCollectionCount(oplogEntry)) {
                 PendingDropInfo info;
                 info.count = *countResult;
-                info.nss = NamespaceString(oplogEntry.getObject()[kToFieldName].String());
+                info.nss = NamespaceStringUtil::deserialize(
+                    opNss.tenantId(), oplogEntry.getObject()[kToFieldName].String());
                 _pendingDrops[dropTargetUUID] = info;
                 _newCounts[dropTargetUUID] = info.count;
             } else {
@@ -1238,7 +1242,7 @@ boost::optional<BSONObj> RollbackImpl::_findDocumentById(OperationContext* opCtx
                                                          UUID uuid,
                                                          NamespaceString nss,
                                                          BSONElement id) {
-    auto document = _storageInterface->findById(opCtx, {nss.db().toString(), uuid}, id);
+    auto document = _storageInterface->findById(opCtx, {nss.dbName(), uuid}, id);
     if (document.isOK()) {
         return document.getValue();
     } else if (document.getStatus().code() == ErrorCodes::NoSuchKey) {

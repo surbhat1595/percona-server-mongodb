@@ -30,7 +30,7 @@
 #pragma once
 
 #include <cstdint>
-#include <stdlib.h>
+#include <cstdlib>
 #include <string>
 
 #include "mongo/base/status.h"
@@ -125,6 +125,7 @@ public:
         kAbort,  // default
         kCommit
     };
+
 
     void commitRegisteredChanges(boost::optional<Timestamp> commitTimestamp);
     void abortRegisteredChanges();

@@ -22,9 +22,9 @@ from pkg_resources import parse_version
 
 import SCons
 import SCons.Script
-from buildscripts.metrics.metrics_datatypes import SConsToolingMetrics
-from buildscripts.metrics.tooling_exit_hook import initialize_exit_hook
-from buildscripts.metrics.tooling_metrics_utils import register_metrics_collection_atexit
+from mongo_tooling_metrics.client import get_mongo_metrics_client
+from mongo_tooling_metrics.errors import ExternalHostException
+from mongo_tooling_metrics.lib.top_level_metrics import SConsToolingMetrics
 from site_scons.mongo import build_profiles
 
 # This must be first, even before EnsureSConsVersion, if
@@ -878,13 +878,13 @@ def variable_arch_converter(val):
     return val
 
 
-def split_dwarf_converter(val):
+def bool_var_converter(val, var):
     try:
         return to_boolean(val)
     except ValueError as exc:
         if val.lower() != "auto":
             raise ValueError(
-                f'Invalid SPLIT_DWARF value {s}, must be a boolean-like string or "auto"') from exc
+                f'Invalid {var} value {s}, must be a boolean-like string or "auto"') from exc
     return "auto"
 
 
@@ -1091,6 +1091,12 @@ env_vars.Add(
 )
 
 env_vars.Add(
+    'READELF',
+    help='Path to readelf',
+    default='readelf',
+)
+
+env_vars.Add(
     'GITDIFFFLAGS',
     help='Sets flags for git diff',
     default='',
@@ -1274,6 +1280,18 @@ env_vars.Add(
 )
 
 env_vars.Add(
+    'LINKFLAGS_COMPILER_EXEC_PREFIX',
+    help='Specify the search path to be injected into the LINKFLAGS',
+    default="",
+)
+
+env_vars.Add(
+    'COMPILER_EXEC_PREFIX_OPT',
+    help='Specify the option sign for compiler exec search paths.',
+    default="-B",
+)
+
+env_vars.Add(
     'NINJA_BUILDDIR',
     help="Location for shared Ninja state",
     default="$BUILD_ROOT/ninja",
@@ -1394,7 +1412,20 @@ env_vars.Add(
     'SPLIT_DWARF',
     help=
     'Set the boolean (auto, on/off true/false 1/0) to enable gsplit-dwarf (non-Windows). Incompatible with DWARF_VERSION=5',
-    converter=split_dwarf_converter,
+    converter=functools.partial(bool_var_converter, var='SPLIT_DWARF'),
+    default="auto",
+)
+
+env_vars.Add(
+    'GDB',
+    help="Configures the path to the 'gdb' debugger binary.",
+)
+
+env_vars.Add(
+    'GDB_INDEX',
+    help=
+    'Set the boolean (auto, on/off true/false 1/0) to enable creation of a gdb_index in binaries.',
+    converter=functools.partial(bool_var_converter, var='GDB_INDEX'),
     default="auto",
 )
 
@@ -1594,15 +1625,23 @@ env.AddMethod(lambda env, name, **kwargs: add_option(name, **kwargs), 'AddOption
 
 # The placement of this is intentional. Here we setup an atexit method to store tooling metrics.
 # We should only register this function after env, env_vars and the parser have been properly initialized.
-register_metrics_collection_atexit(
-    SConsToolingMetrics.generate_metrics, {
-        "utc_starttime": datetime.utcnow(),
-        "env_vars": env_vars,
-        "env": env,
-        "parser": _parser,
-        "args": sys.argv,
-        "exit_hook": initialize_exit_hook(),
-    })
+try:
+    metrics_client = get_mongo_metrics_client()
+    metrics_client.register_metrics(
+        SConsToolingMetrics,
+        utc_starttime=datetime.utcnow(),
+        artifact_dir=env.Dir('$BUILD_DIR').get_abspath(),
+        env_vars=env_vars,
+        env=env,
+        parser=_parser,
+        args=sys.argv,
+    )
+except ExternalHostException as _:
+    pass
+except Exception as _:
+    print(
+        "This MongoDB Virtual Workstation could not connect to the internal cluster\nThis is a non-issue, but if this message persists feel free to reach out in #server-dev-platform"
+    )
 
 if get_option('build-metrics'):
     env['BUILD_METRICS_ARTIFACTS_DIR'] = '$BUILD_ROOT/$VARIANT_DIR'
@@ -1715,6 +1754,9 @@ def CheckDevEnv(context):
         result = True
     return result
 
+
+env.Append(
+    LINKFLAGS=['${_concat(COMPILER_EXEC_PREFIX_OPT, LINKFLAGS_COMPILER_EXEC_PREFIX, "", __env__)}'])
 
 devenv_check = Configure(
     env,
@@ -3464,22 +3506,11 @@ def doConfigure(myenv):
 
         linker_ld = get_option('linker')
         if linker_ld == 'auto':
-            # lld has problems with separate debug info on some platforms. See:
-            # - https://bugzilla.mozilla.org/show_bug.cgi?id=1485556
-            # - https://bugzilla.mozilla.org/show_bug.cgi?id=1485556
-            #
-            # lld also apparently has problems with symbol resolution
-            # in some esoteric configurations that apply for us when
-            # using --link-model=dynamic mode, so disable lld there
-            # too. See:
-            # - https://bugs.llvm.org/show_bug.cgi?id=46676
-            #
-            # We should revisit all of these issues the next time we upgrade our clang minimum.
-            if get_option('separate-debug') == 'off' and get_option('link-model') != 'dynamic':
+            if not env.TargetOSIs('darwin', 'macOS'):
                 if not myenv.AddToLINKFLAGSIfSupported('-fuse-ld=lld'):
-                    myenv.AddToLINKFLAGSIfSupported('-fuse-ld=gold')
-            else:
-                myenv.AddToLINKFLAGSIfSupported('-fuse-ld=gold')
+                    myenv.FatalError(
+                        f"The recommended linker 'lld' is not supported with the current compiler configuration, you can try the 'gold' linker with '--linker=gold'."
+                    )
         elif link_model.startswith("dynamic") and linker_ld == 'bfd':
             # BFD is not supported due to issues with it causing warnings from some of
             # the third party libraries that mongodb is linked with:
@@ -3616,11 +3647,11 @@ def doConfigure(myenv):
         # other than disabling all deprecation warnings. We will
         # revisit this once we are fully on C++20 and can commit the
         # C++20 style code.
-        #
-        # TODO(SERVER-60175): In fact we will want to explicitly opt
-        # in to -Wdeprecated, since clang doesn't include it in -Wall.
         if get_option('cxx-std') == "20":
             myenv.AddToCXXFLAGSIfSupported('-Wno-deprecated')
+
+        # TODO SERVER-58675 - Remove this suppression after abseil is upgraded
+        myenv.AddToCXXFLAGSIfSupported("-Wno-deprecated-builtins")
 
         # Check if we can set "-Wnon-virtual-dtor" when "-Werror" is set. The only time we can't set it is on
         # clang 3.4, where a class with virtual function(s) and a non-virtual destructor throws a warning when
@@ -4360,28 +4391,82 @@ def doConfigure(myenv):
         myenv.AddToCCFLAGSIfSupported('-fno-limit-debug-info')
 
     if myenv.ToolchainIs('gcc', 'clang'):
-        # Usually, --gdb-index is too expensive in big static binaries, but for dynamic
-        # builds it works well.
-        if link_model.startswith("dynamic"):
-            myenv.AddToLINKFLAGSIfSupported('-Wl,--gdb-index')
 
-        # Normalize DWARF_WIDTH to 64 by default if the user did not
-        # select an explicit value and we are on a platform where it
-        # is believed to be meaningful.
-        if not env['DWARF_WIDTH']:
-            if not myenv.TargetOSIs('macOS', 'darwin', 'windows'):
-                env['DWARF_WIDTH'] = 64
-
-        # Only pass -gdwarf{32,64} if an explicit value was selected
+        # Pass -gdwarf{32,64} if an explicit value was selected
         # or defaulted. Fail the build if we can't honor the
         # selection.
-        if env['DWARF_WIDTH']:
+        if myenv['DWARF_WIDTH']:
             if myenv.AddToCCFLAGSIfSupported('-gdwarf$DWARF_WIDTH'):
                 myenv.AppendUnique(LINKFLAGS=['-gdwarf$DWARF_WIDTH'])
             else:
-                env.FatalError('Could not enable selected dwarf width')
+                myenv.FatalError('Could not enable selected dwarf width')
 
-        if env['DWARF_WIDTH'] == 32 and link_model != 'dynamic':
+        # try to determine the if dwarf64 is viable, and fallback to dwarf32 if not
+        elif myenv.CheckCCFLAGSSupported('-gdwarf64'):
+
+            def CheckForDWARF64Support(context):
+
+                context.Message('Checking that DWARF64 format is viable... ')
+                try:
+                    dwarf_version = int(myenv.get('DWARF_VERSION', 0))
+                except ValueError:
+                    dwarf_version = None
+
+                if dwarf_version is None or dwarf_version <= 4:
+                    result = False
+                else:
+                    test_body = """
+                        #include <iostream>
+                        #include <cstdlib>
+                        int main() {
+                            std::cout << "Hello, World" << std::endl;
+                            return EXIT_SUCCESS;
+                        }
+                        """
+                    original_ccflags = context.env.get('CCFLAGS')
+                    original_linkflags = context.env.get('LINKFLAGS')
+
+                    context.env.Append(CCFLAGS=['-gdwarf64'], LINKFLAGS=['-gdwarf64'])
+
+                    ret = context.TryLink(textwrap.dedent(test_body), ".cpp")
+
+                    context.env['CCFLAGS'] = original_ccflags
+                    context.env['LINKFLAGS'] = original_linkflags
+
+                    if not ret:
+                        context.Result("unknown")
+                        return False
+
+                    regex = re.compile(r'^\s*Length:.*[64|32]-bit\)$', re.MULTILINE)
+                    p = subprocess.run([context.env['READELF'], '-wi', context.lastTarget.path],
+                                       capture_output=True, text=True)
+                    matches = re.findall(regex, p.stdout)
+                    address_types = set()
+                    for match in matches:
+                        address_types.add(match[-len('(XX-bit)'):])
+                    result = len(address_types) == 1 and list(address_types)[0] == '(64-bit)'
+
+                context.Result(result)
+                return result
+
+            conf = Configure(
+                myenv,
+                help=False,
+                custom_tests={
+                    'CheckForDWARF64Support': CheckForDWARF64Support,
+                },
+            )
+
+            if conf.CheckForDWARF64Support():
+                myenv['DWARF_WIDTH'] = 64
+                myenv.AppendUnique(LINKFLAGS=['-gdwarf64'], CCFLAGS=['-gdwarf64'])
+            else:
+                myenv['DWARF_WIDTH'] = 32
+                myenv.AppendUnique(LINKFLAGS=['-gdwarf32'], CCFLAGS=['-gdwarf32'])
+
+            conf.Finish()
+
+        if myenv['DWARF_WIDTH'] == 32 and link_model != 'dynamic':
             # This will create an extra section where debug types can be referred from,
             # reducing other section sizes. This helps most with big static links as there
             # will be lots of duplicate debug type info.
@@ -5450,6 +5535,27 @@ if get_option('ninja') != 'disabled':
     # TODO: API for getting the sconscripts programmatically
     # exists upstream: https://github.com/SCons/scons/issues/3625
     def ninja_generate_deps(env, target, source, for_signature):
+
+        # TODO SERVER-72851 add api for vars files to exec other vars files
+        # this would allow us to get rid of this regex here
+        def find_nested_variable_files(variables_file):
+            variable_files = [variables_file]
+
+            with open(variables_file, 'r') as file:
+                data = file.read()
+                pattern = "exec\\(open\\(['\"](.*)['\"]\, ['\"][a-z]+['\"]\\).read\\(\\)\\)"
+                nested_files = re.findall(pattern, data)
+                for file_name in nested_files:
+                    variable_files.extend(find_nested_variable_files(file_name))
+
+            return variable_files
+
+        # vars files can be from outside of the repo dir and can exec other vars files
+        # so we cannot just glob them
+        variables_files = []
+        for variable_file in variables_files_args:
+            variables_files.extend(find_nested_variable_files(variable_file))
+
         dependencies = env.Flatten([
             'SConstruct',
             glob(os.path.join('src', '**', 'SConscript'), recursive=True),
@@ -5458,6 +5564,7 @@ if get_option('ninja') != 'disabled':
             glob(os.path.join('buildscripts', '**', '*.py'), recursive=True),
             glob(os.path.join('src/third_party/scons-*', '**', '*.py'), recursive=True),
             glob(os.path.join('src/mongo/db/modules', '**', '*.py'), recursive=True),
+            variables_files,
         ])
 
         return dependencies
@@ -5654,13 +5761,18 @@ if get_option('ninja') != 'disabled':
 
     env['NINJA_GENERATED_SOURCE_ALIAS_NAME'] = 'generated-sources'
 
-if get_option('separate-debug') == "on" or env.TargetOSIs("windows"):
+gdb_index = env.get('GDB_INDEX')
+if gdb_index == 'auto' and link_model == 'dynamic':
+    gdb_index = True
 
-    # The current ninja builder can't handle --separate-debug on non-Windows platforms
-    # like linux or macOS, because they depend on adding extra actions to the link step,
-    # which cannot be translated into the ninja bulider.
-    if not env.TargetOSIs("windows") and get_option('ninja') != 'disabled':
-        env.FatalError("Cannot use --separate-debug with Ninja on non-Windows platforms.")
+if gdb_index == True:
+    gdb_index = Tool('gdb_index')
+    if gdb_index.exists(env):
+        gdb_index.generate(env)
+    elif env.get('GDB_INDEX') != 'auto':
+        env.FatalError('Could not enable explicit request for gdb index generation.')
+
+if get_option('separate-debug') == "on" or env.TargetOSIs("windows"):
 
     separate_debug = Tool('separate_debug')
     if not separate_debug.exists(env):
@@ -5687,8 +5799,6 @@ if env['SPLIT_DWARF']:
         env.FatalError(
             'Running split dwarf outside of DWARF4 has shown compilation issues when using DWARF5 and gdb index. Disabling this functionality for now. Use SPLIT_DWARF=0 to disable building with split dwarf or use DWARF_VERSION=4 to pin to DWARF version 4.'
         )
-    if env.ToolchainIs('gcc', 'clang'):
-        env.AddToLINKFLAGSIfSupported('-Wl,--gdb-index')
     env.Tool('split_dwarf')
 
 env["AUTO_ARCHIVE_TARBALL_SUFFIX"] = "tgz"

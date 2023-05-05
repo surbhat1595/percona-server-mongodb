@@ -1,3 +1,5 @@
+load("jstests/libs/ttl_util.js");
+
 var ClusteredCappedUtils = class {
     // Validate TTL-based deletion on a clustered, capped collection.
     static testClusteredCappedCollectionWithTTL(db, collName, clusterKeyField) {
@@ -39,7 +41,8 @@ var ClusteredCappedUtils = class {
         }
         assert.commandWorked(coll.insertMany(docs, {ordered: true}));
 
-        ClusteredCollectionUtil.waitForTTL(db);
+        // This test runs with default read concern 'local'.
+        TTLUtil.waitForPass(db, /*waitForMajorityCommit=*/false);
 
         // Only the recent documents survived.
         assert.eq(coll.find().itcount(), batchSize);
@@ -140,7 +143,7 @@ var ClusteredCappedUtils = class {
         // TTL delete the two old documents.
 
         assert.commandWorked(db.adminCommand({setParameter: 1, ttlMonitorEnabled: true}));
-        ClusteredCollectionUtil.waitForTTL(db);
+        TTLUtil.waitForPass(db, /*waitForMajorityCommit=*/isReplicated);
         assert.eq(2, db.getCollection(collName).find().itcount());
 
         // Confirm that the tailable getMore can resume from where it was, since the document the
@@ -209,7 +212,7 @@ var ClusteredCappedUtils = class {
         // TTL delete the two old documents, while the tailable cursor is still on the first one.
 
         assert.commandWorked(db.adminCommand({setParameter: 1, ttlMonitorEnabled: true}));
-        ClusteredCollectionUtil.waitForTTL(db);
+        TTLUtil.waitForPass(db, /*waitForMajorityCommit=*/isReplicated);
         assert.eq(1, db.getCollection(collName).find().itcount());
 
         // Confirm that the tailable cursor returns CappedPositionLost, as the document it was
@@ -280,7 +283,7 @@ var ClusteredCappedUtils = class {
         const oneDayInSeconds = 60 * 60 * 24;
         const tenDaysInMilliseconds = 10 * oneDayInSeconds * 1000;
         const tenDaysAgo = new Date(new Date() - tenDaysInMilliseconds);
-        const earlierTenDaysAgo = new Date(tenDaysAgo.getTime - 1);
+        const earlierTenDaysAgo = new Date(tenDaysAgo.getTime() - 1);
 
         // Create clustered capped collection and insert soon-to-be-expired documents.
         assert.commandWorked(db.createCollection(collName, {
@@ -296,7 +299,8 @@ var ClusteredCappedUtils = class {
 
         // Expire the documents.
         assert.commandWorked(db.adminCommand({setParameter: 1, ttlMonitorEnabled: true}));
-        ClusteredCollectionUtil.waitForTTL(db);
+        // No need to wait for majority commit, as default 'local' read concern is used.
+        TTLUtil.waitForPass(db, /*waitForMajorityCommit=*/false);
         assert.eq(0, db.getCollection(collName).find().itcount());
 
         // The TTL deletion has been replicated to the oplog.
@@ -324,7 +328,16 @@ var ClusteredCappedUtils = class {
                     .sort({$natural: -1})
                     .limit(1)
                     .toArray();
-            assert.eq(2, ops[0].o.applyOps.length);
+            assert.lte(ops[0].o.applyOps.length, 2);
+            if (ops[0].o.applyOps.length === 1) {
+                // The batch got split in two separate executions.
+                const pendingId =
+                    ops[0].o.applyOps[0].o._id === tenDaysAgo ? earlierTenDaysAgo : tenDaysAgo;
+                assert.eq(1,
+                          db.getSiblingDB("local")
+                              .oplog.rs.find({op: "d", ns: ns, "o._id": pendingId})
+                              .itcount());
+            }
         } else {
             assert.eq(1,
                       db.getSiblingDB("local")

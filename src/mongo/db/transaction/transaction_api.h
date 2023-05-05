@@ -417,6 +417,13 @@ public:
      */
     LogicalTime getOperationTime() const;
 
+    /**
+     * Returns an unowned pointer to the ServiceContext used to create this transaction.
+     */
+    ServiceContext* getParentServiceContext() const {
+        return _service;
+    }
+
 private:
     class TransactionState {
     public:
@@ -563,9 +570,9 @@ public:
 
     /**
      * If the transaction needs to be cleaned up, i.e. aborted, this will schedule the necessary
-     * work without waiting for it to complete.
+     * work. Callers can wait for cleanup by waiting on the returned future.
      */
-    void scheduleCleanupIfNecessary();
+    SemiFuture<void> cleanUpIfNecessary();
 
 private:
     // Helper methods for running a transaction.

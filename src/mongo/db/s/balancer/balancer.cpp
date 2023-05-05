@@ -78,13 +78,7 @@ namespace {
 
 MONGO_FAIL_POINT_DEFINE(overrideBalanceRoundInterval);
 
-const Seconds kBalanceRoundDefaultInterval(10);
-
-// Sleep between balancer rounds in the case where the last round found some chunks which needed to
-// be balanced. This value should be set sufficiently low so that imbalanced clusters will quickly
-// reach balanced state, but setting it too low may cause CRUD operations to start failing due to
-// not being able to establish a stable shard version.
-const Seconds kShortBalanceRoundInterval(1);
+const Milliseconds kBalanceRoundDefaultInterval(10 * 1000);
 
 /**
  * Balancer status response
@@ -104,10 +98,13 @@ class BalanceRoundDetails {
 public:
     BalanceRoundDetails() : _executionTimer() {}
 
-    void setSucceeded(int candidateChunks, int chunksMoved) {
+    void setSucceeded(int numCandidateChunks,
+                      int numChunksMoved,
+                      int numImbalancedCachedCollections) {
         invariant(!_errMsg);
-        _candidateChunks = candidateChunks;
-        _chunksMoved = chunksMoved;
+        _numCandidateChunks = numCandidateChunks;
+        _numChunksMoved = numChunksMoved;
+        _numImbalancedCachedCollections = numImbalancedCachedCollections;
     }
 
     void setFailed(const string& errMsg) {
@@ -122,8 +119,9 @@ public:
         if (_errMsg) {
             builder.append("errmsg", *_errMsg);
         } else {
-            builder.append("candidateChunks", _candidateChunks);
-            builder.append("chunksMoved", _chunksMoved);
+            builder.append("candidateChunks", _numCandidateChunks);
+            builder.append("chunksMoved", _numChunksMoved);
+            builder.append("imbalancedCachedCollections", _numImbalancedCachedCollections);
         }
         return builder.obj();
     }
@@ -132,8 +130,9 @@ private:
     const Timer _executionTimer;
 
     // Set only on success
-    int _candidateChunks{0};
-    int _chunksMoved{0};
+    int _numCandidateChunks{0};
+    int _numChunksMoved{0};
+    int _numImbalancedCachedCollections{0};
 
     // Set only on failure
     boost::optional<string> _errMsg;
@@ -282,7 +281,8 @@ Balancer::Balancer()
       _defragmentationPolicy(std::make_unique<BalancerDefragmentationPolicyImpl>(
           _clusterStats.get(), _random, [this]() { _onActionsStreamPolicyStateUpdate(); })),
       _clusterChunksResizePolicy(std::make_unique<ClusterChunksResizePolicyImpl>(
-          [this] { _onActionsStreamPolicyStateUpdate(); })) {}
+          [this] { _onActionsStreamPolicyStateUpdate(); })),
+      _imbalancedCollectionsCache(std::make_unique<stdx::unordered_set<NamespaceString>>()) {}
 
 Balancer::~Balancer() {
     // Terminate the balancer thread so it doesn't leak memory.
@@ -313,6 +313,7 @@ void Balancer::onBecomeArbiter() {
 
 void Balancer::initiateBalancer(OperationContext* opCtx) {
     stdx::lock_guard<Latch> scopedLock(_mutex);
+    _imbalancedCollectionsCache->clear();
     invariant(_state == kStopped);
     _state = kRunning;
 
@@ -698,6 +699,7 @@ void Balancer::_mainThread() {
 
     // Main balancer loop
     auto lastDrainingShardsCheckTime{Date_t::fromMillisSinceEpoch(0)};
+    auto lastMigrationTime = Date_t::fromMillisSinceEpoch(0);
     while (!_stopRequested()) {
         BalanceRoundDetails roundDetails;
 
@@ -739,6 +741,14 @@ void Balancer::_mainThread() {
                 continue;
             }
 
+            boost::optional<Milliseconds> forcedBalancerRoundInterval(boost::none);
+            overrideBalanceRoundInterval.execute([&](const BSONObj& data) {
+                forcedBalancerRoundInterval = Milliseconds(data["intervalMs"].numberInt());
+                LOGV2(21864,
+                      "overrideBalanceRoundInterval: using customized balancing interval",
+                      "balancerInterval"_attr = *forcedBalancerRoundInterval);
+            });
+
             // The current configuration is allowing the balancer to perform operations.
             // Unblock the secondary thread if needed.
             _defragmentationCondVar.notify_all();
@@ -758,13 +768,7 @@ void Balancer::_mainThread() {
                 }
 
                 // Collect and apply up-to-date configuration values on the cluster collections.
-                {
-                    OperationContext* ctx = opCtx.get();
-                    auto allCollections = Grid::get(ctx)->catalogClient()->getCollections(ctx, {});
-                    for (const auto& coll : allCollections) {
-                        _defragmentationPolicy->startCollectionDefragmentation(ctx, coll);
-                    }
-                }
+                _defragmentationPolicy->startCollectionDefragmentations(opCtx.get());
 
                 Status status = _splitChunksIfNeeded(opCtx.get());
                 if (!status.isOK()) {
@@ -791,42 +795,46 @@ void Balancer::_mainThread() {
                 const auto chunksToDefragment =
                     _defragmentationPolicy->selectChunksToMove(opCtx.get(), &availableShards);
 
-                const auto chunksToRebalance =
-                    uassertStatusOK(_chunkSelectionPolicy->selectChunksToMove(
-                        opCtx.get(), shardStats, &availableShards));
+                const auto chunksToRebalance = uassertStatusOK(
+                    _chunkSelectionPolicy->selectChunksToMove(opCtx.get(),
+                                                              shardStats,
+                                                              &availableShards,
+                                                              _imbalancedCollectionsCache.get()));
 
                 if (chunksToRebalance.empty() && chunksToDefragment.empty()) {
                     LOGV2_DEBUG(21862, 1, "No need to move any chunk");
                     _balancedLastTime = 0;
+                    LOGV2_DEBUG(21863, 1, "End balancing round");
+                    _endRound(opCtx.get(),
+                              forcedBalancerRoundInterval ? *forcedBalancerRoundInterval
+                                                          : kBalanceRoundDefaultInterval);
                 } else {
+                    auto timeSinceLastMigration = Date_t::now() - lastMigrationTime;
+                    _sleepFor(opCtx.get(),
+                              forcedBalancerRoundInterval
+                                  ? *forcedBalancerRoundInterval - timeSinceLastMigration
+                                  : Milliseconds(balancerMigrationsThrottlingMs.load()) -
+                                      timeSinceLastMigration);
+
                     _balancedLastTime =
                         _moveChunks(opCtx.get(), chunksToRebalance, chunksToDefragment);
+                    lastMigrationTime = Date_t::now();
 
                     roundDetails.setSucceeded(
                         static_cast<int>(chunksToRebalance.size() + chunksToDefragment.size()),
-                        _balancedLastTime);
+                        _balancedLastTime,
+                        _imbalancedCollectionsCache->size());
 
                     ShardingLogging::get(opCtx.get())
                         ->logAction(opCtx.get(), "balancer.round", "", roundDetails.toBSON())
                         .ignore();
+
+                    LOGV2_DEBUG(6679500, 1, "End balancing round");
+                    // Migration throttling of `balancerMigrationsThrottlingMs` will be applied
+                    // before the next call to _moveChunks, so don't sleep here.
+                    _endRound(opCtx.get(), Milliseconds(0));
                 }
-
-                LOGV2_DEBUG(21863, 1, "End balancing round");
             }
-
-            Milliseconds balancerInterval =
-                _balancedLastTime ? kShortBalanceRoundInterval : kBalanceRoundDefaultInterval;
-
-            overrideBalanceRoundInterval.execute([&](const BSONObj& data) {
-                balancerInterval = Milliseconds(data["intervalMs"].numberInt());
-                LOGV2(21864,
-                      "overrideBalanceRoundInterval: using shorter balancing interval: "
-                      "{balancerInterval}",
-                      "overrideBalanceRoundInterval: using shorter balancing interval",
-                      "balancerInterval"_attr = balancerInterval);
-            });
-
-            _endRound(opCtx.get(), balancerInterval);
         } catch (const DBException& e) {
             LOGV2(21865,
                   "caught exception while doing balance: {error}",

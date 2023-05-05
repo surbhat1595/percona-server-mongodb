@@ -530,8 +530,8 @@ bool ReplicationCoordinatorImpl::_startLoadLocalConfig(
 
     LOGV2(4280504, "Cleaning up any partially applied oplog batches & reading last op from oplog");
     // Read the last op from the oplog after cleaning up any partially applied batches.
-    const auto stableTimestamp = boost::none;
-    _replicationProcess->getReplicationRecovery()->recoverFromOplog(opCtx, stableTimestamp);
+    auto stableTimestamp =
+        _replicationProcess->getReplicationRecovery()->recoverFromOplog(opCtx, boost::none);
     LOGV2(4280505,
           "Creating any necessary TenantMigrationAccessBlockers for unfinished migrations");
 
@@ -543,7 +543,9 @@ bool ReplicationCoordinatorImpl::_startLoadLocalConfig(
 
     tenant_migration_access_blocker::recoverTenantMigrationAccessBlockers(opCtx);
     LOGV2(4280506, "Reconstructing prepared transactions");
-    reconstructPreparedTransactions(opCtx, OplogApplication::Mode::kRecovering);
+    reconstructPreparedTransactions(opCtx,
+                                    stableTimestamp ? OplogApplication::Mode::kStableRecovering
+                                                    : OplogApplication::Mode::kUnstableRecovering);
 
     const auto lastOpTimeAndWallTimeResult = _externalState->loadLastOpTimeAndWallTime(opCtx);
 
@@ -1014,6 +1016,10 @@ bool ReplicationCoordinatorImpl::enterQuiesceModeIfSecondary(Milliseconds quiesc
     if (!_memberState.secondary()) {
         return false;
     }
+
+    // Cancel any ongoing election so that the node cannot become primary once in quiesce mode,
+    // and do not wait for cancellation to complete.
+    _cancelElectionIfNeeded(lk);
 
     _inQuiesceMode = true;
     _quiesceDeadline = _replExecutor->now() + quiesceTime;
@@ -2576,33 +2582,28 @@ ReplicationCoordinatorImpl::AutoGetRstlForStepUpStepDown::AutoGetRstlForStepUpSt
         deadline = start + Seconds(rstlTimeout);  // cap deadline
     }
 
-    try {
-        // Enqueues RSTL in X mode.
-        _rstlLock.emplace(_opCtx, MODE_X, ReplicationStateTransitionLockGuard::EnqueueOnly());
+    _rstlLock.emplace(_opCtx, MODE_X, ReplicationStateTransitionLockGuard::EnqueueOnly());
 
-        ON_BLOCK_EXIT([&] { _stopAndWaitForKillOpThread(); });
-        _startKillOpThread();
+    ON_BLOCK_EXIT([&] { _stopAndWaitForKillOpThread(); });
+    _startKillOpThread();
 
-        // Wait for RSTL to be acquired.
-        _rstlLock->waitForLockUntil(deadline);
-
-    } catch (const ExceptionFor<ErrorCodes::LockTimeout>&) {
-        if (rstlTimeout > 0 && Date_t::now() - start >= Seconds(rstlTimeout)) {
-            // Dump all locks to identify which thread(s) are holding RSTL.
-            getGlobalLockManager()->dump();
-
-            auto lockerInfo =
-                opCtx->lockState()->getLockerInfo(CurOp::get(opCtx)->getLockStatsBase());
-            BSONObjBuilder lockRep;
-            lockerInfo->stats.report(&lockRep);
-            LOGV2_FATAL(5675600,
-                        "Time out exceeded waiting for RSTL, stepUp/stepDown is not possible "
-                        "thus calling abort() to allow cluster to progress.",
-                        "lockRep"_attr = lockRep.obj());
+    // Wait for RSTL to be acquired.
+    _rstlLock->waitForLockUntil(deadline, [opCtx, rstlTimeout, start] {
+        if (rstlTimeout <= 0 || Date_t::now() - start < Seconds{rstlTimeout}) {
+            return;
         }
-        // Rethrow to keep processing as before at a higher layer.
-        throw;
-    }
+
+        // Dump all locks to identify which thread(s) are holding RSTL.
+        getGlobalLockManager()->dump();
+
+        auto lockerInfo = opCtx->lockState()->getLockerInfo(CurOp::get(opCtx)->getLockStatsBase());
+        BSONObjBuilder lockRep;
+        lockerInfo->stats.report(&lockRep);
+        LOGV2_FATAL(5675600,
+                    "Time out exceeded waiting for RSTL, stepUp/stepDown is not possible thus "
+                    "calling abort() to allow cluster to progress",
+                    "lockRep"_attr = lockRep.obj());
+    });
 };
 
 void ReplicationCoordinatorImpl::AutoGetRstlForStepUpStepDown::_startKillOpThread() {

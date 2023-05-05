@@ -1819,11 +1819,25 @@ functions:
       display_name: Jepsen Test Results - ${execution}
       optional: true
 
+  "upload jepsen_log": &upload_jepsen_log
+    command: s3.put
+    params:
+      optional: true
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: src/jepsen-mongodb/jepsen_${task_name}_${execution}.log
+      remote_file: ${project}/${build_variant}/${revision}/jepsen_${task_name}_${execution}.log
+      bucket: mciuploads
+      permissions: public-read
+      content_type: text/plain
+      display_name: Jepsen Test Log
+
   "save jepsen artifacts":
   - *tar_jepsen_logs
   - *archive_jepsen_logs
   - *tar_jepsen_results
   - *archive_jepsen_results
+  - *upload_jepsen_log
 
   "save blackduck artifacts":
   - command: archive.targz_pack
@@ -5191,12 +5205,11 @@ tasks:
     vars:
       resmoke_jobs_max: 1
 
-- <<: *task_template
-  name: sharded_collections_jscore_passthrough
+- <<: *gen_task_template
+  name: sharded_collections_jscore_passthrough_gen
   tags: ["sharding", "jscore"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
 
 - <<: *gen_task_template
   name: sharded_collections_jscore_multiversion_gen
@@ -6771,7 +6784,7 @@ tasks:
       - "./src/evergreen/packages_publish.sh"
 
 - name: push
-  run_on: rhel80-small
+  run_on: rhel8.7-small
   tags: ["publish"]
   patchable: false
   depends_on:
@@ -6825,13 +6838,28 @@ tasks:
       aws_key_remote: ${repo_aws_key}
       aws_secret_remote: ${repo_aws_secret}
   - func: "f_expansions_write"
-  - func: "set up notary client credentials"
+
+  # login to container registry
+  - command: shell.exec
+    params:
+      shell: bash
+      script: |
+        set -oe
+        podman login --username ${release_tools_container_registry_username} --password ${release_tools_container_registry_password} ${release_tools_container_registry}
+
+  # signing windows artifacts
   - command: subprocess.exec
-    type: test
     params:
       binary: bash
       args:
-      - "./src/evergreen/notary_client_run.sh"
+      - "./src/evergreen/garasign_jsign_sign.sh"
+
+  # signing linux artifacts
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "./src/evergreen/garasign_gpg_sign.sh"
 
   # Put the binaries tarball/zipfile
   - command: s3.put
@@ -6944,7 +6972,7 @@ tasks:
       aws_secret: ${aws_secret}
       permissions: public-read
       build_variants: ["enterprise-windows", "windows"]
-      local_file: src/mongodb-${push_name}-${push_arch}-${suffix}-signed.msi
+      local_file: src/mongodb-${push_name}-${push_arch}-${suffix}.msi
       bucket: build-push-testing
       content_type: application/x-msi
       remote_file: ${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}-signed.msi
@@ -7003,7 +7031,7 @@ tasks:
       aws_secret: ${aws_secret}
       permissions: public-read
       build_variants: ["enterprise-windows", "windows"]
-      local_file: src/mongodb-${push_name}-${push_arch}-${suffix}-signed.msi.sha1
+      local_file: src/mongodb-${push_name}-${push_arch}-${suffix}.msi.sha1
       bucket: build-push-testing
       content_type: text/plain
       remote_file: ${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}-signed.msi.sha1
@@ -7061,7 +7089,7 @@ tasks:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
       build_variants: ["enterprise-windows", "windows"]
-      local_file: src/mongodb-${push_name}-${push_arch}-${suffix}-signed.msi.sha256
+      local_file: src/mongodb-${push_name}-${push_arch}-${suffix}.msi.sha256
       bucket: build-push-testing
       permissions: public-read
       remote_file: ${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}-signed.msi.sha256
@@ -7120,7 +7148,7 @@ tasks:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
       build_variants: ["enterprise-windows", "windows"]
-      local_file: src/mongodb-${push_name}-${push_arch}-${suffix}-signed.msi.md5
+      local_file: src/mongodb-${push_name}-${push_arch}-${suffix}.msi.md5
       bucket: build-push-testing
       permissions: public-read
       content_type: text/plain
@@ -7251,7 +7279,7 @@ tasks:
          'destination': {'path': '${push_path}/mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}.${ext|tgz}.md5', 'bucket': '${push_bucket}'}}
 
 - name: crypt_push
-  run_on: rhel80-small
+  run_on: rhel8.7-small
   tags: ["publish_crypt"]
   patchable: false
   stepback: false
@@ -7288,13 +7316,18 @@ tasks:
       aws_key_remote: ${repo_aws_key}
       aws_secret_remote: ${repo_aws_secret}
   - func: "f_expansions_write"
-  - func: "set up notary client credentials"
+  # login to container registry
+  - command: shell.exec
+    params:
+      shell: bash
+      script: |
+        set -oe
+        podman login --username ${release_tools_container_registry_username} --password ${release_tools_container_registry_password} ${release_tools_container_registry}
   - command: subprocess.exec
-    type: test
     params:
       binary: bash
       args:
-      - "./src/evergreen/notary_client_crypt_run.sh"
+      - "./src/evergreen/garasign_gpg_crypt_sign.sh"
   # Put the crypt tarball/zipfile
   - command: s3.put
     params:
@@ -7374,6 +7407,15 @@ tasks:
 
 - <<: *task_template
   name: search_auth
+  tags: []
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+    vars:
+      resmoke_jobs_max: 1
+
+- <<: *task_template
+  name: search_pinned_connections_auth
   tags: []
   commands:
   - func: "do setup"

@@ -347,6 +347,7 @@ buildvariants:
   - name: sasl
   - name: search
   - name: search_auth
+  - name: search_pinned_connections_auth
   - name: search_ssl
   - name: session_jscore_passthrough
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
@@ -553,9 +554,6 @@ buildvariants:
   - name: audit
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.replica_sets !.aggregation !.sharding !.jscore
-  - name: .jepsen_docker
-    distros:
-    - debian11-large
   - name: .jscore .common !.decimal !.sharding
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
@@ -593,7 +591,7 @@ buildvariants:
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
-    - rhel70
+    - rhel70-large
   - name: aggregation
   - name: .auth !.audit !.multiversion
   - name: causally_consistent_jscore_txns_passthrough
@@ -614,7 +612,8 @@ buildvariants:
   - name: .sharding .common !.csrs
   - name: .ssl
   - name: .stitch
-  - name: selinux_rhel7_org
+  #TODO: BF-24515 renable once fixed
+  #- name: selinux_rhel7_org
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -791,6 +790,7 @@ buildvariants:
   - name: sasl
   - name: search
   - name: search_auth
+  - name: search_pinned_connections_auth
   - name: search_ssl
   - name: session_jscore_passthrough
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
@@ -811,7 +811,8 @@ buildvariants:
   - name: server_selection_json_test_TG
     distros:
     - rhel80-large
-  - name: selinux_rhel8_enterprise
+  #TODO: BF-24515 renable once fixed
+  #- name: selinux_rhel8_enterprise
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -833,6 +834,7 @@ buildvariants:
     repo_edition: org
     scons_cache_scope: shared
     large_distro_name: rhel82-arm64-large
+    test_flags: --excludeWithAnyTags=requires_increased_memlock_limits
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:
@@ -902,6 +904,7 @@ buildvariants:
   - name: sasl
   - name: search
   - name: search_auth
+  - name: search_pinned_connections_auth
   - name: search_ssl
   - name: sharding_auth_audit_gen
   - name: sharding_auth_gen
@@ -957,7 +960,8 @@ buildvariants:
   - name: .sharding .common !.csrs !.multiversion
   - name: .ssl
   - name: .stitch
-  - name: selinux_rhel9_org
+  #TODO: BF-24515 renable once fixed
+  #- name: selinux_rhel9_org
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -1023,6 +1027,7 @@ buildvariants:
   - name: sasl
   - name: search
   - name: search_auth
+  - name: search_pinned_connections_auth
   - name: search_ssl
   - name: sharding_auth_audit_gen
   - name: sharding_auth_gen
@@ -1031,7 +1036,8 @@ buildvariants:
   - name: .crypt
   - name: .publish_crypt
   - name: unittest_shell_hang_analyzer_gen
-  - name: selinux_rhel9_enterprise
+  #TODO: BF-24515 renable once fixed
+  #- name: selinux_rhel9_enterprise
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -1122,6 +1128,7 @@ buildvariants:
   - name: sasl
   - name: search
   - name: search_auth
+  - name: search_pinned_connections_auth
   - name: search_ssl
   - name: sharding_auth_audit_gen
   - name: sharding_auth_gen
@@ -1153,6 +1160,7 @@ buildvariants:
     packager_distro: suse12
     repo_edition: org
     scons_cache_scope: shared
+    test_flags: --excludeWithAnyTags=requires_increased_memlock_limits
     large_distro_name: suse12-sp5-large
   tasks:
   - name: compile_test_and_package_serial_TG
@@ -1294,6 +1302,7 @@ buildvariants:
     packager_distro: suse15
     repo_edition: org
     scons_cache_scope: shared
+    test_flags: --excludeWithAnyTags=requires_increased_memlock_limits
     large_distro_name: suse15-build
   tasks:
   - name: compile_test_and_package_serial_TG
@@ -1544,6 +1553,7 @@ buildvariants:
     repo_edition: org
     scons_cache_scope: shared
     large_distro_name: ubuntu2204-large
+    test_flags: --excludeWithAnyTags=requires_increased_memlock_limits
   tasks:
   - name: compile_test_and_package_serial_TG
     distros:

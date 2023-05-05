@@ -656,6 +656,9 @@ var ReplSetTest = function(opts) {
         // replica set nodes and return without waiting to connect to any of them.
         const skipWaitingForAllConnections = (options && options.waitForConnect === false);
 
+        // Keep a copy of these options
+        self.startSetOptions = options;
+
         // Start up without waiting for connections.
         this.startSetAsync(options, restart);
 
@@ -730,8 +733,8 @@ var ReplSetTest = function(opts) {
 
     /**
      * Blocks until the secondary nodes have completed recovery and their roles are known. Blocks on
-     * all secondary nodes or just 'secondaries', if specified. Waits for all 'newlyAdded' fields to
-     * be removed by default.
+     * all secondary nodes or just 'secondaries', if specified. Does not wait for all 'newlyAdded'
+     * fields to be removed by default.
      */
     this.awaitSecondaryNodes = function(
         timeout, secondaries, retryIntervalMS, waitForNewlyAddedRemoval) {
@@ -1361,6 +1364,28 @@ var ReplSetTest = function(opts) {
 
         cmd[cmdKey] = config;
 
+        // If this ReplSet is started using this.startSet and binVersions (ie:
+        // rst.startSet({binVersion: [...]}) we need to make sure the binVersion combination is
+        // valid.
+        if (typeof (this.startSetOptions) === "object" &&
+            this.startSetOptions.hasOwnProperty("binVersion") &&
+            typeof (this.startSetOptions.binVersion) === "object") {
+            let lastLTSSpecified = false;
+            let lastContinuousSpecified = false;
+            this.startSetOptions.binVersion.forEach(function(binVersion, _) {
+                if (lastLTSSpecified === false) {
+                    lastLTSSpecified = MongoRunner.areBinVersionsTheSame(binVersion, lastLTSFCV);
+                }
+                if ((lastContinuousSpecified === false) && (lastLTSFCV !== lastContinuousFCV)) {
+                    lastContinuousSpecified =
+                        MongoRunner.areBinVersionsTheSame(binVersion, lastContinuousFCV);
+                }
+            });
+            if (lastLTSSpecified && lastContinuousSpecified) {
+                throw new Error("Can only specify one of 'last-lts' and 'last-continuous' " +
+                                "in binVersion, not both.");
+            }
+        }
         // Initiating a replica set with a single node will use "latest" FCV. This will
         // cause IncompatibleServerVersion errors if additional "last-lts"/"last-continuous" binary
         // version nodes are subsequently added to the set, since such nodes cannot set their FCV to
@@ -1372,11 +1397,15 @@ var ReplSetTest = function(opts) {
         Object.keys(this.nodeOptions).forEach(function(key, index) {
             let val = self.nodeOptions[key];
             if (typeof (val) === "object" && val.hasOwnProperty("binVersion")) {
-                lastLTSBinVersionWasSpecifiedForSomeNode =
-                    MongoRunner.areBinVersionsTheSame(val.binVersion, lastLTSFCV);
-                lastContinuousBinVersionWasSpecifiedForSomeNode =
-                    (lastLTSFCV !== lastContinuousFCV) &&
-                    MongoRunner.areBinVersionsTheSame(val.binVersion, lastContinuousFCV);
+                if (lastLTSBinVersionWasSpecifiedForSomeNode === false) {
+                    lastLTSBinVersionWasSpecifiedForSomeNode =
+                        MongoRunner.areBinVersionsTheSame(val.binVersion, lastLTSFCV);
+                }
+                if ((lastContinuousBinVersionWasSpecifiedForSomeNode === false) &&
+                    (lastLTSFCV !== lastContinuousFCV)) {
+                    lastContinuousBinVersionWasSpecifiedForSomeNode =
+                        MongoRunner.areBinVersionsTheSame(val.binVersion, lastContinuousFCV);
+                }
                 explicitBinVersionWasSpecifiedForSomeNode = true;
             }
         });

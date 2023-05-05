@@ -250,8 +250,36 @@ last-continuous:
     ticket: SERVER-72620
   - test_file: jstests/core/timeseries/bucket_unpacking_with_sort_extended_range.js
     ticket: SERVER-73110
+  - test_file: jstests/core/doc_validation_with_now_variable.js
+    ticket: SERVER-73125
+  - test_file: jstests/core/clustered_collection_collation.js
+    ticket: SERVER-72224
+  # The test switched directories in a newer version of the server. Include the new path to ensure
+  # multiversion runs with v6.0.
+  - test_file: jstests/core/clustered/clustered_collection_collation.js
+    ticket: SERVER-72224
   - test_file: jstests/sharding/shard_keys_with_dollar_sign.js
     ticket: SERVER-74124
+  - test_file: jstests/sharding/move_chunk_concurrent_cloning.js
+    ticket: SERVER-68648
+  - test_file: jstests/core/timeseries/timeseries_filter_extended_range.js
+    ticket: SERVER-69952
+  - test_file: jstests/replsets/quiesce_mode_fails_elections.js
+    ticket: SERVER-72774
+  - test_file: jstests/core/clustered_collection_collation.js
+    ticket: SERVER-67105
+  - test_file: jstests/core/clustered_collection_bounded_scan.js
+    ticket: SERVER-67105
+  - test_file: jstests/core/map_reduce_subplanning.js
+    ticket: SERVER-74131
+  - test_file: jstests/sharding/resharding_interrupt_before_create_state_machine.js
+    ticket: SERVER-74647
+  - test_file: jstests/replsets/session_cache_refresh_write_error_fail.js
+    ticket: SERVER-73229
+  - test_file: jstests/core/field_name_validation.js
+    ticket: SERVER-75517
+  - test_file: jstests/core/command_let_variables.js
+    ticket: SERVER-75356
   suites: null
 last-lts:
   all:
@@ -577,6 +605,32 @@ last-lts:
     ticket: SERVER-72620
   - test_file: jstests/core/timeseries/bucket_unpacking_with_sort_extended_range.js
     ticket: SERVER-73110
+  - test_file: jstests/core/doc_validation_with_now_variable.js
+    ticket: SERVER-73125
+  # The test switched directories in a newer version of the server. Include the new path to ensure
+  # multiversion runs with v6.0.
+  - test_file: jstests/core/clustered/clustered_collection_collation.js
+    ticket: SERVER-72224
   - test_file: jstests/sharding/shard_keys_with_dollar_sign.js
     ticket: SERVER-74124
+  - test_file: jstests/sharding/move_chunk_concurrent_cloning.js
+    ticket: SERVER-68648
+  - test_file: jstests/core/timeseries/timeseries_filter_extended_range.js
+    ticket: SERVER-69952
+  - test_file: jstests/replsets/quiesce_mode_fails_elections.js
+    ticket: SERVER-72774
+  - test_file: jstests/core/clustered_collection_collation.js
+    ticket: SERVER-67105
+  - test_file: jstests/core/clustered_collection_bounded_scan.js
+    ticket: SERVER-67105
+  - test_file: jstests/core/map_reduce_subplanning.js
+    ticket: SERVER-74131
+  - test_file: jstests/sharding/resharding_interrupt_before_create_state_machine.js
+    ticket: SERVER-74647
+  - test_file: jstests/replsets/session_cache_refresh_write_error_fail.js
+    ticket: SERVER-73229
+  - test_file: jstests/core/field_name_validation.js
+    ticket: SERVER-75517
+  - test_file: jstests/core/command_let_variables.js
+    ticket: SERVER-75356
   suites: null

@@ -61,7 +61,7 @@
 #include "mongo/s/query/cluster_query_knobs_gen.h"
 #include "mongo/s/query/document_source_merge_cursors.h"
 #include "mongo/s/query/establish_cursors.h"
-#include "mongo/s/router.h"
+#include "mongo/s/router_role.h"
 #include "mongo/s/stale_exception.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/util/fail_point.h"
@@ -775,6 +775,10 @@ std::unique_ptr<Pipeline, PipelineDeleter> targetShardsAndAddMergeCursors(
                               hasChangeStream,
                               startsWithDocuments,
                               std::move(pipeline),
+                              // Even if the overall operation is an explain, callers of this
+                              // function always intend to actually execute a regular agg command
+                              // and merge the results with $mergeCursors.
+                              boost::none /*explain*/,
                               shardTargetingPolicy,
                               std::move(readConcern));
 
@@ -957,6 +961,7 @@ BSONObj createCommandForTargetedShards(const boost::intrusive_ptr<ExpressionCont
                                        const SplitPipeline& splitPipeline,
                                        const boost::optional<ShardedExchangePolicy> exchangeSpec,
                                        bool needsMerge,
+                                       boost::optional<ExplainOptions::Verbosity> explain,
                                        boost::optional<BSONObj> readConcern) {
     // Create the command for the shards.
     MutableDocument targetedCmd(serializedCommand);
@@ -988,29 +993,22 @@ BSONObj createCommandForTargetedShards(const boost::intrusive_ptr<ExpressionCont
     targetedCmd[AggregateCommandRequest::kExchangeFieldName] =
         exchangeSpec ? Value(exchangeSpec->exchangeSpec.toBSON()) : Value();
 
-    auto shardCommand = genericTransformForShards(std::move(targetedCmd),
-                                                  expCtx,
-                                                  expCtx->explain,
-                                                  expCtx->getCollatorBSON(),
-                                                  std::move(readConcern));
+    auto shardCommand = genericTransformForShards(
+        std::move(targetedCmd), expCtx, explain, expCtx->getCollatorBSON(), std::move(readConcern));
 
     // Apply RW concern to the final shard command.
     return applyReadWriteConcern(expCtx->opCtx,
-                                 true,             /* appendRC */
-                                 !expCtx->explain, /* appendWC */
+                                 true,     /* appendRC */
+                                 !explain, /* appendWC */
                                  shardCommand);
 }
 
-/**
- * Targets shards for the pipeline and returns a struct with the remote cursors or results, and
- * the pipeline that will need to be executed to merge the results from the remotes. If a stale
- * shard version is encountered, refreshes the routing table and tries again.
- */
 DispatchShardPipelineResults dispatchShardPipeline(
     Document serializedCommand,
     bool hasChangeStream,
     bool startsWithDocuments,
     std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
+    boost::optional<ExplainOptions::Verbosity> explain,
     ShardTargetingPolicy shardTargetingPolicy,
     boost::optional<BSONObj> readConcern) {
     auto expCtx = pipeline->getContext();
@@ -1106,10 +1104,11 @@ DispatchShardPipelineResults dispatchShardPipeline(
                                                          *splitPipelines,
                                                          exchangeSpec,
                                                          true /* needsMerge */,
+                                                         explain,
                                                          std::move(readConcern))
                         : createPassthroughCommandForShard(expCtx,
                                                            serializedCommand,
-                                                           expCtx->explain,
+                                                           explain,
                                                            pipeline.get(),
                                                            expCtx->getCollatorBSON(),
                                                            std::move(readConcern),
@@ -1142,7 +1141,7 @@ DispatchShardPipelineResults dispatchShardPipeline(
             shardIds.size() > 0);
 
     // Explain does not produce a cursor, so instead we scatter-gather commands to the shards.
-    if (expCtx->explain) {
+    if (explain) {
         if (mustRunOnAll) {
             // Some stages (such as $currentOp) need to be broadcast to all shards, and
             // should not participate in the shard version protocol.
@@ -1157,7 +1156,7 @@ DispatchShardPipelineResults dispatchShardPipeline(
             // shards, and should participate in the shard version protocol.
             invariant(executionNsRoutingInfo);
             shardResults =
-                scatterGatherVersionedTargetByRoutingTable(opCtx,
+                scatterGatherVersionedTargetByRoutingTable(expCtx,
                                                            expCtx->ns.db(),
                                                            expCtx->ns,
                                                            *executionNsRoutingInfo,
@@ -1178,7 +1177,7 @@ DispatchShardPipelineResults dispatchShardPipeline(
                                             targetedCommand,
                                             ReadPreferenceSetting::get(opCtx));
 
-        } catch (const StaleConfigException& e) {
+        } catch (const ExceptionFor<ErrorCodes::StaleConfig>& e) {
             // Check to see if the command failed because of a stale shard version or something
             // else.
             auto staleInfo = e.extraInfo<StaleConfigInfo>();
@@ -1494,7 +1493,8 @@ BSONObj targetShardsForExplain(Pipeline* ownedPipeline) {
         dispatchShardPipeline(aggregation_request_helper::serializeToCommandDoc(aggRequest),
                               hasChangeStream,
                               startsWithDocuments,
-                              std::move(pipeline));
+                              std::move(pipeline),
+                              expCtx->explain);
     BSONObjBuilder explainBuilder;
     auto appendStatus =
         appendExplainResults(std::move(shardDispatchResults), expCtx, &explainBuilder);

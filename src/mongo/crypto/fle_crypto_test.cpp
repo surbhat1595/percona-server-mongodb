@@ -428,6 +428,11 @@ TEST(FLETokens, TestVectorESCCollectionDecryptDocument) {
     ASSERT_EQ(swDoc.getValue().compactionPlaceholder, false);
     ASSERT_EQ(swDoc.getValue().position, 0);
     ASSERT_EQ(swDoc.getValue().count, 123456789);
+
+    auto swAnchorDoc = ESCCollection::decryptAnchorDocument(escTwiceValue, doc);
+    ASSERT_OK(swDoc.getStatus());
+    ASSERT_EQ(swDoc.getValue().position, 0);
+    ASSERT_EQ(swDoc.getValue().count, 123456789);
 }
 
 TEST(FLETokens, TestVectorECCCollectionDecryptDocument) {
@@ -507,6 +512,32 @@ TEST(FLE_ESC, RoundTrip) {
         ASSERT_OK(swDoc.getStatus());
         ASSERT_EQ(swDoc.getValue().compactionPlaceholder, true);
         ASSERT_EQ(swDoc.getValue().position, std::numeric_limits<uint64_t>::max());
+        ASSERT_EQ(swDoc.getValue().count, 456789);
+    }
+
+    {
+        // Non-anchor documents don't work with decryptAnchorDocument()
+        BSONObj doc = ESCCollection::generateNonAnchorDocument(escTwiceTag, 123);
+        auto swDoc = ESCCollection::decryptAnchorDocument(escTwiceValue, doc);
+        ASSERT_NOT_OK(swDoc.getStatus());
+        ASSERT_EQ(ErrorCodes::Error::NoSuchKey, swDoc.getStatus().code());
+    }
+
+    {
+        BSONObj doc =
+            ESCCollection::generateAnchorDocument(escTwiceTag, escTwiceValue, 123, 456789);
+        auto swDoc = ESCCollection::decryptAnchorDocument(escTwiceValue, doc);
+        ASSERT_OK(swDoc.getStatus());
+        ASSERT_EQ(swDoc.getValue().position, 0);
+        ASSERT_EQ(swDoc.getValue().count, 456789);
+    }
+
+    {
+        BSONObj doc =
+            ESCCollection::generateNullAnchorDocument(escTwiceTag, escTwiceValue, 123, 456789);
+        auto swDoc = ESCCollection::decryptAnchorDocument(escTwiceValue, doc);
+        ASSERT_OK(swDoc.getStatus());
+        ASSERT_EQ(swDoc.getValue().position, 123);
         ASSERT_EQ(swDoc.getValue().count, 456789);
     }
 }
@@ -1318,6 +1349,124 @@ TEST(FLE_EDC, Disallowed_Types_FLE2InsertUpdatePayload) {
     uint8_t fakeBSONType = 42;
     ASSERT_FALSE(isValidBSONType(fakeBSONType));
     disallowedEqualityPayloadType(static_cast<BSONType>(fakeBSONType));
+}
+
+TEST(FLE_EDC, ServerSide_Equality_Payloads_V2) {
+    TestKeyVault keyVault;
+
+    auto doc = BSON("sample" << 123456);
+    auto element = doc.firstElement();
+
+    auto value = ConstDataRange(element.value(), element.value() + element.valuesize());
+
+    auto collectionToken = FLELevel1TokenGenerator::generateCollectionsLevel1Token(getIndexKey());
+    auto serverEncryptToken =
+        FLELevel1TokenGenerator::generateServerDataEncryptionLevel1Token(getIndexKey());
+    auto serverDerivationToken =
+        FLELevel1TokenGenerator::generateServerTokenDerivationLevel1Token(getIndexKey());
+
+    auto edcToken = FLECollectionTokenGenerator::generateEDCToken(collectionToken);
+    auto escToken = FLECollectionTokenGenerator::generateESCToken(collectionToken);
+    auto ecocToken = FLECollectionTokenGenerator::generateECOCToken(collectionToken);
+    auto serverDerivedFromDataToken =
+        FLEDerivedFromDataTokenGenerator::generateServerDerivedFromDataToken(serverDerivationToken,
+                                                                             value);
+    FLECounter counter = 0;
+
+    EDCDerivedFromDataToken edcDatakey =
+        FLEDerivedFromDataTokenGenerator::generateEDCDerivedFromDataToken(edcToken, value);
+    ESCDerivedFromDataToken escDatakey =
+        FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken, value);
+
+    ESCDerivedFromDataTokenAndContentionFactorToken escDataCounterkey =
+        FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
+            generateESCDerivedFromDataTokenAndContentionFactorToken(escDatakey, counter);
+    EDCDerivedFromDataTokenAndContentionFactorToken edcDataCounterkey =
+        FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
+            generateEDCDerivedFromDataTokenAndContentionFactorToken(edcDatakey, counter);
+
+    FLE2InsertUpdatePayloadV2 iupayload;
+    iupayload.setEdcDerivedToken(edcDatakey.toCDR());
+    iupayload.setEscDerivedToken(escDatakey.toCDR());
+    iupayload.setServerEncryptionToken(serverEncryptToken.toCDR());
+    iupayload.setServerDerivedFromDataToken(serverDerivedFromDataToken.toCDR());
+
+    auto swEncryptedTokens =
+        EncryptedStateCollectionTokensV2(escDataCounterkey).serialize(ecocToken);
+    uassertStatusOK(swEncryptedTokens);
+    iupayload.setEncryptedTokens(swEncryptedTokens.getValue());
+    iupayload.setIndexKeyId(indexKeyId);
+
+    iupayload.setValue(value);
+    iupayload.setType(element.type());
+
+    iupayload.setContentionFactor(counter);
+
+    auto edcTwiceDerived =
+        FLETwiceDerivedTokenGenerator::generateEDCTwiceDerivedToken(edcDataCounterkey);
+
+    auto tag = EDCServerCollection::generateTag(edcTwiceDerived, 123456);
+
+    FLE2IndexedEqualityEncryptedValueV2 serverPayload(iupayload, tag, 123456);
+
+    auto swBuf = serverPayload.serialize(serverEncryptToken, serverDerivedFromDataToken);
+    ASSERT_OK(swBuf.getStatus());
+
+    auto swServerPayload = FLE2IndexedEqualityEncryptedValueV2::decryptAndParse(
+        serverEncryptToken, serverDerivedFromDataToken, swBuf.getValue());
+
+    ASSERT_OK(swServerPayload.getStatus());
+    auto& sp = swServerPayload.getValue();
+    ASSERT_EQ(sp.bsonType, iupayload.getType());
+    ASSERT(sp.indexKeyId == iupayload.getIndexKeyId());
+    ASSERT(sp.clientEncryptedValue == serverPayload.clientEncryptedValue);
+    ASSERT_EQ(serverPayload.clientEncryptedValue.size(), value.length());
+    ASSERT(std::equal(serverPayload.clientEncryptedValue.begin(),
+                      serverPayload.clientEncryptedValue.end(),
+                      value.data<uint8_t>()));
+
+    ASSERT_EQ(sp.metadataBlock.contentionFactor, counter);
+    ASSERT_EQ(sp.metadataBlock.count, 123456);
+    ASSERT(sp.metadataBlock.tag == tag);
+    ASSERT_TRUE(sp.metadataBlock.isValidZerosBlob(sp.metadataBlock.zeros));
+}
+
+TEST(FLE_EDC, ServerSide_Payloads_V2_EmptyClientEncryptedData) {
+    TestKeyVault keyVault;
+    auto value = ConstDataRange(0, 0);
+    auto bogusToken = FLELevel1TokenGenerator::generateCollectionsLevel1Token(getIndexKey());
+    PrfBlock bogusTag;
+    FLE2InsertUpdatePayloadV2 iupayload;
+
+    iupayload.setValue(value);
+    iupayload.setType(BSONType::NumberLong);
+    iupayload.setContentionFactor(0);
+    iupayload.setIndexKeyId(indexKeyId);
+    iupayload.setEdcDerivedToken(bogusToken.toCDR());
+    iupayload.setEscDerivedToken(bogusToken.toCDR());
+    iupayload.setServerEncryptionToken(bogusToken.toCDR());
+    iupayload.setServerDerivedFromDataToken(bogusToken.toCDR());
+    iupayload.setEncryptedTokens(bogusToken.toCDR());
+
+    ASSERT_THROWS_CODE(
+        FLE2IndexedEqualityEncryptedValueV2(iupayload, bogusTag, 0), DBException, 7290804);
+
+    ASSERT_THROWS_CODE(
+        FLE2IndexedEqualityEncryptedValueV2(BSONType::NumberLong,
+                                            indexKeyId,
+                                            std::vector<uint8_t>(),
+                                            FLE2TagAndEncryptedMetadataBlock(0, 0, bogusTag)),
+        DBException,
+        7290804);
+}
+
+TEST(FLE_EDC, ServerSide_Payloads_V2_IsValidZerosBlob) {
+    FLE2TagAndEncryptedMetadataBlock::ZerosBlob zeros;
+    zeros.fill(0);
+    ASSERT_TRUE(FLE2TagAndEncryptedMetadataBlock::isValidZerosBlob(zeros));
+
+    zeros[1] = 1;
+    ASSERT_FALSE(FLE2TagAndEncryptedMetadataBlock::isValidZerosBlob(zeros));
 }
 
 TEST(FLE_EDC, ServerSide_Payloads) {

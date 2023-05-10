@@ -921,7 +921,7 @@ void NetworkInterfaceTL::RequestManager::trySend(
 
         auto& context = requests.at(currentSentIdx);
         context.initialized = true;
-        context.idx = currentSentIdx;
+        context.idx = idx;  // records target's index in `requestOnAny.target`.
         context.request = requestState;
     }
 

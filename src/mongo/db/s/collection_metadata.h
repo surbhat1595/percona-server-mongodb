@@ -29,7 +29,7 @@
 
 #pragma once
 
-#include "mongo/db/range_arithmetic.h"
+#include "mongo/db/s/range_arithmetic.h"
 #include "mongo/s/chunk_manager.h"
 
 namespace mongo {
@@ -160,6 +160,12 @@ public:
      * `doc`. Does not alter any field values (e.g. by hashing); values are copied verbatim.
      */
     BSONObj extractDocumentKey(const BSONObj& doc) const;
+
+    /**
+     * Static version of the function above. Only use this for internal sharding operations where
+     * shard key pattern is fixed and cannot change.
+     */
+    static BSONObj extractDocumentKey(const ShardKeyPattern* shardKeyPattern, const BSONObj& doc);
 
     /**
      * String output of the collection and shard versions.

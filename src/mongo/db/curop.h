@@ -392,6 +392,8 @@ public:
                                          bool backtraceMode,
                                          BSONObjBuilder* infoBuilder);
 
+    static bool currentOpBelongsToTenant(Client* client, TenantId tenantId);
+
     /**
      * Serializes the fields of a GenericCursor which do not appear elsewhere in the currentOp
      * output. If 'maxQuerySize' is given, truncates the cursor's originatingCommand but preserves
@@ -426,7 +428,7 @@ public:
      */
     bool completeAndLogOperation(OperationContext* opCtx,
                                  logv2::LogComponent logComponent,
-                                 std::shared_ptr<ProfileFilter> filter,
+                                 std::shared_ptr<const ProfileFilter> filter,
                                  boost::optional<size_t> responseLength = boost::none,
                                  boost::optional<long long> slowMsOverride = boost::none,
                                  bool forceLog = false);

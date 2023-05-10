@@ -37,6 +37,7 @@
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/index_builds_coordinator.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/repl/apply_ops.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/repl/timestamp_block.h"
@@ -349,16 +350,16 @@ std::pair<std::vector<OplogEntry>, bool> _readTransactionOperationsFromOplogChai
             }
         }
     }
-    return std::make_pair(ops, isTransactionWithCommand);
+    return {std::move(ops), isTransactionWithCommand};
 }
 
 std::vector<OplogEntry> readTransactionOperationsFromOplogChain(
     OperationContext* opCtx,
     const OplogEntry& lastEntryInTxn,
     const std::vector<OplogEntry*>& cachedOps) noexcept {
-    auto result = _readTransactionOperationsFromOplogChain(
+    auto [txnOps, _] = _readTransactionOperationsFromOplogChain(
         opCtx, lastEntryInTxn, cachedOps, false /*checkForCommands*/);
-    return std::get<0>(result);
+    return std::move(txnOps);
 }
 
 std::pair<std::vector<OplogEntry>, bool> readTransactionOperationsFromOplogChainAndCheckForCommands(
@@ -498,6 +499,11 @@ Status _applyPrepareTransaction(OperationContext* opCtx,
         }
 
         txnParticipant.prepareTransaction(opCtx, entry.getOpTime());
+
+        auto opObserver = opCtx->getServiceContext()->getOpObserver();
+        invariant(opObserver);
+        opObserver->onTransactionPrepareNonPrimary(opCtx, ops, entry.getOpTime());
+
         // Prepare transaction success.
         abortOnError.dismiss();
 

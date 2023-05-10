@@ -236,6 +236,9 @@ public:
 
     virtual int numIndexesInProgress() const = 0;
 
+    /**
+     * Returns true if the _id index exists.
+     */
     virtual bool haveIdIndex(OperationContext* opCtx) const = 0;
 
     /**
@@ -281,6 +284,16 @@ public:
         OperationContext* opCtx,
         const std::string& type,
         std::vector<const IndexDescriptor*>& matches,
+        InclusionPolicy inclusionPolicy = InclusionPolicy::kReady) const = 0;
+
+    /**
+     * Finds the index with the given ident. The ident uniquely identifies an index.
+     *
+     * Returns nullptr if the index is not found.
+     */
+    virtual const IndexDescriptor* findIndexByIdent(
+        OperationContext* opCtx,
+        StringData ident,
         InclusionPolicy inclusionPolicy = InclusionPolicy::kReady) const = 0;
 
     /**

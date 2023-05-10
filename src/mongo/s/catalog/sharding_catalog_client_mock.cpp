@@ -69,7 +69,10 @@ CollectionType ShardingCatalogClientMock::getCollection(OperationContext* opCtx,
 }
 
 std::vector<CollectionType> ShardingCatalogClientMock::getCollections(
-    OperationContext* opCtx, StringData dbName, repl::ReadConcernLevel readConcernLevel) {
+    OperationContext* opCtx,
+    StringData dbName,
+    repl::ReadConcernLevel readConcernLevel,
+    const BSONObj& sort) {
     uasserted(ErrorCodes::InternalError, "Method not implemented");
 }
 
@@ -218,6 +221,13 @@ std::vector<ShardId> ShardingCatalogClientMock::getShardsThatOwnDataForDbAtClust
 
 std::vector<ShardId> ShardingCatalogClientMock::getShardsThatOwnDataAtClusterTime(
     OperationContext* opCtx, const Timestamp& clusterTime) {
+    uasserted(ErrorCodes::InternalError, "Method not implemented");
+}
+
+std::vector<ShardId> ShardingCatalogClientMock::getHistoricalPlacement(
+    OperationContext* opCtx,
+    const Timestamp& atClusterTime,
+    const boost::optional<NamespaceString>& nss) {
     uasserted(ErrorCodes::InternalError, "Method not implemented");
 }
 }  // namespace mongo

@@ -29,13 +29,13 @@
 
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/update_request.h"
+#include "mongo/db/s/scoped_collection_metadata.h"
 #include "mongo/db/update/update_driver.h"
 #include "mongo/util/safe_num.h"
 
-
 namespace mongo {
-
 namespace update {
+
 /**
  * Use an UpdateDriver and UpdateRequest to produce the document to insert.
  **/
@@ -44,10 +44,11 @@ BSONObj produceDocumentForUpsert(OperationContext* opCtx,
                                  UpdateDriver* driver,
                                  const CanonicalQuery* cq,
                                  bool isUserInitiatedWrite,
-                                 mutablebson::Document& doc);
+                                 mutablebson::Document& doc,
+                                 const ScopedCollectionDescription& collDesc);
 
 void ensureIdFieldIsFirst(mutablebson::Document* doc, bool generateOIDIfMissing);
 void assertPathsNotArray(const mutablebson::Document& document, const FieldRefSet& paths);
-}  // namespace update
 
+}  // namespace update
 }  // namespace mongo

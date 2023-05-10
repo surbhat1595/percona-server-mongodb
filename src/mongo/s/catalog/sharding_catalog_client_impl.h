@@ -34,6 +34,7 @@
 #include "mongo/platform/mutex.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/client/shard_registry.h"
+#include "mongo/s/request_types/get_historical_placement_info_gen.h"
 
 namespace mongo {
 
@@ -82,7 +83,8 @@ public:
 
     std::vector<CollectionType> getCollections(OperationContext* opCtx,
                                                StringData db,
-                                               repl::ReadConcernLevel readConcernLevel) override;
+                                               repl::ReadConcernLevel readConcernLevel,
+                                               const BSONObj& sort) override;
 
     std::vector<NamespaceString> getAllShardedCollectionsForDb(
         OperationContext* opCtx, StringData dbName, repl::ReadConcernLevel readConcern) override;
@@ -203,6 +205,11 @@ public:
     std::vector<ShardId> getShardsThatOwnDataAtClusterTime(OperationContext* opCtx,
                                                            const Timestamp& clusterTime) override;
 
+    std::vector<ShardId> getHistoricalPlacement(
+        OperationContext* opCtx,
+        const Timestamp& atClusterTime,
+        const boost::optional<NamespaceString>& nss) override;
+
 private:
     /**
      * Updates a single document (if useMultiUpdate is false) or multiple documents (if
@@ -244,6 +251,15 @@ private:
         const std::string& dbName,
         const ReadPreferenceSetting& readPref,
         repl::ReadConcernLevel readConcernLevel);
+
+    /**
+     * Queries the config server to retrieve placement data based on the Request object.
+     * TODO (SERVER-73029): Remove the method - and replace its invocations with
+     * runPlacementHistoryAggregation()
+     */
+    std::vector<ShardId> _fetchPlacementMetadata(OperationContext* opCtx,
+                                                 ConfigsvrGetHistoricalPlacement&& request);
+
 
     /**
      * Returns the Shard type that should be used to access the config server. Unless an instance

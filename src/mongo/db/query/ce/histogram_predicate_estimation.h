@@ -55,6 +55,16 @@ struct EstimationResult {
 };
 
 /**
+ * Converts an input cardinality to a selectivity based on the histogram's sample size.
+ */
+SelectivityType getSelectivity(const stats::ArrayHistogram& ah, CEType cardinality);
+
+/**
+ * Returns the selectivity of arrays according to this histogram.
+ */
+SelectivityType getArraySelectivity(const stats::ArrayHistogram& ah);
+
+/**
  * Returns cumulative total statistics for a histogram.
  */
 EstimationResult getTotals(const stats::ScalarHistogram& h);
@@ -91,5 +101,29 @@ CEType estimateCardRange(const stats::ArrayHistogram& ah,
                          sbe::value::Value valHigh,
                          bool includeScalar,
                          EstimationAlgo estAlgo = EstimationAlgo::HistogramV2);
+
+/**
+ * Estimates the selectivity of an equality predicate given an ArrayHistogram and an SBE value and
+ * type tag pair.
+ */
+SelectivityType estimateSelEq(const stats::ArrayHistogram& ah,
+                              sbe::value::TypeTags tag,
+                              sbe::value::Value val,
+                              bool includeScalar);
+
+/**
+ * Estimates the selectivity of a range predicate given an ArrayHistogram and a range predicate.
+ * Set 'includeScalar' to true to indicate whether or not the provided range should include no-array
+ * values. The other fields define the range of the estimation.
+ */
+SelectivityType estimateSelRange(const stats::ArrayHistogram& ah,
+                                 bool lowInclusive,
+                                 sbe::value::TypeTags tagLow,
+                                 sbe::value::Value valLow,
+                                 bool highInclusive,
+                                 sbe::value::TypeTags tagHigh,
+                                 sbe::value::Value valHigh,
+                                 bool includeScalar,
+                                 EstimationAlgo estAlgo = EstimationAlgo::HistogramV2);
 
 }  // namespace mongo::optimizer::ce

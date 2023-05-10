@@ -61,8 +61,6 @@
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/repl/tenant_migration_access_blocker_registry.h"
-#include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/repl/tenant_migration_conflict_info.h"
 #include "mongo/db/repl/tenant_migration_decoration.h"
 #include "mongo/db/s/collection_sharding_state.h"
@@ -72,6 +70,7 @@
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog_helpers.h"
+#include "mongo/db/timeseries/bucket_catalog/write_batch.h"
 #include "mongo/db/timeseries/bucket_compression.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_extended_range.h"
@@ -95,7 +94,6 @@
 namespace mongo {
 namespace {
 
-MONGO_FAIL_POINT_DEFINE(hangWriteBeforeWaitingForMigrationDecision);
 MONGO_FAIL_POINT_DEFINE(hangInsertBeforeWrite);
 MONGO_FAIL_POINT_DEFINE(hangTimeseriesInsertBeforeCommit);
 MONGO_FAIL_POINT_DEFINE(hangTimeseriesInsertBeforeWrite);
@@ -163,16 +161,16 @@ write_ops::UpdateOpEntry makeTimeseriesUpdateOpEntry(
     const BSONObj& metadata) {
     BSONObjBuilder updateBuilder;
     {
-        if (!batch->min().isEmpty() || !batch->max().isEmpty()) {
+        if (!batch->min.isEmpty() || !batch->max.isEmpty()) {
             BSONObjBuilder controlBuilder(updateBuilder.subobjStart(
                 str::stream() << doc_diff::kSubDiffSectionFieldPrefix << "control"));
-            if (!batch->min().isEmpty()) {
+            if (!batch->min.isEmpty()) {
                 controlBuilder.append(
-                    str::stream() << doc_diff::kSubDiffSectionFieldPrefix << "min", batch->min());
+                    str::stream() << doc_diff::kSubDiffSectionFieldPrefix << "min", batch->min);
             }
-            if (!batch->max().isEmpty()) {
+            if (!batch->max.isEmpty()) {
                 controlBuilder.append(
-                    str::stream() << doc_diff::kSubDiffSectionFieldPrefix << "max", batch->max());
+                    str::stream() << doc_diff::kSubDiffSectionFieldPrefix << "max", batch->max);
             }
         }
     }
@@ -180,8 +178,8 @@ write_ops::UpdateOpEntry makeTimeseriesUpdateOpEntry(
         // doc_diff::kSubDiffSectionFieldPrefix + <field name> => {<index_0>: ..., <index_1>: ...}
         StringDataMap<BSONObjBuilder> dataFieldBuilders;
         auto metadataElem = metadata.firstElement();
-        DecimalCounter<uint32_t> count(batch->numPreviouslyCommittedMeasurements());
-        for (const auto& doc : batch->measurements()) {
+        DecimalCounter<uint32_t> count(batch->numPreviouslyCommittedMeasurements);
+        for (const auto& doc : batch->measurements) {
             for (const auto& elem : doc) {
                 auto key = elem.fieldNameStringData();
                 if (metadataElem && key == metadataElem.fieldNameStringData()) {
@@ -199,7 +197,7 @@ write_ops::UpdateOpEntry makeTimeseriesUpdateOpEntry(
         for (auto& pair : dataFieldBuilders) {
             // Existing 'data' fields with measurements require different treatment from fields
             // not observed before (missing from control.min and control.max).
-            if (batch->newFieldNamesToBeInserted().count(pair.first)) {
+            if (batch->newFieldNamesToBeInserted.count(pair.first)) {
                 newDataFieldsBuilder.append(pair.first, pair.second.obj());
             }
         }
@@ -210,7 +208,7 @@ write_ops::UpdateOpEntry makeTimeseriesUpdateOpEntry(
         for (auto& pair : dataFieldBuilders) {
             // Existing 'data' fields with measurements require different treatment from fields
             // not observed before (missing from control.min and control.max).
-            if (!batch->newFieldNamesToBeInserted().count(pair.first)) {
+            if (!batch->newFieldNamesToBeInserted.count(pair.first)) {
                 dataBuilder.append(doc_diff::kSubDiffSectionFieldPrefix + pair.first.toString(),
                                    BSON(doc_diff::kInsertSectionFieldName << pair.second.obj()));
             }
@@ -221,7 +219,7 @@ write_ops::UpdateOpEntry makeTimeseriesUpdateOpEntry(
         static_cast<bool>(repl::tenantMigrationInfo(opCtx));
     write_ops::UpdateModification u(
         updateBuilder.obj(), write_ops::UpdateModification::DeltaTag{}, options);
-    auto oid = batch->bucket().bucketId.oid;
+    auto oid = batch->bucketHandle.bucketId.oid;
     write_ops::UpdateOpEntry update(BSON("_id" << oid), std::move(u));
     invariant(!update.getMulti(), oid.toString());
     invariant(!update.getUpsert(), oid.toString());
@@ -253,7 +251,7 @@ BSONObj makeTimeseriesInsertDocument(std::shared_ptr<timeseries::bucket_catalog:
 
     StringDataMap<BSONObjBuilder> dataBuilders;
     DecimalCounter<uint32_t> count;
-    for (const auto& doc : batch->measurements()) {
+    for (const auto& doc : batch->measurements) {
         for (const auto& elem : doc) {
             auto key = elem.fieldNameStringData();
             if (metadataElem && key == metadataElem.fieldNameStringData()) {
@@ -265,18 +263,13 @@ BSONObj makeTimeseriesInsertDocument(std::shared_ptr<timeseries::bucket_catalog:
     }
 
     BSONObjBuilder builder;
-    builder.append("_id", batch->bucket().bucketId.oid);
+    builder.append("_id", batch->bucketHandle.bucketId.oid);
     {
         BSONObjBuilder bucketControlBuilder(builder.subobjStart("control"));
         bucketControlBuilder.append(kBucketControlVersionFieldName,
                                     kTimeseriesControlDefaultVersion);
-        bucketControlBuilder.append(kBucketControlMinFieldName, batch->min());
-        bucketControlBuilder.append(kBucketControlMaxFieldName, batch->max());
-
-        if (feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
-                serverGlobalParams.featureCompatibility)) {
-            bucketControlBuilder.append(kBucketControlClosedFieldName, false);
-        }
+        bucketControlBuilder.append(kBucketControlMinFieldName, batch->min);
+        bucketControlBuilder.append(kBucketControlMaxFieldName, batch->max);
     }
     if (metadataElem) {
         builder.appendAs(metadataElem, kBucketMetaFieldName);
@@ -340,62 +333,6 @@ boost::optional<std::pair<Status, bool>> checkFailUnorderedTimeseriesInsertFailP
     return boost::none;
 }
 
-boost::optional<write_ops::WriteError> generateError(OperationContext* opCtx,
-                                                     const Status& status,
-                                                     int index,
-                                                     size_t numErrors) {
-    if (status.isOK()) {
-        return boost::none;
-    }
-
-    boost::optional<Status> overwrittenStatus;
-
-    if (status == ErrorCodes::TenantMigrationConflict) {
-        hangWriteBeforeWaitingForMigrationDecision.pauseWhileSet(opCtx);
-
-        overwrittenStatus.emplace(
-            tenant_migration_access_blocker::handleTenantMigrationConflict(opCtx, status));
-
-        // Interruption errors encountered during batch execution fail the entire batch, so throw on
-        // such errors here for consistency.
-        if (ErrorCodes::isInterruption(*overwrittenStatus)) {
-            uassertStatusOK(*overwrittenStatus);
-        }
-
-        // Tenant migration errors, similarly to migration errors consume too much space in the
-        // ordered:false responses and get truncated. Since the call to
-        // 'handleTenantMigrationConflict' above replaces the original status, we need to manually
-        // truncate the new reason if the original 'status' was also truncated.
-        if (status.reason().empty()) {
-            overwrittenStatus = overwrittenStatus->withReason("");
-        }
-    }
-
-    constexpr size_t kMaxErrorReasonsToReport = 1;
-    constexpr size_t kMaxErrorSizeToReportAfterMaxReasonsReached = 1024 * 1024;
-
-    if (numErrors > kMaxErrorReasonsToReport) {
-        size_t errorSize =
-            overwrittenStatus ? overwrittenStatus->reason().size() : status.reason().size();
-        if (errorSize > kMaxErrorSizeToReportAfterMaxReasonsReached)
-            overwrittenStatus =
-                overwrittenStatus ? overwrittenStatus->withReason("") : status.withReason("");
-    }
-
-    if (overwrittenStatus)
-        return write_ops::WriteError(index, std::move(*overwrittenStatus));
-    else
-        return write_ops::WriteError(index, status);
-}
-
-template <typename T>
-boost::optional<write_ops::WriteError> generateError(OperationContext* opCtx,
-                                                     const StatusWith<T>& result,
-                                                     int index,
-                                                     size_t numErrors) {
-    return generateError(opCtx, result.getStatus(), index, numErrors);
-}
-
 /**
  * Contains hooks that are used by 'populateReply' method.
  */
@@ -443,7 +380,8 @@ void populateReply(OperationContext* opCtx,
     long long nVal = 0;
     std::vector<write_ops::WriteError> errors;
     for (size_t i = 0; i < result.results.size(); ++i) {
-        if (auto error = generateError(opCtx, result.results[i], i, errors.size())) {
+        if (auto error = write_ops_exec::generateError(
+                opCtx, result.results[i].getStatus(), i, errors.size())) {
             errors.emplace_back(std::move(*error));
             continue;
         }
@@ -730,11 +668,8 @@ public:
                 beforeSize = bucketDoc.objsize();
                 // Reset every time we run to ensure we never use a stale value
                 compressionStats = {};
-                auto compressed = timeseries::compressBucket(bucketDoc,
-                                                             closedBucket.timeField,
-                                                             ns(),
-                                                             closedBucket.eligibleForReopening,
-                                                             validateCompression);
+                auto compressed = timeseries::compressBucket(
+                    bucketDoc, closedBucket.timeField, ns(), validateCompression);
                 if (compressed.compressedBucket) {
                     // If compressed object size is larger than uncompressed, skip compression
                     // update.
@@ -788,14 +723,14 @@ public:
             const bool mustCheckExistenceForInsertOperations =
                 static_cast<bool>(repl::tenantMigrationInfo(opCtx));
             auto diff = makeTimeseriesUpdateOpEntry(opCtx, batch, metadata).getU().getDiff();
-            auto after = doc_diff::applyDiff(batch->decompressed().after,
+            auto after = doc_diff::applyDiff(batch->decompressed.value().after,
                                              diff,
                                              nullptr,
                                              mustCheckExistenceForInsertOperations)
                              .postImage;
 
             auto bucketDecompressionFunc =
-                [before = std::move(batch->decompressed().before),
+                [before = std::move(batch->decompressed.value().before),
                  after = std::move(after)](const BSONObj& bucketDoc) -> boost::optional<BSONObj> {
                 // Make sure the document hasn't changed since we read it into the BucketCatalog.
                 // This should not happen, but since we can double-check it here, we can guard
@@ -810,7 +745,7 @@ public:
             write_ops::UpdateCommandRequest op(
                 makeTimeseriesBucketsNamespace(ns()),
                 {makeTimeseriesTransformationOpEntry(
-                    opCtx, batch->bucket().bucketId.oid, std::move(bucketDecompressionFunc))});
+                    opCtx, batch->bucketHandle.bucketId.oid, std::move(bucketDecompressionFunc))});
             op.setWriteCommandRequestBase(_makeTimeseriesWriteOpBase(std::move(stmtIds)));
             return op;
         }
@@ -829,23 +764,23 @@ public:
                                      std::vector<size_t>* docsToRetry) const try {
             auto& bucketCatalog = timeseries::bucket_catalog::BucketCatalog::get(opCtx);
 
-            auto metadata = bucketCatalog.getMetadata(batch->bucket());
+            auto metadata = bucketCatalog.getMetadata(batch->bucketHandle);
             auto status = bucketCatalog.prepareCommit(batch);
             if (!status.isOK()) {
-                invariant(batch->finished());
+                invariant(timeseries::bucket_catalog::isWriteBatchFinished(*batch));
                 docsToRetry->push_back(index);
                 return true;
             }
 
             hangTimeseriesInsertBeforeWrite.pauseWhileSet();
 
-            const auto docId = batch->bucket().bucketId.oid;
-            const bool performInsert = batch->numPreviouslyCommittedMeasurements() == 0;
+            const auto docId = batch->bucketHandle.bucketId.oid;
+            const bool performInsert = batch->numPreviouslyCommittedMeasurements == 0;
             if (performInsert) {
                 const auto output =
                     _performTimeseriesInsert(opCtx, batch, metadata, std::move(stmtIds));
-                if (auto error =
-                        generateError(opCtx, output.result, start + index, errors->size())) {
+                if (auto error = write_ops_exec::generateError(
+                        opCtx, output.result.getStatus(), start + index, errors->size())) {
                     errors->emplace_back(std::move(*error));
                     bucketCatalog.abort(batch, output.result.getStatus());
                     return output.canContinue;
@@ -856,7 +791,7 @@ public:
                               << "Expected 1 insertion of document with _id '" << docId
                               << "', but found " << output.result.getValue().getN() << ".");
             } else {
-                auto op = batch->needToDecompressBucketBeforeInserting()
+                auto op = batch->decompressed.has_value()
                     ? _makeTimeseriesDecompressAndUpdateOp(
                           opCtx, batch, metadata, std::move(stmtIds))
                     : _makeTimeseriesUpdateOp(opCtx, batch, metadata, std::move(stmtIds));
@@ -872,8 +807,8 @@ public:
                     docsToRetry->push_back(index);
                     opCtx->recoveryUnit()->abandonSnapshot();
                     return true;
-                } else if (auto error =
-                               generateError(opCtx, output.result, start + index, errors->size())) {
+                } else if (auto error = write_ops_exec::generateError(
+                               opCtx, output.result.getStatus(), start + index, errors->size())) {
                     errors->emplace_back(std::move(*error));
                     bucketCatalog.abort(batch, output.result.getStatus());
                     return output.canContinue;
@@ -888,8 +823,8 @@ public:
             if (closedBucket) {
                 // If this write closed a bucket, compress the bucket
                 auto output = _performTimeseriesBucketCompression(opCtx, *closedBucket);
-                if (auto error =
-                        generateError(opCtx, output.result, start + index, errors->size())) {
+                if (auto error = write_ops_exec::generateError(
+                        opCtx, output.result.getStatus(), start + index, errors->size())) {
                     errors->emplace_back(std::move(*error));
                     return output.canContinue;
                 }
@@ -920,7 +855,7 @@ public:
                 batchesToCommit;
 
             for (auto& [batch, _] : *batches) {
-                if (batch->claimCommitRights()) {
+                if (timeseries::bucket_catalog::claimWriteBatchCommitRights(*batch)) {
                     batchesToCommit.push_back(batch);
                 }
             }
@@ -931,7 +866,8 @@ public:
 
             // Sort by bucket so that preparing the commit for each batch cannot deadlock.
             std::sort(batchesToCommit.begin(), batchesToCommit.end(), [](auto left, auto right) {
-                return left.get()->bucket().bucketId.oid < right.get()->bucket().bucketId.oid;
+                return left.get()->bucketHandle.bucketId.oid <
+                    right.get()->bucketHandle.bucketId.oid;
             });
 
             Status abortStatus = Status::OK();
@@ -948,31 +884,31 @@ public:
                 std::vector<write_ops::UpdateCommandRequest> updateOps;
 
                 for (auto batch : batchesToCommit) {
-                    auto metadata = bucketCatalog.getMetadata(batch.get()->bucket());
+                    auto metadata = bucketCatalog.getMetadata(batch.get()->bucketHandle);
                     auto prepareCommitStatus = bucketCatalog.prepareCommit(batch);
                     if (!prepareCommitStatus.isOK()) {
                         abortStatus = prepareCommitStatus;
                         return TimeseriesAtomicWriteResult::kContinuableError;
                     }
 
-                    if (batch.get()->numPreviouslyCommittedMeasurements() == 0) {
+                    if (batch.get()->numPreviouslyCommittedMeasurements == 0) {
                         insertOps.push_back(_makeTimeseriesInsertOp(
                             batch,
                             metadata,
-                            std::move(stmtIds[batch.get()->bucket().bucketId.oid])));
+                            std::move(stmtIds[batch.get()->bucketHandle.bucketId.oid])));
                     } else {
-                        if (batch.get()->needToDecompressBucketBeforeInserting()) {
+                        if (batch.get()->decompressed.has_value()) {
                             updateOps.push_back(_makeTimeseriesDecompressAndUpdateOp(
                                 opCtx,
                                 batch,
                                 metadata,
-                                std::move(stmtIds[batch.get()->bucket().bucketId.oid])));
+                                std::move(stmtIds[batch.get()->bucketHandle.bucketId.oid])));
                         } else {
                             updateOps.push_back(_makeTimeseriesUpdateOp(
                                 opCtx,
                                 batch,
                                 metadata,
-                                std::move(stmtIds[batch.get()->bucket().bucketId.oid])));
+                                std::move(stmtIds[batch.get()->bucketHandle.bucketId.oid])));
                         }
                     }
                 }
@@ -1123,8 +1059,8 @@ public:
                 invariant(start + index < request().getDocuments().size());
 
                 if (rebuildOptionsError) {
-                    const auto error{
-                        generateError(opCtx, *rebuildOptionsError, start + index, errors->size())};
+                    const auto error{write_ops_exec::generateError(
+                        opCtx, *rebuildOptionsError, start + index, errors->size())};
                     errors->emplace_back(std::move(*error));
                     return false;
                 }
@@ -1168,14 +1104,13 @@ public:
                                 BSONObj suitableBucket;
 
                                 if (auto* bucketId = stdx::get_if<OID>(&insertResult.candidate)) {
-                                    // Look up archived bucket by _id.
                                     DBDirectClient client{opCtx};
                                     hangTimeseriesInsertBeforeReopeningQuery.pauseWhileSet();
                                     suitableBucket =
                                         client.findOne(bucketsColl->ns(), BSON("_id" << *bucketId));
                                     bucketFindResult.fetchedBucket = true;
-                                } else if (auto* filter =
-                                               stdx::get_if<BSONObj>(&insertResult.candidate)) {
+                                } else if (auto* pipeline = stdx::get_if<std::vector<BSONObj>>(
+                                               &insertResult.candidate)) {
                                     // Resort to Query-Based reopening approach.
                                     DBDirectClient client{opCtx};
 
@@ -1188,8 +1123,25 @@ public:
                                             bucketsColl->getIndexCatalog(),
                                             timeSeriesOptions)) {
                                         hangTimeseriesInsertBeforeReopeningQuery.pauseWhileSet();
-                                        // Run a query to find a suitable bucket to reopen.
-                                        suitableBucket = client.findOne(bucketsColl->ns(), *filter);
+
+                                        // Run an aggregation to find a suitable bucket to reopen.
+                                        AggregateCommandRequest aggRequest(bucketsColl->ns(),
+                                                                           *pipeline);
+
+                                        // TODO (SERVER-73189): Remove manually setting of the
+                                        // Tenant ID.
+                                        aggRequest.setDollarTenant(bucketsColl->ns().tenantId());
+
+                                        auto cursor =
+                                            uassertStatusOK(DBClientCursor::fromAggregationRequest(
+                                                &client,
+                                                aggRequest,
+                                                false /* secondaryOk */,
+                                                false /* useExhaust*/));
+
+                                        if (cursor->more()) {
+                                            suitableBucket = cursor->next();
+                                        }
                                         bucketFindResult.queriedBucket = true;
                                     }
                                 }
@@ -1235,7 +1187,8 @@ public:
                 } while (!swResult.isOK() &&
                          (swResult.getStatus().code() == ErrorCodes::WriteConflict));
 
-                if (auto error = generateError(opCtx, swResult, start + index, errors->size())) {
+                if (auto error = write_ops_exec::generateError(
+                        opCtx, swResult.getStatus(), start + index, errors->size())) {
                     invariant(swResult.getStatus().code() != ErrorCodes::WriteConflict);
                     errors->emplace_back(std::move(*error));
                     return false;
@@ -1245,7 +1198,7 @@ public:
                 batches.emplace_back(std::move(insertResult.batch), index);
                 const auto& batch = batches.back().first;
                 if (isTimeseriesWriteRetryable(opCtx)) {
-                    stmtIds[batch->bucket().bucketId.oid].push_back(stmtId);
+                    stmtIds[batch->bucketHandle.bucketId.oid].push_back(stmtId);
                 }
 
                 // If this insert closed buckets, rewrite to be a compressed column. If we cannot
@@ -1257,8 +1210,8 @@ public:
 
                     // If this write closed a bucket, compress the bucket
                     auto ret = _performTimeseriesBucketCompression(opCtx, closedBucket);
-                    if (auto error =
-                            generateError(opCtx, ret.result, start + index, errors->size())) {
+                    if (auto error = write_ops_exec::generateError(
+                            opCtx, ret.result.getStatus(), start + index, errors->size())) {
                         // Bucket compression only fail when we may not try to perform any other
                         // write operation. When handleError() inside write_ops_exec.cpp return
                         // false.
@@ -1310,14 +1263,15 @@ public:
 
                 // If there are any unprocessed batches, we mark them as error with the last known
                 // error.
-                if (itr > indexOfLastProcessedBatch && batch->claimCommitRights()) {
+                if (itr > indexOfLastProcessedBatch &&
+                    timeseries::bucket_catalog::claimWriteBatchCommitRights(*batch)) {
                     timeseries::bucket_catalog::BucketCatalog::get(opCtx).abort(
                         batch, lastError->getStatus());
                     errors->emplace_back(start + index, lastError->getStatus());
                     continue;
                 }
 
-                auto swCommitInfo = batch->getResult();
+                auto swCommitInfo = timeseries::bucket_catalog::getWriteBatchResult(*batch);
                 if (swCommitInfo.getStatus() == ErrorCodes::TimeseriesBucketCleared) {
                     tassert(6023102, "the 'docsToRetry' cannot be null", docsToRetry);
                     docsToRetry->push_back(index);
@@ -1328,7 +1282,7 @@ public:
                     opCtx->recoveryUnit()->abandonSnapshot();
                     continue;
                 }
-                if (auto error = generateError(
+                if (auto error = write_ops_exec::generateError(
                         opCtx, swCommitInfo.getStatus(), start + index, errors->size())) {
                     errors->emplace_back(std::move(*error));
                     continue;
@@ -1442,9 +1396,9 @@ public:
             size_t itr = 0;
             for (; itr < batches.size(); ++itr) {
                 auto& [batch, index] = batches[itr];
-                if (batch->claimCommitRights()) {
+                if (timeseries::bucket_catalog::claimWriteBatchCommitRights(*batch)) {
                     auto stmtIds = isTimeseriesWriteRetryable(opCtx)
-                        ? std::move(bucketStmtIds[batch->bucket().bucketId.oid])
+                        ? std::move(bucketStmtIds[batch->bucketHandle.bucketId.oid])
                         : std::vector<StmtId>{};
 
                     canContinue = _commitTimeseriesBucket(opCtx,

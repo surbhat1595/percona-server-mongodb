@@ -49,7 +49,6 @@
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/matcher/matcher_type_set.h"
-#include "mongo/db/query/optimizer/rewrites/path_lower.h"
 #include "mongo/db/query/sbe_stage_builder.h"
 #include "mongo/db/storage/execution_context.h"
 #include "mongo/logv2/log.h"
@@ -485,15 +484,20 @@ EvalStage makeUnion(std::vector<EvalStage> inputStages,
 
 EvalStage makeHashAgg(EvalStage stage,
                       sbe::value::SlotVector gbs,
-                      sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>> aggs,
+                      sbe::SlotExprPairVector aggs,
                       boost::optional<sbe::value::SlotId> collatorSlot,
                       bool allowDiskUse,
+                      sbe::SlotExprPairVector mergingExprs,
                       PlanNodeId planNodeId) {
     stage.setOutSlots(gbs);
     for (auto& [slot, _] : aggs) {
         stage.addOutSlot(slot);
     }
 
+    // In debug builds, we artificially force frequent spilling. This makes sure that our tests
+    // exercise the spilling algorithm and the associated logic for merging partial aggregates which
+    // otherwise would require large data sizes to exercise.
+    const bool forceIncreasedSpilling = kDebugBuild && allowDiskUse;
     stage.setStage(sbe::makeS<sbe::HashAggStage>(stage.extractStage(planNodeId),
                                                  std::move(gbs),
                                                  std::move(aggs),
@@ -501,7 +505,10 @@ EvalStage makeHashAgg(EvalStage stage,
                                                  true /* optimized close */,
                                                  collatorSlot,
                                                  allowDiskUse,
-                                                 planNodeId));
+                                                 std::move(mergingExprs),
+                                                 planNodeId,
+                                                 true /* participateInTrialRunTracking */,
+                                                 forceIncreasedSpilling));
     return stage;
 }
 
@@ -625,18 +632,6 @@ std::pair<sbe::value::TypeTags, sbe::value::Value> makeValue(const BSONObj& bo) 
 std::pair<sbe::value::TypeTags, sbe::value::Value> makeValue(const BSONArray& ba) {
     return sbe::value::copyValue(sbe::value::TypeTags::bsonArray,
                                  sbe::value::bitcastFrom<const char*>(ba.objdata()));
-}
-
-std::pair<sbe::value::TypeTags, sbe::value::Value> makeValue(const Value& val) {
-    // TODO: Either make this conversion unnecessary by changing the value representation in
-    // ExpressionConstant, or provide a nicer way to convert directly from Document/Value to
-    // sbe::Value.
-    BSONObjBuilder bob;
-    val.addToBsonObj(&bob, ""_sd);
-    auto obj = bob.done();
-    auto be = obj.objdata();
-    auto end = be + obj.objsize();
-    return sbe::bson::convertFrom<false>(be + 4, end, 0);
 }
 
 uint32_t dateTypeMask() {

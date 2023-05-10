@@ -32,7 +32,6 @@
 
 #include "mongo/db/s/sharding_ddl_coordinator.h"
 
-#include "mongo/db/catalog/catalog_helper.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/s/database_sharding_state.h"
@@ -60,16 +59,6 @@ MONGO_FAIL_POINT_DEFINE(overrideDDLLockTimeout);
 namespace {
 
 const Backoff kExponentialBackoff(Seconds(1), Milliseconds::max());
-
-bool isRetriableErrorForDDLCoordinator(const Status& status) {
-    return status.isA<ErrorCategory::CursorInvalidatedError>() ||
-        status.isA<ErrorCategory::ShutdownError>() || status.isA<ErrorCategory::RetriableError>() ||
-        status.isA<ErrorCategory::CancellationError>() ||
-        status.isA<ErrorCategory::ExceededTimeLimitError>() ||
-        status.isA<ErrorCategory::WriteConcernError>() ||
-        status == ErrorCodes::FailedToSatisfyReadPreference || status == ErrorCodes::Interrupted ||
-        status == ErrorCodes::LockBusy || status == ErrorCodes::CommandNotFound;
-}
 
 }  // namespace
 
@@ -289,7 +278,7 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                     metadata().getDatabaseVersion() /* databaseVersion */);
 
                 // Check under the dbLock if this is still the primary shard for the database
-                catalog_helper::assertIsPrimaryShardForDb(opCtx, originalNss().db());
+                DatabaseShardingState::assertIsPrimaryShardForDb(opCtx, originalNss().db());
             };
         })
         .then([this, executor, token, anchor = shared_from_this()] {
@@ -369,7 +358,7 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                     //  If the token is not cancelled we retry because it could have been generated
                     //  by a remote node.
                     if (!status.isOK() && !_completeOnError &&
-                        (_mustAlwaysMakeProgress() || isRetriableErrorForDDLCoordinator(status)) &&
+                        (_mustAlwaysMakeProgress() || _isRetriableErrorForDDLCoordinator(status)) &&
                         !token.isCanceled()) {
                         LOGV2_INFO(5656000,
                                    "Re-executing sharding DDL coordinator",
@@ -469,6 +458,16 @@ void ShardingDDLCoordinator::_performNoopRetryableWriteOnAllShardsAndConfigsvr(
     }();
 
     sharding_ddl_util::performNoopRetryableWriteOnShards(opCtx, shardsAndConfigsvr, osi, executor);
+}
+
+bool ShardingDDLCoordinator::_isRetriableErrorForDDLCoordinator(const Status& status) {
+    return status.isA<ErrorCategory::CursorInvalidatedError>() ||
+        status.isA<ErrorCategory::ShutdownError>() || status.isA<ErrorCategory::RetriableError>() ||
+        status.isA<ErrorCategory::CancellationError>() ||
+        status.isA<ErrorCategory::ExceededTimeLimitError>() ||
+        status.isA<ErrorCategory::WriteConcernError>() ||
+        status == ErrorCodes::FailedToSatisfyReadPreference || status == ErrorCodes::Interrupted ||
+        status == ErrorCodes::LockBusy || status == ErrorCodes::CommandNotFound;
 }
 
 }  // namespace mongo

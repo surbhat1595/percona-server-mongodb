@@ -109,6 +109,7 @@ let viewsCommandTests = {
     _configsvrCreateDatabase: {skip: isAnInternalCommand},
     _configsvrDropIndexCatalogEntry: {skip: isAnInternalCommand},
     _configsvrEnsureChunkVersionIsGreaterThan: {skip: isAnInternalCommand},
+    _configsvrGetHistoricalPlacement: {skip: isAnInternalCommand},  // TODO SERVER-73029 remove
     _configsvrMoveChunk: {skip: isAnInternalCommand},  // Can be removed once 6.0 is last LTS
     _configsvrMovePrimary: {skip: isAnInternalCommand},
     _configsvrMoveRange: {skip: isAnInternalCommand},
@@ -305,6 +306,7 @@ let viewsCommandTests = {
             assert.commandWorked(conn.runCommand({dropAllRolesFromDatabase: 1}));
         }
     },
+    createSearchIndex: {skip: isUnrelated},
     createUser: {
         command: {createUser: "testuser", pwd: "testpass", roles: []},
         setup: function(conn) {
@@ -370,6 +372,7 @@ let viewsCommandTests = {
             assert.commandWorked(conn.runCommand({dropAllRolesFromDatabase: 1}));
         }
     },
+    dropSearchIndex: {skip: isUnrelated},
     dropUser: {skip: isUnrelated},
     echo: {skip: isUnrelated},
     emptycapped: {
@@ -499,6 +502,7 @@ let viewsCommandTests = {
     listDatabases: {skip: isUnrelated},
     listDatabasesForAllTenants: {skip: isUnrelated},
     listIndexes: {command: {listIndexes: "view"}, expectFailure: true},
+    listSearchIndexes: {skip: isUnrelated},
     listShards: {skip: isUnrelated},
     lockInfo: {skip: isUnrelated},
     logApplicationMessage: {skip: isUnrelated},
@@ -519,6 +523,7 @@ let viewsCommandTests = {
         expectFailure: true,
         expectedErrorCode: ErrorCodes.NamespaceNotSharded,
     },
+    modifySearchIndex: {skip: isUnrelated},
     moveChunk: {
         command: {moveChunk: "test.view", find: {}, to: "a"},
         skipStandalone: true,
@@ -640,6 +645,7 @@ let viewsCommandTests = {
     setDefaultRWConcern: {skip: isUnrelated},
     setFeatureCompatibilityVersion: {skip: isUnrelated},
     setFreeMonitoring: {skip: isUnrelated},
+    setProfilingFilterGlobally: {skip: isUnrelated},
     setParameter: {skip: isUnrelated},
     setShardVersion: {skip: isUnrelated},
     setChangeStreamState: {skip: isUnrelated},

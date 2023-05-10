@@ -49,10 +49,7 @@ Date_t parseDateFromDurationSinceEpoch(const BSONElement& elem) {
             str::stream() << "Epoch value must be numeric, got: " << typeName(elem.type()),
             elem.isNumber());
 
-    long long time;
-    uassertStatusOK(elem.tryCoerce(&time).withContext("Unable to coerce value to an epoch"));
-
-    return Date_t::fromDurationSinceEpoch(Duration{time});
+    return Date_t::fromDurationSinceEpoch(Duration{elem.exactNumberLong()});
 }
 
 /**

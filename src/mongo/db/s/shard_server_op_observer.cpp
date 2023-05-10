@@ -30,7 +30,6 @@
 #include "mongo/db/s/shard_server_op_observer.h"
 
 #include "mongo/bson/util/bson_extract.h"
-#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/s/balancer_stats_registry.h"
@@ -433,13 +432,10 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
             AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(opCtx->lockState());
 
             DatabaseName dbName(boost::none, db);
-
             AutoGetDb autoDb(opCtx, dbName, MODE_X);
-
             auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
                 opCtx, dbName, DSSAcquisitionMode::kExclusive);
-            scopedDss->cancelDbMetadataRefresh();
-            DatabaseHolder::get(opCtx)->clearDbInfo(opCtx, dbName);
+            scopedDss->clearDbInfo(opCtx);
         }
     }
 
@@ -605,6 +601,15 @@ void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
             });
 
             break;
+        case 'o': {
+            opCtx->recoveryUnit()->onCommit([opCtx, nss](auto _) {
+                AutoGetCollection autoColl(opCtx, nss, MODE_IX);
+                auto scsr = CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
+                    opCtx, nss);
+                scsr->clearIndexes(opCtx);
+            });
+            break;
+        }
         case 'm': {
             auto indexVersion = indexDoc["entry"][IndexCatalogType::kLastmodFieldName].timestamp();
             auto fromNss = NamespaceString(indexDoc["entry"]["fromNss"].String());
@@ -621,13 +626,6 @@ void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
                     auto fromCSR =
                         CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
                             opCtx, fromNss);
-                    uassert(
-                        7079504,
-                        format(FMT_STRING("The critical section for collection {} must be taken in "
-                                          "order to execute this command"),
-                               fromNss.toString()),
-                        fromCSR->getCriticalSectionSignal(
-                            opCtx, ShardingMigrationCriticalSection::kWrite));
                     auto indexCache = fromCSR->getIndexes(opCtx, true);
                     indexCache->forEachGlobalIndex([&](const auto& index) {
                         fromIndexes.push_back(index);
@@ -682,13 +680,10 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
         AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(opCtx->lockState());
 
         DatabaseName dbName(boost::none, deletedDatabase);
-
         AutoGetDb autoDb(opCtx, dbName, MODE_X);
-
         auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
             opCtx, dbName, DSSAcquisitionMode::kExclusive);
-        scopedDss->cancelDbMetadataRefresh();
-        DatabaseHolder::get(opCtx)->clearDbInfo(opCtx, dbName);
+        scopedDss->clearDbInfo(opCtx);
     }
 
     if (nss == NamespaceString::kServerConfigurationNamespace) {
@@ -731,7 +726,7 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
                     // Secondary nodes must clear the database metadata before releasing the
                     // in-memory critical section.
                     if (!isStandaloneOrPrimary(opCtx)) {
-                        DatabaseHolder::get(opCtx)->clearDbInfo(opCtx, deletedNss.dbName());
+                        scopedDss->clearDbInfo(opCtx);
                     }
 
                     scopedDss->exitCriticalSection(opCtx, reason);

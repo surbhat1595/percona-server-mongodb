@@ -215,6 +215,17 @@ void IndexCatalogImpl::_init(OperationContext* opCtx,
         BSONObj spec = collection->getIndexSpec(indexName).getOwned();
         BSONObj keyPattern = spec.getObjectField("key");
 
+        if (IndexNames::findPluginName(keyPattern) == IndexNames::COLUMN) {
+            LOGV2_OPTIONS(7281100,
+                          {logv2::LogTag::kStartupWarnings},
+                          "Found a columnstore index in the catalog. Columnstore indexes are "
+                          "a preview feature and not recommended for production use",
+                          "ns"_attr = collection->ns(),
+                          "uuid"_attr = collection->uuid(),
+                          "index"_attr = indexName,
+                          "spec"_attr = spec);
+        }
+
         auto descriptor = std::make_unique<IndexDescriptor>(_getAccessMethodName(keyPattern), spec);
 
         if (spec.hasField(IndexDescriptor::kExpireAfterSecondsFieldName)) {
@@ -999,10 +1010,11 @@ Status IndexCatalogImpl::_isSpecOk(OperationContext* opCtx,
         }
         const std::unique_ptr<MatchExpression> filterExpr = std::move(statusWithMatcher.getValue());
 
-        Status status =
-            _checkValidFilterExpressions(filterExpr.get(),
-                                         feature_flags::gTimeseriesMetricIndexes.isEnabled(
-                                             serverGlobalParams.featureCompatibility));
+        Status status = _checkValidFilterExpressions(
+            filterExpr.get(),
+            !serverGlobalParams.featureCompatibility.isVersionInitialized() ||
+                feature_flags::gTimeseriesMetricIndexes.isEnabled(
+                    serverGlobalParams.featureCompatibility));
         if (!status.isOK()) {
             return status;
         }
@@ -1595,6 +1607,19 @@ void IndexCatalogImpl::findIndexByType(OperationContext* opCtx,
             matches.push_back(desc);
         }
     }
+}
+
+const IndexDescriptor* IndexCatalogImpl::findIndexByIdent(OperationContext* opCtx,
+                                                          StringData ident,
+                                                          InclusionPolicy inclusionPolicy) const {
+    auto ii = getIndexIterator(opCtx, inclusionPolicy);
+    while (ii->more()) {
+        const IndexCatalogEntry* entry = ii->next();
+        if (ident == entry->getIdent()) {
+            return entry->descriptor();
+        }
+    }
+    return nullptr;
 }
 
 const IndexCatalogEntry* IndexCatalogImpl::getEntry(const IndexDescriptor* desc) const {

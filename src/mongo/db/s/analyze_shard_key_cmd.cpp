@@ -43,7 +43,19 @@
 
 namespace mongo {
 
+MONGO_FAIL_POINT_DEFINE(analyzeShardKeySkipCalcalutingReadWriteDistributionMetrics);
+
 namespace {
+
+std::string makeCommandNote() {
+    return str::stream() << "If \"" << KeyCharacteristicsMetrics::kNumOrphanDocsFieldName
+                         << "\" is large relative to \""
+                         << KeyCharacteristicsMetrics::kNumDocsFieldName
+                         << "\", you may want to rerun the command at some other time to get more "
+                            "accurate \""
+                         << KeyCharacteristicsMetrics::kNumDistinctValuesFieldName << "\" and \""
+                         << KeyCharacteristicsMetrics::kFrequencyFieldName << "\" metrics.";
+}
 
 void validateCommandOptions(OperationContext* opCtx,
                             const NamespaceString& nss,
@@ -85,6 +97,20 @@ public:
             auto keyCharacteristics =
                 analyze_shard_key::calculateKeyCharacteristicsMetrics(opCtx, nss, key);
             response.setKeyCharacteristics(keyCharacteristics);
+            response.setNote(makeCommandNote());
+
+            if (!serverGlobalParams.clusterRole.isShardRole() ||
+                MONGO_unlikely(
+                    analyzeShardKeySkipCalcalutingReadWriteDistributionMetrics.shouldFail())) {
+                // Currently, query sampling is only supported on sharded clusters.
+                return response;
+            }
+
+            // Metrics about the read and write distribution.
+            auto [readDistribution, writeDistribution] =
+                analyze_shard_key::calculateReadWriteDistributionMetrics(opCtx, nss, key);
+            response.setReadDistribution(readDistribution);
+            response.setWriteDistribution(writeDistribution);
 
             return response;
         }

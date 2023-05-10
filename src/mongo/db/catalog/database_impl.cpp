@@ -155,7 +155,7 @@ Status DatabaseImpl::validateDBName(StringData dbname) {
 }
 
 DatabaseImpl::DatabaseImpl(const DatabaseName& dbName)
-    : _name(dbName), _viewsName(_name, NamespaceString::kSystemDotViewsCollectionName) {}
+    : _name(dbName), _viewsName(NamespaceString::makeSystemDotViewsNamespace(_name)) {}
 
 void DatabaseImpl::init(OperationContext* const opCtx) {
     Status status = validateDBName(_name.db());
@@ -990,6 +990,10 @@ Status DatabaseImpl::userCreateNS(OperationContext* opCtx,
                                                               std::move(expCtx),
                                                               ExtensionsCallbackNoop(),
                                                               allowedFeatures);
+
+        // Increment counters to track the usage of schema validators.
+        validatorCounters.incrementCounters(
+            "create", collectionOptions.validator, statusWithMatcher.isOK());
 
         // We check the status of the parse to see if there are any banned features, but we don't
         // actually need the result for now.

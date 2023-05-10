@@ -29,8 +29,7 @@
 
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/exec/sbe/values/bson.h"
-#include "mongo/db/pipeline/abt/utils.h"
+#include "mongo/db/exec/docval_to_sbeval.h"
 #include "mongo/db/pipeline/accumulation_statement.h"
 #include "mongo/db/pipeline/accumulator.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -95,7 +94,7 @@ void AccumulatorInternalConstructStats::processInternal(const Value& input, bool
     auto val = doc["val"][InternalConstructStatsAccumulatorParams::kValFieldName];
 
     LOGV2_DEBUG(6735800, 4, "Extracted document", "val"_attr = val);
-    _values.emplace_back(stats::SBEValue(mongo::optimizer::convertFrom(val)));
+    _values.emplace_back(stats::SBEValue(sbe::value::makeValue(val)));
 
     _count++;
     _memUsageBytes = sizeof(*this);
@@ -105,9 +104,8 @@ Value AccumulatorInternalConstructStats::getValue(bool toBeMerged) {
     uassert(8423374, "Can not merge analyze pipelines", !toBeMerged);
 
     // Generate and serialize maxdiff histogram for scalar and array values.
-    auto arrayHistogram =
-        stats::createArrayEstimator(_values, _params.getNumberBuckets(), _params.getSampleRate());
-    auto stats = stats::makeStatistics(_count, arrayHistogram);
+    auto arrayHistogram = stats::createArrayEstimator(_values, _params.getNumberBuckets());
+    auto stats = stats::makeStatistics(_count, _params.getSampleRate(), arrayHistogram);
 
     return Value(stats);
 }

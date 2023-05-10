@@ -37,6 +37,16 @@ var QuerySamplingUtil = (function() {
     }
 
     /**
+     * Waits for the given node to have no active collections for query sampling.
+     */
+    function waitForInactiveSampling(node) {
+        assert.soon(() => {
+            const res = assert.commandWorked(node.adminCommand({serverStatus: 1}));
+            return res.queryAnalyzers.activeCollections == 0;
+        });
+    }
+
+    /**
      * Waits for all shard nodes to have one active collection for query sampling.
      */
     function waitForActiveSamplingOnAllShards(st) {
@@ -262,12 +272,39 @@ var QuerySamplingUtil = (function() {
         return actualNumPerSec;
     }
 
+    /**
+     * Returns the total number of query sample documents across shards.
+     */
+    function getNumSampledQueryDocuments(st) {
+        let numDocs = 0;
+
+        st._rs.forEach((rs) => {
+            numDocs += rs.test.getPrimary().getCollection(kSampledQueriesNs).find().itcount();
+        });
+
+        return numDocs;
+    }
+
+    /**
+     * Returns the total number of query sample diff documents across shards.
+     */
+    function getNumSampledQueryDiffDocuments(st) {
+        let numDocs = 0;
+
+        st._rs.forEach((rs) => {
+            numDocs += rs.test.getPrimary().getCollection(kSampledQueriesDiffNs).find().itcount();
+        });
+
+        return numDocs;
+    }
+
     return {
         getCollectionUuid,
         generateRandomString,
         generateRandomCollation,
         makeCmdObjIgnoreSessionInfo,
         waitForActiveSampling,
+        waitForInactiveSampling,
         waitForActiveSamplingOnAllShards,
         assertSoonSampledQueryDocuments,
         assertSoonSampledQueryDocumentsAcrossShards,
@@ -276,6 +313,8 @@ var QuerySamplingUtil = (function() {
         assertSoonSingleSampledDiffDocument,
         assertNoSampledDiffDocuments,
         clearSampledDiffCollection,
-        runCmdsOnRepeat
+        runCmdsOnRepeat,
+        getNumSampledQueryDocuments,
+        getNumSampledQueryDiffDocuments
     };
 })();

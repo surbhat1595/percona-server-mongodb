@@ -21,7 +21,9 @@ print(`Metadata: ${tojson(dbMetadata)}\n`);
 load(`${dataDir}${dbName}.data`);
 
 print(`Loading ${dataSet.length} collections.\n`);
-loadJSONDataset(testDB, dataSet, dbMetadata);
+runHistogramsTest(function() {
+    loadJSONDataset(testDB, dataSet, dbMetadata);
+});
 
 for (const collMetadata of dbMetadata) {
     const collName = collMetadata.collectionName;
@@ -29,14 +31,8 @@ for (const collMetadata of dbMetadata) {
     const expectedCard = collMetadata.cardinality;
     const actualCard = coll.find().itcount();
     print(`\nTesting collection ${collName}\n`);
-    print(`Indexes: ${tojson(coll.getIndexes())}\n`);
     print(`Expected cardinality: ${expectedCard}\n`);
     print(`Actual cardinality: ${actualCard}\n`);
     assert.eq(expectedCard, actualCard);
-    print('Histogram:\n');
-    let statsColl = testDB.system.statistics[collName];
-    statsColl.find().forEach(function(doc) {
-        jsTestLog(doc);
-    });
 }
 })();

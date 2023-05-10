@@ -58,7 +58,8 @@ public:
 
     std::vector<CollectionType> getCollections(OperationContext* opCtx,
                                                StringData db,
-                                               repl::ReadConcernLevel readConcernLevel) override;
+                                               repl::ReadConcernLevel readConcernLevel,
+                                               const BSONObj& sort) override;
 
     std::vector<NamespaceString> getAllShardedCollectionsForDb(
         OperationContext* opCtx, StringData dbName, repl::ReadConcernLevel readConcern) override;
@@ -160,6 +161,12 @@ public:
 
     std::vector<ShardId> getShardsThatOwnDataAtClusterTime(OperationContext* opCtx,
                                                            const Timestamp& clusterTime) override;
+
+    std::vector<ShardId> getHistoricalPlacement(
+        OperationContext* opCtx,
+        const Timestamp& atClusterTime,
+        const boost::optional<NamespaceString>& nss) override;
+
 
 private:
     StatusWith<repl::OpTimeWith<std::vector<BSONObj>>> _exhaustiveFindOnConfig(

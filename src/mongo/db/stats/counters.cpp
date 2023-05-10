@@ -337,6 +337,8 @@ DotsAndDollarsFieldsCounters dotsAndDollarsFieldsCounters;
 QueryFrameworkCounters queryFrameworkCounters;
 LookupPushdownCounters lookupPushdownCounters;
 SortCounters sortCounters;
+ValidatorCounters validatorCounters;
+GroupCounters groupCounters;
 
 OperatorCounters operatorCountersAggExpressions{"operatorCounters.expressions."};
 OperatorCounters operatorCountersMatchExpressions{"operatorCounters.match."};

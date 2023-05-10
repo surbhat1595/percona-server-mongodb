@@ -291,8 +291,6 @@ public:
      *
      * Returns a ShardAndCollectionVersion object containing the new collection version produced by
      * the merge(s).
-     *
-     * TODO SERVER-72283 add definition of "mergeable" related to `onCurrentShardSince`
      */
     StatusWith<ShardingCatalogManager::ShardAndCollectionVersion> commitMergeAllChunksOnShard(
         OperationContext* opCtx, const NamespaceString& nss, const ShardId& shardId);
@@ -308,15 +306,14 @@ public:
      *   - shardVersion - The new shard version of the source shard
      *   - collectionVersion - The new collection version after the commit
      */
-    StatusWith<ShardAndCollectionVersion> commitChunkMigration(
-        OperationContext* opCtx,
-        const NamespaceString& nss,
-        const ChunkType& migratedChunk,
-        const OID& collectionEpoch,
-        const Timestamp& collectionTimestamp,
-        const ShardId& fromShard,
-        const ShardId& toShard,
-        const boost::optional<Timestamp>& validAfter);
+    StatusWith<ShardAndCollectionVersion> commitChunkMigration(OperationContext* opCtx,
+                                                               const NamespaceString& nss,
+                                                               const ChunkType& migratedChunk,
+                                                               const OID& collectionEpoch,
+                                                               const Timestamp& collectionTimestamp,
+                                                               const ShardId& fromShard,
+                                                               const ShardId& toShard,
+                                                               const Timestamp& validAfter);
 
     /**
      * Removes the jumbo flag from the specified chunk.
@@ -566,6 +563,13 @@ public:
      * config server node.
      */
     ShardingCatalogClient* localCatalogClient();
+
+    /**
+     * Initializes the config.placementHistory collection:
+        - one entry per collection and its placement information at the current timestamp
+        - one entry per database with the current primary shard at the current timestamp
+     */
+    void initializePlacementHistory(OperationContext* opCtx);
 
 private:
     /**

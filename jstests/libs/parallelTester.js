@@ -253,9 +253,10 @@ if (typeof _threadInject != "undefined") {
             // inMemory storage engine.
             "timeseries/timeseries_compact.js",
 
-            // TODO (SERVER-63228): Remove this exclusion once the feature flag is enabled by
+            // TODO (SERVER-66393): Remove this exclusion once the feature flag is enabled by
             // default.
-            "timeseries/timeseries_index_ttl_partial.js",
+            "timeseries/timeseries_update_multi.js",
+            "timeseries/timeseries_delete_multi.js",
         ]);
 
         // Get files, including files in subdirectories.

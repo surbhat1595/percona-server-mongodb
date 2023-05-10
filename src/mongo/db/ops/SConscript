@@ -31,9 +31,24 @@ env.Library(
 )
 
 env.Library(
+    target='write_ops_exec_util',
+    source=[
+        'write_ops_exec_util.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
+        '$BUILD_DIR/mongo/db/shard_role_api',
+    ],
+)
+
+env.Library(
     target='write_ops_exec',
     source=[
         'write_ops_exec.cpp',
+    ],
+    LIBDEPS=[
+        'write_ops_exec_util',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
@@ -48,6 +63,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/record_id_helpers',
         '$BUILD_DIR/mongo/db/repl/oplog',
         '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
+        '$BUILD_DIR/mongo/db/repl/tenant_migration_access_blocker',
         '$BUILD_DIR/mongo/db/s/query_analysis_writer',
         '$BUILD_DIR/mongo/db/shard_role',
         '$BUILD_DIR/mongo/db/stats/counters',

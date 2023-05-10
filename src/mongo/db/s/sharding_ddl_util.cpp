@@ -81,7 +81,7 @@ void runTransactionOnShardingCatalog(OperationContext* opCtx,
     // Instantiate the right custom TXN client to ensure that the queries to the config DB will be
     // routed to the CSRS.
     auto customTxnClient = [&]() -> std::unique_ptr<txn_api::TransactionClient> {
-        if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+        if (serverGlobalParams.clusterRole.isExclusivelyShardRole()) {
             return std::make_unique<txn_api::details::SEPTransactionClient>(
                 opCtx,
                 executor,
@@ -584,7 +584,7 @@ void shardedRenameMetadata(OperationContext* opCtx,
                 .docs;
 
         /*
-         * TODO SERVER-70687 Replace the if block below with
+         * TODO SERVER-72870 Replace the if block below with
          * uassert(RetriableErrorCode,queryResponse.size() == 1)
          */
         if (queryResponse.empty()) {
@@ -759,6 +759,26 @@ void resumeMigrations(OperationContext* opCtx,
                       const NamespaceString& nss,
                       const boost::optional<UUID>& expectedCollectionUUID) {
     setAllowMigrations(opCtx, nss, expectedCollectionUUID, true);
+}
+
+bool checkAllowMigrations(OperationContext* opCtx, const NamespaceString& nss) {
+    auto collDoc =
+        uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getConfigShard()->exhaustiveFindOnConfig(
+                            opCtx,
+                            ReadPreferenceSetting(ReadPreference::PrimaryOnly, TagSet{}),
+                            repl::ReadConcernLevel::kMajorityReadConcern,
+                            CollectionType::ConfigNS,
+                            BSON(CollectionType::kNssFieldName << nss.ns()),
+                            BSONObj(),
+                            1))
+            .docs;
+
+    uassert(ErrorCodes::NamespaceNotFound,
+            str::stream() << "collection " << nss.ns() << " not found",
+            !collDoc.empty());
+
+    auto coll = CollectionType(collDoc[0]);
+    return coll.getAllowMigrations();
 }
 
 boost::optional<UUID> getCollectionUUID(OperationContext* opCtx,

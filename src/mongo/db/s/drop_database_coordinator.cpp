@@ -32,6 +32,7 @@
 
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/catalog/database_holder.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/cluster_transaction_api.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/s/database_sharding_state.h"
@@ -42,6 +43,7 @@
 #include "mongo/db/s/type_shard_database.h"
 #include "mongo/db/transaction/transaction_api.h"
 #include "mongo/db/vector_clock.h"
+#include "mongo/db/vector_clock_mutable.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_namespace_placement_gen.h"
@@ -223,6 +225,14 @@ void DropDatabaseCoordinator::_dropShardedCollection(
     sharding_ddl_util::removeQueryAnalyzerMetadataFromConfig(opCtx, nss, coll.getUuid());
 }
 
+void DropDatabaseCoordinator::_clearDatabaseInfoOnPrimary(OperationContext* opCtx) {
+    DatabaseName dbName(boost::none, _dbName);
+    AutoGetDb autoDb(opCtx, dbName, MODE_X);
+    auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
+        opCtx, dbName, DSSAcquisitionMode::kExclusive);
+    scopedDss->clearDbInfo(opCtx);
+}
+
 void DropDatabaseCoordinator::_clearDatabaseInfoOnSecondaries(OperationContext* opCtx) {
     Status signalStatus = shardmetadatautil::updateShardDatabasesEntry(
         opCtx,
@@ -279,9 +289,11 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
                         const auto db = catalogClient->getDatabase(
                             opCtx, _dbName, repl::ReadConcernLevel::kMajorityReadConcern);
                         if (_doc.getDatabaseVersion()->getUuid() != db.getVersion().getUuid()) {
+                            VectorClockMutable::get(opCtx)->waitForDurableConfigTime().get(opCtx);
                             return;  // skip to FlushDatabaseCacheUpdates
                         }
                     } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
+                        VectorClockMutable::get(opCtx)->waitForDurableConfigTime().get(opCtx);
                         return;  // skip to FlushDatabaseCacheUpdates
                     }
                 }
@@ -376,10 +388,13 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
                     // Clear the database sharding state info before exiting the critical section so
                     // that all subsequent write operations with the old database version will fail
                     // due to StaleDbVersion.
+                    _clearDatabaseInfoOnPrimary(opCtx);
                     _clearDatabaseInfoOnSecondaries(opCtx);
 
                     removeDatabaseFromConfigAndUpdatePlacementHistory(
                         opCtx, **executor, _dbName, *metadata().getDatabaseVersion());
+
+                    VectorClockMutable::get(opCtx)->waitForDurableConfigTime().get(opCtx);
                 }
             }))
         .then([this, executor = executor, anchor = shared_from_this()] {

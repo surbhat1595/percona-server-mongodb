@@ -5,9 +5,11 @@ import argparse
 import datetime
 import json
 import os
+import re
 import subprocess
 import sys
 import locale
+import hashlib
 import time
 from typing import Any, Dict, List, Optional, Tuple
 import multiprocessing
@@ -76,13 +78,17 @@ def _combine_errors(fixes_filename: str, files_to_parse: List[str]) -> int:
             fix_msg = fix["DiagnosticMessage"]
             fix_data = all_fixes.setdefault(fix["DiagnosticName"], {}).setdefault(
                 fix_msg.get("FilePath", "FilePath Not Found"), {}).setdefault(
-                    fix_msg.get("FileOffset", "FileOffset Not Found"), {
+                    str(fix_msg.get("FileOffset", "FileOffset Not Found")), {
                         "replacements": fix_msg.get(
                             "Replacements", "Replacements not found"), "message": fix_msg.get(
                                 "Message", "Message not found"), "count": 0, "source_files": []
                     })
             fix_data["count"] += 1
             fix_data["source_files"].append(fixes['MainSourceFile'])
+            if fix_msg.get("FilePath") and os.path.exists(fix_msg.get("FilePath")):
+                all_fixes[fix["DiagnosticName"]][fix_msg.get("FilePath")]['md5'] = hashlib.md5(
+                    open(fix_msg.get("FilePath"), 'rb').read()).hexdigest()
+
     with open(fixes_filename, "w") as files_file:
         json.dump(all_fixes, files_file, indent=4, sort_keys=True)
 
@@ -90,13 +96,28 @@ def _combine_errors(fixes_filename: str, files_to_parse: List[str]) -> int:
 
 
 def __dedup_errors(clang_tidy_errors_threads: List[str]) -> str:
-    #use dict as an 'ordered set'(in python 3.6+), set value to dummy value(true here)
-    error_to_dummy_value = dict()
+    unique_single_errors = set()
     for errs in clang_tidy_errors_threads:
         if errs:
-            for val in errs.splitlines():
-                error_to_dummy_value[val] = True
-    return os.linesep.join(error_to_dummy_value.keys())
+            lines = errs.splitlines()
+            single_error_start_line = 0
+            for i, line in enumerate(lines):
+                if line:
+                    # the first line of one single error message like:
+                    # ......./d_concurrency.h:175:13: error: .........
+                    # trying to match  :lineNumber:colomnNumber:
+                    matched_regex = re.match("(.+:[0-9]+:[0-9]+:)", line)
+
+                    # Collect a full single error message
+                    # when we find another match or reach the last line of the text
+                    if matched_regex and i != single_error_start_line:
+                        unique_single_errors.add(tuple(lines[single_error_start_line:i]))
+                        single_error_start_line = i
+                    elif i == len(lines) - 1:
+                        unique_single_errors.add(tuple(lines[single_error_start_line:i + 1]))
+
+    unique_single_error_flatten = [item for sublist in unique_single_errors for item in sublist]
+    return os.linesep.join(unique_single_error_flatten)
 
 
 def main():
@@ -116,6 +137,8 @@ def main():
                         help="Log errors to console")
     parser.add_argument("-l", "--log-file", type=str, default="clang_tidy",
                         help="clang tidy log from evergreen")
+    parser.add_argument("--disable-reporting", action='store_true', default=False,
+                        help="Disable generating the report file for evergreen perf.send")
     parser.add_argument("-m", "--check-module", type=str,
                         default="build/install/lib/libmongo_tidy_checks.so",
                         help="Path to load the custom mongo checks module.")
@@ -131,11 +154,30 @@ def main():
     else:
         mongo_tidy_check_module = ''
 
-    with open(args.compile_commands) as compile_commands:
-        compile_commands = json.load(compile_commands)
+    if os.path.exists(args.compile_commands):
+        with open(args.compile_commands) as compile_commands:
+            compile_commands = json.load(compile_commands)
+    else:
+        if args.compile_commands == parser.get_default('compile_commands'):
+            print(
+                f"Could not find compile commands: '{args.compile_commands}', to generate it, use the build command:\n\n"
+                + "python3 buildscripts/scons.py --build-profile=compiledb compiledb\n")
+        else:
+            print(f"Could not find compile commands: {args.compile_commands}")
+        sys.exit(1)
 
-    with open(args.clang_tidy_cfg) as clang_tidy_cfg:
-        clang_tidy_cfg = yaml.safe_load(clang_tidy_cfg)
+    if os.path.exists(args.clang_tidy_cfg):
+        with open(args.clang_tidy_cfg) as clang_tidy_cfg:
+            clang_tidy_cfg = yaml.safe_load(clang_tidy_cfg)
+    else:
+        if args.clang_tidy_cfg == parser.get_default('clang_tidy_cfg'):
+            print(
+                f"Could not find config file: '{args.clang_tidy_cfg}', to generate it, use the build command:\n\n"
+                + "python3 buildscripts/scons.py --build-profile=compiledb compiledb\n")
+        else:
+            print(f"Could not find config file: {args.clang_tidy_cfg}")
+        sys.exit(1)
+
     files_to_tidy = list()
     files_to_parse = list()
     for file_doc in compile_commands:
@@ -181,10 +223,11 @@ def main():
     subprocess.run(["tar", "-czvf", args.output_dir + ".tgz", args.output_dir], check=False)
 
     # create report and dump to report.json
-    error_file_contents = __dedup_errors(clang_tidy_errors_futures)
-    report = make_report(args.log_file, error_file_contents, 1 if failed_files > 0 else 0)
-    try_combine_reports(report)
-    put_report(report)
+    if not args.disable_reporting:
+        error_file_contents = __dedup_errors(clang_tidy_errors_futures)
+        report = make_report(args.log_file, error_file_contents, 1 if failed_files > 0 else 0)
+        try_combine_reports(report)
+        put_report(report)
 
     return failed_files
 

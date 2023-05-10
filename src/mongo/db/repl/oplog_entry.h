@@ -85,6 +85,10 @@ public:
         return o;
     }
 
+    ReplOperation() = default;
+    explicit ReplOperation(DurableReplOperation durableReplOp)
+        : DurableReplOperation(std::move(durableReplOp)) {}
+
     const BSONObj& getPostImageDocumentKey() const {
         return _postImageDocumentKey;
     }
@@ -540,7 +544,7 @@ public:
      */
     bool isTerminalApplyOps() const {
         return getCommandType() == DurableOplogEntry::CommandType::kApplyOps && !shouldPrepare() &&
-            !isPartialTransaction() && !getObject().getBoolField("prepare");
+            !isPartialTransaction();
     }
 
     /**

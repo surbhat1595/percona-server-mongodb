@@ -1,4 +1,4 @@
-# This benchmark measures the performance of ABT translation.
+# This benchmark measures the performance of ABT lowering.
 test_kind: benchmark_test
 
 selector:

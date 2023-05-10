@@ -36,8 +36,6 @@
 
 namespace mongo::optimizer {
 
-std::pair<sbe::value::TypeTags, sbe::value::Value> convertFrom(Value val);
-
 using ABTFieldNameFn =
     std::function<ABT(FieldNameType fieldName, const bool isLastElement, ABT input)>;
 

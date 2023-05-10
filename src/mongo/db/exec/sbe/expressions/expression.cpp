@@ -329,35 +329,20 @@ vm::CodeFragment EPrimBinary::compileDirect(CompileCtx& ctx) const {
             }
         }
 
-        // For now:
-        //   lhs
-        //   if peek() is nothing then goto nothingCase
-        // existsCase:
-        //   goto done
-        // nothingCase:
-        //   pop   // drop lhs
-        //   rhs
-        // done:
-
-        // TODO if we had a jmpNotNothing (exactly like jmpNothing but with the condition reversed)
-        // we could avoid jumping over a jump here:
-        //   lhs
-        //   if peek() is not nothing then goto done
-        //   pop   // drop lhs
-        //   rhs
-        // done:
-
+        /*
+         *            lhs
+         *            jumpNotNothing end
+         * @nothing:  pop
+         *            rhs
+         * @end:
+         */
 
         vm::CodeFragment nothingCase;
         nothingCase.appendPop();
         nothingCase.append(std::move(rhs));
 
-        vm::CodeFragment existsCase;
-        existsCase.appendJump(nothingCase.instrs().size());
-
         code.append(std::move(lhs));
-        code.appendJumpNothing(existsCase.instrs().size());
-        code.append(std::move(existsCase));
+        code.appendJumpNotNothing(nothingCase.instrs().size());
         code.append(std::move(nothingCase));
 
         return code;
@@ -716,6 +701,7 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
      BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::collSetDifference, false}},
     {"collSetEquals",
      BuiltinFn{[](size_t n) { return n >= 3; }, vm::Builtin::collSetEquals, false}},
+    {"aggSetUnion", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggSetUnion, true}},
     {"aggSetUnionCapped",
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggSetUnionCapped, true}},
     {"aggCollSetUnionCapped",

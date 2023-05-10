@@ -42,7 +42,7 @@
 #include "mongo/db/timeseries/bucket_catalog/bucket_identifiers.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_metadata.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_state.h"
-#include "mongo/db/timeseries/bucket_catalog/bucket_state_manager.h"
+#include "mongo/db/timeseries/bucket_catalog/bucket_state_registry.h"
 #include "mongo/db/timeseries/bucket_catalog/closed_bucket.h"
 #include "mongo/db/timeseries/bucket_catalog/execution_stats.h"
 #include "mongo/db/timeseries/bucket_catalog/flat_bson.h"
@@ -59,12 +59,7 @@ namespace mongo::timeseries::bucket_catalog {
 
 class BucketCatalog {
 protected:
-    // Number of new field names we can hold in NewFieldNames without needing to allocate memory.
-    static constexpr std::size_t kNumStaticNewFields = 10;
-    using NewFieldNames = boost::container::small_vector<StringMapHashedKey, kNumStaticNewFields>;
-
     using StripeNumber = std::uint8_t;
-
     using ShouldClearFn = std::function<bool(const NamespaceString&)>;
 
 public:
@@ -86,7 +81,7 @@ public:
 
         std::shared_ptr<WriteBatch> batch;
         ClosedBuckets closedBuckets;
-        stdx::variant<std::monostate, OID, BSONObj> candidate;
+        stdx::variant<std::monostate, OID, std::vector<BSONObj>> candidate;
         uint64_t catalogEra = 0;
     };
 
@@ -320,7 +315,7 @@ protected:
     Bucket* _useBucketAndChangeState(Stripe* stripe,
                                      WithLock stripeLock,
                                      const BucketId& bucketId,
-                                     const BucketStateManager::StateChangeFn& change);
+                                     const BucketStateRegistry::StateChangeFn& change);
 
     /**
      * Mode enum to control whether the bucket retrieval methods below will create new buckets if no
@@ -404,12 +399,12 @@ protected:
         OperationContext* opCtx,
         Stripe* stripe,
         WithLock stripeLock,
+        StripeNumber stripeNumber,
         const BSONObj& doc,
         CombineWithInsertsFromOtherClients combine,
         AllowBucketCreation mode,
         CreationInfo* info,
-        Bucket* bucket,
-        ClosedBuckets* closedBuckets);
+        Bucket* bucket);
 
     /**
      * Wait for other batches to finish so we can prepare 'batch'
@@ -452,7 +447,8 @@ protected:
      * Identifies a previously archived bucket that may be able to accomodate the measurement
      * represented by 'info', if one exists.
      */
-    stdx::variant<std::monostate, OID, BSONObj> _getReopeningCandidate(
+    stdx::variant<std::monostate, OID, std::vector<BSONObj>> _getReopeningCandidate(
+        OperationContext* opCtx,
         Stripe* stripe,
         WithLock stripeLock,
         const CreationInfo& info,
@@ -518,8 +514,8 @@ protected:
         const BSONObj& doc,
         CreationInfo* info,
         Bucket* bucket,
-        NewFieldNames* newFieldNamesToBeInserted,
-        int32_t* sizeToBeAdded,
+        Bucket::NewFieldNames& newFieldNamesToBeInserted,
+        int32_t& sizeToBeAdded,
         AllowBucketCreation mode);
 
     /**
@@ -558,7 +554,7 @@ protected:
     mutable Mutex _mutex =
         MONGO_MAKE_LATCH(HierarchicalAcquisitionLevel(0), "BucketCatalog::_mutex");
 
-    BucketStateManager _bucketStateManager{&_mutex};
+    BucketStateRegistry _bucketStateRegistry{_mutex};
 
     static constexpr std::size_t kNumberOfStripes = 32;
     std::array<Stripe, kNumberOfStripes> _stripes;

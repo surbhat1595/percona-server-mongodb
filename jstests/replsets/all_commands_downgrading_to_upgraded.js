@@ -22,6 +22,8 @@ const fullNs = dbName + "." + collName;
 // Pre-written reasons for skipping a test.
 const isAnInternalCommand = "internal command";
 const isDeprecated = "deprecated command";
+// TODO SERVER-69753 some commands we didn't have time for. Other commands are new in recent
+// releases and don't make sense to test here.
 const isNotImplementedYet = "not implemented yet";
 
 let _lsid = UUID();
@@ -61,6 +63,7 @@ const allCommands = {
     _configsvrCreateDatabase: {skip: isAnInternalCommand},
     _configsvrDropIndexCatalogEntry: {skip: isAnInternalCommand},
     _configsvrEnsureChunkVersionIsGreaterThan: {skip: isAnInternalCommand},
+    _configsvrGetHistoricalPlacement: {skip: isAnInternalCommand},  // TODO SERVER-73029 remove
     _configsvrMoveChunk: {skip: isAnInternalCommand},
     _configsvrMoveRange: {skip: isAnInternalCommand},
     _configsvrRefineCollectionShardKey: {skip: isAnInternalCommand},
@@ -465,6 +468,9 @@ const allCommands = {
             assert.commandWorked(conn.getDB(dbName).runCommand({dropRole: "foo"}));
         }
     },
+    createSearchIndex: {
+        skip: isNotImplementedYet,
+    },
     createUser: {
         command: {createUser: "foo", pwd: "bar", roles: []},
         teardown: function(conn) {
@@ -549,6 +555,9 @@ const allCommands = {
                 conn.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}));
         },
         command: {dropRole: "foo"},
+    },
+    dropSearchIndex: {
+        skip: isNotImplementedYet,
     },
     dropUser: {
         setUp: function(conn) {
@@ -836,6 +845,9 @@ const allCommands = {
             assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
         },
     },
+    listSearchIndexes: {
+        skip: isNotImplementedYet,
+    },
     lockInfo: {skip: isNotImplementedYet, isAdminCommand: 1, command: {lockInfo: 1}},
     logApplicationMessage: {
         skip: isNotImplementedYet,
@@ -891,6 +903,9 @@ const allCommands = {
         //     assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
         // },
         // command: {mergeChunks: fullNs, bounds: [{_id: MinKey}, {_id: MaxKey}]}
+    },
+    modifySearchIndex: {
+        skip: isNotImplementedYet,
     },
     moveChunk: {
         skip: isNotImplementedYet,
@@ -1112,6 +1127,7 @@ const allCommands = {
     setIndexCommitQuorum: {skip: isNotImplementedYet},
     setFeatureCompatibilityVersion: {skip: isNotImplementedYet},
     setFreeMonitoring: {skip: isNotImplementedYet},
+    setProfilingFilterGlobally: {skip: isNotImplementedYet},
     setParameter: {skip: isNotImplementedYet},
     setShardVersion: {skip: isNotImplementedYet},
     setChangeStreamState: {skip: isNotImplementedYet},

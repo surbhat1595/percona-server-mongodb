@@ -33,6 +33,7 @@
 
 #include <string>
 #include <vector>
+#include <iostream>
 
 /*
  * This class represents an active connection to the Azure endpoint and allows for interaction with
@@ -49,11 +50,14 @@ class azure_connection {
     int list_objects(
       const std::string &prefix, std::vector<std::string> &objects, bool list_single) const;
     int put_object(const std::string &object_key, const std::string &file_path) const;
-    int delete_object() const;
+    int delete_object(const std::string &object_key) const;
     int get_object(const std::string &path) const;
+    int object_exists(const std::string &object_key, bool &exists) const;
 
     private:
     const std::string _bucket_name;
     const std::string _object_prefix;
     const Azure::Storage::Blobs::BlobContainerClient _azure_client;
+
+    int bucket_exists(bool &exists) const;
 };

@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/s/analyze_shard_key_read_write_distribution.h"
 
 #include "mongo/db/db_raii.h"
@@ -41,6 +39,7 @@
 #include "mongo/s/analyze_shard_key_util.h"
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/shard_key_pattern_query_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -86,17 +85,14 @@ DistributionMetricsType
 DistributionMetricsCalculator<DistributionMetricsType, SampleSizeType>::_getMetrics() const {
     DistributionMetricsType metrics(_getSampleSize());
     if (auto numTotal = metrics.getSampleSize().getTotal(); numTotal > 0) {
-        metrics.setNumTargetedOneShard(_numTargetedOneShard);
-        metrics.setPercentageOfTargetedOneShard(
-            calculatePercentage(_numTargetedOneShard, numTotal));
+        metrics.setNumSingleShard(_numSingleShard);
+        metrics.setPercentageOfSingleShard(calculatePercentage(_numSingleShard, numTotal));
 
-        metrics.setNumTargetedMultipleShards(_numTargetedMultipleShards);
-        metrics.setPercentageOfTargetedMultipleShards(
-            calculatePercentage(_numTargetedMultipleShards, numTotal));
+        metrics.setNumVariableShard(_numVariableShard);
+        metrics.setPercentageOfVariableShard(calculatePercentage(_numVariableShard, numTotal));
 
-        metrics.setNumTargetedAllShards(_numTargetedAllShards);
-        metrics.setPercentageOfTargetedAllShards(
-            calculatePercentage(_numTargetedAllShards, numTotal));
+        metrics.setNumScatterGather(_numScatterGather);
+        metrics.setPercentageOfScatterGather(calculatePercentage(_numScatterGather, numTotal));
 
         std::vector<int64_t> numDispatchedByRange;
         for (auto& [_, numDispatched] : _numDispatchedByRange) {
@@ -117,11 +113,11 @@ DistributionMetricsCalculator<DistributionMetricsType, SampleSizeType>::_increme
     const boost::optional<LegacyRuntimeConstants>& runtimeConstants,
     const boost::optional<BSONObj>& letParameters) {
     auto filter = primaryFilter;
-    auto shardKey = uassertStatusOK(
-        _getShardKeyPattern().extractShardKeyFromQuery(opCtx, _targeter.getNS(), primaryFilter));
+    auto shardKey = uassertStatusOK(extractShardKeyFromBasicQuery(
+        opCtx, _targeter.getNS(), _getShardKeyPattern(), primaryFilter));
     if (shardKey.isEmpty() && !secondaryFilter.isEmpty()) {
-        filter = secondaryFilter;
         shardKey = _getShardKeyPattern().extractShardKeyFromDoc(secondaryFilter);
+        filter = shardKey;
     }
 
     // Increment metrics about range targeting.
@@ -148,25 +144,25 @@ DistributionMetricsCalculator<DistributionMetricsType, SampleSizeType>::_increme
         // shard key doesn't contain a collatable field, then there is only one matching shard key
         // value so the query is guaranteed to target only one shard. Otherwise, the number of
         // shards that it targets depend on how the matching shard key values are distributed among
-        // shards. Given this, pessimistically classify it as targeting to multiple shards.
+        // shards.
         invariant(!targetMinkeyToMaxKey);
         if (hasSimpleCollation(_getDefaultCollator(), collation) ||
             !shardKeyHasCollatableType(_getShardKeyPattern(), shardKey)) {
-            _incrementTargetedOneShard();
+            _incrementSingleShard();
             invariant(chunkRanges.size() == 1U);
         } else {
-            _incrementTargetedMultipleShards();
+            _incrementVariableShard();
         }
     } else if (targetMinkeyToMaxKey) {
         // This query targets the entire shard key space. Therefore, it always targets all
         // shards and chunks.
-        _incrementTargetedAllShards();
+        _incrementScatterGather();
         invariant((int)chunkRanges.size() == _getChunkManager().numChunks());
     } else {
         // This query targets a subset of the shard key space. Therefore, the number of shards
         // that it targets depends on how the matching shard key ranges are distributed among
-        // shards. Given this, pessimistically classify it as targeting to multiple shards.
-        _incrementTargetedMultipleShards();
+        // shards.
+        _incrementVariableShard();
     }
 
     return shardKey;

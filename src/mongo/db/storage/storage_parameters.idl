@@ -187,7 +187,8 @@ feature_flags:
     featureFlagTimeseriesScalabilityImprovements:
         description: "Enable scalability and usability improvements for time-series collections"
         cpp_varname: feature_flags::gTimeseriesScalabilityImprovements
-        default: false
+        default: true
+        version: 6.3
     featureFlagExtendValidateCommand:
         description: "Enable checks on more types of inconsistencies for the validate command"
         cpp_varname: feature_flags::gExtendValidateCommand
@@ -200,4 +201,12 @@ feature_flags:
     featureFlagInternalWritesAreReplicatedTransactionally:
         description: Feature flag to enable internal writes to use the transactionally replicated WriteUnitOfWork API by default.
         cpp_varname: gFeatureFlagInternalWritesAreReplicatedTransactionally
+        default: false
+    featureFlagTimeseriesUpdatesDeletesSupport:
+        description: "Enable support for arbitrary updates and deletes on time-series collections"
+        cpp_varname: feature_flags::gTimeseriesUpdatesDeletesSupport
+        default: false
+    featureFlagIndexBuildGracefulErrorHandling:
+        description: "Enable index build error handling improvements"
+        cpp_varname: feature_flags::gIndexBuildGracefulErrorHandling
         default: false

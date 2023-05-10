@@ -760,7 +760,6 @@ WiredTigerKVEngine::WiredTigerKVEngine(
       _sizeStorerSyncTracker(cs, 100000, Seconds(60)),
       _ephemeral(ephemeral),
       _inRepairMode(repair),
-      _keepDataHistory(serverGlobalParams.enableMajorityReadConcern),
       _cacheSizeMB(cacheSizeMB) {
     _pinnedOplogTimestamp.store(Timestamp::max().asULL());
     boost::filesystem::path journalPath = path;
@@ -3724,9 +3723,6 @@ Timestamp WiredTigerKVEngine::getInitialDataTimestamp() const {
 }
 
 bool WiredTigerKVEngine::supportsRecoverToStableTimestamp() const {
-    if (!_keepDataHistory) {
-        return false;
-    }
     return true;
 }
 
@@ -3910,10 +3906,6 @@ Timestamp WiredTigerKVEngine::getPinnedOplog() const {
     }
 
     auto oplogNeededForCrashRecovery = getOplogNeededForCrashRecovery();
-    if (!_keepDataHistory) {
-        // We use rollbackViaRefetch, so we only need to pin oplog for crash recovery.
-        return std::min((oplogNeededForCrashRecovery.value_or(Timestamp::max())), pinned);
-    }
 
     if (oplogNeededForCrashRecovery) {
         return std::min(oplogNeededForCrashRecovery.value(), pinned);
@@ -4025,7 +4017,7 @@ bool WiredTigerKVEngine::supportsReadConcernSnapshot() const {
 }
 
 bool WiredTigerKVEngine::supportsReadConcernMajority() const {
-    return _keepDataHistory;
+    return true;
 }
 
 bool WiredTigerKVEngine::supportsOplogStones() const {

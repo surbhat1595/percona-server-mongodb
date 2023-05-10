@@ -61,6 +61,8 @@
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/repl/tenant_migration_access_blocker_registry.h"
+#include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/repl/tenant_migration_conflict_info.h"
 #include "mongo/db/repl/tenant_migration_decoration.h"
 #include "mongo/db/s/collection_sharding_state.h"
@@ -80,6 +82,7 @@
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/logv2/log.h"
+#include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/log_and_backoff.h"
 #include "mongo/util/scopeguard.h"
@@ -98,6 +101,7 @@ MONGO_FAIL_POINT_DEFINE(failAllRemoves);
 MONGO_FAIL_POINT_DEFINE(hangBeforeChildRemoveOpFinishes);
 MONGO_FAIL_POINT_DEFINE(hangBeforeChildRemoveOpIsPopped);
 MONGO_FAIL_POINT_DEFINE(hangAfterAllChildRemoveOpsArePopped);
+MONGO_FAIL_POINT_DEFINE(hangWriteBeforeWaitingForMigrationDecision);
 MONGO_FAIL_POINT_DEFINE(hangDuringBatchInsert);
 MONGO_FAIL_POINT_DEFINE(hangDuringBatchUpdate);
 MONGO_FAIL_POINT_DEFINE(hangAfterBatchUpdate);
@@ -167,16 +171,6 @@ void finishCurOp(OperationContext* opCtx, CurOp* curOp) {
     }
 }
 
-void assertCanWrite_inlock(OperationContext* opCtx, const NamespaceString& nss) {
-    uassert(ErrorCodes::PrimarySteppedDown,
-            str::stream() << "Not primary while writing to " << nss.ns(),
-            repl::ReplicationCoordinator::get(opCtx->getServiceContext())
-                ->canAcceptWritesFor(opCtx, nss));
-
-    CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
-        ->checkShardVersionOrThrow(opCtx);
-}
-
 void makeCollection(OperationContext* opCtx, const NamespaceString& ns) {
     writeConflictRetry(opCtx, "implicit collection creation", ns.ns(), [&opCtx, &ns] {
         AutoGetDb autoDb(opCtx, ns.dbName(), MODE_IX);
@@ -210,6 +204,7 @@ bool handleError(OperationContext* opCtx,
                  const NamespaceString& nss,
                  const bool ordered,
                  bool isMultiUpdate,
+                 const boost::optional<UUID> sampleId,
                  WriteResult* out) {
     NotPrimaryErrorTracker::get(opCtx->getClient()).recordError(ex.code());
     auto& curOp = *CurOp::get(opCtx);
@@ -220,6 +215,22 @@ bool handleError(OperationContext* opCtx,
     }
 
     if (ErrorCodes::WouldChangeOwningShard == ex.code()) {
+        if (analyze_shard_key::supportsPersistingSampledQueries() && sampleId) {
+            // Sample the diff before rethrowing the error since mongos will handle this update by
+            // by performing a delete on the shard owning the pre-image doc and an insert on the
+            // shard owning the post-image doc. As a result, this update will not show up in the
+            // OpObserver as an update.
+            auto wouldChangeOwningShardInfo = ex.extraInfo<WouldChangeOwningShardInfo>();
+            invariant(wouldChangeOwningShardInfo);
+
+            analyze_shard_key::QueryAnalysisWriter::get(opCtx)
+                ->addDiff(*sampleId,
+                          nss,
+                          *wouldChangeOwningShardInfo->getUuid(),
+                          wouldChangeOwningShardInfo->getPreImage(),
+                          wouldChangeOwningShardInfo->getPostImage())
+                .getAsync([](auto) {});
+        }
         throw;  // Fail this write so mongos can retry
     }
 
@@ -383,38 +394,6 @@ std::tuple<bool, bool> getDocumentValidationFlags(OperationContext* opCtx,
 }
 }  // namespace
 
-LastOpFixer::LastOpFixer(OperationContext* opCtx, const NamespaceString& ns)
-    : _opCtx(opCtx), _isOnLocalDb(ns.isLocal()) {}
-
-LastOpFixer::~LastOpFixer() {
-    // We don't need to do this if we are in a multi-document transaction as read-only/noop
-    // transactions will always write another noop entry at transaction commit time which we can
-    // use to wait for writeConcern.
-    if (!_opCtx->inMultiDocumentTransaction() && _needToFixLastOp && !_isOnLocalDb) {
-        // If this operation has already generated a new lastOp, don't bother setting it
-        // here. No-op updates will not generate a new lastOp, so we still need the
-        // guard to fire in that case. Operations on the local DB aren't replicated, so they
-        // don't need to bump the lastOp.
-        replClientInfo().setLastOpToSystemLastOpTimeIgnoringCtxInterrupted(_opCtx);
-        LOGV2_DEBUG(20888,
-                    5,
-                    "Set last op to system time: {timestamp}",
-                    "Set last op to system time",
-                    "timestamp"_attr = replClientInfo().getLastOp().getTimestamp());
-    }
-}
-
-void LastOpFixer::startingOp() {
-    _needToFixLastOp = true;
-    _opTimeAtLastOpStart = replClientInfo().getLastOp();
-}
-
-void LastOpFixer::finishedOpSuccessfully() {
-    // If the op was successful and bumped LastOp, we don't need to do it again. However, we
-    // still need to for no-ops and all failing ops.
-    _needToFixLastOp = (replClientInfo().getLastOp() == _opTimeAtLastOpStart);
-}
-
 bool getFleCrudProcessed(OperationContext* opCtx,
                          const boost::optional<EncryptionInformation>& encryptionInfo) {
     if (encryptionInfo && encryptionInfo->getCrudProcessed().value_or(false)) {
@@ -501,7 +480,8 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
         if (inTxn) {
             // It is not safe to ignore errors from collection creation while inside a
             // multi-document transaction.
-            auto canContinue = handleError(opCtx, ex, nss, ordered, false /* multiUpdate */, out);
+            auto canContinue = handleError(
+                opCtx, ex, nss, ordered, false /* multiUpdate */, boost::none /* sampleId */, out);
             invariant(!canContinue);
             return false;
         }
@@ -579,7 +559,8 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
                 }
             });
         } catch (const DBException& ex) {
-            bool canContinue = handleError(opCtx, ex, nss, ordered, false /* multiUpdate */, out);
+            bool canContinue = handleError(
+                opCtx, ex, nss, ordered, false /* multiUpdate */, boost::none /* sampleId */, out);
 
             if (!canContinue) {
                 // Failed in ordered batch, or in a transaction, or from some unrecoverable error.
@@ -589,6 +570,54 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
     }
 
     return true;
+}
+
+boost::optional<write_ops::WriteError> generateError(OperationContext* opCtx,
+                                                     const Status& status,
+                                                     int index,
+                                                     size_t numErrors) {
+    if (status.isOK()) {
+        return boost::none;
+    }
+
+    boost::optional<Status> overwrittenStatus;
+
+    if (status == ErrorCodes::TenantMigrationConflict) {
+        hangWriteBeforeWaitingForMigrationDecision.pauseWhileSet(opCtx);
+
+        overwrittenStatus.emplace(
+            tenant_migration_access_blocker::handleTenantMigrationConflict(opCtx, status));
+
+        // Interruption errors encountered during batch execution fail the entire batch, so throw on
+        // such errors here for consistency.
+        if (ErrorCodes::isInterruption(*overwrittenStatus)) {
+            uassertStatusOK(*overwrittenStatus);
+        }
+
+        // Tenant migration errors, similarly to migration errors consume too much space in the
+        // ordered:false responses and get truncated. Since the call to
+        // 'handleTenantMigrationConflict' above replaces the original status, we need to manually
+        // truncate the new reason if the original 'status' was also truncated.
+        if (status.reason().empty()) {
+            overwrittenStatus = overwrittenStatus->withReason("");
+        }
+    }
+
+    constexpr size_t kMaxErrorReasonsToReport = 1;
+    constexpr size_t kMaxErrorSizeToReportAfterMaxReasonsReached = 1024 * 1024;
+
+    if (numErrors > kMaxErrorReasonsToReport) {
+        size_t errorSize =
+            overwrittenStatus ? overwrittenStatus->reason().size() : status.reason().size();
+        if (errorSize > kMaxErrorSizeToReportAfterMaxReasonsReached)
+            overwrittenStatus =
+                overwrittenStatus ? overwrittenStatus->withReason("") : status.withReason("");
+    }
+
+    if (overwrittenStatus)
+        return write_ops::WriteError(index, std::move(*overwrittenStatus));
+    else
+        return write_ops::WriteError(index, status);
 }
 
 WriteResult performInserts(OperationContext* opCtx,
@@ -720,6 +749,7 @@ WriteResult performInserts(OperationContext* opCtx,
                                               wholeOp.getNamespace(),
                                               wholeOp.getOrdered(),
                                               false /* multiUpdate */,
+                                              boost::none /* sampleId */,
                                               &out);
             }
 
@@ -1061,7 +1091,7 @@ WriteResult performUpdates(OperationContext* opCtx,
 
         if (analyze_shard_key::supportsPersistingSampledQueries() && singleOp.getSampleId()) {
             analyze_shard_key::QueryAnalysisWriter::get(opCtx)
-                .addUpdateQuery(wholeOp, currentOpIndex)
+                ->addUpdateQuery(wholeOp, currentOpIndex)
                 .getAsync([](auto) {});
         }
 
@@ -1087,8 +1117,13 @@ WriteResult performUpdates(OperationContext* opCtx,
             forgoOpCounterIncrements = true;
             lastOpFixer.finishedOpSuccessfully();
         } catch (const DBException& ex) {
-            out.canContinue =
-                handleError(opCtx, ex, ns, wholeOp.getOrdered(), singleOp.getMulti(), &out);
+            out.canContinue = handleError(opCtx,
+                                          ex,
+                                          ns,
+                                          wholeOp.getOrdered(),
+                                          singleOp.getMulti(),
+                                          singleOp.getSampleId(),
+                                          &out);
             if (!out.canContinue) {
                 break;
             }
@@ -1304,7 +1339,7 @@ WriteResult performDeletes(OperationContext* opCtx,
 
         if (analyze_shard_key::supportsPersistingSampledQueries() && singleOp.getSampleId()) {
             analyze_shard_key::QueryAnalysisWriter::get(opCtx)
-                .addDeleteQuery(wholeOp, currentOpIndex)
+                ->addDeleteQuery(wholeOp, currentOpIndex)
                 .getAsync([](auto) {});
         }
 
@@ -1320,8 +1355,13 @@ WriteResult performDeletes(OperationContext* opCtx,
                                                         source));
             lastOpFixer.finishedOpSuccessfully();
         } catch (const DBException& ex) {
-            out.canContinue =
-                handleError(opCtx, ex, ns, wholeOp.getOrdered(), false /* multiUpdate */, &out);
+            out.canContinue = handleError(opCtx,
+                                          ex,
+                                          ns,
+                                          wholeOp.getOrdered(),
+                                          false /* multiUpdate */,
+                                          singleOp.getSampleId(),
+                                          &out);
             if (!out.canContinue)
                 break;
         }

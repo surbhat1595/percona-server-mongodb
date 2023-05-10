@@ -48,6 +48,7 @@ const allCommands = {
     _configsvrCreateDatabase: {skip: isPrimaryOnly},
     _configsvrDropIndexCatalogEntry: {skip: isPrimaryOnly},
     _configsvrEnsureChunkVersionIsGreaterThan: {skip: isPrimaryOnly},
+    _configsvrGetHistoricalPlacement: {skip: isAnInternalCommand},  // TODO SERVER-73029 remove
     _configsvrMoveChunk: {skip: isPrimaryOnly},
     _configsvrMoveRange: {skip: isPrimaryOnly},
     _configsvrRefineCollectionShardKey: {skip: isPrimaryOnly},
@@ -192,6 +193,7 @@ const allCommands = {
     createBackup: {skip: isNotAUserDataRead},
     createIndexes: {skip: isPrimaryOnly},
     createRole: {skip: isPrimaryOnly},
+    createSearchIndex: {skip: isNotAUserDataRead},
     createUser: {skip: isPrimaryOnly},
     currentOp: {skip: isNotAUserDataRead},
     dataSize: {
@@ -229,6 +231,7 @@ const allCommands = {
     dropDatabase: {skip: isPrimaryOnly},
     dropIndexes: {skip: isPrimaryOnly},
     dropRole: {skip: isPrimaryOnly},
+    dropSearchIndex: {skip: isNotAUserDataRead},
     dropUser: {skip: isPrimaryOnly},
     echo: {skip: isNotAUserDataRead},
     emptycapped: {skip: isPrimaryOnly},
@@ -308,6 +311,7 @@ const allCommands = {
         expectFailure: true,
         expectedErrorCode: ErrorCodes.NotPrimaryOrSecondary
     },
+    listSearchIndexes: {skip: isNotAUserDataRead},
     lockInfo: {skip: isPrimaryOnly},
     logApplicationMessage: {skip: isNotAUserDataRead},
     logMessage: {skip: isNotAUserDataRead},
@@ -326,6 +330,7 @@ const allCommands = {
     },
     mergeAllChunksOnShard: {skip: "primary only"},
     mergeChunks: {skip: isPrimaryOnly},
+    modifySearchIndex: {skip: isNotAUserDataRead},
     moveChunk: {skip: isPrimaryOnly},
     moveRange: {skip: isPrimaryOnly},
     oidcListKeys: {skip: isNotAUserDataRead},
@@ -378,6 +383,7 @@ const allCommands = {
     setIndexCommitQuorum: {skip: isPrimaryOnly},
     setFeatureCompatibilityVersion: {skip: isPrimaryOnly},
     setFreeMonitoring: {skip: isPrimaryOnly},
+    setProfilingFilterGlobally: {skip: isNotAUserDataRead},
     setParameter: {skip: isNotAUserDataRead},
     setShardVersion: {skip: isNotAUserDataRead},
     setChangeStreamState: {skip: isNotAUserDataRead},

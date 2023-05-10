@@ -101,6 +101,7 @@ let testCases = {
     _configsvrCreateDatabase: {skip: "internal command"},
     _configsvrDropIndexCatalogEntry: {skip: "internal command"},
     _configsvrEnsureChunkVersionIsGreaterThan: {skip: "internal command"},
+    _configsvrGetHistoricalPlacement: {skip: "internal command"},  // TODO SERVER-73029 remove
     _configsvrMoveChunk: {skip: "internal command"},
     _configsvrMovePrimary: {skip: "internal command"},  // Can be removed once 6.0 is last LTS
     _configsvrMoveRange: {skip: "internal command"},
@@ -350,6 +351,7 @@ let testCases = {
         shardedTargetsConfigServer: true,
         useLogs: true,
     },
+    createSearchIndex: {skip: "does not accept read or write concern"},
     createUser: {
         command: {createUser: "foo", pwd: "bar", roles: []},
         checkReadConcern: false,
@@ -445,6 +447,7 @@ let testCases = {
         shardedTargetsConfigServer: true,
         useLogs: true,
     },
+    dropSearchIndex: {skip: "does not accept read or write concern"},
     dropUser: {
         setUp: function(conn) {
             assert.commandWorked(conn.getDB(db).runCommand(
@@ -566,6 +569,7 @@ let testCases = {
     listDatabases: {skip: "does not accept read or write concern"},
     listDatabasesForAllTenants: {skip: "does not accept read or write concern"},
     listIndexes: {skip: "does not accept read or write concern"},
+    listSearchIndexes: {skip: "does not accept read or write concern"},
     listShards: {skip: "does not accept read or write concern"},
     lockInfo: {skip: "does not accept read or write concern"},
     logApplicationMessage: {skip: "does not accept read or write concern"},
@@ -576,6 +580,7 @@ let testCases = {
     mapReduce: {skip: "does not accept read or write concern"},
     mergeAllChunksOnShard: {skip: "does not accept read or write concern"},
     mergeChunks: {skip: "does not accept read or write concern"},
+    modifySearchIndex: {skip: "does not accept read or write concern"},
     moveChunk: {
         skip:
             "does not accept read or write concern (accepts writeConcern, but only explicitly and when _secondaryThrottle is true)"
@@ -702,6 +707,7 @@ let testCases = {
     setDefaultRWConcern: {skip: "special case (must run after all other commands)"},
     setFeatureCompatibilityVersion: {skip: "does not accept read or write concern"},
     setFreeMonitoring: {skip: "does not accept read or write concern"},
+    setProfilingFilterGlobally: {skip: "does not accept read or write concern"},
     setIndexCommitQuorum: {skip: "does not accept read or write concern"},
     setParameter: {skip: "does not accept read or write concern"},
     setShardVersion: {skip: "internal command"},

@@ -27,14 +27,12 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/query/sbe_stage_builder.h"
 
 #include <fmt/format.h>
 
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/exec/docval_to_sbeval.h"
 #include "mongo/db/exec/sbe/match_path.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
 #include "mongo/db/exec/sbe/stages/column_scan.h"
@@ -62,7 +60,6 @@
 #include "mongo/db/query/bind_input_params.h"
 #include "mongo/db/query/expression_walker.h"
 #include "mongo/db/query/index_bounds_builder.h"
-#include "mongo/db/query/optimizer/rewrites/const_eval.h"
 #include "mongo/db/query/sbe_stage_builder_abt_helpers.h"
 #include "mongo/db/query/sbe_stage_builder_accumulator.h"
 #include "mongo/db/query/sbe_stage_builder_coll_scan.h"
@@ -130,7 +127,7 @@ std::unique_ptr<sbe::RuntimeEnvironment> makeRuntimeEnvironment(
     for (auto&& [id, name] : Variables::kIdToBuiltinVarName) {
         if (id != Variables::kRootId && id != Variables::kRemoveId &&
             cq.getExpCtx()->variables.hasValue(id)) {
-            auto [tag, val] = makeValue(cq.getExpCtx()->variables.getValue(id));
+            auto [tag, val] = sbe::value::makeValue(cq.getExpCtx()->variables.getValue(id));
             env->registerSlot(name, tag, val, true, slotIdGenerator);
         } else if (id == Variables::kSearchMetaId) {
             // Normally, $search is responsible for setting a value for SEARCH_META, in which case
@@ -213,7 +210,7 @@ void prepareSlotBasedExecutableTree(OperationContext* opCtx,
         // Variables defined in "ExpressionContext" may not always be translated into SBE slots.
         if (auto it = data->variableIdToSlotMap.find(id); it != data->variableIdToSlotMap.end()) {
             auto slotId = it->second;
-            auto [tag, val] = makeValue(expCtx->variables.getValue(id));
+            auto [tag, val] = sbe::value::makeValue(expCtx->variables.getValue(id));
             env->resetSlot(slotId, tag, val, true);
         }
     }
@@ -224,7 +221,7 @@ void prepareSlotBasedExecutableTree(OperationContext* opCtx,
         // actually make use of it in the query plan.
         if (auto slot = env->getSlotIfExists(name); id != Variables::kRootId &&
             id != Variables::kRemoveId && expCtx->variables.hasValue(id) && slot) {
-            auto [tag, val] = makeValue(expCtx->variables.getValue(id));
+            auto [tag, val] = sbe::value::makeValue(expCtx->variables.getValue(id));
             env->resetSlot(*slot, tag, val, true);
         }
     }
@@ -2186,8 +2183,7 @@ EvalExpr generateGroupByKeyImpl(StageBuilderState& state,
                                 const boost::intrusive_ptr<Expression>& idExpr,
                                 const PlanStageSlots& outputs,
                                 const boost::optional<sbe::value::SlotId>& rootSlot) {
-    auto rootExpr = rootSlot.has_value() ? EvalExpr{*rootSlot} : EvalExpr{};
-    return generateExpression(state, idExpr.get(), std::move(rootExpr), &outputs);
+    return generateExpression(state, idExpr.get(), rootSlot, &outputs);
 }
 
 std::tuple<sbe::value::SlotVector, EvalStage, std::unique_ptr<sbe::EExpression>> generateGroupByKey(
@@ -2252,17 +2248,13 @@ std::tuple<sbe::value::SlotVector, EvalStage, std::unique_ptr<sbe::EExpression>>
     return {sbe::value::SlotVector{slot}, std::move(stage), nullptr};
 }
 
-sbe::value::SlotVector generateAccumulator(
-    StageBuilderState& state,
-    const AccumulationStatement& accStmt,
-    const PlanStageSlots& outputs,
-    sbe::value::SlotIdGenerator* slotIdGenerator,
-    sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>>& accSlotToExprMap) {
+sbe::value::SlotVector generateAccumulator(StageBuilderState& state,
+                                           const AccumulationStatement& accStmt,
+                                           const PlanStageSlots& outputs,
+                                           sbe::value::SlotIdGenerator* slotIdGenerator,
+                                           sbe::SlotExprPairVector& accSlotExprPairs) {
     auto rootSlot = outputs.getIfExists(PlanStageSlots::kResult);
-
-    auto rootExpr = rootSlot.has_value() ? EvalExpr{*rootSlot} : EvalExpr{};
-    auto argExpr =
-        generateExpression(state, accStmt.expr.argument.get(), std::move(rootExpr), &outputs);
+    auto argExpr = generateExpression(state, accStmt.expr.argument.get(), rootSlot, &outputs);
 
     // One accumulator may be translated to multiple accumulator expressions. For example, The
     // $avg will have two accumulators expressions, a sum(..) and a count which is implemented
@@ -2275,10 +2267,46 @@ sbe::value::SlotVector generateAccumulator(
     for (auto& accExpr : accExprs) {
         auto slot = slotIdGenerator->generate();
         aggSlots.push_back(slot);
-        accSlotToExprMap.emplace(slot, std::move(accExpr));
+        accSlotExprPairs.push_back({slot, std::move(accExpr)});
     }
 
     return aggSlots;
+}
+
+/**
+ * Generate a vector of (inputSlot, mergingExpression) pairs. The slot (whose id is allocated by
+ * this function) will be used to store spilled partial aggregate values that have been recovered
+ * from disk and deserialized. The merging expression is an agg function which combines these
+ * partial aggregates.
+ *
+ * Usually the returned vector will be of length 1, but in some cases the MQL accumulation statement
+ * is implemented by calculating multiple separate aggregates in the SBE plan, which are finalized
+ * by a subsequent project stage to produce the ultimate value.
+ */
+sbe::SlotExprPairVector generateMergingExpressions(StageBuilderState& state,
+                                                   const AccumulationStatement& accStmt,
+                                                   int numInputSlots) {
+    tassert(7039555, "'numInputSlots' must be positive", numInputSlots > 0);
+    auto slotIdGenerator = state.slotIdGenerator;
+    tassert(7039556, "expected non-null 'slotIdGenerator' pointer", slotIdGenerator);
+    auto frameIdGenerator = state.frameIdGenerator;
+    tassert(7039557, "expected non-null 'frameIdGenerator' pointer", frameIdGenerator);
+
+    auto spillSlots = slotIdGenerator->generateMultiple(numInputSlots);
+    auto collatorSlot = state.data->env->getSlotIfExists("collator"_sd);
+    auto mergingExprs =
+        buildCombinePartialAggregates(accStmt, spillSlots, collatorSlot, *frameIdGenerator);
+
+    // Zip the slot vector and expression vector into a vector of pairs.
+    tassert(7039550,
+            "expected same number of slots and input exprs",
+            spillSlots.size() == mergingExprs.size());
+    sbe::SlotExprPairVector result;
+    result.reserve(spillSlots.size());
+    for (size_t i = 0; i < spillSlots.size(); ++i) {
+        result.push_back({spillSlots[i], std::move(mergingExprs[i])});
+    }
+    return result;
 }
 
 std::tuple<std::vector<std::string>, sbe::value::SlotVector, EvalStage> generateGroupFinalStage(
@@ -2449,7 +2477,6 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     // Builds the child and gets the child result slot.
     auto [childStage, childOutputs] = build(childNode, childReqs);
     auto maybeRootSlot = childOutputs.getIfExists(kResult);
-    auto rootExpr = maybeRootSlot.has_value() ? EvalExpr{*maybeRootSlot} : EvalExpr{};
     auto* childOutputsPtr = &childOutputs;
 
     // Set of field paths referenced by group. Useful for de-duplicating fields and clearing the
@@ -2488,7 +2515,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             } else {
                 // General case: we need to generate a path traversal expression.
                 auto result = stage_builder::generateExpression(
-                    _state, fieldExpr, rootExpr.clone(), childOutputsPtr);
+                    _state, fieldExpr, maybeRootSlot, childOutputsPtr);
 
                 if (result.hasSlot()) {
                     return *result.getSlot();
@@ -2525,11 +2552,23 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     // Translates accumulators which are executed inside the group stage and gets slots for
     // accumulators.
     stage_builder::EvalStage currentStage = std::move(groupByEvalStage);
-    sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>> accSlotToExprMap;
+    sbe::SlotExprPairVector accSlotExprPairs;
     std::vector<sbe::value::SlotVector> aggSlotsVec;
+    // Since partial accumulator state may be spilled to disk and then merged, we must construct not
+    // only the basic agg expressions for each accumulator, but also agg expressions that are used
+    // to combine partial aggregates that have been spilled to disk.
+    sbe::SlotExprPairVector mergingExprs;
     for (const auto& accStmt : accStmts) {
-        aggSlotsVec.emplace_back(generateAccumulator(
-            _state, accStmt, childOutputs, &_slotIdGenerator, accSlotToExprMap));
+        sbe::value::SlotVector curAggSlots =
+            generateAccumulator(_state, accStmt, childOutputs, &_slotIdGenerator, accSlotExprPairs);
+
+        sbe::SlotExprPairVector curMergingExprs =
+            generateMergingExpressions(_state, accStmt, curAggSlots.size());
+
+        aggSlotsVec.emplace_back(std::move(curAggSlots));
+        mergingExprs.insert(mergingExprs.end(),
+                            std::make_move_iterator(curMergingExprs.begin()),
+                            std::make_move_iterator(curMergingExprs.end()));
     }
 
     // There might be duplicated expressions and slots. Dedup them before creating a HashAgg
@@ -2539,9 +2578,10 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     // Builds a group stage with accumulator expressions and group-by slot(s).
     auto groupEvalStage = makeHashAgg(std::move(currentStage),
                                       dedupedGroupBySlots,
-                                      std::move(accSlotToExprMap),
+                                      std::move(accSlotExprPairs),
                                       _state.data->env->getSlotIfExists("collator"_sd),
                                       _cq.getExpCtx()->allowDiskUse,
+                                      std::move(mergingExprs),
                                       nodeId);
 
     tassert(
@@ -2746,7 +2786,7 @@ SlotBasedStageBuilder::buildShardFilterCovered(const QuerySolutionNode* root,
     // there are orphaned documents from aborted migrations. To check if the document is owned by
     // the shard, we need to own a 'ShardFilterer', and extract the document's shard key as a
     // BSONObj.
-    auto shardKeyPattern = _collections.getMainCollection().getShardKeyPattern();
+    auto shardKeyPattern = _collections.getMainCollection().getShardKeyPattern().toBSON();
     // We register the "shardFilterer" slot but we don't construct the ShardFilterer here, because
     // once constructed the ShardFilterer will prevent orphaned documents from being deleted. We
     // will construct the ShardFilterer later while preparing the SBE tree for execution.
@@ -2850,7 +2890,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     // there are orphaned documents from aborted migrations. To check if the document is owned by
     // the shard, we need to own a 'ShardFilterer', and extract the document's shard key as a
     // BSONObj.
-    auto shardKeyPattern = _collections.getMainCollection().getShardKeyPattern();
+    auto shardKeyPattern = _collections.getMainCollection().getShardKeyPattern().toBSON();
     // We register the "shardFilterer" slot but we don't construct the ShardFilterer here, because
     // once constructed the ShardFilterer will prevent orphaned documents from being deleted. We
     // will construct the ShardFilterer later while preparing the SBE tree for execution.

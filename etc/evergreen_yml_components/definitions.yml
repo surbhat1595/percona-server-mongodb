@@ -1890,6 +1890,24 @@ functions:
   - *archive_jepsen_results
   - *upload_jepsen_log
 
+  "save blackduck artifacts":
+  - command: archive.targz_pack
+    params:
+      target: blackduck.tgz
+      source_dir: /home/ec2-user/blackduck/runs/
+      include:
+      - "**"
+  - command: s3.put
+    params:
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: blackduck.tgz
+      remote_file: ${project}/${build_variant}/${version_id}/blackduck-${task_id}-${execution}.tgz
+      bucket: mciuploads
+      permissions: public-read
+      content_type: ${content_type|application/gzip}
+      display_name: BlackDuck logs
+
   ### Process & archive mongo coredumps ###
   "gather mongo coredumps": &gather_mongo_coredumps
     command: subprocess.exec
@@ -2308,6 +2326,7 @@ post:
 - func: "save local client logs"
 - func: "save code coverage data"
 - func: "save jepsen artifacts"
+- func: "save blackduck artifacts"
 - func: "save mongo coredumps"
 - func: "save failed unittests"
 - func: "save hang analyzer debugger files"
@@ -2764,7 +2783,7 @@ tasks:
     vars:
       task_compile_flags: >-
         --build-profile=compiledb
-      targets: compiledb
+      targets: compiledb +mongo-tidy-tests
       compiling_for_test: true
       compile_flags: >-
         --link-model=dynamic
@@ -3534,6 +3553,21 @@ tasks:
 - <<: *gen_burn_in_task_template
   name: burn_in_tests_gen
   tags: []
+  patch_only: true
+  commands:
+  - func: "generate resmoke tasks"
+
+- <<: *gen_burn_in_task_template
+  name: burn_in_tags_gen
+  tags: []
+  patch_only: true
+  commands:
+  - func: "generate resmoke tasks"
+
+- <<: *gen_burn_in_task_template
+  name: burn_in_tasks_gen
+  tags: []
+  patch_only: true
   commands:
   - func: "generate resmoke tasks"
 
@@ -3621,6 +3655,18 @@ tasks:
   - func: "run tests"
     vars:
       suites: benchmarks_abt_lowering
+      exec_timeout_secs: 18000  # 5 hour timeout.
+      resmoke_jobs_max: 1
+  - func: "send benchmark results"
+
+- <<: *benchmark_template
+  name: benchmarks_abt_path_lowering
+  tags: ["benchmarks"]
+  commands:
+  - func: "do benchmark setup"
+  - func: "run tests"
+    vars:
+      suites: benchmarks_abt_path_lowering
       exec_timeout_secs: 18000  # 5 hour timeout.
       resmoke_jobs_max: 1
   - func: "send benchmark results"
@@ -4653,12 +4699,6 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
 
-- <<: *gen_burn_in_task_template
-  name: burn_in_tags_gen
-  tags: []
-  commands:
-  - func: "generate resmoke tasks"
-
 - name: version_gen
   commands:
   - command: manifest.load
@@ -5112,63 +5152,115 @@ tasks:
 
 - <<: *task_template
   name: config_fuzzer_jsCore
-  tags: []
+  tags: ["config_fuzzer"]
   commands:
   - func: "do setup"
   - func: "run tests"
     vars:
       suite: core
       resmoke_args: >-
-        --fuzzMongodConfigs
+        --fuzzMongodConfigs=normal
         --excludeWithAnyTags=does_not_support_config_fuzzer
 
 - <<: *task_template
   name: config_fuzzer_concurrency
-  tags: []
+  tags: ["config_fuzzer"]
   commands:
   - func: "do setup"
   - func: "run tests"
     vars:
       suite: concurrency
       resmoke_args: >-
-        --fuzzMongodConfigs
+        --fuzzMongodConfigs=normal
         --excludeWithAnyTags=does_not_support_config_fuzzer
 
 - <<: *task_template
-  name: config_fuzzer_simulate_crash_concurrency_replication
-  tags: []
+  name: config_fuzzer_simulate_crash_concurrency_replication_gen
+  tags: ["config_fuzzer", "large"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
     vars:
       suite: simulate_crash_concurrency_replication
       resmoke_args: >-
-        --fuzzMongodConfigs
+        --fuzzMongodConfigs=normal
         --excludeWithAnyTags=does_not_support_config_fuzzer
+      use_large_distro: "true"
 
 - <<: *task_template
-  name: config_fuzzer_concurrency_replication
-  tags: []
+  name: config_fuzzer_concurrency_replication_gen
+  tags: ["config_fuzzer", "large"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
     vars:
       suite: concurrency_replication
       resmoke_args: >-
-        --fuzzMongodConfigs
+        --fuzzMongodConfigs=normal
         --excludeWithAnyTags=does_not_support_config_fuzzer
+      use_large_distro: "true"
+
+- <<: *gen_task_template
+  name: config_fuzzer_concurrency_sharded_replication_gen
+  tags: ["config_fuzzer", "large"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      suite: concurrency_sharded_replication
+      resmoke_args: >-
+        --fuzzMongodConfigs=normal
+        --excludeWithAnyTags=does_not_support_config_fuzzer
+      use_large_distro: "true"
 
 - <<: *task_template
-  name: config_fuzzer_replica_sets_jscore_passthrough
-  tags: []
+  name: config_fuzzer_stress_concurrency_replication_gen
+  tags: ["config_fuzzer_stress"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
+    vars:
+      suite: concurrency_replication
+      resmoke_args: >-
+        --fuzzMongodConfigs=stress
+        --excludeWithAnyTags=does_not_support_config_fuzzer
+      use_large_distro: "true"
+      exec_timeout_secs: 14400 # 4 hours
+      timeout_secs: 14400 # 4 hours
+
+- <<: *gen_task_template
+  name: config_fuzzer_stress_concurrency_sharded_replication_gen
+  tags: ["config_fuzzer_stress"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      suite: concurrency_sharded_replication
+      resmoke_args: >-
+        --fuzzMongodConfigs=stress
+        --excludeWithAnyTags=does_not_support_config_fuzzer
+      use_large_distro: "true"
+      exec_timeout_secs: 14400 # 4 hours
+      timeout_secs: 14400 # 4 hours
+
+- <<: *task_template
+  name: config_fuzzer_replica_sets_jscore_passthrough_gen
+  tags: ["config_fuzzer", "large"]
+  commands:
+  - func: "generate resmoke tasks"
     vars:
       suite: replica_sets_jscore_passthrough
       resmoke_args: >-
-        --fuzzMongodConfigs
+        --fuzzMongodConfigs=normal
         --excludeWithAnyTags=does_not_support_config_fuzzer
+      use_large_distro: "true"
+
+- <<: *task_template
+  name: config_fuzzer_sharding_jscore_passthrough_gen
+  tags: ["config_fuzzer", "large"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      suite: sharding_jscore_passthrough
+      resmoke_args: >-
+        --fuzzMongodConfigs=normal
+        --excludeWithAnyTags=does_not_support_config_fuzzer
+      use_large_distro: "true"
 
 - <<: *task_template
   name: jsCore_ese
@@ -6170,16 +6262,22 @@ tasks:
   - func: "generate resmoke tasks"
 
 - <<: *gen_task_template
-  name: replica_sets_ese_gen
-  tags: ["replica_sets", "encrypt", "san", "no_debug_mode"]
+  name: replica_sets_max_mirroring_large_txns_format_gen
+  tags: []
+  commands:
+  - func: "generate resmoke tasks"
+
+- <<: *gen_task_template
+  name: replica_sets_max_mirroring_large_txns_format_ese_gen
+  tags: ["replica_sets", "encrypt", "san", "no_debug_mode", "multi_oplog"]
   commands:
   - func: "generate resmoke tasks"
     vars:
       use_large_distro: "true"
 
 - <<: *gen_task_template
-  name: replica_sets_ese_gcm_gen
-  tags: ["replica_sets", "encrypt", "san", "gcm", "no_debug_mode"]
+  name: replica_sets_max_mirroring_large_txns_format_ese_gcm_gen
+  tags: ["replica_sets", "encrypt", "san", "gcm", "no_debug_mode", "multi_oplog"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -6192,18 +6290,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: replica_sets_large_txns_format_gen
-  tags: ["replica_sets", "multi_oplog", "san"]
-  commands:
-  - func: "generate resmoke tasks"
-
-- <<: *gen_task_template
-  name: replica_sets_max_mirroring_gen
-  tags: ["replica_sets", "san"]
-  commands:
-  - func: "generate resmoke tasks"
 
 - <<: *gen_task_template
   name: replica_sets_multiversion_gen

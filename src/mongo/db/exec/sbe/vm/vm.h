@@ -343,6 +343,7 @@ struct Instruction {
         jmpTrue,
         jmpFalse,
         jmpNothing,
+        jmpNotNothing,
         ret,  // used only by simple local lambdas
         allocStack,
 
@@ -568,6 +569,8 @@ struct Instruction {
                 return "jmpFalse";
             case jmpNothing:
                 return "jmpNothing";
+            case jmpNotNothing:
+                return "jmpNotNothing";
             case ret:
                 return "ret";
             case allocStack:
@@ -666,6 +669,8 @@ enum class Builtin : uint8_t {
     // specified size.
     aggSetUnionCapped,
     aggCollSetUnionCapped,
+    // Agg function for a simple set union (with no size cap or collation).
+    aggSetUnion,
 
     acos,
     acosh,
@@ -880,6 +885,7 @@ public:
     void appendJumpTrue(int jumpOffset);
     void appendJumpFalse(int jumpOffset);
     void appendJumpNothing(int jumpOffset);
+    void appendJumpNotNothing(int jumpOffset);
     void appendRet();
     void appendAllocStack(uint32_t size);
     void appendFail();
@@ -1285,6 +1291,7 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinConcat(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinConcatArrays(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggConcatArraysCapped(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggSetUnion(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggSetUnionCapped(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggCollSetUnionCapped(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> aggSetUnionCappedImpl(

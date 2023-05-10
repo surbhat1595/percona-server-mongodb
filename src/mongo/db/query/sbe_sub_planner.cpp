@@ -55,7 +55,7 @@ CandidatePlans SubPlanner::plan(
         -> StatusWith<std::unique_ptr<QuerySolution>> {
         // One of the indexes in '_queryParams' might have been dropped while planning a previous
         // branch of the OR query. In this case, fail with a 'QueryPlanKilled' error.
-        _indexExistenceChecker.check();
+        _indexExistenceChecker.check(_opCtx, _collections);
 
         // Ensure that no previous plans are registered to yield while we multi plan each branch.
         _yieldPolicy->clearRegisteredPlans();
@@ -86,7 +86,7 @@ CandidatePlans SubPlanner::plan(
 
     // One of the indexes in '_queryParams' might have been dropped while planning the final branch
     // of the OR query. In this case, fail with a 'QueryPlanKilled' error.
-    _indexExistenceChecker.check();
+    _indexExistenceChecker.check(_opCtx, _collections);
 
     if (!subplanSelectStat.isOK()) {
         // Query planning can continue if we failed to find a solution for one of the children.
@@ -109,12 +109,19 @@ CandidatePlans SubPlanner::plan(
 
     auto&& [root, data] = stage_builder::buildSlotBasedExecutableTree(
         _opCtx, _collections, _cq, *compositeSolution, _yieldPolicy);
+
+    // Be careful to cache the plan before preparing or opening it. This will copy 'root' and 'data'
+    // into the cache in their pristine state. This is necessary since plans are currently
+    // re-prepared each time that they are recovered from the cache. The re-preparation step
+    // includes setting up the runtime environment and in particular getting a new "shardFilterer"
+    // value, as the "shardFilterer" must not be stored in the plan cache (doing so would block
+    // range deletion).
+    plan_cache_util::updatePlanCache(_opCtx, _collections, _cq, *compositeSolution, *root, data);
+
     auto status = prepareExecutionPlan(root.get(), &data);
     uassertStatusOK(status);
     auto [result, recordId, exitedEarly] = status.getValue();
     tassert(5323804, "sub-planner unexpectedly exited early during prepare phase", !exitedEarly);
-
-    plan_cache_util::updatePlanCache(_opCtx, _collections, _cq, *compositeSolution, *root, data);
 
     return {makeVector(plan_ranker::CandidatePlan{
                 std::move(compositeSolution), std::move(root), std::move(data)}),

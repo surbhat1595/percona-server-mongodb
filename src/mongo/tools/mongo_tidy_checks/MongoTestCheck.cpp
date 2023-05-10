@@ -26,11 +26,10 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
+#include "MongoTestCheck.h"
 
 #include "clang-tidy/ClangTidy.h"
 #include "clang-tidy/ClangTidyCheck.h"
-#include "clang-tidy/ClangTidyModule.h"
-#include "clang-tidy/ClangTidyModuleRegistry.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 
@@ -42,44 +41,21 @@ using namespace clang::ast_matchers;
 // This is a dummy reference check to give example for writing new checks.
 // This check should be removed (the file here and any references to it) once we have
 // some real checks.
-namespace {
-class MongoDummyCheck : public ClangTidyCheck {
+namespace mongo {
+namespace tidy {
 
-public:
-    MongoDummyCheck(StringRef Name, ClangTidyContext* Context) : ClangTidyCheck(Name, Context) {}
+MongoTestCheck::MongoTestCheck(StringRef Name, ClangTidyContext* Context)
+    : ClangTidyCheck(Name, Context) {}
 
-    void registerMatchers(ast_matchers::MatchFinder* Finder) override {
-        Finder->addMatcher(translationUnitDecl().bind("tu"), this);
-    }
+void MongoTestCheck::registerMatchers(ast_matchers::MatchFinder* Finder) {
+    Finder->addMatcher(translationUnitDecl().bind("tu"), this);
+}
 
-    void check(const ast_matchers::MatchFinder::MatchResult& Result) override {
-        auto S = Result.Nodes.getNodeAs<TranslationUnitDecl>("tu");
-        if (S)
-            diag("mytest success");
-    }
+void MongoTestCheck::check(const ast_matchers::MatchFinder::MatchResult& Result) {
+    auto S = Result.Nodes.getNodeAs<TranslationUnitDecl>("tu");
+    if (S)
+        diag("ran mongo-test-check!");
+}
 
-private:
-};
-
-class CTTestModule : public ClangTidyModule {
-public:
-    void addCheckFactories(ClangTidyCheckFactories& CheckFactories) override {
-        CheckFactories.registerCheck<MongoDummyCheck>("mongo-test-check");
-    }
-};
-}  // namespace
-
-namespace tidy1 {
-// Register the CTTestTidyModule using this statically initialized variable.
-static ClangTidyModuleRegistry::Add<::CTTestModule> X("mytest-module", "Adds my checks.");
-}  // namespace tidy1
-
-namespace tidy2 {
-// intentionally collide with an existing test group name, merging with it
-static ClangTidyModuleRegistry::Add<::CTTestModule> X("misc-module",
-                                                      "Adds miscellaneous lint checks.");
-}  // namespace tidy2
-
-// This anchor is used to force the linker to link in the generated object file
-// and thus register the CTTestModule.
-volatile int CTTestModuleAnchorSource = 0;
+}  // namespace tidy
+}  // namespace mongo

@@ -28,6 +28,7 @@
  */
 
 #include "mongo/db/storage/ticketholder_manager.h"
+#include "mongo/db/storage/storage_engine_parameters_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/concurrency/priority_ticketholder.h"
 #include "mongo/util/concurrency/semaphore_ticketholder.h"
@@ -42,9 +43,36 @@ const auto ticketHolderManagerDecoration =
 
 namespace mongo {
 
+TicketHolderManager::TicketHolderManager(ServiceContext* svcCtx,
+                                         std::unique_ptr<TicketHolder> readTicketHolder,
+                                         std::unique_ptr<TicketHolder> writeTicketHolder)
+    : _readTicketHolder(std::move(readTicketHolder)),
+      _writeTicketHolder(std::move(writeTicketHolder)),
+      _monitor([] {
+          switch (StorageEngineConcurrencyAdjustmentAlgorithm_parse(
+              IDLParserContext{"storageEngineConcurrencyAdjustmentAlgorithm"},
+              gStorageEngineConcurrencyAdjustmentAlgorithm)) {
+              case StorageEngineConcurrencyAdjustmentAlgorithmEnum::kNone:
+                  return nullptr;
+          }
+          MONGO_UNREACHABLE;
+      }()) {
+    if (_monitor && feature_flags::gFeatureFlagExecutionControl.isEnabledAndIgnoreFCV()) {
+        _monitor->start();
+    }
+}
+
 Status TicketHolderManager::updateConcurrentWriteTransactions(const int& newWriteTransactions) {
     if (auto client = Client::getCurrent()) {
         auto ticketHolderManager = TicketHolderManager::get(client->getServiceContext());
+        if (!ticketHolderManager) {
+            LOGV2_WARNING(7323602,
+                          "Attempting to modify write transactions limit on an instance without a "
+                          "storage engine");
+            return Status(ErrorCodes::IllegalOperation,
+                          "Attempting to modify write transactions limit on an instance without a "
+                          "storage engine");
+        }
         auto& writer = ticketHolderManager->_writeTicketHolder;
         if (writer) {
             writer->resize(client->getOperationContext(), newWriteTransactions);
@@ -63,6 +91,14 @@ Status TicketHolderManager::updateConcurrentWriteTransactions(const int& newWrit
 Status TicketHolderManager::updateConcurrentReadTransactions(const int& newReadTransactions) {
     if (auto client = Client::getCurrent()) {
         auto ticketHolderManager = TicketHolderManager::get(client->getServiceContext());
+        if (!ticketHolderManager) {
+            LOGV2_WARNING(7323601,
+                          "Attempting to modify read transactions limit on an instance without a "
+                          "storage engine");
+            return Status(ErrorCodes::IllegalOperation,
+                          "Attempting to modify read transactions limit on an instance without a "
+                          "storage engine");
+        }
         auto& reader = ticketHolderManager->_readTicketHolder;
         if (reader) {
             reader->resize(client->getOperationContext(), newReadTransactions);
@@ -155,5 +191,14 @@ void TicketHolderManager::appendStats(BSONObjBuilder& b) {
         _readTicketHolder->appendStats(bbb);
         bbb.done();
     }
+}
+
+Status TicketHolderManager::validateConcurrencyAdjustmentAlgorithm(
+    const std::string& name, const boost::optional<TenantId>&) try {
+    StorageEngineConcurrencyAdjustmentAlgorithm_parse(
+        IDLParserContext{"storageEngineConcurrencyAdjustmentAlgorithm"}, name);
+    return Status::OK();
+} catch (const DBException& ex) {
+    return ex.toStatus();
 }
 }  // namespace mongo

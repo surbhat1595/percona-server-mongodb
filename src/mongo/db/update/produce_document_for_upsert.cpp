@@ -28,14 +28,13 @@
  */
 
 #include "mongo/db/update/produce_document_for_upsert.h"
+
 #include "mongo/bson/mutable/algorithm.h"
 #include "mongo/db/catalog/document_validation.h"
-#include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/update/storage_validation.h"
 
 namespace mongo {
-
 namespace update {
 
 const char idFieldName[] = "_id";
@@ -119,23 +118,16 @@ BSONObj produceDocumentForUpsert(OperationContext* opCtx,
                                  UpdateDriver* driver,
                                  const CanonicalQuery* canonicalQuery,
                                  bool isUserInitiatedWrite,
-                                 mutablebson::Document& doc) {
+                                 mutablebson::Document& doc,
+                                 const ScopedCollectionDescription& collDesc) {
     // Obtain the collection description. This will be needed to compute the shardKey paths.
-    //
-    // NOTE: The collection description must remain in scope since it owns the pointers used by
-    // 'shardKeyPaths' and 'immutablePaths'.
-    boost::optional<ScopedCollectionDescription> optCollDesc;
     FieldRefSet shardKeyPaths, immutablePaths;
 
     if (isUserInitiatedWrite) {
-        optCollDesc = CollectionShardingState::assertCollectionLockedAndAcquire(
-                          opCtx, request->getNamespaceString())
-                          ->getCollectionDescription(opCtx);
-
         // If the collection is sharded, add all fields from the shard key to the 'shardKeyPaths'
         // set.
-        if (optCollDesc->isSharded()) {
-            shardKeyPaths.fillFrom(optCollDesc->getKeyPatternFields());
+        if (collDesc.isSharded()) {
+            shardKeyPaths.fillFrom(collDesc.getKeyPatternFields());
         }
 
         // An unversioned request cannot update the shard key, so all shardKey paths are immutable.
@@ -215,5 +207,4 @@ void ensureIdFieldIsFirst(mutablebson::Document* doc, bool generateOIDIfMissing)
 }
 
 }  // namespace update
-
 }  // namespace mongo

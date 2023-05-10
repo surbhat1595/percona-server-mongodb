@@ -42,6 +42,7 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_dependencies.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
+#include "mongo/db/stats/counters.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
 #include "mongo/util/destructor_guard.h"
 
@@ -80,6 +81,10 @@ using boost::intrusive_ptr;
 using std::pair;
 using std::shared_ptr;
 using std::vector;
+
+DocumentSourceGroupBase::~DocumentSourceGroupBase() {
+    groupCounters.incrementGroupCounters(_stats);
+}
 
 Value DocumentSourceGroupBase::serialize(boost::optional<ExplainOptions::Verbosity> explain) const {
     MutableDocument insides;
@@ -139,14 +144,11 @@ Value DocumentSourceGroupBase::serialize(boost::optional<ExplainOptions::Verbosi
 
 
 bool DocumentSourceGroupBase::shouldSpillWithAttemptToSaveMemory() {
-    if (!_memoryTracker._allowDiskUse &&
-        (_memoryTracker.currentMemoryBytes() >
-         static_cast<long long>(_memoryTracker._maxAllowedMemoryUsageBytes))) {
+    if (!_memoryTracker._allowDiskUse && !_memoryTracker.withinMemoryLimit()) {
         freeMemory();
     }
 
-    if (_memoryTracker.currentMemoryBytes() >
-        static_cast<long long>(_memoryTracker._maxAllowedMemoryUsageBytes)) {
+    if (!_memoryTracker.withinMemoryLimit()) {
         uassert(ErrorCodes::QueryExceededMemoryLimitNoDiskUseAllowed,
                 "Exceeded memory limit for $group, but didn't allow external sort."
                 " Pass allowDiskUse:true to opt in.",
@@ -601,9 +603,7 @@ void DocumentSourceGroupBase::spill() {
 
     // Initialize '_file' in a lazy manner only when it is needed.
     if (!_file) {
-        if (pExpCtx->explain && *pExpCtx->explain >= ExplainOptions::Verbosity::kExecStats) {
-            _spillStats = std::make_unique<SorterFileStats>(nullptr /* sorterTracker */);
-        }
+        _spillStats = std::make_unique<SorterFileStats>(nullptr /* sorterTracker */);
         _file = std::make_shared<Sorter<Value, Value>::File>(
             pExpCtx->tempDir + "/" + nextFileName(), _spillStats.get());
     }

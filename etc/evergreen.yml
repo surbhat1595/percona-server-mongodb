@@ -256,17 +256,7 @@ variables:
   - name: auth_audit_gen
   - name: auth_gen
   - name: causally_consistent_jscore_txns_passthrough
-  - name: config_fuzzer_concurrency
-  - name: config_fuzzer_simulate_crash_concurrency_replication
-    distros:
-    - rhel70-large
-  - name: config_fuzzer_concurrency_replication
-    distros:
-    - rhel70-large
-  - name: config_fuzzer_jsCore
-  - name: config_fuzzer_replica_sets_jscore_passthrough
-    distros:
-    - rhel70-large
+  - name: .config_fuzzer !.large
   - name: .encrypt !.sharding !.replica_sets !.aggregation !.jscore
   - name: external_auth
   - name: external_auth_aws
@@ -347,6 +337,7 @@ buildvariants:
   - name: replica_sets_jscore_passthrough_gen
   - name: replica_sets_reconfig_jscore_passthrough_gen
   - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
+  - name: replica_sets_max_mirroring_large_txns_format_gen
   - name: .retry
   - name: .read_only
   - name: session_jscore_passthrough
@@ -390,7 +381,7 @@ buildvariants:
     compile_variant: *linux_x86_dynamic_debug_wtdevelop_compile_variant_name
 
 - name: &tla-plus tla-plus
-  display_name: TLA+
+  display_name: "TLA+"
   run_on:
   - rhel80-build
   cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
@@ -745,7 +736,7 @@ buildvariants:
 - name: &stm-daily-cron stm-daily-cron
   modules:
   - enterprise
-  display_name: "~ STM Daily Cron"
+  display_name: "* STM Daily Cron"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - rhel80-small
@@ -771,7 +762,7 @@ buildvariants:
   - name: blackduck_scanner
 
 - name: tooling-metrics
-  display_name: "Tooling Metrics"
+  display_name: "* Tooling Metrics"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   run_on:
   - ubuntu1804-small
@@ -845,6 +836,7 @@ buildvariants:
   - name: .replica_sets .large !.fcbis
     distros:
     - windows-vsCurrent-large
+  - name: replica_sets_max_mirroring_large_txns_format_gen
   - name: .resharding_fuzzer
   - name: retryable_writes_jscore_passthrough_gen
   - name: retryable_writes_jscore_stepdown_passthrough_gen
@@ -907,11 +899,10 @@ buildvariants:
   - name: noPassthrough_gen
   - name: noPassthroughWithMongod_gen
   - name: .replica_sets .common !.ignore_non_generated_replica_sets_jscore_passthrough
-  - name: .replica_sets .multi_oplog !.ignore_non_generated_replica_sets_jscore_passthrough
+  - name: .replica_sets .multi_oplog !.ignore_non_generated_replica_sets_jscore_passthrough !.gcm
   - name: replica_sets_jscore_passthrough_gen
     distros:
     - windows-vsCurrent-large
-  - name: replica_sets_ese_gen
   - name: sasl
   - name: .sharding .txns
   - name: sharding_auth_gen
@@ -942,6 +933,10 @@ buildvariants:
       --excludeWithAnyTags=incompatible_with_windows_tls
       --excludeWithAnyTags=incompatible_with_shard_merge
     external_auth_jobs_max: 1
+    # Uncomment expansion and `burn_in_tasks_gen` task below and add resmoke task name to burn-in.
+    # WARNING! Task splitting is not supported for burn-in tasks. Large unsplitted `_gen` tasks may
+    # run too long and hit execution timeouts.
+    # burn_in_task_name: jsCore
   tasks:
   - name: cqf
   - name: cqf_disabled_pipeline_opt
@@ -950,6 +945,7 @@ buildvariants:
   - name: query_golden_classic
   - name: query_golden_cqf
   - name: burn_in_tests_gen
+  # - name: burn_in_tasks_gen
   - name: audit
   - name: auth_audit_gen
   - name: buildscripts_test
@@ -972,9 +968,8 @@ buildvariants:
   - name: noPassthrough_gen
   - name: noPassthroughWithMongod_gen
   - name: .replica_sets .common !.ignore_non_generated_replica_sets_jscore_passthrough
-  - name: .replica_sets .multi_oplog !.ignore_non_generated_replica_sets_jscore_passthrough
+  - name: .replica_sets .multi_oplog !.ignore_non_generated_replica_sets_jscore_passthrough !.gcm
   - name: replica_sets_jscore_passthrough_gen
-  - name: replica_sets_ese_gen
   - name: sasl
   - name: .sharding .txns
   - name: sharding_auth_gen
@@ -1054,7 +1049,7 @@ buildvariants:
   - name: .updatefuzzer !.multiversion
 
 - name: &enterprise-windows-debug-unoptimized enterprise-windows-debug-unoptimized
-  display_name: Enterprise Windows DEBUG (Unoptimized)
+  display_name: "Enterprise Windows DEBUG (Unoptimized)"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
@@ -1130,7 +1125,7 @@ buildvariants:
   - name: jsCore_txns_large_txns_format
   - name: mongosTest
   - name: replica_sets_gen
-  - name: replica_sets_large_txns_format_gen
+  - name: replica_sets_max_mirroring_large_txns_format_gen
   - name: .ssl
   - name: .stitch
   - name: unittest_shell_hang_analyzer_gen
@@ -1321,8 +1316,7 @@ buildvariants:
     burn_in_tag_buildvariants: >-
       enterprise-rhel-80-64-bit-inmem
       enterprise-rhel-80-64-bit-multiversion
-    burn_in_tag_compile_task_group_name: compile_and_archive_dist_test_TG
-    burn_in_tag_compile_distro: rhel80-xlarge
+    burn_in_tag_compile_task_dependency: archive_dist_test_debug
   depends_on:
   - name: archive_dist_test_debug
     variant: *linux_x86_dynamic_compile_variant_name
@@ -1346,6 +1340,10 @@ buildvariants:
   - name: .misc_js
   - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
   - name: .concurrency .large !.ubsan !.no_txns !.debug_only
+    distros:
+    - rhel80-medium
+  - name: .config_fuzzer !.large
+  - name: .config_fuzzer .large
     distros:
     - rhel80-medium
   - name: disk_wiredtiger
@@ -1446,9 +1444,11 @@ buildvariants:
   - name: .concurrency .large !.ubsan !.no_txns !.debug_only !.no_debug_mode
     distros:
     - rhel80-medium
-  - name: config_fuzzer_concurrency
-  - name: config_fuzzer_jsCore
-  - name: config_fuzzer_replica_sets_jscore_passthrough
+  - name: .config_fuzzer !.large
+  - name: .config_fuzzer .large
+    distros:
+    - rhel80-medium
+  - name: .config_fuzzer_stress
     distros:
     - rhel80-large
   - name: disk_wiredtiger
@@ -1533,6 +1533,10 @@ buildvariants:
     test_flags: >-
       --additionalFeatureFlagsFile all_feature_flags.txt
       --excludeWithAnyTags=incompatible_with_shard_merge
+    # Uncomment expansion and `burn_in_tasks_gen` task below and add resmoke task name to burn-in.
+    # WARNING! Task splitting is not supported for burn-in tasks. Large unsplitted `_gen` tasks may
+    # run too long and hit execution timeouts.
+    # burn_in_task_name: jsCore
   depends_on:
   - name: archive_dist_test_debug
     variant: *linux_x86_dynamic_compile_variant_name
@@ -1554,6 +1558,8 @@ buildvariants:
   - name: lint_fuzzer_sanity_patch
   - name: test_api_version_compatibility
   - name: burn_in_tests_gen
+  - name: burn_in_tags_gen
+  # - name: burn_in_tasks_gen
   - name: check_feature_flag_tags
   - name: check_for_todos
   - name: .aggfuzzer
@@ -1561,7 +1567,6 @@ buildvariants:
   - name: aggregation_repeat_queries
   - name: audit
   - name: .auth
-  - name: burn_in_tags_gen
   - name: buildscripts_test
   - name: resmoke_end2end_tests
   - name: unittest_shell_hang_analyzer_gen
@@ -1576,17 +1581,7 @@ buildvariants:
   - name: .concurrency .large !.ubsan !.no_txns !.debug_only
     distros:
     - rhel80-medium
-  - name: config_fuzzer_concurrency
-  - name: config_fuzzer_simulate_crash_concurrency_replication
-    distros:
-    - rhel80-large
-  - name: config_fuzzer_concurrency_replication
-    distros:
-    - rhel80-large
-  - name: config_fuzzer_jsCore
-  - name: config_fuzzer_replica_sets_jscore_passthrough
-    distros:
-    - rhel80-large
+  - name: .config_fuzzer !.large
   - name: disk_wiredtiger
   - name: .encrypt
   - name: feature_flag_multiversion_gen
@@ -1668,8 +1663,7 @@ buildvariants:
     burn_in_tag_buildvariants: >-
       enterprise-rhel-80-64-bit-inmem
       enterprise-rhel-80-64-bit-multiversion
-    burn_in_tag_compile_task_group_name: compile_and_archive_dist_test_TG
-    burn_in_tag_compile_distro: rhel80-xlarge
+    burn_in_tag_compile_task_dependency: archive_dist_test_debug
   depends_on:
   - name: archive_dist_test_debug
     variant: *linux_x86_dynamic_compile_variant_name
@@ -1798,6 +1792,7 @@ buildvariants:
   - name: .replica_sets !.multi_oplog .large
     distros:
     - rhel80-medium
+  - name: .replica_sets .encrypt
   - name: .resharding_fuzzer
   - name: .rollbackfuzzer
   - name: .sharding .txns
@@ -1922,7 +1917,8 @@ buildvariants:
   - name: libunwind_tests
   - name: replica_sets_auth_gen
   - name: replica_sets_jscore_passthrough
-  - name: .replica_sets .multi_oplog
+  - name: .replica_sets .multi_oplog !.encrypt
+  - name: replica_sets_max_mirroring_large_txns_format_gen
   - name: sasl
   - name: search
   - name: search_auth
@@ -2085,7 +2081,8 @@ buildvariants:
   - name: .logical_session_cache .one_sec
   - name: replica_sets_auth_gen
   - name: replica_sets_jscore_passthrough
-  - name: .replica_sets .multi_oplog
+  - name: .replica_sets .multi_oplog !.encrypt
+  - name: replica_sets_max_mirroring_large_txns_format_gen
   - name: sasl
   - name: search
   - name: search_auth
@@ -2121,7 +2118,7 @@ buildvariants:
   - name: replica_sets_gen
 
 - name: &enterprise-rhel-72-s390x-compile enterprise-rhel-72-s390x-compile
-  display_name: Enterprise RHEL 7.2 s390x Compile
+  display_name: "Enterprise RHEL 7.2 s390x Compile"
   modules:
   - enterprise
   run_on:
@@ -2162,31 +2159,12 @@ buildvariants:
     - rhel72-zseries-build
   - name: generate_buildid_to_debug_symbols_mapping
 
-- <<: *linux_x86_dynamic_debug_compile_variant_dependency
-  name: &linux-debug-suggested linux-debug-suggested
-  display_name: "* Linux x86 Shared Library DEBUG"
-  cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
-  run_on:
-  - rhel80-small
-  expansions:
-    large_distro_name: rhel80-large
-    resmoke_jobs_factor: 0.5  # Avoid starting too many mongod's
-    compile_variant: *linux_x86_dynamic_debug_compile_variant_name
-  tasks:
-  - name: jsCore
-  - name: .read_write_concern !.write !.aggregation
-  - name: replica_sets_jscore_passthrough_gen
-  - name: replica_sets_large_txns_format_jscore_passthrough
-  - name: sharded_collections_jscore_passthrough
-  - name: sharding_gen
-  - name: sharding_auth_gen
-
 ################################
 # storage engine buildvariants #
 ################################
 
 - name: &enterprise-rhel-80-benchmarks enterprise-rhel-80-benchmarks
-  display_name: Enterprise RHEL 8.0 (Benchmarks)
+  display_name: "* Enterprise RHEL 8.0 (Benchmarks)"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
@@ -2262,11 +2240,13 @@ buildvariants:
   - name: .clustered_collections
   - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
   - name: .concurrency .large !.ubsan !.no_txns !.debug_only
-  - name: config_fuzzer_concurrency
-  - name: config_fuzzer_simulate_crash_concurrency_replication
-  - name: config_fuzzer_concurrency_replication
-  - name: config_fuzzer_jsCore
-  - name: config_fuzzer_replica_sets_jscore_passthrough
+  - name: .config_fuzzer !.large
+  - name: .config_fuzzer .large
+    distros:
+    - amazon2-arm64-large
+  - name: .config_fuzzer_stress
+    distros:
+    - amazon2-arm64-large
   - name: disk_wiredtiger
   - name: .encrypt
   - name: feature_flag_multiversion_gen
@@ -2325,7 +2305,7 @@ buildvariants:
 
 - &rhel80-debug-asan-all-feature-flags-template
   name: &rhel80-debug-asan-all-feature-flags rhel80-debug-asan-all-feature-flags
-  display_name: "~ Shared Library ASAN Enterprise RHEL 8.0 DEBUG (all feature flags)"
+  display_name: "* Shared Library ASAN Enterprise RHEL 8.0 DEBUG (all feature flags)"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
@@ -2395,9 +2375,9 @@ buildvariants:
   - name: .multi_shard .common
   - name: .query_fuzzer
   - name: .read_write_concern
-  - name: replica_sets_large_txns_format_gen
   - name: replica_sets_large_txns_format_jscore_passthrough
   - name: .replica_sets !.multi_oplog
+  - name: .replica_sets .encrypt
   - name: .resharding_fuzzer
   - name: .retry
   - name: .read_only
@@ -2419,7 +2399,7 @@ buildvariants:
 #  - name: server_selection_json_test_TG
 
 - name: &rhel80-debug-asan-classic-engine rhel80-debug-asan-classic-engine
-  display_name: ~ ASAN Enterprise RHEL 8.0 DEBUG (Classic Engine)
+  display_name: "* ASAN Enterprise RHEL 8.0 DEBUG (Classic Engine)"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
@@ -2478,9 +2458,9 @@ buildvariants:
   - name: .multi_shard .common
   - name: .query_fuzzer
   - name: .read_write_concern
-  - name: replica_sets_large_txns_format_gen
   - name: replica_sets_large_txns_format_jscore_passthrough
   - name: .replica_sets !.multi_oplog
+  - name: .replica_sets .encrypt
   - name: .resharding_fuzzer
   - name: .retry
   - name: .read_only
@@ -2501,7 +2481,7 @@ buildvariants:
 
 - &rhel80-debug-ubsan-all-feature-flags-template
   name: &rhel80-debug-ubsan-all-feature-flags rhel80-debug-ubsan-all-feature-flags
-  display_name: "~ Shared Library UBSAN Enterprise RHEL 8.0 DEBUG (all feature flags)"
+  display_name: "* Shared Library UBSAN Enterprise RHEL 8.0 DEBUG (all feature flags)"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
@@ -2567,9 +2547,9 @@ buildvariants:
   - name: .logical_session_cache .one_sec
   - name: .multi_shard .common
   - name: .read_write_concern
-  - name: replica_sets_large_txns_format_gen
   - name: replica_sets_large_txns_format_jscore_passthrough
   - name: .replica_sets !.multi_oplog
+  - name: .replica_sets .encrypt
   - name: .resharding_fuzzer
   - name: .retry
   - name: .rollbackfuzzer
@@ -2592,7 +2572,7 @@ buildvariants:
 #  - name: server_selection_json_test_TG
 
 - name: &rhel80-debug-ubsan-classic-engine rhel80-debug-ubsan-classic-engine
-  display_name: "~ UBSAN Enterprise RHEL 8.0 DEBUG (Classic Engine)"
+  display_name: "* UBSAN Enterprise RHEL 8.0 DEBUG (Classic Engine)"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
@@ -2646,9 +2626,9 @@ buildvariants:
   - name: .logical_session_cache .one_sec
   - name: .multi_shard .common
   - name: .read_write_concern
-  - name: replica_sets_large_txns_format_gen
   - name: replica_sets_large_txns_format_jscore_passthrough
   - name: .replica_sets !.multi_oplog
+  - name: .replica_sets .encrypt
   - name: .resharding_fuzzer
   - name: .retry
   - name: .rollbackfuzzer
@@ -2705,6 +2685,22 @@ buildvariants:
   - name: jsCore
   - name: jsCore_txns
   - name: jsCore_column_store_indexes
+
+- <<: *rhel80-debug-aubsan-lite-template
+  name: &rhel80-debug-aubsan-lite-all-feature-flags-suggested rhel80-debug-aubsan-lite-all-feature-flags-suggested
+  display_name: "* Shared Library {A,UB}SAN Enterprise RHEL 8.0 DEBUG (all feature flags)"
+  cron: "0 4 * * *" # From the ${project_required_suggested_cron} parameter
+  expansions:
+    <<: *aubsan-lite-required-expansions
+    # To force disable feature flags even on the all feature flags variant, please use this file:
+    # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
+    test_flags: >-
+      --excludeWithAnyTags=requires_ocsp_stapling
+      --excludeWithAnyTags=incompatible_with_shard_merge
+      --additionalFeatureFlagsFile all_feature_flags.txt
+  tasks:
+  - name: .config_fuzzer
+  - name: .config_fuzzer_stress
 
 - &enterprise-rhel80-debug-tsan-template
   name: &enterprise-rhel80-debug-tsan enterprise-rhel80-debug-tsan
@@ -2763,6 +2759,8 @@ buildvariants:
   - name: buildscripts_test
   # - name: resmoke_end2end_tests # Not passing
   # - name: unittest_shell_hang_analyzer_gen # Not passing
+  # - name: .config_fuzzer # Not passing
+  - name: config_fuzzer_jsCore
   - name: cqf
   - name: cqf_disabled_pipeline_opt
   - name: cqf_passthrough
@@ -2775,16 +2773,6 @@ buildvariants:
   # - name: .concurrency .large !.ubsan !.no_txns !.debug_only # Not passing
   #   distros:
   #   - rhel80-medium
-  # - name: config_fuzzer_concurrency # Not passing
-  # - name: config_fuzzer_simulate_crash_concurrency_replication # Not passing
-  #   distros:
-  #   - rhel80-large
-  # - name: config_fuzzer_concurrency_replication # Not passing
-  #   distros:
-  #   - rhel80-large
-  - name: config_fuzzer_jsCore
-    distros:
-    - rhel80-large
   - name: disk_wiredtiger
   # - name: .encrypt # Not passing
   # - name: idl_tests # Not relevant for TSAN
@@ -2884,13 +2872,7 @@ buildvariants:
   - name: .concurrency .large !.ubsan !.no_txns !.debug_only !.compute_mode
     distros:
     - rhel80-medium
-  - name: config_fuzzer_concurrency
-  - name: config_fuzzer_simulate_crash_concurrency_replication
-    distros:
-    - rhel80-large
-  - name: config_fuzzer_concurrency_replication
-    distros:
-    - rhel80-large
+  - name: .config_fuzzer
   - name: .encrypt
   - name: initial_sync_fuzzer_gen
   - name: .integration
@@ -3416,7 +3398,7 @@ buildvariants:
   - name: lint_fuzzer_sanity_patch
 
 - name: &enterprise-ubuntu1804-64-libvoidstar enterprise-ubuntu1804-64-libvoidstar
-  display_name: ~ Enterprise Ubuntu 18.04 w/ libvoidstar
+  display_name: "~ Enterprise Ubuntu 18.04 w/ libvoidstar"
   modules:
   - enterprise
   run_on:
@@ -3445,7 +3427,7 @@ buildvariants:
 
 - <<: *enterprise-windows-nopush-template
   name: &enterprise-windows-benchmarks enterprise-windows-benchmarks
-  display_name: "~ Enterprise Windows (Benchmarks)"
+  display_name: "* Enterprise Windows (Benchmarks)"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   expansions:
     <<: *enterprise-windows-nopush-expansions-template

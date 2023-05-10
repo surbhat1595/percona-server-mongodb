@@ -95,7 +95,7 @@ public:
 
     struct ProfileSettings {
         int level;
-        std::shared_ptr<ProfileFilter> filter;  // nullable
+        std::shared_ptr<const ProfileFilter> filter;  // nullable
 
         ProfileSettings(int level, std::shared_ptr<ProfileFilter> filter)
             : level(level), filter(filter) {
@@ -216,15 +216,30 @@ public:
     void reloadViews(OperationContext* opCtx, const DatabaseName& dbName) const;
 
     /**
-     * Returns the collection pointer representative of 'nss' at the provided read timestamp. If no
-     * timestamp is provided, returns instance of the latest collection. The returned collection
-     * instance is only valid while the storage snapshot is open and becomes invalidated when the
-     * snapshot is closed.
+     * Returns true if catalog information about this namespace or UUID should be looked up from the
+     * durable catalog rather than using the in-memory state of the catalog.
+     *
+     * This is true when either:
+     *  - The readTimestamp is prior to the minimum valid timestamp for the collection corresponding
+     *    to this namespace, or
+     *  - There's no read timestamp provided and this namespace has a pending DDL operation that has
+     *    not completed yet (which would imply that the latest version of the catalog may or may not
+     *    match the state of the durable catalog for this collection).
+     */
+    bool needsOpenCollection(OperationContext* opCtx,
+                             const NamespaceStringOrUUID& nsOrUUID,
+                             boost::optional<Timestamp> readTimestamp) const;
+
+    /**
+     * Returns the collection pointer representative of 'nssOrUUID' at the provided read timestamp.
+     * If no timestamp is provided, returns instance of the latest collection. The returned
+     * collection instance is only valid while the storage snapshot is open and becomes invalidated
+     * when the snapshot is closed.
      *
      * Returns nullptr when reading from a point-in-time where the collection did not exist.
      */
     CollectionPtr openCollection(OperationContext* opCtx,
-                                 const NamespaceString& nss,
+                                 const NamespaceStringOrUUID& nssOrUUID,
                                  boost::optional<Timestamp> readTimestamp) const;
 
     /**
@@ -531,6 +546,11 @@ public:
     std::set<TenantId> getAllTenants() const;
 
     /**
+     * Updates the profile filter on all databases with non-default settings.
+     */
+    void setAllDatabaseProfileFilters(std::shared_ptr<ProfileFilter> filter);
+
+    /**
      * Sets 'newProfileSettings' as the profiling settings for the database 'dbName'.
      */
     void setDatabaseProfileSettings(const DatabaseName& dbName, ProfileSettings newProfileSettings);
@@ -775,6 +795,14 @@ private:
     // catalogIds
     void _markNamespaceForCatalogIdCleanupIfNeeded(const NamespaceString& nss,
                                                    const std::vector<TimestampedCatalogId>& ids);
+
+    // Helpers to perform openCollection at latest or at point-in-time on Namespace/UUID.
+    CollectionPtr _openCollectionAtLatestByNamespace(OperationContext* opCtx,
+                                                     const NamespaceString& nss) const;
+    CollectionPtr _openCollectionAtLatestByUUID(OperationContext* opCtx, const UUID& uuid) const;
+    CollectionPtr _openCollectionAtPointInTimeByNamespace(OperationContext* opCtx,
+                                                          const NamespaceString& nss,
+                                                          Timestamp readTimestamp) const;
 
     /**
      * When present, indicates that the catalog is in closed state, and contains a map from UUID

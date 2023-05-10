@@ -7,6 +7,7 @@ import functools
 import json
 import os
 import re
+import pathlib
 import platform
 import shlex
 import shutil
@@ -1634,7 +1635,6 @@ try:
         env_vars=env_vars,
         env=env,
         parser=_parser,
-        args=sys.argv,
     )
 except ExternalHostException as _:
     pass
@@ -6263,6 +6263,19 @@ def injectModule(env, module, **kwargs):
 
 
 env.AddMethod(injectModule, 'InjectModule')
+
+replacements = {
+    '@MONGO_BUILD_DIR@': (pathlib.Path(env.Dir('$BUILD_DIR').path) / 'mongo').as_posix(),
+}
+
+clang_tidy_config = env.Substfile(
+    target='.clang-tidy',
+    source=[
+        '.clang-tidy.in',
+    ],
+    SUBST_DICT=replacements,
+)
+env.Alias("generated-sources", clang_tidy_config)
 
 if get_option('ninja') == 'disabled':
     compileCommands = env.CompilationDatabase('compile_commands.json')

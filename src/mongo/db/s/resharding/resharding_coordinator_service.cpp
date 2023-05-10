@@ -327,7 +327,8 @@ BSONObj createReshardingFieldsUpdateForOriginalNss(
     OperationContext* opCtx,
     const ReshardingCoordinatorDocument& coordinatorDoc,
     boost::optional<OID> newCollectionEpoch,
-    boost::optional<Timestamp> newCollectionTimestamp) {
+    boost::optional<Timestamp> newCollectionTimestamp,
+    boost::optional<CollectionIndexes> newCollectionIndexVersion) {
     auto nextState = coordinatorDoc.getState();
     switch (nextState) {
         case CoordinatorStateEnum::kInitializing: {
@@ -389,6 +390,10 @@ BSONObj createReshardingFieldsUpdateForOriginalNss(
                 setFields =
                     setFields.addFields(BSON("timestamp" << newCollectionTimestamp.value()));
             }
+            if (newCollectionIndexVersion.has_value()) {
+                setFields = setFields.addFields(
+                    BSON("indexVersion" << newCollectionIndexVersion->indexVersion()));
+            }
 
             return BSON("$set" << setFields);
         }
@@ -438,9 +443,10 @@ void updateConfigCollectionsForOriginalNss(OperationContext* opCtx,
                                            const ReshardingCoordinatorDocument& coordinatorDoc,
                                            boost::optional<OID> newCollectionEpoch,
                                            boost::optional<Timestamp> newCollectionTimestamp,
+                                           boost::optional<CollectionIndexes> newCollectionIndexes,
                                            TxnNumber txnNumber) {
     auto writeOp = createReshardingFieldsUpdateForOriginalNss(
-        opCtx, coordinatorDoc, newCollectionEpoch, newCollectionTimestamp);
+        opCtx, coordinatorDoc, newCollectionEpoch, newCollectionTimestamp, newCollectionIndexes);
 
     auto request = BatchedCommandRequest::buildUpdateOp(
         CollectionType::ConfigNS,
@@ -460,6 +466,7 @@ void writeToConfigCollectionsForTempNss(OperationContext* opCtx,
                                         const ReshardingCoordinatorDocument& coordinatorDoc,
                                         boost::optional<ChunkVersion> chunkVersion,
                                         boost::optional<const BSONObj&> collation,
+                                        boost::optional<CollectionIndexes> indexVersion,
                                         TxnNumber txnNumber) {
     BatchedCommandRequest request([&] {
         auto nextState = coordinatorDoc.getState();
@@ -467,7 +474,7 @@ void writeToConfigCollectionsForTempNss(OperationContext* opCtx,
             case CoordinatorStateEnum::kPreparingToDonate: {
                 // Insert new entry for the temporary nss into config.collections
                 auto collType = resharding::createTempReshardingCollectionType(
-                    opCtx, coordinatorDoc, chunkVersion.value(), collation.value());
+                    opCtx, coordinatorDoc, chunkVersion.value(), collation.value(), indexVersion);
                 return BatchedCommandRequest::buildInsertOp(
                     CollectionType::ConfigNS, std::vector<BSONObj>{collType.toBSON()});
             }
@@ -553,6 +560,66 @@ void writeToConfigCollectionsForTempNss(OperationContext* opCtx,
 
     if (expectedNumModified) {
         assertNumDocsModifiedMatchesExpected(request, res, *expectedNumModified);
+    }
+}
+
+void writeToConfigIndexesForTempNss(OperationContext* opCtx,
+                                    const ReshardingCoordinatorDocument& coordinatorDoc,
+                                    TxnNumber txnNumber) {
+    if (!feature_flags::gGlobalIndexesShardingCatalog.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        return;
+    }
+    auto nextState = coordinatorDoc.getState();
+
+    switch (nextState) {
+        case CoordinatorStateEnum::kPreparingToDonate: {
+            auto optGii = Grid::get(opCtx)->catalogCache()->getCollectionIndexInfo(
+                opCtx, coordinatorDoc.getSourceNss());
+            if (optGii) {
+                std::vector<BSONObj> indexes;
+                optGii->forEachIndex([&](const auto index) {
+                    IndexCatalogType copyIdx(index);
+                    copyIdx.setCollectionUUID(coordinatorDoc.getReshardingUUID());
+                    // TODO SERVER-73304: add the new index collection UUID here if neccessary.
+                    indexes.push_back(copyIdx.toBSON());
+                    return true;
+                });
+
+                BatchedCommandRequest request([&] {
+                    return BatchedCommandRequest::buildInsertOp(
+                        NamespaceString::kConfigsvrIndexCatalogNamespace, indexes);
+                }());
+                ShardingCatalogManager::get(opCtx)->writeToConfigDocumentInTxn(
+                    opCtx, NamespaceString::kConfigsvrIndexCatalogNamespace, request, txnNumber);
+            }
+        } break;
+        case CoordinatorStateEnum::kCommitting: {
+            BatchedCommandRequest request([&] {
+                return BatchedCommandRequest::buildDeleteOp(
+                    NamespaceString::kConfigsvrIndexCatalogNamespace,
+                    BSON(IndexCatalogType::kCollectionUUIDFieldName
+                         << coordinatorDoc.getSourceUUID()),
+                    true  // multi
+                );
+            }());
+            ShardingCatalogManager::get(opCtx)->writeToConfigDocumentInTxn(
+                opCtx, NamespaceString::kConfigsvrIndexCatalogNamespace, request, txnNumber);
+        } break;
+        case CoordinatorStateEnum::kAborting: {
+            BatchedCommandRequest request([&] {
+                return BatchedCommandRequest::buildDeleteOp(
+                    NamespaceString::kConfigsvrIndexCatalogNamespace,
+                    BSON(IndexCatalogType::kCollectionUUIDFieldName
+                         << coordinatorDoc.getReshardingUUID()),
+                    true  // multi
+                );
+            }());
+            ShardingCatalogManager::get(opCtx)->writeToConfigDocumentInTxn(
+                opCtx, NamespaceString::kConfigsvrIndexCatalogNamespace, request, txnNumber);
+        } break;
+        default:
+            break;
     }
 }
 
@@ -650,7 +717,8 @@ CollectionType createTempReshardingCollectionType(
     OperationContext* opCtx,
     const ReshardingCoordinatorDocument& coordinatorDoc,
     const ChunkVersion& chunkVersion,
-    const BSONObj& collation) {
+    const BSONObj& collation,
+    boost::optional<CollectionIndexes> indexVersion) {
     CollectionType collType(coordinatorDoc.getTempReshardingNss(),
                             chunkVersion.epoch(),
                             chunkVersion.getTimestamp(),
@@ -667,6 +735,10 @@ CollectionType createTempReshardingCollectionType(
     tempEntryReshardingFields.setRecipientFields(std::move(recipientFields));
     collType.setReshardingFields(std::move(tempEntryReshardingFields));
     collType.setAllowMigrations(false);
+
+    if (indexVersion) {
+        collType.setIndexVersion(*indexVersion);
+    }
     return collType;
 }
 
@@ -698,24 +770,35 @@ void writeDecisionPersistedState(OperationContext* opCtx,
                                  ReshardingMetrics* metrics,
                                  const ReshardingCoordinatorDocument& coordinatorDoc,
                                  OID newCollectionEpoch,
-                                 Timestamp newCollectionTimestamp) {
+                                 Timestamp newCollectionTimestamp,
+                                 boost::optional<CollectionIndexes> collectionIndexes) {
 
     // No need to bump originalNss version because its epoch will be changed.
     executeMetadataChangesInTxn(
         opCtx,
-        [&metrics, &coordinatorDoc, &newCollectionEpoch, &newCollectionTimestamp](
-            OperationContext* opCtx, TxnNumber txnNumber) {
+        [&metrics,
+         &coordinatorDoc,
+         &newCollectionEpoch,
+         &newCollectionTimestamp,
+         &collectionIndexes](OperationContext* opCtx, TxnNumber txnNumber) {
             // Update the config.reshardingOperations entry
             writeToCoordinatorStateNss(opCtx, metrics, coordinatorDoc, txnNumber);
 
+            // Copy the original indexes to the temporary uuid.
+            writeToConfigIndexesForTempNss(opCtx, coordinatorDoc, txnNumber);
+
             // Remove the config.collections entry for the temporary collection
             writeToConfigCollectionsForTempNss(
-                opCtx, coordinatorDoc, boost::none, boost::none, txnNumber);
+                opCtx, coordinatorDoc, boost::none, boost::none, boost::none, txnNumber);
 
             // Update the config.collections entry for the original namespace to reflect the new
             // shard key, new epoch, and new UUID
-            updateConfigCollectionsForOriginalNss(
-                opCtx, coordinatorDoc, newCollectionEpoch, newCollectionTimestamp, txnNumber);
+            updateConfigCollectionsForOriginalNss(opCtx,
+                                                  coordinatorDoc,
+                                                  newCollectionEpoch,
+                                                  newCollectionTimestamp,
+                                                  collectionIndexes,
+                                                  txnNumber);
 
             // Insert the list of recipient shard IDs (together with the new timestamp and UUID) as
             // the latest entry in config.placementHistory about the original namespace
@@ -775,7 +858,7 @@ void insertCoordDocAndChangeOrigCollEntry(OperationContext* opCtx,
             // Update the config.collections entry for the original collection to include
             // 'reshardingFields'
             updateConfigCollectionsForOriginalNss(
-                opCtx, coordinatorDoc, boost::none, boost::none, txnNumber);
+                opCtx, coordinatorDoc, boost::none, boost::none, boost::none, txnNumber);
         },
         ShardingCatalogClient::kLocalWriteConcern);
 }
@@ -785,7 +868,8 @@ void writeParticipantShardsAndTempCollInfo(
     ReshardingMetrics* metrics,
     const ReshardingCoordinatorDocument& updatedCoordinatorDoc,
     std::vector<ChunkType> initialChunks,
-    std::vector<BSONObj> zones) {
+    std::vector<BSONObj> zones,
+    boost::optional<CollectionIndexes> indexVersion) {
     const auto tagsQuery = BSON(TagsType::ns(updatedCoordinatorDoc.getTempReshardingNss().ns()));
 
     removeChunkAndTagsDocs(opCtx, tagsQuery, updatedCoordinatorDoc.getReshardingUUID());
@@ -799,12 +883,18 @@ void writeParticipantShardsAndTempCollInfo(
             // chunks all have the same epoch, so picking the last chunk here is arbitrary.
             invariant(initialChunks.size() != 0);
             auto chunkVersion = initialChunks.back().getVersion();
-            writeToConfigCollectionsForTempNss(
-                opCtx, updatedCoordinatorDoc, chunkVersion, CollationSpec::kSimpleSpec, txnNumber);
+            writeToConfigCollectionsForTempNss(opCtx,
+                                               updatedCoordinatorDoc,
+                                               chunkVersion,
+                                               CollationSpec::kSimpleSpec,
+                                               indexVersion,
+                                               txnNumber);
+            // Copy the original indexes to the temporary uuid.
+            writeToConfigIndexesForTempNss(opCtx, updatedCoordinatorDoc, txnNumber);
             // Update on-disk state to reflect latest state transition.
             writeToCoordinatorStateNss(opCtx, metrics, updatedCoordinatorDoc, txnNumber);
             updateConfigCollectionsForOriginalNss(
-                opCtx, updatedCoordinatorDoc, boost::none, boost::none, txnNumber);
+                opCtx, updatedCoordinatorDoc, boost::none, boost::none, boost::none, txnNumber);
         },
         ShardingCatalogClient::kLocalWriteConcern);
 }
@@ -830,7 +920,7 @@ void writeStateTransitionAndCatalogUpdatesThenBumpShardVersions(
 
             // Update the config.collections entry for the original collection
             updateConfigCollectionsForOriginalNss(
-                opCtx, coordinatorDoc, boost::none, boost::none, txnNumber);
+                opCtx, coordinatorDoc, boost::none, boost::none, boost::none, txnNumber);
 
             // Update the config.collections entry for the temporary resharding collection. If we've
             // already successfully committed that the operation will succeed, we've removed the
@@ -838,7 +928,10 @@ void writeStateTransitionAndCatalogUpdatesThenBumpShardVersions(
             // have the new shard key, UUID, and epoch
             if (nextState < CoordinatorStateEnum::kCommitting) {
                 writeToConfigCollectionsForTempNss(
-                    opCtx, coordinatorDoc, boost::none, boost::none, txnNumber);
+                    opCtx, coordinatorDoc, boost::none, boost::none, boost::none, txnNumber);
+
+                // Copy the original indexes to the temporary uuid.
+                writeToConfigIndexesForTempNss(opCtx, coordinatorDoc, txnNumber);
             }
         },
         ShardingCatalogClient::kLocalWriteConcern);
@@ -885,7 +978,7 @@ void removeCoordinatorDocAndReshardingFields(OperationContext* opCtx,
 
             // Remove the resharding fields from the config.collections entry
             updateConfigCollectionsForOriginalNss(
-                opCtx, updatedCoordinatorDoc, boost::none, boost::none, txnNumber);
+                opCtx, updatedCoordinatorDoc, boost::none, boost::none, boost::none, txnNumber);
         },
         ShardingCatalogClient::kLocalWriteConcern);
 
@@ -899,6 +992,27 @@ ChunkVersion ReshardingCoordinatorExternalState::calculateChunkVersionForInitial
     const auto now = VectorClock::get(opCtx)->getTime();
     const auto timestamp = now.clusterTime().asTimestamp();
     return ChunkVersion({OID::gen(), timestamp}, {1, 0});
+}
+
+boost::optional<CollectionIndexes> ReshardingCoordinatorExternalState::getCatalogIndexVersion(
+    OperationContext* opCtx, const NamespaceString& nss, const UUID& uuid) {
+    auto optGii = Grid::get(opCtx)->catalogCache()->getCollectionIndexInfo(opCtx, nss);
+    if (optGii) {
+        VectorClock::VectorTime vt = VectorClock::get(opCtx)->getTime();
+        auto time = vt.clusterTime().asTimestamp();
+        return CollectionIndexes{uuid, time};
+    }
+    return boost::none;
+}
+
+boost::optional<CollectionIndexes>
+ReshardingCoordinatorExternalState::getCatalogIndexVersionForCommit(OperationContext* opCtx,
+                                                                    const NamespaceString& nss) {
+    auto optGii = Grid::get(opCtx)->catalogCache()->getCollectionIndexInfo(opCtx, nss);
+    if (optGii) {
+        return optGii->getCollectionIndexes();
+    }
+    return boost::none;
 }
 
 std::vector<DonorShardEntry> constructDonorShardEntries(const std::set<ShardId>& donorShardIds) {
@@ -1678,10 +1792,24 @@ ExecutorFuture<bool> ReshardingCoordinator::_isReshardingOpRedundant(
     return resharding::WithAutomaticRetry([this, executor] {
                auto cancelableOpCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
                auto opCtx = cancelableOpCtx.get();
-               auto cm = uassertStatusOK(
-                   Grid::get(opCtx)->catalogCache()->getShardedCollectionPlacementInfoWithRefresh(
-                       opCtx, _coordinatorDoc.getSourceNss()));
-               const auto currentShardKey = cm.getShardKeyPattern().getKeyPattern();
+               boost::optional<ChunkManager> cm;
+
+               // Ensure indexes are loaded in the catalog cache, along with the collection
+               // placement.
+               if (feature_flags::gGlobalIndexesShardingCatalog.isEnabled(
+                       serverGlobalParams.featureCompatibility)) {
+                   auto cri = uassertStatusOK(
+                       Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithRefresh(
+                           opCtx, _coordinatorDoc.getSourceNss()));
+                   cm.emplace(cri.cm);
+               } else {
+                   cm.emplace(uassertStatusOK(Grid::get(opCtx)
+                                                  ->catalogCache()
+                                                  ->getShardedCollectionPlacementInfoWithRefresh(
+                                                      opCtx, _coordinatorDoc.getSourceNss())));
+               }
+
+               const auto currentShardKey = cm->getShardKeyPattern().getKeyPattern();
                // Verify if there is any work to be done by the resharding operation by checking
                // if the existing shard key matches the desired new shard key.
                return SimpleBSONObjComparator::kInstance.evaluate(
@@ -1763,11 +1891,17 @@ void ReshardingCoordinator::_calculateParticipantsAndChunksThenWriteToDisk() {
     updatedCoordinatorDoc.setPresetReshardedChunks(boost::none);
     updatedCoordinatorDoc.setZones(boost::none);
 
+    auto indexVersion = _reshardingCoordinatorExternalState->getCatalogIndexVersion(
+        opCtx.get(),
+        updatedCoordinatorDoc.getSourceNss(),
+        updatedCoordinatorDoc.getReshardingUUID());
+
     resharding::writeParticipantShardsAndTempCollInfo(opCtx.get(),
                                                       _metrics.get(),
                                                       updatedCoordinatorDoc,
                                                       std::move(shardsAndChunks.initialChunks),
-                                                      std::move(zones));
+                                                      std::move(zones),
+                                                      std::move(indexVersion));
     installCoordinatorDoc(opCtx.get(), updatedCoordinatorDoc);
 
     reshardingPauseCoordinatorAfterPreparingToDonate.pauseWhileSetAndNotCanceled(
@@ -1974,12 +2108,15 @@ void ReshardingCoordinator::_commit(const ReshardingCoordinatorDocument& coordin
         return now.clusterTime().asTimestamp();
     }();
 
+    auto indexVersion = _reshardingCoordinatorExternalState->getCatalogIndexVersionForCommit(
+        opCtx.get(), updatedCoordinatorDoc.getTempReshardingNss());
 
     resharding::writeDecisionPersistedState(opCtx.get(),
                                             _metrics.get(),
                                             updatedCoordinatorDoc,
                                             std::move(newCollectionEpoch),
-                                            std::move(newCollectionTimestamp));
+                                            std::move(newCollectionTimestamp),
+                                            std::move(indexVersion));
 
     // Update the in memory state
     installCoordinatorDoc(opCtx.get(), updatedCoordinatorDoc);

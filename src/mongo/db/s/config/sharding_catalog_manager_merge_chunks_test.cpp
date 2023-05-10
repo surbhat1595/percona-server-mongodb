@@ -41,6 +41,7 @@
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
+#include "mongo/s/catalog/type_changelog.h"
 #include "mongo/s/catalog/type_chunk.h"
 
 namespace mongo {
@@ -692,11 +693,11 @@ protected:
 
     /* Setup shareded collection randomly spreading chunks across shards */
     void setupCollectionWithRandomRoutingTable() {
+        PseudoRandom random(SecureRandom().nextInt64());
         ChunkVersion collVersion{{_epoch, _ts}, {1, 0}};
 
         // Generate chunk with the provided parameters and increase current collection version
-        auto generateChunk =
-            [&](ShardType& shard, BSONObj min, BSONObj max, Timestamp& validAfter) -> ChunkType {
+        auto generateChunk = [&](ShardType& shard, BSONObj min, BSONObj max) -> ChunkType {
             ChunkType chunk;
             chunk.setCollectionUUID(_collUuid);
             chunk.setVersion(collVersion);
@@ -704,25 +705,31 @@ protected:
             chunk.setShard(shard.getName());
             chunk.setMin(min);
             chunk.setMax(max);
-            // TODO SERVER-72283 set `onCurrentShardSince` to `validAfter`
-            chunk.setHistory({ChunkHistory{validAfter, shard.getName()}});
+
+            // When `onCurrentShardSince` is set to "Timestamp(0, 1)", the chunk is mergeable
+            // because the snapshot window passed. When it is set to "max", the chunk is not
+            // mergeable because the snapshot window did not pass
+            auto randomValidAfter = random.nextInt64() % 2 ? Timestamp(0, 1) : Timestamp::max();
+            chunk.setOnCurrentShardSince(randomValidAfter);
+            chunk.setHistory({ChunkHistory{randomValidAfter, shard.getName()}});
+
+            // Rarely create a jumbo chunk (not mergeable)
+            chunk.setJumbo(random.nextInt64() % 10 == 0);
             return chunk;
         };
 
-        PseudoRandom random(SecureRandom().nextInt64());
-        int numChunks = random.nextInt32(9) + 1;  // minimum 1 chunks, maximum 10 chunks
+        int numChunks = random.nextInt32(19) + 1;  // minimum 1 chunks, maximum 20 chunks
         std::vector<ChunkType> chunks;
 
         // Loop generating random routing table: [MinKey, 0), [1, 2), [2, 3), ... [x, MaxKey]
         int nextMin;
         for (int nextMax = 0; nextMax < numChunks; nextMax++) {
             auto randomShard = _shards.at(random.nextInt64() % _shards.size());
-            auto randomValidAfter = Timestamp(random.nextInt64());
             // set min as `MinKey` during first iteration, otherwise next min
             auto min = nextMax == 0 ? _keyPattern.globalMin() : BSON("x" << nextMin);
             // set max as `MaxKey` during last iteration, otherwise next max
             auto max = nextMax == numChunks - 1 ? _keyPattern.globalMax() : BSON("x" << nextMax);
-            auto chunk = generateChunk(randomShard, min, max, randomValidAfter);
+            auto chunk = generateChunk(randomShard, min, max);
             nextMin = nextMax;
             chunks.push_back(chunk);
         }
@@ -749,7 +756,7 @@ protected:
         return chunks;
     }
 
-    void assertConsistentRoutingTableWithNoContiguousChunksOnTheSameShard(
+    void assertConsistentRoutingTableWithNoContiguousMergeableChunksOnTheSameShard(
         std::vector<ChunkType> routingTable) {
         ASSERT_GTE(routingTable.size(), 0);
 
@@ -759,7 +766,17 @@ protected:
             const auto& prevChunk = routingTable.at(i - 1);
             const auto& currChunk = routingTable.at(i);
             ASSERT_EQ(prevChunk.getMax().woCompare(currChunk.getMin()), 0);
-            ASSERT_NOT_EQUALS(prevChunk.getShard().compare(currChunk.getShard()), 0);
+
+            // Chunks with the following carachteristics are not mergeable:
+            // - Jumbo chunks
+            // - Chunks with `onCurrentShardSince` higher than "now + snapshot window"
+            // So it is excpected for them to potentially have a contiguous chunk on the same shard.
+            if (!prevChunk.getJumbo() &&
+                !(*(prevChunk.getOnCurrentShardSince()) == Timestamp::max()) &&
+                !currChunk.getJumbo() &&
+                !(*(currChunk.getOnCurrentShardSince()) == Timestamp::max())) {
+                ASSERT_NOT_EQUALS(prevChunk.getShard().compare(currChunk.getShard()), 0);
+            }
         }
 
         ASSERT(routingTable.back().getMax().woCompare(_keyPattern.globalMax()) == 0);
@@ -846,6 +863,60 @@ protected:
         }
     }
 
+    void assertChangesWereLoggedAfterMerges(const NamespaceString& nss,
+                                            const std::vector<ChunkType>& originalRoutingTable,
+                                            const std::vector<ChunkType>& mergedRoutingTable) {
+
+        const std::vector<ChunkType> chunksDiff = [&] {
+            // Calculate chunks that are in the merged routing table but aren't in the original one
+            std::vector<ChunkType> chunksDiff;
+            std::set_difference(mergedRoutingTable.begin(),
+                                mergedRoutingTable.end(),
+                                originalRoutingTable.begin(),
+                                originalRoutingTable.end(),
+                                std::back_inserter(chunksDiff),
+                                [](const ChunkType& l, const ChunkType& r) {
+                                    return l.getRange().toBSON().woCompare(r.getRange().toBSON()) <
+                                        0;
+                                });
+            return chunksDiff;
+        }();
+
+        size_t numMergedChunks = 0;
+        size_t numMerges = 0;
+        for (const auto& chunkDiff : chunksDiff) {
+            BSONObjBuilder query;
+            query << ChangeLogType::what("merge") << ChangeLogType::ns(nss.ns());
+            chunkDiff.getVersion().serialize("details.mergedVersion", &query);
+
+            auto response = assertGet(getConfigShard()->exhaustiveFindOnConfig(
+                operationContext(),
+                ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                repl::ReadConcernLevel::kLocalReadConcern,
+                ChangeLogType::ConfigNS,
+                query.obj(),
+                BSONObj(),
+                1));
+
+            ASSERT_EQ(1U, response.docs.size());
+            auto logEntryBSON = response.docs.front();
+            auto logEntry = assertGet(ChangeLogType::fromBSON(logEntryBSON));
+            const auto& logEntryDetails = logEntry.getDetails();
+
+            ASSERT_EQUALS(chunkDiff.getVersion(),
+                          ChunkVersion::parse(logEntryDetails["mergedVersion"]));
+            ASSERT_EQUALS(chunkDiff.getShard(), logEntryDetails["owningShard"].String());
+            ASSERT_EQUALS(0,
+                          chunkDiff.getRange().toBSON().woCompare(
+                              ChunkRange(logEntryDetails["min"].Obj(), logEntryDetails["max"].Obj())
+                                  .toBSON()));
+            numMergedChunks += logEntryDetails["numChunks"].Int();
+            numMerges++;
+        }
+        ASSERT_EQUALS(numMergedChunks,
+                      originalRoutingTable.size() - mergedRoutingTable.size() + numMerges);
+    }
+
     inline const static auto _shards =
         std::vector<ShardType>{ShardType{"shard0", "host0:123"}, ShardType{"shard1", "host1:123"}};
 
@@ -872,7 +943,7 @@ protected:
  * - There are no contiguous chunks on the same shard(s)
  * - The minor versions on chunks have been increased accordingly to the number of merges
  */
-TEST_F(MergeAllChunksOnShardTest, MergeAllChunksOnShard) {
+TEST_F(MergeAllChunksOnShardTest, AllMergeableChunksGetSquashed) {
     setupCollectionWithRandomRoutingTable();
 
     const auto chunksBeforeMerges = getChunks();
@@ -886,9 +957,11 @@ TEST_F(MergeAllChunksOnShardTest, MergeAllChunksOnShard) {
     const auto chunksAfterMerges = getChunks();
 
     try {
-        assertConsistentRoutingTableWithNoContiguousChunksOnTheSameShard(chunksAfterMerges);
+        assertConsistentRoutingTableWithNoContiguousMergeableChunksOnTheSameShard(
+            chunksAfterMerges);
         assertConsistentRoutingTableAfterMerges(chunksBeforeMerges, chunksAfterMerges);
         assertConsistentChunkVersionsAfterMerges(chunksBeforeMerges, chunksAfterMerges);
+        assertChangesWereLoggedAfterMerges(_nss, chunksBeforeMerges, chunksAfterMerges);
     } catch (...) {
         // Log original and merged routing tables only in case of error
         LOGV2_INFO(7161200,

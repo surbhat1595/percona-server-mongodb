@@ -429,6 +429,26 @@ public:
 };
 extern SortCounters sortCounters;
 
+class GroupCounters {
+public:
+    GroupCounters() = default;
+
+    void incrementGroupCounters(const GroupStats& stats) {
+        spills.increment(stats.spills);
+        spillFileSizeBytes.increment(stats.spillFileSizeBytes);
+        numBytesSpilledEstimate.increment(stats.numBytesSpilledEstimate);
+    }
+
+    CounterMetric spills{
+        "query.group.spills"};  // The total number of spills to disk from group stages.
+    CounterMetric spillFileSizeBytes{
+        "query.group.spillFileSizeBytes"};  // The size of the file spilled to disk.
+    CounterMetric numBytesSpilledEstimate{
+        "query.group.numBytesSpilledEstimate"};  // The number of bytes evicted from memory and
+                                                 // spilled to disk.
+};
+extern GroupCounters groupCounters;
+
 /**
  * Generic class for counters of expressions inside various MQL statements.
  */
@@ -460,6 +480,49 @@ private:
     // Map of expressions to the number of occurrences in queries.
     StringMap<std::unique_ptr<ExprCounter>> operatorCountersExprMap = {};
 };
+
+class ValidatorCounters {
+public:
+    ValidatorCounters() {
+        _validatorCounterMap["create"] = std::make_unique<ValidatorCounter>("create");
+        _validatorCounterMap["collMod"] = std::make_unique<ValidatorCounter>("collMod");
+    }
+
+    void incrementCounters(const StringData cmdName,
+                           const BSONObj& validator,
+                           bool parsingSucceeded) {
+        if (!validator.isEmpty()) {
+            auto validatorCounter = _validatorCounterMap.find(cmdName);
+            tassert(7139200,
+                    str::stream() << "The validator counters are not support for the command: "
+                                  << cmdName,
+                    validatorCounter != _validatorCounterMap.end());
+            validatorCounter->second->totalCounter.increment();
+
+            if (!parsingSucceeded) {
+                validatorCounter->second->failedCounter.increment();
+            }
+            if (validator.hasField("$jsonSchema")) {
+                validatorCounter->second->jsonSchemaCounter.increment();
+            }
+        }
+    }
+
+private:
+    struct ValidatorCounter {
+        ValidatorCounter(const StringData name)
+            : totalCounter{"commands." + name + ".validator.total"},
+              failedCounter{"commands." + name + ".validator.failed"},
+              jsonSchemaCounter{"commands." + name + ".validator.jsonSchema"} {}
+        CounterMetric totalCounter;
+        CounterMetric failedCounter;
+        CounterMetric jsonSchemaCounter;
+    };
+
+    StringMap<std::unique_ptr<ValidatorCounter>> _validatorCounterMap = {};
+};
+
+extern ValidatorCounters validatorCounters;
 
 // Global counters for expressions inside aggregation pipelines.
 extern OperatorCounters operatorCountersAggExpressions;

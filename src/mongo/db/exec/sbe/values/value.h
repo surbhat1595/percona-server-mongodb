@@ -46,8 +46,10 @@
 #include "mongo/config.h"
 #include "mongo/db/exec/shard_filterer.h"
 #include "mongo/db/fts/fts_matcher.h"
+#include "mongo/db/matcher/expression.h"
 #include "mongo/db/query/bson_typemask.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/index_bounds.h"
 #include "mongo/platform/bits.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/platform/endian.h"
@@ -189,9 +191,6 @@ enum class TypeTags : uint8_t {
 
     // Pointer to a IndexBounds object.
     indexBounds,
-
-    // Pointer to a classic engine match expression.
-    classicMatchExpresion,
 };
 
 inline constexpr bool isNumber(TypeTags tag) noexcept {
@@ -1259,10 +1258,6 @@ inline IndexBounds* getIndexBoundsView(Value val) noexcept {
     return reinterpret_cast<IndexBounds*>(val);
 }
 
-inline MatchExpression* getClassicMatchExpressionView(Value val) noexcept {
-    return reinterpret_cast<MatchExpression*>(val);
-}
-
 inline sbe::value::CsiCell* getCsiCellView(Value val) noexcept {
     return reinterpret_cast<sbe::value::CsiCell*>(val);
 }
@@ -1477,12 +1472,6 @@ inline std::pair<TypeTags, Value> copyValue(TypeTags tag, Value val) {
             return makeCopyCollator(*getCollatorView(val));
         case TypeTags::indexBounds:
             return makeCopyIndexBounds(*getIndexBoundsView(val));
-        case TypeTags::classicMatchExpresion:
-            // Beware: "shallow cloning" a match expression does not copy the underlying BSON. The
-            // original BSON must remain alive for both the original MatchExpression and the clone.
-            return {TypeTags::classicMatchExpresion,
-                    bitcastFrom<const MatchExpression*>(
-                        getClassicMatchExpressionView(val)->shallowClone().release())};
         default:
             break;
     }

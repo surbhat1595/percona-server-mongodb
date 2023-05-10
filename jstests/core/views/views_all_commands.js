@@ -174,6 +174,8 @@ let viewsCommandTests = {
     _shardsvrJoinMigrations: {skip: isAnInternalCommand},
     _shardsvrMergeAllChunksOnShard: {skip: isAnInternalCommand},
     _shardsvrMovePrimary: {skip: isAnInternalCommand},
+    _shardsvrMovePrimaryEnterCriticalSection: {skip: isAnInternalCommand},
+    _shardsvrMovePrimaryExitCriticalSection: {skip: isAnInternalCommand},
     _shardsvrMoveRange: {
         command: {_shardsvrMoveRange: "test.view"},
         skipStandalone: true,
@@ -726,6 +728,7 @@ let viewsCommandTests = {
     validateDBMetadata:
         {command: {validateDBMetadata: 1, apiParameters: {version: "1", strict: true}}},
     waitForOngoingChunkSplits: {skip: isUnrelated},
+    voteAbortIndexBuild: {skip: isUnrelated},
     voteCommitImportCollection: {skip: isUnrelated},
     voteCommitIndexBuild: {skip: isUnrelated},
     voteCommitTransaction: {skip: isUnrelated},

@@ -124,8 +124,8 @@ if (typeof _threadInject != "undefined") {
         this.params.push(args);
     };
 
-    ParallelTester.prototype.run = function(msg) {
-        assert.parallelTests(this.params, msg);
+    ParallelTester.prototype.run = async function(msg) {
+        await assert.parallelTests(this.params, msg);
     };
 
     // creates lists of tests from jstests dir in a format suitable for use by
@@ -253,10 +253,20 @@ if (typeof _threadInject != "undefined") {
             // inMemory storage engine.
             "timeseries/timeseries_compact.js",
 
+            // TODO (SERVER-63228): Remove this exclusion once the feature flag is enabled by
+            // default.
+            "timeseries/timeseries_index_ttl_partial.js",
+
+            // These tests load 'sbe_assert_error_override.js' unconditionally, which causes
+            // failures in the parallel suite.
+            "computed_projections.js",
+            "query/project/projection_expr_mod.js",
+
             // TODO (SERVER-66393): Remove this exclusion once the feature flag is enabled by
             // default.
             "timeseries/timeseries_update_multi.js",
             "timeseries/timeseries_delete_multi.js",
+            "timeseries/timeseries_delete_one.js",
         ]);
 
         // Get files, including files in subdirectories.
@@ -359,22 +369,28 @@ if (typeof _threadInject != "undefined") {
         return params;
     };
 
+    async function measureAsync(fn) {
+        const start = new Date();
+        await fn.apply(null, Array.from(arguments).slice(2));
+        return (new Date()).getTime() - start.getTime();
+    }
+
     // runs a set of test files
     // first argument is an identifier for this tester, remaining arguments are file names
-    ParallelTester.fileTester = function() {
+    ParallelTester.fileTester = async function() {
         var args = Array.from(arguments);
         var suite = args.shift();
-        args.forEach(function(x) {
+        for (const x of args) {
             print("         S" + suite + " Test : " + x + " ...");
-            var time = Date.timeFunc(function() {
+            const time = await measureAsync(async function() {
                 // Create a new connection to the db for each file. If tests share the same
                 // connection it can create difficult to debug issues.
                 db = new Mongo(db.getMongo().host).getDB(db.getName());
                 gc();
-                load(x);
-            }, 1);
+                await import(x);
+            });
             print("         S" + suite + " Test : " + x + " " + time + "ms");
-        });
+        }
     };
 
     // params: array of arrays, each element of which consists of a function followed

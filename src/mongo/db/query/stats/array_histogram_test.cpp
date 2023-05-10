@@ -53,9 +53,8 @@ TEST(ArrayHistogram, BSONEdgeValues) {
         makeDoubleValue(std::numeric_limits<double>::min()),
         makeDoubleValue(std::numeric_limits<double>::max()),
         makeDoubleValue(std::numeric_limits<double>::infinity()),
-        // TODO SERVER-72807: Support NaN in histograms
-        // makeDoubleValue(std::numeric_limits<double>::quiet_NaN()),
-        // makeDoubleValue(std::numeric_limits<double>::signaling_NaN()),
+        makeDoubleValue(std::numeric_limits<double>::quiet_NaN()),
+        makeDoubleValue(std::numeric_limits<double>::signaling_NaN()),
 
         makeDateValue(Date_t::min()),
         makeDateValue(Date_t::max()),
@@ -86,9 +85,8 @@ TEST(ArrayHistogram, BSONEdgeValues) {
         sbe::value::makeCopyDecimal(Decimal128::kLargestNegativeExponentZero),
         sbe::value::makeCopyDecimal(Decimal128::kNegativeInfinity),
         sbe::value::makeCopyDecimal(Decimal128::kPositiveInfinity),
-        // TODO SERVER-72807: Support NaN in histograms
-        // sbe::value::makeCopyDecimal(Decimal128::kNegativeNaN),
-        // sbe::value::makeCopyDecimal(Decimal128::kPositiveNaN),
+        sbe::value::makeCopyDecimal(Decimal128::kNegativeNaN),
+        sbe::value::makeCopyDecimal(Decimal128::kPositiveNaN),
 
         sbe::value::makeNewArray(),
         sbe::value::makeCopyArray([] {
@@ -110,7 +108,7 @@ TEST(ArrayHistogram, BSONEdgeValues) {
         {sbe::value::TypeTags::Nothing, 1},
         {sbe::value::TypeTags::NumberInt32, 2},
         {sbe::value::TypeTags::NumberInt64, 2},
-        {sbe::value::TypeTags::NumberDouble, 3},
+        {sbe::value::TypeTags::NumberDouble, 5},
         {sbe::value::TypeTags::Date, 2},
         {sbe::value::TypeTags::Timestamp, 2},
         {sbe::value::TypeTags::Boolean, 2},
@@ -119,12 +117,16 @@ TEST(ArrayHistogram, BSONEdgeValues) {
         {sbe::value::TypeTags::StringBig, 2},
         {sbe::value::TypeTags::MinKey, 1},
         {sbe::value::TypeTags::MaxKey, 1},
-        {sbe::value::TypeTags::NumberDecimal, 8},
+        {sbe::value::TypeTags::NumberDecimal, 10},
         {sbe::value::TypeTags::Array, 2},
         {sbe::value::TypeTags::Object, 1},
         {sbe::value::TypeTags::ObjectId, 1},
     };
     ASSERT_EQ(expectedTypeCounts, ah->getTypeCounts());
+    ASSERT_EQ(ah->getTrueCount(), 1);
+    ASSERT_EQ(ah->getFalseCount(), 1);
+    ASSERT_EQ(ah->getNanCount(), 4);
+    ASSERT_EQ(ah->getEmptyArrayCount(), 1);
 
     // TODO SERVER-72997: Fix this test. We currently need to specify at least 20 buckets for this
     // test to pass.
@@ -174,7 +176,7 @@ TEST(ArrayHistograms, LargeNumberOfScalarValuesBucketRanges) {
                   [](auto&& bucket) { ASSERT_GT(bucket._rangeFreq, 1); });
 }
 
-TEST(ArrayHistograms, LargeArraysHistrogram) {
+TEST(ArrayHistograms, LargeArraysHistogram) {
     std::mt19937_64 seed(42);
     MixedDistributionDescriptor uniform{{DistrType::kUniform, 1.0}};
 
@@ -199,7 +201,7 @@ TEST(ArrayHistograms, LargeArraysHistrogram) {
     ASSERT_FALSE(ah->getArrayMax().empty());
 }
 
-TEST(ArrayHistrograms, LargeNumberOfArraysHistrogram) {
+TEST(ArrayHistrograms, LargeNumberOfArraysHistogram) {
     std::mt19937_64 seed(42);
     MixedDistributionDescriptor uniform{{DistrType::kUniform, 1.0}};
 
@@ -298,6 +300,7 @@ TEST(ArrayHistograms, Golden) {
     {
         trueCount: 0.0,
         falseCount: 0.0,
+        nanCount: 0.0,
         emptyArrayCount: 0.0,
         typeCount: [
             { typeName: "NumberInt64", count: 4.0 },

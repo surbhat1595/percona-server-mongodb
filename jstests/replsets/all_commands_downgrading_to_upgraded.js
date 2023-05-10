@@ -121,6 +121,8 @@ const allCommands = {
     _shardsvrJoinMigrations: {skip: isAnInternalCommand},
     _shardsvrMergeAllChunksOnShard: {skip: isAnInternalCommand},
     _shardsvrMovePrimary: {skip: isAnInternalCommand},
+    _shardsvrMovePrimaryEnterCriticalSection: {skip: isAnInternalCommand},
+    _shardsvrMovePrimaryExitCriticalSection: {skip: isAnInternalCommand},
     _shardsvrMoveRange: {skip: isAnInternalCommand},
     _shardsvrRenameCollection: {skip: isAnInternalCommand},
     _shardsvrRenameCollectionParticipant: {skip: isAnInternalCommand},
@@ -1207,6 +1209,7 @@ const allCommands = {
     validateDBMetadata: {
         command: {validateDBMetadata: 1, apiParameters: {version: "1", strict: true}},
     },
+    voteAbortIndexBuild: {skip: isAnInternalCommand},
     voteCommitImportCollection: {skip: isAnInternalCommand},
     voteCommitIndexBuild: {skip: isAnInternalCommand},
     waitForFailPoint: {

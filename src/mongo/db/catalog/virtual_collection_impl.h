@@ -68,6 +68,7 @@ public:
 
     Status initFromExisting(OperationContext* opCtx,
                             const std::shared_ptr<Collection>& collection,
+                            const DurableCatalogEntry& catalogEntry,
                             boost::optional<Timestamp> readTimestamp) final {
         unimplementedTasserted();
         return Status(ErrorCodes::UnknownError, "unknown");
@@ -241,7 +242,8 @@ public:
     }
 
     bool getRequiresTimeseriesExtendedRangeSupport() const final {
-        unimplementedTasserted();
+        // A virtual collection is never a time-series collection, so it never requires
+        // extended-range support.
         return false;
     }
 

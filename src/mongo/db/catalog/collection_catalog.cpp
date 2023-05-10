@@ -33,6 +33,7 @@
 
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/uncommitted_catalog_updates.h"
+#include "mongo/db/commands/server_status.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/concurrency/resource_catalog.h"
@@ -59,6 +60,8 @@ static RecordId kUnknownRangeMarkerId = RecordId::minLong();
 // Used to avoid quadratic behavior when inserting entries at the beginning. When threshold is
 // reached we will fall back to more durable catalog scans.
 static constexpr int kMaxCatalogIdMappingLengthForMissingInsert = 1000;
+
+constexpr auto kNumDurableCatalogScansDueToMissingMapping = "numScansDueToMissingMapping"_sd;
 
 struct LatestCollectionCatalog {
     std::shared_ptr<CollectionCatalog> catalog = std::make_shared<CollectionCatalog>();
@@ -99,6 +102,27 @@ const auto maxUuid = UUID::parse("FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF").getValu
 const auto minUuid = UUID::parse("00000000-0000-0000-0000-000000000000").getValue();
 
 }  // namespace
+
+/**
+ * Defines a new serverStatus section "collectionCatalog".
+ */
+class CollectionCatalogSection final : public ServerStatusSection {
+public:
+    CollectionCatalogSection() : ServerStatusSection("collectionCatalog") {}
+
+    bool includeByDefault() const override {
+        return true;
+    }
+
+    BSONObj generateSection(OperationContext* opCtx, const BSONElement&) const override {
+        BSONObjBuilder section;
+        section.append(kNumDurableCatalogScansDueToMissingMapping,
+                       numScansDueToMissingMapping.loadRelaxed());
+        return section.obj();
+    }
+
+    AtomicWord<long long> numScansDueToMissingMapping;
+} gCollectionCatalogSection;
 
 class IgnoreExternalViewChangesForDatabase {
 public:
@@ -770,8 +794,7 @@ bool CollectionCatalog::needsOpenCollection(OperationContext* opCtx,
                                             const NamespaceStringOrUUID& nsOrUUID,
                                             boost::optional<Timestamp> readTimestamp) const {
     if (readTimestamp) {
-        auto coll = (nsOrUUID.nss() ? lookupCollectionByNamespace(opCtx, *nsOrUUID.nss())
-                                    : lookupCollectionByUUID(opCtx, *nsOrUUID.uuid()));
+        auto coll = lookupCollectionByNamespaceOrUUID(opCtx, nsOrUUID);
         return !coll || *readTimestamp < coll->getMinimumValidSnapshot();
     } else {
         if (nsOrUUID.nss()) {
@@ -1037,6 +1060,7 @@ boost::optional<DurableCatalogEntry> CollectionCatalog::_fetchPITCatalogEntry(
         invariant(readTimestamp);
 
         // Scan durable catalog when we don't have accurate catalogId mapping for this timestamp.
+        gCollectionCatalogSection.numScansDueToMissingMapping.fetchAndAdd(1);
         auto catalogEntry = DurableCatalog::get(opCtx)->scanForCatalogEntryByNss(opCtx, nss);
         writeCatalogIdAfterScan(catalogEntry);
         return catalogEntry;
@@ -1089,8 +1113,11 @@ std::shared_ptr<Collection> CollectionCatalog::_createCompatibleCollection(
                                                   catalogEntry.catalogId,
                                                   catalogEntry.metadata,
                                                   /*rs=*/nullptr);
-        Status status = collToReturn->initFromExisting(
-            opCtx, latestCollection ? latestCollection : dropPendingColl, readTimestamp);
+        Status status =
+            collToReturn->initFromExisting(opCtx,
+                                           latestCollection ? latestCollection : dropPendingColl,
+                                           catalogEntry,
+                                           readTimestamp);
         if (!status.isOK()) {
             LOGV2_DEBUG(
                 6857100, 1, "Failed to instantiate collection", "reason"_attr = status.reason());
@@ -1142,7 +1169,8 @@ std::shared_ptr<Collection> CollectionCatalog::_createNewPITCollection(
                                               catalogEntry.catalogId,
                                               catalogEntry.metadata,
                                               std::move(rs));
-    Status status = collToReturn->initFromExisting(opCtx, /*collection=*/nullptr, readTimestamp);
+    Status status =
+        collToReturn->initFromExisting(opCtx, /*collection=*/nullptr, catalogEntry, readTimestamp);
     if (!status.isOK()) {
         LOGV2_DEBUG(
             6857102, 1, "Failed to instantiate collection", "reason"_attr = status.reason());
@@ -1340,6 +1368,13 @@ CollectionPtr CollectionCatalog::lookupCollectionByUUID(OperationContext* opCtx,
     return (coll && coll->isCommitted())
         ? CollectionPtr(opCtx, coll.get(), LookupCollectionForYieldRestore(coll->ns()))
         : CollectionPtr();
+}
+
+CollectionPtr CollectionCatalog::lookupCollectionByNamespaceOrUUID(
+    OperationContext* opCtx, const NamespaceStringOrUUID& nssOrUUID) const {
+    if (boost::optional<UUID> uuid = nssOrUUID.uuid())
+        return lookupCollectionByUUID(opCtx, *uuid);
+    return lookupCollectionByNamespace(opCtx, *nssOrUUID.nss());
 }
 
 bool CollectionCatalog::isCollectionAwaitingVisibility(UUID uuid) const {

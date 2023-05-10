@@ -28,10 +28,12 @@ var QuerySamplingUtil = (function() {
 
     /**
      * Waits for the given node to have one active collection for query sampling.
+     * Throws if the featureFlagAnalyzeShardKey is not set.
      */
     function waitForActiveSampling(node) {
         assert.soon(() => {
             const res = assert.commandWorked(node.adminCommand({serverStatus: 1}));
+            assert(res.hasOwnProperty("queryAnalyzers"));
             return res.queryAnalyzers.activeCollections == 1;
         });
     }
@@ -275,11 +277,14 @@ var QuerySamplingUtil = (function() {
     /**
      * Returns the total number of query sample documents across shards.
      */
-    function getNumSampledQueryDocuments(st) {
+    function getNumSampledQueryDocuments(st, filter = {}) {
         let numDocs = 0;
 
         st._rs.forEach((rs) => {
-            numDocs += rs.test.getPrimary().getCollection(kSampledQueriesNs).find().itcount();
+            const coll = rs.test.getPrimary().getCollection(kSampledQueriesNs);
+            numDocs += coll.find(filter).itcount();
+            // Make sure that all the documents counted above have been replicated to all nodes.
+            rs.test.awaitReplication();
         });
 
         return numDocs;
@@ -288,11 +293,14 @@ var QuerySamplingUtil = (function() {
     /**
      * Returns the total number of query sample diff documents across shards.
      */
-    function getNumSampledQueryDiffDocuments(st) {
+    function getNumSampledQueryDiffDocuments(st, filter = {}) {
         let numDocs = 0;
 
         st._rs.forEach((rs) => {
-            numDocs += rs.test.getPrimary().getCollection(kSampledQueriesDiffNs).find().itcount();
+            const coll = rs.test.getPrimary().getCollection(kSampledQueriesDiffNs);
+            numDocs += coll.find(filter).itcount();
+            // Make sure that all the documents counted above have been replicated to all nodes.
+            rs.test.awaitReplication();
         });
 
         return numDocs;

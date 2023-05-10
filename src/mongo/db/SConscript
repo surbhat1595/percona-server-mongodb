@@ -68,20 +68,21 @@ env.Library(
     target='server_base',
     source=[
         'basic_types.idl',
-        'database_name.cpp',
         'catalog_shard_feature_flag.idl',
         'cluster_role.cpp',
-        'feature_compatibility_version_parser.cpp',
+        'database_name.cpp',
         'feature_compatibility_version_document.idl',
+        'feature_compatibility_version_parser.cpp',
         'feature_flag.cpp',
         'index_names.cpp',
         'keypattern.cpp',
         'logical_time.cpp',
         'multitenancy.idl',
         'namespace_string.cpp',
-        'server_parameter_with_storage.cpp',
+        'server_options.cpp',
         'server_parameter.cpp',
         'server_parameter.idl',
+        'server_parameter_with_storage.cpp',
         'shard_id.cpp',
         'shutdown_in_progress_quiesce_info.cpp',
         'tenant_id.cpp',
@@ -89,7 +90,6 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/idl/idl_parser',
-        'server_options_core',
     ],
 )
 
@@ -269,16 +269,6 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/idl/cluster_server_parameter',
         'server_base',
-    ],
-)
-
-env.Library(
-    target='server_options_core',
-    source=[
-        'server_options.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/base',
     ],
 )
 
@@ -491,10 +481,10 @@ env.Library(
         'change_stream_options_parameter.idl',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
         'change_stream_options',
         'change_stream_serverless_helpers',
-        'server_options_core',
+        'repl/repl_coordinator_interface',
+        'server_base',
         'service_context',
     ],
 )
@@ -870,6 +860,7 @@ env.Library(
         's/sharding_api_d_DO_NOT_ADD_MORE_USAGES',
     ],
     LIBDEPS_PRIVATE=[
+        'catalog/clustered_collection_options',
         'server_base',
     ],
 )
@@ -1353,6 +1344,7 @@ env.Library(
         'exec/shard_filterer_impl.cpp',
     ],
     LIBDEPS_PRIVATE=[
+        'exec/working_set',
         'shard_role_api',
     ],
 )
@@ -1505,11 +1497,12 @@ env.Library(
         'stats/serveronly_stats',
         'storage/remove_saver',
         'storage/storage_options',
-        'update/produce_document_for_upsert',
+        'update/update_driver',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/catalog/collection_crud',
         '$BUILD_DIR/mongo/db/catalog/database_holder',
+        '$BUILD_DIR/mongo/db/catalog/health_log_interface',
         '$BUILD_DIR/mongo/db/catalog/local_oplog_info',
         '$BUILD_DIR/mongo/db/commands/server_status_core',
         '$BUILD_DIR/mongo/db/concurrency/exception_util',
@@ -1715,7 +1708,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/session/logical_session_id',
-        '$BUILD_DIR/mongo/s/coreshard',
+        '$BUILD_DIR/mongo/s/grid',
         '$BUILD_DIR/mongo/s/query/cluster_cursor_manager',
         '$BUILD_DIR/mongo/util/clock_sources',
         '$BUILD_DIR/mongo/util/periodic_runner',
@@ -1949,7 +1942,7 @@ env.Library(
         'dbdirectclient',
         'repl/replica_set_aware_service',
         'rw_concern_d',
-        'server_options_core',
+        'server_base',
     ],
 )
 
@@ -2222,7 +2215,7 @@ env.Library(
         'catalog/catalog_impl',
         'catalog/collection_options',
         'catalog/document_validation',
-        'catalog/health_log',
+        'catalog/health_log_interface',
         'catalog/index_key_validate',
         'client_metadata_propagation_egress_hook',
         'collection_index_usage_tracker',
@@ -2350,6 +2343,7 @@ env.Library(
         'catalog/catalog_helpers',
         'catalog/catalog_impl',
         'catalog/health_log',
+        'catalog/health_log_interface',
         'commands/mongod',
         'commands/test_commands',
         'concurrency/flow_control_ticketholder',

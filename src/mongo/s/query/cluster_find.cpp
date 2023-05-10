@@ -53,6 +53,7 @@
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/query/query_planner_common.h"
+#include "mongo/db/query/telemetry.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/overflow_arithmetic.h"
@@ -321,7 +322,8 @@ CursorId runQueryWithoutRetrying(OperationContext* opCtx,
         if (findCommand.getAllowPartialResults() && findCommand.getMaxTimeMS()) {
             // Reserve 10% of the time budget (up to 100,000 microseconds max) for processing
             // buffered partial results.
-            deadline -= Microseconds{std::min(1000 * (*findCommand.getMaxTimeMS()) / 10, 100000)};
+            deadline -=
+                Microseconds{std::min(1000LL * (*findCommand.getMaxTimeMS()) / 10, 100'000LL)};
             LOGV2_DEBUG(
                 5746901,
                 0,
@@ -847,6 +849,8 @@ StatusWith<CursorResponse> ClusterFind::runGetMore(OperationContext* opCtx,
                                                          opCtx,
                                                          "waitWithPinnedCursorDuringGetMoreBatch");
     }
+
+    telemetry::registerGetMoreRequest(opCtx);
 
     while (!FindCommon::enoughForGetMore(batchSize, batch.size())) {
         StatusWith<ClusterQueryResult> next =

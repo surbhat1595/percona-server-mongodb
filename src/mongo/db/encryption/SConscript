@@ -59,7 +59,7 @@ env.Library(
         'secret_string.cpp'
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/server_options_core',
+        '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/util/secure_zero_memory'
     ],
 )

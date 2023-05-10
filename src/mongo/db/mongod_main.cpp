@@ -146,7 +146,6 @@
 #include "mongo/db/s/op_observer_sharding_impl.h"
 #include "mongo/db/s/periodic_sharded_index_consistency_checker.h"
 #include "mongo/db/s/query_analysis_op_observer.h"
-#include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/db/s/rename_collection_participant_service.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
 #include "mongo/db/s/resharding/resharding_donor_service.h"
@@ -605,6 +604,9 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     startMongoDFTDC();
 
     if (mongodGlobalParams.scriptingEnabled) {
+        uassert(ErrorCodes::InvalidOptions,
+                "Scripting engine not supported in the serverless environment",
+                !gMultitenancySupport);
         ScriptEngine::setup();
     }
 
@@ -614,7 +616,8 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     }
 
     // Start up health log writer thread.
-    HealthLog::get(startupOpCtx.get()).startup();
+    HealthLogInterface::set(serviceContext, std::make_unique<HealthLog>());
+    HealthLogInterface::get(startupOpCtx.get())->startup();
 
     auto const globalLDAPManager = LDAPManager::get(serviceContext);
     if (globalLDAPManager) {
@@ -1391,6 +1394,11 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         lsc->joinOnShutDown();
     }
 
+    if (analyze_shard_key::supportsSamplingQueriesIgnoreFCV()) {
+        LOGV2_OPTIONS(7350601, {LogComponent::kDefault}, "Shutting down the QueryAnalysisSampler");
+        analyze_shard_key::QueryAnalysisSampler::get(serviceContext).onShutdown();
+    }
+
     // Shutdown the TransportLayer so that new connections aren't accepted
     if (auto tl = serviceContext->getTransportLayer()) {
         LOGV2_OPTIONS(
@@ -1544,8 +1552,10 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
     LOGV2(4784925, "Shutting down free monitoring");
     stopFreeMonitoring();
 
-    LOGV2(4784927, "Shutting down the HealthLog");
-    HealthLog::get(serviceContext).shutdown();
+    if (auto* healthLog = HealthLogInterface::get(serviceContext)) {
+        LOGV2(4784927, "Shutting down the HealthLog");
+        healthLog->shutdown();
+    }
 
     LOGV2(4784928, "Shutting down the TTL monitor");
     shutdownTTLMonitor(serviceContext);

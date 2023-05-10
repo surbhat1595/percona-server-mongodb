@@ -3,7 +3,7 @@ sh = function() {
 };
 
 sh._checkMongos = function() {
-    var x = db._helloOrLegacyHello();
+    var x = globalThis.db._helloOrLegacyHello();
     if (x.msg != "isdbgrid")
         throw Error("not connected to a mongos");
 };
@@ -16,12 +16,12 @@ sh._checkFullName = function(fullName) {
 sh._adminCommand = function(cmd, skipCheck) {
     if (!skipCheck)
         sh._checkMongos();
-    return db.getSiblingDB("admin").runCommand(cmd);
+    return globalThis.db.getSiblingDB("admin").runCommand(cmd);
 };
 
 sh._getConfigDB = function() {
     sh._checkMongos();
-    return db.getSiblingDB("config");
+    return globalThis.db.getSiblingDB("config");
 };
 
 sh._getBalancerStatus = function() {
@@ -91,6 +91,9 @@ sh.help = function() {
     print("\tsh.disableAutoSplit()                   disable autoSplit on one collection");
     print("\tsh.enableAutoSplit()                    re-enable autoSplit on one collection");
     print("\tsh.getShouldAutoSplit()                 returns whether autosplit is enabled");
+    print("\tsh.disableAutoMerge()                   disable autoMerge on one collection");
+    print("\tsh.enableAutoMerge()                    re-enable autoMerge on one collection");
+    print("\tsh.shouldAutoMerge()                    returns whether autoMerge is enabled");
     print(
         "\tsh.balancerCollectionStatus(fullName)       " +
         "returns wheter the specified collection is balanced or the balancer needs to take more actions on it");
@@ -184,14 +187,14 @@ sh.isBalancerRunning = function(configDB) {
 sh.stopBalancer = function(timeoutMs, interval) {
     timeoutMs = timeoutMs || 60000;
 
-    var result = db.adminCommand({balancerStop: 1, maxTimeMS: timeoutMs});
+    var result = globalThis.db.adminCommand({balancerStop: 1, maxTimeMS: timeoutMs});
     return assert.commandWorked(result);
 };
 
 sh.startBalancer = function(timeoutMs, interval) {
     timeoutMs = timeoutMs || 60000;
 
-    var result = db.adminCommand({balancerStart: 1, maxTimeMS: timeoutMs});
+    var result = globalThis.db.adminCommand({balancerStart: 1, maxTimeMS: timeoutMs});
     return assert.commandWorked(result);
 };
 
@@ -221,6 +224,34 @@ sh.getShouldAutoSplit = function(configDB) {
         return true;
     }
     return autosplit.enabled;
+};
+
+sh.enableAutoMerge = function(configDB) {
+    if (configDB === undefined)
+        configDB = sh._getConfigDB();
+    return assert.commandWorked(
+        configDB.settings.update({_id: 'automerge'},
+                                 {$set: {enabled: true}},
+                                 {upsert: true, writeConcern: {w: 'majority', wtimeout: 30000}}));
+};
+
+sh.disableAutoMerge = function(configDB) {
+    if (configDB === undefined)
+        configDB = sh._getConfigDB();
+    return assert.commandWorked(
+        configDB.settings.update({_id: 'automerge'},
+                                 {$set: {enabled: false}},
+                                 {upsert: true, writeConcern: {w: 'majority', wtimeout: 30000}}));
+};
+
+sh.shouldAutoMerge = function(configDB) {
+    if (configDB === undefined)
+        configDB = sh._getConfigDB();
+    var automerge = configDB.settings.findOne({_id: 'automerge'});
+    if (automerge == null) {
+        return true;
+    }
+    return automerge.enabled;
 };
 
 sh.waitForPingChange = function(activePings, timeout, interval) {
@@ -287,7 +318,7 @@ sh.disableBalancing = function(coll) {
     if (coll === undefined) {
         throw Error("Must specify collection");
     }
-    var dbase = db;
+    var dbase = globalThis.db;
     if (coll instanceof DBCollection) {
         dbase = coll.getDB();
     } else {
@@ -304,7 +335,7 @@ sh.enableBalancing = function(coll) {
     if (coll === undefined) {
         throw Error("Must specify collection");
     }
-    var dbase = db;
+    var dbase = globalThis.db;
     if (coll instanceof DBCollection) {
         dbase = coll.getDB();
     } else {
@@ -331,9 +362,9 @@ sh.awaitCollectionBalance = function(coll, timeout, interval) {
         {'$group': {'_id': null, 'totalNumOrphanDocs': {'$sum': '$storageStats.numOrphanDocs'}}}
     ];
 
-    var oldDb = (typeof (db) === 'undefined' ? undefined : db);
+    var oldDb = (typeof (globalThis.db) === 'undefined' ? undefined : globalThis.db);
     try {
-        db = coll.getDB();
+        globalThis.db = coll.getDB();
 
         assert.soon(
             function() {
@@ -364,7 +395,7 @@ sh.awaitCollectionBalance = function(coll, timeout, interval) {
             timeout,
             interval);
     } finally {
-        db = oldDb;
+        globalThis.db = oldDb;
     }
 };
 
@@ -377,9 +408,9 @@ sh.verifyCollectionIsBalanced = function(coll) {
         throw Error("Must specify collection");
     }
 
-    var oldDb = db;
+    var oldDb = globalThis.db;
     try {
-        db = coll.getDB();
+        globalThis.db = coll.getDB();
 
         const configDB = sh._getConfigDB();
         const ns = coll.getFullName();
@@ -421,7 +452,7 @@ sh.verifyCollectionIsBalanced = function(coll) {
                    errorMsg);
 
     } finally {
-        db = oldDb;
+        globalThis.db = oldDb;
     }
 };
 
@@ -435,7 +466,7 @@ sh._lastMigration = function(ns) {
     var config = null;
 
     if (!ns) {
-        config = db.getSiblingDB("config");
+        config = globalThis.db.getSiblingDB("config");
     } else if (ns instanceof DBCollection) {
         coll = ns;
         config = coll.getDB().getSiblingDB("config");
@@ -450,11 +481,11 @@ sh._lastMigration = function(ns) {
         // String namespace
         ns = ns + "";
         if (ns.indexOf(".") > 0) {
-            config = db.getSiblingDB("config");
-            coll = db.getMongo().getCollection(ns);
+            config = globalThis.db.getSiblingDB("config");
+            coll = globalThis.db.getMongo().getCollection(ns);
         } else {
-            config = db.getSiblingDB("config");
-            dbase = db.getSiblingDB(ns);
+            config = globalThis.db.getSiblingDB("config");
+            dbase = globalThis.db.getSiblingDB(ns);
         }
     }
 
@@ -557,7 +588,7 @@ sh.removeRangeFromZone = function(ns, min, max) {
 
 sh.getBalancerWindow = function(configDB) {
     if (configDB === undefined)
-        configDB = db.getSiblingDB('config');
+        configDB = globalThis.db.getSiblingDB('config');
     var settings = configDB.settings.findOne({_id: 'balancer'});
     if (settings == null) {
         return null;
@@ -570,7 +601,7 @@ sh.getBalancerWindow = function(configDB) {
 
 sh.getActiveMigrations = function(configDB) {
     if (configDB === undefined)
-        configDB = db.getSiblingDB('config');
+        configDB = globalThis.db.getSiblingDB('config');
     var activeLocks = configDB.locks.find({state: {$eq: 2}});
     var result = [];
     if (activeLocks != null) {
@@ -583,7 +614,7 @@ sh.getActiveMigrations = function(configDB) {
 
 sh.getRecentFailedRounds = function(configDB) {
     if (configDB === undefined)
-        configDB = db.getSiblingDB('config');
+        configDB = globalThis.db.getSiblingDB('config');
     var balErrs = configDB.actionlog.find({what: "balancer.round"}).sort({time: -1}).limit(5);
     var result = {count: 0, lastErr: "", lastTime: " "};
     if (balErrs != null) {
@@ -687,8 +718,9 @@ sh.configureCollectionBalancing = function(coll) {
 function printShardingStatus(configDB, verbose) {
     // configDB is a DB object that contains the sharding metadata of interest.
     // Defaults to the db named "config" on the current connection.
-    if (configDB === undefined)
-        configDB = db.getSiblingDB('config');
+    if (configDB === undefined) {
+        configDB = globalThis.db.getSiblingDB('config');
+    }
 
     var version = configDB.getCollection("version").findOne();
     if (version == null) {
@@ -760,6 +792,10 @@ function printShardingStatus(configDB, verbose) {
     // Is autosplit currently enabled
     output(2, "Currently enabled: " + (sh.getShouldAutoSplit(configDB) ? "yes" : "no"));
 
+    output(1, "automerge:");
+
+    output(2, "Currently enabled: " + (sh.shouldAutoMerge(configDB) ? "yes" : "no"));
+
     output(1, "balancer:");
 
     let balancerEnabledString;
@@ -809,7 +845,7 @@ function printShardingStatus(configDB, verbose) {
         versionHasActionlog = true;
     }
     if (metaDataVersion == 5) {
-        var verArray = db.serverBuildInfo().versionArray;
+        var verArray = globalThis.db.serverBuildInfo().versionArray;
         if (verArray[0] == 2 && verArray[1] > 6) {
             versionHasActionlog = true;
         }
@@ -932,8 +968,9 @@ function printShardingStatus(configDB, verbose) {
 function printShardingSizes(configDB) {
     // configDB is a DB object that contains the sharding metadata of interest.
     // Defaults to the db named "config" on the current connection.
-    if (configDB === undefined)
-        configDB = db.getSiblingDB('config');
+    if (configDB === undefined) {
+        configDB = globalThis.db.getSiblingDB('config');
+    }
 
     var version = configDB.getCollection("version").findOne();
     if (version == null) {
@@ -953,7 +990,7 @@ function printShardingSizes(configDB) {
         output(2, tojson(z));
     });
 
-    var saveDB = db;
+    var saveDB = globalThis.db;
     output(1, "databases:");
     configDB.databases.find().sort({name: 1}).forEach(function(db) {
         output(2, tojson(db, "", true));

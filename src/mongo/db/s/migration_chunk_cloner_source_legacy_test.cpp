@@ -85,6 +85,7 @@ public:
 
     Status initFromExisting(OperationContext* opCtx,
                             const std::shared_ptr<Collection>& collection,
+                            const DurableCatalogEntry& catalogEntry,
                             boost::optional<Timestamp> readTimestamp) override {
         MONGO_UNREACHABLE;
     }
@@ -496,8 +497,8 @@ protected:
 
         auto opCtx = operationContext();
         DBDirectClient client(opCtx);
-        client.createCollection(NamespaceString::kSessionTransactionsTableNamespace.ns());
-        client.createIndexes(NamespaceString::kSessionTransactionsTableNamespace.ns(),
+        client.createCollection(NamespaceString::kSessionTransactionsTableNamespace);
+        client.createIndexes(NamespaceString::kSessionTransactionsTableNamespace,
                              {MongoDSessionCatalog::getConfigTxnPartialIndexSpec()});
 
         // TODO: SERVER-26919 set the flag on the mock repl coordinator just for the window where it
@@ -637,7 +638,7 @@ protected:
                         ShardId("dummyShardId")));
         }();
 
-        client()->createIndex(kNss.ns(), kShardKeyPattern);
+        client()->createIndex(kNss, kShardKeyPattern);
         insertDocsInShardedCollection(initialDocs);
     }
 

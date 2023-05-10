@@ -401,10 +401,7 @@ Root []
 |       Variable [scan_0]
 NestedLoopJoin [joinType: Inner, {rid_0}]
 |   |   Const [true]
-|   LimitSkip []
-|   |   limitSkip:
-|   |       limit: 1
-|   |       skip: 0
+|   LimitSkip [limit: 1, skip: 0]
 |   Seek [ridProjection: rid_0, {'<root>': scan_0}, collection]
 |   RefBlock: 
 |       Variable [rid_0]
@@ -566,7 +563,7 @@ Evaluation [{combinedProjection_0}]
 |   PathField [a]
 |   PathConstant []
 |   Variable [fieldProj_0]
-IndexScan [{'<indexKey> 0': fieldProj_0}, scanDefName: collection, indexDefName: index1, interval: {=Const [10], =Const [20]}]
+IndexScan [{'<indexKey> 0': fieldProj_0}, scanDefName: collection, indexDefName: index1, interval: {=Const [10 | 20]}]
 
 
 ==== VARIATION: optimized $match index covered, match on three indexed keys then project ====
@@ -635,7 +632,7 @@ Evaluation [{combinedProjection_0}]
 |   PathField [a]
 |   PathConstant []
 |   Variable [fieldProj_0]
-IndexScan [{'<indexKey> 0': fieldProj_0, '<indexKey> 1': fieldProj_1, '<indexKey> 2': fieldProj_2}, scanDefName: collection, indexDefName: index1, interval: {=Const [10], =Const [20], =Const [30]}]
+IndexScan [{'<indexKey> 0': fieldProj_0, '<indexKey> 1': fieldProj_1, '<indexKey> 2': fieldProj_2}, scanDefName: collection, indexDefName: index1, interval: {=Const [10 | 20 | 30]}]
 
 
 ==== VARIATION: optimized $match index covered, inclusion project then match on three indexed keys ====
@@ -704,7 +701,7 @@ Evaluation [{combinedProjection_0}]
 |   PathField [a]
 |   PathConstant []
 |   Variable [fieldProj_0]
-IndexScan [{'<indexKey> 0': fieldProj_0, '<indexKey> 1': fieldProj_1, '<indexKey> 2': fieldProj_2}, scanDefName: collection, indexDefName: index1, interval: {=Const [10], =Const [20], =Const [30]}]
+IndexScan [{'<indexKey> 0': fieldProj_0, '<indexKey> 1': fieldProj_1, '<indexKey> 2': fieldProj_2}, scanDefName: collection, indexDefName: index1, interval: {=Const [10 | 20 | 30]}]
 
 
 ==== VARIATION: optimized $match sort index ====
@@ -755,10 +752,7 @@ Collation []
 |       Variable [sort_0]
 NestedLoopJoin [joinType: Inner, {rid_0}]
 |   |   Const [true]
-|   LimitSkip []
-|   |   limitSkip:
-|   |       limit: 1
-|   |       skip: 0
+|   LimitSkip [limit: 1, skip: 0]
 |   Seek [ridProjection: rid_0, {'<root>': scan_0, 'a': sort_0}, collection]
 |   RefBlock: 
 |       Variable [rid_0]
@@ -808,10 +802,7 @@ Root []
 |       Variable [scan_0]
 NestedLoopJoin [joinType: Inner, {rid_0}]
 |   |   Const [true]
-|   LimitSkip []
-|   |   limitSkip:
-|   |       limit: 1
-|   |       skip: 0
+|   LimitSkip [limit: 1, skip: 0]
 |   Seek [ridProjection: rid_0, {'<root>': scan_0}, collection]
 |   RefBlock: 
 |       Variable [rid_0]
@@ -887,14 +878,11 @@ Root []
 |       Variable [scan_0]
 NestedLoopJoin [joinType: Inner, {rid_0}]
 |   |   Const [true]
-|   LimitSkip []
-|   |   limitSkip:
-|   |       limit: 1
-|   |       skip: 0
+|   LimitSkip [limit: 1, skip: 0]
 |   Seek [ridProjection: rid_0, {'<root>': scan_0}, collection]
 |   RefBlock: 
 |       Variable [rid_0]
-IndexScan [{'<rid>': rid_0}, scanDefName: collection, indexDefName: index1, interval: {=Const [2], =Const [2]}]
+IndexScan [{'<rid>': rid_0}, scanDefName: collection, indexDefName: index1, interval: {=Const [2 | 2]}]
 
 
 ==== VARIATION: optimized index on one key ====
@@ -947,10 +935,7 @@ NestedLoopJoin [joinType: Inner, {rid_0}]
 |   |   PathTraverse [1]
 |   |   PathCompare [Eq]
 |   |   Const [2]
-|   LimitSkip []
-|   |   limitSkip:
-|   |       limit: 1
-|   |       skip: 0
+|   LimitSkip [limit: 1, skip: 0]
 |   Seek [ridProjection: rid_0, {'<root>': scan_0, 'b': evalTemp_4}, collection]
 |   RefBlock: 
 |       Variable [rid_0]

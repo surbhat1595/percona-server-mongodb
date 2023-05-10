@@ -666,6 +666,317 @@ TEST(FLE_ESC, EmuBinary_Empty) {
     ASSERT_EQ(i.value(), 0);
 }
 
+namespace {
+
+std::tuple<ESCTwiceDerivedTagToken, ESCTwiceDerivedValueToken> generateEmuBinaryTokens(
+    ConstDataRange value, uint64_t contention = 0) {
+    auto c1 = FLELevel1TokenGenerator::generateCollectionsLevel1Token(getIndexKey());
+    auto escToken = FLECollectionTokenGenerator::generateESCToken(c1);
+
+    ESCDerivedFromDataToken escDatakey =
+        FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken, value);
+
+    auto escDerivedToken = FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
+        generateESCDerivedFromDataTokenAndContentionFactorToken(escDatakey, contention);
+
+    auto escTwiceTag =
+        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedTagToken(escDerivedToken);
+    auto escTwiceValue =
+        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedValueToken(escDerivedToken);
+    return std::tie(escTwiceTag, escTwiceValue);
+}
+
+mongo::ESCCollection::EmuBinaryResult EmuBinaryV2Test(
+    boost::optional<std::pair<uint64_t, uint64_t>> nullAnchor,
+    uint64_t anchorStart,
+    uint64_t anchorCount,
+    uint64_t anchorCposStart,
+    uint64_t anchorCposEnd,
+    uint64_t nonAnchorStart,
+    uint64_t nonAnchorCount) {
+
+    TestDocumentCollection coll;
+    ConstDataRange value(testValue);
+    auto [tagToken, valueToken] = generateEmuBinaryTokens(value, 0);
+
+    if (nullAnchor.has_value()) {
+        auto nullApos = nullAnchor->first;
+        auto nullCpos = nullAnchor->second;
+        // insert null anchor
+        auto doc =
+            ESCCollection::generateNullAnchorDocument(tagToken, valueToken, nullApos, nullCpos);
+        coll.insert(doc);
+    }
+
+    ASSERT_LESS_THAN_OR_EQUALS(anchorCposStart, anchorCposEnd);
+
+    // insert regular anchors with positions between anchorStart and anchorEnd (exclusive)
+    uint64_t lastAnchorCpos = anchorCposStart;
+    auto anchorEnd = anchorStart + anchorCount;
+    for (auto apos = anchorStart; apos < anchorEnd; apos++) {
+        auto doc =
+            ESCCollection::generateAnchorDocument(tagToken, valueToken, apos, lastAnchorCpos);
+        coll.insert(doc);
+        if (lastAnchorCpos < anchorCposEnd) {
+            lastAnchorCpos++;
+        }
+    }
+
+    // insert non-anchors with positions between nonAnchorStart and nonAnchorEnd (exclusive)
+    uint64_t nonAnchorEnd = nonAnchorStart + nonAnchorCount;
+    for (auto cpos = nonAnchorStart; cpos < nonAnchorEnd; cpos++) {
+        auto doc = ESCCollection::generateNonAnchorDocument(tagToken, cpos);
+        coll.insert(doc);
+    }
+
+    auto res = ESCCollection::emuBinaryV2(coll, tagToken, valueToken);
+
+    return res;
+}
+}  // namespace
+
+// Test EmuBinaryV2 on empty collection
+TEST(FLE_ESC, EmuBinaryV2_Empty) {
+    auto res = EmuBinaryV2Test(boost::none, 0, 0, 0, 0, 0, 0);
+    ASSERT_TRUE(res.apos.has_value());
+    ASSERT_EQ(res.apos.value(), 0);
+    ASSERT_TRUE(res.cpos.has_value());
+    ASSERT_EQ(res.cpos.value(), 0);
+}
+
+// Test EmuBinaryV2 on ESC containing non-anchors only
+TEST(FLE_ESC, EmuBinaryV2_NonAnchorsOnly) {
+    auto res = EmuBinaryV2Test(boost::none, 0, 0, 0, 0, 1, 5);
+    ASSERT_TRUE(res.apos.has_value());
+    ASSERT_EQ(res.apos.value(), 0);
+    ASSERT_TRUE(res.cpos.has_value());
+    ASSERT_EQ(res.cpos.value(), 5);
+}
+
+// Test EmuBinaryV2 on ESC containing non-null anchors only
+TEST(FLE_ESC, EmuBinaryV2_RegularAnchorsOnly) {
+    // insert anchors 1-10, with cpos all at 0
+    auto res = EmuBinaryV2Test(boost::none, 1, 10, 0, 0, 0, 0);
+    ASSERT_FALSE(res.cpos.has_value());
+    ASSERT_TRUE(res.apos.has_value());
+    ASSERT_EQ(res.apos.value(), 10);
+
+    // insert anchors 1-17 with cpos from 31 thru 47
+    res = EmuBinaryV2Test(boost::none, 1, 17, 31, 48, 0, 0);
+    ASSERT_FALSE(res.cpos.has_value());
+    ASSERT_TRUE(res.apos.has_value());
+    ASSERT_EQ(res.apos.value(), 17);
+}
+
+// Test EmuBinaryV2 on ESC containing both non-anchors and regular (non-null) anchors only
+TEST(FLE_ESC, EmuBinaryV2_NonAnchorsAndRegularAnchorsOnly) {
+
+    // insert regular anchors 1-7, with cpos all at 0; non-anchors 1-20
+    auto res = EmuBinaryV2Test(boost::none, 1, 7, 0, 0, 1, 20);
+    ASSERT_TRUE(res.cpos.has_value());
+    ASSERT_EQ(res.cpos.value(), 20);
+    ASSERT_TRUE(res.apos.has_value());
+    ASSERT_EQ(res.apos.value(), 7);
+
+    // insert regular anchors 1-7, with cpos between 41-47; non-anchors 1-20
+    res = EmuBinaryV2Test(boost::none, 1, 7, 41, 47, 1, 20);
+    ASSERT_FALSE(res.cpos.has_value());
+    ASSERT_TRUE(res.apos.has_value());
+    ASSERT_EQ(res.apos.value(), 7);
+
+    // insert regular anchors 1-7, with cpos between 41-47; non-anchors 30-47
+    res = EmuBinaryV2Test(boost::none, 1, 7, 41, 47, 30, 18);
+    ASSERT_FALSE(res.cpos.has_value());
+    ASSERT_TRUE(res.apos.has_value());
+    ASSERT_EQ(res.apos.value(), 7);
+
+    // insert regular anchors 1-7, with cpos between 41-47; non-anchors 48-59
+    res = EmuBinaryV2Test(boost::none, 1, 7, 41, 47, 48, 12);
+    ASSERT_TRUE(res.cpos.has_value());
+    ASSERT_EQ(res.cpos.value(), 59);
+    ASSERT_TRUE(res.apos.has_value());
+    ASSERT_EQ(res.apos.value(), 7);
+}
+
+// Test EmuBinaryV2 on ESC containing the null anchor only
+TEST(FLE_ESC, EmuBinaryV2_NullAnchorOnly) {
+    std::vector<std::pair<uint64_t, uint64_t>> nullAnchors = {
+        {0, 0}, {0, 10}, {10, 0}, {10, 10}, {5, 10}, {10, 5}};
+
+    for (auto& anchor : nullAnchors) {
+        auto res = EmuBinaryV2Test(anchor, 0, 0, 0, 0, 0, 0);
+        ASSERT_FALSE(res.apos.has_value());
+        ASSERT_FALSE(res.cpos.has_value());
+    }
+}
+
+// Test EmuBinaryV2 on ESC containing null anchor and non-anchors only
+TEST(FLE_ESC, EmuBinaryV2_NullAnchorAndNonAnchorsOnly) {
+
+    // insert null anchor with apos = 0, cpos = 23; non-anchors 1-20
+    auto res = EmuBinaryV2Test({{0, 23}}, 0, 0, 0, 0, 1, 20);
+    ASSERT_FALSE(res.apos.has_value());
+    ASSERT_FALSE(res.cpos.has_value());
+
+    // insert null anchor with apos = 0, cpos = 23; non-anchor at 23
+    res = EmuBinaryV2Test({{0, 23}}, 0, 0, 0, 0, 23, 1);
+    ASSERT_FALSE(res.apos.has_value());
+    ASSERT_FALSE(res.cpos.has_value());
+
+    // insert null anchor with apos = 0, cpos = 23; non-anchors 24-29
+    res = EmuBinaryV2Test({{0, 23}}, 0, 0, 0, 0, 24, 6);
+    ASSERT_FALSE(res.apos.has_value());
+    ASSERT_TRUE(res.cpos.has_value());
+    ASSERT_EQ(res.cpos.value(), 29);
+
+    // insert null anchor with apos = 0, cpos = 0; non-anchors 1-20
+    res = EmuBinaryV2Test({{0, 0}}, 0, 0, 0, 0, 1, 20);
+    ASSERT_FALSE(res.apos.has_value());
+    ASSERT_TRUE(res.cpos.has_value());
+    ASSERT_EQ(res.cpos.value(), 20);
+
+    // insert null anchor with apos = 10, cpos = 0; non-anchors 1-20
+    res = EmuBinaryV2Test({{10, 0}}, 0, 0, 0, 0, 1, 20);
+    ASSERT_FALSE(res.apos.has_value());
+    ASSERT_TRUE(res.cpos.has_value());
+    ASSERT_EQ(res.cpos.value(), 20);
+}
+
+// Test EmuBinaryV2 on ESC containing null and non-null anchors only
+TEST(FLE_ESC, EmuBinaryV2_NullAndRegularAnchorsOnly) {
+
+    // insert null anchor with apos = 47, cpos = 123; regular anchors 1-20
+    auto res = EmuBinaryV2Test({{47, 123}}, 1, 20, 41, 60, 0, 0);
+    ASSERT_FALSE(res.apos.has_value());
+    ASSERT_FALSE(res.cpos.has_value());
+
+    // insert null anchor with apos = 47, cpos = 123; regular anchors 20-47
+    res = EmuBinaryV2Test({{47, 123}}, 20, 28, 40, 57, 0, 0);
+    ASSERT_FALSE(res.apos.has_value());
+    ASSERT_FALSE(res.cpos.has_value());
+
+    // insert null anchor with apos = 47, cpos = 123; regular anchors 40-59
+    res = EmuBinaryV2Test({{47, 123}}, 40, 20, 40, 60, 0, 0);
+    ASSERT_TRUE(res.apos.has_value());
+    ASSERT_EQ(res.apos.value(), 59);
+    ASSERT_FALSE(res.cpos.has_value());
+}
+
+// Test EmuBinaryV2 on ESC containing all kinds of records, where the positions in the
+// null anchor are ahead of all existing anchor positions.
+// e.g. (null_apos > last_apos && null_cpos >= last_anchor_cpos)
+TEST(FLE_ESC, EmuBinaryV2_AllRecordTypes_NullAnchorHasNewerPositions) {
+    // all tests have null anchor with null_apos=40 and null_cpos=60
+    auto nullAnchor = std::make_pair<uint64_t, uint64_t>(40, 60);
+
+    // regular anchors 1-39 (cpos 12 thru 50); non-anchors 1-49
+    auto res = EmuBinaryV2Test(nullAnchor, 1, 39, 12, 50, 1, 49);
+    ASSERT_FALSE(res.apos.has_value());
+    ASSERT_FALSE(res.cpos.has_value());
+
+    // regular anchors 1-39 (cpos 12 thru 50); non-anchor at 50
+    res = EmuBinaryV2Test(nullAnchor, 1, 39, 12, 50, 50, 1);
+    ASSERT_FALSE(res.apos.has_value());
+    ASSERT_FALSE(res.cpos.has_value());
+
+    // regular anchors 1-39 (cpos 12 thru 50); non-anchors at 51-59
+    res = EmuBinaryV2Test(nullAnchor, 1, 39, 12, 50, 51, 9);
+    ASSERT_FALSE(res.apos.has_value());
+    ASSERT_FALSE(res.cpos.has_value());
+
+    // regular anchors 1-39 (cpos 12 thru 50); non-anchor at 60
+    res = EmuBinaryV2Test(nullAnchor, 1, 39, 12, 50, 60, 1);
+    ASSERT_FALSE(res.apos.has_value());
+    ASSERT_FALSE(res.cpos.has_value());
+
+    // regular anchors 1-39 (cpos 12 thru 50); non-anchors at 61-69
+    res = EmuBinaryV2Test(nullAnchor, 1, 39, 12, 50, 61, 9);
+    ASSERT_FALSE(res.apos.has_value());
+    ASSERT_TRUE(res.cpos.has_value());
+    ASSERT_EQ(res.cpos.value(), 69);
+
+    // regular anchors 1-39 (cpos 22 thru 60); non-anchors at 50-60
+    res = EmuBinaryV2Test(nullAnchor, 1, 39, 22, 60, 50, 11);
+    ASSERT_FALSE(res.apos.has_value());
+    ASSERT_FALSE(res.cpos.has_value());
+
+    // regular anchors 1-39 (cpos 22 thru 60); non-anchors at 50-69
+    res = EmuBinaryV2Test(nullAnchor, 1, 39, 22, 60, 50, 20);
+    ASSERT_FALSE(res.apos.has_value());
+    ASSERT_TRUE(res.cpos.has_value());
+    ASSERT_EQ(res.cpos.value(), 69);
+}
+
+// Test EmuBinaryV2 on ESC containing all kinds of records, where the positions in the
+// null anchor are similar to the most recent regular anchor's positions.
+// e.g. (null_apos == last_apos && null_cpos == last_anchor_cpos)
+TEST(FLE_ESC, EmuBinaryV2_AllRecordTypes_NullAnchorHasLastAnchorPositions) {
+    // all tests have null anchor with null_apos=40 and null_cpos=60
+    auto nullAnchor = std::make_pair<uint64_t, uint64_t>(40, 60);
+
+    // regular anchors 1-40 (cpos 21 thru 60); non-anchors 1-59
+    auto res = EmuBinaryV2Test(nullAnchor, 1, 40, 21, 60, 1, 59);
+    ASSERT_FALSE(res.apos.has_value());
+    ASSERT_FALSE(res.cpos.has_value());
+
+    // regular anchors 1-40 (cpos 21 thru 60); non-anchor at 60
+    res = EmuBinaryV2Test(nullAnchor, 1, 40, 21, 60, 60, 1);
+    ASSERT_FALSE(res.apos.has_value());
+    ASSERT_FALSE(res.cpos.has_value());
+
+    // regular anchors 1-40 (cpos 21 thru 60); non-anchors 61-69
+    res = EmuBinaryV2Test(nullAnchor, 1, 40, 21, 60, 61, 9);
+    ASSERT_FALSE(res.apos.has_value());
+    ASSERT_TRUE(res.cpos.has_value());
+    ASSERT_EQ(res.cpos.value(), 69);
+}
+
+// Test EmuBinaryV2 on ESC containing all kinds of records, where the positions in the null
+// anchor are less than the most recent regular anchor's positions.
+// e.g. (null_apos < last_apos && null_cpos <= last_anchor_cpos)
+TEST(FLE_ESC, EmuBinaryV2_AllRecordTypes_NullAnchorHasOldAnchorPositions) {
+    // all tests have null anchor with null_apos=40 and null_cpos=60
+    auto nullAnchor = std::make_pair<uint64_t, uint64_t>(40, 60);
+
+    // regular anchors 1-50 (cpos 11 thru 60); non-anchors 1-59
+    auto res = EmuBinaryV2Test(nullAnchor, 1, 50, 11, 60, 1, 59);
+    ASSERT_TRUE(res.apos.has_value());
+    ASSERT_EQ(res.apos.value(), 50);
+    ASSERT_FALSE(res.cpos.has_value());
+
+    // regular anchors 1-50 (cpos 11 thru 60); non-anchor at 60
+    res = EmuBinaryV2Test(nullAnchor, 1, 50, 11, 60, 60, 1);
+    ASSERT_TRUE(res.apos.has_value());
+    ASSERT_EQ(res.apos.value(), 50);
+    ASSERT_FALSE(res.cpos.has_value());
+
+    // regular anchors 1-50 (cpos 11 thru 60); non-anchors 61-69
+    res = EmuBinaryV2Test(nullAnchor, 1, 50, 11, 60, 61, 9);
+    ASSERT_TRUE(res.apos.has_value());
+    ASSERT_EQ(res.apos.value(), 50);
+    ASSERT_TRUE(res.cpos.has_value());
+    ASSERT_EQ(res.cpos.value(), 69);
+
+    // regular anchors 1-50 (cpos 21 thru 70); non-anchors 1-69
+    res = EmuBinaryV2Test(nullAnchor, 1, 50, 21, 70, 1, 69);
+    ASSERT_TRUE(res.apos.has_value());
+    ASSERT_EQ(res.apos.value(), 50);
+    ASSERT_FALSE(res.cpos.has_value());
+
+    // regular anchors 1-50 (cpos 21 thru 70); non-anchor at 70
+    res = EmuBinaryV2Test(nullAnchor, 1, 50, 21, 70, 70, 1);
+    ASSERT_TRUE(res.apos.has_value());
+    ASSERT_EQ(res.apos.value(), 50);
+    ASSERT_FALSE(res.cpos.has_value());
+
+    // regular anchors 1-50 (cpos 21 thru 70); non-anchors at 71-79
+    res = EmuBinaryV2Test(nullAnchor, 1, 50, 21, 70, 71, 9);
+    ASSERT_TRUE(res.apos.has_value());
+    ASSERT_EQ(res.apos.value(), 50);
+    ASSERT_TRUE(res.cpos.has_value());
+    ASSERT_EQ(res.cpos.value(), 79);
+}
+
 // Test one new field in esc
 TEST(FLE_ESC, EmuBinary) {
     TestKeyVault keyVault;
@@ -1431,7 +1742,7 @@ TEST(FLE_EDC, ServerSide_Equality_Payloads_V2) {
     ASSERT_TRUE(sp.metadataBlock.isValidZerosBlob(sp.metadataBlock.zeros));
 }
 
-TEST(FLE_EDC, ServerSide_Payloads_V2_EmptyClientEncryptedData) {
+TEST(FLE_EDC, ServerSide_Payloads_V2_InvalidArgs) {
     TestKeyVault keyVault;
     auto value = ConstDataRange(0, 0);
     auto bogusToken = FLELevel1TokenGenerator::generateCollectionsLevel1Token(getIndexKey());
@@ -1448,6 +1759,19 @@ TEST(FLE_EDC, ServerSide_Payloads_V2_EmptyClientEncryptedData) {
     iupayload.setServerDerivedFromDataToken(bogusToken.toCDR());
     iupayload.setEncryptedTokens(bogusToken.toCDR());
 
+    std::vector<EdgeTokenSetV2> tokens;
+    EdgeTokenSetV2 ets;
+    ets.setEdcDerivedToken(bogusToken.toCDR());
+    ets.setEscDerivedToken(bogusToken.toCDR());
+    ets.setServerDerivedFromDataToken(bogusToken.toCDR());
+    ets.setEncryptedTokens(bogusToken.toCDR());
+
+    tokens.push_back(ets);
+    tokens.push_back(ets);
+
+    iupayload.setEdgeTokenSet(tokens);
+
+    // Test bogus client encrypted value fails for FLE2 indexed equality value v2
     ASSERT_THROWS_CODE(
         FLE2IndexedEqualityEncryptedValueV2(iupayload, bogusTag, 0), DBException, 7290804);
 
@@ -1458,6 +1782,27 @@ TEST(FLE_EDC, ServerSide_Payloads_V2_EmptyClientEncryptedData) {
                                             FLE2TagAndEncryptedMetadataBlock(0, 0, bogusTag)),
         DBException,
         7290804);
+
+    // Test bogus client encrypted value fails for FLE2 indexed range value v2
+    ASSERT_THROWS_CODE(
+        FLE2IndexedRangeEncryptedValueV2(iupayload, {bogusTag}, {0}), DBException, 7290902);
+
+    std::vector<uint8_t> arr{0x12, 0x34};
+    iupayload.setValue(arr);
+
+    iupayload.setType(100);
+
+    // Test setting bogus type byte throws
+    ASSERT_THROWS_CODE(
+        FLE2IndexedEqualityEncryptedValueV2(iupayload, bogusTag, 0), DBException, 7290803);
+
+    ASSERT_THROWS_CODE(
+        FLE2IndexedRangeEncryptedValueV2(iupayload, {bogusTag}, {0}), DBException, 7290901);
+
+    // Test mismatch vector length throws for range encrypted value v2
+    ASSERT_THROWS_CODE(FLE2IndexedRangeEncryptedValueV2(iupayload, {bogusTag, bogusTag}, {0}),
+                       DBException,
+                       7290900);
 }
 
 TEST(FLE_EDC, ServerSide_Payloads_V2_IsValidZerosBlob) {
@@ -1618,6 +1963,127 @@ TEST(FLE_EDC, ServerSide_Range_Payloads) {
         ASSERT_EQ(ets.esc, rhs.esc);
         ASSERT_EQ(ets.ecc, rhs.ecc);
         ASSERT_EQ(sp.counters[i], serverPayload.counters[i]);
+    }
+
+    ASSERT(sp.clientEncryptedValue == serverPayload.clientEncryptedValue);
+    ASSERT_EQ(serverPayload.clientEncryptedValue.size(), value.length());
+    ASSERT(std::equal(serverPayload.clientEncryptedValue.begin(),
+                      serverPayload.clientEncryptedValue.end(),
+                      value.data<uint8_t>()));
+}
+
+TEST(FLE_EDC, ServerSide_Range_Payloads_V2) {
+    TestKeyVault keyVault;
+
+    auto doc = BSON("sample" << 3);
+    auto element = doc.firstElement();
+
+    auto value = ConstDataRange(element.value(), element.value() + element.valuesize());
+
+    auto collectionToken = FLELevel1TokenGenerator::generateCollectionsLevel1Token(getIndexKey());
+    auto serverEncryptToken =
+        FLELevel1TokenGenerator::generateServerDataEncryptionLevel1Token(getIndexKey());
+    auto serverDerivationToken =
+        FLELevel1TokenGenerator::generateServerTokenDerivationLevel1Token(getIndexKey());
+
+    auto edcToken = FLECollectionTokenGenerator::generateEDCToken(collectionToken);
+    auto escToken = FLECollectionTokenGenerator::generateESCToken(collectionToken);
+    auto ecocToken = FLECollectionTokenGenerator::generateECOCToken(collectionToken);
+    auto serverDerivedFromDataToken =
+        FLEDerivedFromDataTokenGenerator::generateServerDerivedFromDataToken(serverDerivationToken,
+                                                                             value);
+
+    FLECounter counter = 0;
+
+    EDCDerivedFromDataToken edcDatakey =
+        FLEDerivedFromDataTokenGenerator::generateEDCDerivedFromDataToken(edcToken, value);
+    ESCDerivedFromDataToken escDatakey =
+        FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken, value);
+
+    ESCDerivedFromDataTokenAndContentionFactorToken escDataCounterkey =
+        FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
+            generateESCDerivedFromDataTokenAndContentionFactorToken(escDatakey, counter);
+    EDCDerivedFromDataTokenAndContentionFactorToken edcDataCounterkey =
+        FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
+            generateEDCDerivedFromDataTokenAndContentionFactorToken(edcDatakey, counter);
+
+    FLE2InsertUpdatePayloadV2 iupayload;
+
+    iupayload.setEdcDerivedToken(edcDatakey.toCDR());
+    iupayload.setEscDerivedToken(escDatakey.toCDR());
+    iupayload.setServerEncryptionToken(serverEncryptToken.toCDR());
+    iupayload.setServerDerivedFromDataToken(serverDerivedFromDataToken.toCDR());
+
+    auto swEncryptedTokens =
+        EncryptedStateCollectionTokensV2(escDataCounterkey).serialize(ecocToken);
+    uassertStatusOK(swEncryptedTokens);
+    iupayload.setEncryptedTokens(swEncryptedTokens.getValue());
+    iupayload.setIndexKeyId(indexKeyId);
+
+    iupayload.setValue(value);
+    iupayload.setType(element.type());
+
+    iupayload.setContentionFactor(counter);
+
+    std::vector<EdgeTokenSetV2> tokens;
+    EdgeTokenSetV2 ets;
+    ets.setEdcDerivedToken(edcDatakey.toCDR());
+    ets.setEscDerivedToken(escDatakey.toCDR());
+    ets.setServerDerivedFromDataToken(serverDerivedFromDataToken.toCDR());
+    ets.setEncryptedTokens(swEncryptedTokens.getValue());
+
+    tokens.push_back(ets);
+    tokens.push_back(ets);
+
+    iupayload.setEdgeTokenSet(tokens);
+
+    auto edcTwiceDerived =
+        FLETwiceDerivedTokenGenerator::generateEDCTwiceDerivedToken(edcDataCounterkey);
+
+    auto tag = EDCServerCollection::generateTag(edcTwiceDerived, 123456);
+
+    std::vector<PrfBlock> tags;
+    tags.push_back(tag);
+    tags.push_back(tag);
+
+    FLE2IndexedRangeEncryptedValueV2 serverPayload(iupayload, tags, {123456, 123456});
+
+    std::vector<ServerDerivedFromDataToken> derivedDataTokens;
+    derivedDataTokens.push_back(serverDerivedFromDataToken);
+    derivedDataTokens.push_back(serverDerivedFromDataToken);
+
+    auto swBuf = serverPayload.serialize(serverEncryptToken, derivedDataTokens);
+    ASSERT_OK(swBuf.getStatus());
+
+    {
+        // Test that serialize and decrypt and parse don't work with derivedDataTokens
+        // of incorrect length.
+        std::vector<ServerDerivedFromDataToken> derivedDataTokensBad = derivedDataTokens;
+        derivedDataTokensBad.push_back(serverDerivedFromDataToken);
+        ASSERT_THROWS_CODE(serverPayload.serialize(serverEncryptToken, derivedDataTokensBad),
+                           DBException,
+                           7290909);
+
+        ASSERT_THROWS_CODE(FLE2IndexedRangeEncryptedValueV2::decryptAndParse(
+                               serverEncryptToken, derivedDataTokensBad, swBuf.getValue()),
+                           DBException,
+                           7290907);
+    }
+
+    auto swServerPayload = FLE2IndexedRangeEncryptedValueV2::decryptAndParse(
+        serverEncryptToken, derivedDataTokens, swBuf.getValue());
+
+    ASSERT_OK(swServerPayload.getStatus());
+    auto sp = swServerPayload.getValue();
+
+    ASSERT_EQ(sp.bsonType, iupayload.getType());
+    ASSERT(sp.indexKeyId == iupayload.getIndexKeyId());
+
+    ASSERT_EQ(sp.metadataBlocks.size(), 2);
+    for (size_t i = 0; i < sp.metadataBlocks.size(); i++) {
+        ASSERT_EQ(sp.metadataBlocks[i].contentionFactor, counter);
+        ASSERT_EQ(sp.metadataBlocks[i].count, 123456);
+        ASSERT(sp.metadataBlocks[i].tag == tag);
     }
 
     ASSERT(sp.clientEncryptedValue == serverPayload.clientEncryptedValue);

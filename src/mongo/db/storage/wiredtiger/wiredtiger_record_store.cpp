@@ -42,8 +42,8 @@
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/static_assert.h"
 #include "mongo/bson/util/builder.h"
-#include "mongo/db/catalog/health_log.h"
 #include "mongo/db/catalog/health_log_gen.h"
+#include "mongo/db/catalog/health_log_interface.h"
 #include "mongo/db/catalog/validate_results.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/locker.h"
@@ -141,6 +141,7 @@ std::size_t computeRecordIdSize(const RecordId& id) {
 }  // namespace
 
 MONGO_FAIL_POINT_DEFINE(WTCompactRecordStoreEBUSY);
+MONGO_FAIL_POINT_DEFINE(WTRecordStoreUassertOutOfOrder);
 MONGO_FAIL_POINT_DEFINE(WTWriteConflictException);
 MONGO_FAIL_POINT_DEFINE(WTWriteConflictExceptionForReads);
 MONGO_FAIL_POINT_DEFINE(slowOplogSamplingReads);
@@ -1369,23 +1370,19 @@ Status WiredTigerRecordStore::_insertRecords(OperationContext* opCtx,
             invariant(!_overwrite);
             invariant(_keyFormat == KeyFormat::String);
 
-            DuplicateKeyErrorInfo::FoundValue foundValueObj;
+            BSONObj foundValueObj;
             if (TestingProctor::instance().isEnabled()) {
                 WT_ITEM foundValue;
                 invariantWTOK(c->get_value(c, &foundValue), c->session);
-
-                foundValueObj.emplace<BSONObj>(reinterpret_cast<const char*>(foundValue.data));
+                foundValueObj = BSONObj(reinterpret_cast<const char*>(foundValue.data));
             }
 
-            // Generate a useful error message that is consistent with duplicate key error messages
-            // on indexes.
-            BSONObj obj = record_id_helpers::toBSONAs(record.id, "");
-            return buildDupKeyErrorStatus(obj,
-                                          NamespaceString(ns()),
-                                          "" /* indexName */,
-                                          BSON("_id" << 1),
-                                          BSONObj() /* collation */,
-                                          std::move(foundValueObj));
+            return Status{DuplicateKeyErrorInfo{BSONObj(),
+                                                BSONObj(),
+                                                BSONObj(),
+                                                std::move(foundValueObj),
+                                                std::move(record.id)},
+                          "Duplicate cluster key found"};
         }
 
         if (ret)
@@ -2225,7 +2222,8 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::next() {
     }
 
     if ((_forward && _lastReturnedId >= id) ||
-        (!_forward && !_lastReturnedId.isNull() && id >= _lastReturnedId)) {
+        (!_forward && !_lastReturnedId.isNull() && id >= _lastReturnedId) ||
+        MONGO_unlikely(WTRecordStoreUassertOutOfOrder.shouldFail())) {
         HealthLogEntry entry;
         entry.setNss(_ns);
         entry.setTimestamp(Date_t::now());
@@ -2242,10 +2240,13 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::next() {
         bob.appendElements(getStackTrace().getBSONRepresentation());
         entry.setData(bob.obj());
 
-        HealthLog::get(_opCtx).log(entry);
+        HealthLogInterface::get(_opCtx)->log(entry);
 
-        // Crash when testing diagnostics are enabled.
-        invariant(!TestingProctor::instance().isEnabled(), "cursor returned out-of-order keys");
+        if (!WTRecordStoreUassertOutOfOrder.shouldFail()) {
+            // Crash when testing diagnostics are enabled and not explicitly uasserting on
+            // out-of-order keys.
+            invariant(!TestingProctor::instance().isEnabled(), "cursor returned out-of-order keys");
+        }
 
         // uassert with 'DataCorruptionDetected' after logging.
         LOGV2_ERROR_OPTIONS(22406,

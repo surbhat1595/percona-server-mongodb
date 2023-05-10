@@ -568,11 +568,11 @@ public:
     void run() {
         auto opCtx = cc().makeOperationContext();
         DBDirectClient client(opCtx.get());
-        client.dropCollection(_ns);
+        client.dropCollection(_nss);
         IndexSpec indexSpec;
         indexSpec.addKey("a").addOptions(BSON("collation" << BSON("locale"
                                                                   << "fr")));
-        client.createIndex(_ns, indexSpec);
+        client.createIndex(_nss, indexSpec);
 
         auto response = client.insertAcknowledged(_ns, {BSON("a" << BSONSymbol("mySymbol"))});
         ASSERT_EQUALS(getStatusFromWriteCommandReply(response), ErrorCodes::CannotBuildIndexKeys);
@@ -585,10 +585,10 @@ public:
     void run() {
         auto opCtx = cc().makeOperationContext();
         DBDirectClient client(opCtx.get());
-        client.dropCollection(_ns);
+        client.dropCollection(_nss);
         IndexSpec indexSpec;
         indexSpec.addKey("a");
-        client.createIndex(_ns, indexSpec);
+        client.createIndex(_nss, indexSpec);
 
         auto response = client.insertAcknowledged(_ns, {BSON("a" << BSONSymbol("mySymbol"))});
         ASSERT_OK(getStatusFromWriteCommandReply(response));
@@ -602,11 +602,11 @@ public:
     void run() {
         auto opCtx = cc().makeOperationContext();
         DBDirectClient client(opCtx.get());
-        client.dropCollection(_ns);
+        client.dropCollection(_nss);
         IndexSpec indexSpec;
         indexSpec.addKey("a").addOptions(BSON("collation" << BSON("locale"
                                                                   << "fr")));
-        client.createIndex(_ns, indexSpec);
+        client.createIndex(_nss, indexSpec);
 
         auto response = client.insertAcknowledged(
             _ns, {BSON("a" << BSON("b" << 99 << "c" << BSONSymbol("mySymbol")))});
@@ -620,11 +620,11 @@ public:
     void run() {
         auto opCtx = cc().makeOperationContext();
         DBDirectClient client(opCtx.get());
-        client.dropCollection(_ns);
+        client.dropCollection(_nss);
         IndexSpec indexSpec;
         indexSpec.addKey("a").addOptions(BSON("collation" << BSON("locale"
                                                                   << "fr")));
-        client.createIndex(_ns, indexSpec);
+        client.createIndex(_nss, indexSpec);
 
         auto response =
             client.insertAcknowledged(_ns, {BSON("a" << BSON_ARRAY(99 << BSONSymbol("mySymbol")))});
@@ -638,13 +638,13 @@ public:
     void run() {
         auto opCtx = cc().makeOperationContext();
         DBDirectClient client(opCtx.get());
-        client.dropCollection(_ns);
+        client.dropCollection(_nss);
         client.insert(_ns, BSON("a" << BSON_ARRAY(99 << BSONSymbol("mySymbol"))));
         ASSERT_EQUALS(client.count(_nss), 1U);
         IndexSpec indexSpec;
         indexSpec.addKey("a").addOptions(BSON("collation" << BSON("locale"
                                                                   << "fr")));
-        ASSERT_THROWS_CODE(client.createIndex(_ns, indexSpec),
+        ASSERT_THROWS_CODE(client.createIndex(_nss, indexSpec),
                            AssertionException,
                            ErrorCodes::CannotBuildIndexKeys);
     }
@@ -655,7 +655,7 @@ public:
     void run() {
         auto opCtx = cc().makeOperationContext();
         DBDirectClient client(opCtx.get());
-        client.dropCollection(_ns);
+        client.dropCollection(_nss);
         BSONObj cmdResult;
         ASSERT_TRUE(client.runCommand({boost::none, "unittests"},
                                       BSON("create"
@@ -666,7 +666,7 @@ public:
                                       cmdResult));
         IndexSpec indexSpec;
         indexSpec.addKey("a");
-        client.createIndex(_ns, indexSpec);
+        client.createIndex(_nss, indexSpec);
 
         auto response =
             client.insertAcknowledged(_ns, {BSON("a" << BSON_ARRAY(99 << BSONSymbol("mySymbol")))});

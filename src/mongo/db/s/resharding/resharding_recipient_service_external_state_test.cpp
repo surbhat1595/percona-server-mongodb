@@ -185,7 +185,8 @@ public:
             return std::vector<BSONObj>{coll.toBSON(), chunkObj};
         }());
 
-        expectCollectionAndIndexesAggregation(tempNss, epoch, timestamp, uuid, skey, {});
+        expectCollectionAndIndexesAggregation(
+            tempNss, epoch, timestamp, uuid, skey, boost::none, {});
 
         future.default_timed_get();
     }
@@ -237,7 +238,7 @@ public:
                                     const std::vector<BSONObj>& indexes) {
         DBDirectClient client(operationContext());
 
-        auto collInfos = client.getCollectionInfos(nss.db().toString());
+        auto collInfos = client.getCollectionInfos(nss.dbName());
         ASSERT_EQ(collInfos.size(), 1);
         ASSERT_EQ(collInfos.front()["name"].str(), nss.coll());
         ASSERT_EQ(unittest::assertGet(UUID::parse(collInfos.front()["info"]["uuid"])), uuid);
@@ -331,8 +332,13 @@ TEST_F(RecipientServiceExternalStateTest, CreateLocalReshardingCollectionBasic) 
                                      << "_id_"))},
             HostAndPort(shards[1].getHost()));
         expectListIndexes(kOrigNss, kOrigUUID, indexes, HostAndPort(shards[0].getHost()));
-        expectCollectionAndIndexesAggregation(
-            kReshardingNss, kReshardingEpoch, kReshardingTimestamp, kReshardingUUID, kShardKey, {});
+        expectCollectionAndIndexesAggregation(kReshardingNss,
+                                              kReshardingEpoch,
+                                              kReshardingTimestamp,
+                                              kReshardingUUID,
+                                              kShardKey,
+                                              boost::none,
+                                              {});
     });
 
     verifyTempReshardingCollectionAndMetadata();
@@ -394,8 +400,13 @@ TEST_F(RecipientServiceExternalStateTest,
         expectRefreshReturnForOriginalColl(
             kOrigNss, kShardKey, kOrigUUID, kOrigEpoch, kOrigTimestamp);
         expectListIndexes(kOrigNss, kOrigUUID, indexes, HostAndPort(shards[0].getHost()));
-        expectCollectionAndIndexesAggregation(
-            kReshardingNss, kReshardingEpoch, kReshardingTimestamp, kReshardingUUID, kShardKey, {});
+        expectCollectionAndIndexesAggregation(kReshardingNss,
+                                              kReshardingEpoch,
+                                              kReshardingTimestamp,
+                                              kReshardingUUID,
+                                              kShardKey,
+                                              boost::none,
+                                              {});
     });
 
     verifyTempReshardingCollectionAndMetadata();
@@ -466,8 +477,13 @@ TEST_F(RecipientServiceExternalStateTest,
                                      << "_id_"))},
             HostAndPort(shards[1].getHost()));
         expectListIndexes(kOrigNss, kOrigUUID, indexes, HostAndPort(shards[0].getHost()));
-        expectCollectionAndIndexesAggregation(
-            kReshardingNss, kReshardingEpoch, kReshardingTimestamp, kReshardingUUID, kShardKey, {});
+        expectCollectionAndIndexesAggregation(kReshardingNss,
+                                              kReshardingEpoch,
+                                              kReshardingTimestamp,
+                                              kReshardingUUID,
+                                              kShardKey,
+                                              boost::none,
+                                              {});
     });
 
     verifyTempReshardingCollectionAndMetadata();
@@ -540,8 +556,13 @@ TEST_F(RecipientServiceExternalStateTest,
                                      << "_id_"))},
             HostAndPort(shards[1].getHost()));
         expectListIndexes(kOrigNss, kOrigUUID, indexes, HostAndPort(shards[0].getHost()));
-        expectCollectionAndIndexesAggregation(
-            kReshardingNss, kReshardingEpoch, kReshardingTimestamp, kReshardingUUID, kShardKey, {});
+        expectCollectionAndIndexesAggregation(kReshardingNss,
+                                              kReshardingEpoch,
+                                              kReshardingTimestamp,
+                                              kReshardingUUID,
+                                              kShardKey,
+                                              boost::none,
+                                              {});
     });
 
     verifyTempReshardingCollectionAndMetadata();
@@ -604,8 +625,13 @@ TEST_F(RecipientServiceExternalStateTest,
                                      << "_id_"))},
             HostAndPort(shards[1].getHost()));
         expectListIndexes(kOrigNss, kOrigUUID, indexes, HostAndPort(shards[0].getHost()));
-        expectCollectionAndIndexesAggregation(
-            kReshardingNss, kReshardingEpoch, kReshardingTimestamp, kReshardingUUID, kShardKey, {});
+        expectCollectionAndIndexesAggregation(kReshardingNss,
+                                              kReshardingEpoch,
+                                              kReshardingTimestamp,
+                                              kReshardingUUID,
+                                              kShardKey,
+                                              boost::none,
+                                              {});
     });
 
     verifyTempReshardingCollectionAndMetadata();

@@ -787,10 +787,7 @@ TEST_F(NodeSBE, SpoolFibonacci) {
         "|   Const [0]\n"
         "Evaluation [{it}]\n"
         "|   Const [1]\n"
-        "LimitSkip []\n"
-        "|   limitSkip:\n"
-        "|       limit: 1\n"
-        "|       skip: 0\n"
+        "LimitSkip [limit: 1, skip: 0]\n"
         "CoScan []\n",
         tree);
 
@@ -834,6 +831,15 @@ TEST_F(NodeSBE, SpoolFibonacci) {
     for (size_t i = 2; i < 10; i++) {
         ASSERT_EQ(results.at(i), results.at(i - 1) + results.at(i - 2));
     }
+}
+
+TEST_F(NodeSBE, TestConstantEquality) {
+    auto tree = make<If>(make<BinaryOp>(Operations::Eq, Constant::int32(9), Constant::nothing()),
+                         Constant::boolean(true),
+                         Constant::boolean(false));
+    auto env = VariableEnvironment::build(tree);
+    ConstEval{env}.optimize(tree);
+    ASSERT_TRUE(tree.is<Constant>());
 }
 
 }  // namespace

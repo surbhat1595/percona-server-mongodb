@@ -207,6 +207,12 @@ function testMonotonicity(conn, dbName, collName, currentShardKey, testCases, nu
     const db = conn.getDB(dbName);
     const coll = db.getCollection(collName);
 
+    const correlationCoefficientThreshold =
+        assert
+            .commandWorked(db.adminCommand(
+                {getParameter: 1, analyzeShardKeyMonotonicityCorrelationCoefficientThreshold: 1}))
+            .analyzeShardKeyMonotonicityCorrelationCoefficientThreshold;
+
     testCases.forEach(testCase => {
         const numDocs = AnalyzeShardKeyUtil.getRandInteger(numDocsRange.min, numDocsRange.max);
         for (let i = 0; i < testCase.fieldOpts.length; i++) {
@@ -238,7 +244,25 @@ function testMonotonicity(conn, dbName, collName, currentShardKey, testCases, nu
             assert.commandWorked(db.runCommand({listCollections: 1, filter: {name: collName}}));
         const isClusteredColl =
             listCollectionRes.cursor.firstBatch[0].options.hasOwnProperty("clusteredIndex");
-        assert.eq(res.monotonicity, isClusteredColl ? "unknown" : testCase.expected, res);
+
+        const expectedType = isClusteredColl ? "unknown" : testCase.expected;
+        assert.eq(res.monotonicity.type, expectedType, res);
+
+        if (expectedType == "unknown") {
+            assert(!res.monotonicity.hasOwnProperty("recordIdCorrelationCoefficient"));
+        } else {
+            assert(res.monotonicity.hasOwnProperty("recordIdCorrelationCoefficient"));
+
+            if (expectedType == "monotonic") {
+                assert.gte(Math.abs(res.monotonicity.recordIdCorrelationCoefficient),
+                           correlationCoefficientThreshold);
+            } else if (expectedType == "not monotonic") {
+                assert.lt(Math.abs(res.monotonicity.recordIdCorrelationCoefficient),
+                          correlationCoefficientThreshold);
+            } else {
+                throw new Error("Unknown expected monotonicity '" + expectedType + "'");
+            }
+        }
 
         assert.commandWorked(coll.remove({}));
         assert.commandWorked(coll.dropIndex(testCase.indexKey));

@@ -42,20 +42,18 @@
 
 
 namespace mongo {
-
-MONGO_FAIL_POINT_DEFINE(analyzeShardKeySkipCalcalutingReadWriteDistributionMetrics);
+namespace analyze_shard_key {
 
 namespace {
 
-std::string makeCommandNote() {
-    return str::stream() << "If \"" << KeyCharacteristicsMetrics::kNumOrphanDocsFieldName
-                         << "\" is large relative to \""
-                         << KeyCharacteristicsMetrics::kNumDocsFieldName
-                         << "\", you may want to rerun the command at some other time to get more "
-                            "accurate \""
-                         << KeyCharacteristicsMetrics::kNumDistinctValuesFieldName << "\" and \""
-                         << KeyCharacteristicsMetrics::kFrequencyFieldName << "\" metrics.";
-}
+MONGO_FAIL_POINT_DEFINE(analyzeShardKeySkipCalcalutingReadWriteDistributionMetrics);
+
+const std::string kOrphanDocsWarningMessage = "If \"" +
+    KeyCharacteristicsMetrics::kNumOrphanDocsFieldName + "\" is large relative to \"" +
+    KeyCharacteristicsMetrics::kNumDocsFieldName +
+    "\", you may want to rerun the command at some other time to get more accurate \"" +
+    KeyCharacteristicsMetrics::kNumDistinctValuesFieldName + "\" and \"" +
+    KeyCharacteristicsMetrics::kFrequencyFieldName + "\" metrics.";
 
 void validateCommandOptions(OperationContext* opCtx,
                             const NamespaceString& nss,
@@ -97,7 +95,9 @@ public:
             auto keyCharacteristics =
                 analyze_shard_key::calculateKeyCharacteristicsMetrics(opCtx, nss, key);
             response.setKeyCharacteristics(keyCharacteristics);
-            response.setNote(makeCommandNote());
+            if (response.getNumOrphanDocs()) {
+                response.setNote(StringData(kOrphanDocsWarningMessage));
+            }
 
             if (!serverGlobalParams.clusterRole.isShardRole() ||
                 MONGO_unlikely(
@@ -155,4 +155,5 @@ MONGO_REGISTER_FEATURE_FLAGGED_COMMAND(AnalyzeShardKeyCmd,
 
 }  // namespace
 
+}  // namespace analyze_shard_key
 }  // namespace mongo

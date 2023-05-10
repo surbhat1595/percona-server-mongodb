@@ -85,7 +85,7 @@ DatabaseName DatabaseNameUtil::deserialize(boost::optional<TenantId> tenantId, S
     if (serverGlobalParams.featureCompatibility.isVersionInitialized() &&
         gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility)) {
         // TODO SERVER-62491 Remove this conditional, the tenantId should be kSystemTenantId.
-        // TODO SERVER-70876 Uncomment out this conditional to check that we always have a tenantId.
+        // TODO SERVER-73025 Uncomment out this conditional to check that we always have a tenantId.
         /* if (db != "admin" && db != "config" && db != "local")
             massert(7005300, "TenantId must be set", tenantId != boost::none);
         */
@@ -103,26 +103,6 @@ DatabaseName DatabaseNameUtil::deserialize(boost::optional<TenantId> tenantId, S
         massert(7005301, "TenantId must match that in db prefix", tenantId == dbName.tenantId());
     }
     return dbName;
-}
-
-boost::optional<TenantId> DatabaseNameUtil::parseTenantIdFromDatabaseName(
-    const DatabaseName& dbName) {
-    if (gMultitenancySupport) {
-        return dbName.tenantId();
-    }
-
-    const auto pos = dbName.db().find('_');
-    if (pos == std::string::npos || pos == 0) {
-        // Not a tenant database.
-        return boost::none;
-    }
-
-    const auto statusWith = OID::parse(dbName.db().substr(0, pos));
-    if (!statusWith.isOK()) {
-        return boost::none;
-    }
-
-    return TenantId(statusWith.getValue());
 }
 
 }  // namespace mongo

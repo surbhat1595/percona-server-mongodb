@@ -8,7 +8,7 @@ load("jstests/libs/analyze_plan.js");
 load("jstests/libs/sbe_util.js");  // For checkSBEEnabled.
 
 if (!checkSBEEnabled(db)) {
-    jsTestLog("Skipping test because the sbe group pushdown feature flag is disabled");
+    jsTestLog("Skipping test because SBE is not enabled");
     return;
 }
 
@@ -185,28 +185,38 @@ assertResultsMatchWithAndWithoutPushdown(
     ],
     1);
 
-// The $group stage refers to two existing sub-fields.
-assertResultsMatchWithAndWithoutPushdown(
-    coll,
-    [
-        {$project: {item: 1, price: 1, quantity: 1, dateParts: {$dateToParts: {date: "$date"}}}},
-        {
-            $group: {
-                _id: "$item",
-                hs: {$sum: {$add: ["$dateParts.hour", "$dateParts.hour", "$dateParts.minute"]}}
-            }
-        },
-    ],
-    [{"_id": "a", "hs": 39}, {"_id": "b", "hs": 34}, {"_id": "c", "hs": 23}],
-    1);
+// Computed projections are only eligible for pushdown into SBE when SBE is fully enabled.
+// Additionally, $group stages with dotted fields may only be eligible for pushdown when SBE is
+// fully enabled as dependancy analysis may produce a dotted projection, which are not currently
+// supported in mainline SBE.
+const sbeFull = checkSBEEnabled(db, ["featureFlagSbeFull"]);
+if (sbeFull) {
+    // The $group stage refers to two existing sub-fields.
+    assertResultsMatchWithAndWithoutPushdown(
+        coll,
+        [
+            {
+                $project:
+                    {item: 1, price: 1, quantity: 1, dateParts: {$dateToParts: {date: "$date"}}}
+            },
+            {
+                $group: {
+                    _id: "$item",
+                    hs: {$sum:
+                             {$add: ["$dateParts.hour", "$dateParts.hour", "$dateParts.minute"]}}
+                }
+            },
+        ],
+        [{"_id": "a", "hs": 39}, {"_id": "b", "hs": 34}, {"_id": "c", "hs": 23}],
+        1);
 
-// The $group stage refers to a non-existing sub-field twice.
-assertResultsMatchWithAndWithoutPushdown(
-    coll,
-    [{$group: {_id: "$item", hs: {$sum: {$add: ["$date.hour", "$date.hour"]}}}}],
-    [{"_id": "a", "hs": 0}, {"_id": "b", "hs": 0}, {"_id": "c", "hs": 0}],
-    1);
-
+    // The $group stage refers to a non-existing sub-field twice.
+    assertResultsMatchWithAndWithoutPushdown(
+        coll,
+        [{$group: {_id: "$item", hs: {$sum: {$add: ["$date.hour", "$date.hour"]}}}}],
+        [{"_id": "a", "hs": 0}, {"_id": "b", "hs": 0}, {"_id": "c", "hs": 0}],
+        1);
+}
 // Two group stages both get pushed down and the second $group stage refers to only existing
 // top-level fields of the first $group. The field name may be one of "result" / "recordId" /
 // "returnKey" / "snapshotId" / "indexId" / "indexKey" / "indexKeyPattern" which are reserved names
@@ -331,21 +341,6 @@ assertResultsMatchWithAndWithoutPushdown(coll,
                                          ],
                                          [{"_id": null, "lowp": 2, "highp": 1}],
                                          2);
-
-// The second $group stage refers to top-fields below a $filter
-assertResultsMatchWithAndWithoutPushdown(
-    coll,
-    [
-        {$group: {_id: "$item", prices: {$push: "$price"}}},
-        {
-            $group: {
-                _id: "$_id",
-                o: {$push: {$filter: {input: "$prices", as: "p", cond: {$gte: ["$$p", 5]}}}}
-            }
-        }
-    ],
-    [{"_id": "a", "o": [[10, 5]]}, {"_id": "b", "o": [[20, 10]]}, {"_id": "c", "o": [[5]]}],
-    2);
 
 // The second $group stage refers to top-fields below a $let
 assertResultsMatchWithAndWithoutPushdown(

@@ -933,21 +933,6 @@ vm::CodeFragment generateTraverseCellTypes(CompileCtx& ctx,
     return generatorLegacy<&vm::CodeFragment::appendTraverseCellTypes>(ctx, nodes, false);
 }
 
-vm::CodeFragment generateClassicMatcher(CompileCtx& ctx, const EExpression::Vector& nodes, bool) {
-    tassert(6681400,
-            "First argument to applyClassicMatcher must be constant",
-            nodes[0]->as<EConstant>());
-    auto [matcherTag, matcherVal] = nodes[0]->as<EConstant>()->getConstant();
-    tassert(6681409,
-            "First argument to applyClassicMatcher must be a classic matcher",
-            matcherTag == value::TypeTags::classicMatchExpresion);
-
-    vm::CodeFragment code;
-    code.append(nodes[1]->compileDirect(ctx));
-    code.appendApplyClassicMatcher(value::getClassicMatchExpressionView(matcherVal));
-    return code;
-}
-
 /**
  * The map of functions that resolve directly to instructions.
  */
@@ -986,7 +971,6 @@ static stdx::unordered_map<std::string, InstrFn> kInstrFunctions = {
     {"isMinKey", InstrFn{1, generator<1, &vm::CodeFragment::appendIsMinKey>, false}},
     {"isMaxKey", InstrFn{1, generator<1, &vm::CodeFragment::appendIsMaxKey>, false}},
     {"isTimestamp", InstrFn{1, generator<1, &vm::CodeFragment::appendIsTimestamp>, false}},
-    {"applyClassicMatcher", InstrFn{2, generateClassicMatcher, false}},
 };
 }  // namespace
 
@@ -1253,18 +1237,10 @@ vm::CodeFragment ELocalLambda::compileBodyDirect(CompileCtx& ctx) const {
     // Lambda parameter is no longer accessible after this point so remove the frame.
     body.removeFrame(_frameId);
 
-    // TODO SERVER-72843 Remove the adjustment below when the issue if fixed.
-    // Adjust the stack offsets by 1 to account to maintain the bug compatibility that
-    // allows traverse lambdas to access clousre variables under special conditions.
-    // Lambda captures are not supported, and adjustment below is only meant to keep
-    // existing stage builder code from falling apart.
-    body.fixupStackOffsets(1);
-
-    // TODO SERVER-72843: Add assert that verifies that lambda uses no closure variables.
-    // Possibly by ensuring that there are no outstanding frames in the lambda code fragment, like:
-    // tassert(7284301,
-    //         !body.hasFrames(),
-    //         "Accessing closure variables from lambda body in not supported.");
+    // Verify that 'body' does not refer to local variables defined outside of 'body'.
+    tassert(7284301,
+            "Lambda referring to local variable defined outside of the lambda is not supported.",
+            !body.hasFrames());
 
     return body;
 }

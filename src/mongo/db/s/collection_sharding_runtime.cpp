@@ -468,12 +468,21 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
 
     const auto& currentMetadata = optCurrentMetadata->get();
 
+    const auto indexFeatureFlag = feature_flags::gGlobalIndexesShardingCatalog.isEnabled(
+        serverGlobalParams.featureCompatibility);
     const auto wantedPlacementVersion = currentMetadata.getShardVersion();
-    const auto wantedShardVersion =
-        ShardVersion(wantedPlacementVersion, boost::optional<CollectionIndexes>(boost::none));
-    const ChunkVersion receivedPlacementVersion = receivedShardVersion.placementVersion();
+    const auto wantedCollectionIndexes =
+        indexFeatureFlag ? getCollectionIndexes(opCtx) : boost::none;
+    const auto wantedIndexVersion = wantedCollectionIndexes
+        ? boost::make_optional(wantedCollectionIndexes->indexVersion())
+        : boost::none;
+    const auto wantedShardVersion = ShardVersion(wantedPlacementVersion, wantedCollectionIndexes);
 
-    if (wantedPlacementVersion.isWriteCompatibleWith(receivedPlacementVersion) ||
+    const ChunkVersion receivedPlacementVersion = receivedShardVersion.placementVersion();
+    const boost::optional<Timestamp> receivedIndexVersion = receivedShardVersion.indexVersion();
+
+    if ((wantedPlacementVersion.isWriteCompatibleWith(receivedPlacementVersion) &&
+         (!indexFeatureFlag || receivedIndexVersion == wantedIndexVersion)) ||
         receivedShardVersion == ShardVersion::IGNORED())
         return optCurrentMetadata;
 
@@ -499,7 +508,13 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
     if (wantedPlacementVersion.majorVersion() != receivedPlacementVersion.majorVersion()) {
         // Could be > or < - wanted is > if this is the source of a migration, wanted < if this is
         // the target of a migration
-        uasserted(std::move(sci), str::stream() << "version mismatch detected for " << _nss.ns());
+        uasserted(std::move(sci),
+                  str::stream() << "placement version mismatch detected for " << _nss.ns());
+    }
+
+    if (indexFeatureFlag && wantedIndexVersion != receivedIndexVersion) {
+        uasserted(std::move(sci),
+                  str::stream() << "index version mismatch detected for " << _nss.ns());
     }
 
     // Those are all the reasons the versions can mismatch
@@ -647,52 +662,48 @@ void CollectionShardingRuntime::_cleanupBeforeInstallingNewCollectionMetadata(
         return;
     }
 
-    if (feature_flags::gFeatureFlagSbeFull.isEnabledAndIgnoreFCV()) {
-        const auto oldUUID = _metadataManager->getCollectionUuid();
-        const auto oldShardVersion = _metadataManager->getActiveShardVersion();
-        ExecutorFuture<void>{Grid::get(opCtx)->getExecutorPool()->getFixedExecutor()}
-            .then([svcCtx{opCtx->getServiceContext()}, oldUUID, oldShardVersion] {
-                ThreadClient tc{"CleanUpShardedMetadata", svcCtx};
-                {
-                    stdx::lock_guard<Client> lk{*tc.get()};
-                    tc->setSystemOperationKillableByStepdown(lk);
-                }
-                auto uniqueOpCtx{tc->makeOperationContext()};
-                auto opCtx{uniqueOpCtx.get()};
+    const auto oldUUID = _metadataManager->getCollectionUuid();
+    const auto oldShardVersion = _metadataManager->getActiveShardVersion();
+    ExecutorFuture<void>{Grid::get(opCtx)->getExecutorPool()->getFixedExecutor()}
+        .then([svcCtx{opCtx->getServiceContext()}, oldUUID, oldShardVersion] {
+            ThreadClient tc{"CleanUpShardedMetadata", svcCtx};
+            {
+                stdx::lock_guard<Client> lk{*tc.get()};
+                tc->setSystemOperationKillableByStepdown(lk);
+            }
+            auto uniqueOpCtx{tc->makeOperationContext()};
+            auto opCtx{uniqueOpCtx.get()};
 
-                try {
-                    auto& planCache = sbe::getPlanCache(opCtx);
-                    planCache.removeIf([&](const sbe::PlanCacheKey& key,
-                                           const sbe::PlanCacheEntry& entry) -> bool {
-                        const auto matchingCollState =
-                            [&](const sbe::PlanCacheKeyCollectionState& entryCollState) {
-                                return entryCollState.uuid == oldUUID &&
-                                    entryCollState.shardVersion &&
-                                    entryCollState.shardVersion->epoch == oldShardVersion.epoch() &&
-                                    entryCollState.shardVersion->ts ==
-                                    oldShardVersion.getTimestamp();
-                            };
+            try {
+                auto& planCache = sbe::getPlanCache(opCtx);
+                planCache.removeIf([&](const sbe::PlanCacheKey& key,
+                                       const sbe::PlanCacheEntry& entry) -> bool {
+                    const auto matchingCollState =
+                        [&](const sbe::PlanCacheKeyCollectionState& entryCollState) {
+                            return entryCollState.uuid == oldUUID && entryCollState.shardVersion &&
+                                entryCollState.shardVersion->epoch == oldShardVersion.epoch() &&
+                                entryCollState.shardVersion->ts == oldShardVersion.getTimestamp();
+                        };
 
-                        // Check whether the main collection of this plan is the one being removed
-                        if (matchingCollState(key.getMainCollectionState()))
+                    // Check whether the main collection of this plan is the one being removed
+                    if (matchingCollState(key.getMainCollectionState()))
+                        return true;
+
+                    // Check whether a secondary collection is the one being removed
+                    for (const auto& secCollState : key.getSecondaryCollectionStates()) {
+                        if (matchingCollState(secCollState))
                             return true;
+                    }
 
-                        // Check whether a secondary collection is the one being removed
-                        for (const auto& secCollState : key.getSecondaryCollectionStates()) {
-                            if (matchingCollState(secCollState))
-                                return true;
-                        }
-
-                        return false;
-                    });
-                } catch (const DBException& ex) {
-                    LOGV2(6549200,
-                          "Interrupted deferred clean up of sharded metadata",
-                          "error"_attr = redact(ex));
-                }
-            })
-            .getAsync([](auto) {});
-    }
+                    return false;
+                });
+            } catch (const DBException& ex) {
+                LOGV2(6549200,
+                      "Interrupted deferred clean up of sharded metadata",
+                      "error"_attr = redact(ex));
+            }
+        })
+        .getAsync([](auto) {});
 }
 
 void CollectionShardingRuntime::_checkCritSecForIndexMetadata(OperationContext* opCtx) const {

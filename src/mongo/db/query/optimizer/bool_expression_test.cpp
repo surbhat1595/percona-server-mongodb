@@ -32,6 +32,7 @@
 #include <algorithm>
 
 #include "mongo/db/query/optimizer/explain.h"
+#include "mongo/db/query/optimizer/utils/bool_expression_printer.h"
 #include "mongo/db/query/optimizer/utils/unit_test_abt_literals.h"
 #include "mongo/db/query/optimizer/utils/unit_test_utils.h"
 #include "mongo/unittest/unittest.h"
@@ -45,23 +46,13 @@ TEST(BoolExpr, IntervalCNFtoDNF) {
     {
         // Convert to CNF: singular DNF becomes singular CNF
         auto interval = _disj(_conj(_interval(_incl("v1"_var), _incl("v2"_var))));
-        ASSERT_INTERVAL_AUTO(
-            "{\n"
-            "    {\n"
-            "        {[Variable [v1], Variable [v2]]}\n"
-            "    }\n"
-            "}\n",
-            interval);
+        ASSERT_INTERVAL_AUTO("{{{[Variable [v1], Variable [v2]]}}}\n",  // NOLINT (test auto-update)
+                             interval);
 
         auto res = BoolExpr<IntervalRequirement>::convertToCNF(interval);
         ASSERT(res.has_value());
-        ASSERT_INTERVAL_AUTO(
-            "{\n"
-            "    {\n"
-            "        {[Variable [v1], Variable [v2]]}\n"
-            "    }\n"
-            "}\n",
-            *res);
+        ASSERT_INTERVAL_AUTO("{{{[Variable [v1], Variable [v2]]}}}\n",  // NOLINT (test auto-update)
+                             *res);
     }
 
     {
@@ -70,13 +61,9 @@ TEST(BoolExpr, IntervalCNFtoDNF) {
                               _conj(_interval(_incl("v1"_var), _incl("v2"_var))));
         ASSERT_INTERVAL_AUTO(
             "{\n"
-            "    {\n"
-            "        {[Variable [v1], Variable [v2]]}\n"
-            "    }\n"
+            "    {{[Variable [v1], Variable [v2]]}}\n"
             " U \n"
-            "    {\n"
-            "        {[Variable [v1], Variable [v2]]}\n"
-            "    }\n"
+            "    {{[Variable [v1], Variable [v2]]}}\n"
             "}\n",
             interval);
 
@@ -244,6 +231,45 @@ TEST(BoolExpr, BoolExprPermutations) {
             }
         }
     }
+}
+
+TEST(BoolExpr, BoolExprVisitorTest) {
+    // Show const visitors
+    IntBoolExpr::Builder b;
+    b.pushConj().pushDisj().atom(1).atom(2).atom(3).pop().pushDisj().atom(4).atom(5).pop();
+    auto intExprCNF = b.finish().get();
+
+    ASSERT(IntBoolExpr::isCNF(intExprCNF));
+    ASSERT_FALSE(IntBoolExpr::isDNF(intExprCNF));
+
+    int max = -1;
+    IntBoolExpr::visitConjuncts(intExprCNF, [&](const IntBoolExpr::Node& conjunct, int) {
+        IntBoolExpr::visitDisjuncts(conjunct, [&](const IntBoolExpr::Node& disjunct, int) {
+            IntBoolExpr::visitAtom(disjunct, [&](const int& val) {
+                if (val > max) {
+                    max = val;
+                }
+            });
+        });
+    });
+    ASSERT_EQ(5, max);
+
+    // Show non const visitors
+    b.pushDisj().pushConj().atom(1).atom(2).atom(3).pop().pushConj().atom(4).atom(5).pop();
+    auto intExprDNF = b.finish().get();
+
+    ASSERT(IntBoolExpr::isDNF(intExprDNF));
+    ASSERT_FALSE(IntBoolExpr::isCNF(intExprDNF));
+
+    IntBoolExpr::visitDisjuncts(intExprDNF, [](IntBoolExpr::Node& disjunct, int) {
+        IntBoolExpr::visitConjuncts(disjunct, [](IntBoolExpr::Node& conjunct, int) {
+            IntBoolExpr::visitAtom(conjunct, [](int& val) { val = val + 1; });
+        });
+    });
+
+    ASSERT_STR_EQ_AUTO(             // NOLINT
+        "((2 ^ 3 ^ 4) U (5 ^ 6))",  // NOLINT (test auto-update)
+        BoolExprPrinter<int>().print(intExprDNF));
 }
 }  // namespace
 }  // namespace mongo::optimizer

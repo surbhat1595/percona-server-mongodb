@@ -72,9 +72,9 @@ TenantFileCloner::TenantFileCloner(const UUID& backupId,
       _queryStage("query", this, &TenantFileCloner::queryStage),
       _fsWorkTaskRunner(dbPool),
       _scheduleFsWorkFn([this](executor::TaskExecutor::CallbackFn work) {
-          auto task = [ this, work = std::move(work) ](
-                          OperationContext * opCtx,
-                          const Status& status) mutable noexcept->TaskRunner::NextAction {
+          auto task = [this, work = std::move(work)](
+                          OperationContext* opCtx,
+                          const Status& status) mutable noexcept -> TaskRunner::NextAction {
               try {
                   work(executor::TaskExecutor::CallbackArgs(nullptr, {}, status, opCtx));
               } catch (const DBException& e) {
@@ -173,8 +173,7 @@ void TenantFileCloner::runQuery() {
         "$_backupFile" << BSON("backupId" << _backupId << "file" << _remoteFileName << "byteOffset"
                                           << static_cast<int64_t>(getFileOffset())));
     AggregateCommandRequest aggRequest(
-        NamespaceString::makeCollectionlessAggregateNSS(NamespaceString::kAdminDb),
-        {backupFileStage});
+        NamespaceString::makeCollectionlessAggregateNSS(DatabaseName::kAdmin), {backupFileStage});
     aggRequest.setReadConcern(ReadConcernArgs::kImplicitDefault);
     aggRequest.setWriteConcern(WriteConcernOptions());
 

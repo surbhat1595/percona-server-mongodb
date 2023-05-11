@@ -30,6 +30,11 @@
 #pragma once
 
 #include <cmath>
+#include <s2cap.h>
+#include <s2cell.h>
+#include <s2latlng.h>
+#include <s2polygon.h>
+#include <s2polyline.h>
 #include <string>
 #include <vector>
 
@@ -37,11 +42,6 @@
 #include "mongo/db/geo/big_polygon.h"
 #include "mongo/db/geo/s2.h"
 #include "mongo/db/jsobj.h"
-#include "third_party/s2/s2cap.h"
-#include "third_party/s2/s2cell.h"
-#include "third_party/s2/s2latlng.h"
-#include "third_party/s2/s2polygon.h"
-#include "third_party/s2/s2polyline.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846

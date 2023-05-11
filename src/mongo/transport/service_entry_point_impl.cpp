@@ -100,7 +100,7 @@ struct ClientSummary {
 };
 }  // namespace
 
-bool shouldOverrideMaxConns(const transport::SessionHandle& session,
+bool shouldOverrideMaxConns(const std::shared_ptr<transport::Session>& session,
                             const std::vector<stdx::variant<CIDR, std::string>>& exemptions) {
     if (exemptions.empty())
         return false;
@@ -291,7 +291,7 @@ void ServiceEntryPointImpl::configureServiceExecutorContext(ServiceContext::Uniq
     transport::ServiceExecutorContext::set(&*client, std::move(seCtx));
 }
 
-void ServiceEntryPointImpl::startSession(transport::SessionHandle session) {
+void ServiceEntryPointImpl::startSession(std::shared_ptr<transport::Session> session) {
     invariant(session);
 
     transport::IngressHandshakeMetrics::get(*session).onSessionStarted(_svcCtx->getTickSource());
@@ -434,7 +434,9 @@ void ServiceEntryPointImpl::appendStats(BSONObjBuilder* bob) const {
     size_t sessionCount = _sessions->size();
     size_t sessionsCreated = _sessions->created();
 
-    auto appendInt = [&](StringData n, auto v) { bob->append(n, static_cast<int>(v)); };
+    auto appendInt = [&](StringData n, auto v) {
+        bob->append(n, static_cast<int>(v));
+    };
 
     appendInt("current", sessionCount);
     appendInt("available", _maxSessions - sessionCount);

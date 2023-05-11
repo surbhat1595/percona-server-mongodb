@@ -101,8 +101,8 @@ Status restoreMissingFeatureCompatibilityVersionDocument(OperationContext* opCtx
         uassertStatusOK(createCollection(opCtx, fcvNss.dbName(), BSON("create" << fcvNss.coll())));
     }
 
-    const CollectionPtr& fcvColl =
-        catalog->lookupCollectionByNamespace(opCtx, NamespaceString::kServerConfigurationNamespace);
+    const CollectionPtr fcvColl(catalog->lookupCollectionByNamespace(
+        opCtx, NamespaceString::kServerConfigurationNamespace));
     invariant(fcvColl);
 
     // Restore the featureCompatibilityVersion document if it is missing.
@@ -139,7 +139,7 @@ Status restoreMissingFeatureCompatibilityVersionDocument(OperationContext* opCtx
  * Returns true if the collection associated with the given CollectionCatalogEntry has an index on
  * the _id field
  */
-bool checkIdIndexExists(OperationContext* opCtx, const CollectionPtr& coll) {
+bool checkIdIndexExists(OperationContext* opCtx, const Collection* coll) {
     auto indexCount = coll->getTotalIndexCount();
     auto indexNames = std::vector<std::string>(indexCount);
     coll->getAllIndexes(&indexNames);
@@ -164,8 +164,9 @@ Status buildMissingIdIndex(OperationContext* opCtx, Collection* collection) {
         indexer.abortIndexBuild(opCtx, collWriter, MultiIndexBlock::kNoopOnCleanUpFn);
     });
 
+    CollectionPtr collPtr(collection);
     const auto indexCatalog = collection->getIndexCatalog();
-    const auto idIndexSpec = indexCatalog->getDefaultIdIndexSpec(collection);
+    const auto idIndexSpec = indexCatalog->getDefaultIdIndexSpec(collPtr);
 
     CollectionWriter collWriter(collection);
     auto swSpecs = indexer.init(opCtx, collWriter, idIndexSpec, MultiIndexBlock::kNoopOnInitFn);
@@ -173,12 +174,12 @@ Status buildMissingIdIndex(OperationContext* opCtx, Collection* collection) {
         return swSpecs.getStatus();
     }
 
-    auto status = indexer.insertAllDocumentsInCollection(opCtx, collection);
+    auto status = indexer.insertAllDocumentsInCollection(opCtx, collPtr);
     if (!status.isOK()) {
         return status;
     }
 
-    status = indexer.checkConstraints(opCtx, collection);
+    status = indexer.checkConstraints(opCtx, collPtr);
     if (!status.isOK()) {
         return status;
     }
@@ -229,14 +230,16 @@ Status ensureCollectionProperties(OperationContext* opCtx,
             LOGV2(21001,
                   "collection {coll_ns} is missing an _id index",
                   "Collection is missing an _id index",
-                  logAttrs(*coll.get()));
+                  logAttrs(*coll));
             if (EnsureIndexPolicy::kBuildMissing == ensureIndexPolicy) {
-                auto status = buildMissingIdIndex(opCtx, collIt.getWritableCollection(opCtx));
+                auto writableCollection =
+                    catalog->lookupCollectionByUUIDForMetadataWrite(opCtx, collIt.uuid());
+                auto status = buildMissingIdIndex(opCtx, writableCollection);
                 if (!status.isOK()) {
                     LOGV2_ERROR(21021,
                                 "could not build an _id index on collection {coll_ns}: {error}",
                                 "Could not build an _id index on collection",
-                                logAttrs(*coll.get()),
+                                logAttrs(*coll),
                                 "error"_attr = status);
                     return downgradeError;
                 }
@@ -246,7 +249,7 @@ Status ensureCollectionProperties(OperationContext* opCtx,
         }
 
         if (coll->getTimeseriesOptions() &&
-            timeseries::collectionMayRequireExtendedRangeSupport(opCtx, coll)) {
+            timeseries::collectionMayRequireExtendedRangeSupport(opCtx, *coll)) {
             coll->setRequiresTimeseriesExtendedRangeSupport(opCtx);
         }
     }
@@ -293,7 +296,7 @@ bool hasReplSetConfigDoc(OperationContext* opCtx) {
 void assertCappedOplog(OperationContext* opCtx) {
     const NamespaceString oplogNss(NamespaceString::kRsOplogNamespace);
     invariant(opCtx->lockState()->isDbLockedForMode(oplogNss.dbName(), MODE_IS));
-    const CollectionPtr& oplogCollection =
+    const Collection* oplogCollection =
         CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, oplogNss);
     if (oplogCollection && !oplogCollection->isCapped()) {
         LOGV2_FATAL_NOTRACE(
@@ -445,7 +448,7 @@ void setReplSetMemberInStandaloneMode(OperationContext* opCtx, StartupRecoveryMo
     }
 
     invariant(opCtx->lockState()->isW());
-    CollectionPtr collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
+    const Collection* collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
         opCtx, NamespaceString::kSystemReplSetNamespace);
     if (collection && !collection->isEmpty(opCtx)) {
         setReplSetMemberInStandaloneMode(opCtx->getServiceContext(), true);
@@ -492,8 +495,7 @@ void startupRepair(OperationContext* opCtx, StorageEngine* storageEngine) {
     // whether not to rebuild unfinished two-phase index builds if this is a replica set node
     // running in standalone mode.
     auto dbNames = storageEngine->listDatabases();
-    if (auto it = std::find(
-            dbNames.begin(), dbNames.end(), DatabaseName(boost::none, NamespaceString::kLocalDb));
+    if (auto it = std::find(dbNames.begin(), dbNames.end(), DatabaseName::kLocal);
         it != dbNames.end()) {
         fassertNoTrace(4805001, repair::repairDatabase(opCtx, storageEngine, *it));
 
@@ -580,12 +582,12 @@ void startupRecovery(OperationContext* opCtx,
             checkForIdIndexesAndDropPendingCollections(opCtx, dbName);
             // Ensure oplog is capped (mongodb does not guarantee order of inserts on noncapped
             // collections)
-            if (dbName.db() == NamespaceString::kLocalDb) {
+            if (dbName == DatabaseName::kLocal) {
                 assertCappedOplog(opCtx);
             }
         }
 
-        if (shouldClearNonLocalTmpCollections || dbName.db() == NamespaceString::kLocalDb) {
+        if (shouldClearNonLocalTmpCollections || dbName == DatabaseName::kLocal) {
             clearTempCollections(opCtx, dbName);
         }
     });

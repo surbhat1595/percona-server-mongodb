@@ -180,7 +180,9 @@ bool QueryPlannerIXSelect::notEqualsNullCanUseIndex(const IndexEntry& index,
 
 bool QueryPlannerIXSelect::canUseIndexForNin(const InMatchExpression* ime) {
     const std::vector<BSONElement>& inList = ime->getEqualities();
-    auto containsNull = [](const BSONElement& elt) { return elt.type() == jstNULL; };
+    auto containsNull = [](const BSONElement& elt) {
+        return elt.type() == jstNULL;
+    };
     auto containsEmptyArray = [](const BSONElement& elt) {
         return elt.type() == Array && elt.embeddedObject().isEmpty();
     };
@@ -333,11 +335,6 @@ std::vector<IndexEntry> QueryPlannerIXSelect::expandIndexes(
     std::vector<IndexEntry> out;
     for (auto&& entry : relevantIndices) {
         if (entry.type == IndexType::INDEX_WILDCARD) {
-            // TODO SERVER-72466: Allow the planner to utilize compound wildcard indexes.
-            if (feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabledAndIgnoreFCV() &&
-                entry.keyPattern.nFields() > 1) {
-                continue;
-            }
             wcp::expandWildcardIndexEntry(entry, fields, &out);
         } else {
             out.push_back(std::move(entry));
@@ -367,6 +364,22 @@ bool QueryPlannerIXSelect::_compatible(const BSONElement& keyPatternElt,
          boundsGeneratingNodeContainsComparisonToType(node, BSONType::Object)) &&
         !CollatorInterface::collatorsMatch(collator, index.collator)) {
         return false;
+    }
+
+    // Fields after "$_path" of a compound wildcard index should not be used to answer any query,
+    // because wildcard IndexEntry with reserved field, "$_path", present is used only to answer
+    // query on non-wildcard prefix.
+    if (index.type == IndexType::INDEX_WILDCARD) {
+        size_t idx = 0;
+        for (auto&& elt : index.keyPattern) {
+            if (elt.fieldNameStringData() == "$_path") {
+                return false;
+            }
+            if (idx == keyPatternIdx) {
+                break;
+            }
+            idx++;
+        }
     }
 
     // Historically one could create indices with any particular value for the index spec,

@@ -244,7 +244,7 @@ TEST_F(ExtensionsCallbackRealTest, TextDiacriticSensitiveAndCaseSensitiveTrue) {
 //
 // $where parsing tests.
 //
-const NamespaceString kTestNss = NamespaceString("db.dummy");
+const NamespaceString kTestNss = NamespaceString::createNamespaceString_forTest("db.dummy");
 
 TEST_F(ExtensionsCallbackRealTest, WhereExpressionDesugarsToExprAndInternalJs) {
     if (_isDesugarWhereToFunctionOn) {
@@ -255,13 +255,10 @@ TEST_F(ExtensionsCallbackRealTest, WhereExpressionDesugarsToExprAndInternalJs) {
         auto expr1 = unittest::assertGet(
             ExtensionsCallbackReal(&_opCtx, &_nss).parseWhere(expCtx, query1.firstElement()));
 
-        BSONObjBuilder gotMatch;
-        expr1->serialize(&gotMatch);
-
         auto expectedMatch = fromjson(
             "{$expr: {$function: {'body': 'function() { return this.x == 10; }', 'args': "
             "['$$CURRENT'], 'lang': 'js', '_internalSetObjToThis': true}}}");
-        ASSERT_BSONOBJ_EQ(gotMatch.obj(), expectedMatch);
+        ASSERT_BSONOBJ_EQ(expr1->serialize(), expectedMatch);
     }
 }
 

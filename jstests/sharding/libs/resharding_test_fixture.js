@@ -36,7 +36,8 @@ var ReshardingTest = class {
         storeFindAndModifyImagesInSideCollection: storeFindAndModifyImagesInSideCollection = true,
         oplogSize: oplogSize = undefined,
         maxNumberOfTransactionOperationsInSingleOplogEntry:
-            maxNumberOfTransactionOperationsInSingleOplogEntry = undefined
+            maxNumberOfTransactionOperationsInSingleOplogEntry = undefined,
+        catalogShard: catalogShard = false,
     } = {}) {
         // The @private JSDoc comments cause VS Code to not display the corresponding properties and
         // methods in its autocomplete list. This makes it simpler for test authors to know what the
@@ -68,6 +69,7 @@ var ReshardingTest = class {
         this._oplogSize = oplogSize;
         this._maxNumberOfTransactionOperationsInSingleOplogEntry =
             maxNumberOfTransactionOperationsInSingleOplogEntry;
+        this._catalogShard = catalogShard || jsTestOptions().catalogShard;
 
         // Properties set by setup().
         /** @private */
@@ -117,7 +119,8 @@ var ReshardingTest = class {
         const configReplSetTestOptions = {};
 
         let nodesPerShard = 2;
-        let nodesPerConfigRs = 1;
+        // Use the shard default in catalog shard mode since the config server will be a shard.
+        let nodesPerConfigRs = this._catalogShard ? 2 : 1;
 
         if (this._enableElections) {
             nodesPerShard = 3;
@@ -184,6 +187,7 @@ var ReshardingTest = class {
             rsOptions,
             configReplSetTestOptions,
             manualAddShard: true,
+            catalogShard: this._catalogShard,
         });
 
         for (let i = 0; i < this._numShards; ++i) {
@@ -206,9 +210,14 @@ var ReshardingTest = class {
             }
 
             const shard = this._st[`shard${i}`];
-            const res = assert.commandWorked(
-                this._st.s.adminCommand({addShard: shard.host, name: shardName}));
-            shard.shardName = res.shardAdded;
+            if (this._catalogShard && i == 0) {
+                assert.commandWorked(this._st.s.adminCommand({transitionToCatalogShard: 1}));
+                shard.shardName = "config";
+            } else {
+                const res = assert.commandWorked(
+                    this._st.s.adminCommand({addShard: shard.host, name: shardName}));
+                shard.shardName = res.shardAdded;
+            }
         }
 
         // In order to enable random failovers, initialize Random's seed if it has not already been
@@ -515,7 +524,9 @@ var ReshardingTest = class {
      * proceeding to the next stage. This helper returns after either:
      *
      * 1) The node's waitForFailPoint returns successfully or
-     * 2) The `reshardCollection` command has returned a response.
+     * 2) The `reshardCollection` command has returned a response or
+     * 3) The ReshardingCoordinator is blocked on the reshardingPauseCoordinatorBeforeCompletion
+     *    failpoint and won't ever satisfy the supplied failpoint.
      *
      * The function returns true when we returned because the server reached the failpoint. The
      * function returns false when the `reshardCollection` command is no longer running.
@@ -524,9 +535,20 @@ var ReshardingTest = class {
      * @private
      */
     _waitForFailPoint(fp) {
+        const completionFailpoint = this._pauseCoordinatorBeforeCompletionFailpoints.find(
+            completionFailpoint => completionFailpoint.conn.host === fp.conn.host);
+
         assert.soon(
             () => {
-                return this._commandDoneSignal.getCount() === 0 || fp.waitWithTimeout(1000);
+                if (this._commandDoneSignal.getCount() === 0 || fp.waitWithTimeout(1000)) {
+                    return true;
+                }
+
+                if (completionFailpoint !== fp && completionFailpoint.waitWithTimeout(1000)) {
+                    completionFailpoint.off();
+                }
+
+                return false;
             },
             "Timed out waiting for failpoint to be hit. Failpoint: " + fp.failPointName,
             undefined,

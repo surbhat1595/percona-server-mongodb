@@ -29,9 +29,8 @@
 
 #pragma once
 
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
-
-#include "boost/smart_ptr/intrusive_ptr.hpp"
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/oid.h"
@@ -229,34 +228,17 @@ bool shouldDoFLERewrite(const T& cmd) {
 /**
  * Abstraction layer for FLE
  */
-class FLEQueryInterface {
+class FLEQueryInterface : public FLETagQueryInterface {
 public:
-    virtual ~FLEQueryInterface();
-
-    /**
-     * Retrieve a single document by _id == BSONElement from nss.
-     *
-     * Returns an empty BSONObj if no document is found.
-     * Expected to throw an error if it detects more then one documents.
-     */
-    virtual BSONObj getById(const NamespaceString& nss, BSONElement element) = 0;
-
-    /**
-     * Count the documents in the collection.
-     *
-     * Throws if the collection is not found.
-     */
-    virtual uint64_t countDocuments(const NamespaceString& nss) = 0;
-
     /**
      * Insert a document into the given collection.
      *
      * If translateDuplicateKey == true and the insert returns DuplicateKey, returns
      * FLEStateCollectionContention instead.
      */
-    virtual StatusWith<write_ops::InsertCommandReply> insertDocument(
+    virtual StatusWith<write_ops::InsertCommandReply> insertDocuments(
         const NamespaceString& nss,
-        BSONObj obj,
+        std::vector<BSONObj> objs,
         StmtId* pStmtId,
         bool translateDuplicateKey,
         bool bypassDocumentValidation = false) = 0;
@@ -271,6 +253,11 @@ public:
         const NamespaceString& nss,
         const EncryptionInformation& ei,
         const write_ops::DeleteCommandRequest& deleteRequest) = 0;
+
+    virtual write_ops::DeleteCommandReply deleteDocument(
+        const NamespaceString& nss,
+        int32_t stmtId,
+        write_ops::DeleteCommandRequest& deleteRequest) = 0;
 
     /**
      * Update a single document with the given query and update operators.
@@ -323,10 +310,10 @@ public:
 
     uint64_t countDocuments(const NamespaceString& nss) final;
 
-    StatusWith<write_ops::InsertCommandReply> insertDocument(
+    StatusWith<write_ops::InsertCommandReply> insertDocuments(
         const NamespaceString& nss,
-        BSONObj obj,
-        int32_t* pStmtId,
+        std::vector<BSONObj> objs,
+        StmtId* pStmtId,
         bool translateDuplicateKey,
         bool bypassDocumentValidation = false) final;
 
@@ -334,6 +321,11 @@ public:
         const NamespaceString& nss,
         const EncryptionInformation& ei,
         const write_ops::DeleteCommandRequest& deleteRequest) final;
+
+    write_ops::DeleteCommandReply deleteDocument(
+        const NamespaceString& nss,
+        int32_t stmtId,
+        write_ops::DeleteCommandRequest& deleteRequest) final;
 
     std::pair<write_ops::UpdateCommandReply, BSONObj> updateWithPreimage(
         const NamespaceString& nss,
@@ -363,7 +355,7 @@ private:
  */
 class TxnCollectionReader : public FLEStateCollectionReader {
 public:
-    TxnCollectionReader(uint64_t count, FLEQueryInterface* queryImpl, const NamespaceString& nss)
+    TxnCollectionReader(uint64_t count, FLETagQueryInterface* queryImpl, const NamespaceString& nss)
         : _count(count), _queryImpl(queryImpl), _nss(nss) {}
 
     uint64_t getDocumentCount() const override {
@@ -378,7 +370,7 @@ public:
 
 private:
     uint64_t _count;
-    FLEQueryInterface* _queryImpl;
+    FLETagQueryInterface* _queryImpl;
     NamespaceString _nss;
 };
 

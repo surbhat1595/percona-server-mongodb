@@ -47,8 +47,11 @@ namespace mongo {
 namespace analyze_shard_key {
 namespace {
 
+const NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("testDb", "testColl0");
+const NamespaceString nss1 = NamespaceString::createNamespaceString_forTest("testDb", "testColl1");
+
 TEST(QueryAnalysisWriterBufferTest, AddBasic) {
-    auto buffer = QueryAnalysisWriter::Buffer();
+    auto buffer = QueryAnalysisWriter::Buffer(nss0);
 
     auto doc0 = BSON("a" << 0);
     buffer.add(doc0);
@@ -65,7 +68,7 @@ TEST(QueryAnalysisWriterBufferTest, AddBasic) {
 }
 
 TEST(QueryAnalysisWriterBufferTest, AddTooLarge) {
-    auto buffer = QueryAnalysisWriter::Buffer();
+    auto buffer = QueryAnalysisWriter::Buffer(nss0);
 
     auto doc = BSON(std::string(BSONObjMaxUserSize, 'a') << 1);
     buffer.add(doc);
@@ -75,7 +78,7 @@ TEST(QueryAnalysisWriterBufferTest, AddTooLarge) {
 
 TEST(QueryAnalysisWriterBufferTest, TruncateBasic) {
     auto testTruncateCommon = [](int oldCount, int newCount) {
-        auto buffer = QueryAnalysisWriter::Buffer();
+        auto buffer = QueryAnalysisWriter::Buffer(nss0);
 
         std::vector<BSONObj> docs;
         for (auto i = 0; i < oldCount; i++) {
@@ -104,7 +107,7 @@ TEST(QueryAnalysisWriterBufferTest, TruncateBasic) {
 }
 
 DEATH_TEST(QueryAnalysisWriterBufferTest, TruncateInvalidIndex_Negative, "invariant") {
-    auto buffer = QueryAnalysisWriter::Buffer();
+    auto buffer = QueryAnalysisWriter::Buffer(nss0);
 
     auto doc = BSON("a" << 0);
     buffer.add(doc);
@@ -115,7 +118,7 @@ DEATH_TEST(QueryAnalysisWriterBufferTest, TruncateInvalidIndex_Negative, "invari
 }
 
 DEATH_TEST(QueryAnalysisWriterBufferTest, TruncateInvalidIndex_Positive, "invariant") {
-    auto buffer = QueryAnalysisWriter::Buffer();
+    auto buffer = QueryAnalysisWriter::Buffer(nss0);
 
     auto doc = BSON("a" << 0);
     buffer.add(doc);
@@ -126,7 +129,7 @@ DEATH_TEST(QueryAnalysisWriterBufferTest, TruncateInvalidIndex_Positive, "invari
 }
 
 DEATH_TEST(QueryAnalysisWriterBufferTest, TruncateInvalidSize_Negative, "invariant") {
-    auto buffer = QueryAnalysisWriter::Buffer();
+    auto buffer = QueryAnalysisWriter::Buffer(nss0);
 
     auto doc = BSON("a" << 0);
     buffer.add(doc);
@@ -137,7 +140,7 @@ DEATH_TEST(QueryAnalysisWriterBufferTest, TruncateInvalidSize_Negative, "invaria
 }
 
 DEATH_TEST(QueryAnalysisWriterBufferTest, TruncateInvalidSize_Zero, "invariant") {
-    auto buffer = QueryAnalysisWriter::Buffer();
+    auto buffer = QueryAnalysisWriter::Buffer(nss0);
 
     auto doc = BSON("a" << 0);
     buffer.add(doc);
@@ -148,7 +151,7 @@ DEATH_TEST(QueryAnalysisWriterBufferTest, TruncateInvalidSize_Zero, "invariant")
 }
 
 DEATH_TEST(QueryAnalysisWriterBufferTest, TruncateInvalidSize_Positive, "invariant") {
-    auto buffer = QueryAnalysisWriter::Buffer();
+    auto buffer = QueryAnalysisWriter::Buffer(nss0);
 
     auto doc = BSON("a" << 0);
     buffer.add(doc);
@@ -352,7 +355,7 @@ protected:
 
     void deleteSampledQueryDocuments() const {
         DBDirectClient client(operationContext());
-        client.remove(NamespaceString::kConfigSampledQueriesNamespace.toString(), BSONObj());
+        client.remove(NamespaceString::kConfigSampledQueriesNamespace, BSONObj());
     }
 
     /**
@@ -408,6 +411,16 @@ protected:
         ASSERT_BSONOBJ_EQ(parsedCmd.toBSON({}), expectedCmd.toBSON({}));
     }
 
+    /* Asserts that there is a sampled write query document with the given sample id and
+     * the given size in bytes.
+     */
+    int assertSampledQueryDocumentSize(const UUID& sampleId, long long size) {
+        auto doc = _getConfigDocument(NamespaceString::kConfigSampledQueriesNamespace, sampleId);
+        auto docSize = doc.objsize();
+        ASSERT_EQ(docSize, size);
+        return docSize;
+    }
+
     /*
      * Returns the number of the documents for the collection 'nss' in the config.sampledQueriesDiff
      * collection.
@@ -433,9 +446,6 @@ protected:
         ASSERT_EQ(parsedDiffDoc.getSampleId(), sampleId);
         assertBsonObjEqualUnordered(parsedDiffDoc.getDiff(), expectedDiff);
     }
-
-    const NamespaceString nss0{"testDb", "testColl0"};
-    const NamespaceString nss1{"testDb", "testColl1"};
 
     // Test with both empty and non-empty filter and collation to verify that the
     // QueryAnalysisWriter doesn't require filter or collation to be non-empty.
@@ -1393,6 +1403,107 @@ TEST_F(QueryAnalysisWriterTest, DiffExceedsSizeLimit) {
     ASSERT_EQ(writer.getDiffsCountForTest(), 0);
 
     ASSERT_EQ(getDiffDocumentsCount(nss0), 0);
+}
+
+TEST_F(QueryAnalysisWriterTest, ReportForCurrentOpForRead) {
+    auto& writer = *QueryAnalysisWriter::get(operationContext());
+
+    auto collUuid0 = getCollectionUUID(nss0);
+    auto sampleId = UUID::gen();
+
+    // Write a sampled query.
+    writer.addFindQuery(sampleId, nss0, makeNonEmptyFilter(), emptyCollation).get();
+    writer.flushQueriesForTest(operationContext());
+
+    // Get currentOp report.
+    std::vector<BSONObj> reps;
+    writer.reportForCurrentOp(&reps);
+    ASSERT_EQ(reps.size(), 1);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kDescriptionFieldName).String(),
+              SampleCounters::kDescriptionFieldValue);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kNamespaceStringFieldName).String(),
+              nss0.toString());
+    ASSERT_EQ(UUID::parse(reps[0].getField(SampleCounters::kCollUuidFieldName)), collUuid0);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kSampledReadsCountFieldName).Long(), 1);
+    auto expectedReadsBytes = assertSampledQueryDocumentSize(
+        sampleId, reps[0].getField(SampleCounters::kSampledReadsBytesFieldName).Long());
+    ASSERT_EQ(reps[0].getField(SampleCounters::kSampledWritesCountFieldName).Long(), 0);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kSampledWritesBytesFieldName).Long(), 0);
+
+    // Attempting to sample a query that is too large will not be counted.
+    sampleId = UUID::gen();
+    BSONObjBuilder bobFilter = makeNonEmptyFilter();
+    bobFilter.append(std::string(BSONObjMaxUserSize, 'a'), 1);
+
+    writer.addFindQuery(sampleId, nss0, bobFilter.obj(), emptyCollation).get();
+    writer.flushQueriesForTest(operationContext());
+
+    // Get currentOp report.
+    reps.clear();
+    writer.reportForCurrentOp(&reps);
+    ASSERT_EQ(reps.size(), 1);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kDescriptionFieldName).String(),
+              SampleCounters::kDescriptionFieldValue);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kNamespaceStringFieldName).String(),
+              nss0.toString());
+    ASSERT_EQ(UUID::parse(reps[0].getField(SampleCounters::kCollUuidFieldName)), collUuid0);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kSampledReadsCountFieldName).Long(), 1);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kSampledReadsBytesFieldName).Long(),
+              expectedReadsBytes);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kSampledWritesCountFieldName).Long(), 0);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kSampledWritesBytesFieldName).Long(), 0);
+}
+
+TEST_F(QueryAnalysisWriterTest, ReportForCurrentOpForWrite) {
+    auto& writer = *QueryAnalysisWriter::get(operationContext());
+
+    auto collUuid0 = getCollectionUUID(nss0);
+
+    auto [originalCmd, expectedSampledCmds] = makeUpdateCommandRequest(nss0, 3, {0});
+    ASSERT_EQ(expectedSampledCmds.size(), 1);
+
+    // Write a sampled query.
+    writer.addUpdateQuery(originalCmd, 0).get();
+    writer.flushQueriesForTest(operationContext());
+
+    // Get currentOp report.
+    std::vector<BSONObj> reps;
+    writer.reportForCurrentOp(&reps);
+    ASSERT_EQ(reps.size(), 1);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kDescriptionFieldName).String(),
+              SampleCounters::kDescriptionFieldValue);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kNamespaceStringFieldName).String(),
+              nss0.toString());
+    ASSERT_EQ(UUID::parse(reps[0].getField(SampleCounters::kCollUuidFieldName)), collUuid0);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kSampledReadsCountFieldName).Long(), 0);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kSampledReadsBytesFieldName).Long(), 0);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kSampledWritesCountFieldName).Long(), 1);
+    auto expectedWritesBytes = assertSampledQueryDocumentSize(
+        expectedSampledCmds.begin()->first,
+        reps[0].getField(SampleCounters::kSampledWritesBytesFieldName).Long());
+
+    // Attempting to sample a query that is too large will not be counted.
+    auto [originalCmd2, expectedSampledCmds2] =
+        makeUpdateCommandRequest(nss0, 3, {0}, std::string(BSONObjMaxUserSize, 'a'));
+    ASSERT_EQ(expectedSampledCmds2.size(), 1);
+
+    writer.addUpdateQuery(originalCmd2, 0).get();
+    writer.flushQueriesForTest(operationContext());
+
+    // Get currentOp report.
+    reps.clear();
+    writer.reportForCurrentOp(&reps);
+    ASSERT_EQ(reps.size(), 1);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kDescriptionFieldName).String(),
+              SampleCounters::kDescriptionFieldValue);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kNamespaceStringFieldName).String(),
+              nss0.toString());
+    ASSERT_EQ(UUID::parse(reps[0].getField(SampleCounters::kCollUuidFieldName)), collUuid0);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kSampledReadsCountFieldName).Long(), 0);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kSampledReadsBytesFieldName).Long(), 0);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kSampledWritesCountFieldName).Long(), 1);
+    ASSERT_EQ(reps[0].getField(SampleCounters::kSampledWritesBytesFieldName).Long(),
+              expectedWritesBytes);
 }
 
 }  // namespace

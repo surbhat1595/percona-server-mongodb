@@ -126,7 +126,7 @@ public:
 
     void setCommand(BSONObj cmdObj) const {
         CurOp::get(opCtx())->setGenericOpRequestDetails(
-            opCtx(), _testNss, nullptr, cmdObj, NetworkOp::dbMsg);
+            _testNss, nullptr, cmdObj, NetworkOp::dbMsg);
     }
 
     void setGetMore(BSONObj originatingCommand) const {
@@ -144,7 +144,8 @@ public:
     }
 
 private:
-    const NamespaceString _testNss{"test", "testing"};
+    const NamespaceString _testNss =
+        NamespaceString::createNamespaceString_forTest("test", "testing");
     ServiceContext::UniqueOperationContext _opCtx;
 };
 

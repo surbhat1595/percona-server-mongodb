@@ -30,6 +30,7 @@ global:
     cpp_namespace: "mongo"
     cpp_includes:
         - "mongo/client/read_preference.h"
+        - "mongo/db/commands/bulk_write_parser.h"
         - "mongo/db/repl/optime.h"
 
 imports:
@@ -39,6 +40,15 @@ imports:
     - "mongo/db/repl/read_concern_args.idl"
     - "mongo/db/repl/replication_types.idl"
     - "mongo/db/write_concern_options.idl"
+
+types:
+    BulkWriteReplyItem:
+        bson_serialization_type: object
+        description: "Structure used to report a single reply resulting from a batch write
+                      command."
+        cpp_type: "mongo::BulkWriteReplyItem"
+        serializer: "mongo::BulkWriteReplyItem::serialize"
+        deserializer: "mongo::BulkWriteReplyItem::parse" 
 
 structs:
 
@@ -53,7 +63,138 @@ structs:
                 stability: unstable
             document:
                 description: "The document to insert into the given collection"
-                type: object_owned
+                type: object
+                stability: unstable
+
+    BulkWriteUpdateOp:
+        description: "A struct representing updates in the 'bulkWrite' command."
+        strict: true
+        fields:
+            update:
+                description: "Update command which references the namespace index in 'nsInfo'."
+                type: safeInt
+                validator: { gte: 0 }
+                stability: unstable
+            filter:
+                description: "The query that matches documents to update. Uses the same query
+                              selectors as used in the 'find' operation."
+                type: object
+                stability: unstable
+            multi:
+                description: "If true, updates all documents that meet the query criteria. If false,
+                              limits the update to one document which meets the query criteria." 
+                type: bool
+                default: false
+                stability: unstable
+            updateMods:
+                description:  "Set of modifications to apply."
+                type: update_modification
+                stability: unstable
+            upsert:
+                description: "If true, perform an insert if no documents match the query. If both
+                              upsert and multi are true and no documents match the query, the update
+                              operation inserts only a single document."
+                type: bool
+                default: false
+                stability: unstable
+            upsertSupplied:
+                description: "Only applicable when upsert is true. If set, and if no documents match
+                              the query, the update subsystem will insert the document supplied as
+                              'let.new' rather than generating a new document from the update spec."
+                type: optionalBool
+                stability: unstable
+            arrayFilters:
+                description: "Specifies which array elements an update modifier should apply to"
+                type: array<object>
+                optional: true
+                stability: unstable
+            hint:
+                description: "Specifies the hint to use for the operation."
+                type: indexHint
+                default: mongo::BSONObj()
+                stability: unstable
+            let:
+                description: "Specifies constant values that can be referred to in the pipeline
+                              performing a custom update."
+                type: object
+                optional: true
+                stability: unstable
+            collation:
+                description: "Specifies the collation to use for the operation."
+                type: object
+                optional: true
+                stability: unstable
+            sort:
+                description: "Determines which document the operation modifies if the query selects
+                              multiple documents."
+                type: object
+                optional: true
+                stability: unstable
+            return:
+                description: "When set to 'post', returns the modified document
+                              rather than the original. Default is to return the original ('pre')."
+                type: string
+                optional: true
+                validator:
+                    callback: validateUpdateReturn
+                stability: unstable
+            returnFields:
+                description: "A subset of fields to return."
+                type: object
+                optional: true
+                stability: unstable
+
+    BulkWriteDeleteOp:
+        description: "A struct representing deletes in the 'bulkWrite' command."
+        strict: true
+        fields:
+            delete:
+                description: "Delete command which references the namespace index in 'nsInfo'."
+                cpp_name: deleteCommand # `delete` is a C++ keyword.
+                type: safeInt
+                validator: { gte: 0 }
+                stability: unstable
+            filter:
+                description: "The query that matches documents to update. Uses the same query
+                              selectors as used in the 'find' operation."
+                type: object
+                stability: unstable
+            multi:
+                description: "If true, updates all documents that meet the query criteria. If false,
+                              limits the update to one document which meets the query criteria." 
+                type: bool
+                default: false
+                stability: unstable
+            hint:
+                description: "Specifies the hint to use for the operation."
+                type: indexHint
+                default: mongo::BSONObj()
+                stability: unstable
+            let:
+                description: "Specifies constant values that can be referred to in the pipeline
+                              performing a custom update."
+                type: object
+                optional: true
+                stability: unstable
+            collation:
+                description: "Specifies the collation to use for the operation."
+                type: object
+                optional: true
+                stability: unstable
+            sort:
+                description: "Determines which document the operation modifies if the query selects
+                              multiple documents."
+                type: object
+                optional: true
+                stability: unstable
+            return:
+                description: "When true, returns the deleted document rather than nothing."
+                type: optionalBool
+                stability: unstable
+            returnFields:
+                description: "A subset of fields to return."
+                type: object
+                optional: true
                 stability: unstable
 
     NamespaceInfoEntry:
@@ -79,49 +220,7 @@ structs:
                               mongos on the time-series view, but got rewritten to target
                               time-series buckets namespace before being sent to shards."
                 type: optionalBool
-                stability: internal               
-
-    BulkWriteReplyItem:
-        description: "A single item in a batch of results in a 'bulkWrite' command response."
-        strict: true
-        fields:
-            ok:
-                type: safeDouble
-                validator: { gte: 0.0, lte: 1.0 }
-                stability: unstable
-            idx:
-                description: "Holds the index of the batch entry."
-                type: int
-                validator: { gte: 0 }
-                stability: unstable
-            n:
-                description: "For insert: number of documents inserted.
-                              For update: number of documents that matched the query predicate.
-                              For delete: number of documents deleted."
-                type: int
-                optional: true
-                stability: unstable
-            nModified:
-                description: "Number of updated documents."
-                type: int
-                optional: true
-                stability: unstable
-            upserted:
-                type: Upserted
-                optional: true
-                stability: unstable
-            value:
-                type: IDLAnyTypeOwned
-                optional: true
-                stability: unstable
-            code:
-                type: int
-                optional: true
-                stability: unstable
-            errmsg:
-                type: string
-                optional: true
-                stability: unstable
+                stability: internal            
 
     BulkWriteCommandResponseCursor:
         description: "Cursor holding results for a successful 'bulkWrite' command."
@@ -173,7 +272,7 @@ commands:
         fields:
             ops:
                 description: "An array of CRUD ops in the bulk write."
-                type: array<BulkWriteInsertOp>
+                type: array<variant<BulkWriteInsertOp, BulkWriteUpdateOp, BulkWriteDeleteOp>>
                 supports_doc_sequence: true
                 stability: unstable
             nsInfo:

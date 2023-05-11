@@ -47,6 +47,7 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_failpoint_helpers.h"
+#include "mongo/db/fle_crud.h"
 #include "mongo/db/pipeline/change_stream_invalidation_info.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/canonical_query_encoder.h"
@@ -57,10 +58,12 @@
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/overflow_arithmetic.h"
+#include "mongo/s/analyze_shard_key_cmd_gen.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/client/num_hosts_targeted_metrics.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/cluster_commands_helpers.h"
+#include "mongo/s/collection_uuid_mismatch.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/query/async_results_merger.h"
 #include "mongo/s/query/cluster_client_cursor_impl.h"
@@ -71,6 +74,7 @@
 #include "mongo/s/stale_exception.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/net/socket_utils.h"
 #include "mongo/util/scopeguard.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -208,6 +212,8 @@ std::vector<std::pair<ShardId, BSONObj>> constructRequestsForShards(
             analyze_shard_key::appendSampleId(&cmdBuilder, *sampleId);
         }
 
+        telemetry::appendShardedTelemetryKeyIfApplicable(
+            cmdBuilder, getHostNameCachedAndPort(), opCtx);
         requests.emplace_back(shardId, cmdBuilder.obj());
     }
 
@@ -300,19 +306,6 @@ CursorId runQueryWithoutRetrying(OperationContext* opCtx,
             "tailable cursor unexpectedly has a sort",
             sortComparatorObj.isEmpty() || !findCommand.getTailable());
 
-    auto establishCursorsOnShards = [&](const std::set<ShardId>& shardIds) {
-        return establishCursors(
-            opCtx,
-            Grid::get(opCtx)->getExecutorPool()->getArbitraryExecutor(),
-            query.nss(),
-            readPref,
-            // Construct the requests that we will use to establish cursors on the targeted shards,
-            // attaching the shardVersion and txnNumber, if necessary.
-            constructRequestsForShards(
-                opCtx, cri, shardIds, query, sampleId, appendGeoNearDistanceProjection),
-            findCommand.getAllowPartialResults());
-    };
-
     try {
         // Establish the cursors with a consistent shardVersion across shards.
 
@@ -331,23 +324,29 @@ CursorId runQueryWithoutRetrying(OperationContext* opCtx,
                 "deadline"_attr = deadline);
         }
 
-        // The call to establishCursorsOnShards has its own timeout mechanism that is controlled
-        // by the opCtx, so we don't expect runWithDeadline to throw a timeout at this level. We
-        // use runWithDeadline because it has the side effect of pushing a temporary
-        // (artificial) deadline onto the opCtx used by establishCursorsOnShards.
+        // The call to establishCursors has its own timeout mechanism that is controlled by the
+        // opCtx, so we don't expect runWithDeadline to throw a timeout at this level. We use
+        // runWithDeadline because it has the side effect of pushing a temporary (artificial)
+        // deadline onto the opCtx used by establishCursors.
         opCtx->runWithDeadline(deadline, ErrorCodes::MaxTimeMSExpired, [&]() -> void {
-            params.remotes = establishCursorsOnShards(shardIds);
+            params.remotes = establishCursors(
+                opCtx,
+                Grid::get(opCtx)->getExecutorPool()->getArbitraryExecutor(),
+                query.nss(),
+                readPref,
+                // Construct the requests that we will use to establish cursors on the targeted
+                // shards, attaching the shardVersion and txnNumber, if necessary.
+                constructRequestsForShards(
+                    opCtx, cri, shardIds, query, sampleId, appendGeoNearDistanceProjection),
+                findCommand.getAllowPartialResults());
         });
     } catch (const DBException& ex) {
         if (ex.code() == ErrorCodes::CollectionUUIDMismatch &&
             !ex.extraInfo<CollectionUUIDMismatchInfo>()->actualCollection() &&
             !shardIds.count(cm.dbPrimary())) {
-            // We received CollectionUUIDMismatchInfo but it does not contain the actual
-            // namespace, and we did not attempt to establish a cursor on the primary shard.
-            // Attempt to do so now in case the collection corresponding to the provided UUID is
-            // unsharded. This should throw CollectionUUIDMismatchInfo, StaleShardVersion, or
-            // StaleDbVersion.
-            establishCursorsOnShards({cm.dbPrimary()});
+            // We received CollectionUUIDMismatch but it does not contain the actual namespace, and
+            // we did not attempt to establish a cursor on the primary shard.
+            uassertStatusOK(populateCollectionUUIDMismatch(opCtx, ex.toStatus()));
             MONGO_UNREACHABLE;
         }
         throw;
@@ -572,7 +571,8 @@ CursorId ClusterFind::runQuery(OperationContext* opCtx,
     auto const catalogCache = Grid::get(opCtx)->catalogCache();
     // Try to generate a sample id for this query here instead of inside 'runQueryWithoutRetrying()'
     // since it is incorrect to generate multiple sample ids for a single query.
-    const auto sampleId = analyze_shard_key::tryGenerateSampleId(opCtx, query.nss());
+    const auto sampleId = analyze_shard_key::tryGenerateSampleId(
+        opCtx, query.nss(), analyze_shard_key::SampledCommandNameEnum::kFind);
 
     // Re-target and re-send the initial find command to the shards until we have established the
     // shard version.
@@ -673,8 +673,8 @@ CursorId ClusterFind::runQuery(OperationContext* opCtx,
             if (auto txnRouter = TransactionRouter::get(opCtx)) {
                 if (!txnRouter.canContinueOnStaleShardOrDbError(kFindCmdName, ex.toStatus())) {
                     if (ex.code() == ErrorCodes::ShardInvalidatedForTargeting) {
-                        (void)catalogCache->getCollectionPlacementInfoWithRefresh(opCtx,
-                                                                                  query.nss());
+                        (void)catalogCache->getCollectionRoutingInfoWithPlacementRefresh(
+                            opCtx, query.nss());
                     }
                     throw;
                 }

@@ -52,13 +52,13 @@ MONGO_FAIL_POINT_DEFINE(deferredCleanupCompletedCheckpoint);
 void waitForQuiescedCluster(OperationContext* opCtx) {
     const auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
     ShardsvrJoinMigrations joinShardOnMigrationsRequest;
-    joinShardOnMigrationsRequest.setDbName(NamespaceString::kAdminDb);
+    joinShardOnMigrationsRequest.setDbName(DatabaseName::kAdmin);
 
     auto unquiescedShardIds = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
 
     const auto responses =
         sharding_util::sendCommandToShards(opCtx,
-                                           NamespaceString::kAdminDb.toString(),
+                                           DatabaseName::kAdmin.toString(),
                                            joinShardOnMigrationsRequest.toBSON({}),
                                            unquiescedShardIds,
                                            executor,
@@ -98,7 +98,7 @@ Status persistRecoveryInfo(OperationContext* opCtx, const CommandInfo& command) 
     recoveryDocument.emplace_back(migrationType.toBSON());
 
     auto reply = dbClient.insertAcknowledged(
-        MigrationType::ConfigNS.ns(), recoveryDocument, true, WriteConcernOptions::Majority);
+        MigrationType::ConfigNS, recoveryDocument, true, WriteConcernOptions::Majority);
     auto insertStatus = getStatusFromWriteCommandReply(reply);
     if (insertStatus != ErrorCodes::DuplicateKey) {
         return insertStatus;
@@ -165,7 +165,7 @@ void deletePersistedRecoveryInfo(DBDirectClient& dbClient, const CommandInfo& co
     const auto& migrationCommand = checked_cast<const MoveChunkCommandInfo&>(command);
     auto recoveryDocId = migrationCommand.getRecoveryDocumentIdentifier();
     try {
-        dbClient.remove(MigrationType::ConfigNS.ns(), recoveryDocId, false /*removeMany*/);
+        dbClient.remove(MigrationType::ConfigNS, recoveryDocId, false /*removeMany*/);
     } catch (const DBException& e) {
         LOGV2_ERROR(5847214, "Failed to remove recovery info", "error"_attr = redact(e));
     }
@@ -185,15 +185,6 @@ const std::string DataSizeCommandInfo::kMinValue = "min";
 const std::string DataSizeCommandInfo::kMaxValue = "max";
 const std::string DataSizeCommandInfo::kEstimatedValue = "estimate";
 const std::string DataSizeCommandInfo::kMaxSizeValue = "maxSize";
-
-const std::string SplitChunkCommandInfo::kCommandName = "splitChunk";
-const std::string SplitChunkCommandInfo::kShardName = "from";
-const std::string SplitChunkCommandInfo::kKeyPattern = "keyPattern";
-const std::string SplitChunkCommandInfo::kLowerBound = "min";
-const std::string SplitChunkCommandInfo::kUpperBound = "max";
-const std::string SplitChunkCommandInfo::kEpoch = "epoch";
-const std::string SplitChunkCommandInfo::kTimestamp = "timestamp";
-const std::string SplitChunkCommandInfo::kSplitKeys = "splitKeys";
 
 BalancerCommandsSchedulerImpl::BalancerCommandsSchedulerImpl() {}
 
@@ -310,49 +301,6 @@ SemiFuture<void> BalancerCommandsSchedulerImpl::requestMergeChunks(OperationCont
         .semi();
 }
 
-SemiFuture<AutoSplitVectorResponse> BalancerCommandsSchedulerImpl::requestAutoSplitVector(
-    OperationContext* opCtx,
-    const NamespaceString& nss,
-    const ShardId& shardId,
-    const BSONObj& keyPattern,
-    const BSONObj& minKey,
-    const BSONObj& maxKey,
-    int64_t maxChunkSizeBytes) {
-    auto commandInfo = std::make_shared<AutoSplitVectorCommandInfo>(
-        nss, shardId, keyPattern, minKey, maxKey, maxChunkSizeBytes);
-    return _buildAndEnqueueNewRequest(opCtx, std::move(commandInfo))
-        .then([](const executor::RemoteCommandResponse& remoteResponse)
-                  -> StatusWith<AutoSplitVectorResponse> {
-            auto responseStatus = processRemoteResponse(remoteResponse);
-            if (!responseStatus.isOK()) {
-                return responseStatus;
-            }
-            return AutoSplitVectorResponse::parse(IDLParserContext("AutoSplitVectorResponse"),
-                                                  std::move(remoteResponse.data));
-        })
-        .semi();
-}
-
-SemiFuture<void> BalancerCommandsSchedulerImpl::requestSplitChunk(
-    OperationContext* opCtx,
-    const NamespaceString& nss,
-    const ShardId& shardId,
-    const ChunkVersion& collectionVersion,
-    const KeyPattern& keyPattern,
-    const BSONObj& minKey,
-    const BSONObj& maxKey,
-    const SplitPoints& splitPoints) {
-
-    auto commandInfo = std::make_shared<SplitChunkCommandInfo>(
-        nss, shardId, keyPattern.toBSON(), minKey, maxKey, collectionVersion, splitPoints);
-
-    return _buildAndEnqueueNewRequest(opCtx, std::move(commandInfo))
-        .then([](const executor::RemoteCommandResponse& remoteResponse) {
-            return processRemoteResponse(remoteResponse);
-        })
-        .semi();
-}
-
 SemiFuture<DataSizeResponse> BalancerCommandsSchedulerImpl::requestDataSize(
     OperationContext* opCtx,
     const NamespaceString& nss,
@@ -382,6 +330,16 @@ SemiFuture<DataSizeResponse> BalancerCommandsSchedulerImpl::requestDataSize(
             long long numObjects = remoteResponse.data["numObjects"].number();
             bool maxSizeReached = remoteResponse.data["maxReached"].trueValue();
             return DataSizeResponse(sizeBytes, numObjects, maxSizeReached);
+        })
+        .semi();
+}
+
+SemiFuture<void> BalancerCommandsSchedulerImpl::requestMergeAllChunksOnShard(
+    OperationContext* opCtx, const NamespaceString& nss, const ShardId& shardId) {
+    auto commandInfo = std::make_shared<MergeAllChunksOnShardCommandInfo>(nss, shardId);
+    return _buildAndEnqueueNewRequest(opCtx, std::move(commandInfo))
+        .then([](const executor::RemoteCommandResponse& remoteResponse) {
+            return processRemoteResponse(remoteResponse);
         })
         .semi();
 }

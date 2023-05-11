@@ -259,7 +259,7 @@ void ExecCommandClient::_prologue() {
     const auto dbname = request.getDatabase();
     uassert(ErrorCodes::IllegalOperation,
             "Can't use 'local' database through mongos",
-            dbname != NamespaceString::kLocalDb);
+            dbname != DatabaseName::kLocal.db());
     uassert(ErrorCodes::InvalidNamespace,
             "Invalid database name: '{}'"_format(dbname),
             NamespaceString::validDBName(dbname, NamespaceString::DollarInDbNameBehavior::Allow));
@@ -586,7 +586,7 @@ void ParseAndRunCommand::_parseCommand() {
         (request.getDatabase() == *_ns ? NamespaceString(*_ns, "$cmd") : NamespaceString(*_ns));
 
     // Fill out all currentOp details.
-    CurOp::get(opCtx)->setGenericOpRequestDetails(opCtx, nss, command, request.body, _opType);
+    CurOp::get(opCtx)->setGenericOpRequestDetails(nss, command, request.body, _opType);
 
     _osi.emplace(initializeOperationSessionInfo(opCtx,
                                                 request.body,
@@ -1003,7 +1003,7 @@ void ParseAndRunCommand::RunAndRetry::_checkRetryForTransaction(Status& status) 
         if (!txnRouter.canContinueOnStaleShardOrDbError(_parc->_commandName, status)) {
             if (status.code() == ErrorCodes::ShardInvalidatedForTargeting) {
                 auto catalogCache = Grid::get(opCtx)->catalogCache();
-                (void)catalogCache->getCollectionPlacementInfoWithRefresh(
+                (void)catalogCache->getCollectionRoutingInfoWithPlacementRefresh(
                     opCtx, status.extraInfo<ShardInvalidatedForTargetingInfo>()->getNss());
             }
 

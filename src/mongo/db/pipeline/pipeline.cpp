@@ -158,11 +158,12 @@ Pipeline::~Pipeline() {
 
 std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::clone(
     const boost::intrusive_ptr<ExpressionContext>& newExpCtx) const {
+    auto expCtx = newExpCtx ? newExpCtx : getContext();
     SourceContainer clonedStages;
     for (auto&& stage : _sources) {
-        clonedStages.push_back(stage->clone(newExpCtx));
+        clonedStages.push_back(stage->clone(expCtx));
     }
-    return create(clonedStages, newExpCtx ? newExpCtx : getContext());
+    return create(clonedStages, expCtx);
 }
 
 template <class T>
@@ -234,39 +235,43 @@ std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::create(
 }
 
 void Pipeline::validateCommon(bool alreadyOptimized) const {
-    size_t i = 0;
-
     uassert(ErrorCodes::FailedToParse,
             str::stream() << "Pipeline length must be no longer than "
                           << internalPipelineLengthLimit << " stages",
             static_cast<int>(_sources.size()) <= internalPipelineLengthLimit);
 
-    for (auto&& stage : _sources) {
+    checkValidOperationContext();
+
+    // Keep track of stages which can only appear once.
+    std::set<StringData> singleUseStages;
+
+    for (auto sourceIter = _sources.begin(); sourceIter != _sources.end(); ++sourceIter) {
+        auto& stage = *sourceIter;
         auto constraints = stage->constraints(_splitState);
 
         // Verify that all stages adhere to their PositionRequirement constraints.
         uassert(40602,
                 str::stream() << stage->getSourceName()
                               << " is only valid as the first stage in a pipeline",
-                !(constraints.requiredPosition == PositionRequirement::kFirst && i != 0));
-        uassert(40603,
-                str::stream() << stage->getSourceName()
-                              << " is only valid as the first stage in an optimized pipeline",
-                !(alreadyOptimized &&
-                  constraints.requiredPosition == PositionRequirement::kFirstAfterOptimization &&
-                  i != 0));
+                !(constraints.requiredPosition == PositionRequirement::kFirst &&
+                  sourceIter != _sources.begin()));
 
+        // TODO SERVER-73790: use PositionRequirement::kCustom to validate $match.
         auto matchStage = dynamic_cast<DocumentSourceMatch*>(stage.get());
         uassert(17313,
                 "$match with $text is only allowed as the first pipeline stage",
-                !(i != 0 && matchStage && matchStage->isTextQuery()));
+                !(sourceIter != _sources.begin() && matchStage && matchStage->isTextQuery()));
 
         uassert(40601,
                 str::stream() << stage->getSourceName()
                               << " can only be the final stage in the pipeline",
                 !(constraints.requiredPosition == PositionRequirement::kLast &&
-                  i != _sources.size() - 1));
-        ++i;
+                  std::next(sourceIter) != _sources.end()));
+
+        // If the stage has a special requirement about its position, validate it.
+        if (constraints.requiredPosition == PositionRequirement::kCustom) {
+            stage->validatePipelinePosition(alreadyOptimized, sourceIter, _sources);
+        }
 
         // Verify that we are not attempting to run a mongoS-only stage on mongoD.
         uassert(40644,
@@ -278,6 +283,12 @@ void Pipeline::validateCommon(bool alreadyOptimized) const {
             str::stream() << "Stage not supported inside of a multi-document transaction: "
                           << stage->getSourceName(),
             !(pCtx->opCtx->inMultiDocumentTransaction() && !constraints.isAllowedInTransaction()));
+
+        // Verify that a stage which can only appear once doesn't appear more than that.
+        uassert(7183900,
+                str::stream() << stage->getSourceName() << " can only be used once in the pipeline",
+                !(constraints.canAppearOnlyOnceInPipeline &&
+                  !singleUseStages.insert(stage->getSourceName()).second));
     }
 }
 
@@ -341,6 +352,9 @@ void Pipeline::detachFromOperationContext() {
     for (auto&& source : _sources) {
         source->detachFromOperationContext();
     }
+
+    // Check for a null operation context to make sure that all children detached correctly.
+    checkValidOperationContext();
 }
 
 void Pipeline::reattachToOperationContext(OperationContext* opCtx) {
@@ -349,6 +363,24 @@ void Pipeline::reattachToOperationContext(OperationContext* opCtx) {
     for (auto&& source : _sources) {
         source->reattachToOperationContext(opCtx);
     }
+
+    checkValidOperationContext();
+}
+
+bool Pipeline::validateOperationContext(const OperationContext* opCtx) const {
+    return std::all_of(_sources.begin(), _sources.end(), [this, opCtx](const auto& s) {
+        // All sources in a pipeline must share its expression context. Subpipelines may have a
+        // different expression context, but must point to the same operation context. Let the
+        // sources validate this themselves since they don't all have the same subpipelines, etc.
+        return s->getContext() == getContext() && s->validateOperationContext(opCtx);
+    });
+}
+
+void Pipeline::checkValidOperationContext() const {
+    tassert(7406000,
+            str::stream()
+                << "All DocumentSources and subpipelines must have the same operation context",
+            validateOperationContext(getContext()->opCtx));
 }
 
 void Pipeline::dispose(OperationContext* opCtx) {

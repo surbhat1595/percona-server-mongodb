@@ -126,7 +126,7 @@ public:
     }
 
     void insert(const BSONObj& obj) {
-        _client.insert(nss.ns(), obj);
+        _client.insert(nss, obj);
     }
 
     // Inserts documents later deleted in a single 'batch' due to targetBatchTimMS or
@@ -137,7 +137,7 @@ public:
                           bool verifyBatchTimeWithDefaultTargetBatchTimeMS = true) {
         Milliseconds totalDurationOfBatch{0};
         for (const auto& [doc, duration] : timedBatch) {
-            _client.insert(nss.ns(), doc);
+            _client.insert(nss, doc);
             _opObserver->setDeleteRecordDurationMillis(doc, duration);
             totalDurationOfBatch += duration;
         }
@@ -155,11 +155,11 @@ public:
     }
 
     void remove(const BSONObj& obj) {
-        _client.remove(nss.ns(), obj);
+        _client.remove(nss, obj);
     }
 
     void update(BSONObj& query, BSONObj& updateSpec) {
-        _client.update(nss.ns(), query, updateSpec);
+        _client.update(nss, query, updateSpec);
     }
 
     void getRecordIds(const CollectionPtr& collection,
@@ -355,8 +355,8 @@ TEST_F(QueryStageBatchedDeleteTest, BatchedDeleteStagedDocIsDeletedWriteConflict
 
     auto nDocs = 11;
     prePopulateCollection(nDocs);
-    const CollectionPtr& coll = CollectionCatalog::get(batchedDeleteOpCtx.get())
-                                    ->lookupCollectionByNamespace(batchedDeleteOpCtx.get(), nss);
+    CollectionPtr coll(CollectionCatalog::get(batchedDeleteOpCtx.get())
+                           ->lookupCollectionByNamespace(batchedDeleteOpCtx.get(), nss));
 
     ASSERT(coll);
 
@@ -484,8 +484,8 @@ TEST_F(QueryStageBatchedDeleteTest, BatchedDeleteStagedDocIsUpdatedToNotMatchCli
 
     auto nDocs = 11;
     prePopulateCollection(nDocs);
-    const CollectionPtr& coll = CollectionCatalog::get(batchedDeleteOpCtx.get())
-                                    ->lookupCollectionByNamespace(batchedDeleteOpCtx.get(), nss);
+    CollectionPtr coll(CollectionCatalog::get(batchedDeleteOpCtx.get())
+                           ->lookupCollectionByNamespace(batchedDeleteOpCtx.get(), nss));
 
     ASSERT(coll);
 

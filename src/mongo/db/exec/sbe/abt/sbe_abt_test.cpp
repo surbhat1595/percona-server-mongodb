@@ -390,8 +390,9 @@ TEST_F(NodeSBE, Lower1) {
     Metadata metadata{{}};
 
     auto opCtx = makeOperationContext();
-    auto pipeline = parsePipeline(
-        "[{$project:{'a.b.c.d':{$literal:'abc'}}}]", NamespaceString("test"), opCtx.get());
+    auto pipeline = parsePipeline("[{$project:{'a.b.c.d':{$literal:'abc'}}}]",
+                                  NamespaceString::createNamespaceString_forTest("test"),
+                                  opCtx.get());
 
     const auto [tag, val] = sbe::value::makeNewArray();
     {
@@ -502,19 +503,14 @@ TEST_F(NodeSBE, Lower2) {
     phaseManager.optimize(root);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pa\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
+        "Root [{pa}]\n"
         "MergeJoin []\n"
         "|   |   |   Condition\n"
         "|   |   |       rid_0 = rid_1\n"
         "|   |   Collation\n"
         "|   |       Ascending\n"
         "|   Union [{rid_1}]\n"
-        "|   Evaluation [{rid_1}]\n"
-        "|   |   Variable [rid_0]\n"
+        "|   Evaluation [{rid_1} = Variable [rid_0]]\n"
         "|   IndexScan [{'<rid>': rid_0}, scanDefName: test, indexDefName: index2, interval: {=Co"
         "nst [2]}]\n"
         "IndexScan [{'<indexKey> 0': pa, '<rid>': rid_0}, scanDefName: test, indexDefName: index1"
@@ -561,11 +557,7 @@ TEST_F(NodeSBE, Lower2) {
 
     // Now we should have a plan with a SortedMerge in it.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pa\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
+        "Root [{pa}]\n"
         "SortedMerge []\n"
         "|   |   |   collation: \n"
         "|   |   |       rid_0: Ascending\n"
@@ -605,7 +597,8 @@ TEST_F(NodeSBE, RequireRID) {
     Metadata metadata{{}};
 
     auto opCtx = makeOperationContext();
-    auto pipeline = parsePipeline("[{$match: {a: 2}}]", NamespaceString("test"), opCtx.get());
+    auto pipeline = parsePipeline(
+        "[{$match: {a: 2}}]", NamespaceString::createNamespaceString_forTest("test"), opCtx.get());
 
     const ProjectionName scanProjName = prefixId.getNextId("scan");
 
@@ -758,11 +751,7 @@ TEST_F(NodeSBE, SpoolFibonacci) {
                     .finish(_coscan());
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       val\n"
-        "|   RefBlock: \n"
-        "|       Variable [val]\n"
+        "Root [{val}]\n"
         "SpoolProducer [Lazy, id: 1, {it, val, val_prev}]\n"
         "|   |   Const [true]\n"
         "Union [{it, val, val_prev}]\n"
@@ -770,8 +759,7 @@ TEST_F(NodeSBE, SpoolFibonacci) {
         "|   |   BinaryOp [Add]\n"
         "|   |   |   Variable [valIn_prev]\n"
         "|   |   Variable [valIn]\n"
-        "|   Evaluation [{val_prev}]\n"
-        "|   |   Variable [valIn]\n"
+        "|   Evaluation [{val_prev} = Variable [valIn]]\n"
         "|   Evaluation [{it}]\n"
         "|   |   BinaryOp [Add]\n"
         "|   |   |   Const [1]\n"
@@ -781,12 +769,9 @@ TEST_F(NodeSBE, SpoolFibonacci) {
         "|   |   |   Const [10]\n"
         "|   |   Variable [itIn]\n"
         "|   SpoolConsumer [Stack, id: 1, {itIn, valIn, valIn_prev}]\n"
-        "Evaluation [{val}]\n"
-        "|   Const [1]\n"
-        "Evaluation [{val_prev}]\n"
-        "|   Const [0]\n"
-        "Evaluation [{it}]\n"
-        "|   Const [1]\n"
+        "Evaluation [{val} = Const [1]]\n"
+        "Evaluation [{val_prev} = Const [0]]\n"
+        "Evaluation [{it} = Const [1]]\n"
         "LimitSkip [limit: 1, skip: 0]\n"
         "CoScan []\n",
         tree);

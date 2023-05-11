@@ -46,6 +46,7 @@
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
+#include "mongo/db/create_indexes_gen.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/write_stage_common.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -121,6 +122,30 @@ repl::OpTime logOperation(OperationContext* opCtx,
     auto opTime = oplogWriter->logOp(opCtx, oplogEntry);
     times.push_back(opTime);
     return opTime;
+}
+
+/**
+ * Generic function that logs an operation.
+ * Intended to reduce branching at call-sites by accepting the least common denominator
+ * type: a MutableOplogEntry.
+ *
+ * 'fromMigrate' is generally hard-coded to false, but is supplied by a few
+ * scenarios from mongos related behavior.
+ */
+void logMutableOplogEntry(OperationContext* opCtx,
+                          MutableOplogEntry* entry,
+                          bool fromMigrate,
+                          OplogWriter* oplogWriter) {
+    auto txnParticipant = TransactionParticipant::get(opCtx);
+    const bool inMultiDocumentTransaction =
+        txnParticipant && opCtx->writesAreReplicated() && txnParticipant.transactionIsOpen();
+
+    if (inMultiDocumentTransaction) {
+        txnParticipant.addTransactionOperation(opCtx, entry->toReplOperation());
+    } else {
+        entry->setFromMigrateIfTrue(fromMigrate);
+        logOperation(opCtx, entry, /*assignWallClockTime=*/true, oplogWriter);
+    }
 }
 
 /**
@@ -374,28 +399,18 @@ void OpObserverImpl::onCreateIndex(OperationContext* opCtx,
                                    const UUID& uuid,
                                    BSONObj indexDoc,
                                    bool fromMigrate) {
-    auto txnParticipant = TransactionParticipant::get(opCtx);
-    const bool inMultiDocumentTransaction =
-        txnParticipant && opCtx->writesAreReplicated() && txnParticipant.transactionIsOpen();
+    BSONObjBuilder builder;
+    builder.append(CreateIndexesCommand::kCommandName, nss.coll());
+    builder.appendElements(indexDoc);
 
-    if (inMultiDocumentTransaction) {
-        auto operation = MutableOplogEntry::makeCreateIndexesCommand(nss, uuid, indexDoc);
-        txnParticipant.addTransactionOperation(opCtx, operation);
-    } else {
-        BSONObjBuilder builder;
-        builder.append("createIndexes", nss.coll());
-        builder.appendElements(indexDoc);
+    MutableOplogEntry oplogEntry;
+    oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
+    oplogEntry.setTid(nss.tenantId());
+    oplogEntry.setNss(nss.getCommandNS());
+    oplogEntry.setUuid(uuid);
+    oplogEntry.setObject(builder.done());
 
-        MutableOplogEntry oplogEntry;
-        oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
-
-        oplogEntry.setTid(nss.tenantId());
-        oplogEntry.setNss(nss.getCommandNS());
-        oplogEntry.setUuid(uuid);
-        oplogEntry.setObject(builder.done());
-        oplogEntry.setFromMigrateIfTrue(fromMigrate);
-        logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _oplogWriter.get());
-    }
+    logMutableOplogEntry(opCtx, &oplogEntry, fromMigrate, _oplogWriter.get());
 }
 
 void OpObserverImpl::onStartIndexBuild(OperationContext* opCtx,
@@ -693,8 +708,8 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
             auto externalKey =
                 ExternalKeysCollectionDocument::parse(IDLParserContext("externalKey"), it->doc);
             opCtx->recoveryUnit()->onCommit(
-                [this, opCtx, externalKey = std::move(externalKey)](
-                    boost::optional<Timestamp> unusedCommitTime) mutable {
+                [this, externalKey = std::move(externalKey)](OperationContext* opCtx,
+                                                             boost::optional<Timestamp>) mutable {
                     auto validator = LogicalTimeValidator::get(opCtx);
                     if (validator) {
                         validator->cacheExternalKey(externalKey);
@@ -1157,26 +1172,18 @@ void OpObserverImpl::onCreateCollection(OperationContext* opCtx,
         return;
     }
 
-    auto txnParticipant = TransactionParticipant::get(opCtx);
-    const bool inMultiDocumentTransaction =
-        txnParticipant && opCtx->writesAreReplicated() && txnParticipant.transactionIsOpen();
+    MutableOplogEntry oplogEntry;
+    oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
+    oplogEntry.setTid(collectionName.tenantId());
+    oplogEntry.setNss(collectionName.getCommandNS());
+    oplogEntry.setUuid(options.uuid);
+    oplogEntry.setObject(MutableOplogEntry::makeCreateCollCmdObj(collectionName, options, idIndex));
 
-    if (inMultiDocumentTransaction) {
-        auto operation = MutableOplogEntry::makeCreateCommand(collectionName, options, idIndex);
-        txnParticipant.addTransactionOperation(opCtx, operation);
-    } else {
-        MutableOplogEntry oplogEntry;
-        oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
-
-        oplogEntry.setTid(collectionName.tenantId());
-        oplogEntry.setNss(collectionName.getCommandNS());
-        oplogEntry.setUuid(options.uuid);
-        oplogEntry.setObject(
-            MutableOplogEntry::makeCreateCollCmdObj(collectionName, options, idIndex));
+    if (!createOpTime.isNull()) {
         oplogEntry.setOpTime(createOpTime);
-        oplogEntry.setFromMigrateIfTrue(fromMigrate);
-        logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _oplogWriter.get());
     }
+
+    logMutableOplogEntry(opCtx, &oplogEntry, fromMigrate, _oplogWriter.get());
 }
 
 void OpObserverImpl::onCollMod(OperationContext* opCtx,
@@ -1230,8 +1237,7 @@ void OpObserverImpl::onCollMod(OperationContext* opCtx,
     if (!db) {
         return;
     }
-    const CollectionPtr& coll =
-        CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
+    const Collection* coll = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
 
     invariant(coll->uuid() == uuid);
 }
@@ -1247,7 +1253,7 @@ void OpObserverImpl::onDropDatabase(OperationContext* opCtx, const DatabaseName&
 
     uassert(50714,
             "dropping the admin database is not allowed.",
-            dbName.db() != NamespaceString::kAdminDb);
+            dbName.db() != DatabaseName::kAdmin.db());
 
     if (dbName.db() == NamespaceString::kSessionTransactionsTableNamespace.db()) {
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
@@ -1666,7 +1672,7 @@ void logCommitOrAbortForPreparedTransaction(OperationContext* opCtx,
     const auto txnRetryCounter = *opCtx->getTxnRetryCounter();
 
     oplogEntry->setOpType(repl::OpTypeEnum::kCommand);
-    oplogEntry->setNss({"admin", "$cmd"});
+    oplogEntry->setNss(NamespaceString::kAdminCommandNamespace);
     oplogEntry->setSessionId(opCtx->getLogicalSessionId());
     oplogEntry->setTxnNumber(opCtx->getTxnNumber());
     if (!isDefaultTxnRetryCounter(txnRetryCounter)) {
@@ -2087,7 +2093,7 @@ void OpObserverImpl::onTransactionPrepare(
                     auto oplogSlot = reservedSlots.front();
                     MutableOplogEntry oplogEntry;
                     oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
-                    oplogEntry.setNss({"admin", "$cmd"});
+                    oplogEntry.setNss(NamespaceString::kAdminCommandNamespace);
                     oplogEntry.setOpTime(oplogSlot);
                     oplogEntry.setPrevWriteOpTimeInTransaction(repl::OpTime());
                     oplogEntry.setObject(applyOpsBuilder.done());

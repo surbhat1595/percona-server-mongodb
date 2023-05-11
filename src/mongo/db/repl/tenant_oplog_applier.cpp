@@ -596,6 +596,7 @@ void TenantOplogApplier::_writeSessionNoOpsForRange(
         noopEntry.setObject2(entry.getEntry().toBSON());
         noopEntry.setOpTime(*iter->second);
         noopEntry.setWallClockTime(opCtx->getServiceContext()->getFastClockSource()->now());
+        noopEntry.setTid(entry.getTid());
 
         boost::optional<SessionTxnRecord> sessionTxnRecord;
         std::vector<StmtId> stmtIds;
@@ -1064,7 +1065,8 @@ Status TenantOplogApplier::_applyOplogEntryOrGroupedInserts(
         }
     }
     // We don't count tenant application in the ops applied stats.
-    auto incrementOpsAppliedStats = [] {};
+    auto incrementOpsAppliedStats = [] {
+    };
     auto status = OplogApplierUtils::applyOplogEntryOrGroupedInsertsCommon(opCtx,
                                                                            entryOrGroupedInserts,
                                                                            oplogApplicationMode,

@@ -43,6 +43,7 @@
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/drop_collection.h"
 #include "mongo/db/catalog/local_oplog_info.h"
+#include "mongo/db/catalog_shard_feature_flag_gen.h"
 #include "mongo/db/change_stream_change_collection_manager.h"
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
 #include "mongo/db/change_stream_serverless_helpers.h"
@@ -134,10 +135,6 @@ namespace repl {
 namespace {
 
 const char kLocalDbName[] = "local";
-// TODO SERVER-62491 Use SystemTenantId
-const DatabaseName kConfigDatabaseName{boost::none, kLocalDbName};
-
-const NamespaceString kConfigCollectionNS{kLocalDbName, "system.replset"};
 
 MONGO_FAIL_POINT_DEFINE(dropPendingCollectionReaperHang);
 
@@ -429,7 +426,8 @@ Status ReplicationCoordinatorExternalStateImpl::initializeReplSetStorage(Operati
                                {
                                    // Writes to 'local.system.replset' must be untimestamped.
                                    WriteUnitOfWork wuow(opCtx);
-                                   Helpers::putSingleton(opCtx, kConfigCollectionNS, config);
+                                   Helpers::putSingleton(
+                                       opCtx, NamespaceString::kSystemReplSetNamespace, config);
                                    wuow.commit();
                                }
                                {
@@ -564,13 +562,17 @@ StatusWith<BSONObj> ReplicationCoordinatorExternalStateImpl::loadLocalConfigDocu
     OperationContext* opCtx) {
     try {
         return writeConflictRetry(
-            opCtx, "load replica set config", kConfigCollectionNS.ns(), [opCtx] {
+            opCtx,
+            "load replica set config",
+            NamespaceString::kSystemReplSetNamespace.ns(),
+            [opCtx] {
                 BSONObj config;
-                if (!Helpers::getSingleton(opCtx, kConfigCollectionNS, config)) {
+                if (!Helpers::getSingleton(
+                        opCtx, NamespaceString::kSystemReplSetNamespace, config)) {
                     return StatusWith<BSONObj>(
                         ErrorCodes::NoMatchingDocument,
                         "Did not find replica set configuration document in {}"_format(
-                            kConfigCollectionNS.toString()));
+                            NamespaceString::kSystemReplSetNamespace.toString()));
                 }
                 return StatusWith<BSONObj>(config);
             });
@@ -583,29 +585,30 @@ Status ReplicationCoordinatorExternalStateImpl::storeLocalConfigDocument(Operati
                                                                          const BSONObj& config,
                                                                          bool writeOplog) {
     try {
-        writeConflictRetry(opCtx, "save replica set config", kConfigCollectionNS.ns(), [&] {
-            {
-                // Writes to 'local.system.replset' must be untimestamped.
-                WriteUnitOfWork wuow(opCtx);
-                Lock::DBLock dbWriteLock(opCtx, kConfigDatabaseName, MODE_X);
-                Helpers::putSingleton(opCtx, kConfigCollectionNS, config);
-                wuow.commit();
-            }
+        writeConflictRetry(
+            opCtx, "save replica set config", NamespaceString::kSystemReplSetNamespace.ns(), [&] {
+                {
+                    // Writes to 'local.system.replset' must be untimestamped.
+                    WriteUnitOfWork wuow(opCtx);
+                    AutoGetCollection coll(opCtx, NamespaceString::kSystemReplSetNamespace, MODE_X);
+                    Helpers::putSingleton(opCtx, NamespaceString::kSystemReplSetNamespace, config);
+                    wuow.commit();
+                }
 
-            if (writeOplog) {
-                // The no-op write doesn't affect the correctness of the safe reconfig protocol and
-                // so it doesn't have to be written in the same WUOW as the config write. In fact,
-                // the no-op write is only needed for some corner cases where the committed snapshot
-                // is dropped after a force reconfig that changes the config content or a safe
-                // reconfig that changes writeConcernMajorityJournalDefault.
-                WriteUnitOfWork wuow(opCtx);
-                auto msgObj = BSON("msg"
-                                   << "Reconfig set"
-                                   << "version" << config["version"]);
-                _service->getOpObserver()->onOpMessage(opCtx, msgObj);
-                wuow.commit();
-            }
-        });
+                if (writeOplog) {
+                    // The no-op write doesn't affect the correctness of the safe reconfig protocol
+                    // and so it doesn't have to be written in the same WUOW as the config write. In
+                    // fact, the no-op write is only needed for some corner cases where the
+                    // committed snapshot is dropped after a force reconfig that changes the config
+                    // content or a safe reconfig that changes writeConcernMajorityJournalDefault.
+                    WriteUnitOfWork wuow(opCtx);
+                    auto msgObj = BSON("msg"
+                                       << "Reconfig set"
+                                       << "version" << config["version"]);
+                    _service->getOpObserver()->onOpMessage(opCtx, msgObj);
+                    wuow.commit();
+                }
+            });
         return Status::OK();
     } catch (const DBException& ex) {
         return ex.toStatus();
@@ -614,13 +617,14 @@ Status ReplicationCoordinatorExternalStateImpl::storeLocalConfigDocument(Operati
 
 Status ReplicationCoordinatorExternalStateImpl::replaceLocalConfigDocument(
     OperationContext* opCtx, const BSONObj& config) try {
-    writeConflictRetry(opCtx, "replace replica set config", kConfigCollectionNS.ns(), [&] {
-        WriteUnitOfWork wuow(opCtx);
-        Lock::DBLock dbWriteLock(opCtx, kConfigDatabaseName, MODE_X);
-        Helpers::emptyCollection(opCtx, kConfigCollectionNS);
-        Helpers::putSingleton(opCtx, kConfigCollectionNS, config);
-        wuow.commit();
-    });
+    writeConflictRetry(
+        opCtx, "replace replica set config", NamespaceString::kSystemReplSetNamespace.ns(), [&] {
+            WriteUnitOfWork wuow(opCtx);
+            AutoGetCollection coll(opCtx, NamespaceString::kSystemReplSetNamespace, MODE_X);
+            Helpers::emptyCollection(opCtx, NamespaceString::kSystemReplSetNamespace);
+            Helpers::putSingleton(opCtx, NamespaceString::kSystemReplSetNamespace, config);
+            wuow.commit();
+        });
     return Status::OK();
 } catch (const DBException& ex) {
     return ex.toStatus();
@@ -831,11 +835,9 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnStepDownHook() {
     if (ShardingState::get(_service)->enabled()) {
         ChunkSplitter::get(_service).onStepDown();
         PeriodicBalancerConfigRefresher::get(_service).onStepDown();
+        CatalogCacheLoader::get(_service).onStepDown();
 
         if (serverGlobalParams.clusterRole != ClusterRole::ConfigServer) {
-            // Config shards don't use a loader that requires this.
-            CatalogCacheLoader::get(_service).onStepDown();
-
             // Called earlier for config servers.
             TransactionCoordinatorService::get(_service)->onStepDown();
         }
@@ -940,11 +942,15 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
 
         PeriodicShardedIndexConsistencyChecker::get(_service).onStepUp(_service);
         TransactionCoordinatorService::get(_service)->onStepUp(opCtx);
+
+        if (gFeatureFlagCatalogShard.isEnabledAndIgnoreFCV()) {
+            CatalogCacheLoader::get(_service).onStepUp();
+        }
     }
     if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
         if (ShardingState::get(opCtx)->enabled()) {
-            Status status = ShardingStateRecovery_DEPRECATED::recover(opCtx);
             VectorClockMutable::get(opCtx)->recoverDirect(opCtx);
+            Status status = ShardingStateRecovery_DEPRECATED::recover(opCtx);
 
             // If the node is shutting down or it lost quorum just as it was becoming primary, don't
             // run the sharding onStepUp machinery. The onStepDown counterpart to these methods is
@@ -957,11 +963,9 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
 
             ChunkSplitter::get(_service).onStepUp();
             PeriodicBalancerConfigRefresher::get(_service).onStepUp(_service);
+            CatalogCacheLoader::get(_service).onStepUp();
 
             if (serverGlobalParams.clusterRole != ClusterRole::ConfigServer) {
-                // Config shards don't use a loader that requires this.
-                CatalogCacheLoader::get(_service).onStepUp();
-
                 // Called earlier for config servers.
                 TransactionCoordinatorService::get(_service)->onStepUp(opCtx);
             }
@@ -1054,6 +1058,17 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
             validator->enableKeyGenerator(opCtx, true);
         }
     }
+
+    if (gFeatureFlagCatalogShard.isEnabled(serverGlobalParams.featureCompatibility) &&
+        serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&
+        !ShardingState::get(opCtx)->enabled()) {
+        // Note this must be called after the config server has created the cluster ID and also
+        // after the onStepUp logic for the shard role because this triggers sharding state
+        // initialization which will transition some components into the "primary" state, like the
+        // TransactionCoordinatorService, and they would fail if the onStepUp logic attempted the
+        // same transition.
+        ShardingCatalogManager::get(opCtx)->installConfigShardIdentityDocument(opCtx);
+    }
 }
 
 void ReplicationCoordinatorExternalStateImpl::signalApplierToChooseNewSyncSource() {
@@ -1111,7 +1126,7 @@ void ReplicationCoordinatorExternalStateImpl::_dropAllTempCollections(OperationC
     for (const auto& dbName : dbNames) {
         // The local db is special because it isn't replicated. It is cleared at startup even on
         // replica set members.
-        if (dbName.db() == NamespaceString::kLocalDb)
+        if (dbName == DatabaseName::kLocal)
             continue;
 
         LOGV2_DEBUG(21309,
@@ -1271,14 +1286,12 @@ bool ReplicationCoordinatorExternalStateImpl::isShardPartOfShardedCluster(
 bool ReplicationCoordinatorExternalStateImpl::isCWWCSetOnConfigShard(
     OperationContext* opCtx) const {
     GetDefaultRWConcern configsvrRequest;
-    // Empty tenant id is acceptable here as command's tenant id will not be serialized to BSON.
-    // TODO SERVER-62491: Use system tenant id.
-    configsvrRequest.setDbName(DatabaseName(boost::none, NamespaceString::kAdminDb));
+    configsvrRequest.setDbName(DatabaseName::kAdmin);
     auto cmdResponse = uassertStatusOK(
         Grid::get(opCtx)->shardRegistry()->getConfigShard()->runCommandWithFixedRetryAttempts(
             opCtx,
             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-            NamespaceString::kAdminDb.toString(),
+            DatabaseName::kAdmin.toString(),
             configsvrRequest.toBSON({}),
             Shard::RetryPolicy::kIdempotent));
 

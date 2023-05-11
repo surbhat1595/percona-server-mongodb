@@ -32,6 +32,8 @@
 
 #include <cmath>
 #include <limits>
+#include <s2cell.h>
+#include <s2regioncoverer.h>
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsontypes.h"
@@ -52,8 +54,6 @@
 #include "mongo/db/query/planner_wildcard_helpers.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/logv2/log.h"
-#include "third_party/s2/s2cell.h"
-#include "third_party/s2/s2regioncoverer.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -301,8 +301,15 @@ void IndexBoundsBuilder::translate(const MatchExpression* expr,
     // adjusted regardless of the predicate. Having filled out the initial bounds, we apply any
     // necessary changes to the tightness here.
     if (index.type == IndexType::INDEX_WILDCARD) {
-        *tightnessOut =
-            wcp::translateWildcardIndexBoundsAndTightness(index, *tightnessOut, oilOut, ietBuilder);
+        // Check if 'elt' is the wildcard field.
+        BSONElement wildcardElt = wcp::getWildcardField(index);
+
+        // Adjust index bounds and tightness only if the index bounds generated are for the wildcard
+        // field.
+        if (wildcardElt.fieldNameStringData() == elt.fieldNameStringData()) {
+            *tightnessOut = wcp::translateWildcardIndexBoundsAndTightness(
+                index, *tightnessOut, oilOut, ietBuilder);
+        }
     }
 }
 

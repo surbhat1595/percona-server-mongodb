@@ -30,6 +30,7 @@
 #include "mongo/db/catalog/index_repair.h"
 #include "mongo/base/status_with.h"
 #include "mongo/db/catalog/collection_write_path.h"
+#include "mongo/db/catalog/collection_yield_restore.h"
 #include "mongo/db/catalog/validate_state.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/exception_util.h"
@@ -46,7 +47,7 @@ StatusWith<int> moveRecordToLostAndFound(OperationContext* opCtx,
     AutoGetCollection autoColl(opCtx, lostAndFoundNss, MODE_IX);
     auto catalog = CollectionCatalog::get(opCtx);
     auto originalCollection = catalog->lookupCollectionByNamespace(opCtx, nss);
-    CollectionPtr localCollection = catalog->lookupCollectionByNamespace(opCtx, lostAndFoundNss);
+    CollectionPtr localCollection(catalog->lookupCollectionByNamespace(opCtx, lostAndFoundNss));
 
     // Creates the collection if it doesn't exist.
     if (!localCollection) {
@@ -63,7 +64,8 @@ StatusWith<int> moveRecordToLostAndFound(OperationContext* opCtx,
                 // duplicate key errors on the _id value.
                 CollectionOptions collOptions;
                 collOptions.setNoIdIndex();
-                localCollection = db->createCollection(opCtx, lostAndFoundNss, collOptions);
+                localCollection =
+                    CollectionPtr(db->createCollection(opCtx, lostAndFoundNss, collOptions));
 
                 // Ensure the collection exists.
                 invariant(localCollection, lostAndFoundNss.ns());
@@ -75,6 +77,8 @@ StatusWith<int> moveRecordToLostAndFound(OperationContext* opCtx,
             return status;
         }
     }
+
+    localCollection.makeYieldable(opCtx, LockedCollectionYieldRestore(opCtx, localCollection));
 
     return writeConflictRetry(
         opCtx, "writeDupDocToLostAndFoundCollection", nss.ns(), [&]() -> StatusWith<int> {
@@ -99,7 +103,7 @@ StatusWith<int> moveRecordToLostAndFound(OperationContext* opCtx,
             // this document matches the record id of the element it tries to unindex. This avoids
             // wrongly unindexing a document with the same _id.
             collection_internal::deleteDocument(opCtx,
-                                                originalCollection,
+                                                CollectionPtr(originalCollection),
                                                 kUninitializedStmtId,
                                                 dupRecord,
                                                 nullptr /* opDebug */,
@@ -176,8 +180,8 @@ int repairMissingIndexEntry(OperationContext* opCtx,
         Snapshotted<BSONObj> doc;
         if (coll->findDoc(opCtx, ridToMove, &doc)) {
 
-            const NamespaceString lostAndFoundNss = NamespaceString(
-                NamespaceString::kLocalDb, "lost_and_found." + coll->uuid().toString());
+            const NamespaceString lostAndFoundNss =
+                NamespaceString(DatabaseName::kLocal, "lost_and_found." + coll->uuid().toString());
 
             auto moveStatus = moveRecordToLostAndFound(opCtx, nss, lostAndFoundNss, ridToMove);
 

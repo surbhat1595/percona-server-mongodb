@@ -81,7 +81,7 @@ TEST_F(ConfigIndexTest, IncompatibleIndexAlreadyExists) {
 }
 
 TEST_F(ConfigIndexTest, CreateIndex) {
-    NamespaceString nss("config.foo");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("config.foo");
 
     ASSERT_EQUALS(ErrorCodes::NamespaceNotFound, getIndexes(operationContext(), nss).getStatus());
 
@@ -111,13 +111,13 @@ TEST_F(ConfigIndexTest, CreateIndex) {
 }
 
 TEST_F(ConfigIndexTest, CreateIndexNonEmptyCollection) {
-    NamespaceString nss("config.foo");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("config.foo");
 
     ASSERT_EQUALS(ErrorCodes::NamespaceNotFound, getIndexes(operationContext(), nss).getStatus());
 
     // Inserting the document should implicitly create the collection
     DBDirectClient dbDirectClient(operationContext());
-    dbDirectClient.insert(nss.toString(), BSON("_id" << 1 << "a" << 1));
+    dbDirectClient.insert(nss, BSON("_id" << 1 << "a" << 1));
 
     auto status = createIndexOnConfigCollection(operationContext(), nss, BSON("a" << 1), false);
     ASSERT_OK(status);

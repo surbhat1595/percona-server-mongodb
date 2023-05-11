@@ -859,7 +859,7 @@ void ReshardingRecipientService::RecipientStateMachine::_cleanupReshardingCollec
             dropCollectionGlobalIndexesMetadata(opCtx.get(), _metadata.getTempReshardingNss());
         }
 
-        mongo::sharding_ddl_util::ensureCollectionDroppedNoChangeEvent(
+        resharding::data_copy::ensureCollectionDropped(
             opCtx.get(), _metadata.getTempReshardingNss(), _metadata.getReshardingUUID());
     }
 }
@@ -1132,7 +1132,7 @@ void ReshardingRecipientService::RecipientStateMachine::_removeRecipientDocument
 
             WriteUnitOfWork wuow(opCtx.get());
 
-            opCtx->recoveryUnit()->onCommit([this](boost::optional<Timestamp> unusedCommitTime) {
+            opCtx->recoveryUnit()->onCommit([this](OperationContext*, boost::optional<Timestamp>) {
                 stdx::lock_guard<Latch> lk(_mutex);
                 _completionPromise.emplaceValue();
             });
@@ -1201,7 +1201,9 @@ void ReshardingRecipientService::RecipientStateMachine::_restoreMetrics(
     std::vector<std::pair<ShardId, boost::optional<ReshardingOplogApplierProgress>>>
         progressDocList;
     for (const auto& donor : _donorShards) {
-        auto setOrAdd = [](auto& opt, auto add) { opt = opt.value_or(0) + add; };
+        auto setOrAdd = [](auto& opt, auto add) {
+            opt = opt.value_or(0) + add;
+        };
         {
             AutoGetCollection oplogBufferColl(opCtx.get(),
                                               resharding::getLocalOplogBufferNamespace(

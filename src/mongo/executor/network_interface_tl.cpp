@@ -35,10 +35,12 @@
 #include "mongo/config.h"
 #include "mongo/db/auth/validated_tenancy_scope.h"
 #include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/connection_health_metrics_parameter_gen.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/connection_pool_tl.h"
+#include "mongo/executor/hedge_options_util.h"
 #include "mongo/executor/hedging_metrics.h"
 #include "mongo/executor/network_interface_tl_gen.h"
 #include "mongo/logv2/log.h"
@@ -472,10 +474,12 @@ void NetworkInterfaceTL::CommandStateBase::setTimer() {
     const auto timeoutCode = requestOnAny.timeoutCode;
     if (nowVal >= deadline) {
         connTimeoutWaitTime = stopwatch.elapsed();
-        LOGV2(6496501,
-              "Operation timed out while waiting to acquire connection",
-              "requestId"_attr = requestOnAny.id,
-              "duration"_attr = connTimeoutWaitTime);
+        if (gEnableDetailedConnectionHealthMetricLogLines) {
+            LOGV2(6496501,
+                  "Operation timed out while waiting to acquire connection",
+                  "requestId"_attr = requestOnAny.id,
+                  "duration"_attr = connTimeoutWaitTime);
+        }
         uasserted(timeoutCode,
                   str::stream() << "Remote command timed out while waiting to get a "
                                    "connection from the pool, took "
@@ -602,12 +606,12 @@ Status NetworkInterfaceTL::startCommand(const TaskExecutor::CallbackHandle& cbHa
     }
 
     bool targetHostsInAlphabeticalOrder =
-        MONGO_unlikely(networkInterfaceSendRequestsToTargetHostsInAlphabeticalOrder.shouldFail(
+        MONGO_unlikely(hedgedReadsSendRequestsToTargetHostsInAlphabeticalOrder.shouldFail(
             [&](const BSONObj&) { return request.options.hedgeOptions.isHedgeEnabled; }));
 
     if (targetHostsInAlphabeticalOrder) {
         std::sort(request.target.begin(), request.target.end(), [](auto&& a, auto&& b) {
-            return detail::orderByLowerHostThenPort(a, b);
+            return compareByLowerHostThenPort(a, b);
         });
     }
 
@@ -844,10 +848,12 @@ void NetworkInterfaceTL::RequestManager::trySend(
         if (cmdState->finishLine.arriveStrongly()) {
             if (swConn.getStatus() == cmdState->requestOnAny.timeoutCode) {
                 cmdState->connTimeoutWaitTime = cmdState->stopwatch.elapsed();
-                LOGV2(6496500,
-                      "Operation timed out while waiting to acquire connection",
-                      "requestId"_attr = cmdState->requestOnAny.id,
-                      "duration"_attr = cmdState->connTimeoutWaitTime);
+                if (gEnableDetailedConnectionHealthMetricLogLines) {
+                    LOGV2(6496500,
+                          "Operation timed out while waiting to acquire connection",
+                          "requestId"_attr = cmdState->requestOnAny.id,
+                          "duration"_attr = cmdState->connTimeoutWaitTime);
+                }
             }
 
             auto& reactor = cmdState->interface->_reactor;
@@ -997,7 +1003,7 @@ void NetworkInterfaceTL::RequestState::resolve(Future<RemoteCommandResponse> fut
 
     std::move(anyFuture)                                    //
         .thenRunOn(makeGuaranteedExecutor(baton, reactor))  // Switch to the baton/reactor.
-        .getAsync([ this, anchor = shared_from_this() ](auto swr) noexcept {
+        .getAsync([this, anchor = shared_from_this()](auto swr) noexcept {
             auto response = uassertStatusOK(swr);
             auto status = response.status;
 
@@ -1459,18 +1465,5 @@ bool NetworkInterfaceTL::onNetworkThread() {
 void NetworkInterfaceTL::dropConnections(const HostAndPort& hostAndPort) {
     _pool->dropConnections(hostAndPort);
 }
-
-namespace detail {
-
-bool orderByLowerHostThenPort(const HostAndPort& a, const HostAndPort& b) {
-    const auto& ah = a.host();
-    const auto& bh = b.host();
-    if (int r = compareTransformed(
-            ah.begin(), ah.end(), bh.begin(), bh.end(), [](auto&& c) { return ctype::toLower(c); }))
-        return r < 0;
-    return a.port() < b.port();
-}
-
-}  // namespace detail
 }  // namespace executor
 }  // namespace mongo

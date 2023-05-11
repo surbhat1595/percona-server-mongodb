@@ -48,7 +48,9 @@ namespace {
 void extract2Args(const BSONObj& args, BSONElement* elts) {
     const size_t nToExtract = 2;
 
-    auto fail = []() { uasserted(31220, "emit takes 2 args"); };
+    auto fail = []() {
+        uasserted(31220, "emit takes 2 args");
+    };
     BSONObjIterator it(args);
     for (size_t i = 0; i < nToExtract; ++i) {
         if (!it.more()) {
@@ -126,10 +128,10 @@ boost::intrusive_ptr<Expression> ExpressionInternalJsEmit::parse(ExpressionConte
     return new ExpressionInternalJsEmit(expCtx, std::move(thisRef), std::move(funcSourceString));
 }
 
-Value ExpressionInternalJsEmit::serialize(bool explain) const {
+Value ExpressionInternalJsEmit::serialize(SerializationOptions options) const {
     return Value(
         Document{{kExpressionName,
-                  Document{{"eval", _funcSource}, {"this", _thisRef->serialize(explain)}}}});
+                  Document{{"eval", _funcSource}, {"this", _thisRef->serialize(options)}}}});
 }
 
 Value ExpressionInternalJsEmit::evaluate(const Document& root, Variables* variables) const {

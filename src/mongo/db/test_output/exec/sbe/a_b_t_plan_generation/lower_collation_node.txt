@@ -10,11 +10,7 @@ Filter []
 |   FunctionCall [getField]
 |   |   Const ["a"]
 |   Variable [proj0]
-Collation []
-|   |   collation: 
-|   |       sortA: Ascending
-|   RefBlock: 
-|       Variable [sortA]
+Collation [{sortA: Ascending}]
 Evaluation [{proj1}]
 |   FunctionCall [getField]
 |   |   Const ["c"]
@@ -47,13 +43,7 @@ Filter []
 |   FunctionCall [getField]
 |   |   Const ["a"]
 |   Variable [proj0]
-Collation []
-|   |   collation: 
-|   |       sortA: Ascending
-|   |       sortB: Descending
-|   RefBlock: 
-|       Variable [sortA]
-|       Variable [sortB]
+Collation [{sortA: Ascending, sortB: Descending}]
 Evaluation [{proj0}]
 |   FunctionCall [getField]
 |   |   Const ["c"]

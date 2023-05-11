@@ -26,16 +26,19 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
+
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/s/query_analysis_writer.h"
 
+#include "mongo/bson/bsonobj.h"
 #include "mongo/client/connpool.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/repl/replica_set_aware_service.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/update/document_diff_calculator.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
@@ -49,7 +52,7 @@
 #include "mongo/util/future_util.h"
 #include "mongo/util/time_support.h"
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 namespace mongo {
 namespace analyze_shard_key {
@@ -84,7 +87,7 @@ BSONObj createSampledQueriesTTLIndex(OperationContext* opCtx) {
     LOGV2_DEBUG(7078401,
                 1,
                 "Creation of the TTL index for the collection storing sampled queries",
-                "ns"_attr = NamespaceString::kConfigSampledQueriesNamespace,
+                "namespace"_attr = NamespaceString::kConfigSampledQueriesNamespace,
                 "response"_attr = redact(resObj));
 
     return resObj;
@@ -107,7 +110,7 @@ BSONObj createSampledQueriesDiffTTLIndex(OperationContext* opCtx) {
     LOGV2_DEBUG(7078402,
                 1,
                 "Creation of the TTL index for the collection storing sampled diffs",
-                "ns"_attr = NamespaceString::kConfigSampledQueriesDiffNamespace,
+                "namespace"_attr = NamespaceString::kConfigSampledQueriesDiffNamespace,
                 "response"_attr = redact(resObj));
 
     return resObj;
@@ -323,7 +326,7 @@ ExecutorFuture<void> QueryAnalysisWriter::createTTLIndexes(OperationContext* opC
 
 void QueryAnalysisWriter::_flushQueries(OperationContext* opCtx) {
     try {
-        _flush(opCtx, NamespaceString::kConfigSampledQueriesNamespace, &_queries);
+        _flush(opCtx, &_queries);
     } catch (DBException& ex) {
         LOGV2(7047300,
               "Failed to flush queries, will try again at the next interval",
@@ -333,7 +336,7 @@ void QueryAnalysisWriter::_flushQueries(OperationContext* opCtx) {
 
 void QueryAnalysisWriter::_flushDiffs(OperationContext* opCtx) {
     try {
-        _flush(opCtx, NamespaceString::kConfigSampledQueriesDiffNamespace, &_diffs);
+        _flush(opCtx, &_diffs);
     } catch (DBException& ex) {
         LOGV2(7075400,
               "Failed to flush diffs, will try again at the next interval",
@@ -341,10 +344,10 @@ void QueryAnalysisWriter::_flushDiffs(OperationContext* opCtx) {
     }
 }
 
-void QueryAnalysisWriter::_flush(OperationContext* opCtx,
-                                 const NamespaceString& ns,
-                                 Buffer* buffer) {
-    Buffer tmpBuffer;
+void QueryAnalysisWriter::_flush(OperationContext* opCtx, Buffer* buffer) {
+    const auto nss = buffer->getNss();
+
+    Buffer tmpBuffer(nss);
     // The indices of invalid documents, e.g. documents that fail to insert with DuplicateKey errors
     // (i.e. duplicates) and BadValue errors. Such documents should not get added back to the buffer
     // when the inserts below fail.
@@ -354,6 +357,13 @@ void QueryAnalysisWriter::_flush(OperationContext* opCtx,
         if (buffer->isEmpty()) {
             return;
         }
+
+        LOGV2_DEBUG(7372300,
+                    1,
+                    "About to flush the sample buffer",
+                    "namespace"_attr = nss,
+                    "numDocs"_attr = buffer->getCount());
+
         std::swap(tmpBuffer, *buffer);
     }
     ScopeGuard backSwapper([&] {
@@ -388,10 +398,13 @@ void QueryAnalysisWriter::_flush(OperationContext* opCtx,
         // We don't add a document that is above the size limit to the buffer so we should have
         // added at least one document to 'docsToInsert'.
         invariant(!docsToInsert.empty());
-        LOGV2_DEBUG(
-            6876102, 2, "Persisting samples", "ns"_attr = ns, "count"_attr = docsToInsert.size());
+        LOGV2_DEBUG(6876102,
+                    2,
+                    "Persisting samples",
+                    "namespace"_attr = nss,
+                    "numDocs"_attr = docsToInsert.size());
 
-        insertDocuments(opCtx, ns, docsToInsert, [&](const BSONObj& resObj) {
+        insertDocuments(opCtx, nss, docsToInsert, [&](const BSONObj& resObj) {
             BatchedCommandResponse res;
             std::string errMsg;
 
@@ -432,12 +445,25 @@ void QueryAnalysisWriter::_flush(OperationContext* opCtx,
     backSwapper.dismiss();
 }
 
-void QueryAnalysisWriter::Buffer::add(BSONObj doc) {
+bool QueryAnalysisWriter::Buffer::add(BSONObj doc) {
     if (doc.objsize() > kMaxBSONObjSizePerInsertBatch) {
-        return;
+        LOGV2_DEBUG(7372301,
+                    4,
+                    "Ignoring a sample due to its size",
+                    "namespace"_attr = _nss,
+                    "size"_attr = doc.objsize(),
+                    "doc"_attr = redact(doc));
+        return false;
     }
+
+    LOGV2_DEBUG(7372302,
+                4,
+                "Adding a sample to the buffer",
+                "namespace"_attr = _nss,
+                "doc"_attr = redact(doc));
     _docs.push_back(std::move(doc));
     _numBytes += _docs.back().objsize();
+    return true;
 }
 
 void QueryAnalysisWriter::Buffer::truncate(size_t index, long long numBytes) {
@@ -509,10 +535,14 @@ ExecutorFuture<void> QueryAnalysisWriter::_addReadQuery(const UUID& sampleId,
             auto expireAt = opCtx->getServiceContext()->getFastClockSource()->now() +
                 mongo::Milliseconds(gQueryAnalysisSampleExpirationSecs.load() * 1000);
             auto doc =
-                SampledQueryDocument{sampleId, nss, *collUuid, cmdName, cmd.toBSON(), expireAt};
+                SampledQueryDocument{sampleId, nss, *collUuid, cmdName, cmd.toBSON(), expireAt}
+                    .toBSON();
 
             stdx::lock_guard<Latch> lk(_mutex);
-            _queries.add(doc.toBSON());
+            if (_queries.add(doc)) {
+                auto counters = _getOrCreateSampleCounters(nss, *collUuid);
+                counters->incrementReads(doc.objsize());
+            }
         })
         .then([this] {
             if (_exceedsMaxSizeBytes()) {
@@ -524,7 +554,7 @@ ExecutorFuture<void> QueryAnalysisWriter::_addReadQuery(const UUID& sampleId,
         .onError([this, nss](Status status) {
             LOGV2(7047302,
                   "Failed to add read query",
-                  "ns"_attr = nss,
+                  "namespace"_attr = nss,
                   "error"_attr = redact(status));
         });
 }
@@ -555,10 +585,14 @@ ExecutorFuture<void> QueryAnalysisWriter::addUpdateQuery(
                                             *collUuid,
                                             SampledCommandNameEnum::kUpdate,
                                             std::move(sampledUpdateCmd.cmd),
-                                            expireAt};
+                                            expireAt}
+                           .toBSON();
 
             stdx::lock_guard<Latch> lk(_mutex);
-            _queries.add(doc.toBSON());
+            if (_queries.add(doc)) {
+                auto counters = _getOrCreateSampleCounters(sampledUpdateCmd.nss, *collUuid);
+                counters->incrementWrites(doc.objsize());
+            }
         })
         .then([this] {
             if (_exceedsMaxSizeBytes()) {
@@ -570,7 +604,7 @@ ExecutorFuture<void> QueryAnalysisWriter::addUpdateQuery(
         .onError([this, nss = updateCmd.getNamespace()](Status status) {
             LOGV2(7075301,
                   "Failed to add update query",
-                  "ns"_attr = nss,
+                  "namespace"_attr = nss,
                   "error"_attr = redact(status));
         });
 }
@@ -601,10 +635,14 @@ ExecutorFuture<void> QueryAnalysisWriter::addDeleteQuery(
                                             *collUuid,
                                             SampledCommandNameEnum::kDelete,
                                             std::move(sampledDeleteCmd.cmd),
-                                            expireAt};
+                                            expireAt}
+                           .toBSON();
 
             stdx::lock_guard<Latch> lk(_mutex);
-            _queries.add(doc.toBSON());
+            if (_queries.add(doc)) {
+                auto counters = _getOrCreateSampleCounters(sampledDeleteCmd.nss, *collUuid);
+                counters->incrementWrites(doc.objsize());
+            }
         })
         .then([this] {
             if (_exceedsMaxSizeBytes()) {
@@ -616,7 +654,7 @@ ExecutorFuture<void> QueryAnalysisWriter::addDeleteQuery(
         .onError([this, nss = deleteCmd.getNamespace()](Status status) {
             LOGV2(7075303,
                   "Failed to add delete query",
-                  "ns"_attr = nss,
+                  "namespace"_attr = nss,
                   "error"_attr = redact(status));
         });
 }
@@ -649,10 +687,14 @@ ExecutorFuture<void> QueryAnalysisWriter::addFindAndModifyQuery(
                                             *collUuid,
                                             SampledCommandNameEnum::kFindAndModify,
                                             std::move(sampledFindAndModifyCmd.cmd),
-                                            expireAt};
+                                            expireAt}
+                           .toBSON();
 
             stdx::lock_guard<Latch> lk(_mutex);
-            _queries.add(doc.toBSON());
+            if (_queries.add(doc)) {
+                auto counters = _getOrCreateSampleCounters(sampledFindAndModifyCmd.nss, *collUuid);
+                counters->incrementWrites(doc.objsize());
+            }
         })
         .then([this] {
             if (_exceedsMaxSizeBytes()) {
@@ -664,7 +706,7 @@ ExecutorFuture<void> QueryAnalysisWriter::addFindAndModifyQuery(
         .onError([this, nss = findAndModifyCmd.getNamespace()](Status status) {
             LOGV2(7075305,
                   "Failed to add findAndModify query",
-                  "ns"_attr = nss,
+                  "namespace"_attr = nss,
                   "error"_attr = redact(status));
         });
 }
@@ -706,8 +748,32 @@ ExecutorFuture<void> QueryAnalysisWriter::addDiff(const UUID& sampleId,
             }
         })
         .onError([this, nss](Status status) {
-            LOGV2(7075401, "Failed to add diff", "ns"_attr = nss, "error"_attr = redact(status));
+            LOGV2(7075401,
+                  "Failed to add diff",
+                  "namespace"_attr = nss,
+                  "error"_attr = redact(status));
         });
+}
+
+void QueryAnalysisWriter::reportForCurrentOp(std::vector<BSONObj>* ops) const {
+    for (auto it = _sampleCountersMap.begin(); it != _sampleCountersMap.end(); ++it) {
+        ops->push_back(it->second->reportCurrentOp());
+    }
+}
+
+std::shared_ptr<SampleCounters> QueryAnalysisWriter::_getOrCreateSampleCounters(
+    const NamespaceString& nss, const UUID& collUuid) {
+    auto it = _sampleCountersMap.find(collUuid);
+    if (it == _sampleCountersMap.end()) {
+        it = _sampleCountersMap.emplace(collUuid, std::make_shared<SampleCounters>(nss, collUuid))
+                 .first;
+    } else {
+        if (nss != it->second->getNss()) {
+            // TODO SERVER-73990 Make sure collection renames are handled correctly, and test.
+            it->second->setNss(nss);
+        }
+    }
+    return it->second;
 }
 
 }  // namespace analyze_shard_key

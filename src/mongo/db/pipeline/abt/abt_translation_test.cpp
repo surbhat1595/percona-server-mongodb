@@ -188,14 +188,15 @@ TEST_F(ABTTranslationTest, UnionTranslation) {
     std::string scanDefA = "collA";
     std::string scanDefB = "collB";
     Metadata metadataUnion{{{scanDefA, {}}, {scanDefB, {}}}};
-    testABTTranslationAndOptimization("union",
-                                      "[{$unionWith: 'collB'}, {$match: {_id: 1}}]",
-                                      scanDefA,
-                                      {},
-                                      metadataUnion,
-                                      {},
-                                      false,
-                                      {{NamespaceString("a." + scanDefB), {}}});
+    testABTTranslationAndOptimization(
+        "union",
+        "[{$unionWith: 'collB'}, {$match: {_id: 1}}]",
+        scanDefA,
+        {},
+        metadataUnion,
+        {},
+        false,
+        {{NamespaceString::createNamespaceString_forTest("a." + scanDefB), {}}});
 }
 
 TEST_F(ABTTranslationTest, SortTranslation) {
@@ -221,11 +222,7 @@ TEST_F(ServiceContextTest, CanonicalQueryTranslation) {
                                                     make<ScanNode>("test", "test"),
                                                     prefixId);
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       test\n"
-        "|   RefBlock: \n"
-        "|       Variable [test]\n"
+        "Root [{test}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [test]\n"
@@ -263,11 +260,7 @@ TEST_F(ServiceContextTest, NonDescriptiveNames) {
 
     // Observe projection names are not descriptive. They are of the form "pXXXX".
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       p4\n"
-        "|   RefBlock: \n"
-        "|       Variable [p4]\n"
+        "Root [{p4}]\n"
         "Evaluation [{p4}]\n"
         "|   EvalPath []\n"
         "|   |   Const [{}]\n"
@@ -278,10 +271,7 @@ TEST_F(ServiceContextTest, NonDescriptiveNames) {
         "|   PathField [_id]\n"
         "|   PathConstant []\n"
         "|   Variable [p1]\n"
-        "GroupBy []\n"
-        "|   |   groupings: \n"
-        "|   |       RefBlock: \n"
-        "|   |           Variable [p1]\n"
+        "GroupBy [{p1}]\n"
         "|   aggregations: \n"
         "|       [p2]\n"
         "|           FunctionCall [$sum]\n"

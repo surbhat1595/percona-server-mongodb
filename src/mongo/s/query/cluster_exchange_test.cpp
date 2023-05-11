@@ -49,7 +49,8 @@ using MergeStrategyDescriptor = DocumentSourceMerge::MergeStrategyDescriptor;
 using WhenMatched = MergeStrategyDescriptor::WhenMatched;
 using WhenNotMatched = MergeStrategyDescriptor::WhenNotMatched;
 
-const NamespaceString kTestTargetNss = NamespaceString{"unittests", "out_ns"};
+const NamespaceString kTestTargetNss =
+    NamespaceString::createNamespaceString_forTest("unittests", "out_ns");
 
 class ClusterExchangeTest : public ShardedAggTestFixture {
 protected:
@@ -103,8 +104,12 @@ TEST_F(ClusterExchangeTest, SingleMergeStageNotEligibleForExchangeIfOutputDataba
     });
 
     // Mock out a response as if the database doesn't exist.
-    expectFindSendBSONObjVector(kConfigHostAndPort, []() { return std::vector<BSONObj>{}; }());
-    expectFindSendBSONObjVector(kConfigHostAndPort, []() { return std::vector<BSONObj>{}; }());
+    expectFindSendBSONObjVector(kConfigHostAndPort, []() {
+        return std::vector<BSONObj>{};
+    }());
+    expectFindSendBSONObjVector(kConfigHostAndPort, []() {
+        return std::vector<BSONObj>{};
+    }());
 
     future.default_timed_get();
 }

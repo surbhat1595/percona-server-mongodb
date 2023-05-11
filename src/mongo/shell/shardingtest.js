@@ -1811,14 +1811,26 @@ var ShardingTest = function(params) {
             var testName = this._testName;
             var admin = this.admin;
 
-            this._connections.forEach(function(z) {
+            this._connections.forEach(function(z, idx) {
                 var n = z.name || z.host || z;
 
-                print("ShardingTest " + testName + " going to add shard : " + n);
+                var name;
+                if (isCatalogShardMode && idx == 0) {
+                    name = "config";
 
-                var result = assert.commandWorked(admin.runCommand({addshard: n}),
-                                                  "Failed to add shard " + n);
-                z.shardName = result.shardAdded;
+                    print("ShardingTest " + testName + " transitioning to catalog shard");
+
+                    var result =
+                        assert.commandWorked(admin.runCommand({transitionToCatalogShard: 1}));
+
+                    z.shardName = name;
+                } else {
+                    print("ShardingTest " + testName + " going to add shard : " + n);
+
+                    var result = assert.commandWorked(admin.runCommand({addshard: n}),
+                                                      "Failed to add shard " + n);
+                    z.shardName = result.shardAdded;
+                }
             });
         }
     } catch (e) {

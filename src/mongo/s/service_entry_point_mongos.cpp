@@ -169,7 +169,6 @@ void HandleRequest::onSuccess(const DbResponse& dbResponse) {
 
     // Mark the op as complete, populate the response length, and log it if appropriate.
     currentOp->completeAndLogOperation(
-        opCtx,
         logv2::LogComponent::kCommand,
         CollectionCatalog::get(opCtx)
             ->getDatabaseProfileSettings(currentOp->getNSS().dbName())

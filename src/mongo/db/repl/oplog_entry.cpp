@@ -365,6 +365,12 @@ StatusWith<MutableOplogEntry> MutableOplogEntry::parse(const BSONObj& object) {
     MONGO_UNREACHABLE;
 }
 
+ReplOperation MutableOplogEntry::toReplOperation() const noexcept {
+    return ReplOperation::parseOwned(
+        IDLParserContext("ReplOperation", /*apiStrict=*/false, getDurableReplOperation().getTid()),
+        getDurableReplOperation().toBSON());
+}
+
 void MutableOplogEntry::setTid(boost::optional<mongo::TenantId> value) & {
     if (gMultitenancySupport && serverGlobalParams.featureCompatibility.isVersionInitialized() &&
         gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))
@@ -789,6 +795,10 @@ bool OplogEntry::isEndOfLargeTransaction() const {
 
 bool OplogEntry::isPreparedCommit() const {
     return _entry.isPreparedCommit();
+}
+
+bool OplogEntry::isPreparedAbort() const {
+    return _entry.isPreparedAbort();
 }
 
 bool OplogEntry::isTerminalApplyOps() const {

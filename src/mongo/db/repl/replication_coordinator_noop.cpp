@@ -580,8 +580,8 @@ ReplicationCoordinatorNoOp::getHelloResponseFuture(
     MONGO_UNREACHABLE;
 }
 
-StatusWith<OpTime> ReplicationCoordinatorNoOp::getLatestWriteOpTime(OperationContext* opCtx) const
-    noexcept {
+StatusWith<OpTime> ReplicationCoordinatorNoOp::getLatestWriteOpTime(
+    OperationContext* opCtx) const noexcept {
     return getMyLastAppliedOpTime();
 }
 
@@ -617,6 +617,10 @@ ReplicationCoordinatorNoOp::getWriteConcernTagChanges() {
 }
 
 SplitPrepareSessionManager* ReplicationCoordinatorNoOp::getSplitPrepareSessionManager() {
+    MONGO_UNREACHABLE;
+}
+
+bool ReplicationCoordinatorNoOp::isRetryableWrite(OperationContext* opCtx) const {
     MONGO_UNREACHABLE;
 }
 

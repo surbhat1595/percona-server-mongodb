@@ -35,16 +35,18 @@ namespace shard_role_details {
 TransactionResources::TransactionResources(repl::ReadConcernArgs readConcern)
     : readConcern(std::move(readConcern)) {}
 
-TransactionResources::TransactionResources(TransactionResources&& other) {
-    *this = std::move(other);
+void TransactionResources::releaseAllResourcesOnCommitOrAbort() noexcept {
+    locker.reset();
+    lockSnapshot.reset();
+    acquiredCollections.clear();
+    acquiredViews.clear();
 }
-
-TransactionResources& TransactionResources::operator=(TransactionResources&&) = default;
 
 TransactionResources::~TransactionResources() {
     invariant(!locker);
     invariant(!lockSnapshot);
     invariant(acquiredCollections.empty());
+    invariant(acquiredViews.empty());
 }
 
 }  // namespace shard_role_details

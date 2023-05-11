@@ -82,7 +82,8 @@ public:
         debug << "\n";
     }
 
-    BSONObj getSerializedRightHandSide() const final {
+    BSONObj getSerializedRightHandSide(SerializationOptions opts) const final {
+        // TODO SERVER-73678 respect 'replacementForLiteralArgs'.
         BSONObjBuilder subBuilder;
         BSONArrayBuilder arrBuilder(subBuilder.subarrayStart(name()));
         _typeSet.toBSONArray(&arrBuilder);
@@ -112,7 +113,9 @@ public:
 
 private:
     ExpressionOptimizerFunc getOptimizer() const final {
-        return [](std::unique_ptr<MatchExpression> expression) { return expression; };
+        return [](std::unique_ptr<MatchExpression> expression) {
+            return expression;
+        };
     }
 
     // The set of matching types.
@@ -199,10 +202,6 @@ public:
         return expr;
     }
 
-    MatchCategory getCategory() const final {
-        return MatchCategory::kOther;
-    }
-
     void acceptVisitor(MatchExpressionMutableVisitor* visitor) final {
         visitor->visit(this);
     }
@@ -256,7 +255,8 @@ public:
         debug << "\n";
     }
 
-    BSONObj getSerializedRightHandSide() const final {
+    BSONObj getSerializedRightHandSide(SerializationOptions opts) const final {
+        // TODO SERVER-73678 respect 'replacementForLiteralArgs'.
         BSONObjBuilder bob;
         bob.append(name(), _binDataSubType);
         return bob.obj();
@@ -285,7 +285,9 @@ public:
 
 private:
     ExpressionOptimizerFunc getOptimizer() const final {
-        return [](std::unique_ptr<MatchExpression> expression) { return expression; };
+        return [](std::unique_ptr<MatchExpression> expression) {
+            return expression;
+        };
     }
 
     BinDataType _binDataSubType;
@@ -414,6 +416,8 @@ public:
         switch (subTypeByte) {
             case EncryptedBinDataType::kFLE2EqualityIndexedValue:
             case EncryptedBinDataType::kFLE2RangeIndexedValue:
+            case EncryptedBinDataType::kFLE2EqualityIndexedValueV2:
+            case EncryptedBinDataType::kFLE2RangeIndexedValueV2:
             case EncryptedBinDataType::kFLE2UnindexedEncryptedValue: {
                 // Verify the type of the encrypted data.
                 if (typeSet().isEmpty()) {

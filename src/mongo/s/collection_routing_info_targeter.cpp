@@ -153,58 +153,6 @@ BSONObj getUpdateExprForTargeting(const boost::intrusive_ptr<ExpressionContext> 
 }
 
 /**
- * This returns "does the query have an _id field" and "is the _id field querying for a direct
- * value like _id : 3 and not _id : { $gt : 3 }"
- *
- * If the query does not use the collection default collation, the _id field cannot contain strings,
- * objects, or arrays.
- *
- * Ex: { _id : 1 } => true
- *     { foo : <anything>, _id : 1 } => true
- *     { _id : { $lt : 30 } } => false
- *     { foo : <anything> } => false
- */
-bool isExactIdQuery(OperationContext* opCtx, const CanonicalQuery& query, const ChunkManager& cm) {
-    auto shardKey = extractShardKeyFromQuery(kVirtualIdShardKey, query);
-    BSONElement idElt = shardKey["_id"];
-
-    if (!idElt) {
-        return false;
-    }
-
-    if (CollationIndexKey::isCollatableType(idElt.type()) && cm.isSharded() &&
-        !query.getFindCommandRequest().getCollation().isEmpty() &&
-        !CollatorInterface::collatorsMatch(query.getCollator(), cm.getDefaultCollator())) {
-
-        // The collation applies to the _id field, but the user specified a collation which doesn't
-        // match the collection default.
-        return false;
-    }
-
-    return true;
-}
-
-bool isExactIdQuery(OperationContext* opCtx,
-                    const NamespaceString& nss,
-                    const BSONObj query,
-                    const BSONObj collation,
-                    const ChunkManager& cm) {
-    auto findCommand = std::make_unique<FindCommandRequest>(nss);
-    findCommand->setFilter(query);
-    if (!collation.isEmpty()) {
-        findCommand->setCollation(collation);
-    }
-    const auto cq = CanonicalQuery::canonicalize(opCtx,
-                                                 std::move(findCommand),
-                                                 false, /* isExplain */
-                                                 nullptr,
-                                                 ExtensionsCallbackNoop(),
-                                                 MatchExpressionParser::kAllowAllSpecialFeatures);
-
-    return cq.isOK() && isExactIdQuery(opCtx, *cq.getValue(), cm);
-}
-
-/**
  * Whether or not the manager/primary pair is different from the other manager/primary pair.
  */
 bool isMetadataDifferent(const CollectionRoutingInfo& managerA,
@@ -270,11 +218,12 @@ CollectionRoutingInfo CollectionRoutingInfoTargeter::_init(OperationContext* opC
             uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithRefresh(
                 opCtx, bucketsNs));
         }
-        auto [bucketsPlacementInfo, _] =
+        auto [bucketsPlacementInfo, bucketsIndexInfo] =
             uassertStatusOK(getCollectionRoutingInfoForTxnCmd(opCtx, bucketsNs));
         if (bucketsPlacementInfo.isSharded()) {
             _nss = bucketsNs;
             cm = std::move(bucketsPlacementInfo);
+            gii = std::move(bucketsIndexInfo);
             _isRequestOnTimeseriesViewNamespace = true;
         }
     } else if (!cm.isSharded() && _isRequestOnTimeseriesViewNamespace) {
@@ -286,9 +235,9 @@ CollectionRoutingInfo CollectionRoutingInfoTargeter::_init(OperationContext* opC
             uassertStatusOK(
                 Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithRefresh(opCtx, _nss));
         }
-        auto cri = uassertStatusOK(getCollectionRoutingInfoForTxnCmd(opCtx, _nss));
-        cm = cri.cm;
-        gii = cri.gii;
+        auto [newCm, newGii] = uassertStatusOK(getCollectionRoutingInfoForTxnCmd(opCtx, _nss));
+        cm = std::move(newCm);
+        gii = std::move(newGii);
         _isRequestOnTimeseriesViewNamespace = false;
     }
 
@@ -336,6 +285,48 @@ BSONObj CollectionRoutingInfoTargeter::extractBucketsShardKeyFromTimeseriesDoc(
 
     auto docWithShardKey = builder.obj();
     return pattern.extractShardKeyFromDoc(docWithShardKey);
+}
+
+bool CollectionRoutingInfoTargeter::isExactIdQuery(OperationContext* opCtx,
+                                                   const CanonicalQuery& query,
+                                                   const ChunkManager& cm) {
+    auto shardKey = extractShardKeyFromQuery(kVirtualIdShardKey, query);
+    BSONElement idElt = shardKey["_id"];
+
+    if (!idElt) {
+        return false;
+    }
+
+    if (CollationIndexKey::isCollatableType(idElt.type()) && cm.isSharded() &&
+        !query.getFindCommandRequest().getCollation().isEmpty() &&
+        !CollatorInterface::collatorsMatch(query.getCollator(), cm.getDefaultCollator())) {
+
+        // The collation applies to the _id field, but the user specified a collation which doesn't
+        // match the collection default.
+        return false;
+    }
+
+    return true;
+}
+
+bool CollectionRoutingInfoTargeter::isExactIdQuery(OperationContext* opCtx,
+                                                   const NamespaceString& nss,
+                                                   const BSONObj& query,
+                                                   const BSONObj& collation,
+                                                   const ChunkManager& cm) {
+    auto findCommand = std::make_unique<FindCommandRequest>(nss);
+    findCommand->setFilter(query);
+    if (!collation.isEmpty()) {
+        findCommand->setCollation(collation);
+    }
+    const auto cq = CanonicalQuery::canonicalize(opCtx,
+                                                 std::move(findCommand),
+                                                 false, /* isExplain */
+                                                 nullptr,
+                                                 ExtensionsCallbackNoop(),
+                                                 MatchExpressionParser::kAllowAllSpecialFeatures);
+
+    return cq.isOK() && isExactIdQuery(opCtx, *cq.getValue(), cm);
 }
 
 ShardEndpoint CollectionRoutingInfoTargeter::targetInsert(OperationContext* opCtx,
@@ -478,14 +469,22 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetUpdate(
         return endPoints;
     }
 
-    // Replacement-style updates must always target a single shard. If we were unable to do so using
-    // the query, we attempt to extract the shard key from the replacement and target based on it.
-    if (updateOp.getU().type() == write_ops::UpdateModification::Type::kReplacement) {
-        if (chunkRanges) {
-            chunkRanges->clear();
+    // Targeting by replacement document is no longer necessary when an updateOne without shard key
+    // is allowed, since we're able to decisively select a document to modify with the two phase
+    // write without shard key protocol.
+    if (!feature_flags::gFeatureFlagUpdateOneWithoutShardKey.isEnabled(
+            serverGlobalParams.featureCompatibility) ||
+        isExactIdQuery(opCtx, _nss, query, collation, _cri.cm)) {
+        // Replacement-style updates must always target a single shard. If we were unable to do so
+        // using the query, we attempt to extract the shard key from the replacement and target
+        // based on it.
+        if (updateOp.getU().type() == write_ops::UpdateModification::Type::kReplacement) {
+            if (chunkRanges) {
+                chunkRanges->clear();
+            }
+            return targetByShardKey(shardKeyPattern.extractShardKeyFromDoc(updateExpr),
+                                    "Failed to target update by replacement document");
         }
-        return targetByShardKey(shardKeyPattern.extractShardKeyFromDoc(updateExpr),
-                                "Failed to target update by replacement document");
     }
 
     // If we are here then this is an op-style update and we were not able to target a single shard.

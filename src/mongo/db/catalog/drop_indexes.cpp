@@ -343,11 +343,13 @@ void dropReadyIndexes(OperationContext* opCtx,
 
     for (const auto& indexName : indexNames) {
         if (collDescription.isSharded()) {
-            uassert(
-                ErrorCodes::CannotDropShardKeyIndex,
-                "Cannot drop the only compatible index for this collection's shard key",
-                !isLastNonHiddenShardKeyIndex(
-                    opCtx, collection, indexCatalog, indexName, collDescription.getKeyPattern()));
+            uassert(ErrorCodes::CannotDropShardKeyIndex,
+                    "Cannot drop the only compatible index for this collection's shard key",
+                    !isLastNonHiddenShardKeyIndex(opCtx,
+                                                  CollectionPtr(collection),
+                                                  indexCatalog,
+                                                  indexName,
+                                                  collDescription.getKeyPattern()));
         }
 
         auto desc = indexCatalog->findIndexByName(opCtx,
@@ -365,8 +367,8 @@ void dropReadyIndexes(OperationContext* opCtx,
 
 void assertNoMovePrimaryInProgress(OperationContext* opCtx, const NamespaceString& nss) {
     try {
-        auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
-            opCtx, nss.dbName(), DSSAcquisitionMode::kShared);
+        const auto scopedDss =
+            DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx, nss.dbName());
         auto scopedCss = CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss);
 
         auto collDesc = scopedCss->getCollectionDescription(opCtx);
@@ -416,7 +418,9 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
                                                 [](const std::vector<std::string>& arg) {
                                                     return boost::algorithm::join(arg, ",");
                                                 },
-                                                [](const BSONObj& arg) { return arg.toString(); }},
+                                                [](const BSONObj& arg) {
+                                                    return arg.toString();
+                                                }},
                               index));
     }
 

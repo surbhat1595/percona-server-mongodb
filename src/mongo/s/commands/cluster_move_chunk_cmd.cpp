@@ -100,9 +100,12 @@ public:
         void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* result) {
 
             Timer t;
-            const auto chunkManager = uassertStatusOK(
-                Grid::get(opCtx)->catalogCache()->getShardedCollectionPlacementInfoWithRefresh(
-                    opCtx, ns()));
+            const auto chunkManager =
+                uassertStatusOK(
+                    Grid::get(opCtx)
+                        ->catalogCache()
+                        ->getShardedCollectionRoutingInfoWithPlacementRefresh(opCtx, ns()))
+                    .cm;
 
             uassert(ErrorCodes::InvalidOptions,
                     "bounds can only have exactly 2 elements",
@@ -188,7 +191,7 @@ public:
 
 
             ConfigsvrMoveRange configsvrRequest(ns());
-            configsvrRequest.setDbName(NamespaceString::kAdminDb);
+            configsvrRequest.setDbName(DatabaseName::kAdmin);
             configsvrRequest.setMoveRangeRequestBase(moveRangeReq);
 
             const auto secondaryThrottle = uassertStatusOK(
@@ -203,7 +206,7 @@ public:
             auto commandResponse = configShard->runCommand(
                 opCtx,
                 ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                NamespaceString::kAdminDb.toString(),
+                DatabaseName::kAdmin.toString(),
                 CommandHelpers::appendMajorityWriteConcern(configsvrRequest.toBSON({})),
                 Shard::RetryPolicy::kIdempotent);
             uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(std::move(commandResponse)));

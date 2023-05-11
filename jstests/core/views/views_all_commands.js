@@ -94,6 +94,8 @@ let viewsCommandTests = {
     _configsvrBalancerStart: {skip: isAnInternalCommand},
     _configsvrBalancerStatus: {skip: isAnInternalCommand},
     _configsvrBalancerStop: {skip: isAnInternalCommand},
+    _configsvrCheckClusterMetadataConsistency: {skip: isAnInternalCommand},
+    _configsvrCheckMetadataConsistency: {skip: isAnInternalCommand},
     _configsvrCleanupReshardCollection: {skip: isAnInternalCommand},
     _configsvrCollMod: {skip: isAnInternalCommand},
     _configsvrClearJumboFlag: {skip: isAnInternalCommand},
@@ -126,6 +128,8 @@ let viewsCommandTests = {
     _configsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _configsvrSetClusterParameter: {skip: isAnInternalCommand},
     _configsvrSetUserWriteBlockMode: {skip: isAnInternalCommand},
+    _configsvrTransitionToCatalogShard: {skip: isAnInternalCommand},
+    _configsvrTransitionToDedicatedConfigServer: {skip: isAnInternalCommand},
     _configsvrUpdateZoneKeyRange: {skip: isAnInternalCommand},
     _flushDatabaseCacheUpdates: {skip: isUnrelated},
     _flushDatabaseCacheUpdatesWithWriteConcern: {skip: isUnrelated},
@@ -153,7 +157,9 @@ let viewsCommandTests = {
     _shardsvrCloneCatalogData: {skip: isAnInternalCommand},
     _shardsvrCompactStructuredEncryptionData: {skip: isAnInternalCommand},
     _shardsvrDropCollection: {skip: isAnInternalCommand},
+    // TODO SERVER-74324: deprecate _shardsvrDropCollectionIfUUIDNotMatching after 7.0 is lastLTS.
     _shardsvrDropCollectionIfUUIDNotMatching: {skip: isUnrelated},
+    _shardsvrDropCollectionIfUUIDNotMatchingWithWriteConcern: {skip: isUnrelated},
     _shardsvrDropCollectionParticipant: {skip: isAnInternalCommand},
     _shardsvrDropIndexCatalogEntryParticipant: {skip: isAnInternalCommand},
     _shardsvrDropIndexes: {skip: isAnInternalCommand},
@@ -198,6 +204,7 @@ let viewsCommandTests = {
     _shardsvrCollModParticipant: {skip: isAnInternalCommand},
     _shardsvrParticipantBlock: {skip: isAnInternalCommand},
     _shardsvrUnregisterIndex: {skip: isAnInternalCommand},
+    _startStreamProcessor: {skip: isAnInternalCommand},
     _transferMods: {skip: isAnInternalCommand},
     _vectorClockPersist: {skip: isAnInternalCommand},
     abortReshardCollection: {skip: isUnrelated},
@@ -308,7 +315,8 @@ let viewsCommandTests = {
             assert.commandWorked(conn.runCommand({dropAllRolesFromDatabase: 1}));
         }
     },
-    createSearchIndex: {skip: isUnrelated},
+    createSearchIndex: {skip: "present in v6.3 but renamed to createSearchIndexes in v7.0"},
+    createSearchIndexes: {skip: isUnrelated},
     createUser: {
         command: {createUser: "testuser", pwd: "testpass", roles: []},
         setup: function(conn) {
@@ -525,7 +533,7 @@ let viewsCommandTests = {
         expectFailure: true,
         expectedErrorCode: ErrorCodes.NamespaceNotSharded,
     },
-    modifySearchIndex: {skip: isUnrelated},
+    modifySearchIndex: {skip: "present in v6.3 but renamed to updateSearchIndex in v7.0"},
     moveChunk: {
         command: {moveChunk: "test.view", find: {}, to: "a"},
         skipStandalone: true,
@@ -707,6 +715,8 @@ let viewsCommandTests = {
     testVersion2: {skip: isAnInternalCommand},
     testVersions1And2: {skip: isAnInternalCommand},
     top: {skip: "tested in views/views_stats.js"},
+    transitionToCatalogShard: {skip: isUnrelated},
+    transitionToDedicatedConfigServer: {skip: isUnrelated},
     update: {command: {update: "view", updates: [{q: {x: 1}, u: {x: 2}}]}, expectFailure: true},
     updateRole: {
         command: {
@@ -721,6 +731,7 @@ let viewsCommandTests = {
             assert.commandWorked(conn.runCommand({dropAllRolesFromDatabase: 1}));
         }
     },
+    updateSearchIndex: {skip: isUnrelated},
     updateUser: {skip: isUnrelated},
     updateZoneKeyRange: {skip: isUnrelated},
     usersInfo: {skip: isUnrelated},

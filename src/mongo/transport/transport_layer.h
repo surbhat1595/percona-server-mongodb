@@ -37,7 +37,6 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/connection_metrics.h"
-#include "mongo/transport/session.h"
 #include "mongo/transport/ssl_connection_context.h"
 #include "mongo/util/functional.h"
 #include "mongo/util/future.h"
@@ -88,13 +87,13 @@ public:
 
     virtual ~TransportLayer() = default;
 
-    virtual StatusWith<SessionHandle> connect(
+    virtual StatusWith<std::shared_ptr<Session>> connect(
         HostAndPort peer,
         ConnectSSLMode sslMode,
         Milliseconds timeout,
         boost::optional<TransientSSLParams> transientSSLParams = boost::none) = 0;
 
-    virtual Future<SessionHandle> asyncConnect(
+    virtual Future<std::shared_ptr<Session>> asyncConnect(
         HostAndPort peer,
         ConnectSSLMode sslMode,
         const ReactorHandle& reactor,

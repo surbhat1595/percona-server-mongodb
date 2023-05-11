@@ -54,9 +54,11 @@ OptPhaseManager::OptPhaseManager(OptPhaseManager::PhaseSet phaseSet,
                                  std::unique_ptr<CostEstimator> costEstimator,
                                  PathToIntervalFn pathToInterval,
                                  ConstFoldFn constFold,
+                                 const bool supportExplain,
                                  DebugInfo debugInfo,
                                  QueryHints queryHints)
     : _phaseSet(std::move(phaseSet)),
+      _supportExplain(supportExplain),
       _debugInfo(std::move(debugInfo)),
       _hints(std::move(queryHints)),
       _metadata(std::move(metadata)),
@@ -68,6 +70,7 @@ OptPhaseManager::OptPhaseManager(OptPhaseManager::PhaseSet phaseSet,
       _pathToInterval(std::move(pathToInterval)),
       _constFold(std::move(constFold)),
       _physicalNodeId(),
+      _postMemoPlan(),
       _requireRID(requireRID),
       _ridProjections(),
       _prefixId(prefixId) {
@@ -186,7 +189,7 @@ void OptPhaseManager::runMemoLogicalRewrite(const OptPhase phase,
     }
 }
 
-void OptPhaseManager::runMemoPhysicalRewrite(const OptPhase phase,
+bool OptPhaseManager::runMemoPhysicalRewrite(const OptPhase phase,
                                              VariableEnvironment& env,
                                              const GroupIdType rootGroupId,
                                              std::unique_ptr<LogicalRewriter>& logicalRewriter,
@@ -194,7 +197,7 @@ void OptPhaseManager::runMemoPhysicalRewrite(const OptPhase phase,
     using namespace properties;
 
     if (!hasPhase(phase)) {
-        return;
+        return true;
     }
 
     tassert(6808704,
@@ -231,19 +234,25 @@ void OptPhaseManager::runMemoPhysicalRewrite(const OptPhase phase,
 
     auto optGroupResult =
         rewriter.optimizeGroup(rootGroupId, std::move(physProps), CostType::kInfinity);
-    tassert(6808706, "Optimization failed.", optGroupResult._success);
+    if (!optGroupResult._success) {
+        return false;
+    }
 
     _physicalNodeId = {rootGroupId, optGroupResult._index};
     std::tie(input, _nodeToGroupPropsMap) =
         extractPhysicalPlan(_physicalNodeId, _metadata, _ridProjections, _memo);
+    if (_supportExplain) {
+        _postMemoPlan = input;
+    }
 
     env.rebuild(input);
     if (env.hasFreeVariables()) {
         tasserted(6808707, "Plan has free variables: " + generateFreeVarsAssertMsg(env));
     }
+    return true;
 }
 
-void OptPhaseManager::runMemoRewritePhases(VariableEnvironment& env, ABT& input) {
+bool OptPhaseManager::runMemoRewritePhases(VariableEnvironment& env, ABT& input) {
     GroupIdType rootGroupId = -1;
     std::unique_ptr<LogicalRewriter> logicalRewriter;
 
@@ -264,11 +273,11 @@ void OptPhaseManager::runMemoRewritePhases(VariableEnvironment& env, ABT& input)
                           input);
 
 
-    runMemoPhysicalRewrite(
+    return runMemoPhysicalRewrite(
         OptPhase::MemoImplementationPhase, env, rootGroupId, logicalRewriter, input);
 }
 
-void OptPhaseManager::optimize(ABT& input) {
+bool OptPhaseManager::optimizeNoAssert(ABT& input) {
     VariableEnvironment env = VariableEnvironment::build(input);
     if (env.hasFreeVariables()) {
         tasserted(6808711, "Plan has free variables: " + generateFreeVarsAssertMsg(env));
@@ -282,7 +291,10 @@ void OptPhaseManager::optimize(ABT& input) {
     runStructuralPhases<OptPhase::ConstEvalPre, OptPhase::PathFuse, ConstEval, PathFusion>(
         ConstEval{env, sargableCheckFn}, PathFusion{env}, env, input);
 
-    runMemoRewritePhases(env, input);
+    const bool success = runMemoRewritePhases(env, input);
+    if (!success) {
+        return false;
+    }
 
     runStructuralPhase<OptPhase::PathLower, PathLowering>(PathLowering{_prefixId, env}, env, input);
 
@@ -310,6 +322,12 @@ void OptPhaseManager::optimize(ABT& input) {
     if (env.hasFreeVariables()) {
         tasserted(6808710, "Plan has free variables: " + generateFreeVarsAssertMsg(env));
     }
+    return true;
+}
+
+void OptPhaseManager::optimize(ABT& input) {
+    const bool success = optimizeNoAssert(input);
+    tassert(6808706, "Optimization failed.", success);
 }
 
 bool OptPhaseManager::hasPhase(const OptPhase phase) const {
@@ -322,6 +340,10 @@ const OptPhaseManager::PhaseSet& OptPhaseManager::getAllRewritesSet() {
 
 MemoPhysicalNodeId OptPhaseManager::getPhysicalNodeId() const {
     return _physicalNodeId;
+}
+
+const boost::optional<ABT>& OptPhaseManager::getPostMemoPlan() const {
+    return _postMemoPlan;
 }
 
 const QueryHints& OptPhaseManager::getHints() const {
@@ -344,20 +366,12 @@ const Metadata& OptPhaseManager::getMetadata() const {
     return _metadata;
 }
 
-PrefixId& OptPhaseManager::getPrefixId() const {
-    return _prefixId;
-}
-
 const NodeToGroupPropsMap& OptPhaseManager::getNodeToGroupPropsMap() const {
     return _nodeToGroupPropsMap;
 }
 
 NodeToGroupPropsMap& OptPhaseManager::getNodeToGroupPropsMap() {
     return _nodeToGroupPropsMap;
-}
-
-const RIDProjectionsMap& OptPhaseManager::getRIDProjections() const {
-    return _ridProjections;
 }
 
 }  // namespace mongo::optimizer

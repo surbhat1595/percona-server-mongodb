@@ -80,7 +80,7 @@ template <typename...>
 struct FastTuple;
 
 template <typename... Ts>
-FastTuple(Ts...)->FastTuple<Ts...>;
+FastTuple(Ts...) -> FastTuple<Ts...>;
 
 template <typename A, typename B, typename C>
 struct FastTuple<A, B, C> {
@@ -209,6 +209,10 @@ inline constexpr bool isObject(TypeTags tag) noexcept {
 
 inline constexpr bool isArray(TypeTags tag) noexcept {
     return tag == TypeTags::Array || tag == TypeTags::ArraySet || tag == TypeTags::bsonArray;
+}
+
+inline constexpr bool isNullish(TypeTags tag) noexcept {
+    return tag == TypeTags::Nothing || tag == TypeTags::Null || tag == TypeTags::bsonUndefined;
 }
 
 inline constexpr bool isObjectId(TypeTags tag) noexcept {
@@ -1024,6 +1028,22 @@ inline size_t getStringLength(TypeTags tag, const Value& val) noexcept {
     MONGO_UNREACHABLE;
 }
 
+/*
+ * Using MONGO_COMPILER_ALWAYS_INLINE on a free function does not always play well between
+ * compilers because some require the 'inline' keyword be used while others prohibit it. To get
+ * around this, we wrap the custom strlen() function in a struct.
+ */
+struct TinyStrHelpers {
+    // Often calling the shared library strlen() function is more expensive than a small loop
+    // for small strings.
+    MONGO_COMPILER_ALWAYS_INLINE static size_t strlen(const char* s) {
+        const char* begin = s;
+        while (*s++)
+            ;
+        return s - begin - 1;
+    }
+};
+
 /**
  * getStringView() should be preferred over getRawStringView() where possible.
  */
@@ -1480,6 +1500,43 @@ inline std::pair<TypeTags, Value> copyValue(TypeTags tag, Value val) {
 }
 
 /**
+ * Implicit conversion from any type to a boolean value.
+ */
+inline std::pair<TypeTags, Value> coerceToBool(TypeTags tag, Value val) {
+    switch (tag) {
+        case value::TypeTags::Nothing: {
+            return {value::TypeTags::Nothing, 0};
+        }
+        case value::TypeTags::Null:
+        case value::TypeTags::bsonUndefined: {
+            return {value::TypeTags::Boolean, value::bitcastFrom<bool>(false)};
+        }
+        case value::TypeTags::Boolean: {
+            return {tag, val};
+        }
+        case value::TypeTags::NumberInt32: {
+            bool isNotZero = (value::bitcastTo<int32_t>(val) != 0);
+            return {value::TypeTags::Boolean, value::bitcastFrom<bool>(isNotZero)};
+        }
+        case value::TypeTags::NumberInt64: {
+            bool isNotZero = (value::bitcastTo<int64_t>(val) != 0);
+            return {value::TypeTags::Boolean, value::bitcastFrom<bool>(isNotZero)};
+        }
+        case value::TypeTags::NumberDouble: {
+            bool isNotZero = (value::bitcastTo<double>(val) != 0.0);
+            return {value::TypeTags::Boolean, value::bitcastFrom<bool>(isNotZero)};
+        }
+        case value::TypeTags::NumberDecimal: {
+            bool isNotZero = !value::bitcastTo<Decimal128>(val).isZero();
+            return {value::TypeTags::Boolean, value::bitcastFrom<bool>(isNotZero)};
+        }
+        default: {
+            return {value::TypeTags::Boolean, value::bitcastFrom<bool>(true)};
+        }
+    }
+}
+
+/**
  * Implicit conversions of numerical types.
  */
 template <typename T>
@@ -1617,6 +1674,9 @@ private:
 /**
  * Holds a view of an array-like type (e.g. TypeTags::Array or TypeTags::bsonArray), and provides an
  * iterface to iterate over the values that are the elements of the array.
+ *
+ * This is a general purpose iterator. If you need to do a simple walk over the entire array in one
+ * go, not saving the place across function calls etc, prefer walkArray().
  */
 class ArrayEnumerator {
 public:
@@ -1643,6 +1703,9 @@ public:
                 auto bson = getRawPointerView(val);
                 _arrayCurrent = bson + 4;
                 _arrayEnd = bson + ConstDataView(bson).read<LittleEndian<uint32_t>>();
+                if (_arrayCurrent != _arrayEnd - 1) {
+                    _fieldNameSize = strlen(_arrayCurrent + 1);
+                }
             } else {
                 MONGO_UNREACHABLE;
             }
@@ -1661,7 +1724,7 @@ public:
         } else if (_arraySet) {
             return _iter == _arraySet->values().end();
         } else {
-            return *_arrayCurrent == 0;
+            return _arrayCurrent == _arrayEnd - 1;
         }
     }
 
@@ -1682,6 +1745,7 @@ private:
     // bsonArray
     const char* _arrayCurrent{nullptr};
     const char* _arrayEnd{nullptr};
+    size_t _fieldNameSize = 0;
 };
 
 /**

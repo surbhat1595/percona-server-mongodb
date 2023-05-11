@@ -27,6 +27,7 @@
  *    it in the license file.
  */
 #include "mongo/s/shard_version.h"
+#include "mongo/s/shard_version_factory.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -36,7 +37,7 @@ TEST(ShardVersionTest, ConstructCorrectly) {
     const CollectionGeneration gen(OID::gen(), Timestamp(1, 2));
     const ChunkVersion chunkVersion(gen, {3, 4});
     const CollectionIndexes collectionIndexes(UUID::gen(), Timestamp(5, 6));
-    const ShardVersion shardVersion(chunkVersion, collectionIndexes);
+    const ShardVersion shardVersion = ShardVersionFactory::make(chunkVersion, collectionIndexes);
     ASSERT_EQ(shardVersion.placementVersion().getTimestamp(), Timestamp(1, 2));
     ASSERT_EQ(shardVersion.placementVersion().majorVersion(), 3);
     ASSERT_EQ(shardVersion.placementVersion().minorVersion(), 4);
@@ -47,7 +48,7 @@ TEST(ShardVersionTest, ToAndFromBSON) {
     const CollectionGeneration gen(OID::gen(), Timestamp(1, 2));
     const ChunkVersion chunkVersion(gen, {3, 4});
     const CollectionIndexes collectionIndexes(UUID::gen(), Timestamp(5, 6));
-    const ShardVersion shardVersion(chunkVersion, collectionIndexes);
+    const ShardVersion shardVersion = ShardVersionFactory::make(chunkVersion, collectionIndexes);
 
     BSONObjBuilder builder;
     shardVersion.serialize(ShardVersion::kShardVersionField, &builder);

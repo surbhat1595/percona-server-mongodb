@@ -125,8 +125,8 @@ public:
                     nss,
                     "validating indexes for refineCollectionShardKey"_sd,
                     [&] {
-                        auto cm =
-                            uassertStatusOK(catalogCache->getCollectionPlacementInfo(opCtx, nss));
+                        auto [cm, _] =
+                            uassertStatusOK(catalogCache->getCollectionRoutingInfo(opCtx, nss));
                         std::set<ShardId> shardsIds;
 
                         cm.getAllShardIds(&shardsIds);
@@ -136,7 +136,7 @@ public:
                         validateRequest.setKey(newShardKeyPattern.getKeyPattern());
                         validateRequest.setEnforceUniquenessCheck(
                             request().getEnforceUniquenessCheck());
-                        validateRequest.setDbName(NamespaceString::kAdminDb);
+                        validateRequest.setDbName(DatabaseName::kAdmin);
                         try {
                             sharding_util::sendCommandToShardsWithVersion(
                                 opCtx,

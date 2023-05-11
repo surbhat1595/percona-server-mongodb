@@ -50,7 +50,7 @@ class CollectionCatalog {
     friend class iterator;
 
 public:
-    using CollectionInfoFn = std::function<bool(const CollectionPtr& collection)>;
+    using CollectionInfoFn = std::function<bool(const Collection* collection)>;
 
     // Number of how many Collection references for a single Collection that is stored in the
     // catalog. Used to determine whether there are external references (uniquely owned). Needs to
@@ -59,7 +59,7 @@ public:
 
     class iterator {
     public:
-        using value_type = CollectionPtr;
+        using value_type = const Collection*;
 
         iterator(OperationContext* opCtx,
                  const DatabaseName& dbName,
@@ -71,9 +71,7 @@ public:
         value_type operator*();
         iterator operator++();
         iterator operator++(int);
-        boost::optional<UUID> uuid();
-
-        Collection* getWritableCollection(OperationContext* opCtx);
+        UUID uuid() const;
 
         /*
          * Equality operators == and != do not attempt to reposition the iterators being compared.
@@ -216,31 +214,35 @@ public:
     void reloadViews(OperationContext* opCtx, const DatabaseName& dbName) const;
 
     /**
-     * Returns true if catalog information about this namespace or UUID should be looked up from the
-     * durable catalog rather than using the in-memory state of the catalog.
+     * Establish a collection instance consistent with the opened storage snapshot.
      *
-     * This is true when either:
-     *  - The readTimestamp is prior to the minimum valid timestamp for the collection corresponding
-     *    to this namespace, or
-     *  - There's no read timestamp provided and this namespace has a pending DDL operation that has
-     *    not completed yet (which would imply that the latest version of the catalog may or may not
-     *    match the state of the durable catalog for this collection).
-     */
-    bool needsOpenCollection(OperationContext* opCtx,
-                             const NamespaceStringOrUUID& nsOrUUID,
-                             boost::optional<Timestamp> readTimestamp) const;
-
-    /**
      * Returns the collection pointer representative of 'nssOrUUID' at the provided read timestamp.
-     * If no timestamp is provided, returns instance of the latest collection. The returned
-     * collection instance is only valid while the storage snapshot is open and becomes invalidated
-     * when the snapshot is closed.
+     * If no timestamp is provided, returns instance of the latest collection. When called
+     * concurrently with a DDL operation the latest collection returned may be the instance being
+     * committed by the concurrent DDL operation.
      *
      * Returns nullptr when reading from a point-in-time where the collection did not exist.
+     *
+     * The returned collection instance is only valid while a reference to this catalog instance is
+     * held or stashed and as long as the storage snapshot remains open. Releasing catalog reference
+     * or closing the storage snapshot invalidates the instance.
+     *
+     * Future calls to lookupCollection, lookupNSS, lookupUUID on this namespace/UUID will return
+     * results consistent with the opened storage snapshot.
+     *
+     * Depending on the internal state of the CollectionCatalog a read from the durable catalog may
+     * be performed and this call may block on I/O. No mutex should be held while calling this
+     * function.
+     *
+     * Multikey state is not guaranteed to be consistent with the storage snapshot. It may indicate
+     * an index to be multikey where it is not multikey in the storage snapshot. However, it will
+     * never be wrong in the other direction.
+     *
+     * No collection level lock is required to call this function.
      */
-    CollectionPtr openCollection(OperationContext* opCtx,
-                                 const NamespaceStringOrUUID& nssOrUUID,
-                                 boost::optional<Timestamp> readTimestamp) const;
+    const Collection* establishConsistentCollection(OperationContext* opCtx,
+                                                    const NamespaceStringOrUUID& nssOrUUID,
+                                                    boost::optional<Timestamp> readTimestamp) const;
 
     /**
      * Returns a shared_ptr to a drop pending index if it's found and not expired.
@@ -382,7 +384,7 @@ public:
      */
     Collection* lookupCollectionByUUIDForMetadataWrite(OperationContext* opCtx,
                                                        const UUID& uuid) const;
-    CollectionPtr lookupCollectionByUUID(OperationContext* opCtx, UUID uuid) const;
+    const Collection* lookupCollectionByUUID(OperationContext* opCtx, UUID uuid) const;
     std::shared_ptr<const Collection> lookupCollectionByUUIDForRead(OperationContext* opCtx,
                                                                     const UUID& uuid) const;
 
@@ -410,8 +412,8 @@ public:
      */
     Collection* lookupCollectionByNamespaceForMetadataWrite(OperationContext* opCtx,
                                                             const NamespaceString& nss) const;
-    CollectionPtr lookupCollectionByNamespace(OperationContext* opCtx,
-                                              const NamespaceString& nss) const;
+    const Collection* lookupCollectionByNamespace(OperationContext* opCtx,
+                                                  const NamespaceString& nss) const;
     std::shared_ptr<const Collection> lookupCollectionByNamespaceForRead(
         OperationContext* opCtx, const NamespaceString& nss) const;
 
@@ -423,8 +425,8 @@ public:
      *
      * Returns nullptr is the namespace or uuid is unknown.
      */
-    CollectionPtr lookupCollectionByNamespaceOrUUID(OperationContext* opCtx,
-                                                    const NamespaceStringOrUUID& nssOrUUID) const;
+    const Collection* lookupCollectionByNamespaceOrUUID(
+        OperationContext* opCtx, const NamespaceStringOrUUID& nssOrUUID) const;
 
     /**
      * This function gets the NamespaceString from the collection catalog entry that
@@ -443,26 +445,28 @@ public:
     /**
      * Returns true if this CollectionCatalog contains the provided collection instance
      */
-    bool containsCollection(OperationContext* opCtx, const CollectionPtr& collection) const;
+    bool containsCollection(OperationContext* opCtx, const Collection* collection) const;
 
     /**
-     * Returns the CatalogId for a given 'nss' at timestamp 'ts'.
+     * Returns the CatalogId for a given 'nss' or 'uuid' at timestamp 'ts'.
      */
     struct CatalogIdLookup {
-        enum class NamespaceExistence {
-            // Namespace exists at time 'ts' and catalogId set in 'id'.
+        enum class Existence {
+            // Namespace or UUID exists at time 'ts' and catalogId set in 'id'.
             kExists,
-            // Namespace does not exist at time 'ts'.
+            // Namespace or UUID does not exist at time 'ts'.
             kNotExists,
-            // Namespace existence at time 'ts' is unknown. The durable catalog must be scanned to
-            // determine.
+            // Namespace or UUID existence at time 'ts' is unknown. The durable catalog must be
+            // scanned to determine.
             kUnknown
         };
         RecordId id;
-        NamespaceExistence result;
+        Existence result;
     };
     CatalogIdLookup lookupCatalogIdByNSS(const NamespaceString& nss,
                                          boost::optional<Timestamp> ts = boost::none) const;
+    CatalogIdLookup lookupCatalogIdByUUID(const UUID& uuid,
+                                          boost::optional<Timestamp> ts = boost::none) const;
 
     /**
      * Iterates through the views in the catalog associated with database `dbName`, applying
@@ -695,14 +699,14 @@ private:
 
     std::shared_ptr<Collection> _lookupCollectionByUUID(UUID uuid) const;
 
-    CollectionPtr _lookupSystemViews(OperationContext* opCtx, const DatabaseName& dbName) const;
+    const Collection* _lookupSystemViews(OperationContext* opCtx, const DatabaseName& dbName) const;
 
     /**
      * Searches for a catalog entry at a point-in-time.
      */
     boost::optional<DurableCatalogEntry> _fetchPITCatalogEntry(
         OperationContext* opCtx,
-        const NamespaceString& nss,
+        const NamespaceStringOrUUID& nssOrUUID,
         boost::optional<Timestamp> readTimestamp) const;
 
     /**
@@ -711,7 +715,7 @@ private:
      */
     std::shared_ptr<Collection> _createCompatibleCollection(
         OperationContext* opCtx,
-        const std::shared_ptr<Collection>& latestCollection,
+        const std::shared_ptr<const Collection>& latestCollection,
         boost::optional<Timestamp> readTimestamp,
         const DurableCatalogEntry& catalogEntry) const;
 
@@ -782,12 +786,13 @@ private:
         Timestamp ts;
     };
 
-    // Push a catalogId for namespace at given Timestamp. Timestamp needs to be larger than other
-    // entries for this namespace. boost::none for catalogId represent drop, boost::none for
-    // timestamp turns this operation into a no-op.
-    void _pushCatalogIdForNSS(const NamespaceString& nss,
-                              boost::optional<RecordId> catalogId,
-                              boost::optional<Timestamp> ts);
+    // Push a catalogId for namespace and UUID at given Timestamp. Timestamp needs to be larger than
+    // other entries for this namespace and UUID. boost::none for catalogId represent drop,
+    // boost::none for timestamp turns this operation into a no-op.
+    void _pushCatalogIdForNSSAndUUID(const NamespaceString& nss,
+                                     const UUID& uuid,
+                                     boost::optional<RecordId> catalogId,
+                                     boost::optional<Timestamp> ts);
 
     // Push a catalogId for 'from' and 'to' for a rename operation at given Timestamp. Timestamp
     // needs to be larger than other entries for these namespaces. boost::none for timestamp turns
@@ -796,24 +801,62 @@ private:
                                  const NamespaceString& to,
                                  boost::optional<Timestamp> ts);
 
-    // Inserts a catalogId for namespace at given Timestamp. Used after scanning the durable catalog
-    // for a correct mapping at the given timestamp.
-    void _insertCatalogIdForNSSAfterScan(const NamespaceString& nss,
-                                         boost::optional<RecordId> catalogId,
-                                         Timestamp ts);
+    // Inserts a catalogId for namespace and UUID at given Timestamp, if not boost::none. Used after
+    // scanning the durable catalog for a correct mapping at the given timestamp.
+    void _insertCatalogIdForNSSAndUUIDAfterScan(boost::optional<NamespaceString> nss,
+                                                boost::optional<UUID> uuid,
+                                                boost::optional<RecordId> catalogId,
+                                                Timestamp ts);
 
-    // Helper to calculate if a namespace needs to be marked for cleanup for a set of timestamped
-    // catalogIds
-    void _markNamespaceForCatalogIdCleanupIfNeeded(const NamespaceString& nss,
-                                                   const std::vector<TimestampedCatalogId>& ids);
+    // Helper to calculate if a namespace or UUID needs to be marked for cleanup for a set of
+    // timestamped catalogIds
+    template <class Key, class CatalogIdChangesContainer>
+    void _markForCatalogIdCleanupIfNeeded(const Key& key,
+                                          CatalogIdChangesContainer& catalogIdChangesContainer,
+                                          const std::vector<TimestampedCatalogId>& ids);
+
+    /**
+     * Returns true if catalog information about this namespace or UUID should be looked up from the
+     * durable catalog rather than using the in-memory state of the catalog.
+     *
+     * This is true when either:
+     *  - The readTimestamp is prior to the minimum valid timestamp for the collection corresponding
+     *    to this namespace, or
+     *  - There's no read timestamp provided and this namespace has a pending DDL operation that has
+     *    not completed yet (which would imply that the latest version of the catalog may or may not
+     *    match the state of the durable catalog for this collection).
+     */
+    bool _needsOpenCollection(OperationContext* opCtx,
+                              const NamespaceStringOrUUID& nsOrUUID,
+                              boost::optional<Timestamp> readTimestamp) const;
+
+    /**
+     * Returns the collection pointer representative of 'nssOrUUID' at the provided read timestamp.
+     * If no timestamp is provided, returns instance of the latest collection. The returned
+     * collection instance is only valid while the storage snapshot is open and becomes invalidated
+     * when the snapshot is closed.
+     *
+     * Returns nullptr when reading from a point-in-time where the collection did not exist.
+     */
+    const Collection* _openCollection(OperationContext* opCtx,
+                                      const NamespaceStringOrUUID& nssOrUUID,
+                                      boost::optional<Timestamp> readTimestamp) const;
 
     // Helpers to perform openCollection at latest or at point-in-time on Namespace/UUID.
-    CollectionPtr _openCollectionAtLatestByNamespace(OperationContext* opCtx,
-                                                     const NamespaceString& nss) const;
-    CollectionPtr _openCollectionAtLatestByUUID(OperationContext* opCtx, const UUID& uuid) const;
-    CollectionPtr _openCollectionAtPointInTimeByNamespace(OperationContext* opCtx,
-                                                          const NamespaceString& nss,
-                                                          Timestamp readTimestamp) const;
+    const Collection* _openCollectionAtLatestByNamespace(OperationContext* opCtx,
+                                                         const NamespaceString& nss) const;
+    const Collection* _openCollectionAtLatestByUUID(OperationContext* opCtx,
+                                                    const UUID& uuid) const;
+    const Collection* _openCollectionAtPointInTimeByNamespaceOrUUID(
+        OperationContext* opCtx,
+        const NamespaceStringOrUUID& nssOrUUID,
+        Timestamp readTimestamp) const;
+
+    // Helpers for 'lookupCatalogIdByNSS' and 'lookupCatalogIdByUUID'.
+    CatalogIdLookup _checkWithOldestCatalogIdTimestampMaintained(
+        boost::optional<Timestamp> ts) const;
+    CatalogIdLookup _findCatalogIdInRange(boost::optional<Timestamp> ts,
+                                          const std::vector<TimestampedCatalogId>& range) const;
 
     /**
      * When present, indicates that the catalog is in closed state, and contains a map from UUID
@@ -841,11 +884,15 @@ private:
     absl::flat_hash_map<NamespaceString, std::shared_ptr<Collection>> _pendingCommitNamespaces;
     absl::flat_hash_map<UUID, std::shared_ptr<Collection>, UUID::Hash> _pendingCommitUUIDs;
 
-    // CatalogId mappings for all known namespaces for the CollectionCatalog. The vector is sorted
-    // on timestamp.
-    absl::flat_hash_map<NamespaceString, std::vector<TimestampedCatalogId>> _catalogIds;
-    // Set of namespaces that need cleanup when the oldest timestamp advances sufficiently.
-    absl::flat_hash_set<NamespaceString> _catalogIdChanges;
+    // CatalogId mappings for all known namespaces and UUIDs for the CollectionCatalog. The vector
+    // is sorted on timestamp. UUIDs will have at most two entries. One for the create and another
+    // for the drop. UUIDs stay the same across collection renames.
+    absl::flat_hash_map<NamespaceString, std::vector<TimestampedCatalogId>> _nssCatalogIds;
+    absl::flat_hash_map<UUID, std::vector<TimestampedCatalogId>, UUID::Hash> _uuidCatalogIds;
+    // Set of namespaces and UUIDs that need cleanup when the oldest timestamp advances
+    // sufficiently.
+    absl::flat_hash_set<NamespaceString> _nssCatalogIdChanges;
+    absl::flat_hash_set<UUID, UUID::Hash> _uuidCatalogIdChanges;
     // Point at which the oldest timestamp need to advance for there to be any catalogId namespace
     // that can be cleaned up
     Timestamp _lowestCatalogIdTimestampForCleanup = Timestamp::max();
@@ -925,18 +972,6 @@ public:
 private:
     OperationContext* _opCtx;
     bool _stashed;
-};
-
-/**
- * Functor for looking up Collection by UUID from the Collection Catalog. This is the default yield
- * restore implementation for CollectionPtr when acquired from the catalog.
- */
-struct LookupCollectionForYieldRestore {
-    explicit LookupCollectionForYieldRestore(const NamespaceString& nss) : _nss(nss) {}
-    const Collection* operator()(OperationContext* opCtx, const UUID& uuid) const;
-
-private:
-    const NamespaceString _nss;
 };
 
 /**

@@ -78,7 +78,7 @@ enums:
            createDatabase :  "createDatabase"  # ID only
            createIndex :  "createIndex"     # ID only
            createRole :  "createRole"
-           createSearchIndex : "createSearchIndex"
+           createSearchIndexes : "createSearchIndexes"
            createUser :  "createUser"
            dbCheck :  "dbCheck"
            dbHash :  "dbHash"
@@ -134,7 +134,7 @@ enums:
            listShards :  "listShards"
            logApplicationMessage :  "logApplicationMessage"
            logRotate :  "logRotate"
-           modifySearchIndex : "modifySearchIndex"
+           updateSearchIndex : "updateSearchIndex"
            moveChunk :  "moveChunk"
            netstat :  "netstat"
            oidcListKeys :  "oidcListKeys"
@@ -187,6 +187,8 @@ enums:
            top :  "top"
            touch :  "touch"
            trafficRecord :  "trafficRecord"
+           transitionToCatalogShard : "transitionToCatalogShard"
+           transitionToDedicatedConfigServer : "transitionToDedicatedConfigServer"
            unlock :  "unlock"
            useTenant : "useTenant"
            useUUID :  "useUUID"
@@ -244,7 +246,7 @@ enums:
                         - convertToCapped
                         - createCollection
                         - createIndex
-                        - createSearchIndex
+                        - createSearchIndexes
                         - dbCheck
                         - dbHash
                         - dbStats
@@ -261,7 +263,7 @@ enums:
                         - listCollections
                         - listIndexes
                         - listSearchIndexes
-                        - modifySearchIndex
+                        - updateSearchIndex
                         - planCacheIndexFilter
                         - planCacheRead
                         - planCacheWrite
@@ -292,7 +294,7 @@ enums:
                         - convertToCapped
                         - createCollection
                         - createIndex
-                        - createSearchIndex
+                        - createSearchIndexes
                         - dbCheck
                         - dbHash
                         - dbStats
@@ -309,7 +311,7 @@ enums:
                         - listCollections
                         - listIndexes
                         - listSearchIndexes
-                        - modifySearchIndex
+                        - updateSearchIndex
                         - planCacheIndexFilter
                         - planCacheRead
                         - planCacheWrite
@@ -364,7 +366,7 @@ enums:
                         - convertToCapped
                         - createCollection
                         - createIndex
-                        - createSearchIndex
+                        - createSearchIndexes
                         - dbCheck
                         - dbHash
                         - dbStats
@@ -382,7 +384,7 @@ enums:
                         - listCollections
                         - listIndexes
                         - listSearchIndexes
-                        - modifySearchIndex
+                        - updateSearchIndex
                         - planCacheIndexFilter
                         - planCacheRead
                         - planCacheWrite

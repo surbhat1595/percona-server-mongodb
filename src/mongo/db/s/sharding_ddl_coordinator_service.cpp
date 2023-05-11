@@ -69,14 +69,18 @@ std::shared_ptr<ShardingDDLCoordinator> constructShardingDDLCoordinatorInstance(
         case DDLCoordinatorTypeEnum::kMovePrimary:
             return std::make_shared<MovePrimaryCoordinator>(service, std::move(initialState));
             break;
+        // TODO SERVER-73627: Remove once 7.0 becomes last LTS.
         case DDLCoordinatorTypeEnum::kDropDatabase:
+        case DDLCoordinatorTypeEnum::kDropDatabasePre70Compatible:
             return std::make_shared<DropDatabaseCoordinator>(service, std::move(initialState));
             break;
+        // TODO SERVER-73627: Remove once 7.0 becomes last LTS.
         case DDLCoordinatorTypeEnum::kDropCollection:
+        case DDLCoordinatorTypeEnum::kDropCollectionPre70Compatible:
             return std::make_shared<DropCollectionCoordinator>(service, std::move(initialState));
             break;
         case DDLCoordinatorTypeEnum::kRenameCollection:
-        // TODO SERVER-7279: Remove once 7.0 becomes last LTS.
+        // TODO SERVER-72796: Remove once gGlobalIndexesShardingCatalog is enabled.
         case DDLCoordinatorTypeEnum::kRenameCollectionPre63Compatible:
             return std::make_shared<RenameCollectionCoordinator>(service, std::move(initialState));
         case DDLCoordinatorTypeEnum::kCreateCollection:
@@ -263,7 +267,7 @@ ShardingDDLCoordinatorService::getOrCreateInstance(OperationContext* opCtx, BSON
     auto coorMetadata = extractShardingDDLCoordinatorMetadata(coorDoc);
     const auto& nss = coorMetadata.getId().getNss();
 
-    if (!nss.isConfigDB()) {
+    if (!nss.isConfigDB() && !nss.isAdminDB()) {
         // Check that the operation context has a database version for this namespace
         const auto clientDbVersion = OperationShardingState::get(opCtx).getDbVersion(nss.db());
         uassert(ErrorCodes::IllegalOperation,

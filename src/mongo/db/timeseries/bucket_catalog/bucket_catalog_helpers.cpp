@@ -149,7 +149,7 @@ BSONObj generateReopeningMatchFilter(const Date_t& time,
                                      const std::string& maxDataTimeFieldPath,
                                      int64_t bucketMaxSpanSeconds) {
     // The bucket must be uncompressed.
-    auto versionFilter = BSON(kControlVersionPath << kTimeseriesControlDefaultVersion);
+    auto versionFilter = BSON(kControlVersionPath << kTimeseriesControlUncompressedVersion);
 
     // The bucket cannot be closed (aka open for new measurements).
     auto closedFlagFilter =
@@ -330,15 +330,15 @@ void handleDirectWrite(OperationContext* opCtx, const NamespaceString& ns, const
     auto& bucketCatalog = BucketCatalog::get(opCtx);
     bucketCatalog.directWriteStart(resolvedNs, bucketId);
 
-    // Then register callbacks so we can let the BucketCatalog know that we are done with our
-    // direct write after the actual write takes place (or is abandoned), and allow reopening.
-    opCtx->recoveryUnit()->onCommit(
-        [svcCtx = opCtx->getServiceContext(), resolvedNs, bucketId](boost::optional<Timestamp>) {
-            auto& bucketCatalog = BucketCatalog::get(svcCtx);
-            bucketCatalog.directWriteFinish(resolvedNs, bucketId);
-        });
+    // Then register callbacks so we can let the BucketCatalog know that we are done with our direct
+    // write after the actual write takes place (or is abandoned), and allow reopening.
+    opCtx->recoveryUnit()->onCommit([svcCtx = opCtx->getServiceContext(), resolvedNs, bucketId](
+                                        OperationContext*, boost::optional<Timestamp>) {
+        auto& bucketCatalog = BucketCatalog::get(svcCtx);
+        bucketCatalog.directWriteFinish(resolvedNs, bucketId);
+    });
     opCtx->recoveryUnit()->onRollback(
-        [svcCtx = opCtx->getServiceContext(), resolvedNs, bucketId]() {
+        [svcCtx = opCtx->getServiceContext(), resolvedNs, bucketId](OperationContext*) {
             auto& bucketCatalog = BucketCatalog::get(svcCtx);
             bucketCatalog.directWriteFinish(resolvedNs, bucketId);
         });

@@ -123,19 +123,19 @@ public:
 
     void attachCurOpErrInfo(OperationContext*, const BSONObj&) const override {}
 
-    bool refreshDatabase(OperationContext* opCtx, const StaleDbRoutingVersion& se) const
-        noexcept override {
+    bool refreshDatabase(OperationContext* opCtx,
+                         const StaleDbRoutingVersion& se) const noexcept override {
         return false;
     }
 
-    bool refreshCollection(OperationContext* opCtx, const StaleConfigInfo& se) const
-        noexcept override {
+    bool refreshCollection(OperationContext* opCtx,
+                           const StaleConfigInfo& se) const noexcept override {
         return false;
     }
 
-    bool refreshCatalogCache(OperationContext* opCtx,
-                             const ShardCannotRefreshDueToLocksHeldInfo& refreshInfo) const
-        noexcept override {
+    bool refreshCatalogCache(
+        OperationContext* opCtx,
+        const ShardCannotRefreshDueToLocksHeldInfo& refreshInfo) const noexcept override {
         return false;
     }
 
@@ -165,7 +165,7 @@ Future<DbResponse> ServiceEntryPointEmbedded::handleRequest(OperationContext* op
     return ServiceEntryPointCommon::handleRequest(opCtx, m, std::make_unique<Hooks>());
 }
 
-void ServiceEntryPointEmbedded::startSession(transport::SessionHandle session) {
+void ServiceEntryPointEmbedded::startSession(std::shared_ptr<transport::Session> session) {
     UASSERT_NOT_IMPLEMENTED;
 }
 

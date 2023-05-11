@@ -50,12 +50,10 @@
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/exec/write_stage_common.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/ops/update.h"
 #include "mongo/db/ops/write_ops_retryability.h"
-#include "mongo/db/query/get_executor.h"
 #include "mongo/db/repl/apply_ops_command_info.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/storage_interface.h"
@@ -206,20 +204,33 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
 
     ActiveTransactionHistory result;
 
-    result.lastTxnRecord = [&]() -> auto {
-        return performReadWithNoTimestampDBDirectClient(
-            opCtx, [&](DBDirectClient* client) -> boost::optional<SessionTxnRecord> {
-                auto result =
-                    client->findOne(NamespaceString::kSessionTransactionsTableNamespace,
-                                    BSON(SessionTxnRecord::kSessionIdFieldName << lsid.toBSON()));
-                if (result.isEmpty()) {
-                    return boost::none;
-                }
-                return SessionTxnRecord::parse(
-                    IDLParserContext("parse latest txn record for session"), result);
-            });
-    }
-    ();
+    result.lastTxnRecord = [&]() -> boost::optional<SessionTxnRecord> {
+        ReadSourceScope readSourceScope(opCtx, RecoveryUnit::ReadSource::kNoTimestamp);
+
+        AutoGetCollectionForRead autoRead(opCtx,
+                                          NamespaceString::kSessionTransactionsTableNamespace);
+
+        BSONObjBuilder bob;
+        bob.append("_id", lsid.toBSON());
+        auto id = bob.obj();
+
+        BSONElement elementKey = id.firstElement();
+
+        auto storageInterface = repl::StorageInterface::get(opCtx);
+        auto swObj = storageInterface->findById(
+            opCtx, NamespaceString::kSessionTransactionsTableNamespace, elementKey);
+        if (!swObj.isOK()) {
+            if (swObj.getStatus() == ErrorCodes::NoSuchKey ||
+                swObj.getStatus() == ErrorCodes::NamespaceNotFound) {
+                return boost::none;
+            }
+
+            uassertStatusOK(swObj.getStatus());
+        }
+
+        return SessionTxnRecord::parse(IDLParserContext("parse latest txn record for session"),
+                                       swObj.getValue());
+    }();
 
     if (!result.lastTxnRecord) {
         return result;
@@ -473,21 +484,6 @@ void updateSessionEntry(OperationContext* opCtx,
 //      code will be thrown, which will cause the write to not commit; if not specified, the write
 //      will be allowed to commit.
 MONGO_FAIL_POINT_DEFINE(onPrimaryTransactionalWrite);
-
-/**
- * Returns true if we are running retryable write or retryable internal multi-document transaction.
- */
-bool writeStageCommonIsRetryableWriteImpl(OperationContext* opCtx) {
-    if (!opCtx->writesAreReplicated() || !opCtx->isRetryableWrite()) {
-        return false;
-    }
-    auto txnParticipant = TransactionParticipant::get(opCtx);
-    return txnParticipant &&
-        (!opCtx->inMultiDocumentTransaction() || txnParticipant.transactionIsOpen());
-}
-
-auto isRetryableWriteRegistration = MONGO_WEAK_FUNCTION_REGISTRATION(
-    write_stage_common::isRetryableWrite, writeStageCommonIsRetryableWriteImpl);
 
 }  // namespace
 
@@ -1416,8 +1412,7 @@ void TransactionParticipant::Participant::_releaseTransactionResourcesToOpCtx(
         stdx::lock_guard<Client> lk(*opCtx->getClient());
         swap(trs, o(lk).txnResourceStash);
         return trs;
-    }
-    ();
+    }();
 
     ScopeGuard releaseOnError([&] {
         // Restore the lock resources back to transaction participant.
@@ -1598,9 +1593,7 @@ void TransactionParticipant::Participant::refreshLocksForPreparedTransaction(
     invariant(o().txnResourceStash);
     invariant(o().txnState.isPrepared());
 
-    // Lock and Ticket reacquisition of a prepared transaction should not fail for
-    // state transitions (step up/step down).
-    _releaseTransactionResourcesToOpCtx(opCtx, MaxLockTimeout::kNotAllowed, AcquireTicket::kNoSkip);
+    _releaseTransactionResourcesToOpCtx(opCtx, MaxLockTimeout::kNotAllowed, AcquireTicket::kSkip);
 
     // Snapshot transactions don't conflict with PBWM lock on both primary and secondary.
     invariant(!opCtx->lockState()->shouldConflictWithSecondaryBatchApplication());
@@ -2013,23 +2006,24 @@ void TransactionParticipant::Participant::_commitStorageTransaction(OperationCon
 }
 
 void TransactionParticipant::Participant::_commitSplitPreparedTxnOnPrimary(
-    OperationContext* parentOpCtx,
+    OperationContext* userOpCtx,
     repl::SplitPrepareSessionManager* splitPrepareManager,
     const LogicalSessionId& userSessionId,
     const TxnNumber& userTxnNumber,
     const Timestamp& commitTimestamp,
     const Timestamp& durableTimestamp) {
 
-    for (const repl::PooledSession& session :
+    for (const auto& sessInfos :
          splitPrepareManager->getSplitSessions(userSessionId, userTxnNumber).get()) {
 
-        auto splitClientOwned = parentOpCtx->getServiceContext()->makeClient("tempSplitClient");
+        auto splitClientOwned = userOpCtx->getServiceContext()->makeClient("tempSplitClient");
         auto splitOpCtx = splitClientOwned->makeOperationContext();
         AlternativeClientRegion acr(splitClientOwned);
 
         std::unique_ptr<MongoDSessionCatalog::Session> checkedOutSession;
 
         repl::UnreplicatedWritesBlock notReplicated(splitOpCtx.get());
+        const auto& session = sessInfos.session;
         splitOpCtx->setLogicalSessionId(session.getSessionId());
         splitOpCtx->setTxnNumber(session.getTxnNumber());
         splitOpCtx->setInMultiDocumentTransaction();
@@ -2057,13 +2051,13 @@ void TransactionParticipant::Participant::_commitSplitPreparedTxnOnPrimary(
                 splitOpCtx.get(), operationCount, oplogOperationBytes);
         }
 
-        newTxnParticipant.stashTransactionResources(splitOpCtx.get());
         checkedOutSession->checkIn(splitOpCtx.get(), OperationContextSession::CheckInReason::kDone);
     }
 
-    parentOpCtx->recoveryUnit()->setCommitTimestamp(commitTimestamp);
-    parentOpCtx->recoveryUnit()->setDurableTimestamp(durableTimestamp);
-    this->_commitStorageTransaction(parentOpCtx);
+    splitPrepareManager->releaseSplitSessions(userSessionId, userTxnNumber);
+    userOpCtx->recoveryUnit()->setCommitTimestamp(commitTimestamp);
+    userOpCtx->recoveryUnit()->setDurableTimestamp(durableTimestamp);
+    this->_commitStorageTransaction(userOpCtx);
 }
 
 void TransactionParticipant::Participant::_finishCommitTransaction(
@@ -2165,6 +2159,17 @@ void TransactionParticipant::Participant::_abortActiveTransaction(
     OperationContext* opCtx, TransactionState::StateSet expectedStates) {
     invariant(!o().txnResourceStash);
 
+    // If this is a split-prepared transaction, cascade the abort.
+    auto* splitPrepareManager =
+        repl::ReplicationCoordinator::get(opCtx)->getSplitPrepareSessionManager();
+    if (splitPrepareManager->isSessionSplit(_sessionId(),
+                                            o().activeTxnNumberAndRetryCounter.getTxnNumber())) {
+        _abortSplitPreparedTxnOnPrimary(opCtx,
+                                        splitPrepareManager,
+                                        _sessionId(),
+                                        o().activeTxnNumberAndRetryCounter.getTxnNumber());
+    }
+
     if (!o().txnState.isInRetryableWriteMode()) {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
         o(lk).transactionMetricsObserver.onTransactionOperation(
@@ -2221,6 +2226,44 @@ void TransactionParticipant::Participant::_abortActiveTransaction(
         opObserver->onTransactionAbort(opCtx, boost::none);
         _finishAbortingActiveTransaction(opCtx, expectedStates);
     }
+}
+
+void TransactionParticipant::Participant::_abortSplitPreparedTxnOnPrimary(
+    OperationContext* opCtx,
+    repl::SplitPrepareSessionManager* splitPrepareManager,
+    const LogicalSessionId& sessionId,
+    const TxnNumber& txnNumber) {
+    // If there are split prepared sessions, it must be because this transaction was prepared
+    // via an oplog entry applied as a secondary.
+    for (const repl::SplitSessionInfo& sessionInfo :
+         splitPrepareManager->getSplitSessions(sessionId, txnNumber).get()) {
+
+        auto splitClientOwned = opCtx->getServiceContext()->makeClient("tempSplitClient");
+        auto splitOpCtx = splitClientOwned->makeOperationContext();
+        AlternativeClientRegion acr(splitClientOwned);
+
+        std::unique_ptr<MongoDSessionCatalog::Session> checkedOutSession;
+
+        repl::UnreplicatedWritesBlock notReplicated(splitOpCtx.get());
+        splitOpCtx->setLogicalSessionId(sessionInfo.session.getSessionId());
+        splitOpCtx->setTxnNumber(sessionInfo.session.getTxnNumber());
+        splitOpCtx->setInMultiDocumentTransaction();
+
+        auto mongoDSessionCatalog = MongoDSessionCatalog::get(splitOpCtx.get());
+        checkedOutSession = mongoDSessionCatalog->checkOutSession(splitOpCtx.get());
+
+        TransactionParticipant::Participant newTxnParticipant =
+            TransactionParticipant::get(splitOpCtx.get());
+        newTxnParticipant.beginOrContinueTransactionUnconditionally(
+            splitOpCtx.get(), {*(splitOpCtx->getTxnNumber())});
+        newTxnParticipant.unstashTransactionResources(splitOpCtx.get(), "abortTransaction");
+        newTxnParticipant.abortTransaction(splitOpCtx.get());
+
+        checkedOutSession->checkIn(splitOpCtx.get(), OperationContextSession::CheckInReason::kDone);
+    }
+
+    splitPrepareManager->releaseSplitSessions(_sessionId(),
+                                              o().activeTxnNumberAndRetryCounter.getTxnNumber());
 }
 
 void TransactionParticipant::Participant::_finishAbortingActiveTransaction(
@@ -3427,9 +3470,9 @@ void TransactionParticipant::Participant::_registerUpdateCacheOnCommit(
     OperationContext* opCtx,
     std::vector<StmtId> stmtIdsWritten,
     const repl::OpTime& lastStmtIdWriteOpTime) {
-    opCtx->recoveryUnit()->onCommit([opCtx,
-                                     stmtIdsWritten = std::move(stmtIdsWritten),
-                                     lastStmtIdWriteOpTime](boost::optional<Timestamp>) {
+    opCtx->recoveryUnit()->onCommit([stmtIdsWritten = std::move(stmtIdsWritten),
+                                     lastStmtIdWriteOpTime](OperationContext* opCtx,
+                                                            boost::optional<Timestamp>) {
         TransactionParticipant::Participant participant(opCtx);
         invariant(participant.p().isValid);
 

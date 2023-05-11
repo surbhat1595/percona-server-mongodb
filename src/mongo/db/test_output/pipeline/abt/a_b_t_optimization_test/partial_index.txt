@@ -24,8 +24,8 @@ metadata:
 					distribution and paths: 
 						distribution type: Centralized
 						distribution paths: 
-					requirementsMap: 
-					    refProjection: scan_0, path: 'PathGet [b] PathTraverse [1] PathIdentity []', intervals: {{{=Const [2]}}}
+					requirements: 
+					    {{{refProjection: scan_0, path: 'PathGet [b] PathTraverse [1] PathIdentity []', intervals: {{{=Const [2]}}}}}}
 
 			collection exists: 1
 			CE type: -1
@@ -39,11 +39,7 @@ optimization phases:
 	PathLower
 
 -- OUTPUT:
-Root []
-|   |   projections: 
-|   |       scan_0
-|   RefBlock: 
-|       Variable [scan_0]
+Root [{scan_0}]
 NestedLoopJoin [joinType: Inner, {rid_0}]
 |   |   Const [true]
 |   Filter []
@@ -58,8 +54,6 @@ NestedLoopJoin [joinType: Inner, {rid_0}]
 |   |   Variable [evalTemp_4]
 |   LimitSkip [limit: 1, skip: 0]
 |   Seek [ridProjection: rid_0, {'<root>': scan_0, 'b': evalTemp_4}, collection]
-|   RefBlock: 
-|       Variable [rid_0]
 IndexScan [{'<rid>': rid_0}, scanDefName: collection, indexDefName: index1, interval: {=Const [3]}]
 
 
@@ -89,8 +83,8 @@ metadata:
 					distribution and paths: 
 						distribution type: Centralized
 						distribution paths: 
-					requirementsMap: 
-					    refProjection: scan_0, path: 'PathGet [b] PathTraverse [1] PathIdentity []', intervals: {{{=Const [2]}}}
+					requirements: 
+					    {{{refProjection: scan_0, path: 'PathGet [b] PathTraverse [1] PathIdentity []', intervals: {{{=Const [2]}}}}}}
 
 			collection exists: 1
 			CE type: -1
@@ -104,11 +98,7 @@ optimization phases:
 	PathLower
 
 -- OUTPUT:
-Root []
-|   |   projections: 
-|   |       scan_0
-|   RefBlock: 
-|       Variable [scan_0]
+Root [{scan_0}]
 Filter []
 |   BinaryOp [FillEmpty]
 |   |   Const [false]

@@ -222,7 +222,7 @@ commands.push({
         assert.commandWorkedIgnoringWriteConcernErrors(db.runCommand({drop: collName}));
     },
     confirmFunc: function(res) {
-        assert.commandFailedWithCode(res, ErrorCodes.NamespaceNotFound);
+        assert.commandWorkedIgnoringWriteConcernErrors(res);
     }
 });
 
@@ -233,7 +233,14 @@ commands.push({
         assert.commandWorkedIgnoringWriteConcernErrors(db.runCommand({create: collName}));
     },
     confirmFunc: function(res) {
-        assert.commandFailedWithCode(res, ErrorCodes.NamespaceExists);
+        // Branching is needed for multiversion tests as 'create' is only idempotent as of 7.0.
+        // TODO SERVER-74062: update this to stop branching on the server version and always
+        // assert the command worked ignoring write concern errors.
+        if (db.version().split('.')[0] >= 7) {
+            assert.commandWorkedIgnoringWriteConcernErrors(res);
+        } else {
+            assert.commandFailedWithCode(res, ErrorCodes.NamespaceExists);
+        }
     }
 });
 
@@ -255,6 +262,18 @@ function testCommandWithWriteConcern(cmd) {
     // Provide a small wtimeout that we expect to time out.
     cmd.req.writeConcern = {w: 3, wtimeout: 1000};
     jsTest.log("Testing " + tojson(cmd.req));
+
+    // Don't run drop cmd on older versions. Starting in v7.0 drop returns OK on non-existent
+    // collections, instead of a NamespaceNotFound error.
+    if (cmd.req["drop"] !== undefined) {
+        const primaryShell = new Mongo(primary.host);
+        const primaryBinVersion = primaryShell.getDB("admin").serverStatus()["version"];
+        if (primaryBinVersion != MongoRunner.getBinVersionFor("latest")) {
+            jsTest.log(
+                "Skipping test: drop on non-existent collections in older versions returns an error.");
+            return;
+        }
+    }
 
     dropTestCollection();
 

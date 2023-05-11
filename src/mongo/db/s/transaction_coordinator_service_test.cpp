@@ -251,8 +251,8 @@ TEST_F(TransactionCoordinatorServiceStepUpStepDownTest, OperationsBlockBeforeSte
 TEST_F(TransactionCoordinatorServiceStepUpStepDownTest, StepUpFailsDueToBadCoordinatorDocument) {
     DBDirectClient client(operationContext());
 
-    auto response = client.insertAcknowledged(
-        NamespaceString::kTransactionCoordinatorsNamespace.ns(), {BSON("IllegalKey" << 1)});
+    auto response = client.insertAcknowledged(NamespaceString::kTransactionCoordinatorsNamespace,
+                                              {BSON("IllegalKey" << 1)});
     ASSERT_OK(getStatusFromWriteCommandReply(response));
     ASSERT_EQ(1, response["n"].Int());
 
@@ -286,8 +286,8 @@ TEST_F(TransactionCoordinatorServiceStepUpStepDownTest, StepUpRecoverTxnRetryCou
     doc.setParticipants(kOneShardIdList);
 
     DBDirectClient client(operationContext());
-    auto response = client.insertAcknowledged(
-        NamespaceString::kTransactionCoordinatorsNamespace.ns(), {doc.toBSON()});
+    auto response = client.insertAcknowledged(NamespaceString::kTransactionCoordinatorsNamespace,
+                                              {doc.toBSON()});
     ASSERT_OK(getStatusFromWriteCommandReply(response));
     ASSERT_EQ(1, response["n"].Int());
 
@@ -837,7 +837,9 @@ TEST_F(TransactionCoordinatorServiceTest,
 
     // Vote commit before the deadline
     onCommands({[&](const executor::RemoteCommandRequest&) { return kPrepareOk; },
-                [&](const executor::RemoteCommandRequest&) { return kPrepareOk; }});
+                [&](const executor::RemoteCommandRequest&) {
+                    return kPrepareOk;
+                }});
 
     // Reach the deadline.
     network()->enterNetwork();
@@ -882,7 +884,9 @@ TEST_F(TransactionCoordinatorServiceTestSingleTxn,
 
     // Simulate a participant voting to abort.
     onCommands({[&](const executor::RemoteCommandRequest& request) { return kPrepareOk; },
-                [&](const executor::RemoteCommandRequest& request) { return kNoSuchTransaction; }});
+                [&](const executor::RemoteCommandRequest& request) {
+                    return kNoSuchTransaction;
+                }});
 
     assertAbortSentAndRespondWithSuccess();
     assertAbortSentAndRespondWithSuccess();

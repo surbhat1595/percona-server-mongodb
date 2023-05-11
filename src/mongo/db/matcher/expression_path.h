@@ -104,10 +104,19 @@ public:
      * path. Each pair in 'renameList' specifies a path prefix that should be renamed (as the first
      * element) and the path components that should replace the renamed prefix (as the second
      * element).
+     *
+     * Returns whether there is any attempted but failed to rename. This case can happen when any
+     * renamed path component is part of sub-fields. For example, expr = {x: {$eq: {y: 3}}} and
+     * renames = {{"x.y", "a.b"}}. We should be able to rename 'x' and 'y' to 'a' and 'b'
+     * respectively but due to the current limitation of the algorithm, we cannot rename such match
+     * expressions.
+     *
+     * TODO SERVER-74298 As soon as we implement SERVER-74298, the return value might not be
+     * necessary any more.
      */
-    void applyRename(const StringMap<std::string>& renameList) {
+    bool applyRename(const StringMap<std::string>& renameList) {
         if (!_elementPath) {
-            return;
+            return false;
         }
 
         size_t renamesFound = 0u;
@@ -131,6 +140,10 @@ public:
                 rewrittenPath = str::stream() << rename.second << "." << pathTail.toString();
 
                 ++renamesFound;
+            } else if (pathFieldRef.isPrefixOf(prefixToRename)) {
+                // TODO SERVER-74298 Implement renaming by each path component instead of
+                // incrementing 'attemptedButFailedRenames'.
+                return true;
             }
         }
 
@@ -141,13 +154,27 @@ public:
             // name.
             setPath(rewrittenPath);
         }
+
+        return false;
     }
 
-    void serialize(BSONObjBuilder* out, bool includePath) const override {
-        if (includePath) {
-            out->append(path(), getSerializedRightHandSide());
+    void serialize(BSONObjBuilder* out, SerializationOptions opts) const override {
+        // TODO SERVER-73678 do we need to pass 'includePath' or other options to
+        // `getSerializedRightHandSide()` here? I don't think we need 'includePath' for
+        // LeafMatchExpression subclasses, but the class comment on PathMatchExpression leaves me a
+        // bit confused over 'includePath' semantics here. Before we changed anything for query
+        // shape, it looks like 'includePath' was not forwarded through, so it's either not needed
+        // or there was a pre-existing bug.
+        auto&& rhs = getSerializedRightHandSide(opts);
+        if (opts.includePath) {
+            if (opts.redactFieldNames) {
+                auto redactedFieldName = opts.redactFieldNamesStrategy(path());
+                out->append(redactedFieldName, rhs);
+            } else {
+                out->append(path(), rhs);
+            }
         } else {
-            out->appendElements(getSerializedRightHandSide());
+            out->appendElements(rhs);
         }
     }
 
@@ -156,8 +183,13 @@ public:
      * serialization of PathMatchExpression in cases where we do not want to serialize the path in
      * line with the expression. For example {x: {$not: {$eq: 1}}}, where $eq is the
      * PathMatchExpression.
+     *
+     * Serialization options should be respected for any descendent expressions. Eg, if the
+     * 'replacementForLiteralArgs' option is set, then any literal argument (like the number 1 in
+     * the example above), should be replaced with this string. 'literal' here is in contrast to
+     * another expression, if that is possible syntactically.
      */
-    virtual BSONObj getSerializedRightHandSide() const = 0;
+    virtual BSONObj getSerializedRightHandSide(SerializationOptions opts = {}) const = 0;
 
 private:
     // ElementPath holds a FieldRef, which owns the underlying path string.

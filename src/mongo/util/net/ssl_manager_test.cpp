@@ -57,7 +57,7 @@ namespace {
 // Test implementation needed by ASIO transport.
 class ServiceEntryPointUtil : public ServiceEntryPoint {
 public:
-    void startSession(transport::SessionHandle session) override {
+    void startSession(std::shared_ptr<transport::Session> session) override {
         stdx::unique_lock<Latch> lk(_mutex);
         _sessions.push_back(std::move(session));
         LOGV2(2303202, "started session");
@@ -66,7 +66,7 @@ public:
 
     void endAllSessions(transport::Session::TagMask tags) override {
         LOGV2(2303302, "end all sessions");
-        std::vector<transport::SessionHandle> old_sessions;
+        std::vector<std::shared_ptr<transport::Session>> old_sessions;
         {
             stdx::unique_lock<Latch> lock(_mutex);
             old_sessions.swap(_sessions);
@@ -110,7 +110,7 @@ public:
 private:
     mutable Mutex _mutex = MONGO_MAKE_LATCH("::_mutex");
     stdx::condition_variable _cv;
-    std::vector<transport::SessionHandle> _sessions;
+    std::vector<std::shared_ptr<transport::Session>> _sessions;
     transport::TransportLayer* _transport = nullptr;
 };
 
@@ -522,9 +522,12 @@ TEST(SSLManager, InitContextFromFileShouldFail) {
     params.sslCAFile = "jstests/libs/ca.pem";
     params.sslClusterFile = "jstests/libs/client.pem";
 #if MONGO_CONFIG_SSL_PROVIDER == MONGO_CONFIG_SSL_PROVIDER_OPENSSL
-    ASSERT_THROWS_CODE([&params] { SSLManagerInterface::create(params, true /* isSSLServer */); }(),
-                       DBException,
-                       ErrorCodes::InvalidSSLConfiguration);
+    ASSERT_THROWS_CODE(
+        [&params] {
+            SSLManagerInterface::create(params, true /* isSSLServer */);
+        }(),
+        DBException,
+        ErrorCodes::InvalidSSLConfiguration);
 #endif
 }
 

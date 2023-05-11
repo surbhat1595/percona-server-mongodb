@@ -31,7 +31,7 @@
 
 #include <map>
 
-#include "mongo/db/query/optimizer/index_bounds.h"
+#include "mongo/db/query/optimizer/partial_schema_requirements.h"
 
 
 namespace mongo::optimizer {
@@ -154,7 +154,7 @@ private:
 
     const DistributionAndPaths _distributionAndPaths;
 
-    // Requirements map for partial filter expression.
+    // Requirements map for partial filter expression. May be trivially true.
     PartialSchemaRequirements _partialReqMap;
 };
 

@@ -133,10 +133,14 @@ void ServiceExecutorSynchronous::SharedState::schedule(Task task) {
 
     Status status = launchServiceWorkerThread([w = std::move(workerInfo)] {
         w->sharedState->lock().onStartThread();
-        ScopeGuard onEndThreadGuard = [&] { w->sharedState->lock().onEndThread(); };
+        ScopeGuard onEndThreadGuard = [&] {
+            w->sharedState->lock().onEndThread();
+        };
 
         workerThreadInfoTls = &*w;
-        ScopeGuard resetTlsGuard = [&] { workerThreadInfoTls = nullptr; };
+        ScopeGuard resetTlsGuard = [&] {
+            workerThreadInfoTls = nullptr;
+        };
 
         w->run();
     });
@@ -191,7 +195,8 @@ void ServiceExecutorSynchronous::appendStats(BSONObjBuilder* bob) const {
         .append("clientsWaitingForData", 0);
 }
 
-void ServiceExecutorSynchronous::_runOnDataAvailable(const SessionHandle& session, Task task) {
+void ServiceExecutorSynchronous::_runOnDataAvailable(const std::shared_ptr<Session>& session,
+                                                     Task task) {
     invariant(session);
     yieldIfAppropriate();
     _schedule(std::move(task));

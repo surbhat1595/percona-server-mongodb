@@ -574,8 +574,9 @@ void writeToConfigIndexesForTempNss(OperationContext* opCtx,
 
     switch (nextState) {
         case CoordinatorStateEnum::kPreparingToDonate: {
-            auto optGii = Grid::get(opCtx)->catalogCache()->getCollectionIndexInfo(
-                opCtx, coordinatorDoc.getSourceNss());
+            auto [_, optGii] =
+                uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(
+                    opCtx, coordinatorDoc.getSourceNss()));
             if (optGii) {
                 std::vector<BSONObj> indexes;
                 optGii->forEachIndex([&](const auto index) {
@@ -996,7 +997,8 @@ ChunkVersion ReshardingCoordinatorExternalState::calculateChunkVersionForInitial
 
 boost::optional<CollectionIndexes> ReshardingCoordinatorExternalState::getCatalogIndexVersion(
     OperationContext* opCtx, const NamespaceString& nss, const UUID& uuid) {
-    auto optGii = Grid::get(opCtx)->catalogCache()->getCollectionIndexInfo(opCtx, nss);
+    auto [_, optGii] =
+        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
     if (optGii) {
         VectorClock::VectorTime vt = VectorClock::get(opCtx)->getTime();
         auto time = vt.clusterTime().asTimestamp();
@@ -1008,7 +1010,8 @@ boost::optional<CollectionIndexes> ReshardingCoordinatorExternalState::getCatalo
 boost::optional<CollectionIndexes>
 ReshardingCoordinatorExternalState::getCatalogIndexVersionForCommit(OperationContext* opCtx,
                                                                     const NamespaceString& nss) {
-    auto optGii = Grid::get(opCtx)->catalogCache()->getCollectionIndexInfo(opCtx, nss);
+    auto [_, optGii] =
+        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
     if (optGii) {
         return optGii->getCollectionIndexes();
     }
@@ -1045,8 +1048,8 @@ std::vector<RecipientShardEntry> constructRecipientShardEntries(
 ReshardingCoordinatorExternalState::ParticipantShardsAndChunks
 ReshardingCoordinatorExternalStateImpl::calculateParticipantShardsAndChunks(
     OperationContext* opCtx, const ReshardingCoordinatorDocument& coordinatorDoc) {
-    const auto cm = uassertStatusOK(
-        Grid::get(opCtx)->catalogCache()->getShardedCollectionPlacementInfoWithRefresh(
+    const auto [cm, _] = uassertStatusOK(
+        Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithPlacementRefresh(
             opCtx, coordinatorDoc.getSourceNss()));
 
     std::set<ShardId> donorShardIds;
@@ -1289,7 +1292,7 @@ void markCompleted(const Status& status, ReshardingMetrics* metrics) {
 BSONObj createFlushReshardingStateChangeCommand(const NamespaceString& nss,
                                                 const UUID& reshardingUUID) {
     _flushReshardingStateChange cmd(nss);
-    cmd.setDbName(NamespaceString::kAdminDb);
+    cmd.setDbName(DatabaseName::kAdmin);
     cmd.setReshardingUUID(reshardingUUID);
     return cmd.toBSON(
         BSON(WriteConcernOptions::kWriteConcernField << WriteConcernOptions::Majority));
@@ -1298,7 +1301,7 @@ BSONObj createFlushReshardingStateChangeCommand(const NamespaceString& nss,
 BSONObj createShardsvrCommitReshardCollectionCmd(const NamespaceString& nss,
                                                  const UUID& reshardingUUID) {
     ShardsvrCommitReshardCollection cmd(nss);
-    cmd.setDbName(NamespaceString::kAdminDb);
+    cmd.setDbName(DatabaseName::kAdmin);
     cmd.setReshardingUUID(reshardingUUID);
     return cmd.toBSON(
         BSON(WriteConcernOptions::kWriteConcernField << WriteConcernOptions::Majority));
@@ -1803,10 +1806,12 @@ ExecutorFuture<bool> ReshardingCoordinator::_isReshardingOpRedundant(
                            opCtx, _coordinatorDoc.getSourceNss()));
                    cm.emplace(cri.cm);
                } else {
-                   cm.emplace(uassertStatusOK(Grid::get(opCtx)
-                                                  ->catalogCache()
-                                                  ->getShardedCollectionPlacementInfoWithRefresh(
-                                                      opCtx, _coordinatorDoc.getSourceNss())));
+                   cm.emplace(
+                       uassertStatusOK(Grid::get(opCtx)
+                                           ->catalogCache()
+                                           ->getShardedCollectionRoutingInfoWithPlacementRefresh(
+                                               opCtx, _coordinatorDoc.getSourceNss()))
+                           .cm);
                }
 
                const auto currentShardKey = cm->getShardKeyPattern().getKeyPattern();
@@ -2151,6 +2156,8 @@ ExecutorFuture<void> ReshardingCoordinator::_awaitAllParticipantShardsDone(
                     Grid::get(opCtx.get())->shardRegistry()->getAllShardIds(opCtx.get());
                 const auto& nss = coordinatorDoc.getSourceNss();
                 const auto& notMatchingThisUUID = coordinatorDoc.getReshardingUUID();
+                // TODO SERVER-74324: deprecate _shardsvrDropCollectionIfUUIDNotMatching after 7.0
+                // is lastLTS.
                 const auto cmdObj =
                     ShardsvrDropCollectionIfUUIDNotMatchingRequest(nss, notMatchingThisUUID)
                         .toBSON({});
@@ -2202,7 +2209,7 @@ void ReshardingCoordinator::_sendCommandToAllParticipants(
 
     _reshardingCoordinatorExternalState->sendCommandToShards(
         opCtx.get(),
-        NamespaceString::kAdminDb,
+        DatabaseName::kAdmin.db(),
         command,
         {participantShardIds.begin(), participantShardIds.end()},
         **executor);
@@ -2216,7 +2223,7 @@ void ReshardingCoordinator::_sendCommandToAllRecipients(
 
     _reshardingCoordinatorExternalState->sendCommandToShards(
         opCtx.get(),
-        NamespaceString::kAdminDb,
+        DatabaseName::kAdmin.db(),
         command,
         {recipientShardIds.begin(), recipientShardIds.end()},
         **executor);
@@ -2230,7 +2237,7 @@ void ReshardingCoordinator::_sendCommandToAllDonors(
 
     _reshardingCoordinatorExternalState->sendCommandToShards(
         opCtx.get(),
-        NamespaceString::kAdminDb,
+        DatabaseName::kAdmin.db(),
         command,
         {donorShardIds.begin(), donorShardIds.end()},
         **executor);
@@ -2297,9 +2304,9 @@ void ReshardingCoordinator::_updateChunkImbalanceMetrics(const NamespaceString& 
     auto opCtx = cancellableOpCtx.get();
 
     try {
-        auto routingInfo = uassertStatusOK(
-            Grid::get(opCtx)->catalogCache()->getShardedCollectionPlacementInfoWithRefresh(opCtx,
-                                                                                           nss));
+        auto [routingInfo, _] = uassertStatusOK(
+            Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithPlacementRefresh(
+                opCtx, nss));
 
         const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
         const auto collectionZones =

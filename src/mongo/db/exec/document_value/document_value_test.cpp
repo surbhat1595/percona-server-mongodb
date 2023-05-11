@@ -548,7 +548,9 @@ public:
     int cmp(const BSONObj& a, const BSONObj& b) {
         int result = DocumentComparator().compare(fromBson(a), fromBson(b));
         return  // sign
-            result < 0 ? -1 : result > 0 ? 1 : 0;
+            result < 0   ? -1
+            : result > 0 ? 1
+                         : 0;
     }
     void assertComparison(int expectedResult, const BSONObj& a, const BSONObj& b) {
         ASSERT_EQUALS(expectedResult, cmp(a, b));
@@ -888,7 +890,8 @@ TEST(MetaFields, CopyMetadataFromCopiesAllMetadata) {
                  << "foo"
                  << "h" << 1 << "$indexKey" << BSON("y" << 1) << "$searchScoreDetails"
                  << BSON("scoreDetails"
-                         << "foo")));
+                         << "foo")
+                 << "$searchSortValues" << BSON("a" << 1)));
 
     MutableDocument destination{};
     destination.copyMetaDataFrom(source);
@@ -905,6 +908,7 @@ TEST(MetaFields, CopyMetadataFromCopiesAllMetadata) {
     ASSERT_BSONOBJ_EQ(result.metadata().getSearchScoreDetails(),
                       BSON("scoreDetails"
                            << "foo"));
+    ASSERT_BSONOBJ_EQ(result.metadata().getSearchSortValues(), BSON("a" << 1));
 }
 
 class SerializationTest : public unittest::Test {
@@ -995,6 +999,7 @@ TEST(MetaFields, ToAndFromBson) {
                                                         << "def"_sd));
     docBuilder.metadata().setSearchScoreDetails(BSON("scoreDetails"
                                                      << "foo"));
+    docBuilder.metadata().setSearchSortValues(BSON("a" << 42));
     Document doc = docBuilder.freeze();
     BSONObj obj = doc.toBsonWithMetaData();
     ASSERT_EQ(10.0, obj[Document::metaFieldTextScore].Double());
@@ -1006,6 +1011,7 @@ TEST(MetaFields, ToAndFromBson) {
     ASSERT_BSONOBJ_EQ(obj[Document::metaFieldSearchScoreDetails].Obj(),
                       BSON("scoreDetails"
                            << "foo"));
+    ASSERT_BSONOBJ_EQ(BSON("a" << 42), obj[Document::metaFieldSearchSortValues].Obj());
     Document fromBson = Document::fromBsonWithMetaData(obj);
     ASSERT_TRUE(fromBson.metadata().hasTextScore());
     ASSERT_TRUE(fromBson.metadata().hasRandVal());
@@ -1014,6 +1020,7 @@ TEST(MetaFields, ToAndFromBson) {
     ASSERT_BSONOBJ_EQ(BSON("scoreDetails"
                            << "foo"),
                       fromBson.metadata().getSearchScoreDetails());
+    ASSERT_BSONOBJ_EQ(BSON("a" << 42), fromBson.metadata().getSearchSortValues());
 }
 
 TEST(MetaFields, MetaFieldsIncludedInDocumentApproximateSize) {
@@ -1162,7 +1169,12 @@ public:
     void run() {
         std::string longString(16793500, 'x');
         auto obj = BSON("str" << longString);
-        ASSERT_THROWS_CODE([&]() { Value{obj["str"]}; }(), DBException, 16493);
+        ASSERT_THROWS_CODE(
+            [&]() {
+                Value{obj["str"]};
+            }(),
+            DBException,
+            16493);
     }
 };
 

@@ -269,7 +269,7 @@ void setAllowMigrations(OperationContext* opCtx,
         Grid::get(opCtx)->shardRegistry()->getConfigShard()->runCommandWithFixedRetryAttempts(
             opCtx,
             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-            NamespaceString::kAdminDb.toString(),
+            DatabaseName::kAdmin.toString(),
             CommandHelpers::appendMajorityWriteConcern(configsvrSetAllowMigrationsCmd.toBSON({})),
             Shard::RetryPolicy::kIdempotent  // Although ConfigsvrSetAllowMigrations is not really
                                              // idempotent (because it will cause the collection
@@ -412,12 +412,12 @@ void removeTagsMetadataFromConfig(OperationContext* opCtx,
 
     // Remove config.tags entries
     ConfigsvrRemoveTags configsvrRemoveTagsCmd(nss);
-    configsvrRemoveTagsCmd.setDbName(NamespaceString::kAdminDb);
+    configsvrRemoveTagsCmd.setDbName(DatabaseName::kAdmin);
 
     const auto swRemoveTagsResult = configShard->runCommandWithFixedRetryAttempts(
         opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-        NamespaceString::kAdminDb.toString(),
+        DatabaseName::kAdmin.toString(),
         CommandHelpers::appendMajorityWriteConcern(configsvrRemoveTagsCmd.toBSON(osi.toBSON())),
         Shard::RetryPolicy::kIdempotent);
 
@@ -452,7 +452,7 @@ void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx,
     const auto deleteResult = configShard->runCommandWithFixedRetryAttempts(
         opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-        NamespaceString::kConfigDb.toString(),
+        DatabaseName::kConfig.toString(),
         CommandHelpers::appendMajorityWriteConcern(deleteCmd.toBSON({})),
         Shard::RetryPolicy::kIdempotent);
 
@@ -497,8 +497,10 @@ void removeCollAndChunksMetadataFromConfig(OperationContext* opCtx,
     const auto& nss = coll.getNss();
     const auto& uuid = coll.getUuid();
 
-    ON_BLOCK_EXIT(
-        [&] { Grid::get(opCtx)->catalogCache()->invalidateCollectionEntry_LINEARIZABLE(nss); });
+    ON_BLOCK_EXIT([&] {
+        Grid::get(opCtx)->catalogCache()->invalidateCollectionEntry_LINEARIZABLE(nss);
+        Grid::get(opCtx)->catalogCache()->invalidateIndexEntry_LINEARIZABLE(nss);
+    });
 
     deleteCollection(opCtx, nss, uuid, writeConcern);
 
@@ -601,7 +603,7 @@ void shardedRenameMetadata(OperationContext* opCtx,
             auto reply = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
                 opCtx,
                 ReadPreferenceSetting(ReadPreference::PrimaryOnly, TagSet{}),
-                NamespaceString::kConfigDb.toString(),
+                DatabaseName::kConfig.toString(),
                 distinctRequest.toBSON({}),
                 Shard::RetryPolicy::kIdempotent));
 
@@ -869,38 +871,6 @@ BSONObj getCriticalSectionReasonForRename(const NamespaceString& from, const Nam
     return BSON("command"
                 << "rename"
                 << "from" << from.toString() << "to" << to.toString());
-}
-
-void ensureCollectionDroppedNoChangeEvent(OperationContext* opCtx,
-                                          const NamespaceString& nss,
-                                          const boost::optional<UUID>& uuid) {
-    invariant(!opCtx->lockState()->isLocked());
-    invariant(!opCtx->lockState()->inAWriteUnitOfWork());
-
-    writeConflictRetry(opCtx,
-                       "mongo::sharding_ddl_util::ensureCollectionDroppedNoChangeEvent",
-                       nss.toString(),
-                       [&] {
-                           try {
-                               AutoGetCollection coll(opCtx, nss, MODE_X);
-                               if (!coll || (uuid && coll->uuid() != uuid)) {
-                                   // If the collection doesn't exist or exists with a different
-                                   // UUID, then the requested collection has been dropped already.
-                                   return;
-                               }
-
-                               WriteUnitOfWork wuow(opCtx);
-                               uassertStatusOK(coll.getDb()->dropCollectionEvenIfSystem(
-                                   opCtx, nss, {} /* dropOpTime */, true /* markFromMigrate */));
-                               wuow.commit();
-                           } catch (const ExceptionFor<ErrorCodes::InvalidViewDefinition>&) {
-                               // AutoGetCollection may raise this exception when the collection
-                               // doesn't exist and the CollectionCatalog starts looking into the
-                               // list of existing views; the error can be ignored, and the
-                               // collection may be considered as already dropped.
-                               return;
-                           }
-                       });
 }
 }  // namespace sharding_ddl_util
 }  // namespace mongo

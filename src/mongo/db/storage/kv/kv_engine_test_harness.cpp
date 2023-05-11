@@ -118,7 +118,9 @@ protected:
 namespace {
 
 std::function<std::unique_ptr<KVHarnessHelper>(ServiceContext*)> basicFactory =
-    [](ServiceContext*) -> std::unique_ptr<KVHarnessHelper> { fassertFailed(40355); };
+    [](ServiceContext*) -> std::unique_ptr<KVHarnessHelper> {
+    fassertFailed(40355);
+};
 
 class KVEngineTestHarness : public ServiceContextTest {
 protected:
@@ -324,6 +326,9 @@ TEST_F(KVEngineTestHarness, TemporaryRecordStoreSimple) {
         ASSERT_EQUALS(1U, all.size());
         ASSERT_EQUALS(ident, all[0]);
 
+        // Dropping a collection might fail if we haven't checkpointed the data
+        engine->checkpoint(opCtx.get());
+
         WriteUnitOfWork wuow(opCtx.get());
         ASSERT_OK(engine->dropIdent(opCtx->recoveryUnit(), ident));
         wuow.commit();
@@ -357,8 +362,7 @@ TEST_F(KVEngineTestHarness, AllDurableTimestamp) {
         WriteUnitOfWork uow1(opCtx1);
         ASSERT_OK(rs->insertRecord(opCtx1, "abc", 4, t51));
 
-        // TODO (SERVER-71148): The all_durable timestamp should be 0 here.
-        // ASSERT_EQ(engine->getAllDurableTimestamp(), 0);
+        ASSERT_EQ(engine->getAllDurableTimestamp(), Timestamp(StorageEngine::kMinimumTimestamp));
 
         auto opCtx2 = opCtxs[1].second.get();
         WriteUnitOfWork uow2(opCtx2);

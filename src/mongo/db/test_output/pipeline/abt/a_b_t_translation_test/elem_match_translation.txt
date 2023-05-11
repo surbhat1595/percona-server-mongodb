@@ -14,17 +14,16 @@ metadata:
 			CE type: -1
 
 -- OUTPUT:
-Root []
-|   |   projections: 
-|   |       scan_0
-|   RefBlock: 
-|       Variable [scan_0]
+Root [{scan_0}]
 Filter []
 |   EvalFilter []
 |   |   Variable [scan_0]
 |   PathGet [a]
-|   PathComposeM []
-|   |   PathArr []
+|   PathArr []
+Filter []
+|   EvalFilter []
+|   |   Variable [scan_0]
+|   PathGet [a]
 |   PathTraverse [1]
 |   PathComposeM []
 |   |   PathComposeA []
@@ -51,11 +50,7 @@ metadata:
 			CE type: -1
 
 -- OUTPUT:
-Root []
-|   |   projections: 
-|   |       scan_0
-|   RefBlock: 
-|       Variable [scan_0]
+Root [{scan_0}]
 Filter []
 |   EvalFilter []
 |   |   Variable [scan_0]
@@ -86,17 +81,16 @@ metadata:
 			CE type: -1
 
 -- OUTPUT:
-Root []
-|   |   projections: 
-|   |       combinedProjection_0
-|   RefBlock: 
-|       Variable [combinedProjection_0]
+Root [{combinedProjection_0}]
 Filter []
 |   EvalFilter []
 |   |   Variable [combinedProjection_0]
 |   PathGet [a]
-|   PathComposeM []
-|   |   PathArr []
+|   PathArr []
+Filter []
+|   EvalFilter []
+|   |   Variable [combinedProjection_0]
+|   PathGet [a]
 |   PathTraverse [1]
 |   PathComposeM []
 |   |   PathComposeM []
@@ -120,8 +114,7 @@ Evaluation [{combinedProjection_0}]
 |   |   PathConstant []
 |   |   Variable [projGetPath_0]
 |   PathKeep [_id, a]
-Evaluation [{projGetPath_0}]
-|   Const [[1, 2, 3, 4]]
+Evaluation [{projGetPath_0} = Const [[1, 2, 3, 4]]]
 Scan [collection, {scan_0}]
 
 
@@ -141,17 +134,16 @@ metadata:
 			CE type: -1
 
 -- OUTPUT:
-Root []
-|   |   projections: 
-|   |       scan_0
-|   RefBlock: 
-|       Variable [scan_0]
+Root [{scan_0}]
 Filter []
 |   EvalFilter []
 |   |   Variable [scan_0]
 |   PathGet [a]
-|   PathComposeM []
-|   |   PathArr []
+|   PathArr []
+Filter []
+|   EvalFilter []
+|   |   Variable [scan_0]
+|   PathGet [a]
 |   PathTraverse [1]
 |   PathComposeM []
 |   |   PathComposeA []

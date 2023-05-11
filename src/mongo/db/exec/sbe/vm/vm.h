@@ -34,13 +34,21 @@
 #include <vector>
 
 #include "mongo/base/compare_numbers.h"
+#include "mongo/config.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/vm/datetime.h"
+#include "mongo/db/exec/sbe/vm/label.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 
 #include <absl/container/inlined_vector.h>
+
+#if !defined(MONGO_CONFIG_DEBUG_BUILD)
+#define MONGO_COMPILER_ALWAYS_INLINE_OPT MONGO_COMPILER_ALWAYS_INLINE
+#else
+#define MONGO_COMPILER_ALWAYS_INLINE_OPT
+#endif
 
 namespace mongo {
 namespace sbe {
@@ -368,8 +376,8 @@ struct Instruction {
      * An instruction parameter descriptor. Values (instruction arguments) live on the VM stack and
      * the descriptor tells where to find it. The position on the stack is expressed as an offset
      * from the top of stack.
-     * Optionally, an instruction can "consume" the value by poping the stack. All non-named
-     * temporaries are poped after the use. Naturally, only the top of stack (offset 0) can be
+     * Optionally, an instruction can "consume" the value by popping the stack. All non-named
+     * temporaries are popped after the use. Naturally, only the top of stack (offset 0) can be
      * popped. We do not support an arbitrary erasure from the middle of stack.
      */
     struct Parameter {
@@ -381,7 +389,7 @@ struct Instruction {
             return sizeof(bool) + (frameId ? sizeof(int) : 0);
         }
 
-        MONGO_COMPILER_ALWAYS_INLINE
+        MONGO_COMPILER_ALWAYS_INLINE_OPT
         static std::pair<bool, int> decodeParam(const uint8_t*& pcPointer) noexcept {
             auto pop = readFromMemory<bool>(pcPointer);
             pcPointer += sizeof(pop);
@@ -596,6 +604,7 @@ enum class Builtin : uint8_t {
     dayOfMonth,
     dayOfWeek,
     datePartsWeekYear,
+    dateToString,
     dropFields,
     newArray,
     keepFields,
@@ -691,6 +700,7 @@ enum class Builtin : uint8_t {
     isDayOfWeek,
     isTimeUnit,
     isTimezone,
+    isValidToStringFormat,
     setUnion,
     setIntersection,
     setDifference,
@@ -768,6 +778,9 @@ using ArityType = uint32_t;
 
 class CodeFragment {
 public:
+    const auto& frames() const {
+        return _frames;
+    }
     auto& instrs() {
         return _instrs;
     }
@@ -877,11 +890,11 @@ public:
     void appendIsTimestamp(Instruction::Parameter input);
     void appendTypeMatch(Instruction::Parameter input, uint32_t mask);
     void appendFunction(Builtin f, ArityType arity);
-    void appendJump(int jumpOffset);
-    void appendJumpTrue(int jumpOffset);
-    void appendJumpFalse(int jumpOffset);
-    void appendJumpNothing(int jumpOffset);
-    void appendJumpNotNothing(int jumpOffset);
+    void appendLabelJump(LabelId labelId);
+    void appendLabelJumpTrue(LabelId labelId);
+    void appendLabelJumpFalse(LabelId labelId);
+    void appendLabelJumpNothing(LabelId labelId);
+    void appendLabelJumpNotNothing(LabelId labelId);
     void appendRet();
     void appendAllocStack(uint32_t size);
     void appendFail();
@@ -896,26 +909,40 @@ public:
     // variable reference and frame declaration is allowed to happen in any order.
     void declareFrame(FrameId frameId);
 
-    // Declares and defines a local variable frame at the current stack depth modifies by the gives
+    // Declares and defines a local variable frame at the current stack depth modifies by the given
     // offset.
     void declareFrame(FrameId frameId, int stackOffset);
 
-    // Removes the frame from scope. The frame must exist and must have no outstanding fixups.
-    // That is: have been declared or have never been referenced.
+    // Removes the frame from scope. The frame must have no outstanding fixups.
+    // That is: must be declared or never referenced.
     void removeFrame(FrameId frameId);
 
     // Returns whether the are any frames currently in scope.
     bool hasFrames() const;
 
+    // Associates the current code position with a label.
+    void appendLabel(LabelId labelId);
+
+    // Removes the label from scope. The label must have no outstanding fixups.
+    // That is: must be associated with code position or never referenced.
+    void removeLabel(LabelId labelId);
+
+    void validate();
+
 private:
-    // Adjusts all the stack offsets in the outstanding fixups by the provided delta.
+    // Adjusts all the stack offsets in the outstanding fixups by the provided delta as follows: for
+    // a given 'stackOffsetDelta' of frames in this CodeFragment:
+    //   1. Adds this delta to the 'stackPosition' of all frames having a defined stack position.
+    //   2. Adds this delta to all uses of frame stack posn's in code (located at 'fixupOffset's).
+    // The net effect is to change the stack offsets of all frames with defined stack positions and
+    // all code references to frame offsets in this CodeFragment by 'stackOffsetDelta'.
     void fixupStackOffsets(int stackOffsetDelta);
 
     // Stores the fixup information for stack frames.
-    // stackPosition - stack depth of where the frame was declared, or kPositionNotSet if not known
-    // yet.
-    // fixupOffsets - offsets in the code where the stack depth of the frame was used and need
-    // fixup.
+    // fixupOffsets - byte offsets in the code where the stack depth of the frame was used and need
+    //   fixup.
+    // stackPosition - stack depth in elements of where the frame was declared, or kPositionNotSet
+    //   if not known yet.
     struct FrameInfo {
         static constexpr int64_t kPositionNotSet = std::numeric_limits<int64_t>::min();
 
@@ -923,8 +950,19 @@ private:
         int64_t stackPosition{kPositionNotSet};
     };
 
+    // Stores the fixup information for labels.
+    // fixupOffsets - offsets in the code where the label was used and need fixup.
+    // definitionOffset - offset in the code where label was defined.
+    struct LabelInfo {
+        static constexpr int64_t kOffsetNotSet = std::numeric_limits<int64_t>::min();
+        absl::InlinedVector<size_t, 2> fixupOffsets;
+        int64_t definitionOffset{kOffsetNotSet};
+    };
+
     template <typename... Ts>
     void appendSimpleInstruction(Instruction::Tags tag, Ts&&... params);
+    void appendLabelJumpInstruction(LabelId labelId, Instruction::Tags tag);
+
     auto allocateSpace(size_t size) {
         auto oldSize = _instrs.size();
         _instrs.resize(oldSize + size);
@@ -944,24 +982,45 @@ private:
         return -var - 1;
     }
 
-    FrameInfo& getOrDefineFrame(FrameId frameId);
+    // Returns the frame with ID 'frameId' if it already exists, else creates and returns it.
+    FrameInfo& getOrDeclareFrame(FrameId frameId);
+
+    // For a given 'frame' in this CodeFragment, subtracts the frame's 'stackPosition' from all the
+    // refs to this frame in code (located at 'fixupOffset's). This is done once the true stack
+    // position of the frame is known, so code refs point to the correct location in the frame.
     void fixupFrame(FrameInfo& frame);
 
+    LabelInfo& getOrDeclareLabel(LabelId labelId);
+    void fixupLabel(LabelInfo& label);
+
+    // The sequence of byte code instructions this CodeFragment represents.
     absl::InlinedVector<uint8_t, 16> _instrs;
 
     // A collection of frame information for local variables.
     // Variables can be declared or referenced out of order and at the time of variable reference
-    // it may not be known the relative stack offset of variable daclaration w.r.t to the its use.
+    // it may not be known the relative stack offset of variable declaration w.r.t to its use.
     // This tracks both declaration info (stack depth) and use info (code offset).
     // When code is concatenated the offsets are adjusted if needed and when declaration stack depth
     // becomes known all fixups are resolved.
     absl::flat_hash_map<FrameId, FrameInfo> _frames;
 
-    size_t _stackSize{0};
-    size_t _maxStackSize{0};
+    // A collection of label information for labels that are currently in scope.
+    // Labels can be defined or referenced out of order and at at time of label reference (e.g:
+    // jumps or lambda creation), the exact relative offset may not be yet known.
+    // This tracks both label definition (code offset where label is defined) and use info for jumps
+    // or lambdas (code offset). When code is concatenated the offsets are adjusted, if needed, and
+    // when label definition offset becomes known all fixups are resolved.
+    absl::flat_hash_map<LabelId, LabelInfo> _labels;
+
+    // Delta number of '_argStack' entries effect of this CodeFragment; may be negative.
+    int64_t _stackSize{0};
+
+    // Maximum absolute number of entries in '_argStack' from this CodeFragment.
+    int64_t _maxStackSize{0};
 };
 
 class ByteCode {
+    // The number of bytes per stack entry.
     static constexpr size_t sizeOfElement =
         sizeof(bool) + sizeof(value::TypeTags) + sizeof(value::Value);
     static_assert(sizeOfElement == 10);
@@ -1196,7 +1255,6 @@ private:
                                                              int64_t binSize,
                                                              TimeZone timezone,
                                                              DayOfWeek startOfWeek);
-
     FastTuple<bool, value::TypeTags, value::Value> builtinSplit(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinDate(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinDateWeekYear(ArityType arity);
@@ -1295,6 +1353,7 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinIsDayOfWeek(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinIsTimeUnit(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinIsTimezone(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinIsValidToStringFormat(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinSetUnion(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinSetIntersection(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinSetDifference(ArityType arity);
@@ -1324,6 +1383,7 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinTsSecond(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinTsIncrement(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinTypeMatch(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinDateToString(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinDateTrunc(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinMinMaxFromArray(ArityType arity,
                                                                           Builtin f);
@@ -1334,24 +1394,24 @@ private:
     static constexpr size_t offsetTag = 1;
     static constexpr size_t offsetVal = 2;
 
-    MONGO_COMPILER_ALWAYS_INLINE FastTuple<bool, value::TypeTags, value::Value> readTuple(
-        uint8_t* ptr) noexcept {
+    MONGO_COMPILER_ALWAYS_INLINE_OPT
+    FastTuple<bool, value::TypeTags, value::Value> readTuple(uint8_t* ptr) noexcept {
         auto owned = readFromMemory<bool>(ptr + offsetOwned);
         auto tag = readFromMemory<value::TypeTags>(ptr + offsetTag);
         auto val = readFromMemory<value::Value>(ptr + offsetVal);
         return {owned, tag, val};
     }
 
-    MONGO_COMPILER_ALWAYS_INLINE void writeTuple(uint8_t* ptr,
-                                                 bool owned,
-                                                 value::TypeTags tag,
-                                                 value::Value val) noexcept {
+    MONGO_COMPILER_ALWAYS_INLINE_OPT
+    void writeTuple(uint8_t* ptr, bool owned, value::TypeTags tag, value::Value val) noexcept {
         writeToMemory(ptr + offsetOwned, owned);
         writeToMemory(ptr + offsetTag, tag);
         writeToMemory(ptr + offsetVal, val);
     }
-    MONGO_COMPILER_ALWAYS_INLINE FastTuple<bool, value::TypeTags, value::Value> getFromStack(
-        size_t offset, bool pop = false) noexcept {
+
+    MONGO_COMPILER_ALWAYS_INLINE_OPT
+    FastTuple<bool, value::TypeTags, value::Value> getFromStack(size_t offset,
+                                                                bool pop = false) noexcept {
         auto ret = readTuple(_argStackTop - offset * sizeOfElement);
 
         if (pop) {
@@ -1361,8 +1421,8 @@ private:
         return ret;
     }
 
-    MONGO_COMPILER_ALWAYS_INLINE FastTuple<bool, value::TypeTags, value::Value> moveFromStack(
-        size_t offset) noexcept {
+    MONGO_COMPILER_ALWAYS_INLINE_OPT
+    FastTuple<bool, value::TypeTags, value::Value> moveFromStack(size_t offset) noexcept {
         if (MONGO_likely(offset == 0)) {
             auto [owned, tag, val] = readTuple(_argStackTop);
             writeToMemory(_argStackTop + offsetOwned, false);
@@ -1375,8 +1435,8 @@ private:
         }
     }
 
-    MONGO_COMPILER_ALWAYS_INLINE std::pair<value::TypeTags, value::Value> moveOwnedFromStack(
-        size_t offset) {
+    MONGO_COMPILER_ALWAYS_INLINE_OPT
+    std::pair<value::TypeTags, value::Value> moveOwnedFromStack(size_t offset) {
         auto [owned, tag, val] = moveFromStack(offset);
         if (!owned) {
             std::tie(tag, val) = value::copyValue(tag, val);
@@ -1385,10 +1445,8 @@ private:
         return {tag, val};
     }
 
-    MONGO_COMPILER_ALWAYS_INLINE void setStack(size_t offset,
-                                               bool owned,
-                                               value::TypeTags tag,
-                                               value::Value val) noexcept {
+    MONGO_COMPILER_ALWAYS_INLINE_OPT
+    void setStack(size_t offset, bool owned, value::TypeTags tag, value::Value val) noexcept {
         if (MONGO_likely(offset == 0)) {
             topStack(owned, tag, val);
         } else {
@@ -1396,9 +1454,8 @@ private:
         }
     }
 
-    MONGO_COMPILER_ALWAYS_INLINE void pushStack(bool owned,
-                                                value::TypeTags tag,
-                                                value::Value val) noexcept {
+    MONGO_COMPILER_ALWAYS_INLINE_OPT
+    void pushStack(bool owned, value::TypeTags tag, value::Value val) noexcept {
         auto localPtr = _argStackTop += sizeOfElement;
         if constexpr (kDebugBuild) {
             invariant(localPtr != _argStackEnd);
@@ -1417,7 +1474,8 @@ private:
         _argStackTop -= sizeOfElement;
     }
 
-    MONGO_COMPILER_ALWAYS_INLINE void popAndReleaseStack() noexcept {
+    MONGO_COMPILER_ALWAYS_INLINE_OPT
+    void popAndReleaseStack() noexcept {
         auto [owned, tag, val] = getFromStack(0);
         if (owned) {
             value::releaseValue(tag, val);
@@ -1433,8 +1491,13 @@ private:
     void allocStack(size_t size) noexcept;
     void swapStack();
 
+    // The top entry in '_argStack', or one element before the stack when empty.
     uint8_t* _argStackTop{nullptr};
+
+    // The byte following '_argStack's current memory block.
     uint8_t* _argStackEnd{nullptr};
+
+    // Expression execution stack of (owned, tag, value) tuples each of 'sizeOfElement' bytes.
     uint8_t* _argStack{nullptr};
 };
 }  // namespace vm

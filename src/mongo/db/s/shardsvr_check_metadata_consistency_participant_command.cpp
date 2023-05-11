@@ -46,7 +46,7 @@ class ShardsvrCheckMetadataConsistencyParticipantCommand final
     : public TypedCommand<ShardsvrCheckMetadataConsistencyParticipantCommand> {
 public:
     using Request = ShardsvrCheckMetadataConsistencyParticipant;
-    using Response = CheckMetadataConsistencyResponse;
+    using Response = CursorInitialReply;
 
     bool adminOnly() const override {
         return false;
@@ -92,7 +92,7 @@ public:
             std::vector<CollectionPtr> localCollection;
             for (const auto& localNss : localNssCollections) {
                 localCollection.push_back(
-                    collectionCatalog->lookupCollectionByNamespace(opCtx, localNss));
+                    CollectionPtr(collectionCatalog->lookupCollectionByNamespace(opCtx, localNss)));
             }
 
             // Check consistency between local metadata and configsvr metadata
@@ -100,7 +100,7 @@ public:
                 metadata_consistency_util::checkCollectionMetadataInconsistencies(
                     opCtx, shardId, primaryShardId, catalogClientCollections, localCollection);
 
-            return metadata_consistency_util::_makeCursor(
+            return metadata_consistency_util::makeCursor(
                 opCtx, std::move(inconsistencies), nss, request().toBSON({}));
         }
 

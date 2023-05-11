@@ -46,11 +46,13 @@ namespace mongo {
 
 class ShardingRecoveryServiceTest : public ShardServerTestFixture {
 public:
-    inline static const NamespaceString collNss{"TestDB", "TestCollection"};
+    inline static const NamespaceString collNss =
+        NamespaceString::createNamespaceString_forTest("TestDB", "TestCollection");
     inline static const BSONObj collOpReason =
         BSON("Dummy operation on collection" << collNss.ns());
 
-    inline static const NamespaceString dbName{"TestDB"};
+    inline static const NamespaceString dbName =
+        NamespaceString::createNamespaceString_forTest("TestDB");
     inline static const BSONObj dbOpReason = BSON("Dummy operation on database" << dbName.ns());
 
     inline static const BSONObj differentOpReason = BSON("Yet another dummy operation" << true);
@@ -98,8 +100,7 @@ public:
             doc = CollectionCriticalSectionDocument(nss, reason, blockReads);
 
             DBDirectClient dbClient(opCtx());
-            dbClient.insert(NamespaceString::kCollectionCriticalSectionsNamespace.ns(),
-                            doc->toBSON());
+            dbClient.insert(NamespaceString::kCollectionCriticalSectionsNamespace, doc->toBSON());
 
             return;
         }
@@ -108,7 +109,7 @@ public:
         ASSERT_NE(doc->getBlockReads(), blockReads);
 
         DBDirectClient dbClient(opCtx());
-        dbClient.update(NamespaceString::kCollectionCriticalSectionsNamespace.ns(),
+        dbClient.update(NamespaceString::kCollectionCriticalSectionsNamespace,
                         BSON(CollectionCriticalSectionDocument::kNssFieldName << nss.toString()),
                         BSON("$set" << BSON(CollectionCriticalSectionDocument::kBlockReadsFieldName
                                             << blockReads)));
@@ -119,7 +120,7 @@ public:
         ASSERT(readCriticalSectionDocument(nss, reason));
 
         DBDirectClient dbClient(opCtx());
-        dbClient.remove(NamespaceString::kCollectionCriticalSectionsNamespace.ns(),
+        dbClient.remove(NamespaceString::kCollectionCriticalSectionsNamespace,
                         BSON(CollectionCriticalSectionDocument::kNssFieldName << nss.toString()),
                         false /* removeMany */);
     }
@@ -127,10 +128,10 @@ public:
     void assertCriticalSectionCatchUpEnteredInMemory(const NamespaceString& nss) {
         if (nsIsDbOnly(nss.ns())) {
             AutoGetDb db(opCtx(), nss.dbName(), MODE_IS);
-            auto dss =
-                DatabaseShardingState::acquire(opCtx(), nss.dbName(), DSSAcquisitionMode::kShared);
-            ASSERT(dss->getCriticalSectionSignal(ShardingMigrationCriticalSection::kWrite));
-            ASSERT(!dss->getCriticalSectionSignal(ShardingMigrationCriticalSection::kRead));
+            const auto scopedDss =
+                DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx(), nss.dbName());
+            ASSERT(scopedDss->getCriticalSectionSignal(ShardingMigrationCriticalSection::kWrite));
+            ASSERT(!scopedDss->getCriticalSectionSignal(ShardingMigrationCriticalSection::kRead));
         } else {
             AutoGetCollection coll(opCtx(), nss, MODE_IS);
             const auto csr =
@@ -145,10 +146,10 @@ public:
     void assertCriticalSectionCommitEnteredInMemory(const NamespaceString& nss) {
         if (nsIsDbOnly(nss.ns())) {
             AutoGetDb db(opCtx(), nss.dbName(), MODE_IS);
-            auto dss =
-                DatabaseShardingState::acquire(opCtx(), nss.dbName(), DSSAcquisitionMode::kShared);
-            ASSERT(dss->getCriticalSectionSignal(ShardingMigrationCriticalSection::kWrite));
-            ASSERT(dss->getCriticalSectionSignal(ShardingMigrationCriticalSection::kRead));
+            const auto scopedDss =
+                DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx(), nss.dbName());
+            ASSERT(scopedDss->getCriticalSectionSignal(ShardingMigrationCriticalSection::kWrite));
+            ASSERT(scopedDss->getCriticalSectionSignal(ShardingMigrationCriticalSection::kRead));
         } else {
             AutoGetCollection coll(opCtx(), nss, MODE_IS);
             const auto csr =
@@ -162,10 +163,10 @@ public:
     void assertCriticalSectionLeftInMemory(const NamespaceString& nss) {
         if (nsIsDbOnly(nss.ns())) {
             AutoGetDb db(opCtx(), nss.dbName(), MODE_IS);
-            auto dss =
-                DatabaseShardingState::acquire(opCtx(), nss.dbName(), DSSAcquisitionMode::kShared);
-            ASSERT(!dss->getCriticalSectionSignal(ShardingMigrationCriticalSection::kWrite));
-            ASSERT(!dss->getCriticalSectionSignal(ShardingMigrationCriticalSection::kRead));
+            const auto scopedDss =
+                DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx(), nss.dbName());
+            ASSERT(!scopedDss->getCriticalSectionSignal(ShardingMigrationCriticalSection::kWrite));
+            ASSERT(!scopedDss->getCriticalSectionSignal(ShardingMigrationCriticalSection::kRead));
         } else {
             AutoGetCollection coll(opCtx(), nss, MODE_IS);
             const auto csr =

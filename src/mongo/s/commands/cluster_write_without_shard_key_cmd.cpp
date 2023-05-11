@@ -34,6 +34,8 @@
 #include "mongo/db/shard_id.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/cluster_commands_helpers.h"
+#include "mongo/s/commands/cluster_find_and_modify_cmd.h"
+#include "mongo/s/commands/cluster_write_cmd.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/is_mongos.h"
 #include "mongo/s/multi_statement_transaction_requests_sender.h"
@@ -45,35 +47,91 @@
 namespace mongo {
 namespace {
 
-BSONObj _createCmdObj(const BSONObj& writeCmd,
+BSONObj _createCmdObj(OperationContext* opCtx,
+                      const ShardId& shardId,
+                      const NamespaceString& nss,
                       const StringData& commandName,
-                      const BSONObj& targetDocId,
-                      const NamespaceString& nss) {
-    // Drop collation and writeConcern as
-    // targeting by _id uses default collation and writeConcern cannot be specified for
-    // commands run in internal transactions. This object will be used to construct the command
-    // request used by clusterWriteWithoutShardKey.
-    BSONObjBuilder writeCmdObjBuilder(
-        writeCmd.removeFields(std::set<std::string>{"collation", "writeConcern"}));
-    writeCmdObjBuilder.appendElementsUnique(BSON("$db" << nss.dbName().toString()));
-    auto writeCmdObj = writeCmdObjBuilder.obj();
+                      const BSONObj& writeCmd,
+                      const BSONObj& targetDocId) {
+    const auto cri = uassertStatusOK(getCollectionRoutingInfoForTxnCmd(opCtx, nss));
+    uassert(ErrorCodes::InvalidOptions,
+            "_clusterWriteWithoutShardKey can only be run against sharded collections.",
+            cri.cm.isSharded());
+    const auto shardVersion = cri.getShardVersion(shardId);
+
+    // Parse into OpMsgRequest to append the $db field, which is required for command
+    // parsing.
+    const auto opMsgRequest = OpMsgRequest::fromDBAndBody(nss.db(), writeCmd);
 
     // Parse original write command and set _id as query filter for new command object.
-    if (commandName == "update") {
-        auto parsedUpdateRequest = write_ops::UpdateCommandRequest::parse(
-            IDLParserContext("_clusterWriteWithoutShardKey"), writeCmdObj);
-        parsedUpdateRequest.getUpdates().front().setQ(targetDocId);
-        return parsedUpdateRequest.toBSON(BSONObj());
-    } else if (commandName == "delete") {
-        auto parsedDeleteRequest = write_ops::DeleteCommandRequest::parse(
-            IDLParserContext("_clusterWriteWithoutShardKey"), writeCmdObj);
-        parsedDeleteRequest.getDeletes().front().setQ(targetDocId);
-        return parsedDeleteRequest.toBSON(BSONObj());
-    } else if (commandName == "findandmodify" || commandName == "findAndModify") {
-        auto parsedFindAndModifyRequest = write_ops::FindAndModifyCommandRequest::parse(
-            IDLParserContext("_clusterWriteWithoutShardKey"), writeCmdObj);
-        parsedFindAndModifyRequest.setQuery(targetDocId);
-        return parsedFindAndModifyRequest.toBSON(BSONObj());
+    if (commandName == write_ops::UpdateCommandRequest::kCommandName) {
+        auto updateRequest = write_ops::UpdateCommandRequest::parse(
+            IDLParserContext("_clusterWriteWithoutShardKeyForUpdate"), opMsgRequest.body);
+
+        // The original query and collation are sent along with the modified command for the
+        // purposes of query sampling.
+        if (updateRequest.getUpdates().front().getSampleId()) {
+            auto writeCommandRequestBase =
+                write_ops::WriteCommandRequestBase(updateRequest.getWriteCommandRequestBase());
+            writeCommandRequestBase.setOriginalQuery(updateRequest.getUpdates().front().getQ());
+            writeCommandRequestBase.setOriginalCollation(
+                updateRequest.getUpdates().front().getCollation());
+            updateRequest.setWriteCommandRequestBase(writeCommandRequestBase);
+        }
+
+        updateRequest.getUpdates().front().setQ(targetDocId);
+
+        // Unset the collation because targeting by _id uses default collation.
+        updateRequest.getUpdates().front().setCollation(boost::none);
+
+        auto batchedCommandRequest = BatchedCommandRequest(updateRequest);
+        batchedCommandRequest.setShardVersion(shardVersion);
+        return batchedCommandRequest.toBSON();
+    } else if (commandName == write_ops::DeleteCommandRequest::kCommandName) {
+        auto deleteRequest = write_ops::DeleteCommandRequest::parse(
+            IDLParserContext("_clusterWriteWithoutShardKeyForDelete"), opMsgRequest.body);
+
+        // The original query and collation are sent along with the modified command for the
+        // purposes of query sampling.
+        if (deleteRequest.getDeletes().front().getSampleId()) {
+            auto writeCommandRequestBase =
+                write_ops::WriteCommandRequestBase(deleteRequest.getWriteCommandRequestBase());
+            writeCommandRequestBase.setOriginalQuery(deleteRequest.getDeletes().front().getQ());
+            writeCommandRequestBase.setOriginalCollation(
+                deleteRequest.getDeletes().front().getCollation());
+            deleteRequest.setWriteCommandRequestBase(writeCommandRequestBase);
+        }
+
+        deleteRequest.getDeletes().front().setQ(targetDocId);
+
+        // Unset the collation because targeting by _id uses default collation.
+        deleteRequest.getDeletes().front().setCollation(boost::none);
+
+        auto batchedCommandRequest = BatchedCommandRequest(deleteRequest);
+        batchedCommandRequest.setShardVersion(shardVersion);
+        return batchedCommandRequest.toBSON();
+    } else if (commandName == write_ops::FindAndModifyCommandRequest::kCommandName ||
+               commandName == write_ops::FindAndModifyCommandRequest::kCommandAlias) {
+        auto findAndModifyRequest = write_ops::FindAndModifyCommandRequest::parse(
+            IDLParserContext("_clusterWriteWithoutShardKeyForFindAndModify"), opMsgRequest.body);
+
+        // The original query and collation are sent along with the modified command for the
+        // purposes of query sampling.
+        if (findAndModifyRequest.getSampleId()) {
+            findAndModifyRequest.setOriginalQuery(findAndModifyRequest.getQuery());
+            findAndModifyRequest.setOriginalCollation(findAndModifyRequest.getCollation());
+        }
+
+        findAndModifyRequest.setQuery(targetDocId);
+
+        // Unset the collation because targeting by _id uses default collation.
+        findAndModifyRequest.setCollation(boost::none);
+
+        // Drop the writeConcern as it cannot be specified for commands run in internal
+        // transactions. This object will be used to construct the command request used by
+        // _clusterWriteWithoutShardKey.
+        findAndModifyRequest.setWriteConcern(boost::none);
+        return appendShardVersion(findAndModifyRequest.toBSON({}), shardVersion);
     } else {
         uasserted(ErrorCodes::InvalidOptions,
                   "_clusterWriteWithoutShardKey only supports update, delete, and "
@@ -111,27 +169,58 @@ public:
             const auto targetDocId = request().getTargetDocId();
             const auto commandName = writeCmd.firstElementFieldNameStringData();
 
-            const BSONObj cmdObj = _createCmdObj(writeCmd, commandName, targetDocId, nss);
+            const BSONObj cmdObj =
+                _createCmdObj(opCtx, shardId, nss, commandName, writeCmd, targetDocId);
 
-            const auto cri = uassertStatusOK(getCollectionRoutingInfoForTxnCmd(opCtx, nss));
-            uassert(ErrorCodes::InvalidOptions,
-                    "_clusterWriteWithoutShardKey can only be run against sharded collections.",
-                    cri.cm.isSharded());
-
-            auto versionedCmdObj = appendShardVersion(cmdObj, cri.getShardVersion(shardId));
-
-            AsyncRequestsSender::Request arsRequest(shardId, versionedCmdObj);
+            AsyncRequestsSender::Request arsRequest(shardId, cmdObj);
             std::vector<AsyncRequestsSender::Request> arsRequestVector({arsRequest});
 
             MultiStatementTransactionRequestsSender ars(
                 opCtx,
                 Grid::get(opCtx)->getExecutorPool()->getArbitraryExecutor(),
-                request().getDbName().toString(),
+                request().getDbName(),
                 std::move(arsRequestVector),
                 ReadPreferenceSetting(ReadPreference::PrimaryOnly),
                 Shard::RetryPolicy::kNoRetry);
 
             auto response = uassertStatusOK(ars.next().swResponse);
+
+            if (getStatusFromCommandResult(response.data) == ErrorCodes::WouldChangeOwningShard) {
+                // Parse into OpMsgRequest to append the $db field, which is required for command
+                // parsing.
+                auto opMsgRequest = OpMsgRequest::fromDBAndBody(ns().db(), cmdObj);
+                if (commandName == write_ops::UpdateCommandRequest::kCommandName) {
+                    auto request = BatchedCommandRequest::parseUpdate(opMsgRequest);
+
+                    write_ops::WriteError error(0, getStatusFromCommandResult(response.data));
+                    error.setIndex(0);
+                    BatchedCommandResponse emulatedResponse;
+                    emulatedResponse.setStatus(Status::OK());
+                    emulatedResponse.setN(0);
+                    emulatedResponse.addToErrDetails(std::move(error));
+
+                    auto wouldChangeOwningShardSucceeded =
+                        ClusterWriteCmd::handleWouldChangeOwningShardError(
+                            opCtx, &request, &emulatedResponse, {});
+
+                    if (wouldChangeOwningShardSucceeded) {
+                        BSONObjBuilder bob(emulatedResponse.toBSON());
+                        bob.append("ok", 1);
+                        auto res = bob.obj();
+                        return Response(res, shardId.toString());
+                    }
+                } else {
+                    BSONObjBuilder res;
+                    FindAndModifyCmd::handleWouldChangeOwningShardError(
+                        opCtx,
+                        shardId,
+                        nss,
+                        opMsgRequest.body,
+                        getStatusFromCommandResult(response.data),
+                        &res);
+                    return Response(res.obj(), shardId.toString());
+                }
+            }
             return Response(response.data, shardId.toString());
         }
 

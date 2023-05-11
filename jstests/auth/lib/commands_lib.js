@@ -2235,7 +2235,7 @@ export const authCommandsLib = {
             ops: [
               {insert: 0, document: {skey: "MongoDB"}},
               {insert: 1, document: {skey: "MongoDB"}}],
-            nsInfo: [{ns: firstDbName + ".coll"}, {ns: secondDbName + ".coll1"}]
+            nsInfo: [{ns: firstDbName + ".coll"}, {ns: secondDbName + ".coll1"}],
           },
           skipSharded: true,
           testcases: [{
@@ -2267,6 +2267,108 @@ export const authCommandsLib = {
                 actions: ['insert', 'bypassDocumentValidation']
               }
             ]
+          }]
+        },
+        {
+          testname: "bulkWrite_update",
+          command: {
+            bulkWrite: 1,
+            ops: [
+              {update: 0, filter: {skey: "MongoDB"}, updateMods: {field1: 1}},
+              {update: 1, filter: {skey: "MongoDB"}, updateMods: {field1: 1}}],
+            nsInfo: [{ns: firstDbName + ".coll"}, {ns: secondDbName + ".coll1"}],
+          },
+          skipSharded: true,
+          testcases: [{
+            runOnDb: adminDbName,
+            privileges: [{resource: {db: firstDbName, collection: "coll"}, actions: ['update']},
+                         {resource: {db: secondDbName, collection: "coll1"}, actions: ['update']}]
+          }]
+        },
+        {
+          testname: "bulkWrite_updateBypassDocumentValidation",
+          command: {
+            bulkWrite: 1,
+            ops: [
+              {update: 0, filter: {skey: "MongoDB"}, updateMods: {field1: 1}},
+              {update: 1, filter: {skey: "MongoDB"}, updateMods: {field1: 1}}],
+            nsInfo: [{ns: firstDbName + ".coll"}, {ns: secondDbName + ".coll1"}],
+            bypassDocumentValidation: true,
+          },
+          skipSharded: true,
+          testcases: [{
+            runOnDb: adminDbName,
+            privileges: [
+              {
+                resource: {db: firstDbName, collection: "coll"},
+                actions: ['update', 'bypassDocumentValidation']
+              },
+              {
+                resource: {db: secondDbName, collection: "coll1"},
+                actions: ['update', 'bypassDocumentValidation']
+              }
+            ]
+          }]
+        },
+        {
+          testname: "bulkWrite_delete",
+          command: {
+            bulkWrite: 1,
+            ops: [
+              {delete: 0, filter: {skey: "MongoDB"}},
+              {delete: 1, filter: {skey: "MongoDB"}}],
+            nsInfo: [{ns: firstDbName + ".coll"}, {ns: secondDbName + ".coll1"}],
+          },
+          skipSharded: true,
+          testcases: [{
+            runOnDb: adminDbName,
+            privileges: [{resource: {db: firstDbName, collection: "coll"}, actions: ['remove']},
+                         {resource: {db: secondDbName, collection: "coll1"}, actions: ['remove']}]
+          }]
+        },
+        {
+          testname: "bulkWrite_deleteBypassDocumentValidation",
+          command: {
+            bulkWrite: 1,
+            ops: [
+              {delete: 0, filter: {skey: "MongoDB"}},
+              {delete: 1, filter: {skey: "MongoDB"}}],
+            nsInfo: [{ns: firstDbName + ".coll"}, {ns: secondDbName + ".coll1"}],
+            bypassDocumentValidation: true,
+          },
+          skipSharded: true,
+          testcases: [{
+            runOnDb: adminDbName,
+            privileges: [
+              {
+                resource: {db: firstDbName, collection: "coll"},
+                actions: ['remove', 'bypassDocumentValidation']
+              },
+              {
+                resource: {db: secondDbName, collection: "coll1"},
+                actions: ['remove', 'bypassDocumentValidation']
+              }
+            ]
+          }]
+        },
+        {
+          testname: "bulkWrite_insert_update_delete",
+          command: {
+            bulkWrite: 1,
+            ops: [
+              {insert: 0, document: {skey: "MongoDB"}},
+              {insert: 1, document: {skey: "MongoDB"}},
+              {update: 0, filter: {skey: "MongoDB"}, updateMods: {field1: 1}},
+              {update: 1, filter: {skey: "MongoDB"}, updateMods: {field1: 1}},
+              {delete: 0, filter: {skey: "MongoDB"}},
+              {delete: 1, filter: {skey: "MongoDB"}}],
+            nsInfo: [{ns: firstDbName + ".coll"}, {ns: secondDbName + ".coll1"}],
+          },
+          skipSharded: true,
+          testcases: [{
+            runOnDb: adminDbName,
+            privileges: [{resource: {db: firstDbName, collection: "coll"}, actions: ['insert', 'update', 'remove']},
+                         {resource: {db: secondDbName, collection: "coll1"}, actions: ['insert', 'update', 'remove']}]
           }]
         },
         {
@@ -3650,13 +3752,15 @@ export const authCommandsLib = {
           }]
         },
         {
-          testname: "createSearchIndex",
-          command: {createSearchIndex: "x", indexDefinition: {"testBlob": "blob"}},
+          testname: "createSearchIndexes",
+          command: {
+              createSearchIndexes: "x",
+              indexes: [{'definition': {'mappings': {'dynamic': true}}}],
+          },
           // Only enterprise knows of this command.
           skipTest: (conn) => {
               return !getBuildInfo().modules.includes("enterprise");
           },
-          skipSharded: true,  // TODO (SERVER-73274): add mongos cmds
           testcases: [{
               runOnDb: firstDbName,
               roles: Object.extend({
@@ -3670,7 +3774,8 @@ export const authCommandsLib = {
                   __system: 1
               }),
               privileges:
-                  [{resource: {db: firstDbName, collection: "x"}, actions: ["createSearchIndex"]}],
+                  [{resource: {db: firstDbName, collection: "x"}, actions: ["createSearchIndexes"]}],
+              expectFail: true,
           }]
         },
         {
@@ -4032,24 +4137,28 @@ export const authCommandsLib = {
         },
         {
           testname: "dropSearchIndex",
-          command: {dropSearchIndex: "x", indexDefinition: {"testBlob": "blob"}},
+          command: {
+              dropSearchIndex: "x",
+              name: 'indexName',
+          },
           // Only enterprise knows of this command.
           skipTest: (conn) => {
               return !getBuildInfo().modules.includes("enterprise");
           },
-          skipSharded: true,  // TODO (SERVER-73274): add mongos cmds
           testcases: [
             {
               runOnDb: firstDbName,
               roles: roles_writeDbAdmin,
               privileges:
                   [{resource: {db: firstDbName, collection: "x"}, actions: ["dropSearchIndex"]}],
+              expectFail: true,
             },
             {
               runOnDb: secondDbName,
               roles: roles_writeDbAdminAny,
               privileges:
                   [{resource: {db: secondDbName, collection: "x"}, actions: ["dropSearchIndex"]}],
+              expectFail: true,
             }
           ]
         },
@@ -5148,7 +5257,6 @@ export const authCommandsLib = {
           skipTest: (conn) => {
               return !getBuildInfo().modules.includes("enterprise");
           },
-          skipSharded: true,  // TODO (SERVER-73274): add mongos cmds
           testcases: [{
               runOnDb: firstDbName,
               roles: {
@@ -5165,6 +5273,7 @@ export const authCommandsLib = {
               },
               privileges:
                   [{resource: {db: firstDbName, collection: ""}, actions: ["listSearchIndexes"]}],
+              expectFail: true,
           }]
         },
         {
@@ -5301,26 +5410,30 @@ export const authCommandsLib = {
           ]
         },
         {
-          testname: "modifySearchIndex",
-          command: {modifySearchIndex: "foo", indexDefinition: {"textBlob": "blob"}},
+          testname: "updateSearchIndex",
+          command: {
+              updateSearchIndex: "foo",
+              indexID: 'index-ID-number',
+              indexDefinition: {"textBlob": "blob"},
+          },
           // Only enterprise knows of this command.
           skipTest: (conn) => {
               return !getBuildInfo().modules.includes("enterprise");
           },
-          skipSharded: true,  // TODO (SERVER-73274): add mongos cmds
           testcases: [
               {
                 runOnDb: firstDbName,
                 roles: Object.extend({restore: 1}, roles_dbAdmin),
                 privileges:
-                    [{resource: {db: firstDbName, collection: "foo"}, actions: ["modifySearchIndex"]}],
+                    [{resource: {db: firstDbName, collection: "foo"}, actions: ["updateSearchIndex"]}],
                 expectFail: true,
               },
               {
                 runOnDb: secondDbName,
                 roles: Object.extend({restore: 1}, roles_dbAdminAny),
                 privileges:
-                    [{resource: {db: secondDbName, collection: "foo"}, actions: ["modifySearchIndex"]}],
+                    [{resource: {db: secondDbName, collection: "foo"}, actions: ["updateSearchIndex"]}],
+                expectFail: true,
               }
           ]
         },

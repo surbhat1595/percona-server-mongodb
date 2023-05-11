@@ -46,8 +46,12 @@ void WhereMatchExpressionBase::debugString(StringBuilder& debug, int indentation
     debug << "code: " << getCode() << "\n";
 }
 
-void WhereMatchExpressionBase::serialize(BSONObjBuilder* out, bool includePath) const {
-    out->appendCode("$where", getCode());
+void WhereMatchExpressionBase::serialize(BSONObjBuilder* out, SerializationOptions opts) const {
+    if (opts.replacementForLiteralArgs) {
+        out->append("$where", *opts.replacementForLiteralArgs);
+    } else {
+        out->appendCode("$where", getCode());
+    }
 }
 
 bool WhereMatchExpressionBase::equivalent(const MatchExpression* other) const {

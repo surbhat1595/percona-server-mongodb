@@ -328,9 +328,9 @@ void ResourceConsumption::MetricsCollector::beginScopedCollecting(OperationConte
     _collecting = ScopedCollectionState::kInScopeCollecting;
     _hasCollectedMetrics = true;
 
-    // The OperationCPUTimer may be nullptr on unsupported systems.
-    _metrics.cpuTimer = OperationCPUTimer::get(opCtx);
-    if (_metrics.cpuTimer) {
+    // The OperationCPUTimers may be nullptr on unsupported systems.
+    if (auto timers = OperationCPUTimers::get(opCtx)) {
+        _metrics.cpuTimer = timers->makeTimer();
         _metrics.cpuTimer->start();
     }
 }
@@ -415,7 +415,7 @@ void ResourceConsumption::merge(OperationContext* opCtx,
     // inconsistent state is not impactful for the purposes of metrics collection, perform a
     // best-effort check so that we can record metrics for this operation.
     auto isPrimary = repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesForDatabase_UNSAFE(
-        opCtx, NamespaceString::kAdminDb);
+        opCtx, DatabaseName::kAdmin.toString());
 
     AggregatedMetrics newMetrics;
     if (isPrimary) {

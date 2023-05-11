@@ -236,8 +236,7 @@ public:
 
         const BSONObj query(BSON(ReshardingCoordinatorDocument::kReshardingUUIDFieldName
                                  << newDoc.getReshardingUUID()));
-        client.update(
-            NamespaceString::kConfigReshardingOperationsNamespace.ns(), {}, newDoc.toBSON());
+        client.update(NamespaceString::kConfigReshardingOperationsNamespace, {}, newDoc.toBSON());
     }
 
     void waitUntilCommittedCoordinatorDocReach(OperationContext* opCtx,
@@ -402,12 +401,12 @@ public:
             reshardingFields,
             std::move(epoch),
             opCtx->getServiceContext()->getPreciseClockSource()->now());
-        client.insert(CollectionType::ConfigNS.ns(), originalNssCatalogEntry.toBSON());
+        client.insert(CollectionType::ConfigNS, originalNssCatalogEntry.toBSON());
 
         DatabaseType dbDoc(coordinatorDoc.getSourceNss().db().toString(),
                            coordinatorDoc.getDonorShards().front().getId(),
                            DatabaseVersion{UUID::gen(), Timestamp(1, 1)});
-        client.insert(NamespaceString::kConfigDatabasesNamespace.ns(), dbDoc.toBSON());
+        client.insert(NamespaceString::kConfigDatabasesNamespace, dbDoc.toBSON());
 
         return coordinatorDoc;
     }
@@ -417,11 +416,11 @@ public:
         DBDirectClient client(opCtx);
 
         for (const auto& chunk : chunks) {
-            client.insert(ChunkType::ConfigNS.ns(), chunk.toConfigBSON());
+            client.insert(ChunkType::ConfigNS, chunk.toConfigBSON());
         }
 
         for (const auto& zone : zones) {
-            client.insert(TagsType::ConfigNS.ns(), zone.toBSON());
+            client.insert(TagsType::ConfigNS, zone.toBSON());
         }
     }
 
@@ -632,12 +631,13 @@ public:
 
     repl::PrimaryOnlyServiceRegistry* _registry = nullptr;
 
-    NamespaceString _originalNss = NamespaceString("db.foo");
+    NamespaceString _originalNss = NamespaceString::createNamespaceString_forTest("db.foo");
     UUID _originalUUID = UUID::gen();
     OID _originalEpoch = OID::gen();
     Timestamp _originalTimestamp = Timestamp(1);
 
-    NamespaceString _tempNss = NamespaceString("db.system.resharding." + _originalUUID.toString());
+    NamespaceString _tempNss = NamespaceString::createNamespaceString_forTest(
+        "db.system.resharding." + _originalUUID.toString());
     UUID _reshardingUUID = UUID::gen();
     OID _tempEpoch = OID::gen();
     Timestamp _tempTimestamp = Timestamp(2);
@@ -669,7 +669,9 @@ TEST_F(ReshardingCoordinatorServiceTest, ReshardingCoordinatorSuccessfullyTransi
 
 TEST_F(ReshardingCoordinatorServiceTest, ReshardingCoordinatorTransitionsTokDoneWithInterrupt) {
 
-    const auto interrupt = [this] { killAllReshardingCoordinatorOps(); };
+    const auto interrupt = [this] {
+        killAllReshardingCoordinatorOps();
+    };
     runReshardingToCompletion(
         TransitionFunctionMap{{CoordinatorStateEnum::kPreparingToDonate, interrupt},
                               {CoordinatorStateEnum::kCloning, interrupt},
@@ -912,7 +914,7 @@ TEST_F(ReshardingCoordinatorServiceTest, ReshardingCoordinatorFailsIfMigrationNo
 
     {
         DBDirectClient client(opCtx);
-        client.update(CollectionType::ConfigNS.ns(),
+        client.update(CollectionType::ConfigNS,
                       BSON(CollectionType::kNssFieldName << _originalNss.ns()),
                       BSON("$set" << BSON(CollectionType::kAllowMigrationsFieldName << false)));
     }
@@ -956,27 +958,29 @@ TEST_F(ReshardingCoordinatorServiceTest, MultipleReshardingOperationsFail) {
 
     // Asserts that a resharding op with different namespace and different shard key fails with
     // ConflictingOperationInProgress.
-    ASSERT_THROWS_CODE(initializeAndGetCoordinator(
-                           UUID::gen(),
-                           NamespaceString("db.moo"),
-                           NamespaceString("db.system.resharding." + UUID::gen().toString()),
-                           ShardKeyPattern(BSON("shardKeyV1" << 1)),
-                           UUID::gen(),
-                           ShardKeyPattern(BSON("shardKeyV2" << 1))),
-                       DBException,
-                       ErrorCodes::ConflictingOperationInProgress);
+    ASSERT_THROWS_CODE(
+        initializeAndGetCoordinator(UUID::gen(),
+                                    NamespaceString::createNamespaceString_forTest("db.moo"),
+                                    NamespaceString::createNamespaceString_forTest(
+                                        "db.system.resharding." + UUID::gen().toString()),
+                                    ShardKeyPattern(BSON("shardKeyV1" << 1)),
+                                    UUID::gen(),
+                                    ShardKeyPattern(BSON("shardKeyV2" << 1))),
+        DBException,
+        ErrorCodes::ConflictingOperationInProgress);
 
     // Asserts that a resharding op with same namespace and different shard key fails with
     // ConflictingOperationInProgress.
-    ASSERT_THROWS_CODE(initializeAndGetCoordinator(
-                           UUID::gen(),
-                           _originalNss,
-                           NamespaceString("db.system.resharding." + UUID::gen().toString()),
-                           ShardKeyPattern(BSON("shardKeyV1" << 1)),
-                           UUID::gen(),
-                           _oldShardKey),
-                       DBException,
-                       ErrorCodes::ConflictingOperationInProgress);
+    ASSERT_THROWS_CODE(
+        initializeAndGetCoordinator(UUID::gen(),
+                                    _originalNss,
+                                    NamespaceString::createNamespaceString_forTest(
+                                        "db.system.resharding." + UUID::gen().toString()),
+                                    ShardKeyPattern(BSON("shardKeyV1" << 1)),
+                                    UUID::gen(),
+                                    _oldShardKey),
+        DBException,
+        ErrorCodes::ConflictingOperationInProgress);
 
     runReshardingToCompletion(TransitionFunctionMap{}, std::move(stateTransitionsGuard));
 }

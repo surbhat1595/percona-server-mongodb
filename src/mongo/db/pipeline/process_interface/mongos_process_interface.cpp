@@ -47,6 +47,7 @@
 #include "mongo/s/query/document_source_merge_cursors.h"
 #include "mongo/s/query/establish_cursors.h"
 #include "mongo/s/query/router_exec_stage.h"
+#include "mongo/s/query_analysis_sampler.h"
 #include "mongo/s/stale_shard_version_helpers.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/util/fail_point.h"
@@ -289,6 +290,13 @@ void MongosProcessInterface::_reportCurrentOpsForPrimaryOnlyServices(
     CurrentOpSessionsMode sessionMode,
     std::vector<BSONObj>* ops) const {};
 
+void MongosProcessInterface::_reportCurrentOpsForQueryAnalysis(OperationContext* opCtx,
+                                                               std::vector<BSONObj>* ops) const {
+    if (analyze_shard_key::supportsSamplingQueries()) {
+        analyze_shard_key::QueryAnalysisSampler::get(opCtx).reportForCurrentOp(ops);
+    }
+}
+
 std::vector<GenericCursor> MongosProcessInterface::getIdleCursors(
     const boost::intrusive_ptr<ExpressionContext>& expCtx, CurrentOpUserMode userMode) const {
     invariant(hasGlobalServiceContext());
@@ -298,8 +306,8 @@ std::vector<GenericCursor> MongosProcessInterface::getIdleCursors(
 }
 
 bool MongosProcessInterface::isSharded(OperationContext* opCtx, const NamespaceString& nss) {
-    auto cm =
-        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionPlacementInfo(opCtx, nss));
+    auto [cm, _] =
+        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
     return cm.isSharded();
 }
 

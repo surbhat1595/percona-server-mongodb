@@ -123,7 +123,7 @@ typedef SetSteadyStateConstraints<OplogApplierImplTest, true>
     OplogApplierImplTestEnableSteadyStateConstraints;
 
 TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsInsertDocumentDatabaseMissing) {
-    NamespaceString nss("test.t");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     auto op = makeOplogEntry(OpTypeEnum::kInsert, nss, {});
     ASSERT_THROWS(_applyOplogEntryOrGroupedInsertsWrapper(
                       _opCtx.get(), ApplierOperation{&op}, OplogApplication::Mode::kSecondary),
@@ -133,8 +133,9 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsInsertDocumentDataba
 TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
        applyOplogEntryOrGroupedInsertsDeleteDocumentDatabaseMissing) {
 
-    const NamespaceString nss(boost::none, "test.t");
-    NamespaceString otherNss("test.othername");
+    const NamespaceString nss =
+        NamespaceString::createNamespaceString_forTest(boost::none, "test.t");
+    NamespaceString otherNss = NamespaceString::createNamespaceString_forTest("test.othername");
     auto op = makeOplogEntry(OpTypeEnum::kDelete, otherNss, {});
     int prevDeleteFromMissing = replOpCounters.getDeleteFromMissingNamespace()->load();
     _testApplyOplogEntryOrGroupedInsertsCrudOperation(ErrorCodes::OK, op, nss, false);
@@ -150,7 +151,7 @@ TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
 
 TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
        applyOplogEntryOrGroupedInsertsDeleteDocumentDatabaseMissing) {
-    NamespaceString otherNss("test.othername");
+    NamespaceString otherNss = NamespaceString::createNamespaceString_forTest("test.othername");
     auto op = makeOplogEntry(OpTypeEnum::kDelete, otherNss, {});
     ASSERT_THROWS(_applyOplogEntryOrGroupedInsertsWrapper(
                       _opCtx.get(), ApplierOperation{&op}, OplogApplication::Mode::kSecondary),
@@ -159,9 +160,10 @@ TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
 
 TEST_F(OplogApplierImplTest,
        applyOplogEntryOrGroupedInsertsInsertDocumentCollectionLookupByUUIDFails) {
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     createDatabase(_opCtx.get(), nss.db());
-    NamespaceString otherNss(nss.getSisterNS("othername"));
+    NamespaceString otherNss =
+        NamespaceString::createNamespaceString_forTest(nss.getSisterNS("othername"));
     auto op = makeOplogEntry(OpTypeEnum::kInsert, otherNss, kUuid);
     ASSERT_THROWS(_applyOplogEntryOrGroupedInsertsWrapper(
                       _opCtx.get(), ApplierOperation{&op}, OplogApplication::Mode::kSecondary),
@@ -170,9 +172,10 @@ TEST_F(OplogApplierImplTest,
 
 TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
        applyOplogEntryOrGroupedInsertsDeleteDocumentCollectionLookupByUUIDFails) {
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     createDatabase(_opCtx.get(), nss.db());
-    NamespaceString otherNss(nss.getSisterNS("othername"));
+    NamespaceString otherNss =
+        NamespaceString::createNamespaceString_forTest(nss.getSisterNS("othername"));
     auto op = makeOplogEntry(OpTypeEnum::kDelete, otherNss, kUuid);
     int prevDeleteFromMissing = replOpCounters.getDeleteFromMissingNamespace()->load();
     _testApplyOplogEntryOrGroupedInsertsCrudOperation(ErrorCodes::OK, op, nss, false);
@@ -188,9 +191,10 @@ TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
 
 TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
        applyOplogEntryOrGroupedInsertsDeleteDocumentCollectionLookupByUUIDFails) {
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     createDatabase(_opCtx.get(), nss.db());
-    NamespaceString otherNss(nss.getSisterNS("othername"));
+    NamespaceString otherNss =
+        NamespaceString::createNamespaceString_forTest(nss.getSisterNS("othername"));
     auto op = makeOplogEntry(OpTypeEnum::kDelete, otherNss, kUuid);
     ASSERT_THROWS(_applyOplogEntryOrGroupedInsertsWrapper(
                       _opCtx.get(), ApplierOperation{&op}, OplogApplication::Mode::kSecondary),
@@ -198,7 +202,7 @@ TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
 }
 
 TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsInsertDocumentCollectionMissing) {
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     createDatabase(_opCtx.get(), nss.db());
     // Even though the collection doesn't exist, this is handled in the actual application function,
     // which in the case of this test just ignores such errors. This tests mostly that we don't
@@ -212,7 +216,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsInsertDocumentCollec
 
 TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
        applyOplogEntryOrGroupedInsertsDeleteDocumentCollectionMissing) {
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     createDatabase(_opCtx.get(), nss.db());
     // Even though the collection doesn't exist, this is handled in the actual application function,
     // which in the case of this test just ignores such errors. This tests mostly that we don't
@@ -233,7 +237,7 @@ TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
 
 TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
        applyOplogEntryOrGroupedInsertsDeleteDocumentCollectionMissing) {
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     createDatabase(_opCtx.get(), nss.db());
     // With steady state constraints enabled, attempting to delete from a missing collection is an
     // error.
@@ -244,7 +248,7 @@ TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
 }
 
 TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsInsertDocumentCollectionExists) {
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     repl::createCollection(_opCtx.get(), nss, {});
     auto op = makeOplogEntry(OpTypeEnum::kInsert, nss, {});
     _testApplyOplogEntryOrGroupedInsertsCrudOperation(ErrorCodes::OK, op, nss, true);
@@ -252,7 +256,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsInsertDocumentCollec
 
 TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
        applyOplogEntryOrGroupedInsertsDeleteDocumentDocMissing) {
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     repl::createCollection(_opCtx.get(), nss, {});
     auto op = makeOplogEntry(OpTypeEnum::kDelete, nss, {});
     int prevDeleteWasEmpty = replOpCounters.getDeleteWasEmpty()->load();
@@ -269,7 +273,7 @@ TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
 
 TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
        applyOplogEntryOrGroupedInsertsDeleteDocumentDocMissing) {
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     repl::createCollection(_opCtx.get(), nss, {});
     auto op = makeOplogEntry(OpTypeEnum::kDelete, nss, {});
     ASSERT_THROWS(_applyOplogEntryOrGroupedInsertsWrapper(
@@ -281,7 +285,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsDeleteDocumentCollec
     // Setup the pre-images collection.
     ChangeStreamPreImagesCollectionManager::createPreImagesCollection(_opCtx.get(),
                                                                       boost::none /* tenantId */);
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     createCollection(
         _opCtx.get(), nss, createRecordChangeStreamPreAndPostImagesCollectionOptions());
     ASSERT_OK(getStorageInterface()->insertDocument(_opCtx.get(), nss, {BSON("_id" << 0)}, 0));
@@ -291,7 +295,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsDeleteDocumentCollec
 
 TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
        applyOplogEntryOrGroupedInsertsInsertExistingDocument) {
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
     ASSERT_OK(getStorageInterface()->insertDocument(_opCtx.get(), nss, {BSON("_id" << 0)}, 0));
     auto op = makeOplogEntry(OpTypeEnum::kInsert, nss, uuid);
@@ -309,7 +313,7 @@ TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
 
 TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
        applyOplogEntryOrGroupedInsertsInsertExistingDocument) {
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
     ASSERT_OK(getStorageInterface()->insertDocument(_opCtx.get(), nss, {BSON("_id" << 0)}, 0));
     auto op = makeOplogEntry(OpTypeEnum::kInsert, nss, uuid);
@@ -318,7 +322,7 @@ TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
 
 TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
        applyOplogEntryOrGroupedInsertsUpdateMissingDocument) {
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
     auto op = makeOplogEntry(repl::OpTypeEnum::kUpdate,
                              nss,
@@ -340,7 +344,7 @@ TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
 
 TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
        applyOplogEntryOrGroupedInsertsUpdateMissingDocument) {
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
     auto op = makeOplogEntry(repl::OpTypeEnum::kUpdate,
                              nss,
@@ -353,23 +357,25 @@ TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
 }
 
 TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsInsertDocumentCollectionLockedByUUID) {
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
     // Test that the collection to lock is determined by the UUID and not the 'ns' field.
-    NamespaceString otherNss(nss.getSisterNS("othername"));
+    NamespaceString otherNss =
+        NamespaceString::createNamespaceString_forTest(nss.getSisterNS("othername"));
     auto op = makeOplogEntry(OpTypeEnum::kInsert, otherNss, uuid);
     _testApplyOplogEntryOrGroupedInsertsCrudOperation(ErrorCodes::OK, op, nss, true);
 }
 
 TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
        applyOplogEntryOrGroupedInsertsDeleteMissingDocCollectionLockedByUUID) {
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     CollectionOptions options;
     options.uuid = kUuid;
     createCollection(_opCtx.get(), nss, options);
 
     // Test that the collection to lock is determined by the UUID and not the 'ns' field.
-    NamespaceString otherNss(nss.getSisterNS("othername"));
+    NamespaceString otherNss =
+        NamespaceString::createNamespaceString_forTest(nss.getSisterNS("othername"));
     auto op = makeOplogEntry(OpTypeEnum::kDelete, otherNss, options.uuid);
     int prevDeleteWasEmpty = replOpCounters.getDeleteWasEmpty()->load();
     _testApplyOplogEntryOrGroupedInsertsCrudOperation(ErrorCodes::OK, op, nss, false);
@@ -385,12 +391,13 @@ TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
 
 TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
        applyOplogEntryOrGroupedInsertsDeleteMissingDocCollectionLockedByUUID) {
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     CollectionOptions options;
     options.uuid = kUuid;
     createCollection(_opCtx.get(), nss, options);
 
-    NamespaceString otherNss(nss.getSisterNS("othername"));
+    NamespaceString otherNss =
+        NamespaceString::createNamespaceString_forTest(nss.getSisterNS("othername"));
     auto op = makeOplogEntry(OpTypeEnum::kDelete, otherNss, options.uuid);
     ASSERT_THROWS(_applyOplogEntryOrGroupedInsertsWrapper(
                       _opCtx.get(), ApplierOperation{&op}, OplogApplication::Mode::kSecondary),
@@ -401,7 +408,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsDeleteDocumentCollec
     // Setup the pre-images collection.
     ChangeStreamPreImagesCollectionManager::createPreImagesCollection(_opCtx.get(),
                                                                       boost::none /* tenantId */);
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     CollectionOptions options = createRecordChangeStreamPreAndPostImagesCollectionOptions();
     options.uuid = kUuid;
     createCollection(_opCtx.get(), nss, options);
@@ -410,7 +417,8 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsDeleteDocumentCollec
     ASSERT_OK(getStorageInterface()->insertDocument(_opCtx.get(), nss, {BSON("_id" << 0)}, 0));
 
     // Test that the collection to lock is determined by the UUID and not the 'ns' field.
-    NamespaceString otherNss(nss.getSisterNS("othername"));
+    NamespaceString otherNss =
+        NamespaceString::createNamespaceString_forTest(nss.getSisterNS("othername"));
     auto op = makeOplogEntry(OpTypeEnum::kDelete, otherNss, options.uuid);
     _testApplyOplogEntryOrGroupedInsertsCrudOperation(ErrorCodes::OK, op, nss, true);
 }
@@ -421,7 +429,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryToRecordChangeStreamPreImages) {
                                                                       boost::none /* tenantId */);
 
     // Create the collection.
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     CollectionOptions options;
     options.uuid = kUuid;
     options.changeStreamPreAndPostImagesOptions.setEnabled(true);
@@ -463,7 +471,9 @@ TEST_F(OplogApplierImplTest, applyOplogEntryToRecordChangeStreamPreImages) {
         auto op = makeOplogEntry(
             [opCtx = _opCtx.get()] {
                 WriteUnitOfWork wuow{opCtx};
-                ScopeGuard guard{[&wuow] { wuow.commit(); }};
+                ScopeGuard guard{[&wuow] {
+                    wuow.commit();
+                }};
                 return repl::getNextOpTime(opCtx);
             }(),
             testCase.opType,
@@ -515,7 +525,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryToRecordChangeStreamPreImages) {
 }
 
 TEST_F(OplogApplierImplTest, CreateCollectionCommand) {
-    NamespaceString nss("test.t");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     auto op =
         BSON("op"
              << "c"
@@ -544,7 +554,7 @@ TEST_F(OplogApplierImplTest, CreateCollectionCommandMultitenant) {
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
 
     auto tid{TenantId(OID::gen())};
-    NamespaceString nss(tid, "test.foo");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(tid, "test.foo");
 
     auto op = BSON("create" << nss.coll());
     bool applyCmdCalled = false;
@@ -573,7 +583,7 @@ TEST_F(OplogApplierImplTest, CreateCollectionCommandMultitenantRequireTenantIDFa
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", false);
 
     auto tid{TenantId(OID::gen())};
-    NamespaceString nss(tid, "test.foo");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(tid, "test.foo");
 
     auto op =
         BSON("op"
@@ -610,8 +620,10 @@ TEST_F(OplogApplierImplTest, CreateCollectionCommandMultitenantAlreadyExists) {
     auto tid1{TenantId(OID::gen())};
     auto tid2{TenantId(OID::gen())};
     std::string commonNamespace("test.foo");
-    NamespaceString nssTenant1(tid1, commonNamespace);
-    NamespaceString nssTenant2(tid2, commonNamespace);
+    NamespaceString nssTenant1 =
+        NamespaceString::createNamespaceString_forTest(tid1, commonNamespace);
+    NamespaceString nssTenant2 =
+        NamespaceString::createNamespaceString_forTest(tid2, commonNamespace);
     ASSERT_NE(tid1, tid2);
 
     CollectionOptions options;
@@ -666,8 +678,10 @@ TEST_F(OplogApplierImplTest, RenameCollectionCommandMultitenant) {
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
 
     auto tid{TenantId(OID::gen())};  // rename should not occur across tenants
-    const NamespaceString sourceNss(tid, "test.foo");
-    const NamespaceString targetNss(tid, "test.bar");
+    const NamespaceString sourceNss =
+        NamespaceString::createNamespaceString_forTest(tid, "test.foo");
+    const NamespaceString targetNss =
+        NamespaceString::createNamespaceString_forTest(tid, "test.bar");
 
     auto oRename = BSON("renameCollection" << sourceNss.toString() << "to" << targetNss.toString()
                                            << "tid" << tid);
@@ -676,7 +690,9 @@ TEST_F(OplogApplierImplTest, RenameCollectionCommandMultitenant) {
     // createCollection uses an actual opTime, so we must generate an actually opTime in the future.
     auto opTime = [opCtx = _opCtx.get()] {
         WriteUnitOfWork wuow{opCtx};
-        ScopeGuard guard{[&wuow] { wuow.commit(); }};
+        ScopeGuard guard{[&wuow] {
+            wuow.commit();
+        }};
         return repl::getNextOpTime(opCtx);
     }();
     auto op = makeCommandOplogEntry(opTime, sourceNss, oRename, {});
@@ -692,8 +708,10 @@ TEST_F(OplogApplierImplTest, RenameCollectionCommandMultitenantRequireTenantIDFa
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", false);
 
     auto tid{TenantId(OID::gen())};  // rename should not occur across tenants
-    const NamespaceString sourceNss(tid, "test.foo");
-    const NamespaceString targetNss(tid, "test.bar");
+    const NamespaceString sourceNss =
+        NamespaceString::createNamespaceString_forTest(tid, "test.foo");
+    const NamespaceString targetNss =
+        NamespaceString::createNamespaceString_forTest(tid, "test.bar");
 
     auto oRename = BSON("renameCollection" << sourceNss.toStringWithTenantId() << "to"
                                            << targetNss.toStringWithTenantId());
@@ -702,7 +720,9 @@ TEST_F(OplogApplierImplTest, RenameCollectionCommandMultitenantRequireTenantIDFa
     // createCollection uses an actual opTime, so we must generate an actually opTime in the future.
     auto opTime = [opCtx = _opCtx.get()] {
         WriteUnitOfWork wuow{opCtx};
-        ScopeGuard guard{[&wuow] { wuow.commit(); }};
+        ScopeGuard guard{[&wuow] {
+            wuow.commit();
+        }};
         return repl::getNextOpTime(opCtx);
     }();
     auto op = makeCommandOplogEntry(opTime, sourceNss, oRename, {});
@@ -719,9 +739,12 @@ TEST_F(OplogApplierImplTest, RenameCollectionCommandMultitenantAcrossTenantsRequ
 
     auto tid{TenantId(OID::gen())};
     auto wrongTid{TenantId(OID::gen())};  // rename should not occur across tenants
-    const NamespaceString sourceNss(tid, "test.foo");
-    const NamespaceString targetNss(tid, "test.bar");
-    const NamespaceString wrongTargetNss(wrongTid, targetNss.toString());
+    const NamespaceString sourceNss =
+        NamespaceString::createNamespaceString_forTest(tid, "test.foo");
+    const NamespaceString targetNss =
+        NamespaceString::createNamespaceString_forTest(tid, "test.bar");
+    const NamespaceString wrongTargetNss =
+        NamespaceString::createNamespaceString_forTest(wrongTid, targetNss.toString());
 
     ASSERT_NE(sourceNss, wrongTargetNss);
 
@@ -732,7 +755,9 @@ TEST_F(OplogApplierImplTest, RenameCollectionCommandMultitenantAcrossTenantsRequ
     // createCollection uses an actual opTime, so we must generate an actually opTime in the future.
     auto opTime = [opCtx = _opCtx.get()] {
         WriteUnitOfWork wuow{opCtx};
-        ScopeGuard guard{[&wuow] { wuow.commit(); }};
+        ScopeGuard guard{[&wuow] {
+            wuow.commit();
+        }};
         return repl::getNextOpTime(opCtx);
     }();
     auto op = makeCommandOplogEntry(opTime, sourceNss, oRename, {});
@@ -750,7 +775,7 @@ TEST_F(IdempotencyTest, CollModCommandMultitenant) {
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
 
     auto tid{TenantId(OID::gen())};
-    const NamespaceString nss(tid, "test.foo");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest(tid, "test.foo");
 
     setNss(nss);  // IdempotencyTest keeps nss state, update with tid
 
@@ -790,8 +815,10 @@ TEST_F(IdempotencyTest, CollModCommandMultitenantWrongTenant) {
     auto tid1{TenantId(OID::gen())};
     auto tid2{TenantId(OID::gen())};
     std::string commonNamespace("test.foo");
-    NamespaceString nssTenant1(tid1, commonNamespace);
-    NamespaceString nssTenant2(tid2, commonNamespace);
+    NamespaceString nssTenant1 =
+        NamespaceString::createNamespaceString_forTest(tid1, commonNamespace);
+    NamespaceString nssTenant2 =
+        NamespaceString::createNamespaceString_forTest(tid2, commonNamespace);
     ASSERT_NE(tid1, tid2);
 
     setNss(nssTenant1);  // IdempotencyTest keeps nss state, update with tid of the created nss
@@ -913,7 +940,8 @@ bool _testOplogEntryIsForCappedCollection(OperationContext* opCtx,
 TEST_F(
     OplogApplierImplTest,
     MultiApplyDoesNotSetOplogEntryIsForCappedCollectionWhenProcessingNonCappedCollectionInsertOperation) {
-    NamespaceString nss("local." + _agent.getSuiteName() + "_" + _agent.getTestName());
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "local." + _agent.getSuiteName() + "_" + _agent.getTestName());
     ASSERT_FALSE(_testOplogEntryIsForCappedCollection(_opCtx.get(),
                                                       ReplicationCoordinator::get(_opCtx.get()),
                                                       getConsistencyMarkers(),
@@ -924,7 +952,8 @@ TEST_F(
 
 TEST_F(OplogApplierImplTest,
        MultiApplySetsOplogEntryIsForCappedCollectionWhenProcessingCappedCollectionInsertOperation) {
-    NamespaceString nss("local." + _agent.getSuiteName() + "_" + _agent.getTestName());
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "local." + _agent.getSuiteName() + "_" + _agent.getTestName());
     ASSERT_TRUE(_testOplogEntryIsForCappedCollection(_opCtx.get(),
                                                      ReplicationCoordinator::get(_opCtx.get()),
                                                      getConsistencyMarkers(),
@@ -935,7 +964,8 @@ TEST_F(OplogApplierImplTest,
 
 TEST_F(OplogApplierImplTest,
        OplogApplicationThreadFuncUsesApplyOplogEntryOrGroupedInsertsToApplyOperation) {
-    NamespaceString nss("local." + _agent.getSuiteName() + "_" + _agent.getTestName());
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "local." + _agent.getSuiteName() + "_" + _agent.getTestName());
     auto op = makeCreateCollectionOplogEntry({Timestamp(Seconds(1), 0), 1LL}, nss);
 
     std::vector<ApplierOperation> ops = {ApplierOperation{&op}};
@@ -1005,7 +1035,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsInsertDocumentInclud
     RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
     const TenantId tid(OID::gen());
-    const NamespaceString nss(tid, "test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest(tid, "test.t");
     BSONObj doc = BSON("_id" << 0);
 
     repl::createCollection(_opCtx.get(), nss, {});
@@ -1023,8 +1053,10 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsInsertDocumentIncorr
     const auto commonNss("test.t"_sd);
     const TenantId tid1(OID::gen());
     const TenantId tid2(OID::gen());
-    const NamespaceString nssTenant1(tid1, commonNss);
-    const NamespaceString nssTenant2(tid2, commonNss);
+    const NamespaceString nssTenant1 =
+        NamespaceString::createNamespaceString_forTest(tid1, commonNss);
+    const NamespaceString nssTenant2 =
+        NamespaceString::createNamespaceString_forTest(tid2, commonNss);
     BSONObj doc = BSON("_id" << 0);
 
     repl::createCollection(_opCtx.get(), nssTenant1, {});
@@ -1047,7 +1079,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsDeleteDocumentInclud
     ChangeStreamPreImagesCollectionManager::createPreImagesCollection(_opCtx.get(), tid);
     RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
-    const NamespaceString nss(tid, "test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest(tid, "test.t");
     BSONObj doc = BSON("_id" << 0);
 
     // this allows us to set deleteArgs.deletedDoc needed by the onDeleteFn validation function in
@@ -1072,8 +1104,10 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsDeleteDocumentIncorr
     const auto commonNss("test.t"_sd);
     const TenantId tid1(OID::gen());
     const TenantId tid2(OID::gen());
-    const NamespaceString nssTenant1(tid1, commonNss);
-    const NamespaceString nssTenant2(tid2, commonNss);
+    const NamespaceString nssTenant1 =
+        NamespaceString::createNamespaceString_forTest(tid1, commonNss);
+    const NamespaceString nssTenant2 =
+        NamespaceString::createNamespaceString_forTest(tid2, commonNss);
     BSONObj doc = BSON("_id" << 0);
 
     repl::createCollection(_opCtx.get(), nssTenant1, {});
@@ -1098,8 +1132,10 @@ TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
     const auto commonNss("test.t"_sd);
     const TenantId tid1(OID::gen());
     const TenantId tid2(OID::gen());
-    const NamespaceString nssTenant1(tid1, commonNss);
-    const NamespaceString nssTenant2(tid2, commonNss);
+    const NamespaceString nssTenant1 =
+        NamespaceString::createNamespaceString_forTest(tid1, commonNss);
+    const NamespaceString nssTenant2 =
+        NamespaceString::createNamespaceString_forTest(tid2, commonNss);
     BSONObj doc = BSON("_id" << 0);
 
     auto uuid1 = createCollectionWithUuid(_opCtx.get(), nssTenant1);
@@ -1122,7 +1158,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsUpdateDocumentInclud
     RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
     const TenantId tid(OID::gen());
-    const NamespaceString nss(tid, "test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest(tid, "test.t");
     BSONObj doc = BSON("_id" << 0);
 
     createCollection(_opCtx.get(), nss, {});
@@ -1149,8 +1185,10 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsUpdateDocumentIncorr
     const auto commonNss("test.t"_sd);
     const TenantId tid1(OID::gen());
     const TenantId tid2(OID::gen());
-    const NamespaceString nssTenant1(tid1, commonNss);
-    const NamespaceString nssTenant2(tid2, commonNss);
+    const NamespaceString nssTenant1 =
+        NamespaceString::createNamespaceString_forTest(tid1, commonNss);
+    const NamespaceString nssTenant2 =
+        NamespaceString::createNamespaceString_forTest(tid2, commonNss);
     BSONObj doc = BSON("_id" << 0);
 
     createCollection(_opCtx.get(), nssTenant1, {});
@@ -1181,7 +1219,8 @@ public:
 protected:
     void setUp() override {
         OplogApplierImplTest::setUp();
-        const NamespaceString cmdNss{"admin", "$cmd"};
+        const NamespaceString cmdNss =
+            NamespaceString::createNamespaceString_forTest("admin", "$cmd");
 
         _uuid1 = createCollectionWithUuid(_opCtx.get(), _nss1);
         _uuid2 = createCollectionWithUuid(_opCtx.get(), _nss2);
@@ -1377,7 +1416,7 @@ TEST_F(MultiOplogEntryOplogApplierImplTest, MultiApplyUnpreparedTransactionTwoBa
     std::vector<OplogEntry> insertOps;
     std::vector<BSONObj> insertDocs;
 
-    const NamespaceString cmdNss{"admin", "$cmd"};
+    const NamespaceString cmdNss = NamespaceString::createNamespaceString_forTest("admin", "$cmd");
     for (int i = 0; i < 4; i++) {
         insertDocs.push_back(BSON("_id" << i));
         insertOps.push_back(makeCommandOplogEntryWithSessionInfoAndStmtIds(
@@ -1457,7 +1496,7 @@ TEST_F(MultiOplogEntryOplogApplierImplTest, MultiApplyTwoTransactionsOneBatch) {
 
 
     std::vector<OplogEntry> insertOps1, insertOps2;
-    const NamespaceString cmdNss{"admin", "$cmd"};
+    const NamespaceString cmdNss = NamespaceString::createNamespaceString_forTest("admin", "$cmd");
     insertOps1.push_back(makeCommandOplogEntryWithSessionInfoAndStmtIds(
         {Timestamp(Seconds(1), 1), 1LL},
         cmdNss,
@@ -2385,7 +2424,8 @@ TEST_F(OplogApplierImplTest, OplogApplicationThreadFuncAddsWorkerMultikeyPathInf
     ASSERT_OK(
         ReplicationCoordinator::get(_opCtx.get())->setFollowerMode(MemberState::RS_SECONDARY));
 
-    NamespaceString nss("test." + _agent.getSuiteName() + "_" + _agent.getTestName());
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "test." + _agent.getSuiteName() + "_" + _agent.getTestName());
 
     {
         auto op = makeCreateCollectionOplogEntry(
@@ -2410,7 +2450,8 @@ TEST_F(OplogApplierImplTest, OplogApplicationThreadFuncAddsMultipleWorkerMultike
     ASSERT_OK(
         ReplicationCoordinator::get(_opCtx.get())->setFollowerMode(MemberState::RS_SECONDARY));
 
-    NamespaceString nss("test." + _agent.getSuiteName() + "_" + _agent.getTestName());
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "test." + _agent.getSuiteName() + "_" + _agent.getTestName());
 
     {
         auto op = makeCreateCollectionOplogEntry(
@@ -2453,7 +2494,8 @@ TEST_F(OplogApplierImplTest,
        OplogApplicationThreadFuncDoesNotAddWorkerMultikeyPathInfoOnCreateIndex) {
     ASSERT_OK(
         ReplicationCoordinator::get(_opCtx.get())->setFollowerMode(MemberState::RS_RECOVERING));
-    NamespaceString nss("test." + _agent.getSuiteName() + "_" + _agent.getTestName());
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "test." + _agent.getSuiteName() + "_" + _agent.getTestName());
 
     {
         auto op = makeCreateCollectionOplogEntry(
@@ -2484,7 +2526,8 @@ TEST_F(OplogApplierImplTest,
 TEST_F(OplogApplierImplTest, OplogApplicationThreadFuncFailsWhenCollectionCreationTriesToMakeUUID) {
     ASSERT_OK(
         ReplicationCoordinator::get(_opCtx.get())->setFollowerMode(MemberState::RS_SECONDARY));
-    NamespaceString nss("foo." + _agent.getSuiteName() + "_" + _agent.getTestName());
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "foo." + _agent.getSuiteName() + "_" + _agent.getTestName());
 
     auto op = makeCreateCollectionOplogEntry({Timestamp(Seconds(1), 0), 1LL}, nss);
 
@@ -2499,7 +2542,8 @@ TEST_F(OplogApplierImplTest, OplogApplicationThreadFuncFailsWhenCollectionCreati
 
 TEST_F(OplogApplierImplTest,
        OplogApplicationThreadFuncDisablesDocumentValidationWhileApplyingOperations) {
-    NamespaceString nss("local." + _agent.getSuiteName() + "_" + _agent.getTestName());
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "local." + _agent.getSuiteName() + "_" + _agent.getTestName());
     bool onInsertsCalled = false;
     _opObserver->onInsertsFn =
         [&](OperationContext* opCtx, const NamespaceString&, const std::vector<BSONObj>&) {
@@ -2518,7 +2562,8 @@ TEST_F(OplogApplierImplTest,
 TEST_F(
     OplogApplierImplTest,
     OplogApplicationThreadFuncPassesThroughApplyOplogEntryOrGroupedInsertsErrorAfterFailingToApplyOperation) {
-    NamespaceString nss("local." + _agent.getSuiteName() + "_" + _agent.getTestName());
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "local." + _agent.getSuiteName() + "_" + _agent.getTestName());
     // Delete operation without _id in 'o' field.
     auto op = makeDeleteDocumentOplogEntry({Timestamp(Seconds(1), 0), 1LL}, nss, {});
     ASSERT_EQUALS(ErrorCodes::NoSuchKey, runOpSteadyState(op));
@@ -2526,7 +2571,8 @@ TEST_F(
 
 TEST_F(OplogApplierImplTest,
        OplogApplicationThreadFuncPassesThroughApplyOplogEntryOrGroupedInsertsException) {
-    NamespaceString nss("local." + _agent.getSuiteName() + "_" + _agent.getTestName());
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "local." + _agent.getSuiteName() + "_" + _agent.getTestName());
     bool onInsertsCalled = false;
     _opObserver->onInsertsFn =
         [&](OperationContext* opCtx, const NamespaceString&, const std::vector<BSONObj>&) {
@@ -2542,9 +2588,9 @@ TEST_F(OplogApplierImplTest,
 
 TEST_F(OplogApplierImplTest,
        OplogApplicationThreadFuncSortsOperationsStablyByNamespaceBeforeApplying) {
-    NamespaceString nss1("test.t1");
-    NamespaceString nss2("test.t2");
-    NamespaceString nss3("test.t3");
+    NamespaceString nss1 = NamespaceString::createNamespaceString_forTest("test.t1");
+    NamespaceString nss2 = NamespaceString::createNamespaceString_forTest("test.t2");
+    NamespaceString nss3 = NamespaceString::createNamespaceString_forTest("test.t3");
 
     const Seconds s(1);
     unsigned int i = 1;
@@ -2593,8 +2639,10 @@ TEST_F(OplogApplierImplTest,
         auto t = seconds++;
         return makeInsertDocumentOplogEntry({Timestamp(Seconds(t), 0), 1LL}, nss, BSON("_id" << t));
     };
-    NamespaceString nss1("test." + _agent.getSuiteName() + "_" + _agent.getTestName() + "_1");
-    NamespaceString nss2("test." + _agent.getSuiteName() + "_" + _agent.getTestName() + "_2");
+    NamespaceString nss1 = NamespaceString::createNamespaceString_forTest(
+        "test." + _agent.getSuiteName() + "_" + _agent.getTestName() + "_1");
+    NamespaceString nss2 = NamespaceString::createNamespaceString_forTest(
+        "test." + _agent.getSuiteName() + "_" + _agent.getTestName() + "_2");
     auto createOp1 = makeCreateCollectionOplogEntry({Timestamp(Seconds(seconds++), 0), 1LL}, nss1);
     auto createOp2 = makeCreateCollectionOplogEntry({Timestamp(Seconds(seconds++), 0), 1LL}, nss2);
     auto insertOp1a = makeOp(nss1);
@@ -2635,7 +2683,8 @@ TEST_F(OplogApplierImplTest,
         auto t = seconds++;
         return makeInsertDocumentOplogEntry({Timestamp(Seconds(t), 0), 1LL}, nss, BSON("_id" << t));
     };
-    NamespaceString nss("test." + _agent.getSuiteName() + "_" + _agent.getTestName() + "_1");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "test." + _agent.getSuiteName() + "_" + _agent.getTestName() + "_1");
     auto createOp = makeCreateCollectionOplogEntry({Timestamp(Seconds(seconds++), 0), 1LL}, nss);
 
     // Generate operations to apply:
@@ -2687,7 +2736,8 @@ OplogEntry makeSizedInsertOp(const NamespaceString& nss, int size, int id) {
 TEST_F(OplogApplierImplTest,
        OplogApplicationThreadFuncLimitsBatchSizeWhenGroupingInsertOperations) {
     int seconds = 1;
-    NamespaceString nss("test." + _agent.getSuiteName() + "_" + _agent.getTestName());
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "test." + _agent.getSuiteName() + "_" + _agent.getTestName());
     auto createOp = makeCreateCollectionOplogEntry({Timestamp(Seconds(seconds++), 0), 1LL}, nss);
 
     // Create a sequence of insert ops that are too large to fit in one group.
@@ -2737,7 +2787,8 @@ TEST_F(OplogApplierImplTest,
 TEST_F(OplogApplierImplTest,
        OplogApplicationThreadFuncAppliesOpIndividuallyWhenOpIndividuallyExceedsBatchSize) {
     int seconds = 1;
-    NamespaceString nss("test." + _agent.getSuiteName() + "_" + _agent.getTestName());
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "test." + _agent.getSuiteName() + "_" + _agent.getTestName());
     auto createOp = makeCreateCollectionOplogEntry({Timestamp(Seconds(seconds++), 0), 1LL}, nss);
 
     int maxBatchSize = write_ops::insertVectorMaxBytes;
@@ -2781,9 +2832,10 @@ TEST_F(OplogApplierImplTest,
 
     // Create a sequence of 3 'insert' ops that can't be grouped because they are from different
     // namespaces.
-    std::vector<OplogEntry> operationsToApply = {makeOp(NamespaceString(testNs + "_1")),
-                                                 makeOp(NamespaceString(testNs + "_2")),
-                                                 makeOp(NamespaceString(testNs + "_3"))};
+    std::vector<OplogEntry> operationsToApply = {
+        makeOp(NamespaceString::createNamespaceString_forTest(testNs + "_1")),
+        makeOp(NamespaceString::createNamespaceString_forTest(testNs + "_2")),
+        makeOp(NamespaceString::createNamespaceString_forTest(testNs + "_3"))};
 
     for (const auto& oplogEntry : operationsToApply) {
         createCollectionWithUuid(_opCtx.get(), oplogEntry.getNss());
@@ -2816,7 +2868,8 @@ TEST_F(OplogApplierImplTest,
         auto t = seconds++;
         return makeInsertDocumentOplogEntry({Timestamp(Seconds(t), 0), 1LL}, nss, BSON("_id" << t));
     };
-    NamespaceString nss("test." + _agent.getSuiteName() + "_" + _agent.getTestName() + "_1");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "test." + _agent.getSuiteName() + "_" + _agent.getTestName() + "_1");
     auto createOp = makeCreateCollectionOplogEntry({Timestamp(Seconds(seconds++), 0), 1LL}, nss);
 
     // Generate operations to apply:
@@ -2865,7 +2918,7 @@ TEST_F(OplogApplierImplTest,
 TEST_F(OplogApplierImplTest, ApplyGroupIgnoresUpdateOperationIfDocumentIsMissingFromSyncSource) {
     TestApplyOplogGroupApplier oplogApplier(
         nullptr, nullptr, OplogApplier::Options(OplogApplication::Mode::kInitialSync));
-    NamespaceString nss("test.t");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     {
         Lock::GlobalWrite globalLock(_opCtx.get());
         bool justCreated = false;
@@ -2892,8 +2945,10 @@ TEST_F(OplogApplierImplTest,
     BSONObj emptyDoc;
     TestApplyOplogGroupApplier oplogApplier(
         nullptr, nullptr, OplogApplier::Options(OplogApplication::Mode::kInitialSync));
-    NamespaceString nss("local." + _agent.getSuiteName() + "_" + _agent.getTestName());
-    NamespaceString badNss("local." + _agent.getSuiteName() + "_" + _agent.getTestName() + "bad");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "local." + _agent.getSuiteName() + "_" + _agent.getTestName());
+    NamespaceString badNss = NamespaceString::createNamespaceString_forTest(
+        "local." + _agent.getSuiteName() + "_" + _agent.getTestName() + "bad");
     auto doc1 = BSON("_id" << 1);
     auto doc2 = BSON("_id" << 2);
     auto doc3 = BSON("_id" << 3);
@@ -2923,7 +2978,8 @@ TEST_F(OplogApplierImplTest,
     BSONObj emptyDoc;
     TestApplyOplogGroupApplier oplogApplier(
         nullptr, nullptr, OplogApplier::Options(OplogApplication::Mode::kInitialSync));
-    NamespaceString nss("test." + _agent.getSuiteName() + "_" + _agent.getTestName());
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "test." + _agent.getSuiteName() + "_" + _agent.getTestName());
     NamespaceString badNss("test." + _agent.getSuiteName() + "_" + _agent.getTestName() + "bad");
     auto doc1 = BSON("_id" << 1);
     auto keyPattern = BSON("a" << 1);
@@ -3229,8 +3285,9 @@ TEST_F(IdempotencyTest, CreateCollectionWithView) {
     ASSERT_OK(
         runOpInitialSync(makeCreateCollectionOplogEntry(nextOpTime(), viewNss, options.toBSON())));
 
-    auto viewDoc = BSON("_id" << NamespaceString(_nss.db(), "view").ns() << "viewOn" << _nss.coll()
-                              << "pipeline" << fromjson("[ { '$project' : { 'x' : 1 } } ]"));
+    auto viewDoc = BSON(
+        "_id" << NamespaceString::createNamespaceString_forTest(_nss.db(), "view").ns() << "viewOn"
+              << _nss.coll() << "pipeline" << fromjson("[ { '$project' : { 'x' : 1 } } ]"));
     auto insertViewOp = makeInsertDocumentOplogEntry(nextOpTime(), viewNss, viewDoc);
     auto dropColl = makeCommandOplogEntry(nextOpTime(), _nss, BSON("drop" << _nss.coll()));
 
@@ -3315,7 +3372,7 @@ TEST_F(IdempotencyTest, InsertToFCVCollectionBesidesFCVDocumentSucceeds) {
 
 TEST_F(IdempotencyTest, DropDatabaseSucceeds) {
     // Choose `system.profile` so the storage engine doesn't expect the drop to be timestamped.
-    auto ns = NamespaceString("foo.system.profile");
+    auto ns = NamespaceString::createNamespaceString_forTest("foo.system.profile");
     ::mongo::repl::createCollection(_opCtx.get(), ns, CollectionOptions());
     ASSERT_OK(
         ReplicationCoordinator::get(_opCtx.get())->setFollowerMode(MemberState::RS_RECOVERING));
@@ -3326,7 +3383,7 @@ TEST_F(IdempotencyTest, DropDatabaseSucceeds) {
 
 TEST_F(OplogApplierImplTest, DropDatabaseSucceedsInRecovering) {
     // Choose `system.profile` so the storage engine doesn't expect the drop to be timestamped.
-    auto ns = NamespaceString("foo.system.profile");
+    auto ns = NamespaceString::createNamespaceString_forTest("foo.system.profile");
     ::mongo::repl::createCollection(_opCtx.get(), ns, CollectionOptions());
     ASSERT_OK(
         ReplicationCoordinator::get(_opCtx.get())->setFollowerMode(MemberState::RS_RECOVERING));
@@ -3340,7 +3397,7 @@ TEST_F(OplogApplierImplWithFastAutoAdvancingClockTest, LogSlowOpApplicationWhenS
     auto applyDuration = serverGlobalParams.slowMS.load() * 10;
 
     // We are inserting into an existing collection.
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     repl::createCollection(_opCtx.get(), nss, {});
     auto entry = makeOplogEntry(OpTypeEnum::kInsert, nss, {});
 
@@ -3364,7 +3421,7 @@ TEST_F(OplogApplierImplWithFastAutoAdvancingClockTest, DoNotLogSlowOpApplication
     auto applyDuration = serverGlobalParams.slowMS.load() * 10;
 
     // We are trying to insert into a non-existing database.
-    NamespaceString nss("test.t");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     auto entry = makeOplogEntry(OpTypeEnum::kInsert, nss, {});
 
     startCapturingLogMessages();
@@ -3386,7 +3443,7 @@ TEST_F(OplogApplierImplWithSlowAutoAdvancingClockTest, DoNotLogNonSlowOpApplicat
     auto applyDuration = serverGlobalParams.slowMS.load() / 10;
 
     // We are inserting into an existing collection.
-    const NamespaceString nss("test.t");
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     repl::createCollection(_opCtx.get(), nss, {});
     auto entry = makeOplogEntry(OpTypeEnum::kInsert, nss, {});
 
@@ -3511,7 +3568,8 @@ private:
     static const NamespaceString kNs;
 };
 
-const NamespaceString OplogApplierImplTxnTableTest::kNs("test.foo");
+const NamespaceString OplogApplierImplTxnTableTest::kNs =
+    NamespaceString::createNamespaceString_forTest("test.foo");
 
 TEST_F(OplogApplierImplTxnTableTest, SimpleWriteWithTxn) {
     const auto sessionId = makeLogicalSessionIdForTest();
@@ -3684,7 +3742,7 @@ TEST_F(OplogApplierImplTxnTableTest, InterleavedWriteWithTxnMixedWithDirectUpdat
 }
 
 TEST_F(OplogApplierImplTxnTableTest, RetryableWriteThenMultiStatementTxnWriteOnSameSession) {
-    const NamespaceString cmdNss{"admin", "$cmd"};
+    const NamespaceString cmdNss = NamespaceString::createNamespaceString_forTest("admin", "$cmd");
     const auto sessionId = makeLogicalSessionIdForTest();
     OperationSessionInfo sessionInfo;
     sessionInfo.setSessionId(sessionId);
@@ -3755,7 +3813,7 @@ TEST_F(OplogApplierImplTxnTableTest, RetryableWriteThenMultiStatementTxnWriteOnS
 }
 
 TEST_F(OplogApplierImplTxnTableTest, MultiStatementTxnWriteThenRetryableWriteOnSameSession) {
-    const NamespaceString cmdNss{"admin", "$cmd"};
+    const NamespaceString cmdNss = NamespaceString::createNamespaceString_forTest("admin", "$cmd");
     const auto sessionId = makeLogicalSessionIdForTest();
     OperationSessionInfo sessionInfo;
     sessionInfo.setSessionId(sessionId);
@@ -3826,10 +3884,10 @@ TEST_F(OplogApplierImplTxnTableTest, MultiStatementTxnWriteThenRetryableWriteOnS
 
 
 TEST_F(OplogApplierImplTxnTableTest, MultiApplyUpdatesTheTransactionTable) {
-    NamespaceString ns0("test.0");
-    NamespaceString ns1("test.1");
-    NamespaceString ns2("test.2");
-    NamespaceString ns3("test.3");
+    NamespaceString ns0 = NamespaceString::createNamespaceString_forTest("test.0");
+    NamespaceString ns1 = NamespaceString::createNamespaceString_forTest("test.1");
+    NamespaceString ns2 = NamespaceString::createNamespaceString_forTest("test.2");
+    NamespaceString ns3 = NamespaceString::createNamespaceString_forTest("test.3");
 
     DBDirectClient client(_opCtx.get());
     BSONObj result;
@@ -4150,7 +4208,7 @@ TEST_F(IdempotencyTestTxns, CommitUnpreparedTransactionDataPartiallyApplied) {
     auto lsid = makeLogicalSessionId(_opCtx.get());
     TxnNumber txnNum(0);
 
-    NamespaceString nss2("test.coll2");
+    NamespaceString nss2 = NamespaceString::createNamespaceString_forTest("test.coll2");
     auto uuid2 = createCollectionWithUuid(_opCtx.get(), nss2);
 
     auto commitOp = commitUnprepared(lsid,
@@ -4214,7 +4272,7 @@ TEST_F(IdempotencyTestTxns, CommitPreparedTransactionDataPartiallyApplied) {
     auto lsid = makeLogicalSessionId(_opCtx.get());
     TxnNumber txnNum(0);
 
-    NamespaceString nss2("test.coll2");
+    NamespaceString nss2 = NamespaceString::createNamespaceString_forTest("test.coll2");
     auto uuid2 = createCollectionWithUuid(_opCtx.get(), nss2);
 
     auto prepareOp = prepare(lsid,
@@ -4774,16 +4832,37 @@ protected:
             _writerPool.get());
     }
 
-    auto makePrepareOplogForCrudBatch(const std::vector<BSONObj>& batch,
-                                      const OpTime opTime,
-                                      const LogicalSessionId& lsid,
-                                      TxnNumber txnNumber) {
+    auto makePrepareOplogEntry(const std::vector<BSONObj>& docs,
+                               const OpTime opTime,
+                               const LogicalSessionId& lsid,
+                               TxnNumber txnNumber) {
         BSONArrayBuilder arrBuilder;
-        arrBuilder.append(batch.begin(), batch.end());
+        arrBuilder.append(docs.begin(), docs.end());
         auto command = BSON("applyOps" << arrBuilder.arr() << "prepare" << true);
 
         return makeCommandOplogEntryWithSessionInfoAndStmtIds(
             opTime, _cmdNss, command, lsid, TxnNumber(txnNumber), {StmtId(0)}, OpTime());
+    }
+
+    auto makeCommitOplogEntry(const OpTime opTime,
+                              const Timestamp commitTs,
+                              const LogicalSessionId& lsid,
+                              TxnNumber txnNumber,
+                              const OpTime prevOpTime) {
+        auto command = BSON("commitTransaction" << 1 << "commitTimestamp" << commitTs);
+
+        return makeCommandOplogEntryWithSessionInfoAndStmtIds(
+            opTime, _cmdNss, command, lsid, TxnNumber(txnNumber), {StmtId(0)}, prevOpTime);
+    }
+
+    auto makeAbortOplogEntry(const OpTime opTime,
+                             const LogicalSessionId& lsid,
+                             TxnNumber txnNumber,
+                             const OpTime prevOpTime) {
+        auto command = BSON("abortTransaction" << 1);
+
+        return makeCommandOplogEntryWithSessionInfoAndStmtIds(
+            opTime, _cmdNss, command, lsid, TxnNumber(txnNumber), {StmtId(0)}, prevOpTime);
     }
 
     int filterConfigTransactionsEntryFromWriterVectors(WriterVectors& writerVectors) {
@@ -4820,7 +4899,7 @@ TEST_F(PreparedTxnSplitTest, MultiplePrepareTxnsInSameBatch) {
     // changes.
     const int kNumEntries = _writerPool->getStats().options.maxThreads * 1000;
 
-    std::vector<OplogEntry> ops;
+    std::vector<OplogEntry> prepareOps;
     std::vector<BSONObj> cruds1;
     std::vector<BSONObj> cruds2;
     cruds1.reserve(kNumEntries);
@@ -4836,28 +4915,29 @@ TEST_F(PreparedTxnSplitTest, MultiplePrepareTxnsInSameBatch) {
                               << BSON("_id" << i + kNumEntries)));
     }
 
-    ops.push_back(makePrepareOplogForCrudBatch(cruds1, {Timestamp(1, 1), 1}, _lsid1, _txnNum1));
-    ops.push_back(makePrepareOplogForCrudBatch(cruds2, {Timestamp(1, 2), 1}, _lsid2, _txnNum2));
+    prepareOps.push_back(makePrepareOplogEntry(cruds1, {Timestamp(1, 1), 1}, _lsid1, _txnNum1));
+    prepareOps.push_back(makePrepareOplogEntry(cruds2, {Timestamp(1, 2), 1}, _lsid2, _txnNum2));
 
-    WriterVectors writerVectors(_writerPool->getStats().options.maxThreads);
-    std::vector<std::vector<OplogEntry>> derivedOps;
-    _applier->fillWriterVectors_forTest(_opCtx.get(), &ops, &writerVectors, &derivedOps);
+    WriterVectors prepareWriterVectors(_writerPool->getStats().options.maxThreads);
+    std::vector<std::vector<OplogEntry>> derivedPrepareOps;
+    _applier->fillWriterVectors_forTest(
+        _opCtx.get(), &prepareOps, &prepareWriterVectors, &derivedPrepareOps);
 
     // Verify the config.transactions collection got one entry for each prepared transaction.
-    int txnTableOps = filterConfigTransactionsEntryFromWriterVectors(writerVectors);
+    int txnTableOps = filterConfigTransactionsEntryFromWriterVectors(prepareWriterVectors);
     ASSERT_EQ(2, txnTableOps);
 
     // Verify each writer has been assigned operations for both prepared transactions.
-    for (auto& writer : writerVectors) {
+    for (auto& writer : prepareWriterVectors) {
         ASSERT_EQ(2, writer.size());
 
-        ASSERT_EQ(ApplicationInstruction::applySplitPrepareOps, writer[0].instruction);
+        ASSERT_EQ(ApplicationInstruction::applySplitPrepareOp, writer[0].instruction);
         ASSERT_TRUE(writer[0]->shouldPrepare());
         ASSERT_NE(boost::none, writer[0].subSession);
         ASSERT_NE(boost::none, writer[0].splitPrepareOps);
         ASSERT_FALSE(writer[0].splitPrepareOps->empty());
 
-        ASSERT_EQ(ApplicationInstruction::applySplitPrepareOps, writer[1].instruction);
+        ASSERT_EQ(ApplicationInstruction::applySplitPrepareOp, writer[1].instruction);
         ASSERT_TRUE(writer[1]->shouldPrepare());
         ASSERT_NE(boost::none, writer[1].subSession);
         ASSERT_NE(boost::none, writer[1].splitPrepareOps);
@@ -4865,35 +4945,114 @@ TEST_F(PreparedTxnSplitTest, MultiplePrepareTxnsInSameBatch) {
 
         ASSERT_NE(writer[0].subSession->getSessionId(), writer[1].subSession->getSessionId());
     }
+
+    // Test that applying a commitTransaction or abortTransaction entry in the next batch will
+    // correctly split the entry and add them into those writer vectors that previously got
+    // assigned the prepare entry.
+    std::vector<OplogEntry> commitOps;
+    commitOps.push_back(makeCommitOplogEntry(
+        {Timestamp(3, 1), 1}, Timestamp(2, 1), _lsid1, _txnNum1, prepareOps[0].getOpTime()));
+    commitOps.push_back(
+        makeAbortOplogEntry({Timestamp(3, 2), 1}, _lsid2, _txnNum2, prepareOps[1].getOpTime()));
+
+    WriterVectors commitWriterVectors(_writerPool->getStats().options.maxThreads);
+    std::vector<std::vector<OplogEntry>> derivedCommitOps;
+    _applier->fillWriterVectors_forTest(
+        _opCtx.get(), &commitOps, &commitWriterVectors, &derivedCommitOps);
+
+    // Verify the config.transactions collection got one entry for each commit/abort op.
+    txnTableOps = filterConfigTransactionsEntryFromWriterVectors(commitWriterVectors);
+    ASSERT_EQ(2, txnTableOps);
+
+    // Verify each writer has been assigned a split commit and abort op.
+    for (size_t i = 0; i < commitWriterVectors.size(); ++i) {
+        auto& commitWriter = commitWriterVectors[i];
+        auto& prepareWriter = prepareWriterVectors[i];
+
+        ASSERT_EQ(2, commitWriter.size());
+        ASSERT_EQ(2, prepareWriter.size());
+
+        ASSERT_EQ(ApplicationInstruction::applySplitCommitOrAbortOp, commitWriter[0].instruction);
+        ASSERT_TRUE(commitWriter[0]->isPreparedCommit());
+        ASSERT_EQ(prepareWriter[0].subSession->getSessionId(),
+                  commitWriter[0].subSession->getSessionId());
+        ASSERT_EQ(boost::none, commitWriter[0].splitPrepareOps);
+
+        ASSERT_EQ(ApplicationInstruction::applySplitCommitOrAbortOp, commitWriter[1].instruction);
+        ASSERT_EQ(prepareWriter[1].subSession->getSessionId(),
+                  commitWriter[1].subSession->getSessionId());
+        ASSERT_NE(boost::none, commitWriter[1].subSession);
+        ASSERT_EQ(boost::none, commitWriter[1].splitPrepareOps);
+
+        ASSERT_NE(commitWriter[0].subSession->getSessionId(),
+                  commitWriter[1].subSession->getSessionId());
+    }
 }
 
 TEST_F(PreparedTxnSplitTest, SingleEmptyPrepareTransaction) {
     RAIIServerParameterControllerForTest controller("featureFlagApplyPreparedTxnsInParallel", true);
 
-    std::vector<OplogEntry> ops;
-    ops.push_back(makePrepareOplogForCrudBatch({}, {Timestamp(1, 1), 1}, _lsid1, _txnNum1));
+    std::vector<OplogEntry> prepareOps;
+    prepareOps.push_back(makePrepareOplogEntry({}, {Timestamp(1, 1), 1}, _lsid1, _txnNum1));
 
-    WriterVectors writerVectors(_writerPool->getStats().options.maxThreads);
-    std::vector<std::vector<OplogEntry>> derivedOps;
-    _applier->fillWriterVectors_forTest(_opCtx.get(), &ops, &writerVectors, &derivedOps);
+    WriterVectors prepareWriterVectors(_writerPool->getStats().options.maxThreads);
+    std::vector<std::vector<OplogEntry>> derivedPrepareOps;
+    _applier->fillWriterVectors_forTest(
+        _opCtx.get(), &prepareOps, &prepareWriterVectors, &derivedPrepareOps);
 
     // Verify the config.transactions collection got an entry for the empty prepared transaction.
-    int txnTableOps = filterConfigTransactionsEntryFromWriterVectors(writerVectors);
+    int txnTableOps = filterConfigTransactionsEntryFromWriterVectors(prepareWriterVectors);
     ASSERT_EQ(1, txnTableOps);
 
-    // Verify exactly writer has been assigned operation for the empty prepared transaction.
-    int count = std::count_if(writerVectors.begin(), writerVectors.end(), [](auto& writer) {
-        if (writer.size() != 1) {
-            return false;
+    // Verify exactly one writer has been assigned operation for the empty prepared transaction.
+    boost::optional<uint32_t> writerId;
+    for (size_t i = 0; i < prepareWriterVectors.size(); ++i) {
+        auto& writer = prepareWriterVectors[i];
+        ASSERT_LTE(writer.size(), 1);
+        if (writer.size() == 1) {
+            ASSERT_EQ(boost::none, writerId);
+            writerId = i;
+            ASSERT_EQ(ApplicationInstruction::applySplitPrepareOp, writer[0].instruction);
+            ASSERT_TRUE(writer[0]->shouldPrepare());
+            ASSERT_NE(boost::none, writer[0].subSession);
+            ASSERT_NE(boost::none, writer[0].splitPrepareOps);
+            ASSERT_TRUE(writer[0].splitPrepareOps->empty());
         }
-        ASSERT_EQ(ApplicationInstruction::applySplitPrepareOps, writer[0].instruction);
-        ASSERT_TRUE(writer[0]->shouldPrepare());
-        ASSERT_NE(boost::none, writer[0].subSession);
-        ASSERT_NE(boost::none, writer[0].splitPrepareOps);
-        ASSERT_TRUE(writer[0].splitPrepareOps->empty());
-        return true;
-    });
-    ASSERT_EQ(1, count);
+    }
+
+    // Test that applying a commitTransaction in the next batch will correctly split the entry
+    // and add it into those writer vectors that previously got assigned the prepare entry.
+    std::vector<OplogEntry> commitOps;
+    commitOps.push_back(makeCommitOplogEntry(
+        {Timestamp(3, 1), 1}, Timestamp(2, 1), _lsid1, _txnNum1, prepareOps[0].getOpTime()));
+
+    WriterVectors commitWriterVectors(_writerPool->getStats().options.maxThreads);
+    std::vector<std::vector<OplogEntry>> derivedCommitOps;
+    _applier->fillWriterVectors_forTest(
+        _opCtx.get(), &commitOps, &commitWriterVectors, &derivedCommitOps);
+
+    // Verify the config.transactions collection got an entry for the commit op.
+    txnTableOps = filterConfigTransactionsEntryFromWriterVectors(commitWriterVectors);
+    ASSERT_EQ(1, txnTableOps);
+
+    // Verify exactly one writer has been assigned a split commit op.
+    for (size_t i = 0; i < commitWriterVectors.size(); ++i) {
+        auto& commitwriter = commitWriterVectors[i];
+        auto& prepareWriter = prepareWriterVectors[i];
+        ASSERT_LTE(commitwriter.size(), 1);
+        ASSERT_LTE(prepareWriter.size(), 1);
+        ASSERT_EQ(prepareWriter.size(), commitwriter.size());
+
+        if (commitwriter.size() == 1) {
+            ASSERT_EQ(writerId.get(), i);
+            ASSERT_EQ(ApplicationInstruction::applySplitCommitOrAbortOp,
+                      commitwriter[0].instruction);
+            ASSERT_TRUE(commitwriter[0]->isPreparedCommit());
+            ASSERT_EQ(prepareWriter[0].subSession->getSessionId(),
+                      commitwriter[0].subSession->getSessionId());
+            ASSERT_EQ(boost::none, commitwriter[0].splitPrepareOps);
+        }
+    }
 }
 
 class GlobalIndexTest : public OplogApplierImplTest {
@@ -4926,7 +5085,7 @@ protected:
 
     auto makeApplyOpsForGlobalIndexCrudBatch(const std::vector<GlobalIndexCrudOp>& batch) {
         BSONArrayBuilder arrBuilder;
-        NamespaceString nss("system"_sd);
+        NamespaceString nss = NamespaceString::createNamespaceString_forTest("system"_sd);
         for (const auto& op : batch) {
             if (op.type == GlobalIndexCrudOp::Type::Insert) {
                 arrBuilder << MutableOplogEntry::makeInsertGlobalIndexKeyOperation(

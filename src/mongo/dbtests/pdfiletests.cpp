@@ -55,7 +55,8 @@ protected:
         return NamespaceString("unittests.pdfiletests.Insert");
     }
     CollectionPtr collection() {
-        return CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, nss());
+        return CollectionPtr(
+            CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, nss()));
     }
 
     const ServiceContext::UniqueOperationContext _opCtxPtr = cc().makeOperationContext();
@@ -70,10 +71,10 @@ public:
         WriteUnitOfWork wunit(&_opCtx);
         BSONObj x = BSON("x" << 1);
         ASSERT(x["_id"].type() == 0);
-        CollectionPtr coll =
-            CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, nss());
+        CollectionPtr coll(
+            CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, nss()));
         if (!coll) {
-            coll = _context.db()->createCollection(&_opCtx, nss());
+            coll = CollectionPtr(_context.db()->createCollection(&_opCtx, nss()));
         }
         ASSERT(coll);
         OpDebug* const nullOpDebug = nullptr;

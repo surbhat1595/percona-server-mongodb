@@ -381,9 +381,14 @@ public:
         const IndexingRequirement& requirements = getPropertyConst<IndexingRequirement>(_physProps);
         const CandidateIndexes& candidateIndexes = node.getCandidateIndexes();
         const IndexReqTarget indexReqTarget = requirements.getIndexReqTarget();
+        const PartialSchemaRequirements& reqMap = node.getReqMap();
+
         switch (indexReqTarget) {
             case IndexReqTarget::Complete:
                 if (_hints._disableScan) {
+                    return;
+                }
+                if (_hints._forceIndexScanForPredicates && hasProperIntervals(reqMap)) {
                     return;
                 }
                 break;
@@ -412,7 +417,6 @@ public:
         }
 
         const ProjectionName& scanProjectionName = indexingAvailability.getScanProjection();
-        const PartialSchemaRequirements& reqMap = node.getReqMap();
         for (const auto& [key, req] : reqMap.conjuncts()) {
             if (key._projectionName != scanProjectionName) {
                 // We can only satisfy partial schema requirements using our root projection.
@@ -473,7 +477,7 @@ public:
                 const auto& indexDefName = candidateIndexEntry._indexDefName;
                 const auto& indexDef = scanDef.getIndexDefs().at(indexDefName);
 
-                if (!indexDef.getPartialReqMap().empty() &&
+                if (!indexDef.getPartialReqMap().isNoop() &&
                     (_hints._disableIndexes == DisableIndexOptions::DisablePartialOnly ||
                      satisfiedPartialIndexes.count(indexDefName) == 0)) {
                     // Consider only indexes for which we satisfy partial requirements.
@@ -1363,6 +1367,7 @@ private:
                     case IndexFieldPredType::Unbound:
                         if (reqProjName != projName) {
                             indexSuitable = false;
+                            break;
                         }
                         updateDirectionsFn(indexCollationSpec.at(indexField)._op, reqOp);
                         break;

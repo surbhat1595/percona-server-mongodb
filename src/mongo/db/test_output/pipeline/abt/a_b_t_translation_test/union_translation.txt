@@ -22,11 +22,7 @@ metadata:
 			CE type: -1
 
 -- OUTPUT:
-Root []
-|   |   projections: 
-|   |       scan_0
-|   RefBlock: 
-|       Variable [scan_0]
+Root [{scan_0}]
 Filter []
 |   EvalFilter []
 |   |   Variable [scan_0]
@@ -35,10 +31,7 @@ Filter []
 |   PathCompare [Eq]
 |   Const [1]
 Union [{scan_0}]
-|   Evaluation [{scan_0}]
-|   |   EvalPath []
-|   |   |   Variable [scan_1]
-|   |   PathIdentity []
+|   Evaluation [{scan_0} = Variable [scan_1]]
 |   Scan [collB, {scan_1}]
 Scan [collA, {scan_0}]
 

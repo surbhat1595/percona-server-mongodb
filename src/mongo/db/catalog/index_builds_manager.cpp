@@ -254,7 +254,7 @@ StatusWith<std::pair<long long, long long>> IndexBuildsManager::startBuildingInd
     long long bytesRemoved = 0;
 
     const NamespaceString lostAndFoundNss =
-        NamespaceString(NamespaceString::kLocalDb, "lost_and_found." + coll->uuid().toString());
+        NamespaceString(DatabaseName::kLocal, "lost_and_found." + coll->uuid().toString());
 
     // Delete duplicate record and insert it into local lost and found.
     Status status = [&] {
@@ -409,7 +409,7 @@ void IndexBuildsManager::_registerIndexBuild(UUID buildUUID) {
     invariant(_builders.insert(std::make_pair(buildUUID, std::move(mib))).second);
 }
 
-void IndexBuildsManager::unregisterIndexBuild(const UUID& buildUUID) {
+void IndexBuildsManager::tearDownAndUnregisterIndexBuild(const UUID& buildUUID) {
     stdx::unique_lock<Latch> lk(_mutex);
 
     auto builderIt = _builders.find(buildUUID);

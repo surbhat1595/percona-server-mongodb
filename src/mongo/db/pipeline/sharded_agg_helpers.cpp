@@ -30,6 +30,7 @@
 
 #include "mongo/db/pipeline/sharded_agg_helpers.h"
 
+#include "mongo/db/catalog_shard_feature_flag_gen.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
@@ -51,6 +52,7 @@
 #include "mongo/db/pipeline/search_helper.h"
 #include "mongo/db/pipeline/semantic_analysis.h"
 #include "mongo/db/query/cursor_response_gen.h"
+#include "mongo/db/query/telemetry.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -65,6 +67,7 @@
 #include "mongo/s/stale_exception.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/net/socket_utils.h"
 #include "mongo/util/overloaded_visitor.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -220,8 +223,8 @@ std::vector<RemoteCursor> establishShardCursors(
         }
     } else {
         // The collection is unsharded. Target only the primary shard for the database.
-        // Don't append shard version info when contacting the config servers.
-        auto versionedCmdObj = cri->cm.dbPrimary() != ShardId::kConfigServerId
+        // Don't append shard version info when contacting a fixed db collection.
+        auto versionedCmdObj = !cri->cm.dbVersion().isFixed()
             ? appendShardVersion(cmdObj, ShardVersion::UNSHARDED())
             : cmdObj;
         versionedCmdObj = appendDbVersionIfPresent(versionedCmdObj, cri->cm.dbVersion());
@@ -738,6 +741,17 @@ void abandonCacheIfSentToShards(Pipeline* shardsPipeline) {
     }
 }
 
+void setTelemetryKeyOnAggRequest(AggregateCommandRequest& request, ExpressionContext* expCtx) {
+    if (!telemetry::isTelemetryEnabled()) {
+        return;
+    }
+
+    if (auto telemetryKey = telemetry::getTelemetryKeyFromOpCtx(expCtx->opCtx)) {
+        request.setHashedTelemetryKey(
+            telemetry::telemetryKeyToShardedStoreId(*telemetryKey, getHostNameCachedAndPort()));
+    }
+}
+
 }  // namespace
 
 std::unique_ptr<Pipeline, PipelineDeleter> targetShardsAndAddMergeCursors(
@@ -778,6 +792,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> targetShardsAndAddMergeCursors(
     LiteParsedPipeline liteParsedPipeline(aggRequest);
     auto hasChangeStream = liteParsedPipeline.hasChangeStream();
     auto startsWithDocuments = liteParsedPipeline.startsWithDocuments();
+    setTelemetryKeyOnAggRequest(aggRequest, expCtx.get());
     auto shardDispatchResults =
         dispatchShardPipeline(aggregation_request_helper::serializeToCommandDoc(aggRequest),
                               hasChangeStream,
@@ -830,9 +845,9 @@ std::unique_ptr<Pipeline, PipelineDeleter> runPipelineDirectlyOnSingleShard(
             return appendShardVersion(aggregation_request_helper::serializeToCommandObj(request),
                                       cri.getShardVersion(shardId));
         } else {
-            // The collection is unsharded. Don't append shard version info when contacting the
-            // config servers.
-            const auto cmdObjWithShardVersion = (shardId != ShardId::kConfigServerId)
+            // The collection is unsharded. Don't append shard version info when contacting a fixed
+            // db collection.
+            const auto cmdObjWithShardVersion = !cri.cm.dbVersion().isFixed()
                 ? appendShardVersion(aggregation_request_helper::serializeToCommandObj(request),
                                      ShardVersion::UNSHARDED())
                 : aggregation_request_helper::serializeToCommandObj(request);
@@ -946,6 +961,9 @@ BSONObj createPassthroughCommandForShard(
                        [SimpleCursorOptions::kBatchSizeFieldName] = Value(*overrideBatchSize);
         }
     }
+
+    telemetry::appendShardedTelemetryKeyIfApplicable(
+        targetedCmd, getHostNameCachedAndPort(), expCtx->opCtx);
 
     auto shardCommand = genericTransformForShards(std::move(targetedCmd),
                                                   expCtx,
@@ -1117,7 +1135,8 @@ DispatchShardPipelineResults dispatchShardPipeline(
                                                            std::move(readConcern),
                                                            boost::none));
     const auto targetedSampleId = eligibleForSampling
-        ? analyze_shard_key::tryGenerateTargetedSampleId(opCtx, expCtx->ns, shardIds)
+        ? analyze_shard_key::tryGenerateTargetedSampleId(
+              opCtx, expCtx->ns, analyze_shard_key::SampledCommandNameEnum::kAggregate, shardIds)
         : boost::none;
 
     // A $changeStream pipeline must run on all shards, and will also open an extra cursor on the
@@ -1482,6 +1501,7 @@ BSONObj targetShardsForExplain(Pipeline* ownedPipeline) {
     }();
 
     AggregateCommandRequest aggRequest(expCtx->ns, rawStages);
+    setTelemetryKeyOnAggRequest(aggRequest, expCtx.get());
     LiteParsedPipeline liteParsedPipeline(aggRequest);
     auto hasChangeStream = liteParsedPipeline.hasChangeStream();
     auto startsWithDocuments = liteParsedPipeline.startsWithDocuments();
@@ -1506,8 +1526,13 @@ StatusWith<CollectionRoutingInfo> getExecutionNsRoutingInfo(OperationContext* op
     // a collection before its enclosing database is created. However, if there are no shards
     // present, then $changeStream should immediately return an empty cursor just as other
     // aggregations do when the database does not exist.
+    //
+    // Note despite config.collections always being unsharded, to support $shardedDataDistribution
+    // we always take the shard targeting path. The collection must only exist on the config server,
+    // so even if there are no shards, the query can still succeed and we shouldn't return
+    // ShardNotFound.
     const auto shardIds = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
-    if (shardIds.empty()) {
+    if (shardIds.empty() && execNss != NamespaceString::kConfigsvrCollectionsNamespace) {
         return {ErrorCodes::ShardNotFound, "No shards are present in the cluster"};
     }
 
@@ -1587,14 +1612,20 @@ std::unique_ptr<Pipeline, PipelineDeleter> attachCursorToPipeline(
             const auto& cm = cri.cm;
             auto pipelineToTarget = pipeline->clone();
 
-            if (!cm.isSharded() && expCtx->ns != NamespaceString::kConfigsvrCollectionsNamespace) {
+            if (!cm.isSharded() &&
+                (gFeatureFlagCatalogShard.isEnabled(serverGlobalParams.featureCompatibility) ||
+                 expCtx->ns != NamespaceString::kConfigsvrCollectionsNamespace)) {
                 // If the collection is unsharded and we are on the primary, we should be able to
                 // do a local read. The primary may be moved right after the primary shard check,
                 // but the local read path will do a db version check before it establishes a cursor
                 // to catch this case and ensure we fail to read locally.
+                //
                 // There is the case where we are in config.collections (collection unsharded) and
-                // we want to broadcast to all shards. In this case we don't want to do a local read
-                // and we must target the config servers.
+                // we want to broadcast to all shards for the $shardedDataDistribution pipeline. In
+                // this case we don't want to do a local read and we must target the config servers.
+                // If the catalog shard feature flag is enabled in the current FCV, read locally
+                // because all nodes in the cluster should be running a recent enough binary so only
+                // the config server will be targeted for the pipeline.
                 try {
                     auto expectUnshardedCollection(
                         expCtx->mongoProcessInterface->expectUnshardedCollectionInScope(

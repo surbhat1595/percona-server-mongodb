@@ -54,11 +54,7 @@ BSONObj makeVersionedCmdObj(const CollectionRoutingInfo& cri,
                             const BSONObj& unversionedCmdObj,
                             ShardId shardId) {
     if (cri.cm.isSharded()) {
-        return appendShardVersion(
-            unversionedCmdObj,
-            ShardVersion(cri.cm.getVersion(shardId),
-                         cri.gii ? boost::make_optional(cri.gii->getCollectionIndexes())
-                                 : boost::none));
+        return appendShardVersion(unversionedCmdObj, cri.getShardVersion(shardId));
     }
     auto versionedCmdObj = appendShardVersion(unversionedCmdObj, ShardVersion::UNSHARDED());
     return appendDbVersionIfPresent(versionedCmdObj, cri.cm.dbVersion());
@@ -115,8 +111,8 @@ public:
                 candidateShardIds.erase(shardId);
 
                 uassert(ErrorCodes::IllegalOperation,
-                        "Cannot analyze a shard key for a collection on the config server",
-                        shardId != ShardId::kConfigServerId);
+                        "Cannot analyze a shard key for a collection in a fixed database",
+                        !cri.cm.dbVersion().isFixed());
 
                 // Build a versioned command for the selected shard.
                 auto versionedCmdObj = makeVersionedCmdObj(cri, unversionedCmdObj, shardId);
@@ -127,7 +123,7 @@ public:
                 auto swResponse = shard->runCommandWithFixedRetryAttempts(
                     opCtx,
                     ReadPreferenceSetting{ReadPreference::SecondaryPreferred},
-                    NamespaceString::kAdminDb.toString(),
+                    DatabaseName::kAdmin.toString(),
                     versionedCmdObj,
                     Shard::RetryPolicy::kIdempotent);
                 auto status = Shard::CommandResponse::getEffectiveStatus(swResponse);

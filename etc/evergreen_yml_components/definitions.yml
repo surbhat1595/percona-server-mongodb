@@ -298,7 +298,6 @@ variables:
   - enterprise-macos
   - enterprise-macos-arm64
   - enterprise-rhel-70-64-bit
-  - enterprise-rhel-70-64-bit-no-libunwind
   - enterprise-rhel-81-ppc64le
   - enterprise-rhel-72-s390x
   - enterprise-rhel-80-64-bit
@@ -2319,6 +2318,19 @@ functions:
       content_type: text/plain
       display_name: Resmoke.py Invocation for Local Usage
 
+  "attach multiversion exclude tags":
+    command: s3.put
+    params:
+      optional: true
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: src/generated_resmoke_config/multiversion_exclude_tags.yml
+      remote_file: ${project}/${build_variant}/${revision}/multiversion_exclude_tags-${task_id}-${execution}.yml
+      bucket: mciuploads
+      permissions: public-read
+      content_type: text/plain
+      display_name: Generated multiversion exclude tags options
+
 # Pre task steps
 pre:
 - func: "set task expansion macros"
@@ -2329,6 +2341,7 @@ post:
 - func: "f_expansions_write"
 - func: "upload npm logs"
 - func: "attach local resmoke invocation"
+- func: "attach multiversion exclude tags"
 - func: "attach report"
 - func: "attach artifacts"
 - func: "save ec2 task artifacts"
@@ -2567,6 +2580,25 @@ tasks:
   - func: "ninja compile"
     vars:
       ninja_file: "build.ninja"
+      targets: "install-devcore compiledb"
+
+- name: compile_ninja_quick
+  tags: []
+  depends_on:
+  - name: version_expansions_gen
+    variant: generate-tasks-for-version
+  commands:
+  - func: "scons compile"
+    vars:
+      generating_for_ninja: true
+      separate_debug: off
+      task_compile_flags: >-
+        --ninja
+  - *f_expansions_write
+  - func: "ninja compile"
+    vars:
+      ninja_file: "build.ninja"
+      targets: "install-wiredtiger compiledb"
 
 - name: compile_ninja_default_profile
   tags: []
@@ -2604,6 +2636,7 @@ tasks:
   - func: "ninja compile"
     vars:
       ninja_file: "build.ninja"
+      targets: "install-devcore compiledb"
 
 - name: compile_ninja_opt_profile
   tags: []
@@ -2623,6 +2656,7 @@ tasks:
   - func: "ninja compile"
     vars:
       ninja_file: "opt.ninja"
+      targets: "install-devcore compiledb"
 
 - name: compile_ninja_fast_profile
   tags: []
@@ -2642,6 +2676,7 @@ tasks:
   - func: "ninja compile"
     vars:
       ninja_file: "fast.ninja"
+      targets: "install-devcore compiledb"
 
 - name: compile_ninja_san_profile
   tags: []
@@ -2662,6 +2697,7 @@ tasks:
   - func: "ninja compile"
     vars:
       ninja_file: "san.ninja"
+      targets: "install-devcore compiledb"
 
 - name: compile_ninja_compiledb_profile
   tags: []
@@ -2680,6 +2716,7 @@ tasks:
   - func: "ninja compile"
     vars:
       ninja_file: "compiledb.ninja"
+      targets: "install-devcore compiledb"
 
 - name: compile_ninja_next
   tags: []
@@ -2698,6 +2735,7 @@ tasks:
   - func: "ninja compile"
     vars:
       ninja_file: "build.ninja"
+      targets: "install-devcore compiledb"
 
 - name: compile_build_tools_next
   tags: []
@@ -4795,26 +4833,8 @@ tasks:
   - func: "run tests"
 
 - <<: *task_template
-  name: change_streams_mongos_passthrough
-  tags: ["change_streams", "no_debug_mode"]
-  depends_on:
-  - name: change_streams
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: change_streams_secondary_reads
+  name: change_streams_secondary_reads_sharded_collections
   tags: ["change_streams", "secondary_reads"]
-  depends_on:
-  - name: change_streams
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: change_streams_sharded_collections_passthrough
-  tags: ["change_streams"]
   depends_on:
   - name: change_streams
   commands:
@@ -4865,28 +4885,10 @@ tasks:
   - func: "run tests"
 
 - <<: *task_template
-  name: change_streams_whole_db_mongos_passthrough
-  tags: ["change_streams", "no_debug_mode"]
-  depends_on:
-  - name: change_streams_mongos_passthrough
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: change_streams_whole_db_secondary_reads_passthrough
+  name: change_streams_whole_db_secondary_reads_sharded_collections
   tags: ["change_streams", "secondary_reads"]
   depends_on:
-  - name: change_streams_secondary_reads
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: change_streams_whole_db_sharded_collections_passthrough
-  tags: ["change_streams"]
-  depends_on:
-  - name: change_streams_sharded_collections_passthrough
+  - name: change_streams_secondary_reads_sharded_collections
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -4901,28 +4903,10 @@ tasks:
   - func: "run tests"
 
 - <<: *task_template
-  name: change_streams_whole_cluster_mongos_passthrough
-  tags: ["change_streams", "no_debug_mode"]
-  depends_on:
-  - name: change_streams_mongos_passthrough
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: change_streams_whole_cluster_secondary_reads_passthrough
+  name: change_streams_whole_cluster_secondary_reads_sharded_collections
   tags: ["change_streams", "secondary_reads"]
   depends_on:
-  - name: change_streams_secondary_reads
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: change_streams_whole_cluster_sharded_collections_passthrough
-  tags: ["change_streams"]
-  depends_on:
-  - name: change_streams_sharded_collections_passthrough
+  - name: change_streams_secondary_reads_sharded_collections
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -5142,6 +5126,24 @@ tasks:
       - "src/evergreen/external_auth_aws_pip.sh"
   - func: "run tests"
 
+- <<: *task_template
+  name: external_auth_oidc
+  tags: []
+  commands:
+  - *f_expansions_write
+  - func: "do setup"
+  - func: "f_expansions_write"
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/external_auth_pip.sh"
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/external_auth_oidc_setup.sh"
+  - func: "run tests"
 
 - <<: *task_template
   name: external_auth_windows
@@ -6005,6 +6007,15 @@ tasks:
       resmoke_jobs_max: 1
 
 - <<: *gen_task_template
+  name: concurrency_sharded_with_catalog_shard_gen
+  tags: ["catalog_shard", "large"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+      resmoke_jobs_max: 1
+
+- <<: *gen_task_template
   name: concurrency_sharded_replication_multiversion_gen
   tags: ["multiversion_passthrough", "sharded", "multiversion"]
   commands:
@@ -6016,6 +6027,15 @@ tasks:
 - <<: *gen_task_template
   name: concurrency_sharded_replication_with_balancer_gen
   tags: ["concurrency", "common", "read_concern_maj", "large", "sharded", "no_debug_mode"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+      resmoke_jobs_max: 1
+
+- <<: *gen_task_template
+  name: concurrency_sharded_with_balancer_and_catalog_shard_gen
+  tags: ["catalog_shard", "large"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -6345,14 +6365,6 @@ tasks:
       run_no_feature_flag_tests: "true"
 
 - <<: *gen_task_template
-  name: sharding_max_mirroring_gen
-  tags: ["sharding", "common"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-
-- <<: *gen_task_template
   name: sharding_csrs_continuous_config_stepdown_gen
   tags: ["sharding", "common", "csrs", "non_live_record"]
   commands:
@@ -6361,17 +6373,28 @@ tasks:
       suite: sharding_continuous_config_stepdown
       use_large_distro: "true"
 
+# This is a subset of sharding_max_mirroring_opportunistic_secondary_targeting_ese_gen and
+# sharding_max_mirroring_opportunistic_secondary_targeting_ese_gcm_gen and should not be ran
+# in the same varient as them
 - <<: *gen_task_template
-  name: sharding_ese_gen
-  tags: ["sharding", "encrypt", "no_debug_mode"]
+  name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
+  tags: []
   commands:
   - func: "generate resmoke tasks"
     vars:
       use_large_distro: "true"
 
 - <<: *gen_task_template
-  name: sharding_ese_gcm_gen
-  tags: ["sharding", "encrypt", "gcm", "no_debug_mode"]
+  name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gen
+  tags: ["sharding", "common", "encrypt", "no_debug_mode"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
+- <<: *gen_task_template
+  name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gcm_gen
+  tags: ["sharding", "common", "encrypt", "gcm", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -6379,7 +6402,7 @@ tasks:
 
 - <<: *gen_task_template
   name: sharding_auth_gen
-  tags: ["sharding", "auth", "no_debug_mode"]
+  tags: []
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -6387,7 +6410,15 @@ tasks:
 
 - <<: *gen_task_template
   name: sharding_auth_audit_gen
-  tags: ["auth", "audit", "non_live_record", "no_debug_mode"]
+  tags: ["sharding", "auth", "audit", "non_live_record", "no_debug_mode"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
+- <<: *gen_task_template
+  name: sharding_api_strict_passthrough_gen
+  tags: ["sharding"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -6411,14 +6442,6 @@ tasks:
       use_large_distro: "true"
       multiversion_exclude_tags_version: last_lts
       run_no_feature_flag_tests: "true"
-
-- <<: *gen_task_template
-  name: sharding_opportunistic_secondary_targeting_gen
-  tags: ["sharding", "common"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
 
 - <<: *gen_task_template
   name: analyze_shard_key_jscore_passthrough_gen
@@ -7949,6 +7972,13 @@ tasks:
   - func: "do setup"
   - func: "run tests"
 
+- <<: *task_template
+  name: streams
+  tags: []
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
 - name: shared_scons_cache_pruning
   tags: []
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
@@ -8211,6 +8241,11 @@ task_groups:
       permissions: public-read
       content_type: text/plain
       display_name: build.ninja
+
+- <<: *compile_task_group_template
+  name: compile_ninja_quick_TG
+  tasks:
+  - compile_ninja_quick
 
 - <<: *compile_task_group_template
   name: compile_ninja_default_profile_TG

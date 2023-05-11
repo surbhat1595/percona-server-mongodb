@@ -222,8 +222,8 @@ void createIndexForApplyOps(OperationContext* opCtx,
     // Check if collection exists.
     auto databaseHolder = DatabaseHolder::get(opCtx);
     auto db = databaseHolder->getDb(opCtx, indexNss.dbName());
-    auto indexCollection =
-        db ? CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, indexNss) : nullptr;
+    auto indexCollection = CollectionPtr(
+        db ? CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, indexNss) : nullptr);
     uassert(ErrorCodes::NamespaceNotFound,
             str::stream() << "Failed to create index due to missing collection: " << indexNss.ns(),
             indexCollection);
@@ -289,15 +289,20 @@ void createIndexForApplyOps(OperationContext* opCtx,
         try {
             indexBuildsCoordinator->createIndexesOnEmptyCollection(
                 opCtx, coll, {indexSpec}, fromMigrate);
-        } catch (const ExceptionFor<ErrorCodes::IndexAlreadyExists>& e) {
-            // Ignore the "IndexAlreadyExists" error during oplog application.
-            LOGV2_DEBUG(7261800,
-                        1,
-                        "Ignoring indexing error",
-                        "error"_attr = redact(e.toStatus()),
-                        logAttrs(indexCollection->ns()),
-                        logAttrs(indexCollection->uuid()),
-                        "spec"_attr = indexSpec);
+        } catch (DBException& ex) {
+            // Some indexing errors can be ignored during oplog application.
+            const auto& status = ex.toStatus();
+            if (IndexBuildsCoordinator::isCreateIndexesErrorSafeToIgnore(status, constraints)) {
+                LOGV2_DEBUG(7261800,
+                            1,
+                            "Ignoring indexing error",
+                            "error"_attr = redact(status),
+                            logAttrs(indexCollection->ns()),
+                            logAttrs(indexCollection->uuid()),
+                            "spec"_attr = indexSpec);
+                return;
+            }
+            throw;
         }
         wuow.commit();
     } else {
@@ -431,7 +436,8 @@ void _logOpsInner(OperationContext* opCtx,
 
     // Set replCoord last optime only after we're sure the WUOW didn't abort and roll back.
     opCtx->recoveryUnit()->onCommit(
-        [opCtx, replCoord, finalOpTime, wallTime](boost::optional<Timestamp> commitTime) {
+        [replCoord, finalOpTime, wallTime](OperationContext* opCtx,
+                                           boost::optional<Timestamp> commitTime) {
             if (commitTime) {
                 // The `finalOpTime` may be less than the `commitTime` if multiple oplog entries
                 // are logging within one WriteUnitOfWork.
@@ -528,7 +534,7 @@ OpTime logOp(OperationContext* opCtx, MutableOplogEntry* oplogEntry) {
                  oplogEntry->getNss(),
                  &records,
                  timestamps,
-                 oplog,
+                 CollectionPtr(oplog),
                  slot,
                  wallClockTime,
                  isAbortIndexBuild);
@@ -642,11 +648,17 @@ std::vector<OpTime> logInsertOps(
     invariant(!opTimes.empty());
     auto lastOpTime = opTimes.back();
     invariant(!lastOpTime.isNull());
-    const auto& oplog = oplogInfo->getCollection();
+    const Collection* oplog = oplogInfo->getCollection();
     auto wallClockTime = oplogEntryTemplate->getWallClockTime();
     const bool isAbortIndexBuild = false;
-    _logOpsInner(
-        opCtx, nss, &records, timestamps, oplog, lastOpTime, wallClockTime, isAbortIndexBuild);
+    _logOpsInner(opCtx,
+                 nss,
+                 &records,
+                 timestamps,
+                 CollectionPtr(oplog),
+                 lastOpTime,
+                 wallClockTime,
+                 isAbortIndexBuild);
     wuow.commit();
     return opTimes;
 }
@@ -751,7 +763,7 @@ void createOplog(OperationContext* opCtx,
     const ReplSettings& replSettings = ReplicationCoordinator::get(opCtx)->getSettings();
 
     OldClientContext ctx(opCtx, oplogCollectionName);
-    CollectionPtr collection =
+    const Collection* collection =
         CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, oplogCollectionName);
 
     if (collection) {
@@ -1345,10 +1357,10 @@ Status applyOperation_inlock(OperationContext* opCtx,
     }
 
     NamespaceString requestNss;
-    CollectionPtr collection = nullptr;
+    CollectionPtr collection;
     if (auto uuid = op.getUuid()) {
         auto catalog = CollectionCatalog::get(opCtx);
-        collection = catalog->lookupCollectionByUUID(opCtx, uuid.value());
+        collection = CollectionPtr(catalog->lookupCollectionByUUID(opCtx, uuid.value()));
         uassert(ErrorCodes::NamespaceNotFound,
                 str::stream() << "Failed to apply operation due to missing collection ("
                               << uuid.value() << "): " << redact(opOrGroupedInserts.toBSON()),
@@ -1360,7 +1372,8 @@ Status applyOperation_inlock(OperationContext* opCtx,
         invariant(requestNss.coll().size());
         dassert(opCtx->lockState()->isCollectionLockedForMode(requestNss, MODE_IX),
                 requestNss.ns());
-        collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, requestNss);
+        collection = CollectionPtr(
+            CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, requestNss));
     }
 
     BSONObj o = op.getObject();
@@ -1383,8 +1396,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
     if (op.getObject2())
         o2 = op.getObject2().value();
 
-    const IndexCatalog* indexCatalog =
-        collection == nullptr ? nullptr : collection->getIndexCatalog();
+    const IndexCatalog* indexCatalog = !collection ? nullptr : collection->getIndexCatalog();
     const bool haveWrappingWriteUnitOfWork = opCtx->lockState()->inAWriteUnitOfWork();
     uassert(ErrorCodes::CommandNotSupportedOnView,
             str::stream() << "applyOps not supported on view: " << requestNss.ns(),
@@ -1765,7 +1777,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                         // such as an updateCriteria of the form
                         // { _id:..., { x : {$size:...} }
                         // thus this is not ideal.
-                        if (collection == nullptr ||
+                        if (!collection ||
                             (indexCatalog->haveIdIndex(opCtx) &&
                              Helpers::findById(opCtx, collection, updateCriteria).isNull()) ||
                             // capped collections won't have an _id index
@@ -2265,10 +2277,10 @@ void clearLocalOplogPtr(ServiceContext* service) {
 
 void acquireOplogCollectionForLogging(OperationContext* opCtx) {
     AutoGetCollection autoColl(opCtx, NamespaceString::kRsOplogNamespace, MODE_IX);
-    LocalOplogInfo::get(opCtx)->setCollection(autoColl.getCollection());
+    LocalOplogInfo::get(opCtx)->setCollection(autoColl.getCollection().get());
 }
 
-void establishOplogCollectionForLogging(OperationContext* opCtx, const CollectionPtr& oplog) {
+void establishOplogCollectionForLogging(OperationContext* opCtx, const Collection* oplog) {
     invariant(opCtx->lockState()->isW());
     invariant(oplog);
     LocalOplogInfo::get(opCtx)->setCollection(oplog);

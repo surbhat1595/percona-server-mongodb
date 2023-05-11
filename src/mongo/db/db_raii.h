@@ -247,7 +247,7 @@ private:
     AutoGetDb _autoDb;
     std::vector<CollectionNamespaceOrUUIDLock> _collLocks;
 
-    CollectionPtr _coll = nullptr;
+    CollectionPtr _coll;
     std::shared_ptr<const ViewDefinition> _view;
 
     // If the object was instantiated with a UUID, contains the resolved namespace, otherwise it is
@@ -484,16 +484,19 @@ public:
     }
 
     const ViewDefinition* getView() const {
-        return stdx::visit(
-            OverloadedVisitor{[](auto&& impl) { return impl.getView(); },
-                              [](stdx::monostate) -> const ViewDefinition* { MONGO_UNREACHABLE; }},
-            _impl);
+        return stdx::visit(OverloadedVisitor{[](auto&& impl) { return impl.getView(); },
+                                             [](stdx::monostate) -> const ViewDefinition* {
+                                                 MONGO_UNREACHABLE;
+                                             }},
+                           _impl);
     }
 
     const NamespaceString& getNss() const {
         return stdx::visit(
             OverloadedVisitor{[](auto&& impl) -> const NamespaceString& { return impl.getNss(); },
-                              [](stdx::monostate) -> const NamespaceString& { MONGO_UNREACHABLE; }},
+                              [](stdx::monostate) -> const NamespaceString& {
+                                  MONGO_UNREACHABLE;
+                              }},
             _impl);
     }
 
@@ -506,7 +509,9 @@ public:
         return stdx::visit(
             OverloadedVisitor{
                 [](auto&& impl) { return impl.isAnySecondaryNamespaceAViewOrSharded(); },
-                [](stdx::monostate) -> bool { MONGO_UNREACHABLE; }},
+                [](stdx::monostate) -> bool {
+                    MONGO_UNREACHABLE;
+                }},
             _impl);
     }
 

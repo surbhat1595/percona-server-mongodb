@@ -38,7 +38,7 @@
 #include "mongo/s/refresh_query_analyzer_configuration_cmd_gen.h"
 #include "mongo/util/net/socket_utils.h"
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 namespace mongo {
 namespace analyze_shard_key {
@@ -150,13 +150,26 @@ double QueryAnalysisSampler::SampleRateLimiter::_getBurstCapacity(double numToke
 
 void QueryAnalysisSampler::SampleRateLimiter::_refill(double numTokensPerSecond,
                                                       double burstCapacity) {
-    auto now = _serviceContext->getFastClockSource()->now();
-    double numSecondsElapsed =
-        duration_cast<Microseconds>(now - _lastRefillTime).count() / 1000000.0;
+    auto currTicks = _serviceContext->getTickSource()->getTicks();
+    double numSecondsElapsed = _serviceContext->getTickSource()
+                                   ->ticksTo<Nanoseconds>(currTicks - _lastRefillTimeTicks)
+                                   .count() /
+        1.0e9;
     if (numSecondsElapsed > 0) {
         _lastNumTokens =
             std::min(burstCapacity, numSecondsElapsed * numTokensPerSecond + _lastNumTokens);
-        _lastRefillTime = now;
+        _lastRefillTimeTicks = currTicks;
+
+        LOGV2_DEBUG(7372303,
+                    2,
+                    "Refilled the bucket",
+                    "namespace"_attr = _nss,
+                    "collectionUUID"_attr = _collUuid,
+                    "numSecondsElapsed"_attr = numSecondsElapsed,
+                    "numTokensPerSecond"_attr = numTokensPerSecond,
+                    "burstCapacity"_attr = burstCapacity,
+                    "lastNumTokens"_attr = _lastNumTokens,
+                    "lastRefillTimeTicks"_attr = _lastRefillTimeTicks);
     }
 }
 
@@ -165,13 +178,31 @@ bool QueryAnalysisSampler::SampleRateLimiter::tryConsume() {
 
     if (_lastNumTokens >= 1) {
         _lastNumTokens -= 1;
+        LOGV2_DEBUG(7372304,
+                    2,
+                    "Successfully consumed one token",
+                    "namespace"_attr = _nss,
+                    "collectionUUID"_attr = _collUuid,
+                    "lastNumTokens"_attr = _lastNumTokens);
         return true;
     } else if (isApproximatelyEqual(_lastNumTokens, 1, kEpsilon)) {
         // To avoid skipping queries that could have been sampled, allow one token to be consumed
         // if there is nearly one.
         _lastNumTokens = 0;
+        LOGV2_DEBUG(7372305,
+                    2,
+                    "Successfully consumed approximately one token",
+                    "namespace"_attr = _nss,
+                    "collectionUUID"_attr = _collUuid,
+                    "lastNumTokens"_attr = _lastNumTokens);
         return true;
     }
+    LOGV2_DEBUG(7372306,
+                2,
+                "Failed to consume one token",
+                "namespace"_attr = _nss,
+                "collectionUUID"_attr = _collUuid,
+                "lastNumTokens"_attr = _lastNumTokens);
     return false;
 }
 
@@ -198,7 +229,7 @@ void QueryAnalysisSampler::_refreshConfigurations(OperationContext* opCtx) {
     }
 
     RefreshQueryAnalyzerConfiguration cmd;
-    cmd.setDbName(NamespaceString::kAdminDb);
+    cmd.setDbName(DatabaseName::kAdmin);
     cmd.setName(getHostNameCached() + ":" + std::to_string(serverGlobalParams.port));
     cmd.setNumQueriesExecutedPerSecond(*lastAvgCount);
 
@@ -206,7 +237,7 @@ void QueryAnalysisSampler::_refreshConfigurations(OperationContext* opCtx) {
     auto swResponse = configShard->runCommandWithFixedRetryAttempts(
         opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-        NamespaceString::kAdminDb.toString(),
+        DatabaseName::kAdmin.toString(),
         cmd.toBSON({}),
         Shard::RetryPolicy::kIdempotent);
     auto status = Shard::CommandResponse::getEffectiveStatus(swResponse);
@@ -227,6 +258,14 @@ void QueryAnalysisSampler::_refreshConfigurations(OperationContext* opCtx) {
                 "Refreshed query analyzer configurations",
                 "numQueriesExecutedPerSecond"_attr = lastAvgCount,
                 "response"_attr = response);
+    if (response.getConfigurations().size() != _sampleRateLimiters.size()) {
+        LOGV2(7362407,
+              "Refreshed query analyzer configurations. The number of collections with active "
+              "sampling has changed.",
+              "before"_attr = _sampleRateLimiters.size(),
+              "after"_attr = response.getConfigurations().size(),
+              "response"_attr = response);
+    }
 
     stdx::lock_guard<Latch> lk(_mutex);
     std::map<NamespaceString, SampleRateLimiter> sampleRateLimiters;
@@ -244,7 +283,11 @@ void QueryAnalysisSampler::_refreshConfigurations(OperationContext* opCtx) {
                                                          configuration.getSampleRate()});
         } else {
             auto rateLimiter = it->second;
-            invariant(rateLimiter.getNss() == configuration.getNs());
+            if (it->second.getNss() != configuration.getNs()) {
+                // Nss changed due to collection rename.
+                // TODO SERVER-73990: Test collection renaming during query sampling
+                it->second.setNss(configuration.getNs());
+            }
             rateLimiter.refreshRate(configuration.getSampleRate());
             sampleRateLimiters.emplace(configuration.getNs(), std::move(rateLimiter));
         }
@@ -252,8 +295,36 @@ void QueryAnalysisSampler::_refreshConfigurations(OperationContext* opCtx) {
     _sampleRateLimiters = std::move(sampleRateLimiters);
 }
 
+void QueryAnalysisSampler::SampleRateLimiter::incrementCounters(
+    const SampledCommandNameEnum cmdName) {
+    switch (cmdName) {
+        case SampledCommandNameEnum::kFind:
+        case SampledCommandNameEnum::kAggregate:
+        case SampledCommandNameEnum::kCount:
+        case SampledCommandNameEnum::kDistinct:
+            _counters.incrementReads(boost::none);
+            break;
+        case SampledCommandNameEnum::kInsert:
+        case SampledCommandNameEnum::kUpdate:
+        case SampledCommandNameEnum::kDelete:
+        case SampledCommandNameEnum::kFindAndModify:
+            _counters.incrementWrites(boost::none);
+            break;
+        default:
+            MONGO_UNREACHABLE;
+    }
+}
+
+BSONObj QueryAnalysisSampler::SampleRateLimiter::reportForCurrentOp() const {
+    BSONObjBuilder bob = _counters.reportCurrentOp();
+    bob.append(SampleCounters::kSampleRateFieldName, _numTokensPerSecond);
+    BSONObj obj = bob.obj();
+    return obj;
+}
+
 boost::optional<UUID> QueryAnalysisSampler::tryGenerateSampleId(OperationContext* opCtx,
-                                                                const NamespaceString& nss) {
+                                                                const NamespaceString& nss,
+                                                                SampledCommandNameEnum cmdName) {
     if (!opCtx->getClient()->session() && !opCtx->explicitlyOptedIntoQuerySampling()) {
         // Do not generate a sample id for an internal query unless it has explicitly opted into
         // query sampling.
@@ -269,6 +340,7 @@ boost::optional<UUID> QueryAnalysisSampler::tryGenerateSampleId(OperationContext
 
     auto& rateLimiter = it->second;
     if (rateLimiter.tryConsume()) {
+        rateLimiter.incrementCounters(cmdName);
         return UUID::gen();
     }
     return boost::none;
@@ -277,6 +349,12 @@ boost::optional<UUID> QueryAnalysisSampler::tryGenerateSampleId(OperationContext
 void QueryAnalysisSampler::appendInfoForServerStatus(BSONObjBuilder* bob) const {
     stdx::lock_guard<Latch> lk(_mutex);
     bob->append(kActiveCollectionsFieldName, static_cast<int>(_sampleRateLimiters.size()));
+}
+
+void QueryAnalysisSampler::reportForCurrentOp(std::vector<BSONObj>* ops) const {
+    for (auto it = _sampleRateLimiters.begin(); it != _sampleRateLimiters.end(); ++it) {
+        ops->push_back(it->second.reportForCurrentOp());
+    }
 }
 
 }  // namespace analyze_shard_key

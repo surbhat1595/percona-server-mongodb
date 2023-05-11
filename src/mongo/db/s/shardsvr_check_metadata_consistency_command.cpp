@@ -49,11 +49,21 @@
 namespace mongo {
 namespace {
 
+MetadataConsistencyCommandLevelEnum getCommandLevel(const NamespaceString& nss) {
+    if (nss.isAdminDB()) {
+        return MetadataConsistencyCommandLevelEnum::kClusterLevel;
+    } else if (nss.isCollectionlessCursorNamespace()) {
+        return MetadataConsistencyCommandLevelEnum::kDatabaseLevel;
+    } else {
+        return MetadataConsistencyCommandLevelEnum::kCollectionLevel;
+    }
+}
+
 class ShardsvrCheckMetadataConsistencyCommand final
     : public TypedCommand<ShardsvrCheckMetadataConsistencyCommand> {
 public:
     using Request = ShardsvrCheckMetadataConsistency;
-    using Response = CheckMetadataConsistencyResponse;
+    using Response = CursorInitialReply;
 
     bool skipApiVersionCheck() const override {
         // Internal command (server to server).
@@ -79,8 +89,71 @@ public:
         Response typedRun(OperationContext* opCtx) {
             uassertStatusOK(ShardingState::get(opCtx)->canAcceptShardedCommands());
 
-            const auto& nss = ns();
-            const auto& primaryShardId = ShardingState::get(opCtx)->shardId();
+            const auto nss = ns();
+            switch (getCommandLevel(nss)) {
+                case MetadataConsistencyCommandLevelEnum::kClusterLevel:
+                    return _runClusterLevel(opCtx, nss);
+                case MetadataConsistencyCommandLevelEnum::kDatabaseLevel:
+                    return _runDatabaseLevel(opCtx, nss);
+                case MetadataConsistencyCommandLevelEnum::kCollectionLevel:
+                    return _runCollectionLevel(nss);
+                default:
+                    MONGO_UNREACHABLE;
+            }
+        }
+
+    private:
+        Response _runClusterLevel(OperationContext* opCtx, const NamespaceString& nss) {
+            uassert(
+                ErrorCodes::InvalidNamespace,
+                "cluster level mode must be run against the 'admin' database with {aggregate: 1}",
+                nss.isCollectionlessCursorNamespace());
+
+            std::vector<MetadataInconsistencyItem> inconsistenciesMerged;
+
+            // Need to retrieve a list of databases which this shard is primary for and run the
+            // command on each of them.
+            const auto databases = Grid::get(opCtx)->catalogClient()->getAllDBs(
+                opCtx, repl::ReadConcernLevel::kMajorityReadConcern);
+            const auto shardId = ShardingState::get(opCtx)->shardId();
+
+            // TODO: SERVER-73976: Retrieve the list of databases which the given shard is the
+            // primary db shard directly from configsvr.
+            for (const auto& db : databases) {
+                if (db.getPrimary() == shardId) {
+                    const auto inconsistencies = _checkMetadataConsistencyOnParticipants(
+                        opCtx, NamespaceString(db.getName(), nss.coll()));
+
+                    inconsistenciesMerged.insert(inconsistenciesMerged.end(),
+                                                 std::make_move_iterator(inconsistencies.begin()),
+                                                 std::make_move_iterator(inconsistencies.end()));
+                }
+            }
+
+            return metadata_consistency_util::makeCursor(
+                opCtx, inconsistenciesMerged, nss, request().toBSON({}));
+        }
+
+        Response _runDatabaseLevel(OperationContext* opCtx, const NamespaceString& nss) {
+            return metadata_consistency_util::makeCursor(
+                opCtx,
+                _checkMetadataConsistencyOnParticipants(opCtx, nss),
+                nss,
+                request().toBSON({}));
+        }
+
+        Response _runCollectionLevel(const NamespaceString& nss) {
+            uasserted(ErrorCodes::NotImplemented,
+                      "collection level mode command is not implemented");
+        }
+
+        // It first acquires a DDL lock on the database to prevent concurrent metadata changes, and
+        // then sends a command to all shards to check for metadata inconsistencies. The responses
+        // from all shards are merged together to produce a list of metadata inconsistencies to be
+        // returned.
+        std::vector<MetadataInconsistencyItem> _checkMetadataConsistencyOnParticipants(
+            OperationContext* opCtx, const NamespaceString& nss) {
+            const auto primaryShardId = ShardingState::get(opCtx)->shardId();
             std::vector<AsyncRequestsSender::Response> responses;
 
             {
@@ -90,30 +163,32 @@ public:
                 const auto dbDDLLock = ddlLockManager->lock(
                     opCtx, nss.db(), lockReason, DDLLockManager::kDefaultLockTimeout);
 
-                // Send command to all shards
+                std::vector<AsyncRequestsSender::Request> requests;
+
+                // Shard requests
                 ShardsvrCheckMetadataConsistencyParticipant participantRequest{nss};
                 participantRequest.setPrimaryShardId(primaryShardId);
                 const auto participants = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
-                responses = sharding_util::sendCommandToShards(
+                for (const auto& shardId : participants) {
+                    requests.emplace_back(shardId, participantRequest.toBSON({}));
+                }
+
+                // Config server request
+                ConfigsvrCheckMetadataConsistency configRequest{nss};
+                requests.emplace_back(ShardId::kConfigServerId, configRequest.toBSON({}));
+
+                responses = sharding_util::processShardResponses(
                     opCtx,
                     nss.db(),
                     participantRequest.toBSON({}),
-                    participants,
-                    Grid::get(opCtx)->getExecutorPool()->getFixedExecutor());
+                    requests,
+                    Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(),
+                    true /* throwOnError */);
             }
 
-            // Merge responses from shards
-            auto inconsistenciesMerged = _parseResponsesFromShards(opCtx, nss, responses);
+            const auto cursorManager = Grid::get(opCtx)->getCursorManager();
 
-            return metadata_consistency_util::_makeCursor(
-                opCtx, inconsistenciesMerged, nss, request().toBSON({}), request().getCursor());
-        }
-
-    private:
-        std::vector<MetadataInconsistencyItem> _parseResponsesFromShards(
-            OperationContext* opCtx,
-            const NamespaceString& nss,
-            std::vector<AsyncRequestsSender::Response>& responses) {
+            // Merge responses
             std::vector<MetadataInconsistencyItem> inconsistenciesMerged;
             for (auto&& cmdResponse : responses) {
                 auto response = uassertStatusOK(std::move(cmdResponse.swResponse));
@@ -127,21 +202,20 @@ public:
                                         response.data,
                                         nss,
                                         Grid::get(opCtx)->getExecutorPool()->getArbitraryExecutor(),
-                                        Grid::get(opCtx)->getCursorManager(),
+                                        cursorManager,
                                         {}));
 
-                auto checkMetadataConsistencyResponse =
-                    CheckMetadataConsistencyResponse::parseOwned(
-                        IDLParserContext("checkMetadataConsistencyResponse"),
-                        std::move(transformedResponse));
+                auto checkMetadataConsistencyResponse = CursorInitialReply::parseOwned(
+                    IDLParserContext("checkMetadataConsistency"), std::move(transformedResponse));
                 const auto& cursor = checkMetadataConsistencyResponse.getCursor();
 
-                auto& shardInconsistencies = cursor.getFirstBatch();
-                inconsistenciesMerged.insert(inconsistenciesMerged.end(),
-                                             std::make_move_iterator(shardInconsistencies.begin()),
-                                             std::make_move_iterator(shardInconsistencies.end()));
-
-                const auto cursorManager = Grid::get(opCtx)->getCursorManager();
+                auto& firstBatch = cursor->getFirstBatch();
+                for (const auto& shardInconsistency : firstBatch) {
+                    auto inconsistency = MetadataInconsistencyItem::parseOwned(
+                        IDLParserContext("MetadataInconsistencyItem"),
+                        shardInconsistency.getOwned());
+                    inconsistenciesMerged.push_back(inconsistency);
+                }
 
                 const auto authzSession = AuthorizationSession::get(opCtx->getClient());
                 const auto authChecker =
@@ -154,7 +228,7 @@ public:
                 // Check out the cursor. If the cursor is not found, all data was retrieve in the
                 // first batch.
                 auto pinnedCursor =
-                    cursorManager->checkOutCursor(cursor.getId(), opCtx, authChecker);
+                    cursorManager->checkOutCursor(cursor->getCursorId(), opCtx, authChecker);
                 if (!pinnedCursor.isOK()) {
                     continue;
                 }

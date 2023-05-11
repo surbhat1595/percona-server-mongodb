@@ -84,7 +84,7 @@ public:
     }
 
     Status initFromExisting(OperationContext* opCtx,
-                            const std::shared_ptr<Collection>& collection,
+                            const std::shared_ptr<const Collection>& collection,
                             const DurableCatalogEntry& catalogEntry,
                             boost::optional<Timestamp> readTimestamp) override {
         MONGO_UNREACHABLE;
@@ -568,20 +568,20 @@ protected:
                 docsToInsert.pop_front();
             }
 
-            auto response = client()->insertAcknowledged(kNss.ns(), batchToInsert);
+            auto response = client()->insertAcknowledged(kNss, batchToInsert);
             ASSERT_OK(getStatusFromWriteCommandReply(response));
             ASSERT_GT(response["n"].Int(), 0);
         }
     }
 
     void deleteDocsInShardedCollection(BSONObj query) {
-        auto response = client()->removeAcknowledged(kNss.ns(), query);
+        auto response = client()->removeAcknowledged(kNss, query);
         ASSERT_OK(getStatusFromWriteCommandReply(response));
         ASSERT_GT(response["n"].Int(), 0);
     }
 
     void updateDocsInShardedCollection(BSONObj filter, BSONObj updated) {
-        auto response = client()->updateAcknowledged(kNss.ns(), filter, updated);
+        auto response = client()->updateAcknowledged(kNss, filter, updated);
         ASSERT_OK(getStatusFromWriteCommandReply(response));
         ASSERT_GT(response["n"].Int(), 0);
     }
@@ -1258,7 +1258,7 @@ TEST_F(MigrationChunkClonerSourceTest, CloneShouldNotCrashWhenNextCloneBatchThro
         {
             auto collWithFault =
                 std::make_unique<CollectionWithFault>(autoColl.getCollection().get());
-            CollectionPtr collPtrWithFault(collWithFault.get(), CollectionPtr::NoYieldTag());
+            CollectionPtr collPtrWithFault(collWithFault.get());
 
             // Note: findDoc currently doesn't have any interruption points, this test simulates
             // an exception being thrown while it is being called.

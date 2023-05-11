@@ -90,7 +90,7 @@ public:
         });
     }
 
-    NamespaceString _nss = {"test", "coll"};
+    NamespaceString _nss = NamespaceString::createNamespaceString_forTest("test", "coll");
 
 private:
     // Creates a reasonable set of ReplSettings for most tests.  We need to be able to
@@ -111,19 +111,18 @@ TEST_F(AuthOpObserverTest, OnRollbackInvalidatesAuthCacheWhenAuthNamespaceRolled
 
     // Verify that the rollback op observer invalidates the user cache for each auth namespace by
     // checking that the cache generation changes after a call to the rollback observer method.
-    auto nss = AuthorizationManager::rolesCollectionNamespace;
     OpObserver::RollbackObserverInfo rbInfo;
-    rbInfo.rollbackNamespaces = {AuthorizationManager::rolesCollectionNamespace};
+    rbInfo.rollbackNamespaces = {NamespaceString::kAdminRolesNamespace};
     opObserver.onReplicationRollback(opCtx.get(), rbInfo);
     ASSERT_NE(initCacheGen, authMgr->getCacheGeneration());
 
     initCacheGen = authMgr->getCacheGeneration();
-    rbInfo.rollbackNamespaces = {AuthorizationManager::usersCollectionNamespace};
+    rbInfo.rollbackNamespaces = {NamespaceString::kAdminUsersNamespace};
     opObserver.onReplicationRollback(opCtx.get(), rbInfo);
     ASSERT_NE(initCacheGen, authMgr->getCacheGeneration());
 
     initCacheGen = authMgr->getCacheGeneration();
-    rbInfo.rollbackNamespaces = {AuthorizationManager::versionCollectionNamespace};
+    rbInfo.rollbackNamespaces = {NamespaceString::kServerConfigurationNamespace};
     opObserver.onReplicationRollback(opCtx.get(), rbInfo);
     ASSERT_NE(initCacheGen, authMgr->getCacheGeneration());
 }
@@ -135,7 +134,6 @@ TEST_F(AuthOpObserverTest, OnRollbackDoesntInvalidateAuthCacheWhenNoAuthNamespac
     auto initCacheGen = authMgr->getCacheGeneration();
 
     // Verify that the rollback op observer doesn't invalidate the user cache.
-    auto nss = AuthorizationManager::rolesCollectionNamespace;
     OpObserver::RollbackObserverInfo rbInfo;
     opObserver.onReplicationRollback(opCtx.get(), rbInfo);
     auto newCacheGen = authMgr->getCacheGeneration();
@@ -145,7 +143,7 @@ TEST_F(AuthOpObserverTest, OnRollbackDoesntInvalidateAuthCacheWhenNoAuthNamespac
 TEST_F(AuthOpObserverTest, MultipleAboutToDeleteAndOnDelete) {
     AuthOpObserver opObserver;
     auto opCtx = cc().makeOperationContext();
-    NamespaceString nss = {"test", "coll"};
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("test", "coll");
     WriteUnitOfWork wunit(opCtx.get());
     AutoGetCollection autoColl(opCtx.get(), nss, MODE_IX);
     opObserver.aboutToDelete(opCtx.get(), *autoColl, BSON("_id" << 1));
@@ -158,7 +156,7 @@ DEATH_TEST_F(AuthOpObserverTest, AboutToDeleteMustPreceedOnDelete, "invariant") 
     AuthOpObserver opObserver;
     auto opCtx = cc().makeOperationContext();
     cc().swapLockState(std::make_unique<LockerNoop>());
-    NamespaceString nss = {"test", "coll"};
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("test", "coll");
     AutoGetCollection autoColl(opCtx.get(), nss, MODE_IX);
     opObserver.onDelete(opCtx.get(), *autoColl, {}, {});
 }

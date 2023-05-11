@@ -125,7 +125,9 @@ public:
 
         auto opTime = [opCtx] {
             WriteUnitOfWork wuow(opCtx);
-            ScopeGuard guard{[&wuow] { wuow.commit(); }};
+            ScopeGuard guard{[&wuow] {
+                wuow.commit();
+            }};
             return repl::getNextOpTime(opCtx);
         }();
         WriteUnitOfWork wuow(opCtx);
@@ -141,7 +143,7 @@ public:
 
     void insertOp(OperationContext* opCtx, const BSONObj& oplogBson) {
         DBDirectClient client(opCtx);
-        client.insert(_oplogBufferNss.toString(), oplogBson);
+        client.insert(_oplogBufferNss, oplogBson);
     }
 
     void makeInProgressTxn(OperationContext* opCtx, LogicalSessionId lsid, TxnNumber txnNumber) {
@@ -386,8 +388,8 @@ public:
 private:
     // Used for pre/post image oplog entry lookup.
     const ShardId _donorShardId{"donor-0"};
-    const NamespaceString _oplogBufferNss{NamespaceString::kReshardingLocalOplogBufferPrefix +
-                                          _donorShardId.toString()};
+    const NamespaceString _oplogBufferNss = NamespaceString::createNamespaceString_forTest(
+        NamespaceString::kReshardingLocalOplogBufferPrefix + _donorShardId.toString());
 };
 
 TEST_F(ReshardingOplogSessionApplicationTest, IncomingRetryableWriteForNewSession) {

@@ -14,11 +14,7 @@ metadata:
 			CE type: -1
 
 -- OUTPUT:
-Root []
-|   |   projections: 
-|   |       combinedProjection_0
-|   RefBlock: 
-|       Variable [combinedProjection_0]
+Root [{combinedProjection_0}]
 Evaluation [{combinedProjection_0}]
 |   EvalPath []
 |   |   Variable [scan_0]
@@ -42,11 +38,7 @@ metadata:
 			CE type: -1
 
 -- OUTPUT:
-Root []
-|   |   projections: 
-|   |       combinedProjection_0
-|   RefBlock: 
-|       Variable [combinedProjection_0]
+Root [{combinedProjection_0}]
 Evaluation [{combinedProjection_0}]
 |   EvalPath []
 |   |   Variable [scan_0]
@@ -76,11 +68,7 @@ metadata:
 			CE type: -1
 
 -- OUTPUT:
-Root []
-|   |   projections: 
-|   |       combinedProjection_0
-|   RefBlock: 
-|       Variable [combinedProjection_0]
+Root [{combinedProjection_0}]
 Evaluation [{combinedProjection_0}]
 |   EvalPath []
 |   |   Variable [scan_0]
@@ -104,11 +92,7 @@ metadata:
 			CE type: -1
 
 -- OUTPUT:
-Root []
-|   |   projections: 
-|   |       combinedProjection_0
-|   RefBlock: 
-|       Variable [combinedProjection_0]
+Root [{combinedProjection_0}]
 Evaluation [{combinedProjection_0}]
 |   EvalPath []
 |   |   Variable [scan_0]
@@ -148,8 +132,7 @@ Evaluation [{combinedProjection_0}]
 |   |   |   PathKeep [c]
 |   |   PathKeep [b]
 |   PathKeep [_id, a, a1]
-Evaluation [{projGetPath_0}]
-|   Const ["str"]
+Evaluation [{projGetPath_0} = Const ["str"]]
 Scan [collection, {scan_0}]
 
 

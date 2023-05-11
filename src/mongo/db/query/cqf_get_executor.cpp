@@ -44,6 +44,7 @@
 #include "mongo/db/query/cost_model/cost_model_manager.h"
 #include "mongo/db/query/cost_model/on_coefficients_change_updater_impl.h"
 #include "mongo/db/query/cqf_command_utils.h"
+#include "mongo/db/query/explain_version_validator.h"
 #include "mongo/db/query/optimizer/explain.h"
 #include "mongo/db/query/optimizer/metadata_factory.h"
 #include "mongo/db/query/optimizer/node.h"
@@ -238,7 +239,7 @@ static opt::unordered_map<std::string, optimizer::IndexDefinition> buildIndexSpe
     return result;
 }
 
-static QueryHints getHintsFromQueryKnobs() {
+QueryHints getHintsFromQueryKnobs() {
     QueryHints hints;
 
     hints._disableScan = internalCascadesOptimizerDisableScan.load();
@@ -262,46 +263,15 @@ static QueryHints getHintsFromQueryKnobs() {
     return hints;
 }
 
-static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> optimizeAndCreateExecutor(
-    OptPhaseManager phaseManager,
-    ABT abt,
-    OperationContext* opCtx,
-    boost::intrusive_ptr<ExpressionContext> expCtx,
-    const NamespaceString& nss,
-    const CollectionPtr& collection,
-    std::unique_ptr<CanonicalQuery> cq,
-    const bool requireRID,
-    const ScanOrder scanOrder) {
-
-    phaseManager.optimize(abt);
-
-    {
-        const auto& memo = phaseManager.getMemo();
-        const auto& memoStats = memo.getStats();
-        OPTIMIZER_DEBUG_LOG(6264800,
-                            5,
-                            "Optimizer stats",
-                            "memoGroups"_attr = memo.getGroupCount(),
-                            "memoLogicalNodes"_attr = memo.getLogicalNodeCount(),
-                            "memoPhysNodes"_attr = memo.getPhysicalNodeCount(),
-                            "memoIntegrations"_attr = memoStats._numIntegrations,
-                            "physPlansExplored"_attr = memoStats._physPlanExplorationCount,
-                            "physMemoChecks"_attr = memoStats._physMemoCheckCount);
-    }
-
-    {
-        const std::string explain = ExplainGenerator::explainV2Compact(
-            make<MemoPhysicalDelegatorNode>(phaseManager.getPhysicalNodeId()),
-            true /*displayPhysicalProperties*/,
-            &phaseManager.getMemo());
-        OPTIMIZER_DEBUG_LOG(6264801, 5, "Optimized ABT", "explain"_attr = explain);
-    }
-
-    OPTIMIZER_DEBUG_LOG(6264802,
-                        5,
-                        "Optimized and lowered physical ABT",
-                        "explain"_attr = ExplainGenerator::explainV2(abt));
-
+static ExecParams createExecutor(OptPhaseManager phaseManager,
+                                 ABT abt,
+                                 OperationContext* opCtx,
+                                 boost::intrusive_ptr<ExpressionContext> expCtx,
+                                 const NamespaceString& nss,
+                                 const CollectionPtr& collection,
+                                 const bool requireRID,
+                                 const ScanOrder scanOrder,
+                                 const bool needsExplain) {
     auto env = VariableEnvironment::build(abt);
     SlotVarMap slotMap;
     auto runtimeEnvironment = std::make_unique<sbe::RuntimeEnvironment>();  // TODO use factory
@@ -331,7 +301,7 @@ static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> optimizeAndCreateExe
     }
 
     sbePlan->attachToOperationContext(opCtx);
-    if (expCtx->explain || expCtx->mayDbProfile) {
+    if (needsExplain || expCtx->mayDbProfile) {
         sbePlan->markShouldCollectTimingInfo();
     }
 
@@ -343,21 +313,46 @@ static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> optimizeAndCreateExe
                                              nullptr,
                                              std::make_unique<YieldPolicyCallbacksImpl>(nss));
 
+    std::unique_ptr<ABTPrinter> abtPrinter;
+    if (needsExplain) {
+        // By default, we print the optimized ABT. For test-only versions we output the post-memo
+        // phan instead.
+        ABT toExplain = std::move(abt);
+
+        ExplainVersion explainVersion = ExplainVersion::Vmax;
+        const auto& explainVersionStr = internalCascadesOptimizerExplainVersion.get();
+        if (explainVersionStr == "v1"_sd) {
+            explainVersion = ExplainVersion::V1;
+            toExplain = *phaseManager.getPostMemoPlan();
+        } else if (explainVersionStr == "v2"_sd) {
+            explainVersion = ExplainVersion::V2;
+            toExplain = *phaseManager.getPostMemoPlan();
+        } else if (explainVersionStr == "v2compact"_sd) {
+            explainVersion = ExplainVersion::V2Compact;
+            toExplain = *phaseManager.getPostMemoPlan();
+        } else if (explainVersionStr == "bson"_sd) {
+            explainVersion = ExplainVersion::V3;
+        } else {
+            // Should have been validated.
+            MONGO_UNREACHABLE;
+        }
+
+        abtPrinter = std::make_unique<ABTPrinter>(
+            std::move(toExplain), phaseManager.getNodeToGroupPropsMap(), explainVersion);
+    }
+
     sbePlan->prepare(data.ctx);
     CurOp::get(opCtx)->stopQueryPlanningTimer();
-    auto planExec = uassertStatusOK(plan_executor_factory::make(
-        opCtx,
-        std::move(cq),
-        nullptr /*solution*/,
-        {std::move(sbePlan), std::move(data)},
-        std::make_unique<ABTPrinter>(std::move(abt), phaseManager.getNodeToGroupPropsMap()),
-        MultipleCollectionAccessor(collection),
-        QueryPlannerParams::Options::DEFAULT,
-        nss,
-        std::move(yieldPolicy),
-        false /*isFromPlanCache*/,
-        true /* generatedByBonsai */));
-    return planExec;
+
+    return {opCtx,
+            nullptr /*solution*/,
+            {std::move(sbePlan), std::move(data)},
+            std::move(abtPrinter),
+            QueryPlannerParams::Options::DEFAULT,
+            nss,
+            std::move(yieldPolicy),
+            false /*isFromPlanCache*/,
+            true /* generatedByBonsai */};
 }
 
 static void populateAdditionalScanDefs(
@@ -376,7 +371,7 @@ static void populateAdditionalScanDefs(
         // multi-collection queries.
         AutoGetCollectionForReadCommandMaybeLockFree ctx(opCtx, involvedNss);
         const CollectionPtr& collection = ctx ? ctx.getCollection() : CollectionPtr::null;
-        const bool collectionExists = collection != nullptr;
+        const bool collectionExists = static_cast<bool>(collection);
         const std::string uuidStr =
             collectionExists ? collection->uuid().toString() : "<missing_uuid>";
         const std::string collNameStr = involvedNss.coll().toString();
@@ -504,7 +499,7 @@ Metadata populateMetadata(boost::intrusive_ptr<ExpressionContext> expCtx,
                           QueryHints& queryHints,
                           PrefixId& prefixId) {
     auto opCtx = expCtx->opCtx;
-    const bool collectionExists = collection != nullptr;
+    const bool collectionExists = static_cast<bool>(collection);
 
     // Add the base collection metadata.
     opt::unordered_map<std::string, optimizer::IndexDefinition> indexDefs;
@@ -565,6 +560,7 @@ static OptPhaseManager createPhaseManager(const CEMode mode,
                                           const bool requireRID,
                                           Metadata metadata,
                                           const ConstFoldFn& constFold,
+                                          const bool supportExplain,
                                           QueryHints hints) {
     switch (mode) {
         case CEMode::kSampling: {
@@ -584,6 +580,7 @@ static OptPhaseManager createPhaseManager(const CEMode mode,
                                                     std::make_unique<CostEstimatorImpl>(costModel),
                                                     defaultConvertPathToInterval,
                                                     constFold,
+                                                    supportExplain,
                                                     DebugInfo::kDefaultForProd,
                                                     {} /*hints*/};
             return {OptPhaseManager::getAllRewritesSet(),
@@ -598,6 +595,7 @@ static OptPhaseManager createPhaseManager(const CEMode mode,
                     std::make_unique<CostEstimatorImpl>(costModel),
                     defaultConvertPathToInterval,
                     constFold,
+                    supportExplain,
                     DebugInfo::kDefaultForProd,
                     std::move(hints)};
         }
@@ -614,6 +612,7 @@ static OptPhaseManager createPhaseManager(const CEMode mode,
                     std::make_unique<CostEstimatorImpl>(costModel),
                     defaultConvertPathToInterval,
                     constFold,
+                    supportExplain,
                     DebugInfo::kDefaultForProd,
                     std::move(hints)};
 
@@ -627,6 +626,7 @@ static OptPhaseManager createPhaseManager(const CEMode mode,
                     std::make_unique<CostEstimatorImpl>(costModel),
                     defaultConvertPathToInterval,
                     constFold,
+                    supportExplain,
                     DebugInfo::kDefaultForProd,
                     std::move(hints)};
 
@@ -635,14 +635,15 @@ static OptPhaseManager createPhaseManager(const CEMode mode,
     }
 }
 
-std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOptimizer(
+boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
     OperationContext* opCtx,
     boost::intrusive_ptr<ExpressionContext> expCtx,
     const NamespaceString& nss,
     const CollectionPtr& collection,
+    QueryHints queryHints,
     const boost::optional<BSONObj>& indexHint,
-    std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
-    std::unique_ptr<CanonicalQuery> canonicalQuery) {
+    const Pipeline* pipeline,
+    const CanonicalQuery* canonicalQuery) {
     if (MONGO_unlikely(failConstructingBonsaiExecutor.shouldFail())) {
         uasserted(620340, "attempting to use CQF while it is disabled");
     }
@@ -657,10 +658,10 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOp
         involvedCollections = pipeline->getInvolvedCollections();
     }
 
-    validateCommandOptions(canonicalQuery.get(), collection, indexHint, involvedCollections);
+    validateCommandOptions(canonicalQuery, collection, indexHint, involvedCollections);
 
     const bool requireRID = canonicalQuery ? canonicalQuery->getForceGenerateRecordId() : false;
-    const bool collectionExists = collection != nullptr;
+    const bool collectionExists = static_cast<bool>(collection);
     const std::string uuidStr = collectionExists ? collection->uuid().toString() : "<missing_uuid>";
     const std::string collNameStr = nss.coll().toString();
     const std::string scanDefName = collNameStr + "_" + uuidStr;
@@ -669,8 +670,6 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOp
     // optimization.
     auto prefixId = PrefixId::create(internalCascadesOptimizerUseDescriptiveVarNames.load());
     const ProjectionName& scanProjName = prefixId.getNextId("scan");
-
-    QueryHints queryHints = getHintsFromQueryKnobs();
 
     ConstFoldFn constFold = ConstEval::constFold;
     auto metadata = populateMetadata(expCtx,
@@ -724,6 +723,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOp
     }
 
     auto costModel = cost_model::costModelManager(opCtx->getServiceContext()).getCoefficients();
+    const bool needsExplain = expCtx->explain.has_value();
 
     OptPhaseManager phaseManager = createPhaseManager(mode,
                                                       costModel,
@@ -734,31 +734,82 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOp
                                                       requireRID,
                                                       std::move(metadata),
                                                       constFold,
+                                                      needsExplain,
                                                       std::move(queryHints));
-    return optimizeAndCreateExecutor(std::move(phaseManager),
-                                     std::move(abt),
-                                     opCtx,
-                                     expCtx,
-                                     nss,
-                                     collection,
-                                     std::move(canonicalQuery),
-                                     requireRID,
-                                     scanOrder);
+    if (!phaseManager.optimizeNoAssert(abt)) {
+        return boost::none;
+    }
+
+    {
+        const auto& memo = phaseManager.getMemo();
+        const auto& memoStats = memo.getStats();
+        OPTIMIZER_DEBUG_LOG(6264800,
+                            5,
+                            "Optimizer stats",
+                            "memoGroups"_attr = memo.getGroupCount(),
+                            "memoLogicalNodes"_attr = memo.getLogicalNodeCount(),
+                            "memoPhysNodes"_attr = memo.getPhysicalNodeCount(),
+                            "memoIntegrations"_attr = memoStats._numIntegrations,
+                            "physPlansExplored"_attr = memoStats._physPlanExplorationCount,
+                            "physMemoChecks"_attr = memoStats._physMemoCheckCount);
+    }
+
+    {
+        const std::string explain = ExplainGenerator::explainV2Compact(
+            make<MemoPhysicalDelegatorNode>(phaseManager.getPhysicalNodeId()),
+            true /*displayPhysicalProperties*/,
+            &phaseManager.getMemo());
+        OPTIMIZER_DEBUG_LOG(6264801, 5, "Optimized ABT", "explain"_attr = explain);
+    }
+
+    OPTIMIZER_DEBUG_LOG(6264802,
+                        5,
+                        "Optimized and lowered physical ABT",
+                        "explain"_attr = ExplainGenerator::explainV2(abt));
+
+    return createExecutor(std::move(phaseManager),
+                          std::move(abt),
+                          opCtx,
+                          expCtx,
+                          nss,
+                          collection,
+                          requireRID,
+                          scanOrder,
+                          needsExplain);
 }
 
-std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getSBEExecutorViaCascadesOptimizer(
-    const CollectionPtr& collection, std::unique_ptr<CanonicalQuery> query) {
+boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(const CollectionPtr& collection,
+                                                               QueryHints queryHints,
+                                                               const CanonicalQuery* query) {
     boost::optional<BSONObj> indexHint = query->getFindCommandRequest().getHint().isEmpty()
         ? boost::none
         : boost::make_optional(query->getFindCommandRequest().getHint());
-
 
     auto opCtx = query->getOpCtx();
     auto expCtx = query->getExpCtx();
     auto nss = query->nss();
 
-    return getSBEExecutorViaCascadesOptimizer(
-        opCtx, expCtx, nss, collection, indexHint, nullptr /* pipeline */, std::move(query));
+    return getSBEExecutorViaCascadesOptimizer(opCtx,
+                                              expCtx,
+                                              nss,
+                                              collection,
+                                              std::move(queryHints),
+                                              indexHint,
+                                              nullptr /* pipeline */,
+                                              query);
 }
 
+StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> makeExecFromParams(
+    std::unique_ptr<CanonicalQuery> cq, ExecParams execArgs) {
+    return plan_executor_factory::make(execArgs.opCtx,
+                                       std::move(cq),
+                                       std::move(execArgs.solution),
+                                       std::move(execArgs.root),
+                                       std::move(execArgs.optimizerData),
+                                       execArgs.plannerOptions,
+                                       execArgs.nss,
+                                       std::move(execArgs.yieldPolicy),
+                                       execArgs.planIsFromCache,
+                                       execArgs.generatedByBonsai);
+}
 }  // namespace mongo

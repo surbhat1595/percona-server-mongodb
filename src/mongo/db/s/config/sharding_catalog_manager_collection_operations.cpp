@@ -90,7 +90,7 @@ void triggerFireAndForgetShardRefreshes(OperationContext* opCtx,
             shard->runFireAndForgetCommand(
                 opCtx,
                 ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                NamespaceString::kAdminDb.toString(),
+                DatabaseName::kAdmin.toString(),
                 BSON("_flushRoutingTableCacheUpdates" << coll.getNss().ns()));
         }
     }
@@ -381,7 +381,8 @@ void ShardingCatalogManager::configureCollectionBalancing(
     const NamespaceString& nss,
     boost::optional<int32_t> chunkSizeMB,
     boost::optional<bool> defragmentCollection,
-    boost::optional<bool> enableAutoSplitter) {
+    boost::optional<bool> enableAutoSplitter,
+    boost::optional<bool> enableAutoMerger) {
 
     uassert(ErrorCodes::InvalidOptions,
             "invalid configure collection balancing update",
@@ -436,6 +437,11 @@ void ShardingCatalogManager::configureCollectionBalancing(
             setClauseBuilder.append(CollectionType::kNoAutoSplitFieldName, !doSplit);
             updatedFields++;
         }
+        if (enableAutoMerger) {
+            setClauseBuilder.append(CollectionType::kEnableAutoMergeFieldName,
+                                    enableAutoMerger.value());
+            updatedFields++;
+        }
     }
     if (chunkSizeMB && *chunkSizeMB == 0) {
         // Logic to reset the 'maxChunkSizeBytes' field to its default value
@@ -487,8 +493,9 @@ void ShardingCatalogManager::configureCollectionBalancing(
         // during refresh, so it is safe to release the chunk lock.
     }
 
-    const auto cm = uassertStatusOK(
-        Grid::get(opCtx)->catalogCache()->getShardedCollectionPlacementInfoWithRefresh(opCtx, nss));
+    const auto [cm, _] = uassertStatusOK(
+        Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithPlacementRefresh(opCtx,
+                                                                                              nss));
     std::set<ShardId> shardsIds;
     cm.getAllShardIds(&shardsIds);
 
@@ -502,51 +509,6 @@ void ShardingCatalogManager::configureCollectionBalancing(
     Balancer::get(opCtx)->notifyPersistedBalancerSettingsChanged(opCtx);
 
     logConfigureCollectionBalancing();
-}
-
-void ShardingCatalogManager::applyLegacyConfigurationToSessionsCollection(OperationContext* opCtx) {
-    auto updateStmt = BSON("$unset" << BSON(CollectionType::kMaxChunkSizeBytesFieldName << 0));
-    // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk splits, merges, and
-    // migrations
-    Lock::ExclusiveLock lk(opCtx, _kChunkOpLock);
-
-    withTransaction(opCtx,
-                    CollectionType::ConfigNS,
-                    [this, &updateStmt](OperationContext* opCtx, TxnNumber txnNumber) {
-                        const auto query = BSON(CollectionType::kNssFieldName
-                                                << NamespaceString::kLogicalSessionsNamespace.ns());
-                        const auto res = writeToConfigDocumentInTxn(
-                            opCtx,
-                            CollectionType::ConfigNS,
-                            BatchedCommandRequest::buildUpdateOp(CollectionType::ConfigNS,
-                                                                 query,
-                                                                 updateStmt,
-                                                                 false /* upsert */,
-                                                                 false /* multi */),
-                            txnNumber);
-                        const auto numDocsModified = UpdateOp::parseResponse(res).getN();
-                        uassert(ErrorCodes::NamespaceNotSharded,
-                                str::stream() << "Expected to match one doc for query " << query
-                                              << " but matched " << numDocsModified,
-                                numDocsModified == 1);
-
-                        bumpCollectionMinorVersionInTxn(
-                            opCtx, NamespaceString::kLogicalSessionsNamespace, txnNumber);
-                    });
-    const auto cm = uassertStatusOK(
-        Grid::get(opCtx)->catalogCache()->getShardedCollectionPlacementInfoWithRefresh(
-            opCtx, NamespaceString::kLogicalSessionsNamespace));
-    std::set<ShardId> shardsIds;
-    cm.getAllShardIds(&shardsIds);
-
-    const auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
-    sharding_util::tellShardsToRefreshCollection(
-        opCtx,
-        {std::make_move_iterator(shardsIds.begin()), std::make_move_iterator(shardsIds.end())},
-        NamespaceString::kLogicalSessionsNamespace,
-        executor);
-
-    Balancer::get(opCtx)->notifyPersistedBalancerSettingsChanged(opCtx);
 }
 
 void ShardingCatalogManager::renameShardedMetadata(
@@ -596,8 +558,9 @@ void ShardingCatalogManager::updateTimeSeriesBucketingParameters(
     // Take _kChunkOpLock in exclusive mode to prevent concurrent updates of the collection version.
     Lock::ExclusiveLock lk(opCtx, _kChunkOpLock);
 
-    const auto cm = uassertStatusOK(
-        Grid::get(opCtx)->catalogCache()->getShardedCollectionPlacementInfoWithRefresh(opCtx, nss));
+    const auto [cm, _] = uassertStatusOK(
+        Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithPlacementRefresh(opCtx,
+                                                                                              nss));
     std::set<ShardId> shardIds;
     cm.getAllShardIds(&shardIds);
 

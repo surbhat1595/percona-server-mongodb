@@ -84,21 +84,14 @@ TEST(PhysRewriter, PhysicalRewriterBasic) {
     ASSERT_EQ(5, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       p2\n"
-        "|   RefBlock: \n"
-        "|       Variable [p2]\n"
+        "Root [{p2}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [p2]\n"
         "|   PathGet [a]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
-        "Evaluation [{p2}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [p1]\n"
-        "|   PathIdentity []\n"
+        "Evaluation [{p2} = Variable [p1]]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [p1]\n"
@@ -127,11 +120,7 @@ TEST(PhysRewriter, PhysicalRewriterBasic) {
         "|           type: Centralized\n"
         "|       indexingRequirement: \n"
         "|           Complete, dedupRID\n"
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       p2\n"
-        "|   RefBlock: \n"
-        "|       Variable [p2]\n"
+        "Root [{p2}]\n"
         "Properties [cost: 0.438321, localCost: 0.00983406, adjustedCE: 10]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
@@ -182,10 +171,7 @@ TEST(PhysRewriter, PhysicalRewriterBasic) {
         "|           type: Centralized, disableExchanges\n"
         "|       indexingRequirement: \n"
         "|           Complete, dedupRID\n"
-        "Evaluation [{p2}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [p1]\n"
-        "|   PathIdentity []\n"
+        "Evaluation [{p2} = Variable [p1]]\n"
         "Properties [cost: 0.428487, localCost: 0, adjustedCE: 100]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
@@ -275,11 +261,7 @@ TEST(PhysRewriter, GroupBy) {
     ASSERT_EQ(7, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       c\n"
-        "|   RefBlock: \n"
-        "|       Variable [c]\n"
+        "Root [{c}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [a]\n"
@@ -288,21 +270,12 @@ TEST(PhysRewriter, GroupBy) {
         "|   EvalFilter []\n"
         "|   |   Variable [c]\n"
         "|   PathIdentity []\n"
-        "GroupBy []\n"
-        "|   |   groupings: \n"
-        "|   |       RefBlock: \n"
-        "|   |           Variable [a]\n"
+        "GroupBy [{a}]\n"
         "|   aggregations: \n"
         "|       [c]\n"
         "|           Variable [b]\n"
-        "Evaluation [{b}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathIdentity []\n"
-        "Evaluation [{a}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathIdentity []\n"
+        "Evaluation [{b} = Variable [ptest]]\n"
+        "Evaluation [{a} = Variable [ptest]]\n"
         "PhysicalScan [{'<root>': ptest}, test]\n",
         optimized);
 }
@@ -351,19 +324,12 @@ TEST(PhysRewriter, GroupBy1) {
 
     // Projection "pb1" is unused and we do not generate an aggregation expression for it.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pb\n"
-        "|   RefBlock: \n"
-        "|       Variable [pb]\n"
+        "Root [{pb}]\n"
         "GroupBy []\n"
-        "|   |   groupings: \n"
-        "|   |       RefBlock: \n"
         "|   aggregations: \n"
         "|       [pb]\n"
         "|           Variable [pa]\n"
-        "Evaluation [{pa}]\n"
-        "|   Const [null]\n"
+        "Evaluation [{pa} = Const [null]]\n"
         "PhysicalScan [{}, test]\n",
         optimized);
 }
@@ -409,13 +375,7 @@ TEST(PhysRewriter, Unwind) {
     ASSERT_EQ(7, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       a\n"
-        "|   |       b\n"
-        "|   RefBlock: \n"
-        "|       Variable [a]\n"
-        "|       Variable [b]\n"
+        "Root [{a, b}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [b]\n"
@@ -424,15 +384,9 @@ TEST(PhysRewriter, Unwind) {
         "|   EvalFilter []\n"
         "|   |   Variable [a]\n"
         "|   PathIdentity []\n"
-        "Unwind []\n"
-        "Evaluation [{b}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathIdentity []\n"
-        "Evaluation [{a}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathIdentity []\n"
+        "Unwind [{a, a_pid}]\n"
+        "Evaluation [{b} = Variable [ptest]]\n"
+        "Evaluation [{a} = Variable [ptest]]\n"
         "PhysicalScan [{'<root>': ptest}, test]\n",
         optimized);
 }
@@ -477,11 +431,7 @@ TEST(PhysRewriter, DuplicateFilter) {
 
     // Only one copy of the filter.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_2]\n"
@@ -534,16 +484,8 @@ TEST(PhysRewriter, FilterCollation) {
 
     // Limit-skip is attached to the collation node by virtue of physical props.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pb\n"
-        "|   RefBlock: \n"
-        "|       Variable [pb]\n"
-        "Collation []\n"
-        "|   |   collation: \n"
-        "|   |       pb: Ascending\n"
-        "|   RefBlock: \n"
-        "|       Variable [pb]\n"
+        "Root [{pb}]\n"
+        "Collation [{pb: Ascending}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_1]\n"
@@ -585,16 +527,8 @@ TEST(PhysRewriter, EvalCollation) {
     ASSERT_EQ(4, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pa\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
-        "Collation []\n"
-        "|   |   collation: \n"
-        "|   |       pa: Ascending\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
+        "Root [{pa}]\n"
+        "Collation [{pa: Ascending}]\n"
         "PhysicalScan [{'a': pa}, c1]\n",
         optimized);
 }
@@ -638,16 +572,8 @@ TEST(PhysRewriter, FilterEvalCollation) {
     ASSERT_EQ(4, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
-        "Collation []\n"
-        "|   |   collation: \n"
-        "|   |       pa: Ascending\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
+        "Root [{root}]\n"
+        "Collation [{pa: Ascending}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [pa]\n"
@@ -692,18 +618,14 @@ TEST(PhysRewriter, FilterIndexing) {
         phaseManager.optimize(optimized);
 
         ASSERT_EXPLAIN_V2_AUTO(
-            "Root []\n"
-            "|   |   projections: \n"
-            "|   |       root\n"
-            "|   RefBlock: \n"
-            "|       Variable [root]\n"
+            "Root [{root}]\n"
             "RIDIntersect [root]\n"
             "|   Scan [c1, {root}]\n"
             "Sargable [Index]\n"
-            "|   |   |   requirementsMap: \n"
-            "|   |   |       refProjection: root, path: 'PathGet [a] PathTraverse [1] PathIdentity "
-            "[]"
-            "', intervals: {{{=Const [1]}}}\n"
+            "|   |   |   requirements: \n"
+            "|   |   |       {{{refProjection: root, path: 'PathGet [a] PathTraverse [1] "
+            "PathIdentity "
+            "[]', intervals: {{{=Const [1]}}}}}}\n"
             "|   |   candidateIndexes: \n"
             "|   |       candidateId: 1, index1, {}, {SimpleEquality}, {{{=Const [1]}}}\n"
             "Scan [c1, {root}]\n",
@@ -728,20 +650,13 @@ TEST(PhysRewriter, FilterIndexing) {
 
         // Test sargable filter is satisfied with an index scan.
         ASSERT_EXPLAIN_V2_AUTO(
-            "Root []\n"
-            "|   |   projections: \n"
-            "|   |       root\n"
-            "|   RefBlock: \n"
-            "|       Variable [root]\n"
+            "Root [{root}]\n"
             "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
             "|   |   Const [true]\n"
             "|   LimitSkip [limit: 1, skip: 0]\n"
             "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-            "|   RefBlock: \n"
-            "|       Variable [rid_0]\n"
             "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {=Const "
-            "[1"
-            "]}]\n",
+            "[1]}]\n",
             optimized);
     }
 
@@ -762,11 +677,7 @@ TEST(PhysRewriter, FilterIndexing) {
 
         // Test we can optimize sargable filter nodes even without an index.
         ASSERT_EXPLAIN_V2_AUTO(
-            "Root []\n"
-            "|   |   projections: \n"
-            "|   |       root\n"
-            "|   RefBlock: \n"
-            "|       Variable [root]\n"
+            "Root [{root}]\n"
             "Filter []\n"
             "|   EvalFilter []\n"
             "|   |   Variable [evalTemp_0]\n"
@@ -822,11 +733,7 @@ TEST(PhysRewriter, FilterIndexing1) {
     ASSERT_EQ(7, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       p1\n"
-        "|   RefBlock: \n"
-        "|       Variable [p1]\n"
+        "Root [{p1}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [p1]\n"
@@ -888,17 +795,11 @@ TEST(PhysRewriter, FilterIndexing2) {
     ASSERT_EQ(4, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
         "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {=Const [1"
         "]}]\n",
         optimized);
@@ -960,17 +861,11 @@ TEST(PhysRewriter, FilterIndexing2NonSarg) {
 
     // Demonstrate non-sargable evaluation and filter are moved under the NLJ+seek,
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [pb]\n"
@@ -1070,11 +965,7 @@ TEST(PhysRewriter, FilterIndexing3) {
 
     // We dont need a Seek if we dont have multi-key paths.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pa\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
+        "Root [{pa}]\n"
         "IndexScan [{'<indexKey> 0': pa}, scanDefName: c1, indexDefName: index1, interval: {[Const "
         "[1 | minKey], Const [1 | maxKey]]}]\n",
         optimized);
@@ -1122,20 +1013,12 @@ TEST(PhysRewriter, FilterIndexing3MultiKey) {
 
     // We need a Seek to obtain value for "a".
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pa\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
+        "Root [{pa}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'a': pa}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
-        "Unique []\n"
-        "|   projections: \n"
-        "|       rid_0\n"
+        "Unique [{rid_0}]\n"
         "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {[Const [1"
         " | minKey], Const [1 | maxKey]]}]\n",
         optimized);
@@ -1225,11 +1108,7 @@ TEST(PhysRewriter, FilterIndexing4) {
     }
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pa\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
+        "Root [{pa}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_14]\n"
@@ -1308,29 +1187,16 @@ TEST(PhysRewriter, FilterIndexing5) {
 
     // We can cover both fields with the index, and need separate sort on "b".
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pa\n"
-        "|   |       pb\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
-        "|       Variable [pb]\n"
-        "Collation []\n"
-        "|   |   collation: \n"
-        "|   |       pb: Ascending\n"
-        "|   RefBlock: \n"
-        "|       Variable [pb]\n"
+        "Root [{pa, pb}]\n"
+        "Collation [{pb: Ascending}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [pb]\n"
         "|   PathCompare [Gt]\n"
         "|   Const [0]\n"
-        "Evaluation [{pb}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [evalTemp_0]\n"
-        "|   PathIdentity []\n"
-        "IndexScan [{'<indexKey> 0': pa, '<indexKey> 1': evalTemp_0}, scanDefName: c1, indexDefNa"
-        "me: index1, interval: {>Const [0 | maxKey]}]\n",
+        "Evaluation [{pb} = Variable [evalTemp_0]]\n"
+        "IndexScan [{'<indexKey> 0': pa, '<indexKey> 1': evalTemp_0}, scanDefName: c1, "
+        "indexDefName: index1, interval: {>Const [0 | maxKey]}]\n",
         optimized);
 }
 
@@ -1391,15 +1257,9 @@ TEST(PhysRewriter, FilterIndexing6) {
 
     // We can cover both fields with the index, and do not need a separate sort on "b".
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pa\n"
-        "|   |       pb\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
-        "|       Variable [pb]\n"
-        "IndexScan [{'<indexKey> 0': pa, '<indexKey> 1': pb}, scanDefName: c1, indexDefName: inde"
-        "x1, interval: {(Const [0 | 0], Const [0 | maxKey]]}]\n",
+        "Root [{pa, pb}]\n"
+        "IndexScan [{'<indexKey> 0': pa, '<indexKey> 1': pb}, scanDefName: c1, indexDefName: "
+        "index1, interval: {(Const [0 | 0], Const [0 | maxKey]]}]\n",
         optimized);
 }
 
@@ -1545,21 +1405,12 @@ TEST(PhysRewriter, FilterIndexingVariable) {
     // (max(param_0, param_1), Const [maxKey]] U [param_0 > param_1 ? MaxKey : param_1, max(param_0,
     // param_1)]
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
-        "GroupBy []\n"
-        "|   |   groupings: \n"
-        "|   |       RefBlock: \n"
-        "|   |           Variable [rid_0]\n"
+        "GroupBy [{rid_0}]\n"
         "|   aggregations: \n"
         "Union [{rid_0}]\n"
         "|   IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {[If ["
@@ -1623,11 +1474,7 @@ TEST(PhysRewriter, FilterIndexingMaxKey) {
 
     // Observe redundant predicate a <= MaxKey is removed.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_3]\n"
@@ -1692,17 +1539,11 @@ TEST(PhysRewriter, FilterIndexingRIN) {
 
     // Demonstrate RIN plan which consists of three equality prefixes.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
         "NestedLoopJoin [joinType: Inner, {evalTemp_57, evalTemp_58}]\n"
         "|   |   Const [true]\n"
         "|   NestedLoopJoin [joinType: Inner, {evalTemp_57, evalTemp_58, evalTemp_59, "
@@ -1791,21 +1632,11 @@ TEST(PhysRewriter, FilterIndexingRIN1) {
     // Observe how the index scan for the first equality prefix (on "a") is reversed while the
     // second one (on "a") is not.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   |       pa\n"
-        "|   |       pb\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
-        "|       Variable [pb]\n"
-        "|       Variable [root]\n"
+        "Root [{pa, pb, root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
         "NestedLoopJoin [joinType: Inner, {pa}]\n"
         "|   |   Const [true]\n"
         "|   IndexScan [{'<indexKey> 1': pb, '<rid>': rid_0}, scanDefName: c1, indexDefName: "
@@ -1872,25 +1703,12 @@ TEST(PhysRewriter, FilterIndexingRIN2) {
     ASSERT_BETWEEN(5, 10, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   |       pa\n"
-        "|   |       pb\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
-        "|       Variable [pb]\n"
-        "|       Variable [root]\n"
+        "Root [{pa, pb, root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
-        "GroupBy []\n"
-        "|   |   groupings: \n"
-        "|   |       RefBlock: \n"
-        "|   |           Variable [rid_0]\n"
+        "GroupBy [{rid_0}]\n"
         "|   aggregations: \n"
         "|       [pa]\n"
         "|           FunctionCall [$first]\n"
@@ -1901,10 +1719,7 @@ TEST(PhysRewriter, FilterIndexingRIN2) {
         "Union [{disjunction_0, disjunction_1, rid_0}]\n"
         "|   NestedLoopJoin [joinType: Inner, {disjunction_0}]\n"
         "|   |   |   Const [true]\n"
-        "|   |   GroupBy []\n"
-        "|   |   |   |   groupings: \n"
-        "|   |   |   |       RefBlock: \n"
-        "|   |   |   |           Variable [rid_0]\n"
+        "|   |   GroupBy [{rid_0}]\n"
         "|   |   |   aggregations: \n"
         "|   |   |       [disjunction_1]\n"
         "|   |   |           FunctionCall [$first]\n"
@@ -1930,10 +1745,7 @@ TEST(PhysRewriter, FilterIndexingRIN2) {
         "interval: {[Const [3 | minKey], Const [4 | maxKey]]}]\n"
         "NestedLoopJoin [joinType: Inner, {disjunction_0}]\n"
         "|   |   Const [true]\n"
-        "|   GroupBy []\n"
-        "|   |   |   groupings: \n"
-        "|   |   |       RefBlock: \n"
-        "|   |   |           Variable [rid_0]\n"
+        "|   GroupBy [{rid_0}]\n"
         "|   |   aggregations: \n"
         "|   |       [disjunction_1]\n"
         "|   |           FunctionCall [$first]\n"
@@ -1997,23 +1809,18 @@ TEST(PhysRewriter, SargableProjectionRenames) {
     // Demonstrate we can combine the field access to "a" into a single entry and provide two output
     // projections.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
-        "Evaluation [{pa1}]\n"
-        "|   Variable [pa]\n"
+        "Root [{root}]\n"
+        "Evaluation [{pa1} = Variable [pa]]\n"
         "Sargable [Complete]\n"
-        "|   |   |   |   requirementsMap: \n"
-        "|   |   |   |       refProjection: root, path: 'PathGet [a] PathIdentity []', boundProje"
-        "ction: pa, intervals: {{{=Const [1]}}}\n"
+        "|   |   |   |   requirements: \n"
+        "|   |   |   |       {{{refProjection: root, path: 'PathGet [a] PathIdentity []', "
+        "boundProjection: pa, intervals: {{{=Const [1]}}}}}}\n"
         "|   |   |   candidateIndexes: \n"
         "|   |   scanParams: \n"
         "|   |       {'a': pa}\n"
         "|   |           residualReqs: \n"
-        "|   |               refProjection: pa, path: 'PathIdentity []', intervals: {{{=Const [1]"
-        "}}}, entryIndex: 0\n"
+        "|   |               refProjection: pa, path: 'PathIdentity []', intervals: {{{=Const "
+        "[1]}}}, entryIndex: 0\n"
         "Scan [c1, {root}]\n",
         optimized);
 }
@@ -2049,21 +1856,17 @@ TEST(PhysRewriter, SargableAcquireProjection) {
 
     // Demonstrate that we combine the field access for the filter and eval nodes.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "Sargable [Complete]\n"
-        "|   |   |   |   requirementsMap: \n"
-        "|   |   |   |       refProjection: root, path: 'PathGet [a] PathIdentity []', boundProje"
-        "ction: pa, intervals: {{{=Const [1]}}}\n"
+        "|   |   |   |   requirements: \n"
+        "|   |   |   |       {{{refProjection: root, path: 'PathGet [a] PathIdentity []', "
+        "boundProjection: pa, intervals: {{{=Const [1]}}}}}}\n"
         "|   |   |   candidateIndexes: \n"
         "|   |   scanParams: \n"
         "|   |       {'a': pa}\n"
         "|   |           residualReqs: \n"
-        "|   |               refProjection: pa, path: 'PathIdentity []', intervals: {{{=Const [1]"
-        "}}}, entryIndex: 0\n"
+        "|   |               refProjection: pa, path: 'PathIdentity []', intervals: {{{=Const "
+        "[1]}}}, entryIndex: 0\n"
         "Scan [c1, {root}]\n",
         optimized);
 }
@@ -2113,11 +1916,7 @@ TEST(PhysRewriter, FilterReorder) {
     // Observe filters are ordered from most selective (lowest sel) to least selective (highest
     // sel).
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_14]\n"
@@ -2197,17 +1996,11 @@ TEST(PhysRewriter, CoveredScan) {
     // Since we do not optimize with fast null handling, we need to split the predicate between the
     // index scan and fetch in order to handle null.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pa\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
+        "Root [{pa}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'a': pa}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
         "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {<Const [1"
         "]}]\n",
         optimized);
@@ -2255,14 +2048,9 @@ TEST(PhysRewriter, EvalIndexing) {
 
         // Should not need a collation node.
         ASSERT_EXPLAIN_V2_AUTO(
-            "Root []\n"
-            "|   |   projections: \n"
-            "|   |       pa\n"
-            "|   RefBlock: \n"
-            "|       Variable [pa]\n"
+            "Root [{pa}]\n"
             "IndexScan [{'<indexKey> 0': pa}, scanDefName: c1, indexDefName: index1, interval: "
-            "{>Cons"
-            "t [1]}]\n",
+            "{>Const [1]}]\n",
             optimized);
     }
 
@@ -2287,19 +2075,10 @@ TEST(PhysRewriter, EvalIndexing) {
 
         // Index does not have the right collation and now we need a collation node.
         ASSERT_EXPLAIN_V2_AUTO(
-            "Root []\n"
-            "|   |   projections: \n"
-            "|   |       pa\n"
-            "|   RefBlock: \n"
-            "|       Variable [pa]\n"
-            "Collation []\n"
-            "|   |   collation: \n"
-            "|   |       pa: Ascending\n"
-            "|   RefBlock: \n"
-            "|       Variable [pa]\n"
+            "Root [{pa}]\n"
+            "Collation [{pa: Ascending}]\n"
             "IndexScan [{'<indexKey> 0': pa}, scanDefName: c1, indexDefName: index1, interval: "
-            "{>Cons"
-            "t [1]}]\n",
+            "{>Const [1]}]\n",
             optimized);
     }
 }
@@ -2344,19 +2123,13 @@ TEST(PhysRewriter, EvalIndexing1) {
     ASSERT_EQ(8, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
-        "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {=Const [1"
-        "]}]\n",
+        "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {=Const "
+        "[1]}]\n",
         optimized);
 }
 
@@ -2410,13 +2183,8 @@ TEST(PhysRewriter, EvalIndexing2) {
 
     // Verify collation is subsumed into the index scan.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pa2\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa2]\n"
-        "Evaluation [{pa3}]\n"
-        "|   Variable [pa1]\n"
+        "Root [{pa2}]\n"
+        "Evaluation [{pa3} = Variable [pa1]]\n"
         "Evaluation [{pa2}]\n"
         "|   EvalPath []\n"
         "|   |   Const [0]\n"
@@ -2499,34 +2267,19 @@ TEST(PhysRewriter, MultiKeyIndex) {
         // CollationNode.
 
         ASSERT_EXPLAIN_V2_AUTO(
-            "Root []\n"
-            "|   |   projections: \n"
-            "|   |       root\n"
-            "|   RefBlock: \n"
-            "|       Variable [root]\n"
-            "Collation []\n"
-            "|   |   collation: \n"
-            "|   |       pa: Ascending\n"
-            "|   |       pb: Ascending\n"
-            "|   RefBlock: \n"
-            "|       Variable [pa]\n"
-            "|       Variable [pb]\n"
+            "Root [{root}]\n"
+            "Collation [{pa: Ascending, pb: Ascending}]\n"
             "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
             "|   |   Const [true]\n"
             "|   LimitSkip [limit: 1, skip: 0]\n"
             "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-            "|   RefBlock: \n"
-            "|       Variable [rid_0]\n"
             "Filter []\n"
             "|   EvalFilter []\n"
             "|   |   FunctionCall [getArraySize]\n"
             "|   |   Variable [sides_0]\n"
             "|   PathCompare [Eq]\n"
             "|   Const [2]\n"
-            "GroupBy []\n"
-            "|   |   groupings: \n"
-            "|   |       RefBlock: \n"
-            "|   |           Variable [rid_0]\n"
+            "GroupBy [{rid_0}]\n"
             "|   aggregations: \n"
             "|       [pa]\n"
             "|           FunctionCall [$max]\n"
@@ -2538,22 +2291,17 @@ TEST(PhysRewriter, MultiKeyIndex) {
             "|           FunctionCall [$addToSet]\n"
             "|           Variable [sideId_0]\n"
             "Union [{rid_0, sideId_0, unionTemp_0, unionTemp_1}]\n"
-            "|   Evaluation [{unionTemp_1}]\n"
-            "|   |   Variable [pb]\n"
-            "|   Evaluation [{unionTemp_0}]\n"
-            "|   |   Const [Nothing]\n"
-            "|   Evaluation [{sideId_0}]\n"
-            "|   |   Const [1]\n"
+            "|   Evaluation [{unionTemp_1} = Variable [pb]]\n"
+            "|   Evaluation [{unionTemp_0} = Const [Nothing]]\n"
+            "|   Evaluation [{sideId_0} = Const [1]]\n"
             "|   IndexScan [{'<indexKey> 0': pb, '<rid>': rid_0}, scanDefName: c1, indexDefName: "
             "index2, interval: {[Const [maxKey], Const [2])}]\n"
-            "Evaluation [{unionTemp_1}]\n"
-            "|   Const [Nothing]\n"
-            "Evaluation [{unionTemp_0}]\n"
-            "|   Variable [pa]\n"
-            "Evaluation [{sideId_0}]\n"
-            "|   Const [0]\n"
+            "Evaluation [{unionTemp_1} = Const [Nothing]]\n"
+            "Evaluation [{unionTemp_0} = Variable [pa]]\n"
+            "Evaluation [{sideId_0} = Const [0]]\n"
             "IndexScan [{'<indexKey> 0': pa, '<rid>': rid_0}, scanDefName: c1, indexDefName: "
-            "index1, interval: {=Const [1]}]\n",
+            "index1, "
+            "interval: {=Const [1]}]\n",
             optimized);
     }
 
@@ -2567,23 +2315,16 @@ TEST(PhysRewriter, MultiKeyIndex) {
 
         // Index2 will be used in reverse direction.
         ASSERT_EXPLAIN_V2_AUTO(
-            "Root []\n"
-            "|   |   projections: \n"
-            "|   |       root\n"
-            "|   RefBlock: \n"
-            "|       Variable [root]\n"
+            "Root [{root}]\n"
             "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
             "|   |   Const [true]\n"
             "|   LimitSkip [limit: 1, skip: 0]\n"
             "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-            "|   RefBlock: \n"
-            "|       Variable [rid_0]\n"
             "HashJoin [joinType: Inner]\n"
             "|   |   Condition\n"
             "|   |       rid_0 = rid_2\n"
             "|   Union [{rid_2}]\n"
-            "|   Evaluation [{rid_2}]\n"
-            "|   |   Variable [rid_0]\n"
+            "|   Evaluation [{rid_2} = Variable [rid_0]]\n"
             "|   IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index2, interval: "
             "{[Const [maxKey], Const [2])}, reversed]\n"
             "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {=Const "
@@ -2998,21 +2739,12 @@ TEST(PhysRewriter, CompoundIndex5) {
     // and [=1, =3].
     // TODO: SERVER-70298: we should be seeing merge joins instead of union+groupby.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
-        "GroupBy []\n"
-        "|   |   groupings: \n"
-        "|   |       RefBlock: \n"
-        "|   |           Variable [rid_0]\n"
+        "GroupBy [{rid_0}]\n"
         "|   aggregations: \n"
         "Union [{rid_0}]\n"
         "|   |   |   IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval"
@@ -3154,19 +2886,13 @@ TEST(PhysRewriter, IndexBoundsIntersect1) {
     // Demonstrate we can intersect the intervals since we have non-multikey paths, and the
     // collation requirement is satisfied via the index scan.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
-        "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {(Const [7"
-        "0], Const [90])}]\n",
+        "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {(Const "
+        "[70], Const [90])}]\n",
         optimized);
 }
 
@@ -3218,22 +2944,14 @@ TEST(PhysRewriter, IndexBoundsIntersect2) {
     // Demonstrate we can intersect the bounds here because composition does not contain
     // traverse.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
-        "Unique []\n"
-        "|   projections: \n"
-        "|       rid_0\n"
-        "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {(Const [7"
-        "0], Const [90])}]\n",
+        "Unique [{rid_0}]\n"
+        "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {(Const "
+        "[70], Const [90])}]\n",
         optimized);
 }
 
@@ -3290,11 +3008,7 @@ TEST(PhysRewriter, IndexBoundsIntersect3) {
 
     // We do not intersect the bounds, because the outer composition is over the different fields.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [root]\n"
@@ -3311,6 +3025,96 @@ TEST(PhysRewriter, IndexBoundsIntersect3) {
         "|   Const [70]\n"
         "PhysicalScan [{'<root>': root}, c1]\n",
         optimized);
+}
+
+TEST(PhysRewriter, IndexBoundsIntersect4) {
+    using namespace properties;
+    using namespace unit_test_abt_literals;
+
+    auto prefixId = PrefixId::createForTests();
+
+    ABT rootNode = NodeBuilder{}
+                       .root("root")
+                       .filter(_evalf(_composem(_get("a", _traverse1(_cmp("Gt", "70"_cint64))),
+                                                _get("a", _traverse1(_cmp("Lt", "90"_cint64)))),
+                                      "root"_var))
+                       .finish(_scan("root", "c1"));
+
+    const auto makePhaseManagerFn = [&prefixId]() {
+        // Make filter and scan costs zero. This should make residual predicates very appealing.
+        auto costModel = getTestCostModel();
+        costModel.setFilterIncrementalCost(0.0);
+        costModel.setScanIncrementalCost(0.0);
+
+        return makePhaseManager(
+            {OptPhase::MemoSubstitutionPhase,
+             OptPhase::MemoExplorationPhase,
+             OptPhase::MemoImplementationPhase},
+            prefixId,
+            {{{"c1",
+               createScanDef({},
+                             {{"index1",
+                               IndexDefinition{{{makeIndexPath("a"), CollationOp::Ascending}},
+                                               true /*isMultiKey*/}}})}}},
+            std::move(costModel),
+            {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
+    };
+
+    ABT optimized = rootNode;
+    auto phaseManager = makePhaseManagerFn();
+    phaseManager.getHints()._forceIndexScanForPredicates = true;
+    phaseManager.optimize(optimized);
+    ASSERT_BETWEEN_AUTO(  // NOLINT (test auto-update)
+        6,
+        10,
+        phaseManager.getMemo().getStats()._physPlanExplorationCount);
+
+    // Demonstrate that we get an index intersection plan even though from costing perspective a
+    // collection scan with residual predicates should have been preferable.
+    ASSERT_EXPLAIN_V2_AUTO(  // NOLINT (test auto-update)
+        "Root [{root}]\n"
+        "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
+        "|   |   Const [true]\n"
+        "|   LimitSkip [limit: 1, skip: 0]\n"
+        "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
+        "HashJoin [joinType: Inner]\n"
+        "|   |   Condition\n"
+        "|   |       rid_0 = rid_1\n"
+        "|   Union [{rid_1}]\n"
+        "|   Evaluation [{rid_1} = Variable [rid_0]]\n"
+        "|   Unique [{rid_0}]\n"
+        "|   IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {>Const "
+        "[70]}]\n"
+        "Unique [{rid_0}]\n"
+        "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {<Const "
+        "[90]}]\n",
+        optimized);
+
+    ABT optimized1 = rootNode;
+    auto phaseManager1 = makePhaseManagerFn();
+    phaseManager1.optimize(optimized1);
+    ASSERT_BETWEEN_AUTO(  // NOLINT (test auto-update)
+        1,
+        2,
+        phaseManager1.getMemo().getStats()._physPlanExplorationCount);
+
+    // Demonstrate that without the hint we get residual predicates.
+    ASSERT_EXPLAIN_V2_AUTO(  // NOLINT (test auto-update)
+        "Root [{root}]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [evalTemp_6]\n"
+        "|   PathTraverse [1]\n"
+        "|   PathCompare [Gt]\n"
+        "|   Const [70]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [evalTemp_6]\n"
+        "|   PathTraverse [1]\n"
+        "|   PathCompare [Lt]\n"
+        "|   Const [90]\n"
+        "PhysicalScan [{'<root>': root, 'a': evalTemp_6}, c1]\n",
+        optimized1);
 }
 
 TEST(PhysRewriter, IndexResidualReq) {
@@ -3382,11 +3186,7 @@ TEST(PhysRewriter, IndexResidualReq) {
         "|           type: Centralized\n"
         "|       indexingRequirement: \n"
         "|           Complete, dedupRID\n"
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pa\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
+        "Root [{pa}]\n"
         "Properties [cost: 0.176361, localCost: 0.176361, adjustedCE: 330]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
@@ -3490,17 +3290,11 @@ TEST(PhysRewriter, IndexResidualReq1) {
 
     // Prefer index1 over index2 and index3 in order to cover all fields.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
         "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {[Const [0"
         " | 0 | 0 | minKey], Const [0 | 0 | 0 | maxKey]]}]\n",
         optimized);
@@ -3552,20 +3346,12 @@ TEST(PhysRewriter, IndexResidualReq2) {
 
     // We can cover "b" with the index and filter before we Seek.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
-        "Unique []\n"
-        "|   projections: \n"
-        "|       rid_0\n"
+        "Unique [{rid_0}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_10]\n"
@@ -3614,11 +3400,7 @@ TEST(PhysRewriter, ElemMatchIndex) {
     ASSERT_EQ(6, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   Filter []\n"
@@ -3627,11 +3409,7 @@ TEST(PhysRewriter, ElemMatchIndex) {
         "|   |   PathArr []\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root, 'a': evalTemp_4}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
-        "Unique []\n"
-        "|   projections: \n"
-        "|       rid_0\n"
+        "Unique [{rid_0}]\n"
         "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {(Const [7"
         "0], Const [90])}]\n",
         optimized);
@@ -3689,11 +3467,7 @@ TEST(PhysRewriter, ElemMatchIndex1) {
     // Demonstrate we can cover both the filter and the extracted elemMatch predicate with the
     // index.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   Filter []\n"
@@ -3702,11 +3476,7 @@ TEST(PhysRewriter, ElemMatchIndex1) {
         "|   |   PathArr []\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root, 'a': evalTemp_17}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
-        "Unique []\n"
-        "|   projections: \n"
-        "|       rid_0\n"
+        "Unique [{rid_0}]\n"
         "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {(Const [1"
         " | 70], Const [1 | 90])}]\n",
         optimized);
@@ -3754,13 +3524,8 @@ TEST(PhysRewriter, ElemMatchIndexNoArrays) {
 
     // If we do not have arrays (index is not multikey) we simplify to unsatisfiable query.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
-        "Evaluation [{root}]\n"
-        "|   Const [Nothing]\n"
+        "Root [{root}]\n"
+        "Evaluation [{root} = Const [Nothing]]\n"
         "LimitSkip [limit: 0, skip: 0]\n"
         "CoScan []\n",
         optimized);
@@ -3826,11 +3591,7 @@ TEST(PhysRewriter, ObjectElemMatchResidual) {
     // So the 'ComposeA PathArr PathObj' is redundant and we could remove it.
 
     ASSERT_EXPLAIN_V2Compact_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [root]\n"
@@ -3849,11 +3610,7 @@ TEST(PhysRewriter, ObjectElemMatchResidual) {
         "|   |   PathArr []\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root, 'a': evalTemp_3}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
-        "Unique []\n"
-        "|   projections: \n"
-        "|       rid_0\n"
+        "Unique [{rid_0}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_8]\n"
@@ -3914,11 +3671,7 @@ TEST(PhysRewriter, ObjectElemMatchBounds) {
 
     // We should pick the index, and generate bounds for the 'b' predicate.
     ASSERT_EXPLAIN_V2Compact_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [root]\n"
@@ -3937,10 +3690,8 @@ TEST(PhysRewriter, ObjectElemMatchBounds) {
         "|   |   PathArr []\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root, 'a': evalTemp_2}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
-        "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {=Const [4"
-        "]}]\n",
+        "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {=Const "
+        "[4]}]\n",
         optimized);
 }
 
@@ -3992,11 +3743,7 @@ TEST(PhysRewriter, NestedElemMatch) {
     // PathArr bounds, but that only tells us which documents have arrays-of-arrays; then we can run
     // a residual predicate to check that the inner array contains '2'.
     ASSERT_EXPLAIN_V2Compact_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [root]\n"
@@ -4011,26 +3758,19 @@ TEST(PhysRewriter, NestedElemMatch) {
         "|   |   PathArr []\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root, 'a': evalTemp_2}, coll1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   FunctionCall [getArraySize] Variable [sides_0]\n"
         "|   PathCompare [Eq] Const [2]\n"
-        "GroupBy []\n"
-        "|   |   groupings: \n"
-        "|   |       RefBlock: \n"
-        "|   |           Variable [rid_0]\n"
+        "GroupBy [{rid_0}]\n"
         "|   aggregations: \n"
         "|       [sides_0]\n"
         "|           FunctionCall [$addToSet] Variable [sideId_0]\n"
         "Union [{rid_0, sideId_0}]\n"
-        "|   Evaluation [{sideId_0}]\n"
-        "|   |   Const [1]\n"
-        "|   IndexScan [{'<rid>': rid_0}, scanDefName: coll1, indexDefName: index1, interval: {[C"
-        "onst [[]], Const [BinData(0, )])}]\n"
-        "Evaluation [{sideId_0}]\n"
-        "|   Const [0]\n"
+        "|   Evaluation [{sideId_0} = Const [1]]\n"
+        "|   IndexScan [{'<rid>': rid_0}, scanDefName: coll1, indexDefName: index1, interval: "
+        "{[Const [[]], Const [BinData(0, )])}]\n"
+        "Evaluation [{sideId_0} = Const [0]]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_3]\n"
@@ -4079,20 +3819,12 @@ TEST(PhysRewriter, PathObj) {
 
     // We should get index bounds for the PathObj.
     ASSERT_EXPLAIN_V2Compact_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
-        "Unique []\n"
-        "|   projections: \n"
-        "|       rid_0\n"
+        "Unique [{rid_0}]\n"
         "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {[Const [{"
         "} | minKey], Const [[] | minKey])}]\n",
         optimized);
@@ -4155,11 +3887,7 @@ TEST(PhysRewriter, ArrayConstantIndex) {
     // original filter. We have index bound with the array itself unioned with bound using the first
     // array element.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [root]\n"
@@ -4174,12 +3902,7 @@ TEST(PhysRewriter, ArrayConstantIndex) {
         "|   |   Const [true]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
-        "GroupBy []\n"
-        "|   |   groupings: \n"
-        "|   |       RefBlock: \n"
-        "|   |           Variable [rid_0]\n"
+        "GroupBy [{rid_0}]\n"
         "|   aggregations: \n"
         "Union [{rid_0}]\n"
         "|   IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {=Cons"
@@ -4240,11 +3963,7 @@ TEST(PhysRewriter, ArrayConstantNoIndex) {
     // Without an index, we retain the original array bounds predicate, and do not duplicate the
     // predicates in the sargable node (they are perf only)
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [root]\n"
@@ -4298,15 +4017,10 @@ TEST(PhysRewriter, ParallelScan) {
     ASSERT_EQ(4, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "Exchange []\n"
         "|   |   distribution: \n"
         "|   |       type: Centralized\n"
-        "|   RefBlock: \n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_0]\n"
@@ -4360,19 +4074,11 @@ TEST(PhysRewriter, HashPartitioning) {
     ASSERT_BETWEEN(5, 10, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pc\n"
-        "|   RefBlock: \n"
-        "|       Variable [pc]\n"
+        "Root [{pc}]\n"
         "Exchange []\n"
         "|   |   distribution: \n"
         "|   |       type: Centralized\n"
-        "|   RefBlock: \n"
-        "GroupBy []\n"
-        "|   |   groupings: \n"
-        "|   |       RefBlock: \n"
-        "|   |           Variable [pa]\n"
+        "GroupBy [{pa}]\n"
         "|   aggregations: \n"
         "|       [pc]\n"
         "|           Variable [pb]\n"
@@ -4446,19 +4152,11 @@ TEST(PhysRewriter, IndexPartitioning0) {
     ASSERT_BETWEEN(60, 100, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pc\n"
-        "|   RefBlock: \n"
-        "|       Variable [pc]\n"
+        "Root [{pc}]\n"
         "Exchange []\n"
         "|   |   distribution: \n"
         "|   |       type: Centralized\n"
-        "|   RefBlock: \n"
-        "GroupBy []\n"
-        "|   |   groupings: \n"
-        "|   |       RefBlock: \n"
-        "|   |           Variable [pa]\n"
+        "GroupBy [{pa}]\n"
         "|   aggregations: \n"
         "|       [pc]\n"
         "|           Variable [pb]\n"
@@ -4467,8 +4165,6 @@ TEST(PhysRewriter, IndexPartitioning0) {
         "|   |       type: HashPartitioning\n"
         "|   |           projections: \n"
         "|   |               pa\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   Filter []\n"
@@ -4478,12 +4174,9 @@ TEST(PhysRewriter, IndexPartitioning0) {
         "|   |   Const [1]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'b': pb}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
         "Exchange []\n"
         "|   |   distribution: \n"
         "|   |       type: RoundRobin\n"
-        "|   RefBlock: \n"
         "IndexScan [{'<indexKey> 0': pa, '<rid>': rid_0}, scanDefName: c1, indexDefName: index1, "
         "interval: {>Const [0]}]\n",
         optimized);
@@ -4627,21 +4320,11 @@ TEST(PhysRewriter, LocalGlobalAgg) {
     ASSERT_BETWEEN(15, 25, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pa\n"
-        "|   |       pc\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
-        "|       Variable [pc]\n"
+        "Root [{pa, pc}]\n"
         "Exchange []\n"
         "|   |   distribution: \n"
         "|   |       type: Centralized\n"
-        "|   RefBlock: \n"
-        "GroupBy [Global]\n"
-        "|   |   groupings: \n"
-        "|   |       RefBlock: \n"
-        "|   |           Variable [pa]\n"
+        "GroupBy [{pa}, Global]\n"
         "|   aggregations: \n"
         "|       [pc]\n"
         "|           FunctionCall [$sum]\n"
@@ -4651,12 +4334,7 @@ TEST(PhysRewriter, LocalGlobalAgg) {
         "|   |       type: HashPartitioning\n"
         "|   |           projections: \n"
         "|   |               pa\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
-        "GroupBy [Local]\n"
-        "|   |   groupings: \n"
-        "|   |       RefBlock: \n"
-        "|   |           Variable [pa]\n"
+        "GroupBy [{pa}, Local]\n"
         "|   aggregations: \n"
         "|       [preagg_0]\n"
         "|           FunctionCall [$sum]\n"
@@ -4701,14 +4379,8 @@ TEST(PhysRewriter, LocalGlobalAgg1) {
     ASSERT_BETWEEN(5, 15, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pc\n"
-        "|   RefBlock: \n"
-        "|       Variable [pc]\n"
+        "Root [{pc}]\n"
         "GroupBy [Global]\n"
-        "|   |   groupings: \n"
-        "|   |       RefBlock: \n"
         "|   aggregations: \n"
         "|       [pc]\n"
         "|           FunctionCall [$sum]\n"
@@ -4716,10 +4388,7 @@ TEST(PhysRewriter, LocalGlobalAgg1) {
         "Exchange []\n"
         "|   |   distribution: \n"
         "|   |       type: Centralized\n"
-        "|   RefBlock: \n"
         "GroupBy [Local]\n"
-        "|   |   groupings: \n"
-        "|   |       RefBlock: \n"
         "|   aggregations: \n"
         "|       [preagg_0]\n"
         "|           FunctionCall [$sum]\n"
@@ -4770,11 +4439,7 @@ TEST(PhysRewriter, LocalLimitSkip) {
         "|   Physical:\n"
         "|       distribution: \n"
         "|           type: Centralized\n"
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "Properties [cost: 0.00929774, localCost: 0.00252777, adjustedCE: 30]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
@@ -4823,7 +4488,6 @@ TEST(PhysRewriter, LocalLimitSkip) {
         "Exchange []\n"
         "|   |   distribution: \n"
         "|   |       type: Centralized\n"
-        "|   RefBlock: \n"
         "Properties [cost: 0.00376897, localCost: 0.00376897, adjustedCE: 30]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
@@ -4898,11 +4562,7 @@ TEST(PhysRewriter, CollationLimit) {
         "|   Physical:\n"
         "|       distribution: \n"
         "|           type: Centralized\n"
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "Properties [cost: 4.75042, localCost: 4.32193, adjustedCE: 20]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
@@ -4931,11 +4591,7 @@ TEST(PhysRewriter, CollationLimit) {
         "|           type: Centralized\n"
         "|       indexingRequirement: \n"
         "|           Complete, dedupRID\n"
-        "Collation []\n"
-        "|   |   collation: \n"
-        "|   |       pa: Ascending\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
+        "Collation [{pa: Ascending}]\n"
         "Properties [cost: 0.428487, localCost: 0.428487, adjustedCE: 1000]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
@@ -5023,11 +4679,7 @@ TEST(PhysRewriter, PartialIndex1) {
 
     // Partial schema requirement is not on an index field. We get a seek on this field.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   Filter []\n"
@@ -5038,8 +4690,6 @@ TEST(PhysRewriter, PartialIndex1) {
         "|   |   Const [2]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root, 'b': evalTemp_4}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
         "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {=Const [3"
         "]}]\n",
         optimized);
@@ -5094,19 +4744,13 @@ TEST(PhysRewriter, PartialIndex2) {
 
     // Partial schema requirement on an index field.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
-        "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {=Const [3"
-        "]}]\n",
+        "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {=Const "
+        "[3]}]\n",
         optimized);
 }
 
@@ -5166,11 +4810,7 @@ TEST(PhysRewriter, PartialIndexReject) {
 
     // Incompatible partial filter. Use scan.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_3]\n"
@@ -5218,13 +4858,7 @@ TEST(PhysRewriter, RequireRID) {
 
     // Make sure the Scan node returns rid, and the Root node refers to it.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       rid_0\n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
-        "|       Variable [root]\n"
+        "Root [{rid_0, root}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_0]\n"
@@ -5260,13 +4894,7 @@ TEST(PhysRewriter, RequireRID1) {
     ASSERT_EQ(3, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       rid_0\n"
-        "|   |       scan_0\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
-        "|       Variable [scan_0]\n"
+        "Root [{rid_0, scan_0}]\n"
         "Filter []\n"
         "|   Const [true]\n"
         "PhysicalScan [{'<rid>': rid_0, '<root>': scan_0}, c1]\n",
@@ -5319,11 +4947,7 @@ TEST(PhysRewriter, UnionRewrite) {
     ASSERT_EQ(4, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pUnion1\n"
-        "|   RefBlock: \n"
-        "|       Variable [pUnion1]\n"
+        "Root [{pUnion1}]\n"
         "Union [{pUnion1}]\n"
         "|   PhysicalScan [{'a': pUnion1}, test2]\n"
         "PhysicalScan [{'a': pUnion1}, test1]\n",
@@ -5380,13 +5004,7 @@ TEST(PhysRewriter, JoinRewrite) {
     ASSERT_EQ(4, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       p11\n"
-        "|   |       p21\n"
-        "|   RefBlock: \n"
-        "|       Variable [p11]\n"
-        "|       Variable [p21]\n"
+        "Root [{p11, p21}]\n"
         "NestedLoopJoin [joinType: Inner, ]\n"
         "|   |   BinaryOp [Eq]\n"
         "|   |   |   Variable [p22]\n"
@@ -5452,13 +5070,7 @@ TEST(PhysRewriter, JoinRewrite1) {
 
     // Demonstrate index nested loop join and variable interval intersection.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       p1\n"
-        "|   |       p2\n"
-        "|   RefBlock: \n"
-        "|       Variable [p1]\n"
-        "|       Variable [p2]\n"
+        "Root [{p1, p2}]\n"
         "NestedLoopJoin [joinType: Inner, {p1, p2}]\n"
         "|   |   Const [true]\n"
         "|   IndexScan [{}, scanDefName: test2, indexDefName: index1, interval: {>If [] BinaryOp "
@@ -5496,11 +5108,7 @@ TEST(PhysRewriter, RootInterval) {
     ASSERT_EQ(2, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [root]\n"
@@ -5541,11 +5149,7 @@ TEST(PhysRewriter, ResidualFilterPathIsBalanced) {
     // because it can't be satisfied with an index. The path under the resulting FilterNode should
     // be balanced.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_0]\n"
@@ -5612,11 +5216,7 @@ TEST(PhysRewriter, DisjunctiveEqsConsolidatedIntoEqMember) {
     // be combined into one EqMember path that accounts for all original separate Eq and EqMember
     // paths, as well as one Gt path and one Lt path.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_0]\n"
@@ -5662,11 +5262,7 @@ TEST(PhysRewriter, KeepBoundsForNothingCheck) {
 
     // sbe::nothing will not pass the (Minkey, Maxkey) check. Check that we don't get rid of it.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_0]\n"
@@ -5716,26 +5312,20 @@ TEST(PhysRewriter, EqMemberSargable) {
         phaseManager.optimize(optimized);
 
         ASSERT_EXPLAIN_V2_AUTO(
-            "Root []\n"
-            "|   |   projections: \n"
-            "|   |       root\n"
-            "|   RefBlock: \n"
-            "|       Variable [root]\n"
+            "Root [{root}]\n"
             "Sargable [Complete]\n"
-            "|   |   |   |   requirementsMap: \n"
-            "|   |   |   |       refProjection: root, path: 'PathGet [a] PathIdentity []', "
-            "intervals:"
-            " {{{=Const [1]}} U {{=Const [2]}} U {{=Const [3]}}}\n"
+            "|   |   |   |   requirements: \n"
+            "|   |   |   |       {{{refProjection: root, path: 'PathGet [a] PathIdentity []', "
+            "intervals: {{{=Const [1]}} U {{=Const [2]}} U {{=Const [3]}}}}}}\n"
             "|   |   |   candidateIndexes: \n"
             "|   |   |       candidateId: 1, index1, {}, {Compound}, {{{=Const [1]}} U {{=Const "
-            "[2]}}"
-            " U {{=Const [3]}}}\n"
+            "[2]}} "
+            "U {{=Const [3]}}}\n"
             "|   |   scanParams: \n"
             "|   |       {'a': evalTemp_0}\n"
             "|   |           residualReqs: \n"
             "|   |               refProjection: evalTemp_0, path: 'PathIdentity []', intervals: "
-            "{{{=C"
-            "onst [1]}} U {{=Const [2]}} U {{=Const [3]}}}, entryIndex: 0\n"
+            "{{{=Const [1]}} U {{=Const [2]}} U {{=Const [3]}}}, entryIndex: 0\n"
             "Scan [c1, {root}]\n",
             optimized);
     }
@@ -5777,11 +5367,7 @@ TEST(PhysRewriter, EqMemberSargable) {
             "|           type: Centralized\n"
             "|       indexingRequirement: \n"
             "|           Complete, dedupRID\n"
-            "Root []\n"
-            "|   |   projections: \n"
-            "|   |       root\n"
-            "|   RefBlock: \n"
-            "|       Variable [root]\n"
+            "Root [{root}]\n"
             "Properties [cost: 0.173038, localCost: 0.0180785, adjustedCE: 54.6819]\n"
             "|   |   Logical:\n"
             "|   |       cardinalityEstimate: \n"
@@ -5831,8 +5417,6 @@ TEST(PhysRewriter, EqMemberSargable) {
             "|   |       repetitionEstimate: 54.6819\n"
             "|   LimitSkip [limit: 1, skip: 0]\n"
             "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-            "|   RefBlock: \n"
-            "|       Variable [rid_0]\n"
             "Properties [cost: 0.0791597, localCost: 0.0791597, adjustedCE: 18.2273]\n"
             "|   |   Logical:\n"
             "|   |       cardinalityEstimate: \n"
@@ -5857,10 +5441,7 @@ TEST(PhysRewriter, EqMemberSargable) {
             "|           type: Centralized\n"
             "|       indexingRequirement: \n"
             "|           Index, dedupRID\n"
-            "GroupBy []\n"
-            "|   |   groupings: \n"
-            "|   |       RefBlock: \n"
-            "|   |           Variable [rid_0]\n"
+            "GroupBy [{rid_0}]\n"
             "|   aggregations: \n"
             "Union [{rid_0}]\n"
             "|   |   IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: "
@@ -5934,13 +5515,7 @@ TEST(PhysRewriter, IndexSubfieldCovered) {
     // residual predicates. Also observe the traverse for "a.c" is removed due to "a" being
     // non-multikey.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pa\n"
-        "|   |       pb\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
-        "|       Variable [pb]\n"
+        "Root [{pa, pb}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [pb]\n"
@@ -6019,11 +5594,7 @@ TEST(PhysRewriter, PerfOnlyPreds1) {
     // Demonstrate predicates are repeated on the Seek side. Also demonstrate null handling, and the
     // fact that we apply the predicates on the Seek side in increasing selectivity order.
     ASSERT_EXPLAIN_V2Compact_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pa\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
+        "Root [{pa}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   Filter []\n"
@@ -6036,8 +5607,6 @@ TEST(PhysRewriter, PerfOnlyPreds1) {
         "|   |   PathCompare [Lt] Const [1]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'a': pa, 'b': evalTemp_3}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
         "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {[Const [2"
         " | minKey], Const [2 | 1])}]\n",
         optimized);
@@ -6104,11 +5673,7 @@ TEST(PhysRewriter, PerfOnlyPreds2) {
 
     // Demonstrate an intersection plan, with predicates repeated on the Seek side.
     ASSERT_EXPLAIN_V2Compact_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pa\n"
-        "|   RefBlock: \n"
-        "|       Variable [pa]\n"
+        "Root [{pa}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   Filter []\n"
@@ -6121,18 +5686,15 @@ TEST(PhysRewriter, PerfOnlyPreds2) {
         "|   |   PathCompare [Eq] Const [1]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'a': pa, 'b': evalTemp_2}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
         "MergeJoin []\n"
         "|   |   |   Condition\n"
         "|   |   |       rid_0 = rid_5\n"
         "|   |   Collation\n"
         "|   |       Ascending\n"
         "|   Union [{rid_5}]\n"
-        "|   Evaluation [{rid_5}]\n"
-        "|   |   Variable [rid_0]\n"
-        "|   IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index2, interval: {=Cons"
-        "t [2]}]\n"
+        "|   Evaluation [{rid_5} = Variable [rid_0]]\n"
+        "|   IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index2, interval: {=Const "
+        "[2]}]\n"
         "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {=Const [1"
         "]}]\n",
         optimized);
@@ -6187,11 +5749,7 @@ TEST(PhysRewriter, ConjunctionTraverseMultikey1) {
     // the original query.
     // But at the same time, the index should help satisfy one predicate or the other.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   Filter []\n"
@@ -6203,11 +5761,7 @@ TEST(PhysRewriter, ConjunctionTraverseMultikey1) {
         "|   |   Const [1]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root, 'a': evalTemp_11}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
-        "Unique []\n"
-        "|   projections: \n"
-        "|       rid_0\n"
+        "Unique [{rid_0}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [evalTemp_9]\n"
@@ -6257,11 +5811,7 @@ TEST(PhysRewriter, ConjunctionTraverseMultikey2) {
     // If we use the index to satisfy {a: 1} then we can't also use it to satisfy {'a.x': 1},
     // because that would be forcing the same array element to match both predicates.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   Filter []\n"
@@ -6273,8 +5823,6 @@ TEST(PhysRewriter, ConjunctionTraverseMultikey2) {
         "|   |   Const [1]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root, 'a': evalTemp_5}, c1]\n"
-        "|   RefBlock: \n"
-        "|       Variable [rid_0]\n"
         "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {=Const [1"
         "]}]\n",
         optimized);

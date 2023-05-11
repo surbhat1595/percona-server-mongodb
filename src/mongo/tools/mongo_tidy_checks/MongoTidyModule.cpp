@@ -27,31 +27,40 @@
  *    it in the license file.
  */
 
-#include "MongoTestCheck.h"
+#include "MongoCctypeCheck.h"
+#include "MongoHeaderBracketCheck.h"
+#include "MongoStdOptionalCheck.h"
+#include "MongoUninterruptibleLockGuardCheck.h"
+#include "MongoVolatileCheck.h"
 
-#include "clang-tidy/ClangTidy.h"
-#include "clang-tidy/ClangTidyCheck.h"
-#include "clang-tidy/ClangTidyModule.h"
-#include "clang-tidy/ClangTidyModuleRegistry.h"
+#include <clang-tidy/ClangTidy.h>
+#include <clang-tidy/ClangTidyCheck.h>
+#include <clang-tidy/ClangTidyModule.h>
+#include <clang-tidy/ClangTidyModuleRegistry.h>
 
 namespace mongo {
 namespace tidy {
 
-class MongoTidyModule : public ClangTidyModule {
+class MongoTidyModule : public clang::tidy::ClangTidyModule {
 public:
-    void addCheckFactories(ClangTidyCheckFactories& CheckFactories) override {
-        CheckFactories.registerCheck<MongoTestCheck>("mongo-test-check");
+    void addCheckFactories(clang::tidy::ClangTidyCheckFactories& CheckFactories) override {
+        CheckFactories.registerCheck<MongoUninterruptibleLockGuardCheck>(
+            "mongo-uninterruptible-lock-guard-check");
+        CheckFactories.registerCheck<MongoHeaderBracketCheck>("mongo-header-bracket-check");
+        CheckFactories.registerCheck<MongoCctypeCheck>("mongo-cctype-check");
+        CheckFactories.registerCheck<MongoStdOptionalCheck>("mongo-std-optional-check");
+        CheckFactories.registerCheck<MongoVolatileCheck>("mongo-volatile-check");
     }
 };
 
 // Register the MongoTidyModule using this statically initialized variable.
-static ClangTidyModuleRegistry::Add<MongoTidyModule> X("mongo-tidy-module",
-                                                       "MongoDB custom checks.");
+static clang::tidy::ClangTidyModuleRegistry::Add<MongoTidyModule> X("mongo-tidy-module",
+                                                                    "MongoDB custom checks.");
 
 }  // namespace tidy
 
 // This anchor is used to force the linker to link in the generated object file
 // and thus register the MongoTidyModule.
-volatile int MongoTidyModuleAnchorSource = 0;
+volatile int MongoTidyModuleAnchorSource = 0;  // NOLINT
 
 }  // namespace mongo

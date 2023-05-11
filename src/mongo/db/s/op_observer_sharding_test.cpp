@@ -41,11 +41,13 @@
 #include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/db/s/type_shard_identity.h"
 #include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/s/shard_version_factory.h"
 
 namespace mongo {
 namespace {
 
-const NamespaceString kTestNss("TestDB", "TestColl");
+const NamespaceString kTestNss =
+    NamespaceString::createNamespaceString_forTest("TestDB", "TestColl");
 const NamespaceString kUnshardedNss("TestDB", "UnshardedColl");
 
 void setCollectionFilteringMetadata(OperationContext* opCtx, CollectionMetadata metadata) {
@@ -66,8 +68,8 @@ protected:
         bool justCreated = false;
         auto databaseHolder = DatabaseHolder::get(operationContext());
         auto db = databaseHolder->openDb(operationContext(), kTestNss.dbName(), &justCreated);
-        auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
-            operationContext(), kTestNss.dbName(), DSSAcquisitionMode::kExclusive);
+        auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireExclusive(
+            operationContext(), kTestNss.dbName());
         scopedDss->setDbInfo(operationContext(),
                              DatabaseType{kTestNss.dbName().db(), ShardId("this"), dbVersion1});
         ASSERT_TRUE(db);
@@ -123,8 +125,8 @@ TEST_F(DocumentKeyStateTest, MakeDocumentKeyStateUnsharded) {
     ScopedSetShardRole scopedSetShardRole{
         operationContext(),
         kTestNss,
-        ShardVersion(metadata.getShardVersion(),
-                     boost::optional<CollectionIndexes>(boost::none)) /* shardVersion */,
+        ShardVersionFactory::make(
+            metadata, boost::optional<CollectionIndexes>(boost::none)) /* shardVersion */,
         boost::none /* databaseVersion */};
     AutoGetCollection autoColl(operationContext(), kTestNss, MODE_IX);
 
@@ -149,8 +151,8 @@ TEST_F(DocumentKeyStateTest, MakeDocumentKeyStateShardedWithoutIdInShardKey) {
     ScopedSetShardRole scopedSetShardRole{
         operationContext(),
         kTestNss,
-        ShardVersion(metadata.getShardVersion(),
-                     boost::optional<CollectionIndexes>(boost::none)) /* shardVersion */,
+        ShardVersionFactory::make(
+            metadata, boost::optional<CollectionIndexes>(boost::none)) /* shardVersion */,
         boost::none /* databaseVersion */};
     AutoGetCollection autoColl(operationContext(), kTestNss, MODE_IX);
 
@@ -178,8 +180,8 @@ TEST_F(DocumentKeyStateTest, MakeDocumentKeyStateShardedWithIdInShardKey) {
     ScopedSetShardRole scopedSetShardRole{
         operationContext(),
         kTestNss,
-        ShardVersion(metadata.getShardVersion(),
-                     boost::optional<CollectionIndexes>(boost::none)) /* shardVersion */,
+        ShardVersionFactory::make(
+            metadata, boost::optional<CollectionIndexes>(boost::none)) /* shardVersion */,
         boost::none /* databaseVersion */};
     AutoGetCollection autoColl(operationContext(), kTestNss, MODE_IX);
 
@@ -207,8 +209,8 @@ TEST_F(DocumentKeyStateTest, MakeDocumentKeyStateShardedWithIdHashInShardKey) {
     ScopedSetShardRole scopedSetShardRole{
         operationContext(),
         kTestNss,
-        ShardVersion(metadata.getShardVersion(),
-                     boost::optional<CollectionIndexes>(boost::none)) /* shardVersion */,
+        ShardVersionFactory::make(
+            metadata, boost::optional<CollectionIndexes>(boost::none)) /* shardVersion */,
         boost::none /* databaseVersion */};
     AutoGetCollection autoColl(operationContext(), kTestNss, MODE_IX);
 
@@ -254,7 +256,9 @@ TEST_F(DocumentKeyStateTest, CheckDBVersion) {
     auto onInsert = [&]() {
         opObserver.onInserts(opCtx, *autoColl, toInsert.begin(), toInsert.end(), fromMigrate);
     };
-    auto onUpdate = [&]() { opObserver.onUpdate(opCtx, update); };
+    auto onUpdate = [&]() {
+        opObserver.onUpdate(opCtx, update);
+    };
     auto onDelete = [&]() {
         opObserver.aboutToDelete(opCtx, *autoColl, BSON("_id" << 0));
         opObserver.onDelete(opCtx, *autoColl, kUninitializedStmtId, {});

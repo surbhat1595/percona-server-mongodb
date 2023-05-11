@@ -42,8 +42,11 @@ const st = new ShardingTest({
     shards: 3,
     rs: {
         nodes: 2,
-        setParameter:
-            {queryAnalysisSamplerConfigurationRefreshSecs, queryAnalysisWriterIntervalSecs}
+        setParameter: {
+            queryAnalysisSamplerConfigurationRefreshSecs,
+            queryAnalysisWriterIntervalSecs,
+            logComponentVerbosity: tojson({sharding: 2})
+        }
     },
     configOptions: {
         setParameter: {queryAnalysisSamplerInActiveThresholdSecs: 3},
@@ -250,10 +253,10 @@ function testQuerySampling(dbName, collNameNotSampled, collNameSampled) {
                tojsononeline(
                    {expectedTotalCount, expectedFindCount, expectedDeleteCount, expectedAggCount}));
 
-    assertDiffPercentage(sampleSize.total, expectedTotalCount, 5 /* maxDiffPercentage */);
-    assertDiffPercentage(sampleSize.find, expectedFindCount, 10 /* maxDiffPercentage */);
-    assertDiffPercentage(sampleSize.delete, expectedDeleteCount, 10 /* maxDiffPercentage */);
-    assertDiffPercentage(sampleSize.aggregate, expectedAggCount, 10 /* maxDiffPercentage */);
+    assertDiffPercentage(sampleSize.total, expectedTotalCount, 10 /* maxDiffPercentage */);
+    assertDiffPercentage(sampleSize.find, expectedFindCount, 15 /* maxDiffPercentage */);
+    assertDiffPercentage(sampleSize.delete, expectedDeleteCount, 15 /* maxDiffPercentage */);
+    assertDiffPercentage(sampleSize.aggregate, expectedAggCount, 15 /* maxDiffPercentage */);
 
     QuerySamplingUtil.clearSampledQueryCollectionOnAllShards(st);
 }

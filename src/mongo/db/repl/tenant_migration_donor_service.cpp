@@ -447,7 +447,8 @@ boost::optional<BSONObj> TenantMigrationDonorService::Instance::reportForCurrent
     bob.append("readPreference", _readPreference.toInnerBSON());
     bob.append("receivedCancellation", _abortRequested);
     if (_durableState) {
-        bob.append("lastDurableState", _durableState.value().state);
+        bob.append("lastDurableState",
+                   TenantMigrationDonorState_serializer(_durableState.get().state));
     } else {
         bob.appendUndefined("lastDurableState");
     }
@@ -614,7 +615,7 @@ ExecutorFuture<repl::OpTime> TenantMigrationDonorService::Instance::_updateState
                            mtab->startBlockingWrites();
 
                            opCtx->recoveryUnit()->onRollback(
-                               [mtab] { mtab->rollBackStartBlocking(); });
+                               [mtab](OperationContext*) { mtab->rollBackStartBlocking(); });
                        }
 
                        // Reserve an opTime for the write.
@@ -784,7 +785,7 @@ ExecutorFuture<void> TenantMigrationDonorService::Instance::_sendRecipientSyncDa
         repl::ReplicationCoordinator::get(_serviceContext)->getConfigConnectionString();
 
     RecipientSyncData request;
-    request.setDbName(NamespaceString::kAdminDb);
+    request.setDbName(DatabaseName::kAdmin);
 
     MigrationRecipientCommonData commonData(
         _migrationUuid, donorConnString.toString(), _readPreference);
@@ -827,7 +828,7 @@ ExecutorFuture<void> TenantMigrationDonorService::Instance::_sendRecipientForget
         repl::ReplicationCoordinator::get(_serviceContext)->getConfigConnectionString();
 
     RecipientForgetMigration request;
-    request.setDbName(NamespaceString::kAdminDb);
+    request.setDbName(DatabaseName::kAdmin);
 
     MigrationRecipientCommonData commonData(
         _migrationUuid, donorConnString.toString(), _readPreference);

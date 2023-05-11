@@ -310,7 +310,9 @@ public:
         // 'DistributedPlanLogic' or until a following stage causes the given validation
         // function to return false. By default this will not allow swapping with any
         // following stages.
-        movePastFunctionType canMovePast = [](const DocumentSource&) { return false; };
+        movePastFunctionType canMovePast = [](const DocumentSource&) {
+            return false;
+        };
     };
 
     virtual ~DocumentSource() {}
@@ -322,8 +324,8 @@ public:
      * original's 'ExpressionContext'.
      */
     virtual boost::intrusive_ptr<DocumentSource> clone(
-        const boost::intrusive_ptr<ExpressionContext>& newExpCtx = nullptr) const {
-        auto expCtx = newExpCtx ? newExpCtx : pExpCtx;
+        const boost::intrusive_ptr<ExpressionContext>& expCtx) const {
+        tassert(7406001, "expCtx passed to clone must not be null", expCtx);
         std::vector<Value> serializedDoc;
         serializeToArray(serializedDoc);
         tassert(5757900,
@@ -381,6 +383,16 @@ public:
      */
     virtual StageConstraints constraints(
         Pipeline::SplitState = Pipeline::SplitState::kUnsplit) const = 0;
+
+    /**
+     * If a stage's StageConstraints::PositionRequirement is kCustom, then it should also override
+     * this method, which will be called by the validation process.
+     */
+    virtual void validatePipelinePosition(bool alreadyOptimized,
+                                          Pipeline::SourceContainer::const_iterator pos,
+                                          const Pipeline::SourceContainer& container) const {
+        MONGO_UNIMPLEMENTED_TASSERT(7183905);
+    };
 
     /**
      * Informs the stage that it is no longer needed and can release its resources. After dispose()
@@ -453,6 +465,14 @@ public:
     virtual void detachFromOperationContext() {}
 
     virtual void reattachToOperationContext(OperationContext* opCtx) {}
+
+    /**
+     * Validate that all operation contexts associated with this document source, including any
+     * subpipelines, match the argument.
+     */
+    virtual bool validateOperationContext(const OperationContext* opCtx) const {
+        return getContext()->opCtx == opCtx;
+    }
 
     virtual bool usedDisk() {
         return false;

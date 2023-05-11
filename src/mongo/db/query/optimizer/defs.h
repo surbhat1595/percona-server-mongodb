@@ -68,6 +68,8 @@ using ProjectionNameVector = std::vector<ProjectionName>;
 
 template <typename T>
 using ProjectionNameMap = opt::unordered_map<ProjectionName, T, ProjectionName::Hasher>;
+
+// Key: new/target projection, value: existing/source projection.
 using ProjectionRenames = ProjectionNameMap<ProjectionName>;
 
 // Map from scanDefName to rid projection name.
@@ -255,6 +257,12 @@ struct CostAndCE {
     CEType _ce;
 };
 
+/**
+ * Note: Ascending and Descending sorts are performed according to the semantics of BinaryOp
+ * comparisons: gt, lt, etc where for examples arrays sort after all numbers, as opposed to sort
+ * semantics where arrays sort relative to numbers and one another based on their smallest/largest
+ * element as defined by the sort path.
+ */
 #define COLLATIONOP_OPNAMES(F) \
     F(Ascending)               \
     F(Descending)              \
@@ -294,6 +302,9 @@ struct QueryHints {
 
     // Disable placing a group-by and union based RIDIntersect implementation.
     bool _disableGroupByAndUnionRIDIntersect = false;
+
+    // Force an index scan for eligible sargable predicate. Prevent their execution as residual.
+    bool _forceIndexScanForPredicates = false;
 
     // If set keep track of rejected plans in the memo.
     bool _keepRejectedPlans = false;

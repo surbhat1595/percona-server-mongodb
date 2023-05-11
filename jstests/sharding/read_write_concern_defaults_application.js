@@ -87,6 +87,8 @@ let testCases = {
     _configsvrBalancerStart: {skip: "internal command"},
     _configsvrBalancerStatus: {skip: "internal command"},
     _configsvrBalancerStop: {skip: "internal command"},
+    _configsvrCheckClusterMetadataConsistency: {skip: "internal command"},
+    _configsvrCheckMetadataConsistency: {skip: "internal command"},
     _configsvrCleanupReshardCollection: {skip: "internal command"},
     _configsvrCollMod: {skip: "internal command"},
     _configsvrClearJumboFlag: {skip: "internal command"},
@@ -118,6 +120,8 @@ let testCases = {
     _configsvrSetAllowMigrations: {skip: "internal command"},
     _configsvrSetClusterParameter: {skip: "internal command"},
     _configsvrSetUserWriteBlockMode: {skip: "internal command"},
+    _configsvrTransitionToCatalogShard: {skip: "internal command"},
+    _configsvrTransitionToDedicatedConfigServer: {skip: "internal command"},
     _configsvrUpdateZoneKeyRange: {skip: "internal command"},
     _flushDatabaseCacheUpdates: {skip: "internal command"},
     _flushDatabaseCacheUpdatesWithWriteConcern: {skip: "internal command"},
@@ -152,7 +156,9 @@ let testCases = {
     _shardsvrCreateGlobalIndex: {skip: "internal command"},
     _shardsvrDropGlobalIndex: {skip: "internal command"},
     _shardsvrDropCollection: {skip: "internal command"},
+    // TODO SERVER-74324: deprecate _shardsvrDropCollectionIfUUIDNotMatching after 7.0 is lastLTS.
     _shardsvrDropCollectionIfUUIDNotMatching: {skip: "internal command"},
+    _shardsvrDropCollectionIfUUIDNotMatchingWithWriteConcern: {skip: "internal command"},
     _shardsvrDropCollectionParticipant: {skip: "internal command"},
     _shardsvrUnregisterIndex: {skip: "internal command"},
     _shardsvrDropIndexCatalogEntryParticipant: {skip: "internal command"},
@@ -186,6 +192,7 @@ let testCases = {
     _shardsvrCollMod: {skip: "internal command"},
     _shardsvrCollModParticipant: {skip: "internal command"},
     _shardsvrParticipantBlock: {skip: "internal command"},
+    _startStreamProcessor: {skip: "internal command"},
     _transferMods: {skip: "internal command"},
     _vectorClockPersist: {skip: "internal command"},
     abortReshardCollection: {skip: "does not accept read or write concern"},
@@ -353,7 +360,8 @@ let testCases = {
         shardedTargetsConfigServer: true,
         useLogs: true,
     },
-    createSearchIndex: {skip: "does not accept read or write concern"},
+    createSearchIndex: {skip: "present in v6.3 but renamed to createSearchIndexes in v7.0"},
+    createSearchIndexes: {skip: "does not accept read or write concern"},
     createUser: {
         command: {createUser: "foo", pwd: "bar", roles: []},
         checkReadConcern: false,
@@ -582,7 +590,7 @@ let testCases = {
     mapReduce: {skip: "does not accept read or write concern"},
     mergeAllChunksOnShard: {skip: "does not accept read or write concern"},
     mergeChunks: {skip: "does not accept read or write concern"},
-    modifySearchIndex: {skip: "does not accept read or write concern"},
+    modifySearchIndex: {skip: "present in v6.3 but renamed to updateSearchIndex in v7.0"},
     moveChunk: {
         skip:
             "does not accept read or write concern (accepts writeConcern, but only explicitly and when _secondaryThrottle is true)"
@@ -735,6 +743,8 @@ let testCases = {
     testVersions1And2: {skip: "does not accept read or write concern"},
     testVersion2: {skip: "does not accept read or write concern"},
     top: {skip: "does not accept read or write concern"},
+    transitionToCatalogShard: {skip: "does not accept read or write concern"},
+    transitionToDedicatedConfigServer: {skip: "does not accept read or write concern"},
     update: {
         setUp: function(conn) {
             assert.commandWorked(conn.getCollection(nss).insert({x: 1}, {writeConcern: {w: 1}}));
@@ -757,6 +767,7 @@ let testCases = {
         shardedTargetsConfigServer: true,
         useLogs: true,
     },
+    updateSearchIndex: {skip: "does not accept read or write concern"},
     updateUser: {
         setUp: function(conn) {
             assert.commandWorked(conn.getDB(db).runCommand(

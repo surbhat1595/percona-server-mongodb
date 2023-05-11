@@ -48,6 +48,7 @@
 
 #include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
 
+#include <boost/algorithm/string/join.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
 #include <boost/filesystem/operations.hpp>
@@ -788,6 +789,9 @@ WiredTigerKVEngine::WiredTigerKVEngine(
     if (gWiredTigerEvictionDirtyTargetGB)
         ss << "eviction_dirty_target="
            << static_cast<size_t>(gWiredTigerEvictionDirtyTargetGB * 1024) << "MB,";
+    if (!gWiredTigerExtraDiagnostics.empty())
+        ss << "extra_diagnostics=[" << boost::algorithm::join(gWiredTigerExtraDiagnostics, ",")
+           << "],";
     if (gWiredTigerEvictionDirtyMaxGB)
         ss << "eviction_dirty_trigger=" << static_cast<size_t>(gWiredTigerEvictionDirtyMaxGB * 1024)
            << "MB,";
@@ -1165,7 +1169,7 @@ void WiredTigerKVEngine::cleanShutdown() {
     bool leak_memory = !kAddressSanitizerEnabled;
     std::string closeConfig = "";
 
-    if (RUNNING_ON_VALGRIND) {
+    if (RUNNING_ON_VALGRIND) {  // NOLINT
         leak_memory = false;
     }
 
@@ -3274,14 +3278,14 @@ Status WiredTigerKVEngine::dropIdent(RecoveryUnit* ru,
 
     WiredTigerSession session(_conn);
 
-    int ret = session.getSession()->drop(
-        session.getSession(), uri.c_str(), "force,checkpoint_wait=false");
+    int ret =
+        session.getSession()->drop(session.getSession(), uri.c_str(), "checkpoint_wait=false");
     LOGV2_DEBUG(22338, 1, "WT drop", "uri"_attr = uri, "ret"_attr = ret);
 
     if (ret == EBUSY || MONGO_unlikely(WTDropEBUSY.shouldFail())) {
         // Drop requires exclusive access to the table. EBUSY will be returned if there's a
-        // checkpoint running, if there are any open cursors on the ident, or the ident is otherwise
-        // in use.
+        // checkpoint running, there's dirty data pending to be written to disk, there are any open
+        // cursors on the ident, or the ident is otherwise in use.
         return {ErrorCodes::ObjectIsBusy,
                 str::stream() << "Failed to remove drop-pending ident " << ident};
     }
@@ -3291,6 +3295,7 @@ Status WiredTigerKVEngine::dropIdent(RecoveryUnit* ru,
     }
 
     if (ret == ENOENT) {
+        // Ident doesn't exist, it is effectively dropped.
         return Status::OK();
     }
 
@@ -3310,7 +3315,7 @@ void WiredTigerKVEngine::dropIdentForImport(OperationContext* opCtx, StringData 
     // cursor is open. In short, using "checkpoint_wait=false" and "lock_wait=true" means that we
     // can potentially be waiting for a short period of time for WT_SESSION::drop() to run, but
     // would rather get EBUSY than wait a long time for a checkpoint to complete.
-    const std::string config = "force=true,checkpoint_wait=false,lock_wait=true,remove_files=false";
+    const std::string config = "checkpoint_wait=false,lock_wait=true,remove_files=false";
     int ret = 0;
     size_t attempt = 0;
     do {
@@ -3331,6 +3336,10 @@ void WiredTigerKVEngine::dropIdentForImport(OperationContext* opCtx, StringData 
                       "config"_attr = config,
                       "ret"_attr = ret);
     } while (ret == EBUSY);
+    if (ret == ENOENT) {
+        // If the ident doesn't exist then it has already been dropped.
+        return;
+    }
     invariantWTOK(ret, session.getSession());
 }
 
@@ -3950,7 +3959,7 @@ StatusWith<Timestamp> WiredTigerKVEngine::pinOldestTimestamp(
         // should be atomic with this pin request. If the `WriteUnitOfWork` is rolled back, either
         // unpin the oldest timestamp or repin the previous value.
         opCtx->recoveryUnit()->onRollback(
-            [this, svcName = requestingServiceName, previousTimestamp]() {
+            [this, svcName = requestingServiceName, previousTimestamp](OperationContext*) {
                 if (previousTimestamp.isNull()) {
                     unpinOldestTimestamp(svcName);
                 } else {

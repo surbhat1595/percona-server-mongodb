@@ -230,7 +230,7 @@ public:
      * Returns the SnapshotTooOld error if the underlying data files have already been removed.
      */
     virtual Status initFromExisting(OperationContext* opCtx,
-                                    const std::shared_ptr<Collection>& collection,
+                                    const std::shared_ptr<const Collection>& collection,
                                     const DurableCatalogEntry& catalogEntry,
                                     boost::optional<Timestamp> readTimestamp) = 0;
 
@@ -715,8 +715,7 @@ public:
 /**
  * Smart-pointer'esque type to handle yielding of Collection lock that may invalidate pointers when
  * resuming. CollectionPtr will re-load the Collection from the Catalog when restoring from a yield
- * that dropped locks. The yield and restore behavior can be disabled by constructing this type from
- * a writable Collection or by specifying NoYieldTag.
+ * that dropped locks.
  */
 class CollectionPtr : public Yieldable {
 public:
@@ -726,16 +725,11 @@ public:
     // yield
     using RestoreFn = std::function<const Collection*(OperationContext*, UUID)>;
 
-    CollectionPtr();
-
-    // Creates a Yieldable CollectionPtr that reloads the Collection pointer from the catalog when
-    // restoring from yield
-    CollectionPtr(OperationContext* opCtx, const Collection* collection, RestoreFn restoreFn);
-
-    // Creates non-yieldable CollectionPtr, performing yield/restore will be a no-op.
-    struct NoYieldTag {};
-    CollectionPtr(const Collection* collection, NoYieldTag);
-    CollectionPtr(Collection* collection);
+    // Creates non-yieldable CollectionPtr, performing yield/restore will invariant. To make this
+    // CollectionPtr yieldable call `makeYieldable` and provide appropriate implementation depending
+    // on context.
+    CollectionPtr() = default;
+    explicit CollectionPtr(const Collection* collection);
 
     CollectionPtr(const CollectionPtr&) = delete;
     CollectionPtr(CollectionPtr&&);
@@ -761,10 +755,18 @@ public:
         return _collection;
     }
 
+    // Makes this CollectionPtr yieldable. The RestoreFn provides an implementation on how to setup
+    // the correct state after yield and fetches the internal Collection pointer.
+    void makeYieldable(OperationContext* opCtx, RestoreFn restoreFn) {
+        _opCtx = opCtx;
+        _restoreFn = std::move(restoreFn);
+    }
+
     void reset() {
         *this = CollectionPtr();
     }
 
+    bool yieldable() const override;
     void yield() const override;
     void restore() const override;
 
@@ -778,17 +780,15 @@ public:
     }
 
 private:
-    bool _canYield() const;
-
     // These members needs to be mutable so the yield/restore interface can be const. We don't want
     // yield/restore to require a non-const instance when it otherwise could be const.
-    mutable const Collection* _collection;
+    mutable const Collection* _collection = nullptr;
 
     // If the collection is currently in the 'yielded' state (i.e. yield() has been called), this
     // field will contain what was the UUID of the collection at the time of yield.
     mutable boost::optional<UUID> _yieldedUUID;
 
-    OperationContext* _opCtx;
+    OperationContext* _opCtx = nullptr;
     RestoreFn _restoreFn;
 
     // Stores a consistent view of shard key with the collection that will be needed during the

@@ -278,13 +278,7 @@ TEST(Optimizer, Basic) {
                        std::move(evalNode));
 
     ASSERT_EXPLAIN_AUTO(
-        "Root []\n"
-        "  projections: \n"
-        "    P1\n"
-        "    ptest\n"
-        "  RefBlock: \n"
-        "    Variable [P1]\n"
-        "    Variable [ptest]\n"
+        "Root [{P1, ptest}]\n"
         "  Evaluation [{P1}]\n"
         "    EvalPath []\n"
         "      PathConstant []\n"
@@ -302,13 +296,7 @@ TEST(Optimizer, Basic) {
 
     ABT clonedNode = rootNode;
     ASSERT_EXPLAIN_AUTO(
-        "Root []\n"
-        "  projections: \n"
-        "    P1\n"
-        "    ptest\n"
-        "  RefBlock: \n"
-        "    Variable [P1]\n"
-        "    Variable [ptest]\n"
+        "Root [{P1, ptest}]\n"
         "  Evaluation [{P1}]\n"
         "    EvalPath []\n"
         "      PathConstant []\n"
@@ -356,33 +344,16 @@ TEST(Optimizer, GroupBy) {
         std::move(groupByNode));
 
     ASSERT_EXPLAIN_AUTO(
-        "Root []\n"
-        "  projections: \n"
-        "    p1\n"
-        "    p2\n"
-        "    a1\n"
-        "    a2\n"
-        "  RefBlock: \n"
-        "    Variable [a1]\n"
-        "    Variable [a2]\n"
-        "    Variable [p1]\n"
-        "    Variable [p2]\n"
-        "  GroupBy []\n"
-        "    groupings: \n"
-        "      RefBlock: \n"
-        "        Variable [p1]\n"
-        "        Variable [p2]\n"
+        "Root [{a1, a2, p1, p2}]\n"
+        "  GroupBy [{p1, p2}]\n"
         "    aggregations: \n"
         "      [a1]\n"
         "        Const [10]\n"
         "      [a2]\n"
         "        Const [11]\n"
-        "    Evaluation [{p3}]\n"
-        "      Const [3]\n"
-        "      Evaluation [{p2}]\n"
-        "        Const [2]\n"
-        "        Evaluation [{p1}]\n"
-        "          Const [1]\n"
+        "    Evaluation [{p3} = Const [3]]\n"
+        "      Evaluation [{p2} = Const [2]]\n"
+        "        Evaluation [{p1} = Const [1]]\n"
         "          Scan [test, {ptest}]\n",
         rootNode);
 
@@ -424,22 +395,13 @@ TEST(Optimizer, Union) {
     }
 
     ASSERT_EXPLAIN_AUTO(
-        "Root []\n"
-        "  projections: \n"
-        "    ptest\n"
-        "    B\n"
-        "  RefBlock: \n"
-        "    Variable [B]\n"
-        "    Variable [ptest]\n"
+        "Root [{B, ptest}]\n"
         "  Union [{B, ptest}]\n"
-        "    Evaluation [{B}]\n"
-        "      Const [3]\n"
+        "    Evaluation [{B} = Const [3]]\n"
         "      Scan [test, {ptest}]\n"
-        "    Evaluation [{B}]\n"
-        "      Const [4]\n"
+        "    Evaluation [{B} = Const [4]]\n"
         "      Scan [test, {ptest}]\n"
-        "    Evaluation [{B}]\n"
-        "      Const [5]\n"
+        "    Evaluation [{B} = Const [5]]\n"
         "      Evaluation [{ptest}]\n"
         "        EvalPath []\n"
         "          PathConstant []\n"
@@ -487,16 +449,8 @@ TEST(Optimizer, Unwind) {
     }
 
     ASSERT_EXPLAIN_AUTO(
-        "Root []\n"
-        "  projections: \n"
-        "    p1\n"
-        "    p2\n"
-        "    p2pid\n"
-        "  RefBlock: \n"
-        "    Variable [p1]\n"
-        "    Variable [p2]\n"
-        "    Variable [p2pid]\n"
-        "  Unwind [retainNonArrays]\n"
+        "Root [{p1, p2, p2pid}]\n"
+        "  Unwind [{p2, p2pid}, retainNonArrays]\n"
         "    Evaluation [{p2}]\n"
         "      EvalPath []\n"
         "        PathConstant []\n"
@@ -526,13 +480,7 @@ TEST(Optimizer, Collation) {
     }
 
     ASSERT_EXPLAIN_AUTO(
-        "Collation []\n"
-        "  collation: \n"
-        "    a: Ascending\n"
-        "    b: Clustered\n"
-        "  RefBlock: \n"
-        "    Variable [a]\n"
-        "    Variable [b]\n"
+        "Collation [{a: Ascending, b: Clustered}]\n"
         "  Evaluation [{b}]\n"
         "    EvalPath []\n"
         "      PathConstant []\n"
@@ -587,8 +535,6 @@ TEST(Optimizer, Distribution) {
         "    type: HashPartitioning\n"
         "      projections: \n"
         "        b\n"
-        "  RefBlock: \n"
-        "    Variable [b]\n"
         "  Evaluation [{b}]\n"
         "    EvalPath []\n"
         "      PathConstant []\n"
@@ -734,54 +680,34 @@ TEST(IntervalNormalize, IntervalNormalizeConstantsFirst) {
                               _conj(_interval(_incl("var3"_var), _incl("4"_cint64))),
                               _conj(_interval(_incl("1"_cint64), _incl("5"_cint64))));
 
-    ASSERT_INTERVAL(
+    ASSERT_INTERVAL_AUTO(
         "{\n"
-        "    {\n"
-        "        {[Variable [var1], Variable [var2]]}\n"
-        "    }\n"
+        "    {{[Variable [var1], Variable [var2]]}}\n"
         " U \n"
-        "    {\n"
-        "        {[Const [3], Variable [var2]]}\n"
-        "    }\n"
+        "    {{[Const [3], Variable [var2]]}}\n"
         " U \n"
-        "    {\n"
-        "        {[Const [7], Const [8]]}\n"
-        "    }\n"
+        "    {{[Const [7], Const [8]]}}\n"
         " U \n"
-        "    {\n"
-        "        {[Variable [var3], Const [4]]}\n"
-        "    }\n"
+        "    {{[Variable [var3], Const [4]]}}\n"
         " U \n"
-        "    {\n"
-        "        {[Const [1], Const [5]]}\n"
-        "    }\n"
+        "    {{[Const [1], Const [5]]}}\n"
         "}\n",
         intervalExpr);
 
     normalizeIntervals(intervalExpr);
 
     // Demonstrate that constant intervals are sorted first.
-    ASSERT_INTERVAL(
+    ASSERT_INTERVAL_AUTO(
         "{\n"
-        "    {\n"
-        "        {[Const [1], Const [5]]}\n"
-        "    }\n"
+        "    {{[Const [1], Const [5]]}}\n"
         " U \n"
-        "    {\n"
-        "        {[Const [7], Const [8]]}\n"
-        "    }\n"
+        "    {{[Const [7], Const [8]]}}\n"
         " U \n"
-        "    {\n"
-        "        {[Const [3], Variable [var2]]}\n"
-        "    }\n"
+        "    {{[Const [3], Variable [var2]]}}\n"
         " U \n"
-        "    {\n"
-        "        {[Variable [var1], Variable [var2]]}\n"
-        "    }\n"
+        "    {{[Variable [var1], Variable [var2]]}}\n"
         " U \n"
-        "    {\n"
-        "        {[Variable [var3], Const [4]]}\n"
-        "    }\n"
+        "    {{[Variable [var3], Const [4]]}}\n"
         "}\n",
         intervalExpr);
 }
@@ -801,11 +727,7 @@ TEST(Optimizer, ExplainRIDUnion) {
                                   std::move(unionNode));
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "RIDUnion [root]\n"
         "|   Scan [c1, {root}]\n"
         "Filter []\n"

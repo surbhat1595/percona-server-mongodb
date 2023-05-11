@@ -33,6 +33,7 @@
 #include "mongo/db/pipeline/abt/collation_translation.h"
 #include "mongo/db/pipeline/abt/match_expression_visitor.h"
 #include "mongo/db/pipeline/abt/transformer_visitor.h"
+#include "mongo/db/query/optimizer/utils/path_utils.h"
 
 namespace mongo::optimizer {
 
@@ -44,11 +45,11 @@ ABT translateCanonicalQueryToABT(const Metadata& metadata,
     auto matchExpr = generateMatchExpression(
         canonicalQuery.root(), true /* allowAggExpression */, scanProjName, prefixId);
 
-    // Decompose conjunction in the filter into a serial chain of FilterNodes.
-    const auto& composition = collectComposedBounded(matchExpr, kMaxPathConjunctionDecomposition);
-    for (const auto& path : composition) {
-        initialNode = make<FilterNode>(make<EvalFilter>(path, make<Variable>(scanProjName)),
-                                       std::move(initialNode));
+    {
+        // Decompose conjunction in the filter into a serial chain of FilterNodes.
+        auto result = decomposeToFilterNodes(
+            initialNode, matchExpr, make<Variable>(scanProjName), 1 /*minDepth*/);
+        initialNode = std::move(*result);
     }
 
     AlgebrizerContext ctx{prefixId, {scanProjName, std::move(initialNode)}};

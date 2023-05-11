@@ -37,6 +37,7 @@
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/curop_metrics.h"
@@ -101,6 +102,47 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
 
 namespace mongo::write_ops_exec {
+class Atomic64Metric;
+}  // namespace mongo::write_ops_exec
+
+namespace mongo {
+template <>
+struct BSONObjAppendFormat<write_ops_exec::Atomic64Metric> : FormatKind<NumberLong> {};
+}  // namespace mongo
+
+
+namespace mongo::write_ops_exec {
+
+/**
+ * Atomic wrapper for long long type for Metrics.
+ */
+class Atomic64Metric {
+public:
+    /** Set _value to the max of the current or newMax. */
+    void setIfMax(long long newMax) {
+        /*  Note: compareAndSwap will load into val most recent value. */
+        for (long long val = _value.load(); val < newMax && !_value.compareAndSwap(&val, newMax);) {
+        }
+    }
+
+    /** store val into value. */
+    void set(long long val) {
+        _value.store(val);
+    }
+
+    /** Return the current value. */
+    long long get() const {
+        return _value.load();
+    }
+
+    /** TODO: SERVER-73806 Avoid implicit conversion to long long */
+    operator long long() const {
+        return get();
+    }
+
+private:
+    mongo::AtomicWord<long long> _value;
+};
 
 // Convention in this file: generic helpers go in the anonymous namespace. Helpers that are for a
 // single type of operation are static functions defined above their caller.
@@ -129,6 +171,43 @@ MONGO_FAIL_POINT_DEFINE(hangTimeseriesInsertBeforeReopeningQuery);
 MONGO_FAIL_POINT_DEFINE(hangTimeseriesInsertBeforeWrite);
 MONGO_FAIL_POINT_DEFINE(failUnorderedTimeseriesInsert);
 
+
+/**
+ * Metrics group for the `updateMany` and `deleteMany` operations. For each
+ * operation, the `duration` and `numDocs` will contribute to aggregated total
+ * and max metrics.
+ */
+class MultiUpdateDeleteMetrics {
+public:
+    void operator()(Microseconds duration, size_t numDocs) {
+        _durationTotalMicroseconds.increment(durationCount<Microseconds>(duration));
+        _durationTotalMs.set(
+            durationCount<Milliseconds>(Microseconds{_durationTotalMicroseconds.get()}));
+        _durationMaxMs.setIfMax(durationCount<Milliseconds>(duration));
+
+        _numDocsTotal.increment(numDocs);
+        _numDocsMax.setIfMax(numDocs);
+    }
+
+private:
+    /**
+     * To avoid rapid accumulation of roundoff error in the duration total, it
+     * is maintained precisely, and we arrange for the corresponding
+     * Millisecond metric to hold an exported low-res image of it.
+     */
+    Counter64 _durationTotalMicroseconds;
+
+    Atomic64Metric& _durationTotalMs =
+        makeServerStatusMetric<Atomic64Metric>("query.updateDeleteManyDurationTotalMs");
+    Atomic64Metric& _durationMaxMs =
+        makeServerStatusMetric<Atomic64Metric>("query.updateDeleteManyDurationMaxMs");
+
+    CounterMetric _numDocsTotal{"query.updateDeleteManyDocumentsTotalCount"};
+    Atomic64Metric& _numDocsMax =
+        makeServerStatusMetric<Atomic64Metric>("query.updateDeleteManyDocumentsMaxCount");
+};
+
+MultiUpdateDeleteMetrics collectMultiUpdateDeleteMetrics;
 
 void updateRetryStats(OperationContext* opCtx, bool containsRetry) {
     if (containsRetry) {
@@ -164,7 +243,6 @@ void finishCurOp(OperationContext* opCtx, CurOp* curOp) {
         // Mark the op as complete, and log it if appropriate. Returns a boolean indicating whether
         // this op should be sampled for profiling.
         const bool shouldProfile = curOp->completeAndLogOperation(
-            opCtx,
             MONGO_LOGV2_DEFAULT_COMPONENT,
             CollectionCatalog::get(opCtx)
                 ->getDatabaseProfileSettings(curOp->getNSS().dbName())
@@ -916,7 +994,7 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
         CollectionQueryInfo::get(coll).notifyOfQuery(opCtx, coll, summary);
     }
 
-    if (curOp.shouldDBProfile(opCtx)) {
+    if (curOp.shouldDBProfile()) {
         auto&& [stats, _] = explainer.getWinningPlanStats(ExplainOptions::Verbosity::kExecStats);
         curOp.debug().execStats = std::move(stats);
     }
@@ -1094,10 +1172,8 @@ WriteResult performUpdates(OperationContext* opCtx,
         const Command* cmd = parentCurOp.getCommand();
         boost::optional<CurOp> curOp;
         if (source != OperationSource::kTimeseriesInsert) {
-            curOp.emplace(opCtx);
-
-            stdx::lock_guard<Client> lk(*opCtx->getClient());
-            curOp->setCommand_inlock(cmd);
+            curOp.emplace(cmd);
+            curOp->push(opCtx);
         }
         ON_BLOCK_EXIT([&] {
             if (curOp) {
@@ -1106,8 +1182,18 @@ WriteResult performUpdates(OperationContext* opCtx,
         });
 
         if (analyze_shard_key::supportsPersistingSampledQueries() && singleOp.getSampleId()) {
+            auto updateOp = wholeOp;
+
+            // If the initial query was a write without shard key, the two phase write protocol
+            // modifies the query in the write phase. In order to get correct metrics, we need to
+            // reconstruct the original query prior to sampling.
+            if (wholeOp.getOriginalQuery()) {
+                updateOp.getUpdates().front().setQ(*wholeOp.getOriginalQuery());
+                updateOp.getUpdates().front().setCollation(wholeOp.getOriginalCollation());
+            }
+
             analyze_shard_key::QueryAnalysisWriter::get(opCtx)
-                ->addUpdateQuery(wholeOp, currentOpIndex)
+                ->addUpdateQuery(updateOp, currentOpIndex)
                 .getAsync([](auto) {});
         }
 
@@ -1120,7 +1206,12 @@ WriteResult performUpdates(OperationContext* opCtx,
                 ? *wholeOp.getStmtIds()
                 : std::vector<StmtId>{stmtId};
 
-            out.results.emplace_back(
+            boost::optional<Timer> timer;
+            if (singleOp.getMulti()) {
+                timer.emplace();
+            }
+
+            const SingleWriteResult&& reply =
                 performSingleUpdateOpWithDupKeyRetry(opCtx,
                                                      ns,
                                                      wholeOp.getCollectionUUID(),
@@ -1129,9 +1220,15 @@ WriteResult performUpdates(OperationContext* opCtx,
                                                      runtimeConstants,
                                                      wholeOp.getLet(),
                                                      source,
-                                                     forgoOpCounterIncrements));
+                                                     forgoOpCounterIncrements);
+            out.results.emplace_back(reply);
             forgoOpCounterIncrements = true;
             lastOpFixer.finishedOpSuccessfully();
+
+            if (singleOp.getMulti()) {
+                updateManyCount.increment(1);
+                collectMultiUpdateDeleteMetrics(timer->elapsed(), reply.getNModified());
+            }
         } catch (const DBException& ex) {
             out.canContinue = handleError(opCtx,
                                           ex,
@@ -1221,23 +1318,32 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
                     *timeseriesOptions, request.getHint())));
         }
 
-        uassert(ErrorCodes::InvalidOptions,
+        // TODO SERVER-73077 Remove this if block entirely.
+        if (!feature_flags::gTimeseriesUpdatesDeletesSupport.isEnabled(
+                serverGlobalParams.featureCompatibility)) {
+            uassert(
+                ErrorCodes::InvalidOptions,
                 "Cannot perform a delete with a non-empty query on a time-series collection that "
                 "does not have a metaField",
                 timeseriesOptions->getMetaField() || request.getQuery().isEmpty());
 
-        uassert(ErrorCodes::IllegalOperation,
-                "Cannot perform a non-multi delete on a time-series collection",
-                request.getMulti());
-        if (auto metaField = timeseriesOptions->getMetaField()) {
-            request.setQuery(timeseries::translateQuery(request.getQuery(), *metaField));
+            uassert(ErrorCodes::IllegalOperation,
+                    "Cannot perform a non-multi delete on a time-series collection",
+                    request.getMulti());
+            if (auto metaField = timeseriesOptions->getMetaField()) {
+                request.setQuery(timeseries::translateQuery(request.getQuery(), *metaField));
+            }
         }
 
         documentCounter =
             timeseries::numMeasurementsForBucketCounter(timeseriesOptions->getTimeField());
     }
 
-    ParsedDelete parsedDelete(opCtx, &request);
+    ParsedDelete parsedDelete(opCtx,
+                              &request,
+                              source == OperationSource::kTimeseriesDelete && collection
+                                  ? collection->getTimeseriesOptions()
+                                  : boost::none);
     uassertStatusOK(parsedDelete.parseRequest());
 
     if (collection.getDb()) {
@@ -1272,7 +1378,7 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
     }
     curOp.debug().setPlanSummaryMetrics(summary);
 
-    if (curOp.shouldDBProfile(opCtx)) {
+    if (curOp.shouldDBProfile()) {
         auto&& [stats, _] = explainer.getWinningPlanStats(ExplainOptions::Verbosity::kExecStats);
         curOp.debug().execStats = std::move(stats);
     }
@@ -1336,11 +1442,8 @@ WriteResult performDeletes(OperationContext* opCtx,
         // Add Command pointer to the nested CurOp.
         auto& parentCurOp = *CurOp::get(opCtx);
         const Command* cmd = parentCurOp.getCommand();
-        CurOp curOp(opCtx);
-        {
-            stdx::lock_guard<Client> lk(*opCtx->getClient());
-            curOp.setCommand_inlock(cmd);
-        }
+        CurOp curOp(cmd);
+        curOp.push(opCtx);
         ON_BLOCK_EXIT([&] {
             if (MONGO_unlikely(hangBeforeChildRemoveOpFinishes.shouldFail())) {
                 CurOpFailpointHelpers::waitWhileFailPointEnabled(
@@ -1354,22 +1457,44 @@ WriteResult performDeletes(OperationContext* opCtx,
         });
 
         if (analyze_shard_key::supportsPersistingSampledQueries() && singleOp.getSampleId()) {
+            auto deleteOp = wholeOp;
+
+            // If the initial query was a write without shard key, the two phase write protocol
+            // modifies the query in the write phase. In order to get correct metrics, we need to
+            // reconstruct the original query prior to sampling.
+            if (wholeOp.getOriginalQuery()) {
+                deleteOp.getDeletes().front().setQ(*wholeOp.getOriginalQuery());
+                deleteOp.getDeletes().front().setCollation(wholeOp.getOriginalCollation());
+            }
+
             analyze_shard_key::QueryAnalysisWriter::get(opCtx)
-                ->addDeleteQuery(wholeOp, currentOpIndex)
+                ->addDeleteQuery(deleteOp, currentOpIndex)
                 .getAsync([](auto) {});
         }
 
         try {
             lastOpFixer.startingOp();
-            out.results.push_back(performSingleDeleteOp(opCtx,
-                                                        ns,
-                                                        wholeOp.getCollectionUUID(),
-                                                        stmtId,
-                                                        singleOp,
-                                                        runtimeConstants,
-                                                        wholeOp.getLet(),
-                                                        source));
+
+            boost::optional<Timer> timer;
+            if (singleOp.getMulti()) {
+                timer.emplace();
+            }
+
+            const SingleWriteResult&& reply = performSingleDeleteOp(opCtx,
+                                                                    ns,
+                                                                    wholeOp.getCollectionUUID(),
+                                                                    stmtId,
+                                                                    singleOp,
+                                                                    runtimeConstants,
+                                                                    wholeOp.getLet(),
+                                                                    source);
+            out.results.push_back(reply);
             lastOpFixer.finishedOpSuccessfully();
+
+            if (singleOp.getMulti()) {
+                deleteManyCount.increment(1);
+                collectMultiUpdateDeleteMetrics(timer->elapsed(), reply.getN());
+            }
         } catch (const DBException& ex) {
             out.canContinue = handleError(opCtx,
                                           ex,
@@ -1389,7 +1514,7 @@ WriteResult performDeletes(OperationContext* opCtx,
     }
 
     return out;
-}
+}  // namespace mongo::write_ops_exec
 
 Status performAtomicTimeseriesWrites(
     OperationContext* opCtx,
@@ -1430,7 +1555,7 @@ Status performAtomicTimeseriesWrites(
     // Since we are manually updating the "lastWriteOpTime" before committing, we'll also need to
     // manually reset if the storage transaction is aborted.
     if (slot && participant) {
-        opCtx->recoveryUnit()->onRollback([opCtx] {
+        opCtx->recoveryUnit()->onRollback([](OperationContext* opCtx) {
             TransactionParticipant::get(opCtx).setLastWriteOpTime(opCtx, repl::OpTime());
         });
     }

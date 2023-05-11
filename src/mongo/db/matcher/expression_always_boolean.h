@@ -62,8 +62,12 @@ public:
         debug << name() << ": 1\n";
     }
 
-    void serialize(BSONObjBuilder* out, bool includePath) const final {
-        out->append(name(), 1);
+    void serialize(BSONObjBuilder* out, SerializationOptions opts) const final {
+        if (opts.replacementForLiteralArgs) {
+            out->append(name(), *opts.replacementForLiteralArgs);
+        } else {
+            out->append(name(), 1);
+        }
     }
 
     bool equivalent(const MatchExpression* other) const final {
@@ -92,7 +96,9 @@ public:
 
 private:
     ExpressionOptimizerFunc getOptimizer() const final {
-        return [](std::unique_ptr<MatchExpression> expression) { return expression; };
+        return [](std::unique_ptr<MatchExpression> expression) {
+            return expression;
+        };
     }
 
     bool _value;

@@ -30,6 +30,7 @@
 #include "mongo/db/pipeline/document_source_lookup.h"
 
 #include "mongo/base/init.h"
+#include "mongo/db/catalog_shard_feature_flag_gen.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/jsobj.h"
@@ -231,10 +232,7 @@ DocumentSourceLookUp::DocumentSourceLookUp(
 
 DocumentSourceLookUp::DocumentSourceLookUp(const DocumentSourceLookUp& original,
                                            const boost::intrusive_ptr<ExpressionContext>& newExpCtx)
-    : DocumentSource(
-          kStageName,
-          newExpCtx ? newExpCtx
-                    : original.pExpCtx->copyWith(original.pExpCtx->ns, original.pExpCtx->uuid)),
+    : DocumentSource(kStageName, newExpCtx),
       _fromNs(original._fromNs),
       _resolvedNs(original._resolvedNs),
       _as(original._as),
@@ -254,10 +252,10 @@ DocumentSourceLookUp::DocumentSourceLookUp(const DocumentSourceLookUp& original,
         _cache.emplace(internalDocumentSourceCursorBatchSizeBytes.load());
     }
     if (original._matchSrc) {
-        _matchSrc = static_cast<DocumentSourceMatch*>(original._matchSrc->clone().get());
+        _matchSrc = static_cast<DocumentSourceMatch*>(original._matchSrc->clone(pExpCtx).get());
     }
     if (original._unwindSrc) {
-        _unwindSrc = static_cast<DocumentSourceUnwind*>(original._unwindSrc->clone().get());
+        _unwindSrc = static_cast<DocumentSourceUnwind*>(original._unwindSrc->clone(pExpCtx).get());
     }
 }
 
@@ -385,7 +383,12 @@ StageConstraints DocumentSourceLookUp::constraints(Pipeline::SplitState pipeStat
         // This stage will only be on the shards pipeline if $lookup on sharded foreign collections
         // is allowed.
         hostRequirement = HostTypeRequirement::kAnyShard;
-    } else if (_fromNs == NamespaceString::kConfigsvrCollectionsNamespace) {
+    } else if (_fromNs == NamespaceString::kConfigsvrCollectionsNamespace &&
+               // If the catalog shard feature flag is enabled, the config server should have the
+               // components necessary to handle a merge. Config servers are upgraded first and
+               // downgraded last, so if any server is running the latest binary, we can assume the
+               // conifg servers are too.
+               !gFeatureFlagCatalogShard.isEnabledAndIgnoreFCV()) {
         // This is an unsharded collection, but the primary shard would be the config server, and
         // the config servers are not prepared to take queries. Instead, we'll merge on any of the
         // other shards.
@@ -1167,6 +1170,21 @@ void DocumentSourceLookUp::reattachToOperationContext(OperationContext* opCtx) {
     } else if (_fromExpCtx) {
         _fromExpCtx->opCtx = opCtx;
     }
+}
+
+bool DocumentSourceLookUp::validateOperationContext(const OperationContext* opCtx) const {
+    if (getContext()->opCtx != opCtx || (_fromExpCtx && _fromExpCtx->opCtx != opCtx)) {
+        return false;
+    }
+
+    if (_pipeline) {
+        const auto& sources = _pipeline->getSources();
+        return std::all_of(sources.begin(), sources.end(), [opCtx](const auto& s) {
+            return s->validateOperationContext(opCtx);
+        });
+    }
+
+    return true;
 }
 
 boost::intrusive_ptr<DocumentSource> DocumentSourceLookUp::createFromBson(

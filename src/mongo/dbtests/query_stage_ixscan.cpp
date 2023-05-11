@@ -59,7 +59,7 @@ public:
 
         _ctx.db()->dropCollection(&_opCtx, nss()).transitional_ignore();
         _coll = _ctx.db()->createCollection(&_opCtx, nss());
-        _collPtr = _coll;
+        _collPtr = CollectionPtr(_coll);
 
         ASSERT_OK(_coll->getIndexCatalog()->createIndexOnEmptyCollection(
             &_opCtx,
@@ -73,12 +73,8 @@ public:
     void insert(const BSONObj& doc) {
         WriteUnitOfWork wunit(&_opCtx);
         OpDebug* const nullOpDebug = nullptr;
-        ASSERT_OK(
-            collection_internal::insertDocument(&_opCtx,
-                                                CollectionPtr(_coll, CollectionPtr::NoYieldTag{}),
-                                                InsertStatement(doc),
-                                                nullOpDebug,
-                                                false));
+        ASSERT_OK(collection_internal::insertDocument(
+            &_opCtx, CollectionPtr(_coll), InsertStatement(doc), nullOpDebug, false));
         wunit.commit();
     }
 

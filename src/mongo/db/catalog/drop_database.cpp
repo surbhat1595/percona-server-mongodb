@@ -136,9 +136,8 @@ Status _dropDatabase(OperationContext* opCtx, const DatabaseName& dbName, bool a
     // As of SERVER-32205, dropping the admin database is prohibited.
     uassert(ErrorCodes::IllegalOperation,
             str::stream() << "Dropping the '" << dbName << "' database is prohibited.",
-            dbName != NamespaceString::kAdminDb);
+            dbName.db() != DatabaseName::kAdmin.db());
 
-    // TODO (Kal): OldClientContext legacy, needs to be removed
     {
         CurOp::get(opCtx)->ensureStarted();
         stdx::lock_guard<Client> lk(*opCtx->getClient());

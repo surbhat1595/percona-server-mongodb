@@ -127,7 +127,7 @@ Future<executor::TaskExecutor::ResponseStatus> AsyncWorkScheduler::scheduleRemot
             auto start = _executor->now();
 
             auto requestOpMsg =
-                OpMsgRequest::fromDBAndBody(NamespaceString::kAdminDb, commandObj).serialize();
+                OpMsgRequest::fromDBAndBody(DatabaseName::kAdmin.db(), commandObj).serialize();
             const auto replyOpMsg = OpMsg::parseOwned(
                 service->getServiceEntryPoint()->handleRequest(opCtx, requestOpMsg).get().response);
 
@@ -145,7 +145,7 @@ Future<executor::TaskExecutor::ResponseStatus> AsyncWorkScheduler::scheduleRemot
         .then([this, shardId, commandObj = commandObj.getOwned(), readPref](
                   HostAndShard hostAndShard) mutable {
             executor::RemoteCommandRequest request(hostAndShard.hostTargeted,
-                                                   NamespaceString::kAdminDb.toString(),
+                                                   DatabaseName::kAdmin.toString(),
                                                    commandObj,
                                                    readPref.toContainingBSON(),
                                                    nullptr);
@@ -155,15 +155,15 @@ Future<executor::TaskExecutor::ResponseStatus> AsyncWorkScheduler::scheduleRemot
             stdx::unique_lock<Latch> ul(_mutex);
             uassertStatusOK(_shutdownStatus);
 
-            auto scheduledCommandHandle =
-                uassertStatusOK(_executor->scheduleRemoteCommand(request, [
-                    this,
-                    commandObj = std::move(commandObj),
-                    shardId = std::move(shardId),
-                    hostTargeted = std::move(hostAndShard.hostTargeted),
-                    shard = std::move(hostAndShard.shard),
-                    promise = std::make_shared<Promise<ResponseStatus>>(std::move(pf.promise))
-                ](const RemoteCommandCallbackArgs& args) mutable noexcept {
+            auto scheduledCommandHandle = uassertStatusOK(_executor->scheduleRemoteCommand(
+                request,
+                [this,
+                 commandObj = std::move(commandObj),
+                 shardId = std::move(shardId),
+                 hostTargeted = std::move(hostAndShard.hostTargeted),
+                 shard = std::move(hostAndShard.shard),
+                 promise = std::make_shared<Promise<ResponseStatus>>(std::move(pf.promise))](
+                    const RemoteCommandCallbackArgs& args) mutable noexcept {
                     auto status = args.response.status;
                     shard->updateReplSetMonitor(hostTargeted, status);
 

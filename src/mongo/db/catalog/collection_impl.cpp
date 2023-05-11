@@ -130,10 +130,9 @@ Status checkValidationOptionsCanBeUsed(const CollectionOptions& opts,
 }
 
 Status validateIsNotInDbs(const NamespaceString& ns,
-                          const std::vector<StringData>& disallowedDbs,
+                          const std::vector<DatabaseName>& disallowedDbs,
                           StringData optionName) {
-    // TODO SERVER-62491 Check for DatabaseName instead
-    if (std::find(disallowedDbs.begin(), disallowedDbs.end(), ns.db()) != disallowedDbs.end()) {
+    if (std::find(disallowedDbs.begin(), disallowedDbs.end(), ns.dbName()) != disallowedDbs.end()) {
         return {ErrorCodes::InvalidOptions,
                 str::stream() << optionName << " collection option is not supported on the "
                               << ns.db() << " database"};
@@ -145,10 +144,10 @@ Status validateIsNotInDbs(const NamespaceString& ns,
 // Validates that the option is not used on admin, local or config db as well as not being used on
 // config servers.
 Status validateChangeStreamPreAndPostImagesOptionIsPermitted(const NamespaceString& ns) {
-    const auto validationStatus = validateIsNotInDbs(
-        ns,
-        {NamespaceString::kAdminDb, NamespaceString::kLocalDb, NamespaceString::kConfigDb},
-        "changeStreamPreAndPostImages");
+    const auto validationStatus =
+        validateIsNotInDbs(ns,
+                           {DatabaseName::kAdmin, DatabaseName::kLocal, DatabaseName::kConfig},
+                           "changeStreamPreAndPostImages");
     if (validationStatus != Status::OK()) {
         return validationStatus;
     }
@@ -213,10 +212,10 @@ bool doesMinMaxHaveMixedSchemaData(const BSONObj& min, const BSONObj& max) {
 
 StatusWith<std::shared_ptr<Ident>> findSharedIdentForIndex(OperationContext* opCtx,
                                                            StorageEngine* storageEngine,
-                                                           Collection* collection,
+                                                           const Collection* collection,
                                                            StringData ident) {
     // First check the index catalog of the existing collection for the index entry.
-    auto latestEntry = [&]() -> std::shared_ptr<IndexCatalogEntry> {
+    auto latestEntry = [&]() -> std::shared_ptr<const IndexCatalogEntry> {
         if (!collection)
             return nullptr;
 
@@ -363,8 +362,7 @@ void CollectionImpl::init(OperationContext* opCtx) {
     _metadata = DurableCatalog::get(opCtx)->getMetaData(opCtx, getCatalogId());
     const auto& collectionOptions = _metadata->options;
 
-    _shared->_collator = parseCollation(opCtx, _ns, collectionOptions.collation);
-
+    _initShared(opCtx, collectionOptions);
     _initCommon(opCtx);
 
     if (collectionOptions.clusteredIndex) {
@@ -374,10 +372,11 @@ void CollectionImpl::init(OperationContext* opCtx) {
             auto svcCtx = opCtx->getClient()->getServiceContext();
             auto uuid = *collectionOptions.uuid;
             if (opCtx->lockState()->inAWriteUnitOfWork()) {
-                opCtx->recoveryUnit()->onCommit([svcCtx, uuid](auto ts) {
-                    TTLCollectionCache::get(svcCtx).registerTTLInfo(
-                        uuid, TTLCollectionCache::Info{TTLCollectionCache::ClusteredId{}});
-                });
+                opCtx->recoveryUnit()->onCommit(
+                    [svcCtx, uuid](OperationContext*, boost::optional<Timestamp>) {
+                        TTLCollectionCache::get(svcCtx).registerTTLInfo(
+                            uuid, TTLCollectionCache::Info{TTLCollectionCache::ClusteredId{}});
+                    });
             } else {
                 TTLCollectionCache::get(svcCtx).registerTTLInfo(
                     uuid, TTLCollectionCache::Info{TTLCollectionCache::ClusteredId{}});
@@ -390,7 +389,7 @@ void CollectionImpl::init(OperationContext* opCtx) {
 }
 
 Status CollectionImpl::initFromExisting(OperationContext* opCtx,
-                                        const std::shared_ptr<Collection>& collection,
+                                        const std::shared_ptr<const Collection>& collection,
                                         const DurableCatalogEntry& catalogEntry,
                                         boost::optional<Timestamp> readTimestamp) {
     // We are per definition committed if we initialize from an existing collection.
@@ -400,7 +399,9 @@ Status CollectionImpl::initFromExisting(OperationContext* opCtx,
         // Use the shared state from the existing collection.
         LOGV2_DEBUG(
             6825402, 1, "Initializing collection using shared state", logAttrs(collection->ns()));
-        _shared = static_cast<CollectionImpl*>(collection.get())->_shared;
+        _shared = static_cast<const CollectionImpl*>(collection.get())->_shared;
+    } else {
+        _initShared(opCtx, catalogEntry.metadata->options);
     }
 
     // When initializing a collection from an earlier point-in-time, we don't know when the last DDL
@@ -455,6 +456,10 @@ Status CollectionImpl::initFromExisting(OperationContext* opCtx,
 
     _initialized = true;
     return Status::OK();
+}
+
+void CollectionImpl::_initShared(OperationContext* opCtx, const CollectionOptions& options) {
+    _shared->_collator = parseCollation(opCtx, _ns, options.collation);
 }
 
 void CollectionImpl::_initCommon(OperationContext* opCtx) {
@@ -679,6 +684,8 @@ Collection::Validator CollectionImpl::parseValidator(
     auto expCtx = make_intrusive<ExpressionContext>(
         opCtx, CollatorInterface::cloneCollator(_shared->_collator.get()), ns());
 
+    expCtx->variables.setDefaultRuntimeConstants(opCtx);
+
     // The MatchExpression and contained ExpressionContext created as part of the validator are
     // owned by the Collection and will outlive the OperationContext they were created under.
     expCtx->opCtx = nullptr;
@@ -893,7 +900,7 @@ Status CollectionImpl::updateCappedSize(OperationContext* opCtx,
     }
 
     if (ns().isOplog() && newCappedSize) {
-        Status status = _shared->_recordStore->updateOplogSize(*newCappedSize);
+        Status status = _shared->_recordStore->updateOplogSize(opCtx, *newCappedSize);
         if (!status.isOK()) {
             return status;
         }
@@ -1666,7 +1673,7 @@ bool CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
         return false;
 
     opCtx->recoveryUnit()->onRollback(
-        [this, uncommittedMultikeys]() { uncommittedMultikeys->erase(this); });
+        [this, uncommittedMultikeys](OperationContext*) { uncommittedMultikeys->erase(this); });
 
     DurableCatalog::get(opCtx)->putMetaData(opCtx, getCatalogId(), *metadata);
 
@@ -1707,7 +1714,7 @@ bool CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
     // commiting/rolling back the transaction is fully complete.
     opCtx->recoveryUnit()->onCommit(
         [this, uncommittedMultikeys, setMultikey = std::move(setMultikey), concurrentWriteTracker](
-            auto ts) {
+            OperationContext*, boost::optional<Timestamp>) {
             // Merge in changes to this index, other indexes may have been updated since we made our
             // copy. Don't check for result as another thread could be setting multikey at the same
             // time
@@ -1761,12 +1768,13 @@ void CollectionImpl::forceSetIndexIsMultikey(OperationContext* opCtx,
     forceSetMultikey(*metadata);
 
     opCtx->recoveryUnit()->onRollback(
-        [this, uncommittedMultikeys]() { uncommittedMultikeys->erase(this); });
+        [this, uncommittedMultikeys](OperationContext*) { uncommittedMultikeys->erase(this); });
 
     DurableCatalog::get(opCtx)->putMetaData(opCtx, getCatalogId(), *metadata);
 
     opCtx->recoveryUnit()->onCommit(
-        [this, uncommittedMultikeys, forceSetMultikey = std::move(forceSetMultikey)](auto ts) {
+        [this, uncommittedMultikeys, forceSetMultikey = std::move(forceSetMultikey)](
+            OperationContext*, boost::optional<Timestamp>) {
             // Merge in changes to this index, other indexes may have been updated since we made our
             // copy.
             forceSetMultikey(*_metadata);

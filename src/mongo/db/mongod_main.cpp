@@ -173,6 +173,7 @@
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/backup_cursor_hooks.h"
 #include "mongo/db/storage/control/storage_control.h"
+#include "mongo/db/storage/disk_space_monitor.h"
 #include "mongo/db/storage/durable_history_pin.h"
 #include "mongo/db/storage/encryption_hooks.h"
 #include "mongo/db/storage/flow_control.h"
@@ -195,6 +196,7 @@
 #include "mongo/executor/network_interface_thread_pool.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/idl/cluster_server_parameter_gen.h"
+#include "mongo/idl/cluster_server_parameter_initializer.h"
 #include "mongo/idl/cluster_server_parameter_op_observer.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/process_id.h"
@@ -261,8 +263,6 @@ MONGO_FAIL_POINT_DEFINE(hangDuringQuiesceMode);
 MONGO_FAIL_POINT_DEFINE(pauseWhileKillingOperationsAtShutdown);
 MONGO_FAIL_POINT_DEFINE(hangBeforeShutdown);
 
-const NamespaceString startupLogCollectionName("local.startup_log");
-
 #ifdef _WIN32
 const ntservice::NtServiceDefaultStrings defaultServiceStrings = {
     L"MongoDB", L"MongoDB", L"MongoDB Server"};
@@ -290,24 +290,25 @@ void logStartup(OperationContext* opCtx) {
     BSONObj o = toLog.obj();
 
     Lock::GlobalWrite lk(opCtx);
-    AutoGetDb autoDb(opCtx, startupLogCollectionName.dbName(), mongo::MODE_X);
+    AutoGetDb autoDb(opCtx, NamespaceString::kStartupLogNamespace.dbName(), mongo::MODE_X);
     auto db = autoDb.ensureDbExists(opCtx);
-    CollectionPtr collection =
-        CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, startupLogCollectionName);
+    auto collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
+        opCtx, NamespaceString::kStartupLogNamespace);
     WriteUnitOfWork wunit(opCtx);
     if (!collection) {
         BSONObj options = BSON("capped" << true << "size" << 10 * 1024 * 1024);
         repl::UnreplicatedWritesBlock uwb(opCtx);
         CollectionOptions collectionOptions = uassertStatusOK(
             CollectionOptions::parse(options, CollectionOptions::ParseKind::parseForCommand));
-        uassertStatusOK(db->userCreateNS(opCtx, startupLogCollectionName, collectionOptions));
+        uassertStatusOK(
+            db->userCreateNS(opCtx, NamespaceString::kStartupLogNamespace, collectionOptions));
         collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
-            opCtx, startupLogCollectionName);
+            opCtx, NamespaceString::kStartupLogNamespace);
     }
     invariant(collection);
 
     uassertStatusOK(collection_internal::insertDocument(
-        opCtx, collection, InsertStatement(o), nullptr /* OpDebug */, false));
+        opCtx, CollectionPtr(collection), InsertStatement(o), nullptr /* OpDebug */, false));
     wunit.commit();
 }
 
@@ -580,6 +581,14 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         exitCleanly(ExitCode::needDowngrade);
     }
 
+    // If we are on standalone, load cluster parameters from disk. If we are replicated, this is not
+    // a concern as the cluster parameter initializer runs automatically.
+    auto replCoord = repl::ReplicationCoordinator::get(startupOpCtx.get());
+    invariant(replCoord);
+    if (!replCoord->isReplEnabled()) {
+        ClusterServerParameterInitializer::synchronizeAllParametersFromDisk(startupOpCtx.get());
+    }
+
     // Ensure FCV document exists and is initialized in-memory. Fatally asserts if there is an
     // error.
     FeatureCompatibilityVersion::fassertInitializedAfterStartup(startupOpCtx.get());
@@ -735,8 +744,6 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
                               << "startupRecoveryForRestore at the same time",
                 !repl::startupRecoveryForRestore);
 
-        auto replCoord = repl::ReplicationCoordinator::get(startupOpCtx.get());
-        invariant(replCoord);
         uassert(ErrorCodes::BadValue,
                 str::stream() << "Cannot use queryableBackupMode in a replica set",
                 !replCoord->isReplEnabled());
@@ -752,9 +759,6 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         }
 
         startFreeMonitoring(serviceContext);
-
-        auto replCoord = repl::ReplicationCoordinator::get(startupOpCtx.get());
-        invariant(replCoord);
 
         if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
             // Note: For replica sets, ShardingStateRecovery happens on transition to primary.
@@ -831,6 +835,11 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         storageEngine->startTimestampMonitor();
 
         startFLECrud(serviceContext);
+
+        DiskSpaceMonitor::start(serviceContext);
+        auto diskMonitor = DiskSpaceMonitor::get(serviceContext);
+        diskMonitor->registerAction(
+            IndexBuildsCoordinator::get(serviceContext)->makeKillIndexBuildOnLowDiskSpaceAction());
     }
 
     startClientCursorMonitor();
@@ -1379,6 +1388,8 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         LOGV2_OPTIONS(4695103, {LogComponent::kReplication}, "Exiting quiesce mode for shutdown");
     }
 
+    DiskSpaceMonitor::stop(serviceContext);
+
     LOGV2_OPTIONS(6371601, {LogComponent::kDefault}, "Shutting down the FLE Crud thread pool");
     stopFLECrud();
 
@@ -1436,7 +1447,10 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
             uniqueOpCtx = client->makeOperationContext();
             opCtx = uniqueOpCtx.get();
         }
-        opCtx->setIsExecutingShutdown();
+        {
+            stdx::lock_guard lg(*client);
+            opCtx->setIsExecutingShutdown();
+        }
 
         // This can wait a long time while we drain the secondary's apply queue, especially if
         // it is building an index.

@@ -30,6 +30,7 @@
 
 #include "mongo/platform/basic.h"
 
+#include <absl/container/flat_hash_map.h>
 #include <limits>
 #include <memory>
 #include <timelib.h>
@@ -97,6 +98,8 @@ const std::vector<timelib_format_specifier> kDateFromStringFormatMap = {
 // Format specifier map when converting a date to a string.
 //
 const std::vector<timelib_format_specifier> kDateToStringFormatMap = {
+    {'b', TIMELIB_FORMAT_TEXTUAL_MONTH_3_LETTER},
+    {'B', TIMELIB_FORMAT_TEXTUAL_MONTH_FULL},
     {'d', TIMELIB_FORMAT_DAY_TWO_DIGIT},
     {'G', TIMELIB_FORMAT_YEAR_ISO},
     {'H', TIMELIB_FORMAT_HOUR_TWO_DIGIT_24_MAX},
@@ -113,27 +116,45 @@ const std::vector<timelib_format_specifier> kDateToStringFormatMap = {
     {'z', TIMELIB_FORMAT_TIMEZONE_OFFSET},
     {'Z', TIMELIB_FORMAT_TIMEZONE_OFFSET_MINUTES}};
 
-
 // Verifies that any '%' is followed by a valid format character as indicated by 'allowedFormats',
 // and that the 'format' string ends with an even number of '%' symbols.
-void validateFormat(StringData format,
-                    const std::vector<timelib_format_specifier>& allowedFormats) {
+template <bool UserErrorMessage>
+bool checkFormatString(StringData format,
+                       const std::vector<timelib_format_specifier>& allowedFormats) {
     for (auto it = format.begin(); it != format.end(); ++it) {
         if (*it != '%') {
             continue;
         }
 
         ++it;  // next character must be format modifier
-        uassert(18535, "Unmatched '%' at end of format string", it != format.end());
+        if constexpr (UserErrorMessage) {
+            uassert(18535, "Unmatched '%' at end of format string", it != format.end());
+        } else if (it == format.end()) {
+            return false;
+        }
 
         const bool validSpecifier = (*it == '%') ||
             std::find_if(allowedFormats.begin(), allowedFormats.end(), [=](const auto& format) {
                 return format.specifier == *it;
             }) != allowedFormats.end();
-        uassert(18536,
-                str::stream() << "Invalid format character '%" << *it << "' in format string",
-                validSpecifier);
+        if constexpr (UserErrorMessage) {
+            uassert(18536,
+                    str::stream() << "Invalid format character '%" << *it << "' in format string",
+                    validSpecifier);
+        } else if (!validSpecifier) {
+            return false;
+        }
     }
+    return true;
+}
+
+bool isValidFormat(StringData format, const std::vector<timelib_format_specifier>& allowedFormats) {
+    return checkFormatString<false>(format, allowedFormats);
+}
+
+void validateFormat(StringData format,
+                    const std::vector<timelib_format_specifier>& allowedFormats) {
+    checkFormatString<true>(format, allowedFormats);
 }
 
 }  // namespace
@@ -591,6 +612,63 @@ Seconds TimeZone::utcOffset(Date_t date) const {
     } else {
         return _utcOffset;
     }
+}
+
+// A mapping from months to full string representations of the month.
+static const absl::flat_hash_map<int, std::string> monthToFullMonthNameMap{
+    {1, "January"},
+    {2, "February"},
+    {3, "March"},
+    {4, "April"},
+    {5, "May"},
+    {6, "June"},
+    {7, "July"},
+    {8, "August"},
+    {9, "September"},
+    {10, "October"},
+    {11, "November"},
+    {12, "December"},
+};
+
+// A mapping from months to three letter string representations of the month.
+static const absl::flat_hash_map<int, std::string> monthToThreeLetterMonthNameMap{
+    {1, "Jan"},
+    {2, "Feb"},
+    {3, "Mar"},
+    {4, "Apr"},
+    {5, "May"},
+    {6, "Jun"},
+    {7, "Jul"},
+    {8, "Aug"},
+    {9, "Sep"},
+    {10, "Oct"},
+    {11, "Nov"},
+    {12, "Dec"},
+};
+
+std::string TimeZone::fullMonthName(int monthNum) const {
+    auto iterator = monthToFullMonthNameMap.find(monthNum);
+    uassert(ErrorCodes::FailedToParse,
+            str::stream() << "unknown month value: " << monthNum,
+            iterator != monthToFullMonthNameMap.end());
+    return iterator->second;
+}
+
+std::string TimeZone::threeLetterMonthName(int monthNum) const {
+    auto iterator = monthToThreeLetterMonthNameMap.find(monthNum);
+    uassert(ErrorCodes::FailedToParse,
+            str::stream() << "unknown month value: " << monthNum,
+            iterator != monthToThreeLetterMonthNameMap.end());
+    return iterator->second;
+}
+
+
+bool TimeZone::isValidToStringFormat(StringData format) {
+    return isValidFormat(format, kDateToStringFormatMap);
+}
+
+bool TimeZone::isValidFromStringFormat(StringData format) {
+    return isValidFormat(format, kDateFromStringFormatMap);
 }
 
 void TimeZone::validateToStringFormat(StringData format) {

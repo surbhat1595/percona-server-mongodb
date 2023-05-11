@@ -71,6 +71,14 @@ BatchedCommandRequest constructBatchedCommandRequest(const OpMsgRequest& request
 
 }  // namespace
 
+// TODO(SERVER-74155): consider this for the helper class to access variant op.
+const mongo::BulkWriteInsertOp& getInsert(const stdx::variant<mongo::BulkWriteInsertOp,
+                                                              mongo::BulkWriteUpdateOp,
+                                                              mongo::BulkWriteDeleteOp>& op) {
+    // Caller needs to check the type with getOpType or this stdx::get<>() will throw.
+    return stdx::get<mongo::BulkWriteInsertOp>(op);
+}
+
 const boost::optional<LegacyRuntimeConstants> BatchedCommandRequest::kEmptyRuntimeConstants =
     boost::optional<LegacyRuntimeConstants>{};
 const boost::optional<BSONObj> BatchedCommandRequest::kEmptyLet = boost::optional<BSONObj>{};
@@ -139,7 +147,9 @@ void BatchedCommandRequest::unsetLegacyRuntimeConstants() {
     _visit(OverloadedVisitor{
         [](write_ops::InsertCommandRequest&) {},
         [&](write_ops::UpdateCommandRequest& op) { op.setLegacyRuntimeConstants(boost::none); },
-        [&](write_ops::DeleteCommandRequest& op) { op.setLegacyRuntimeConstants(boost::none); }});
+        [&](write_ops::DeleteCommandRequest& op) {
+            op.setLegacyRuntimeConstants(boost::none);
+        }});
 }
 
 const boost::optional<LegacyRuntimeConstants>& BatchedCommandRequest::getLegacyRuntimeConstants()

@@ -61,13 +61,11 @@ env.Library(
 )
 
 env.Library(
-    target='aggregation_request_helper',
-    source=[
+    target='aggregation_request_helper', source=[
         'aggregation_request_helper.cpp',
         'aggregate_command.idl',
         'external_data_source_option.idl',
-    ],
-    LIBDEPS=[
+    ], LIBDEPS=[
         '$BUILD_DIR/mongo/db/exec/document_value/document_value',
         '$BUILD_DIR/mongo/db/query/command_request_response',
         '$BUILD_DIR/mongo/db/query/common_query_enums_and_helpers',
@@ -77,8 +75,9 @@ env.Library(
         '$BUILD_DIR/mongo/db/storage/storage_options',
         '$BUILD_DIR/mongo/db/write_concern_options',
         'document_sources_idl',
-    ],
-)
+    ], LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/query/telemetry_idl',
+    ])
 
 env.Library(
     target='variable_validation',
@@ -178,6 +177,7 @@ env.Library(
         'sharded_agg_helpers.cpp',
     ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/s/async_requests_sender',
         '$BUILD_DIR/mongo/s/query/cluster_query',
         'aggregation',
@@ -386,6 +386,7 @@ pipelineEnv.Library(
         '$BUILD_DIR/mongo/db/storage/encryption_hooks',
         '$BUILD_DIR/mongo/db/storage/index_entry_comparison',
         '$BUILD_DIR/mongo/db/storage/storage_options',
+        '$BUILD_DIR/mongo/db/timeseries/catalog_helper',
         '$BUILD_DIR/mongo/db/update/update_document_diff',
         '$BUILD_DIR/mongo/db/views/resolved_view',
         '$BUILD_DIR/mongo/s/is_mongos',
@@ -398,6 +399,7 @@ pipelineEnv.Library(
         'granularity_rounder',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/catalog/collection_catalog',
         '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
         '$BUILD_DIR/mongo/db/fts/base_fts',
         '$BUILD_DIR/mongo/db/mongohasher',
@@ -484,6 +486,7 @@ env.Library(
         'document_source_merge.idl',
         'document_source_merge_modes.idl',
         'document_source_merge_spec.cpp',
+        'document_source_out.idl',
         'document_source_parsing_validators.cpp',
         'document_source_replace_root.idl',
         'document_source_set_window_fields.idl',
@@ -497,6 +500,7 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/exec/document_value/document_value',
         '$BUILD_DIR/mongo/db/storage/key_string',
+        '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         '$BUILD_DIR/mongo/idl/idl_parser',
         '$BUILD_DIR/mongo/s/common_s',
         'runtime_constants_idl',
@@ -637,6 +641,7 @@ env.CppUnitTest(
         'expression_field_path_test.cpp',
         'expression_find_internal_test.cpp',
         'expression_javascript_test.cpp' if get_option('js-engine') != 'none' else [],
+        'expression_let_test.cpp',
         'expression_nary_test.cpp',
         'expression_object_test.cpp',
         'expression_or_test.cpp',

@@ -49,6 +49,7 @@
 #include "mongo/s/catalog_cache_loader_mock.h"
 #include "mongo/s/database_version.h"
 #include "mongo/s/shard_cannot_refresh_due_to_locks_held_exception.h"
+#include "mongo/s/shard_version_factory.h"
 #include "mongo/unittest/unittest.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
@@ -82,7 +83,7 @@ void runInTransaction(OperationContext* opCtx, Callable&& func) {
 
 class DestinedRecipientTest : public ShardServerTestFixture {
 public:
-    const NamespaceString kNss{"test.foo"};
+    const NamespaceString kNss = NamespaceString::createNamespaceString_forTest("test.foo");
     const std::string kShardKey = "x";
     const HostAndPort kConfigHostAndPort{"DummyConfig", 12345};
     const std::vector<ShardType> kShardList = {ShardType("shard0", "Host0:12345"),
@@ -198,13 +199,13 @@ protected:
         ReshardingEnv env(CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, kNss).value());
         env.destShard = kShardList[1].getName();
         CollectionGeneration gen(OID::gen(), Timestamp(1, 1));
-        env.version = ShardVersion(ChunkVersion(gen, {1, 0}),
-                                   boost::optional<CollectionIndexes>(boost::none));
-        env.tempNss =
-            NamespaceString(kNss.db(),
-                            fmt::format("{}{}",
-                                        NamespaceString::kTemporaryReshardingCollectionPrefix,
-                                        env.sourceUuid.toString()));
+        env.version = ShardVersionFactory::make(ChunkVersion(gen, {1, 0}),
+                                                boost::optional<CollectionIndexes>(boost::none));
+        env.tempNss = NamespaceString::createNamespaceString_forTest(
+            kNss.db(),
+            fmt::format("{}{}",
+                        NamespaceString::kTemporaryReshardingCollectionPrefix,
+                        env.sourceUuid.toString()));
 
         uassertStatusOK(createCollection(
             operationContext(), env.tempNss.dbName(), BSON("create" << env.tempNss.coll())));
@@ -332,7 +333,7 @@ TEST_F(DestinedRecipientTest, TestGetDestinedRecipientThrowsOnBlockedRefresh) {
                                  });
     }
 
-    auto sw = catalogCache()->getCollectionPlacementInfoWithRefresh(opCtx, env.tempNss);
+    auto sw = catalogCache()->getCollectionRoutingInfoWithRefresh(opCtx, env.tempNss);
 }
 
 TEST_F(DestinedRecipientTest, TestOpObserverSetsDestinedRecipientOnInserts) {
@@ -376,7 +377,7 @@ TEST_F(DestinedRecipientTest, TestOpObserverSetsDestinedRecipientOnUpdates) {
     auto opCtx = operationContext();
 
     DBDirectClient client(opCtx);
-    client.insert(kNss.toString(), BSON("_id" << 0 << "x" << 2 << "y" << 10 << "z" << 4));
+    client.insert(kNss, BSON("_id" << 0 << "x" << 2 << "y" << 10 << "z" << 4));
 
     auto env = setupReshardingEnv(opCtx, true);
 
@@ -394,17 +395,14 @@ TEST_F(DestinedRecipientTest, TestOpObserverSetsDestinedRecipientOnMultiUpdates)
     auto opCtx = operationContext();
 
     DBDirectClient client(opCtx);
-    client.insert(kNss.toString(), BSON("x" << 0 << "y" << 10 << "z" << 4));
-    client.insert(kNss.toString(), BSON("x" << 0 << "y" << 10 << "z" << 4));
+    client.insert(kNss, BSON("x" << 0 << "y" << 10 << "z" << 4));
+    client.insert(kNss, BSON("x" << 0 << "y" << 10 << "z" << 4));
 
     auto env = setupReshardingEnv(opCtx, true);
 
     OperationShardingState::setShardRole(opCtx, kNss, ShardVersion::IGNORED(), env.dbVersion);
-    client.update(kNss.ns(),
-                  BSON("x" << 0),
-                  BSON("$set" << BSON("z" << 5)),
-                  false /*upsert*/,
-                  true /*multi*/);
+    client.update(
+        kNss, BSON("x" << 0), BSON("$set" << BSON("z" << 5)), false /*upsert*/, true /*multi*/);
 
     auto entry = getLastOplogEntry(opCtx);
     auto recipShard = entry.getDestinedRecipient();
@@ -417,7 +415,7 @@ TEST_F(DestinedRecipientTest, TestOpObserverSetsDestinedRecipientOnUpdatesOutOfP
     auto opCtx = operationContext();
 
     DBDirectClient client(opCtx);
-    client.insert(kNss.toString(), BSON("_id" << 0 << "x" << 2 << "y" << 10));
+    client.insert(kNss, BSON("_id" << 0 << "x" << 2 << "y" << 10));
 
     auto env = setupReshardingEnv(opCtx, true);
 
@@ -435,7 +433,7 @@ TEST_F(DestinedRecipientTest, TestOpObserverSetsDestinedRecipientOnUpdatesInTran
     auto opCtx = operationContext();
 
     DBDirectClient client(opCtx);
-    client.insert(kNss.toString(), BSON("_id" << 0 << "x" << 2 << "y" << 10 << "z" << 4));
+    client.insert(kNss, BSON("_id" << 0 << "x" << 2 << "y" << 10 << "z" << 4));
 
     auto env = setupReshardingEnv(opCtx, true);
 
@@ -463,7 +461,7 @@ TEST_F(DestinedRecipientTest, TestOpObserverSetsDestinedRecipientOnDeletes) {
     auto opCtx = operationContext();
 
     DBDirectClient client(opCtx);
-    client.insert(kNss.toString(), BSON("_id" << 0 << "x" << 2 << "y" << 10 << "z" << 4));
+    client.insert(kNss, BSON("_id" << 0 << "x" << 2 << "y" << 10 << "z" << 4));
 
     auto env = setupReshardingEnv(opCtx, true);
 
@@ -481,7 +479,7 @@ TEST_F(DestinedRecipientTest, TestOpObserverSetsDestinedRecipientOnDeletesInTran
     auto opCtx = operationContext();
 
     DBDirectClient client(opCtx);
-    client.insert(kNss.toString(), BSON("_id" << 0 << "x" << 2 << "y" << 10));
+    client.insert(kNss, BSON("_id" << 0 << "x" << 2 << "y" << 10));
 
     auto env = setupReshardingEnv(opCtx, true);
 
@@ -508,7 +506,7 @@ TEST_F(DestinedRecipientTest, TestUpdateChangesOwningShardThrows) {
     auto opCtx = operationContext();
 
     DBDirectClient client(opCtx);
-    client.insert(kNss.toString(), BSON("_id" << 0 << "x" << 2 << "y" << 2 << "z" << 4));
+    client.insert(kNss, BSON("_id" << 0 << "x" << 2 << "y" << 2 << "z" << 4));
 
     auto env = setupReshardingEnv(opCtx, true);
 
@@ -528,7 +526,7 @@ TEST_F(DestinedRecipientTest, TestUpdateSameOwningShard) {
     auto opCtx = operationContext();
 
     DBDirectClient client(opCtx);
-    client.insert(kNss.toString(), BSON("_id" << 0 << "x" << 2 << "y" << 2 << "z" << 4));
+    client.insert(kNss, BSON("_id" << 0 << "x" << 2 << "y" << 2 << "z" << 4));
 
     auto env = setupReshardingEnv(opCtx, true);
 

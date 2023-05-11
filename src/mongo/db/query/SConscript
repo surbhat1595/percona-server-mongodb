@@ -23,10 +23,7 @@ env.SConscript(
 
 env.Library(
     target='canonical_query',
-    source=[
-        'canonical_query.cpp',
-        'canonical_query_encoder.cpp',
-    ],
+    source=['canonical_query.cpp', 'canonical_query_encoder.cpp', 'query_shape.cpp'],
     LIBDEPS=[
         '$BUILD_DIR/mongo/crypto/encrypted_field_config',
         '$BUILD_DIR/mongo/db/cst/cst',
@@ -250,6 +247,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/server_base',
         'cursor_response_idl',
+        'telemetry_idl',
     ],
 )
 
@@ -258,6 +256,7 @@ env.Library(
     source=[
         'ce_mode_parameter.cpp',
         'cost_model/cost_model_on_update.cpp',
+        'explain_version_validator.cpp',
         'framework_control.cpp',
         'query_feature_flags.idl',
         'query_knobs.idl',
@@ -389,14 +388,27 @@ env.Library(
         'memory_util',
         'query_knobs',
         'rate_limiting',
+        'telemetry_idl',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/auth/auth',
         '$BUILD_DIR/mongo/db/auth/user_acquisition_stats',
         '$BUILD_DIR/mongo/db/prepare_conflict_tracker',
         '$BUILD_DIR/mongo/db/stats/resource_consumption_metrics',
+        # TODO (SERVER-66896): Remove this dependency.
+        '$BUILD_DIR/mongo/db/storage/storage_engine_feature_flags',
         '$BUILD_DIR/mongo/util/concurrency/admission_context',
+        '$BUILD_DIR/mongo/util/md5',
         '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
+    ],
+)
+
+env.Library(
+    target='telemetry_idl',
+    source=['telemetry.idl'],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        "$BUILD_DIR/mongo/idl/idl_parser",
     ],
 )
 
@@ -425,8 +437,6 @@ env.CppUnitTest(
         "interval_test.cpp",
         "killcursors_request_test.cpp",
         "lru_key_value_test.cpp",
-        'map_reduce_output_format_test.cpp',
-        "util/memory_util_test.cpp",
         "parsed_distinct_test.cpp",
         "plan_cache_indexability_test.cpp",
         "plan_cache_key_info_test.cpp",
@@ -442,35 +452,41 @@ env.CppUnitTest(
         "query_planner_collation_test.cpp",
         "query_planner_columnar_test.cpp",
         "query_planner_geo_test.cpp",
-        "query_planner_pipeline_pushdown_test.cpp",
         "query_planner_hashed_index_test.cpp",
-        "query_planner_partialidx_test.cpp",
         "query_planner_index_test.cpp",
         "query_planner_operator_test.cpp",
         "query_planner_options_test.cpp",
-        "query_planner_tree_test.cpp",
+        "query_planner_partialidx_test.cpp",
+        "query_planner_pipeline_pushdown_test.cpp",
         "query_planner_text_test.cpp",
+        "query_planner_tree_test.cpp",
         "query_planner_wildcard_index_test.cpp",
         "query_request_test.cpp",
         "query_settings_test.cpp",
+        "query_shape_test.cpp",
         "query_solution_test.cpp",
         "rate_limiting_test.cpp",
         "sbe_and_hash_test.cpp",
         "sbe_and_sorted_test.cpp",
+        "sbe_shard_filter_test.cpp",
         "sbe_stage_builder_accumulator_test.cpp",
         "sbe_stage_builder_const_eval_test.cpp",
         "sbe_stage_builder_lookup_test.cpp",
         "sbe_stage_builder_test.cpp",
         "sbe_stage_builder_test_fixture.cpp",
-        "sbe_shard_filter_test.cpp",
+        "sbe_stage_builder_type_checker_test.cpp",
         "shard_filterer_factory_mock.cpp",
+        "sort_pattern_test.cpp",
         "telemetry_store_test.cpp",
+        "util/memory_util_test.cpp",
         "view_response_formatter_test.cpp",
+        'map_reduce_output_format_test.cpp',
     ],
     LIBDEPS=[
         "$BUILD_DIR/mongo/db/auth/authmocks",
         "$BUILD_DIR/mongo/db/catalog/collection_crud",
         "$BUILD_DIR/mongo/db/concurrency/lock_manager",
+        "$BUILD_DIR/mongo/db/exec/document_value/document_value_test_util",
         "$BUILD_DIR/mongo/db/exec/sbe/sbe_plan_stage_test",
         "$BUILD_DIR/mongo/db/multitenancy",
         "$BUILD_DIR/mongo/db/pipeline/aggregation_request_helper",

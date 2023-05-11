@@ -79,20 +79,12 @@ void appendToKeyString(const std::vector<BSONElement>& elems,
     }
 }
 
-// We should make a new Ordering for wildcard key generator because the index keys generated for
-// wildcard indexes include a "$_path" field prior to the wildcard field and the Ordering passed in
-// does not account for the "$_path" field.
-Ordering makeOrdering(const BSONObj& pattern) {
-    BSONObjBuilder newPattern;
-    for (auto elem : pattern) {
-        const auto fieldName = elem.fieldNameStringData();
-        if ((fieldName == "$**") || fieldName.endsWith(".$**")) {
-            newPattern.append("$_path", 1);  // "$_path" should always be in ascending order.
-        }
-        newPattern.append(elem);
+// Append 'MinKey' to 'keyString'. Multikey path keys use 'MinKey' for non-wildcard fields.
+void appendToMultiKeyString(const std::vector<BSONElement>& elems,
+                            KeyString::PooledBuilder* keyString) {
+    for (size_t i = 0; i < elems.size(); i++) {
+        keyString->appendBSONElement(kMinBSONKey.firstElement());
     }
-
-    return Ordering::make(newPattern.obj());
 }
 
 /**
@@ -226,13 +218,13 @@ void SingleDocumentKeyEncoder::_addMultiKey(const FieldRef& fullPath) {
         KeyString::PooledBuilder keyString(_pooledBufferBuilder, _keyStringVersion, _ordering);
 
         if (!_preElems.empty()) {
-            appendToKeyString(_preElems, _collator, &keyString);
+            appendToMultiKeyString(_preElems, &keyString);
         }
         for (auto elem : BSON("" << 1 << "" << fullPath.dottedField())) {
             keyString.appendBSONElement(elem);
         }
         if (!_postElems.empty()) {
-            appendToKeyString(_postElems, _collator, &keyString);
+            appendToMultiKeyString(_postElems, &keyString);
         }
 
         keyString.appendRecordId(record_id_helpers::reservedIdFor(
@@ -281,11 +273,11 @@ WildcardProjection WildcardKeyGenerator::createProjectionExecutor(BSONObj keyPat
     size_t suffixPos = std::string::npos;
     for (auto elem : keyPattern) {
         StringData fieldName(elem.fieldNameStringData());
-        if (fieldName == "$**" || fieldName.endsWith(".$**")) {
+        if (WildcardNames::isWildcardFieldName(fieldName)) {
             // The _keyPattern is either {..., "$**": 1, ..} for all paths or
             // {.., "path.$**": 1, ...} for a single subtree. If we are indexing a single subtree
             // then we will project just that path.
-            indexRoot = elem.fieldNameStringData();
+            indexRoot = fieldName;
             suffixPos = indexRoot.find(kSubtreeSuffix);
             break;
         }
@@ -296,9 +288,9 @@ WildcardProjection WildcardKeyGenerator::createProjectionExecutor(BSONObj keyPat
             str::stream() << "the wildcard keyPattern " << keyPattern.toString() << " is invalid",
             !indexRoot.empty() && (suffixPos == std::string::npos || pathProjection.isEmpty()));
 
-    auto projSpec = (suffixPos != std::string::npos
-                         ? BSON(indexRoot.substr(0, suffixPos) << 1)
-                         : pathProjection.isEmpty() ? kDefaultProjection : pathProjection);
+    auto projSpec = (suffixPos != std::string::npos ? BSON(indexRoot.substr(0, suffixPos) << 1)
+                         : pathProjection.isEmpty() ? kDefaultProjection
+                                                    : pathProjection);
 
     // Construct a dummy ExpressionContext for ProjectionExecutor. It's OK to set the
     // ExpressionContext's OperationContext and CollatorInterface to 'nullptr' and the namespace
@@ -321,7 +313,7 @@ WildcardKeyGenerator::WildcardKeyGenerator(BSONObj keyPattern,
       _collator(collator),
       _keyPattern(keyPattern),
       _keyStringVersion(keyStringVersion),
-      _ordering(makeOrdering(keyPattern)),
+      _ordering(ordering),
       _rsKeyFormat(rsKeyFormat) {
     std::vector<const char*> preFields;
     std::vector<const char*> postFields;
@@ -330,7 +322,7 @@ WildcardKeyGenerator::WildcardKeyGenerator(BSONObj keyPattern,
     size_t idx = 0;
     bool iteratorIsBeforeWildcard = true;
     for (auto elem : keyPattern) {
-        if (elem.fieldNameStringData().endsWith("$**")) {
+        if (WildcardNames::isWildcardFieldName(elem.fieldNameStringData())) {
             iteratorIsBeforeWildcard = false;
         } else if (iteratorIsBeforeWildcard) {
             preElems.push_back(BSONElement());
@@ -371,17 +363,20 @@ void WildcardKeyGenerator::generateKeys(SharedBufferFragmentBuilder& pooledBuffe
 
     std::vector<BSONElement> preElems;
     std::vector<BSONElement> postElems;
+    boost::dynamic_bitset<size_t> preElemsExist;
+    boost::dynamic_bitset<size_t> postElemsExist;
 
     // Extract elements for regular fields if this is a compound wildcard index.
     if (_preBtreeGenerator) {
-        _preBtreeGenerator->extractElements(inputDoc, &preElems);
+        preElemsExist = _preBtreeGenerator->extractElements(inputDoc, &preElems);
     }
     if (_postBtreeGenerator) {
-        _postBtreeGenerator->extractElements(inputDoc, &postElems);
+        postElemsExist = _postBtreeGenerator->extractElements(inputDoc, &postElems);
     }
 
     FieldRef rootPath;
     auto keysSequence = keys->extract_sequence();
+    auto sequenceSize = keysSequence.size();
     // multikeyPaths is allowed to be nullptr
     KeyStringSet::sequence_type multikeyPathsSequence;
     if (multikeyPaths)
@@ -400,6 +395,32 @@ void WildcardKeyGenerator::generateKeys(SharedBufferFragmentBuilder& pooledBuffe
 
     keyEncoder.traverseWildcard(
         _proj.exec()->applyTransformation(Document{inputDoc}).toBson(), false, &rootPath);
+
+    // If no key is generated for this index at this point, that means the document doesn't have any
+    // field that is indexed by the wildcard field. We should still add index keys for this
+    // document if the document has any regular field of a compound wildcad index. For example,
+    // a document {a: 1} should still be indexed by this compound wildcard index {a:1, "b.$**": 1}.
+    // In this case, we generate an index key {'': 1, '': MinKey, '': MinKey} for this document.
+    if (keysSequence.size() == sequenceSize && (!preElems.empty() || !postElems.empty())) {
+        KeyString::PooledBuilder keyString(pooledBufferBuilder, _keyStringVersion, _ordering);
+
+        if (preElemsExist.any() || postElemsExist.any()) {
+            if (!preElems.empty()) {
+                appendToKeyString(preElems, _collator, &keyString);
+            }
+            // We use 'MinKey' for both the '$_path' field and the wildcard field similar to what we
+            // use in multikey-path index keys.
+            keyString.appendBSONElement(kMinBSONKey.firstElement());
+            keyString.appendBSONElement(kMinBSONKey.firstElement());
+            if (!postElems.empty()) {
+                appendToKeyString(postElems, _collator, &keyString);
+            }
+            if (id) {
+                keyString.appendRecordId(*id);
+            }
+            keysSequence.push_back(keyString.release());
+        }
+    }
 
     if (multikeyPaths)
         multikeyPaths->adopt_sequence(std::move(multikeyPathsSequence));

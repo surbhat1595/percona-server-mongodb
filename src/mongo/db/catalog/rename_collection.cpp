@@ -339,7 +339,7 @@ Status renameCollectionWithinDB(OperationContext* opCtx,
         return renameCollectionDirectly(opCtx, db, sourceColl->uuid(), source, target, options);
     } else {
         return renameCollectionAndDropTarget(
-            opCtx, db, sourceColl->uuid(), source, target, targetColl, options, {});
+            opCtx, db, sourceColl->uuid(), source, target, CollectionPtr(targetColl), options, {});
     }
 }
 
@@ -434,7 +434,7 @@ Status renameCollectionWithinDBForApplyOps(OperationContext* opCtx,
                                                 sourceColl->uuid(),
                                                 source,
                                                 target,
-                                                targetColl,
+                                                CollectionPtr(targetColl),
                                                 options,
                                                 renameOpTimeFromApplyOps);
         }
@@ -688,12 +688,13 @@ Status renameCollectionAcrossDatabases(OperationContext* opCtx,
                 // Inserts to indexed capped collections cannot be batched.
                 // Otherwise, CollectionImpl::_insertDocuments() will fail with
                 // OperationCannotBeBatched. See SERVER-21512.
-                buildBatchedWritesWithPolicy(batchedWriteMaxSizeBytes,
-                                             batchedWriteMaxNumberOfInserts,
-                                             [&cursor]() { return cursor->next(); },
-                                             record,
-                                             stmts,
-                                             canBeBatched);
+                buildBatchedWritesWithPolicy(
+                    batchedWriteMaxSizeBytes,
+                    batchedWriteMaxNumberOfInserts,
+                    [&cursor]() { return cursor->next(); },
+                    record,
+                    stmts,
+                    canBeBatched);
 
                 bool isGroupedOplogEntries = stmts.size() > 1U;
                 WriteUnitOfWork wunit(opCtx, isGroupedOplogEntries);
@@ -804,7 +805,8 @@ void doLocalRenameIfOptionsAndIndexesHaveNotChanged(OperationContext* opCtx,
 
 void validateNamespacesForRenameCollection(OperationContext* opCtx,
                                            const NamespaceString& source,
-                                           const NamespaceString& target) {
+                                           const NamespaceString& target,
+                                           const RenameCollectionOptions& options) {
     uassert(ErrorCodes::InvalidNamespace,
             str::stream() << "Invalid source namespace: " << source.ns(),
             source.isValid());
@@ -858,7 +860,7 @@ void validateNamespacesForRenameCollection(OperationContext* opCtx,
 
     uassert(ErrorCodes::IllegalOperation,
             "Renaming system.buckets collections is not allowed",
-            !source.isTimeseriesBucketsCollection());
+            options.allowBuckets || !source.isTimeseriesBucketsCollection());
 }
 
 void validateAndRunRenameCollection(OperationContext* opCtx,
@@ -867,7 +869,7 @@ void validateAndRunRenameCollection(OperationContext* opCtx,
                                     const RenameCollectionOptions& options) {
     invariant(source != target, "Can't rename a collection to itself");
 
-    validateNamespacesForRenameCollection(opCtx, source, target);
+    validateNamespacesForRenameCollection(opCtx, source, target, options);
 
     OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE unsafeCreateCollection(
         opCtx);

@@ -41,8 +41,8 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/update/path_support.h"
-#include "mongo/db/update/produce_document_for_upsert.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
+#include "mongo/db/update/update_util.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
@@ -229,10 +229,8 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj,
 
     BSONObj newObj;
 
-
     if (docWasModified) {
         // Prepare to write back the modified document
-        RecordId newRecordId;
         CollectionUpdateArgs args{oldObjValue};
 
         if (!request->explain()) {
@@ -283,8 +281,6 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj,
                 invariant(oldObj.snapshotId() == opCtx()->recoveryUnit()->getSnapshotId());
                 wunit.commit();
             }
-
-            newRecordId = recordId;
         } else {
             // The updates were not in place. Apply them through the file manager.
 
@@ -303,7 +299,7 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj,
 
                 auto diff = update_oplog_entry::extractDiffFromOplogEntry(logObj);
                 WriteUnitOfWork wunit(opCtx());
-                newRecordId = collection_internal::updateDocument(
+                collection_internal::updateDocument(
                     opCtx(),
                     collection(),
                     recordId,
@@ -317,16 +313,12 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj,
             }
         }
 
-        // If the document moved, we might see it again in a collection scan (maybe it's
-        // a document after our current document).
-        //
-        // If the document is indexed and the mod changes an indexed value, we might see
-        // it again.  For an example, see the comment above near declaration of
-        // updatedRecordIds.
+        // If the document is indexed and the mod changes an indexed value, we might see it again.
+        // For an example, see the comment above near declaration of '_updatedRecordIds'.
         //
         // This must be done after the wunit commits so we are sure we won't be rolling back.
-        if (_updatedRecordIds && (newRecordId != recordId || driver->modsAffectIndices())) {
-            _updatedRecordIds->insert(newRecordId);
+        if (_updatedRecordIds && driver->modsAffectIndices()) {
+            _updatedRecordIds->insert(recordId);
         }
     }
 
@@ -418,22 +410,22 @@ PlanStage::StageState UpdateStage::doWork(WorkingSetID* out) {
         }
 
         bool docStillMatches;
-        const auto ensureStillMatchesRet =
-            handlePlanStageYield(expCtx(),
-                                 "UpdateStage ensureStillMatches",
-                                 collection()->ns().ns(),
-                                 [&] {
-                                     docStillMatches = write_stage_common::ensureStillMatches(
-                                         collection(), opCtx(), _ws, id, _params.canonicalQuery);
-                                     return PlanStage::NEED_TIME;
-                                 },
-                                 [&] {
-                                     // yieldHandler
-                                     // There was a problem trying to detect if the document still
-                                     // exists, so retry.
-                                     memberFreer.dismiss();
-                                     prepareToRetryWSM(id, out);
-                                 });
+        const auto ensureStillMatchesRet = handlePlanStageYield(
+            expCtx(),
+            "UpdateStage ensureStillMatches",
+            collection()->ns().ns(),
+            [&] {
+                docStillMatches = write_stage_common::ensureStillMatches(
+                    collection(), opCtx(), _ws, id, _params.canonicalQuery);
+                return PlanStage::NEED_TIME;
+            },
+            [&] {
+                // yieldHandler
+                // There was a problem trying to detect if the document still
+                // exists, so retry.
+                memberFreer.dismiss();
+                prepareToRetryWSM(id, out);
+            });
 
         if (ensureStillMatchesRet != PlanStage::NEED_TIME) {
             return ensureStillMatchesRet;
@@ -473,17 +465,18 @@ PlanStage::StageState UpdateStage::doWork(WorkingSetID* out) {
         invariant(oldObj.isOwned());
 
         // Save state before making changes.
-        handlePlanStageYield(expCtx(),
-                             "UpdateStage saveState",
-                             collection()->ns().ns(),
-                             [&] {
-                                 child()->saveState();
-                                 return PlanStage::NEED_TIME /* unused */;
-                             },
-                             [&] {
-                                 // yieldHandler
-                                 std::terminate();
-                             });
+        handlePlanStageYield(
+            expCtx(),
+            "UpdateStage saveState",
+            collection()->ns().ns(),
+            [&] {
+                child()->saveState();
+                return PlanStage::NEED_TIME /* unused */;
+            },
+            [&] {
+                // yieldHandler
+                std::terminate();
+            });
         // If we care about the pre-updated version of the doc, save it out here.
         SnapshotId oldSnapshot = member->doc.snapshotId();
 
@@ -653,6 +646,7 @@ void UpdateStage::_checkRestrictionsOnUpdatingShardKeyAreNotViolated(
             serverGlobalParams.featureCompatibility) &&
         sentShardVersion && !ShardVersion::isIgnoredVersion(*sentShardVersion);
 
+    // TODO: SERVER-73689 Fix shard key update check in update_stage.cpp to exclude _id queries.
     uassert(31025,
             "Shard key update is not allowed without specifying the full shard key in the "
             "query",

@@ -33,6 +33,7 @@
 #include "mongo/db/audit.h"
 #include "mongo/db/auth/authentication_metrics.h"
 #include "mongo/db/client.h"
+#include "mongo/db/connection_health_metrics_parameter_gen.h"
 #include "mongo/logv2/log.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
@@ -339,41 +340,58 @@ void AuthenticationSession::markSuccessful() {
 
     BSONObj metrics = _metricsRecorder.capture();
 
-    LOGV2(5286306,
-          "Successfully authenticated",
-          "client"_attr = _client->getRemote(),
-          "isSpeculative"_attr = _isSpeculative,
-          "isClusterMember"_attr = _isClusterMember,
-          "mechanism"_attr = _mechName,
-          "user"_attr = _userName.getUser(),
-          "db"_attr = _userName.getDB(),
-          "result"_attr = Status::OK().code(),
-          "metrics"_attr = metrics);
+    if (gEnableDetailedConnectionHealthMetricLogLines) {
+        BSONObjBuilder extraInfoBob;
+        if (_mech) {
+            _mech->appendExtraInfo(&extraInfoBob);
+        }
+
+        LOGV2(5286306,
+              "Successfully authenticated",
+              "client"_attr = _client->getRemote(),
+              "isSpeculative"_attr = _isSpeculative,
+              "isClusterMember"_attr = _isClusterMember,
+              "mechanism"_attr = _mechName,
+              "user"_attr = _userName.getUser(),
+              "db"_attr = _userName.getDB(),
+              "result"_attr = Status::OK().code(),
+              "metrics"_attr = metrics,
+              "extraInfo"_attr = extraInfoBob.obj());
+    }
 }
 
 void AuthenticationSession::markFailed(const Status& status) {
     _finish();
 
-    auto event = audit::AuthenticateEvent(_mechName,
-                                          _userName.getDB(),
-                                          _userName.getUser(),
-                                          makeAppender(_mech.get()),
-                                          status.code());
-    audit::logAuthentication(_client, event);
+    if (!_isSpeculative) {
+        auto event = audit::AuthenticateEvent(_mechName,
+                                              _userName.getDB(),
+                                              _userName.getUser(),
+                                              makeAppender(_mech.get()),
+                                              status.code());
+        audit::logAuthentication(_client, event);
+    }
 
     BSONObj metrics = _metricsRecorder.capture();
 
-    LOGV2(5286307,
-          "Failed to authenticate",
-          "client"_attr = _client->getRemote(),
-          "isSpeculative"_attr = _isSpeculative,
-          "isClusterMember"_attr = _isClusterMember,
-          "mechanism"_attr = _mechName,
-          "user"_attr = _userName.getUser(),
-          "db"_attr = _userName.getDB(),
-          "error"_attr = status,
-          "result"_attr = status.code(),
-          "metrics"_attr = metrics);
-}
+    if (gEnableDetailedConnectionHealthMetricLogLines) {
+        BSONObjBuilder extraInfoBob;
+        if (_mech) {
+            _mech->appendExtraInfo(&extraInfoBob);
+        }
 
+        LOGV2(5286307,
+              "Failed to authenticate",
+              "client"_attr = _client->getRemote(),
+              "isSpeculative"_attr = _isSpeculative,
+              "isClusterMember"_attr = _isClusterMember,
+              "mechanism"_attr = _mechName,
+              "user"_attr = _userName.getUser(),
+              "db"_attr = _userName.getDB(),
+              "error"_attr = redact(status),
+              "result"_attr = status.code(),
+              "metrics"_attr = metrics,
+              "extraInfo"_attr = extraInfoBob.obj());
+    }
+}
 }  // namespace mongo

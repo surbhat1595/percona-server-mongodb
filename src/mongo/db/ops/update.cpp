@@ -33,6 +33,7 @@
 #include "mongo/db/ops/update.h"
 
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/collection_yield_restore.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/client.h"
@@ -69,7 +70,8 @@ UpdateResult update(OperationContext* opCtx, Database* db, const UpdateRequest& 
     // The update stage does not create its own collection.  As such, if the update is
     // an upsert, create the collection that the update stage inserts into beforehand.
     writeConflictRetry(opCtx, "createCollection", nsString.ns(), [&] {
-        collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nsString);
+        collection = CollectionPtr(
+            CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nsString));
         if (collection || !request.isUpsert()) {
             return;
         }
@@ -83,10 +85,12 @@ UpdateResult update(OperationContext* opCtx, Database* db, const UpdateRequest& 
                                                  << nsString << " during upsert"));
         }
         WriteUnitOfWork wuow(opCtx);
-        collection = db->createCollection(opCtx, nsString, CollectionOptions());
+        collection = CollectionPtr(db->createCollection(opCtx, nsString, CollectionOptions()));
         invariant(collection);
         wuow.commit();
     });
+
+    collection.makeYieldable(opCtx, LockedCollectionYieldRestore(opCtx, collection));
 
     // Parse the update, get an executor for it, run the executor, get stats out.
     const ExtensionsCallbackReal extensionsCallback(opCtx, &request.getNamespaceString());

@@ -222,7 +222,7 @@ Status insertDocumentsImpl(OperationContext* opCtx,
         opDebug->additiveMetrics.incrementKeysInserted(keysInserted);
         // 'opDebug' may be deleted at rollback time in case of multi-document transaction.
         if (!opCtx->inMultiDocumentTransaction()) {
-            opCtx->recoveryUnit()->onRollback([opDebug, keysInserted]() {
+            opCtx->recoveryUnit()->onRollback([opDebug, keysInserted](OperationContext*) {
                 opDebug->additiveMetrics.incrementKeysInserted(-keysInserted);
             });
         }
@@ -302,10 +302,10 @@ Status insertDocumentForBulkLoader(OperationContext* opCtx,
     // Capture the recordStore here instead of the CollectionPtr object itself, because the record
     // store's lifetime is controlled by the collection IX lock held on the write paths, whereas the
     // CollectionPtr is just a front to the collection and its lifetime is shorter
-    opCtx->recoveryUnit()->onCommit(
-        [recordStore = collection->getRecordStore()](boost::optional<Timestamp>) {
-            recordStore->notifyCappedWaitersIfNeeded();
-        });
+    opCtx->recoveryUnit()->onCommit([recordStore = collection->getRecordStore()](
+                                        OperationContext*, boost::optional<Timestamp>) {
+        recordStore->notifyCappedWaitersIfNeeded();
+    });
 
     return loc.getStatus();
 }
@@ -362,10 +362,10 @@ Status insertDocuments(OperationContext* opCtx,
     // Capture the recordStore here instead of the CollectionPtr object itself, because the record
     // store's lifetime is controlled by the collection IX lock held on the write paths, whereas the
     // CollectionPtr is just a front to the collection and its lifetime is shorter
-    opCtx->recoveryUnit()->onCommit(
-        [recordStore = collection->getRecordStore()](boost::optional<Timestamp>) {
-            recordStore->notifyCappedWaitersIfNeeded();
-        });
+    opCtx->recoveryUnit()->onCommit([recordStore = collection->getRecordStore()](
+                                        OperationContext*, boost::optional<Timestamp>) {
+        recordStore->notifyCappedWaitersIfNeeded();
+    });
 
     hangAfterCollectionInserts.executeIf(
         [&](const BSONObj& data) {
@@ -426,14 +426,14 @@ Status checkFailCollectionInsertsFailPoint(const NamespaceString& ns, const BSON
     return s;
 }
 
-RecordId updateDocument(OperationContext* opCtx,
-                        const CollectionPtr& collection,
-                        const RecordId& oldLocation,
-                        const Snapshotted<BSONObj>& oldDoc,
-                        const BSONObj& newDoc,
-                        const BSONObj* opDiff,
-                        OpDebug* opDebug,
-                        CollectionUpdateArgs* args) {
+void updateDocument(OperationContext* opCtx,
+                    const CollectionPtr& collection,
+                    const RecordId& oldLocation,
+                    const Snapshotted<BSONObj>& oldDoc,
+                    const BSONObj& newDoc,
+                    const BSONObj* opDiff,
+                    OpDebug* opDebug,
+                    CollectionUpdateArgs* args) {
     {
         auto status = collection->checkValidationAndParseResult(opCtx, newDoc);
         if (!status.isOK()) {
@@ -523,10 +523,11 @@ RecordId updateDocument(OperationContext* opCtx,
             opDebug->additiveMetrics.incrementKeysDeleted(keysDeleted);
             // 'opDebug' may be deleted at rollback time in case of multi-document transaction.
             if (!opCtx->inMultiDocumentTransaction()) {
-                opCtx->recoveryUnit()->onRollback([opDebug, keysInserted, keysDeleted]() {
-                    opDebug->additiveMetrics.incrementKeysInserted(-keysInserted);
-                    opDebug->additiveMetrics.incrementKeysDeleted(-keysDeleted);
-                });
+                opCtx->recoveryUnit()->onRollback(
+                    [opDebug, keysInserted, keysDeleted](OperationContext*) {
+                        opDebug->additiveMetrics.incrementKeysInserted(-keysInserted);
+                        opDebug->additiveMetrics.incrementKeysDeleted(-keysDeleted);
+                    });
             }
         }
     }
@@ -535,8 +536,6 @@ RecordId updateDocument(OperationContext* opCtx,
     args->updatedDoc = newDoc;
 
     opCtx->getServiceContext()->getOpObserver()->onUpdate(opCtx, onUpdateArgs);
-
-    return oldLocation;
 }
 
 StatusWith<BSONObj> updateDocumentWithDamages(OperationContext* opCtx,
@@ -603,10 +602,11 @@ StatusWith<BSONObj> updateDocumentWithDamages(OperationContext* opCtx,
             opDebug->additiveMetrics.incrementKeysDeleted(keysDeleted);
             // 'opDebug' may be deleted at rollback time in case of multi-document transaction.
             if (!opCtx->inMultiDocumentTransaction()) {
-                opCtx->recoveryUnit()->onRollback([opDebug, keysInserted, keysDeleted]() {
-                    opDebug->additiveMetrics.incrementKeysInserted(-keysInserted);
-                    opDebug->additiveMetrics.incrementKeysDeleted(-keysDeleted);
-                });
+                opCtx->recoveryUnit()->onRollback(
+                    [opDebug, keysInserted, keysDeleted](OperationContext*) {
+                        opDebug->additiveMetrics.incrementKeysInserted(-keysInserted);
+                        opDebug->additiveMetrics.incrementKeysDeleted(-keysDeleted);
+                    });
             }
         }
     }
@@ -701,7 +701,7 @@ void deleteDocument(OperationContext* opCtx,
         opDebug->additiveMetrics.incrementKeysDeleted(keysDeleted);
         // 'opDebug' may be deleted at rollback time in case of multi-document transaction.
         if (!opCtx->inMultiDocumentTransaction()) {
-            opCtx->recoveryUnit()->onRollback([opDebug, keysDeleted]() {
+            opCtx->recoveryUnit()->onRollback([opDebug, keysDeleted](OperationContext*) {
                 opDebug->additiveMetrics.incrementKeysDeleted(-keysDeleted);
             });
         }

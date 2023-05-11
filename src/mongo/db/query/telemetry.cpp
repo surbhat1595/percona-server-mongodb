@@ -44,7 +44,9 @@
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/md5.hpp"
 #include "mongo/util/system_clock_source.h"
+#include <array>
 #include <optional>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -53,9 +55,57 @@ namespace mongo {
 
 namespace telemetry {
 
+// This is defined by IDL in the find and aggregate command, but we don't want to pull in those
+// files/libraries here. Instead define here as well.
+static const std::string kTelemetryKeyInShardedCommand = "hashedTelemetryKey";
+
 bool isTelemetryEnabled() {
-    return feature_flags::gFeatureFlagTelemetry.isEnabledAndIgnoreFCV();
+    // During initialization FCV may not yet be setup but queries could be run. We can't
+    // check whether telemetry should be enabled without FCV, so default to not recording
+    // those queries.
+    return serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+        feature_flags::gFeatureFlagTelemetry.isEnabled(serverGlobalParams.featureCompatibility);
 }
+
+ShardedTelemetryStoreKey telemetryKeyToShardedStoreId(const BSONObj& key, std::string hostAndPort) {
+    md5digest finishedMD5;
+    std::array<unsigned char, 16> md5Bin;
+    md5(key.objdata(), 16, finishedMD5);
+    std::copy(std::begin(finishedMD5), std::end(finishedMD5), std::begin(md5Bin));
+    return ShardedTelemetryStoreKey(hostAndPort, md5Bin);
+}
+
+boost::optional<BSONObj> getTelemetryKeyFromOpCtx(OperationContext* opCtx) {
+    return CurOp::get(opCtx)->debug().telemetryStoreKey;
+}
+
+void appendShardedTelemetryKeyIfApplicable(MutableDocument& objToModify,
+                                           std::string hostAndPort,
+                                           OperationContext* opCtx) {
+    if (!isTelemetryEnabled()) {
+        return;
+    }
+    if (auto telemetryKey = getTelemetryKeyFromOpCtx(opCtx)) {
+        objToModify.addField(
+            kTelemetryKeyInShardedCommand,
+            Value(telemetryKeyToShardedStoreId(*telemetryKey, hostAndPort).toBSON()));
+    }
+}
+
+void appendShardedTelemetryKeyIfApplicable(BSONObjBuilder& objToModify,
+                                           std::string hostAndPort,
+                                           OperationContext* opCtx) {
+    if (!isTelemetryEnabled()) {
+        return;
+    }
+    auto telemetryKey = getTelemetryKeyFromOpCtx(opCtx);
+    if (!telemetryKey) {
+        return;
+    }
+    objToModify.append(kTelemetryKeyInShardedCommand,
+                       telemetryKeyToShardedStoreId(*telemetryKey, hostAndPort).toBSON());
+}
+
 
 namespace {
 
@@ -137,10 +187,17 @@ public:
 
 ServiceContext::ConstructorActionRegisterer telemetryStoreManagerRegisterer{
     "TelemetryStoreManagerRegisterer", [](ServiceContext* serviceCtx) {
-        if (!isTelemetryEnabled()) {
+        // It is possible that this is called before FCV is properly set up. Setting up the store if
+        // the flag is enabled but FCV is incorrect is safe, and guards against the FCV being
+        // changed to a supported version later.
+        // TODO SERVER-73907. Move this to run after FCV is initialized. It could be we'd have to
+        // re-run this function if FCV changes later during the life of the process.
+        if (!feature_flags::gFeatureFlagTelemetry.isEnabledAndIgnoreFCV()) {
             // featureFlags are not allowed to be changed at runtime. Therefore it's not an issue
             // to not create a telemetry store in ConstructorActionRegisterer at start up with the
             // flag off - because the flag can not be turned on at any point afterwards.
+            telemetry_util::telemetryStoreOnParamChangeUpdater(serviceCtx) =
+                std::make_unique<telemetry_util::NoChangesAllowedTelemetryParamUpdater>();
             return;
         }
 
@@ -303,7 +360,6 @@ void appendWithRedactedLiterals(BSONObjBuilder& builder, const BSONElement& el) 
         auto fieldName = fleSafeFieldNameRedactor(el);
         builder.append(fieldName, "###"_sd);
     }
-    builder.done();
 }
 
 }  // namespace
@@ -382,7 +438,6 @@ const BSONObj& TelemetryMetrics::redactKey(const BSONObj& key, bool redactFieldN
 // Once query execution is complete, the telemetry context is grabbed from OpDebug, a telemetry key
 // is generated from this and metrics are paired to this key in the telemetry store.
 void registerAggRequest(const AggregateCommandRequest& request, OperationContext* opCtx) {
-
     if (!isTelemetryEnabled()) {
         return;
     }
@@ -395,13 +450,20 @@ void registerAggRequest(const AggregateCommandRequest& request, OperationContext
     if (!shouldCollect(opCtx->getServiceContext())) {
         return;
     }
+    if (auto hashKey = request.getHashedTelemetryKey()) {
+        // The key is in the command request in "telemetryKey".
+        CurOp::get(opCtx)->debug().telemetryStoreKey = hashKey->toBSON();
+        return;
+    }
 
+    // On standalone build the key from the request.
     BSONObjBuilder telemetryKey;
     BSONObjBuilder pipelineBuilder = telemetryKey.subarrayStart("pipeline"_sd);
     try {
         for (auto&& stage : request.getPipeline()) {
             BSONObjBuilder stageBuilder = pipelineBuilder.subobjStart("stage"_sd);
             appendWithRedactedLiterals(stageBuilder, stage.firstElement());
+            stageBuilder.done();
         }
         pipelineBuilder.done();
         telemetryKey.append("namespace", request.getNamespace().toString());
@@ -416,8 +478,6 @@ void registerAggRequest(const AggregateCommandRequest& request, OperationContext
     }
 
     CurOp::get(opCtx)->debug().telemetryStoreKey = telemetryKey.obj();
-    // Mark this request as one that telemetry machinery has decided to collect metrics from.
-    CurOp::get(opCtx)->debug().shouldRecordTelemetry = true;
 }
 
 void registerFindRequest(const FindCommandRequest& request,
@@ -433,6 +493,12 @@ void registerFindRequest(const FindCommandRequest& request,
     }
 
     if (!shouldCollect(opCtx->getServiceContext())) {
+        return;
+    }
+
+    if (auto hashKey = request.getHashedTelemetryKey()) {
+        // The key is in the command request in "hashedTelemetryKey".
+        CurOp::get(opCtx)->debug().telemetryStoreKey = hashKey->toBSON();
         return;
     }
 
@@ -456,9 +522,10 @@ void registerFindRequest(const FindCommandRequest& request,
         return;
     }
     CurOp::get(opCtx)->debug().telemetryStoreKey = telemetryKey.obj();
-    CurOp::get(opCtx)->debug().shouldRecordTelemetry = true;
 }
 
+// TODO SERVER-73727 registerGetMoreRequest should be removed once metrics are aggregated on cursors
+// across getMores on mongos
 void registerGetMoreRequest(OperationContext* opCtx) {
     if (!isTelemetryEnabled()) {
         return;
@@ -472,7 +539,6 @@ void registerGetMoreRequest(OperationContext* opCtx) {
     if (!shouldCollect(opCtx->getServiceContext())) {
         return;
     }
-    CurOp::get(opCtx)->debug().shouldRecordTelemetry = true;
 }
 
 TelemetryStore& getTelemetryStore(OperationContext* opCtx) {
@@ -481,7 +547,6 @@ TelemetryStore& getTelemetryStore(OperationContext* opCtx) {
 }
 
 void recordExecution(OperationContext* opCtx, bool isFle) {
-
     if (!isTelemetryEnabled()) {
         return;
     }
@@ -491,10 +556,10 @@ void recordExecution(OperationContext* opCtx, bool isFle) {
     // Confirms that this is an operation the telemetry machinery has decided to collect metrics
     // from.
     auto&& opDebug = CurOp::get(opCtx)->debug();
-    if (!opDebug.shouldRecordTelemetry) {
+    if (!opDebug.telemetryStoreKey) {
         return;
     }
-    auto&& metrics = LockedMetrics::get(opCtx, opDebug.telemetryStoreKey);
+    auto&& metrics = LockedMetrics::get(opCtx, *opDebug.telemetryStoreKey);
     metrics->execCount++;
     metrics->queryOptMicros.aggregate(opDebug.planningTime.count());
 }
@@ -502,15 +567,37 @@ void recordExecution(OperationContext* opCtx, bool isFle) {
 void collectTelemetry(OperationContext* opCtx, const OpDebug& opDebug) {
     // Confirms that this is an operation the telemetry machinery has decided to collect metrics
     // from.
-    if (!opDebug.shouldRecordTelemetry) {
+    if (!opDebug.telemetryStoreKey) {
         return;
     }
-    auto&& metrics = LockedMetrics::get(opCtx, opDebug.telemetryStoreKey);
+
+    auto&& metrics = LockedMetrics::get(opCtx, *opDebug.telemetryStoreKey);
     metrics->docsReturned.aggregate(opDebug.nreturned);
     metrics->docsScanned.aggregate(opDebug.additiveMetrics.docsExamined.value_or(0));
     metrics->keysScanned.aggregate(opDebug.additiveMetrics.keysExamined.value_or(0));
     metrics->lastExecutionMicros = opDebug.executionTime.count();
     metrics->queryExecMicros.aggregate(opDebug.executionTime.count());
+}
+
+void writeTelemetry(OperationContext* opCtx,
+                    boost::optional<BSONObj> telemetryKey,
+                    const uint64_t queryOptMicros,
+                    const uint64_t queryExecMicros,
+                    const uint64_t docsReturned,
+                    const uint64_t docsScanned,
+                    const uint64_t keysScanned) {
+    if (!telemetryKey) {
+        return;
+    }
+    auto&& metrics = LockedMetrics::get(opCtx, *telemetryKey);
+
+    metrics->lastExecutionMicros = queryExecMicros;
+    metrics->execCount++;
+    metrics->queryOptMicros.aggregate(queryOptMicros);
+    metrics->queryExecMicros.aggregate(queryExecMicros);
+    metrics->docsReturned.aggregate(docsReturned);
+    metrics->docsScanned.aggregate(docsScanned);
+    metrics->keysScanned.aggregate(keysScanned);
 }
 }  // namespace telemetry
 }  // namespace mongo

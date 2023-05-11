@@ -108,14 +108,18 @@
     checkOptions(c2, Object.keys(coll2Options));
     checkUUID(c2, coll2uuid);
 
-    function checkIndexes(collName, expectedIndexes) {
+    function checkIndexes(collName, expectedIndexes, shardedColl) {
         var res = toShard.getDB('test').runCommand({listIndexes: collName});
         assert.commandWorked(res, 'Failed to get indexes for collection ' + collName);
         var indexes = res.cursor.firstBatch;
         indexes.sort(sortByName);
 
-        // There should be 3 indexes on each collection - the _id one, and the 2 we created.
-        assert.eq(indexes.length, 3);
+        // TODO SERVER-74252: once 7.0 becomes LastLTS we can assume that the movePrimary will never
+        // copy indexes of sharded collections.
+        if (shardedColl)
+            assert(indexes.length === 1 || indexes.length === 3);
+        else
+            assert(indexes.length === 3);
 
         indexes.forEach((index, i) => {
             var expected;
@@ -129,8 +133,8 @@
         });
     }
 
-    checkIndexes('coll1', coll1Indexes);
-    checkIndexes('coll2', coll2Indexes);
+    checkIndexes('coll1', coll1Indexes, /*shardedColl*/ false);
+    checkIndexes('coll2', coll2Indexes, /*shardedColl*/ true);
 
     // Verify that the data from the unsharded collections resides on the new primary shard, and was
     // copied as part of the clone.
@@ -160,14 +164,22 @@
 
     const isCatalogShardEnabled = CatalogShardUtil.isEnabledIgnoringFCV(st);
 
-    // Check that the command fails when attempting to run on the config server.
-    assert.commandFailedWithCode(st.configRS.getPrimary().adminCommand({
-        _shardsvrCloneCatalogData: 'test',
-        from: fromShard.host,
-        writeConcern: {w: "majority"}
-    }),
-                                 isCatalogShardEnabled ? ErrorCodes.ShardingStateNotInitialized
-                                                       : ErrorCodes.NoShardingEnabled);
+    // Check that the command fails when attempting to run on a config server that doesn't support
+    // catalog shard mode.
+    if (isCatalogShardEnabled) {
+        assert.commandWorked(st.configRS.getPrimary().adminCommand({
+            _shardsvrCloneCatalogData: 'test',
+            from: fromShard.host,
+            writeConcern: {w: "majority"}
+        }));
+    } else {
+        assert.commandFailedWithCode(st.configRS.getPrimary().adminCommand({
+            _shardsvrCloneCatalogData: 'test',
+            from: fromShard.host,
+            writeConcern: {w: "majority"}
+        }),
+                                     ErrorCodes.NoShardingEnabled);
+    }
 
     // Check that the command fails when failing to specify a source.
     assert.commandFailedWithCode(

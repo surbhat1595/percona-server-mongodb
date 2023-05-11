@@ -28,11 +28,9 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
-#include "boost/optional.hpp"
 #include <algorithm>
 #include <asio.hpp>
+#include <boost/optional.hpp>
 
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/service_context.h"
@@ -243,7 +241,9 @@ TEST_F(ServiceExecutorFixedTest, ScheduleSucceedsBeforeShutdown) {
     auto runner = handle->makeTaskRunner();
 
     // The executor accepts the work, but hasn't used the underlying pool yet.
-    JoinThread scheduleClient{[&] { runner->schedule([&](Status s) { pf.promise.setFrom(s); }); }};
+    JoinThread scheduleClient{[&] {
+        runner->schedule([&](Status s) { pf.promise.setFrom(s); });
+    }};
     (*failpoint)->waitForTimesEntered(failpoint->initialTimesEntered() + 1);
 
     // Trigger an immediate shutdown which will not affect the task we have accepted.

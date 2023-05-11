@@ -48,7 +48,9 @@ std::vector<T> toVector(boost::optional<stdx::variant<T, std::vector<T>>> optVal
         return {};
     }
     return stdx::visit(OverloadedVisitor{[](T val) { return std::vector<T>{val}; },
-                                         [](const std::vector<T>& vals) { return vals; }},
+                                         [](const std::vector<T>& vals) {
+                                             return vals;
+                                         }},
                        *optVals);
 }
 }  // namespace variant_util
@@ -82,6 +84,13 @@ public:
     static ReplOperation parse(const IDLParserContext& ctxt, const BSONObj& bsonObject) {
         ReplOperation o;
         o.parseProtected(ctxt, bsonObject);
+        return o;
+    }
+
+    static ReplOperation parseOwned(const IDLParserContext& ctxt, const BSONObj&& bsonObject) {
+        ReplOperation o;
+        o.parseProtected(ctxt, bsonObject);
+        o.setAnchor(std::move(bsonObject));
         return o;
     }
 
@@ -383,6 +392,28 @@ public:
         if (value)
             setFromMigrate(value);
     }
+
+    /**
+     * ReplOperation and MutableOplogEntry mostly hold the same data,
+     * but lack a common ancestor in C++. Due to the details of IDL,
+     * there is no generated C++ link between the two hierarchies.
+     *
+     * The primary difference between the two types is the OpTime
+     * stored in OplogEntryBase that is absent in DurableReplOperation.
+     *
+     * This type conversion is useful in contexts when the two type
+     * hierarchies should be interchangeable, like with internal tx's.
+     * See: logMutableOplogEntry() in op_observer_impl.cpp.
+     *
+     * OplogEntryBase<>-------DurableReplOperation
+     *        ^                       ^
+     *        |                       |
+     * MutableOplogEntry       ReplOperation
+     *        ^
+     *        |
+     * DurableOplogEntry
+     */
+    ReplOperation toReplOperation() const noexcept;
 };
 
 /**
@@ -535,6 +566,13 @@ public:
      */
     bool isPreparedCommit() const {
         return getCommandType() == DurableOplogEntry::CommandType::kCommitTransaction;
+    }
+
+    /**
+     * Returns if this is a prepared 'abortTransaction' oplog entry.
+     */
+    bool isPreparedAbort() const {
+        return getCommandType() == DurableOplogEntry::CommandType::kAbortTransaction;
     }
 
     /**
@@ -734,6 +772,7 @@ public:
     bool isPartialTransaction() const;
     bool isEndOfLargeTransaction() const;
     bool isPreparedCommit() const;
+    bool isPreparedAbort() const;
     bool isTerminalApplyOps() const;
     bool isSingleOplogEntryTransaction() const;
     bool isSingleOplogEntryTransactionWithCommand() const;

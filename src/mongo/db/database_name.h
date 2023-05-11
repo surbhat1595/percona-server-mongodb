@@ -36,6 +36,7 @@
 #include "mongo/base/string_data.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/logv2/log_attr.h"
+#include "mongo/util/static_immortal.h"
 
 namespace mongo {
 
@@ -46,6 +47,65 @@ namespace mongo {
  */
 class DatabaseName {
 public:
+    /**
+     * Used to create `constexpr` reserved DatabaseName constants. See
+     * NamespaceString::ConstantProxy in namespace_string.h for more details.
+     */
+    class ConstantProxy {
+    public:
+        class SharedState {
+        public:
+            explicit constexpr SharedState(StringData db) : _db{db} {}
+
+            const DatabaseName& get() const {
+                std::call_once(_once, [this] {
+                    _dbName = new DatabaseName{TenantId::systemTenantId(), _db};
+                });
+                return *_dbName;
+            }
+
+        private:
+            StringData _db;
+            mutable std::once_flag _once;
+            mutable const DatabaseName* _dbName = nullptr;
+        };
+
+        constexpr explicit ConstantProxy(const SharedState* sharedState)
+            : _sharedState{sharedState} {}
+
+        operator const DatabaseName&() const {
+            return _get();
+        }
+
+        decltype(auto) db() const {
+            return _get().db();
+        }
+        decltype(auto) tenantId() const {
+            return _get().tenantId();
+        }
+        decltype(auto) toString() const {
+            return _get().toString();
+        }
+
+        friend std::ostream& operator<<(std::ostream& stream, const ConstantProxy& dbName) {
+            return stream << dbName.toString();
+        }
+        friend StringBuilder& operator<<(StringBuilder& builder, const ConstantProxy& dbName) {
+            return builder << dbName.toString();
+        }
+
+    private:
+        const DatabaseName& _get() const {
+            return _sharedState->get();
+        }
+
+        const SharedState* _sharedState;
+    };
+
+#define DBNAME_CONSTANT(id, db) static const ConstantProxy id;
+#include "database_name_reserved.def.h"
+#undef DBNAME_CONSTANT
+
     /**
      * Constructs an empty DatabaseName.
      */
@@ -74,8 +134,6 @@ public:
     DatabaseName(StringData dbName, boost::optional<TenantId> tenantId = boost::none)
         : DatabaseName(std::move(tenantId), dbName) {}
 
-    static DatabaseName createSystemTenantDbName(StringData dbString);
-
     const boost::optional<TenantId>& tenantId() const {
         return _tenantId;
     }
@@ -99,6 +157,38 @@ public:
         return (_tenantId == other._tenantId) && boost::iequals(toString(), other.toString());
     }
 
+    friend std::ostream& operator<<(std::ostream& stream, const DatabaseName& tdb) {
+        return stream << tdb.toString();
+    }
+
+    friend StringBuilder& operator<<(StringBuilder& builder, const DatabaseName& tdb) {
+        return builder << tdb.toString();
+    }
+
+    friend bool operator==(const DatabaseName& a, const DatabaseName& b) {
+        return a._lens() == b._lens();
+    }
+
+    friend bool operator!=(const DatabaseName& a, const DatabaseName& b) {
+        return a._lens() != b._lens();
+    }
+
+    friend bool operator<(const DatabaseName& a, const DatabaseName& b) {
+        return a._lens() < b._lens();
+    }
+
+    friend bool operator>(const DatabaseName& a, const DatabaseName& b) {
+        return a._lens() > b._lens();
+    }
+
+    friend bool operator<=(const DatabaseName& a, const DatabaseName& b) {
+        return a._lens() <= b._lens();
+    }
+
+    friend bool operator>=(const DatabaseName& a, const DatabaseName& b) {
+        return a._lens() >= b._lens();
+    }
+
     template <typename H>
     friend H AbslHashValue(H h, const DatabaseName& obj) {
         if (obj._tenantId) {
@@ -112,46 +202,27 @@ public:
     }
 
 private:
+    std::tuple<const boost::optional<TenantId>&, const std::string&> _lens() const {
+        return std::tie(_tenantId, _dbString);
+    }
+
     boost::optional<TenantId> _tenantId = boost::none;
     std::string _dbString;
 };
 
-inline std::ostream& operator<<(std::ostream& stream, const DatabaseName& tdb) {
-    return stream << tdb.toString();
-}
+// The `constexpr` definitions for `DatabaseName::ConstantProxy` static data members are below. See
+// `constexpr` definitions for the `NamespaceString::ConstantProxy` static data members of NSS in
+// namespace_string.h for more details.
+namespace dbname_detail::const_proxy_shared_states {
+#define DBNAME_CONSTANT(id, db) constexpr inline DatabaseName::ConstantProxy::SharedState id{db};
+#include "database_name_reserved.def.h"
+#undef DBNAME_CONSTANT
+}  // namespace dbname_detail::const_proxy_shared_states
 
-inline StringBuilder& operator<<(StringBuilder& builder, const DatabaseName& tdb) {
-    return builder << tdb.toString();
-}
-
-inline bool operator==(const DatabaseName& lhs, const DatabaseName& rhs) {
-    return (lhs.tenantId() == rhs.tenantId()) && (lhs.db() == rhs.db());
-}
-
-inline bool operator!=(const DatabaseName& lhs, const DatabaseName& rhs) {
-    return !(lhs == rhs);
-}
-
-inline bool operator<(const DatabaseName& lhs, const DatabaseName& rhs) {
-    if (lhs.tenantId() != rhs.tenantId()) {
-        return lhs.tenantId() < rhs.tenantId();
-    }
-    return lhs.db() < rhs.db();
-}
-
-inline bool operator>(const DatabaseName& lhs, const DatabaseName& rhs) {
-    if (lhs.tenantId() != rhs.tenantId()) {
-        return lhs.tenantId() > rhs.tenantId();
-    }
-    return lhs.db() > rhs.db();
-}
-
-inline bool operator<=(const DatabaseName& lhs, const DatabaseName& rhs) {
-    return !(lhs > rhs);
-}
-
-inline bool operator>=(const DatabaseName& lhs, const DatabaseName& rhs) {
-    return !(lhs < rhs);
-}
+#define DBNAME_CONSTANT(id, db)                                    \
+    constexpr inline DatabaseName::ConstantProxy DatabaseName::id{ \
+        &dbname_detail::const_proxy_shared_states::id};
+#include "database_name_reserved.def.h"
+#undef DBNAME_CONSTANT
 
 }  // namespace mongo

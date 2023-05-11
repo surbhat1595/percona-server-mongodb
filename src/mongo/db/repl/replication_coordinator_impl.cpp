@@ -94,6 +94,7 @@
 #include "mongo/db/shutdown_in_progress_quiesce_info.h"
 #include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/db/storage/storage_options.h"
+#include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/db/vector_clock_mutable.h"
 #include "mongo/db/write_concern.h"
@@ -280,7 +281,9 @@ ReplicationCoordinator::Mode getReplicationModeFromSettings(const ReplSettings& 
 InitialSyncerInterface::Options createInitialSyncerOptions(
     ReplicationCoordinator* replCoord, ReplicationCoordinatorExternalState* externalState) {
     InitialSyncerInterface::Options options;
-    options.getMyLastOptime = [replCoord]() { return replCoord->getMyLastAppliedOpTime(); };
+    options.getMyLastOptime = [replCoord]() {
+        return replCoord->getMyLastAppliedOpTime();
+    };
     options.setMyLastOptime = [replCoord,
                                externalState](const OpTimeAndWallTime& opTimeAndWallTime) {
         // Note that setting the last applied opTime forward also advances the global timestamp.
@@ -292,7 +295,9 @@ InitialSyncerInterface::Options createInitialSyncerOptions(
         replCoord->getServiceContext()->getStorageEngine()->setOldestTimestamp(
             opTimeAndWallTime.opTime.getTimestamp());
     };
-    options.resetOptimes = [replCoord]() { replCoord->resetMyLastOpTimes(); };
+    options.resetOptimes = [replCoord]() {
+        replCoord->resetMyLastOpTimes();
+    };
     options.syncSourceSelector = replCoord;
     options.oplogFetcherMaxFetcherRestarts =
         externalState->getOplogFetcherInitialSyncMaxFetcherRestarts();
@@ -1007,6 +1012,10 @@ bool ReplicationCoordinatorImpl::enterQuiesceModeIfSecondary(Milliseconds quiesc
         return false;
     }
 
+    // Cancel any ongoing election so that the node cannot become primary once in quiesce mode,
+    // and do not wait for cancellation to complete.
+    _cancelElectionIfNeeded(lk);
+
     _inQuiesceMode = true;
     _quiesceDeadline = _replExecutor->now() + quiesceTime;
 
@@ -1123,7 +1132,9 @@ Status ReplicationCoordinatorImpl::waitForMemberState(Interruptible* interruptib
     }
 
     stdx::unique_lock<Latch> lk(_mutex);
-    auto pred = [this, expectedState]() { return _memberState == expectedState; };
+    auto pred = [this, expectedState]() {
+        return _memberState == expectedState;
+    };
     if (!interruptible->waitForConditionOrInterruptFor(_memberStateChange, lk, timeout, pred)) {
         return Status(ErrorCodes::ExceededTimeLimit,
                       str::stream()
@@ -2473,8 +2484,8 @@ std::shared_ptr<const HelloResponse> ReplicationCoordinatorImpl::awaitHelloRespo
     return statusWithHello.getValue();
 }
 
-StatusWith<OpTime> ReplicationCoordinatorImpl::getLatestWriteOpTime(OperationContext* opCtx) const
-    noexcept try {
+StatusWith<OpTime> ReplicationCoordinatorImpl::getLatestWriteOpTime(
+    OperationContext* opCtx) const noexcept try {
     ShouldNotConflictWithSecondaryBatchApplicationBlock noPBWMBlock(opCtx->lockState());
     Lock::GlobalLock globalLock(opCtx, MODE_IS);
     // Check if the node is primary after acquiring global IS lock.
@@ -4226,8 +4237,7 @@ void ReplicationCoordinatorImpl::_reconfigToRemoveNewlyAddedField(
                    "An automatic reconfig. Used to remove a 'newlyAdded' config field for a "
                    "replica set member.");
         curOp->setOpDescription_inlock(bob.obj());
-        // TODO SERVER-62491 Use systemTenantId.
-        curOp->setNS_inlock(NamespaceString(boost::none, "local.system.replset"));
+        curOp->setNS_inlock(NamespaceString::kSystemReplSetNamespace);
         curOp->ensureStarted();
     }
 
@@ -6337,6 +6347,15 @@ ReplicationCoordinatorImpl::getWriteConcernTagChanges() {
 
 SplitPrepareSessionManager* ReplicationCoordinatorImpl::getSplitPrepareSessionManager() {
     return &_splitSessionManager;
+}
+
+bool ReplicationCoordinatorImpl::isRetryableWrite(OperationContext* opCtx) const {
+    if (!opCtx->writesAreReplicated() || !opCtx->isRetryableWrite()) {
+        return false;
+    }
+    auto txnParticipant = TransactionParticipant::get(opCtx);
+    return txnParticipant &&
+        (!opCtx->inMultiDocumentTransaction() || txnParticipant.transactionIsOpen());
 }
 
 }  // namespace repl

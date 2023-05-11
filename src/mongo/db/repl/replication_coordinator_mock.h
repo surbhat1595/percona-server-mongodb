@@ -391,8 +391,8 @@ public:
         const SplitHorizon::Parameters& horizonParams,
         boost::optional<TopologyVersion> clientTopologyVersion) override;
 
-    virtual StatusWith<OpTime> getLatestWriteOpTime(OperationContext* opCtx) const
-        noexcept override;
+    virtual StatusWith<OpTime> getLatestWriteOpTime(
+        OperationContext* opCtx) const noexcept override;
 
     virtual HostAndPort getCurrentPrimaryHostAndPort() const override;
 
@@ -430,6 +430,10 @@ public:
      */
     void setUpdateCommittedSnapshot(bool val) {
         _updateCommittedSnapshot = val;
+    }
+
+    bool isRetryableWrite(OperationContext* opCtx) const override {
+        return false;
     }
 
 private:

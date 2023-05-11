@@ -36,6 +36,7 @@
 #include "mongo/db/cluster_transaction_api.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/s/database_sharding_state.h"
+#include "mongo/db/s/participant_block_gen.h"
 #include "mongo/db/s/shard_metadata_util.h"
 #include "mongo/db/s/sharding_ddl_util.h"
 #include "mongo/db/s/sharding_logging.h"
@@ -158,8 +159,8 @@ public:
         // directly
         DatabaseName databaseName(boost::none, _dbName);
         Lock::DBLock dbLock(_opCtx, databaseName, MODE_X);
-        auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
-            _opCtx, databaseName, DSSAcquisitionMode::kExclusive);
+        auto scopedDss =
+            DatabaseShardingState::assertDbLockedAndAcquireExclusive(_opCtx, databaseName);
         scopedDss->enterCriticalSectionCatchUpPhase(_opCtx, _reason);
         scopedDss->enterCriticalSectionCommitPhase(_opCtx, _reason);
     }
@@ -171,8 +172,8 @@ public:
         // directly
         DatabaseName databaseName(boost::none, _dbName);
         Lock::DBLock dbLock(_opCtx, databaseName, MODE_X);
-        auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
-            _opCtx, databaseName, DSSAcquisitionMode::kExclusive);
+        auto scopedDss =
+            DatabaseShardingState::assertDbLockedAndAcquireExclusive(_opCtx, databaseName);
         scopedDss->exitCriticalSection(_opCtx, _reason);
     }
 
@@ -202,6 +203,12 @@ bool isDbAlreadyDropped(OperationContext* opCtx,
     return false;
 }
 
+BSONObj getReasonForDropCollection(const NamespaceString& nss) {
+    return BSON("command"
+                << "dropCollection fromDropDatabase"
+                << "nss" << nss.ns());
+}
+
 }  // namespace
 
 void DropDatabaseCoordinator::_dropShardedCollection(
@@ -215,6 +222,23 @@ void DropDatabaseCoordinator::_dropShardedCollection(
     const auto coorName = DDLCoordinatorType_serializer(_coordId.getOperationType());
     auto collDDLLock = DDLLockManager::get(opCtx)->lock(
         opCtx, nss.ns(), coorName, DDLLockManager::kDefaultLockTimeout);
+
+    if (!_isPre70Compatible()) {
+        _updateSession(opCtx);
+        ShardsvrParticipantBlock blockCRUDOperationsRequest(nss);
+        blockCRUDOperationsRequest.setBlockType(
+            mongo::CriticalSectionBlockTypeEnum::kReadsAndWrites);
+        blockCRUDOperationsRequest.setReason(getReasonForDropCollection(nss));
+        blockCRUDOperationsRequest.setAllowViews(true);
+        const auto cmdObj =
+            CommandHelpers::appendMajorityWriteConcern(blockCRUDOperationsRequest.toBSON({}));
+        sharding_ddl_util::sendAuthenticatedCommandToShards(
+            opCtx,
+            nss.db(),
+            cmdObj.addFields(getCurrentSession().toBSON()),
+            Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx),
+            **executor);
+    }
 
     sharding_ddl_util::removeCollAndChunksMetadataFromConfig(
         opCtx, coll, ShardingCatalogClient::kMajorityWriteConcern);
@@ -242,13 +266,29 @@ void DropDatabaseCoordinator::_dropShardedCollection(
 
     // Remove collection's query analyzer configuration document, if it exists.
     sharding_ddl_util::removeQueryAnalyzerMetadataFromConfig(opCtx, nss, coll.getUuid());
+
+    if (!_isPre70Compatible()) {
+        _updateSession(opCtx);
+        ShardsvrParticipantBlock unblockCRUDOperationsRequest(nss);
+        unblockCRUDOperationsRequest.setBlockType(CriticalSectionBlockTypeEnum::kUnblock);
+        unblockCRUDOperationsRequest.setReason(getReasonForDropCollection(nss));
+        unblockCRUDOperationsRequest.setAllowViews(true);
+
+        const auto cmdObj =
+            CommandHelpers::appendMajorityWriteConcern(unblockCRUDOperationsRequest.toBSON({}));
+        sharding_ddl_util::sendAuthenticatedCommandToShards(
+            opCtx,
+            nss.db(),
+            cmdObj.addFields(getCurrentSession().toBSON()),
+            Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx),
+            **executor);
+    }
 }
 
 void DropDatabaseCoordinator::_clearDatabaseInfoOnPrimary(OperationContext* opCtx) {
     DatabaseName dbName(boost::none, _dbName);
     AutoGetDb autoDb(opCtx, dbName, MODE_X);
-    auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
-        opCtx, dbName, DSSAcquisitionMode::kExclusive);
+    auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireExclusive(opCtx, dbName);
     scopedDss->clearDbInfo(opCtx);
 }
 

@@ -51,6 +51,7 @@
 #include "mongo/s/cluster_write.h"
 #include "mongo/s/query/document_source_merge_cursors.h"
 #include "mongo/s/router.h"
+#include "mongo/s/shard_version_factory.h"
 #include "mongo/s/stale_shard_version_helpers.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -61,8 +62,8 @@ namespace mongo {
 using namespace fmt::literals;
 
 bool ShardServerProcessInterface::isSharded(OperationContext* opCtx, const NamespaceString& nss) {
-    const auto cm =
-        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionPlacementInfo(opCtx, nss));
+    const auto [cm, _] =
+        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
     return cm.isSharded();
 }
 
@@ -74,20 +75,21 @@ void ShardServerProcessInterface::checkRoutingInfoEpochOrThrow(
     auto* catalogCache = Grid::get(expCtx->opCtx)->catalogCache();
 
     // Since we are only checking the epoch, don't advance the time in store of the index cache
-    auto currentGlobalIndexesInfo = catalogCache->getCollectionIndexInfo(expCtx->opCtx, nss);
+    auto currentGlobalIndexesInfo =
+        uassertStatusOK(catalogCache->getCollectionRoutingInfo(expCtx->opCtx, nss)).gii;
 
     // Mark the cache entry routingInfo for the 'nss' and 'shardId' if the entry is staler than
     // 'targetCollectionVersion'.
-    const ShardVersion ignoreIndexVersion{
+    const ShardVersion ignoreIndexVersion = ShardVersionFactory::make(
         targetCollectionVersion,
         currentGlobalIndexesInfo
             ? boost::make_optional(currentGlobalIndexesInfo->getCollectionIndexes())
-            : boost::none};
+            : boost::none);
     catalogCache->invalidateShardOrEntireCollectionEntryForShardedCollection(
         nss, ignoreIndexVersion, shardId);
 
     const auto routingInfo =
-        uassertStatusOK(catalogCache->getCollectionPlacementInfo(expCtx->opCtx, nss));
+        uassertStatusOK(catalogCache->getCollectionRoutingInfo(expCtx->opCtx, nss)).cm;
 
     const auto foundVersion =
         routingInfo.isSharded() ? routingInfo.getVersion() : ChunkVersion::UNSHARDED();
@@ -174,6 +176,7 @@ void ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged(
     const NamespaceString& targetNs,
     bool dropTarget,
     bool stayTemp,
+    bool allowBuckets,
     const BSONObj& originalCollectionOptions,
     const std::list<BSONObj>& originalIndexes) {
     auto cachedDbInfo =
@@ -187,7 +190,7 @@ void ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged(
     auto response =
         executeCommandAgainstDatabasePrimary(opCtx,
                                              // internalRenameIfOptionsAndIndexesMatch is adminOnly.
-                                             NamespaceString::kAdminDb,
+                                             DatabaseName::kAdmin.db(),
                                              std::move(cachedDbInfo),
                                              newCmdObj,
                                              ReadPreferenceSetting(ReadPreference::PrimaryOnly),

@@ -1228,8 +1228,9 @@ void RunCommandImpl::_epilogue() {
         });
 
     behaviors.waitForLinearizableReadConcern(opCtx);
-    tenant_migration_access_blocker::checkIfLinearizableReadWasAllowedOrThrow(
-        opCtx, request.getDatabase());
+    const DatabaseName requestDbName =
+        DatabaseNameUtil::deserialize(request.getValidatedTenantId(), request.getDatabase());
+    tenant_migration_access_blocker::checkIfLinearizableReadWasAllowedOrThrow(opCtx, requestDbName);
 
     // Wait for data to satisfy the read concern level, if necessary.
     behaviors.waitForSpeculativeMajorityReadConcern(opCtx);
@@ -2319,7 +2320,6 @@ void HandleRequest::completeOperation(DbResponse& response) {
     // Mark the op as complete, and log it if appropriate. Returns a boolean indicating whether
     // this op should be written to the profiler.
     const bool shouldProfile = currentOp.completeAndLogOperation(
-        opCtx,
         MONGO_LOGV2_DEFAULT_COMPONENT,
         CollectionCatalog::get(opCtx)
             ->getDatabaseProfileSettings(currentOp.getNSS().dbName())
@@ -2396,9 +2396,8 @@ void onHandleRequestException(const HandleRequest& hr, const Status& status) {
 }
 
 Future<DbResponse> ServiceEntryPointCommon::handleRequest(
-    OperationContext* opCtx,
-    const Message& m,
-    std::unique_ptr<const Hooks> behaviors) noexcept try {
+    OperationContext* opCtx, const Message& m, std::unique_ptr<const Hooks> behaviors) noexcept
+    try {
     HandleRequest hr(opCtx, m, std::move(behaviors));
     hr.startOperation();
 

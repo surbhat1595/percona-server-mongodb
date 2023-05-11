@@ -10,6 +10,8 @@
  *  ]
  */
 
+load('jstests/libs/feature_flag_util.js');
+
 const dbPrefix = jsTestName() + '_DB_';
 const dbCount = 2;
 const collPrefix = 'sharded_coll_';
@@ -62,6 +64,10 @@ var $config = (function() {
                 ]);
         },
         movePrimary: function(db, collName, connCache) {
+            if (this.skipMovePrimary) {
+                return;
+            }
+
             db = getRandomDb(db);
             const shardId = getRandomShard(connCache);
 
@@ -73,11 +79,6 @@ var $config = (function() {
                     // occurs at this phase, the movePrimary operation does not recover.
                     7120202
                 ]);
-
-            // TODO (SERVER-71308): Remove explicit updating of database metadata on recipient. The
-            // recipient of a movePrimary operation is an agnostic participant of the protocol and
-            // doesn't update its cached metadata as a consequence of the operation.
-            assert.commandWorked(db.runCommand({listCollections: 1, nameOnly: true}));
         },
         collMod: function(db, collName, connCache) {
             db = getRandomDb(db);
@@ -91,6 +92,10 @@ var $config = (function() {
     };
 
     let setup = function(db, collName, connCache) {
+        // TODO (SERVER-71309): Remove once 7.0 becomes last LTS. Prevent non-resilient movePrimary
+        // operations from being executed in multiversion suites.
+        this.skipMovePrimary = !FeatureFlagUtil.isEnabled(db.getMongo(), 'ResilientMovePrimary');
+
         for (var i = 0; i < dbCount; i++) {
             const dbName = dbPrefix + i;
             const newDb = db.getSiblingDB(dbName);
@@ -116,7 +121,6 @@ var $config = (function() {
         startState: 'create',
         states: states,
         transitions: transitions,
-        data: {},
         setup: setup,
         teardown: teardown,
         passConnectionCache: true

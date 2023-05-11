@@ -157,7 +157,7 @@ TEST_F(BasicRS, QueryPrimary) {
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
 
     // Note: IdentityNS contains the name of the server.
-    FindCommandRequest findCmd{NamespaceString{IdentityNS}};
+    FindCommandRequest findCmd{IdentityNS};
     auto cursor =
         replConn.find(std::move(findCmd), ReadPreferenceSetting{ReadPreference::PrimaryOnly});
     BSONObj doc = cursor->next();
@@ -173,7 +173,7 @@ TEST_F(BasicRS, QuerySecondaryOnly) {
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
 
     // Note: IdentityNS contains the name of the server.
-    FindCommandRequest findCmd{NamespaceString{IdentityNS}};
+    FindCommandRequest findCmd{IdentityNS};
     auto cursor =
         replConn.find(std::move(findCmd), ReadPreferenceSetting{ReadPreference::SecondaryOnly});
     BSONObj doc = cursor->next();
@@ -190,7 +190,7 @@ TEST_F(BasicRS, QueryPrimaryPreferred) {
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
 
     // Note: IdentityNS contains the name of the server.
-    FindCommandRequest findCmd{NamespaceString{IdentityNS}};
+    FindCommandRequest findCmd{IdentityNS};
     auto cursor =
         replConn.find(std::move(findCmd), ReadPreferenceSetting{ReadPreference::PrimaryPreferred});
     BSONObj doc = cursor->next();
@@ -206,7 +206,7 @@ TEST_F(BasicRS, QuerySecondaryPreferred) {
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
 
     // Note: IdentityNS contains the name of the server.
-    FindCommandRequest findCmd{NamespaceString{IdentityNS}};
+    FindCommandRequest findCmd{IdentityNS};
     auto cursor = replConn.find(std::move(findCmd),
                                 ReadPreferenceSetting{ReadPreference::SecondaryPreferred});
     BSONObj doc = cursor->next();
@@ -270,7 +270,7 @@ TEST_F(AllNodesDown, QueryPrimary) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
 
-    FindCommandRequest findCmd{NamespaceString{IdentityNS}};
+    FindCommandRequest findCmd{IdentityNS};
     ASSERT_THROWS(
         replConn.find(std::move(findCmd), ReadPreferenceSetting{ReadPreference::PrimaryOnly}),
         AssertionException);
@@ -284,7 +284,7 @@ TEST_F(AllNodesDown, QuerySecondaryOnly) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
 
-    FindCommandRequest findCmd{NamespaceString{IdentityNS}};
+    FindCommandRequest findCmd{IdentityNS};
     ASSERT_THROWS(
         replConn.find(std::move(findCmd), ReadPreferenceSetting{ReadPreference::SecondaryOnly}),
         AssertionException);
@@ -298,7 +298,7 @@ TEST_F(AllNodesDown, QueryPrimaryPreferred) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
 
-    FindCommandRequest findCmd{NamespaceString{IdentityNS}};
+    FindCommandRequest findCmd{IdentityNS};
     ASSERT_THROWS(
         replConn.find(std::move(findCmd), ReadPreferenceSetting{ReadPreference::PrimaryPreferred}),
         AssertionException);
@@ -312,7 +312,7 @@ TEST_F(AllNodesDown, QuerySecondaryPreferred) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
 
-    FindCommandRequest findCmd{NamespaceString{IdentityNS}};
+    FindCommandRequest findCmd{IdentityNS};
     ASSERT_THROWS(replConn.find(std::move(findCmd),
                                 ReadPreferenceSetting{ReadPreference::SecondaryPreferred}),
                   AssertionException);
@@ -326,7 +326,7 @@ TEST_F(AllNodesDown, QueryNearest) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
 
-    FindCommandRequest findCmd{NamespaceString{IdentityNS}};
+    FindCommandRequest findCmd{IdentityNS};
     ASSERT_THROWS(replConn.find(std::move(findCmd), ReadPreferenceSetting{ReadPreference::Nearest}),
                   AssertionException);
 }
@@ -372,7 +372,7 @@ TEST_F(PrimaryDown, QueryPrimary) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
 
-    FindCommandRequest findCmd{NamespaceString{IdentityNS}};
+    FindCommandRequest findCmd{IdentityNS};
     ASSERT_THROWS(
         replConn.find(std::move(findCmd), ReadPreferenceSetting{ReadPreference::PrimaryOnly}),
         AssertionException);
@@ -387,7 +387,7 @@ TEST_F(PrimaryDown, QuerySecondaryOnly) {
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
 
     // Note: IdentityNS contains the name of the server.
-    FindCommandRequest findCmd{NamespaceString{IdentityNS}};
+    FindCommandRequest findCmd{IdentityNS};
     auto cursor =
         replConn.find(std::move(findCmd), ReadPreferenceSetting{ReadPreference::SecondaryOnly});
     BSONObj doc = cursor->next();
@@ -404,7 +404,7 @@ TEST_F(PrimaryDown, QueryPrimaryPreferred) {
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
 
     // Note: IdentityNS contains the name of the server.
-    FindCommandRequest findCmd{NamespaceString{IdentityNS}};
+    FindCommandRequest findCmd{IdentityNS};
     auto cursor =
         replConn.find(std::move(findCmd), ReadPreferenceSetting{ReadPreference::PrimaryPreferred});
     BSONObj doc = cursor->next();
@@ -421,7 +421,7 @@ TEST_F(PrimaryDown, QuerySecondaryPreferred) {
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
 
     // Note: IdentityNS contains the name of the server.
-    FindCommandRequest findCmd{NamespaceString{IdentityNS}};
+    FindCommandRequest findCmd{IdentityNS};
     auto cursor = replConn.find(std::move(findCmd),
                                 ReadPreferenceSetting{ReadPreference::SecondaryPreferred});
     BSONObj doc = cursor->next();
@@ -437,7 +437,7 @@ TEST_F(PrimaryDown, Nearest) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
 
-    FindCommandRequest findCmd{NamespaceString{IdentityNS}};
+    FindCommandRequest findCmd{IdentityNS};
     auto cursor = replConn.find(std::move(findCmd), ReadPreferenceSetting{ReadPreference::Nearest});
     BSONObj doc = cursor->next();
     ASSERT_EQUALS(replSet->getSecondaries().front(), doc[HostField.name()].str());
@@ -482,7 +482,7 @@ TEST_F(SecondaryDown, QueryPrimary) {
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
 
     // Note: IdentityNS contains the name of the server.
-    FindCommandRequest findCmd{NamespaceString{IdentityNS}};
+    FindCommandRequest findCmd{IdentityNS};
     auto cursor =
         replConn.find(std::move(findCmd), ReadPreferenceSetting{ReadPreference::PrimaryOnly});
     BSONObj doc = cursor->next();
@@ -497,7 +497,7 @@ TEST_F(SecondaryDown, QuerySecondaryOnly) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
 
-    FindCommandRequest findCmd{NamespaceString{IdentityNS}};
+    FindCommandRequest findCmd{IdentityNS};
     ASSERT_THROWS(
         replConn.find(std::move(findCmd), ReadPreferenceSetting{ReadPreference::SecondaryOnly}),
         AssertionException);
@@ -512,7 +512,7 @@ TEST_F(SecondaryDown, QueryPrimaryPreferred) {
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
 
     // Note: IdentityNS contains the name of the server.
-    FindCommandRequest findCmd{NamespaceString{IdentityNS}};
+    FindCommandRequest findCmd{IdentityNS};
     auto cursor =
         replConn.find(std::move(findCmd), ReadPreferenceSetting{ReadPreference::PrimaryPreferred});
     BSONObj doc = cursor->next();
@@ -527,7 +527,7 @@ TEST_F(SecondaryDown, QuerySecondaryPreferred) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
 
-    FindCommandRequest findCmd{NamespaceString{IdentityNS}};
+    FindCommandRequest findCmd{IdentityNS};
     auto cursor = replConn.find(std::move(findCmd),
                                 ReadPreferenceSetting{ReadPreference::SecondaryPreferred});
     BSONObj doc = cursor->next();
@@ -542,7 +542,7 @@ TEST_F(SecondaryDown, QueryNearest) {
     MockReplicaSet* replSet = getReplSet();
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
 
-    FindCommandRequest findCmd{NamespaceString{IdentityNS}};
+    FindCommandRequest findCmd{IdentityNS};
     auto cursor = replConn.find(std::move(findCmd), ReadPreferenceSetting{ReadPreference::Nearest});
     BSONObj doc = cursor->next();
     ASSERT_EQUALS(replSet->getPrimary(), doc[HostField.name()].str());
@@ -692,7 +692,7 @@ TEST_F(TaggedFiveMemberRS, ConnShouldPinIfSameSettings) {
     {
         // Note: IdentityNS contains the name of the server.
         std::unique_ptr<DBClientCursor> cursor =
-            replConn.find(FindCommandRequest{NamespaceString{IdentityNS}},
+            replConn.find(FindCommandRequest{IdentityNS},
                           ReadPreferenceSetting{ReadPreference::PrimaryPreferred});
         BSONObj doc = cursor->next();
         dest = doc[HostField.name()].str();
@@ -700,7 +700,7 @@ TEST_F(TaggedFiveMemberRS, ConnShouldPinIfSameSettings) {
 
     {
         std::unique_ptr<DBClientCursor> cursor =
-            replConn.find(FindCommandRequest{NamespaceString{IdentityNS}},
+            replConn.find(FindCommandRequest{IdentityNS},
                           ReadPreferenceSetting{ReadPreference::PrimaryPreferred});
         BSONObj doc = cursor->next();
         const string newDest = doc[HostField.name()].str();
@@ -719,7 +719,7 @@ TEST_F(TaggedFiveMemberRS, ConnShouldNotPinIfHostMarkedAsFailed) {
     {
         // Note: IdentityNS contains the name of the server.
         std::unique_ptr<DBClientCursor> cursor =
-            replConn.find(FindCommandRequest{NamespaceString{IdentityNS}},
+            replConn.find(FindCommandRequest{IdentityNS},
                           ReadPreferenceSetting{ReadPreference::PrimaryPreferred});
         BSONObj doc = cursor->next();
         dest = doc[HostField.name()].str();
@@ -733,7 +733,7 @@ TEST_F(TaggedFiveMemberRS, ConnShouldNotPinIfHostMarkedAsFailed) {
 
     {
         std::unique_ptr<DBClientCursor> cursor =
-            replConn.find(FindCommandRequest{NamespaceString{IdentityNS}},
+            replConn.find(FindCommandRequest{IdentityNS},
                           ReadPreferenceSetting{ReadPreference::PrimaryPreferred});
         BSONObj doc = cursor->next();
         const string newDest = doc[HostField.name()].str();
@@ -752,8 +752,7 @@ TEST_F(TaggedFiveMemberRS, SecondaryConnReturnsSecConn) {
     mongo::DBClientConnection& secConn = replConn.secondaryConn();
 
     // Note: IdentityNS contains the name of the server.
-    std::unique_ptr<DBClientCursor> cursor =
-        secConn.find(FindCommandRequest{NamespaceString{IdentityNS}});
+    std::unique_ptr<DBClientCursor> cursor = secConn.find(FindCommandRequest{IdentityNS});
     BSONObj doc = cursor->next();
     std::string dest = doc[HostField.name()].str();
     ASSERT_NOT_EQUALS(dest, replSet->getPrimary());

@@ -72,7 +72,6 @@ IndexCatalogEntryImpl::IndexCatalogEntryImpl(OperationContext* const opCtx,
     : _ident(ident),
       _descriptor(std::move(descriptor)),
       _catalogId(collection->getCatalogId()),
-      _ordering(Ordering::make(_descriptor->keyPattern())),
       _isReady(false),
       _isFrozen(isFrozen),
       _shouldValidateDocument(false),
@@ -133,8 +132,10 @@ bool IndexCatalogEntryImpl::isReady(OperationContext* opCtx) const {
     // For multi-document transactions, we can open a snapshot prior to checking the
     // minimumSnapshotVersion on a collection.  This means we are unprotected from reading
     // out-of-sync index catalog entries.  To fix this, we uassert if we detect that the
-    // in-memory catalog is out-of-sync with the on-disk catalog.
-    if (opCtx->inMultiDocumentTransaction()) {
+    // in-memory catalog is out-of-sync with the on-disk catalog. This check is not necessary when
+    // point-in-time catalog lookups are enabled as the snapshot is always in sync.
+    if (opCtx->inMultiDocumentTransaction() &&
+        !feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCV()) {
         if (!isPresentInMySnapshot(opCtx) || isReadyInMySnapshot(opCtx) != _isReady) {
             uasserted(ErrorCodes::SnapshotUnavailable,
                       str::stream() << "Unable to read from a snapshot due to pending collection"
@@ -377,6 +378,10 @@ Status IndexCatalogEntryImpl::_setMultikeyInMultiDocumentTransaction(
 
 std::shared_ptr<Ident> IndexCatalogEntryImpl::getSharedIdent() const {
     return _accessMethod ? _accessMethod->getSharedIdent() : nullptr;
+}
+
+const Ordering& IndexCatalogEntryImpl::ordering() const {
+    return _descriptor->ordering();
 }
 
 void IndexCatalogEntryImpl::setIdent(std::shared_ptr<Ident> newIdent) {

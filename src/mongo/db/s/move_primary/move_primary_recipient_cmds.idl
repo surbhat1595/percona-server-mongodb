@@ -38,23 +38,15 @@ imports:
     - "mongo/db/repl/replication_types.idl"
 
 structs:
-    MovePrimaryRecipientSyncDataResponse:
-        description: "Response for the 'movePrimaryRecipientSyncData' command"
-        strict: false
-        is_command_reply: true
-        generate_comparison_operators: false
-        fields:
-            majorityAppliedDonorOpTime:
-                type: optime
-                description: "Majority applied donor optime by the recipient"
     MovePrimaryRecipientMetadata:
-        description: "Common metadata sent as part of every recipient command"
+        description: "Common metadata at the recipient for movePrimary op"
         strict: false
         inline_chained_structs: true
         generate_comparison_operators: false
         fields:
             migrationId:
-                description: "Unique identifier for the movePrimary operation."
+                description: >-
+                    "Unique identifier for the movePrimary operation."
                 type: uuid
             databaseName:
                 description: "The name of the database being moved as part of movePrimary."
@@ -70,7 +62,7 @@ commands:
         command_name: movePrimaryRecipientSyncData
         strict: false
         namespace: ignored
-        reply_type: MovePrimaryRecipientSyncDataResponse
+        reply_type: OkReply
         inline_chained_structs: true
         chained_structs:
             MovePrimaryRecipientMetadata: MovePrimaryRecipientMetadata

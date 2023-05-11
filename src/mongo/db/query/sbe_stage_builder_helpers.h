@@ -628,6 +628,9 @@ struct StageBuilderState {
 
     // Holds the mapping between the custom ABT variable names and the slot id they are referencing.
     optimizer::SlotVarMap slotVarMap;
+
+    StringMap<sbe::value::SlotId> stringConstantToSlotMap;
+    SimpleBSONObjMap<sbe::value::SlotId> keyPatternToSlotMap;
 };
 
 /**
@@ -1025,7 +1028,9 @@ void visitPathTreeNodes(PathTreeNode<T>* treeRoot,
     boost::optional<std::string> path = std::move(rootPath);
     const std::string emptyPath;
 
-    auto getPath = [&]() -> const std::string& { return path ? *path : emptyPath; };
+    auto getPath = [&]() -> const std::string& {
+        return path ? *path : emptyPath;
+    };
     auto dfsPop = [&] {
         dfs.pop_back();
         if (isPathNeeded && path) {
@@ -1113,18 +1118,11 @@ inline StringData getTopLevelField(const T& path) {
 
 template <typename T>
 inline std::vector<std::string> getTopLevelFields(const T& setOfPaths) {
-    const bool testCommandsEnabled = getTestCommandsEnabled();
     std::vector<std::string> topLevelFields;
     StringSet topLevelFieldsSet;
 
     for (const auto& path : setOfPaths) {
         auto field = getTopLevelField(path);
-        // If test commands are enabled, then we need to skip any top-level field named
-        // "POISON" so that the "failOnPoisonedFieldLookup" fail point works correctly.
-        if (testCommandsEnabled && field == "POISON") {
-            continue;
-        }
-
         if (!topLevelFieldsSet.count(field)) {
             topLevelFields.emplace_back(std::string(field));
             topLevelFieldsSet.emplace(std::string(field));
@@ -1132,12 +1130,6 @@ inline std::vector<std::string> getTopLevelFields(const T& setOfPaths) {
     }
 
     return topLevelFields;
-}
-
-template <typename T>
-inline bool containsPoisonTopLevelField(const T& setOfPaths) {
-    auto it = setOfPaths.lower_bound("POISON");
-    return getTestCommandsEnabled() && it != setOfPaths.end() && getTopLevelField(*it) == "POISON";
 }
 
 template <typename T, typename FuncT>

@@ -47,7 +47,7 @@ namespace add_shard_util {
 
 AddShard createAddShardCmd(OperationContext* opCtx, const ShardId& shardName) {
     AddShard addShardCmd;
-    addShardCmd.setDbName(NamespaceString::kAdminDb);
+    addShardCmd.setDbName(DatabaseName::kAdmin);
 
     ShardIdentity shardIdentity;
     shardIdentity.setShardName(shardName.toString());
@@ -59,7 +59,8 @@ AddShard createAddShardCmd(OperationContext* opCtx, const ShardId& shardName) {
     return addShardCmd;
 }
 
-BSONObj createShardIdentityUpsertForAddShard(const AddShard& addShardCmd) {
+BSONObj createShardIdentityUpsertForAddShard(const AddShard& addShardCmd,
+                                             const WriteConcernOptions& wc) {
     BatchedCommandRequest request([&] {
         write_ops::UpdateCommandRequest updateOp(NamespaceString::kServerConfigurationNamespace);
         updateOp.setUpdates({[&] {
@@ -73,7 +74,7 @@ BSONObj createShardIdentityUpsertForAddShard(const AddShard& addShardCmd) {
 
         return updateOp;
     }());
-    request.setWriteConcern(ShardingCatalogClient::kMajorityWriteConcern.toBSON());
+    request.setWriteConcern(wc.toBSON());
 
     return request.toBSON();
 }

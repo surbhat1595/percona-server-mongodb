@@ -223,7 +223,9 @@ public:
         _net = net.get();
 
         executor::ThreadPoolMock::Options dbThreadPoolOptions;
-        dbThreadPoolOptions.onCreateThread = []() { Client::initThread("FetchMockTaskExecutor"); };
+        dbThreadPoolOptions.onCreateThread = []() {
+            Client::initThread("FetchMockTaskExecutor");
+        };
 
         auto pool = std::make_unique<executor::ThreadPoolMock>(_net, 1, dbThreadPoolOptions);
         _threadpoolTaskExecutor =
@@ -317,7 +319,7 @@ protected:
         ASSERT_BSONOBJ_EQ(memoryStateDoc.toBSON(), persistedStateDocWithStatus.getValue().toBSON());
     }
     void insertToNodes(MockReplicaSet* replSet,
-                       const std::string& nss,
+                       const NamespaceString& nss,
                        BSONObj obj,
                        const std::vector<HostAndPort>& hosts) {
         for (const auto& host : hosts) {
@@ -326,7 +328,7 @@ protected:
     }
 
     void clearCollection(MockReplicaSet* replSet,
-                         const std::string& nss,
+                         const NamespaceString& nss,
                          const std::vector<HostAndPort>& hosts) {
         for (const auto& host : hosts) {
             replSet->getNode(host.toString())->remove(nss, BSONObj{} /*filter*/);
@@ -339,9 +341,9 @@ protected:
         const auto targetHosts = hosts.empty() ? replSet->getHosts() : hosts;
         // The MockRemoteDBService does not actually implement the database, so to make our
         // find work correctly we must make sure there's only one document to find.
-        clearCollection(replSet, NamespaceString::kRsOplogNamespace.ns(), targetHosts);
+        clearCollection(replSet, NamespaceString::kRsOplogNamespace, targetHosts);
         insertToNodes(replSet,
-                      NamespaceString::kRsOplogNamespace.ns(),
+                      NamespaceString::kRsOplogNamespace,
                       makeOplogEntry(topOfOplogOpTime,
                                      OpTypeEnum::kNoop,
                                      {} /* namespace */,
@@ -444,11 +446,10 @@ void sendReponseToExpectedRequest(const BSONObj& backupCursorResponse,
 }
 
 BSONObj createServerAggregateReply() {
-    return CursorResponse(
-               NamespaceString::makeCollectionlessAggregateNSS(NamespaceString::kAdminDb),
-               0 /* cursorId */,
-               {BSON("byteOffset" << 0 << "endOfFile" << true << "data"
-                                  << BSONBinData(0, 0, BinDataGeneral))})
+    return CursorResponse(NamespaceString::makeCollectionlessAggregateNSS(DatabaseName::kAdmin),
+                          0 /* cursorId */,
+                          {BSON("byteOffset" << 0 << "endOfFile" << true << "data"
+                                             << BSONBinData(0, 0, BinDataGeneral))})
         .toBSONAsInitialResponse();
 }
 
@@ -522,7 +523,8 @@ TEST_F(TenantMigrationRecipientServiceShardMergeTestInsert,
 
 TEST_F(TenantMigrationRecipientServiceShardMergeTest, CannotCreateServiceWithoutTenants) {
     const UUID migrationUUID = UUID::gen();
-    const NamespaceString aggregateNs = NamespaceString("admin.$cmd.aggregate");
+    const NamespaceString aggregateNs =
+        NamespaceString::createNamespaceString_forTest("admin.$cmd.aggregate");
 
     MockReplicaSet replSet("donorSet", 3, true /* hasPrimary */, true /* dollarPrefixHosts */);
 
@@ -547,7 +549,8 @@ TEST_F(TenantMigrationRecipientServiceShardMergeTest, OpenBackupCursorSuccessful
     stopFailPointEnableBlock fp("fpBeforeAdvancingStableTimestamp");
     const UUID migrationUUID = UUID::gen();
     const CursorId backupCursorId = 12345;
-    const NamespaceString aggregateNs = NamespaceString("admin.$cmd.aggregate");
+    const NamespaceString aggregateNs =
+        NamespaceString::createNamespaceString_forTest("admin.$cmd.aggregate");
 
     auto taskFp = globalFailPointRegistry().find("hangBeforeTaskCompletion");
     auto initialTimesEntered = taskFp->setMode(FailPoint::alwaysOn);
@@ -616,7 +619,8 @@ TEST_F(TenantMigrationRecipientServiceShardMergeTest, OpenBackupCursorAndRetries
     stopFailPointEnableBlock fp("fpBeforeAdvancingStableTimestamp");
     const UUID migrationUUID = UUID::gen();
     const CursorId backupCursorId = 12345;
-    const NamespaceString aggregateNs = NamespaceString("admin.$cmd.aggregate");
+    const NamespaceString aggregateNs =
+        NamespaceString::createNamespaceString_forTest("admin.$cmd.aggregate");
 
     auto taskFp = globalFailPointRegistry().find("hangBeforeTaskCompletion");
     auto initialTimesEntered = taskFp->setMode(FailPoint::alwaysOn);

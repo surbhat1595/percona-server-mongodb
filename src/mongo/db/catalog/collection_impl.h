@@ -81,7 +81,7 @@ public:
 
     void init(OperationContext* opCtx) final;
     Status initFromExisting(OperationContext* opCtx,
-                            const std::shared_ptr<Collection>& collection,
+                            const std::shared_ptr<const Collection>& collection,
                             const DurableCatalogEntry& catalogEntry,
                             boost::optional<Timestamp> readTimestamp) final;
     bool isInitialized() const final;
@@ -383,6 +383,11 @@ private:
      */
     template <typename Func>
     void _writeMetadata(OperationContext* opCtx, Func func);
+
+    /**
+     * Helper for init() and initFromExisting() to initialize shared state.
+     */
+    void _initShared(OperationContext* opCtx, const CollectionOptions& options);
 
     /**
      * Helper for init() and initFromExisting() to initialize common state.

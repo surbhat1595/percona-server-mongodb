@@ -56,7 +56,7 @@ ScanDefinition createScanDef(ScanDefOptions options,
     for (const auto& [indexDefName, indexDef] : indexDefs) {
         // Skip partial indexes. A path could be non-multikey on a partial index (subset of the
         // collection), but still be multikey on the overall collection.
-        if (!indexDef.getPartialReqMap().empty()) {
+        if (!indexDef.getPartialReqMap().isNoop()) {
             continue;
         }
 
@@ -69,8 +69,17 @@ ScanDefinition createScanDef(ScanDefOptions options,
 
     // Simplify partial filter requirements using the non-multikey paths.
     for (auto& [indexDefName, indexDef] : indexDefs) {
-        [[maybe_unused]] const bool hasEmptyInterval = simplifyPartialSchemaReqPaths(
-            "<root>", multikeynessTrie, indexDef.getPartialReqMap(), constFold);
+        ProjectionRenames projRenames_unused;
+        [[maybe_unused]] const bool hasEmptyInterval =
+            simplifyPartialSchemaReqPaths(boost::none /*scanProjName*/,
+                                          multikeynessTrie,
+                                          indexDef.getPartialReqMap(),
+                                          projRenames_unused,
+                                          constFold);
+        tassert(6624157,
+                "We should not be seeing renames from partial index filters",
+                projRenames_unused.empty());
+
         // If "hasEmptyInterval" is set, we have a partial filter index with an unsatisfiable
         // condition, which is thus guaranteed to never contain any documents.
     }

@@ -727,10 +727,8 @@ ExecutorFuture<void> ShardSplitDonorService::DonorStateMachine::_applySplitConfi
                auto opCtxHolder = _cancelableOpCtxFactory->makeOperationContext(&cc());
                DBDirectClient client(opCtxHolder.get());
                BSONObj result;
-               const bool returnValue =
-                   client.runCommand(DatabaseName(boost::none, NamespaceString::kAdminDb),
-                                     BSON("replSetReconfig" << splitConfig.toBSON()),
-                                     result);
+               const bool returnValue = client.runCommand(
+                   DatabaseName::kAdmin, BSON("replSetReconfig" << splitConfig.toBSON()), result);
                uassert(ErrorCodes::BadValue,
                        "Invalid return value for 'replSetReconfig' command.",
                        returnValue);
@@ -906,7 +904,7 @@ ExecutorFuture<repl::OpTime> ShardSplitDonorService::DonorStateMachine::_updateS
                            mtab->startBlockingWrites();
 
                            opCtx->recoveryUnit()->onRollback(
-                               [mtab] { mtab->rollBackStartBlocking(); });
+                               [mtab](OperationContext*) { mtab->rollBackStartBlocking(); });
                        }
 
                        // Reserve an opTime for the write.
@@ -1218,10 +1216,8 @@ ExecutorFuture<void> ShardSplitDonorService::DonorStateMachine::_removeSplitConf
                DBDirectClient client(opCtx.get());
 
                BSONObj result;
-               const bool returnValue =
-                   client.runCommand(DatabaseName(boost::none, NamespaceString::kAdminDb),
-                                     BSON("replSetReconfig" << newConfigBob.obj()),
-                                     result);
+               const bool returnValue = client.runCommand(
+                   DatabaseName::kAdmin, BSON("replSetReconfig" << newConfigBob.obj()), result);
                uassert(
                    ErrorCodes::BadValue, "Invalid return value for replSetReconfig", returnValue);
                uassertStatusOK(getStatusFromCommandResult(result));

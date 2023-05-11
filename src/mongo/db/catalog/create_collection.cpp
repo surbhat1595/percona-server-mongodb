@@ -58,6 +58,7 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/idl/command_generic_argument.h"
@@ -206,9 +207,10 @@ Status _createView(OperationContext* opCtx,
 
         // If the view creation rolls back, ensure that the Top entry created for the view is
         // deleted.
-        opCtx->recoveryUnit()->onRollback([nss, serviceContext = opCtx->getServiceContext()]() {
-            Top::get(serviceContext).collectionDropped(nss);
-        });
+        opCtx->recoveryUnit()->onRollback(
+            [nss, serviceContext = opCtx->getServiceContext()](OperationContext*) {
+                Top::get(serviceContext).collectionDropped(nss);
+            });
 
         // Even though 'collectionOptions' is passed by rvalue reference, it is not safe to move
         // because 'userCreateNS' may throw a WriteConflictException.
@@ -249,31 +251,10 @@ Status _createDefaultTimeseriesIndex(OperationContext* opCtx, CollectionWriter& 
     return Status::OK();
 }
 
-Status _createTimeseries(OperationContext* opCtx,
-                         const NamespaceString& ns,
-                         const CollectionOptions& optionsArg) {
-    // This path should only be taken when a user creates a new time-series collection on the
-    // primary. Secondaries replicate individual oplog entries.
-    invariant(!ns.isTimeseriesBucketsCollection());
-    invariant(opCtx->writesAreReplicated());
-
-    auto bucketsNs = ns.makeTimeseriesBucketsNamespace();
-
-    CollectionOptions options = optionsArg;
-
-    Status timeseriesOptionsValidateAndSetStatus =
-        timeseries::validateAndSetBucketingParameters(options.timeseries.get());
-
-    if (!timeseriesOptionsValidateAndSetStatus.isOK()) {
-        return timeseriesOptionsValidateAndSetStatus;
-    }
-
-    // Set the validator option to a JSON schema enforcing constraints on bucket documents.
-    // This validation is only structural to prevent accidental corruption by users and
-    // cannot cover all constraints. Leave the validationLevel and validationAction to their
-    // strict/error defaults.
-    auto timeField = options.timeseries->getTimeField();
-    auto validatorObj = fromjson(fmt::sprintf(R"(
+BSONObj _generateTimeseriesValidator(int bucketVersion, StringData timeField) {
+    switch (bucketVersion) {
+        case timeseries::kTimeseriesControlCompressedVersion:
+            return fromjson(fmt::sprintf(R"(
 {
 '$jsonSchema' : {
     bsonType: 'object',
@@ -306,10 +287,79 @@ Status _createTimeseries(OperationContext* opCtx,
     additionalProperties: false
 }
 })",
-                                              timeField,
-                                              timeField,
-                                              timeField,
-                                              timeField));
+                                         timeField,
+                                         timeField,
+                                         timeField,
+                                         timeField));
+        case timeseries::kTimeseriesControlUncompressedVersion:
+            return fromjson(fmt::sprintf(R"(
+{
+'$jsonSchema' : {
+    bsonType: 'object',
+    required: ['_id', 'control', 'data'],
+    properties: {
+        _id: {bsonType: 'objectId'},
+        control: {
+            bsonType: 'object',
+            required: ['version', 'min', 'max'],
+            properties: {
+                version: {bsonType: 'number'},
+                min: {
+                    bsonType: 'object',
+                    required: ['%s'],
+                    properties: {'%s': {bsonType: 'date'}}
+                },
+                max: {
+                    bsonType: 'object',
+                    required: ['%s'],
+                    properties: {'%s': {bsonType: 'date'}}
+                },
+                closed: {bsonType: 'bool'}
+            }
+        },
+        data: {bsonType: 'object'},
+        meta: {}
+    },
+    additionalProperties: false
+}
+})",
+                                         timeField,
+                                         timeField,
+                                         timeField,
+                                         timeField));
+        default:
+            MONGO_UNREACHABLE;
+    };
+}
+
+Status _createTimeseries(
+    OperationContext* opCtx,
+    const NamespaceString& ns,
+    const CollectionOptions& optionsArg,
+    enum TimeseriesCreateLevel createOpt = TimeseriesCreateLevel::kBothCollAndView) {
+    // This path should only be taken when a user creates a new time-series collection on the
+    // primary. Secondaries replicate individual oplog entries.
+    invariant(!ns.isTimeseriesBucketsCollection());
+    invariant(opCtx->writesAreReplicated());
+
+    auto bucketsNs = ns.makeTimeseriesBucketsNamespace();
+
+    CollectionOptions options = optionsArg;
+
+    Status timeseriesOptionsValidateAndSetStatus =
+        timeseries::validateAndSetBucketingParameters(options.timeseries.get());
+
+    if (!timeseriesOptionsValidateAndSetStatus.isOK()) {
+        return timeseriesOptionsValidateAndSetStatus;
+    }
+
+    // Set the validator option to a JSON schema enforcing constraints on bucket documents.
+    // This validation is only structural to prevent accidental corruption by users and
+    // cannot cover all constraints. Leave the validationLevel and validationAction to their
+    // strict/error defaults.
+    auto timeField = options.timeseries->getTimeField();
+    int bucketVersion = timeseries::kTimeseriesControlLatestVersion;
+    auto validatorObj = _generateTimeseriesValidator(bucketVersion, timeField);
 
     bool existingBucketCollectionIsCompatible = false;
 
@@ -350,7 +400,7 @@ Status _createTimeseries(OperationContext* opCtx,
             // If the buckets collection and time-series view creation roll back, ensure that their
             // Top entries are deleted.
             opCtx->recoveryUnit()->onRollback(
-                [serviceContext = opCtx->getServiceContext(), bucketsNs]() {
+                [serviceContext = opCtx->getServiceContext(), bucketsNs](OperationContext*) {
                     Top::get(serviceContext).collectionDropped(bucketsNs);
                 });
 
@@ -380,6 +430,21 @@ Status _createTimeseries(OperationContext* opCtx,
                 existingBucketCollectionIsCompatible =
                     coll->getCollectionOptions().matchesStorageOptions(
                         bucketsOptions, CollatorFactoryInterface::get(opCtx->getServiceContext()));
+
+                // We may have a bucket collection created with a previous version of mongod, this
+                // is also OK as we do not convert bucket collections to latest version during
+                // upgrade.
+                while (!existingBucketCollectionIsCompatible &&
+                       bucketVersion > timeseries::kTimeseriesControlMinVersion) {
+                    validatorObj = _generateTimeseriesValidator(--bucketVersion, timeField);
+                    bucketsOptions.validator = validatorObj;
+
+                    existingBucketCollectionIsCompatible =
+                        coll->getCollectionOptions().matchesStorageOptions(
+                            bucketsOptions,
+                            CollatorFactoryInterface::get(opCtx->getServiceContext()));
+                }
+
                 return Status(ErrorCodes::NamespaceExists,
                               str::stream() << "Bucket Collection already exists. NS: " << bucketsNs
                                             << ". UUID: " << coll->uuid());
@@ -395,8 +460,9 @@ Status _createTimeseries(OperationContext* opCtx,
             return Status::OK();
         });
 
-    // If compatible bucket collection already exists then proceed with creating view definition.
-    if (!ret.isOK() && !existingBucketCollectionIsCompatible)
+    // If compatible bucket collection already exists then proceed with creating view defintion.
+    if ((!ret.isOK() && !existingBucketCollectionIsCompatible) ||
+        createOpt == TimeseriesCreateLevel::kBucketsCollOnly)
         return ret;
 
     ret = writeConflictRetry(opCtx, "create", ns.ns(), [&]() -> Status {
@@ -439,9 +505,10 @@ Status _createTimeseries(OperationContext* opCtx,
 
         // If the buckets collection and time-series view creation roll back, ensure that their
         // Top entries are deleted.
-        opCtx->recoveryUnit()->onRollback([serviceContext = opCtx->getServiceContext(), ns]() {
-            Top::get(serviceContext).collectionDropped(ns);
-        });
+        opCtx->recoveryUnit()->onRollback(
+            [serviceContext = opCtx->getServiceContext(), ns](OperationContext*) {
+                Top::get(serviceContext).collectionDropped(ns);
+            });
 
         if (MONGO_unlikely(failTimeseriesViewCreation.shouldFail(
                 [&ns](const BSONObj& data) { return data["ns"_sd].String() == ns.ns(); }))) {
@@ -544,9 +611,10 @@ Status _createCollection(
 
         // If the collection creation rolls back, ensure that the Top entry created for the
         // collection is deleted.
-        opCtx->recoveryUnit()->onRollback([nss, serviceContext = opCtx->getServiceContext()]() {
-            Top::get(serviceContext).collectionDropped(nss);
-        });
+        opCtx->recoveryUnit()->onRollback(
+            [nss, serviceContext = opCtx->getServiceContext()](OperationContext*) {
+                Top::get(serviceContext).collectionDropped(nss);
+            });
 
         // Even though 'collectionOptions' is passed by rvalue reference, it is not safe to move
         // because 'userCreateNS' may throw a WriteConflictException.
@@ -637,6 +705,19 @@ Status createCollection(OperationContext* opCtx,
     return createCollection(opCtx, nss, collectionOptions, idIndex);
 }
 }  // namespace
+
+Status createTimeseries(OperationContext* opCtx,
+                        const NamespaceString& ns,
+                        const BSONObj& options,
+                        TimeseriesCreateLevel level) {
+    StatusWith<CollectionOptions> statusWith =
+        CollectionOptions::parse(options, CollectionOptions::parseForCommand);
+    if (!statusWith.isOK()) {
+        return statusWith.getStatus();
+    }
+    auto collectionOptions = statusWith.getValue();
+    return _createTimeseries(opCtx, ns, collectionOptions, level);
+}
 
 Status createCollection(OperationContext* opCtx,
                         const DatabaseName& dbName,
@@ -831,6 +912,11 @@ Status createCollection(OperationContext* opCtx,
     }
 
     if (options.isView()) {
+        // system.profile will have new document inserts due to profiling. Inserts aren't supported
+        // on views.
+        uassert(ErrorCodes::IllegalOperation,
+                "Cannot create system.profile as a view",
+                !ns.isSystemDotProfile());
         uassert(ErrorCodes::OperationNotSupportedInTransaction,
                 str::stream() << "Cannot create a view in a multi-document "
                                  "transaction.",
@@ -841,6 +927,11 @@ Status createCollection(OperationContext* opCtx,
 
         return _createView(opCtx, ns, options);
     } else if (options.timeseries && !ns.isTimeseriesBucketsCollection()) {
+        // system.profile must be a simple collection since new document insertions directly work
+        // against the usual collection API. See introspect.cpp for more details.
+        uassert(ErrorCodes::IllegalOperation,
+                "Cannot create system.profile as a timeseries collection",
+                !ns.isSystemDotProfile());
         // This helper is designed for user-created time-series collections on primaries. If a
         // time-series buckets collection is created explicitly or during replication, treat this as
         // a normal collection creation.

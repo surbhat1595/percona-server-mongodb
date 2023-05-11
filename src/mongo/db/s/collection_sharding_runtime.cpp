@@ -41,6 +41,7 @@
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/shard_version_factory.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/util/duration.h"
 
@@ -145,6 +146,14 @@ ScopedCollectionFilter CollectionShardingRuntime::getOwnershipFilter(
     }
 
     return {std::move(metadata)};
+}
+
+ScopedCollectionFilter CollectionShardingRuntime::getOwnershipFilter(
+    OperationContext* opCtx,
+    OrphanCleanupPolicy orphanCleanupPolicy,
+    const ShardVersion& receivedShardVersion) const {
+    return _getMetadataWithVersionCheckAt(
+        opCtx, repl::ReadConcernArgs::get(opCtx).getArgsAtClusterTime(), receivedShardVersion);
 }
 
 ScopedCollectionDescription CollectionShardingRuntime::getCollectionDescription(
@@ -476,7 +485,8 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
     const auto wantedIndexVersion = wantedCollectionIndexes
         ? boost::make_optional(wantedCollectionIndexes->indexVersion())
         : boost::none;
-    const auto wantedShardVersion = ShardVersion(wantedPlacementVersion, wantedCollectionIndexes);
+    const auto wantedShardVersion =
+        ShardVersionFactory::make(currentMetadata, wantedCollectionIndexes);
 
     const ChunkVersion receivedPlacementVersion = receivedShardVersion.placementVersion();
     const boost::optional<Timestamp> receivedIndexVersion = receivedShardVersion.indexVersion();

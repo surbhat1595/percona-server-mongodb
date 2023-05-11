@@ -236,6 +236,13 @@ public:
                                                         TxnNumber txnNumber,
                                                         const BSONObj& query);
 
+    /**
+     * Find a single document. Returns an empty BSONObj if no matching document is found.
+     */
+    BSONObj findOneConfigDocument(OperationContext* opCtx,
+                                  const NamespaceString& nss,
+                                  const BSONObj& query);
+
     //
     // Chunk Operations
     //
@@ -444,14 +451,8 @@ public:
                                       const NamespaceString& nss,
                                       boost::optional<int32_t> chunkSizeMB,
                                       boost::optional<bool> defragmentCollection,
-                                      boost::optional<bool> enableAutoSplitter);
-
-    /**
-     * Removes the maxChunkSize constraint from config.system.collection to ensure compatibility
-     * with the balancing strategy implemented in v6.1.
-     * TODO SERVER-65332 remove the function once 6.1 branches out.
-     */
-    void applyLegacyConfigurationToSessionsCollection(OperationContext* opCtx);
+                                      boost::optional<bool> enableAutoSplitter,
+                                      boost::optional<bool> enableAutoMerger);
 
     /**
      * Updates the bucketing parameters of a time-series collection. Also bumps the shard versions
@@ -479,7 +480,14 @@ public:
      */
     StatusWith<std::string> addShard(OperationContext* opCtx,
                                      const std::string* shardProposedName,
-                                     const ConnectionString& shardConnectionString);
+                                     const ConnectionString& shardConnectionString,
+                                     bool isCatalogShard);
+
+    /**
+     * Inserts the config server shard identity document using a sentinel shard id. Requires the
+     * config server's ShardingState has not already been enabled. Throws on errors.
+     */
+    void installConfigShardIdentityDocument(OperationContext* opCtx);
 
     /**
      * Tries to remove a shard. To completely remove a shard from a sharded cluster,
@@ -627,7 +635,8 @@ private:
     StatusWith<ShardType> _validateHostAsShard(OperationContext* opCtx,
                                                std::shared_ptr<RemoteCommandTargeter> targeter,
                                                const std::string* shardProposedName,
-                                               const ConnectionString& connectionString);
+                                               const ConnectionString& connectionString,
+                                               bool isCatalogShard);
 
     /**
      * Drops the sessions collection on the specified host.

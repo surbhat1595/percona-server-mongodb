@@ -49,7 +49,7 @@
 namespace mongo {
 namespace {
 
-const NamespaceString kNss = NamespaceString("foo", "bar");
+const NamespaceString kNss = NamespaceString::createNamespaceString_forTest("foo", "bar");
 const std::string kShardKey = "_id";
 const BSONObj kShardKeyPattern = BSON(kShardKey << 1);
 
@@ -141,7 +141,8 @@ private:
  */
 class RenameRangeDeletionsTest : public RangeDeleterTest {
 public:
-    const NamespaceString kToNss = NamespaceString(kNss.db(), "toColl");
+    const NamespaceString kToNss =
+        NamespaceString::createNamespaceString_forTest(kNss.db(), "toColl");
 
     void setUp() override {
         RangeDeleterTest::setUp();
@@ -218,7 +219,7 @@ TEST_F(RangeDeleterTest,
     setFilteringMetadataWithUUID(uuid());
     auto task = insertRangeDeletionTask(_opCtx, uuid(), range, 1);
     DBDirectClient dbclient(_opCtx);
-    dbclient.insert(kNss.toString(), BSON(kShardKey << 5));
+    dbclient.insert(kNss, BSON(kShardKey << 5));
 
     auto cleanupComplete =
         removeDocumentsInRange(executor(),
@@ -245,7 +246,7 @@ TEST_F(RangeDeleterTest,
     auto task = insertRangeDeletionTask(_opCtx, uuid(), range, numDocsToInsert);
     DBDirectClient dbclient(_opCtx);
     for (auto i = 0; i < numDocsToInsert; ++i) {
-        dbclient.insert(kNss.toString(), BSON(kShardKey << i));
+        dbclient.insert(kNss, BSON(kShardKey << i));
     }
 
     auto cleanupComplete =
@@ -275,7 +276,7 @@ TEST_F(RangeDeleterTest,
     DBDirectClient dbclient(_opCtx);
     // All documents below the range.
     for (auto i = minKey - numDocsToInsert; i < minKey; ++i) {
-        dbclient.insert(kNss.toString(), BSON(kShardKey << i));
+        dbclient.insert(kNss, BSON(kShardKey << i));
     }
 
     auto cleanupComplete =
@@ -306,7 +307,7 @@ TEST_F(RangeDeleterTest,
     DBDirectClient dbclient(_opCtx);
     // All documents greater than or equal to the range.
     for (auto i = maxKey; i < maxKey + numDocsToInsert; ++i) {
-        dbclient.insert(kNss.toString(), BSON(kShardKey << i));
+        dbclient.insert(kNss, BSON(kShardKey << i));
     }
 
     auto cleanupComplete =
@@ -334,7 +335,7 @@ TEST_F(RangeDeleterTest,
     auto wrongTask = insertRangeDeletionTask(_opCtx, collUuidWrongTaks, range, numDocsToInsert);
     DBDirectClient dbclient(_opCtx);
     for (auto i = 0; i < numDocsToInsert; ++i) {
-        dbclient.insert(kNss.toString(), BSON(kShardKey << i));
+        dbclient.insert(kNss, BSON(kShardKey << i));
     }
 
     auto queriesComplete = SemiFuture<void>::makeReady();
@@ -357,7 +358,8 @@ TEST_F(RangeDeleterTest,
 
 TEST_F(RangeDeleterTest, RemoveDocumentsInRangeThrowsErrorWhenCollectionDoesNotExist) {
     auto queriesComplete = SemiFuture<void>::makeReady();
-    const auto notExistingNss = NamespaceString("someFake.namespace");
+    const auto notExistingNss =
+        NamespaceString::createNamespaceString_forTest("someFake.namespace");
     const auto notExistingCollectionUUID = UUID::gen();
     const auto range = ChunkRange(BSON(kShardKey << 0), BSON(kShardKey << 10));
     auto task =
@@ -386,7 +388,7 @@ TEST_F(RangeDeleterTest, RemoveDocumentsInRangeLeavesDocumentsWhenTaskDocumentDo
 
     setFilteringMetadataWithUUID(uuid());
     DBDirectClient dbclient(_opCtx);
-    dbclient.insert(kNss.toString(), BSON(kShardKey << 5));
+    dbclient.insert(kNss, BSON(kShardKey << 5));
 
     // We intentionally skip inserting a range deletion task document to simulate it already having
     // been deleted.
@@ -437,7 +439,7 @@ TEST_F(RangeDeleterTest, RemoveDocumentsInRangeWaitsForReplicationAfterDeletingS
     setFilteringMetadataWithUUID(uuid());
     DBDirectClient dbclient(_opCtx);
     for (auto i = 0; i < numDocsToInsert; ++i) {
-        dbclient.insert(kNss.toString(), BSON(kShardKey << i));
+        dbclient.insert(kNss, BSON(kShardKey << i));
     }
 
     // Insert range deletion task for this collection and range.
@@ -486,7 +488,7 @@ TEST_F(RangeDeleterTest, RemoveDocumentsInRangeWaitsForReplicationOnlyOnceAfterS
     setFilteringMetadataWithUUID(uuid());
     DBDirectClient dbclient(_opCtx);
     for (auto i = 0; i < numDocsToInsert; ++i) {
-        dbclient.insert(kNss.toString(), BSON(kShardKey << i));
+        dbclient.insert(kNss, BSON(kShardKey << i));
     }
 
     // Insert range deletion task for this collection and range.
@@ -527,7 +529,7 @@ TEST_F(RangeDeleterTest, RemoveDocumentsInRangeDoesNotWaitForReplicationIfErrorD
     setFilteringMetadataWithUUID(uuid());
     DBDirectClient dbclient(_opCtx);
     for (auto i = 0; i < numDocsToInsert; ++i) {
-        dbclient.insert(kNss.toString(), BSON(kShardKey << i));
+        dbclient.insert(kNss, BSON(kShardKey << i));
     }
 
     // Insert range deletion task for this collection and range.
@@ -572,7 +574,7 @@ TEST_F(RangeDeleterTest, RemoveDocumentsInRangeRetriesOnWriteConflictException) 
 
     setFilteringMetadataWithUUID(uuid());
     DBDirectClient dbclient(_opCtx);
-    dbclient.insert(kNss.toString(), BSON(kShardKey << 5));
+    dbclient.insert(kNss, BSON(kShardKey << 5));
 
     // Insert range deletion task for this collection and range.
     auto t = insertRangeDeletionTask(_opCtx, uuid(), range);
@@ -602,7 +604,7 @@ TEST_F(RangeDeleterTest, RemoveDocumentsInRangeRetriesOnUnexpectedError) {
 
     setFilteringMetadataWithUUID(uuid());
     DBDirectClient dbclient(_opCtx);
-    dbclient.insert(kNss.toString(), BSON(kShardKey << 5));
+    dbclient.insert(kNss, BSON(kShardKey << 5));
 
     // Insert range deletion task for this collection and range.
     auto t = insertRangeDeletionTask(_opCtx, uuid(), range);
@@ -635,7 +637,7 @@ TEST_F(RangeDeleterTest, RemoveDocumentsInRangeRespectsDelayInBetweenBatches) {
     auto task = insertRangeDeletionTask(_opCtx, uuid(), range, numDocsToInsert);
     DBDirectClient dbclient(_opCtx);
     for (auto i = 0; i < numDocsToInsert; ++i) {
-        dbclient.insert(kNss.toString(), BSON(kShardKey << i));
+        dbclient.insert(kNss, BSON(kShardKey << i));
     }
 
     // The deletion of a document in unit tests with ephemeral storage engine is usually
@@ -676,7 +678,7 @@ TEST_F(RangeDeleterTest, RemoveDocumentsInRangeRespectsOrphanCleanupDelay) {
     auto task = insertRangeDeletionTask(_opCtx, uuid(), range, numDocsToInsert);
     DBDirectClient dbclient(_opCtx);
     for (auto i = 0; i < numDocsToInsert; ++i) {
-        dbclient.insert(kNss.toString(), BSON(kShardKey << i));
+        dbclient.insert(kNss, BSON(kShardKey << i));
     }
 
     auto cleanupComplete = removeDocumentsInRange(executor(),
@@ -710,7 +712,7 @@ TEST_F(RangeDeleterTest, RemoveDocumentsInRangeRemovesRangeDeletionTaskOnSuccess
 
     setFilteringMetadataWithUUID(uuid());
     DBDirectClient dbclient(_opCtx);
-    dbclient.insert(kNss.toString(), BSON(kShardKey << 5));
+    dbclient.insert(kNss, BSON(kShardKey << 5));
 
     // Insert range deletion task for this collection and range.
     auto t = insertRangeDeletionTask(_opCtx, uuid(), range);
@@ -736,7 +738,7 @@ TEST_F(RangeDeleterTest,
     auto queriesComplete = SemiFuture<void>::makeReady();
 
     DBDirectClient dbclient(_opCtx);
-    dbclient.insert(kNss.toString(), BSON(kShardKey << 5));
+    dbclient.insert(kNss, BSON(kShardKey << 5));
 
     // Insert range deletion task for this collection and range.
     auto t = insertRangeDeletionTask(_opCtx, uuid(), range);
@@ -768,7 +770,7 @@ TEST_F(RangeDeleterTest,
 
     setFilteringMetadataWithUUID(uuid());
     DBDirectClient dbclient(_opCtx);
-    dbclient.insert(kNss.toString(), BSON(kShardKey << 5));
+    dbclient.insert(kNss, BSON(kShardKey << 5));
 
     // Insert range deletion task for this collection and range.
     auto t = insertRangeDeletionTask(_opCtx, uuid(), range);
@@ -803,7 +805,7 @@ TEST_F(RangeDeleterTest,
 DEATH_TEST_F(RangeDeleterTest, RemoveDocumentsInRangeCrashesIfInputFutureHasError, "invariant") {
     const ChunkRange range = ChunkRange(BSON(kShardKey << 0), BSON(kShardKey << 10));
     DBDirectClient dbclient(_opCtx);
-    dbclient.insert(kNss.toString(), BSON(kShardKey << 5));
+    dbclient.insert(kNss, BSON(kShardKey << 5));
 
     // Insert range deletion task for this collection and range.
     auto t = insertRangeDeletionTask(_opCtx, uuid(), range);
@@ -905,7 +907,9 @@ TEST_F(RenameRangeDeletionsTest, BasicRenameRangeDeletionsTest) {
  */
 TEST_F(RenameRangeDeletionsTest, IdempotentRenameRangeDeletionsTest) {
     PseudoRandom random(SecureRandom().nextInt64());
-    auto generateRandomNumberFrom1To10 = [&random]() { return random.nextInt32(9) + 1; };
+    auto generateRandomNumberFrom1To10 = [&random]() {
+        return random.nextInt32(9) + 1;
+    };
 
     const auto numTasks = 10;
     std::vector<RangeDeletionTask> tasks;

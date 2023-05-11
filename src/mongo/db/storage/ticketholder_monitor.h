@@ -50,6 +50,10 @@ protected:
     TicketHolder* _readTicketHolder;
     TicketHolder* _writeTicketHolder;
 
+    Milliseconds _interval() {
+        return _job.getPeriod();
+    }
+
 private:
     virtual void _run(Client*) = 0;
 

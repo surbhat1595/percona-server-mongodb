@@ -59,7 +59,7 @@ PreWriteFilter::PreWriteFilter(OperationContext* opCtx, NamespaceString nss)
 
           // Always allow writes on standalone and secondary nodes.
           const auto replCoord{repl::ReplicationCoordinator::get(opCtx)};
-          return !replCoord->canAcceptWritesForDatabase(opCtx, NamespaceString::kAdminDb);
+          return !replCoord->canAcceptWritesForDatabase(opCtx, DatabaseName::kAdmin.toString());
       }()) {}
 
 PreWriteFilter::Action PreWriteFilter::computeAction(const Document& doc) {
@@ -176,8 +176,8 @@ bool ensureStillMatches(const CollectionPtr& collection,
 }
 
 bool isRetryableWrite(OperationContext* opCtx) {
-    static auto w = MONGO_WEAK_FUNCTION_DEFINITION(write_stage_common::isRetryableWrite);
-    return w(opCtx);
+    const auto replCoord{repl::ReplicationCoordinator::get(opCtx)};
+    return replCoord->isRetryableWrite(opCtx);
 }
 
 }  // namespace write_stage_common

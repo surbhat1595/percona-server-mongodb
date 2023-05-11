@@ -49,6 +49,8 @@ const allCommands = {
     _configsvrBalancerStart: {skip: isAnInternalCommand},
     _configsvrBalancerStatus: {skip: isAnInternalCommand},
     _configsvrBalancerStop: {skip: isAnInternalCommand},
+    _configsvrCheckClusterMetadataConsistency: {skip: isAnInternalCommand},
+    _configsvrCheckMetadataConsistency: {skip: isAnInternalCommand},
     _configsvrCleanupReshardCollection: {skip: isAnInternalCommand},
     _configsvrCollMod: {skip: isAnInternalCommand},
     _configsvrClearJumboFlag: {skip: isAnInternalCommand},
@@ -78,6 +80,8 @@ const allCommands = {
     _configsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _configsvrSetClusterParameter: {skip: isAnInternalCommand},
     _configsvrSetUserWriteBlockMode: {skip: isAnInternalCommand},
+    _configsvrTransitionToCatalogShard: {skip: isAnInternalCommand},
+    _configsvrTransitionToDedicatedConfigServer: {skip: isAnInternalCommand},
     _configsvrUpdateZoneKeyRange: {skip: isAnInternalCommand},
     _flushDatabaseCacheUpdates: {skip: isAnInternalCommand},
     _flushDatabaseCacheUpdatesWithWriteConcern: {skip: isAnInternalCommand},
@@ -108,7 +112,9 @@ const allCommands = {
     _shardsvrDropCollection: {skip: isAnInternalCommand},
     _shardsvrCreateCollection: {skip: isAnInternalCommand},
     _shardsvrCreateGlobalIndex: {skip: isAnInternalCommand},
+    // TODO SERVER-74324: deprecate _shardsvrDropCollectionIfUUIDNotMatching after 7.0 is lastLTS.
     _shardsvrDropCollectionIfUUIDNotMatching: {skip: isAnInternalCommand},
+    _shardsvrDropCollectionIfUUIDNotMatchingWithWriteConcern: {skip: isAnInternalCommand},
     _shardsvrDropCollectionParticipant: {skip: isAnInternalCommand},
     _shardsvrDropGlobalIndex: {skip: isAnInternalCommand},
     _shardsvrDropIndexCatalogEntryParticipant: {skip: isAnInternalCommand},
@@ -143,6 +149,7 @@ const allCommands = {
     _shardsvrParticipantBlock: {skip: isAnInternalCommand},
     _shardsvrCheckMetadataConsistency: {skip: isAnInternalCommand},
     _shardsvrCheckMetadataConsistencyParticipant: {skip: isAnInternalCommand},
+    _startStreamProcessor: {skip: isAnInternalCommand},
     _transferMods: {skip: isAnInternalCommand},
     _vectorClockPersist: {skip: isAnInternalCommand},
     abortReshardCollection: {
@@ -470,7 +477,7 @@ const allCommands = {
             assert.commandWorked(conn.getDB(dbName).runCommand({dropRole: "foo"}));
         }
     },
-    createSearchIndex: {
+    createSearchIndexes: {
         skip: isNotImplementedYet,
     },
     createUser: {
@@ -906,9 +913,6 @@ const allCommands = {
         // },
         // command: {mergeChunks: fullNs, bounds: [{_id: MinKey}, {_id: MaxKey}]}
     },
-    modifySearchIndex: {
-        skip: isNotImplementedYet,
-    },
     moveChunk: {
         skip: isNotImplementedYet,
         isShardedOnly: true,
@@ -1173,6 +1177,9 @@ const allCommands = {
         teardown: function(conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({dropRole: "foo"}));
         }
+    },
+    updateSearchIndex: {
+        skip: isNotImplementedYet,
     },
     updateUser: {
         setUp: function(conn) {

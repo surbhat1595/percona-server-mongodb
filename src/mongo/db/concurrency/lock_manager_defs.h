@@ -34,7 +34,7 @@
 #include <map>
 #include <string>
 
-#include <third_party/murmurhash3/MurmurHash3.h>
+#include <MurmurHash3.h>
 
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
@@ -328,7 +328,6 @@ typedef uint64_t LockerId;
 // Hardcoded resource id for the oplog collection, which is special-cased both for resource
 // acquisition purposes and for statistics reporting.
 extern const ResourceId resourceIdLocalDB;
-extern const ResourceId resourceIdOplog;
 
 // Hardcoded resource id for admin db. This is to ensure direct writes to auth collections
 // are serialized (see SERVER-16092)

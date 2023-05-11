@@ -31,6 +31,7 @@
 
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/internal_transactions_feature_flag_gen.h"
 #include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/internal_plans.h"
@@ -89,17 +90,17 @@ DistributionMetricsCalculator<DistributionMetricsType, SampleSizeType>::_getMetr
         metrics.setNumSingleShard(_numSingleShard);
         metrics.setPercentageOfSingleShard(calculatePercentage(_numSingleShard, numTotal));
 
-        metrics.setNumVariableShard(_numVariableShard);
-        metrics.setPercentageOfVariableShard(calculatePercentage(_numVariableShard, numTotal));
+        metrics.setNumMultiShard(_numMultiShard);
+        metrics.setPercentageOfMultiShard(calculatePercentage(_numMultiShard, numTotal));
 
         metrics.setNumScatterGather(_numScatterGather);
         metrics.setPercentageOfScatterGather(calculatePercentage(_numScatterGather, numTotal));
 
-        std::vector<int64_t> numDispatchedByRange;
-        for (auto& [_, numDispatched] : _numDispatchedByRange) {
-            numDispatchedByRange.push_back(numDispatched);
+        std::vector<int64_t> numByRange;
+        for (auto& [_, num] : _numByRange) {
+            numByRange.push_back(num);
         }
-        metrics.setNumDispatchedByRange(numDispatchedByRange);
+        metrics.setNumByRange(numByRange);
     }
     return metrics;
 }
@@ -142,7 +143,7 @@ DistributionMetricsCalculator<DistributionMetricsType, SampleSizeType>::_increme
                         &shardIds,
                         &chunkRanges,
                         &targetMinkeyToMaxKey);
-    _incrementNumDispatchedByRanges(chunkRanges);
+    _incrementNumByRanges(chunkRanges);
 
     // Increment metrics about sharding targeting.
     if (!shardKey.isEmpty()) {
@@ -150,14 +151,14 @@ DistributionMetricsCalculator<DistributionMetricsType, SampleSizeType>::_increme
         // shard key doesn't contain a collatable field, then there is only one matching shard key
         // value so the query is guaranteed to target only one shard. Otherwise, the number of
         // shards that it targets depend on how the matching shard key values are distributed among
-        // shards.
+        // shards. Given this, pessimistically classify it as targeting to multiple shards.
         invariant(!targetMinkeyToMaxKey);
         if (hasSimpleCollation(_getDefaultCollator(), collation) ||
             !shardKeyHasCollatableType(_getShardKeyPattern(), shardKey)) {
             _incrementNumSingleShard();
             invariant(chunkRanges.size() == 1U);
         } else {
-            _incrementNumVariableShard();
+            _incrementNumMultiShard();
         }
     } else if (targetMinkeyToMaxKey) {
         // This query targets the entire shard key space. Therefore, it always targets all
@@ -167,8 +168,8 @@ DistributionMetricsCalculator<DistributionMetricsType, SampleSizeType>::_increme
     } else {
         // This query targets a subset of the shard key space. Therefore, the number of shards
         // that it targets depends on how the matching shard key ranges are distributed among
-        // shards.
-        _incrementNumVariableShard();
+        // shards. Given this, pessimistically classify it as targeting to multiple shards.
+        _incrementNumMultiShard();
     }
 
     return shardKey;
@@ -269,16 +270,31 @@ void WriteDistributionMetricsCalculator::_addUpdateQuery(
     for (const auto& updateOp : cmd.getUpdates()) {
         _numUpdate++;
         auto primaryFilter = updateOp.getQ();
+        auto collation = write_ops::collationOf(updateOp);
         // If this is a non-upsert replacement update, the replacement document can be used as a
         // filter.
-        auto secondaryFilter = !updateOp.getUpsert() &&
-                updateOp.getU().type() == write_ops::UpdateModification::Type::kReplacement
-            ? updateOp.getU().getUpdateReplacement()
-            : BSONObj();
+        auto secondaryFilter = [&] {
+            auto isReplacementUpdate = !updateOp.getUpsert() &&
+                updateOp.getU().type() == write_ops::UpdateModification::Type::kReplacement;
+            auto isExactIdQuery = [&] {
+                return CollectionRoutingInfoTargeter::isExactIdQuery(
+                    opCtx, cmd.getNamespace(), primaryFilter, collation, _getChunkManager());
+            };
+
+            // Currently, targeting by replacement document is only done when an updateOne without
+            // shard key is not supported or when the query targets an exact id value.
+            if (isReplacementUpdate &&
+                (!feature_flags::gFeatureFlagUpdateOneWithoutShardKey.isEnabled(
+                     serverGlobalParams.featureCompatibility) ||
+                 isExactIdQuery())) {
+                return updateOp.getU().getUpdateReplacement();
+            }
+            return BSONObj();
+        }();
         _incrementMetricsForQuery(opCtx,
                                   primaryFilter,
                                   secondaryFilter,
-                                  write_ops::collationOf(updateOp),
+                                  collation,
                                   updateOp.getMulti(),
                                   cmd.getLegacyRuntimeConstants(),
                                   cmd.getLet());

@@ -482,7 +482,7 @@ void DBClientConnection::_markFailed(FailAction action) {
         if (action == kEndSession) {
             _session->end();
         } else if (action == kReleaseSession) {
-            transport::SessionHandle destroyedOutsideMutex;
+            std::shared_ptr<transport::Session> destroyedOutsideMutex;
 
             stdx::lock_guard<Latch> lk(_sessionMutex);
             _session.swap(destroyedOutsideMutex);
@@ -756,7 +756,11 @@ void DBClientConnection::handleNotPrimaryResponse(const BSONObj& replyBody,
 
 #ifdef MONGO_CONFIG_SSL
 const SSLConfiguration* DBClientConnection::getSSLConfiguration() {
-    return _session->getSSLConfiguration();
+    auto& sslManager = _session->getSSLManager();
+    if (!sslManager) {
+        return nullptr;
+    }
+    return &sslManager->getSSLConfiguration();
 }
 
 bool DBClientConnection::isUsingTransientSSLParams() const {

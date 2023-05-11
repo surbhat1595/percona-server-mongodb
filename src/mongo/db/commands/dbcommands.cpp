@@ -141,7 +141,7 @@ public:
             auto dbName = request().getDbName();
             // disallow dropping the config database
             if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&
-                (dbName == NamespaceString::kConfigDb)) {
+                (dbName == DatabaseName::kConfig)) {
                 uasserted(ErrorCodes::IllegalOperation,
                           "Cannot drop 'config' database if mongod started "
                           "with --configsvr");
@@ -149,7 +149,7 @@ public:
 
             if ((repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() !=
                  repl::ReplicationCoordinator::modeNone) &&
-                (dbName == NamespaceString::kLocalDb)) {
+                (dbName == DatabaseName::kLocal)) {
                 uasserted(ErrorCodes::IllegalOperation,
                           str::stream() << "Cannot drop '" << dbName
                                         << "' database while replication is active");
@@ -633,7 +633,6 @@ public:
                     NamespaceString::validDBName(dbname.db(),
                                                  NamespaceString::DollarInDbNameBehavior::Allow));
 
-            // TODO (Kal): OldClientContext legacy, needs to be removed
             {
                 CurOp::get(opCtx)->ensureStarted();
                 stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -676,7 +675,6 @@ public:
             } else {
                 {
                     stdx::lock_guard<Client> lk(*opCtx->getClient());
-                    // TODO: OldClientContext legacy, needs to be removed
                     CurOp::get(opCtx)->enter_inlock(
                         dbname, CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(dbname));
                 }
@@ -725,7 +723,9 @@ BuildInfoExecutor* BuildInfoExecutor::get(ServiceContext* svc) {
 const auto buildInfoExecutorRegisterer = ServiceContext::ConstructorActionRegisterer{
     "BuildInfoExecutor",
     [](ServiceContext* ctx) { getBuildInfoExecutor(ctx).start(); },
-    [](ServiceContext* ctx) { getBuildInfoExecutor(ctx).stop(); }};
+    [](ServiceContext* ctx) {
+        getBuildInfoExecutor(ctx).stop();
+    }};
 
 class CmdBuildInfo : public BasicCommand {
 public:

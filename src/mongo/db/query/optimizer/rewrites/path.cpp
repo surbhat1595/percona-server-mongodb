@@ -28,7 +28,8 @@
  */
 
 #include "mongo/db/query/optimizer/rewrites/path.h"
-#include "mongo/db/query/optimizer/utils/utils.h"
+#include "mongo/db/query/optimizer/utils/path_utils.h"
+
 
 namespace mongo::optimizer {
 ABT::reference_type PathFusion::follow(ABT::reference_type n) {
@@ -107,9 +108,6 @@ bool PathFusion::fuse(ABT& lhs, const ABT& rhs) {
             case Kind::project:
                 lhs = make<PathComposeM>(rhs, std::move(lhs));
                 return true;
-
-            default:
-                MONGO_UNREACHABLE;
         }
     }
 
@@ -233,9 +231,6 @@ void PathFusion::transport(ABT& n, const PathComposeM& path, ABT& p1, ABT& p2) {
                 n = make<PathConstant>(make<EvalPath>(p2, p1Const->getConstant()));
                 _changed = true;
                 return;
-
-            default:
-                MONGO_UNREACHABLE;
         }
     }
 

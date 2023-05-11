@@ -58,12 +58,12 @@ ValidateState::ValidateState(OperationContext* opCtx,
                              const NamespaceString& nss,
                              ValidateMode mode,
                              RepairMode repairMode,
-                             bool turnOnExtraLoggingForTest)
+                             bool logDiagnostics)
     : _nss(nss),
       _mode(mode),
       _repairMode(repairMode),
       _dataThrottle(opCtx),
-      _extraLoggingForTest(turnOnExtraLoggingForTest) {
+      _logDiagnostics(logDiagnostics) {
 
     // Subsequent re-locks will use the UUID when 'background' is true.
     if (isBackground()) {
@@ -80,7 +80,8 @@ ValidateState::ValidateState(OperationContext* opCtx,
 
     _database = _databaseLock->getDb() ? _databaseLock->getDb() : nullptr;
     if (_database)
-        _collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, _nss);
+        _collection =
+            CollectionPtr(CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, _nss));
 
     if (!_collection) {
         auto view = CollectionCatalog::get(opCtx)->lookupView(opCtx, _nss);
@@ -100,7 +101,8 @@ ValidateState::ValidateState(OperationContext* opCtx,
             } else {
                 _collectionLock.emplace(opCtx, _nss, MODE_X);
             }
-            _collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, _nss);
+            _collection = CollectionPtr(
+                CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, _nss));
             uassert(
                 ErrorCodes::NamespaceNotFound,
                 fmt::format(
@@ -409,7 +411,8 @@ void ValidateState::_relockDatabaseAndCollection(OperationContext* opCtx) {
         uasserted(ErrorCodes::Interrupted, collErrMsg);
     }
 
-    _collection = CollectionCatalog::get(opCtx)->lookupCollectionByUUID(opCtx, *_uuid);
+    _collection =
+        CollectionPtr(CollectionCatalog::get(opCtx)->lookupCollectionByUUID(opCtx, *_uuid));
     uassert(ErrorCodes::Interrupted, collErrMsg, _collection);
 
     // The namespace of the collection can be changed during a same database collection rename.

@@ -392,9 +392,9 @@ protected:
         _mockServer->setCommandReply("listDatabases", makeListDatabasesResponse({}));
         _options1.uuid = UUID::gen();
 
-        _mockServer->insert(
-            ReplicationConsistencyMarkersImpl::kDefaultInitialSyncIdNamespace.toString(),
-            BSON("_id" << UUID::gen()));
+        _mockServer->insert(NamespaceString::createNamespaceString_forTest(
+                                ReplicationConsistencyMarkersImpl::kDefaultInitialSyncIdNamespace),
+                            BSON("_id" << UUID::gen()));
 
         reset();
 
@@ -411,11 +411,15 @@ protected:
 
         InitialSyncerInterface::Options options;
         options.initialSyncRetryWait = Milliseconds(1);
-        options.getMyLastOptime = [this]() { return _myLastOpTime; };
+        options.getMyLastOptime = [this]() {
+            return _myLastOpTime;
+        };
         options.setMyLastOptime = [this](const OpTimeAndWallTime& opTimeAndWallTime) {
             _setMyLastOptime(opTimeAndWallTime);
         };
-        options.resetOptimes = [this]() { _myLastOpTime = OpTime(); };
+        options.resetOptimes = [this]() {
+            _myLastOpTime = OpTime();
+        };
         options.syncSourceSelector = this;
 
         _options = options;
@@ -550,13 +554,17 @@ private:
 
 executor::ThreadPoolMock::Options InitialSyncerTest::makeThreadPoolMockOptions() const {
     executor::ThreadPoolMock::Options options;
-    options.onCreateThread = []() { Client::initThread("InitialSyncerTest"); };
+    options.onCreateThread = []() {
+        Client::initThread("InitialSyncerTest");
+    };
     return options;
 }
 
 executor::ThreadPoolMock::Options InitialSyncerTest::makeClonerThreadPoolMockOptions() const {
     executor::ThreadPoolMock::Options options;
-    options.onCreateThread = []() { Client::initThread("ClonerThreadTest"); };
+    options.onCreateThread = []() {
+        Client::initThread("ClonerThreadTest");
+    };
     return options;
 }
 
@@ -636,18 +644,18 @@ OplogEntry makeOplogEntry(int t,
         oField = BSON("dropIndexes"
                       << "a_1");
     }
-    return {DurableOplogEntry(OpTime(Timestamp(t, 1), 1),  // optime
-                              opType,                      // op type
-                              NamespaceString("a.a"),      // namespace
-                              boost::none,                 // uuid
-                              boost::none,                 // fromMigrate
-                              version,                     // version
-                              oField,                      // o
-                              boost::none,                 // o2
-                              {},                          // sessionInfo
-                              boost::none,                 // upsert
-                              Date_t() + Seconds(t),       // wall clock time
-                              {},                          // statement ids
+    return {DurableOplogEntry(OpTime(Timestamp(t, 1), 1),                             // optime
+                              opType,                                                 // op type
+                              NamespaceString::createNamespaceString_forTest("a.a"),  // namespace
+                              boost::none,                                            // uuid
+                              boost::none,                                            // fromMigrate
+                              version,                                                // version
+                              oField,                                                 // o
+                              boost::none,                                            // o2
+                              {},                                                     // sessionInfo
+                              boost::none,                                            // upsert
+                              Date_t() + Seconds(t),  // wall clock time
+                              {},                     // statement ids
                               boost::none,    // optime of previous write within same transaction
                               boost::none,    // pre-image optime
                               boost::none,    // post-image optime
@@ -701,11 +709,16 @@ void InitialSyncerTest::processSuccessfulFCVFetcherResponse(std::vector<BSONObj>
 
 TEST_F(InitialSyncerTest, InvalidConstruction) {
     InitialSyncerInterface::Options options;
-    options.getMyLastOptime = []() { return OpTime(); };
-    options.setMyLastOptime = [](const OpTimeAndWallTime&) {};
-    options.resetOptimes = []() {};
+    options.getMyLastOptime = []() {
+        return OpTime();
+    };
+    options.setMyLastOptime = [](const OpTimeAndWallTime&) {
+    };
+    options.resetOptimes = []() {
+    };
     options.syncSourceSelector = this;
-    auto callback = [](const StatusWith<OpTimeAndWallTime>&) {};
+    auto callback = [](const StatusWith<OpTimeAndWallTime>&) {
+    };
 
     // Null task executor in external state.
     {
@@ -990,7 +1003,9 @@ TEST_F(InitialSyncerTest,
     auto opCtx = makeOpCtx();
 
     _syncSourceSelector->setChooseNewSyncSourceResult_forTest(HostAndPort());
-    _executorProxy->shouldFailScheduleWorkAtRequest = []() { return true; };
+    _executorProxy->shouldFailScheduleWorkAtRequest = []() {
+        return true;
+    };
     ASSERT_OK(initialSyncer->startup(opCtx.get(), maxAttempts));
 
     initialSyncer->join();
@@ -1016,7 +1031,9 @@ TEST_F(InitialSyncerTest,
 
     // Last choose sync source attempt should now be scheduled. Advance clock so we fail last
     // choose sync source attempt which cause the next initial sync attempt to be scheduled.
-    _executorProxy->shouldFailScheduleWorkAtRequest = []() { return true; };
+    _executorProxy->shouldFailScheduleWorkAtRequest = []() {
+        return true;
+    };
     advanceClock(net, _options.syncSourceRetryWait);
 
     initialSyncer->join();
@@ -1291,7 +1308,7 @@ TEST_F(InitialSyncerTest, InitialSyncerPassesThroughDefaultBeginFetchingOpTimeSc
     ASSERT_EQUALS(ErrorCodes::OperationFailed, _lastApplied);
 
     ASSERT_EQUALS(syncSource, request.target);
-    ASSERT_EQUALS(NamespaceString::kLocalDb, request.dbname);
+    ASSERT_EQUALS(DatabaseName::kLocal.db(), request.dbname);
     assertRemoteCommandNameEquals("find", request);
 }
 
@@ -1380,7 +1397,7 @@ TEST_F(InitialSyncerTest, InitialSyncerPassesThroughGetBeginFetchingOpTimeSchedu
     ASSERT_EQUALS(ErrorCodes::OperationFailed, _lastApplied);
 
     ASSERT_EQUALS(syncSource, request.target);
-    ASSERT_EQUALS(NamespaceString::kConfigDb, request.dbname);
+    ASSERT_EQUALS(DatabaseName::kConfig.db(), request.dbname);
     assertRemoteCommandNameEquals("find", request);
 }
 
@@ -3582,13 +3599,13 @@ TEST_F(InitialSyncerTest, LastOpTimeShouldBeSetEvenIfNoOperationsAreAppliedAfter
         // Instead of fast forwarding to AllDatabaseCloner completion by returning an empty list of
         // database names, we'll simulate copying a single database with a single collection on the
         // sync source.  We must do this setup before responding to the FCV, to avoid a race.
-        NamespaceString nss("a.a");
+        NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.a");
         _mockServer->setCommandReply("listDatabases",
                                      makeListDatabasesResponse({nss.db().toString()}));
 
         // Set up data for "a"
         _mockServer->assignCollectionUuid(nss.ns(), *_options1.uuid);
-        _mockServer->insert(nss.ns(), BSON("_id" << 1 << "a" << 1));
+        _mockServer->insert(nss, BSON("_id" << 1 << "a" << 1));
 
         // listCollections for "a"
         _mockServer->setCommandReply(
@@ -3693,7 +3710,9 @@ TEST_F(InitialSyncerTest, InitialSyncerPassesThroughGetNextApplierBatchScheduleE
         // Before processing scheduled last oplog entry fetcher response, set flag in
         // TaskExecutorMock so that InitialSyncer will fail to schedule
         // _getNextApplierBatchCallback().
-        _executorProxy->shouldFailScheduleWorkRequest = []() { return true; };
+        _executorProxy->shouldFailScheduleWorkRequest = []() {
+            return true;
+        };
 
         // Oplog entry associated with the stopTimestamp.
         processSuccessfulLastOplogEntryFetcherResponse({makeOplogEntryObj(2)});
@@ -3750,7 +3769,9 @@ TEST_F(InitialSyncerTest, InitialSyncerPassesThroughSecondGetNextApplierBatchSch
         // Before processing scheduled last oplog entry fetcher response, set flag in
         // TaskExecutorMock so that InitialSyncer will fail to schedule second
         // _getNextApplierBatchCallback() at (now + options.getApplierBatchCallbackRetryWait).
-        _executorProxy->shouldFailScheduleWorkAtRequest = []() { return true; };
+        _executorProxy->shouldFailScheduleWorkAtRequest = []() {
+            return true;
+        };
 
         // Oplog entry associated with the stopTimestamp.
         processSuccessfulLastOplogEntryFetcherResponse({makeOplogEntryObj(2)});
@@ -4003,7 +4024,9 @@ TEST_F(InitialSyncerTest, InitialSyncerPassesThroughMultiApplierScheduleError) {
         getOplogFetcher()->receiveBatch(1LL, {makeOplogEntryObj(1), makeOplogEntryObj(2)});
 
         // Make MultiApplier::startup() fail.
-        _executorProxy->shouldFailScheduleWorkRequest = []() { return true; };
+        _executorProxy->shouldFailScheduleWorkRequest = []() {
+            return true;
+        };
 
         // Advance clock until _getNextApplierBatchCallback() runs.
         auto when = net->now() + _options.getApplierBatchCallbackRetryWait;
@@ -4266,14 +4289,14 @@ TEST_F(InitialSyncerTest,
         // Instead of fast forwarding to AllDatabaseCloner completion by returning an empty list of
         // database names, we'll simulate copying a single database with a single collection on the
         // sync source.  We must do this setup before responding to the FCV, to avoid a race.
-        NamespaceString nss("a.a");
+        NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.a");
         _mockServer->setCommandReply("listDatabases",
                                      makeListDatabasesResponse({nss.db().toString()}));
 
 
         // Set up data for "a"
         _mockServer->assignCollectionUuid(nss.ns(), *_options1.uuid);
-        _mockServer->insert(nss.ns(), BSON("_id" << 1 << "a" << 1));
+        _mockServer->insert(nss, BSON("_id" << 1 << "a" << 1));
 
         // listCollections for "a"
         _mockServer->setCommandReply(
@@ -4431,7 +4454,7 @@ TEST_F(InitialSyncerTest, TestRemainingInitialSyncEstimatedMillisMetric) {
     const auto dbSize = 10000;
     const auto numDocs = 5;
     const auto avgObjSize = dbSize / numDocs;
-    NamespaceString nss("a.a");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.a");
 
     auto hangDuringCloningFailPoint =
         globalFailPointRegistry().find("initialSyncHangDuringCollectionClone");
@@ -4481,7 +4504,7 @@ TEST_F(InitialSyncerTest, TestRemainingInitialSyncEstimatedMillisMetric) {
         // Set up data for "a"
         _mockServer->assignCollectionUuid(nss.ns(), *_options1.uuid);
         for (int i = 1; i <= 5; ++i) {
-            _mockServer->insert(nss.ns(), BSON("_id" << i << "a" << i));
+            _mockServer->insert(nss, BSON("_id" << i << "a" << i));
         }
 
         // listCollections for "a"
@@ -4718,7 +4741,7 @@ TEST_F(InitialSyncerTest, GetInitialSyncProgressReturnsCorrectProgress) {
 
         // Set up the successful cloner run.
         // listDatabases: a
-        NamespaceString nss("a.a");
+        NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.a");
         _mockServer->setCommandReply("listDatabases",
                                      makeListDatabasesResponse({nss.db().toString()}));
         // The AllDatabaseCloner post stage calls dbStats to record initial sync progress metrics.
@@ -4727,7 +4750,7 @@ TEST_F(InitialSyncerTest, GetInitialSyncProgressReturnsCorrectProgress) {
         // Set up data for "a"
         _mockServer->assignCollectionUuid(nss.ns(), *_options1.uuid);
         for (int i = 1; i <= 5; ++i) {
-            _mockServer->insert(nss.ns(), BSON("_id" << i << "a" << i));
+            _mockServer->insert(nss, BSON("_id" << i << "a" << i));
         }
 
         // listCollections for "a"
@@ -5095,7 +5118,7 @@ TEST_F(InitialSyncerTest, GetInitialSyncProgressOmitsClonerStatsIfClonerStatsExc
 
             // Set up the cloner data.  This must be done before providing the FCV to avoid races.
             // listDatabases
-            NamespaceString nss("a.a");
+            NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.a");
             _mockServer->setCommandReply("listDatabases",
                                          makeListDatabasesResponse({nss.db().toString()}));
 

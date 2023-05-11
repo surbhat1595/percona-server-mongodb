@@ -17,12 +17,12 @@ const testDB = db.getSiblingDB(dbName);
 load(`${dataDir}${dbName}.schema`);
 print(`Metadata: ${tojson(dbMetadata)}\n`);
 
-// This load command will create a variable named dataSet that contains all the data.
+// This load command will create a variable named 'chunkNames' that contains the names of
+// all chunks that must be loaded.
 load(`${dataDir}${dbName}.data`);
 
-print(`Loading ${dataSet.length} collections.\n`);
 runHistogramsTest(function() {
-    loadJSONDataset(testDB, dataSet, dbMetadata);
+    loadJSONDataset(testDB, chunkNames, dataDir, dbMetadata);
 });
 
 for (const collMetadata of dbMetadata) {
@@ -34,5 +34,11 @@ for (const collMetadata of dbMetadata) {
     print(`Expected cardinality: ${expectedCard}\n`);
     print(`Actual cardinality: ${actualCard}\n`);
     assert.eq(expectedCard, actualCard);
+    collMetadata.fields.forEach(function(fieldMetadata) {
+        fieldName = fieldMetadata.fieldName;
+        const fieldCard = coll.find({}, {fieldName: 1}).itcount();
+        print(`card(${fieldName}) = ${fieldCard}\n`);
+        assert.eq(fieldCard, actualCard);
+    });
 }
 })();

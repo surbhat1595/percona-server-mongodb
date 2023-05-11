@@ -86,7 +86,8 @@ protected:
 
     bool doTTLSubPassForTest(OperationContext* opCtx) {
         TTLMonitor* ttlMonitor = TTLMonitor::get(getGlobalServiceContext());
-        return ttlMonitor->_doTTLSubPass(opCtx);
+
+        return ttlMonitor->_doTTLSubPass(opCtx, _collSubpassHistoryPlaceHolder);
     }
 
     long long getTTLPasses() {
@@ -122,6 +123,13 @@ protected:
 
 private:
     ServiceContext::UniqueOperationContext _opCtx;
+
+    // In a given TTL Pass, there may be multiple subpasses. Between subpasses, collection delete
+    // history is tracked for collections who have remaining TTL deletes a subpass. The
+    // history is strictly for TTL delete priority purposes in a contended system. It does not
+    // impact behavior in an uncontended, isolated system such as this test suite. This is used
+    // strictly as a placeholder in order to test subpass behavior.
+    stdx::unordered_map<UUID, long long, UUID::Hash> _collSubpassHistoryPlaceHolder;
 };
 
 namespace {
@@ -131,11 +139,11 @@ public:
     SimpleClient(OperationContext* opCtx) : _client(opCtx), _opCtx(opCtx) {}
 
     void insert(const NamespaceString& nss, const BSONObj& obj) {
-        _client.insert(nss.ns(), obj);
+        _client.insert(nss, obj);
     }
 
-    void insert(const NamespaceString& ns, const std::vector<BSONObj>& docs, bool ordered = true) {
-        _client.insert(ns.ns(), docs, ordered);
+    void insert(const NamespaceString& nss, const std::vector<BSONObj>& docs, bool ordered = true) {
+        _client.insert(nss, docs, ordered);
     }
 
     long long count(const NamespaceString& nss) {
@@ -171,7 +179,7 @@ TEST_F(TTLTest, TTLPassSingleCollectionTwoIndexes) {
 
     SimpleClient client(opCtx());
 
-    NamespaceString nss("testDB.coll0");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("testDB.coll0");
 
     client.createCollection(nss);
 
@@ -203,8 +211,8 @@ TEST_F(TTLTest, TTLPassMultipCollectionsPass) {
 
     SimpleClient client(opCtx());
 
-    NamespaceString nss0("testDB.coll0");
-    NamespaceString nss1("testDB.coll1");
+    NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("testDB.coll0");
+    NamespaceString nss1 = NamespaceString::createNamespaceString_forTest("testDB.coll1");
 
     client.createCollection(nss0);
     client.createCollection(nss1);
@@ -265,7 +273,7 @@ TEST_F(TTLTest, TTLSingleSubPass) {
     // expected sub-passes differs from the expected sub-passes in the indidual test.
     int nInitialSubPasses = getTTLSubPasses();
 
-    NamespaceString nss("testDB.coll");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("testDB.coll");
 
     client.createCollection(nss);
 
@@ -323,7 +331,7 @@ TEST_F(TTLTest, TTLSubPassesRemoveExpiredDocuments) {
     // expected sub-passes differs from the expected sub-passes in the indidual test.
     int nInitialSubPasses = getTTLSubPasses();
 
-    NamespaceString nss("testDB.coll");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("testDB.coll");
 
     client.createCollection(nss);
 
@@ -400,7 +408,7 @@ TEST_F(TTLTest, TTLSubPassesRemoveExpiredDocumentsAddedBetweenSubPasses) {
 
     SimpleClient client(opCtx());
 
-    NamespaceString nss("testDB.coll");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("testDB.coll");
 
     client.createCollection(nss);
 
@@ -489,7 +497,7 @@ TEST_F(TTLTest, TTLSubPassesStartRemovingFromNewTTLIndex) {
     // expected sub-passes differs from the expected sub-passes in the indidual test.
     int nInitialSubPasses = getTTLSubPasses();
 
-    NamespaceString nss("testDB.coll");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("testDB.coll");
 
     client.createCollection(nss);
 

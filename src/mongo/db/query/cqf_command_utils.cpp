@@ -1048,12 +1048,11 @@ bool isEligibleCommon(const RequestType& request,
             return !param.isEmpty();
         }
     };
-    bool unsupportedCmdOption = noneOrDefaultEmpty(request.getHint()) ||
-        noneOrDefaultEmpty(request.getCollation()) || noneOrDefaultEmpty(request.getLet()) ||
-        request.getLegacyRuntimeConstants();
+    const bool unsupportedCmdOption = noneOrDefaultEmpty(request.getCollation()) ||
+        noneOrDefaultEmpty(request.getLet()) || request.getLegacyRuntimeConstants();
 
     bool unsupportedIndexType = [&]() {
-        if (collection == nullptr)
+        if (!collection)
             return false;
 
         const IndexCatalog& indexCatalog = *collection->getIndexCatalog();
@@ -1079,7 +1078,7 @@ bool isEligibleCommon(const RequestType& request,
     }();
 
     bool unsupportedCollectionType = [&]() {
-        if (collection == nullptr)
+        if (!collection)
             return false;
 
         if (collection->isClustered() || !collection->getCollectionOptions().collation.isEmpty() ||

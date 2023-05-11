@@ -78,8 +78,8 @@ public:
                 "Performing splitVector across dbs isn't supported via mongos",
                 nss.dbName() == dbName);
 
-        const auto cm = uassertStatusOK(
-            Grid::get(opCtx)->catalogCache()->getCollectionPlacementInfo(opCtx, nss));
+        const auto [cm, _] =
+            uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
         uassert(ErrorCodes::IllegalOperation,
                 str::stream() << "can't do command: " << getName() << " on sharded collection",
                 !cm.isSharded());
@@ -97,7 +97,7 @@ public:
             opCtx,
             ReadPreferenceSetting::get(opCtx),
             dbName.toStringWithTenantId(),
-            cm.dbPrimary() == ShardId::kConfigServerId ? filteredCmdObj : filteredCmdObjWithVersion,
+            cm.dbVersion().isFixed() ? filteredCmdObj : filteredCmdObjWithVersion,
             Shard::RetryPolicy::kIdempotent));
 
         uassert(ErrorCodes::IllegalOperation,

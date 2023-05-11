@@ -94,7 +94,9 @@ inline CardinalityEstimatorFactoryFn makeHistogramEstimatorFactoryFn(
  * Returns a factory function to create a heuristics based estimator.
  */
 inline CardinalityEstimatorFactoryFn makeHeuristicEstimatorFactoryFn() {
-    return []() { return makeHeuristicCE(); };
+    return []() {
+        return makeHeuristicCE();
+    };
 }
 
 /**
@@ -130,6 +132,34 @@ struct BenchmarkDescriptor {
      * The number of individual (atom) predicates in a benchmark query.
      */
     const size_t numPredicates;
+};
+
+/**
+ * Some benchamrk parameters can only be computed in runtime based on the provided static parameters
+ * specified in a 'BenchmarkDescriptor'. For example, a total size of the generated historgrams.
+ * This struct will hold such parameters for each individual benchmark.
+ */
+struct BenchmarkRuntimeParameters {
+    /**
+     * Runtime parameters per field path.
+     */
+    struct FieldPathParameters {
+        int histogramSize;
+    };
+
+    const FieldPathParameters& getFieldPathParameters(const std::string& fieldName) const {
+        uassert(7313300,
+                str::stream() << "Runtime parameters not avialble for the field path of '"
+                              << fieldName << "'",
+                fieldPaths.find(fieldName) != fieldPaths.end());
+        return fieldPaths.at(fieldName);
+    }
+
+    void addFieldPathParameters(const std::string& fieldName, FieldPathParameters parameters) {
+        fieldPaths[fieldName] = std::move(parameters);
+    }
+
+    opt::unordered_map<std::string, FieldPathParameters> fieldPaths;
 };
 
 /**
@@ -189,10 +219,15 @@ struct BenchmarkDescriptor {
  */
 class BenchmarkResults {
 public:
-    BenchmarkResults(BenchmarkDescriptor descriptor) : _descriptor(std::move(descriptor)) {}
+    BenchmarkResults(BenchmarkDescriptor descriptor, BenchmarkRuntimeParameters runtimeParameters)
+        : _descriptor(std::move(descriptor)), _runtimeParameters(std::move(runtimeParameters)) {}
 
     const BenchmarkDescriptor& getDescriptor() const {
         return _descriptor;
+    }
+
+    const BenchmarkRuntimeParameters& getRuntimeParameters() const {
+        return _runtimeParameters;
     }
 
     /**
@@ -231,6 +266,7 @@ private:
     aggregateTimeMetrics(std::vector<Nanoseconds> times) const;
 
     const BenchmarkDescriptor _descriptor;
+    const BenchmarkRuntimeParameters _runtimeParameters;
     std::map<std::string, TimeMetrics> _results;
 };
 

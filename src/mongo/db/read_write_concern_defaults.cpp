@@ -168,10 +168,11 @@ void ReadWriteConcernDefaults::observeDirectWriteToConfigSettings(OperationConte
         ? RWConcernDefault::parse(IDLParserContext("RWDefaultsWriteObserver"), newDoc->getOwned())
         : RWConcernDefault();
 
-    opCtx->recoveryUnit()->onCommit([this, opCtx, newDefaultsDoc = std::move(newDefaultsDoc)](
-                                        boost::optional<Timestamp> unusedCommitTime) mutable {
-        setDefault(opCtx, std::move(newDefaultsDoc));
-    });
+    opCtx->recoveryUnit()->onCommit(
+        [this, newDefaultsDoc = std::move(newDefaultsDoc)](OperationContext* opCtx,
+                                                           boost::optional<Timestamp>) mutable {
+            setDefault(opCtx, std::move(newDefaultsDoc));
+        });
 }
 
 void ReadWriteConcernDefaults::invalidate() {
@@ -339,13 +340,14 @@ ReadWriteConcernDefaults::~ReadWriteConcernDefaults() = default;
 ReadWriteConcernDefaults::Cache::Cache(ServiceContext* service,
                                        ThreadPoolInterface& threadPool,
                                        FetchDefaultsFn fetchDefaultsFn)
-    : ReadThroughCache(_mutex,
-                       service,
-                       threadPool,
-                       [this](OperationContext* opCtx, Type, const ValueHandle& unusedCachedValue) {
-                           return LookupResult(lookup(opCtx));
-                       },
-                       1 /* cacheSize */),
+    : ReadThroughCache(
+          _mutex,
+          service,
+          threadPool,
+          [this](OperationContext* opCtx, Type, const ValueHandle& unusedCachedValue) {
+              return LookupResult(lookup(opCtx));
+          },
+          1 /* cacheSize */),
       _fetchDefaultsFn(std::move(fetchDefaultsFn)) {}
 
 boost::optional<RWConcernDefault> ReadWriteConcernDefaults::Cache::lookup(OperationContext* opCtx) {

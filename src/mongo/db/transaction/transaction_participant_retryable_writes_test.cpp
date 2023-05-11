@@ -57,7 +57,7 @@
 namespace mongo {
 namespace {
 
-const NamespaceString kNss("TestDB", "TestColl");
+const NamespaceString kNss = NamespaceString::createNamespaceString_forTest("TestDB", "TestColl");
 
 /**
  * Creates an OplogEntry with given parameters and preset defaults for this test suite.
@@ -116,7 +116,9 @@ public:
 
     bool onTransactionPrepareThrowsException = false;
     bool transactionPrepared = false;
-    std::function<void()> onTransactionPrepareFn = [this]() { transactionPrepared = true; };
+    std::function<void()> onTransactionPrepareFn = [this]() {
+        transactionPrepared = true;
+    };
 
     void onUnpreparedTransactionCommit(
         OperationContext* opCtx, const TransactionOperations& transactionOperations) override {
@@ -818,7 +820,7 @@ TEST_F(TransactionParticipantRetryableWritesTest, IncompleteHistoryDueToOpLogTru
         insertOplogEntry(entry2);
 
         DBDirectClient client(opCtx());
-        client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), [&] {
+        client.insert(NamespaceString::kSessionTransactionsTableNamespace, [&] {
             SessionTxnRecord sessionRecord;
             sessionRecord.setSessionId(sessionId);
             sessionRecord.setTxnNum(txnNum);
@@ -887,7 +889,7 @@ TEST_F(TransactionParticipantRetryableWritesTest,
         insertOplogEntry(entry2);
 
         DBDirectClient client(opCtx());
-        client.insert(NamespaceString::kSessionTransactionsTableNamespace.ns(), [&] {
+        client.insert(NamespaceString::kSessionTransactionsTableNamespace, [&] {
             SessionTxnRecord sessionRecord;
             sessionRecord.setSessionId(sessionId);
             sessionRecord.setTxnNum(txnNum);

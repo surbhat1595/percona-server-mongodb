@@ -104,8 +104,8 @@ void coordinateIndexCatalogModificationAcrossCollectionShards(
         [&] { sharding_ddl_util::resumeMigrations(opCtx, userCollectionNss, collectionUUID); });
 
     // Get an up to date shard distribution.
-    auto routingInfo =
-        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionPlacementInfoWithRefresh(
+    auto [routingInfo, _] = uassertStatusOK(
+        Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithPlacementRefresh(
             opCtx, userCollectionNss));
     uassert(ErrorCodes::NamespaceNotSharded,
             str::stream() << "collection " << userCollectionNss << " is not sharded",
@@ -181,7 +181,7 @@ void registerIndexCatalogEntry(OperationContext* opCtx,
 
             ShardsvrCommitIndexParticipant shardsvrCommitIndexParticipantRequest(userCollectionNss);
             shardsvrCommitIndexParticipantRequest.setIndexCatalogType(index);
-            shardsvrCommitIndexParticipantRequest.setDbName(NamespaceString::kAdminDb);
+            shardsvrCommitIndexParticipantRequest.setDbName(DatabaseName::kAdmin);
 
             sharding_util::sendCommandToShards(
                 opCtx,
@@ -194,7 +194,7 @@ void registerIndexCatalogEntry(OperationContext* opCtx,
             // Now commit the change in the config server.
             ConfigsvrCommitIndex configsvrCommitIndexRequest(userCollectionNss);
             configsvrCommitIndexRequest.setIndexCatalogType(index);
-            configsvrCommitIndexRequest.setDbName(NamespaceString::kAdminDb);
+            configsvrCommitIndexRequest.setDbName(DatabaseName::kAdmin);
             auto commitIndexEntryResponse =
                 Grid::get(opCtx)
                     ->shardRegistry()
@@ -238,7 +238,7 @@ void unregisterIndexCatalogEntry(OperationContext* opCtx,
             dropIndexCatalogRequest.setName(name);
             configsvrDropIndexCatalogRequest.setUnregisterIndexCatalogRequest(
                 dropIndexCatalogRequest);
-            configsvrDropIndexCatalogRequest.setDbName(NamespaceString::kAdminDb);
+            configsvrDropIndexCatalogRequest.setDbName(DatabaseName::kAdmin);
             auto commitIndexEntryResponse =
                 Grid::get(opCtx)
                     ->shardRegistry()
@@ -258,11 +258,11 @@ void unregisterIndexCatalogEntry(OperationContext* opCtx,
                 userCollectionNss);
             shardsvrDropIndexCatalogEntryRequest.setUnregisterIndexCatalogRequest(
                 dropIndexCatalogRequest);
-            shardsvrDropIndexCatalogEntryRequest.setDbName(NamespaceString::kAdminDb);
+            shardsvrDropIndexCatalogEntryRequest.setDbName(DatabaseName::kAdmin);
 
             sharding_util::sendCommandToShards(
                 opCtx,
-                NamespaceString::kAdminDb,
+                DatabaseName::kAdmin.db(),
                 CommandHelpers::appendMajorityWriteConcern(
                     shardsvrDropIndexCatalogEntryRequest.toBSON(osi.toBSON())),
                 shardIdsVec,

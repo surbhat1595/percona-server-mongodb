@@ -43,6 +43,7 @@
 #include "mongo/db/catalog/drop_indexes.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_catalog_impl.h"
+#include "mongo/db/catalog_shard_feature_flag_gen.h"
 #include "mongo/db/coll_mod_gen.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
@@ -65,7 +66,6 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/tenant_migration_donor_service.h"
 #include "mongo/db/repl/tenant_migration_recipient_service.h"
-#include "mongo/db/s/balancer/balancer.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/global_index_ddl_util.h"
 #include "mongo/db/s/migration_coordinator_document_gen.h"
@@ -73,7 +73,9 @@
 #include "mongo/db/s/resharding/coordinator_document_gen.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
 #include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
+#include "mongo/db/s/shard_authoritative_catalog_gen.h"
 #include "mongo/db/s/sharding_ddl_coordinator_service.h"
+#include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/sharding_util.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/server_options.h"
@@ -309,18 +311,6 @@ public:
 
         const auto requestedVersion = request.getCommandParameter();
         const auto actualVersion = serverGlobalParams.featureCompatibility.getVersion();
-        if (request.getDowngradeOnDiskChanges()) {
-            uassert(ErrorCodes::IllegalOperation,
-                    str::stream()
-                        << "Cannot set featureCompatibilityVersion to "
-                        << FeatureCompatibilityVersionParser::serializeVersion(requestedVersion)
-                        << " with '"
-                        << SetFeatureCompatibilityVersion::kDowngradeOnDiskChangesFieldName
-                        << "' set to true. This is only allowed when downgrading to "
-                        << multiversion::toString(GenericFCV::kLastContinuous),
-                    requestedVersion <= actualVersion &&
-                        requestedVersion == GenericFCV::kLastContinuous);
-        }
 
         if (requestedVersion == actualVersion) {
             // Set the client's last opTime to the system last opTime so no-ops wait for
@@ -333,6 +323,18 @@ public:
                 ShardingDDLCoordinatorService::getService(opCtx)
                     ->waitForCoordinatorsOfGivenTypeToComplete(
                         opCtx, DDLCoordinatorTypeEnum::kRenameCollectionPre63Compatible);
+            }
+            // TODO SERVER-73627: Remove once 7.0 becomes last LTS.
+            if (serverGlobalParams.clusterRole == ClusterRole::ShardServer &&
+                feature_flags::gDropCollectionHoldingCriticalSection.isEnabledOnVersion(
+                    requestedVersion)) {
+                ShardingDDLCoordinatorService::getService(opCtx)
+                    ->waitForCoordinatorsOfGivenTypeToComplete(
+                        opCtx, DDLCoordinatorTypeEnum::kDropCollectionPre70Compatible);
+
+                ShardingDDLCoordinatorService::getService(opCtx)
+                    ->waitForCoordinatorsOfGivenTypeToComplete(
+                        opCtx, DDLCoordinatorTypeEnum::kDropDatabasePre70Compatible);
             }
 
             return true;
@@ -367,6 +369,25 @@ public:
                 // 'kUpgrading' or 'kDowngrading' state, respectively.
                 const auto fcvChangeRegion(
                     FeatureCompatibilityVersion::enterFCVChangeRegion(opCtx));
+
+                // If catalogShard is enabled and there is an entry in config.shards with _id:
+                // ShardId::kConfigServerId then the config server is a catalog shard.
+                auto isCatalogShard = serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&
+                    serverGlobalParams.clusterRole == ClusterRole::ShardServer &&
+                    !ShardingCatalogManager::get(opCtx)
+                         ->findOneConfigDocument(opCtx,
+                                                 NamespaceString::kConfigsvrShardsNamespace,
+                                                 BSON("_id" << ShardId::kConfigServerId.toString()))
+                         .isEmpty();
+
+                // TODO SERVER-73784: Update catalog_shard_feature_flag.idl so that the version for
+                // gFeatureFlagCatalogShard is 7.0 when master is 7.0
+                uassert(ErrorCodes::IllegalOperation,
+                        "Cannot downgrade featureCompatibilityVersion to {} "
+                        "with a catalog shard as it may result in data loss "_format(
+                            multiversion::toString(requestedVersion)),
+                        !isCatalogShard ||
+                            gFeatureFlagCatalogShard.isEnabledOnVersion(requestedVersion));
 
                 uassert(ErrorCodes::Error(6744303),
                         "Failing setFeatureCompatibilityVersion before reaching the FCV "
@@ -446,6 +467,19 @@ public:
                     opCtx, DDLCoordinatorTypeEnum::kRenameCollectionPre63Compatible);
         }
 
+        // TODO SERVER-73627: Remove once 7.0 becomes last LTS.
+        if (serverGlobalParams.clusterRole == ClusterRole::ShardServer &&
+            requestedVersion > actualVersion &&
+            feature_flags::gDropCollectionHoldingCriticalSection.isEnabledOnVersion(
+                requestedVersion)) {
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(
+                    opCtx, DDLCoordinatorTypeEnum::kDropCollectionPre70Compatible);
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(
+                    opCtx, DDLCoordinatorTypeEnum::kDropDatabasePre70Compatible);
+        }
+
         LOGV2(6744302,
               "setFeatureCompatibilityVersion succeeded",
               "upgradeOrDowngrade"_attr = upgradeOrDowngrade,
@@ -493,6 +527,18 @@ private:
             ShardingDDLCoordinatorService::getService(opCtx)
                 ->waitForCoordinatorsOfGivenTypeToComplete(
                     opCtx, DDLCoordinatorTypeEnum::kRenameCollection);
+        }
+
+        // TODO SERVER-73627: Remove once 7.0 becomes last LTS.
+        if (actualVersion > requestedVersion &&
+            !feature_flags::gDropCollectionHoldingCriticalSection.isEnabledOnVersion(
+                requestedVersion)) {
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(opCtx,
+                                                           DDLCoordinatorTypeEnum::kDropCollection);
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(opCtx,
+                                                           DDLCoordinatorTypeEnum::kDropDatabase);
         }
 
         // TODO SERVER-68373 remove once 7.0 becomes last LTS
@@ -543,10 +589,9 @@ private:
             _createSchemaOnConfigSettings(opCtx, requestedVersion);
             _initializePlacementHistory(opCtx, requestedVersion);
             _setOnCurrentShardSinceFieldOnChunks(opCtx, requestedVersion);
-        } else if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
-        } else {
-            return;
         }
+
+        _removeRecordPreImagesCollectionOption(opCtx);
     }
 
     // TODO SERVER-68889 remove once 7.0 becomes last LTS
@@ -651,6 +696,33 @@ private:
         if (feature_flags::gAutoMerger.isEnabledOnVersion(requestedVersion)) {
             uassertStatusOK(
                 ShardingCatalogManager::get(opCtx)->setOnCurrentShardSinceFieldOnChunks(opCtx));
+        }
+    }
+
+    // Removes collection option "recordPreImages" from all collection definitions.
+    // TODO SERVER-74036: Remove once FCV 7.0 becomes last-LTS.
+    void _removeRecordPreImagesCollectionOption(OperationContext* opCtx) {
+        for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
+            Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
+            catalog::forEachCollectionFromDb(
+                opCtx,
+                dbName,
+                MODE_X,
+                [&](const Collection* collection) {
+                    // To remove collection option "recordPreImages" from persistent storage, issue
+                    // the "collMod" command with none of the parameters set.
+                    BSONObjBuilder responseBuilder;
+                    uassertStatusOK(processCollModCommand(
+                        opCtx, collection->ns(), CollMod{collection->ns()}, &responseBuilder));
+                    LOGV2(7383300,
+                          "Removed 'recordPreImages' collection option",
+                          "ns"_attr = collection->ns(),
+                          "collModResponse"_attr = responseBuilder.obj());
+                    return true;
+                },
+                [&](const Collection* collection) {
+                    return collection->getCollectionOptions().recordPreImagesOptionUsed;
+                });
         }
     }
 
@@ -811,7 +883,7 @@ private:
                         opCtx,
                         dbName,
                         MODE_S,
-                        [&](const CollectionPtr& collection) {
+                        [&](const Collection* collection) {
                             auto tsOptions = collection->getTimeseriesOptions();
                             invariant(tsOptions);
 
@@ -860,7 +932,7 @@ private:
 
                             return true;
                         },
-                        [&](const CollectionPtr& collection) {
+                        [&](const Collection* collection) {
                             return collection->getTimeseriesOptions() != boost::none;
                         });
                 }
@@ -871,7 +943,7 @@ private:
             for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
                 Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
                 catalog::forEachCollectionFromDb(
-                    opCtx, dbName, MODE_X, [&](const CollectionPtr& collection) {
+                    opCtx, dbName, MODE_X, [&](const Collection* collection) {
                         auto& efc = collection->getCollectionOptions().encryptedFieldConfig;
 
                         uassert(ErrorCodes::CannotDowngrade,
@@ -892,7 +964,7 @@ private:
                         opCtx,
                         dbName,
                         MODE_S,
-                        [&](const CollectionPtr& collection) {
+                        [&](const Collection* collection) {
                             uasserted(
                                 ErrorCodes::CannotDowngrade,
                                 str::stream()
@@ -902,7 +974,7 @@ private:
                                     << collection->ns() << "'");
                             return true;
                         },
-                        [&](const CollectionPtr& collection) {
+                        [&](const Collection* collection) {
                             return collection->isCapped() &&
                                 collection->getCappedMaxSize() % 256 != 0;
                         });
@@ -988,16 +1060,14 @@ private:
                 LOGV2(7013200, "Clearing global indexes for all collections");
                 DBDirectClient client(opCtx);
                 FindCommandRequest findCmd{NamespaceString::kShardCollectionCatalogNamespace};
-                findCmd.setFilter(
-                    BSON(CollectionType::kIndexVersionFieldName << BSON("$exists" << true)));
+                findCmd.setFilter(BSON(ShardAuthoritativeCollectionType::kIndexVersionFieldName
+                                       << BSON("$exists" << true)));
                 auto cursor = client.find(std::move(findCmd));
                 while (cursor->more()) {
                     const auto collectionDoc = cursor->next();
-                    auto collUUID =
-                        uassertStatusOK(UUID::parse(collectionDoc[CollectionType::kUuidFieldName]));
-                    auto collNss =
-                        NamespaceString(collectionDoc[CollectionType::kNssFieldName].String());
-                    clearCollectionGlobalIndexes(opCtx, collNss, collUUID);
+                    auto collection = ShardAuthoritativeCollectionType::parse(
+                        IDLParserContext("FCVDropIndexCatalog"), collectionDoc);
+                    clearCollectionGlobalIndexes(opCtx, collection.getNss(), collection.getUuid());
                 }
 
                 LOGV2(6711905,
@@ -1022,10 +1092,11 @@ private:
                 write_ops::UpdateCommandRequest update(CollectionType::ConfigNS);
                 update.setUpdates({[&]() {
                     write_ops::UpdateOpEntry entry;
-                    entry.setQ(
-                        BSON(CollectionType::kIndexVersionFieldName << BSON("$exists" << true)));
-                    entry.setU(write_ops::UpdateModification::parseFromClassicUpdate(
-                        BSON("$unset" << BSON(CollectionType::kIndexVersionFieldName << true))));
+                    entry.setQ(BSON(ShardAuthoritativeCollectionType::kIndexVersionFieldName
+                                    << BSON("$exists" << true)));
+                    entry.setU(write_ops::UpdateModification::parseFromClassicUpdate(BSON(
+                        "$unset" << BSON(ShardAuthoritativeCollectionType::kIndexVersionFieldName
+                                         << true))));
                     entry.setMulti(true);
                     return entry;
                 }()});
@@ -1081,8 +1152,6 @@ private:
                        const SetFeatureCompatibilityVersion& request,
                        boost::optional<Timestamp> changeTimestamp) {
         const auto requestedVersion = request.getCommandParameter();
-        // TODO  SERVER-65332 remove logic bound to this future object when v7.0 branches out
-        boost::optional<SharedSemiFuture<void>> chunkResizeAsyncTask;
 
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
             uassert(ErrorCodes::Error(6794600),
@@ -1095,14 +1164,6 @@ private:
         // Any actions that should be done before taking the FCV full transition lock in S mode
         // should go in this function.
         _prepareForDowngrade(opCtx);
-
-        if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&
-            requestedVersion == GenericFCV::kLastLTS) {
-            // As data size aware balancing is supported starting from v6.1, chunks resizing is
-            // required only when downgrading to v6.0
-            chunkResizeAsyncTask =
-                Balancer::get(opCtx)->applyLegacyChunkSizeConstraintsOnClusterData(opCtx);
-        }
 
         {
             // Take the FCV full transition lock in S mode to create a barrier for operations taking
@@ -1151,37 +1212,9 @@ private:
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
             // Tell the shards to enter phase-2 of setFCV (fully downgraded)
             _sendSetFCVRequestToShards(opCtx, request, changeTimestamp, SetFCVPhaseEnum::kComplete);
-            if (!feature_flags::gNoMoreAutoSplitter.isEnabledOnVersion(requestedVersion)) {
-                // chunkResizeAsyncTask is only used by config servers as part of internal server
-                // downgrade cleanup. Waiting for the task to complete is put at the end of
-                // _runDowngrade instead of inside _internalServerDowngradeCleanup because the task
-                // might take a long time to complete.
-                invariant(chunkResizeAsyncTask.has_value());
-                LOGV2(6417108, "Waiting for cluster chunks resize process to complete.");
-                uassertStatusOKWithContext(
-                    chunkResizeAsyncTask->getNoThrow(opCtx),
-                    "Failed to enforce chunk size constraint during FCV downgrade");
-                LOGV2(6417109, "Cluster chunks resize process completed.");
-            }
         }
 
         hangWhileDowngrading.pauseWhileSet(opCtx);
-
-        if (request.getDowngradeOnDiskChanges()) {
-            invariant(requestedVersion == GenericFCV::kLastContinuous);
-            _downgradeOnDiskChanges();
-            LOGV2(4875603, "Downgrade of on-disk format complete.");
-        }
-    }
-
-    /**
-     * Rolls back any upgraded on-disk changes to reflect the disk format of the last-continuous
-     * version.
-     */
-    void _downgradeOnDiskChanges() {
-        LOGV2(4975602,
-              "Downgrading on-disk format to reflect the last-continuous version.",
-              "last_continuous_version"_attr = multiversion::toString(GenericFCV::kLastContinuous));
     }
 
     /**

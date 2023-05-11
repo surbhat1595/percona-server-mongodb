@@ -103,10 +103,9 @@ void ElemMatchObjectMatchExpression::debugString(StringBuilder& debug, int inden
     _sub->debugString(debug, indentationLevel + 1);
 }
 
-BSONObj ElemMatchObjectMatchExpression::getSerializedRightHandSide() const {
-    BSONObjBuilder subBob;
-    _sub->serialize(&subBob, true);
-    return BSON("$elemMatch" << subBob.obj());
+BSONObj ElemMatchObjectMatchExpression::getSerializedRightHandSide(
+    SerializationOptions opts) const {
+    return BSON("$elemMatch" << _sub->serialize(opts));
 }
 
 MatchExpression::ExpressionOptimizerFunc ElemMatchObjectMatchExpression::getOptimizer() const {
@@ -174,11 +173,12 @@ void ElemMatchValueMatchExpression::debugString(StringBuilder& debug, int indent
     }
 }
 
-BSONObj ElemMatchValueMatchExpression::getSerializedRightHandSide() const {
+BSONObj ElemMatchValueMatchExpression::getSerializedRightHandSide(SerializationOptions opts) const {
     BSONObjBuilder emBob;
 
+    opts.includePath = false;
     for (auto&& child : _subs) {
-        child->serialize(&emBob, false);
+        child->serialize(&emBob, opts);
     }
 
     return BSON("$elemMatch" << emBob.obj());
@@ -219,8 +219,12 @@ void SizeMatchExpression::debugString(StringBuilder& debug, int indentationLevel
     }
 }
 
-BSONObj SizeMatchExpression::getSerializedRightHandSide() const {
-    return BSON("$size" << _size);
+BSONObj SizeMatchExpression::getSerializedRightHandSide(SerializationOptions opts) const {
+    const char* opName = "$size";
+    if (opts.replacementForLiteralArgs) {
+        return BSON(opName << *opts.replacementForLiteralArgs);
+    }
+    return BSON(opName << _size);
 }
 
 bool SizeMatchExpression::equivalent(const MatchExpression* other) const {

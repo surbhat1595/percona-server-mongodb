@@ -83,7 +83,7 @@ public:
     virtual std::unique_ptr<RecordStore> createRecordStore(OperationContext* opCtx,
                                                            const std::string& ns) final {
         std::string ident = ns;
-        NamespaceString nss(ns);
+        NamespaceString nss = NamespaceString::createNamespaceString_forTest(ns);
         std::string uri = WiredTigerKVEngine::kTableUriPrefix + ns;
         StatusWith<std::string> result =
             WiredTigerRecordStore::generateCreateString(kWiredTigerEngineName,
@@ -390,7 +390,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture,
     {
         WriteUnitOfWork wuow(opCtx);
         opCtx->recoveryUnit()->onCommit(
-            [&](boost::optional<Timestamp> commitTime) { commitTs = commitTime; });
+            [&](OperationContext*, boost::optional<Timestamp> commitTime) {
+                commitTs = commitTime;
+            });
         wuow.commit();
     }
     ASSERT(!commitTs);
@@ -404,7 +406,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, ChangeIsPassedLastTimestampSetOnCommit
     {
         WriteUnitOfWork wuow(opCtx);
         opCtx->recoveryUnit()->onCommit(
-            [&](boost::optional<Timestamp> commitTime) { commitTs = commitTime; });
+            [&](OperationContext*, boost::optional<Timestamp> commitTime) {
+                commitTs = commitTime;
+            });
         ASSERT_OK(opCtx->recoveryUnit()->setTimestamp(ts1));
         ASSERT(!commitTs);
         ASSERT_OK(opCtx->recoveryUnit()->setTimestamp(ts2));
@@ -424,7 +428,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, ChangeIsNotPassedLastTimestampSetOnAbo
     {
         WriteUnitOfWork wuow(opCtx);
         opCtx->recoveryUnit()->onCommit(
-            [&](boost::optional<Timestamp> commitTime) { commitTs = commitTime; });
+            [&](OperationContext*, boost::optional<Timestamp> commitTime) {
+                commitTs = commitTime;
+            });
         ASSERT_OK(opCtx->recoveryUnit()->setTimestamp(ts1));
         ASSERT(!commitTs);
     }
@@ -442,7 +448,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, ChangeIsPassedCommitTimestamp) {
     {
         WriteUnitOfWork wuow(opCtx);
         opCtx->recoveryUnit()->onCommit(
-            [&](boost::optional<Timestamp> commitTime) { commitTs = commitTime; });
+            [&](OperationContext*, boost::optional<Timestamp> commitTime) {
+                commitTs = commitTime;
+            });
         ASSERT(!commitTs);
         wuow.commit();
         ASSERT_EQ(*commitTs, ts1);
@@ -463,7 +471,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, ChangeIsNotPassedCommitTimestampIfClea
     {
         WriteUnitOfWork wuow(opCtx);
         opCtx->recoveryUnit()->onCommit(
-            [&](boost::optional<Timestamp> commitTime) { commitTs = commitTime; });
+            [&](OperationContext*, boost::optional<Timestamp> commitTime) {
+                commitTs = commitTime;
+            });
         ASSERT(!commitTs);
         wuow.commit();
     }
@@ -486,7 +496,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, ChangeIsPassedNewestCommitTimestamp) {
     {
         WriteUnitOfWork wuow(opCtx);
         opCtx->recoveryUnit()->onCommit(
-            [&](boost::optional<Timestamp> commitTime) { commitTs = commitTime; });
+            [&](OperationContext*, boost::optional<Timestamp> commitTime) {
+                commitTs = commitTime;
+            });
         ASSERT(!commitTs);
         wuow.commit();
         ASSERT_EQ(*commitTs, ts1);
@@ -505,7 +517,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, ChangeIsNotPassedCommitTimestampOnAbor
     {
         WriteUnitOfWork wuow(opCtx);
         opCtx->recoveryUnit()->onCommit(
-            [&](boost::optional<Timestamp> commitTime) { commitTs = commitTime; });
+            [&](OperationContext*, boost::optional<Timestamp> commitTime) {
+                commitTs = commitTime;
+            });
         ASSERT(!commitTs);
     }
     ASSERT(!commitTs);
@@ -523,7 +537,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CommitTimestampBeforeSetTimestampOnCom
     {
         WriteUnitOfWork wuow(opCtx);
         opCtx->recoveryUnit()->onCommit(
-            [&](boost::optional<Timestamp> commitTime) { commitTs = commitTime; });
+            [&](OperationContext*, boost::optional<Timestamp> commitTime) {
+                commitTs = commitTime;
+            });
         ASSERT(!commitTs);
         wuow.commit();
         ASSERT_EQ(*commitTs, ts2);
@@ -534,7 +550,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CommitTimestampBeforeSetTimestampOnCom
     {
         WriteUnitOfWork wuow(opCtx);
         opCtx->recoveryUnit()->onCommit(
-            [&](boost::optional<Timestamp> commitTime) { commitTs = commitTime; });
+            [&](OperationContext*, boost::optional<Timestamp> commitTime) {
+                commitTs = commitTime;
+            });
         ASSERT_OK(opCtx->recoveryUnit()->setTimestamp(ts1));
         ASSERT_EQ(*commitTs, ts2);
         wuow.commit();
@@ -552,7 +570,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CommitTimestampAfterSetTimestampOnComm
     {
         WriteUnitOfWork wuow(opCtx);
         opCtx->recoveryUnit()->onCommit(
-            [&](boost::optional<Timestamp> commitTime) { commitTs = commitTime; });
+            [&](OperationContext*, boost::optional<Timestamp> commitTime) {
+                commitTs = commitTime;
+            });
         ASSERT(!commitTs);
         ASSERT_OK(opCtx->recoveryUnit()->setTimestamp(ts2));
         ASSERT(!commitTs);
@@ -567,7 +587,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CommitTimestampAfterSetTimestampOnComm
     {
         WriteUnitOfWork wuow(opCtx);
         opCtx->recoveryUnit()->onCommit(
-            [&](boost::optional<Timestamp> commitTime) { commitTs = commitTime; });
+            [&](OperationContext*, boost::optional<Timestamp> commitTime) {
+                commitTs = commitTime;
+            });
         ASSERT_EQ(*commitTs, ts2);
         wuow.commit();
         ASSERT_EQ(*commitTs, ts1);
@@ -587,7 +609,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CommitTimestampBeforeSetTimestampOnAbo
     {
         WriteUnitOfWork wuow(opCtx);
         opCtx->recoveryUnit()->onCommit(
-            [&](boost::optional<Timestamp> commitTime) { commitTs = commitTime; });
+            [&](OperationContext*, boost::optional<Timestamp> commitTime) {
+                commitTs = commitTime;
+            });
         ASSERT(!commitTs);
     }
     ASSERT(!commitTs);
@@ -596,7 +620,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CommitTimestampBeforeSetTimestampOnAbo
     {
         WriteUnitOfWork wuow(opCtx);
         opCtx->recoveryUnit()->onCommit(
-            [&](boost::optional<Timestamp> commitTime) { commitTs = commitTime; });
+            [&](OperationContext*, boost::optional<Timestamp> commitTime) {
+                commitTs = commitTime;
+            });
         ASSERT_OK(opCtx->recoveryUnit()->setTimestamp(ts1));
         ASSERT(!commitTs);
     }
@@ -612,7 +638,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CommitTimestampAfterSetTimestampOnAbor
     {
         WriteUnitOfWork wuow(opCtx);
         opCtx->recoveryUnit()->onCommit(
-            [&](boost::optional<Timestamp> commitTime) { commitTs = commitTime; });
+            [&](OperationContext*, boost::optional<Timestamp> commitTime) {
+                commitTs = commitTime;
+            });
         ASSERT(!commitTs);
         ASSERT_OK(opCtx->recoveryUnit()->setTimestamp(ts2));
         ASSERT(!commitTs);
@@ -625,7 +653,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CommitTimestampAfterSetTimestampOnAbor
     {
         WriteUnitOfWork wuow(opCtx);
         opCtx->recoveryUnit()->onCommit(
-            [&](boost::optional<Timestamp> commitTime) { commitTs = commitTime; });
+            [&](OperationContext*, boost::optional<Timestamp> commitTime) {
+                commitTs = commitTime;
+            });
         ASSERT(!commitTs);
     }
     ASSERT(!commitTs);
@@ -995,77 +1025,64 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, AbandonSnapshotAbortMode) {
     ASSERT_EQ(0, strncmp(key, returnedKey, strlen(key)));
 }
 
-size_t numOnOpenSnapshotCalled = 0;
-size_t numOnCloseSnapshotCalled = 0;
-
 class SnapshotTestDecoration {
 public:
-    SnapshotTestDecoration() {
-        numOnOpenSnapshotCalled++;
+    void hit() {
+        _hits++;
     }
 
-    ~SnapshotTestDecoration() {
-        numOnCloseSnapshotCalled++;
+    int getHits() {
+        return _hits;
     }
+
+private:
+    int _hits = 0;
 };
 
 const RecoveryUnit::Snapshot::Decoration<SnapshotTestDecoration> getSnapshotDecoration =
     RecoveryUnit::Snapshot::declareDecoration<SnapshotTestDecoration>();
 
 TEST_F(WiredTigerRecoveryUnitTestFixture, AbandonSnapshotChange) {
-    numOnOpenSnapshotCalled = 0;
-    numOnCloseSnapshotCalled = 0;
-
-    // A snapshot is already open from when the RU was constructed.
     ASSERT(ru1->getSession());
-    ASSERT_EQ(0, numOnOpenSnapshotCalled);
-    ASSERT_EQ(0, numOnCloseSnapshotCalled);
+
+    getSnapshotDecoration(ru1->getSnapshot()).hit();
+    ASSERT_EQ(1, getSnapshotDecoration(ru1->getSnapshot()).getHits());
 
     ru1->abandonSnapshot();
 
-    // A snapshot is opened after closing the last one.
-    ASSERT_EQ(1, numOnOpenSnapshotCalled);
-    ASSERT_EQ(1, numOnCloseSnapshotCalled);
+    // A snapshot is closed, reconstructing our decoration.
+    ASSERT_EQ(0, getSnapshotDecoration(ru1->getSnapshot()).getHits());
 }
 
 TEST_F(WiredTigerRecoveryUnitTestFixture, CommitSnapshotChange) {
-    numOnOpenSnapshotCalled = 0;
-    numOnCloseSnapshotCalled = 0;
-
     ru1->beginUnitOfWork(/*readOnly=*/false);
-    ASSERT_EQ(0, numOnOpenSnapshotCalled);
-    ASSERT_EQ(0, numOnCloseSnapshotCalled);
 
-    // A snapshot is already open from when the RU was constructed.
+    getSnapshotDecoration(ru1->getSnapshot()).hit();
+    ASSERT_EQ(1, getSnapshotDecoration(ru1->getSnapshot()).getHits());
+
     ASSERT(ru1->getSession());
-    ASSERT_EQ(0, numOnOpenSnapshotCalled);
-    ASSERT_EQ(0, numOnCloseSnapshotCalled);
+
+    ASSERT_EQ(1, getSnapshotDecoration(ru1->getSnapshot()).getHits());
 
     ru1->commitUnitOfWork();
 
-    // A snapshot is opened after closing the last one.
-    ASSERT_EQ(1, numOnOpenSnapshotCalled);
-    ASSERT_EQ(1, numOnCloseSnapshotCalled);
+    // A snapshot is closed, reconstructing our decoration.
+    ASSERT_EQ(0, getSnapshotDecoration(ru1->getSnapshot()).getHits());
 }
 
 TEST_F(WiredTigerRecoveryUnitTestFixture, AbortSnapshotChange) {
-    numOnOpenSnapshotCalled = 0;
-    numOnCloseSnapshotCalled = 0;
-
     // A snapshot is already open from when the RU was constructed.
     ASSERT(ru1->getSession());
-    ASSERT_EQ(0, numOnOpenSnapshotCalled);
-    ASSERT_EQ(0, numOnCloseSnapshotCalled);
+    getSnapshotDecoration(ru1->getSnapshot()).hit();
+    ASSERT_EQ(1, getSnapshotDecoration(ru1->getSnapshot()).getHits());
 
     ru1->beginUnitOfWork(/*readOnly=*/false);
-    ASSERT_EQ(0, numOnOpenSnapshotCalled);
-    ASSERT_EQ(0, numOnCloseSnapshotCalled);
+    ASSERT_EQ(1, getSnapshotDecoration(ru1->getSnapshot()).getHits());
 
     ru1->abortUnitOfWork();
 
-    // A snapshot is opened after closing the last one.
-    ASSERT_EQ(1, numOnOpenSnapshotCalled);
-    ASSERT_EQ(1, numOnCloseSnapshotCalled);
+    // A snapshot is closed, reconstructing our decoration.
+    ASSERT_EQ(0, getSnapshotDecoration(ru1->getSnapshot()).getHits());
 }
 
 DEATH_TEST_REGEX_F(WiredTigerRecoveryUnitTestFixture,
@@ -1125,7 +1142,7 @@ DEATH_TEST_F(WiredTigerRecoveryUnitTestFixture,
     {
         WriteUnitOfWork wuow(opCtx);
         ru->assertInActiveTxn();
-        ru->onRollback([ru] { ru->getSession(); });
+        ru->onRollback([ru](OperationContext*) { ru->getSession(); });
     }
 }
 

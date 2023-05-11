@@ -62,6 +62,7 @@
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/cluster_write.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/shard_version_factory.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
 
 
@@ -282,12 +283,12 @@ void cleanupPartialChunksFromPreviousAttempt(OperationContext* opCtx,
 
     // Remove the chunks matching uuid
     ConfigsvrRemoveChunks configsvrRemoveChunksCmd(uuid);
-    configsvrRemoveChunksCmd.setDbName(NamespaceString::kAdminDb);
+    configsvrRemoveChunksCmd.setDbName(DatabaseName::kAdmin);
 
     const auto swRemoveChunksResult = configShard->runCommandWithFixedRetryAttempts(
         opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-        NamespaceString::kAdminDb.toString(),
+        DatabaseName::kAdmin.toString(),
         CommandHelpers::appendMajorityWriteConcern(configsvrRemoveChunksCmd.toBSON(osi.toBSON())),
         Shard::RetryPolicy::kIdempotent);
 
@@ -802,7 +803,7 @@ void CreateCollectionCoordinator::_checkCommandArguments(OperationContext* opCtx
     LOGV2_DEBUG(
         5277902, 2, "Create collection _checkCommandArguments", "namespace"_attr = originalNss());
 
-    if (originalNss().db() == NamespaceString::kConfigDb) {
+    if (originalNss().dbName() == DatabaseName::kConfig) {
         // Only allowlisted collections in config may be sharded (unless we are in test mode)
         uassert(ErrorCodes::IllegalOperation,
                 "only special collections in the config db may be sharded",
@@ -854,7 +855,7 @@ void CreateCollectionCoordinator::_checkCommandArguments(OperationContext* opCtx
                     numChunks <= maxNumInitialChunksTotal);
     }
 
-    if (originalNss().db() == NamespaceString::kConfigDb) {
+    if (originalNss().dbName() == DatabaseName::kConfig) {
         auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
 
         auto findReponse = uassertStatusOK(
@@ -1157,7 +1158,6 @@ void CreateCollectionCoordinator::_createPolicy(OperationContext* opCtx,
         shardKeyPattern,
         _request.getNumInitialChunks() ? *_request.getNumInitialChunks() : 0,
         _request.getPresplitHashedZones() ? *_request.getPresplitHashedZones() : false,
-        _request.getInitialSplitPoints(),
         getTagsAndValidate(opCtx, nss(), shardKeyPattern.toBSON()),
         getNumShards(opCtx),
         *_collectionEmpty,
@@ -1333,7 +1333,7 @@ void CreateCollectionCoordinator::_commit(OperationContext* opCtx,
         auto shard = uassertStatusOK(shardRegistry->getShard(opCtx, shardid));
         shard->runFireAndForgetCommand(opCtx,
                                        ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                       NamespaceString::kAdminDb.toString(),
+                                       DatabaseName::kAdmin.toString(),
                                        BSON("_flushRoutingTableCacheUpdates" << nss().ns()));
     }
 
@@ -1343,8 +1343,8 @@ void CreateCollectionCoordinator::_commit(OperationContext* opCtx,
           "numInitialChunks"_attr = _initialChunks->chunks.size(),
           "initialCollectionVersion"_attr = _initialChunks->collVersion());
 
-    auto result = CreateCollectionResponse(
-        {placementVersion, boost::optional<CollectionIndexes>(boost::none)});
+    auto result = CreateCollectionResponse(ShardVersionFactory::make(
+        placementVersion, boost::optional<CollectionIndexes>(boost::none)));
     result.setCollectionUUID(_collectionUUID);
     _result = std::move(result);
 

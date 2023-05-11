@@ -55,11 +55,7 @@ TEST(LogicalRewriter, RootNodeMerge) {
                                   std::move(limitSkipNode2));
 
     ASSERT_EXPLAIN_AUTO(
-        "Root []\n"
-        "  projections: \n"
-        "    a\n"
-        "  RefBlock: \n"
-        "    Variable [a]\n"
+        "Root [{a}]\n"
         "  LimitSkip [limit: 5, skip: 0]\n"
         "    LimitSkip [limit: (none), skip: 10]\n"
         "      Scan [test, {a}]\n",
@@ -74,11 +70,7 @@ TEST(LogicalRewriter, RootNodeMerge) {
     phaseManager.optimize(rewritten);
 
     ASSERT_EXPLAIN_AUTO(
-        "Root []\n"
-        "  projections: \n"
-        "    a\n"
-        "  RefBlock: \n"
-        "    Variable [a]\n"
+        "Root [{a}]\n"
         "  LimitSkip [limit: 5, skip: 10]\n"
         "    Scan [test, {a}]\n",
         rewritten);
@@ -244,21 +236,12 @@ TEST(LogicalRewriter, FilterProjectRewrite) {
 
     ASSERT_EXPLAIN_AUTO(
         "Root []\n"
-        "  projections: \n"
-        "  RefBlock: \n"
         "  Filter []\n"
         "    EvalFilter []\n"
         "      PathIdentity []\n"
         "      Variable [P1]\n"
-        "    Evaluation [{P1}]\n"
-        "      EvalPath []\n"
-        "        PathIdentity []\n"
-        "        Variable [ptest]\n"
-        "      Collation []\n"
-        "        collation: \n"
-        "          ptest: Ascending\n"
-        "        RefBlock: \n"
-        "          Variable [ptest]\n"
+        "    Evaluation [{P1} = Variable [ptest]]\n"
+        "      Collation [{ptest: Ascending}]\n"
         "        Scan [test, {ptest}]\n",
         rootNode);
 
@@ -272,21 +255,12 @@ TEST(LogicalRewriter, FilterProjectRewrite) {
 
     ASSERT_EXPLAIN_AUTO(
         "Root []\n"
-        "  projections: \n"
-        "  RefBlock: \n"
-        "  Collation []\n"
-        "    collation: \n"
-        "      ptest: Ascending\n"
-        "    RefBlock: \n"
-        "      Variable [ptest]\n"
+        "  Collation [{ptest: Ascending}]\n"
         "    Filter []\n"
         "      EvalFilter []\n"
         "        PathIdentity []\n"
         "        Variable [P1]\n"
-        "      Evaluation [{P1}]\n"
-        "        EvalPath []\n"
-        "          PathIdentity []\n"
-        "          Variable [ptest]\n"
+        "      Evaluation [{P1} = Variable [ptest]]\n"
         "        Scan [test, {ptest}]\n",
         latest);
 }
@@ -326,8 +300,6 @@ TEST(LogicalRewriter, FilterProjectComplexRewrite) {
 
     ASSERT_EXPLAIN_V2_AUTO(
         "Root []\n"
-        "|   |   projections: \n"
-        "|   RefBlock: \n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [p2]\n"
@@ -340,23 +312,10 @@ TEST(LogicalRewriter, FilterProjectComplexRewrite) {
         "|   EvalFilter []\n"
         "|   |   Variable [p1]\n"
         "|   PathIdentity []\n"
-        "Evaluation [{p1}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathIdentity []\n"
-        "Collation []\n"
-        "|   |   collation: \n"
-        "|   |       ptest: Ascending\n"
-        "|   RefBlock: \n"
-        "|       Variable [ptest]\n"
-        "Evaluation [{p3}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathIdentity []\n"
-        "Evaluation [{p2}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathIdentity []\n"
+        "Evaluation [{p1} = Variable [ptest]]\n"
+        "Collation [{ptest: Ascending}]\n"
+        "Evaluation [{p3} = Variable [ptest]]\n"
+        "Evaluation [{p2} = Variable [ptest]]\n"
         "Scan [test, {ptest}]\n",
         rootNode);
 
@@ -371,13 +330,7 @@ TEST(LogicalRewriter, FilterProjectComplexRewrite) {
     // Note: this assert depends on the order on which we consider rewrites.
     ASSERT_EXPLAIN_V2_AUTO(
         "Root []\n"
-        "|   |   projections: \n"
-        "|   RefBlock: \n"
-        "Collation []\n"
-        "|   |   collation: \n"
-        "|   |       ptest: Ascending\n"
-        "|   RefBlock: \n"
-        "|       Variable [ptest]\n"
+        "Collation [{ptest: Ascending}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [p2]\n"
@@ -390,18 +343,9 @@ TEST(LogicalRewriter, FilterProjectComplexRewrite) {
         "|   EvalFilter []\n"
         "|   |   Variable [p1]\n"
         "|   PathIdentity []\n"
-        "Evaluation [{p1}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathIdentity []\n"
-        "Evaluation [{p3}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathIdentity []\n"
-        "Evaluation [{p2}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathIdentity []\n"
+        "Evaluation [{p1} = Variable [ptest]]\n"
+        "Evaluation [{p3} = Variable [ptest]]\n"
+        "Evaluation [{p2} = Variable [ptest]]\n"
         "Scan [test, {ptest}]\n",
         latest);
 }
@@ -439,30 +383,17 @@ TEST(LogicalRewriter, FilterProjectGroupRewrite) {
     phaseManager.optimize(latest);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       c\n"
-        "|   RefBlock: \n"
-        "|       Variable [c]\n"
-        "GroupBy []\n"
-        "|   |   groupings: \n"
-        "|   |       RefBlock: \n"
-        "|   |           Variable [a]\n"
+        "Root [{c}]\n"
+        "GroupBy [{a}]\n"
         "|   aggregations: \n"
         "|       [c]\n"
         "|           Variable [b]\n"
-        "Evaluation [{b}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathIdentity []\n"
+        "Evaluation [{b} = Variable [ptest]]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [a]\n"
         "|   PathIdentity []\n"
-        "Evaluation [{a}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathIdentity []\n"
+        "Evaluation [{a} = Variable [ptest]]\n"
         "Scan [test, {ptest}]\n",
         latest);
 }
@@ -503,13 +434,7 @@ TEST(LogicalRewriter, FilterProjectUnwindRewrite) {
     phaseManager.optimize(latest);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       a\n"
-        "|   |       b\n"
-        "|   RefBlock: \n"
-        "|       Variable [a]\n"
-        "|       Variable [b]\n"
+        "Root [{a, b}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [b]\n"
@@ -518,15 +443,9 @@ TEST(LogicalRewriter, FilterProjectUnwindRewrite) {
         "|   EvalFilter []\n"
         "|   |   Variable [a]\n"
         "|   PathIdentity []\n"
-        "Unwind []\n"
-        "Evaluation [{b}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathIdentity []\n"
-        "Evaluation [{a}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathIdentity []\n"
+        "Unwind [{a, a_pid}]\n"
+        "Evaluation [{b} = Variable [ptest]]\n"
+        "Evaluation [{a} = Variable [ptest]]\n"
         "Scan [test, {ptest}]\n",
         latest);
 }
@@ -563,32 +482,18 @@ TEST(LogicalRewriter, FilterProjectExchangeRewrite) {
     phaseManager.optimize(latest);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       a\n"
-        "|   |       b\n"
-        "|   RefBlock: \n"
-        "|       Variable [a]\n"
-        "|       Variable [b]\n"
-        "Evaluation [{b}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathIdentity []\n"
+        "Root [{a, b}]\n"
+        "Evaluation [{b} = Variable [ptest]]\n"
         "Exchange []\n"
         "|   |   distribution: \n"
         "|   |       type: HashPartitioning\n"
         "|   |           projections: \n"
         "|   |               a\n"
-        "|   RefBlock: \n"
-        "|       Variable [a]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [a]\n"
         "|   PathIdentity []\n"
-        "Evaluation [{a}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathIdentity []\n"
+        "Evaluation [{a} = Variable [ptest]]\n"
         "Scan [test, {ptest}]\n",
         latest);
 }
@@ -629,27 +534,11 @@ TEST(LogicalRewriter, UnwindCollationRewrite) {
     phaseManager.optimize(latest);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       a\n"
-        "|   |       b\n"
-        "|   RefBlock: \n"
-        "|       Variable [a]\n"
-        "|       Variable [b]\n"
-        "Collation []\n"
-        "|   |   collation: \n"
-        "|   |       b: Ascending\n"
-        "|   RefBlock: \n"
-        "|       Variable [b]\n"
-        "Unwind []\n"
-        "Evaluation [{b}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathIdentity []\n"
-        "Evaluation [{a}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathIdentity []\n"
+        "Root [{a, b}]\n"
+        "Collation [{b: Ascending}]\n"
+        "Unwind [{a, a_pid}]\n"
+        "Evaluation [{b} = Variable [ptest]]\n"
+        "Evaluation [{a} = Variable [ptest]]\n"
         "Scan [test, {ptest}]\n",
         latest);
 }
@@ -683,11 +572,7 @@ TEST(LogicalRewriter, FilterUnionReorderSingleProjection) {
     ABT latest = std::move(rootNode);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pUnion\n"
-        "|   RefBlock: \n"
-        "|       Variable [pUnion]\n"
+        "Root [{pUnion}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [pUnion]\n"
@@ -696,15 +581,9 @@ TEST(LogicalRewriter, FilterUnionReorderSingleProjection) {
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
         "Union [{pUnion}]\n"
-        "|   Evaluation [{pUnion}]\n"
-        "|   |   EvalPath []\n"
-        "|   |   |   Variable [ptest2]\n"
-        "|   |   PathIdentity []\n"
+        "|   Evaluation [{pUnion} = Variable [ptest2]]\n"
         "|   Scan [test2, {ptest2}]\n"
-        "Evaluation [{pUnion}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest1]\n"
-        "|   PathIdentity []\n"
+        "Evaluation [{pUnion} = Variable [ptest1]]\n"
         "Scan [test1, {ptest1}]\n",
         latest);
 
@@ -717,11 +596,7 @@ TEST(LogicalRewriter, FilterUnionReorderSingleProjection) {
     phaseManager.optimize(latest);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pUnion\n"
-        "|   RefBlock: \n"
-        "|       Variable [pUnion]\n"
+        "Root [{pUnion}]\n"
         "Union [{pUnion}]\n"
         "|   Filter []\n"
         "|   |   EvalFilter []\n"
@@ -730,10 +605,7 @@ TEST(LogicalRewriter, FilterUnionReorderSingleProjection) {
         "|   |   PathTraverse [1]\n"
         "|   |   PathCompare [Eq]\n"
         "|   |   Const [1]\n"
-        "|   Evaluation [{pUnion}]\n"
-        "|   |   EvalPath []\n"
-        "|   |   |   Variable [ptest2]\n"
-        "|   |   PathIdentity []\n"
+        "|   Evaluation [{pUnion} = Variable [ptest2]]\n"
         "|   Scan [test2, {ptest2}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
@@ -742,10 +614,7 @@ TEST(LogicalRewriter, FilterUnionReorderSingleProjection) {
         "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
-        "Evaluation [{pUnion}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest1]\n"
-        "|   PathIdentity []\n"
+        "Evaluation [{pUnion} = Variable [ptest1]]\n"
         "Scan [test1, {ptest1}]\n",
         latest);
 }
@@ -799,13 +668,7 @@ TEST(LogicalRewriter, MultipleFilterUnionReorder) {
     ABT latest = std::move(rootNode);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pUnion1\n"
-        "|   |       pUnion2\n"
-        "|   RefBlock: \n"
-        "|       Variable [pUnion1]\n"
-        "|       Variable [pUnion2]\n"
+        "Root [{pUnion1, pUnion2}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [pUnion2]\n"
@@ -821,23 +684,11 @@ TEST(LogicalRewriter, MultipleFilterUnionReorder) {
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
         "Union [{pUnion1, pUnion2}]\n"
-        "|   Evaluation [{pUnion2}]\n"
-        "|   |   EvalPath []\n"
-        "|   |   |   Variable [ptest2]\n"
-        "|   |   PathIdentity []\n"
-        "|   Evaluation [{pUnion1}]\n"
-        "|   |   EvalPath []\n"
-        "|   |   |   Variable [ptest2]\n"
-        "|   |   PathIdentity []\n"
+        "|   Evaluation [{pUnion2} = Variable [ptest2]]\n"
+        "|   Evaluation [{pUnion1} = Variable [ptest2]]\n"
         "|   Scan [test2, {ptest2}]\n"
-        "Evaluation [{pUnion2}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest1]\n"
-        "|   PathIdentity []\n"
-        "Evaluation [{pUnion1}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest1]\n"
-        "|   PathIdentity []\n"
+        "Evaluation [{pUnion2} = Variable [ptest1]]\n"
+        "Evaluation [{pUnion1} = Variable [ptest1]]\n"
         "Scan [test1, {ptest1}]\n",
         latest);
 
@@ -850,13 +701,7 @@ TEST(LogicalRewriter, MultipleFilterUnionReorder) {
     phaseManager.optimize(latest);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       pUnion1\n"
-        "|   |       pUnion2\n"
-        "|   RefBlock: \n"
-        "|       Variable [pUnion1]\n"
-        "|       Variable [pUnion2]\n"
+        "Root [{pUnion1, pUnion2}]\n"
         "Union [{pUnion1, pUnion2}]\n"
         "|   Filter []\n"
         "|   |   EvalFilter []\n"
@@ -865,10 +710,7 @@ TEST(LogicalRewriter, MultipleFilterUnionReorder) {
         "|   |   PathTraverse [1]\n"
         "|   |   PathCompare [Eq]\n"
         "|   |   Const [1]\n"
-        "|   Evaluation [{pUnion2}]\n"
-        "|   |   EvalPath []\n"
-        "|   |   |   Variable [ptest2]\n"
-        "|   |   PathIdentity []\n"
+        "|   Evaluation [{pUnion2} = Variable [ptest2]]\n"
         "|   Filter []\n"
         "|   |   EvalFilter []\n"
         "|   |   |   Variable [pUnion1]\n"
@@ -876,10 +718,7 @@ TEST(LogicalRewriter, MultipleFilterUnionReorder) {
         "|   |   PathTraverse [1]\n"
         "|   |   PathCompare [Eq]\n"
         "|   |   Const [1]\n"
-        "|   Evaluation [{pUnion1}]\n"
-        "|   |   EvalPath []\n"
-        "|   |   |   Variable [ptest2]\n"
-        "|   |   PathIdentity []\n"
+        "|   Evaluation [{pUnion1} = Variable [ptest2]]\n"
         "|   Scan [test2, {ptest2}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
@@ -888,10 +727,7 @@ TEST(LogicalRewriter, MultipleFilterUnionReorder) {
         "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
-        "Evaluation [{pUnion2}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest1]\n"
-        "|   PathIdentity []\n"
+        "Evaluation [{pUnion2} = Variable [ptest1]]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [pUnion1]\n"
@@ -899,10 +735,7 @@ TEST(LogicalRewriter, MultipleFilterUnionReorder) {
         "|   PathTraverse [1]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
-        "Evaluation [{pUnion1}]\n"
-        "|   EvalPath []\n"
-        "|   |   Variable [ptest1]\n"
-        "|   PathIdentity []\n"
+        "Evaluation [{pUnion1} = Variable [ptest1]]\n"
         "Scan [test1, {ptest1}]\n",
         latest);
 }
@@ -937,11 +770,7 @@ TEST(LogicalRewriter, FilterUnionUnionPushdown) {
     ABT latest = std::move(rootNode);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       ptest\n"
-        "|   RefBlock: \n"
-        "|       Variable [ptest]\n"
+        "Root [{ptest}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [ptest]\n"
@@ -959,16 +788,12 @@ TEST(LogicalRewriter, FilterUnionUnionPushdown) {
     phaseManager.optimize(latest);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       ptest\n"
-        "|   RefBlock: \n"
-        "|       Variable [ptest]\n"
+        "Root [{ptest}]\n"
         "Union [{ptest}]\n"
         "|   Sargable [Complete]\n"
-        "|   |   |   |   |   requirementsMap: \n"
-        "|   |   |   |   |       refProjection: ptest, path: 'PathGet [a] PathTraverse [1] PathId"
-        "entity []', intervals: {{{=Const [1]}}}\n"
+        "|   |   |   |   |   requirements: \n"
+        "|   |   |   |   |       {{{refProjection: ptest, path: 'PathGet [a] PathTraverse [1] "
+        "PathIdentity []', intervals: {{{=Const [1]}}}}}}\n"
         "|   |   |   |   candidateIndexes: \n"
         "|   |   |   scanParams: \n"
         "|   |   |       {'a': evalTemp_0}\n"
@@ -978,9 +803,9 @@ TEST(LogicalRewriter, FilterUnionUnionPushdown) {
         "|   Scan [test3, {ptest}]\n"
         "Union [{ptest}]\n"
         "|   Sargable [Complete]\n"
-        "|   |   |   |   |   requirementsMap: \n"
-        "|   |   |   |   |       refProjection: ptest, path: 'PathGet [a] PathTraverse [1] PathId"
-        "entity []', intervals: {{{=Const [1]}}}\n"
+        "|   |   |   |   |   requirements: \n"
+        "|   |   |   |   |       {{{refProjection: ptest, path: 'PathGet [a] PathTraverse [1] "
+        "PathIdentity []', intervals: {{{=Const [1]}}}}}}\n"
         "|   |   |   |   candidateIndexes: \n"
         "|   |   |   scanParams: \n"
         "|   |   |       {'a': evalTemp_2}\n"
@@ -989,15 +814,15 @@ TEST(LogicalRewriter, FilterUnionUnionPushdown) {
         "[]', intervals: {{{=Const [1]}}}, entryIndex: 0\n"
         "|   Scan [test2, {ptest}]\n"
         "Sargable [Complete]\n"
-        "|   |   |   |   requirementsMap: \n"
-        "|   |   |   |       refProjection: ptest, path: 'PathGet [a] PathTraverse [1] PathIdenti"
-        "ty []', intervals: {{{=Const [1]}}}\n"
+        "|   |   |   |   requirements: \n"
+        "|   |   |   |       {{{refProjection: ptest, path: 'PathGet [a] PathTraverse [1] "
+        "PathIdentity []', intervals: {{{=Const [1]}}}}}}\n"
         "|   |   |   candidateIndexes: \n"
         "|   |   scanParams: \n"
         "|   |       {'a': evalTemp_1}\n"
         "|   |           residualReqs: \n"
-        "|   |               refProjection: evalTemp_1, path: 'PathTraverse [1] PathIdentity []',"
-        " intervals: {{{=Const [1]}}}, entryIndex: 0\n"
+        "|   |               refProjection: evalTemp_1, path: 'PathTraverse [1] PathIdentity []', "
+        "intervals: {{{=Const [1]}}}, entryIndex: 0\n"
         "Scan [test1, {ptest}]\n",
         latest);
 }
@@ -1054,8 +879,8 @@ TEST(LogicalRewriter, UnionPreservesCommonLogicalProps) {
         "    |   |       projections: \n"
         "    |   |           ptest1\n"
         "    |   |       indexingAvailability: \n"
-        "    |   |           [groupId: 0, scanProjection: ptest1, scanDefName: test1, eqPredsOnly"
-        "]\n"
+        "    |   |           [groupId: 0, scanProjection: ptest1, scanDefName: test1, "
+        "eqPredsOnly]\n"
         "    |   |       collectionAvailability: \n"
         "    |   |           test1\n"
         "    |   |       distributionAvailability: \n"
@@ -1093,9 +918,9 @@ TEST(LogicalRewriter, UnionPreservesCommonLogicalProps) {
         "    |   logicalNodes: \n"
         "    |       logicalNodeId: 0, rule: Root\n"
         "    |           Sargable [Complete]\n"
-        "    |           |   |   |   |   requirementsMap: \n"
-        "    |           |   |   |   |       refProjection: ptest1, path: 'PathGet [a] PathIdenti"
-        "ty []', boundProjection: a, intervals: {{{<fully open>}}}\n"
+        "    |           |   |   |   |   requirements: \n"
+        "    |           |   |   |   |       {{{refProjection: ptest1, path: 'PathGet [a] "
+        "PathIdentity []', boundProjection: a, intervals: {{{<fully open>}}}}}}\n"
         "    |           |   |   |   candidateIndexes: \n"
         "    |           |   |   scanParams: \n"
         "    |           |   |       {'a': a}\n"
@@ -1108,8 +933,8 @@ TEST(LogicalRewriter, UnionPreservesCommonLogicalProps) {
         "    |   |       projections: \n"
         "    |   |           ptest2\n"
         "    |   |       indexingAvailability: \n"
-        "    |   |           [groupId: 2, scanProjection: ptest2, scanDefName: test2, eqPredsOnly"
-        "]\n"
+        "    |   |           [groupId: 2, scanProjection: ptest2, scanDefName: test2, "
+        "eqPredsOnly]\n"
         "    |   |       collectionAvailability: \n"
         "    |   |           test2\n"
         "    |   |       distributionAvailability: \n"
@@ -1147,9 +972,9 @@ TEST(LogicalRewriter, UnionPreservesCommonLogicalProps) {
         "    |   logicalNodes: \n"
         "    |       logicalNodeId: 0, rule: Root\n"
         "    |           Sargable [Complete]\n"
-        "    |           |   |   |   |   requirementsMap: \n"
-        "    |           |   |   |   |       refProjection: ptest2, path: 'PathGet [a] PathIdenti"
-        "ty []', boundProjection: a, intervals: {{{<fully open>}}}\n"
+        "    |           |   |   |   |   requirements: \n"
+        "    |           |   |   |   |       {{{refProjection: ptest2, path: 'PathGet [a] "
+        "PathIdentity []', boundProjection: a, intervals: {{{<fully open>}}}}}}\n"
         "    |           |   |   |   candidateIndexes: \n"
         "    |           |   |   scanParams: \n"
         "    |           |   |       {'a': a}\n"
@@ -1203,11 +1028,7 @@ TEST(LogicalRewriter, UnionPreservesCommonLogicalProps) {
         "    |   |               type: UnknownPartitioning\n"
         "    |   logicalNodes: \n"
         "    |       logicalNodeId: 0, rule: Root\n"
-        "    |           Root []\n"
-        "    |           |   |   projections: \n"
-        "    |           |   |       a\n"
-        "    |           |   RefBlock: \n"
-        "    |           |       Variable [a]\n"
+        "    |           Root [{a}]\n"
         "    |           MemoLogicalDelegator [groupId: 4]\n"
         "    physicalNodes: \n",
         phaseManager.getMemo());
@@ -1268,10 +1089,10 @@ TEST(LogicalRewriter, SargableCE) {
         "    |   |       cardinalityEstimate: \n"
         "    |   |           ce: 5.62341\n"
         "    |   |           requirementCEs: \n"
-        "    |   |               refProjection: ptest, path: 'PathGet [a] PathIdentity []', ce: 3"
-        "1.6228\n"
-        "    |   |               refProjection: ptest, path: 'PathGet [b] PathIdentity []', ce: 3"
-        "1.6228\n"
+        "    |   |               refProjection: ptest, path: 'PathGet [a] PathIdentity []', ce: "
+        "31.6228\n"
+        "    |   |               refProjection: ptest, path: 'PathGet [b] PathIdentity []', ce: "
+        "31.6228\n"
         "    |   |       projections: \n"
         "    |   |           ptest\n"
         "    |   |       indexingAvailability: \n"
@@ -1285,11 +1106,16 @@ TEST(LogicalRewriter, SargableCE) {
         "    |   logicalNodes: \n"
         "    |       logicalNodeId: 0, rule: Root\n"
         "    |           Sargable [Complete]\n"
-        "    |           |   |   |   |   requirementsMap: \n"
-        "    |           |   |   |   |       refProjection: ptest, path: 'PathGet [a] PathIdentit"
-        "y []', intervals: {{{=Const [1]}}}\n"
-        "    |           |   |   |   |       refProjection: ptest, path: 'PathGet [b] PathIdentit"
-        "y []', intervals: {{{=Const [2]}}}\n"
+        "    |           |   |   |   |   requirements: \n"
+        "    |           |   |   |   |       {\n"
+        "    |           |   |   |   |           {\n"
+        "    |           |   |   |   |               {refProjection: ptest, path: 'PathGet [a] "
+        "PathIdentity []', intervals: {{{=Const [1]}}}}\n"
+        "    |           |   |   |   |            ^ \n"
+        "    |           |   |   |   |               {refProjection: ptest, path: 'PathGet [b] "
+        "PathIdentity []', intervals: {{{=Const [2]}}}}\n"
+        "    |           |   |   |   |           }\n"
+        "    |           |   |   |   |       }\n"
         "    |           |   |   |   candidateIndexes: \n"
         "    |           |   |   scanParams: \n"
         "    |           |   |       {'a': evalTemp_2, 'b': evalTemp_3}\n"
@@ -1316,11 +1142,7 @@ TEST(LogicalRewriter, SargableCE) {
         "    |   |               type: Centralized\n"
         "    |   logicalNodes: \n"
         "    |       logicalNodeId: 0, rule: Root\n"
-        "    |           Root []\n"
-        "    |           |   |   projections: \n"
-        "    |           |   |       ptest\n"
-        "    |           |   RefBlock: \n"
-        "    |           |       Variable [ptest]\n"
+        "    |           Root [{ptest}]\n"
         "    |           MemoLogicalDelegator [groupId: 1]\n"
         "    physicalNodes: \n",
         phaseManager.getMemo());
@@ -1349,11 +1171,7 @@ TEST(LogicalRewriter, RemoveNoopFilter) {
     phaseManager.optimize(latest);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       ptest\n"
-        "|   RefBlock: \n"
-        "|       Variable [ptest]\n"
+        "Root [{ptest}]\n"
         "Scan [test, {ptest}]\n",
         latest);
 }
@@ -1401,11 +1219,7 @@ TEST(LogicalRewriter, NotPushdownToplevelSuccess) {
 
     // We remove the Traverse nodes, and combine the Not ... Eq into Neq.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       scan_0\n"
-        "|   RefBlock: \n"
-        "|       Variable [scan_0]\n"
+        "Root [{scan_0}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [scan_0]\n"
@@ -1461,11 +1275,7 @@ TEST(LogicalRewriter, NotPushdownToplevelFailureMultikey) {
     // Because the index is multikey, we don't remove the Traverse nodes,
     // which prevents us from pushing down the Not.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       scan_0\n"
-        "|   RefBlock: \n"
-        "|       Variable [scan_0]\n"
+        "Root [{scan_0}]\n"
         "Filter []\n"
         "|   UnaryOp [Not]\n"
         "|   EvalFilter []\n"
@@ -1510,11 +1320,7 @@ TEST(LogicalRewriter, NotPushdownComposeM) {
     // We should push the Not down as far as possible, so that some leaves become Neq.
     // Leaves with a Traverse in the way residualize a Not instead.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       scan_0\n"
-        "|   RefBlock: \n"
-        "|       Variable [scan_0]\n"
+        "Root [{scan_0}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [scan_0]\n"
@@ -1593,11 +1399,7 @@ TEST(LogicalRewriter, NotPushdownUnderLambdaSuccess) {
 
     // All the Traverses should be eliminated, and the Not ... Eq combined as Neq.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       scan_0\n"
-        "|   RefBlock: \n"
-        "|       Variable [scan_0]\n"
+        "Root [{scan_0}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [scan_0]\n"
@@ -1606,15 +1408,15 @@ TEST(LogicalRewriter, NotPushdownUnderLambdaSuccess) {
         "|   PathCompare [Neq]\n"
         "|   Const [2]\n"
         "Sargable [Complete]\n"
-        "|   |   |   |   requirementsMap: \n"
-        "|   |   |   |       refProjection: scan_0, path: 'PathGet [a] PathIdentity []', interval"
-        "s: {{{[Const [[]], Const [BinData(0, )])}}}\n"
+        "|   |   |   |   requirements: \n"
+        "|   |   |   |       {{{refProjection: scan_0, path: 'PathGet [a] PathIdentity []', "
+        "intervals: {{{[Const [[]], Const [BinData(0, )])}}}}}}\n"
         "|   |   |   candidateIndexes: \n"
         "|   |   scanParams: \n"
         "|   |       {'a': evalTemp_2}\n"
         "|   |           residualReqs: \n"
-        "|   |               refProjection: evalTemp_2, path: 'PathIdentity []', intervals: {{{[C"
-        "onst [[]], Const [BinData(0, )])}}}, entryIndex: 0\n"
+        "|   |               refProjection: evalTemp_2, path: 'PathIdentity []', intervals: "
+        "{{{[Const [[]], Const [BinData(0, )])}}}, entryIndex: 0\n"
         "Scan [coll, {scan_0}]\n",
         latest);
 }
@@ -1674,11 +1476,7 @@ TEST(LogicalRewriter, NotPushdownUnderLambdaKeepOuterTraverse) {
     // The inner Traverses should be eliminated, and the Not ... Eq combined as Neq.
     // We have to keep the outer traverse since 'a' is multikey.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       scan_0\n"
-        "|   RefBlock: \n"
-        "|       Variable [scan_0]\n"
+        "Root [{scan_0}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [scan_0]\n"
@@ -1692,17 +1490,22 @@ TEST(LogicalRewriter, NotPushdownUnderLambdaKeepOuterTraverse) {
         "|   |   PathObj []\n"
         "|   PathArr []\n"
         "Sargable [Complete]\n"
-        "|   |   |   |   requirementsMap: \n"
-        "|   |   |   |       refProjection: scan_0, path: 'PathGet [a] PathIdentity []', interval"
-        "s: {{{[Const [[]], Const [BinData(0, )])}}}\n"
-        "|   |   |   |       refProjection: scan_0, path: 'PathGet [a] PathTraverse [1] PathIdent"
-        "ity []', intervals: {{{[Const [{}], Const [BinData(0, )])}}}, perfOnly\n"
+        "|   |   |   |   requirements: \n"
+        "|   |   |   |       {\n"
+        "|   |   |   |           {\n"
+        "|   |   |   |               {refProjection: scan_0, path: 'PathGet [a] PathIdentity []', "
+        "intervals: {{{[Const [[]], Const [BinData(0, )])}}}}\n"
+        "|   |   |   |            ^ \n"
+        "|   |   |   |               {refProjection: scan_0, path: 'PathGet [a] PathTraverse [1] "
+        "PathIdentity []', intervals: {{{[Const [{}], Const [BinData(0, )])}}}, perfOnly}\n"
+        "|   |   |   |           }\n"
+        "|   |   |   |       }\n"
         "|   |   |   candidateIndexes: \n"
         "|   |   scanParams: \n"
         "|   |       {'a': evalTemp_1}\n"
         "|   |           residualReqs: \n"
-        "|   |               refProjection: evalTemp_1, path: 'PathIdentity []', intervals: {{{[C"
-        "onst [[]], Const [BinData(0, )])}}}, entryIndex: 0\n"
+        "|   |               refProjection: evalTemp_1, path: 'PathIdentity []', intervals: "
+        "{{{[Const [[]], Const [BinData(0, )])}}}, entryIndex: 0\n"
         "Scan [coll, {scan_0}]\n",
         latest);
 }
@@ -1742,11 +1545,7 @@ TEST(LogicalRewriter, NotPushdownUnderLambdaFailsWithFreeVar) {
     // The Not should be gone: combined into Neq.
     // But the Lambda [x] should still be there, because 'x' is still used.
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       scan_0\n"
-        "|   RefBlock: \n"
-        "|       Variable [scan_0]\n"
+        "Root [{scan_0}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [scan_0]\n"
@@ -1807,23 +1606,19 @@ TEST(LogicalRewriter, RemoveTraverseSplitComposeM) {
 
     // We should end up with a Sargable node and no residual Filter.
     ASSERT_EXPLAIN_V2_AUTO(  // NOLINT (test auto-update)
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       scan_0\n"
-        "|   RefBlock: \n"
-        "|       Variable [scan_0]\n"
+        "Root [{scan_0}]\n"
         "Sargable [Complete]\n"
-        "|   |   |   |   requirementsMap: \n"
-        "|   |   |   |       refProjection: scan_0, path: 'PathGet [a] PathGet [b] PathIdentity ["
-        "]', intervals: {{{(Const [3], Const [8])}}}\n"
+        "|   |   |   |   requirements: \n"
+        "|   |   |   |       {{{refProjection: scan_0, path: 'PathGet [a] PathGet [b] "
+        "PathIdentity []', intervals: {{{(Const [3], Const [8])}}}}}}\n"
         "|   |   |   candidateIndexes: \n"
-        "|   |   |       candidateId: 1, index1, {}, {SimpleInequality}, {{{(Const [3], Const [8]"
-        ")}}}\n"
+        "|   |   |       candidateId: 1, index1, {}, {SimpleInequality}, {{{(Const [3], Const "
+        "[8])}}}\n"
         "|   |   scanParams: \n"
         "|   |       {'a': evalTemp_2}\n"
         "|   |           residualReqs: \n"
-        "|   |               refProjection: evalTemp_2, path: 'PathGet [b] PathIdentity []', inte"
-        "rvals: {{{(Const [3], Const [8])}}}, entryIndex: 0\n"
+        "|   |               refProjection: evalTemp_2, path: 'PathGet [b] PathIdentity []', "
+        "intervals: {{{(Const [3], Const [8])}}}, entryIndex: 0\n"
         "Scan [coll, {scan_0}]\n",
         latest);
 }
@@ -1884,11 +1679,7 @@ TEST(LogicalRewriter, TraverseComposeMTraverse) {
     //   of doubly-nested arrays.
     // (We may also get a perfOnly Sargable node; that's not the point of this test.)
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       scan_0\n"
-        "|   RefBlock: \n"
-        "|       Variable [scan_0]\n"
+        "Root [{scan_0}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [scan_0]\n"
@@ -1904,12 +1695,17 @@ TEST(LogicalRewriter, TraverseComposeMTraverse) {
         "|   |   PathObj []\n"
         "|   PathArr []\n"
         "Sargable [Complete]\n"
-        "|   |   |   |   requirementsMap: \n"
-        "|   |   |   |       refProjection: scan_0, path: 'PathGet [a] PathTraverse [1] PathIdent"
-        "ity []', intervals: {{{[Const [{}], Const [BinData(0, )])}}}, perfOnly\n"
-        "|   |   |   |       refProjection: scan_0, path: 'PathGet [a] PathTraverse [1] PathTrave"
-        "rse [1] PathGet [b] PathTraverse [1] PathIdentity []', intervals: {{{>Const [3]}}}, perf"
-        "Only\n"
+        "|   |   |   |   requirements: \n"
+        "|   |   |   |       {\n"
+        "|   |   |   |           {\n"
+        "|   |   |   |               {refProjection: scan_0, path: 'PathGet [a] PathTraverse [1] "
+        "PathIdentity []', intervals: {{{[Const [{}], Const [BinData(0, )])}}}, perfOnly}\n"
+        "|   |   |   |            ^ \n"
+        "|   |   |   |               {refProjection: scan_0, path: 'PathGet [a] PathTraverse [1] "
+        "PathTraverse [1] PathGet [b] PathTraverse [1] PathIdentity []', intervals: {{{>Const "
+        "[3]}}}, perfOnly}\n"
+        "|   |   |   |           }\n"
+        "|   |   |   |       }\n"
         "|   |   |   candidateIndexes: \n"
         "|   |   scanParams: \n"
         "|   |       {}\n"
@@ -1966,11 +1762,7 @@ TEST(LogicalRewriter, RelaxComposeM) {
     phaseManager.optimize(optimized);
 
     ASSERT_EXPLAIN_V2_AUTO(
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [root]\n"
@@ -1990,9 +1782,9 @@ TEST(LogicalRewriter, RelaxComposeM) {
         "|   PathCompare [Gt]\n"
         "|   Const [0]\n"
         "Sargable [Complete]\n"
-        "|   |   |   |   requirementsMap: \n"
-        "|   |   |   |       refProjection: root, path: 'PathGet [a] PathTraverse [1] PathGet [b]"
-        " PathIdentity []', intervals: {{{>Const [0]}}}, perfOnly\n"
+        "|   |   |   |   requirements: \n"
+        "|   |   |   |       {{{refProjection: root, path: 'PathGet [a] PathTraverse [1] PathGet "
+        "[b] PathIdentity []', intervals: {{{>Const [0]}}}, perfOnly}}}\n"
         "|   |   |   candidateIndexes: \n"
         "|   |   scanParams: \n"
         "|   |       {}\n"
@@ -2043,14 +1835,20 @@ TEST(LogicalRewriter, SargableNodeRIN) {
     const SargableNode& node = *optimized.cast<RootNode>()->getChild().cast<SargableNode>();
 
     // Demonstrate we encode intervals for "a", "c", and "e".
-    ASSERT_EQ(
-        "requirementsMap: \n"
-        "    refProjection: root, path: 'PathGet [a] PathIdentity []', intervals: {{{=Const "
-        "[1]}}}\n"
-        "    refProjection: root, path: 'PathGet [c] PathIdentity []', intervals: {{{=Const "
-        "[2]}}}\n"
-        "    refProjection: root, path: 'PathGet [e] PathIdentity []', intervals: {{{=Const "
-        "[3]}}}\n",
+    ASSERT_STR_EQ_AUTO(
+        "requirements: \n"
+        "    {\n"
+        "        {\n"
+        "            {refProjection: root, path: 'PathGet [a] PathIdentity []', intervals: "
+        "{{{=Const [1]}}}}\n"
+        "         ^ \n"
+        "            {refProjection: root, path: 'PathGet [c] PathIdentity []', intervals: "
+        "{{{=Const [2]}}}}\n"
+        "         ^ \n"
+        "            {refProjection: root, path: 'PathGet [e] PathIdentity []', intervals: "
+        "{{{=Const [3]}}}}\n"
+        "        }\n"
+        "    }\n",
         ExplainGenerator::explainPartialSchemaReqMap(node.getReqMap()));
 
     const auto& ci = node.getCandidateIndexes();
@@ -2062,12 +1860,8 @@ TEST(LogicalRewriter, SargableNodeRIN) {
 
     // The first index field ("a") is constrained to 1, the remaining fields are not constrained.
     ASSERT_INTERVAL_AUTO(  // NOLINT
-        "{\n"
-        "    {\n"
-        "        {[Const [1 | minKey | minKey | minKey | minKey], Const [1 | maxKey | maxKey | "
-        "maxKey | maxKey]]}\n"
-        "    }\n"
-        "}\n",
+        "{{{[Const [1 | minKey | minKey | minKey | minKey], Const [1 | maxKey | maxKey | maxKey | "
+        "maxKey]]}}}\n",
         ci.at(0)._eqPrefixes.front()._interval);
 
     // No correlated projections.
@@ -2091,12 +1885,8 @@ TEST(LogicalRewriter, SargableNodeRIN) {
 
     // The first index field ("a") is again constrained to 1, and the remaining ones are not.
     ASSERT_INTERVAL_AUTO(  // NOLINT
-        "{\n"
-        "    {\n"
-        "        {[Const [1 | minKey | minKey | minKey | minKey], Const [1 | maxKey | maxKey | ma"
-        "xKey | maxKey]]}\n"
-        "    }\n"
-        "}\n",
+        "{{{[Const [1 | minKey | minKey | minKey | minKey], Const [1 | maxKey | maxKey | maxKey | "
+        "maxKey]]}}}\n",
         ci.at(1)._eqPrefixes.at(0)._interval);
 
     // Second eq prefix begins at index field 2.
@@ -2105,13 +1895,9 @@ TEST(LogicalRewriter, SargableNodeRIN) {
     // The first two index fields are constrained to variables obtained from the first scan, the
     // third one ("c") is bound to "2". The last two fields are unconstrained.
     ASSERT_INTERVAL_AUTO(  // NOLINT
-        "{\n"
-        "    {\n"
-        "        {[Variable [evalTemp_26] | Variable [evalTemp_27] | Const [2] | Const [minKey] |"
-        " Const [minKey], Variable [evalTemp_26] | Variable [evalTemp_27] | Const [2] | Const [ma"
-        "xKey] | Const [maxKey]]}\n"
-        "    }\n"
-        "}\n",
+        "{{{[Variable [evalTemp_26] | Variable [evalTemp_27] | Const [2] | Const [minKey] | Const "
+        "[minKey], Variable [evalTemp_26] | Variable [evalTemp_27] | Const [2] | Const [maxKey] | "
+        "Const [maxKey]]}}}\n",
         ci.at(1)._eqPrefixes.at(1)._interval);
 
     // Two correlated projections.
@@ -2133,35 +1919,23 @@ TEST(LogicalRewriter, SargableNodeRIN) {
 
     // The first index field ("a") is again constrained to 1.
     ASSERT_INTERVAL_AUTO(  // NOLINT
-        "{\n"
-        "    {\n"
-        "        {[Const [1 | minKey | minKey | minKey | minKey], Const [1 | maxKey | maxKey | ma"
-        "xKey | maxKey]]}\n"
-        "    }\n"
-        "}\n",
+        "{{{[Const [1 | minKey | minKey | minKey | minKey], Const [1 | maxKey | maxKey | maxKey | "
+        "maxKey]]}}}\n",
         ci.at(2)._eqPrefixes.at(0)._interval);
 
     // The first two index fields are constrained to variables obtained from the first scan, the
     // third one ("c") is bound to "2". The last two fields are unconstrained.
     ASSERT_INTERVAL_AUTO(  // NOLINT
-        "{\n"
-        "    {\n"
-        "        {[Variable [evalTemp_29] | Variable [evalTemp_30] | Const [2] | Const [minKey] |"
-        " Const [minKey], Variable [evalTemp_29] | Variable [evalTemp_30] | Const [2] | Const [ma"
-        "xKey] | Const [maxKey]]}\n"
-        "    }\n"
-        "}\n",
+        "{{{[Variable [evalTemp_29] | Variable [evalTemp_30] | Const [2] | Const [minKey] | Const "
+        "[minKey], Variable [evalTemp_29] | Variable [evalTemp_30] | Const [2] | Const [maxKey] | "
+        "Const [maxKey]]}}}\n",
         ci.at(2)._eqPrefixes.at(1)._interval);
 
     // The first 4 index fields are constrained to variables from the second scan, and the last one
     // to 4.
     ASSERT_INTERVAL_AUTO(  // NOLINT
-        "{\n"
-        "    {\n"
-        "        {=Variable [evalTemp_29] | Variable [evalTemp_30] | Variable [evalTemp_31] | Var"
-        "iable [evalTemp_32] | Const [3]}\n"
-        "    }\n"
-        "}\n",
+        "{{{=Variable [evalTemp_29] | Variable [evalTemp_30] | Variable [evalTemp_31] | Variable "
+        "[evalTemp_32] | Const [3]}}}\n",
         ci.at(2)._eqPrefixes.at(2)._interval);
 }
 
@@ -2189,11 +1963,7 @@ TEST(LogicalRewriter, EmptyArrayIndexBounds) {
     phaseManager.optimize(rootNode);
 
     ASSERT_EXPLAIN_V2_AUTO(  // NOLINT (test auto-update)
-        "Root []\n"
-        "|   |   projections: \n"
-        "|   |       root\n"
-        "|   RefBlock: \n"
-        "|       Variable [root]\n"
+        "Root [{root}]\n"
         "Filter []\n"
         "|   EvalFilter []\n"
         "|   |   Variable [root]\n"
@@ -2205,9 +1975,9 @@ TEST(LogicalRewriter, EmptyArrayIndexBounds) {
         "|   PathCompare [Eq]\n"
         "|   Const [[]]\n"
         "Sargable [Complete]\n"
-        "|   |   |   |   requirementsMap: \n"
-        "|   |   |   |       refProjection: root, path: 'PathGet [a] PathTraverse [1] PathIdentit"
-        "y []', intervals: {{{=Const [undefined]}} U {{=Const [[]]}}}, perfOnly\n"
+        "|   |   |   |   requirements: \n"
+        "|   |   |   |       {{{refProjection: root, path: 'PathGet [a] PathTraverse [1] "
+        "PathIdentity []', intervals: {{{=Const [undefined]}} U {{=Const [[]]}}}, perfOnly}}}\n"
         "|   |   |   candidateIndexes: \n"
         "|   |   scanParams: \n"
         "|   |       {}\n"

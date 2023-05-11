@@ -87,21 +87,40 @@ public:
                                                             << "ns" << ns().toString()));
                 auto blockType = request().getBlockType().get_value_or(
                     CriticalSectionBlockTypeEnum::kReadsAndWrites);
+
+                bool allowViews = request().getAllowViews();
                 auto service = ShardingRecoveryService::get(opCtx);
                 switch (blockType) {
                     case CriticalSectionBlockTypeEnum::kUnblock:
                         service->releaseRecoverableCriticalSection(
-                            opCtx, ns(), reason, ShardingCatalogClient::kLocalWriteConcern);
+                            opCtx,
+                            ns(),
+                            reason,
+                            ShardingCatalogClient::kLocalWriteConcern,
+                            /* throwIfReasonDiffers */ true,
+                            allowViews);
                         break;
                     case CriticalSectionBlockTypeEnum::kWrites:
                         service->acquireRecoverableCriticalSectionBlockWrites(
-                            opCtx, ns(), reason, ShardingCatalogClient::kLocalWriteConcern);
+                            opCtx,
+                            ns(),
+                            reason,
+                            ShardingCatalogClient::kLocalWriteConcern,
+                            allowViews);
                         break;
                     default:
                         service->acquireRecoverableCriticalSectionBlockWrites(
-                            opCtx, ns(), reason, ShardingCatalogClient::kLocalWriteConcern);
+                            opCtx,
+                            ns(),
+                            reason,
+                            ShardingCatalogClient::kLocalWriteConcern,
+                            allowViews);
                         service->promoteRecoverableCriticalSectionToBlockAlsoReads(
-                            opCtx, ns(), reason, ShardingCatalogClient::kLocalWriteConcern);
+                            opCtx,
+                            ns(),
+                            reason,
+                            ShardingCatalogClient::kLocalWriteConcern,
+                            allowViews);
                 };
             };
 
@@ -131,7 +150,7 @@ public:
                 // durably persisted on the oplog. This must be the last operation done on this
                 // command.
                 DBDirectClient client(opCtx);
-                client.update(NamespaceString::kServerConfigurationNamespace.ns(),
+                client.update(NamespaceString::kServerConfigurationNamespace,
                               BSON("_id" << Request::kCommandName),
                               BSON("$inc" << BSON("count" << 1)),
                               true /* upsert */,

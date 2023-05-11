@@ -45,7 +45,6 @@
 #include "mongo/db/s/resharding/resharding_txn_cloner_progress_gen.h"
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/s/session_catalog_migration.h"
-#include "mongo/db/s/sharding_ddl_util.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_txn_record_gen.h"
 #include "mongo/db/storage/write_unit_of_work.h"
@@ -71,6 +70,28 @@ void ensureCollectionExists(OperationContext* opCtx,
         coll.ensureDbExists(opCtx)->createCollection(opCtx, nss, options);
         wuow.commit();
     });
+}
+
+void ensureCollectionDropped(OperationContext* opCtx,
+                             const NamespaceString& nss,
+                             const boost::optional<UUID>& uuid) {
+    invariant(!opCtx->lockState()->isLocked());
+    invariant(!opCtx->lockState()->inAWriteUnitOfWork());
+
+    writeConflictRetry(
+        opCtx, "resharding::data_copy::ensureCollectionDropped", nss.toString(), [&] {
+            AutoGetCollection coll(opCtx, nss, MODE_X);
+            if (!coll || (uuid && coll->uuid() != uuid)) {
+                // If the collection doesn't exist or exists with a different UUID, then the
+                // requested collection has been dropped already.
+                return;
+            }
+
+            WriteUnitOfWork wuow(opCtx);
+            uassertStatusOK(coll.getDb()->dropCollectionEvenIfSystem(
+                opCtx, nss, {} /* dropOpTime */, true /* markFromMigrate */));
+            wuow.commit();
+        });
 }
 
 void ensureOplogCollectionsDropped(OperationContext* opCtx,
@@ -99,11 +120,11 @@ void ensureOplogCollectionsDropped(OperationContext* opCtx,
 
         // Drop the conflict stash collection for this donor.
         auto stashNss = getLocalConflictStashNamespace(sourceUUID, donor.getShardId());
-        mongo::sharding_ddl_util::ensureCollectionDroppedNoChangeEvent(opCtx, stashNss);
+        resharding::data_copy::ensureCollectionDropped(opCtx, stashNss);
 
         // Drop the oplog buffer collection for this donor.
         auto oplogBufferNss = getLocalOplogBufferNamespace(sourceUUID, donor.getShardId());
-        mongo::sharding_ddl_util::ensureCollectionDroppedNoChangeEvent(opCtx, oplogBufferNss);
+        resharding::data_copy::ensureCollectionDropped(opCtx, oplogBufferNss);
     }
 }
 
@@ -191,7 +212,8 @@ std::vector<InsertStatement> fillBatchForInsert(Pipeline& pipeline, int batchSiz
     // The BlockingResultsMerger underlying by the $mergeCursors stage records how long the
     // recipient spent waiting for documents from the donor shards. It doing so requires the CurOp
     // to be marked as having started.
-    auto* curOp = CurOp::get(pipeline.getContext()->opCtx);
+    auto opCtx = pipeline.getContext()->opCtx;
+    auto* curOp = CurOp::get(opCtx);
     curOp->ensureStarted();
     ON_BLOCK_EXIT([curOp] { curOp->done(); });
 

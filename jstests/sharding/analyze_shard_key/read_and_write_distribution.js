@@ -3,7 +3,7 @@
  * distribution metrics, but on replica sets it does not since query sampling is only supported on
  * sharded clusters at this point.
  *
- * @tags: [requires_fcv_63, featureFlagAnalyzeShardKey]
+ * @tags: [requires_fcv_63, featureFlagAnalyzeShardKey, featureFlagUpdateOneWithoutShardKey]
  */
 (function() {
 "use strict";
@@ -38,23 +38,22 @@ function assertReadMetricsNonEmptySampleSize(actual, expected, isHashed) {
     assertApprox(actual.percentageOfSingleShardReads,
                  calculatePercentage(expected.numSingleShard, expected.sampleSize.total),
                  {actual, expected});
-    assertApprox(actual.percentageOfVariableShardReads,
-                 calculatePercentage(expected.numVariableShard, expected.sampleSize.total),
+    assertApprox(actual.percentageOfMultiShardReads,
+                 calculatePercentage(expected.numMultiShard, expected.sampleSize.total),
                  {actual, expected});
     assertApprox(actual.percentageOfScatterGatherReads,
                  calculatePercentage(expected.numScatterGather, expected.sampleSize.total),
                  {actual, expected});
 
-    assert.eq(
-        actual.numDispatchedReadsByRange.length, analyzeShardKeyNumRanges, {actual, expected});
+    assert.eq(actual.numReadsByRange.length, analyzeShardKeyNumRanges, {actual, expected});
     if (isHashed) {
-        assert.eq(actual.percentageOfVariableShardReads, 0, {actual, expected});
-        assert.eq(sum(actual.numDispatchedReadsByRange),
+        assert.eq(actual.percentageOfMultiShardReads, 0, {actual, expected});
+        assert.eq(sum(actual.numReadsByRange),
                   expected.numSingleShard + expected.numScatterGather * analyzeShardKeyNumRanges,
                   {actual, expected});
     } else {
-        assert.gte(sum(actual.numDispatchedReadsByRange),
-                   expected.numSingleShard + expected.numVariableShard +
+        assert.gte(sum(actual.numReadsByRange),
+                   expected.numSingleShard + expected.numMultiShard +
                        expected.numScatterGather * analyzeShardKeyNumRanges,
                    {actual, expected});
     }
@@ -70,23 +69,22 @@ function assertWriteMetricsNonEmptySampleSize(actual, expected, isHashed) {
     assertApprox(actual.percentageOfSingleShardWrites,
                  calculatePercentage(expected.numSingleShard, expected.sampleSize.total),
                  {actual, expected});
-    assertApprox(actual.percentageOfVariableShardWrites,
-                 calculatePercentage(expected.numVariableShard, expected.sampleSize.total),
+    assertApprox(actual.percentageOfMultiShardWrites,
+                 calculatePercentage(expected.numMultiShard, expected.sampleSize.total),
                  {actual, expected});
     assertApprox(actual.percentageOfScatterGatherWrites,
                  calculatePercentage(expected.numScatterGather, expected.sampleSize.total),
                  {actual, expected});
 
-    assert.eq(
-        actual.numDispatchedWritesByRange.length, analyzeShardKeyNumRanges, {actual, expected});
+    assert.eq(actual.numWritesByRange.length, analyzeShardKeyNumRanges, {actual, expected});
     if (isHashed) {
-        assert.eq(actual.percentageOfVariableShardWrites, 0, {actual, expected});
-        assert.eq(sum(actual.numDispatchedWritesByRange),
+        assert.eq(actual.percentageOfMultiShardWrites, 0, {actual, expected});
+        assert.eq(sum(actual.numWritesByRange),
                   expected.numSingleShard + expected.numScatterGather * analyzeShardKeyNumRanges,
                   {actual, expected});
     } else {
-        assert.gte(sum(actual.numDispatchedWritesByRange),
-                   expected.numSingleShard + expected.numVariableShard +
+        assert.gte(sum(actual.numWritesByRange),
+                   expected.numSingleShard + expected.numMultiShard +
                        expected.numScatterGather * analyzeShardKeyNumRanges,
                    {actual, expected});
     }
@@ -144,13 +142,13 @@ function makeTestCase(collName, isShardedColl, {shardKeyField, isHashed, minVal,
     const readDistribution = {
         sampleSize: {total: 0, find: 0, aggregate: 0, count: 0, distinct: 0},
         numSingleShard: 0,
-        numVariableShard: 0,
+        numMultiShard: 0,
         numScatterGather: 0
     };
     const writeDistribution = {
         sampleSize: {total: 0, update: 0, delete: 0, findAndModify: 0},
         numSingleShard: 0,
-        numVariableShard: 0,
+        numMultiShard: 0,
         numScatterGather: 0,
         numShardKeyUpdates: 0,
         numSingleWritesWithoutShardKey: 0,
@@ -201,7 +199,7 @@ function makeTestCase(collName, isShardedColl, {shardKeyField, isHashed, minVal,
             // For hashed sharding, range queries on the shard key target all shards.
             readDistribution.numScatterGather++;
         } else {
-            readDistribution.numVariableShard++;
+            readDistribution.numMultiShard++;
         }
     }
 
@@ -217,7 +215,7 @@ function makeTestCase(collName, isShardedColl, {shardKeyField, isHashed, minVal,
             // For hashed sharding, range queries on the shard key target all shards.
             readDistribution.numScatterGather++;
         } else {
-            readDistribution.numVariableShard++;
+            readDistribution.numMultiShard++;
         }
     }
 
@@ -229,7 +227,7 @@ function makeTestCase(collName, isShardedColl, {shardKeyField, isHashed, minVal,
             // For hashed sharding, range queries on the shard key target all shards.
             readDistribution.numScatterGather++;
         } else {
-            readDistribution.numVariableShard++;
+            readDistribution.numMultiShard++;
         }
     }
 
@@ -283,67 +281,63 @@ function makeTestCase(collName, isShardedColl, {shardKeyField, isHashed, minVal,
         writeDistribution.numShardKeyUpdates++;
     }
 
-    // TODO (SERVER-73045): Remove the if below to add test coverage for sampling of single write
-    // without shard key.
-    if (!isShardedColl) {
-        // Below are writes targeting a variable number of shards.
+    // Below are writes targeting a variable number of shards.
 
-        for (let i = 0; i < getRandomCount(); i++) {
-            cmdObjs.push({
-                update: collName,
-                updates: [{q: {[shardKeyField]: {$gte: getNextVal()}}, u: {$set: {z: 0}}}]
-            });
-            writeDistribution.sampleSize.update++;
-            writeDistribution.sampleSize.total++;
-            if (isHashed) {
-                // For hashed sharding, range queries on the shard key target all shards.
-                writeDistribution.numScatterGather++;
-            } else {
-                writeDistribution.numVariableShard++;
-            }
-            writeDistribution.numSingleWritesWithoutShardKey++;
-        }
-
-        for (let i = 0; i < getRandomCount(); i++) {
-            cmdObjs.push(
-                {delete: collName, deletes: [{q: {[shardKeyField]: {$lte: minVal++}}, limit: 0}]});
-            writeDistribution.sampleSize.delete ++;
-            writeDistribution.sampleSize.total++;
-            if (isHashed) {
-                // For hashed sharding, range queries on the shard key target all shards.
-                writeDistribution.numScatterGather++;
-            } else {
-                writeDistribution.numVariableShard++;
-            }
-            writeDistribution.numMultiWritesWithoutShardKey++;
-        }
-
-        for (let i = 0; i < getRandomCount(); i++) {
-            cmdObjs.push({
-                findAndModify: collName,
-                query: {[shardKeyField]: {$lte: getNextVal()}},
-                update: {$set: {z: 0}}
-            });
-            writeDistribution.sampleSize.findAndModify++;
-            writeDistribution.sampleSize.total++;
-            if (isHashed) {
-                // For hashed sharding, range queries on the shard key target all shards.
-                writeDistribution.numScatterGather++;
-            } else {
-                writeDistribution.numVariableShard++;
-            }
-            writeDistribution.numSingleWritesWithoutShardKey++;
-        }
-
-        // Below are writes targeting all shards.
-
-        for (let i = 0; i < getRandomCount(); i++) {
-            cmdObjs.push({findAndModify: collName, query: {}, update: {$set: {z: 0}}});
-            writeDistribution.sampleSize.findAndModify++;
-            writeDistribution.sampleSize.total++;
+    for (let i = 0; i < getRandomCount(); i++) {
+        cmdObjs.push({
+            update: collName,
+            updates: [{q: {[shardKeyField]: {$gte: getNextVal()}}, u: {$set: {z: 0}}}]
+        });
+        writeDistribution.sampleSize.update++;
+        writeDistribution.sampleSize.total++;
+        if (isHashed) {
+            // For hashed sharding, range queries on the shard key target all shards.
             writeDistribution.numScatterGather++;
-            writeDistribution.numSingleWritesWithoutShardKey++;
+        } else {
+            writeDistribution.numMultiShard++;
         }
+        writeDistribution.numSingleWritesWithoutShardKey++;
+    }
+
+    for (let i = 0; i < getRandomCount(); i++) {
+        cmdObjs.push(
+            {delete: collName, deletes: [{q: {[shardKeyField]: {$lte: minVal++}}, limit: 0}]});
+        writeDistribution.sampleSize.delete ++;
+        writeDistribution.sampleSize.total++;
+        if (isHashed) {
+            // For hashed sharding, range queries on the shard key target all shards.
+            writeDistribution.numScatterGather++;
+        } else {
+            writeDistribution.numMultiShard++;
+        }
+        writeDistribution.numMultiWritesWithoutShardKey++;
+    }
+
+    for (let i = 0; i < getRandomCount(); i++) {
+        cmdObjs.push({
+            findAndModify: collName,
+            query: {[shardKeyField]: {$lte: getNextVal()}},
+            update: {$set: {z: 0}}
+        });
+        writeDistribution.sampleSize.findAndModify++;
+        writeDistribution.sampleSize.total++;
+        if (isHashed) {
+            // For hashed sharding, range queries on the shard key target all shards.
+            writeDistribution.numScatterGather++;
+        } else {
+            writeDistribution.numMultiShard++;
+        }
+        writeDistribution.numSingleWritesWithoutShardKey++;
+    }
+
+    // Below are writes targeting all shards.
+
+    for (let i = 0; i < getRandomCount(); i++) {
+        cmdObjs.push({findAndModify: collName, query: {}, update: {$set: {z: 0}}});
+        writeDistribution.sampleSize.findAndModify++;
+        writeDistribution.sampleSize.total++;
+        writeDistribution.numScatterGather++;
+        writeDistribution.numSingleWritesWithoutShardKey++;
     }
 
     return {cmdObjs, metrics: {readDistribution, writeDistribution}};
@@ -372,7 +366,8 @@ const analyzeShardKeyNumRanges = 10;
             setParameter: {
                 queryAnalysisSamplerConfigurationRefreshSecs,
                 queryAnalysisWriterIntervalSecs,
-                analyzeShardKeyNumRanges
+                analyzeShardKeyNumRanges,
+                logComponentVerbosity: tojson({sharding: 2})
             }
         },
         mongosOptions: {setParameter: {queryAnalysisSamplerConfigurationRefreshSecs}}
@@ -397,15 +392,14 @@ const analyzeShardKeyNumRanges = 10;
             // Set up the sharded collection. Make it have three chunks:
             // shard0: [MinKey, -1000]
             // shard1: [-1000, 1000]
-            // shard1: [1000, MaxKey]
-            const nsSharded = dbName + "." + collNameSharded;
-            assert.commandWorked(st.s0.adminCommand({shardCollection: nsSharded, key: {x: 1}}));
-            assert.commandWorked(st.s0.adminCommand({split: nsSharded, middle: {x: -1000}}));
-            assert.commandWorked(st.s0.adminCommand({split: nsSharded, middle: {x: 1000}}));
-            assert.commandWorked(st.s0.adminCommand(
-                {moveChunk: nsSharded, find: {x: -1000}, to: st.shard1.shardName}));
-            assert.commandWorked(st.s0.adminCommand(
-                {moveChunk: nsSharded, find: {x: 1000}, to: st.shard2.shardName}));
+            // shard2: [1000, MaxKey]
+            assert.commandWorked(st.s0.adminCommand({shardCollection: ns, key: {x: 1}}));
+            assert.commandWorked(st.s0.adminCommand({split: ns, middle: {x: -1000}}));
+            assert.commandWorked(st.s0.adminCommand({split: ns, middle: {x: 1000}}));
+            assert.commandWorked(
+                st.s0.adminCommand({moveChunk: ns, find: {x: -1000}, to: st.shard1.shardName}));
+            assert.commandWorked(
+                st.s0.adminCommand({moveChunk: ns, find: {x: 1000}, to: st.shard2.shardName}));
         }
 
         const mongos0Coll = st.s0.getDB(dbName).getCollection(collName);
@@ -515,13 +509,12 @@ const analyzeShardKeyNumRanges = 10;
 
     runTest({isShardedColl: false, shardKeyField: "x", isHashed: false});
     runTest({isShardedColl: false, shardKeyField: "x", isHashed: true});
+
     // Note that {x: 1} is the current shard key for the sharded collection being tested.
     runTest({isShardedColl: true, shardKeyField: "x", isHashed: false});
     runTest({isShardedColl: true, shardKeyField: "x", isHashed: true});
-    // TODO (SERVER-73045): Uncomment the tests below to add test coverage for sampling of single
-    // writes without shard key.
-    // runTest({isShardedColl: true, shardKeyField: "y", isHashed: false});
-    // runTest({isShardedColl: true, shardKeyField: "y", isHashed: true});
+    runTest({isShardedColl: true, shardKeyField: "y", isHashed: false});
+    runTest({isShardedColl: true, shardKeyField: "y", isHashed: true});
 
     st.stop();
 }
@@ -530,7 +523,8 @@ const analyzeShardKeyNumRanges = 10;
     jsTest.log("Verify that on a replica set the analyzeShardKey command doesn't return read " +
                "and write distribution metrics");
 
-    const rst = new ReplSetTest({nodes: 2});
+    const rst =
+        new ReplSetTest({nodes: 2, setParameter: {logComponentVerbosity: tojson({sharding: 2})}});
     rst.startSet();
     rst.initiate();
     const primary = rst.getPrimary();

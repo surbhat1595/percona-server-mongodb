@@ -75,8 +75,8 @@ MONGO_FAIL_POINT_DEFINE(hangAfterCollModIndexUniqueReleaseIXLock);
 
 void assertNoMovePrimaryInProgress(OperationContext* opCtx, NamespaceString const& nss) {
     try {
-        auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
-            opCtx, nss.dbName(), DSSAcquisitionMode::kShared);
+        const auto scopedDss =
+            DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx, nss.dbName());
         auto scopedCss = CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss);
 
         auto collDesc = scopedCss->getCollectionDescription(opCtx);
@@ -621,10 +621,12 @@ void _setClusteredExpireAfterSeconds(
                 // If this collection was not previously TTL, inform the TTL monitor when we commit.
                 if (!oldExpireAfterSeconds) {
                     auto ttlCache = &TTLCollectionCache::get(opCtx->getServiceContext());
-                    opCtx->recoveryUnit()->onCommit([ttlCache, uuid = coll->uuid()](auto _) {
-                        ttlCache->registerTTLInfo(
-                            uuid, TTLCollectionCache::Info{TTLCollectionCache::ClusteredId{}});
-                    });
+                    opCtx->recoveryUnit()->onCommit(
+                        [ttlCache, uuid = coll->uuid()](OperationContext*,
+                                                        boost::optional<Timestamp>) {
+                            ttlCache->registerTTLInfo(
+                                uuid, TTLCollectionCache::Info{TTLCollectionCache::ClusteredId{}});
+                        });
                 }
 
                 invariant(newExpireAfterSeconds >= 0);
@@ -693,7 +695,7 @@ StatusWith<const IndexDescriptor*> _setUpCollModIndexUnique(OperationContext* op
 
     const auto& collection = coll.getCollection();
     if (!collection) {
-        checkCollectionUUIDMismatch(opCtx, nss, nullptr, cmd.getCollectionUUID());
+        checkCollectionUUIDMismatch(opCtx, nss, CollectionPtr(), cmd.getCollectionUUID());
         return Status(ErrorCodes::NamespaceNotFound,
                       str::stream() << "ns does not exist for unique index conversion: " << nss);
     }
@@ -707,11 +709,12 @@ StatusWith<const IndexDescriptor*> _setUpCollModIndexUnique(OperationContext* op
     auto idx = cmr.indexRequest.idx;
     auto violatingRecordsList = scanIndexForDuplicates(opCtx, collection, idx);
 
-    CurOpFailpointHelpers::waitWhileFailPointEnabled(&hangAfterCollModIndexUniqueFullIndexScan,
-                                                     opCtx,
-                                                     "hangAfterCollModIndexUniqueFullIndexScan",
-                                                     []() {},
-                                                     nss);
+    CurOpFailpointHelpers::waitWhileFailPointEnabled(
+        &hangAfterCollModIndexUniqueFullIndexScan,
+        opCtx,
+        "hangAfterCollModIndexUniqueFullIndexScan",
+        []() {},
+        nss);
 
     if (!violatingRecordsList.empty()) {
         uassertStatusOK(buildConvertUniqueErrorStatus(opCtx, collection, violatingRecordsList));
@@ -789,7 +792,7 @@ Status _collModInternal(OperationContext* opCtx,
             CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
                 ->checkShardVersionOrThrow(opCtx);
         }
-        checkCollectionUUIDMismatch(opCtx, nss, nullptr, cmd.getCollectionUUID());
+        checkCollectionUUIDMismatch(opCtx, nss, CollectionPtr(), cmd.getCollectionUUID());
         return Status(ErrorCodes::NamespaceNotFound, "ns does not exist");
     }
 

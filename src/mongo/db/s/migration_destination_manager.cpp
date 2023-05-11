@@ -311,7 +311,8 @@ void replaceGlobalIndexesInShardIfNeeded(OperationContext* opCtx,
         return;
     }
 
-    auto optGii = Grid::get(opCtx)->catalogCache()->getCollectionIndexInfoWithRefresh(opCtx, nss);
+    auto [_, optGii] = uassertStatusOK(
+        Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithIndexRefresh(opCtx, nss));
 
     if (optGii) {
         std::vector<IndexCatalogType> indexes;
@@ -990,7 +991,7 @@ void MigrationDestinationManager::cloneCollectionIndexesAndOptions(
         // missing (auto-heal indexes).
 
         // Checks that the collection's UUID matches the donor's.
-        auto checkUUIDsMatch = [&](const CollectionPtr& collection) {
+        auto checkUUIDsMatch = [&](const Collection* collection) {
             uassert(ErrorCodes::NotWritablePrimary,
                     str::stream() << "Unable to create collection " << nss.ns()
                                   << " because the node is not primary",
@@ -1030,7 +1031,7 @@ void MigrationDestinationManager::cloneCollectionIndexesAndOptions(
             AutoGetCollection collection(opCtx, nss, MODE_IS);
 
             if (collection) {
-                checkUUIDsMatch(collection.getCollection());
+                checkUUIDsMatch(collection.getCollection().get());
                 auto indexSpecs =
                     checkEmptyOrGetMissingIndexesFromDonor(collection.getCollection());
                 if (indexSpecs.empty()) {
@@ -1078,7 +1079,7 @@ void MigrationDestinationManager::cloneCollectionIndexesAndOptions(
             collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
         }
 
-        auto indexSpecs = checkEmptyOrGetMissingIndexesFromDonor(collection);
+        auto indexSpecs = checkEmptyOrGetMissingIndexesFromDonor(CollectionPtr(collection));
         if (!indexSpecs.empty()) {
             WriteUnitOfWork wunit(opCtx);
             CollectionWriter collWriter(opCtx, collection->uuid());

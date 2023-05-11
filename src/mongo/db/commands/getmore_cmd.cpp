@@ -52,7 +52,6 @@
 #include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_summary_stats.h"
-#include "mongo/db/query/telemetry.h"
 #include "mongo/db/read_concern.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -565,8 +564,6 @@ public:
             exec->reattachToOperationContext(opCtx);
             exec->restoreState(readLock ? &readLock->getCollection() : nullptr);
 
-            telemetry::registerGetMoreRequest(opCtx);
-
             auto planSummary = exec->getPlanExplainer().getPlanSummary();
             {
                 stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -661,7 +658,7 @@ public:
             // generate the stats eagerly for all operations due to cost.
             if (cursorPin->getExecutor()->lockPolicy() !=
                     PlanExecutor::LockPolicy::kLocksInternally &&
-                curOp->shouldDBProfile(opCtx)) {
+                curOp->shouldDBProfile()) {
                 auto&& explainer = exec->getPlanExplainer();
                 auto&& [stats, _] =
                     explainer.getWinningPlanStats(ExplainOptions::Verbosity::kExecStats);
@@ -697,6 +694,8 @@ public:
             // Ensure log and profiler include the number of results returned in this getMore's
             // response batch.
             curOp->debug().nreturned = numResults;
+
+            collectTelemetry(opCtx, cursorPin, true);
 
             if (respondWithId) {
                 cursorDeleter.dismiss();

@@ -71,7 +71,7 @@ public:
             hangInShardsvrSetClusterParameter.pauseWhileSet();
 
             SetClusterParameter setClusterParameterRequest(request().getCommandParameter());
-            setClusterParameterRequest.setDbName(NamespaceString::kAdminDb);
+            setClusterParameterRequest.setDbName(DatabaseName::kAdmin);
             std::unique_ptr<ServerParameterService> parameterService =
                 std::make_unique<ClusterParameterService>();
             DBDirectClient client(opCtx);
@@ -89,7 +89,7 @@ public:
                 // Since no write happened on this txnNumber, we need to make a dummy write so
                 // that secondaries can be aware of this txn.
                 DBDirectClient client(opCtx);
-                client.update(NamespaceString::kServerConfigurationNamespace.ns(),
+                client.update(NamespaceString::kServerConfigurationNamespace,
                               BSON("_id"
                                    << "SetClusterParameterStats"),
                               BSON("$inc" << BSON("count" << 1)),

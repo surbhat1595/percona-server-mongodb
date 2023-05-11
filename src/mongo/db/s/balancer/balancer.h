@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/db/repl/replica_set_aware_service.h"
+#include "mongo/db/s/balancer/auto_merger_policy.h"
 #include "mongo/db/s/balancer/balancer_chunk_selection_policy.h"
 #include "mongo/db/s/balancer/balancer_random.h"
 #include "mongo/platform/mutex.h"
@@ -44,7 +45,6 @@ class ChunkType;
 class ClusterStatistics;
 class BalancerCommandsScheduler;
 class BalancerDefragmentationPolicy;
-class ClusterChunksResizePolicy;
 class MigrationSecondaryThrottleOptions;
 class OperationContext;
 class ServiceContext;
@@ -170,13 +170,6 @@ public:
     void abortCollectionDefragmentation(OperationContext* opCtx, const NamespaceString& nss);
 
     /**
-     * Asynchronously requests the resize of all the chunks defined in the cluster, so that
-     * the "Collection Max Chunk Size" constraint existing in FCV 5.0 is enforced.
-     * TODO SERVER-65332 remove the function once 6.1 branches out.
-     */
-    SharedSemiFuture<void> applyLegacyChunkSizeConstraintsOnClusterData(OperationContext* opCtx);
-
-    /**
      * Returns if a given collection is draining due to a removed shard, has chunks on an invalid
      * zone or the number of chunks is imbalanced across the cluster
      */
@@ -279,7 +272,7 @@ private:
 
     AtomicWord<int> _outstandingStreamingOps{0};
 
-    AtomicWord<bool> _newInfoOnStreamingActions{true};
+    AtomicWord<bool> _actionStreamsStateUpdated{true};
 
     // Indicates whether the balancer is currently executing a balancer round
     bool _inBalancerRound{false};
@@ -291,7 +284,7 @@ private:
     // changes (in particular, state/balancer round and number of balancer rounds).
     stdx::condition_variable _condVar;
 
-    stdx::condition_variable _defragmentationCondVar;
+    stdx::condition_variable _actionStreamCondVar;
 
     // Number of moved chunks in last round
     int _balancedLastTime;
@@ -311,8 +304,7 @@ private:
 
     std::unique_ptr<BalancerDefragmentationPolicy> _defragmentationPolicy;
 
-    // TODO  SERVER-65332 remove logic bound to this policy object When kLastLTS is 6.0
-    std::unique_ptr<ClusterChunksResizePolicy> _clusterChunksResizePolicy;
+    std::unique_ptr<AutoMergerPolicy> _autoMergerPolicy;
 };
 
 }  // namespace mongo

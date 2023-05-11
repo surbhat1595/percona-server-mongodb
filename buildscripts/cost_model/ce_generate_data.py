@@ -29,6 +29,7 @@
 
 import asyncio
 import dataclasses
+from datetime import datetime
 import json
 import math
 import os
@@ -38,10 +39,11 @@ from pathlib import Path
 import seaborn as sns
 import bson
 import matplotlib.pyplot as plt
-from config import CollectionTemplate, FieldTemplate, DataType
+from config import CollectionTemplate, FieldTemplate
 from data_generator import CollectionInfo, DataGenerator
 from database_instance import DatabaseInstance
 import parameters_extractor
+from random_generator import DataType
 from ce_data_settings import database_config, data_generator_config
 
 __all__ = []
@@ -73,29 +75,68 @@ class OidEncoder(json.JSONEncoder):
             # Replace the OID with a consequtive int number as needed by the query generator
             OidEncoder.cur_oid += 1
             return OidEncoder.cur_oid
+        if isinstance(o, datetime):
+            return str(o)
         return super(OidEncoder, self).default(o)
 
 
-async def dump_collection_to_json(db, dump_path, database_name, collections):
-    with open(Path(dump_path) / f'{database_name}.data', "w") as data_file:
-        data_file.write('// This is a generated file.\n')
-        data_file.write('const dataSet = [\n')
-        coll_pos = 1
-        for coll_name in collections:
-            collection = db[coll_name]
-            doc_count = await collection.count_documents({})
-            doc_pos = 1
-            data_file.write(f'{{collName: "{coll_name}", collData: [\n')
-            async for doc in collection.find({}):
-                data_file.write(json.dumps(doc, cls=OidEncoder))
-                if doc_pos < doc_count:
-                    data_file.write(',')
-                data_file.write("\n")
-                doc_pos += 1
-            data_file.write(']}')
-            if coll_pos < len(collections):
-                data_file.write(",")
-        data_file.write("]\n")
+async def dump_collection(db, dump_path, database_name, coll_name, chunk_size):
+    """Dump a collection into separate files each containing at most chunk_size documents."""
+
+    def open_chunk_file(chunk_id):
+        chunk_name = f'{coll_name}_{chunk_id}'
+        chunk_file_path = Path(dump_path) / f'{chunk_name}'
+        print(f'Writing chunk: {chunk_file_path}')
+        chunk_file = open(chunk_file_path, 'w', encoding="utf-8")
+        chunk_file.write('// This is a generated file.\n')
+        chunk_file.write(f'{chunk_name} = {{collName: "{coll_name}", collData: [\n')
+        return chunk_file, "'" + chunk_name + "'"
+
+    def close_chunk_file(chunk_file):
+        if not chunk_file.closed:
+            chunk_file.write("]}\n")
+            chunk_file.close()
+
+    collection = db[coll_name]
+    doc_count = await collection.count_documents({})
+    chunk_names = []
+    if doc_count == 0:
+        return chunk_names
+
+    doc_pos = 0
+    chunk_id = 1
+    chunk_file, chunk_name = open_chunk_file(chunk_id)
+    chunk_names.append(chunk_name)
+    async for doc in collection.find({}):
+        if doc_pos > 0 and doc_pos % chunk_size == 0:
+            # Open a new data file for the next chunk of data.
+            close_chunk_file(chunk_file)
+            chunk_id += 1
+            chunk_file, chunk_name = open_chunk_file(chunk_id)
+            chunk_names.append(chunk_name)
+
+        chunk_file.write(json.dumps(doc, cls=OidEncoder))
+        doc_pos += 1
+        chunk_file.write(',')
+        chunk_file.write("\n")
+    close_chunk_file(chunk_file)
+    return chunk_names
+
+
+async def dump_collections_to_json(db, dump_path, database_name, collections):
+    chunk_size = 100  # number of documents per chunk file
+    print(f'Dumping all collections into chunks of size {chunk_size}.')
+    all_chunk_names = []
+    for coll_name in collections:
+        coll_chunk_names = await dump_collection(db, dump_path, database_name, coll_name,
+                                                 chunk_size)
+        all_chunk_names.extend(coll_chunk_names)
+
+    # Generate a JS file that loads all chunk files
+    load_file = open(Path(dump_path) / f'{database_name}.data', 'w')
+    load_file.write('// This is a generated file.\n')
+    # Create an array named 'chunkNames' with all chunk file names to be loaded.
+    load_file.write(f'const chunkNames = [{",".join(all_chunk_names)}];')
 
 
 async def generate_histograms(coll_template, coll, dump_path):
@@ -107,6 +148,8 @@ async def generate_histograms(coll_template, coll, dump_path):
     doc_count = await coll.count_documents({})
     for field in coll_template.fields:
         field_data = []
+        if re.match('^mixeddata_.*', field.name):
+            continue
         async for doc in coll.find({field.name: {"$exists": True}}, {"_id": 0, field.name: 1}):
             field_val = doc[field.name]
             if isinstance(field_val, str):
@@ -152,8 +195,8 @@ async def main():
         #     'mongoexport', f'--db={database_config.database_name}', f'--collection={coll_name}',
         #     f'--out={coll_name}.dat'
         # ], cwd=database_config.dump_path, check=True)
-        await dump_collection_to_json(database_instance.database, database_config.dump_path,
-                                      database_config.database_name, db_collections)
+        await dump_collections_to_json(database_instance.database, database_config.dump_path,
+                                       database_config.database_name, db_collections)
 
         # 4. Export the collection templates used to create the test collections into JSON file
         with open(Path(database_config.dump_path) / f'{database_config.database_name}.schema',

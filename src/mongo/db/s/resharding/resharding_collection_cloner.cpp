@@ -69,7 +69,7 @@ namespace {
 
 bool collectionHasSimpleCollation(OperationContext* opCtx, const NamespaceString& nss) {
     auto catalogCache = Grid::get(opCtx)->catalogCache();
-    auto sourceChunkMgr = uassertStatusOK(catalogCache->getCollectionPlacementInfo(opCtx, nss));
+    auto [sourceChunkMgr, _] = uassertStatusOK(catalogCache->getCollectionRoutingInfo(opCtx, nss));
 
     uassert(ErrorCodes::NamespaceNotSharded,
             str::stream() << "Expected collection " << nss << " to be sharded",
@@ -111,7 +111,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> ReshardingCollectionCloner::makePipel
     // Assume that the config.cache.chunks collection isn't a view either.
     auto tempNss = resharding::constructTemporaryReshardingNss(_sourceNss.db(), _sourceUUID);
     auto tempCacheChunksNss =
-        NamespaceString(NamespaceString::kConfigDb, "cache.chunks." + tempNss.ns());
+        NamespaceString(DatabaseName::kConfig, "cache.chunks." + tempNss.ns());
     resolvedNamespaces[tempCacheChunksNss.coll()] = {tempCacheChunksNss, std::vector<BSONObj>{}};
 
     // sharded_agg_helpers::targetShardsAndAddMergeCursors() ignores the collation set on the

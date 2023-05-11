@@ -77,11 +77,11 @@ public:
     }
 
     void insert(const BSONObj& doc) {
-        _client.insert(nss.ns(), doc);
+        _client.insert(nss, doc);
     }
 
     void remove(const BSONObj& obj) {
-        _client.remove(nss.ns(), obj);
+        _client.remove(nss, obj);
     }
 
     size_t count(const BSONObj& query) {
@@ -265,8 +265,8 @@ public:
             CurOp& curOp = *CurOp::get(_opCtx);
             OpDebug* opDebug = &curOp.debug();
             UpdateDriver driver(_expCtx);
-            CollectionPtr coll =
-                CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, nss);
+            CollectionPtr coll(
+                CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, nss));
             ASSERT(coll);
 
             // Get the RecordIds that would be returned by an in-order scan.

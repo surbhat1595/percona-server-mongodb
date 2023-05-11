@@ -32,6 +32,7 @@
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/catalog/collection_yield_restore.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
@@ -43,16 +44,11 @@
 #include "mongo/db/fle_crud.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/ops/delete_request_gen.h"
 #include "mongo/db/ops/insert.h"
 #include "mongo/db/ops/parsed_delete.h"
 #include "mongo/db/ops/parsed_update.h"
-#include "mongo/db/ops/update_request.h"
-#include "mongo/db/ops/write_ops_exec.h"
 #include "mongo/db/ops/write_ops_retryability.h"
 #include "mongo/db/query/collection_query_info.h"
-#include "mongo/db/query/explain.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_summary_stats.h"
@@ -68,6 +64,7 @@
 #include "mongo/db/transaction/retryable_writes_stats.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction_validation.h"
+#include "mongo/db/update/update_util.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
@@ -144,32 +141,6 @@ void validate(const write_ops::FindAndModifyCommandRequest& request) {
         request.getArrayFilters()) {
         uasserted(ErrorCodes::FailedToParse, "Cannot specify arrayFilters and a pipeline update");
     }
-}
-
-void makeUpdateRequest(OperationContext* opCtx,
-                       const write_ops::FindAndModifyCommandRequest& request,
-                       boost::optional<ExplainOptions::Verbosity> explain,
-                       UpdateRequest* requestOut) {
-    requestOut->setQuery(request.getQuery());
-    requestOut->setProj(request.getFields().value_or(BSONObj()));
-    invariant(request.getUpdate());
-    requestOut->setUpdateModification(*request.getUpdate());
-    requestOut->setLegacyRuntimeConstants(
-        request.getLegacyRuntimeConstants().value_or(Variables::generateRuntimeConstants(opCtx)));
-    requestOut->setLetParameters(request.getLet());
-    requestOut->setSort(request.getSort().value_or(BSONObj()));
-    requestOut->setHint(request.getHint());
-    requestOut->setCollation(request.getCollation().value_or(BSONObj()));
-    requestOut->setArrayFilters(request.getArrayFilters().value_or(std::vector<BSONObj>()));
-    requestOut->setUpsert(request.getUpsert().value_or(false));
-    requestOut->setReturnDocs((request.getNew().value_or(false)) ? UpdateRequest::RETURN_NEW
-                                                                 : UpdateRequest::RETURN_OLD);
-    requestOut->setMulti(false);
-    requestOut->setExplain(explain);
-
-    requestOut->setYieldPolicy(opCtx->inMultiDocumentTransaction()
-                                   ? PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY
-                                   : PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
 }
 
 void makeDeleteRequest(OperationContext* opCtx,
@@ -399,7 +370,7 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::writeConflict
     // Fill out OpDebug with the number of deleted docs.
     opDebug->additiveMetrics.ndeleted = docFound ? 1 : 0;
 
-    if (curOp->shouldDBProfile(opCtx)) {
+    if (curOp->shouldDBProfile()) {
         auto&& explainer = exec->getPlanExplainer();
         auto&& [stats, _] = explainer.getWinningPlanStats(ExplainOptions::Verbosity::kExecStats);
         curOp->debug().execStats = std::move(stats);
@@ -446,8 +417,8 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::writeConflict
     if (!*collectionPtr && request.getUpsert() && *request.getUpsert()) {
         assertCanWrite_inlock(opCtx, nsString);
 
-        createdCollection =
-            CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nsString);
+        createdCollection = CollectionPtr(
+            CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nsString));
 
         // If someone else beat us to creating the collection, do nothing
         if (!createdCollection) {
@@ -459,11 +430,13 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::writeConflict
             uassertStatusOK(db->userCreateNS(opCtx, nsString, defaultCollectionOptions));
             wuow.commit();
 
-            createdCollection =
-                CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nsString);
+            createdCollection = CollectionPtr(
+                CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nsString));
         }
 
         invariant(createdCollection);
+        createdCollection.makeYieldable(opCtx,
+                                        LockedCollectionYieldRestore(opCtx, createdCollection));
         collectionPtr = &createdCollection;
     }
     const auto& collection = *collectionPtr;
@@ -499,7 +472,7 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::writeConflict
         dotsAndDollarsFieldsCounters.incrementForUpsert(!updateResult.upsertedId.isEmpty());
     }
 
-    if (curOp->shouldDBProfile(opCtx)) {
+    if (curOp->shouldDBProfile()) {
         auto&& [stats, _] = explainer.getWinningPlanStats(ExplainOptions::Verbosity::kExecStats);
         curOp->debug().execStats = std::move(stats);
     }
@@ -599,7 +572,7 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
     } else {
         auto updateRequest = UpdateRequest();
         updateRequest.setNamespaceString(nss);
-        makeUpdateRequest(opCtx, request, verbosity, &updateRequest);
+        update::makeUpdateRequest(opCtx, request, verbosity, &updateRequest);
 
         const ExtensionsCallbackReal extensionsCallback(opCtx, &updateRequest.getNamespaceString());
         ParsedUpdate parsedUpdate(opCtx, &updateRequest, extensionsCallback);
@@ -681,8 +654,18 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
     }
 
     if (analyze_shard_key::supportsPersistingSampledQueries() && req.getSampleId()) {
-        analyze_shard_key::QueryAnalysisWriter::get(opCtx)->addFindAndModifyQuery(req).getAsync(
-            [](auto) {});
+        auto findAndModifyOp = req;
+
+        // If the initial query was a write without shard key, the two phase write protocol
+        // modifies the query in the write phase. In order to get correct metrics, we need to
+        // reconstruct the original query prior to sampling.
+        if (req.getOriginalQuery()) {
+            findAndModifyOp.setQuery(*req.getOriginalQuery());
+            findAndModifyOp.setCollation(req.getOriginalCollation());
+        }
+        analyze_shard_key::QueryAnalysisWriter::get(opCtx)
+            ->addFindAndModifyQuery(findAndModifyOp)
+            .getAsync([](auto) {});
     }
 
     if (MONGO_unlikely(failAllFindAndModify.shouldFail())) {
@@ -713,7 +696,7 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
                 auto updateRequest = UpdateRequest();
                 updateRequest.setNamespaceString(nsString);
                 const auto verbosity = boost::none;
-                makeUpdateRequest(opCtx, req, verbosity, &updateRequest);
+                update::makeUpdateRequest(opCtx, req, verbosity, &updateRequest);
 
                 if (opCtx->getTxnNumber()) {
                     updateRequest.setStmtIds({stmtId});

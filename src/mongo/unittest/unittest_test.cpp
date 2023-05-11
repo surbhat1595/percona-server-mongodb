@@ -55,11 +55,17 @@ bool containsPattern(const std::string& pattern, const std::string& value) {
 }
 
 #define ASSERT_TEST_FAILS(TEST_STMT) \
-    ASSERT_THROWS([&] { TEST_STMT; }(), mongo::unittest::TestAssertionFailureException)
+    ASSERT_THROWS(                   \
+        [&] {                        \
+            TEST_STMT;               \
+        }(),                         \
+        mongo::unittest::TestAssertionFailureException)
 
 #define ASSERT_TEST_FAILS_MATCH(TEST_STMT, PATTERN)     \
     ASSERT_THROWS_WITH_CHECK(                           \
-        [&] { TEST_STMT; }(),                           \
+        [&] {                                           \
+            TEST_STMT;                                  \
+        }(),                                            \
         mongo::unittest::TestAssertionFailureException, \
         ([&](const auto& ex) { ASSERT_STRING_CONTAINS(ex.getMessage(), (PATTERN)); }))
 
@@ -142,10 +148,14 @@ TEST(UnitTestSelfTest, TestAssertStringOmits) {
 }
 
 TEST(UnitTestSelfTest, TestAssertIdentity) {
-    auto intIdentity = [](int x) { return x; };
+    auto intIdentity = [](int x) {
+        return x;
+    };
     ASSERT_IDENTITY(123, intIdentity);
     ASSERT_IDENTITY(123, [](int x) { return x; });
-    auto zero = [](auto) { return 0; };
+    auto zero = [](auto) {
+        return 0;
+    };
     ASSERT_TEST_FAILS(ASSERT_IDENTITY(1, zero));
     ASSERT_TEST_FAILS_MATCH(ASSERT_IDENTITY(1, zero) << "XmsgX", "XmsgX");
 }
@@ -195,7 +205,7 @@ class UnitTestFormatTest : public mongo::unittest::Test {
 public:
     template <template <typename...> class Optional, typename T, typename... As>
     auto mkOptional(As&&... as) {
-        return Optional<T>(std::forward<As>(as)...);
+        return Optional<T>(std::forward<As>(as)...);  // NOLINT
     }
 
     template <template <typename...> class OptionalTemplate>
@@ -209,10 +219,10 @@ public:
 
     template <template <typename...> class OptionalTemplate, class None>
     void runEqOptionalTest(None none) {
-        ASSERT_EQ(OptionalTemplate<int>{1}, OptionalTemplate<int>{1});
-        ASSERT_NE(OptionalTemplate<int>{1}, OptionalTemplate<int>{2});
-        ASSERT_EQ(OptionalTemplate<int>{}, OptionalTemplate<int>{});
-        ASSERT_EQ(OptionalTemplate<int>{}, none);
+        ASSERT_EQ(OptionalTemplate<int>{1}, OptionalTemplate<int>{1});  // NOLINT
+        ASSERT_NE(OptionalTemplate<int>{1}, OptionalTemplate<int>{2});  // NOLINT
+        ASSERT_EQ(OptionalTemplate<int>{}, OptionalTemplate<int>{});    // NOLINT
+        ASSERT_EQ(OptionalTemplate<int>{}, none);                       // NOLINT
     }
 };
 

@@ -46,6 +46,7 @@
 #include "mongo/db/vector_clock.h"
 #include "mongo/s/catalog/sharding_catalog_client_mock.h"
 #include "mongo/s/catalog_cache_loader_mock.h"
+#include "mongo/s/shard_version_factory.h"
 #include "mongo/stdx/chrono.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/fail_point.h"
@@ -53,7 +54,8 @@
 namespace mongo {
 namespace {
 
-const NamespaceString kTestNss("TestDB", "TestColl");
+const NamespaceString kTestNss =
+    NamespaceString::createNamespaceString_forTest("TestDB", "TestColl");
 const std::string kShardKey = "_id";
 const BSONObj kShardKeyPattern = BSON(kShardKey << 1);
 
@@ -101,7 +103,7 @@ TEST_F(CollectionShardingRuntimeTest,
     ScopedSetShardRole scopedSetShardRole{
         opCtx,
         kTestNss,
-        ShardVersion(metadata.getShardVersion(), boost::optional<CollectionIndexes>(boost::none)),
+        ShardVersionFactory::make(metadata, boost::optional<CollectionIndexes>(boost::none)),
         boost::none /* databaseVersion */};
     ASSERT_THROWS_CODE(csr.getCollectionDescription(opCtx), DBException, ErrorCodes::StaleConfig);
 }
@@ -123,7 +125,7 @@ TEST_F(CollectionShardingRuntimeTest,
     ScopedSetShardRole scopedSetShardRole{
         opCtx,
         kTestNss,
-        ShardVersion(metadata.getShardVersion(), boost::optional<CollectionIndexes>(boost::none)),
+        ShardVersionFactory::make(metadata, boost::optional<CollectionIndexes>(boost::none)),
         boost::none /* databaseVersion */};
     ASSERT_TRUE(csr.getCollectionDescription(opCtx).isSharded());
 }
@@ -190,7 +192,7 @@ TEST_F(CollectionShardingRuntimeTest,
     ScopedSetShardRole scopedSetShardRole{
         opCtx,
         kTestNss,
-        ShardVersion(metadata.getShardVersion(), boost::optional<CollectionIndexes>(boost::none)),
+        ShardVersionFactory::make(metadata, boost::optional<CollectionIndexes>(boost::none)),
         boost::none /* databaseVersion */};
     ASSERT_EQ(csr.getNumMetadataManagerChanges_forTest(), 1);
 
@@ -205,7 +207,8 @@ TEST_F(CollectionShardingRuntimeTest,
 }
 
 TEST_F(CollectionShardingRuntimeTest, ReturnUnshardedMetadataInServerlessMode) {
-    const NamespaceString testNss("TestDBForServerless", "TestColl");
+    const NamespaceString testNss =
+        NamespaceString::createNamespaceString_forTest("TestDBForServerless", "TestColl");
     OperationContext* opCtx = operationContext();
 
     // Enable serverless mode in global settings.
@@ -235,9 +238,10 @@ TEST_F(CollectionShardingRuntimeTest, ReturnUnshardedMetadataInServerlessMode) {
     ScopedSetShardRole scopedSetShardRole2{
         opCtx,
         NamespaceString::kLogicalSessionsNamespace,
-        ShardVersion(ChunkVersion(gen, {1, 0}),
-                     boost::optional<CollectionIndexes>(boost::none)), /* shardVersion */
-        boost::none                                                    /* databaseVersion */
+        ShardVersionFactory::make(
+            ChunkVersion(gen, {1, 0}),
+            boost::optional<CollectionIndexes>(boost::none)), /* shardVersion */
+        boost::none                                           /* databaseVersion */
     };
 
     CollectionShardingRuntime csrLogicalSession(
@@ -257,7 +261,7 @@ TEST_F(CollectionShardingRuntimeTest, ReturnUnshardedMetadataInServerlessMode) {
 
 class CollectionShardingRuntimeTestWithMockedLoader : public ShardServerTestFixture {
 public:
-    const NamespaceString kNss{"test.foo"};
+    const NamespaceString kNss = NamespaceString::createNamespaceString_forTest("test.foo");
     const UUID kCollUUID = UUID::gen();
     const std::string kShardKey = "x";
     const HostAndPort kConfigHostAndPort{"DummyConfig", 12345};

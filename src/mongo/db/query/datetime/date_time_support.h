@@ -225,6 +225,16 @@ public:
     Seconds utcOffset(Date_t) const;
 
     /**
+     * Returns the full textual name of the month.
+     */
+    std::string fullMonthName(int) const;
+
+    /**
+     * Returns the full textual name of the month.
+     */
+    std::string threeLetterMonthName(int) const;
+
+    /**
      * Adjusts 'timelibTime' according to this time zone definition.
      */
     void adjustTimeZone(_timelib_time* timelibTime) const;
@@ -287,6 +297,16 @@ public:
                         status != Status::OK())
                         return status;
                     break;
+                case 'B':  // Full name of month
+                    if (auto status = insertString(os, fullMonthName(parts.month));
+                        status != Status::OK())
+                        return status;
+                    break;
+                case 'b':  // Three letter name of month
+                    if (auto status = insertString(os, threeLetterMonthName(parts.month));
+                        status != Status::OK())
+                        return status;
+                    break;
                 case 'j':  // Day of year
                     if (auto status = insertPadded(os, dayOfYear(date), 3); status != Status::OK())
                         return status;
@@ -340,6 +360,8 @@ public:
      * Verifies that any '%' is followed by a valid format character, and that 'format' string
      * ends with an even number of '%' symbols.
      */
+    static bool isValidToStringFormat(StringData format);
+    static bool isValidFromStringFormat(StringData format);
     static void validateToStringFormat(StringData format);
     static void validateFromStringFormat(StringData format);
     std::unique_ptr<_timelib_time, TimelibTimeDeleter> getTimelibTime(Date_t) const;
@@ -385,6 +407,15 @@ private:
             os.write("0000", width - digits);
         }
         os << number;
+        return Status::OK();
+    }
+
+    template <typename OutputStream>
+    static auto insertString(OutputStream& os, std::string str) {
+        if (str.length() == 0) {
+            return Status{ErrorCodes::Error{7340200}, "Cannot append empty string"};
+        }
+        os << str;
         return Status::OK();
     }
 

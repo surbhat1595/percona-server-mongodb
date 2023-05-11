@@ -63,16 +63,16 @@ LocalOplogInfo* LocalOplogInfo::get(OperationContext* opCtx) {
     return get(opCtx->getServiceContext());
 }
 
-const CollectionPtr& LocalOplogInfo::getCollection() const {
+const Collection* LocalOplogInfo::getCollection() const {
     return _oplog;
 }
 
-void LocalOplogInfo::setCollection(const CollectionPtr& oplog) {
-    _oplog = CollectionPtr(oplog.get(), CollectionPtr::NoYieldTag{});
+void LocalOplogInfo::setCollection(const Collection* oplog) {
+    _oplog = oplog;
 }
 
 void LocalOplogInfo::resetCollection() {
-    _oplog.reset();
+    _oplog = nullptr;
 }
 
 void LocalOplogInfo::setNewTimestamp(ServiceContext* service, const Timestamp& newTime) {
@@ -122,7 +122,7 @@ std::vector<OplogSlot> LocalOplogInfo::getNextOpTimes(OperationContext* opCtx, s
     // stable timestamp if necessary, since this oplog hole may have been holding back the stable
     // timestamp.
     opCtx->recoveryUnit()->onRollback(
-        [replCoord]() { replCoord->attemptToAdvanceStableTimestamp(); });
+        [replCoord](OperationContext*) { replCoord->attemptToAdvanceStableTimestamp(); });
 
     return oplogSlots;
 }

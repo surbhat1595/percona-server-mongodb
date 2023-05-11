@@ -122,7 +122,7 @@ TEST(OpMsg, FireAndForgetInsertWorks) {
         ]
     })")));
 
-    ASSERT_EQ(conn->count(NamespaceString("test.collection")), 1u);
+    ASSERT_EQ(conn->count(NamespaceString::createNamespaceString_forTest("test.collection")), 1u);
 }
 
 TEST(OpMsg, DocumentSequenceLargeDocumentMultiInsertWorks) {
@@ -152,8 +152,8 @@ TEST(OpMsg, DocumentSequenceLargeDocumentMultiInsertWorks) {
     Message reply;
     conn->call(request, reply);
 
-    ASSERT_EQ(conn->count(NamespaceString("test.collection")), 3u);
-    conn->dropCollection(NamespaceString("test.collection"));
+    ASSERT_EQ(conn->count(NamespaceString::createNamespaceString_forTest("test.collection")), 3u);
+    conn->dropCollection(NamespaceString::createNamespaceString_forTest("test.collection"));
 }
 
 TEST(OpMsg, DocumentSequenceMaxWriteBatchWorks) {
@@ -185,8 +185,9 @@ TEST(OpMsg, DocumentSequenceMaxWriteBatchWorks) {
     Message reply;
     conn->call(request, reply);
 
-    ASSERT_EQ(conn->count(NamespaceString("test.collection")), write_ops::kMaxWriteBatchSize);
-    conn->dropCollection(NamespaceString("test.collection"));
+    ASSERT_EQ(conn->count(NamespaceString::createNamespaceString_forTest("test.collection")),
+              write_ops::kMaxWriteBatchSize);
+    conn->dropCollection(NamespaceString::createNamespaceString_forTest("test.collection"));
 }
 
 TEST(OpMsg, CloseConnectionOnFireAndForgetNotWritablePrimaryError) {
@@ -331,13 +332,13 @@ void exhaustGetMoreTest(bool enableChecksum) {
 
     ON_BLOCK_EXIT([&] { enableClientChecksum(); });
 
-    NamespaceString nss("test", "coll");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("test", "coll");
 
     conn->dropCollection(nss);
 
     // Insert a few documents.
     for (int i = 0; i < 5; i++) {
-        conn->insert(nss.toString(), BSON("_id" << i));
+        conn->insert(nss, BSON("_id" << i));
     }
 
     // Issue a find request to open a cursor but return 0 documents. Specify a sort in order to
@@ -418,13 +419,13 @@ TEST(OpMsg, FindIgnoresExhaust) {
         return;
     }
 
-    NamespaceString nss("test", "coll");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("test", "coll");
 
     conn->dropCollection(nss);
 
     // Insert a few documents.
     for (int i = 0; i < 5; i++) {
-        conn->insert(nss.toString(), BSON("_id" << i));
+        conn->insert(nss, BSON("_id" << i));
     }
 
     // Issue a find request with exhaust flag. Returns 0 documents.
@@ -450,13 +451,13 @@ TEST(OpMsg, ServerDoesNotSetMoreToComeOnErrorInGetMore) {
         return;
     }
 
-    NamespaceString nss("test", "coll");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("test", "coll");
 
     conn->dropCollection(nss);
 
     // Insert a few documents.
     for (int i = 0; i < 5; i++) {
-        conn->insert(nss.toString(), BSON("_id" << i));
+        conn->insert(nss, BSON("_id" << i));
     }
 
     // Issue a find request to open a cursor but return 0 documents.
@@ -497,13 +498,13 @@ TEST(OpMsg, MongosIgnoresExhaustForGetMore) {
         return;
     }
 
-    NamespaceString nss("test", "coll");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("test", "coll");
 
     conn->dropCollection(nss);
 
     // Insert a few documents.
     for (int i = 0; i < 5; i++) {
-        conn->insert(nss.toString(), BSON("_id" << i));
+        conn->insert(nss, BSON("_id" << i));
     }
 
     // Issue a find request to open a cursor but return 0 documents. Specify a sort in order to
@@ -548,14 +549,14 @@ TEST(OpMsg, ExhaustWorksForAggCursor) {
         return;
     }
 
-    NamespaceString nss("test", "coll");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("test", "coll");
 
     conn->dropCollection(nss);
 
     // Insert 5 documents so that a cursor using a batchSize of 2 requires three batches to get all
     // the results.
     for (int i = 0; i < 5; i++) {
-        conn->insert(nss.toString(), BSON("_id" << i));
+        conn->insert(nss, BSON("_id" << i));
     }
 
     // Issue an agg request to open a cursor but return 0 documents. Specify a sort in order to
@@ -1226,14 +1227,14 @@ TEST(OpMsg, ExhaustWithDBClientCursorBehavesCorrectly) {
         return;
     }
 
-    NamespaceString nss("test", "coll");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("test", "coll");
     conn->dropCollection(nss);
 
     const int nDocs = 5;
     LOGV2(22634, "Inserting {nDocs} documents.", "nDocs"_attr = nDocs);
     for (int i = 0; i < nDocs; i++) {
         auto doc = BSON("_id" << i);
-        conn->insert(nss.toString(), doc);
+        conn->insert(nss, doc);
     }
 
     ASSERT_EQ(conn->count(nss), size_t(nDocs));

@@ -54,14 +54,11 @@ _RE_LINT = re.compile("//.*NOLINT")
 _RE_COMMENT_STRIP = re.compile("//.*")
 
 _RE_PATTERN_MONGO_POLYFILL = _make_polyfill_regex()
-_RE_VOLATILE = re.compile('[^_]volatile')
 _RE_MUTEX = re.compile('(^|[ ({,])stdx?::mutex[ ({]')
 _RE_ASSERT = re.compile(r'\bassert\s*\(')
 _RE_UNSTRUCTURED_LOG = re.compile(r'\blogd\s*\(')
-_RE_STD_OPTIONAL = re.compile(r'\bstd::optional\b')
 _RE_TRACING_SUPPORT = re.compile(r'\bTracerProvider::(get|initialize)\b')
 _RE_COLLECTION_SHARDING_RUNTIME = re.compile(r'\bCollectionShardingRuntime\b')
-_RE_UNINTERRUPTIBLE_LOCK_GUARD = re.compile(r'\bUninterruptibleLockGuard\s+.+\s*;')
 _RE_RAND = re.compile(r'\b(srand\(|rand\(\))')
 
 _RE_GENERIC_FCV_COMMENT = re.compile(r'\(Generic FCV reference\):')
@@ -156,18 +153,14 @@ class Linter:
             if not self.clean_lines[linenum]:
                 continue
 
-            self._check_for_mongo_volatile(linenum)
             self._check_for_mongo_polyfill(linenum)
             self._check_for_mongo_atomic(linenum)
             self._check_for_mongo_mutex(linenum)
             self._check_for_nonmongo_assert(linenum)
             self._check_for_mongo_unstructured_log(linenum)
             self._check_for_mongo_config_header(linenum)
-            self._check_for_ctype(linenum)
-            self._check_for_std_optional(linenum)
             self._check_for_tracing_support(linenum)
             self._check_for_collection_sharding_runtime(linenum)
-            self._check_for_uninterruptible_lock_guard(linenum)
             self._check_for_rand(linenum)
             self._check_for_c_stdlib_headers(linenum)
 
@@ -240,14 +233,6 @@ class Linter:
             if def_line is not None:
                 self._error(def_line, 'mongodb/undefmacro', f'Missing "#undef {macro}"')
 
-    def _check_for_mongo_volatile(self, linenum):
-        line = self.clean_lines[linenum]
-        if _RE_VOLATILE.search(line) and not "__asm__" in line:
-            self._error(
-                linenum, 'mongodb/volatile',
-                'Illegal use of the volatile storage keyword, use AtomicWord instead '
-                'from "mongo/platform/atomic_word.h"')
-
     def _check_for_mongo_polyfill(self, linenum):
         line = self.clean_lines[linenum]
         match = _RE_PATTERN_MONGO_POLYFILL.search(line)
@@ -287,18 +272,6 @@ class Linter:
                 linenum, 'mongodb/unstructuredlog', 'Illegal use of unstructured logging, '
                 'this is only for local development use and should not be committed.')
 
-    def _check_for_ctype(self, linenum):
-        line = self.clean_lines[linenum]
-        if 'include <cctype>' in line or 'include <ctype.h>' in line:
-            self._error(linenum, 'mongodb/ctype',
-                        'Use of prohibited <ctype.h> or <cctype> header, use "mongo/util/ctype.h"')
-
-    def _check_for_std_optional(self, linenum):
-        line = self.clean_lines[linenum]
-        if _RE_STD_OPTIONAL.search(line):
-            self._error(linenum, 'mongodb/stdoptional',
-                        'Use of std::optional, use boost::optional instead.')
-
     def _check_for_tracing_support(self, linenum):
         line = self.clean_lines[linenum]
         if _RE_TRACING_SUPPORT.search(line):
@@ -315,16 +288,6 @@ class Linter:
                 linenum, 'mongodb/collection_sharding_runtime', 'Illegal use of '
                 'CollectionShardingRuntime outside of mongo/db/s/; use CollectionShardingState '
                 'instead; see src/mongo/db/s/collection_sharding_state.h for details.')
-
-    def _check_for_uninterruptible_lock_guard(self, linenum):
-        line = self.clean_lines[linenum]
-        if _RE_UNINTERRUPTIBLE_LOCK_GUARD.search(line):
-            self._error(
-                linenum, 'mongodb/uninterruptible_lock_guard',
-                'Potentially incorrect use of UninterruptibleLockGuard, '
-                'the programming model inside MongoDB requires that all operations be interruptible. '
-                'Review with care and if the use is warranted, add NOLINT and a comment explaining why.'
-            )
 
     def _check_for_rand(self, linenum):
         line = self.clean_lines[linenum]
@@ -399,16 +362,16 @@ class Linter:
         if linenum in self.nolint_suppression:
             return
 
+        norm_file_name = self.file_name.replace('\\', '/')
+
+        # Custom clang-tidy check tests purposefully produce errors for
+        # tests to find. They should be ignored.
+        if "mongo_tidy_checks/tests/" in norm_file_name:
+            return
+
         if category == "legal/license":
             # Enterprise module does not have the SSPL license
             if "enterprise" in self.file_name:
-                return
-
-            norm_file_name = self.file_name.replace('\\', '/')
-
-            # Custom clang-tidy check tests purposefully produce errors for
-            # tests to find, they should be ignored.
-            if "mongo_tidy_checks/tests/" in norm_file_name:
                 return
 
             # The following files are in the src/mongo/ directory but technically belong

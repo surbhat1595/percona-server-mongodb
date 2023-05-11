@@ -140,7 +140,7 @@ public:
 TEST_F(WiredTigerKVEngineRepairTest, OrphanedDataFilesCanBeRecovered) {
     auto opCtxPtr = _makeOperationContext();
 
-    NamespaceString nss("a.b");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     std::string ident = "collection-1234";
     std::string record = "abcd";
     CollectionOptions defaultCollectionOptions;
@@ -174,6 +174,10 @@ TEST_F(WiredTigerKVEngineRepairTest, OrphanedDataFilesCanBeRecovered) {
         _engine->recoverOrphanedIdent(opCtxPtr.get(), nss, ident, defaultCollectionOptions);
     ASSERT_EQ(ErrorCodes::CommandNotSupported, status.code());
 #else
+
+    // Dropping a collection might fail if we haven't checkpointed the data.
+    _engine->checkpoint(opCtxPtr.get());
+
     // Move the data file out of the way so the ident can be dropped. This not permitted on Windows
     // because the file cannot be moved while it is open. The implementation for orphan recovery is
     // also not implemented on Windows for this reason.
@@ -197,7 +201,7 @@ TEST_F(WiredTigerKVEngineRepairTest, OrphanedDataFilesCanBeRecovered) {
 TEST_F(WiredTigerKVEngineRepairTest, UnrecoverableOrphanedDataFilesAreRebuilt) {
     auto opCtxPtr = _makeOperationContext();
 
-    NamespaceString nss("a.b");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     std::string ident = "collection-1234";
     std::string record = "abcd";
     CollectionOptions defaultCollectionOptions;
@@ -222,6 +226,9 @@ TEST_F(WiredTigerKVEngineRepairTest, UnrecoverableOrphanedDataFilesAreRebuilt) {
     ASSERT(dataFilePath);
 
     ASSERT(boost::filesystem::exists(*dataFilePath));
+
+    // Dropping a collection might fail if we haven't checkpointed the data
+    _engine->checkpoint(opCtxPtr.get());
 
     ASSERT_OK(_engine->dropIdent(opCtxPtr.get()->recoveryUnit(), ident));
 
@@ -369,7 +376,7 @@ TEST_F(WiredTigerKVEngineTest, IdentDrop) {
 
     auto opCtxPtr = _makeOperationContext();
 
-    NamespaceString nss("a.b");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     std::string ident = "collection-1234";
     CollectionOptions defaultCollectionOptions;
 

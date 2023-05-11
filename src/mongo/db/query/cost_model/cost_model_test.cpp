@@ -73,17 +73,11 @@ TEST(CostModel, IncreaseIndexScanCost) {
         phaseManager.optimize(optimized);
 
         ASSERT_EXPLAIN_V2_AUTO(
-            "Root []\n"
-            "|   |   projections: \n"
-            "|   |       root\n"
-            "|   RefBlock: \n"
-            "|       Variable [root]\n"
+            "Root [{root}]\n"
             "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
             "|   |   Const [true]\n"
             "|   LimitSkip [limit: 1, skip: 0]\n"
             "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-            "|   RefBlock: \n"
-            "|       Variable [rid_0]\n"
             "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {=Const "
             "[1]}]\n",
             optimized);
@@ -110,11 +104,7 @@ TEST(CostModel, IncreaseIndexScanCost) {
         phaseManager.optimize(optimized);
 
         ASSERT_EXPLAIN_V2_AUTO(
-            "Root []\n"
-            "|   |   projections: \n"
-            "|   |       root\n"
-            "|   RefBlock: \n"
-            "|       Variable [root]\n"
+            "Root [{root}]\n"
             "Filter []\n"
             "|   EvalFilter []\n"
             "|   |   Variable [evalTemp_0]\n"
@@ -172,19 +162,14 @@ TEST(CostModel, IncreaseJoinsCost) {
         ABT optimized = rootNode;
         phaseManager.optimize(optimized);
         ASSERT_EXPLAIN_V2_AUTO(
-            "Root []\n"
-            "|   |   projections: \n"
-            "|   |       pa\n"
-            "|   RefBlock: \n"
-            "|       Variable [pa]\n"
+            "Root [{pa}]\n"
             "MergeJoin []\n"
             "|   |   |   Condition\n"
             "|   |   |       rid_0 = rid_1\n"
             "|   |   Collation\n"
             "|   |       Ascending\n"
             "|   Union [{rid_1}]\n"
-            "|   Evaluation [{rid_1}]\n"
-            "|   |   Variable [rid_0]\n"
+            "|   Evaluation [{rid_1} = Variable [rid_0]]\n"
             "|   IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index2, interval: "
             "{=Const [2]}]\n"
             "IndexScan [{'<indexKey> 0': pa, '<rid>': rid_0}, scanDefName: c1, indexDefName: "
@@ -252,11 +237,7 @@ TEST(CostModel, IncreaseJoinsCost) {
         phaseManager.optimize(optimized);
 
         ASSERT_EXPLAIN_V2_AUTO(
-            "Root []\n"
-            "|   |   projections: \n"
-            "|   |       pa\n"
-            "|   RefBlock: \n"
-            "|       Variable [pa]\n"
+            "Root [{pa}]\n"
             "Filter []\n"
             "|   EvalFilter []\n"
             "|   |   Variable [evalTemp_1]\n"

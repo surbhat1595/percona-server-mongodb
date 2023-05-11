@@ -62,11 +62,18 @@ def generate_scons_cache_expansions():
             shared_mount_root = 'X:\\'
         else:
             shared_mount_root = '/efs'
-        default_cache_path = os.path.join(shared_mount_root, system_uuid, "scons-cache")
+
+        scons_cache_dir = os.getenv("SCONS_CACHE_DIR")
+        if scons_cache_dir:
+            default_cache_path = os.path.join(shared_mount_root, system_uuid, 'per_variant_caches',
+                                              scons_cache_dir, "scons-cache")
+        else:
+            default_cache_path = os.path.join(shared_mount_root, system_uuid, "scons-cache")
+
         expansions["scons_cache_path"] = default_cache_path
         expansions[
-            "scons_cache_args"] = "--cache={0} --cache-signature-mode=validate --cache-dir={1} --cache-show".format(
-                scons_cache_mode, shlex.quote(default_cache_path))
+            "scons_cache_args"] = "--cache=nolinked --cache-signature-mode=validate --cache-dir={0} --cache-show".format(
+                shlex.quote(default_cache_path))
 
     # Local shared cache - host-based
     elif os.getenv("SCONS_CACHE_SCOPE") == "local":

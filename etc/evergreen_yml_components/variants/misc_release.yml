@@ -35,6 +35,7 @@ buildvariants:
   - name: .aggfuzzer .common
   - name: aggregation
   - name: .auth !.audit !.multiversion
+  - name: sharding_auth_gen
   - name: causally_consistent_jscore_txns_passthrough
   - name: .misc_js
   - name: .concurrency .common
@@ -49,7 +50,8 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .sharding .common !.csrs
+  - name: .sharding .common !.csrs !.encrypt
+  - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: .sharding .txns
   - name: .ssl
   - name: .stitch
@@ -155,6 +157,7 @@ buildvariants:
     - amazon2-arm64-large
   - name: aggregation
   - name: .auth !.audit !.multiversion
+  - name: sharding_auth_gen
   - name: causally_consistent_jscore_txns_passthrough
   - name: .misc_js
   - name: .concurrency .common
@@ -169,7 +172,8 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .txns
-  - name: .sharding .common !.csrs !.multiversion
+  - name: .sharding .common !.csrs !.multiversion !.encrypt
+  - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: .ssl
   - name: .stitch
   - name: test_packages
@@ -339,7 +343,8 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .txns
-  - name: .sharding .common !.csrs !.multiversion
+  - name: .sharding .common !.csrs !.multiversion !.encrypt
+  - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: .ssl
   - name: .stitch
   - name: test_packages
@@ -448,8 +453,6 @@ buildvariants:
     distros:
     - amazon2022-large
   - name: .publish_crypt
-    distros:
-    - amazon2022-large
   - name: secondary_reads_passthrough_gen
   - name: server_discovery_and_monitoring_json_test_TG
   - name: .serverless
@@ -490,6 +493,7 @@ buildvariants:
     - amazon2022-arm64-large
   - name: aggregation
   - name: .auth !.audit !.multiversion
+  - name: sharding_auth_gen
   - name: causally_consistent_jscore_txns_passthrough
   - name: .misc_js
   - name: .concurrency .common
@@ -504,7 +508,8 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .txns
-  - name: .sharding .common !.csrs !.multiversion
+  - name: .sharding .common !.csrs !.multiversion !.encrypt
+  - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: .ssl
   - name: .stitch
   - name: test_packages
@@ -663,6 +668,7 @@ buildvariants:
   - name: aggregation
   - name: aggregation_auth
   - name: .auth !.audit !.multiversion
+  - name: sharding_auth_gen
   - name: causally_consistent_jscore_txns_passthrough
   - name: .misc_js
   - name: .concurrency .common
@@ -676,7 +682,8 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .sharding .common !.csrs
+  - name: .sharding .common !.csrs !.encrypt
+  - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: .ssl
   - name: .stitch
   - name: test_packages
@@ -738,7 +745,7 @@ buildvariants:
   - name: replica_sets_auth_gen
   - name: replica_sets_jscore_passthrough
   - name: sasl
-  - name: sharding_auth_gen
+  - name: sharding_auth_audit_gen
   - name: .stitch
   - name: .crypt
   - name: .publish_crypt
@@ -781,6 +788,7 @@ buildvariants:
   - name: aggregation
   - name: aggregation_auth
   - name: .auth !.audit !.multiversion
+  - name: sharding_auth_gen
   - name: causally_consistent_jscore_txns_passthrough
   - name: .misc_js
   - name: .concurrency .common
@@ -794,7 +802,8 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .sharding .common !.csrs
+  - name: .sharding .common !.csrs !.encrypt
+  - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: .ssl
   - name: .stitch
   - name: test_packages
@@ -854,7 +863,7 @@ buildvariants:
   - name: replica_sets_auth_gen
   - name: replica_sets_jscore_passthrough
   - name: sasl
-  - name: sharding_auth_gen
+  - name: sharding_auth_audit_gen
   - name: .stitch
   - name: .crypt
   - name: .publish_crypt
@@ -894,6 +903,7 @@ buildvariants:
     - rhel70
   - name: aggregation
   - name: .auth !.audit !.multiversion
+  - name: sharding_auth_gen
   - name: causally_consistent_jscore_txns_passthrough
   - name: .misc_js
   - name: .concurrency .common
@@ -909,7 +919,8 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .txns
-  - name: .sharding .common !.csrs
+  - name: .sharding .common !.csrs !.encrypt
+  - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: .ssl
   - name: .stitch
   - name: test_packages
@@ -938,6 +949,7 @@ buildvariants:
   - name: .ssl
   - name: jsCore
   - name: external_auth
+  - name: external_auth_oidc
 
 - name: ubi8
   display_name: "UBI 8"
@@ -995,6 +1007,7 @@ buildvariants:
     - rhel80-build
   - name: aggregation
   - name: .auth !.audit !.multiversion
+  - name: sharding_auth_gen
   - name: causally_consistent_jscore_txns_passthrough
   - name: .misc_js
   - name: .concurrency .common
@@ -1010,7 +1023,8 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .txns
-  - name: .sharding .common !.csrs
+  - name: .sharding .common !.csrs !.encrypt
+  - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: .ssl
   - name: .stitch
   - name: test_packages
@@ -1172,6 +1186,7 @@ buildvariants:
     - rhel82-arm64-large
   - name: aggregation
   - name: .auth !.audit !.multiversion
+  - name: sharding_auth_gen
   - name: causally_consistent_jscore_txns_passthrough
   - name: .misc_js
   - name: .concurrency .common
@@ -1186,7 +1201,8 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .txns
-  - name: .sharding .common !.csrs !.multiversion
+  - name: .sharding .common !.csrs !.multiversion !.encrypt
+  - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: .ssl
   - name: .stitch
   - name: test_packages
@@ -1239,6 +1255,7 @@ buildvariants:
   - name: .encrypt !.sharding !.replica_sets !.aggregation !.jscore
   - name: external_auth
   - name: external_auth_aws
+  - name: external_auth_oidc
   - name: .jscore .common !.decimal !.sharding
   - name: jsCore_txns_large_txns_format
   - name: .jstestfuzz .common
@@ -1251,7 +1268,6 @@ buildvariants:
   - name: search_auth
   - name: search_ssl
   - name: sharding_auth_audit_gen
-  - name: sharding_auth_gen
   - name: .stitch
   - name: .crypt
     distros:
@@ -1290,6 +1306,7 @@ buildvariants:
     - rhel90-build
   - name: aggregation
   - name: .auth !.audit !.multiversion
+  - name: sharding_auth_gen
   - name: causally_consistent_jscore_txns_passthrough
   - name: .misc_js
   - name: .concurrency .common
@@ -1304,7 +1321,8 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .txns
-  - name: .sharding .common !.csrs !.multiversion
+  - name: .sharding .common !.csrs !.multiversion !.encrypt
+  - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: .ssl
   - name: .stitch
   - name: test_packages
@@ -1357,6 +1375,7 @@ buildvariants:
   - name: .encrypt !.sharding !.replica_sets !.aggregation !.jscore
   - name: external_auth
   - name: external_auth_aws
+  - name: external_auth_oidc
   - name: .jscore .common !.decimal !.sharding
   - name: jsCore_txns_large_txns_format
   - name: .jstestfuzz .common
@@ -1371,7 +1390,6 @@ buildvariants:
   - name: search_auth
   - name: search_ssl
   - name: sharding_auth_audit_gen
-  - name: sharding_auth_gen
   - name: .stitch
   - name: .crypt
   - name: .publish_crypt
@@ -1413,6 +1431,7 @@ buildvariants:
     - rhel90-arm64-large
   - name: aggregation
   - name: .auth !.audit !.multiversion
+  - name: sharding_auth_gen
   - name: causally_consistent_jscore_txns_passthrough
   - name: .misc_js
   - name: .concurrency .common
@@ -1427,15 +1446,14 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .txns
-  - name: .sharding .common !.csrs !.multiversion
+  - name: .sharding .common !.csrs !.multiversion !.encrypt
+  - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: .ssl
   - name: .stitch
   - name: test_packages
     distros:
     - ubuntu2204-arm64-small
   - name: .publish
-    distros:
-    - rhel80-small
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-rhel90-arm64
@@ -1483,6 +1501,7 @@ buildvariants:
   - name: .encrypt !.sharding !.replica_sets !.aggregation !.jscore
   - name: external_auth
   - name: external_auth_aws
+  - name: external_auth_oidc
   - name: .jscore .common !.decimal !.sharding
   - name: jsCore_txns_large_txns_format
   - name: .jstestfuzz .common
@@ -1505,8 +1524,6 @@ buildvariants:
     distros:
     - ubuntu2204-arm64-small
   - name: .publish
-    distros:
-    - rhel80-small
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: suse12
@@ -1545,6 +1562,7 @@ buildvariants:
   - name: .aggfuzzer .common
   - name: aggregation
   - name: .auth !.audit !.multiversion
+  - name: sharding_auth_gen
   - name: causally_consistent_jscore_txns_passthrough
   - name: .misc_js
   - name: .concurrency .common !.large
@@ -1561,7 +1579,8 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .txns
-  - name: .sharding .common !.csrs
+  - name: .sharding .common !.csrs !.encrypt
+  - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: .ssl
   - name: .stitch
   - name: test_packages
@@ -1620,7 +1639,7 @@ buildvariants:
   - name: replica_sets_auth_gen
   - name: replica_sets_jscore_passthrough
   - name: sasl
-  - name: sharding_auth_gen
+  - name: sharding_auth_audit_gen
   - name: .stitch
   - name: .crypt
     distros:
@@ -1676,7 +1695,7 @@ buildvariants:
   - name: replica_sets_auth_gen
   - name: replica_sets_jscore_passthrough
   - name: sasl
-  - name: sharding_auth_gen
+  - name: sharding_auth_audit_gen
   - name: .stitch
   - name: .crypt
   - name: .publish_crypt
@@ -1718,6 +1737,7 @@ buildvariants:
   - name: .aggfuzzer .common !.multiversion
   - name: aggregation
   - name: .auth !.audit !.multiversion
+  - name: sharding_auth_gen
   - name: causally_consistent_jscore_txns_passthrough
   - name: .misc_js
   - name: .concurrency .common
@@ -1731,7 +1751,8 @@ buildvariants:
   - name: replica_sets_gen
   - name: .replica_sets .common
   - name: .sharding .txns
-  - name: .sharding .common !.csrs !.multiversion
+  - name: .sharding .common !.csrs !.multiversion !.encrypt
+  - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: .ssl
   - name: .stitch
   - name: .publish
@@ -1775,6 +1796,7 @@ buildvariants:
   - name: .aggfuzzer .common
   - name: aggregation
   - name: .auth !.audit !.multiversion
+  - name: sharding_auth_gen
   - name: .misc_js
   - name: .concurrency .common
   - name: concurrency_replication_causal_consistency_gen
@@ -1862,6 +1884,7 @@ buildvariants:
   - name: .encrypt !.aggregation !.replica_sets !.sharding !.jscore
   - name: external_auth
   - name: external_auth_aws
+  - name: external_auth_oidc
   - name: .jepsen
     distros:
     - ubuntu1804-build
@@ -1877,7 +1900,7 @@ buildvariants:
   - name: replica_sets_auth_gen
   - name: replica_sets_jscore_passthrough
   - name: sasl
-  - name: sharding_auth_gen
+  - name: sharding_auth_audit_gen
   - name: .watchdog
   - name: test_packages
     distros:
@@ -1927,6 +1950,7 @@ buildvariants:
   - name: aggregation
   - name: aggregation_wildcard_fuzzer_gen
   - name: .auth !.audit !.multiversion !.jscore
+  - name: sharding_auth_gen
   - name: causally_consistent_jscore_txns_passthrough
   - name: .misc_js
   - name: .concurrency .common
@@ -2021,6 +2045,7 @@ buildvariants:
   - name: .aggfuzzer .common !.multiversion
   - name: aggregation
   - name: .auth !.audit !.multiversion
+  - name: sharding_auth_gen
   - name: .misc_js
   - name: .concurrency .common
   - name: concurrency_replication_causal_consistency_gen
@@ -2076,6 +2101,7 @@ buildvariants:
   - name: .aggfuzzer .common !.multiversion
   - name: aggregation
   - name: .auth !.audit !.multiversion
+  - name: sharding_auth_gen
   - name: .misc_js
   - name: .concurrency .common
   - name: concurrency_replication_causal_consistency_gen
@@ -2148,6 +2174,7 @@ buildvariants:
   - name: .encrypt !.aggregation !.replica_sets !.sharding !.jscore
   - name: external_auth
   - name: external_auth_aws
+  - name: external_auth_oidc
   - name: .jscore .common !.decimal !.sharding
   - name: jsCore_auth
   - name: .jstestfuzz .common
@@ -2157,7 +2184,7 @@ buildvariants:
   - name: replica_sets_auth_gen
   - name: replica_sets_jscore_passthrough
   - name: sasl
-  - name: sharding_auth_gen
+  - name: sharding_auth_audit_gen
   - name: test_packages
     distros:
     - ubuntu2004-package
@@ -2214,6 +2241,7 @@ buildvariants:
   - name: .encrypt !.aggregation !.replica_sets !.sharding !.jscore
   - name: external_auth
   - name: external_auth_aws
+  - name: external_auth_oidc
   - name: .jscore .common !.decimal !.sharding
   - name: jsCore_auth
   - name: .jstestfuzz .common
@@ -2223,7 +2251,7 @@ buildvariants:
   - name: replica_sets_auth_gen
   - name: replica_sets_jscore_passthrough
   - name: sasl
-  - name: sharding_auth_gen
+  - name: sharding_auth_audit_gen
   - name: test_packages
     distros:
     - ubuntu2204-large
@@ -2271,6 +2299,7 @@ buildvariants:
   - name: aggregation
   - name: aggregation_wildcard_fuzzer_gen
   - name: .auth !.audit !.multiversion !.jscore
+  - name: sharding_auth_gen
   - name: causally_consistent_jscore_txns_passthrough
   - name: .misc_js
   - name: .concurrency .common
@@ -2363,6 +2392,7 @@ buildvariants:
   - name: aggregation
   - name: aggregation_wildcard_fuzzer_gen
   - name: .auth !.audit !.multiversion !.jscore
+  - name: sharding_auth_gen
   - name: causally_consistent_jscore_txns_passthrough
   - name: .misc_js
   - name: .concurrency .common
@@ -2479,7 +2509,8 @@ buildvariants:
   - name: replica_sets_jscore_passthrough_gen
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
   - name: .sharding .txns
-  - name: .sharding .common !.csrs
+  - name: .sharding .common !.csrs !.encrypt
+  - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: .ssl
   - name: .stitch
   - name: .updatefuzzer
@@ -2557,7 +2588,7 @@ buildvariants:
   - name: replica_sets_jscore_passthrough
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
   - name: .sharding .txns
-  - name: .sharding .common !.csrs
+  - name: .sharding .common !.csrs !.gcm
   - name: .ssl
   - name: .stitch
   - name: .updatefuzzer
@@ -2591,7 +2622,7 @@ buildvariants:
   - name: .aggregation !.auth !.encrypt !.unwind
   - name: auth_gen
   - name: .causally_consistent !.sharding
-  - name: .change_streams !.secondary_reads
+  - name: .change_streams
   - name: .misc_js
   - name: .concurrency !.ubsan !.no_txns !.debug_only !.kill_terminate
   - name: disk_wiredtiger
@@ -2645,7 +2676,7 @@ buildvariants:
   - name: .aggregation !.auth !.encrypt !.unwind
   - name: auth_gen
   - name: .causally_consistent !.sharding
-  - name: .change_streams !.secondary_reads
+  - name: .change_streams
   - name: .misc_js
   - name: .concurrency !.ubsan !.no_txns !.debug_only !.kill_terminate
   - name: disk_wiredtiger

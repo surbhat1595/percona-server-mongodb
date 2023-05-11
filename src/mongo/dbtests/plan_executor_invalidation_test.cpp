@@ -31,6 +31,7 @@
 
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/collection_yield_restore.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
@@ -52,7 +53,8 @@ namespace mongo {
 
 using std::unique_ptr;
 
-static const NamespaceString nss("unittests.PlanExecutorInvalidationTest");
+static const NamespaceString nss =
+    NamespaceString::createNamespaceString_forTest("unittests.PlanExecutorInvalidationTest");
 
 /**
  * Test fixture for verifying that plan executors correctly raise errors when invalidating events
@@ -66,7 +68,7 @@ public:
         _client.dropCollection(nss);
 
         for (int i = 0; i < N(); ++i) {
-            _client.insert(nss.ns(), BSON("foo" << i));
+            _client.insert(nss, BSON("foo" << i));
         }
 
         _refreshCollection();
@@ -95,7 +97,7 @@ public:
                                         std::move(ws),
                                         std::move(scan),
                                         &collection(),
-                                        PlanYieldPolicy::YieldPolicy::YIELD_MANUAL,
+                                        PlanYieldPolicy::YieldPolicy::NO_YIELD,
                                         QueryPlannerParams::DEFAULT);
 
         ASSERT_OK(statusWithPlanExecutor.getStatus());
@@ -114,7 +116,7 @@ public:
                                           startKey,
                                           endKey,
                                           BoundInclusion::kIncludeBothStartAndEndKeys,
-                                          PlanYieldPolicy::YieldPolicy::YIELD_MANUAL);
+                                          PlanYieldPolicy::YieldPolicy::NO_YIELD);
     }
 
     int N() {
@@ -189,7 +191,8 @@ public:
 
 private:
     void _refreshCollection() {
-        _coll = CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, nss);
+        _coll = CollectionPtr(
+            CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, nss));
     }
 
     BSONObj _makeMinimalIndexSpec(BSONObj keyPattern) {
@@ -212,8 +215,8 @@ TEST_F(PlanExecutorInvalidationTest, ExecutorToleratesDeletedDocumentsDuringYiel
     exec->saveState();
 
     // Delete some data, namely the next 2 things we'd expect.
-    _client.remove(nss.ns(), BSON("foo" << 10));
-    _client.remove(nss.ns(), BSON("foo" << 11));
+    _client.remove(nss, BSON("foo" << 10));
+    _client.remove(nss, BSON("foo" << 11));
 
     exec->restoreState(&collection());
 

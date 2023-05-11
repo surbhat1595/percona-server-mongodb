@@ -33,10 +33,15 @@
 #include "mongo/db/repl/replica_set_aware_service.h"
 #include "mongo/db/service_context.h"
 #include "mongo/executor/task_executor.h"
+#include "mongo/logv2/log.h"
 #include "mongo/s/analyze_shard_key_common_gen.h"
 #include "mongo/s/analyze_shard_key_role.h"
+#include "mongo/s/query_analysis_sample_counters.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/util/periodic_runner.h"
+
+#include <map>
+#include <string>
 
 namespace mongo {
 namespace analyze_shard_key {
@@ -73,11 +78,18 @@ public:
      */
     struct Buffer {
     public:
+        Buffer(const NamespaceString& nss) : _nss(nss){};
+
+        const NamespaceString& getNss() const {
+            return _nss;
+        }
+
         /**
          * Adds the given document to the buffer if its size is below the limit (i.e.
          * BSONObjMaxUserSize - some padding) and increments the total number of bytes accordingly.
+         * Returns true unless the document's size exceeds the limit.
          */
-        void add(BSONObj doc);
+        bool add(BSONObj doc);
 
         /**
          * Removes the documents at 'index' onwards from the buffer and decrements the total number
@@ -103,6 +115,8 @@ public:
         }
 
     private:
+        NamespaceString _nss;
+
         std::vector<BSONObj> _docs;
         long long _numBytes = 0;
     };
@@ -180,6 +194,8 @@ public:
         _flushDiffs(opCtx);
     }
 
+    void reportForCurrentOp(std::vector<BSONObj>* ops) const;
+
 private:
     bool shouldRegisterReplicaSetAwareService() const override final;
 
@@ -205,9 +221,9 @@ private:
 
     /**
      * The helper for '_flushQueries' and '_flushDiffs'. Inserts the documents in 'buffer' into the
-     * collection 'ns' in batches, and removes all the inserted documents from 'buffer'. Internally
-     * retries the inserts on retryable errors for a fixed number of times. Ignores DuplicateKey
-     * errors since they are expected for the following reasons:
+     * collection it is associated with in batches, and removes all the inserted documents from
+     * 'buffer'. Internally retries the inserts on retryable errors for a fixed number of times.
+     * Ignores DuplicateKey errors since they are expected for the following reasons:
      * - For the query buffer, a sampled query that is idempotent (e.g. a read or retryable write)
      *   could get added to the buffer (across nodes) more than once due to retries.
      * - For the diff buffer, a sampled multi-update query could end up generating multiple diffs
@@ -215,7 +231,7 @@ private:
      *
      * Throws an error if the inserts fail with any other error.
      */
-    void _flush(OperationContext* opCtx, const NamespaceString& nss, Buffer* buffer);
+    void _flush(OperationContext* opCtx, Buffer* buffer);
 
     /**
      * Returns true if the total size of the buffered queries and diffs has exceeded the maximum
@@ -223,13 +239,23 @@ private:
      */
     bool _exceedsMaxSizeBytes();
 
+    /**
+     * Retrieve the collection's sample counters given the namespace string and the
+     * collection UUID. If the collection's sample counters are not found, a new set of
+     * counters is created for the collection and returned.
+     */
+    std::shared_ptr<SampleCounters> _getOrCreateSampleCounters(const NamespaceString& nss,
+                                                               const UUID& collUuid);
+
     mutable Mutex _mutex = MONGO_MAKE_LATCH("QueryAnalysisWriter::_mutex");
 
     PeriodicJobAnchor _periodicQueryWriter;
-    Buffer _queries;
+    Buffer _queries{NamespaceString::kConfigSampledQueriesNamespace};
 
     PeriodicJobAnchor _periodicDiffWriter;
-    Buffer _diffs;
+    Buffer _diffs{NamespaceString::kConfigSampledQueriesDiffNamespace};
+
+    std::map<UUID, std::shared_ptr<SampleCounters>> _sampleCountersMap;
 
     // Initialized on startup and joined on shutdown.
     std::shared_ptr<executor::TaskExecutor> _executor;

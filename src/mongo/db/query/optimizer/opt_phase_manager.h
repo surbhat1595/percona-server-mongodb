@@ -84,6 +84,7 @@ public:
                     std::unique_ptr<CostEstimator> costEstimator,
                     PathToIntervalFn pathToInterval,
                     ConstFoldFn constFold,
+                    bool supportExplain,
                     DebugInfo debugInfo,
                     QueryHints queryHints = {});
 
@@ -99,9 +100,16 @@ public:
      */
     void optimize(ABT& input);
 
+    /**
+     * Similar to optimize, but returns a bool to indicate success or failure. True means success;
+     * false means failure.
+     */
+    [[nodiscard]] bool optimizeNoAssert(ABT& input);
+
     static const PhaseSet& getAllRewritesSet();
 
     MemoPhysicalNodeId getPhysicalNodeId() const;
+    const boost::optional<ABT>& getPostMemoPlan() const;
 
     const QueryHints& getHints() const;
     QueryHints& getHints();
@@ -112,12 +120,8 @@ public:
 
     const Metadata& getMetadata() const;
 
-    PrefixId& getPrefixId() const;
-
     const NodeToGroupPropsMap& getNodeToGroupPropsMap() const;
     NodeToGroupPropsMap& getNodeToGroupPropsMap();
-
-    const RIDProjectionsMap& getRIDProjections() const;
 
 private:
     bool hasPhase(OptPhase phase) const;
@@ -140,18 +144,23 @@ private:
                                std::unique_ptr<LogicalRewriter>& logicalRewriter,
                                ABT& input);
 
-    void runMemoPhysicalRewrite(OptPhase phase,
-                                VariableEnvironment& env,
-                                GroupIdType rootGroupId,
-                                std::unique_ptr<LogicalRewriter>& logicalRewriter,
-                                ABT& input);
+    [[nodiscard]] bool runMemoPhysicalRewrite(OptPhase phase,
+                                              VariableEnvironment& env,
+                                              GroupIdType rootGroupId,
+                                              std::unique_ptr<LogicalRewriter>& logicalRewriter,
+                                              ABT& input);
 
-    void runMemoRewritePhases(VariableEnvironment& env, ABT& input);
+    [[nodiscard]] bool runMemoRewritePhases(VariableEnvironment& env, ABT& input);
 
 
     static PhaseSet _allRewrites;
 
     const PhaseSet _phaseSet;
+
+    /**
+     * True if we should maintain extra internal state in support of explain.
+     */
+    const bool _supportExplain;
 
     const DebugInfo _debugInfo;
 
@@ -202,6 +211,12 @@ private:
      * Root physical node if we have performed physical rewrites.
      */
     MemoPhysicalNodeId _physicalNodeId;
+
+    /**
+     * Post memo exploration phase plan (set if '_supportExplain' is set and if we have performed
+     * memo rewrites).
+     */
+    boost::optional<ABT> _postMemoPlan;
 
     /**
      * Map from node to logical and physical properties.

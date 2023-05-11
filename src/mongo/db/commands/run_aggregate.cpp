@@ -70,6 +70,7 @@
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/query/get_executor.h"
+#include "mongo/db/query/optimizer/defs.h"
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
@@ -677,10 +678,14 @@ Status runAggregate(OperationContext* opCtx,
 
     // If we are running a retryable write without shard key, check if the write was applied on this
     // shard, and if so, return early with an empty cursor with $_wasStatementExecuted
-    // set to true.
+    // set to true. The isRetryableWrite() check here is to check that the client executed write was
+    // a retryable write (which would've spawned an internal session for a retryable write to
+    // execute the two phase write without shard key protocol), otherwise we skip the retryable
+    // write check.
     auto isClusterQueryWithoutShardKeyCmd = request.getIsClusterQueryWithoutShardKeyCmd();
-    auto stmtId = request.getStmtId();
-    if (isClusterQueryWithoutShardKeyCmd && stmtId) {
+    if (opCtx->isRetryableWrite() && isClusterQueryWithoutShardKeyCmd) {
+        auto stmtId = request.getStmtId();
+        tassert(7058100, "StmtId must be set for a retryable write without shard key", stmtId);
         if (TransactionParticipant::get(opCtx).checkStatementExecuted(opCtx, *stmtId)) {
             CursorResponseBuilder::Options options;
             options.isInitialResponse = true;
@@ -747,8 +752,8 @@ Status runAggregate(OperationContext* opCtx,
         collections.clear();
     };
 
-    auto collectTelemetry = [&]() -> void {
-        // Collect telemetry. Exclude queries against collections with encrypted fields.
+    auto registerTelemetry = [&]() -> void {
+        // Register telemetry. Exclude queries against collections with encrypted fields.
         // We still collect telemetry on collection-less aggregations.
         if (!(ctx && ctx->getCollection() &&
               ctx->getCollection()->getCollectionOptions().encryptedFieldConfig)) {
@@ -760,10 +765,6 @@ Status runAggregate(OperationContext* opCtx,
     boost::intrusive_ptr<ExpressionContext> expCtx;
     auto curOp = CurOp::get(opCtx);
     auto catalog = CollectionCatalog::get(opCtx);
-
-    // Since we remove encryptionInformation after rewriting a FLE2 query, this boolean keeps track
-    // of whether the input query did originally have encryption information.
-    bool didDoFLERewrite = false;
 
     {
         // If we are in a transaction, check whether the parsed pipeline supports being in
@@ -833,13 +834,13 @@ Status runAggregate(OperationContext* opCtx,
             // collation. We do not inherit the collection's default collation or UUID, since
             // the stream may be resuming from a point before the current UUID existed.
             auto [collator, match] = PipelineD::resolveCollator(
-                opCtx, request.getCollation().get_value_or(BSONObj()), nullptr);
+                opCtx, request.getCollation().get_value_or(BSONObj()), CollectionPtr());
             collatorToUse.emplace(std::move(collator));
             collatorToUseMatchesDefault = match;
 
             // Obtain collection locks on the execution namespace; that is, the oplog.
             initContext(auto_get_collection::ViewMode::kViewsForbidden);
-            collectTelemetry();
+            registerTelemetry();
         } else if (nss.isCollectionlessAggregateNS() && pipelineInvolvedNamespaces.empty()) {
             uassert(4928901,
                     str::stream() << AggregateCommandRequest::kCollectionUUIDFieldName
@@ -853,17 +854,17 @@ Status runAggregate(OperationContext* opCtx,
                                  AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
                                  0);
             auto [collator, match] = PipelineD::resolveCollator(
-                opCtx, request.getCollation().get_value_or(BSONObj()), nullptr);
+                opCtx, request.getCollation().get_value_or(BSONObj()), CollectionPtr());
             collatorToUse.emplace(std::move(collator));
             collatorToUseMatchesDefault = match;
             tassert(6235101,
                     "A collection-less aggregate should not take any locks",
                     ctx == boost::none);
-            collectTelemetry();
+            registerTelemetry();
         } else {
             // This is a regular aggregation. Lock the collection or view.
             initContext(auto_get_collection::ViewMode::kViewsPermitted);
-            collectTelemetry();
+            registerTelemetry();
             auto [collator, match] =
                 PipelineD::resolveCollator(opCtx,
                                            request.getCollation().get_value_or(BSONObj()),
@@ -919,10 +920,13 @@ Status runAggregate(OperationContext* opCtx,
 
             // Set this operation's shard version for the underlying collection to unsharded.
             // This is prerequisite for future shard versioning checks.
-            ScopedSetShardRole scopedSetShardRole(opCtx,
-                                                  resolvedView.getNamespace(),
-                                                  ShardVersion::UNSHARDED() /* shardVersion */,
-                                                  boost::none /* databaseVersion */);
+            boost::optional<ScopedSetShardRole> scopeSetShardRole;
+            if (serverGlobalParams.clusterRole != ClusterRole::None) {
+                scopeSetShardRole.emplace(opCtx,
+                                          resolvedView.getNamespace(),
+                                          ShardVersion::UNSHARDED() /* shardVersion */,
+                                          boost::none /* databaseVersion */);
+            }
 
             uassert(std::move(resolvedView),
                     "Explain of a resolved view must be executed by mongos",
@@ -1007,7 +1011,9 @@ Status runAggregate(OperationContext* opCtx,
             pipeline = processFLEPipelineD(
                 opCtx, nss, request.getEncryptionInformation().value(), std::move(pipeline));
             request.setEncryptionInformation(boost::none);
-            didDoFLERewrite = true;
+            // Set the telemetryStoreKey to none so telemetry isn't collected when we've done a FLE
+            // rewrite.
+            CurOp::get(opCtx)->debug().telemetryStoreKey = boost::none;
         }
 
         pipeline->optimizePipeline();
@@ -1024,7 +1030,10 @@ Status runAggregate(OperationContext* opCtx,
                 .getAsync([](auto) {});
         }
 
-        if (isEligibleForBonsai(request, *pipeline, opCtx, collections.getMainCollection())) {
+        const bool bonsaiEligible =
+            isEligibleForBonsai(request, *pipeline, opCtx, collections.getMainCollection());
+        bool bonsaiExecSuccess = true;
+        if (bonsaiEligible) {
             uassert(6624344,
                     "Exchanging is not supported in the Cascades optimizer",
                     !request.getExchange().has_value());
@@ -1043,18 +1052,39 @@ Status runAggregate(OperationContext* opCtx,
                         SimpleBSONObjComparator::kInstance.evaluate(*request.getCollation() ==
                                                                     CollationSpec::kSimpleSpec));
 
+            optimizer::QueryHints queryHints = getHintsFromQueryKnobs();
+            const bool fastIndexNullHandling = queryHints._fastIndexNullHandling;
             auto timeBegin = Date_t::now();
-            execs.emplace_back(getSBEExecutorViaCascadesOptimizer(opCtx,
-                                                                  expCtx,
-                                                                  nss,
-                                                                  collections.getMainCollection(),
-                                                                  request.getHint(),
-                                                                  std::move(pipeline)));
+            auto maybeExec = getSBEExecutorViaCascadesOptimizer(opCtx,
+                                                                expCtx,
+                                                                nss,
+                                                                collections.getMainCollection(),
+                                                                std::move(queryHints),
+                                                                request.getHint(),
+                                                                pipeline.get());
+            if (maybeExec) {
+                execs.emplace_back(
+                    uassertStatusOK(makeExecFromParams(nullptr, std::move(*maybeExec))));
+            } else {
+                // If we had an optimization failure, only error if we're not in tryBonsai.
+                bonsaiExecSuccess = false;
+                const auto queryControl =
+                    ServerParameterSet::getNodeParameterSet()->get<QueryFrameworkControl>(
+                        "internalQueryFrameworkControl");
+                tassert(7319401,
+                        "Optimization failed either without tryBonsai set, or without a hint.",
+                        queryControl->_data.get() == QueryFrameworkControlEnum::kTryBonsai &&
+                            request.getHint() && !request.getHint()->isEmpty() &&
+                            !fastIndexNullHandling);
+            }
+
             auto elapsed =
                 (Date_t::now().toMillisSinceEpoch() - timeBegin.toMillisSinceEpoch()) / 1000.0;
             OPTIMIZER_DEBUG_LOG(
                 6264804, 5, "Cascades optimization time elapsed", "time"_attr = elapsed);
-        } else {
+        }
+
+        if (!bonsaiEligible || !bonsaiExecSuccess) {
             execs = createLegacyExecutor(std::move(pipeline),
                                          liteParsedPipeline,
                                          nss,
@@ -1064,6 +1094,7 @@ Status runAggregate(OperationContext* opCtx,
                                          resetContext);
         }
         tassert(6624353, "No executors", !execs.empty());
+
 
         {
             auto planSummary = execs[0]->getPlanExplainer().getPlanSummary();
@@ -1146,7 +1177,8 @@ Status runAggregate(OperationContext* opCtx,
         curOp->debug().setPlanSummaryMetrics(stats);
         curOp->debug().nreturned = stats.nReturned;
 
-        telemetry::recordExecution(opCtx, didDoFLERewrite);
+        boost::optional<ClientCursorPin&> cursorForTelemetry = pins[0];
+        collectTelemetry(opCtx, keepCursor ? cursorForTelemetry : boost::none, false);
 
         // For an optimized away pipeline, signal the cache that a query operation has completed.
         // For normal pipelines this is done in DocumentSourceCursor.

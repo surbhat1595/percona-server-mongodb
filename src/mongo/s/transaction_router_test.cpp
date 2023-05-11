@@ -111,7 +111,7 @@ protected:
     const BSONObj kDummyResWithWriteConcernError =
         BSON("ok" << 1 << "writeConcernError" << kDummyWriteConcernError);
 
-    const NamespaceString kViewNss = NamespaceString("test.foo");
+    const NamespaceString kViewNss = NamespaceString::createNamespaceString_forTest("test.foo");
 
     const Status kStaleConfigStatus = {
         StaleConfigInfo(kViewNss, ShardVersion::UNSHARDED(), boost::none, shard1),
@@ -159,7 +159,7 @@ protected:
             onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
                 seenHostAndPorts.insert(request.target);
 
-                ASSERT_EQ(NamespaceString::kAdminDb, request.dbname);
+                ASSERT_EQ(DatabaseName::kAdmin.db(), request.dbname);
 
                 auto cmdName = request.cmdObj.firstElement().fieldNameStringData();
                 ASSERT_EQ(cmdName, "abortTransaction");
@@ -4725,12 +4725,12 @@ TEST_F(TransactionRouterTest, RouterMetricsCurrent_ReapForInactiveTxn) {
 
     // Mark the session for reap which will also erase it from the catalog.
     auto catalog = SessionCatalog::get(operationContext()->getServiceContext());
-    catalog->scanSessionsForReap(*operationContext()->getLogicalSessionId(),
-                                 [](ObservableSession& parentSession) {
-                                     parentSession.markForReap(
-                                         ObservableSession::ReapMode::kNonExclusive);
-                                 },
-                                 [](ObservableSession& childSession) {});
+    catalog->scanSessionsForReap(
+        *operationContext()->getLogicalSessionId(),
+        [](ObservableSession& parentSession) {
+            parentSession.markForReap(ObservableSession::ReapMode::kNonExclusive);
+        },
+        [](ObservableSession& childSession) {});
 
     // Verify the session was reaped.
     catalog->scanSession(*operationContext()->getLogicalSessionId(), [](const ObservableSession&) {
@@ -4761,12 +4761,12 @@ TEST_F(TransactionRouterTest, RouterMetricsCurrent_ReapForUnstartedTxn) {
 
     // Mark the session for reap which will also erase it from the catalog.
     auto catalog = SessionCatalog::get(operationContext()->getServiceContext());
-    catalog->scanSessionsForReap(*operationContext()->getLogicalSessionId(),
-                                 [](ObservableSession& parentSession) {
-                                     parentSession.markForReap(
-                                         ObservableSession::ReapMode::kNonExclusive);
-                                 },
-                                 [](ObservableSession& childSession) {});
+    catalog->scanSessionsForReap(
+        *operationContext()->getLogicalSessionId(),
+        [](ObservableSession& parentSession) {
+            parentSession.markForReap(ObservableSession::ReapMode::kNonExclusive);
+        },
+        [](ObservableSession& childSession) {});
 
     // Verify the session was reaped.
     catalog->scanSession(*operationContext()->getLogicalSessionId(), [](const ObservableSession&) {

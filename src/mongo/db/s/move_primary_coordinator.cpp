@@ -196,7 +196,6 @@ ExecutorFuture<void> MovePrimaryCoordinator::runMovePrimaryWorkflow(
                                      }
 
                                      blockReads(opCtx);
-
                                      enterCriticalSectionOnRecipient(opCtx);
                                  }))
         .then(_buildPhaseHandler(
@@ -230,13 +229,6 @@ ExecutorFuture<void> MovePrimaryCoordinator::runMovePrimaryWorkflow(
                                      getForwardableOpMetadata().setOn(opCtx);
 
                                      dropStaleDataOnDonor(opCtx);
-
-                                     LOGV2(7120206,
-                                           "Completed movePrimary operation",
-                                           "db"_attr = _dbName,
-                                           "to"_attr = _doc.getToShardId());
-
-                                     logChange(opCtx, "end");
                                  }))
         .then(_buildPhaseHandler(Phase::kExitCriticalSection,
                                  [this, executor = executor, anchor = shared_from_this()] {
@@ -251,8 +243,14 @@ ExecutorFuture<void> MovePrimaryCoordinator::runMovePrimaryWorkflow(
                                      }
 
                                      unblockReadsAndWrites(opCtx);
-
                                      exitCriticalSectionOnRecipient(opCtx);
+
+                                     LOGV2(7120206,
+                                           "Completed movePrimary operation",
+                                           "db"_attr = _dbName,
+                                           "to"_attr = _doc.getToShardId());
+
+                                     logChange(opCtx, "end");
                                  }))
         .onError([this, anchor = shared_from_this()](const Status& status) {
             const auto opCtxHolder = cc().makeOperationContext();
@@ -378,7 +376,7 @@ StatusWith<Shard::CommandResponse> MovePrimaryCoordinator::cloneDataToRecipient(
     return toShard->runCommandWithFixedRetryAttempts(
         opCtx,
         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-        NamespaceString::kAdminDb.toString(),
+        DatabaseName::kAdmin.db(),
         cloneCommand,
         Shard::RetryPolicy::kNotIdempotent);
 }
@@ -408,7 +406,7 @@ void MovePrimaryCoordinator::commitMetadataToConfig(
     OperationContext* opCtx, const DatabaseVersion& preCommitDbVersion) const {
     const auto commitCommand = [&] {
         ConfigsvrCommitMovePrimary request(_dbName, preCommitDbVersion, _doc.getToShardId());
-        request.setDbName(NamespaceString::kAdminDb);
+        request.setDbName(DatabaseName::kAdmin);
         return CommandHelpers::appendMajorityWriteConcern(request.toBSON({}));
     }();
 
@@ -416,7 +414,7 @@ void MovePrimaryCoordinator::commitMetadataToConfig(
     const auto commitResponse =
         config->runCommandWithFixedRetryAttempts(opCtx,
                                                  ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                                 NamespaceString::kAdminDb.toString(),
+                                                 DatabaseName::kAdmin.db(),
                                                  commitCommand,
                                                  Shard::RetryPolicy::kIdempotent);
 
@@ -461,8 +459,7 @@ void MovePrimaryCoordinator::assertChangedMetadataOnConfig(
 
 void MovePrimaryCoordinator::clearDbMetadataOnPrimary(OperationContext* opCtx) const {
     AutoGetDb autoDb(opCtx, _dbName, MODE_IX);
-    auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
-        opCtx, _dbName, DSSAcquisitionMode::kExclusive);
+    auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireExclusive(opCtx, _dbName);
     scopedDss->clearDbInfo(opCtx);
 }
 
@@ -511,15 +508,13 @@ void MovePrimaryCoordinator::dropOrphanedDataOnRecipient(
 
 void MovePrimaryCoordinator::blockWritesLegacy(OperationContext* opCtx) const {
     AutoGetDb autoDb(opCtx, _dbName, MODE_X);
-    auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
-        opCtx, _dbName, DSSAcquisitionMode::kExclusive);
+    auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireExclusive(opCtx, _dbName);
     scopedDss->setMovePrimaryInProgress(opCtx);
 }
 
 void MovePrimaryCoordinator::unblockWritesLegacy(OperationContext* opCtx) const {
     AutoGetDb autoDb(opCtx, _dbName, MODE_IX);
-    auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
-        opCtx, _dbName, DSSAcquisitionMode::kExclusive);
+    auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireExclusive(opCtx, _dbName);
     scopedDss->unsetMovePrimaryInProgress(opCtx);
 }
 
@@ -541,7 +536,7 @@ void MovePrimaryCoordinator::unblockReadsAndWrites(OperationContext* opCtx) cons
 void MovePrimaryCoordinator::enterCriticalSectionOnRecipient(OperationContext* opCtx) const {
     const auto enterCriticalSectionCommand = [&] {
         ShardsvrMovePrimaryEnterCriticalSection request(_dbName);
-        request.setDbName(NamespaceString::kAdminDb);
+        request.setDbName(DatabaseName::kAdmin);
         request.setReason(_csReason);
 
         auto command = CommandHelpers::appendMajorityWriteConcern(request.toBSON({}));
@@ -555,7 +550,7 @@ void MovePrimaryCoordinator::enterCriticalSectionOnRecipient(OperationContext* o
         return toShard->runCommandWithFixedRetryAttempts(
             opCtx,
             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-            NamespaceString::kAdminDb.toString(),
+            DatabaseName::kAdmin.toString(),
             enterCriticalSectionCommand,
             Shard::RetryPolicy::kIdempotent);
     }();
@@ -573,7 +568,7 @@ void MovePrimaryCoordinator::enterCriticalSectionOnRecipient(OperationContext* o
 void MovePrimaryCoordinator::exitCriticalSectionOnRecipient(OperationContext* opCtx) const {
     const auto exitCriticalSectionCommand = [&] {
         ShardsvrMovePrimaryExitCriticalSection request(_dbName);
-        request.setDbName(NamespaceString::kAdminDb);
+        request.setDbName(DatabaseName::kAdmin);
         request.setReason(_csReason);
 
         auto command = CommandHelpers::appendMajorityWriteConcern(request.toBSON({}));
@@ -587,7 +582,7 @@ void MovePrimaryCoordinator::exitCriticalSectionOnRecipient(OperationContext* op
         return toShard->runCommandWithFixedRetryAttempts(
             opCtx,
             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-            NamespaceString::kAdminDb.toString(),
+            DatabaseName::kAdmin.toString(),
             exitCriticalSectionCommand,
             Shard::RetryPolicy::kIdempotent);
     }();

@@ -68,6 +68,7 @@ env.Library(
 env.Library(
     target='record_store_base',
     source=[
+        'collection_markers.cpp',
         'external_record_store.cpp',
         'multi_bson_stream_cursor.cpp',
         'named_pipe_posix.cpp' if not env.TargetOSIs('windows') else [],
@@ -208,14 +209,27 @@ env.Library(
 env.Library(
     target='storage_engine_parameters',
     source=[
+        'execution_control/throughput_probing.cpp',
+        'execution_control/throughput_probing.idl',
         'ticketholder_manager.cpp',
         'ticketholder_monitor.cpp',
         'storage_engine_parameters.idl',
     ],
-    LIBDEPS=[
+    LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/util/concurrency/ticketholder',
+        'storage_engine_feature_flags',
+    ],
+)
+
+env.Library(
+    target='storage_engine_feature_flags',
+    source=[
+        'storage_engine_feature_flags.idl',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/server_base',
     ],
 )
 
@@ -371,6 +385,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/service_context',
         'storage_change_lock',
         'storage_control',
+        'storage_engine_feature_flags',
         'storage_engine_lock_file',
         'storage_engine_metadata',
         'storage_options',
@@ -443,8 +458,8 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/db/dbhelpers',
         '$BUILD_DIR/mongo/db/repl/replica_set_messages',
+        '$BUILD_DIR/mongo/db/repl/storage_interface',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/db/storage/journal_flusher',
         'storage_file_util',
@@ -515,7 +530,9 @@ env.Library(
 env.CppUnitTest(
     target='db_storage_test',
     source=[
+        'collection_markers_test.cpp',
         'external_record_store_test.cpp',
+        'disk_space_monitor_test.cpp',
         'flow_control_test.cpp',
         'historical_ident_tracker_test.cpp',
         'index_entry_comparison_test.cpp',
@@ -550,11 +567,13 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/executor/network_interface_factory',
         '$BUILD_DIR/mongo/executor/network_interface_mock',
         '$BUILD_DIR/mongo/util/periodic_runner_factory',
+        'disk_space_monitor',
         'flow_control',
         'flow_control_parameters',
         'historical_ident_tracker',
         'key_string',
         'kv/kv_drop_pending_ident_reaper',
+        'record_store_base',
         'storage_engine_common',
         'storage_engine_lock_file',
         'storage_engine_metadata',
@@ -592,6 +611,19 @@ env.Library(
         '$BUILD_DIR/mongo/db/storage/storage_options',
         'durable_catalog_impl',
         'kv/kv_drop_pending_ident_reaper',
+    ],
+)
+
+env.Library(
+    target='disk_space_monitor',
+    source=[
+        'disk_space_monitor.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/commands/server_status_core',
+        '$BUILD_DIR/mongo/db/server_base',
+        '$BUILD_DIR/mongo/db/service_context',
+        'storage_options',
     ],
 )
 

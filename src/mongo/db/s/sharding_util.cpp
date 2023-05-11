@@ -37,6 +37,7 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/index_builds_coordinator.h"
+#include "mongo/db/s/shard_authoritative_catalog_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_index_catalog.h"
@@ -59,7 +60,7 @@ void tellShardsToRefreshCollection(OperationContext* opCtx,
     cmd.setSyncFromConfig(true);
     cmd.setDbName(nss.db());
     auto cmdObj = CommandHelpers::appendMajorityWriteConcern(cmd.toBSON({}));
-    sendCommandToShards(opCtx, NamespaceString::kAdminDb, cmdObj, shardIds, executor);
+    sendCommandToShards(opCtx, DatabaseName::kAdmin.db(), cmdObj, shardIds, executor);
 }
 
 std::vector<AsyncRequestsSender::Response> processShardResponses(
@@ -172,7 +173,7 @@ Status createIndexOnCollection(OperationContext* opCtx,
         auto removeIndexBuildsToo = false;
         auto indexSpecs = indexCatalog->removeExistingIndexes(
             opCtx,
-            CollectionPtr(collection, CollectionPtr::NoYieldTag{}),
+            CollectionPtr(collection),
             uassertStatusOK(
                 collection->addCollationDefaultsToIndexSpecsForCreate(opCtx, {index.toBSON()})),
             removeIndexBuildsToo);
@@ -244,10 +245,11 @@ Status createGlobalIndexesIndexes(OperationContext* opCtx) {
 
 Status createShardCollectionCatalogIndexes(OperationContext* opCtx) {
     bool unique = true;
-    auto result = createIndexOnCollection(opCtx,
-                                          NamespaceString::kShardCollectionCatalogNamespace,
-                                          BSON(CollectionType::kUuidFieldName << 1),
-                                          !unique);
+    auto result =
+        createIndexOnCollection(opCtx,
+                                NamespaceString::kShardCollectionCatalogNamespace,
+                                BSON(ShardAuthoritativeCollectionType::kUuidFieldName << 1),
+                                !unique);
     if (!result.isOK()) {
         return result.withContext(str::stream()
                                   << "couldn't create uuid_1 index on "

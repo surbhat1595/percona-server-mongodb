@@ -32,6 +32,7 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/simple_bsonelement_comparator.h"
 #include "mongo/db/catalog/collection_catalog.h"
+#include "mongo/db/catalog/collection_yield_restore.h"
 #include "mongo/db/catalog/multi_index_block_gen.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/exception_util.h"
@@ -97,7 +98,8 @@ MultiIndexBlock::~MultiIndexBlock() {
     invariant(_buildIsCleanedUp);
 }
 
-MultiIndexBlock::OnCleanUpFn MultiIndexBlock::kNoopOnCleanUpFn = []() {};
+MultiIndexBlock::OnCleanUpFn MultiIndexBlock::kNoopOnCleanUpFn = []() {
+};
 
 MultiIndexBlock::OnCleanUpFn MultiIndexBlock::makeTimestampedOnCleanUpFn(
     OperationContext* opCtx, const CollectionPtr& coll) {
@@ -164,7 +166,9 @@ void MultiIndexBlock::ignoreUniqueConstraint() {
 }
 
 MultiIndexBlock::OnInitFn MultiIndexBlock::kNoopOnInitFn =
-    [](std::vector<BSONObj>& specs) -> Status { return Status::OK(); };
+    [](std::vector<BSONObj>& specs) -> Status {
+    return Status::OK();
+};
 
 MultiIndexBlock::OnInitFn MultiIndexBlock::makeTimestampedIndexOnInitFn(OperationContext* opCtx,
                                                                         const CollectionPtr& coll) {
@@ -210,7 +214,7 @@ StatusWith<std::vector<BSONObj>> MultiIndexBlock::init(
         // On rollback in init(), cleans up _indexes so that ~MultiIndexBlock doesn't try to clean
         // up _indexes manually (since the changes were already rolled back). Due to this, it is
         // thus legal to call init() again after it fails.
-        opCtx->recoveryUnit()->onRollback([this, opCtx]() {
+        opCtx->recoveryUnit()->onRollback([this](OperationContext*) {
             _indexes.clear();
             _buildIsCleanedUp = true;
         });
@@ -350,18 +354,19 @@ StatusWith<std::vector<BSONObj>> MultiIndexBlock::init(
             index.filterExpression = indexCatalogEntry->getFilterExpression();
         }
 
-        opCtx->recoveryUnit()->onCommit([ns = collection->ns(), this](auto commitTs) {
-            if (!_buildUUID) {
-                return;
-            }
+        opCtx->recoveryUnit()->onCommit(
+            [ns = collection->ns(), this](OperationContext*, boost::optional<Timestamp> commitTs) {
+                if (!_buildUUID) {
+                    return;
+                }
 
-            LOGV2(20346,
-                  "Index build: initialized",
-                  "buildUUID"_attr = _buildUUID,
-                  "collectionUUID"_attr = _collectionUUID,
-                  logAttrs(ns),
-                  "initializationTimestamp"_attr = commitTs);
-        });
+                LOGV2(20346,
+                      "Index build: initialized",
+                      "buildUUID"_attr = _buildUUID,
+                      "collectionUUID"_attr = _collectionUUID,
+                      logAttrs(ns),
+                      "initializationTimestamp"_attr = commitTs);
+            });
 
         wunit.commit();
         return indexInfoObjs;
@@ -637,21 +642,21 @@ void MultiIndexBlock::_doCollectionScan(OperationContext* opCtx,
         // cursor around the side table write in case any write conflict exception occurs that would
         // otherwise reposition the cursor unexpectedly. All WUOW and write conflict exception
         // handling for the side table write is handled internally.
-        uassertStatusOK(
-            _insert(opCtx,
-                    collection,
-                    objToIndex,
-                    loc,
-                    /*saveCursorBeforeWrite*/
-                    [&exec, &objToIndex] {
-                        // Update objToIndex so that it continues to point to valid data when the
-                        // cursor is closed. A WCE may occur during a write to index A, and
-                        // objToIndex must still be used when the write is retried or for a write to
-                        // another index (if creating multiple indexes at once)
-                        objToIndex = objToIndex.getOwned();
-                        exec->saveState();
-                    },
-                    /*restoreCursorAfterWrite*/ [&] { exec->restoreState(&collection); }));
+        uassertStatusOK(_insert(
+            opCtx,
+            collection,
+            objToIndex,
+            loc,
+            /*saveCursorBeforeWrite*/
+            [&exec, &objToIndex] {
+                // Update objToIndex so that it continues to point to valid data when the
+                // cursor is closed. A WCE may occur during a write to index A, and
+                // objToIndex must still be used when the write is retried or for a write to
+                // another index (if creating multiple indexes at once)
+                objToIndex = objToIndex.getOwned();
+                exec->saveState();
+            },
+            /*restoreCursorAfterWrite*/ [&] { exec->restoreState(&collection); }));
 
         _failPointHangDuringBuild(opCtx,
                                   &hangIndexBuildDuringCollectionScanPhaseAfterInsertion,
@@ -834,8 +839,9 @@ Status MultiIndexBlock::drainBackgroundWrites(
 
     ReadSourceScope readSourceScope(opCtx, readSource);
 
-    const CollectionPtr& coll =
-        CollectionCatalog::get(opCtx)->lookupCollectionByUUID(opCtx, _collectionUUID.value());
+    CollectionPtr coll(
+        CollectionCatalog::get(opCtx)->lookupCollectionByUUID(opCtx, _collectionUUID.value()));
+    coll.makeYieldable(opCtx, LockedCollectionYieldRestore(opCtx, coll));
 
     // Drain side-writes table for each index. This only drains what is visible. Assuming intent
     // locks are held on the user collection, more writes can come in after this drain completes.
@@ -894,8 +900,10 @@ Status MultiIndexBlock::checkConstraints(OperationContext* opCtx, const Collecti
     return Status::OK();
 }
 
-MultiIndexBlock::OnCreateEachFn MultiIndexBlock::kNoopOnCreateEachFn = [](const BSONObj& spec) {};
-MultiIndexBlock::OnCommitFn MultiIndexBlock::kNoopOnCommitFn = []() {};
+MultiIndexBlock::OnCreateEachFn MultiIndexBlock::kNoopOnCreateEachFn = [](const BSONObj& spec) {
+};
+MultiIndexBlock::OnCommitFn MultiIndexBlock::kNoopOnCommitFn = []() {
+};
 
 Status MultiIndexBlock::commit(OperationContext* opCtx,
                                Collection* collection,
@@ -952,12 +960,14 @@ Status MultiIndexBlock::commit(OperationContext* opCtx,
         if (interceptor) {
             auto multikeyPaths = interceptor->getMultikeyPaths();
             if (multikeyPaths) {
-                indexCatalogEntry->setMultikey(opCtx, collection, {}, multikeyPaths.value());
+                indexCatalogEntry->setMultikey(
+                    opCtx, CollectionPtr(collection), {}, multikeyPaths.value());
             }
 
             multikeyPaths = interceptor->getSkippedRecordTracker()->getMultikeyPaths();
             if (multikeyPaths) {
-                indexCatalogEntry->setMultikey(opCtx, collection, {}, multikeyPaths.value());
+                indexCatalogEntry->setMultikey(
+                    opCtx, CollectionPtr(collection), {}, multikeyPaths.value());
             }
         }
 
@@ -968,7 +978,8 @@ Status MultiIndexBlock::commit(OperationContext* opCtx,
         // MultikeyPaths into IndexCatalogEntry::setMultikey here.
         const auto& bulkBuilder = _indexes[i].bulk;
         if (bulkBuilder->isMultikey()) {
-            indexCatalogEntry->setMultikey(opCtx, collection, {}, bulkBuilder->getMultikeyPaths());
+            indexCatalogEntry->setMultikey(
+                opCtx, CollectionPtr(collection), {}, bulkBuilder->getMultikeyPaths());
         }
 
         if (opCtx->getServiceContext()->getStorageEngine()->supportsCheckpoints()) {
@@ -1005,9 +1016,9 @@ Status MultiIndexBlock::commit(OperationContext* opCtx,
         }
     }
 
-    CollectionQueryInfo::get(collection).clearQueryCache(opCtx, collection);
+    CollectionQueryInfo::get(collection).clearQueryCache(opCtx, CollectionPtr(collection));
     opCtx->recoveryUnit()->onCommit(
-        [this](boost::optional<Timestamp> commitTime) { _buildIsCleanedUp = true; });
+        [this](OperationContext*, boost::optional<Timestamp>) { _buildIsCleanedUp = true; });
 
     return Status::OK();
 }

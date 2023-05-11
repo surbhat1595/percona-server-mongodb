@@ -41,7 +41,6 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/ops/write_ops_parsers.h"
-#include "mongo/db/pipeline/document_source_add_fields.h"
 #include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
 #include "mongo/db/pipeline/document_source_merge.h"
@@ -118,7 +117,7 @@ OpMsg runCommandInLocalTxn(OperationContext* opCtx,
 BSONObj executeConfigRequest(OperationContext* opCtx,
                              const NamespaceString& nss,
                              const BatchedCommandRequest& request) {
-    invariant(nss.db() == NamespaceString::kConfigDb);
+    invariant(nss.dbName() == DatabaseName::kConfig);
     DBDirectClient client(opCtx);
     BSONObj result;
     client.runCommand(nss.dbName(), request.toBSON(), result);
@@ -174,15 +173,14 @@ BSONObj commitOrAbortTransaction(OperationContext* opCtx,
 
     const auto cmdObj = bob.obj();
 
-    const auto replyOpMsg =
-        OpMsg::parseOwned(newOpCtx->getServiceContext()
-                              ->getServiceEntryPoint()
-                              ->handleRequest(newOpCtx.get(),
-                                              OpMsgRequest::fromDBAndBody(
-                                                  NamespaceString::kAdminDb.toString(), cmdObj)
-                                                  .serialize())
-                              .get()
-                              .response);
+    const auto replyOpMsg = OpMsg::parseOwned(
+        newOpCtx->getServiceContext()
+            ->getServiceEntryPoint()
+            ->handleRequest(
+                newOpCtx.get(),
+                OpMsgRequest::fromDBAndBody(DatabaseName::kAdmin.toString(), cmdObj).serialize())
+            .get()
+            .response);
     return replyOpMsg.body;
 }
 
@@ -353,54 +351,39 @@ AggregateCommandRequest createInitPlacementHistoryAggregationRequest(
     OperationContext* opCtx, const Timestamp& initTimestamp) {
     // Compose the pipeline to generate a NamespacePlacementType for every collection and database
     // in the cluster.
-    // 1. Join config.collections and config.chunks using the collection UUID. This will create
-    // an array of docs called chunk_docs that contains all the chunk entries for the
-    // collection. As a part of the join, run a pipeline on every chunk_docs that pushes the
-    // chunk.shard into a a set. This will create a field called shardsSet that contains a
-    // unique set of shards for the collection.
+    // 1. Join config.collections and config.chunks using the collection UUID and group the result
+    // by shards. This will return a set of shards in which each collection is on. The lookup makes
+    // use of the index uuid_1_shard_1_min_1 which will make the query time proportional to the
+    // number of collections in the cluster and almost negligible in terms of number of chunks
     // 2. Translate the output to a config.placementHistory entry format.
-    // 3. Concatenate the result of the join with config.databases and convert the output to a
-    // config.placementHistory entry format.
-    // 4. Insert the result into config.placementHistory.
+    // 3. Add the databases placement info to the result.
+    // 4. merge the result into config.placementHistory.
     /* config.collections.aggregate([
+    [
     {
-        "$lookup": {
-        "from": "chunks",
-        "localField": "uuid",
-        "foreignField": "uuid",
-        "as": "chunk_docs",
-        "pipeline":
-        [
-            {
-                "$project":
-                {
-                    "shard": 1
-                }
-            },
-            {
-                "$group":
-                {
-                    _id: "",
-                    shardsSet:
-                    {
-                        $addToSet: "$shard"
-                    }
-                }
-            }
-        ]
-        }
-    },
-    {
-        $unwind: {
-            path: "$chunk_docs"
-        }
-    },
-    {
-        "$project":
+        $lookup:
         {
-            "_id": 0,
-            "nss": "$_id",
-            "shards": "$chunk_docs.shardsSet"
+            from: "chunks",
+            localField: "uuid",
+            foreignField: "uuid",
+            as: "lookupResult",
+            pipeline: [
+            {
+                $group: {
+                _id: "$shard",
+                },
+            },
+            ],
+        }
+    },
+    {
+        $project: {
+        _id: 0,
+        nss: "$_id",
+        shards: "$lookupResult._id",
+        uuid: 1,
+        timestamp: <initTimestamp>,
+        },
         }
     },
     {
@@ -415,18 +398,13 @@ AggregateCommandRequest createInitPlacementHistoryAggregationRequest(
                         "_id": 0,
                         "nss": "$_id",
                         "shards": [ "$primary"]
+                        "timestamp": <initTimestamp>,
                     }
                 }
             ]
          }
 
     },
-    {
-        "$set"
-        {
-            "timestamp": "<configTimeOfSnapshotRead>"
-        }
-    }
     //insertion to placementHistory
     {
         "$merge":
@@ -442,10 +420,8 @@ AggregateCommandRequest createInitPlacementHistoryAggregationRequest(
     using Lookup = DocumentSourceLookUp;
     using UnionWith = DocumentSourceUnionWith;
     using Merge = DocumentSourceMerge;
-    using Set = DocumentSourceAddFields;
     using Group = DocumentSourceGroup;
     using Project = DocumentSourceProject;
-    using Unwind = DocumentSourceUnwind;
 
     const auto kNss = NamespacePlacementType::kNssFieldName.toString();
     const auto kUuid = NamespacePlacementType::kUuidFieldName.toString();
@@ -462,45 +438,29 @@ AggregateCommandRequest createInitPlacementHistoryAggregationRequest(
 
     // Stage 1. Join config.collections and config.chunks using the collection UUID and create a set
     // of shards
-    pipeline.addStage<Lookup>(
-        BSON("from" << ChunkType::ConfigNS.coll() << "localField" << CollectionType::kUuidFieldName
-                    << "foreignField" << ChunkType::collectionUUID.name() << "as"
-                    << "chunk_docs"
-                    << "pipeline"
-                    << PipelineBuilder(pipeline.getExpCtx())
-                           // Stage 1. Project the shard field
-                           .addStage<Project>(BSON(ChunkType::shard << 1))
-                           // Stage 2. Group by shard and push the document's shard field
-                           // into an array called "shards"
-                           .addStage<Group>(BSON("_id"
-                                                 << ""
-                                                 << "shardSet"
-                                                 << BSON("$addToSet"
-                                                         << "$" + ChunkType::shard.name())))
-                           .toBson()));
+    pipeline.addStage<Lookup>(BSON("from" << ChunkType::ConfigNS.coll() << "localField"
+                                          << CollectionType::kUuidFieldName << "foreignField"
+                                          << ChunkType::collectionUUID.name() << "as"
+                                          << "lookupResult"
+                                          << "pipeline"
+                                          << PipelineBuilder(pipeline.getExpCtx())
+                                                 .addStage<Group>(BSON("_id"
+                                                                       << "$shard"))
+                                                 .toBson()));
 
-    // Stage 2. Unwind the chunk_docs array (which after the pipeline is of size 1)
-    pipeline.addStage<Unwind>(BSON("path"
-                                   << "$chunk_docs"));
+    // Stage 2. Translate the output to a config.placementHistory entry format
+    pipeline.addStage<Project>(BSON("_id" << 0 << kNss << "$_id" << kShards << "$lookupResult._id"
+                                          << kUuid << 1 << kTimestamp << initTimestamp));
 
-    // Stage 3. Adapt the output to the config.placementHistory schema
-    pipeline.addStage<Project>(BSON("_id" << 0 << kShards << "$chunk_docs.shardSet" << kNss
-                                          << "$_id" << kUuid << "$" + kUuidChunks));
-
-    // Stage 4. Union with the databases collection
+    // Stage 3 Add the databases to the pipeline
     pipeline.addStage<UnionWith>(
-        BSON("coll" << NamespaceString::kConfigDatabasesNamespace.coll() <<
-             // unionWith pipeline to convert the output to a placementHistory entry format
-             "pipeline"
+        BSON("coll" << NamespaceString::kConfigDatabasesNamespace.coll() << "pipeline"
                     << PipelineBuilder(pipeline.getExpCtx())
-                           .addStage<DocumentSourceProject>(BSON(
-                               "_id" << 0 << kNss << "$_id" << kShards << BSON_ARRAY("$primary")))
+                           .addStage<Project>(BSON("_id" << 0 << kNss << "$_id" << kShards
+                                                         << BSON_ARRAY("$primary") << kUuid << 1
+                                                         << kTimestamp << initTimestamp))
                            .toBson()));
-
-    // Stage 5. Set the timestamp
-    pipeline.addStage<Set>(BSON(kTimestamp << initTimestamp));
-
-    // Stage 6. Merge into the placementHistory collection
+    // Stage 4. Merge into the placementHistory collection
     pipeline.addStage<Merge>(BSON("into"
                                   << NamespaceString::kConfigsvrPlacementHistoryNamespace.coll()
                                   << "on" << BSON_ARRAY(kNss << kTimestamp) << "whenMatched"
@@ -889,7 +849,7 @@ BSONObj ShardingCatalogManager::writeToConfigDocumentInTxn(OperationContext* opC
                                                            const NamespaceString& nss,
                                                            const BatchedCommandRequest& request,
                                                            TxnNumber txnNumber) {
-    invariant(nss.db() == NamespaceString::kConfigDb);
+    invariant(nss.dbName() == DatabaseName::kConfig);
     auto response = runCommandInLocalTxn(
                         opCtx, nss.db(), false /* startTransaction */, txnNumber, request.toBSON())
                         .body;
@@ -903,7 +863,7 @@ void ShardingCatalogManager::insertConfigDocuments(OperationContext* opCtx,
                                                    const NamespaceString& nss,
                                                    std::vector<BSONObj> docs,
                                                    boost::optional<TxnNumber> txnNumber) {
-    invariant(nss.db() == NamespaceString::kConfigDb);
+    invariant(nss.dbName() == DatabaseName::kConfig);
 
     // if the operation is in a transaction then the overhead for each document is different.
     const auto documentOverhead = txnNumber
@@ -934,7 +894,7 @@ boost::optional<BSONObj> ShardingCatalogManager::findOneConfigDocumentInTxn(
     TxnNumber txnNumber,
     const BSONObj& query) {
 
-    invariant(nss.db() == NamespaceString::kConfigDb);
+    invariant(nss.dbName() == DatabaseName::kConfig);
 
     FindCommandRequest findCommand(nss);
     findCommand.setFilter(query);
@@ -955,6 +915,18 @@ boost::optional<BSONObj> ShardingCatalogManager::findOneConfigDocumentInTxn(
     }
 
     return result.front().getOwned();
+}
+
+BSONObj ShardingCatalogManager::findOneConfigDocument(OperationContext* opCtx,
+                                                      const NamespaceString& nss,
+                                                      const BSONObj& query) {
+    invariant(nss.dbName().db() == DatabaseName::kConfig.db());
+
+    FindCommandRequest findCommand(nss);
+    findCommand.setFilter(query);
+
+    DBDirectClient client(opCtx);
+    return client.findOne(findCommand);
 }
 
 void ShardingCatalogManager::withTransactionAPI(OperationContext* opCtx,
@@ -1121,7 +1093,9 @@ void ShardingCatalogManager::initializePlacementHistory(OperationContext* opCtx)
 
     // no-op callback
     auto callback = [](const std::vector<BSONObj>& batch,
-                       const boost::optional<BSONObj>& postBatchResumeToken) { return true; };
+                       const boost::optional<BSONObj>& postBatchResumeToken) {
+        return true;
+    };
 
     const Status status = _localConfigShard->runAggregation(opCtx, aggRequest, callback);
     uassertStatusOK(status);

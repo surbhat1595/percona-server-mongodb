@@ -48,7 +48,7 @@ namespace ValidateTests {
 namespace {
 
 const auto kIndexVersion = IndexDescriptor::IndexVersion::kV2;
-const bool kTurnOnExtraLoggingForTest = true;
+const bool kLogDiagnostics = true;
 
 std::size_t omitTransientWarningsFromCount(const ValidateResults& results) {
     return std::count_if(
@@ -118,7 +118,8 @@ public:
 
     // Helper to refetch the Collection from the catalog in order to see any changes made to it
     CollectionPtr coll() const {
-        return CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, _nss);
+        return CollectionPtr(
+            CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, _nss));
     }
 
 protected:
@@ -150,7 +151,7 @@ protected:
 
         forceCheckpoint(_background);
         ASSERT_OK(CollectionValidation::validate(
-            &_opCtx, _nss, mode, repairMode, &results, &output, kTurnOnExtraLoggingForTest));
+            &_opCtx, _nss, mode, repairMode, &results, &output, kLogDiagnostics));
 
         //  Check if errors are reported if and only if valid is set to false.
         ASSERT_EQ(results.valid, results.errors.empty());
@@ -1267,7 +1268,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1387,7 +1388,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1478,7 +1479,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1593,7 +1594,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1622,7 +1623,7 @@ public:
                                                CollectionValidation::RepairMode::kFixErrors,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1658,7 +1659,7 @@ public:
                                                CollectionValidation::RepairMode::kFixErrors,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1777,7 +1778,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1808,7 +1809,7 @@ public:
                                                CollectionValidation::RepairMode::kFixErrors,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1840,7 +1841,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1930,7 +1931,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1961,7 +1962,7 @@ public:
                                                CollectionValidation::RepairMode::kFixErrors,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1992,7 +1993,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2144,7 +2145,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2174,7 +2175,7 @@ public:
                                                CollectionValidation::RepairMode::kFixErrors,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2196,7 +2197,7 @@ public:
             // Verify the older duplicate document appears in the lost-and-found as expected.
             {
                 const NamespaceString lostAndFoundNss = NamespaceString(
-                    NamespaceString::kLocalDb, "lost_and_found." + coll()->uuid().toString());
+                    DatabaseName::kLocal, "lost_and_found." + coll()->uuid().toString());
                 AutoGetCollectionForRead autoColl(&_opCtx, lostAndFoundNss);
                 Snapshotted<BSONObj> result;
                 ASSERT(autoColl.getCollection()->findDoc(&_opCtx, RecordId(1), &result));
@@ -2227,7 +2228,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2399,7 +2400,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2432,7 +2433,7 @@ public:
                                                CollectionValidation::RepairMode::kFixErrors,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2456,7 +2457,7 @@ public:
             // Verify the older document appears in the lost-and-found as expected.
             {
                 const NamespaceString lostAndFoundNss = NamespaceString(
-                    NamespaceString::kLocalDb, "lost_and_found." + coll()->uuid().toString());
+                    DatabaseName::kLocal, "lost_and_found." + coll()->uuid().toString());
                 AutoGetCollectionForRead autoColl(&_opCtx, lostAndFoundNss);
                 Snapshotted<BSONObj> result;
                 ASSERT(autoColl.getCollection()->findDoc(&_opCtx, RecordId(1), &result));
@@ -2486,7 +2487,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2747,7 +2748,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2777,7 +2778,7 @@ public:
                                                CollectionValidation::RepairMode::kFixErrors,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2801,7 +2802,7 @@ public:
             // Verify the older duplicate document appears in the lost-and-found as expected.
             {
                 const NamespaceString lostAndFoundNss = NamespaceString(
-                    NamespaceString::kLocalDb, "lost_and_found." + coll()->uuid().toString());
+                    DatabaseName::kLocal, "lost_and_found." + coll()->uuid().toString());
                 AutoGetCollectionForRead autoColl(&_opCtx, lostAndFoundNss);
                 Snapshotted<BSONObj> result;
                 ASSERT(autoColl.getCollection()->findDoc(&_opCtx, RecordId(1), &result));
@@ -2831,7 +2832,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2957,7 +2958,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2988,7 +2989,7 @@ public:
                                                CollectionValidation::RepairMode::kFixErrors,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3020,7 +3021,7 @@ public:
                                                CollectionValidation::RepairMode::kFixErrors,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3434,7 +3435,7 @@ public:
                                                      CollectionValidation::RepairMode::kNone,
                                                      &results,
                                                      &output,
-                                                     kTurnOnExtraLoggingForTest));
+                                                     kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3502,7 +3503,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3533,7 +3534,7 @@ public:
                                                CollectionValidation::RepairMode::kFixErrors,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3568,7 +3569,7 @@ public:
                                                CollectionValidation::RepairMode::kFixErrors,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3599,7 +3600,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3766,7 +3767,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3795,7 +3796,7 @@ public:
                                                CollectionValidation::RepairMode::kFixErrors,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3825,7 +3826,7 @@ public:
                                                CollectionValidation::RepairMode::kFixErrors,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3973,7 +3974,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -4002,7 +4003,7 @@ public:
                                                CollectionValidation::RepairMode::kFixErrors,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -4031,7 +4032,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -4139,7 +4140,7 @@ public:
                                                CollectionValidation::RepairMode::kAdjustMultikey,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -4172,7 +4173,7 @@ public:
                                                CollectionValidation::RepairMode::kAdjustMultikey,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -4245,7 +4246,7 @@ public:
                                                      CollectionValidation::RepairMode::kNone,
                                                      &results,
                                                      &output,
-                                                     kTurnOnExtraLoggingForTest));
+                                                     kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -4359,7 +4360,7 @@ public:
                                                      CollectionValidation::RepairMode::kNone,
                                                      &results,
                                                      &output,
-                                                     kTurnOnExtraLoggingForTest));
+                                                     kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -4470,7 +4471,7 @@ public:
                                                      CollectionValidation::RepairMode::kNone,
                                                      &results,
                                                      &output,
-                                                     kTurnOnExtraLoggingForTest));
+                                                     kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -4510,7 +4511,7 @@ public:
                                                      CollectionValidation::RepairMode::kFixErrors,
                                                      &results,
                                                      &output,
-                                                     kTurnOnExtraLoggingForTest));
+                                                     kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -4637,7 +4638,7 @@ public:
                                                CollectionValidation::RepairMode::kNone,
                                                &results,
                                                &output,
-                                               kTurnOnExtraLoggingForTest));
+                                               kLogDiagnostics));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);

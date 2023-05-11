@@ -1043,13 +1043,15 @@ struct GroupStats : public SpecificStats {
     // The size of the file spilled to disk. Note that this is not the same as the number of bytes
     // spilled to disk, as any data spilled to disk will be compressed before being written to a
     // file.
-    uint64_t spillFileSizeBytes = 0u;
+    uint64_t spilledDataStorageSize = 0u;
 
     // The number of bytes evicted from memory and spilled to disk.
     uint64_t numBytesSpilledEstimate = 0u;
 
     // The number of times that we spilled data to disk while grouping the data.
     uint64_t spills = 0u;
+
+    uint64_t spilledRecords = 0u;
 };
 
 struct DocumentSourceCursorStats : public SpecificStats {
@@ -1157,6 +1159,26 @@ struct UnpackTimeseriesBucketStats final : public SpecificStats {
     }
 
     size_t nBucketsUnpacked = 0u;
+};
+
+struct TimeseriesWriteStats final : public SpecificStats {
+    std::unique_ptr<SpecificStats> clone() const final {
+        return std::make_unique<TimeseriesWriteStats>(*this);
+    }
+
+    uint64_t estimateObjectSizeInBytes() const {
+        return sizeof(*this);
+    }
+
+    void acceptVisitor(PlanStatsConstVisitor* visitor) const final {
+        visitor->visit(this);
+    }
+
+    void acceptVisitor(PlanStatsMutableVisitor* visitor) final {
+        visitor->visit(this);
+    }
+
+    size_t measurementsDeleted = 0u;
 };
 
 struct SampleFromTimeseriesBucketStats final : public SpecificStats {

@@ -34,6 +34,7 @@ global:
 imports:
     - "mongo/db/repl/replication_types.idl"
     - "mongo/db/basic_types.idl"
+    - "mongo/db/s/move_primary/move_primary_recipient_cmds.idl"
 
 enums:
     MovePrimaryDonorState:
@@ -55,12 +56,13 @@ enums:
             kUninitialized: 0
             kStarted: 1
             kConsistent: 2
-            kAborted: 3
-            kDone: 4
+            kBlocking: 3
+            kAborted: 4
+            kDone: 5
 
 structs:
-    MovePrimaryDonorDocument:
-        description: "Represents an in-progress move primary operation on the donor."
+    MovePrimaryDonorMetadata:
+        description: "Immutable metadata fields for a movePrimary donor."
         strict: false
         fields:
             _id:
@@ -74,6 +76,13 @@ structs:
             toShard:
                 type: string
                 description: "The name of the recipient shard."
+    
+    MovePrimaryDonorMutableFields:
+        description: >-
+            Contains fields for a move primary donor which can be updated throughout the lifetime
+            of the operation.
+        strict: false
+        fields:
             state:
                 type: MovePrimaryDonorState
                 description: "The state of an in-progress movePrimary operation on the donor."
@@ -89,9 +98,23 @@ structs:
                 description: "The error that caused the migration to abort."
                 optional: true
 
+    MovePrimaryDonorDocument:
+        description: "Represents an in-progress move primary operation on the donor."
+        strict: false
+        inline_chained_structs: true
+        chained_structs:
+            MovePrimaryDonorMetadata: metadata
+        fields:
+            mutableFields:
+                type: MovePrimaryDonorMutableFields
+                default: true
+
     MovePrimaryRecipientDocument:
         description: "Represents an in-progress movePrimary operation on the recipient."
         strict: false
+        inline_chained_structs: true
+        chained_structs:
+            MovePrimaryRecipientMetadata: MovePrimaryRecipientMetadata
         fields:
             _id:
                 type: uuid
@@ -99,13 +122,6 @@ structs:
                     Unique identifier for the movePrimary operation. 
                     This is sent as migrationId to the recipient by the donor.
                 cpp_name: id
-            databaseName:
-                type: string
-                description: >-
-                    The name of the database being moved as part of movePrimary operation.
-            fromShard:
-                type: string
-                description: "The name of the donor shard."
             state:
                 type: MovePrimaryRecipientState
                 description: "The state of the recipient during an in progress movePrimary operation."

@@ -71,6 +71,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/audit',
+        '$BUILD_DIR/mongo/db/connection_health_metrics_parameter',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/db/stats/counters',
     ],
@@ -457,6 +458,7 @@ env.Library(
         'user',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/connection_health_metrics_parameter',
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/service_context',
         'cluster_auth_mode',

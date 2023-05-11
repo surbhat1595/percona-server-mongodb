@@ -66,8 +66,8 @@ protected:
     }
 
     CollectionPtr lookupCollectionFromCatalog() {
-        return CollectionCatalog::get(operationContext())
-            ->lookupCollectionByNamespace(operationContext(), kNss);
+        return CollectionPtr(CollectionCatalog::get(operationContext())
+                                 ->lookupCollectionByNamespace(operationContext(), kNss));
     }
 
     const Collection* lookupCollectionFromCatalogForRead() {
@@ -82,16 +82,17 @@ protected:
             auto opCtx = client->makeOperationContext();
             ASSERT_EQ(expected,
                       CollectionCatalog::get(opCtx.get())
-                          ->lookupCollectionByNamespace(opCtx.get(), kNss)
-                          .get());
+                          ->lookupCollectionByNamespace(opCtx.get(), kNss));
         });
         t.join();
     }
 
-    const NamespaceString kNss{"testdb", "testcol"};
+    const NamespaceString kNss =
+        NamespaceString::createNamespaceString_forTest("testdb", "testcol");
 };
 
 TEST_F(CollectionWriterTest, Commit) {
+    AutoGetCollection lock(operationContext(), kNss, MODE_X);
     CollectionWriter writer(operationContext(), kNss);
 
     const Collection* before = lookupCollectionFromCatalog().get();
@@ -102,7 +103,6 @@ TEST_F(CollectionWriterTest, Commit) {
     ASSERT_EQ(lookupCollectionFromCatalog().get(), lookupCollectionFromCatalogForRead());
 
     {
-        AutoGetCollection lock(operationContext(), kNss, MODE_X);
         WriteUnitOfWork wuow(operationContext());
         auto writable = writer.getWritableCollection(operationContext());
 
@@ -129,7 +129,6 @@ TEST_F(CollectionWriterTest, Commit) {
     before = lookupCollectionFromCatalog().get();
 
     {
-        AutoGetCollection lock(operationContext(), kNss, MODE_X);
         WriteUnitOfWork wuow(operationContext());
         auto writable = writer.getWritableCollection(operationContext());
 
@@ -146,6 +145,7 @@ TEST_F(CollectionWriterTest, Commit) {
 }
 
 TEST_F(CollectionWriterTest, Rollback) {
+    AutoGetCollection lock(operationContext(), kNss, MODE_X);
     CollectionWriter writer(operationContext(), kNss);
 
     const Collection* before = lookupCollectionFromCatalog().get();
@@ -154,7 +154,6 @@ TEST_F(CollectionWriterTest, Rollback) {
     ASSERT_EQ(lookupCollectionFromCatalog().get(), lookupCollectionFromCatalogForRead());
 
     {
-        AutoGetCollection lock(operationContext(), kNss, MODE_X);
         WriteUnitOfWork wuow(operationContext());
         auto writable = writer.getWritableCollection(operationContext());
 
@@ -256,11 +255,12 @@ public:
 
         CollectionCatalog::write(getServiceContext(), [&](CollectionCatalog& catalog) {
             for (size_t i = 0; i < NumCollections; ++i) {
-                catalog.registerCollection(operationContext(),
-                                           UUID::gen(),
-                                           std::make_shared<CollectionMock>(
-                                               NamespaceString("many", fmt::format("coll{}", i))),
-                                           /*ts=*/boost::none);
+                catalog.registerCollection(
+                    operationContext(),
+                    UUID::gen(),
+                    std::make_shared<CollectionMock>(NamespaceString::createNamespaceString_forTest(
+                        "many", fmt::format("coll{}", i))),
+                    /*ts=*/boost::none);
             }
         });
     }

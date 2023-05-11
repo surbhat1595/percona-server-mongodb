@@ -120,15 +120,16 @@ std::set<std::string> getDatabasesToRestore(OperationContext* opCtx) {
 const stdx::unordered_map<NamespaceString,
                           std::pair<boost::optional<std::string>, boost::optional<std::string>>>
     kCollectionEntries = {
-        {NamespaceString("config.chunks"), std::make_pair(boost::none, std::string("uuid"))},
-        {NamespaceString("config.collections"),
+        {NamespaceString::kConfigsvrChunksNamespace,
+         std::make_pair(boost::none, std::string("uuid"))},
+        {NamespaceString::kConfigsvrCollectionsNamespace,
          std::make_pair(std::string("_id"), std::string("uuid"))},
-        {NamespaceString("config.migrationCoordinators"),
+        {NamespaceString::kMigrationCoordinatorsNamespace,
          std::make_pair(std::string("nss"), std::string("collectionUuid"))},
-        {NamespaceString("config.tags"), std::make_pair(std::string("ns"), boost::none)},
-        {NamespaceString("config.rangeDeletions"),
+        {NamespaceString::kConfigsvrTagsNamespace, std::make_pair(std::string("ns"), boost::none)},
+        {NamespaceString::kRangeDeletionNamespace,
          std::make_pair(std::string("nss"), std::string("collectionUuid"))},
-        {NamespaceString("config.system.sharding_ddl_coordinators"),
+        {NamespaceString::kShardingDDLCoordinatorsNamespace,
          std::make_pair(std::string("_id.namespace"), boost::none)}};
 
 class ConfigSvrRunRestoreCommand : public BasicCommand {
@@ -178,8 +179,8 @@ public:
         {
             // The "local.system.collections_to_restore" collection needs to exist prior to running
             // this command.
-            CollectionPtr restoreColl = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
-                opCtx, NamespaceString::kConfigsvrRestoreNamespace);
+            CollectionPtr restoreColl(CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
+                opCtx, NamespaceString::kConfigsvrRestoreNamespace));
             uassert(ErrorCodes::NamespaceNotFound,
                     str::stream() << "Collection " << NamespaceString::kConfigsvrRestoreNamespace
                                   << " is missing",
@@ -193,8 +194,8 @@ public:
 
 
             LOGV2(6261300, "1st Phase - Restoring collection entries", logAttrs(nss));
-            CollectionPtr coll =
-                CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
+            CollectionPtr coll(
+                CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss));
             if (!coll) {
                 LOGV2(6261301, "Collection not found, skipping", logAttrs(nss));
                 continue;
@@ -269,14 +270,14 @@ public:
 
         {
             const std::vector<NamespaceString> databasesEntries = {
-                NamespaceString("config.databases")};
+                NamespaceString::kConfigDatabasesNamespace};
 
             // Remove database entries from the config collections if no collection for the given
             // database was restored.
             for (const NamespaceString& nss : databasesEntries) {
                 LOGV2(6261303, "2nd Phase - Restoring database entries", logAttrs(nss));
-                CollectionPtr coll =
-                    CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
+                CollectionPtr coll(
+                    CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss));
                 if (!coll) {
                     LOGV2(6261304, "Collection not found, skipping", logAttrs(nss));
                     return true;

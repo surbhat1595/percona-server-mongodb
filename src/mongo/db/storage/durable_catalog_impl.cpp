@@ -294,6 +294,30 @@ boost::optional<DurableCatalogEntry> DurableCatalogImpl::scanForCatalogEntryByNs
     return boost::none;
 }
 
+boost::optional<DurableCatalogEntry> DurableCatalogImpl::scanForCatalogEntryByUUID(
+    OperationContext* opCtx, const UUID& uuid) const {
+    auto cursor = _rs->getCursor(opCtx);
+    while (auto record = cursor->next()) {
+        BSONObj obj = record->data.releaseToBson();
+
+        if (isFeatureDocument(obj)) {
+            // Skip over the version document because it doesn't correspond to a collection.
+            continue;
+        }
+
+        std::shared_ptr<BSONCollectionCatalogEntry::MetaData> md = _parseMetaData(obj["md"]);
+        if (md->options.uuid == uuid) {
+            BSONElement idxIdent = obj["idxIdent"];
+            return DurableCatalogEntry{record->id,
+                                       obj["ident"].String(),
+                                       idxIdent.eoo() ? BSONObj() : idxIdent.Obj().getOwned(),
+                                       md};
+        }
+    }
+
+    return boost::none;
+}
+
 DurableCatalog::EntryIdentifier DurableCatalogImpl::getEntry(const RecordId& catalogId) const {
     stdx::lock_guard<Latch> lk(_catalogIdToEntryMapLock);
     auto it = _catalogIdToEntryMap.find(catalogId);
@@ -507,7 +531,7 @@ Status DurableCatalogImpl::_replaceEntry(OperationContext* opCtx,
 
     NamespaceString fromName = it->second.nss;
     it->second.nss = toNss;
-    opCtx->recoveryUnit()->onRollback([this, catalogId, fromName]() {
+    opCtx->recoveryUnit()->onRollback([this, catalogId, fromName](OperationContext*) {
         stdx::lock_guard<Latch> lk(_catalogIdToEntryMapLock);
         const auto it = _catalogIdToEntryMap.find(catalogId);
         invariant(it != _catalogIdToEntryMap.end());
@@ -524,7 +548,7 @@ Status DurableCatalogImpl::_removeEntry(OperationContext* opCtx, const RecordId&
         return Status(ErrorCodes::NamespaceNotFound, "collection not found");
     }
 
-    opCtx->recoveryUnit()->onRollback([this, catalogId, entry = it->second]() {
+    opCtx->recoveryUnit()->onRollback([this, catalogId, entry = it->second](OperationContext*) {
         stdx::lock_guard<Latch> lk(_catalogIdToEntryMapLock);
         _catalogIdToEntryMap[catalogId] = entry;
     });
@@ -663,7 +687,7 @@ StatusWith<std::pair<RecordId, std::unique_ptr<RecordStore>>> DurableCatalogImpl
         return status;
 
     auto ru = opCtx->recoveryUnit();
-    opCtx->recoveryUnit()->onRollback([ru, catalog = this, ident = entry.ident]() {
+    opCtx->recoveryUnit()->onRollback([ru, catalog = this, ident = entry.ident](OperationContext*) {
         // Intentionally ignoring failure
         catalog->_engine->getEngine()->dropIdent(ru, ident).ignore();
     });
@@ -686,11 +710,12 @@ Status DurableCatalogImpl::createIndex(OperationContext* opCtx,
         ? kvEngine->createColumnStore(opCtx, nss, collOptions, ident, spec)
         : kvEngine->createSortedDataInterface(opCtx, nss, collOptions, ident, spec);
     if (status.isOK()) {
-        opCtx->recoveryUnit()->onRollback([this, ident, recoveryUnit = opCtx->recoveryUnit()]() {
-            // Intentionally ignoring failure.
-            auto kvEngine = _engine->getEngine();
-            kvEngine->dropIdent(recoveryUnit, ident).ignore();
-        });
+        opCtx->recoveryUnit()->onRollback(
+            [this, ident, recoveryUnit = opCtx->recoveryUnit()](OperationContext*) {
+                // Intentionally ignoring failure.
+                auto kvEngine = _engine->getEngine();
+                kvEngine->dropIdent(recoveryUnit, ident).ignore();
+            });
     }
     return status;
 }
@@ -770,7 +795,7 @@ StatusWith<DurableCatalog::ImportResult> DurableCatalogImpl::importCollection(
     EntryIdentifier& entry = swEntry.getValue();
 
     opCtx->recoveryUnit()->onRollback(
-        [opCtx, catalog = this, ident = entry.ident, indexIdents = indexIdents]() {
+        [catalog = this, ident = entry.ident, indexIdents = indexIdents](OperationContext* opCtx) {
             catalog->_engine->getEngine()->dropIdentForImport(opCtx, ident);
             for (const auto& indexIdent : indexIdents) {
                 catalog->_engine->getEngine()->dropIdentForImport(opCtx, indexIdent);

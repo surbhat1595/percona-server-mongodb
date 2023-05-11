@@ -152,14 +152,15 @@ std::vector<AsyncRequestsSender::Request> buildVersionedRequestsForTargetedShard
             return {};
         }
 
-        // Attach shardVersion "UNSHARDED", unless targeting the config server.
-        auto cmdObjWithVersions = (primaryShardId != ShardId::kConfigServerId)
+        // Attach shardVersion "UNSHARDED", unless targeting a fixed db collection.
+        auto cmdObjWithVersions = !cm.dbVersion().isFixed()
             ? appendShardVersion(cmdObj, ShardVersion::UNSHARDED())
             : cmdObj;
         cmdObjWithVersions = appendDbVersionIfPresent(cmdObjWithVersions, cm.dbVersion());
 
         if (eligibleForSampling) {
-            if (auto sampleId = analyze_shard_key::tryGenerateSampleId(opCtx, nss)) {
+            if (auto sampleId = analyze_shard_key::tryGenerateSampleId(
+                    opCtx, nss, cmdObj.firstElementFieldName())) {
                 cmdObjWithVersions =
                     analyze_shard_key::appendSampleId(cmdObjWithVersions, *sampleId);
             }
@@ -189,7 +190,8 @@ std::vector<AsyncRequestsSender::Request> buildVersionedRequestsForTargetedShard
                         nullptr /* targetMinKeyToMaxKey */);
 
     const auto targetedSampleId = eligibleForSampling
-        ? analyze_shard_key::tryGenerateTargetedSampleId(opCtx, nss, shardIds)
+        ? analyze_shard_key::tryGenerateTargetedSampleId(
+              opCtx, nss, cmdObj.firstElementFieldNameStringData(), shardIds)
         : boost::none;
 
     for (const ShardId& shardId : shardIds) {
@@ -459,8 +461,8 @@ AsyncRequestsSender::Response executeCommandAgainstDatabasePrimary(
     const BSONObj& cmdObj,
     const ReadPreferenceSetting& readPref,
     Shard::RetryPolicy retryPolicy) {
-    // Attach shardVersion "UNSHARDED", unless targeting the config server.
-    const auto cmdObjWithShardVersion = (dbInfo->getPrimary() != ShardId::kConfigServerId)
+    // Attach shardVersion "UNSHARDED", unless targeting a fixed db collection.
+    const auto cmdObjWithShardVersion = !dbInfo->getVersion().isFixed()
         ? appendShardVersion(cmdObj, ShardVersion::UNSHARDED())
         : cmdObj;
 
@@ -735,7 +737,7 @@ StatusWith<Shard::QueryResponse> loadIndexesFromAuthoritativeShard(OperationCont
         } else {
             // For an unsharded collection, the primary shard will have correct indexes. We attach
             // unsharded shard version to detect if the collection has become sharded.
-            const auto cmdObjWithShardVersion = (cm.dbPrimary() != ShardId::kConfigServerId)
+            const auto cmdObjWithShardVersion = !cm.dbVersion().isFixed()
                 ? appendShardVersion(cmdNoVersion, ShardVersion::UNSHARDED())
                 : cmdNoVersion;
             return {

@@ -66,56 +66,6 @@ inline size_t computeHashSeq(const Args&... seq) {
 }
 
 /**
- * Returns a vector all paths nested under conjunctions (PathComposeM) in the given path.
- * For example, PathComposeM(PathComposeM(Foo, Bar), Baz) returns [Foo, Bar, Baz].
- * If the given path is not a conjunction, returns a vector with the given path.
- */
-std::vector<ABT::reference_type> collectComposed(const ABT& n);
-
-/**
- * Like collectComposed() but bounded by a maximum number of composed paths.
- * If the given path has more PathComposeM;s than specified by maxDepth, then return a vector
- * with the given path. Otherwise, returns the result of collectComposed().
- *
- * This is useful for preventing the optimizer from unintentionally creating a very deep tree which
- * causes stack-overflow on a recursive traversal.
- */
-std::vector<ABT::reference_type> collectComposedBounded(const ABT& n, size_t maxDepth);
-
-/**
- * Returns true if the path represented by 'node' is of the form PathGet "field" PathId
- */
-bool isSimplePath(const ABT& node);
-
-template <class Element = PathComposeM>
-inline void maybeComposePath(ABT& composition, ABT child) {
-    if (child.is<PathIdentity>()) {
-        return;
-    }
-    if (composition.is<PathIdentity>()) {
-        composition = std::move(child);
-        return;
-    }
-
-    composition = make<Element>(std::move(composition), std::move(child));
-}
-
-/**
- * Creates a balanced tree of composition elements over the input vector which it modifies in place.
- * In the end at most one element remains in the vector.
- */
-template <class Element = PathComposeM>
-inline void maybeComposePaths(ABTVector& paths) {
-    while (paths.size() > 1) {
-        const size_t half = paths.size() / 2;
-        for (size_t i = 0; i < half; i++) {
-            maybeComposePath<Element>(paths.at(i), std::move(paths.back()));
-            paths.pop_back();
-        }
-    }
-}
-
-/**
  * Used to access and manipulate the child of a unary node.
  */
 template <class NodeType>
@@ -253,42 +203,6 @@ CollationSplitResult splitCollationSpec(const boost::optional<ProjectionName>& r
                                         const ProjectionNameSet& leftProjections,
                                         const ProjectionNameSet& rightProjections);
 
-/**
- * Appends a path to another path. Performs the append at PathIdentity elements.
- */
-class PathAppender {
-public:
-    PathAppender(ABT suffix) : _suffix(std::move(suffix)) {}
-
-    void transport(ABT& n, const PathIdentity& node) {
-        n = _suffix;
-    }
-
-    template <typename T, typename... Ts>
-    void transport(ABT& /*n*/, const T& /*node*/, Ts&&...) {
-        // noop
-    }
-
-    /**
-     * Concatenate 'prefix' and 'suffix' by modifying 'prefix' in place.
-     */
-    static void appendInPlace(ABT& prefix, ABT suffix) {
-        PathAppender instance{std::move(suffix)};
-        algebra::transport<true>(prefix, instance);
-    }
-
-    /**
-     * Return the concatenation of 'prefix' and 'suffix'.
-     */
-    [[nodiscard]] static ABT append(ABT prefix, ABT suffix) {
-        appendInPlace(prefix, std::move(suffix));
-        return prefix;
-    }
-
-private:
-    ABT _suffix;
-};
-
 struct PartialSchemaReqConversion {
     PartialSchemaReqConversion(PartialSchemaRequirements reqMap);
     PartialSchemaReqConversion(ABT bound);
@@ -296,7 +210,7 @@ struct PartialSchemaReqConversion {
     // If set, contains a Constant or Variable bound of an (yet unknown) interval.
     boost::optional<ABT> _bound;
 
-    // Requirements we have built so far.
+    // Requirements we have built so far. May be trivially true.
     PartialSchemaRequirements _reqMap;
 
     // Have we added a PathComposeM.
@@ -326,26 +240,19 @@ boost::optional<PartialSchemaReqConversion> convertExprToPartialSchemaReq(
     const ABT& expr, bool isFilterContext, const PathToIntervalFn& pathToInterval);
 
 /**
- * Given a path and a MultikeynessTrie describing the path's input,
- * removes any Traverse nodes that we know will never encounter an array.
- *
- * Returns true if any changes were made to the ABT.
- */
-bool simplifyTraverseNonArray(ABT& path, const MultikeynessTrie& multikeynessTrie);
-
-/**
  * Given a set of non-multikey paths, remove redundant Traverse elements from paths in a Partial
- * Schema Requirement structure. Returns true if we have an empty result after simplification.
+ * Schema Requirement structure. Following that the intervals of any remaining non-multikey paths
+ * (following simplification) on the same key are intersected. Intervals of multikey paths are
+ * checked for subsumption and if one subsumes the other, the subsuming one is retained. Returns
+ * true if we have an empty result after simplification. Each redundant binding gets an entry in
+ * 'projectionRenames', which maps redundant name to the de-duplicated name.
  */
-bool simplifyPartialSchemaReqPaths(const ProjectionName& scanProjName,
-                                   const MultikeynessTrie& multikeynessTrie,
-                                   PartialSchemaRequirements& reqMap,
-                                   const ConstFoldFn& constFold);
-
-/**
- * Check if a path contains a Traverse element.
- */
-bool checkPathContainsTraverse(const ABT& path);
+[[nodiscard]] bool simplifyPartialSchemaReqPaths(
+    const boost::optional<ProjectionName>& scanProjName,
+    const MultikeynessTrie& multikeynessTrie,
+    PartialSchemaRequirements& reqMap,
+    ProjectionRenames& projectionRenames,
+    const ConstFoldFn& constFold);
 
 /**
  * Try to check whether the predicate 'lhs' is a subset of 'rhs'.
@@ -371,9 +278,7 @@ bool isSubsetOfPartialSchemaReq(const PartialSchemaRequirements& lhs,
  * The intersection:
  * - is a predicate that matches iff both original predicates match.
  * - has all the bindings from 'target' and 'source', but excluding
- *   bindings that would be redundant (have the same key). Each
- *   redundant binding gets an entry in 'projectionRenames', which maps
- *   the redundant name to the de-duplicated name.
+ *   bindings that would be redundant (have the same key).
  *
  * "Failure" means we are unable to represent the result as a PartialSchemaRequirements.
  * This can happen when:
@@ -381,8 +286,7 @@ bool isSubsetOfPartialSchemaReq(const PartialSchemaRequirements& lhs,
  * - 'source' reads from a projection bound by 'target'.
  */
 bool intersectPartialSchemaReq(PartialSchemaRequirements& target,
-                               const PartialSchemaRequirements& source,
-                               ProjectionRenames& projectionRenames);
+                               const PartialSchemaRequirements& source);
 
 
 /**
@@ -442,10 +346,7 @@ void lowerPartialSchemaRequirements(CEType scanGroupCE,
 
 void sortResidualRequirements(ResidualRequirementsWithCE& residualReq);
 
-void applyProjectionRenames(ProjectionRenames projectionRenames,
-                            ABT& node,
-                            const std::function<void(const ABT& node)>& visitor = [](const ABT&) {
-                            });
+void applyProjectionRenames(ProjectionRenames projectionRenames, ABT& node);
 
 void removeRedundantResidualPredicates(const ProjectionNameOrderPreservingSet& requiredProjections,
                                        ResidualRequirements& residualReqs,
@@ -511,11 +412,6 @@ PhysPlanBuilder lowerEqPrefixes(PrefixId& prefixId,
                                 const std::map<size_t, SelectivityType>& indexPredSelMap,
                                 CEType indexCE,
                                 CEType scanGroupCE);
-
-/**
- * This helper checks to see if we have a PathTraverse + PathId at the end of the path.
- */
-bool pathEndsInTraverse(const optimizer::ABT& path);
 
 bool hasProperIntervals(const PartialSchemaRequirements& reqMap);
 }  // namespace mongo::optimizer

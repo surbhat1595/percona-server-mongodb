@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <boost/optional.hpp>
 #include <iosfwd>
+#include <mutex>
 #include <string>
 
 #include "mongo/base/status_with.h"
@@ -49,6 +50,81 @@ namespace mongo {
 
 class NamespaceString {
 public:
+    /**
+     * The NamespaceString reserved constants are actually this `ConstantProxy`
+     * type, which can be `constexpr` and can be used directly in place of
+     * `NamespaceString`, except in very rare cases. To work around those, use a
+     * `static_cast<const NamespaceString&>`. The first time it's used, a
+     * `ConstantProxy` produces a memoized `const NamespaceString*` and retains
+     * it for future uses.
+     */
+    class ConstantProxy {
+    public:
+        /**
+         * `ConstantProxy` objects can be copied, so that they behave more like
+         * `NamespaceString`. All copies will point to the same `SharedState`.
+         * The `SharedState` is meant to be defined constexpr, but has mutable
+         * data members to implement the on-demand memoization of the
+         * `NamespaceString`.
+         */
+        class SharedState {
+        public:
+            constexpr SharedState(DatabaseName::ConstantProxy dbName, StringData coll)
+                : _db{dbName}, _coll{coll} {}
+
+            const NamespaceString& get() const {
+                std::call_once(_once, [this] { _nss = new NamespaceString{_db, _coll}; });
+                return *_nss;
+            }
+
+        private:
+            DatabaseName::ConstantProxy _db;
+            StringData _coll;
+            mutable std::once_flag _once;
+            mutable const NamespaceString* _nss = nullptr;
+        };
+
+        constexpr explicit ConstantProxy(const SharedState* sharedState)
+            : _sharedState{sharedState} {}
+
+        operator const NamespaceString&() const {
+            return _get();
+        }
+
+        decltype(auto) ns() const {
+            return _get().ns();
+        }
+        decltype(auto) db() const {
+            return _get().db();
+        }
+        decltype(auto) coll() const {
+            return _get().coll();
+        }
+        decltype(auto) tenantId() const {
+            return _get().tenantId();
+        }
+        decltype(auto) dbName() const {
+            return _get().dbName();
+        }
+        decltype(auto) toString() const {
+            return _get().toString();
+        }
+
+        friend std::ostream& operator<<(std::ostream& stream, const ConstantProxy& nss) {
+            return stream << nss.toString();
+        }
+        friend StringBuilder& operator<<(StringBuilder& builder, const ConstantProxy& nss) {
+            return builder << nss.toString();
+        }
+
+    private:
+        const NamespaceString& _get() const {
+            return _sharedState->get();
+        }
+
+        const SharedState* _sharedState;
+    };
+
     constexpr static size_t MaxDatabaseNameLen =
         128;  // max str len for the db name, including null char
     constexpr static size_t MaxNSCollectionLenFCV42 = 120U;
@@ -60,18 +136,6 @@ public:
     constexpr static size_t MaxNsShardedCollectionLen = 235;  // 255 - len(ChunkType::ShardNSPrefix)
 
     // Reserved system namespaces
-
-    // Namespace for the admin database
-    static constexpr StringData kAdminDb = "admin"_sd;
-
-    // Namespace for the local database
-    static constexpr StringData kLocalDb = "local"_sd;
-
-    // Namespace for the system database
-    static constexpr StringData kSystemDb = "system"_sd;
-
-    // Namespace for the sharding config database
-    static constexpr StringData kConfigDb = "config"_sd;
 
     // The $external database used by X.509, LDAP, etc...
     static constexpr StringData kExternalDb = "$external"_sd;
@@ -124,173 +188,19 @@ public:
     static constexpr StringData kAnalyzeShardKeySplitPointsCollectionPrefix =
         "analyzeShardKey.splitPoints."_sd;
 
-    // Namespace for storing configuration data, which needs to be replicated if the server is
-    // running as a replica set. Documents in this collection should represent some configuration
-    // state of the server, which needs to be recovered/consulted at startup. Each document in this
-    // namespace should have its _id set to some string, which meaningfully describes what it
-    // represents. For example, 'shardIdentity' and 'featureCompatibilityVersion'.
-    static const NamespaceString kServerConfigurationNamespace;
 
-    // Namespace for storing the logical sessions information
-    static const NamespaceString kLogicalSessionsNamespace;
+    // Maintainers Note: The large set of `NamespaceString`-typed static data
+    // members of the `NamespaceString` class representing system-reserved
+    // collections is now generated from "namespace_string_reserved.def.h".
+    // Please make edits there to add or change such constants.
 
-    // Namespace for storing databases information
-    static const NamespaceString kConfigDatabasesNamespace;
-
-    // Namespace for storing the transaction information for each session
-    static const NamespaceString kSessionTransactionsTableNamespace;
-
-    // Name for a shard's collections metadata collection, each document of which indicates the
-    // state of a specific collection
-    static const NamespaceString kShardConfigCollectionsNamespace;
-
-    // Name for a shard's databases metadata collection, each document of which indicates the state
-    // of a specific database
-    static const NamespaceString kShardConfigDatabasesNamespace;
-
-    // Namespace for storing keys for signing and validating cluster times created by the cluster
-    // that this node is in.
-    static const NamespaceString kKeysCollectionNamespace;
-
-    // Namespace for storing keys for validating cluster times created by other clusters.
-    static const NamespaceString kExternalKeysCollectionNamespace;
-
-    // Namespace of the the oplog collection.
-    static const NamespaceString kRsOplogNamespace;
-
-    // Namespace for storing the persisted state of transaction coordinators.
-    static const NamespaceString kTransactionCoordinatorsNamespace;
-
-    // Namespace for storing the persisted state of migration coordinators.
-    static const NamespaceString kMigrationCoordinatorsNamespace;
-
-    // Namespace for storing the persisted state of migration recipients.
-    static const NamespaceString kMigrationRecipientsNamespace;
-
-    // Namespace for storing the persisted state of tenant migration donors.
-    static const NamespaceString kTenantMigrationDonorsNamespace;
-
-    // Namespace for storing the persisted state of tenant migration recipient service instances.
-    static const NamespaceString kTenantMigrationRecipientsNamespace;
-
-    // Namespace for view on local.oplog.rs for tenant migrations.
-    static const NamespaceString kTenantMigrationOplogView;
-
-    // Namespace for storing the persisted state of tenant split donors.
-    static const NamespaceString kShardSplitDonorsNamespace;
-
-    // Namespace for replica set configuration settings.
-    static const NamespaceString kSystemReplSetNamespace;
-
-    // Namespace for storing the last replica set election vote.
-    static const NamespaceString kLastVoteNamespace;
-
-    // Namespace for index build entries.
-    static const NamespaceString kIndexBuildEntryNamespace;
-
-    // Namespace for pending range deletions.
-    static const NamespaceString kRangeDeletionNamespace;
-
-    // Namespace containing pending range deletions snapshots for rename operations.
-    static const NamespaceString kRangeDeletionForRenameNamespace;
-
-    // Namespace for the coordinator's resharding operation state.
-    static const NamespaceString kConfigReshardingOperationsNamespace;
-
-    // Namespace for the donor shard's local resharding operation state.
-    static const NamespaceString kDonorReshardingOperationsNamespace;
-
-    // Namespace for the recipient shard's local resharding operation state.
-    static const NamespaceString kRecipientReshardingOperationsNamespace;
-
-    // Namespace for persisting sharding DDL coordinators state documents
-    static const NamespaceString kShardingDDLCoordinatorsNamespace;
-
-    // Namespace for persisting sharding DDL rename participant state documents
-    static const NamespaceString kShardingRenameParticipantsNamespace;
-
-    // Namespace for balancer settings and default read and write concerns.
-    static const NamespaceString kConfigSettingsNamespace;
-
-    // Namespace for vector clock state.
-    static const NamespaceString kVectorClockNamespace;
-
-    // Namespace for storing oplog applier progress for resharding.
-    static const NamespaceString kReshardingApplierProgressNamespace;
-
-    // Namespace for storing config.transactions cloner progress for resharding.
-    static const NamespaceString kReshardingTxnClonerProgressNamespace;
-
-    // Namespace for storing config.collectionCriticalSections documents
-    static const NamespaceString kCollectionCriticalSectionsNamespace;
-
-    // Dummy namespace used for forcing secondaries to handle an oplog entry on its own batch.
-    static const NamespaceString kForceOplogBatchBoundaryNamespace;
-
-    // Namespace used for storing retryable findAndModify images.
-    static const NamespaceString kConfigImagesNamespace;
-
-    // Namespace used for persisting ConfigsvrCoordinator state documents.
-    static const NamespaceString kConfigsvrCoordinatorsNamespace;
-
-    // Namespace for storing user write blocking critical section documents
-    static const NamespaceString kUserWritesCriticalSectionsNamespace;
-
-    // Namespace used during the recovery procedure for the config server.
-    static const NamespaceString kConfigsvrRestoreNamespace;
-
-    // Namespace used for CompactParticipantCoordinator service.
-    static const NamespaceString kCompactStructuredEncryptionCoordinatorNamespace;
-
-    // Namespace used for storing cluster wide parameters on dedicated configurations.
-    static const NamespaceString kClusterParametersNamespace;
-
-    // Namespace used for storing the list of shards on the CSRS.
-    static const NamespaceString kConfigsvrShardsNamespace;
-
-    // Namespace used for storing the list of sharded collections on the CSRS.
-    static const NamespaceString kConfigsvrCollectionsNamespace;
-
-    // Namespace used for storing the index catalog on the CSRS.
-    static const NamespaceString kConfigsvrIndexCatalogNamespace;
-
-    // Namespace used for storing the index catalog on the shards.
-    static const NamespaceString kShardIndexCatalogNamespace;
-
-    // Namespace used for storing the collection catalog on the shards.
-    static const NamespaceString kShardCollectionCatalogNamespace;
-
-    // Namespace used for storing NamespacePlacementType docs on the CSRS.
-    static const NamespaceString kConfigsvrPlacementHistoryNamespace;
-
-    // Namespace value used to identify the "fcv marker entry" of
-    // kConfigsvrPlacementHistoryNamespace collection which marks the start or the end of a FCV
-    // upgrade/downgrade.
-    static const NamespaceString kConfigsvrPlacementHistoryFcvMarkerNamespace;
-
-    // TODO SERVER-68551: remove once 7.0 becomes last-lts
-    static const NamespaceString kLockpingsNamespace;
-
-    // TODO SERVER-68551: remove once 7.0 becomes last-lts
-    static const NamespaceString kDistLocksNamepsace;
-
-    // Namespace used to store the state document of 'SetChangeStreamStateCoordinator'.
-    static const NamespaceString kSetChangeStreamStateCoordinatorNamespace;
-
-    // Namespace used for storing global index cloner state documents.
-    static const NamespaceString kGlobalIndexClonerNamespace;
-
-    // Namespace used for storing query analyzer settings.
-    static const NamespaceString kConfigQueryAnalyzersNamespace;
-
-    // Namespace used for storing sampled queries.
-    static const NamespaceString kConfigSampledQueriesNamespace;
-
-    // Namespace used for storing the diffs for sampled update queries.
-    static const NamespaceString kConfigSampledQueriesDiffNamespace;
-
-    // Namespace used for the health log.
-    static const NamespaceString kLocalHealthLogNamespace;
+    // The constants are declared as merely `const` but have `constexpr`
+    // definitions below. Because the `NamespaceString` class enclosing their
+    // type is incomplete, they can't be _declared_ fully constexpr (a constexpr
+    // limitation).
+#define NSS_CONSTANT(id, db, coll) static const ConstantProxy id;
+#include "namespace_string_reserved.def.h"
+#undef NSS_CONSTANT
 
     /**
      * Constructs an empty NamespaceString.
@@ -371,6 +281,44 @@ public:
     static NamespaceString parseFromStringExpectTenantIdInMultitenancyMode(StringData ns);
 
     /**
+     * Constructs a NamespaceString in the global config db, "config.<collName>".
+     */
+    static NamespaceString makeGlobalConfigCollection(StringData collName);
+
+    /**
+     * These functions construct a NamespaceString without checking for presence of TenantId.
+     *
+     * MUST only be used for tests.
+     */
+    static NamespaceString createNamespaceString_forTest(StringData ns) {
+        return NamespaceString(boost::none, ns);
+    }
+
+    static NamespaceString createNamespaceString_forTest(const DatabaseName& dbName) {
+        return NamespaceString(dbName);
+    }
+
+    static NamespaceString createNamespaceString_forTest(StringData db, StringData coll) {
+        return NamespaceString(boost::none, db, coll);
+    }
+
+    static NamespaceString createNamespaceString_forTest(const DatabaseName& dbName,
+                                                         StringData coll) {
+        return NamespaceString(dbName, coll);
+    }
+
+    static NamespaceString createNamespaceString_forTest(const boost::optional<TenantId>& tenantId,
+                                                         StringData ns) {
+        return NamespaceString(tenantId, ns);
+    }
+
+    static NamespaceString createNamespaceString_forTest(const boost::optional<TenantId>& tenantId,
+                                                         StringData db,
+                                                         StringData coll) {
+        return NamespaceString(tenantId, db, coll);
+    }
+
+    /**
      * Constructs the namespace '<dbName>.$cmd.aggregate', which we use as the namespace for
      * aggregation commands with the format {aggregate: 1}.
      */
@@ -414,6 +362,18 @@ public:
      * namespace is admin.$cmd.bulkWrite".
      */
     static NamespaceString makeBulkWriteNSS();
+
+    /**
+     * Constructs the oplog buffer NamespaceString for the given UUID and donor shardId.
+     */
+    static NamespaceString makeReshardingLocalOplogBufferNSS(const UUID& existingUUID,
+                                                             const std::string& donorShardId);
+
+    /**
+     * Constructs the conflict stash NamespaceString for the given UUID and donor shardId.
+     */
+    static NamespaceString makeReshardingLocalConflictStashNSS(const UUID& existingUUID,
+                                                               const std::string& donorShardId);
 
     /**
      * NOTE: DollarInDbNameBehavior::allow is deprecated.
@@ -482,10 +442,10 @@ public:
         return !isSystem() && !(isLocal() && coll().startsWith("replset."));
     }
     bool isAdminDB() const {
-        return db() == kAdminDb;
+        return db() == DatabaseName::kAdmin.db();
     }
     bool isLocal() const {
-        return db() == kLocalDb;
+        return db() == DatabaseName::kLocal.db();
     }
     bool isSystemDotProfile() const {
         return coll() == kSystemDotProfileCollectionName;
@@ -497,7 +457,7 @@ public:
         return coll() == kSystemDotJavascriptCollectionName;
     }
     bool isServerConfigurationCollection() const {
-        return (db() == kAdminDb) && (coll() == "system.version");
+        return (db() == DatabaseName::kAdmin.db()) && (coll() == "system.version");
     }
     bool isPrivilegeCollection() const {
         if (!isAdminDB()) {
@@ -506,7 +466,7 @@ public:
         return (coll() == kSystemUsers) || (coll() == kSystemRoles);
     }
     bool isConfigDB() const {
-        return db() == kConfigDb;
+        return db() == DatabaseName::kConfig.db();
     }
     bool isCommand() const {
         return coll() == "$cmd";
@@ -515,11 +475,11 @@ public:
         return oplog(_ns);
     }
     bool isOnInternalDb() const {
-        if (db() == kAdminDb)
+        if (db() == DatabaseName::kAdmin.db())
             return true;
-        if (db() == kLocalDb)
+        if (db() == DatabaseName::kLocal.db())
             return true;
-        if (db() == kConfigDb)
+        if (db() == DatabaseName::kConfig.db())
             return true;
         return false;
     }
@@ -748,30 +708,36 @@ public:
      */
     static bool validCollectionName(StringData coll);
 
-    // Relops among `NamespaceString`.
+    friend std::ostream& operator<<(std::ostream& stream, const NamespaceString& nss) {
+        return stream << nss.toString();
+    }
+
+    friend StringBuilder& operator<<(StringBuilder& builder, const NamespaceString& nss) {
+        return builder << nss.toString();
+    }
+
     friend bool operator==(const NamespaceString& a, const NamespaceString& b) {
-        return (a.tenantId() == b.tenantId()) && (a.ns() == b.ns());
+        return a._lens() == b._lens();
     }
+
     friend bool operator!=(const NamespaceString& a, const NamespaceString& b) {
-        return !(a == b);
+        return a._lens() != b._lens();
     }
+
     friend bool operator<(const NamespaceString& a, const NamespaceString& b) {
-        if (a.tenantId() != b.tenantId()) {
-            return a.tenantId() < b.tenantId();
-        }
-        return a.ns() < b.ns();
+        return a._lens() < b._lens();
     }
+
     friend bool operator>(const NamespaceString& a, const NamespaceString& b) {
-        if (a.tenantId() != b.tenantId()) {
-            return a.tenantId() > b.tenantId();
-        }
-        return a.ns() > b.ns();
+        return a._lens() > b._lens();
     }
+
     friend bool operator<=(const NamespaceString& a, const NamespaceString& b) {
-        return !(a > b);
+        return a._lens() <= b._lens();
     }
+
     friend bool operator>=(const NamespaceString& a, const NamespaceString& b) {
-        return !(a < b);
+        return a._lens() >= b._lens();
     }
 
     template <typename H>
@@ -787,6 +753,10 @@ public:
     }
 
 private:
+    std::tuple<const boost::optional<TenantId>&, const std::string&> _lens() const {
+        return std::tie(tenantId(), ns());
+    }
+
     DatabaseName _dbName;
     std::string _ns;
     size_t _dotIndex = std::string::npos;
@@ -800,6 +770,8 @@ class NamespaceStringOrUUID {
 public:
     NamespaceStringOrUUID() = delete;
     NamespaceStringOrUUID(NamespaceString nss) : _nss(std::move(nss)) {}
+    NamespaceStringOrUUID(const NamespaceString::ConstantProxy& nss)
+        : NamespaceStringOrUUID{static_cast<const NamespaceString&>(nss)} {}
     NamespaceStringOrUUID(DatabaseName dbname, UUID uuid)
         : _uuid(std::move(uuid)), _dbname(std::move(dbname)) {}
     NamespaceStringOrUUID(boost::optional<TenantId> tenantId, std::string db, UUID uuid)
@@ -856,6 +828,14 @@ public:
 
     void serialize(BSONObjBuilder* builder, StringData fieldName) const;
 
+    friend std::ostream& operator<<(std::ostream& stream, const NamespaceStringOrUUID& o) {
+        return stream << o.toString();
+    }
+
+    friend StringBuilder& operator<<(StringBuilder& builder, const NamespaceStringOrUUID& o) {
+        return builder << o.toString();
+    }
+
 private:
     // At any given time exactly one of these optionals will be initialized.
     boost::optional<NamespaceString> _nss;
@@ -869,11 +849,6 @@ private:
     // collection belongs to the database named here.
     boost::optional<DatabaseName> _dbname;
 };
-
-std::ostream& operator<<(std::ostream& stream, const NamespaceString& nss);
-std::ostream& operator<<(std::ostream& stream, const NamespaceStringOrUUID& nsOrUUID);
-StringBuilder& operator<<(StringBuilder& builder, const NamespaceString& nss);
-StringBuilder& operator<<(StringBuilder& builder, const NamespaceStringOrUUID& nsOrUUID);
 
 /**
  * "database.a.b.c" -> "database"
@@ -996,5 +971,24 @@ inline bool NamespaceString::validCollectionName(StringData coll) {
 
     return true;
 }
+
+// Here are the `constexpr` definitions for the `NamespaceString::ConstantProxy`
+// constant static data members of `NamespaceString`. They cannot be defined
+// `constexpr` inside the class definition, but they can be upgraded to
+// `constexpr` here below it. Each one needs to be initialized with the address
+// of their associated shared state, so those are all defined first, as
+// variables named by the same `id`, but in separate nested namespace.
+namespace nss_detail::const_proxy_shared_states {
+#define NSS_CONSTANT(id, db, coll) \
+    constexpr inline NamespaceString::ConstantProxy::SharedState id{db, coll};
+#include "namespace_string_reserved.def.h"
+#undef NSS_CONSTANT
+}  // namespace nss_detail::const_proxy_shared_states
+
+#define NSS_CONSTANT(id, db, coll)                                       \
+    constexpr inline NamespaceString::ConstantProxy NamespaceString::id{ \
+        &nss_detail::const_proxy_shared_states::id};
+#include "namespace_string_reserved.def.h"
+#undef NSS_CONSTANT
 
 }  // namespace mongo

@@ -37,7 +37,7 @@
 #include "mongo/platform/mutex.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/client/shard.h"
-#include "mongo/s/request_types/auto_split_vector_gen.h"
+#include "mongo/s/request_types/merge_chunk_request_gen.h"
 #include "mongo/s/request_types/migration_secondary_throttle_options.h"
 #include "mongo/s/request_types/move_range_request_gen.h"
 #include "mongo/stdx/condition_variable.h"
@@ -82,7 +82,7 @@ public:
     }
 
     virtual std::string getTargetDb() const {
-        return NamespaceString::kAdminDb.toString();
+        return DatabaseName::kAdmin.toString();
     }
 
     const ShardId& getTarget() const {
@@ -295,40 +295,6 @@ private:
     static const std::string kTimestamp;
 };
 
-class AutoSplitVectorCommandInfo : public CommandInfo {
-public:
-    AutoSplitVectorCommandInfo(const NamespaceString& nss,
-                               const ShardId& shardId,
-                               const BSONObj& shardKeyPattern,
-                               const BSONObj& lowerBoundKey,
-                               const BSONObj& upperBoundKey,
-                               int64_t maxChunkSizeBytes)
-        : CommandInfo(shardId, nss, boost::none),
-          _shardKeyPattern(shardKeyPattern),
-          _lowerBoundKey(lowerBoundKey),
-          _upperBoundKey(upperBoundKey),
-          _maxChunkSizeBytes(maxChunkSizeBytes) {}
-
-    BSONObj serialise() const override {
-        return AutoSplitVectorRequest(getNameSpace(),
-                                      _shardKeyPattern,
-                                      _lowerBoundKey,
-                                      _upperBoundKey,
-                                      _maxChunkSizeBytes)
-            .toBSON({});
-    }
-
-    std::string getTargetDb() const override {
-        return getNameSpace().db().toString();
-    }
-
-private:
-    BSONObj _shardKeyPattern;
-    const BSONObj _lowerBoundKey;
-    const BSONObj _upperBoundKey;
-    int64_t _maxChunkSizeBytes;
-};
-
 class DataSizeCommandInfo : public CommandInfo {
 public:
     DataSizeCommandInfo(const NamespaceString& nss,
@@ -377,51 +343,15 @@ private:
     static const std::string kMaxSizeValue;
 };
 
-class SplitChunkCommandInfo : public CommandInfo {
-
+class MergeAllChunksOnShardCommandInfo : public CommandInfo {
 public:
-    SplitChunkCommandInfo(const NamespaceString& nss,
-                          const ShardId& shardId,
-                          const BSONObj& shardKeyPattern,
-                          const BSONObj& lowerBoundKey,
-                          const BSONObj& upperBoundKey,
-                          const ChunkVersion& version,
-                          const SplitPoints& splitPoints)
-        : CommandInfo(shardId, nss, boost::none),
-          _shardKeyPattern(shardKeyPattern),
-          _lowerBoundKey(lowerBoundKey),
-          _upperBoundKey(upperBoundKey),
-          _version(version),
-          _splitPoints(splitPoints) {}
+    MergeAllChunksOnShardCommandInfo(const NamespaceString& nss, const ShardId& shardId)
+        : CommandInfo(shardId, nss, boost::none) {}
 
     BSONObj serialise() const override {
-        BSONObjBuilder commandBuilder;
-        commandBuilder.append(kCommandName, getNameSpace().toString())
-            .append(kShardName, getTarget().toString())
-            .append(kKeyPattern, _shardKeyPattern)
-            .append(kEpoch, _version.epoch())
-            .append(kTimestamp, _version.getTimestamp())
-            .append(kLowerBound, _lowerBoundKey)
-            .append(kUpperBound, _upperBoundKey)
-            .append(kSplitKeys, _splitPoints);
-        return commandBuilder.obj();
+        ShardSvrMergeAllChunksOnShard req(getNameSpace(), getTarget());
+        return req.toBSON({});
     }
-
-private:
-    BSONObj _shardKeyPattern;
-    BSONObj _lowerBoundKey;
-    BSONObj _upperBoundKey;
-    ChunkVersion _version;
-    SplitPoints _splitPoints;
-
-    static const std::string kCommandName;
-    static const std::string kShardName;
-    static const std::string kKeyPattern;
-    static const std::string kLowerBound;
-    static const std::string kUpperBound;
-    static const std::string kEpoch;
-    static const std::string kTimestamp;
-    static const std::string kSplitKeys;
 };
 
 /**
@@ -561,23 +491,6 @@ public:
                                         const ChunkRange& chunkRange,
                                         const ChunkVersion& version) override;
 
-    SemiFuture<AutoSplitVectorResponse> requestAutoSplitVector(OperationContext* opCtx,
-                                                               const NamespaceString& nss,
-                                                               const ShardId& shardId,
-                                                               const BSONObj& keyPattern,
-                                                               const BSONObj& minKey,
-                                                               const BSONObj& maxKey,
-                                                               int64_t maxChunkSizeBytes) override;
-
-    SemiFuture<void> requestSplitChunk(OperationContext* opCtx,
-                                       const NamespaceString& nss,
-                                       const ShardId& shardId,
-                                       const ChunkVersion& collectionVersion,
-                                       const KeyPattern& keyPattern,
-                                       const BSONObj& minKey,
-                                       const BSONObj& maxKey,
-                                       const SplitPoints& splitPoints) override;
-
     SemiFuture<DataSizeResponse> requestDataSize(OperationContext* opCtx,
                                                  const NamespaceString& nss,
                                                  const ShardId& shardId,
@@ -586,6 +499,10 @@ public:
                                                  const KeyPattern& keyPattern,
                                                  bool estimatedValue,
                                                  int64_t maxSize) override;
+
+    SemiFuture<void> requestMergeAllChunksOnShard(OperationContext* opCtx,
+                                                  const NamespaceString& nss,
+                                                  const ShardId& shardId) override;
 
 private:
     enum class SchedulerState { Recovering, Running, Stopping, Stopped };

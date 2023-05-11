@@ -408,8 +408,8 @@ public:
         boost::optional<TopologyVersion> clientTopologyVersion,
         boost::optional<Date_t> deadline) override;
 
-    virtual StatusWith<OpTime> getLatestWriteOpTime(OperationContext* opCtx) const
-        noexcept override;
+    virtual StatusWith<OpTime> getLatestWriteOpTime(
+        OperationContext* opCtx) const noexcept override;
 
     virtual HostAndPort getCurrentPrimaryHostAndPort() const override;
 
@@ -589,6 +589,8 @@ public:
      * Returns a pointer to the WriteConcernTagChanges used by this instance.
      */
     WriteConcernTagChanges* getWriteConcernTagChanges() override;
+
+    bool isRetryableWrite(OperationContext* opCtx) const override;
 
 private:
     using CallbackFn = executor::TaskExecutor::CallbackFn;

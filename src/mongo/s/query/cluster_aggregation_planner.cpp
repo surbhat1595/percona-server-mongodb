@@ -34,6 +34,7 @@
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/client/connpool.h"
 #include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/catalog_shard_feature_flag_gen.h"
 #include "mongo/db/pipeline/change_stream_constants.h"
 #include "mongo/db/pipeline/change_stream_invalidation_info.h"
 #include "mongo/db/pipeline/document_source_limit.h"
@@ -101,7 +102,7 @@ AsyncRequestsSender::Response establishMergingShardCursor(OperationContext* opCt
     MultiStatementTransactionRequestsSender ars(
         opCtx,
         Grid::get(opCtx)->getExecutorPool()->getArbitraryExecutor(),
-        nss.db().toString(),
+        nss.dbName(),
         {{mergingShardId, mergeCmdObj}},
         ReadPreferenceSetting::get(opCtx),
         sharded_agg_helpers::getDesiredRetryPolicy(opCtx));
@@ -825,7 +826,8 @@ Status runPipelineOnSpecificShardOnly(const boost::intrusive_ptr<ExpressionConte
                                                                            boost::none,
                                                                            overrideBatchSize);
 
-    if (!forPerShardCursor && shardId != ShardId::kConfigServerId) {
+    if (!forPerShardCursor && (!dbVersion || !dbVersion->isFixed())) {
+        // A fixed dbVersion database can't move or be sharded, so we don't attach any version.
         cmdObj = appendShardVersion(std::move(cmdObj), ShardVersion::UNSHARDED());
     }
     if (!forPerShardCursor) {
@@ -835,8 +837,10 @@ Status runPipelineOnSpecificShardOnly(const boost::intrusive_ptr<ExpressionConte
     }
 
     if (eligibleForSampling) {
-        if (auto sampleId =
-                analyze_shard_key::tryGenerateSampleId(opCtx, namespaces.executionNss)) {
+        if (auto sampleId = analyze_shard_key::tryGenerateSampleId(
+                opCtx,
+                namespaces.executionNss,
+                analyze_shard_key::SampledCommandNameEnum::kAggregate)) {
             cmdObj = analyze_shard_key::appendSampleId(std::move(cmdObj), std::move(*sampleId));
         }
     }
@@ -844,7 +848,7 @@ Status runPipelineOnSpecificShardOnly(const boost::intrusive_ptr<ExpressionConte
     MultiStatementTransactionRequestsSender ars(
         opCtx,
         Grid::get(opCtx)->getExecutorPool()->getArbitraryExecutor(),
-        namespaces.executionNss.db().toString(),
+        namespaces.executionNss.dbName(),
         {{shardId, cmdObj}},
         ReadPreferenceSetting::get(opCtx),
         Shard::RetryPolicy::kIdempotent);

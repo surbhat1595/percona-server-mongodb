@@ -32,6 +32,7 @@
 
 #include "mongo/db/curop.h"
 
+#include "mongo/util/duration.h"
 #include <iomanip>
 
 #include "mongo/bson/mutable/document.h"
@@ -49,7 +50,7 @@
 #include "mongo/db/query/telemetry.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/stats/timer_stats.h"
-#include "mongo/db/storage/storage_engine_parameters_gen.h"
+#include "mongo/db/storage/storage_engine_feature_flags_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/rpc/metadata/impersonated_user_metadata.h"
@@ -95,7 +96,9 @@ class CurOp::CurOpStack {
     CurOpStack& operator=(const CurOpStack&) = delete;
 
 public:
-    CurOpStack() : _base(nullptr, this) {}
+    CurOpStack() {
+        _pushNoLock(&_base);
+    }
 
     /**
      * Returns the top of the CurOp stack.
@@ -105,23 +108,14 @@ public:
     }
 
     /**
-     * Adds "curOp" to the top of the CurOp stack for a client. Called by CurOp's constructor.
+     * Adds "curOp" to the top of the CurOp stack for a client.
+     *
+     * This sets the "_parent", "_stack", and "_lockStatsBase" fields
+     * of "curOp".
      */
-    void push(OperationContext* opCtx, CurOp* curOp) {
-        invariant(opCtx);
-        if (_opCtx) {
-            invariant(_opCtx == opCtx);
-        } else {
-            _opCtx = opCtx;
-        }
-        stdx::lock_guard<Client> lk(*_opCtx->getClient());
-        push_nolock(curOp);
-    }
-
-    void push_nolock(CurOp* curOp) {
-        invariant(!curOp->_parent);
-        curOp->_parent = _top;
-        _top = curOp;
+    void push(CurOp* curOp) {
+        stdx::lock_guard<Client> lk(*opCtx()->getClient());
+        _pushNoLock(curOp);
     }
 
     /**
@@ -138,34 +132,53 @@ public:
         // the client during the final pop.
         const bool shouldLock = _top->_parent;
         if (shouldLock) {
-            invariant(_opCtx);
-            _opCtx->getClient()->lock();
+            opCtx()->getClient()->lock();
         }
         invariant(_top);
         CurOp* retval = _top;
         _top = _top->_parent;
         if (shouldLock) {
-            _opCtx->getClient()->unlock();
+            opCtx()->getClient()->unlock();
         }
         return retval;
     }
 
-    const OperationContext* opCtx() {
-        return _opCtx;
+    OperationContext* opCtx() {
+        auto ctx = _curopStack.owner(this);
+        invariant(ctx);
+        return ctx;
     }
 
 private:
-    OperationContext* _opCtx = nullptr;
+    void _pushNoLock(CurOp* curOp) {
+        invariant(!curOp->_parent);
+        curOp->_stack = this;
+        curOp->_parent = _top;
+
+        // If `curOp` is a sub-operation, we store the snapshot of lock stats as the base lock stats
+        // of the current operation.
+        if (_top) {
+            if (auto lockerInfo = opCtx()->lockState()->getLockerInfo(boost::none)) {
+                curOp->_lockStatsBase = lockerInfo->stats;
+            }
+        }
+
+        _top = curOp;
+    }
 
     // Top of the stack of CurOps for a Client.
     CurOp* _top = nullptr;
 
     // The bottom-most CurOp for a client.
-    const CurOp _base;
+    CurOp _base;
 };
 
 const OperationContext::Decoration<CurOp::CurOpStack> CurOp::_curopStack =
     OperationContext::declareDecoration<CurOp::CurOpStack>();
+
+void CurOp::push(OperationContext* opCtx) {
+    _curopStack(opCtx).push(this);
+}
 
 CurOp* CurOp::get(const OperationContext* opCtx) {
     return get(*opCtx);
@@ -253,7 +266,7 @@ void CurOp::reportCurrentOpForClient(OperationContext* opCtx,
             lsid->serialize(&lsidBuilder);
         }
 
-        CurOp::get(clientOpCtx)->reportState(clientOpCtx, infoBuilder, truncateOps);
+        CurOp::get(clientOpCtx)->reportState(infoBuilder, truncateOps);
     }
 
 #ifndef MONGO_CONFIG_USE_RAW_LATCHES
@@ -287,47 +300,30 @@ bool CurOp::currentOpBelongsToTenant(Client* client, TenantId tenantId) {
     return true;
 }
 
+OperationContext* CurOp::opCtx() {
+    invariant(_stack);
+    return _stack->opCtx();
+}
+
 void CurOp::setOpDescription_inlock(const BSONObj& opDescription) {
-    _opDescription = serializeDollarDbInOpDescription(_nss.tenantId(), opDescription);
+    if (_nss.tenantId()) {
+        _opDescription = serializeDollarDbInOpDescription(_nss.tenantId(), opDescription);
+    } else {
+        _opDescription = opDescription;
+    }
 }
 
 void CurOp::setGenericCursor_inlock(GenericCursor gc) {
     _genericCursor = std::move(gc);
 }
 
-void CurOp::_finishInit(OperationContext* opCtx, CurOpStack* stack) {
-    _stack = stack;
-    _tickSource = globalSystemTickSource();
-
-    if (opCtx) {
-        _stack->push(opCtx, this);
-    } else {
-        _stack->push_nolock(this);
-    }
-}
-
-CurOp::CurOp(OperationContext* opCtx) {
-    // If this is a sub-operation, we store the snapshot of lock stats as the base lock stats of the
-    // current operation.
-    if (_parent != nullptr)
-        _lockStatsBase = opCtx->lockState()->getLockerInfo(boost::none)->stats;
-
-    // Add the CurOp object onto the stack of active CurOp objects.
-    _finishInit(opCtx, &_curopStack(opCtx));
-}
-
-CurOp::CurOp(OperationContext* opCtx, CurOpStack* stack) {
-    _finishInit(opCtx, stack);
-}
-
 CurOp::~CurOp() {
     if (parent() != nullptr)
         parent()->yielded(_numYields.load());
-    invariant(this == _stack->pop());
+    invariant(!_stack || this == _stack->pop());
 }
 
-void CurOp::setGenericOpRequestDetails(OperationContext* opCtx,
-                                       NamespaceString nss,
+void CurOp::setGenericOpRequestDetails(NamespaceString nss,
                                        const Command* command,
                                        BSONObj cmdObj,
                                        NetworkOp op) {
@@ -337,7 +333,7 @@ void CurOp::setGenericOpRequestDetails(OperationContext* opCtx,
     const bool isCommand = (op == dbMsg || (op == dbQuery && nss.isCommand()));
     auto logicalOp = (command ? command->getLogicalOp() : networkOpToLogicalOp(op));
 
-    stdx::lock_guard<Client> clientLock(*opCtx->getClient());
+    stdx::lock_guard<Client> clientLock(*opCtx()->getClient());
     _isCommand = _debug.iscommand = isCommand;
     _logicalOp = _debug.logicalOp = logicalOp;
     _networkOp = _debug.networkOp = op;
@@ -376,18 +372,15 @@ void CurOp::setNS_inlock(const DatabaseName& dbName) {
 }
 
 TickSource::Tick CurOp::startTime() {
-    // It is legal for this function to get called multiple times, but all of those calls should be
-    // from the same thread, which should be the thread that "owns" this CurOp object. We define
-    // ownership here in terms of the Client object: each thread is associated with a Client
-    // (accessed by 'Client::getCurrent()'), which should be the same as the Client associated with
-    // this CurOp (by way of the OperationContext). Note that, if this is the "base" CurOp on the
-    // CurOpStack, then we don't yet hava an initialized pointer to the OperationContext, and we
-    // cannot perform this check. That is a rare case, however.
-    invariant(!_stack->opCtx() || Client::getCurrent() == _stack->opCtx()->getClient());
-
     auto start = _start.load();
     if (start != 0) {
         return start;
+    }
+
+    // Start the CPU timer if this system supports it.
+    if (auto cpuTimers = OperationCPUTimers::get(opCtx())) {
+        _cpuTimer = cpuTimers->makeTimer();
+        _cpuTimer->start();
     }
 
     // The '_start' value is initialized to 0 and gets assigned on demand the first time it gets
@@ -400,12 +393,11 @@ TickSource::Tick CurOp::startTime() {
 }
 
 void CurOp::done() {
-    // As documented in the 'CurOp::startTime()' member function, it is legal for this function to
-    // be called multiple times, but all calls must be in in the thread that "owns" this CurOp
-    // object.
-    invariant(!_stack->opCtx() || Client::getCurrent() == _stack->opCtx()->getClient());
-
     _end = _tickSource->getTicks();
+
+    if (_cpuTimer) {
+        _debug.cpuTime = _cpuTimer->getElapsed();
+    }
 }
 
 Microseconds CurOp::computeElapsedTimeTotal(TickSource::Tick startTime,
@@ -436,12 +428,12 @@ void CurOp::raiseDbProfileLevel(int dbProfileLevel) {
 
 static constexpr size_t appendMaxElementSize = 50 * 1024;
 
-bool CurOp::completeAndLogOperation(OperationContext* opCtx,
-                                    logv2::LogComponent component,
+bool CurOp::completeAndLogOperation(logv2::LogComponent component,
                                     std::shared_ptr<const ProfileFilter> filter,
                                     boost::optional<size_t> responseLength,
                                     boost::optional<long long> slowMsOverride,
                                     bool forceLog) {
+    auto opCtx = this->opCtx();
     const long long slowMs = slowMsOverride.value_or(serverGlobalParams.slowMS.load());
 
     // Record the size of the response returned to the client, if applicable.
@@ -454,6 +446,7 @@ bool CurOp::completeAndLogOperation(OperationContext* opCtx,
     _debug.executionTime = duration_cast<Microseconds>(elapsedTimeExcludingPauses());
     const auto executionTimeMillis = durationCount<Milliseconds>(_debug.executionTime);
 
+    // TODO SERVER-73727 remove telemetry collection here once metrics are aggregated in cursor
     telemetry::collectTelemetry(opCtx, CurOp::get(opCtx)->debug());
 
     if (_debug.isReplOplogGetMore) {
@@ -535,7 +528,7 @@ bool CurOp::completeAndLogOperation(OperationContext* opCtx,
     // Return 'true' if this operation should also be added to the profiler.
     // rateLimit only affects profiler at level 2
     if (_dbprofile >= 2)
-        return _shouldDBProfileWithRateLimit(opCtx, slowMs);
+        return _shouldDBProfileWithRateLimit(slowMs);
     if (_dbprofile <= 0)
         return false;
     return shouldProfileAtLevel1;
@@ -678,7 +671,8 @@ BSONObj CurOp::truncateAndSerializeGenericCursor(GenericCursor* cursor,
     return serialized;
 }
 
-void CurOp::reportState(OperationContext* opCtx, BSONObjBuilder* builder, bool truncateOps) {
+void CurOp::reportState(BSONObjBuilder* builder, bool truncateOps) {
+    auto opCtx = this->opCtx();
     auto start = _start.load();
     if (start) {
         auto end = _end.load();
@@ -767,9 +761,18 @@ void CurOp::reportState(OperationContext* opCtx, BSONObjBuilder* builder, bool t
             builder->append("admissionPriority", toString(admissionPriority));
         }
     }
+
+    if (auto start = _waitForWriteConcernStart.load(); start > 0) {
+        auto end = _waitForWriteConcernEnd.load();
+        auto elapsedTimeTotal =
+            duration_cast<Microseconds>(debug().waitForWriteConcernDurationMillis);
+        elapsedTimeTotal += computeElapsedTimeTotal(start, end);
+        builder->append("waitForWriteConcernDurationMillis",
+                        durationCount<Milliseconds>(elapsedTimeTotal));
+    }
 }
 
-bool CurOp::_shouldDBProfileWithRateLimit(OperationContext* opCtx, long long slowMS) {
+bool CurOp::_shouldDBProfileWithRateLimit(long long slowMS) {
     auto rateLimit = serverGlobalParams.rateLimit.load();
     if (rateLimit > 1) {
         // Slow operations are always profiled
@@ -783,7 +786,7 @@ bool CurOp::_shouldDBProfileWithRateLimit(OperationContext* opCtx, long long slo
                               std::numeric_limits<int64_t>::max(),
                           "product of RATE_LIMIT_MAX and RATE_LIMIT_MULTIPLIER should not exceed "
                           "int64_t range");
-            const auto client = opCtx->getClient();
+            const auto client = opCtx()->getClient();
             _rateLimitSample.emplace(client->getPrng().nextInt64(RATE_LIMIT_MULTIPLIER) *
                                          rateLimit <
                                      RATE_LIMIT_MULTIPLIER);
@@ -898,6 +901,10 @@ void OpDebug::report(OperationContext* opCtx,
 
     if (catalogCacheCollectionLookupMillis > Milliseconds::zero()) {
         pAttrs->add("catalogCacheCollectionLookupDuration", catalogCacheCollectionLookupMillis);
+    }
+
+    if (catalogCacheIndexLookupMillis > Milliseconds::zero()) {
+        pAttrs->add("catalogCacheIndexLookupDuration", catalogCacheIndexLookupMillis);
     }
 
     if (databaseVersionRefreshMillis > Milliseconds::zero()) {
@@ -1035,6 +1042,10 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->add("writeConcern", writeConcern->toBSON());
     }
 
+    if (waitForWriteConcernDurationMillis > Milliseconds::zero()) {
+        pAttrs->add("waitForWriteConcernDuration", waitForWriteConcernDurationMillis);
+    }
+
     if (storageStats) {
         pAttrs->add("storage", storageStats->toBSON());
     }
@@ -1043,6 +1054,10 @@ void OpDebug::report(OperationContext* opCtx,
         BSONObjBuilder builder;
         operationMetrics->toBsonNonZeroFields(&builder);
         pAttrs->add("operationMetrics", builder.obj());
+    }
+
+    if (cpuTime > Nanoseconds::zero()) {
+        pAttrs->add("cpuNanos", durationCount<Nanoseconds>(cpuTime));
     }
 
     if (client && client->session()) {
@@ -1224,6 +1239,10 @@ void OpDebug::append(OperationContext* opCtx,
 
     if (remoteOpWaitTime) {
         b.append("remoteOpWaitMillis", durationCount<Milliseconds>(*remoteOpWaitTime));
+    }
+
+    if (cpuTime > Nanoseconds::zero()) {
+        b.appendNumber("cpuNanos", durationCount<Nanoseconds>(cpuTime));
     }
 
     b.appendNumber("millis", durationCount<Milliseconds>(executionTime));
@@ -1532,6 +1551,12 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
     addIfNeeded("remoteOpWaitMillis", [](auto field, auto args, auto& b) {
         if (args.op.remoteOpWaitTime) {
             b.append(field, durationCount<Milliseconds>(*args.op.remoteOpWaitTime));
+        }
+    });
+
+    addIfNeeded("cpuNanos", [](auto field, auto args, auto& b) {
+        if (args.op.cpuTime > Nanoseconds::zero()) {
+            b.appendNumber(field, durationCount<Nanoseconds>(args.op.cpuTime));
         }
     });
 

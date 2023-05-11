@@ -27,16 +27,14 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
 
+#include <MurmurHash3.h>
 #include <algorithm>
 #include <array>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <string>
-#include <third_party/murmurhash3/MurmurHash3.h>
 #include <unordered_map>
 #include <vector>
-
-#include "boost/smart_ptr/intrusive_ptr.hpp"
 
 #include "mongo/base/data_range.h"
 #include "mongo/base/error_codes.h"
@@ -209,8 +207,6 @@ protected:
                         bool bypassDocumentValidation = false);
     void doSingleInsert(int id, BSONObj obj, bool bypassDocumentValidation = false);
 
-    void doSingleRangeInsert(int id, BSONElement element);
-
     void doSingleInsertWithContention(
         int id, BSONElement element, int64_t cm, uint64_t cf, EncryptedFieldConfig efc);
     void doSingleInsertWithContention(
@@ -264,10 +260,10 @@ protected:
 
     TestKeyVault _keyVault;
 
-    NamespaceString _edcNs{"test.edc"};
-    NamespaceString _escNs{"test.esc"};
-    NamespaceString _eccNs{"test.ecc"};
-    NamespaceString _ecocNs{"test.ecoc"};
+    NamespaceString _edcNs = NamespaceString::createNamespaceString_forTest("test.edc");
+    NamespaceString _escNs = NamespaceString::createNamespaceString_forTest("test.esc");
+    NamespaceString _eccNs = NamespaceString::createNamespaceString_forTest("test.ecc");
+    NamespaceString _ecocNs = NamespaceString::createNamespaceString_forTest("test.ecoc");
 };
 
 void FleCrudTest::setUp() {
@@ -299,7 +295,9 @@ void FleCrudTest::createCollection(const NamespaceString& ns) {
     CollectionOptions collectionOptions;
     collectionOptions.uuid = UUID::gen();
     auto statusCC = _storage->createCollection(
-        _opCtx.get(), NamespaceString(ns.db(), ns.coll()), collectionOptions);
+        _opCtx.get(),
+        NamespaceString::createNamespaceString_forTest(ns.dbName(), ns.coll()),
+        collectionOptions);
     ASSERT_OK(statusCC);
 }
 
@@ -678,8 +676,13 @@ void FleCrudTest::doSingleDelete(int id, Fle2AlgorithmInt alg) {
 
     auto efc = getTestEncryptedFieldConfig(alg);
 
-    auto doc = EncryptionInformationHelpers::encryptionInformationSerializeForDelete(
-        _edcNs, efc, &_keyVault);
+    auto doc = EncryptionInformationHelpers::encryptionInformationSerialize(_edcNs, efc);
+
+    // TODO: SERVER-73303 delete when v2 is enabled by default
+    if (!gFeatureFlagFLE2ProtocolVersion2.isEnabledAndIgnoreFCV()) {
+        doc = EncryptionInformationHelpers::encryptionInformationSerializeForDelete(
+            _edcNs, efc, &_keyVault);
+    }
 
     auto ei = EncryptionInformation::parse(IDLParserContext("test"), doc);
 
@@ -722,7 +725,7 @@ void FleCrudTest::doFindAndModify(write_ops::FindAndModifyCommandRequest& reques
 class CollectionReader : public FLEStateCollectionReader {
 public:
     CollectionReader(std::string&& coll, FLEQueryInterfaceMock& queryImpl)
-        : _coll(NamespaceString(coll)), _queryImpl(queryImpl) {}
+        : _coll(NamespaceString::createNamespaceString_forTest(coll)), _queryImpl(queryImpl) {}
 
     uint64_t getDocumentCount() const override {
         return _queryImpl.countDocuments(_coll);
@@ -747,20 +750,26 @@ protected:
         FleCrudTest::tearDown();
     }
     std::vector<PrfBlock> readTagsWithContention(BSONObj obj, uint64_t contention = 0) {
+        if (!gFeatureFlagFLE2ProtocolVersion2.isEnabledAndIgnoreFCV()) {
+            auto s = getTestESCDataToken(obj);
+            auto c = getTestECCDataToken(obj);
+            auto d = getTestEDCDataToken(obj);
+            auto esc = CollectionReader("test.esc", *_queryImpl);
+            auto ecc = CollectionReader("test.ecc", *_queryImpl);
+            return mongo::fle::readTagsWithContention(esc, ecc, s, c, d, contention, 100, {});
+        }
         auto s = getTestESCDataToken(obj);
-        auto c = getTestECCDataToken(obj);
         auto d = getTestEDCDataToken(obj);
         auto esc = CollectionReader("test.esc", *_queryImpl);
-        auto ecc = CollectionReader("test.ecc", *_queryImpl);
-        return mongo::fle::readTagsWithContention(esc, ecc, s, c, d, contention, 100, {});
+        return mongo::fle::readTagsWithContentionV2(esc, s, d, contention, 100, {});
     }
     std::vector<PrfBlock> readTags(BSONObj obj, uint64_t cm = 0) {
         auto s = getTestESCDataToken(obj);
         auto c = getTestECCDataToken(obj);
         auto d = getTestEDCDataToken(obj);
-        auto esc = CollectionReader("test.esc", *_queryImpl);
-        auto ecc = CollectionReader("test.ecc", *_queryImpl);
-        return mongo::fle::readTags(esc, ecc, s, c, d, cm);
+        auto nssEsc = NamespaceString("test.esc");
+        auto nssEcc = NamespaceString("test.ecc");
+        return mongo::fle::readTags(_queryImpl.get(), nssEsc, nssEcc, s, c, d, cm);
     }
 };
 
@@ -779,6 +788,34 @@ TEST_F(FleCrudTest, InsertOne) {
                      .isEmpty());
 }
 
+// TODO: SERVER-73303 delete when v2 is enabled by default
+TEST_F(FleCrudTest, InsertOneV2) {
+    RAIIServerParameterControllerForTest controller("featureFlagFLE2ProtocolVersion2", true);
+    auto doc = BSON("encrypted"
+                    << "secret");
+    auto element = doc.firstElement();
+
+    doSingleInsert(1, element, Fle2AlgorithmInt::kEquality);
+
+    assertDocumentCounts(1, 1, 0, 1);
+    assertECOCDocumentCountByField("encrypted", 1);
+
+    ASSERT_FALSE(
+        _queryImpl->getById(_escNs, ESCCollection::generateNonAnchorId(getTestESCToken(element), 1))
+            .isEmpty());
+}
+
+// TODO: SERVER-73303 delete when v2 is enabled by default
+TEST_F(FleCrudTest, InsertOneRangeV2) {
+    RAIIServerParameterControllerForTest controller("featureFlagFLE2ProtocolVersion2", true);
+    auto doc = BSON("encrypted" << 5);
+    auto element = doc.firstElement();
+
+    doSingleInsert(1, element, Fle2AlgorithmInt::kRange);
+    assertDocumentCounts(1, 5, 0, 5);
+    assertECOCDocumentCountByField("encrypted", 5);
+}
+
 // Insert two documents with same values
 TEST_F(FleCrudTest, InsertTwoSame) {
 
@@ -795,6 +832,26 @@ TEST_F(FleCrudTest, InsertTwoSame) {
                      .isEmpty());
     ASSERT_FALSE(_queryImpl->getById(_escNs, ESCCollection::generateId(getTestESCToken(element), 2))
                      .isEmpty());
+}
+
+// Insert two documents with same values
+// TODO: SERVER-73303 delete when v2 is enabled by default
+TEST_F(FleCrudTest, InsertTwoSameV2) {
+    RAIIServerParameterControllerForTest controller("featureFlagFLE2ProtocolVersion2", true);
+    auto doc = BSON("encrypted"
+                    << "secret");
+    auto element = doc.firstElement();
+    doSingleInsert(1, element, Fle2AlgorithmInt::kEquality);
+    doSingleInsert(2, element, Fle2AlgorithmInt::kEquality);
+
+    assertDocumentCounts(2, 2, 0, 2);
+    assertECOCDocumentCountByField("encrypted", 2);
+
+    auto escTagToken = getTestESCToken(element);
+    ASSERT_FALSE(
+        _queryImpl->getById(_escNs, ESCCollection::generateNonAnchorId(escTagToken, 1)).isEmpty());
+    ASSERT_FALSE(
+        _queryImpl->getById(_escNs, ESCCollection::generateNonAnchorId(escTagToken, 2)).isEmpty());
 }
 
 // Insert two documents with different values
@@ -824,6 +881,35 @@ TEST_F(FleCrudTest, InsertTwoDifferent) {
                      .isEmpty());
 }
 
+// TODO: SERVER-73303 delete when v2 is enabled by default
+TEST_F(FleCrudTest, InsertTwoDifferentV2) {
+    RAIIServerParameterControllerForTest controller("featureFlagFLE2ProtocolVersion2", true);
+    doSingleInsert(1,
+                   BSON("encrypted"
+                        << "secret"));
+    doSingleInsert(2,
+                   BSON("encrypted"
+                        << "topsecret"));
+
+    assertDocumentCounts(2, 2, 0, 2);
+    assertECOCDocumentCountByField("encrypted", 2);
+
+    ASSERT_FALSE(
+        _queryImpl
+            ->getById(_escNs,
+                      ESCCollection::generateNonAnchorId(getTestESCToken(BSON("encrypted"
+                                                                              << "secret")),
+                                                         1))
+            .isEmpty());
+    ASSERT_FALSE(
+        _queryImpl
+            ->getById(_escNs,
+                      ESCCollection::generateNonAnchorId(getTestESCToken(BSON("encrypted"
+                                                                              << "topsecret")),
+                                                         1))
+            .isEmpty());
+}
+
 // Insert 1 document with 100 fields
 TEST_F(FleCrudTest, Insert100Fields) {
 
@@ -845,6 +931,34 @@ TEST_F(FleCrudTest, Insert100Fields) {
                 ->getById(
                     _escNs,
                     ESCCollection::generateId(
+                        getTestESCToken(fieldName, valueGenerator(fieldNameFromInt(field), 0)), 1))
+                .isEmpty());
+    }
+}
+
+// Insert 1 document with 100 fields
+// TODO: SERVER-73303 delete when v2 is enabled by default
+TEST_F(FleCrudTest, Insert100FieldsV2) {
+    RAIIServerParameterControllerForTest controller("featureFlagFLE2ProtocolVersion2", true);
+
+    uint64_t fieldCount = 100;
+    ValueGenerator valueGenerator = [](StringData fieldName, uint64_t row) {
+        return fieldName.toString();
+    };
+    doSingleWideInsert(1, fieldCount, valueGenerator);
+
+    assertDocumentCounts(1, fieldCount, 0, fieldCount);
+
+    for (uint64_t field = 0; field < fieldCount; field++) {
+        auto fieldName = fieldNameFromInt(field);
+
+        assertECOCDocumentCountByField(fieldName, 1);
+
+        ASSERT_FALSE(
+            _queryImpl
+                ->getById(
+                    _escNs,
+                    ESCCollection::generateNonAnchorId(
                         getTestESCToken(fieldName, valueGenerator(fieldNameFromInt(field), 0)), 1))
                 .isEmpty());
     }
@@ -886,6 +1000,84 @@ TEST_F(FleCrudTest, Insert20Fields50Rows) {
     }
 }
 
+// Insert 100 documents each with 20 fields with 7 distinct values per field
+// TODO: SERVER-73303 delete when v2 is enabled by default
+TEST_F(FleCrudTest, Insert20Fields50RowsV2) {
+    RAIIServerParameterControllerForTest controller("featureFlagFLE2ProtocolVersion2", true);
+    uint64_t fieldCount = 20;
+    uint64_t rowCount = 50;
+
+    ValueGenerator valueGenerator = [](StringData fieldName, uint64_t row) {
+        return fieldName.toString() + std::to_string(row % 7);
+    };
+
+
+    for (uint64_t row = 0; row < rowCount; row++) {
+        doSingleWideInsert(row, fieldCount, valueGenerator);
+    }
+
+    assertDocumentCounts(rowCount, rowCount * fieldCount, 0, rowCount * fieldCount);
+
+    for (uint64_t row = 0; row < rowCount; row++) {
+        for (uint64_t field = 0; field < fieldCount; field++) {
+            auto fieldName = fieldNameFromInt(field);
+
+            int count = (row / 7) + 1;
+
+            assertECOCDocumentCountByField(fieldName, rowCount);
+            ASSERT_FALSE(
+                _queryImpl
+                    ->getById(_escNs,
+                              ESCCollection::generateNonAnchorId(
+                                  getTestESCToken(fieldName,
+                                                  valueGenerator(fieldNameFromInt(field), row)),
+                                  count))
+                    .isEmpty());
+        }
+    }
+}
+
+// Test v1 FLE2InsertUpdatePayload is rejected if v2 is enabled.
+// There are 2 places where the payload version compatibility is checked:
+// 1. When parsing the InsertUpdatePayload in EDCServerCollection::getEncryptedFieldInfo()
+// 2. When transforming the InsertUpdatePayload to the on-disk format in processInsert()
+TEST_F(FleCrudTest, InsertV1PayloadAgainstV2Protocol) {
+    RAIIServerParameterControllerForTest controller("featureFlagFLE2ProtocolVersion2", true);
+
+    std::vector<uint8_t> buf(64);
+    buf[0] = static_cast<uint8_t>(EncryptedBinDataType::kFLE2InsertUpdatePayload);
+
+    BSONObjBuilder builder;
+    builder.append("_id", 1);
+    builder.append("counter", 1);
+    builder.append("plainText", "sample");
+    builder.appendBinData("encrypted", buf.size(), BinDataType::Encrypt, buf.data());
+
+    BSONObj document = builder.obj();
+    ASSERT_THROWS_CODE(EDCServerCollection::getEncryptedFieldInfo(document), DBException, 7291901);
+
+    FLE2InsertUpdatePayloadV2 payload;
+    PrfBlock dummyToken;
+    payload.setEdcDerivedToken(dummyToken);
+    payload.setEscDerivedToken(dummyToken);
+    payload.setServerDerivedFromDataToken(dummyToken);
+    payload.setServerEncryptionToken(dummyToken);
+    payload.setEncryptedTokens(buf);
+    payload.setValue(buf);
+    payload.setType(BSONType::String);
+
+    std::vector<EDCServerPayloadInfo> serverPayload(1);
+    serverPayload.front().fieldPathName = "encrypted";
+    serverPayload.front().counts = {1};
+    serverPayload.front().payload = std::move(payload);
+
+    auto efc = getTestEncryptedFieldConfig();
+    ASSERT_THROWS_CODE(
+        processInsert(_queryImpl.get(), _edcNs, serverPayload, efc, 0, document, false),
+        DBException,
+        7291907);
+}
+
 #define ASSERT_ECC_DOC(assertElement, assertPosition, assertStart, assertEnd)            \
     {                                                                                    \
         auto _eccDoc = getECCDocument(getTestECCToken((assertElement)), assertPosition); \
@@ -895,7 +1087,8 @@ TEST_F(FleCrudTest, Insert20Fields50Rows) {
     }
 
 // Insert and delete one document
-TEST_F(FleCrudTest, InsertAndDeleteOne) {
+// TODO: SERVER-73303 delete when v2 is enabled by default
+TEST_F(FleCrudTest, InsertAndDeleteOneV1) {
     auto doc = BSON("encrypted"
                     << "secret");
     auto element = doc.firstElement();
@@ -916,7 +1109,29 @@ TEST_F(FleCrudTest, InsertAndDeleteOne) {
 }
 
 // Insert and delete one document
-TEST_F(FleCrudTest, InsertAndDeleteOneRange) {
+TEST_F(FleCrudTest, InsertAndDeleteOne) {
+    RAIIServerParameterControllerForTest controller("featureFlagFLE2ProtocolVersion2", true);
+    auto doc = BSON("encrypted"
+                    << "secret");
+    auto element = doc.firstElement();
+
+    doSingleInsert(1, element, Fle2AlgorithmInt::kEquality);
+
+    assertDocumentCounts(1, 1, 0, 1);
+
+    ASSERT_FALSE(
+        _queryImpl->getById(_escNs, ESCCollection::generateNonAnchorId(getTestESCToken(element), 1))
+            .isEmpty());
+
+    doSingleDelete(1, Fle2AlgorithmInt::kEquality);
+
+    assertDocumentCounts(0, 1, 0, 1);
+    assertECOCDocumentCountByField("encrypted", 1);
+}
+
+// Insert and delete one document
+// TODO: SERVER-73303 delete when v2 is enabled by default
+TEST_F(FleCrudTest, InsertAndDeleteOneRangeV1) {
     RAIIServerParameterControllerForTest controller("featureFlagFLE2Range", true);
     auto doc = BSON("encrypted" << 5);
     auto element = doc.firstElement();
@@ -931,8 +1146,25 @@ TEST_F(FleCrudTest, InsertAndDeleteOneRange) {
     assertECOCDocumentCountByField("encrypted", 10);
 }
 
+// Insert and delete one document
+TEST_F(FleCrudTest, InsertAndDeleteOneRange) {
+    RAIIServerParameterControllerForTest controller("featureFlagFLE2ProtocolVersion2", true);
+    auto doc = BSON("encrypted" << 5);
+    auto element = doc.firstElement();
+
+    doSingleInsert(1, element, Fle2AlgorithmInt::kRange);
+
+    assertDocumentCounts(1, 5, 0, 5);
+
+    doSingleDelete(1, Fle2AlgorithmInt::kRange);
+
+    assertDocumentCounts(0, 5, 0, 5);
+    assertECOCDocumentCountByField("encrypted", 5);
+}
+
 // Insert two documents, and delete both
-TEST_F(FleCrudTest, InsertTwoSamAndDeleteTwo) {
+// TODO: SERVER-73303 delete when v2 is enabled by default
+TEST_F(FleCrudTest, InsertTwoSamAndDeleteTwoV1) {
     auto doc = BSON("encrypted"
                     << "secret");
     auto element = doc.firstElement();
@@ -954,8 +1186,32 @@ TEST_F(FleCrudTest, InsertTwoSamAndDeleteTwo) {
     ASSERT_ECC_DOC(element, 2, 1, 1);
 }
 
+// Insert two documents, and delete both
+TEST_F(FleCrudTest, InsertTwoSameAndDeleteTwo) {
+    RAIIServerParameterControllerForTest controller("featureFlagFLE2ProtocolVersion2", true);
+    auto doc = BSON("encrypted"
+                    << "secret");
+    auto element = doc.firstElement();
+
+    doSingleInsert(1, element, Fle2AlgorithmInt::kEquality);
+    doSingleInsert(2, element, Fle2AlgorithmInt::kEquality);
+
+    assertDocumentCounts(2, 2, 0, 2);
+
+    ASSERT_FALSE(
+        _queryImpl->getById(_escNs, ESCCollection::generateNonAnchorId(getTestESCToken(element), 1))
+            .isEmpty());
+
+    doSingleDelete(2, Fle2AlgorithmInt::kEquality);
+    doSingleDelete(1, Fle2AlgorithmInt::kEquality);
+
+    assertDocumentCounts(0, 2, 0, 2);
+    assertECOCDocumentCountByField("encrypted", 2);
+}
+
 // Insert two documents with different values and delete them
-TEST_F(FleCrudTest, InsertTwoDifferentAndDeleteTwo) {
+// TODO: SERVER-73303 delete when v2 is enabled by default
+TEST_F(FleCrudTest, InsertTwoDifferentAndDeleteTwoV1) {
 
     doSingleInsert(1,
                    BSON("encrypted"
@@ -986,9 +1242,43 @@ TEST_F(FleCrudTest, InsertTwoDifferentAndDeleteTwo) {
                    1);
 }
 
+// Insert two documents with different values and delete them
+TEST_F(FleCrudTest, InsertTwoDifferentAndDeleteTwo) {
+    RAIIServerParameterControllerForTest controller("featureFlagFLE2ProtocolVersion2", true);
+    doSingleInsert(1,
+                   BSON("encrypted"
+                        << "secret"));
+    doSingleInsert(2,
+                   BSON("encrypted"
+                        << "topsecret"));
+
+    assertDocumentCounts(2, 2, 0, 2);
+
+    doSingleDelete(2, Fle2AlgorithmInt::kEquality);
+    doSingleDelete(1, Fle2AlgorithmInt::kEquality);
+
+    assertDocumentCounts(0, 2, 0, 2);
+    assertECOCDocumentCountByField("encrypted", 2);
+}
+
+// Insert one document but delete another document
+// TODO: SERVER-73303 delete when v2 is enabled by default
+TEST_F(FleCrudTest, InsertOneButDeleteAnotherV1) {
+
+    doSingleInsert(1,
+                   BSON("encrypted"
+                        << "secret"));
+    assertDocumentCounts(1, 1, 0, 1);
+
+    doSingleDelete(2, Fle2AlgorithmInt::kEquality);
+
+    assertDocumentCounts(1, 1, 0, 1);
+    assertECOCDocumentCountByField("encrypted", 1);
+}
+
 // Insert one document but delete another document
 TEST_F(FleCrudTest, InsertOneButDeleteAnother) {
-
+    RAIIServerParameterControllerForTest controller("featureFlagFLE2ProtocolVersion2", true);
     doSingleInsert(1,
                    BSON("encrypted"
                         << "secret"));
@@ -1381,6 +1671,15 @@ TEST_F(FleTagsTest, InsertOne) {
     ASSERT_EQ(1, readTags(doc).size());
 }
 
+// TODO: SERVER-73303 delete when v2 is enabled by default
+TEST_F(FleTagsTest, InsertOneV2) {
+    RAIIServerParameterControllerForTest controller("featureFlagFLE2ProtocolVersion2", true);
+    auto doc = BSON("encrypted"
+                    << "a");
+    doSingleInsert(1, doc);
+    ASSERT_EQ(1, readTags(doc).size());
+}
+
 TEST_F(FleTagsTest, InsertTwoSame) {
     auto doc = BSON("encrypted"
                     << "a");
@@ -1388,6 +1687,16 @@ TEST_F(FleTagsTest, InsertTwoSame) {
     doSingleInsert(1, doc);
     doSingleInsert(2, doc);
 
+    ASSERT_EQ(2, readTags(doc).size());
+}
+
+// TODO: SERVER-73303 delete when v2 is enabled by default
+TEST_F(FleTagsTest, InsertTwoSameV2) {
+    RAIIServerParameterControllerForTest controller("featureFlagFLE2ProtocolVersion2", true);
+    auto doc = BSON("encrypted"
+                    << "a");
+    doSingleInsert(1, doc);
+    doSingleInsert(2, doc);
     ASSERT_EQ(2, readTags(doc).size());
 }
 
@@ -1404,7 +1713,23 @@ TEST_F(FleTagsTest, InsertTwoDifferent) {
     ASSERT_EQ(1, readTags(doc2).size());
 }
 
-TEST_F(FleTagsTest, InsertAndDeleteOne) {
+// TODO: SERVER-73303 delete when v2 is enabled by default
+TEST_F(FleTagsTest, InsertTwoDifferentV2) {
+    RAIIServerParameterControllerForTest controller("featureFlagFLE2ProtocolVersion2", true);
+    auto doc1 = BSON("encrypted"
+                     << "a");
+    auto doc2 = BSON("encrypted"
+                     << "b");
+
+    doSingleInsert(1, doc1);
+    doSingleInsert(2, doc2);
+
+    ASSERT_EQ(1, readTags(doc1).size());
+    ASSERT_EQ(1, readTags(doc2).size());
+}
+
+// TODO: SERVER-73303 delete when v2 is enabled by default
+TEST_F(FleTagsTest, InsertAndDeleteOneV1) {
     auto doc = BSON("encrypted"
                     << "a");
 
@@ -1414,7 +1739,19 @@ TEST_F(FleTagsTest, InsertAndDeleteOne) {
     ASSERT_EQ(0, readTags(doc).size());
 }
 
-TEST_F(FleTagsTest, InsertTwoSameAndDeleteOne) {
+TEST_F(FleTagsTest, InsertAndDeleteOne) {
+    RAIIServerParameterControllerForTest controller("featureFlagFLE2ProtocolVersion2", true);
+    auto doc = BSON("encrypted"
+                    << "a");
+
+    doSingleInsert(1, doc);
+    doSingleDelete(1, Fle2AlgorithmInt::kEquality);
+
+    ASSERT_EQ(1, readTags(doc).size());
+}
+
+// TODO: SERVER-73303 delete when v2 is enabled by default
+TEST_F(FleTagsTest, InsertTwoSameAndDeleteOneV1) {
     auto doc = BSON("encrypted"
                     << "a");
 
@@ -1425,7 +1762,20 @@ TEST_F(FleTagsTest, InsertTwoSameAndDeleteOne) {
     ASSERT_EQ(1, readTags(doc).size());
 }
 
-TEST_F(FleTagsTest, InsertTwoDifferentAndDeleteOne) {
+TEST_F(FleTagsTest, InsertTwoSameAndDeleteOne) {
+    RAIIServerParameterControllerForTest controller("featureFlagFLE2ProtocolVersion2", true);
+    auto doc = BSON("encrypted"
+                    << "a");
+
+    doSingleInsert(1, doc);
+    doSingleInsert(2, doc);
+    doSingleDelete(2, Fle2AlgorithmInt::kEquality);
+
+    ASSERT_EQ(2, readTags(doc).size());
+}
+
+// TODO: SERVER-73303 delete when v2 is enabled by default
+TEST_F(FleTagsTest, InsertTwoDifferentAndDeleteOneV1) {
     auto doc1 = BSON("encrypted"
                      << "a");
     auto doc2 = BSON("encrypted"
@@ -1436,6 +1786,21 @@ TEST_F(FleTagsTest, InsertTwoDifferentAndDeleteOne) {
     doSingleDelete(1, Fle2AlgorithmInt::kEquality);
 
     ASSERT_EQ(0, readTags(doc1).size());
+    ASSERT_EQ(1, readTags(doc2).size());
+}
+
+TEST_F(FleTagsTest, InsertTwoDifferentAndDeleteOne) {
+    RAIIServerParameterControllerForTest controller("featureFlagFLE2ProtocolVersion2", true);
+    auto doc1 = BSON("encrypted"
+                     << "a");
+    auto doc2 = BSON("encrypted"
+                     << "b");
+
+    doSingleInsert(1, doc1);
+    doSingleInsert(2, doc2);
+    doSingleDelete(1, Fle2AlgorithmInt::kEquality);
+
+    ASSERT_EQ(1, readTags(doc1).size());
     ASSERT_EQ(1, readTags(doc2).size());
 }
 
@@ -1491,7 +1856,49 @@ TEST_F(FleTagsTest, ContentionFactor) {
     ASSERT_EQ(2, readTags(doc2, 4).size());
 }
 
-TEST_F(FleTagsTest, MemoryLimit) {
+// TODO: SERVER-73303 delete when v2 is enabled by default
+TEST_F(FleTagsTest, ContentionFactorV2) {
+    RAIIServerParameterControllerForTest controller("featureFlagFLE2ProtocolVersion2", true);
+    auto efc = EncryptedFieldConfig::parse(IDLParserContext("root"), fromjson(R"({
+        "escCollection": "esc",
+        "eccCollection": "ecc",
+        "ecocCollection": "ecoc",
+        "fields": [{
+            "keyId": { "$uuid": "12345678-1234-9876-1234-123456789012"},
+            "path": "encrypted",
+            "bsonType": "string",
+            "queries": {"queryType": "equality", "contention": NumberLong(4)}
+        }]
+    })"));
+
+    auto doc1 = BSON("encrypted"
+                     << "a");
+    auto doc2 = BSON("encrypted"
+                     << "b");
+
+    // Insert doc1 twice with a contention factor of 0 and once with a contention factor or 3.
+    doSingleInsertWithContention(1, doc1, 4, 0, efc);
+    doSingleInsertWithContention(4, doc1, 4, 3, efc);
+    doSingleInsertWithContention(5, doc1, 4, 0, efc);
+
+    // Insert doc2 once with a contention factor of 2 and once with a contention factor of 3.
+    doSingleInsertWithContention(7, doc2, 4, 2, efc);
+    doSingleInsertWithContention(8, doc2, 4, 3, efc);
+
+    ASSERT_EQ(2, readTagsWithContention(doc1, 0).size());
+    ASSERT_EQ(0, readTagsWithContention(doc2, 0).size());
+    ASSERT_EQ(0, readTagsWithContention(doc1, 1).size());
+    ASSERT_EQ(0, readTagsWithContention(doc2, 1).size());
+    ASSERT_EQ(0, readTagsWithContention(doc1, 2).size());
+    ASSERT_EQ(1, readTagsWithContention(doc2, 2).size());
+    ASSERT_EQ(1, readTagsWithContention(doc1, 3).size());
+    ASSERT_EQ(1, readTagsWithContention(doc2, 3).size());
+    ASSERT_EQ(3, readTags(doc1, 4).size());
+    ASSERT_EQ(2, readTags(doc2, 4).size());
+}
+
+// TODO: SERVER-73303 delete when v2 is enabled by default
+TEST_F(FleTagsTest, MemoryLimitV1) {
     auto doc = BSON("encrypted"
                     << "a");
 
@@ -1517,6 +1924,35 @@ TEST_F(FleTagsTest, MemoryLimit) {
 
     // readTags returns 10 tags which does not exceed memory limit.
     ASSERT_EQ(tagLimit, readTags(doc).size());
+}
+
+TEST_F(FleTagsTest, MemoryLimit) {
+    RAIIServerParameterControllerForTest controller("featureFlagFLE2ProtocolVersion2", true);
+    auto doc = BSON("encrypted"
+                    << "a");
+
+    const auto tagLimit = 10;
+
+    // Set memory limit to 10 tags * 40 bytes per tag
+    internalQueryFLERewriteMemoryLimit.store(tagLimit * 40);
+
+    // Do 10 inserts
+    for (auto i = 0; i < tagLimit; i++) {
+        doSingleInsert(i, doc);
+    }
+
+    // readTags returns 10 tags which does not exceed memory limit.
+    ASSERT_EQ(tagLimit, readTags(doc).size());
+
+    doSingleInsert(10, doc);
+
+    // readTags returns 11 tags which does exceed memory limit.
+    ASSERT_THROWS_CODE(readTags(doc), DBException, ErrorCodes::FLEMaxTagLimitExceeded);
+
+    doSingleDelete(5, Fle2AlgorithmInt::kEquality);
+
+    // readTags returns 11 tags which does exceed memory limit.
+    ASSERT_THROWS_CODE(readTags(doc), DBException, ErrorCodes::FLEMaxTagLimitExceeded);
 }
 
 TEST_F(FleTagsTest, SampleMemoryLimit) {

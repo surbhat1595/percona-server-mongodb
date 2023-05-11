@@ -86,23 +86,27 @@ public:
                 {
                     // Clear database metadata on primary node.
                     AutoGetDb autoDb(newOpCtx.get(), dbName, MODE_IX);
-                    auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
-                        newOpCtx.get(), dbName, DSSAcquisitionMode::kExclusive);
+                    auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireExclusive(
+                        newOpCtx.get(), dbName);
                     scopedDss->clearDbInfo(newOpCtx.get());
                 }
 
+                // The critical section may have been entered by another operation, which implies
+                // that the one with the specified reason has already been exited. Consequently,
+                // this skips the requirement that reason must match.
                 ShardingRecoveryService::get(newOpCtx.get())
                     ->releaseRecoverableCriticalSection(newOpCtx.get(),
                                                         NamespaceString(dbName),
                                                         csReason,
-                                                        ShardingCatalogClient::kLocalWriteConcern);
+                                                        ShardingCatalogClient::kLocalWriteConcern,
+                                                        false /* throwIfReasonDiffers */);
             }
 
             // Since no write that generated a retryable write oplog entry with this sessionId and
             // txnNumber happened, we need to make a dummy write so that the session gets durably
             // persisted on the oplog. This must be the last operation done on this command.
             DBDirectClient dbClient(opCtx);
-            dbClient.update(NamespaceString::kServerConfigurationNamespace.ns(),
+            dbClient.update(NamespaceString::kServerConfigurationNamespace,
                             BSON("_id" << Request::kCommandName),
                             BSON("$inc" << BSON("count" << 1)),
                             true /* upsert */,

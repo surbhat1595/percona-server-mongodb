@@ -100,8 +100,7 @@ constexpr int kCheckpointTsBackupCursorErrorCode = 6929900;
 constexpr int kCloseCursorBeforeOpenErrorCode = 50886;
 
 NamespaceString getOplogBufferNs(const UUID& migrationUUID) {
-    return NamespaceString(NamespaceString::kConfigDb,
-                           kOplogBufferPrefix + migrationUUID.toString());
+    return NamespaceString(DatabaseName::kConfig, kOplogBufferPrefix + migrationUUID.toString());
 }
 
 bool isMigrationCompleted(TenantMigrationRecipientStateEnum state) {
@@ -443,8 +442,8 @@ boost::optional<BSONObj> TenantMigrationRecipientService::Instance::reportForCur
     }
     bob.append("donorConnectionString", _stateDoc.getDonorConnectionString());
     bob.append("readPreference", _stateDoc.getReadPreference().toInnerBSON());
-    bob.append("state", _stateDoc.getState());
-    bob.append("dataSyncCompleted", _dataSyncCompletionPromise.getFuture().isReady());
+    bob.append("state", TenantMigrationRecipientState_serializer(_stateDoc.getState()));
+    bob.append("migrationCompleted", _dataSyncCompletionPromise.getFuture().isReady());
     bob.append("garbageCollectable", _forgetMigrationDurablePromise.getFuture().isReady());
     bob.append("numRestartsDueToDonorConnectionFailure",
                _stateDoc.getNumRestartsDueToDonorConnectionFailure());
@@ -1008,7 +1007,7 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::_openBackupCursor(
 
     const auto aggregateCommandRequestObj = [] {
         AggregateCommandRequest aggRequest(
-            NamespaceString::makeCollectionlessAggregateNSS(NamespaceString::kAdminDb),
+            NamespaceString::makeCollectionlessAggregateNSS(DatabaseName::kAdmin),
             {BSON("$backupCursor" << BSONObj())});
         // We must set a writeConcern on internal commands.
         aggRequest.setWriteConcern(WriteConcernOptions());
@@ -1026,17 +1025,15 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::_openBackupCursor(
 
     auto fetchStatus = std::make_shared<boost::optional<Status>>();
     auto uniqueMetadataInfo = std::make_unique<boost::optional<shard_merge_utils::MetadataInfo>>();
-    const auto fetcherCallback =
-        [
-            this,
-            self = shared_from_this(),
-            fetchStatus,
-            metadataInfoPtr = uniqueMetadataInfo.get(),
-            token,
-            startMigrationDonorTimestamp
-        ](const Fetcher::QueryResponseStatus& dataStatus,
-          Fetcher::NextAction* nextAction,
-          BSONObjBuilder* getMoreBob) noexcept {
+    const auto fetcherCallback = [this,
+                                  self = shared_from_this(),
+                                  fetchStatus,
+                                  metadataInfoPtr = uniqueMetadataInfo.get(),
+                                  token,
+                                  startMigrationDonorTimestamp](
+                                     const Fetcher::QueryResponseStatus& dataStatus,
+                                     Fetcher::NextAction* nextAction,
+                                     BSONObjBuilder* getMoreBob) noexcept {
         try {
             uassertStatusOK(dataStatus);
             uassert(ErrorCodes::CallbackCanceled, "backup cursor interrupted", !token.isCanceled());
@@ -1134,7 +1131,7 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::_openBackupCursor(
     _donorFilenameBackupCursorFileFetcher = std::make_unique<Fetcher>(
         _backupCursorExecutor.get(),
         _client->getServerHostAndPort(),
-        NamespaceString::kAdminDb.toString(),
+        DatabaseName::kAdmin.toString(),
         aggregateCommandRequestObj,
         fetcherCallback,
         ReadPreferenceSetting(ReadPreference::PrimaryPreferred).toContainingBSON(),
@@ -3267,7 +3264,7 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
             stdx::lock_guard lk(_mutex);
             invariant(_dataSyncCompletionPromise.getFuture().isReady());
 
-            if (status.code() == ErrorCodes::ConflictingServerlessOperation) {
+            if (status == ErrorCodes::ConflictingServerlessOperation) {
                 LOGV2(6531506,
                       "Migration failed as another serverless operation was in progress",
                       "migrationId"_attr = getMigrationUUID(),
@@ -3275,9 +3272,18 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
                       "status"_attr = status);
                 setPromiseOkifNotReady(lk, _forgetMigrationDurablePromise);
                 return status;
-            } else if (!status.isOK()) {
-                // We should only hit here on a stepDown/shutDown, or a 'conflicting migration'
-                // error.
+            }
+
+            if (status == ErrorCodes::CallbackCanceled) {
+                // Replace the CallbackCanceled error with InterruptedDueToReplStateChange to
+                // support retry behavior. We can receive a CallbackCanceled error here during
+                // a failover if the ScopedTaskExecutor is shut down and rejects a task before
+                // the OperationContext is interrupted.
+                status = Status{ErrorCodes::InterruptedDueToReplStateChange,
+                                "operation was interrupted"};
+            }
+
+            if (!status.isOK()) {
                 LOGV2(4881402,
                       "Migration not marked to be garbage collectable",
                       "migrationId"_attr = getMigrationUUID(),
@@ -3285,6 +3291,7 @@ SemiFuture<void> TenantMigrationRecipientService::Instance::run(
                       "status"_attr = status);
                 setPromiseErrorifNotReady(lk, _forgetMigrationDurablePromise, status);
             }
+
             _taskState.setState(TaskState::kDone);
 
             return Status::OK();

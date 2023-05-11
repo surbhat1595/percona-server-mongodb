@@ -41,6 +41,7 @@
 #include "mongo/db/catalog_shard_feature_flag_gen.h"
 #include "mongo/db/client_metadata_propagation_egress_hook.h"
 #include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/keys_collection_client_direct.h"
 #include "mongo/db/keys_collection_client_sharded.h"
@@ -109,7 +110,7 @@ public:
 
     // Update the shard identy config string
     void onConfirmedSet(const State& state) noexcept final {
-        auto connStr = state.connStr;
+        const auto& connStr = state.connStr;
         try {
             LOGV2(471691,
                   "Updating the shard registry with confirmed replica set",
@@ -131,17 +132,19 @@ public:
             return;
         }
 
-        auto setName = connStr.getSetName();
+        const auto& setName = connStr.getSetName();
         bool updateInProgress = false;
         {
             stdx::lock_guard lock(_mutex);
             if (!_hasUpdateState(lock, setName)) {
-                _updateStates.emplace(setName, std::make_shared<ReplSetConfigUpdateState>());
+                _updateStates.emplace(std::piecewise_construct,
+                                      std::forward_as_tuple(setName),
+                                      std::forward_as_tuple());
             }
 
-            auto updateState = _updateStates.at(setName);
-            updateState->nextUpdateToSend = connStr;
-            updateInProgress = updateState->updateInProgress;
+            auto& updateState = _updateStates.at(setName);
+            updateState.nextUpdateToSend = connStr;
+            updateInProgress = updateState.updateInProgress;
         }
 
         if (!updateInProgress) {
@@ -167,31 +170,33 @@ public:
 
 private:
     // Schedules updates to the shard identity config string while preserving order.
-    void _scheduleUpdateShardIdentityConfigString(std::string setName) {
-        ConnectionString update;
+    void _scheduleUpdateShardIdentityConfigString(const std::string& setName) {
+        ConnectionString updatedConnectionString;
         {
             stdx::lock_guard lock(_mutex);
             if (!_hasUpdateState(lock, setName)) {
                 return;
             }
-            auto updateState = _updateStates.at(setName);
-            if (updateState->updateInProgress) {
+            auto& updateState = _updateStates.at(setName);
+            if (updateState.updateInProgress) {
                 return;
             }
-            updateState->updateInProgress = true;
-            update = updateState->nextUpdateToSend.value();
-            updateState->nextUpdateToSend = boost::none;
+            updateState.updateInProgress = true;
+            updatedConnectionString = updateState.nextUpdateToSend.value();
+            updateState.nextUpdateToSend = boost::none;
         }
 
         auto executor = Grid::get(_serviceContext)->getExecutorPool()->getFixedExecutor();
-        executor->schedule([self = shared_from_this(), setName, update](Status status) {
+        executor->schedule([self = shared_from_this(),
+                            setName,
+                            update = std::move(updatedConnectionString)](const Status& status) {
             self->_updateShardIdentityConfigString(status, setName, update);
         });
     }
 
-    void _updateShardIdentityConfigString(Status status,
-                                          std::string setName,
-                                          ConnectionString update) {
+    void _updateShardIdentityConfigString(const Status& status,
+                                          const std::string& setName,
+                                          const ConnectionString& update) {
         if (ErrorCodes::isCancellationError(status.code())) {
             LOGV2_DEBUG(22067,
                         2,
@@ -238,28 +243,29 @@ private:
         _endUpdateShardIdentityConfigString(setName, update);
     }
 
-    void _endUpdateShardIdentityConfigString(std::string setName, ConnectionString update) {
+    void _endUpdateShardIdentityConfigString(const std::string& setName,
+                                             const ConnectionString& update) {
         bool moreUpdates = false;
         {
             stdx::lock_guard lock(_mutex);
             invariant(_hasUpdateState(lock, setName));
-            auto updateState = _updateStates.at(setName);
-            updateState->updateInProgress = false;
-            moreUpdates = (updateState->nextUpdateToSend != boost::none);
+            auto& updateState = _updateStates.at(setName);
+            updateState.updateInProgress = false;
+            moreUpdates = (updateState.nextUpdateToSend != boost::none);
             if (!moreUpdates) {
                 _updateStates.erase(setName);
             }
         }
         if (moreUpdates) {
             auto executor = Grid::get(_serviceContext)->getExecutorPool()->getFixedExecutor();
-            executor->schedule([self = shared_from_this(), setName](auto args) {
+            executor->schedule([self = shared_from_this(), setName](const auto& _) {
                 self->_scheduleUpdateShardIdentityConfigString(setName);
             });
         }
     }
 
     // Returns true if a ReplSetConfigUpdateState exists for replica set setName.
-    bool _hasUpdateState(WithLock, std::string setName) {
+    bool _hasUpdateState(WithLock, const std::string& setName) {
         return (_updateStates.find(setName) != _updateStates.end());
     }
 
@@ -267,11 +273,15 @@ private:
     mutable Mutex _mutex = MONGO_MAKE_LATCH("ShardingReplicaSetChangeListenerMongod::mutex");
 
     struct ReplSetConfigUpdateState {
+        ReplSetConfigUpdateState() = default;
+        ReplSetConfigUpdateState(const ReplSetConfigUpdateState&) = delete;
+        ReplSetConfigUpdateState& operator=(const ReplSetConfigUpdateState&) = delete;
+
         bool updateInProgress = false;
         boost::optional<ConnectionString> nextUpdateToSend;
     };
 
-    stdx::unordered_map<std::string, std::shared_ptr<ReplSetConfigUpdateState>> _updateStates;
+    stdx::unordered_map<std::string, ReplSetConfigUpdateState> _updateStates;
 };
 
 }  // namespace
@@ -557,7 +567,23 @@ void initializeGlobalShardingStateForConfigServerIfNeeded(OperationContext* opCt
         return {ConnectionString::forLocal()};
     }();
 
-    CatalogCacheLoader::set(service, std::make_unique<ConfigServerCatalogCacheLoader>());
+    if (gFeatureFlagCatalogShard.isEnabledAndIgnoreFCV()) {
+        CatalogCacheLoader::set(service,
+                                std::make_unique<ShardServerCatalogCacheLoader>(
+                                    std::make_unique<ConfigServerCatalogCacheLoader>()));
+
+        // This is only called in startup when there shouldn't be replication state changes, but to
+        // be safe we take the RSTL anyway.
+        repl::ReplicationStateTransitionLockGuard rstl(opCtx, MODE_IX);
+        const auto replCoord = repl::ReplicationCoordinator::get(opCtx);
+        bool isReplSet =
+            replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet;
+        bool isStandaloneOrPrimary =
+            !isReplSet || (replCoord->getMemberState() == repl::MemberState::RS_PRIMARY);
+        CatalogCacheLoader::get(opCtx).initializeReplicaSetRole(isStandaloneOrPrimary);
+    } else {
+        CatalogCacheLoader::set(service, std::make_unique<ConfigServerCatalogCacheLoader>());
+    }
 
     initializeGlobalShardingStateForMongoD(opCtx, configCS);
 
@@ -639,15 +665,15 @@ void initializeGlobalShardingStateForMongoD(OperationContext* opCtx,
         return std::make_unique<KeysCollectionClientSharded>(catalogClient);
     };
 
-    uassertStatusOK(
-        initializeGlobalShardingState(opCtx,
-                                      std::move(catalogCache),
-                                      std::move(shardRegistry),
-                                      [service] { return makeEgressHooksList(service); },
-                                      // We only need one task executor here because sharding task
-                                      // executors aren't used for user queries in mongod.
-                                      1,
-                                      initKeysClient));
+    uassertStatusOK(initializeGlobalShardingState(
+        opCtx,
+        std::move(catalogCache),
+        std::move(shardRegistry),
+        [service] { return makeEgressHooksList(service); },
+        // We only need one task executor here because sharding task
+        // executors aren't used for user queries in mongod.
+        1,
+        initKeysClient));
 
     auto const replCoord = repl::ReplicationCoordinator::get(service);
     if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&

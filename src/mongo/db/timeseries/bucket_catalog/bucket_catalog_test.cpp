@@ -92,9 +92,12 @@ protected:
     StringData _timeField = "time";
     StringData _metaField = "meta";
 
-    NamespaceString _ns1{"bucket_catalog_test_1", "t_1"};
-    NamespaceString _ns2{"bucket_catalog_test_1", "t_2"};
-    NamespaceString _ns3{"bucket_catalog_test_2", "t_1"};
+    NamespaceString _ns1 =
+        NamespaceString::createNamespaceString_forTest("bucket_catalog_test_1", "t_1");
+    NamespaceString _ns2 =
+        NamespaceString::createNamespaceString_forTest("bucket_catalog_test_1", "t_2");
+    NamespaceString _ns3 =
+        NamespaceString::createNamespaceString_forTest("bucket_catalog_test_2", "t_1");
 };
 
 class BucketCatalogWithoutMetadataTest : public BucketCatalogTest {
@@ -899,8 +902,9 @@ TEST_F(BucketCatalogTest, CannotConcurrentlyCommitBatchesForSameBucket) {
 
     {
         auto task = RunBackgroundTaskAndWaitForFailpoint{
-            "hangWaitingForConflictingPreparedBatch",
-            [&]() { ASSERT_OK(_bucketCatalog->prepareCommit(batch2)); }};
+            "hangWaitingForConflictingPreparedBatch", [&]() {
+                ASSERT_OK(_bucketCatalog->prepareCommit(batch2));
+            }};
 
         // Finish the first batch.
         _bucketCatalog->finish(batch1, {});
@@ -952,8 +956,9 @@ TEST_F(BucketCatalogTest, AbortingBatchEnsuresBucketIsEventuallyClosed) {
 
     {
         auto task = RunBackgroundTaskAndWaitForFailpoint{
-            "hangWaitingForConflictingPreparedBatch",
-            [&]() { ASSERT_NOT_OK(_bucketCatalog->prepareCommit(batch2)); }};
+            "hangWaitingForConflictingPreparedBatch", [&]() {
+                ASSERT_NOT_OK(_bucketCatalog->prepareCommit(batch2));
+            }};
 
         // If we abort the third batch, it should abort the second one too, as it isn't prepared.
         // However, since the first batch is prepared, we can't abort it or clean up the bucket. We
@@ -1791,7 +1796,7 @@ TEST_F(BucketCatalogTest, CannotInsertIntoOutdatedBucket) {
 
     // If we advance the catalog era, then we shouldn't use a bucket that was fetched during a
     // previous era.
-    const NamespaceString fakeNs{"test.foo"};
+    const NamespaceString fakeNs = NamespaceString::createNamespaceString_forTest("test.foo");
     const auto fakeId = OID();
     _bucketCatalog->directWriteStart(fakeNs, fakeId);
     _bucketCatalog->directWriteFinish(fakeNs, fakeId);

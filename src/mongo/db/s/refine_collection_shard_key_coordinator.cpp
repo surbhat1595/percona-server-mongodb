@@ -130,9 +130,10 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                 shardkeyutil::validateShardKeyIsNotEncrypted(
                     opCtx, nss(), ShardKeyPattern(_newShardKey.toBSON()));
 
-                const auto cm = uassertStatusOK(
-                    Grid::get(opCtx)->catalogCache()->getShardedCollectionPlacementInfoWithRefresh(
-                        opCtx, nss()));
+                const auto [cm, _] = uassertStatusOK(
+                    Grid::get(opCtx)
+                        ->catalogCache()
+                        ->getShardedCollectionRoutingInfoWithPlacementRefresh(opCtx, nss()));
 
                 _oldShardKey = cm.getShardKeyPattern().getKeyPattern();
                 _collectionUUID = cm.getUUID();
@@ -149,7 +150,7 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                 const auto cmdResponse = uassertStatusOK(configShard->runCommand(
                     opCtx,
                     ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                    NamespaceString::kAdminDb.toString(),
+                    DatabaseName::kAdmin.toString(),
                     CommandHelpers::appendMajorityWriteConcern(
                         configsvrRefineCollShardKey.toBSON({}), opCtx->getWriteConcern()),
                     Shard::RetryPolicy::kIdempotent));

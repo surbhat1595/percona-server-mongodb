@@ -49,7 +49,7 @@ namespace {
 
 using unittest::assertGet;
 
-const NamespaceString kNss("TestDB", "TestColl");
+const NamespaceString kNss = NamespaceString::createNamespaceString_forTest("TestDB", "TestColl");
 
 auto buildUpdate(const NamespaceString& nss, BSONObj query, BSONObj update, bool upsert) {
     write_ops::UpdateCommandRequest updateOp(nss);
@@ -74,9 +74,8 @@ class CollectionRoutingInfoTargeterTest : public CatalogCacheTestFixture {
 public:
     CollectionRoutingInfoTargeter prepare(BSONObj shardKeyPattern,
                                           const std::vector<BSONObj>& splitPoints) {
-        collectionRoutingInfo.emplace(
-            makeChunkManager(kNss, ShardKeyPattern(shardKeyPattern), nullptr, false, splitPoints),
-            boost::optional<GlobalIndexesCache>(boost::none));
+        collectionRoutingInfo.emplace(makeCollectionRoutingInfo(
+            kNss, ShardKeyPattern(shardKeyPattern), nullptr, false, splitPoints, {}));
         return CollectionRoutingInfoTargeter(operationContext(), kNss);
     };
     boost::optional<CollectionRoutingInfo> collectionRoutingInfo;
@@ -302,13 +301,14 @@ void CollectionRoutingInfoTargeterTest::
 
     // Cause the global chunk manager to have some other configuration.
     std::vector<BSONObj> differentPoints = {BSON("c" << BSONNULL), BSON("c" << 0)};
-    auto cm2 = makeChunkManager(kNss,
-                                ShardKeyPattern(BSON("c" << 1 << "d"
-                                                         << "hashed")),
-                                nullptr,
-                                false,
-                                differentPoints);
-    ASSERT_EQ(cm2.numChunks(), 3);
+    auto cri2 = makeCollectionRoutingInfo(kNss,
+                                          ShardKeyPattern(BSON("c" << 1 << "d"
+                                                                   << "hashed")),
+                                          nullptr,
+                                          false,
+                                          differentPoints,
+                                          {});
+    ASSERT_EQ(cri2.cm.numChunks(), 3);
 
     // Run common test on the custom ChunkManager of CollectionRoutingInfoTargeter.
     testTargetInsertWithRangePrefixHashedShardKeyCommon(operationContext(), criTargeter);

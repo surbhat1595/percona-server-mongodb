@@ -28,6 +28,8 @@
  */
 
 #include "mongo/db/storage/ticketholder_manager.h"
+#include "mongo/db/storage/execution_control/throughput_probing.h"
+#include "mongo/db/storage/storage_engine_feature_flags_gen.h"
 #include "mongo/db/storage/storage_engine_parameters_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/concurrency/priority_ticketholder.h"
@@ -48,12 +50,15 @@ TicketHolderManager::TicketHolderManager(ServiceContext* svcCtx,
                                          std::unique_ptr<TicketHolder> writeTicketHolder)
     : _readTicketHolder(std::move(readTicketHolder)),
       _writeTicketHolder(std::move(writeTicketHolder)),
-      _monitor([] {
+      _monitor([this, svcCtx]() -> std::unique_ptr<TicketHolderMonitor> {
           switch (StorageEngineConcurrencyAdjustmentAlgorithm_parse(
               IDLParserContext{"storageEngineConcurrencyAdjustmentAlgorithm"},
               gStorageEngineConcurrencyAdjustmentAlgorithm)) {
               case StorageEngineConcurrencyAdjustmentAlgorithmEnum::kNone:
                   return nullptr;
+              case StorageEngineConcurrencyAdjustmentAlgorithmEnum::kThroughputProbing:
+                  return std::make_unique<execution_control::ThroughputProbing>(
+                      svcCtx, _readTicketHolder.get(), _writeTicketHolder.get(), Milliseconds{500});
           }
           MONGO_UNREACHABLE;
       }()) {
@@ -62,7 +67,7 @@ TicketHolderManager::TicketHolderManager(ServiceContext* svcCtx,
     }
 }
 
-Status TicketHolderManager::updateConcurrentWriteTransactions(const int& newWriteTransactions) {
+Status TicketHolderManager::updateConcurrentWriteTransactions(const int32_t& newWriteTransactions) {
     if (auto client = Client::getCurrent()) {
         auto ticketHolderManager = TicketHolderManager::get(client->getServiceContext());
         if (!ticketHolderManager) {
@@ -88,7 +93,7 @@ Status TicketHolderManager::updateConcurrentWriteTransactions(const int& newWrit
     return Status::OK();
 };
 
-Status TicketHolderManager::updateConcurrentReadTransactions(const int& newReadTransactions) {
+Status TicketHolderManager::updateConcurrentReadTransactions(const int32_t& newReadTransactions) {
     if (auto client = Client::getCurrent()) {
         auto ticketHolderManager = TicketHolderManager::get(client->getServiceContext());
         if (!ticketHolderManager) {
@@ -116,7 +121,7 @@ Status TicketHolderManager::updateConcurrentReadTransactions(const int& newReadT
 }
 
 Status TicketHolderManager::updateLowPriorityAdmissionBypassThreshold(
-    const int& newBypassThreshold) {
+    const int32_t& newBypassThreshold) {
     if (auto client = Client::getCurrent()) {
         // TODO SERVER-72616: Remove the ifdef once TicketBroker is implemented in a cross-platform
         // manner.

@@ -257,7 +257,8 @@ void IndexCatalogImpl::_init(OperationContext* opCtx,
                         [svcCtx = opCtx->getServiceContext(),
                          uuid = collection->uuid(),
                          indexName,
-                         hasInvalidExpireAfterSeconds](auto commitTime) {
+                         hasInvalidExpireAfterSeconds](OperationContext*,
+                                                       boost::optional<Timestamp>) {
                             TTLCollectionCache::get(svcCtx).registerTTLInfo(
                                 uuid,
                                 TTLCollectionCache::Info{indexName, hasInvalidExpireAfterSeconds});
@@ -318,7 +319,7 @@ void IndexCatalogImpl::_init(OperationContext* opCtx,
     if (!fromExisting) {
         // Only do this when we're not initializing an earlier collection from the shared state of
         // an existing collection.
-        CollectionQueryInfo::get(collection).init(opCtx, collection);
+        CollectionQueryInfo::get(collection).init(opCtx, CollectionPtr(collection));
     }
 }
 
@@ -590,13 +591,13 @@ IndexCatalogEntry* IndexCatalogImpl::createIndexEntry(OperationContext* opCtx,
                                                       Collection* collection,
                                                       std::unique_ptr<IndexDescriptor> descriptor,
                                                       CreateIndexEntryFlags flags) {
-    Status status = _isSpecOk(opCtx, collection, descriptor->infoObj());
+    Status status = _isSpecOk(opCtx, CollectionPtr(collection), descriptor->infoObj());
     if (!status.isOK()) {
-        LOGV2_FATAL_NOTRACE(28782,
-                            "Found an invalid index",
-                            "descriptor"_attr = descriptor->infoObj(),
-                            "namespace"_attr = collection->ns(),
-                            "error"_attr = redact(status));
+        LOGV2_FATAL(28782,
+                    "Found an invalid index",
+                    "descriptor"_attr = descriptor->infoObj(),
+                    "namespace"_attr = collection->ns(),
+                    "error"_attr = redact(status));
     }
 
     auto engine = opCtx->getServiceContext()->getStorageEngine();
@@ -609,7 +610,7 @@ IndexCatalogEntry* IndexCatalogImpl::createIndexEntry(OperationContext* opCtx,
 
     auto* const descriptorPtr = descriptor.get();
     auto entry = std::make_shared<IndexCatalogEntryImpl>(
-        opCtx, collection, ident, std::move(descriptor), frozen);
+        opCtx, CollectionPtr(collection), ident, std::move(descriptor), frozen);
 
     IndexDescriptor* desc = entry->descriptor();
 
@@ -641,7 +642,7 @@ IndexCatalogEntry* IndexCatalogImpl::createIndexEntry(OperationContext* opCtx,
         const std::string indexName = descriptorPtr->indexName();
         opCtx->recoveryUnit()->onRollback(
             [collectionDecorations = collection->getSharedDecorations(),
-             indexName = std::move(indexName)] {
+             indexName = std::move(indexName)](OperationContext*) {
                 CollectionIndexUsageTrackerDecoration::get(collectionDecorations)
                     .unregisterIndex(indexName);
             });
@@ -660,7 +661,8 @@ StatusWith<BSONObj> IndexCatalogImpl::createIndexOnEmptyCollection(OperationCont
                             << " UUID: " << collection->uuid()
                             << " Count (from size storer): " << collection->numRecords(opCtx));
 
-    StatusWith<BSONObj> statusWithSpec = prepareSpecForCreate(opCtx, collection, spec);
+    StatusWith<BSONObj> statusWithSpec =
+        prepareSpecForCreate(opCtx, CollectionPtr(collection), spec);
     Status status = statusWithSpec.getStatus();
     if (!status.isOK())
         return status;
@@ -1290,8 +1292,10 @@ void IndexCatalogImpl::dropIndexes(OperationContext* opCtx,
 
     if (!didExclude) {
         if (numIndexesTotal() || numIndexesInCollectionCatalogEntry || _readyIndexes.size()) {
-            _logInternalState(
-                opCtx, collection, numIndexesInCollectionCatalogEntry, indexNamesToDrop);
+            _logInternalState(opCtx,
+                              CollectionPtr(collection),
+                              numIndexesInCollectionCatalogEntry,
+                              indexNamesToDrop);
         }
         fassert(17327, numIndexesTotal() == 0);
         fassert(17328, numIndexesInCollectionCatalogEntry == 0);
@@ -1303,16 +1307,17 @@ void IndexCatalogImpl::dropAllIndexes(OperationContext* opCtx,
                                       Collection* collection,
                                       bool includingIdIndex,
                                       std::function<void(const IndexDescriptor*)> onDropFn) {
-    dropIndexes(opCtx,
-                collection,
-                [includingIdIndex](const IndexDescriptor* indexDescriptor) {
-                    if (includingIdIndex) {
-                        return true;
-                    }
+    dropIndexes(
+        opCtx,
+        collection,
+        [includingIdIndex](const IndexDescriptor* indexDescriptor) {
+            if (includingIdIndex) {
+                return true;
+            }
 
-                    return !indexDescriptor->isIdIndex();
-                },
-                onDropFn);
+            return !indexDescriptor->isIdIndex();
+        },
+        onDropFn);
 }
 
 Status IndexCatalogImpl::dropIndex(OperationContext* opCtx,
@@ -1474,7 +1479,7 @@ Status IndexCatalogImpl::dropIndexEntry(OperationContext* opCtx,
     opCtx->recoveryUnit()->registerChange(std::make_unique<IndexRemoveChange>(
         collection->ns(), collection->uuid(), released, collection->getSharedDecorations()));
 
-    CollectionQueryInfo::get(collection).rebuildIndexData(opCtx, collection);
+    CollectionQueryInfo::get(collection).rebuildIndexData(opCtx, CollectionPtr(collection));
     CollectionIndexUsageTrackerDecoration::get(collection->getSharedDecorations())
         .unregisterIndex(indexName);
     _deleteIndexFromDisk(opCtx, collection, indexName, released);
@@ -1681,13 +1686,14 @@ const IndexDescriptor* IndexCatalogImpl::refreshEntry(OperationContext* opCtx,
                        IndexFeatures::make(desc, collection->ns().isOnInternalDb()));
 
     // Last rebuild index data for CollectionQueryInfo for this Collection.
-    CollectionQueryInfo::get(collection).rebuildIndexData(opCtx, collection);
+    CollectionQueryInfo::get(collection).rebuildIndexData(opCtx, CollectionPtr(collection));
 
-    opCtx->recoveryUnit()->onCommit([newEntry](auto commitTime) {
-        if (commitTime) {
-            newEntry->setMinimumVisibleSnapshot(*commitTime);
-        }
-    });
+    opCtx->recoveryUnit()->onCommit(
+        [newEntry](OperationContext*, boost::optional<Timestamp> commitTime) {
+            if (commitTime) {
+                newEntry->setMinimumVisibleSnapshot(*commitTime);
+            }
+        });
 
     // Return the new descriptor.
     return newEntry->descriptor();
@@ -2029,8 +2035,9 @@ void IndexCatalogImpl::indexBuildSuccess(OperationContext* opCtx,
     // Wait to unset the interceptor until the index actually commits. If a write conflict is
     // encountered and the index commit process is restated, the multikey information from the
     // interceptor may still be needed.
-    opCtx->recoveryUnit()->onCommit(
-        [index](boost::optional<Timestamp>) { index->setIndexBuildInterceptor(nullptr); });
+    opCtx->recoveryUnit()->onCommit([index](OperationContext*, boost::optional<Timestamp>) {
+        index->setIndexBuildInterceptor(nullptr);
+    });
     index->setIsReady(true);
 }
 

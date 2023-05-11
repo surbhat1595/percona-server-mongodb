@@ -170,11 +170,13 @@ Status makeNoopWriteIfNeeded(OperationContext* opCtx,
                             "clusterTime"_attr = clusterTime.toString(),
                             "remainingAttempts"_attr = remainingAttempts);
 
-                auto onRemoteCmdScheduled = [](executor::TaskExecutor::CallbackHandle handle) {};
-                auto onRemoteCmdComplete = [](executor::TaskExecutor::CallbackHandle handle) {};
+                auto onRemoteCmdScheduled = [](executor::TaskExecutor::CallbackHandle handle) {
+                };
+                auto onRemoteCmdComplete = [](executor::TaskExecutor::CallbackHandle handle) {
+                };
                 auto appendOplogNoteResponse = replCoord->runCmdOnPrimaryAndAwaitResponse(
                     opCtx,
-                    NamespaceString::kAdminDb.toString(),
+                    DatabaseName::kAdmin.toString(),
                     BSON("appendOplogNote"
                          << 1 << "maxClusterTime" << clusterTime.asTimestamp() << "data"
                          << BSON("noop write for afterClusterTime read concern" << 1)

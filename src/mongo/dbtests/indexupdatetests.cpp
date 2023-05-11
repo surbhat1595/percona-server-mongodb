@@ -306,12 +306,11 @@ public:
             int32_t nDocs = 1000;
             OpDebug* const nullOpDebug = nullptr;
             for (int32_t i = 0; i < nDocs; ++i) {
-                ASSERT_OK(collection_internal::insertDocument(
-                    _opCtx,
-                    CollectionPtr(coll, CollectionPtr::NoYieldTag{}),
-                    InsertStatement(BSON("_id" << i)),
-                    nullOpDebug,
-                    true));
+                ASSERT_OK(collection_internal::insertDocument(_opCtx,
+                                                              CollectionPtr(coll),
+                                                              InsertStatement(BSON("_id" << i)),
+                                                              nullOpDebug,
+                                                              true));
             }
             wunit.commit();
             // Request an interrupt.
@@ -553,6 +552,8 @@ protected:
 class IndexCatatalogFixIndexKey : public IndexBuildBase {
 public:
     void run() {
+        AutoGetCollection autoColl(_opCtx, _nss, LockMode::MODE_X);
+
         auto indexCatalog = collection().get()->getIndexCatalog();
 
         ASSERT_BSONOBJ_EQ(BSON("x" << 1), indexCatalog->fixIndexKey(BSON("x" << 1)));
@@ -574,7 +575,7 @@ public:
                                                                   << "fr")));
         client.createIndex(_nss, indexSpec);
 
-        auto response = client.insertAcknowledged(_ns, {BSON("a" << BSONSymbol("mySymbol"))});
+        auto response = client.insertAcknowledged(_nss, {BSON("a" << BSONSymbol("mySymbol"))});
         ASSERT_EQUALS(getStatusFromWriteCommandReply(response), ErrorCodes::CannotBuildIndexKeys);
         ASSERT_EQUALS(client.count(_nss), 0U);
     }
@@ -590,7 +591,7 @@ public:
         indexSpec.addKey("a");
         client.createIndex(_nss, indexSpec);
 
-        auto response = client.insertAcknowledged(_ns, {BSON("a" << BSONSymbol("mySymbol"))});
+        auto response = client.insertAcknowledged(_nss, {BSON("a" << BSONSymbol("mySymbol"))});
         ASSERT_OK(getStatusFromWriteCommandReply(response));
         ASSERT_EQUALS(response["n"].Int(), 1);
         ASSERT_EQUALS(client.count(_nss), 1U);
@@ -609,7 +610,7 @@ public:
         client.createIndex(_nss, indexSpec);
 
         auto response = client.insertAcknowledged(
-            _ns, {BSON("a" << BSON("b" << 99 << "c" << BSONSymbol("mySymbol")))});
+            _nss, {BSON("a" << BSON("b" << 99 << "c" << BSONSymbol("mySymbol")))});
         ASSERT_EQUALS(getStatusFromWriteCommandReply(response), ErrorCodes::CannotBuildIndexKeys);
         ASSERT_EQUALS(client.count(_nss), 0U);
     }
@@ -626,8 +627,8 @@ public:
                                                                   << "fr")));
         client.createIndex(_nss, indexSpec);
 
-        auto response =
-            client.insertAcknowledged(_ns, {BSON("a" << BSON_ARRAY(99 << BSONSymbol("mySymbol")))});
+        auto response = client.insertAcknowledged(
+            _nss, {BSON("a" << BSON_ARRAY(99 << BSONSymbol("mySymbol")))});
         ASSERT_EQUALS(getStatusFromWriteCommandReply(response), ErrorCodes::CannotBuildIndexKeys);
         ASSERT_EQUALS(client.count(_nss), 0U);
     }
@@ -639,7 +640,7 @@ public:
         auto opCtx = cc().makeOperationContext();
         DBDirectClient client(opCtx.get());
         client.dropCollection(_nss);
-        client.insert(_ns, BSON("a" << BSON_ARRAY(99 << BSONSymbol("mySymbol"))));
+        client.insert(_nss, BSON("a" << BSON_ARRAY(99 << BSONSymbol("mySymbol"))));
         ASSERT_EQUALS(client.count(_nss), 1U);
         IndexSpec indexSpec;
         indexSpec.addKey("a").addOptions(BSON("collation" << BSON("locale"
@@ -668,8 +669,8 @@ public:
         indexSpec.addKey("a");
         client.createIndex(_nss, indexSpec);
 
-        auto response =
-            client.insertAcknowledged(_ns, {BSON("a" << BSON_ARRAY(99 << BSONSymbol("mySymbol")))});
+        auto response = client.insertAcknowledged(
+            _nss, {BSON("a" << BSON_ARRAY(99 << BSONSymbol("mySymbol")))});
         ASSERT_EQUALS(getStatusFromWriteCommandReply(response), ErrorCodes::CannotBuildIndexKeys);
     }
 };

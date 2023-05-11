@@ -27,12 +27,10 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
-#include "mongo/db/service_context.h"
-#include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/concurrency/ticketholder.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/storage_engine_feature_flags_gen.h"
+#include "mongo/util/concurrency/admission_context.h"
 
 #include <iostream>
 
@@ -65,7 +63,7 @@ void updateQueueStatsOnTicketAcquisition(ServiceContext* serviceContext,
 }
 }  // namespace
 
-void TicketHolderWithQueueingStats::resize(OperationContext* opCtx, int newSize) noexcept {
+void TicketHolderWithQueueingStats::resize(OperationContext* opCtx, int32_t newSize) noexcept {
     stdx::lock_guard<Latch> lk(_resizeMutex);
 
     _resize(opCtx, newSize, _outof.load());
@@ -101,6 +99,7 @@ boost::optional<Ticket> TicketHolderWithQueueingStats::tryAcquire(AdmissionConte
     if (ticket) {
         auto& queueStats = _getQueueStatsToUse(admCtx);
         updateQueueStatsOnTicketAcquisition(_serviceContext, queueStats, admCtx);
+        _updatePeakUsed();
     }
     return ticket;
 }
@@ -141,9 +140,26 @@ boost::optional<Ticket> TicketHolderWithQueueingStats::waitForTicketUntil(Operat
     if (ticket) {
         cancelWait.dismiss();
         updateQueueStatsOnTicketAcquisition(_serviceContext, queueStats, admCtx);
+        _updatePeakUsed();
         return ticket;
     } else {
         return boost::none;
+    }
+}
+
+int32_t TicketHolderWithQueueingStats::getAndResetPeakUsed() {
+    return _peakUsed.swap(used());
+}
+
+void TicketHolderWithQueueingStats::_updatePeakUsed() {
+    if (!feature_flags::gFeatureFlagExecutionControl.isEnabledAndIgnoreFCV()) {
+        return;
+    }
+
+    auto currentUsed = used();
+    auto peakUsed = _peakUsed.load();
+
+    while (currentUsed > peakUsed && !_peakUsed.compareAndSwap(&peakUsed, currentUsed)) {
     }
 }
 
@@ -154,12 +170,12 @@ void TicketHolderWithQueueingStats::_appendCommonQueueImplStats(BSONObjBuilder& 
 
     b.append("addedToQueue", added);
     b.append("removedFromQueue", removed);
-    b.append("queueLength", std::max(static_cast<int>(added - removed), 0));
+    b.append("queueLength", std::max(added - removed, (int64_t)0));
 
     auto finished = stats.totalFinishedProcessing.loadRelaxed();
     auto started = stats.totalStartedProcessing.loadRelaxed();
     b.append("startedProcessing", started);
-    b.append("processing", std::max(static_cast<int>(started - finished), 0));
+    b.append("processing", std::max(started - finished, (int64_t)0));
     b.append("finishedProcessing", finished);
     b.append("totalTimeProcessingMicros", stats.totalTimeProcessingMicros.loadRelaxed());
     b.append("canceled", stats.totalCanceled.loadRelaxed());

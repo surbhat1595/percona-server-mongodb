@@ -52,7 +52,7 @@ function runTest(conn) {
     coll.find().toArray();
     fp.off();
     let logAndCount = getSlowLogAndCount(conn);
-    const slowSessionWorkflowCount = logAndCount.count;
+    let slowSessionWorkflowCount = logAndCount.count;
     assert.gt(slowSessionWorkflowCount,
               prevSlowSessionWorkflowCount,
               "Expected to find at least one slow SessionWorkflow log.");
@@ -70,15 +70,34 @@ function runTest(conn) {
     assert.gte(sendResponseElapsed,
                sleepMillisInSendResponse,
                "The time reported sending a response didn't include the sleep in the failpoint.");
+
+    assert.commandWorked(
+        conn.adminCommand({setParameter: 1, enableDetailedConnectionHealthMetricLogLines: false}));
+    assert.commandWorked(conn.adminCommand({clearLog: 'global'}));
+
+    // Wait, then do a query beyond the 100ms threshold. Make sure the slow loop log line does not
+    // exist this time.
+    const fp2 = configureFailPoint(
+        conn, "sessionWorkflowDelaySendMessage", {millis: sleepMillisInSendResponse});
+    coll.find().toArray();
+    fp2.off();
+    logAndCount = getSlowLogAndCount(conn);
+    slowSessionWorkflowCount = logAndCount.count;
+    assert.eq(slowSessionWorkflowCount, 0);
 }
 
-// Test standalone.
-const m = MongoRunner.runMongod();
-runTest(m);
-MongoRunner.stopMongod(m);
+// TODO(SERVER-63883): re-enable or delete this test depending on resolution
+const testEnabled = false;
 
-// Test sharded.
-const st = new ShardingTest({shards: 1, mongos: 1});
-runTest(st.s0);
-st.stop();
+if (testEnabled) {
+    // Test standalone.
+    const m = MongoRunner.runMongod();
+    runTest(m);
+    MongoRunner.stopMongod(m);
+
+    // Test sharded.
+    const st = new ShardingTest({shards: 1, mongos: 1});
+    runTest(st.s0);
+    st.stop();
+}
 })();

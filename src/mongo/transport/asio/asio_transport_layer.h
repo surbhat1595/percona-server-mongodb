@@ -173,7 +173,9 @@ public:
         enum class State { kInitialized, kStarted, kStopped };
         AtomicWord<State> _state;
 
-        Spawn _spawn = [](std::function<void()> f) { return stdx::thread{std::move(f)}; };
+        Spawn _spawn = [](std::function<void()> f) {
+            return stdx::thread{std::move(f)};
+        };
         stdx::thread _thread;
     };
 
@@ -183,12 +185,13 @@ public:
 
     ~AsioTransportLayer() override;
 
-    StatusWith<SessionHandle> connect(HostAndPort peer,
-                                      ConnectSSLMode sslMode,
-                                      Milliseconds timeout,
-                                      boost::optional<TransientSSLParams> transientSSLParams) final;
+    StatusWith<std::shared_ptr<Session>> connect(
+        HostAndPort peer,
+        ConnectSSLMode sslMode,
+        Milliseconds timeout,
+        boost::optional<TransientSSLParams> transientSSLParams) final;
 
-    Future<SessionHandle> asyncConnect(
+    Future<std::shared_ptr<Session>> asyncConnect(
         HostAndPort peer,
         ConnectSSLMode sslMode,
         const ReactorHandle& reactor,
@@ -243,14 +246,12 @@ public:
 #endif
 
 private:
-    using AsioSessionHandle = std::shared_ptr<AsioSession>;
-    using ConstAsioSessionHandle = std::shared_ptr<const AsioSession>;
     using GenericAcceptor = asio::basic_socket_acceptor<asio::generic::stream_protocol>;
 
     void _acceptConnection(GenericAcceptor& acceptor);
 
     template <typename Endpoint>
-    StatusWith<AsioSessionHandle> _doSyncConnect(
+    StatusWith<std::shared_ptr<AsioSession>> _doSyncConnect(
         Endpoint endpoint,
         const HostAndPort& peer,
         const Milliseconds& timeout,

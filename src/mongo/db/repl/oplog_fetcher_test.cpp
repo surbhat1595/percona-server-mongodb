@@ -54,7 +54,7 @@ using namespace mongo::repl;
 using namespace unittest;
 
 HostAndPort source("localhost:12345");
-NamespaceString nss("local.oplog.rs");
+NamespaceString nss = NamespaceString::createNamespaceString_forTest("local.oplog.rs");
 
 ReplSetConfig _createConfig() {
     BSONObjBuilder bob;
@@ -83,25 +83,25 @@ BSONObj concatenate(BSONObj a, const BSONObj& b) {
 }
 
 BSONObj makeNoopOplogEntry(OpTime opTime) {
-    auto oplogEntry =
-        repl::DurableOplogEntry(opTime,                           // optime
-                                OpTypeEnum ::kNoop,               // opType
-                                NamespaceString("test.t"),        // namespace
-                                boost::none,                      // uuid
-                                boost::none,                      // fromMigrate
-                                repl::OplogEntry::kOplogVersion,  // version
-                                BSONObj(),                        // o
-                                boost::none,                      // o2
-                                {},                               // sessionInfo
-                                boost::none,                      // upsert
-                                Date_t(),                         // wall clock time
-                                {},                               // statement ids
-                                boost::none,   // optime of previous write within same transaction
-                                boost::none,   // pre-image optime
-                                boost::none,   // post-image optime
-                                boost::none,   // ShardId of resharding recipient
-                                boost::none,   // _id
-                                boost::none);  // needsRetryImage
+    auto oplogEntry = repl::DurableOplogEntry(
+        opTime,                                                    // optime
+        OpTypeEnum ::kNoop,                                        // opType
+        NamespaceString::createNamespaceString_forTest("test.t"),  // namespace
+        boost::none,                                               // uuid
+        boost::none,                                               // fromMigrate
+        repl::OplogEntry::kOplogVersion,                           // version
+        BSONObj(),                                                 // o
+        boost::none,                                               // o2
+        {},                                                        // sessionInfo
+        boost::none,                                               // upsert
+        Date_t(),                                                  // wall clock time
+        {},                                                        // statement ids
+        boost::none,   // optime of previous write within same transaction
+        boost::none,   // pre-image optime
+        boost::none,   // post-image optime
+        boost::none,   // ShardId of resharding recipient
+        boost::none,   // _id
+        boost::none);  // needsRetryImage
     return oplogEntry.toBSON();
 }
 
@@ -367,7 +367,9 @@ protected:
 private:
     executor::ThreadPoolMock::Options makeThreadPoolMockOptions() const override {
         executor::ThreadPoolMock::Options options;
-        options.onCreateThread = []() { Client::initThread("OplogFetcherTest"); };
+        options.onCreateThread = []() {
+            Client::initThread("OplogFetcherTest");
+        };
         return options;
     };
 };
@@ -594,7 +596,9 @@ TEST_F(OplogFetcherTest, ShuttingExecutorDownShouldPreventOplogFetcherFromStarti
 
 TEST_F(OplogFetcherTest, OplogFetcherReturnsOperationFailedIfExecutorFailsToScheduleRunQuery) {
     TaskExecutorMock taskExecutorMock(&getExecutor());
-    taskExecutorMock.shouldFailScheduleWorkRequest = []() { return true; };
+    taskExecutorMock.shouldFailScheduleWorkRequest = []() {
+        return true;
+    };
 
     // The onShutdownFn should not be called because the oplog fetcher should fail during startup.
     auto oplogFetcher = makeOplogFetcherWithDifferentExecutor(
@@ -617,7 +621,9 @@ TEST_F(OplogFetcherTest, ShuttingExecutorDownAfterStartupButBeforeRunQuerySchedu
     // Defer scheduling work so that the executor's shutdown happens before startup's work is
     // scheduled.
     TaskExecutorMock taskExecutorMock(&getExecutor());
-    taskExecutorMock.shouldDeferScheduleWorkRequestByOneSecond = []() { return true; };
+    taskExecutorMock.shouldDeferScheduleWorkRequestByOneSecond = []() {
+        return true;
+    };
 
     auto oplogFetcher =
         makeOplogFetcherWithDifferentExecutor(&taskExecutorMock, std::ref(shutdownState));
@@ -640,7 +646,9 @@ TEST_F(OplogFetcherTest, OplogFetcherReturnsCallbackCanceledIfShutdownBeforeRunQ
     // Defer scheduling work so that the oplog fetcher's shutdown happens before startup's work is
     // scheduled.
     TaskExecutorMock taskExecutorMock(&getExecutor());
-    taskExecutorMock.shouldDeferScheduleWorkRequestByOneSecond = []() { return true; };
+    taskExecutorMock.shouldDeferScheduleWorkRequestByOneSecond = []() {
+        return true;
+    };
 
     auto oplogFetcher =
         makeOplogFetcherWithDifferentExecutor(&taskExecutorMock, std::ref(shutdownState));
@@ -1063,7 +1071,7 @@ TEST_F(OplogFetcherTest, MetadataIsNotProcessedOnBatchThatTriggersRollback) {
 
     // Set the remote node's first oplog entry to equal to lastFetched.
     auto remoteFirstOplogEntry = makeNoopOplogEntry(lastFetched);
-    _mockServer->insert(nss.ns(), remoteFirstOplogEntry);
+    _mockServer->insert(nss, remoteFirstOplogEntry);
 
     ASSERT_EQUALS(
         ErrorCodes::OplogStartMissing,
@@ -1080,7 +1088,7 @@ TEST_F(OplogFetcherTest, TooStaleToSyncFromSyncSource) {
     // Set the remote node's first oplog entry to be later than lastFetched, so we have fallen off
     // the sync source's oplog.
     auto remoteFirstOplogEntry = makeNoopOplogEntry(Seconds(200));
-    _mockServer->insert(nss.ns(), remoteFirstOplogEntry);
+    _mockServer->insert(nss, remoteFirstOplogEntry);
 
     ASSERT_EQUALS(
         ErrorCodes::TooStaleToSyncFromSource,
@@ -1095,7 +1103,7 @@ TEST_F(OplogFetcherTest, NotTooStaleShouldReturnOplogStartMissing) {
     // Set the remote node's first oplog entry to be earlier than lastFetched, so we have not fallen
     // off the sync source's oplog.
     auto remoteFirstOplogEntry = makeNoopOplogEntry(Seconds(1));
-    _mockServer->insert(nss.ns(), remoteFirstOplogEntry);
+    _mockServer->insert(nss, remoteFirstOplogEntry);
 
     ASSERT_EQUALS(
         ErrorCodes::OplogStartMissing,
@@ -1109,7 +1117,7 @@ TEST_F(OplogFetcherTest, BadRemoteFirstOplogEntryReturnsInvalidBSON) {
 
     // Set the remote node's first oplog entry to be an invalid BSON.
     auto remoteFirstOplogEntry = BSON("ok" << false);
-    _mockServer->insert(nss.ns(), remoteFirstOplogEntry);
+    _mockServer->insert(nss, remoteFirstOplogEntry);
 
     ASSERT_EQUALS(
         ErrorCodes::InvalidBSON,
@@ -1123,7 +1131,7 @@ TEST_F(OplogFetcherTest, EmptyRemoteFirstOplogEntryReturnsInvalidBSON) {
 
     // Set the remote node's first oplog entry to be an empty BSON.
     auto remoteFirstOplogEntry = BSONObj();
-    _mockServer->insert(nss.ns(), remoteFirstOplogEntry);
+    _mockServer->insert(nss, remoteFirstOplogEntry);
 
     ASSERT_EQUALS(
         ErrorCodes::InvalidBSON,
@@ -1137,7 +1145,7 @@ TEST_F(OplogFetcherTest, RemoteFirstOplogEntryWithNullTimestampReturnsInvalidBSO
 
     // Set the remote node's first oplog entry to have a null timestamp.
     auto remoteFirstOplogEntry = makeNoopOplogEntry(Seconds(0));
-    _mockServer->insert(nss.ns(), remoteFirstOplogEntry);
+    _mockServer->insert(nss, remoteFirstOplogEntry);
 
     ASSERT_EQUALS(
         ErrorCodes::InvalidBSON,
@@ -1152,7 +1160,7 @@ TEST_F(OplogFetcherTest, RemoteFirstOplogEntryWithExtraFieldsReturnsOplogStartMi
     // Set the remote node's first oplog entry to include extra fields.
     auto remoteFirstOplogEntry = BSON("ts" << Timestamp(1, 0) << "t" << 1LL << "extra"
                                            << "field");
-    _mockServer->insert(nss.ns(), remoteFirstOplogEntry);
+    _mockServer->insert(nss, remoteFirstOplogEntry);
 
     auto shutdownState = processSingleBatch(makeFirstBatch(cursorId, {entry}, {metadataObj}));
 
@@ -1794,7 +1802,7 @@ TEST_F(
 
     // Set the remote node's first oplog entry to equal to lastFetched.
     auto remoteFirstOplogEntry = makeNoopOplogEntry(lastFetched);
-    _mockServer->insert(nss.ns(), remoteFirstOplogEntry);
+    _mockServer->insert(nss, remoteFirstOplogEntry);
 
     ASSERT_EQUALS(ErrorCodes::OplogStartMissing,
                   processSingleBatch(makeFirstBatch(cursorId, {entry}, metadataObj))->getStatus());

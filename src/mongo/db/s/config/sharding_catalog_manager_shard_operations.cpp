@@ -63,6 +63,7 @@
 #include "mongo/db/s/add_shard_cmd_gen.h"
 #include "mongo/db/s/add_shard_util.h"
 #include "mongo/db/s/sharding_logging.h"
+#include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/type_shard_identity.h"
 #include "mongo/db/s/user_writes_critical_section_document_gen.h"
 #include "mongo/db/s/user_writes_recoverable_critical_section_service.h"
@@ -341,9 +342,10 @@ StatusWith<ShardType> ShardingCatalogManager::_validateHostAsShard(
     OperationContext* opCtx,
     std::shared_ptr<RemoteCommandTargeter> targeter,
     const std::string* shardProposedName,
-    const ConnectionString& connectionString) {
+    const ConnectionString& connectionString,
+    bool isCatalogShard) {
     auto swCommandResponse = _runCommandForAddShard(
-        opCtx, targeter.get(), NamespaceString::kAdminDb, BSON("isMaster" << 1));
+        opCtx, targeter.get(), DatabaseName::kAdmin.db(), BSON("isMaster" << 1));
     if (swCommandResponse.getStatus() == ErrorCodes::IncompatibleServerVersion) {
         return swCommandResponse.getStatus().withReason(
             str::stream() << "Cannot add " << connectionString.toString()
@@ -426,7 +428,7 @@ StatusWith<ShardType> ShardingCatalogManager::_validateHostAsShard(
 
     // Is it a config server?
     if (resIsMaster.hasField("configsvr")) {
-        if (!gFeatureFlagCatalogShard.isEnabledAndIgnoreFCV()) {
+        if (!isCatalogShard) {
             return {ErrorCodes::OperationFailed,
                     str::stream() << "Cannot add " << connectionString.toString()
                                   << " as a shard since it is a config server"};
@@ -531,7 +533,7 @@ StatusWith<ShardType> ShardingCatalogManager::_validateHostAsShard(
     }
 
     // Disallow adding shard replica set with name 'config'
-    if (actualShardName == NamespaceString::kConfigDb) {
+    if (!isCatalogShard && actualShardName == DatabaseName::kConfig.db()) {
         return {ErrorCodes::BadValue, "use of shard replica set with name 'config' is not allowed"};
     }
 
@@ -577,7 +579,7 @@ StatusWith<std::vector<std::string>> ShardingCatalogManager::_getDBNamesListFrom
     auto swCommandResponse =
         _runCommandForAddShard(opCtx,
                                targeter.get(),
-                               NamespaceString::kAdminDb,
+                               DatabaseName::kAdmin.db(),
                                BSON("listDatabases" << 1 << "nameOnly" << true));
     if (!swCommandResponse.isOK()) {
         return swCommandResponse.getStatus();
@@ -595,8 +597,8 @@ StatusWith<std::vector<std::string>> ShardingCatalogManager::_getDBNamesListFrom
     for (const auto& dbEntry : cmdResult["databases"].Obj()) {
         const auto& dbName = dbEntry["name"].String();
 
-        if (!(dbName == NamespaceString::kAdminDb || dbName == NamespaceString::kLocalDb ||
-              dbName == NamespaceString::kConfigDb)) {
+        if (!(dbName == DatabaseName::kAdmin.db() || dbName == DatabaseName::kLocal.db() ||
+              dbName == DatabaseName::kConfig.db())) {
             dbNames.push_back(dbName);
         }
     }
@@ -604,10 +606,30 @@ StatusWith<std::vector<std::string>> ShardingCatalogManager::_getDBNamesListFrom
     return dbNames;
 }
 
+void ShardingCatalogManager::installConfigShardIdentityDocument(OperationContext* opCtx) {
+    invariant(!ShardingState::get(opCtx)->enabled());
+
+    // Insert a shard identity document. Note we insert with local write concern, so the shard
+    // identity may roll back, which will trigger an fassert to clear the in-memory sharding state.
+    {
+        auto addShardCmd = add_shard_util::createAddShardCmd(opCtx, ShardId::kConfigServerId);
+
+        auto shardIdUpsertCmd = add_shard_util::createShardIdentityUpsertForAddShard(
+            addShardCmd, ShardingCatalogClient::kLocalWriteConcern);
+        DBDirectClient localClient(opCtx);
+        BSONObj res;
+
+        localClient.runCommand(DatabaseName::kAdmin, shardIdUpsertCmd, res);
+
+        uassertStatusOK(getStatusFromWriteCommandReply(res));
+    }
+}
+
 StatusWith<std::string> ShardingCatalogManager::addShard(
     OperationContext* opCtx,
     const std::string* shardProposedName,
-    const ConnectionString& shardConnectionString) {
+    const ConnectionString& shardConnectionString,
+    bool isCatalogShard) {
     if (!shardConnectionString) {
         return {ErrorCodes::BadValue, "Invalid connection string"};
     }
@@ -640,7 +662,8 @@ StatusWith<std::string> ShardingCatalogManager::addShard(
     auto targeter = shard->getTargeter();
 
     ScopeGuard stopMonitoringGuard([&] {
-        if (shardConnectionString.type() == ConnectionString::ConnectionType::kReplicaSet) {
+        if (shardConnectionString.type() == ConnectionString::ConnectionType::kReplicaSet &&
+            !isCatalogShard) {
             // This is a workaround for the case were we could have some bad shard being
             // requested to be added and we put that bad connection string on the global replica set
             // monitor registry. It needs to be cleaned up so that when a correct replica set is
@@ -650,8 +673,8 @@ StatusWith<std::string> ShardingCatalogManager::addShard(
     });
 
     // Validate the specified connection string may serve as shard at all
-    auto shardStatus =
-        _validateHostAsShard(opCtx, targeter, shardProposedName, shardConnectionString);
+    auto shardStatus = _validateHostAsShard(
+        opCtx, targeter, shardProposedName, shardConnectionString, isCatalogShard);
     if (!shardStatus.isOK()) {
         return shardStatus.getStatus();
     }
@@ -696,7 +719,7 @@ StatusWith<std::string> ShardingCatalogManager::addShard(
     // Helper function that runs a command on the to-be shard and returns the status
     auto runCmdOnNewShard = [this, &opCtx, &targeter](const BSONObj& cmd) -> Status {
         auto swCommandResponse =
-            _runCommandForAddShard(opCtx, targeter.get(), NamespaceString::kAdminDb, cmd);
+            _runCommandForAddShard(opCtx, targeter.get(), DatabaseName::kAdmin.db(), cmd);
         if (!swCommandResponse.isOK()) {
             return swCommandResponse.getStatus();
         }
@@ -708,20 +731,22 @@ StatusWith<std::string> ShardingCatalogManager::addShard(
         return Shard::CommandResponse::processBatchWriteResponse(commandResponse, &batchResponse);
     };
 
-    AddShard addShardCmd = add_shard_util::createAddShardCmd(opCtx, shardType.getName());
+    if (!isCatalogShard) {
+        AddShard addShardCmd = add_shard_util::createAddShardCmd(opCtx, shardType.getName());
 
-    // Use the _addShard command to add the shard, which in turn inserts a shardIdentity document
-    // into the shard and triggers sharding state initialization.
-    auto addShardStatus = runCmdOnNewShard(addShardCmd.toBSON({}));
-    if (!addShardStatus.isOK()) {
-        return addShardStatus;
+        // Use the _addShard command to add the shard, which in turn inserts a shardIdentity
+        // document into the shard and triggers sharding state initialization.
+        auto addShardStatus = runCmdOnNewShard(addShardCmd.toBSON({}));
+        if (!addShardStatus.isOK()) {
+            return addShardStatus;
+        }
+
+        // Set the user-writes blocking state on the new shard.
+        _setUserWriteBlockingStateOnNewShard(opCtx, targeter.get());
+
+        // Determine the set of cluster parameters to be used.
+        _standardizeClusterParameters(opCtx, shard.get());
     }
-
-    // Set the user-writes blocking state on the new shard.
-    _setUserWriteBlockingStateOnNewShard(opCtx, targeter.get());
-
-    // Determine the set of cluster parameters to be used.
-    _standardizeClusterParameters(opCtx, shard.get());
 
     {
         // Keep the FCV stable across checking the FCV, sending setFCV to the new shard and writing
@@ -732,6 +757,15 @@ StatusWith<std::string> ShardingCatalogManager::addShard(
         // while blocking on the network).
         FixedFCVRegion fcvRegion(opCtx);
 
+        // Prevent the race where an FCV downgrade happens concurrently with the catalogShard
+        // being added and the FCV downgrade finishes before the catalogShard is added.
+        uassert(
+            5563604,
+            "Cannot add catalog shard because it is not supported in featureCompatibilityVersion: {}"_format(
+                multiversion::toString(serverGlobalParams.featureCompatibility.getVersion())),
+            gFeatureFlagCatalogShard.isEnabled(serverGlobalParams.featureCompatibility) ||
+                !isCatalogShard);
+
         uassert(5563603,
                 "Cannot add shard while in upgrading/downgrading FCV state",
                 !fcvRegion->isUpgradingOrDowngrading());
@@ -741,22 +775,24 @@ StatusWith<std::string> ShardingCatalogManager::addShard(
                   fcvRegion == multiversion::GenericFCV::kLastContinuous ||
                   fcvRegion == multiversion::GenericFCV::kLastLTS);
 
-        SetFeatureCompatibilityVersion setFcvCmd(fcvRegion->getVersion());
-        setFcvCmd.setDbName(NamespaceString::kAdminDb);
-        setFcvCmd.setFromConfigServer(true);
+        if (!isCatalogShard) {
+            SetFeatureCompatibilityVersion setFcvCmd(fcvRegion->getVersion());
+            setFcvCmd.setDbName(DatabaseName::kAdmin);
+            setFcvCmd.setFromConfigServer(true);
 
-        auto versionResponse =
-            _runCommandForAddShard(opCtx,
-                                   targeter.get(),
-                                   NamespaceString::kAdminDb,
-                                   setFcvCmd.toBSON(BSON(WriteConcernOptions::kWriteConcernField
-                                                         << opCtx->getWriteConcern().toBSON())));
-        if (!versionResponse.isOK()) {
-            return versionResponse.getStatus();
-        }
+            auto versionResponse = _runCommandForAddShard(
+                opCtx,
+                targeter.get(),
+                DatabaseName::kAdmin.db(),
+                setFcvCmd.toBSON(BSON(WriteConcernOptions::kWriteConcernField
+                                      << opCtx->getWriteConcern().toBSON())));
+            if (!versionResponse.isOK()) {
+                return versionResponse.getStatus();
+            }
 
-        if (!versionResponse.getValue().commandStatus.isOK()) {
-            return versionResponse.getValue().commandStatus;
+            if (!versionResponse.getValue().commandStatus.isOK()) {
+                return versionResponse.getValue().commandStatus;
+            }
         }
 
         // Tick clusterTime to get a new topologyTime for this mutation of the topology.
@@ -974,7 +1010,10 @@ RemoveShardProgress ShardingCatalogManager::removeShard(OperationContext* opCtx,
     // set monitor is removed, otherwise the shard would be referencing a dropped RSM.
     Grid::get(opCtx)->shardRegistry()->reload(opCtx);
 
-    ReplicaSetMonitor::remove(name);
+    if (shardId != ShardId::kConfigServerId) {
+        // Don't remove the catalog shard's RSM because it is used to target the config server.
+        ReplicaSetMonitor::remove(name);
+    }
 
     // Record finish in changelog
     ShardingLogging::get(opCtx)->logChange(
@@ -1052,7 +1091,7 @@ void ShardingCatalogManager::_setUserWriteBlockingStateOnNewShard(OperationConte
         const auto makeShardsvrSetUserWriteBlockModeCommand =
             [](ShardsvrSetUserWriteBlockModePhaseEnum phase) -> BSONObj {
             ShardsvrSetUserWriteBlockMode shardsvrSetUserWriteBlockModeCmd;
-            shardsvrSetUserWriteBlockModeCmd.setDbName(NamespaceString::kAdminDb);
+            shardsvrSetUserWriteBlockModeCmd.setDbName(DatabaseName::kAdmin);
             SetUserWriteBlockModeRequest setUserWriteBlockModeRequest(true /* global */);
             shardsvrSetUserWriteBlockModeCmd.setSetUserWriteBlockModeRequest(
                 std::move(setUserWriteBlockModeRequest));
@@ -1067,7 +1106,7 @@ void ShardingCatalogManager::_setUserWriteBlockingStateOnNewShard(OperationConte
                 ShardsvrSetUserWriteBlockModePhaseEnum::kPrepare);
 
             const auto cmdResponse =
-                _runCommandForAddShard(opCtx, targeter, NamespaceString::kAdminDb, cmd);
+                _runCommandForAddShard(opCtx, targeter, DatabaseName::kAdmin.db(), cmd);
             uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(cmdResponse));
         }
 
@@ -1077,7 +1116,7 @@ void ShardingCatalogManager::_setUserWriteBlockingStateOnNewShard(OperationConte
                 ShardsvrSetUserWriteBlockModePhaseEnum::kComplete);
 
             const auto cmdResponse =
-                _runCommandForAddShard(opCtx, targeter, NamespaceString::kAdminDb, cmd);
+                _runCommandForAddShard(opCtx, targeter, DatabaseName::kAdmin.db(), cmd);
             uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(cmdResponse));
         }
 
@@ -1094,7 +1133,7 @@ void ShardingCatalogManager::_setClusterParametersLocally(OperationContext* opCt
         SetClusterParameter setClusterParameterRequest(
             BSON(parameter["_id"].String() << parameter.filterFieldsUndotted(
                      BSON("_id" << 1 << "clusterParameterTime" << 1), false)));
-        setClusterParameterRequest.setDbName(DatabaseName(tenantId, NamespaceString::kAdminDb));
+        setClusterParameterRequest.setDbName(DatabaseName(tenantId, DatabaseName::kAdmin.db()));
         std::unique_ptr<ServerParameterService> parameterService =
             std::make_unique<ClusterParameterService>();
         SetClusterParameterInvocation invocation{std::move(parameterService), dbService};
@@ -1233,14 +1272,14 @@ void ShardingCatalogManager::_pushClusterParametersToNewShard(
             ShardsvrSetClusterParameter setClusterParamsCmd(
                 BSON(parameter["_id"].String() << parameter.filterFieldsUndotted(
                          BSON("_id" << 1 << "clusterParameterTime" << 1), false)));
-            setClusterParamsCmd.setDbName(DatabaseName(tenantId, NamespaceString::kAdminDb));
+            setClusterParamsCmd.setDbName(DatabaseName(tenantId, DatabaseName::kAdmin.db()));
             setClusterParamsCmd.setClusterParameterTime(
                 parameter["clusterParameterTime"].timestamp());
 
             const auto cmdResponse = _runCommandForAddShard(
                 opCtx,
                 targeter.get(),
-                DatabaseName(tenantId, NamespaceString::kAdminDb).toStringWithTenantId(),
+                DatabaseName(tenantId, DatabaseName::kAdmin.db()).toStringWithTenantId(),
                 CommandHelpers::appendMajorityWriteConcern(setClusterParamsCmd.toBSON({})));
             uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(cmdResponse));
         }

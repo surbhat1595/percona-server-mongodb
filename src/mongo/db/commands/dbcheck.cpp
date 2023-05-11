@@ -97,7 +97,7 @@ public:
             HealthLogInterface::get(_opCtx->getServiceContext())->log(*healthLogEntry);
 
             DbCheckOplogStartStop oplogEntry;
-            const auto nss = NamespaceString("admin.$cmd");
+            const auto nss = NamespaceString::kAdminCommandNamespace;
             oplogEntry.setNss(nss);
             oplogEntry.setType(OplogEntriesEnum::Start);
             _logOp(_opCtx, nss, boost::none /*uuid*/, oplogEntry.toBSON());
@@ -109,7 +109,7 @@ public:
     ~DbCheckStartAndStopLogger() {
         try {
             DbCheckOplogStartStop oplogEntry;
-            const auto nss = NamespaceString("admin.$cmd");
+            const auto nss = NamespaceString::kAdminCommandNamespace;
             oplogEntry.setNss(nss);
             oplogEntry.setType(OplogEntriesEnum::Stop);
             _logOp(_opCtx, nss, boost::none /*uuid*/, oplogEntry.toBSON());
@@ -208,7 +208,7 @@ std::unique_ptr<DbCheckRun> fullDatabaseRun(OperationContext* opCtx,
     const auto maxBytesPerBatch = invocation.getMaxBytesPerBatch();
     const auto maxBatchTimeMillis = invocation.getMaxBatchTimeMillis();
     auto result = std::make_unique<DbCheckRun>();
-    auto perCollectionWork = [&](const CollectionPtr& coll) {
+    auto perCollectionWork = [&](const Collection* coll) {
         if (!coll->ns().isReplicated()) {
             return true;
         }

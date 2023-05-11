@@ -198,7 +198,7 @@ public:
 
         ASSERT_OK(authManagerExternalState->updateOne(
             opCtx.get(),
-            AuthorizationManager::versionCollectionNamespace,
+            NamespaceString::kServerConfigurationNamespace,
             AuthorizationManager::versionDocumentQuery,
             BSON("$set" << BSON(AuthorizationManager::schemaVersionFieldName
                                 << AuthorizationManager::schemaVersion26Final)),
@@ -207,7 +207,7 @@ public:
 
         ASSERT_OK(authManagerExternalState->insert(
             opCtx.get(),
-            NamespaceString("admin.system.users"),
+            NamespaceString::createNamespaceString_forTest("admin.system.users"),
             BSON("_id"
                  << "test.sajack"
                  << "user"
@@ -222,7 +222,8 @@ public:
 
 
         ASSERT_OK(authManagerExternalState->insert(opCtx.get(),
-                                                   NamespaceString("admin.system.users"),
+                                                   NamespaceString::createNamespaceString_forTest(
+                                                       "admin.system.users"),
                                                    BSON("_id"
                                                         << "$external.sajack"
                                                         << "user"

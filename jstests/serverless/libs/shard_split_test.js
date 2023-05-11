@@ -53,13 +53,13 @@ export function doWriteOperations(rstArgs, tenantIds) {
     return writeResults;
 }
 
-export function addRecipientNodes({rst, numNodes, recipientTagName}) {
+export function addRecipientNodes({rst, numNodes, recipientTagName, nodeOptions}) {
     numNodes = numNodes || 3;  // default to three nodes
     const recipientNodes = [];
-    const options = makeX509OptionsForTest();
+    const options = Object.assign({}, makeX509OptionsForTest().donor, nodeOptions);
     jsTestLog(`Adding ${numNodes} non-voting recipient nodes to donor`);
     for (let i = 0; i < numNodes; ++i) {
-        recipientNodes.push(rst.add(options.donor));
+        recipientNodes.push(rst.add(options));
     }
 
     const primary = rst.getPrimary();
@@ -206,7 +206,11 @@ export function runShardSplitCommand(
             // run() with commandWorked() as retrying on retryable writeConcernErrors can
             // cause the retry attempt to fail with writeErrors.
             res = undefined;
-            res = primary.adminCommand(cmdObj);
+            // In some tests we expects the command to fail due to a network error. We want to
+            // catch the error OR the unhandled exception here and return the error to the
+            // caller to assert on the result. Otherwise if this is not a network exception
+            // it will be caught in the outter catch and either be retried or thrown.
+            res = executeNoThrowNetworkError(() => primary.adminCommand(cmdObj));
             assert.commandWorked(res);
             return true;
         } catch (e) {
@@ -221,7 +225,6 @@ export function runShardSplitCommand(
             // Otherwise rethrow e to propagate it to the caller.
             if (res)
                 return true;
-
             throw e;
         }
     }, "failed to retry commitShardSplit", 10 * 1000, 1 * 1000);
@@ -419,13 +422,13 @@ export class ShardSplitTest {
      * Add recipient nodes to the current donor set.
      * @param {numNodes} indicates the number of recipient nodes to be added.
      */
-    addRecipientNodes(numNodes) {
+    addRecipientNodes({numNodes, nodeOptions} = {}) {
         if (this.recipientNodes.length > 0) {
             throw new Error("Recipient nodes may only be added once");
         }
 
-        this.recipientNodes =
-            addRecipientNodes({rst: this.donor, numNodes, recipientTagName: this.recipientTagName});
+        this.recipientNodes = addRecipientNodes(
+            {rst: this.donor, numNodes, nodeOptions, recipientTagName: this.recipientTagName});
     }
 
     /*
@@ -433,7 +436,7 @@ export class ShardSplitTest {
      * @param {numNodes} indicates the number of recipient nodes to be added.
      */
     addAndAwaitRecipientNodes(numNodes) {
-        this.addRecipientNodes(numNodes);
+        this.addRecipientNodes({numNodes});
         this.donor.awaitSecondaryNodes();
     }
 

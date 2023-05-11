@@ -36,42 +36,11 @@
 #include "mongo/db/query/optimizer/syntax/syntax.h"
 #include "mongo/db/query/optimizer/utils/ce_math.h"
 #include "mongo/db/query/optimizer/utils/interval_utils.h"
+#include "mongo/db/query/optimizer/utils/path_utils.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 
+
 namespace mongo::optimizer {
-
-std::vector<ABT::reference_type> collectComposed(const ABT& n) {
-    if (auto comp = n.cast<PathComposeM>(); comp) {
-        auto lhs = collectComposed(comp->getPath1());
-        auto rhs = collectComposed(comp->getPath2());
-        lhs.insert(lhs.end(), rhs.begin(), rhs.end());
-        return lhs;
-    }
-    return {n.ref()};
-}
-
-// Helper function to count the size of a nested conjunction.
-size_t countComposed(const ABT& n) {
-    if (auto comp = n.cast<PathComposeM>()) {
-        return countComposed(comp->getPath1()) + countComposed(comp->getPath2());
-    }
-    return 1;
-}
-
-std::vector<ABT::reference_type> collectComposedBounded(const ABT& n, size_t maxDepth) {
-    if (countComposed(n) > maxDepth) {
-        return {n.ref()};
-    }
-    return collectComposed(n);
-}
-
-bool isSimplePath(const ABT& node) {
-    if (auto getPtr = node.cast<PathGet>();
-        getPtr != nullptr && getPtr->getPath().is<PathIdentity>()) {
-        return true;
-    }
-    return false;
-}
 
 ProjectionNameOrderedSet convertToOrderedSet(ProjectionNameSet unordered) {
     ProjectionNameOrderedSet ordered;
@@ -209,26 +178,28 @@ public:
     PartialSchemaReqConverter(const bool isFilterContext, const PathToIntervalFn& pathToInterval)
         : _isFilterContext(isFilterContext), _pathToInterval(pathToInterval) {}
 
-    ResultType handleEvalPathAndEvalFilter(ResultType pathResult, ResultType inputResult) {
+    ResultType handleEvalContext(ResultType pathResult, ResultType inputResult) {
         if (!pathResult || !inputResult) {
             return {};
         }
-        if (pathResult->_bound || !inputResult->_bound || !inputResult->_reqMap.empty()) {
+        if (pathResult->_bound || !inputResult->_bound || !inputResult->_reqMap.isNoop()) {
             return {};
         }
 
         if (auto boundPtr = inputResult->_bound->cast<Variable>(); boundPtr != nullptr) {
             const ProjectionName& boundVarName = boundPtr->name();
-            PartialSchemaRequirements newMap;
+            PSRExpr::Builder newReqs;
+            newReqs.pushDisj().pushConj();
 
             for (auto& [key, req] : pathResult->_reqMap.conjuncts()) {
                 if (key._projectionName) {
                     return {};
                 }
-                newMap.add(PartialSchemaKey{boundVarName, key._path}, std::move(req));
+
+                newReqs.atom(PartialSchemaKey{boundVarName, key._path}, std::move(req));
             }
 
-            PartialSchemaReqConversion result{std::move(newMap)};
+            PartialSchemaReqConversion result{std::move(*newReqs.finish())};
             result._retainPredicate = pathResult->_retainPredicate;
             return result;
         }
@@ -240,14 +211,14 @@ public:
                          const EvalPath& evalPath,
                          ResultType pathResult,
                          ResultType inputResult) {
-        return handleEvalPathAndEvalFilter(std::move(pathResult), std::move(inputResult));
+        return handleEvalContext(std::move(pathResult), std::move(inputResult));
     }
 
     ResultType transport(const ABT& n,
                          const EvalFilter& evalFilter,
                          ResultType pathResult,
                          ResultType inputResult) {
-        return handleEvalPathAndEvalFilter(std::move(pathResult), std::move(inputResult));
+        return handleEvalContext(std::move(pathResult), std::move(inputResult));
     }
 
     template <bool isMultiplicative>
@@ -279,13 +250,20 @@ public:
         auto& leftReqMap = leftResult->_reqMap;
         auto& rightReqMap = rightResult->_reqMap;
         if constexpr (isMultiplicative) {
-            ProjectionRenames projectionRenames;
-            if (!intersectPartialSchemaReq(leftReqMap, rightReqMap, projectionRenames)) {
+            if (!intersectPartialSchemaReq(leftReqMap, rightReqMap)) {
                 return {};
             }
-            if (!projectionRenames.empty()) {
-                return {};
-            }
+
+            ProjectionRenames renames_unused;
+            const bool hasEmptyInterval =
+                simplifyPartialSchemaReqPaths(boost::none /*scanProjName*/,
+                                              {} /*multikeynessTrie*/,
+                                              leftReqMap,
+                                              renames_unused,
+                                              {} /*constFold*/);
+            tassert(6624168,
+                    "Cannot detect empty intervals without providing a constant folder",
+                    !hasEmptyInterval);
 
             leftResult->_hasIntersected = true;
             return leftResult;
@@ -345,7 +323,8 @@ public:
             // Each side is a conjunction, and we're taking a disjunction.
             // Use the fact that OR distributes over AND to build a new conjunction:
             //     (a & b) | (x & y) == (a | x) & (a | y) & (b | x) & (b | y)
-            PartialSchemaRequirements resultMap;
+            PSRExpr::Builder resultReqs;
+            resultReqs.pushDisj().pushConj();
             for (const auto& [rightKey1, rightReq1] : rightReqMap.conjuncts()) {
                 for (const auto& [leftKey1, leftReq1] : leftReqMap.conjuncts()) {
                     auto combinedIntervals = leftReq1.getIntervals();
@@ -358,11 +337,11 @@ public:
                         std::move(combinedIntervals),
                         leftReq1.getIsPerfOnly(),
                     };
-                    resultMap.add(leftKey1, combinedReq);
+                    resultReqs.atom(leftKey1, combinedReq);
                 }
             }
 
-            leftReqMap = std::move(resultMap);
+            leftReqMap = std::move(*resultReqs.finish());
             return leftResult;
         }
         // Left and right don't all use the same key.
@@ -503,7 +482,8 @@ public:
         }
 
         // New map has keys with appended paths.
-        PartialSchemaRequirements newMap;
+        PSRExpr::Builder newReqs;
+        newReqs.pushDisj().pushConj();
 
         for (const auto& entry : inputResult->_reqMap.conjuncts()) {
             if (entry.first._projectionName) {
@@ -517,10 +497,10 @@ public:
             std::swap(appendedPath.cast<T>()->getPath(), path);
             std::swap(path, appendedPath);
 
-            newMap.add(PartialSchemaKey{std::move(path)}, std::move(entry.second));
+            newReqs.atom(PartialSchemaKey{std::move(path)}, std::move(entry.second));
         }
 
-        inputResult->_reqMap = std::move(newMap);
+        inputResult->_reqMap = std::move(*newReqs.finish());
         return inputResult;
     }
 
@@ -593,7 +573,7 @@ public:
         if (!inputResult) {
             return {};
         }
-        if (!inputResult->_bound || !inputResult->_reqMap.empty()) {
+        if (!inputResult->_bound || !inputResult->_reqMap.isNoop()) {
             return {};
         }
 
@@ -694,7 +674,7 @@ boost::optional<PartialSchemaReqConversion> convertExprToPartialSchemaReq(
     }
 
     auto& reqMap = result->_reqMap;
-    if (reqMap.empty()) {
+    if (reqMap.isNoop()) {
         return {};
     }
 
@@ -716,152 +696,13 @@ boost::optional<PartialSchemaReqConversion> convertExprToPartialSchemaReq(
     return result;
 }
 
-/**
- * Check if an index path contains a Traverse element.
- */
-class PathTraverseChecker {
-public:
-    PathTraverseChecker() {}
-
-    bool transport(const ABT& /*n*/, const PathTraverse& /*node*/, bool /*childResult*/) {
-        return true;
-    }
-
-    bool transport(const ABT& /*n*/, const PathGet& /*node*/, bool childResult) {
-        return childResult;
-    }
-
-    bool transport(const ABT& /*n*/, const PathIdentity& /*node*/) {
-        return false;
-    }
-
-    template <typename T, typename... Ts>
-    bool transport(const ABT& /*n*/, const T& /*node*/, Ts&&...) {
-        uasserted(6624153, "Index paths only consist of Get, Traverse, and Id nodes.");
-        return false;
-    }
-
-    bool check(const ABT& path) {
-        return algebra::transport<true>(path, *this);
-    }
-};
-
-bool checkPathContainsTraverse(const ABT& path) {
-    return PathTraverseChecker{}.check(path);
-}
-
-/**
- * Removes Traverse nodes from a single path, using MultikeynessTrie which tells us
- * which child paths are never applied to an array.
- */
-class MultikeynessSimplifier {
-public:
-    bool operator()(ABT&, PathIdentity&, const MultikeynessTrie&, bool /*skippedParentTraverse*/) {
-        // No simplifications apply here.
-        return false;
-    }
-
-    bool operator()(ABT& path,
-                    PathGet& get,
-                    const MultikeynessTrie& trie,
-                    bool skippedParentTraverse) {
-        if (auto it = trie.children.find(get.name()); it != trie.children.end()) {
-            return get.getPath().visit(*this, it->second, false /*skippedParentTraverse*/);
-        } else {
-            return false;
-        }
-    }
-
-    bool operator()(ABT& path,
-                    PathTraverse& traverse,
-                    const MultikeynessTrie& trie,
-                    bool skippedParentTraverse) {
-        tassert(6859603,
-                "Unexpected maxDepth for Traverse in MultikeynessSimplifier",
-                traverse.getMaxDepth() == PathTraverse::kSingleLevel);
-
-        if (!trie.isMultiKey) {
-            // This path is never applied to an array: we can remove any number of Traverse nodes,
-            // of any maxDepth.
-            path = std::exchange(traverse.getPath(), make<Blackhole>());
-            // The parent can't have been a Traverse that we skipped, because we would have
-            // removed it, because !trie.isMultiKey.
-            invariant(!skippedParentTraverse);
-            path.visit(*this, trie, false /*skippedParentTraverse*/);
-            return true;
-        } else if (traverse.getMaxDepth() == PathTraverse::kSingleLevel && !skippedParentTraverse) {
-            // This path is possibly multikey, so we can't remove any Traverse nodes.
-            // But each edge in the trie represents a 'Traverse [1] Get [a]', so we can
-            // skip a single Traverse [1] node.
-            return traverse.getPath().visit(*this, trie, true /*skippedParentTraverse*/);
-        } else {
-            // We have no information about multikeyness of the child path.
-            return false;
-        }
-    }
-
-    bool operator()(ABT& path,
-                    PathLambda& pathLambda,
-                    const MultikeynessTrie& trie,
-                    bool skippedParentTraverse) {
-        // Look for PathLambda Lambda [tmp] UnaryOp [Not] EvalFilter <path> Variable [tmp],
-        // and simplify <path>.  This works because 'tmp' is the same variable name in both places,
-        // so <path> is applied to the same input as the PathLambda. (And the 'trie' tells us
-        // which parts of that input are not arrays.)
-
-        // In the future we may want to generalize this to skip over other expressions besides Not,
-        // as long as the Lambda and EvalFilter are connected by a variable.
-
-        if (auto* lambda = pathLambda.getLambda().cast<LambdaAbstraction>()) {
-            if (auto* unary = lambda->getBody().cast<UnaryOp>();
-                unary && unary->op() == Operations::Not) {
-                if (auto* evalFilter = unary->getChild().cast<EvalFilter>()) {
-                    if (auto* variable = evalFilter->getInput().cast<Variable>();
-                        variable && variable->name() == lambda->varName()) {
-                        return evalFilter->getPath().visit(
-                            *this, trie, false /*skippedParentTraverse*/);
-                    }
-                }
-            }
-        }
-        return false;
-    }
-
-    bool operator()(ABT& path,
-                    PathComposeM& compose,
-                    const MultikeynessTrie& trie,
-                    bool skippedParentTraverse) {
-        const bool simplified1 = compose.getPath1().visit(*this, trie, skippedParentTraverse);
-        const bool simplified2 = compose.getPath2().visit(*this, trie, skippedParentTraverse);
-        return simplified1 || simplified2;
-    }
-
-    template <typename T, typename... Ts>
-    bool operator()(ABT& n, T& /*node*/, Ts&&...) {
-        // Don't optimize a node we don't recognize.
-        return false;
-
-        // Some other cases to consider:
-        // - Remove PathArr for non-multikey paths.
-        // - Descend into disjunction.
-        // - Descend into PathLambda and simplify expressions, especially Not and EvalFilter.
-    }
-
-    static bool simplify(ABT& path, const MultikeynessTrie& trie) {
-        MultikeynessSimplifier instance;
-        return path.visit(instance, trie, false /*skippedParentTraverse*/);
-    }
-};
-
-bool simplifyTraverseNonArray(ABT& path, const MultikeynessTrie& multikeynessTrie) {
-    return MultikeynessSimplifier::simplify(path, multikeynessTrie);
-}
-
-bool simplifyPartialSchemaReqPaths(const ProjectionName& scanProjName,
+bool simplifyPartialSchemaReqPaths(const boost::optional<ProjectionName>& scanProjName,
                                    const MultikeynessTrie& multikeynessTrie,
                                    PartialSchemaRequirements& reqMap,
+                                   ProjectionRenames& projectionRenames,
                                    const ConstFoldFn& constFold) {
-    PartialSchemaRequirements result;
+    PSRExpr::Builder resultReqs;
+    resultReqs.pushDisj().pushConj();
     boost::optional<std::pair<PartialSchemaKey, PartialSchemaRequirement>> prevEntry;
 
     const auto simplifyFn = [&constFold](IntervalReqExpr::Node& intervals) -> bool {
@@ -873,54 +714,73 @@ bool simplifyPartialSchemaReqPaths(const ProjectionName& scanProjName,
         return simplified.has_value();
     };
 
+    const auto nextEntryFn = [&](PartialSchemaKey newKey, const PartialSchemaRequirement& req) {
+        resultReqs.atom(std::move(prevEntry->first), std::move(prevEntry->second));
+        prevEntry.reset({std::move(newKey), req});
+    };
+
     // Simplify paths by eliminating unnecessary Traverse elements.
     for (const auto& [key, req] : reqMap.conjuncts()) {
         PartialSchemaKey newKey = key;
+
         bool simplified = false;
-        if (key._projectionName == scanProjName && checkPathContainsTraverse(newKey._path)) {
-            simplified |= simplifyTraverseNonArray(newKey._path, multikeynessTrie);
+        const bool containedTraverse = checkPathContainsTraverse(newKey._path);
+        if (key._projectionName == scanProjName && containedTraverse) {
+            simplified = simplifyTraverseNonArray(newKey._path, multikeynessTrie);
         }
+        // At this point we have simplified the path in newKey.
 
-        // Maintain the invariant that Traverse-less keys appear only once:
-        // we can move the conjunction into the intervals and simplify.
-        if (prevEntry) {
-            if (simplified && prevEntry->first == newKey) {
-                auto& prevReq = prevEntry->second;
-
-                boost::optional<ProjectionName> resultBoundProjName;
-                auto resultIntervals = prevReq.getIntervals();
-                if (const auto& boundProjName = req.getBoundProjectionName()) {
-                    tassert(6624168,
-                            "Should not be seeing more than one bound projection per key",
-                            !prevReq.getBoundProjectionName());
-                    resultBoundProjName = boundProjName;
-                } else {
-                    resultBoundProjName = prevReq.getBoundProjectionName();
-                }
-
-                combineIntervalsDNF(true /*intersect*/, resultIntervals, req.getIntervals());
-                if (!simplifyFn(resultIntervals)) {
-                    return true;
-                }
-
-                prevReq = {std::move(resultBoundProjName),
-                           std::move(resultIntervals),
-                           req.getIsPerfOnly() && prevReq.getIsPerfOnly()};
-            } else {
-                result.add(std::move(prevEntry->first), std::move(prevEntry->second));
-                prevEntry.reset({std::move(newKey), req});
-            }
-        } else {
+        if (!prevEntry) {
             prevEntry.reset({std::move(newKey), req});
+            continue;
         }
+        if (prevEntry->first != newKey) {
+            nextEntryFn(std::move(newKey), req);
+            continue;
+        }
+
+        auto& prevReq = prevEntry->second;
+        auto resultIntervals = prevReq.getIntervals();
+        combineIntervalsDNF(true /*intersect*/, resultIntervals, req.getIntervals());
+
+        // Ensure that Traverse-less keys appear only once: we can move the conjunction into the
+        // intervals and simplify. For traversing keys, check if interval is subsumed in the other
+        // and if so, then combine.
+        if (containedTraverse && !simplified &&
+            !(resultIntervals == prevReq.getIntervals() || resultIntervals == req.getIntervals())) {
+            // We cannot combine multikey paths where one interval does not subsume the other.
+            nextEntryFn(std::move(newKey), req);
+            continue;
+        }
+
+        auto resultBoundProjName = prevReq.getBoundProjectionName();
+        if (const auto& boundProjName = req.getBoundProjectionName()) {
+            if (resultBoundProjName) {
+                // The existing name wins (stays in 'reqMap'). We tell the caller that the name
+                // "boundProjName" is available under "resultBoundProjName".
+                projectionRenames.emplace(*boundProjName, *resultBoundProjName);
+            } else {
+                resultBoundProjName = boundProjName;
+            }
+        }
+
+        if (constFold && !simplifyFn(resultIntervals)) {
+            return true;
+        }
+        prevReq = {std::move(resultBoundProjName),
+                   std::move(resultIntervals),
+                   req.getIsPerfOnly() && prevReq.getIsPerfOnly()};
     }
     if (prevEntry) {
-        result.add(std::move(prevEntry->first), std::move(prevEntry->second));
+        resultReqs.atom(std::move(prevEntry->first), std::move(prevEntry->second));
     }
 
-    // Intersect and normalize intervals.
-    const bool representable =
-        result.simplify([&](const PartialSchemaKey&, PartialSchemaRequirement& req) -> bool {
+    PartialSchemaRequirements newReqs{std::move(*resultReqs.finish())};
+
+    if (constFold) {
+        // Intersect and normalize intervals.
+        const bool representable = newReqs.simplify([&](const PartialSchemaKey&,
+                                                        PartialSchemaRequirement& req) -> bool {
             auto resultIntervals = req.getIntervals();
             if (!simplifyFn(resultIntervals)) {
                 return false;
@@ -931,13 +791,14 @@ bool simplifyPartialSchemaReqPaths(const ProjectionName& scanProjName,
             req = {req.getBoundProjectionName(), std::move(resultIntervals), req.getIsPerfOnly()};
             return true;
         });
-    if (!representable) {
-        // It simplifies to an always-false predicate, which we do not represent
-        // as PartialSchemaRequirements.
-        return true;
+        if (!representable) {
+            // It simplifies to an always-false predicate, which we do not represent
+            // as PartialSchemaRequirements.
+            return true;
+        }
     }
 
-    reqMap = std::move(result);
+    reqMap = std::move(newReqs);
     return false;
 }
 
@@ -945,86 +806,22 @@ bool simplifyPartialSchemaReqPaths(const ProjectionName& scanProjName,
  * Try to compute the intersection of a an existing PartialSchemaRequirements object and a new
  * key/requirement pair.
  *
- * Returns false on "failure", which means the result was not representable for some reason.
- * Reasons include:
- * - The intersection predicate is always-false.
- * - There is a def-use dependency that combining into one PartialSchemaRequirements would break.
+ * Returns false on "failure", which means the result was not representable. This happens if there
+ * is a def-use dependency that combining into one PartialSchemaRequirements would break.
  *
  * The implementation works as follows:
- *     1. If the path of the new requirement does not exist in existing requirements, we add it.
- *     2. If the path already exists:
- *         2a. The path is multikey (e.g. Get "a" Traverse Id):
- *             Add the new requirement to the requirements (under the same key)
- *         2b. The path is not multikey (e.g. Get "a" Id):
- *             If we have an entry with the same path, combine intervals,
- *             otherwise add to requirements.
- *     3. We have an entry which binds the variable which the requirement uses.
+ *     1. If the path of the new requirement already exists, we add it to the existing requirements.
+ *     2. If the path does not exist, and does not refer to an existing entry, we add it.
+ *     3. If we have an entry which binds the variable which the requirement uses.
  *        Append the paths (to rephrase the new requirement in terms of bindings
  *        visible in the input of the existing requirements) and retry. We will either
  *        add a new requirement or combine with an existing one.
  */
 static bool intersectPartialSchemaReq(PartialSchemaRequirements& reqMap,
                                       PartialSchemaKey key,
-                                      PartialSchemaRequirement req,
-                                      ProjectionRenames& projectionRenames) {
+                                      PartialSchemaRequirement req) {
     for (;;) {
         bool merged = false;
-
-        const bool pathIsId = key._path.is<PathIdentity>();
-        const bool pathHasTraverse = !pathIsId && checkPathContainsTraverse(key._path);
-        {
-            bool success = false;
-            // Look for exact match on the path, and if found combine intervals.
-            for (auto& [existingKey, existingReq] : reqMap.conjuncts()) {
-                if (existingKey != key) {
-                    continue;
-                }
-
-                auto resultIntervals = existingReq.getIntervals();
-                if (pathHasTraverse) {
-                    combineIntervalsDNF(true /*intersect*/, resultIntervals, req.getIntervals());
-                    if (resultIntervals == existingReq.getIntervals()) {
-                        // Existing interval subsumes the new one.
-                        success = true;
-                    }
-                } else {
-                    // Non-multikey path. Directly intersect and simplify intervals.
-                    combineIntervalsDNF(true /*intersect*/, resultIntervals, req.getIntervals());
-                    success = true;
-                }
-
-                if (success) {
-                    boost::optional<ProjectionName> resultBoundProjName =
-                        existingReq.getBoundProjectionName();
-                    if (const auto& boundProjName = req.getBoundProjectionName()) {
-                        if (resultBoundProjName) {
-                            // The new and existing projections both bind a name, so:
-                            // - The existing name wins (stays in 'reqMap').
-                            // - We tell the caller that the name bound is 'req' is now
-                            //   available by the name in 'existingReq'.
-                            projectionRenames.emplace(*boundProjName, *resultBoundProjName);
-                        } else {
-                            // Only the new projection binds a name, so we'll update 'reqMap' to
-                            // include it.
-                            resultBoundProjName = boundProjName;
-                        }
-                    }
-
-                    existingReq = {std::move(resultBoundProjName),
-                                   std::move(resultIntervals),
-                                   req.getIsPerfOnly() && existingReq.getIsPerfOnly()};
-
-                    // No need to iterate further: we could continue, but the result would not
-                    // change.
-                    break;
-                }
-            }
-
-            if (success) {
-                return true;
-            }
-        }
-
         const bool reqHasBoundProj = req.getBoundProjectionName().has_value();
         for (const auto& [existingKey, existingReq] : reqMap.conjuncts()) {
             uassert(6624150,
@@ -1072,21 +869,27 @@ bool isSubsetOfPartialSchemaReq(const PartialSchemaRequirements& lhs,
                 !req.getBoundProjectionName());
     }
 
-    ProjectionRenames projectionRenames_unused;
     PartialSchemaRequirements intersection = lhs;
-    if (intersectPartialSchemaReq(intersection, rhs, projectionRenames_unused)) {
-        return intersection == lhs;
-    }
-    // Intersection was empty-set, and we assume neither input is empty-set.
-    // So intersection != lhs.
-    return false;
+    const bool success = intersectPartialSchemaReq(intersection, rhs);
+    tassert(6624172, "Intersection should succeed since 'rhs' has no projections", success);
+
+    ProjectionRenames renames_unused;
+    const bool hasEmptyInterval = simplifyPartialSchemaReqPaths(boost::none /*scanProjName*/,
+                                                                {} /*multikeynessTrie*/,
+                                                                intersection,
+                                                                renames_unused,
+                                                                {} /*constFold*/);
+    tassert(6624169,
+            "Cannot detect empty intervals without providing a constant folder",
+            !hasEmptyInterval);
+
+    return intersection == lhs;
 }
 
 bool intersectPartialSchemaReq(PartialSchemaRequirements& target,
-                               const PartialSchemaRequirements& source,
-                               ProjectionRenames& projectionRenames) {
+                               const PartialSchemaRequirements& source) {
     for (const auto& [key, req] : source.conjuncts()) {
-        if (!intersectPartialSchemaReq(target, key, req, projectionRenames)) {
+        if (!intersectPartialSchemaReq(target, key, req)) {
             return false;
         }
     }
@@ -1125,69 +928,6 @@ const ProjectionName& getExistingOrTempProjForFieldName(PrefixId& prefixId,
     invariant(result.second);
     return result.first->second;
 }
-
-/**
- * Fuses an index path and a query path to determine a residual path to apply over the index
- * results. Checks if one index path is a prefix of another. Considers only Get, Traverse, and Id.
- * Return the suffix that doesn't match.
- */
-class IndexPathFusor {
-public:
-    struct ResultType {
-        boost::optional<ABT::reference_type> _suffix;
-        size_t _numTraversesSkipped = 0;
-        size_t _numTraversesFused = 0;
-    };
-
-    /**
-     * 'n' - The complete index path being compared to, can be modified if needed.
-     * 'node' - Same as 'n' but cast to a specific type by the caller in order to invoke the
-     *   correct operator.
-     * 'other' - The query path, of which the index may satisfy a prefix.
-     */
-    ResultType operator()(const ABT& n, const PathGet& node, const ABT& other) {
-        if (auto otherGet = other.cast<PathGet>();
-            otherGet != nullptr && otherGet->name() == node.name()) {
-            if (auto otherChildTraverse = otherGet->getPath().cast<PathTraverse>();
-                otherChildTraverse != nullptr && !node.getPath().is<PathTraverse>()) {
-                // If a query path has a Traverse, but the index path doesn't, the query can
-                // still be evaluated by this index. Skip the Traverse node, and continue matching.
-                // This works because we know the Traverse will never be applied to an array,
-                // so 'Traverse [anything] p == p'.
-                auto result = node.getPath().visit(*this, otherChildTraverse->getPath());
-                result._numTraversesSkipped++;
-                return result;
-            } else {
-                return node.getPath().visit(*this, otherGet->getPath());
-            }
-        }
-        return {};
-    }
-
-    ResultType operator()(const ABT& n, const PathTraverse& node, const ABT& other) {
-        if (auto otherTraverse = other.cast<PathTraverse>();
-            otherTraverse != nullptr && otherTraverse->getMaxDepth() == node.getMaxDepth()) {
-            auto result = node.getPath().visit(*this, otherTraverse->getPath());
-            result._numTraversesFused++;
-            return result;
-        }
-        return {};
-    }
-
-    ResultType operator()(const ABT& n, const PathIdentity& node, const ABT& other) {
-        return {other.ref()};
-    }
-
-    template <typename T, typename... Ts>
-    ResultType operator()(const ABT& /*n*/, const T& /*node*/, Ts&&...) {
-        uasserted(6624152, "Unexpected node type");
-    }
-
-    static ResultType fuse(const ABT& node, const ABT& candidatePrefix) {
-        IndexPathFusor instance;
-        return candidatePrefix.visit(instance, node);
-    }
-};
 
 /**
  * Pad compound interval with supplied simple interval.
@@ -1268,7 +1008,7 @@ static bool computeCandidateIndexEntry(PrefixId& prefixId,
                                        const size_t maxIndexEqPrefixes,
                                        PartialSchemaKeySet unsatisfiedKeys,
                                        const ProjectionName& scanProjName,
-                                       const bool fastNullHandling,
+                                       const QueryHints& hints,
                                        const ConstFoldFn& constFold,
                                        const IndexCollationSpec& indexCollationSpec,
                                        CandidateIndexEntry& entry) {
@@ -1293,8 +1033,8 @@ static bool computeCandidateIndexEntry(PrefixId& prefixId,
 
         PartialSchemaKey indexKey{scanProjName, indexCollationEntry._path};
         if (auto result = reqMap.findFirstConjunct(indexKey)) {
-            if (const auto& [queryPredPos, req] = *result;
-                fastNullHandling || !req.getIsPerfOnly() || !req.mayReturnNull(constFold)) {
+            if (const auto& [queryPredPos, req] = *result; hints._fastIndexNullHandling ||
+                !req.getIsPerfOnly() || !req.mayReturnNull(constFold)) {
                 const auto& requiredInterval = req.getIntervals();
                 const bool success = extendCompoundInterval(prefixId,
                                                             indexCollationSpec,
@@ -1359,7 +1099,7 @@ static bool computeCandidateIndexEntry(PrefixId& prefixId,
 
         for (size_t indexField = 0; indexField < indexCollationSpec.size(); indexField++) {
             if (const auto fusedPath =
-                    IndexPathFusor::fuse(queryKey._path, indexCollationSpec.at(indexField)._path);
+                    fuseIndexPath(queryKey._path, indexCollationSpec.at(indexField)._path);
                 fusedPath._suffix &&
                 (allowFuseTraverse[indexField] || fusedPath._numTraversesFused == 0)) {
                 if (fusedPath._numTraversesFused > 0) {
@@ -1368,6 +1108,12 @@ static bool computeCandidateIndexEntry(PrefixId& prefixId,
                 auto result = reqMap.findFirstConjunct(queryKey);
                 tassert(6624158, "QueryKey must exist in the requirements map", result);
                 const auto& [index, req] = *result;
+
+                if (hints._forceIndexScanForPredicates &&
+                    !isIntervalReqFullyOpenDNF(req.getIntervals())) {
+                    // We need to cover all predicates with index scans.
+                    break;
+                }
 
                 if (!req.getIsPerfOnly()) {
                     // Only regular requirements are added to residual predicates.
@@ -1444,7 +1190,7 @@ CandidateIndexes computeCandidateIndexes(PrefixId& prefixId,
                                                             i,
                                                             unsatisfiedKeysInitial,
                                                             scanProjectionName,
-                                                            hints._fastIndexNullHandling,
+                                                            hints,
                                                             constFold,
                                                             indexDef.getCollationSpec(),
                                                             entry);
@@ -1628,7 +1374,8 @@ static void consolidateEqDisjunctions(ABTVector& childResults) {
         newResults.emplace_back(
             make<PathCompare>(Operations::EqMember, make<Constant>(eqMembersTag, eqMembersVal)));
     } else if (eqMembersArray->size() == 1) {
-        const auto [eqConstantTag, eqConstantVal] = eqMembersArray->getAt(0);
+        const auto [eqConstantTag, eqConstantVal] =
+            sbe::value::copyValue(eqMembersArray->getAt(0).first, eqMembersArray->getAt(0).second);
         newResults.emplace_back(
             make<PathCompare>(Operations::Eq, make<Constant>(eqConstantTag, eqConstantVal)));
     }
@@ -1817,13 +1564,10 @@ void sortResidualRequirements(ResidualRequirementsWithCE& residualReq) {
     }
 }
 
-void applyProjectionRenames(ProjectionRenames projectionRenames,
-                            ABT& node,
-                            const std::function<void(const ABT& node)>& visitor) {
+void applyProjectionRenames(ProjectionRenames projectionRenames, ABT& node) {
     for (auto&& [targetProjName, sourceProjName] : projectionRenames) {
         node = make<EvaluationNode>(
             std::move(targetProjName), make<Variable>(std::move(sourceProjName)), std::move(node));
-        visitor(node);
     }
 }
 
@@ -2575,34 +2319,6 @@ PhysPlanBuilder lowerEqPrefixes(PrefixId& prefixId,
                                           indexCE,
                                           scanGroupCE);
     return lowerTransport.lower(eqPrefixes.at(eqPrefixIndex)._interval);
-}
-
-/**
- * Checks if a path ends in a Traverse + PathId.
- */
-class PathEndsInTraverseId {
-public:
-    bool transport(const optimizer::PathTraverse& node, bool childResult) {
-        return node.getPath().is<PathIdentity>() || childResult;
-    }
-
-    bool transport(const optimizer::PathGet& /*node*/, bool childResult) {
-        return childResult;
-    }
-
-    bool transport(const optimizer::PathIdentity& /*node*/) {
-        return false;
-    }
-
-    template <typename T, typename... Ts>
-    bool transport(const T& node, Ts&&... /* args */) {
-        uasserted(6749500, "Unexpected node in transport to check if path is $elemMatch.");
-    }
-};
-
-bool pathEndsInTraverse(const optimizer::ABT& path) {
-    PathEndsInTraverseId t;
-    return optimizer::algebra::transport<false>(path, t);
 }
 
 bool hasProperIntervals(const PartialSchemaRequirements& reqMap) {

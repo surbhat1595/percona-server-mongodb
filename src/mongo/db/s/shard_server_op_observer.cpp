@@ -252,8 +252,8 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
                      * Perform shard identity initialization once we are certain that the document
                      * is committed.
                      */
-                    opCtx->recoveryUnit()->onCommit([opCtx,
-                                                     shardIdentity = std::move(shardIdentityDoc)](
+                    opCtx->recoveryUnit()->onCommit([shardIdentity = std::move(shardIdentityDoc)](
+                                                        OperationContext* opCtx,
                                                         boost::optional<Timestamp>) {
                         try {
                             ShardingInitializationMongoD::get(opCtx)->initializeFromShardIdentity(
@@ -285,14 +285,13 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
         }
 
         if (nss == NamespaceString::kCollectionCriticalSectionsNamespace &&
-            !recoverable_critical_section_util::inRecoveryMode(opCtx)) {
+            !sharding_recovery_util::inRecoveryMode(opCtx)) {
             const auto collCSDoc = CollectionCriticalSectionDocument::parse(
                 IDLParserContext("ShardServerOpObserver"), insertedDoc);
             invariant(!collCSDoc.getBlockReads());
             opCtx->recoveryUnit()->onCommit(
-                [opCtx,
-                 insertedNss = collCSDoc.getNss(),
-                 reason = collCSDoc.getReason().getOwned()](boost::optional<Timestamp>) {
+                [insertedNss = collCSDoc.getNss(), reason = collCSDoc.getReason().getOwned()](
+                    OperationContext* opCtx, boost::optional<Timestamp>) {
                     if (nsIsDbOnly(insertedNss.ns())) {
                         boost::optional<AutoGetDb> lockDbIfNotPrimary;
                         if (!isStandaloneOrPrimary(opCtx)) {
@@ -300,8 +299,8 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
                         }
                         // TODO (SERVER-71444): Fix to be interruptible or document exception.
                         UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
-                        auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
-                            opCtx, insertedNss.dbName(), DSSAcquisitionMode::kExclusive);
+                        auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireExclusive(
+                            opCtx, insertedNss.dbName());
                         scopedDss->enterCriticalSectionCatchUpPhase(opCtx, reason);
                     } else {
                         boost::optional<AutoGetCollection> lockCollectionIfNotPrimary;
@@ -309,7 +308,7 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
                             lockCollectionIfNotPrimary.emplace(
                                 opCtx,
                                 insertedNss,
-                                MODE_IX,
+                                fixLockModeForSystemDotViewsChanges(insertedNss, MODE_IX),
                                 AutoGetCollection::Options{}.viewMode(
                                     auto_get_collection::ViewMode::kViewsPermitted));
                         }
@@ -433,8 +432,8 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
 
             DatabaseName dbName(boost::none, db);
             AutoGetDb autoDb(opCtx, dbName, MODE_X);
-            auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
-                opCtx, dbName, DSSAcquisitionMode::kExclusive);
+            auto scopedDss =
+                DatabaseShardingState::assertDbLockedAndAcquireExclusive(opCtx, dbName);
             scopedDss->clearDbInfo(opCtx);
         }
     }
@@ -460,14 +459,14 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
     }
 
     if (args.coll->ns() == NamespaceString::kCollectionCriticalSectionsNamespace &&
-        !recoverable_critical_section_util::inRecoveryMode(opCtx)) {
+        !sharding_recovery_util::inRecoveryMode(opCtx)) {
         const auto collCSDoc = CollectionCriticalSectionDocument::parse(
             IDLParserContext("ShardServerOpObserver"), args.updateArgs->updatedDoc);
         invariant(collCSDoc.getBlockReads());
 
         opCtx->recoveryUnit()->onCommit(
-            [opCtx, updatedNss = collCSDoc.getNss(), reason = collCSDoc.getReason().getOwned()](
-                boost::optional<Timestamp>) {
+            [updatedNss = collCSDoc.getNss(), reason = collCSDoc.getReason().getOwned()](
+                OperationContext* opCtx, boost::optional<Timestamp>) {
                 if (nsIsDbOnly(updatedNss.ns())) {
                     boost::optional<AutoGetDb> lockDbIfNotPrimary;
                     if (!isStandaloneOrPrimary(opCtx)) {
@@ -476,8 +475,8 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
 
                     // TODO (SERVER-71444): Fix to be interruptible or document exception.
                     UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
-                    auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
-                        opCtx, updatedNss.dbName(), DSSAcquisitionMode::kExclusive);
+                    auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireExclusive(
+                        opCtx, updatedNss.dbName());
                     scopedDss->enterCriticalSectionCommitPhase(opCtx, reason);
                 } else {
                     boost::optional<AutoGetCollection> lockCollectionIfNotPrimary;
@@ -485,7 +484,7 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
                         lockCollectionIfNotPrimary.emplace(
                             opCtx,
                             updatedNss,
-                            MODE_IX,
+                            fixLockModeForSystemDotViewsChanges(updatedNss, MODE_IX),
                             AutoGetCollection::Options{}.viewMode(
                                 auto_get_collection::ViewMode::kViewsPermitted));
                     }
@@ -533,6 +532,11 @@ void ShardServerOpObserver::aboutToDelete(OperationContext* opCtx,
 
 void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
     OperationContext* opCtx, const NamespaceString& nss, const UUID& uuid, BSONObj indexDoc) {
+    // If we are in recovery mode (STARTUP or ROLLBACK) let the sharding recovery service to take
+    // care of the in-memory state.
+    if (sharding_recovery_util::inRecoveryMode(opCtx)) {
+        return;
+    }
     LOGV2_DEBUG(
         6712303,
         1,
@@ -544,7 +548,8 @@ void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
         case ShardingIndexCatalogOpEnumEnum::insert: {
             auto indexEntry = ShardingIndexCatalogInsertEntry::parse(
                 IDLParserContext("OplogModifyCatalogEntryContext"), indexDoc);
-            opCtx->recoveryUnit()->onCommit([opCtx, nss, indexEntry](auto _) {
+            opCtx->recoveryUnit()->onCommit([nss, indexEntry](OperationContext* opCtx,
+                                                              boost::optional<Timestamp>) {
                 auto scsr = CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
                     opCtx, nss);
                 scsr->addIndex(
@@ -557,7 +562,8 @@ void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
         case ShardingIndexCatalogOpEnumEnum::remove: {
             auto removeEntry = ShardingIndexCatalogRemoveEntry::parse(
                 IDLParserContext("OplogModifyCatalogEntryContext"), indexDoc);
-            opCtx->recoveryUnit()->onCommit([opCtx, nss, removeEntry](auto _) {
+            opCtx->recoveryUnit()->onCommit([nss, removeEntry](OperationContext* opCtx,
+                                                               boost::optional<Timestamp>) {
                 auto scsr = CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
                     opCtx, nss);
                 scsr->removeIndex(opCtx,
@@ -569,7 +575,8 @@ void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
         case ShardingIndexCatalogOpEnumEnum::replace: {
             auto replaceEntry = ShardingIndexCatalogReplaceEntry::parse(
                 IDLParserContext("OplogModifyCatalogEntryContext"), indexDoc);
-            opCtx->recoveryUnit()->onCommit([opCtx, nss, replaceEntry](auto _) {
+            opCtx->recoveryUnit()->onCommit([nss, replaceEntry](OperationContext* opCtx,
+                                                                boost::optional<Timestamp>) {
                 auto scsr = CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
                     opCtx, nss);
                 scsr->replaceIndexes(opCtx,
@@ -579,7 +586,8 @@ void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
             break;
         }
         case ShardingIndexCatalogOpEnumEnum::clear:
-            opCtx->recoveryUnit()->onCommit([opCtx, nss](auto _) {
+            opCtx->recoveryUnit()->onCommit([nss](OperationContext* opCtx,
+                                                  boost::optional<Timestamp>) {
                 auto scsr = CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
                     opCtx, nss);
                 scsr->clearIndexes(opCtx);
@@ -587,7 +595,8 @@ void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
 
             break;
         case ShardingIndexCatalogOpEnumEnum::drop: {
-            opCtx->recoveryUnit()->onCommit([opCtx, nss](auto _) {
+            opCtx->recoveryUnit()->onCommit([nss](OperationContext* opCtx,
+                                                  boost::optional<Timestamp>) {
                 auto scsr = CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
                     opCtx, nss);
                 scsr->clearIndexes(opCtx);
@@ -598,7 +607,8 @@ void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
         case ShardingIndexCatalogOpEnumEnum::rename: {
             auto renameEntry = ShardingIndexCatalogRenameEntry::parse(
                 IDLParserContext("OplogModifyCatalogEntryContext"), indexDoc);
-            opCtx->recoveryUnit()->onCommit([opCtx, renameEntry](auto _) {
+            opCtx->recoveryUnit()->onCommit([renameEntry](OperationContext* opCtx,
+                                                          boost::optional<Timestamp>) {
                 std::vector<IndexCatalogType> fromIndexes;
                 boost::optional<UUID> uuid;
                 {
@@ -660,8 +670,7 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
 
         DatabaseName dbName(boost::none, deletedDatabase);
         AutoGetDb autoDb(opCtx, dbName, MODE_X);
-        auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
-            opCtx, dbName, DSSAcquisitionMode::kExclusive);
+        auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireExclusive(opCtx, dbName);
         scopedDss->clearDbInfo(opCtx);
     }
 
@@ -683,14 +692,14 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
     }
 
     if (nss == NamespaceString::kCollectionCriticalSectionsNamespace &&
-        !recoverable_critical_section_util::inRecoveryMode(opCtx)) {
+        !sharding_recovery_util::inRecoveryMode(opCtx)) {
         const auto& deletedDoc = documentId;
         const auto collCSDoc = CollectionCriticalSectionDocument::parse(
             IDLParserContext("ShardServerOpObserver"), deletedDoc);
 
         opCtx->recoveryUnit()->onCommit(
-            [opCtx, deletedNss = collCSDoc.getNss(), reason = collCSDoc.getReason().getOwned()](
-                boost::optional<Timestamp>) {
+            [deletedNss = collCSDoc.getNss(), reason = collCSDoc.getReason().getOwned()](
+                OperationContext* opCtx, boost::optional<Timestamp>) {
                 if (nsIsDbOnly(deletedNss.ns())) {
                     boost::optional<AutoGetDb> lockDbIfNotPrimary;
                     if (!isStandaloneOrPrimary(opCtx)) {
@@ -699,8 +708,8 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
 
                     // TODO (SERVER-71444): Fix to be interruptible or document exception.
                     UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
-                    auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
-                        opCtx, deletedNss.dbName(), DSSAcquisitionMode::kExclusive);
+                    auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireExclusive(
+                        opCtx, deletedNss.dbName());
 
                     // Secondary nodes must clear the database metadata before releasing the
                     // in-memory critical section.
@@ -715,7 +724,7 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
                         lockCollectionIfNotPrimary.emplace(
                             opCtx,
                             deletedNss,
-                            MODE_IX,
+                            fixLockModeForSystemDotViewsChanges(deletedNss, MODE_IX),
                             AutoGetCollection::Options{}.viewMode(
                                 auto_get_collection::ViewMode::kViewsPermitted));
                     }
@@ -753,9 +762,8 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
             return uassertStatusOK(UUID::parse(std::move(collUuidElem)));
         }();
 
-        opCtx->recoveryUnit()->onCommit([opCtx = opCtx,
-                                         collUuid = std::move(collUuid),
-                                         numOrphanDocs](boost::optional<Timestamp>) {
+        opCtx->recoveryUnit()->onCommit([collUuid = std::move(collUuid), numOrphanDocs](
+                                            OperationContext* opCtx, boost::optional<Timestamp>) {
             BalancerStatsRegistry::get(opCtx)->onRangeDeletionTaskDeletion(collUuid, numOrphanDocs);
         });
     }

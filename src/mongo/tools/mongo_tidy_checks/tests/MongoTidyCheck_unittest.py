@@ -21,7 +21,12 @@ class MongoTidyTests(unittest.TestCase):
 
     def run_clang_tidy(self):
         p = subprocess.run(self.cmd, capture_output=True, text=True)
-        passed = self.expected_output is not None and self.expected_output in p.stdout
+
+        if isinstance(self.expected_output, list):
+            passed = all([expected_output in p.stdout for expected_output in self.expected_output])
+        else:
+            passed = self.expected_output is not None and self.expected_output in p.stdout
+
         with open(self.config_file.name) as f:
             msg = '\n'.join([
                 '>' * 80,
@@ -59,7 +64,7 @@ class MongoTidyTests(unittest.TestCase):
         self.config_file = None
         self.expected_output = None
         for compiledb in self.COMPILE_COMMANDS_FILES:
-            if compiledb.endswith("/" + self._testMethodName + ".json"):
+            if compiledb.endswith("/" + self._testMethodName + "/compile_commands.json"):
                 self.compile_db = compiledb
         if self.compile_db:
             self.cmd = [
@@ -67,7 +72,7 @@ class MongoTidyTests(unittest.TestCase):
                 'buildscripts/clang_tidy.py',
                 '--disable-reporting',
                 f'--check-module={self.TIDY_MODULE}',
-                f'--output-dir={os.path.join(os.path.dirname(compiledb), self._testMethodName + "_out")}',
+                f'--output-dir={os.path.join(os.path.dirname(self.compile_db), self._testMethodName + "_out")}',
                 f'--compile-commands={self.compile_db}',
             ]
         else:
@@ -78,15 +83,87 @@ class MongoTidyTests(unittest.TestCase):
             self.config_file.close()
             os.unlink(self.config_file.name)
 
-    def test_MongoTestCheck(self):
+    def test_MongoHeaderBracketCheck(self):
 
         self.write_config(
             textwrap.dedent("""\
-                Checks: '-*,mongo-test-check'
+                Checks: '-*,mongo-header-bracket-check'
                 WarningsAsErrors: '*'
                 """))
 
-        self.expected_output = "ran mongo-test-check!"
+        self.expected_output = [
+            "error: non-mongo include 'cctype' should use angle brackets",
+            "error: mongo include 'test_MongoHeaderBracketCheck.h' should use double quotes",
+            "error: third_party include 'third_party/s2/hash.h' should not start with 'third_party/'",
+        ]
+
+        self.run_clang_tidy()
+
+    def test_MongoUninterruptibleLockGuardCheck(self):
+
+        self.write_config(
+            textwrap.dedent("""\
+                Checks: '-*,mongo-uninterruptible-lock-guard-check'
+                WarningsAsErrors: '*'
+                """))
+
+        self.expected_output = (
+            "Potentially incorrect use of UninterruptibleLockGuard, "
+            "the programming model inside MongoDB requires that all operations be interruptible. "
+            "Review with care and if the use is warranted, add NOLINT and a comment explaining why."
+        )
+
+        self.run_clang_tidy()
+
+    def test_MongoCctypeCheck(self):
+
+        self.write_config(
+            textwrap.dedent("""\
+                    Checks: '-*,mongo-cctype-check'
+                    WarningsAsErrors: '*'
+                    HeaderFilterRegex: '(mongo/.*)'
+                    """))
+
+        self.expected_output = [
+            "Use of prohibited \"cctype\" header, use \"mongo/util/ctype.h\"",
+            "Use of prohibited <ctype.h> header, use \"mongo/util/ctype.h\"",
+        ]
+
+        self.run_clang_tidy()
+
+    def test_MongoStdOptionalCheck(self):
+
+        self.write_config(
+            textwrap.dedent("""\
+                Checks: '-*,mongo-std-optional-check'
+                WarningsAsErrors: '*'
+                """))
+
+        self.expected_output = [
+            "Use of std::optional, use boost::optional instead.  [mongo-std-optional-check,-warnings-as-errors]\nvoid f(std::optional<std::string> parameterDeclTest) {",
+            "Use of std::optional, use boost::optional instead.  [mongo-std-optional-check,-warnings-as-errors]\n    std::optional<std::string> variableDeclTest;",
+            "Use of std::optional, use boost::optional instead.  [mongo-std-optional-check,-warnings-as-errors]\n    std::optional<int> fieldDeclTest = 5;",
+            "Use of std::optional, use boost::optional instead.  [mongo-std-optional-check,-warnings-as-errors]\nvoid functionName(const std::optional<int>& referenceDeclTest) {",
+            "Use of std::optional, use boost::optional instead.  [mongo-std-optional-check,-warnings-as-errors]\nstd::optional<std::string> functionReturnTypeDeclTest(StringData name);",
+            "Use of std::optional, use boost::optional instead.  [mongo-std-optional-check,-warnings-as-errors]\nstd::optional<T> templateDeclTest;",
+            "Use of std::optional, use boost::optional instead.  [mongo-std-optional-check,-warnings-as-errors]\nusing std::optional;",
+        ]
+
+        self.run_clang_tidy()
+
+    def test_MongoVolatileCheck(self):
+
+        self.write_config(
+            textwrap.dedent("""\
+                Checks: '-*,mongo-volatile-check'
+                WarningsAsErrors: '*'
+                """))
+
+        self.expected_output = [
+            "Illegal use of the volatile storage keyword, use AtomicWord instead from \"mongo/platform/atomic_word.h\" [mongo-volatile-check,-warnings-as-errors]\nvolatile int varVolatileTest;",
+            "Illegal use of the volatile storage keyword, use AtomicWord instead from \"mongo/platform/atomic_word.h\" [mongo-volatile-check,-warnings-as-errors]\n    volatile int fieldVolatileTest;",
+            "Illegal use of the volatile storage keyword, use AtomicWord instead from \"mongo/platform/atomic_word.h\" [mongo-volatile-check,-warnings-as-errors]\nvoid functionName(volatile int varVolatileTest) {}",
+        ]
 
         self.run_clang_tidy()
 

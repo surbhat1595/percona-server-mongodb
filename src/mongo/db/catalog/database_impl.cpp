@@ -116,8 +116,8 @@ Status validateDBNameForWindows(StringData dbname) {
 }
 
 void assertNoMovePrimaryInProgress(OperationContext* opCtx, NamespaceString const& nss) {
-    auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquire(
-        opCtx, nss.dbName(), DSSAcquisitionMode::kShared);
+    const auto scopedDss =
+        DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx, nss.dbName());
     if (scopedDss->isMovePrimaryInProgress()) {
         LOGV2(4909100, "assertNoMovePrimaryInProgress", "namespace"_attr = nss.toString());
 
@@ -170,12 +170,12 @@ void DatabaseImpl::init(OperationContext* const opCtx) {
 
     auto catalog = CollectionCatalog::get(opCtx);
     for (const auto& uuid : catalog->getAllCollectionUUIDsFromDb(_name)) {
-        CollectionWriter collection(opCtx, uuid);
+        const Collection* collection = catalog->lookupCollectionByUUID(opCtx, uuid);
         invariant(collection);
         // If this is called from the repair path, the collection is already initialized.
         if (!collection->isInitialized()) {
             WriteUnitOfWork wuow(opCtx);
-            collection.getWritableCollection(opCtx)->init(opCtx);
+            catalog->lookupCollectionByUUIDForMetadataWrite(opCtx, uuid)->init(opCtx);
             wuow.commit();
         }
     }
@@ -279,7 +279,7 @@ void DatabaseImpl::getStats(OperationContext* opCtx,
     invariant(opCtx->lockState()->isDbLockedForMode(name(), MODE_IS));
 
     catalog::forEachCollectionFromDb(
-        opCtx, name(), MODE_IS, [&](const CollectionPtr& collection) -> bool {
+        opCtx, name(), MODE_IS, [&](const Collection* collection) -> bool {
             nCollections += 1;
             objects += collection->numRecords(opCtx);
             size += collection->dataSize(opCtx);
@@ -582,14 +582,15 @@ Status DatabaseImpl::_finishDropCollection(OperationContext* opCtx,
         if (!status.isOK())
             return status;
 
-        opCtx->recoveryUnit()->onCommit([opCtx, nss, uuid, ident = sharedIdent->getIdent()](
-                                            boost::optional<Timestamp> commitTime) {
-            if (!commitTime) {
-                return;
-            }
+        opCtx->recoveryUnit()->onCommit(
+            [nss, uuid, ident = sharedIdent->getIdent()](OperationContext* opCtx,
+                                                         boost::optional<Timestamp> commitTime) {
+                if (!commitTime) {
+                    return;
+                }
 
-            HistoricalIdentTracker::get(opCtx).recordDrop(ident, nss, uuid, commitTime.value());
-        });
+                HistoricalIdentTracker::get(opCtx).recordDrop(ident, nss, uuid, commitTime.value());
+            });
     }
 
     CollectionCatalog::get(opCtx)->dropCollection(
@@ -642,8 +643,9 @@ Status DatabaseImpl::renameCollection(OperationContext* opCtx,
 
     CollectionCatalog::get(opCtx)->onCollectionRename(opCtx, writableCollection, fromNss);
 
-    opCtx->recoveryUnit()->onCommit([opCtx, fromNss, writableCollection](
-                                        boost::optional<Timestamp> commitTime) {
+    opCtx->recoveryUnit()->onCommit([fromNss,
+                                     writableCollection](OperationContext* opCtx,
+                                                         boost::optional<Timestamp> commitTime) {
         if (!commitTime) {
             return;
         }
@@ -871,7 +873,8 @@ Collection* DatabaseImpl::_createCollection(
             fullIdIndexSpec = uassertStatusOK(ic->createIndexOnEmptyCollection(
                 opCtx,
                 collection,
-                !idIndex.isEmpty() ? idIndex : ic->getDefaultIdIndexSpec(collection)));
+                !idIndex.isEmpty() ? idIndex
+                                   : ic->getDefaultIdIndexSpec(CollectionPtr(collection))));
             createColumnIndex = createColumnIndexOnAllCollections.shouldFail() &&
                 doesCollectionModificationsUpdateIndexes(nss);
         } else {
@@ -894,8 +897,13 @@ Collection* DatabaseImpl::_createCollection(
 
     hangBeforeLoggingCreateCollection.pauseWhileSet();
 
-    opCtx->getServiceContext()->getOpObserver()->onCreateCollection(
-        opCtx, collection, nss, optionsWithUUID, fullIdIndexSpec, createOplogSlot, fromMigrate);
+    opCtx->getServiceContext()->getOpObserver()->onCreateCollection(opCtx,
+                                                                    CollectionPtr(collection),
+                                                                    nss,
+                                                                    optionsWithUUID,
+                                                                    fullIdIndexSpec,
+                                                                    createOplogSlot,
+                                                                    fromMigrate);
 
     // It is necessary to create the system index *after* running the onCreateCollection so that
     // the storage timestamp for the index creation is after the storage timestamp for the
@@ -1026,8 +1034,7 @@ Status DatabaseImpl::userCreateNS(OperationContext* opCtx,
             return Status(
                 ErrorCodes::InvalidNamespace,
                 "View name cannot start with 'system.', which is reserved for system namespaces");
-
-        uassertStatusOK(createView(opCtx, nss, collectionOptions));
+        return createView(opCtx, nss, collectionOptions);
     } else {
         invariant(_createCollection(
                       opCtx, nss, collectionOptions, createDefaultIndexes, idIndex, fromMigrate),

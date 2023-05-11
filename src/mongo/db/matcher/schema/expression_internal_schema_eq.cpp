@@ -69,7 +69,9 @@ void InternalSchemaEqMatchExpression::debugString(StringBuilder& debug,
     debug << "\n";
 }
 
-BSONObj InternalSchemaEqMatchExpression::getSerializedRightHandSide() const {
+BSONObj InternalSchemaEqMatchExpression::getSerializedRightHandSide(
+    SerializationOptions opts) const {
+    // TODO SERVER-73678 respect 'replacementForLiteralArgs.'
     BSONObjBuilder eqObj;
     eqObj.appendAs(_rhsElem, kName);
     return eqObj.obj();

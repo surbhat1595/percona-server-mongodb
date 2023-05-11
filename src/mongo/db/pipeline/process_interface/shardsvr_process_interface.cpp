@@ -70,20 +70,20 @@ bool ShardServerProcessInterface::isSharded(OperationContext* opCtx, const Names
 void ShardServerProcessInterface::checkRoutingInfoEpochOrThrow(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const NamespaceString& nss,
-    ChunkVersion targetCollectionVersion) const {
+    ChunkVersion targetCollectionPlacementVersion) const {
     auto const shardId = ShardingState::get(expCtx->opCtx)->shardId();
     auto* catalogCache = Grid::get(expCtx->opCtx)->catalogCache();
 
     // Since we are only checking the epoch, don't advance the time in store of the index cache
-    auto currentGlobalIndexesInfo =
-        uassertStatusOK(catalogCache->getCollectionRoutingInfo(expCtx->opCtx, nss)).gii;
+    auto currentShardingIndexCatalogInfo =
+        uassertStatusOK(catalogCache->getCollectionRoutingInfo(expCtx->opCtx, nss)).sii;
 
     // Mark the cache entry routingInfo for the 'nss' and 'shardId' if the entry is staler than
-    // 'targetCollectionVersion'.
+    // 'targetCollectionPlacementVersion'.
     const ShardVersion ignoreIndexVersion = ShardVersionFactory::make(
-        targetCollectionVersion,
-        currentGlobalIndexesInfo
-            ? boost::make_optional(currentGlobalIndexesInfo->getCollectionIndexes())
+        targetCollectionPlacementVersion,
+        currentShardingIndexCatalogInfo
+            ? boost::make_optional(currentShardingIndexCatalogInfo->getCollectionIndexes())
             : boost::none);
     catalogCache->invalidateShardOrEntireCollectionEntryForShardedCollection(
         nss, ignoreIndexVersion, shardId);
@@ -96,9 +96,9 @@ void ShardServerProcessInterface::checkRoutingInfoEpochOrThrow(
 
     uassert(StaleEpochInfo(nss),
             str::stream() << "Could not act as router for " << nss.ns() << ", wanted "
-                          << targetCollectionVersion.toString() << ", but found "
+                          << targetCollectionPlacementVersion.toString() << ", but found "
                           << foundVersion.toString(),
-            foundVersion.isSameCollection(targetCollectionVersion));
+            foundVersion.isSameCollection(targetCollectionPlacementVersion));
 }
 
 boost::optional<Document> ShardServerProcessInterface::lookupSingleDocument(

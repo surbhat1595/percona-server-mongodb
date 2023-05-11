@@ -28,8 +28,12 @@
 
 global:
   cpp_namespace: "mongo::analyze_shard_key"
+  cpp_includes:
+    - "mongo/client/read_preference.h"
+    - "mongo/s/analyze_shard_key_util.h"
 
 imports:
+  - "mongo/client/read_preference_setting.idl"
   - "mongo/db/basic_types.idl"
   - "mongo/db/keypattern.idl"
 
@@ -51,7 +55,7 @@ structs:
         type: object_owned
       frequency:
         type: long
-        validator: { gte: 0 }
+        validator: { gt: 0 }
 
   MonotonicityMetrics:
     description: "The metrics about the monotonicity of a shard key, i.e. whether its value is
@@ -114,18 +118,23 @@ structs:
     fields:
       total:
         type: long
+        validator: { gte: 0 }
         default: 0
       find:
         type: long
+        validator: { gte: 0 }
         default: 0
       aggregate:
         type: long
+        validator: { gte: 0 }
         default: 0
       count:
         type: long
+        validator: { gte: 0 }
         default: 0
       distinct:
         type: long
+        validator: { gte: 0 }
         default: 0
 
   WriteSampleSize:
@@ -134,15 +143,19 @@ structs:
     fields:
       total:
         type: long
+        validator: { gte: 0 }
         default: 0
       update:
         type: long
+        validator: { gte: 0 }
         default: 0
       delete:
         type: long
+        validator: { gte: 0 }
         default: 0
       findAndModify:
         type: long
+        validator: { gte: 0 }
         default: 0
 
   ReadDistributionMetrics:
@@ -303,3 +316,12 @@ commands:
       key:
         type: KeyPattern
         description: "The shard key to evaluate."
+        validator:
+          callback: validateShardKeyPattern
+      $readPreference:
+        type: readPreference
+        cpp_name: readPreference
+        description: >-
+            The read preference to use for metrics calculation. The default is set to
+            "secondaryPreferred" to minimize the impact on user workloads.
+        default: ReadPreferenceSetting{ReadPreference::SecondaryPreferred}

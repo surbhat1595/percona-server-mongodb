@@ -303,14 +303,10 @@ void WiredTigerSessionCache::waitUntilDurable(OperationContext* opCtx,
 
             auto config = syncType == Fsync::kCheckpointStableTimestamp ? "use_timestamp=true"
                                                                         : "use_timestamp=false";
-            {
-                auto checkpointLock = _engine->getCheckpointLock(
-                    opCtx, StorageEngine::CheckpointLock::Mode::kExclusive);
-                invariantWTOK(s->checkpoint(s, config), s);
-                if (s2)
-                    invariantWTOK(s2->checkpoint(s2, config), s2);
-                _engine->clearIndividuallyCheckpointedIndexes();
-            }
+
+            invariantWTOK(s->checkpoint(s, config), s);
+            if (s2)
+                invariantWTOK(s2->checkpoint(s2, config), s2);
 
             if (token) {
                 journalListener->onDurable(token.value());
@@ -375,12 +371,9 @@ void WiredTigerSessionCache::waitUntilDurable(OperationContext* opCtx,
                       _waitUntilDurableSession);
         LOGV2_DEBUG(22419, 4, "flushed journal");
     } else {
-        auto checkpointLock =
-            _engine->getCheckpointLock(opCtx, StorageEngine::CheckpointLock::Mode::kExclusive);
         invariantWTOK(_waitUntilDurableSession->checkpoint(_waitUntilDurableSession, nullptr),
                       _waitUntilDurableSession);
         LOGV2_DEBUG(22420, 4, "created checkpoint");
-        _engine->clearIndividuallyCheckpointedIndexes();
     }
 
     // keyDB is always durable (opened with journal enabled)

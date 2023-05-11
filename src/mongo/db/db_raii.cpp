@@ -787,6 +787,10 @@ AutoGetCollectionForReadPITCatalog::AutoGetCollectionForReadPITCatalog(
 
         auto collDesc = scopedCss->getCollectionDescription(opCtx);
         if (collDesc.isSharded()) {
+            uassert(ErrorCodes::SnapshotTooOld,
+                    str::stream() << "Snapshot too old to read on collection '" << _coll->ns()
+                                  << "' with UUID: " << _coll->uuid(),
+                    collDesc.uuidMatches(_coll->uuid()));
             _coll.setShardKeyPattern(collDesc.getKeyPattern());
         }
 
@@ -840,7 +844,7 @@ AutoGetCollectionForReadPITCatalog::AutoGetCollectionForReadPITCatalog(
     // there are the following possibilities depending on the received shard version:
     //   1. ShardVersion::UNSHARDED: The request comes from a router and the operation entails the
     //      implicit creation of an unsharded collection. We can continue.
-    //   2. ShardVersion::IGNORED: The request comes from a router that broadcasted the same to all
+    //   2. ChunkVersion::IGNORED: The request comes from a router that broadcasted the same to all
     //      shards, but this shard doesn't own any chunks for the collection. We can continue.
     //   3. boost::none: The request comes from client directly connected to the shard. We can
     //      continue.
@@ -855,7 +859,7 @@ AutoGetCollectionForReadPITCatalog::AutoGetCollectionForReadPITCatalog(
             str::stream() << "No metadata for namespace " << _resolvedNss << " therefore the shard "
                           << "version attached to the request must be unset, UNSHARDED or IGNORED",
             !receivedShardVersion || *receivedShardVersion == ShardVersion::UNSHARDED() ||
-                *receivedShardVersion == ShardVersion::IGNORED());
+                ShardVersion::isPlacementVersionIgnored(*receivedShardVersion));
 }
 
 const CollectionPtr& AutoGetCollectionForReadPITCatalog::getCollection() const {
@@ -935,7 +939,7 @@ void AutoGetCollectionForReadLockFreeLegacy::EmplaceHelper::emplace(
                     // should never be nested.
                     invariant(!isLockFreeReadSubOperation);
 
-                    auto coll = catalog.lookupCollectionByUUIDForRead(opCtx, uuid);
+                    auto coll = catalog.lookupCollectionByUUIDForRead_DONT_USE(opCtx, uuid);
 
                     if (coll) {
                         if (coll->usesCappedSnapshots()) {
@@ -1355,6 +1359,11 @@ AutoGetCollectionForReadLockFreePITCatalog::AutoGetCollectionForReadLockFreePITC
         auto scopedCss = CollectionShardingState::acquire(opCtx, _collectionPtr->ns());
         auto collDesc = scopedCss->getCollectionDescription(opCtx);
         if (collDesc.isSharded()) {
+            uassert(ErrorCodes::SnapshotTooOld,
+                    str::stream() << "Snapshot too old to read on collection '"
+                                  << _collectionPtr->ns()
+                                  << "' with UUID: " << _collectionPtr->uuid(),
+                    collDesc.uuidMatches(_collectionPtr->uuid()));
             _collectionPtr.setShardKeyPattern(collDesc.getKeyPattern());
         }
     } else {

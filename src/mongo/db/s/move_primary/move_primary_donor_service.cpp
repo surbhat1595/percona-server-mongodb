@@ -29,19 +29,92 @@
 
 #include "mongo/db/s/move_primary/move_primary_donor_service.h"
 
+#include "mongo/db/persistent_task_store.h"
 #include "mongo/db/s/move_primary/move_primary_server_parameters_gen.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kMovePrimary
+
 namespace mongo {
+namespace {
+// Both of these failpoints have the same implementation. A single failpoint can't be active
+// multiple times with different arguments, but setting up more complex scenarios sometimes requires
+// multiple failpoints.
+MONGO_FAIL_POINT_DEFINE(pauseDuringMovePrimaryDonorStateEnumTransition);
+MONGO_FAIL_POINT_DEFINE(pauseDuringMovePrimaryDonorStateEnumTransitionAlternate);
+
+MONGO_FAIL_POINT_DEFINE(pauseBeforeBeginningMovePrimaryDonorWorkflow);
+
+enum StateTransitionProgress {
+    kBefore,   // Prior to any changes for state.
+    kPartial,  // After updating on-disk state, but before updating in-memory state.
+    kAfter     // After updating in-memory state.
+};
+
+const auto kProgressArgMap = [] {
+    return stdx::unordered_map<std::string, StateTransitionProgress>{
+        {"before", StateTransitionProgress::kBefore},
+        {"partial", StateTransitionProgress::kPartial},
+        {"after", StateTransitionProgress::kAfter}};
+}();
+
+boost::optional<StateTransitionProgress> readProgressArgument(const BSONObj& data) {
+    auto arg = data.getStringField("progress");
+    auto it = kProgressArgMap.find(arg.toString());
+    if (it == kProgressArgMap.end()) {
+        return boost::none;
+    }
+    return it->second;
+}
+
+boost::optional<MovePrimaryDonorStateEnum> readStateArgument(const BSONObj& data) {
+    try {
+        auto arg = data.getStringField("state");
+        IDLParserContext ectx("pauseDuringMovePrimaryDonorStateEnumTransition::readStateArgument");
+        return MovePrimaryDonorState_parse(ectx, arg);
+    } catch (...) {
+        return boost::none;
+    }
+}
+
+void evaluatePauseDuringStateTransitionFailpoint(StateTransitionProgress progress,
+                                                 MovePrimaryDonorStateEnum newState,
+                                                 FailPoint& failpoint) {
+    failpoint.executeIf(
+        [&](const auto& data) { failpoint.pauseWhileSet(); },
+        [&](const auto& data) {
+            auto desiredProgress = readProgressArgument(data);
+            auto desiredState = readStateArgument(data);
+            if (!desiredProgress.has_value() || !desiredState.has_value()) {
+                LOGV2(7306200,
+                      "pauseDuringMovePrimaryDonorStateEnumTransition failpoint data must contain "
+                      "progress and state arguments",
+                      "failpoint"_attr = failpoint.getName(),
+                      "data"_attr = data);
+                return false;
+            }
+            return *desiredProgress == progress && *desiredState == newState;
+        });
+}
+
+void evaluatePauseDuringStateTransitionFailpoints(StateTransitionProgress progress,
+                                                  MovePrimaryDonorStateEnum newState) {
+    const auto fps = {std::ref(pauseDuringMovePrimaryDonorStateEnumTransition),
+                      std::ref(pauseDuringMovePrimaryDonorStateEnumTransitionAlternate)};
+    for (auto& fp : fps) {
+        evaluatePauseDuringStateTransitionFailpoint(progress, newState, fp);
+    }
+}
+}  // namespace
 
 MovePrimaryDonorService::MovePrimaryDonorService(ServiceContext* serviceContext)
-    : PrimaryOnlyService{serviceContext} {}
+    : PrimaryOnlyService{serviceContext}, _serviceContext{serviceContext} {}
 
 StringData MovePrimaryDonorService::getServiceName() const {
     return kServiceName;
 }
 
 NamespaceString MovePrimaryDonorService::getStateDocumentsNS() const {
-    return NamespaceString::kTenantMigrationDonorsNamespace;
+    return NamespaceString::kMovePrimaryDonorNamespace;
 }
 
 ThreadPool::Limits MovePrimaryDonorService::getThreadPoolLimits() const {
@@ -59,7 +132,7 @@ void MovePrimaryDonorService::checkIfConflictsWithOtherInstances(
         IDLParserContext("MovePrimaryDonorCheckIfConflictsWithOtherInstances"), initialState);
     const auto& newMetadata = initialDoc.getMetadata();
     for (const auto& instance : existingInstances) {
-        auto typed = checked_cast<const MovePrimaryDonorService::Instance*>(instance);
+        auto typed = checked_cast<const MovePrimaryDonor*>(instance);
         const auto& existingMetadata = typed->getMetadata();
         uassert(ErrorCodes::ConflictingOperationInProgress,
                 str::stream() << "Existing movePrimary operation for database "
@@ -70,42 +143,164 @@ void MovePrimaryDonorService::checkIfConflictsWithOtherInstances(
 
 std::shared_ptr<repl::PrimaryOnlyService::Instance> MovePrimaryDonorService::constructInstance(
     BSONObj initialState) {
-    return std::make_shared<MovePrimaryDonorService::Instance>(MovePrimaryDonorDocument::parse(
-        IDLParserContext("MovePrimaryDonorConstructInstance"), initialState));
+    return std::make_shared<MovePrimaryDonor>(
+        _serviceContext,
+        this,
+        MovePrimaryDonorDocument::parse(
+            IDLParserContext("MovePrimaryDonorServiceConstructInstance"), initialState));
 }
 
-SemiFuture<void> MovePrimaryDonorService::Instance::run(
-    std::shared_ptr<executor::ScopedTaskExecutor> executor,
-    const CancellationToken& token) noexcept {
-    return SemiFuture<void>(Status::OK());
+
+MovePrimaryDonorCancelState::MovePrimaryDonorCancelState(const CancellationToken& stepdownToken)
+    : _stepdownToken{stepdownToken},
+      _abortSource{stepdownToken},
+      _abortToken{_abortSource.token()} {}
+
+const CancellationToken& MovePrimaryDonorCancelState::getStepdownToken() {
+    return _stepdownToken;
 }
 
-void MovePrimaryDonorService::Instance::interrupt(Status status) {}
+const CancellationToken& MovePrimaryDonorCancelState::getAbortToken() {
+    return _abortToken;
+}
 
-boost::optional<BSONObj> MovePrimaryDonorService::Instance::reportForCurrentOp(
+MovePrimaryDonorRetryHelper::MovePrimaryDonorRetryHelper(
+    std::shared_ptr<executor::ScopedTaskExecutor> taskExecutor,
+    MovePrimaryDonorCancelState* cancelState)
+    : _taskExecutor{taskExecutor},
+      _markKilledExecutor{std::make_shared<ThreadPool>([] {
+          ThreadPool::Options options;
+          options.poolName = "MovePrimaryDonorRetryHelperCancelableOpCtxPool";
+          options.minThreads = 1;
+          options.maxThreads = 1;
+          return options;
+      }())},
+      _cancelState{cancelState},
+      _cancelOnStepdownFactory{_cancelState->getStepdownToken(), _markKilledExecutor},
+      _cancelOnAbortFactory{_cancelState->getAbortToken(), _markKilledExecutor} {
+    _markKilledExecutor->startup();
+}
+
+void MovePrimaryDonorRetryHelper::handleTransientError(const Status& status) {}
+void MovePrimaryDonorRetryHelper::handleUnrecoverableError(const Status& status) {}
+
+MovePrimaryDonor::MovePrimaryDonor(ServiceContext* serviceContext,
+                                   MovePrimaryDonorService* donorService,
+                                   MovePrimaryDonorDocument initialState)
+    : _serviceContext{serviceContext},
+      _donorService{donorService},
+      _metadata{std::move(initialState.getMetadata())},
+      _mutableFields{std::move(initialState.getMutableFields())},
+      _metrics{MovePrimaryMetrics::initializeFrom(initialState, _serviceContext)} {
+    _metrics->onStateTransition(boost::none, getCurrentState());
+}
+
+SemiFuture<void> MovePrimaryDonor::run(std::shared_ptr<executor::ScopedTaskExecutor> executor,
+                                       const CancellationToken& stepdownToken) noexcept {
+    initializeRun(executor, stepdownToken);
+    _completionPromise.setFrom(
+        runDonorWorkflow().unsafeToInlineFuture().tapError([](const Status& status) {
+            LOGV2(7306201, "MovePrimaryDonor encountered an error", "error"_attr = redact(status));
+        }));
+    return _completionPromise.getFuture().semi();
+}
+
+void MovePrimaryDonor::interrupt(Status status) {}
+
+boost::optional<BSONObj> MovePrimaryDonor::reportForCurrentOp(
     MongoProcessInterface::CurrentOpConnectionsMode connMode,
     MongoProcessInterface::CurrentOpSessionsMode sessionMode) noexcept {
-    return boost::none;
+    return _metrics->reportForCurrentOp();
 }
 
-void MovePrimaryDonorService::Instance::checkIfOptionsConflict(const BSONObj& stateDoc) const {
+void MovePrimaryDonor::checkIfOptionsConflict(const BSONObj& stateDoc) const {
     auto otherDoc = MovePrimaryDonorDocument::parse(
         IDLParserContext("MovePrimaryDonorCheckIfOptionsConflict"), stateDoc);
     const auto& otherMetadata = otherDoc.getMetadata();
     const auto& metadata = getMetadata();
-    invariant(metadata.getId() == otherMetadata.getId());
+    invariant(metadata.get_id() == otherMetadata.get_id());
     uassert(ErrorCodes::ConflictingOperationInProgress,
             "Existing movePrimary operation exists with same id, but incompatible arguments",
             metadata.getDatabaseName() == otherMetadata.getDatabaseName() &&
-                metadata.getToShard() == otherMetadata.getToShard());
+                metadata.getShardName() == otherMetadata.getShardName());
 }
 
-MovePrimaryDonorService::Instance::Instance(MovePrimaryDonorDocument initialState)
-    : _metadata{std::move(initialState.getMetadata())},
-      _mutableFields{std::move(initialState.getMutableFields())} {}
-
-const MovePrimaryDonorMetadata& MovePrimaryDonorService::Instance::getMetadata() const {
+const MovePrimaryCommonMetadata& MovePrimaryDonor::getMetadata() const {
     return _metadata;
+}
+
+SharedSemiFuture<void> MovePrimaryDonor::getCompletionFuture() const {
+    return _completionPromise.getFuture();
+}
+
+MovePrimaryDonorStateEnum MovePrimaryDonor::getCurrentState() const {
+    stdx::unique_lock lock(_mutex);
+    return _mutableFields.getState();
+}
+
+MovePrimaryDonorMutableFields MovePrimaryDonor::getMutableFields() const {
+    stdx::unique_lock lock(_mutex);
+    return _mutableFields;
+}
+
+MovePrimaryDonorDocument MovePrimaryDonor::buildCurrentStateDocument() const {
+    MovePrimaryDonorDocument doc;
+    doc.setMetadata(getMetadata());
+    doc.setMutableFields(getMutableFields());
+    return doc;
+}
+
+void MovePrimaryDonor::initializeRun(std::shared_ptr<executor::ScopedTaskExecutor> executor,
+                                     const CancellationToken& stepdownToken) {
+    stdx::unique_lock lock(_mutex);
+    _taskExecutor = executor;
+    _cancelState.emplace(stepdownToken);
+    _retry.emplace(_taskExecutor, _cancelState.get_ptr());
+}
+
+ExecutorFuture<void> MovePrimaryDonor::runDonorWorkflow() {
+    return runOnTaskExecutor([] { pauseBeforeBeginningMovePrimaryDonorWorkflow.pauseWhileSet(); })
+        .then([this] { return transitionToState(MovePrimaryDonorStateEnum::kInitializing); })
+        .then([this] { return doInitializing(); });
+}
+
+ExecutorFuture<void> MovePrimaryDonor::transitionToState(MovePrimaryDonorStateEnum newState) {
+    return _retry->untilAbortOrSuccess([this, newState](const auto& factory) {
+        auto oldState = getCurrentState();
+        if (oldState >= newState) {
+            return;
+        }
+        auto opCtx = factory.makeOperationContext(&cc());
+        auto newDocument = buildCurrentStateDocument();
+        newDocument.getMutableFields().setState(newState);
+        evaluatePauseDuringStateTransitionFailpoints(StateTransitionProgress::kBefore, newState);
+
+        updateOnDiskState(opCtx.get(), newDocument);
+
+        evaluatePauseDuringStateTransitionFailpoints(StateTransitionProgress::kPartial, newState);
+
+        updateInMemoryState(newDocument);
+        _metrics->onStateTransition(oldState, newState);
+
+        evaluatePauseDuringStateTransitionFailpoints(StateTransitionProgress::kAfter, newState);
+    });
+}
+
+void MovePrimaryDonor::updateOnDiskState(OperationContext* opCtx,
+                                         const MovePrimaryDonorDocument& newStateDocument) {
+    PersistentTaskStore<MovePrimaryDonorDocument> store(_donorService->getStateDocumentsNS());
+    store.add(opCtx, newStateDocument);
+}
+
+void MovePrimaryDonor::updateInMemoryState(const MovePrimaryDonorDocument& newStateDocument) {
+    stdx::unique_lock lock(_mutex);
+    _mutableFields = newStateDocument.getMutableFields();
+}
+
+ExecutorFuture<void> MovePrimaryDonor::doInitializing() {
+    return _retry->untilAbortOrSuccess([](const auto& factory) {
+        // TODO: SERVER-74757
+    });
 }
 
 }  // namespace mongo

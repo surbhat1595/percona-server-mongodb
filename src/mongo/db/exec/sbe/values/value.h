@@ -126,6 +126,10 @@ enum class TypeTags : uint8_t {
     MinKey,
     MaxKey,
 
+    // Pointer to sort key component vector. This type is always owned within a SortSpec,
+    // and is never created, copied, or destroyed by SBE.
+    sortKeyComponentVector,
+
     // Pointer to a struct with data necessary to read values from a columnstore index cell. The
     // values of this type are fully owned by the column_scan stage and are never created, cloned or
     // destroyed by SBE.
@@ -806,75 +810,57 @@ class Array {
 public:
     Array() = default;
     Array(const Array& other) {
-        // Reserve space in all vectors, they are the same size. We arbitrarily picked _typeTags
-        // to determine the size.
-        reserve(other._typeTags.size());
-        for (size_t idx = 0; idx < other._values.size(); ++idx) {
-            const auto [tag, val] = copyValue(other._typeTags[idx], other._values[idx]);
-            _values.push_back(val);
-            _typeTags.push_back(tag);
+        reserve(other._vals.size());
+        for (size_t idx = 0; idx < other._vals.size(); ++idx) {
+            auto [t, v] = other._vals[idx];
+            _vals.push_back(copyValue(t, v));
         }
     }
     Array(Array&&) = default;
     ~Array() {
-        for (size_t idx = 0; idx < _typeTags.size(); ++idx) {
-            releaseValue(_typeTags[idx], _values[idx]);
+        for (size_t idx = 0; idx < _vals.size(); ++idx) {
+            releaseValue(_vals[idx].first, _vals[idx].second);
         }
     }
 
     void push_back(TypeTags tag, Value val) {
         if (tag != TypeTags::Nothing) {
             ValueGuard guard{tag, val};
-            // Reserve space in all vectors, they are the same size. We arbitrarily picked _typeTags
-            // to determine the size.
-            if (_typeTags.capacity() == _typeTags.size()) {
-                // Reserve double capacity.
-                // Note: we are not concerned about the overflow in the operation below, as the size
-                // of 'Value' is 8 bytes. Consequently, the maximum capacity ever is 2^64/8 = 2^61.
-                // We can freely shift 2^61 << 1 without any overflow.
-                // Note: the case of '_typeTags.capacity() == 1' is handled inside 'reserve' itself.
-                reserve(_typeTags.capacity() << 1);
-            }
-            _typeTags.push_back(tag);
-            _values.push_back(val);
-
+            _vals.push_back({tag, val});
             guard.reset();
         }
     }
 
     auto size() const noexcept {
-        return _values.size();
+        return _vals.size();
     }
 
     std::pair<TypeTags, Value> getAt(std::size_t idx) const {
-        if (idx >= _values.size()) {
+        if (idx >= _vals.size()) {
             return {TypeTags::Nothing, 0};
         }
 
-        return {_typeTags[idx], _values[idx]};
+        return _vals[idx];
     }
 
     // The in-place update of arrays is allowed only in very limited set of contexts (e.g. when
     // arrays are used in an accumulator slot). The owner of the array must guarantee that no other
     // component can observe the value being updated.
     void setAt(std::size_t idx, TypeTags tag, Value val) {
-        if (tag != TypeTags::Nothing && idx < _values.size()) {
-            releaseValue(_typeTags[idx], _values[idx]);
-            _typeTags[idx] = tag;
-            _values[idx] = val;
+        if (tag != TypeTags::Nothing && idx < _vals.size()) {
+            releaseValue(_vals[idx].first, _vals[idx].second);
+            _vals[idx] = {tag, val};
         }
     }
 
     void reserve(size_t s) {
         // Normalize to at least 1.
         s = s ? s : 1;
-        _typeTags.reserve(s);
-        _values.reserve(s);
+        _vals.reserve(s);
     }
 
 private:
-    std::vector<TypeTags> _typeTags;
-    std::vector<Value> _values;
+    std::vector<std::pair<TypeTags, Value>> _vals;
 };
 
 /**
@@ -935,6 +921,13 @@ public:
 
 private:
     ValueSetType _values;
+};
+
+/*
+ * A vector of values representing a sort key. The values are NOT owned by this object.
+ */
+struct SortKeyComponentVector {
+    std::vector<std::pair<value::TypeTags, value::Value>> elts;
 };
 
 bool operator==(const ArraySet& lhs, const ArraySet& rhs);
@@ -1276,6 +1269,10 @@ inline MakeObjSpec* getMakeObjSpecView(Value val) noexcept {
 
 inline IndexBounds* getIndexBoundsView(Value val) noexcept {
     return reinterpret_cast<IndexBounds*>(val);
+}
+
+inline SortKeyComponentVector* getSortKeyComponentVectorView(Value v) noexcept {
+    return reinterpret_cast<SortKeyComponentVector*>(v);
 }
 
 inline sbe::value::CsiCell* getCsiCellView(Value val) noexcept {

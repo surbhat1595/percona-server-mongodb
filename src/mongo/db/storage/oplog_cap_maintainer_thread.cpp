@@ -36,7 +36,6 @@
 #include "mongo/base/string_data.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
@@ -66,7 +65,8 @@ bool OplogCapMaintainerThread::_deleteExcessDocuments() {
     // Maintaining the Oplog cap is crucial to the stability of the server so that we don't let the
     // oplog grow unbounded. We mark the operation as having immediate priority to skip ticket
     // acquisition and flow control.
-    SetAdmissionPriorityForLock priority(opCtx.get(), AdmissionContext::Priority::kImmediate);
+    ScopedAdmissionPriorityForLock priority(opCtx->lockState(),
+                                            AdmissionContext::Priority::kImmediate);
 
     try {
         // A Global IX lock should be good enough to protect the oplog truncation from
@@ -106,6 +106,11 @@ bool OplogCapMaintainerThread::_deleteExcessDocuments() {
 void OplogCapMaintainerThread::run() {
     LOGV2_DEBUG(5295000, 1, "Oplog cap maintainer thread started", "threadName"_attr = _name);
     ThreadClient tc(_name, getGlobalServiceContext());
+
+    {
+        stdx::lock_guard<Client> lk(*tc.get());
+        tc.get()->setSystemOperationUnKillableByStepdown(lk);
+    }
 
     while (!globalInShutdownDeprecated()) {
         if (MONGO_unlikely(hangOplogCapMaintainerThread.shouldFail())) {

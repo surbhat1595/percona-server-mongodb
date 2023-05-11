@@ -77,6 +77,13 @@ boost::optional<ShardVersion> getOperationReceivedVersion(OperationContext* opCt
     return boost::none;
 }
 
+// This shard version is used as the received version in StaleConfigInfo since we do not have
+// information about the received version of the operation.
+ShardVersion ShardVersionPlacementIgnoredNoIndexes() {
+    return ShardVersionFactory::make(ChunkVersion::IGNORED(),
+                                     boost::optional<CollectionIndexes>(boost::none));
+}
+
 }  // namespace
 
 CollectionShardingRuntime::ScopedSharedCollectionShardingRuntime::
@@ -141,7 +148,7 @@ ScopedCollectionFilter CollectionShardingRuntime::getOwnershipFilter(
         tassert(7032301,
                 "For sharded collections getOwnershipFilter cannot be relied on without a valid "
                 "shard version",
-                !ShardVersion::isIgnoredVersion(*optReceivedShardVersion) ||
+                !ShardVersion::isPlacementVersionIgnored(*optReceivedShardVersion) ||
                     !metadata->get().allowMigrations() || !metadata->get().isSharded());
     }
 
@@ -179,7 +186,8 @@ ScopedCollectionDescription CollectionShardingRuntime::getCollectionDescription(
     const auto receivedShardVersion{oss.getShardVersion(_nss)};
     uassert(
         StaleConfigInfo(_nss,
-                        receivedShardVersion ? *receivedShardVersion : ShardVersion::IGNORED(),
+                        receivedShardVersion ? *receivedShardVersion
+                                             : ShardVersionPlacementIgnoredNoIndexes(),
                         boost::none /* wantedVersion */,
                         ShardingState::get(_serviceContext)->shardId()),
         str::stream() << "sharding status of collection " << _nss.ns()
@@ -188,6 +196,11 @@ ScopedCollectionDescription CollectionShardingRuntime::getCollectionDescription(
         optMetadata);
 
     return {std::move(optMetadata)};
+}
+
+boost::optional<ShardingIndexesCatalogCache> CollectionShardingRuntime::getIndexesInCritSec(
+    OperationContext* opCtx) const {
+    return _shardingIndexesCatalogInfo;
 }
 
 boost::optional<CollectionMetadata> CollectionShardingRuntime::getCurrentMetadataIfKnown() const {
@@ -212,8 +225,8 @@ void CollectionShardingRuntime::checkShardVersionOrThrow(
 void CollectionShardingRuntime::enterCriticalSectionCatchUpPhase(const BSONObj& reason) {
     _critSec.enterCriticalSectionCatchUpPhase(reason);
 
-    if (_shardVersionInRecoverOrRefresh) {
-        _shardVersionInRecoverOrRefresh->cancellationSource.cancel();
+    if (_placementVersionInRecoverOrRefresh) {
+        _placementVersionInRecoverOrRefresh->cancellationSource.cancel();
     }
 }
 
@@ -250,9 +263,9 @@ void CollectionShardingRuntime::setFilteringMetadata(OperationContext* opCtx,
     // If the collection was sharded and the new metadata represents a new collection we might need
     // to clean up some sharding-related state
     if (_metadataManager) {
-        const auto oldShardVersion = _metadataManager->getActiveShardVersion();
-        const auto newShardVersion = newMetadata.getShardVersion();
-        if (!oldShardVersion.isSameCollection(newShardVersion))
+        const auto oldShardPlacementVersion = _metadataManager->getActivePlacementVersion();
+        const auto newShardPlacementVersion = newMetadata.getShardPlacementVersion();
+        if (!oldShardPlacementVersion.isSameCollection(newShardPlacementVersion))
             _cleanupBeforeInstallingNewCollectionMetadata(lk, opCtx);
     }
 
@@ -281,8 +294,8 @@ void CollectionShardingRuntime::setFilteringMetadata(OperationContext* opCtx,
 
 void CollectionShardingRuntime::_clearFilteringMetadata(OperationContext* opCtx,
                                                         bool collIsDropped) {
-    if (_shardVersionInRecoverOrRefresh) {
-        _shardVersionInRecoverOrRefresh->cancellationSource.cancel();
+    if (_placementVersionInRecoverOrRefresh) {
+        _placementVersionInRecoverOrRefresh->cancellationSource.cancel();
     }
 
     stdx::lock_guard lk(_metadataManagerLock);
@@ -445,8 +458,9 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
         return kUnshardedCollection;
 
     // Assume that the received shard version was IGNORED if the current operation wasn't versioned
-    const auto& receivedShardVersion =
-        optReceivedShardVersion ? *optReceivedShardVersion : ShardVersion::IGNORED();
+    const auto& receivedShardVersion = optReceivedShardVersion
+        ? *optReceivedShardVersion
+        : ShardVersionPlacementIgnoredNoIndexes();
 
     {
         auto criticalSectionSignal = _critSec.getSignal(
@@ -479,7 +493,7 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
 
     const auto indexFeatureFlag = feature_flags::gGlobalIndexesShardingCatalog.isEnabled(
         serverGlobalParams.featureCompatibility);
-    const auto wantedPlacementVersion = currentMetadata.getShardVersion();
+    const auto wantedPlacementVersion = currentMetadata.getShardPlacementVersion();
     const auto wantedCollectionIndexes =
         indexFeatureFlag ? getCollectionIndexes(opCtx) : boost::none;
     const auto wantedIndexVersion = wantedCollectionIndexes
@@ -489,11 +503,15 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
         ShardVersionFactory::make(currentMetadata, wantedCollectionIndexes);
 
     const ChunkVersion receivedPlacementVersion = receivedShardVersion.placementVersion();
+    const bool isPlacementVersionIgnored =
+        ShardVersion::isPlacementVersionIgnored(receivedShardVersion);
     const boost::optional<Timestamp> receivedIndexVersion = receivedShardVersion.indexVersion();
 
     if ((wantedPlacementVersion.isWriteCompatibleWith(receivedPlacementVersion) &&
          (!indexFeatureFlag || receivedIndexVersion == wantedIndexVersion)) ||
-        receivedShardVersion == ShardVersion::IGNORED())
+        (isPlacementVersionIgnored &&
+         (!wantedPlacementVersion.isSet() || !indexFeatureFlag ||
+          receivedIndexVersion == wantedIndexVersion)))
         return optCurrentMetadata;
 
     StaleConfigInfo sci(
@@ -501,21 +519,25 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
 
     uassert(std::move(sci),
             str::stream() << "timestamp mismatch detected for " << _nss.ns(),
-            wantedPlacementVersion.isSameCollection(receivedPlacementVersion));
+            isPlacementVersionIgnored ||
+                wantedPlacementVersion.isSameCollection(receivedPlacementVersion));
 
-    if (!wantedPlacementVersion.isSet() && receivedPlacementVersion.isSet()) {
+    if (isPlacementVersionIgnored ||
+        (!wantedPlacementVersion.isSet() && receivedPlacementVersion.isSet())) {
         uasserted(std::move(sci),
                   str::stream() << "this shard no longer contains chunks for " << _nss.ns() << ", "
                                 << "the collection may have been dropped");
     }
 
-    if (wantedPlacementVersion.isSet() && !receivedPlacementVersion.isSet()) {
+    if (isPlacementVersionIgnored ||
+        (wantedPlacementVersion.isSet() && !receivedPlacementVersion.isSet())) {
         uasserted(std::move(sci),
                   str::stream() << "this shard contains chunks for " << _nss.ns() << ", "
                                 << "but the client expects unsharded collection");
     }
 
-    if (wantedPlacementVersion.majorVersion() != receivedPlacementVersion.majorVersion()) {
+    if (isPlacementVersionIgnored ||
+        (wantedPlacementVersion.majorVersion() != receivedPlacementVersion.majorVersion())) {
         // Could be > or < - wanted is > if this is the source of a migration, wanted < if this is
         // the target of a migration
         uasserted(std::move(sci),
@@ -536,8 +558,8 @@ void CollectionShardingRuntime::appendShardVersion(BSONObjBuilder* builder) cons
     if (optCollDescr) {
         BSONObjBuilder versionBuilder(builder->subobjStart(_nss.ns()));
         versionBuilder.appendTimestamp("placementVersion",
-                                       optCollDescr->getShardVersion().toLong());
-        versionBuilder.append("timestamp", optCollDescr->getShardVersion().getTimestamp());
+                                       optCollDescr->getShardPlacementVersion().toLong());
+        versionBuilder.append("timestamp", optCollDescr->getShardPlacementVersion().getTimestamp());
     }
 }
 
@@ -550,75 +572,75 @@ size_t CollectionShardingRuntime::numberOfRangesScheduledForDeletion() const {
 }
 
 
-void CollectionShardingRuntime::setShardVersionRecoverRefreshFuture(
+void CollectionShardingRuntime::setPlacementVersionRecoverRefreshFuture(
     SharedSemiFuture<void> future, CancellationSource cancellationSource) {
-    invariant(!_shardVersionInRecoverOrRefresh);
-    _shardVersionInRecoverOrRefresh.emplace(std::move(future), std::move(cancellationSource));
+    invariant(!_placementVersionInRecoverOrRefresh);
+    _placementVersionInRecoverOrRefresh.emplace(std::move(future), std::move(cancellationSource));
 }
 
 boost::optional<SharedSemiFuture<void>>
-CollectionShardingRuntime::getShardVersionRecoverRefreshFuture(OperationContext* opCtx) const {
-    return _shardVersionInRecoverOrRefresh
-        ? boost::optional<SharedSemiFuture<void>>(_shardVersionInRecoverOrRefresh->future)
+CollectionShardingRuntime::getPlacementVersionRecoverRefreshFuture(OperationContext* opCtx) const {
+    return _placementVersionInRecoverOrRefresh
+        ? boost::optional<SharedSemiFuture<void>>(_placementVersionInRecoverOrRefresh->future)
         : boost::none;
 }
 
-void CollectionShardingRuntime::resetShardVersionRecoverRefreshFuture() {
-    invariant(_shardVersionInRecoverOrRefresh);
-    _shardVersionInRecoverOrRefresh = boost::none;
+void CollectionShardingRuntime::resetPlacementVersionRecoverRefreshFuture() {
+    invariant(_placementVersionInRecoverOrRefresh);
+    _placementVersionInRecoverOrRefresh = boost::none;
 }
 
 boost::optional<CollectionIndexes> CollectionShardingRuntime::getCollectionIndexes(
     OperationContext* opCtx) const {
     _checkCritSecForIndexMetadata(opCtx);
 
-    return _globalIndexesInfo ? boost::make_optional(_globalIndexesInfo->getCollectionIndexes())
-                              : boost::none;
+    return _shardingIndexesCatalogInfo
+        ? boost::make_optional(_shardingIndexesCatalogInfo->getCollectionIndexes())
+        : boost::none;
 }
 
-boost::optional<GlobalIndexesCache> CollectionShardingRuntime::getIndexes(OperationContext* opCtx,
-                                                                          bool withCritSec) const {
-    if (!withCritSec)
-        _checkCritSecForIndexMetadata(opCtx);
-
-    return _globalIndexesInfo;
+boost::optional<ShardingIndexesCatalogCache> CollectionShardingRuntime::getIndexes(
+    OperationContext* opCtx) const {
+    _checkCritSecForIndexMetadata(opCtx);
+    return _shardingIndexesCatalogInfo;
 }
 
 void CollectionShardingRuntime::addIndex(OperationContext* opCtx,
                                          const IndexCatalogType& index,
                                          const CollectionIndexes& collectionIndexes) {
-    if (_globalIndexesInfo) {
-        _globalIndexesInfo->add(index, collectionIndexes);
+    if (_shardingIndexesCatalogInfo) {
+        _shardingIndexesCatalogInfo->add(index, collectionIndexes);
     } else {
         IndexCatalogTypeMap indexMap;
         indexMap.emplace(index.getName(), index);
-        _globalIndexesInfo.emplace(collectionIndexes, std::move(indexMap));
+        _shardingIndexesCatalogInfo.emplace(collectionIndexes, std::move(indexMap));
     }
 }
 
 void CollectionShardingRuntime::removeIndex(OperationContext* opCtx,
                                             const std::string& name,
                                             const CollectionIndexes& collectionIndexes) {
-    tassert(
-        7019500, "Index information does not exist on CSR", _globalIndexesInfo.is_initialized());
-    _globalIndexesInfo->remove(name, collectionIndexes);
+    tassert(7019500,
+            "Index information does not exist on CSR",
+            _shardingIndexesCatalogInfo.is_initialized());
+    _shardingIndexesCatalogInfo->remove(name, collectionIndexes);
 }
 
 void CollectionShardingRuntime::clearIndexes(OperationContext* opCtx) {
-    _globalIndexesInfo = boost::none;
+    _shardingIndexesCatalogInfo = boost::none;
 }
 
 void CollectionShardingRuntime::replaceIndexes(OperationContext* opCtx,
                                                const std::vector<IndexCatalogType>& indexes,
                                                const CollectionIndexes& collectionIndexes) {
-    if (_globalIndexesInfo) {
-        _globalIndexesInfo = boost::none;
+    if (_shardingIndexesCatalogInfo) {
+        _shardingIndexesCatalogInfo = boost::none;
     }
     IndexCatalogTypeMap indexMap;
     for (const auto& index : indexes) {
         indexMap.emplace(index.getName(), index);
     }
-    _globalIndexesInfo.emplace(collectionIndexes, std::move(indexMap));
+    _shardingIndexesCatalogInfo.emplace(collectionIndexes, std::move(indexMap));
 }
 
 CollectionCriticalSection::CollectionCriticalSection(OperationContext* opCtx,
@@ -673,40 +695,39 @@ void CollectionShardingRuntime::_cleanupBeforeInstallingNewCollectionMetadata(
     }
 
     const auto oldUUID = _metadataManager->getCollectionUuid();
-    const auto oldShardVersion = _metadataManager->getActiveShardVersion();
+    const auto oldShardVersion = _metadataManager->getActivePlacementVersion();
     ExecutorFuture<void>{Grid::get(opCtx)->getExecutorPool()->getFixedExecutor()}
         .then([svcCtx{opCtx->getServiceContext()}, oldUUID, oldShardVersion] {
             ThreadClient tc{"CleanUpShardedMetadata", svcCtx};
-            {
-                stdx::lock_guard<Client> lk{*tc.get()};
-                tc->setSystemOperationKillableByStepdown(lk);
-            }
             auto uniqueOpCtx{tc->makeOperationContext()};
             auto opCtx{uniqueOpCtx.get()};
 
             try {
                 auto& planCache = sbe::getPlanCache(opCtx);
-                planCache.removeIf([&](const sbe::PlanCacheKey& key,
-                                       const sbe::PlanCacheEntry& entry) -> bool {
-                    const auto matchingCollState =
-                        [&](const sbe::PlanCacheKeyCollectionState& entryCollState) {
-                            return entryCollState.uuid == oldUUID && entryCollState.shardVersion &&
-                                entryCollState.shardVersion->epoch == oldShardVersion.epoch() &&
-                                entryCollState.shardVersion->ts == oldShardVersion.getTimestamp();
-                        };
+                planCache.removeIf(
+                    [&](const sbe::PlanCacheKey& key, const sbe::PlanCacheEntry& entry) -> bool {
+                        const auto matchingCollState =
+                            [&](const sbe::PlanCacheKeyCollectionState& entryCollState) {
+                                return entryCollState.uuid == oldUUID &&
+                                    entryCollState.collectionGeneration &&
+                                    entryCollState.collectionGeneration->epoch ==
+                                    oldShardVersion.epoch() &&
+                                    entryCollState.collectionGeneration->ts ==
+                                    oldShardVersion.getTimestamp();
+                            };
 
-                    // Check whether the main collection of this plan is the one being removed
-                    if (matchingCollState(key.getMainCollectionState()))
-                        return true;
-
-                    // Check whether a secondary collection is the one being removed
-                    for (const auto& secCollState : key.getSecondaryCollectionStates()) {
-                        if (matchingCollState(secCollState))
+                        // Check whether the main collection of this plan is the one being removed
+                        if (matchingCollState(key.getMainCollectionState()))
                             return true;
-                    }
 
-                    return false;
-                });
+                        // Check whether a secondary collection is the one being removed
+                        for (const auto& secCollState : key.getSecondaryCollectionStates()) {
+                            if (matchingCollState(secCollState))
+                                return true;
+                        }
+
+                        return false;
+                    });
             } catch (const DBException& ex) {
                 LOGV2(6549200,
                       "Interrupted deferred clean up of sharded metadata",
@@ -728,8 +749,9 @@ void CollectionShardingRuntime::_checkCritSecForIndexMetadata(OperationContext* 
 
     // Assume that the received shard version was IGNORED if the current operation wasn't
     // versioned
-    const auto& receivedShardVersion =
-        optReceivedShardVersion ? *optReceivedShardVersion : ShardVersion::IGNORED();
+    const auto& receivedShardVersion = optReceivedShardVersion
+        ? *optReceivedShardVersion
+        : ShardVersionPlacementIgnoredNoIndexes();
     auto criticalSectionSignal = _critSec.getSignal(opCtx->lockState()->isWriteLocked()
                                                         ? ShardingMigrationCriticalSection::kWrite
                                                         : ShardingMigrationCriticalSection::kRead);

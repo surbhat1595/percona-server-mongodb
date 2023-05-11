@@ -36,11 +36,18 @@ namespace mongo {
 namespace global_index {
 namespace {
 
+using TimedPhase = GlobalIndexMetrics::TimedPhase;
+const auto kTimedPhaseNamesMap = [] {
+    return GlobalIndexMetrics::TimedPhaseNameMap{
+        {TimedPhase::kCloning, "totalCopyTimeElapsedSecs"}};
+}();
+
+
 inline GlobalIndexMetrics::State getDefaultState(GlobalIndexMetrics::Role role) {
     using Role = GlobalIndexMetrics::Role;
     switch (role) {
         case Role::kCoordinator:
-            return GlobalIndexMetrics::GlobalIndexCoordinatorStateEnumPlaceholder::kUnused;
+            return GlobalIndexCoordinatorStateEnumPlaceholder::kUnused;
         case Role::kRecipient:
             return GlobalIndexClonerStateEnum::kUnused;
         case Role::kDonor:
@@ -64,82 +71,6 @@ BSONObj createOriginalCommand(const NamespaceString& nss, BSONObj keyPattern, bo
 }
 }  // namespace
 
-GlobalIndexMetrics::RecipientState::RecipientState(GlobalIndexClonerStateEnum enumVal)
-    : _enumVal(enumVal) {}
-
-GlobalIndexCumulativeMetrics::RecipientStateEnum GlobalIndexMetrics::RecipientState::toMetrics()
-    const {
-    using MetricsEnum = GlobalIndexCumulativeMetrics::RecipientStateEnum;
-
-    switch (_enumVal) {
-        case GlobalIndexClonerStateEnum::kUnused:
-            return MetricsEnum::kUnused;
-
-        case GlobalIndexClonerStateEnum::kCloning:
-            return MetricsEnum::kCloning;
-
-        case GlobalIndexClonerStateEnum::kReadyToCommit:
-            return MetricsEnum::kReadyToCommit;
-
-        case GlobalIndexClonerStateEnum::kDone:
-            return MetricsEnum::kDone;
-
-        default:
-            invariant(false, str::stream() << "Unexpected Global Index coordinator state: ");
-            MONGO_UNREACHABLE;
-    }
-}
-
-GlobalIndexClonerStateEnum GlobalIndexMetrics::RecipientState::getState() const {
-    return _enumVal;
-}
-
-GlobalIndexMetrics::CoordinatorState::CoordinatorState(
-    GlobalIndexCoordinatorStateEnumPlaceholder enumVal)
-    : _enumVal(enumVal) {}
-
-GlobalIndexCumulativeMetrics::CoordinatorStateEnum GlobalIndexMetrics::CoordinatorState::toMetrics()
-    const {
-    using MetricsEnum = GlobalIndexCumulativeMetrics::CoordinatorStateEnum;
-
-    switch (_enumVal) {
-        case GlobalIndexCoordinatorStateEnumPlaceholder::kUnused:
-            return MetricsEnum::kUnused;
-
-        case GlobalIndexCoordinatorStateEnumPlaceholder::kInitializing:
-            return MetricsEnum::kInitializing;
-
-        case GlobalIndexCoordinatorStateEnumPlaceholder::kPreparingToDonate:
-            return MetricsEnum::kPreparingToDonate;
-
-        case GlobalIndexCoordinatorStateEnumPlaceholder::kCloning:
-            return MetricsEnum::kCloning;
-
-        case GlobalIndexCoordinatorStateEnumPlaceholder::kApplying:
-            return MetricsEnum::kApplying;
-
-        case GlobalIndexCoordinatorStateEnumPlaceholder::kBlockingWrites:
-            return MetricsEnum::kBlockingWrites;
-
-        case GlobalIndexCoordinatorStateEnumPlaceholder::kAborting:
-            return MetricsEnum::kAborting;
-
-        case GlobalIndexCoordinatorStateEnumPlaceholder::kCommitting:
-            return MetricsEnum::kCommitting;
-
-        case GlobalIndexCoordinatorStateEnumPlaceholder::kDone:
-            return MetricsEnum::kDone;
-        default:
-            invariant(false, str::stream() << "Unexpected Global Index coordinator state: ");
-            MONGO_UNREACHABLE;
-    }
-}
-
-GlobalIndexMetrics::GlobalIndexCoordinatorStateEnumPlaceholder
-GlobalIndexMetrics::CoordinatorState::getState() const {
-    return _enumVal;
-}
-
 GlobalIndexMetrics::GlobalIndexMetrics(UUID instanceId,
                                        BSONObj originatingCommand,
                                        NamespaceString nss,
@@ -147,14 +78,14 @@ GlobalIndexMetrics::GlobalIndexMetrics(UUID instanceId,
                                        Date_t startTime,
                                        ClockSource* clockSource,
                                        ShardingDataTransformCumulativeMetrics* cumulativeMetrics)
-    : ShardingDataTransformInstanceMetrics{std::move(instanceId),
-                                           std::move(originatingCommand),
-                                           std::move(nss),
-                                           role,
-                                           startTime,
-                                           clockSource,
-                                           cumulativeMetrics,
-                                           std::make_unique<GlobalIndexMetricsFieldNameProvider>()},
+    : Base{std::move(instanceId),
+           std::move(originatingCommand),
+           std::move(nss),
+           role,
+           startTime,
+           clockSource,
+           cumulativeMetrics,
+           std::make_unique<GlobalIndexMetricsFieldNameProvider>()},
       _stateHolder{getGlobalIndexCumulativeMetrics(), getDefaultState(role)},
       _scopedObserver(registerInstanceMetrics()),
       _globalIndexFieldNames{static_cast<GlobalIndexMetricsFieldNameProvider*>(_fieldNames.get())} {
@@ -194,6 +125,13 @@ StringData GlobalIndexMetrics::getStateString() const noexcept {
                                              return GlobalIndexClonerState_serializer(state);
                                          }},
                        _stateHolder.getState());
+}
+
+BSONObj GlobalIndexMetrics::reportForCurrentOp() const noexcept {
+    BSONObjBuilder builder;
+    reportDurationsForAllPhases<Seconds>(kTimedPhaseNamesMap, getClockSource(), &builder);
+    builder.appendElementsUnique(ShardingDataTransformInstanceMetrics::reportForCurrentOp());
+    return builder.obj();
 }
 
 }  // namespace global_index

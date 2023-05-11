@@ -498,6 +498,13 @@ struct __wt_page_modify {
 
 #define WT_PAGE_RS_RESTORED 0x1
     uint8_t restore_state; /* Created by restoring updates */
+
+/* Additional diagnostics fields to catch invalid updates to page_state, even in release builds. */
+/* AUTOMATIC FLAG VALUE GENERATION START 0 */
+#define WT_PAGE_MODIFY_EXCLUSIVE 0x1u
+#define WT_PAGE_MODIFY_RECONCILING 0x2u
+    /* AUTOMATIC FLAG VALUE GENERATION STOP 8 */
+    uint8_t flags;
 };
 
 /*
@@ -805,10 +812,9 @@ struct __wt_page {
  * 	Prepare state will not be updated during rollback and will continue to
  * 	have the state as INPROGRESS.
  */
-#define WT_PREPARE_INIT              \
-    0 /* Must be 0, as structures    \
-         will be default initialized \
-         with 0. */
+
+/* Must be 0, as structures will be default initialized with 0. */
+#define WT_PREPARE_INIT 0
 #define WT_PREPARE_INPROGRESS 1
 #define WT_PREPARE_LOCKED 2
 #define WT_PREPARE_RESOLVED 3

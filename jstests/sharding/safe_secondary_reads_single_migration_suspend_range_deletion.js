@@ -122,7 +122,7 @@ let testCases = {
         behavior: "versioned"
     },
     analyze: {skip: "primary only"},
-    analyzeShardKey: {skip: "does not return user data"},
+    analyzeShardKey: {skip: "only support readConcern 'local'"},
     appendOplogNote: {skip: "primary only"},
     applyOps: {skip: "primary only"},
     authSchemaUpgrade: {skip: "primary only"},
@@ -210,7 +210,6 @@ let testCases = {
         },
         behavior: "versioned"
     },
-    driverOIDTest: {skip: "does not return user data"},
     drop: {skip: "primary only"},
     dropAllRolesFromDatabase: {skip: "primary only"},
     dropAllUsersFromDatabase: {skip: "primary only"},
@@ -258,6 +257,7 @@ let testCases = {
     getLog: {skip: "does not return user data"},
     getMore: {skip: "shard version already established"},
     getParameter: {skip: "does not return user data"},
+    getQueryableEncryptionCountInfo: {skip: "primary only"},
     getShardMap: {skip: "does not return user data"},
     getShardVersion: {skip: "primary only"},
     godinsert: {skip: "for testing only"},

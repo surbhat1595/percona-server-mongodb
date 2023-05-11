@@ -3721,6 +3721,18 @@ tasks:
       resmoke_jobs_max: 1
   - func: "send benchmark results"
 
+- <<: *benchmark_template
+  name: benchmarks_streams
+  tags: ["benchmarks"]
+  commands:
+  - func: "do benchmark setup"
+  - func: "run tests"
+    vars:
+      suites: benchmarks_streams
+      exec_timeout_secs: 18000  # 5 hour timeout.
+      resmoke_jobs_max: 1
+  - func: "send benchmark results"
+
 - <<: *run_jepsen_template
   name: jepsen_register_findAndModify
   tags: ["jepsen"]
@@ -6355,6 +6367,14 @@ tasks:
       use_large_distro: "true"
 
 - <<: *gen_task_template
+  name: sharding_catalog_shard_gen
+  tags: []
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
+- <<: *gen_task_template
   name: sharding_multiversion_gen
   tags: ["random_multiversion_ds", "multiversion"]
   commands:
@@ -6409,6 +6429,14 @@ tasks:
       use_large_distro: "true"
 
 - <<: *gen_task_template
+  name: sharding_auth_catalog_shard_gen
+  tags: []
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
+- <<: *gen_task_template
   name: sharding_auth_audit_gen
   tags: ["sharding", "auth", "audit", "non_live_record", "no_debug_mode"]
   commands:
@@ -6448,27 +6476,6 @@ tasks:
   tags: ["sharding"]
   commands:
   - func: "generate resmoke tasks"
-
-- <<: *task_template
-  name: analyze_shard_key_stepdown_jscore_passthrough
-  tags: ["sharding"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: analyze_shard_key_kill_primary_jscore_passthrough
-  tags: ["sharding"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: analyze_shard_key_terminate_primary_jscore_passthrough
-  tags: ["sharding"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
 
 - <<: *gen_task_template
   name: ssl_gen

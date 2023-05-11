@@ -925,11 +925,6 @@ std::vector<DatabaseName> StorageEngineImpl::listDatabases(
     return res;
 }
 
-Status StorageEngineImpl::closeDatabase(OperationContext* opCtx, const DatabaseName& dbName) {
-    // This is ok to be a no-op as there is no database layer in kv.
-    return Status::OK();
-}
-
 Status StorageEngineImpl::dropDatabase(OperationContext* opCtx, const DatabaseName& dbName) {
     auto catalog = CollectionCatalog::get(opCtx);
     {
@@ -941,10 +936,7 @@ Status StorageEngineImpl::dropDatabase(OperationContext* opCtx, const DatabaseNa
 
     std::vector<UUID> toDrop = catalog->getAllCollectionUUIDsFromDb(dbName);
 
-    // Do not timestamp any of the following writes. This will remove entries from the catalog as
-    // well as drop any underlying tables. It's not expected for dropping tables to be reversible
-    // on crash/recoverToStableTimestamp.
-    auto status = _dropCollectionsNoTimestamp(opCtx, toDrop);
+    auto status = _dropCollections(opCtx, toDrop);
 
     // If all collections were dropped successfully then drop database's encryption key
     if (status.isOK()) {
@@ -958,32 +950,10 @@ Status StorageEngineImpl::dropDatabase(OperationContext* opCtx, const DatabaseNa
  * Returns the first `dropCollection` error that this method encounters. This method will attempt
  * to drop all collections, regardless of the error status.
  */
-Status StorageEngineImpl::_dropCollectionsNoTimestamp(OperationContext* opCtx,
-                                                      const std::vector<UUID>& toDrop) {
-    // On primaries, this method will be called outside of any `TimestampBlock` state meaning the
-    // "commit timestamp" will not be set. For this case, this method needs no special logic to
-    // avoid timestamping the upcoming writes.
-    //
-    // On secondaries, there will be a wrapping `TimestampBlock` and the "commit timestamp" will
-    // be set. Carefully save that to the side so the following writes can go through without that
-    // context.
-    const Timestamp commitTs = opCtx->recoveryUnit()->getCommitTimestamp();
-    if (!commitTs.isNull()) {
-        opCtx->recoveryUnit()->clearCommitTimestamp();
-    }
-
-    // Ensure the method exits with the same "commit timestamp" state that it was called with.
-    ScopeGuard addCommitTimestamp([&opCtx, commitTs] {
-        if (!commitTs.isNull()) {
-            opCtx->recoveryUnit()->setCommitTimestamp(commitTs);
-        }
-    });
-
-    // This code makes untimestamped writes to the _mdb_catalog.
-    opCtx->recoveryUnit()->allowUntimestampedWrite();
-
+Status StorageEngineImpl::_dropCollections(OperationContext* opCtx,
+                                           const std::vector<UUID>& toDrop) {
     Status firstError = Status::OK();
-    WriteUnitOfWork untimestampedDropWuow(opCtx);
+    WriteUnitOfWork wuow(opCtx);
     auto collectionCatalog = CollectionCatalog::get(opCtx);
     for (auto& uuid : toDrop) {
         auto coll = collectionCatalog->lookupCollectionByUUIDForMetadataWrite(opCtx, uuid);
@@ -1019,7 +989,7 @@ Status StorageEngineImpl::_dropCollectionsNoTimestamp(OperationContext* opCtx,
             opCtx, coll, opCtx->getServiceContext()->getStorageEngine()->supportsPendingDrops());
     }
 
-    untimestampedDropWuow.commit();
+    wuow.commit();
     return firstError;
 }
 
@@ -1217,8 +1187,8 @@ bool StorageEngineImpl::supportsReadConcernMajority() const {
     return _engine->supportsReadConcernMajority();
 }
 
-bool StorageEngineImpl::supportsOplogStones() const {
-    return _engine->supportsOplogStones();
+bool StorageEngineImpl::supportsOplogTruncateMarkers() const {
+    return _engine->supportsOplogTruncateMarkers();
 }
 
 bool StorageEngineImpl::supportsResumableIndexBuilds() const {
@@ -1276,17 +1246,12 @@ void StorageEngineImpl::dropIdentsOlderThan(OperationContext* opCtx, const Times
     _dropPendingIdentReaper.dropIdentsOlderThan(opCtx, ts);
 }
 
-std::shared_ptr<Ident> StorageEngineImpl::markIdentInUse(const std::string& ident) {
+std::shared_ptr<Ident> StorageEngineImpl::markIdentInUse(StringData ident) {
     return _dropPendingIdentReaper.markIdentInUse(ident);
 }
 
 void StorageEngineImpl::checkpoint(OperationContext* opCtx) {
     _engine->checkpoint(opCtx);
-}
-
-std::unique_ptr<StorageEngine::CheckpointLock> StorageEngineImpl::getCheckpointLock(
-    OperationContext* opCtx, CheckpointLock::Mode mode) {
-    return _engine->getCheckpointLock(opCtx, mode);
 }
 
 void StorageEngineImpl::_onMinOfCheckpointAndOldestTimestampChanged(const Timestamp& timestamp) {
@@ -1402,7 +1367,8 @@ void StorageEngineImpl::TimestampMonitor::_startup() {
                 throw;
             }
         },
-        Seconds(1));
+        Seconds(1),
+        false /*isKillableByStepdown*/);
 
     _job = _periodicRunner->makeJob(std::move(job));
     _job.start();

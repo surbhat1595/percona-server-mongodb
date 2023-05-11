@@ -3,8 +3,7 @@
  *
  * @tags: [
  *   featureFlagAutoMerger,
- *   # Balancer is stopped when stepping down
- *   does_not_support_stepdowns,
+ *   temporary_catalog_shard_incompatible,
  * ]
  */
 (function() {
@@ -58,16 +57,20 @@ function setJumboFlag(configDB, coll, chunkQuery) {
 }
 
 function setHistoryWindowInSecs(st, valueInSeconds) {
-    assert.commandWorked(st.configRS.getPrimary().adminCommand({
-        configureFailPoint: 'overrideHistoryWindowInSecs',
-        mode: 'alwaysOn',
-        data: {seconds: valueInSeconds}
-    }));
+    st.forEachConfigServer((conn) => {
+        assert.commandWorked(conn.adminCommand({
+            configureFailPoint: 'overrideHistoryWindowInSecs',
+            mode: 'alwaysOn',
+            data: {seconds: valueInSeconds}
+        }));
+    });
 }
 
 function resetHistoryWindowInSecs(st) {
-    assert.commandWorked(st.configRS.getPrimary().adminCommand(
-        {configureFailPoint: 'overrideHistoryWindowInSecs', mode: 'off'}));
+    st.forEachConfigServer((conn) => {
+        assert.commandWorked(
+            conn.adminCommand({configureFailPoint: 'overrideHistoryWindowInSecs', mode: 'off'}));
+    });
 }
 
 let defaultChunkDefragmentationThrottlingMS = null;
@@ -213,6 +216,28 @@ function mergeAllChunksOnShardTest(st, testDB) {
     assert.commandWorked(
         st.s.adminCommand({mergeAllChunksOnShard: coll.getFullName(), shard: shard1}));
     assertExpectedChunksOnShard(configDB, coll, shard1, [{min: 1, max: 3}, {min: 7, max: 10}]);
+}
+
+function mergeAllChunksWithMaxNumberOfChunksTest(st, testDB) {
+    // Consider all chunks mergeable
+    setHistoryWindowInSecs(st, -10 /* seconds */);
+
+    const coll = newShardedColl(st, testDB);
+
+    // Split unique chunk in 11 chunks on the same shard
+    for (var i = 0; i < 10; i++) {
+        splitChunk(st, coll, i /* middle */);
+    }
+
+    // Verify the `maxNumberOfChunksToMerge` is honored
+    for (var i = 10; i > 0; i--) {
+        assert.commandWorked(st.s.adminCommand({
+            mergeAllChunksOnShard: coll.getFullName(),
+            shard: st.shard0.shardName,
+            maxNumberOfChunksToMerge: NumberInt(2)
+        }));
+        assert.eq(findChunksUtil.findChunksByNs(st.config, coll.getFullName()).toArray().length, i);
+    }
 }
 
 /* Tests mergeAllChunks command considering history window preservation */
@@ -365,8 +390,9 @@ function testConfigurableAutoMergerIntervalSecs(st, testDB) {
     setHistoryWindowInSecs(st, 0 /* seconds */);
 
     // Set automerger interval to 1 second
-    assert.commandWorked(
-        st.configRS.getPrimary().adminCommand({setParameter: 1, autoMergerIntervalSecs: 1}));
+    st.forEachConfigServer((conn) => {
+        assert.commandWorked(conn.adminCommand({setParameter: 1, autoMergerIntervalSecs: 1}));
+    });
 
     st.startBalancer();
     // Potentially join previous balancing round with longer round interval from previous test case
@@ -380,8 +406,7 @@ function testConfigurableAutoMergerIntervalSecs(st, testDB) {
         assert.soon(
             () =>
                 findChunksUtil.findChunksByNs(st.config, coll.getFullName()).toArray().length == 1,
-            "Automerger unexpectly didn't merge back chunks within a reasonable time",
-            5000 /* timeout */);
+            "Automerger unexpectly didn't merge back chunks within a reasonable time");
     }
 }
 
@@ -407,6 +432,7 @@ function executeTestCase(testFunc) {
 }
 
 executeTestCase(mergeAllChunksOnShardTest);
+executeTestCase(mergeAllChunksWithMaxNumberOfChunksTest);
 executeTestCase(mergeAllChunksOnShardConsideringHistoryWindowTest);
 executeTestCase(mergeAllChunksOnShardConsideringJumboFlagTest);
 executeTestCase(balancerTriggersAutomergerWhenIsEnabledTest);

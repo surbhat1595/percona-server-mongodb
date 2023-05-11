@@ -474,8 +474,7 @@ void expandWildcardIndexEntry(const IndexEntry& wildcardIndex,
             "expandWildcardIndexEntry expected only WildcardIndexes",
             wildcardIndex.type == INDEX_WILDCARD);
 
-    if (!feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
+    if (!feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabledAndIgnoreFCV()) {
         // Should only have one field of the form {"path.$**" : 1}.
         tassert(7246511,
                 "Wildcard Index's key pattern must always have length 1 for non-compound Wildcard "
@@ -523,8 +522,7 @@ void expandWildcardIndexEntry(const IndexEntry& wildcardIndex,
     // should also check whether the regular fields is able to answer the query or not. That is - if
     // any field of the regular fields in a compound wildcard index is in 'fields', then we should
     // also generate an expanded wildcard 'IndexEntry' for later index analysis.
-    if (feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabled(
-            serverGlobalParams.featureCompatibility) &&
+    if (feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabledAndIgnoreFCV() &&
         !wildcardIndexUsed) {
 
         bool shouldExpand = false;
@@ -550,6 +548,25 @@ void expandWildcardIndexEntry(const IndexEntry& wildcardIndex,
     }
 }
 
+bool canOnlyAnswerWildcardPrefixQuery(const IndexEntry& index, const IndexBounds& bounds) {
+    tassert(7444000, "Expected a wildcard index.", index.type == INDEX_WILDCARD);
+    tassert(7444001,
+            "A wildcard index should always have a virtual $_path field at wildcardFieldPos - 1.",
+            bounds.fields[index.wildcardFieldPos - 1].name == "$_path"_sd);
+
+    if (index.wildcardFieldPos == 1) {
+        // This is either a single-field wildcard index, or a compound wildcard index without a
+        // prefix.
+        return false;
+    }
+
+    // If the index entry was not expanded to include a second $_path field, we cannot answer a
+    // query on a wildcard field with an IXSCAN + FETCH if the predicate itself is, for e.g. an
+    // ineligible $not query, because we won't retrieve documents where the wildcard field is
+    // missing from the IXSCAN.
+    return bounds.fields[index.wildcardFieldPos].name != "$_path"_sd;
+}
+
 BoundsTightness translateWildcardIndexBoundsAndTightness(
     const IndexEntry& index,
     BoundsTightness tightnessIn,
@@ -565,6 +582,14 @@ BoundsTightness translateWildcardIndexBoundsAndTightness(
         invariant(index.multikeyPaths.size() == 1);
     }
     invariant(oil);
+
+    // If 'oil' was not filled the filter type may not be supported, but we can still use this
+    // wildcard index for queries on prefix fields. The index bounds for the wildcard field will be
+    // filled later to include all values. Therefore, we should use INEXACT_FETCH to avoid false
+    // positives.
+    if (oil->name.empty()) {
+        return BoundsTightness::INEXACT_FETCH;
+    }
 
     // If our bounds include any objects -- anything in the range ({}, []) -- then we will need to
     // use subpath bounds; that is, we will add the interval ["path.","path/") at the point where we
@@ -653,10 +678,11 @@ void finalizeWildcardIndexScanConfiguration(
     FieldRef queryPath{wildcardFieldName};
     auto& multikeyPaths = index->multikeyPaths[index->wildcardFieldPos];
 
-    // If the bounds overlap the object type bracket, then we must retrieve all documents which
-    // include the given path. We must therefore add bounds that encompass all its subpaths,
-    // specifically the interval ["path.","path/") on "$_path".
-    const bool requiresSubpathBounds =
+    // If the bounds overlap the object type bracket or the wildcard field's bounds were not filled,
+    // then we must retrieve all documents which include the given path. We must therefore add
+    // bounds that encompass all its subpaths, specifically the interval ["path.","path/") on
+    // "$_path".
+    const bool requiresSubpathBounds = bounds->fields[index->wildcardFieldPos].name.empty() ||
         boundsOverlapObjectTypeBracket(bounds->fields[index->wildcardFieldPos]);
 
     // Account for fieldname-or-array-index semantics. $** indexes do not explicitly encode array
@@ -692,8 +718,7 @@ bool isWildcardObjectSubpathScan(const IndexScanNode* node) {
     }
 
     // We expect consistent arguments, representing a $** index which has already been finalized.
-    if (!feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
+    if (!feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabledAndIgnoreFCV()) {
         invariant(node->index.keyPattern.nFields() == 2);
         invariant(node->index.multikeyPaths.size() == 2);
         invariant(node->bounds.fields.size() == 2);

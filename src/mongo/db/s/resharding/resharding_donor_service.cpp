@@ -46,13 +46,13 @@
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
-#include "mongo/db/s/global_index_ddl_util.h"
 #include "mongo/db/s/resharding/resharding_change_event_o2_field_gen.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
 #include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
 #include "mongo/db/s/resharding/resharding_future_util.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/s/resharding/resharding_util.h"
+#include "mongo/db/s/sharding_index_catalog_ddl_util.h"
 #include "mongo/db/s/sharding_recovery_service.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/write_block_bypass.h"
@@ -192,10 +192,6 @@ public:
     }
 };
 
-ReshardingMetrics::DonorState toMetricsState(DonorStateEnum state) {
-    return ReshardingMetrics::DonorState(state);
-}
-
 }  // namespace
 
 ThreadPool::Limits ReshardingDonorService::getThreadPoolLimits() const {
@@ -245,7 +241,7 @@ ReshardingDonorService::DonorStateMachine::DonorStateMachine(
       }()) {
     invariant(_externalState);
 
-    _metrics->onStateTransition(boost::none, toMetricsState(_donorCtx.getState()));
+    _metrics->onStateTransition(boost::none, _donorCtx.getState());
 }
 
 ExecutorFuture<void> ReshardingDonorService::DonorStateMachine::_runUntilBlockingWritesOrErrored(
@@ -397,7 +393,8 @@ ExecutorFuture<void> ReshardingDonorService::DonorStateMachine::_finishReshardin
                            _critSecReason,
                            ShardingCatalogClient::kLocalWriteConcern);
 
-                   _metrics->onCriticalSectionEnd();
+                   _metrics->setEndFor(ReshardingMetrics::TimedPhase::kCriticalSection,
+                                       getCurrentTime());
                }
 
                auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
@@ -422,7 +419,7 @@ ExecutorFuture<void> ReshardingDonorService::DonorStateMachine::_finishReshardin
 
 Status ReshardingDonorService::DonorStateMachine::_runMandatoryCleanup(
     Status status, const CancellationToken& stepdownToken) {
-    _metrics->onStateTransition(toMetricsState(_donorCtx.getState()), boost::none);
+    _metrics->onStateTransition(_donorCtx.getState(), boost::none);
 
     // Destroy metrics early so it's lifetime will not be tied to the lifetime of this state
     // machine. This is because we have future callbacks copy shared pointers to this state machine
@@ -710,7 +707,7 @@ void ReshardingDonorService::DonorStateMachine::
                 _critSecReason,
                 ShardingCatalogClient::kLocalWriteConcern);
 
-        _metrics->onCriticalSectionBegin();
+        _metrics->setStartFor(ReshardingMetrics::TimedPhase::kCriticalSection, getCurrentTime());
     }
 
     {
@@ -829,7 +826,7 @@ void ReshardingDonorService::DonorStateMachine::_dropOriginalCollectionThenTrans
 
         if (feature_flags::gGlobalIndexesShardingCatalog.isEnabled(
                 serverGlobalParams.featureCompatibility)) {
-            dropCollectionGlobalIndexesMetadata(opCtx.get(), _metadata.getSourceNss());
+            dropCollectionShardingIndexCatalog(opCtx.get(), _metadata.getSourceNss());
         }
         resharding::data_copy::ensureCollectionDropped(
             opCtx.get(), _metadata.getSourceNss(), _metadata.getSourceUUID());
@@ -854,7 +851,7 @@ void ReshardingDonorService::DonorStateMachine::_transitionState(DonorShardConte
 
     _updateDonorDocument(std::move(newDonorCtx));
 
-    _metrics->onStateTransition(toMetricsState(oldState), toMetricsState(newState));
+    _metrics->onStateTransition(oldState, newState);
 
     LOGV2_INFO(5279505,
                "Transitioned resharding donor state",

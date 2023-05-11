@@ -36,6 +36,7 @@
 #include "mongo/base/parse_number.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/exec/bucket_unpacker.h"
 #include "mongo/db/exec/cached_plan.h"
 #include "mongo/db/exec/collection_scan.h"
 #include "mongo/db/exec/count.h"
@@ -52,6 +53,8 @@
 #include "mongo/db/exec/shard_filter.h"
 #include "mongo/db/exec/sort_key_generator.h"
 #include "mongo/db/exec/subplan.h"
+#include "mongo/db/exec/timeseries_modify.h"
+#include "mongo/db/exec/unpack_timeseries_bucket.h"
 #include "mongo/db/exec/upsert_stage.h"
 #include "mongo/db/index/columns_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -102,6 +105,7 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/storage_options.h"
+#include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/shard_key_pattern_query_util.h"
 #include "mongo/scripting/engine.h"
@@ -193,6 +197,24 @@ IndexEntry indexEntryFromIndexCatalogEntry(OperationContext* opCtx,
     auto desc = ice.descriptor();
     invariant(desc);
 
+    if (desc->isIdIndex()) {
+        // _id indexes are guaranteed to be non-multikey. Determining whether the index is multikey
+        // has a small cost associated with it, so we skip that here to make _id lookups faster.
+        return {desc->keyPattern(),
+                desc->getIndexType(),
+                desc->version(),
+                false, /* isMultikey */
+                {},    /* MultikeyPaths */
+                {},    /* multikey Pathset */
+                desc->isSparse(),
+                desc->unique(),
+                IndexEntry::Identifier{desc->indexName()},
+                ice.getFilterExpression(),
+                desc->infoObj(),
+                ice.getCollator(),
+                nullptr /* wildcard projection */};
+    }
+
     auto accessMethod = ice.accessMethod();
     invariant(accessMethod);
 
@@ -237,7 +259,7 @@ IndexEntry indexEntryFromIndexCatalogEntry(OperationContext* opCtx,
             // Indexes that have these metadata keys do not store a fixed-size vector of multikey
             // metadata in the index catalog. Depending on the index type, an index uses one of
             // these mechanisms (or neither), but not both.
-            multikeyPathSet,
+            std::move(multikeyPathSet),
             desc->isSparse(),
             desc->unique(),
             IndexEntry::Identifier{desc->indexName()},
@@ -278,18 +300,17 @@ ColumnIndexEntry columnIndexEntryFromIndexCatalogEntry(OperationContext* opCtx,
 void applyIndexFilters(const CollectionPtr& collection,
                        const CanonicalQuery& canonicalQuery,
                        QueryPlannerParams* plannerParams) {
-    if (!isIdHackEligibleQuery(collection, canonicalQuery)) {
-        const QuerySettings* querySettings =
-            QuerySettingsDecoration::get(collection->getSharedDecorations());
-        const auto key = canonicalQuery.encodeKeyForPlanCacheCommand();
 
-        // Filter index catalog if index filters are specified for query.
-        // Also, signal to planner that application hint should be ignored.
-        if (boost::optional<AllowedIndicesFilter> allowedIndicesFilter =
-                querySettings->getAllowedIndicesFilter(key)) {
-            filterAllowedIndexEntries(*allowedIndicesFilter, &plannerParams->indices);
-            plannerParams->indexFiltersApplied = true;
-        }
+    const QuerySettings* querySettings =
+        QuerySettingsDecoration::get(collection->getSharedDecorations());
+    const auto key = canonicalQuery.encodeKeyForPlanCacheCommand();
+
+    // Filter index catalog if index filters are specified for query.
+    // Also, signal to planner that application hint should be ignored.
+    if (boost::optional<AllowedIndicesFilter> allowedIndicesFilter =
+            querySettings->getAllowedIndicesFilter(key)) {
+        filterAllowedIndexEntries(*allowedIndicesFilter, &plannerParams->indices);
+        plannerParams->indexFiltersApplied = true;
     }
 }
 
@@ -300,6 +321,7 @@ void fillOutIndexEntries(OperationContext* opCtx,
                          const CollectionPtr& collection,
                          std::vector<IndexEntry>& entries,
                          std::vector<ColumnIndexEntry>& columnEntries) {
+    std::vector<const IndexCatalogEntry*> columnIndexes, plainIndexes;
     auto ii = collection->getIndexCatalog()->getIndexIterator(
         opCtx, IndexCatalog::InclusionPolicy::kReady);
     while (ii->more()) {
@@ -318,12 +340,19 @@ void fillOutIndexEntries(OperationContext* opCtx,
             continue;
 
         if (indexType == IndexType::INDEX_COLUMN) {
-            columnEntries.emplace_back(
-                columnIndexEntryFromIndexCatalogEntry(opCtx, collection, *ice));
+            columnIndexes.push_back(ice);
         } else {
-            entries.emplace_back(
-                indexEntryFromIndexCatalogEntry(opCtx, collection, *ice, canonicalQuery));
+            plainIndexes.push_back(ice);
         }
+    }
+    columnEntries.reserve(columnIndexes.size());
+    for (auto ice : columnIndexes) {
+        columnEntries.emplace_back(columnIndexEntryFromIndexCatalogEntry(opCtx, collection, *ice));
+    }
+    entries.reserve(plainIndexes.size());
+    for (auto ice : plainIndexes) {
+        entries.emplace_back(
+            indexEntryFromIndexCatalogEntry(opCtx, collection, *ice, canonicalQuery));
     }
 }
 }  // namespace
@@ -344,17 +373,21 @@ void fillOutPlannerParams(OperationContext* opCtx,
     invariant(canonicalQuery);
     bool apiStrict = APIParameters::get(opCtx).getAPIStrict().value_or(false);
 
-    // If it's not NULL, we may have indices. Access the catalog and fill out IndexEntry(s)
-    fillOutIndexEntries(opCtx,
-                        apiStrict,
-                        canonicalQuery,
-                        collection,
-                        plannerParams->indices,
-                        plannerParams->columnStoreIndexes);
+    // _id queries can skip checking the catalog for indices since they will always use the _id
+    // index.
+    if (!isIdHackEligibleQuery(collection, *canonicalQuery)) {
+        // If it's not NULL, we may have indices. Access the catalog and fill out IndexEntry(s)
+        fillOutIndexEntries(opCtx,
+                            apiStrict,
+                            canonicalQuery,
+                            collection,
+                            plannerParams->indices,
+                            plannerParams->columnStoreIndexes);
 
-    // If query supports index filters, filter params.indices by indices in query settings.
-    // Ignore index filters when it is possible to use the id-hack.
-    applyIndexFilters(collection, *canonicalQuery, plannerParams);
+        // If query supports index filters, filter params.indices by indices in query settings.
+        // Ignore index filters when it is possible to use the id-hack.
+        applyIndexFilters(collection, *canonicalQuery, plannerParams);
+    }
 
     // We will not output collection scans unless there are no indexed solutions. NO_TABLE_SCAN
     // overrides this behavior by not outputting a collscan even if there are no indexed
@@ -930,6 +963,7 @@ protected:
     std::unique_ptr<ClassicPrepareExecutionResult> buildIdHackPlan() {
         if (!isIdHackEligibleQuery(_collection, *_cq))
             return nullptr;
+
         const IndexDescriptor* descriptor = _collection->getIndexCatalog()->findIdIndex(_opCtx);
         if (!descriptor)
             return nullptr;
@@ -1227,7 +1261,7 @@ std::unique_ptr<sbe::RuntimePlanner> makeRuntimePlannerIfNeeded(
     bool needsSubplanning,
     PlanYieldPolicySBE* yieldPolicy,
     size_t plannerOptions,
-    const boost::optional<stage_builder::PlanStageData>& planStageData) {
+    boost::optional<const stage_builder::PlanStageData&> planStageData) {
     // If we have multiple solutions, we always need to do the runtime planning.
     if (numSolutions > 1) {
         invariant(!needsSubplanning && !decisionWorks);
@@ -1317,7 +1351,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
     // When query requires sub-planning, we may not get any executable plans.
     const auto planStageData = roots.empty()
         ? boost::none
-        : boost::optional<stage_builder::PlanStageData>(roots[0].second);
+        : boost::optional<const stage_builder::PlanStageData&>(roots[0].second);
 
     // In some circumstances (e.g. when have multiple candidate plans or using a cached one), we
     // might need to execute the plan(s) to pick the best one or to confirm the choice.
@@ -1511,7 +1545,7 @@ attemptToGetSlotBasedExecutor(
     std::unique_ptr<CanonicalQuery> canonicalQuery,
     std::function<void(CanonicalQuery*, bool)> extractAndAttachPipelineStages,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
-    QueryPlannerParams plannerParams) {
+    const QueryPlannerParams& plannerParams) {
     if (extractAndAttachPipelineStages) {
         // Push down applicable pipeline stages and attach to the query, but don't remove from
         // the high-level pipeline object until we know for sure we will execute with SBE.
@@ -1943,8 +1977,20 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
         !deleteStageParams->returnDeleted && deleteStageParams->sort.isEmpty() &&
         !deleteStageParams->numStatsForDoc;
 
-    if (batchDelete) {
-        root = std::make_unique<BatchedDeleteStage>(cq->getExpCtxRaw(),
+    auto expCtxRaw = cq->getExpCtxRaw();
+    if (parsedDelete->getResidualExpr()) {
+        // Checks if the delete is on a time-series collection and cannot run on bucket documents
+        // directly.
+        root = std::make_unique<TimeseriesModifyStage>(
+            expCtxRaw,
+            std::move(deleteStageParams),
+            ws.get(),
+            std::move(root),
+            collection,
+            BucketUnpacker(*collection->getTimeseriesOptions()),
+            parsedDelete->releaseResidualExpr());
+    } else if (batchDelete) {
+        root = std::make_unique<BatchedDeleteStage>(expCtxRaw,
                                                     std::move(deleteStageParams),
                                                     std::make_unique<BatchedDeleteStageParams>(),
                                                     ws.get(),
@@ -1952,7 +1998,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
                                                     root.release());
     } else {
         root = std::make_unique<DeleteStage>(
-            cq->getExpCtxRaw(), std::move(deleteStageParams), ws.get(), collection, root.release());
+            expCtxRaw, std::move(deleteStageParams), ws.get(), collection, root.release());
     }
 
     if (projection) {

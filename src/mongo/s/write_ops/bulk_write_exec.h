@@ -34,20 +34,20 @@
 #include "mongo/db/commands/bulk_write_gen.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/s/ns_targeter.h"
+#include "mongo/s/write_ops/batch_write_op.h"
 #include "mongo/s/write_ops/write_op.h"
 
 namespace mongo {
 namespace bulkWriteExec {
 /**
  * Executes a client bulkWrite request by sending child batches to several shard endpoints, and
- * returns a client bulkWrite response.
+ * returns a vector of BulkWriteReplyItem (each of which is a reply for an individual op).
  *
- * This function does not throw, any errors are reported via the reply object.
+ * This function does not throw, any errors are reported via the function return.
  */
-void execute(OperationContext* opCtx,
-             const std::vector<std::unique_ptr<NSTargeter>>& targeters,
-             const BulkWriteCommandRequest& clientRequest,
-             BulkWriteCommandReply* reply);
+std::vector<BulkWriteReplyItem> execute(OperationContext* opCtx,
+                                        const std::vector<std::unique_ptr<NSTargeter>>& targeters,
+                                        const BulkWriteCommandRequest& clientRequest);
 
 /**
  * The BulkWriteOp class manages the lifecycle of a bulkWrite request received by mongos. Each op in
@@ -101,10 +101,9 @@ public:
      * If a write without a shard key is detected, return an OK StatusWith that has 'true' as the
      * value.
      */
-    StatusWith<bool> target(
-        const std::vector<std::unique_ptr<NSTargeter>>& targeters,
-        bool recordTargetErrors,
-        stdx::unordered_map<ShardId, std::unique_ptr<TargetedWriteBatch>>& targetedBatches);
+    StatusWith<bool> target(const std::vector<std::unique_ptr<NSTargeter>>& targeters,
+                            bool recordTargetErrors,
+                            TargetedBatchMap& targetedBatches);
 
     /**
      * Returns false if the bulk write op needs more processing.
@@ -112,6 +111,25 @@ public:
     bool isFinished() const;
 
     const WriteOp& getWriteOp_forTest(int i) const;
+
+    int numWriteOpsIn(WriteOpState opState) const;
+
+    /**
+     * Aborts any further writes in the batch with the provided error status.  There must be no
+     * pending ops awaiting results when a batch is aborted.
+     *
+     * Batch is finished immediately after aborting.
+     */
+    void abortBatch(const Status& status);
+
+    // TODO(SERVER-72792): Finish this and process real batch responses.
+    void noteBatchResponse(const TargetedWriteBatch& targetedBatch);
+
+    /**
+     * Returns a vector of BulkWriteReplyItem based on the end state of each individual write in
+     * this bulkWrite operation.
+     */
+    std::vector<BulkWriteReplyItem> generateReplyItems() const;
 
 private:
     // The OperationContext the client bulkWrite request is run on.

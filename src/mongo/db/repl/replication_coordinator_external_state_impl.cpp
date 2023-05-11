@@ -53,7 +53,6 @@
 #include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
@@ -80,7 +79,6 @@
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/s/balancer/balancer.h"
-#include "mongo/db/s/chunk_splitter.h"
 #include "mongo/db/s/config/index_on_config.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/migration_util.h"
@@ -150,6 +148,12 @@ auto makeThreadPool(const std::string& poolName, const std::string& threadName) 
     threadPoolOptions.poolName = poolName;
     threadPoolOptions.onCreateThread = [](const std::string& threadName) {
         Client::initThread(threadName.c_str());
+
+        {
+            stdx::lock_guard<Client> lk(cc());
+            cc().setSystemOperationUnKillableByStepdown(lk);
+        }
+
         AuthorizationSession::get(cc())->grantInternalAuthorization(&cc());
     };
     return std::make_unique<ThreadPool>(threadPoolOptions);
@@ -833,7 +837,6 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnStepDownHook() {
         TransactionCoordinatorService::get(_service)->onStepDown();
     }
     if (ShardingState::get(_service)->enabled()) {
-        ChunkSplitter::get(_service).onStepDown();
         PeriodicBalancerConfigRefresher::get(_service).onStepDown();
         CatalogCacheLoader::get(_service).onStepDown();
 
@@ -864,7 +867,8 @@ void ReplicationCoordinatorExternalStateImpl::_stopAsyncUpdatesOfAndClearOplogTr
     // As opCtx does not expose a method to allow skipping flow control on purpose we mark the
     // operation as having Immediate priority. This will skip flow control and ticket acquisition.
     // It is fine to do this since the system is essentially shutting down at this point.
-    SetAdmissionPriorityForLock priority(opCtx, AdmissionContext::Priority::kImmediate);
+    ScopedAdmissionPriorityForLock priority(opCtx->lockState(),
+                                            AdmissionContext::Priority::kImmediate);
 
     // Tell the system to stop updating the oplogTruncateAfterPoint asynchronously and to go
     // back to using last applied to update repl's durable timestamp instead of the truncate
@@ -961,7 +965,6 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
             }
             fassert(40107, status);
 
-            ChunkSplitter::get(_service).onStepUp();
             PeriodicBalancerConfigRefresher::get(_service).onStepUp(_service);
             CatalogCacheLoader::get(_service).onStepUp();
 
@@ -1015,7 +1018,7 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
 
         if (mongo::feature_flags::gGlobalIndexesShardingCatalog.isEnabledAndIgnoreFCV()) {
             // Create indexes in config.shard.indexes if needed.
-            indexStatus = sharding_util::createGlobalIndexesIndexes(opCtx);
+            indexStatus = sharding_util::createShardingIndexCatalogIndexes(opCtx);
             if (!indexStatus.isOK()) {
                 // If the node is shutting down or it lost quorum just as it was becoming primary,
                 // don't run the sharding onStepUp machinery. The onStepDown counterpart to these

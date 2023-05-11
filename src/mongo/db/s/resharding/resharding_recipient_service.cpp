@@ -43,7 +43,6 @@
 #include "mongo/db/repl/oplog_applier.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
-#include "mongo/db/s/global_index_ddl_util.h"
 #include "mongo/db/s/migration_destination_manager.h"
 #include "mongo/db/s/resharding/resharding_change_event_o2_field_gen.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
@@ -54,6 +53,7 @@
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/s/shard_key_util.h"
 #include "mongo/db/s/sharding_ddl_util.h"
+#include "mongo/db/s/sharding_index_catalog_ddl_util.h"
 #include "mongo/db/s/sharding_recovery_service.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/write_block_bypass.h"
@@ -170,22 +170,18 @@ void setMeticsAfterWrite(ReshardingMetrics* metrics,
                          Date_t timestamp) {
     switch (newState) {
         case RecipientStateEnum::kCloning:
-            metrics->setCopyingBegin(timestamp);
+            metrics->setStartFor(ReshardingMetrics::TimedPhase::kCloning, timestamp);
             return;
         case RecipientStateEnum::kApplying:
-            metrics->setCopyingEnd(timestamp);
-            metrics->setApplyingBegin(timestamp);
+            metrics->setEndFor(ReshardingMetrics::TimedPhase::kCloning, timestamp);
+            metrics->setStartFor(ReshardingMetrics::TimedPhase::kApplying, timestamp);
             return;
         case RecipientStateEnum::kStrictConsistency:
-            metrics->setApplyingEnd(timestamp);
+            metrics->setEndFor(ReshardingMetrics::TimedPhase::kApplying, timestamp);
             return;
         default:
             return;
     }
-}
-
-ReshardingMetrics::RecipientState toMetricsState(RecipientStateEnum state) {
-    return ReshardingMetrics::RecipientState(state);
 }
 
 }  // namespace
@@ -244,7 +240,7 @@ ReshardingRecipientService::RecipientStateMachine::RecipientStateMachine(
       }()) {
     invariant(_externalState);
 
-    _metrics->onStateTransition(boost::none, toMetricsState(_recipientCtx.getState()));
+    _metrics->onStateTransition(boost::none, _recipientCtx.getState());
 }
 
 ExecutorFuture<void>
@@ -444,7 +440,7 @@ ExecutorFuture<void> ReshardingRecipientService::RecipientStateMachine::_runMand
                        self = shared_from_this(),
                        outerStatus = status,
                        isCanceled = stepdownToken.isCanceled()](Status dataReplicationHaltStatus) {
-            _metrics->onStateTransition(toMetricsState(_recipientCtx.getState()), boost::none);
+            _metrics->onStateTransition(_recipientCtx.getState(), boost::none);
 
             // Destroy metrics early so it's lifetime will not be tied to the lifetime of this
             // state machine. This is because we have future callbacks copy shared pointers to this
@@ -856,7 +852,7 @@ void ReshardingRecipientService::RecipientStateMachine::_cleanupReshardingCollec
     if (aborted) {
         if (feature_flags::gGlobalIndexesShardingCatalog.isEnabled(
                 serverGlobalParams.featureCompatibility)) {
-            dropCollectionGlobalIndexesMetadata(opCtx.get(), _metadata.getTempReshardingNss());
+            dropCollectionShardingIndexCatalog(opCtx.get(), _metadata.getTempReshardingNss());
         }
 
         resharding::data_copy::ensureCollectionDropped(
@@ -888,7 +884,7 @@ void ReshardingRecipientService::RecipientStateMachine::_transitionState(
     _updateRecipientDocument(
         std::move(newRecipientCtx), std::move(cloneDetails), std::move(configStartTime), factory);
 
-    _metrics->onStateTransition(toMetricsState(oldState), toMetricsState(newState));
+    _metrics->onStateTransition(oldState, newState);
 
     LOGV2_INFO(5279506,
                "Transitioned resharding recipient state",

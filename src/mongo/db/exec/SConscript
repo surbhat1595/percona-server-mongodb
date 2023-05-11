@@ -132,6 +132,7 @@ env.CppUnitTest(
         "find_projection_executor_test.cpp",
         "inclusion_projection_executor_test.cpp",
         "projection_executor_builder_test.cpp",
+        "projection_executor_redaction_test.cpp",
         "projection_executor_test.cpp",
         "projection_executor_utils_test.cpp",
         "projection_executor_wildcard_access_test.cpp",
@@ -139,6 +140,7 @@ env.CppUnitTest(
         "sort_test.cpp",
         "working_set_test.cpp",
         "bucket_unpacker_test.cpp",
+        "spool_test.cpp",
     ],
     LIBDEPS=[
         "$BUILD_DIR/mongo/base",

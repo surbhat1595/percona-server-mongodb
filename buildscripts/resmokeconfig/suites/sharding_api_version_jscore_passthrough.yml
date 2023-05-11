@@ -82,6 +82,7 @@ executor:
     hooks:
       - CheckReplOplogs
       - CheckReplDBHash
+      - CheckMetadataConsistencyInBackground
       - ValidateCollections
   config:
     shell_options:
@@ -94,6 +95,7 @@ executor:
   # validating the entire contents of the collection.
   - class: CheckReplOplogs
   - class: CheckReplDBHash
+  - class: CheckMetadataConsistencyInBackground
   - class: ValidateCollections
   - class: CleanEveryN
     n: 20

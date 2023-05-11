@@ -78,24 +78,43 @@ const WriteConcernOptions kMajorityWriteConcern(WriteConcernOptions::kMajority,
 std::string kEmptyErrMsgForMoveTimingHelper;
 
 /*
- * Taking into account the provided max chunk size, returns:
- * - A `max` bound to perform split+move in case the chunk owning `min` is splittable.
- * - The `max` bound of the chunk owning `min in case it can't be split (too small or jumbo).
+ * Calculates the max or min bound perform split+move in case the chunk in question is splittable.
+ * If the chunk is not splittable, returns the bound of the existing chunk for the max or min.Finds
+ * a max bound if needMaxBound is true and a min bound if forward is false.
  */
-BSONObj computeMaxBound(OperationContext* opCtx,
-                        const NamespaceString& nss,
-                        const BSONObj& min,
-                        const Chunk& owningChunk,
-                        const ShardKeyPattern& skPattern,
-                        const long long maxChunkSizeBytes) {
-    // TODO SERVER-64926 do not assume min always present
+BSONObj computeOtherBound(OperationContext* opCtx,
+                          const NamespaceString& nss,
+                          const BSONObj& min,
+                          const BSONObj& max,
+                          const ShardKeyPattern& skPattern,
+                          const long long maxChunkSizeBytes,
+                          bool needMaxBound) {
     auto [splitKeys, _] = autoSplitVector(
-        opCtx, nss, skPattern.toBSON(), min, owningChunk.getMax(), maxChunkSizeBytes, 1);
+        opCtx, nss, skPattern.toBSON(), min, max, maxChunkSizeBytes, 1, needMaxBound);
     if (splitKeys.size()) {
         return std::move(splitKeys.front());
     }
 
-    return owningChunk.getMax();
+    return needMaxBound ? max : min;
+}
+
+/**
+ * If `max` is the max bound of some chunk, returns that chunk. Otherwise, returns the chunk that
+ * contains the key `max`.
+ */
+Chunk getChunkForMaxBound(const ChunkManager& cm, const BSONObj& max) {
+    boost::optional<Chunk> chunkWithMaxBound;
+    cm.forEachChunk([&](const auto& chunk) {
+        if (chunk.getMax().woCompare(max) == 0) {
+            chunkWithMaxBound.emplace(chunk);
+            return false;
+        }
+        return true;
+    });
+    if (chunkWithMaxBound) {
+        return *chunkWithMaxBound;
+    }
+    return cm.findIntersectingChunkWithSimpleCollation(max);
 }
 
 MONGO_FAIL_POINT_DEFINE(moveChunkHangAtStep1);
@@ -160,7 +179,7 @@ MigrationSourceManager::MigrationSourceManager(OperationContext* opCtx,
     _moveTimingHelper.done(1);
     moveChunkHangAtStep1.pauseWhileSet();
 
-    // Make sure the latest shard version is recovered as of the time of the invocation of the
+    // Make sure the latest placement version is recovered as of the time of the invocation of the
     // command.
     onCollectionPlacementVersionMismatch(_opCtx, nss(), boost::none);
 
@@ -205,21 +224,36 @@ MigrationSourceManager::MigrationSourceManager(OperationContext* opCtx,
             std::move(metadata), std::move(indexInfo), std::move(collectionUUID));
     }();
 
-    // Compute the max bound in case only `min` is set (moveRange)
+    // Compute the max or min bound in case only one is set (moveRange)
     if (!_args.getMax().has_value()) {
-        // TODO SERVER-64926 do not assume min always present
         const auto& min = *_args.getMin();
 
         const auto cm = collectionMetadata.getChunkManager();
         const auto owningChunk = cm->findIntersectingChunkWithSimpleCollation(min);
-        const auto max = computeMaxBound(_opCtx,
-                                         nss(),
-                                         min,
-                                         owningChunk,
-                                         cm->getShardKeyPattern(),
-                                         _args.getMaxChunkSizeBytes());
+        const auto max = computeOtherBound(_opCtx,
+                                           nss(),
+                                           min,
+                                           owningChunk.getMax(),
+                                           cm->getShardKeyPattern(),
+                                           _args.getMaxChunkSizeBytes(),
+                                           true /* needMaxBound */);
         _args.getMoveRangeRequestBase().setMax(max);
         _moveTimingHelper.setMax(max);
+    } else if (!_args.getMin().has_value()) {
+        const auto& max = *_args.getMax();
+
+        const auto cm = collectionMetadata.getChunkManager();
+        const auto owningChunk = getChunkForMaxBound(*cm, max);
+        const auto min = computeOtherBound(_opCtx,
+                                           nss(),
+                                           owningChunk.getMin(),
+                                           max,
+                                           cm->getShardKeyPattern(),
+                                           _args.getMaxChunkSizeBytes(),
+                                           false /* needMaxBound */);
+
+        _args.getMoveRangeRequestBase().setMin(min);
+        _moveTimingHelper.setMin(min);
     }
 
     checkShardKeyPattern(_opCtx,
@@ -442,14 +476,11 @@ void MigrationSourceManager::commitChunkMetadataOnConfig() {
 
         auto migratedChunk = MigratedChunkType(*_chunkVersion, *_args.getMin(), *_args.getMax());
 
-        const auto currentTime = VectorClock::get(_opCtx)->getTime();
-
         CommitChunkMigrationRequest request(nss(),
                                             _args.getFromShard(),
                                             _args.getToShard(),
                                             migratedChunk,
-                                            metadata.getCollVersion(),
-                                            currentTime.clusterTime().asTimestamp());
+                                            metadata.getCollPlacementVersion());
 
         request.serialize({}, &builder);
         builder.append(kWriteConcernField, kMajorityWriteConcern.toBSON());
@@ -545,16 +576,17 @@ void MigrationSourceManager::commitChunkMetadataOnConfig() {
 
 
     LOGV2(22018,
-          "Migration succeeded and updated collection version to {updatedCollectionVersion}",
-          "Migration succeeded and updated collection version",
-          "updatedCollectionVersion"_attr = refreshedMetadata.getCollVersion(),
+          "Migration succeeded and updated collection placement version to "
+          "{updatedCollectionPlacementVersion}",
+          "Migration succeeded and updated collection placement version",
+          "updatedCollectionPlacementVersion"_attr = refreshedMetadata.getCollPlacementVersion(),
           "migrationId"_attr = _coordinator->getMigrationId());
 
     // If the migration has succeeded, clear the BucketCatalog so that the buckets that got migrated
     // out are no longer updatable.
     if (nss().isTimeseriesBucketsCollection()) {
         auto& bucketCatalog = timeseries::bucket_catalog::BucketCatalog::get(_opCtx);
-        bucketCatalog.clear(nss().getTimeseriesViewNamespace());
+        clear(bucketCatalog, nss().getTimeseriesViewNamespace());
     }
 
     _coordinator->setMigrationDecision(DecisionEnum::kCommitted);
@@ -655,9 +687,11 @@ CollectionMetadata MigrationSourceManager::_getCurrentMetadataAndCheckEpoch() {
             str::stream() << "The collection's epoch has changed since the migration began. "
                              "Expected collection epoch: "
                           << _collectionEpoch->toString() << ", but found: "
-                          << (metadata.isSharded() ? metadata.getCollVersion().epoch().toString()
-                                                   : "unsharded collection"),
-            metadata.isSharded() && metadata.getCollVersion().epoch() == *_collectionEpoch);
+                          << (metadata.isSharded()
+                                  ? metadata.getCollPlacementVersion().epoch().toString()
+                                  : "unsharded collection"),
+            metadata.isSharded() &&
+                metadata.getCollPlacementVersion().epoch() == *_collectionEpoch);
 
     return metadata;
 }
@@ -709,10 +743,6 @@ void MigrationSourceManager::_cleanup(bool completeMigration) noexcept {
             }
 
             auto newClient = _opCtx->getServiceContext()->makeClient("MigrationCoordinator");
-            {
-                stdx::lock_guard<Client> lk(*newClient.get());
-                newClient->setSystemOperationKillableByStepdown(lk);
-            }
             AlternativeClientRegion acr(newClient);
             auto newOpCtxPtr = cc().makeOperationContext();
             auto newOpCtx = newOpCtxPtr.get();
@@ -725,13 +755,13 @@ void MigrationSourceManager::_cleanup(bool completeMigration) noexcept {
                 //
                 // Wait for the updates to the cache of the routing table to be fully written to
                 // disk before clearing the 'minOpTime recovery' document. This way, we ensure that
-                // all nodes from a shard, which donated a chunk will always be at the shard version
-                // of the last migration it performed.
+                // all nodes from a shard, which donated a chunk will always be at the placement
+                // version of the last migration it performed.
                 //
                 // If the metadata is not persisted before clearing the 'inMigration' flag below, it
                 // is possible that the persisted metadata is rolled back after step down, but the
                 // write which cleared the 'inMigration' flag is not, a secondary node will report
-                // itself at an older shard version.
+                // itself at an older placement version.
                 CatalogCacheLoader::get(newOpCtx).waitForCollectionFlush(newOpCtx, nss());
 
                 // Clear the 'minOpTime recovery' document so that the next time a node from this
@@ -783,8 +813,7 @@ BSONObj MigrationSourceManager::getMigrationStatusReport(
         _args.getFromShard(),
         _args.getToShard(),
         true,
-        // TODO SERVER-64926 do not assume min always present
-        *_args.getMin(),
+        _args.getMin().value_or(BSONObj()),
         _args.getMax().value_or(BSONObj()),
         sessionOplogEntriesToBeMigratedSoFar,
         sessionOplogEntriesSkippedSoFarLowerBound);

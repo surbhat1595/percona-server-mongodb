@@ -54,7 +54,12 @@ const StringDataSet kAllowedDollarPrefixedFields = {
     "$sortKey",
 
     // This is necessary for the "showRecordId" feature.
-    "$recordId"};
+    "$recordId",
+
+    // This is necessary for $search queries with a specified sort.
+    "$searchSortValues"_sd,
+    "$searchScore"_sd,
+};
 
 }  // namespace
 
@@ -158,5 +163,16 @@ FieldPath FieldPath::concat(const FieldPath& tail) const {
     invariant(newHashes.size() == expectedDotSize - 1);
 
     return FieldPath(std::move(concat), std::move(newDots), std::move(newHashes));
+}
+
+std::string FieldPath::redactedFullPath(SerializationOptions opts) const {
+    std::stringstream redacted;
+    for (size_t i = 0; i < getPathLength(); ++i) {
+        if (i > 0) {
+            redacted << ".";
+        }
+        redacted << opts.redactFieldNamesStrategy(getFieldName(i));
+    }
+    return redacted.str();
 }
 }  // namespace mongo

@@ -114,8 +114,8 @@ const int kMaxRoundsWithoutProgress(5);
 std::vector<AsyncRequestsSender::Request> constructARSRequestsToSend(
     OperationContext* opCtx,
     NSTargeter& targeter,
-    std::map<ShardId, std::unique_ptr<TargetedWriteBatch>>& childBatches,
-    std::map<ShardId, std::unique_ptr<TargetedWriteBatch>>& pendingBatches,
+    TargetedBatchMap& childBatches,
+    TargetedBatchMap& pendingBatches,
     BatchWriteExecStats* stats,
     BatchWriteOp& batchOp) {
     std::vector<AsyncRequestsSender::Request> requests;
@@ -128,7 +128,7 @@ std::vector<AsyncRequestsSender::Request> constructARSRequestsToSend(
             continue;
 
         // If we already have a batch for this shard, wait until the next time
-        const auto& targetShardId = nextBatch->getEndpoint().shardName;
+        const auto& targetShardId = nextBatch->getShardId();
         if (pendingBatches.count(targetShardId))
             continue;
 
@@ -285,7 +285,7 @@ bool processErrorResponseFromLocal(OperationContext* opCtx,
 void executeChildBatches(OperationContext* opCtx,
                          NSTargeter& targeter,
                          const BatchedCommandRequest& clientRequest,
-                         std::map<ShardId, std::unique_ptr<TargetedWriteBatch>>& childBatches,
+                         TargetedBatchMap& childBatches,
                          BatchWriteExecStats* stats,
                          BatchWriteOp& batchOp,
                          bool& abortBatch) {
@@ -294,7 +294,7 @@ void executeChildBatches(OperationContext* opCtx,
 
     while (numSent != numToSend) {
         // Collect batches out on the network, mapped by endpoint
-        std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> pendingBatches;
+        TargetedBatchMap pendingBatches;
 
         auto requests = constructARSRequestsToSend(
             opCtx, targeter, childBatches, pendingBatches, stats, batchOp);
@@ -321,7 +321,7 @@ void executeChildBatches(OperationContext* opCtx,
             TargetedWriteBatch* batch = pendingBatches.find(response.shardId)->second.get();
 
             const auto shardInfo = response.shardHostAndPort ? response.shardHostAndPort->toString()
-                                                             : batch->getEndpoint().shardName;
+                                                             : batch->getShardId();
 
             // Then check if we successfully got a response.
             Status responseStatus = response.swResponse.getStatus();
@@ -375,7 +375,7 @@ void executeChildBatches(OperationContext* opCtx,
 void executeTwoPhaseWrite(OperationContext* opCtx,
                           NSTargeter& targeter,
                           BatchWriteOp& batchOp,
-                          std::map<ShardId, std::unique_ptr<TargetedWriteBatch>>& childBatches,
+                          TargetedBatchMap& childBatches,
                           BatchWriteExecStats* stats,
                           const BatchedCommandRequest& clientRequest,
                           bool& abortBatch) {
@@ -415,7 +415,16 @@ void executeTwoPhaseWrite(OperationContext* opCtx,
     }
 
     // Since we only send the write to a single shard, record the response of the write against the
-    // corresponding child batch for the targeted shard. Record no-ops for the remaining shards.
+    // first TargetedWriteBatch, and record no-ops for the remaining targeted shards. We always
+    // resolve the first batch due to a quirk of this protocol running within an internal
+    // transaction. This is because StaleShardVersion errors are automatically retried within the
+    // internal transaction, and if there happened to be a moveChunk that changes the number of
+    // targetable shards, the two phase protocol would still complete successfully, but the
+    // childBatches here could potentially still only include targetedWrites for the previous subset
+    // of shards before the moveChunk (since the StaleShardVersion error was not made visible here).
+    // It isn't important which TargetedWriteBatch records the write response, just as long as only
+    // one does so that the response on the client is still valid.
+    bool hasRecordedWriteResponseForFirstBatch = false;
     for (auto&& childBatch : childBatches) {
         auto nextBatch = std::move(childBatch.second);
 
@@ -424,18 +433,20 @@ void executeTwoPhaseWrite(OperationContext* opCtx,
         invariant(nextBatch->getWrites().size() == 1);
 
         if (responseStatus.isOK()) {
-            // If no document matches were made, then the shardId would be the empty string and all
-            // of the child batches would record no-ops.
-            if (swRes.getValue().getShardId() == nextBatch->getEndpoint().shardName) {
-                if ((abortBatch = processResponseFromRemote(opCtx,
-                                                            targeter,
-                                                            nextBatch->getEndpoint().shardName,
-                                                            batchedCommandResponse,
-                                                            batchOp,
-                                                            nextBatch.get(),
-                                                            stats))) {
+            // If no document matches were made, then the response shardId would be the empty string
+            // and all of the child batches would record no-ops.
+            if (!hasRecordedWriteResponseForFirstBatch && !swRes.getValue().getShardId().empty()) {
+                if ((abortBatch = processResponseFromRemote(
+                         opCtx,
+                         targeter,
+                         ShardId(swRes.getValue().getShardId().toString()),
+                         batchedCommandResponse,
+                         batchOp,
+                         nextBatch.get(),
+                         stats))) {
                     break;
                 }
+                hasRecordedWriteResponseForFirstBatch = true;
             } else {
                 // Explicitly set the status so that debug builds won't invariant when checking the
                 // status.
@@ -443,7 +454,7 @@ void executeTwoPhaseWrite(OperationContext* opCtx,
                 noopBatchCommandResponse.setStatus(Status::OK());
                 processResponseFromRemote(opCtx,
                                           targeter,
-                                          nextBatch->getEndpoint().shardName,
+                                          nextBatch->getShardId(),
                                           noopBatchCommandResponse,
                                           batchOp,
                                           nextBatch.get(),
@@ -455,7 +466,7 @@ void executeTwoPhaseWrite(OperationContext* opCtx,
                                                             batchOp,
                                                             nextBatch.get(),
                                                             responseStatus,
-                                                            nextBatch->getEndpoint().shardName,
+                                                            nextBatch->getShardId(),
                                                             boost::none))) {
                 break;
             }
@@ -512,7 +523,7 @@ void BatchWriteExec::executeBatch(OperationContext* opCtx,
         //    exactly when the metadata changed.
         //
 
-        std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> childBatches;
+        TargetedBatchMap childBatches;
 
         // If we've already had a targeting error, we've refreshed the metadata once and can
         // record target errors definitively.

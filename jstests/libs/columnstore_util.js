@@ -41,9 +41,13 @@ function safeToCreateColumnStoreIndexInCluster(nodes) {
             continue;
         }
 
-        const createColumnIndexParameter =
-            getParameter(conn, "failpoint.createColumnIndexOnAllCollections");
-        if (createColumnIndexParameter.mode) {
+        const fpName = "failpoint.createColumnIndexOnAllCollections";
+        const getParamRes = conn.getDB("admin").runCommand({getParameter: 1, [fpName]: 1});
+        if (!getParamRes.ok) {
+            return false;
+        }
+
+        if (getParamRes[fpName].mode) {
             // Test is already configured to create column store indexes on all collections; skip
             // it so that we don't create double indexes.
             jsTestLog("Note: declining to create column store index, because they are already " +
@@ -58,7 +62,14 @@ function safeToCreateColumnStoreIndexInCluster(nodes) {
             return false;
         }
 
-        break;
+        const getParamFeatureFlagRes = assert.commandWorked(
+            conn.adminCommand({getParameter: 1, featureFlagColumnstoreIndexes: 1}));
+        if (!getParamFeatureFlagRes.featureFlagColumnstoreIndexes ||
+            !getParamFeatureFlagRes.featureFlagColumnstoreIndexes["value"]) {
+            jsTestLog("Note: declining to create column store index, because " +
+                      "featureFlagColumnstoreIndexes is disabled");
+            return false;
+        }
     }
 
     return true;

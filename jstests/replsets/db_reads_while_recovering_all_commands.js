@@ -232,7 +232,6 @@ const allCommands = {
     abortShardSplit: {skip: isPrimaryOnly},
     commitShardSplit: {skip: isPrimaryOnly},
     forgetShardSplit: {skip: isPrimaryOnly},
-    driverOIDTest: {skip: isNotAUserDataRead},
     drop: {skip: isPrimaryOnly},
     dropAllRolesFromDatabase: {skip: isPrimaryOnly},
     dropAllUsersFromDatabase: {skip: isPrimaryOnly},
@@ -275,6 +274,7 @@ const allCommands = {
         expectFailure: true,
         expectedErrorCode: ErrorCodes.NotPrimaryOrSecondary
     },
+    getQueryableEncryptionCountInfo: {skip: isPrimaryOnly},
     getParameter: {skip: isNotAUserDataRead},
     getShardMap: {skip: isNotAUserDataRead},
     getShardVersion: {skip: isPrimaryOnly},

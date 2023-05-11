@@ -456,7 +456,6 @@ export const TenantMigrationConcurrentWriteUtil = {
         donorForgetMigration: {skip: isNotRunOnUserDatabase},
         donorStartMigration: {skip: isNotRunOnUserDatabase},
         donorWaitForMigrationToCommit: {skip: isNotRunOnUserDatabase},
-        driverOIDTest: {skip: isNotRunOnUserDatabase},
         drop: {
             explicitlyCreateCollection: true,
             command: function(dbName, collName) {
@@ -531,6 +530,7 @@ export const TenantMigrationConcurrentWriteUtil = {
         getLog: {skip: isNotRunOnUserDatabase},
         getMore: {skip: isNotWriteCommand},
         getParameter: {skip: isNotRunOnUserDatabase},
+        getQueryableEncryptionCountInfo: {skip: isNotWriteCommand},
         getShardMap: {skip: isNotRunOnUserDatabase},
         getShardVersion: {skip: isNotRunOnUserDatabase},
         getnonce: {skip: "removed in v6.3"},

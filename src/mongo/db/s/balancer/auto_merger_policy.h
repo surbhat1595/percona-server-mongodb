@@ -30,7 +30,6 @@
 #pragma once
 
 #include "mongo/db/s/balancer/actions_stream_policy.h"
-#include "mongo/s/catalog/type_collection.h"
 #include "mongo/util/timer.h"
 
 namespace mongo {
@@ -64,6 +63,11 @@ public:
                            const BalancerStreamAction& action,
                            const BalancerStreamActionResponse& result) override;
 
+    /*
+     * Maximum number of chunks to merge in one request
+     */
+    inline static constexpr int MAX_NUMBER_OF_CHUNKS_TO_MERGE = 1000;
+
 private:
     void _init(WithLock lk);
     void _checkInternalUpdatesWithLock(WithLock lk);
@@ -73,12 +77,20 @@ private:
 private:
     Mutex _mutex = MONGO_MAKE_LATCH("AutoMergerPolicyPolicyImpl::_mutex");
 
+    inline static constexpr int MAX_NUMBER_OF_CONCURRENT_MERGE_ACTIONS = 10;
+
     const std::function<void()> _onStateUpdated;
+
     bool _enabled;
 
     bool _firstAction;
     Timer _intervalTimer;
+    Timestamp _maxHistoryTimeCurrentRound{0, 0};
+    Timestamp _maxHistoryTimePreviousRound{0, 0};
+    uint32_t _outstandingActions = 0;
 
     std::map<ShardId, std::vector<NamespaceString>> _collectionsToMergePerShard;
+
+    friend class AutoMergerPolicyTest;
 };
 }  // namespace mongo

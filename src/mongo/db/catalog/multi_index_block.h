@@ -78,6 +78,8 @@ class MultiIndexBlock {
     MultiIndexBlock& operator=(const MultiIndexBlock&) = delete;
 
 public:
+    using RetrySkippedRecordMode = IndexBuildInterceptor::RetrySkippedRecordMode;
+
     MultiIndexBlock() = default;
     ~MultiIndexBlock();
 
@@ -96,6 +98,9 @@ public:
         _buildUUID = indexBuildUUID;
     }
 
+    using OnInitFn = std::function<Status(std::vector<BSONObj>& specs)>;
+    enum class InitMode { SteadyState, InitialSync, Recovery };
+
     /**
      * Prepares the index(es) for building and returns the canonicalized form of the requested index
      * specifications.
@@ -108,23 +113,17 @@ public:
      *
      * Requires holding an exclusive lock on the collection.
      */
-    using OnInitFn = std::function<Status(std::vector<BSONObj>& specs)>;
     StatusWith<std::vector<BSONObj>> init(
         OperationContext* opCtx,
         CollectionWriter& collection,
         const std::vector<BSONObj>& specs,
         OnInitFn onInit,
-        bool forRecovery,
+        InitMode initMode = InitMode::SteadyState,
         const boost::optional<ResumeIndexInfo>& resumeInfo = boost::none);
     StatusWith<std::vector<BSONObj>> init(OperationContext* opCtx,
                                           CollectionWriter& collection,
                                           const BSONObj& spec,
                                           OnInitFn onInit);
-    StatusWith<std::vector<BSONObj>> initForResume(OperationContext* opCtx,
-                                                   const CollectionPtr& collection,
-                                                   const std::vector<BSONObj>& specs,
-                                                   const ResumeIndexInfo& resumeInfo);
-
     /**
      * Not all index initializations need an OnInitFn, in particular index builds that do not need
      * to timestamp catalog writes. This is a no-op.
@@ -210,16 +209,22 @@ public:
 
 
     /**
-     * Retries key generation and insertion for all records skipped during the collection scanning
-     * phase.
+     * By default, retries key generation and insertion for all records skipped during the
+     * collection scanning phase.
      *
      * Index builds ignore key generation errors on secondaries. In steady-state replication, all
      * writes from the primary are eventually applied, so an index build should always succeed when
      * the primary commits. In two-phase index builds, a secondary may become primary in the middle
      * of an index build, so it must ensure that before it finishes, it has indexed all documents in
      * a collection, requiring a call to this function upon completion.
+     *
+     * When featureFlagIndexBuildsGracefulErrorHandling is enagled, the function is also called to
+     * preemptively abort index builds on step-up if the skipped records remain invalid.
      */
-    Status retrySkippedRecords(OperationContext* opCtx, const CollectionPtr& collection);
+    Status retrySkippedRecords(
+        OperationContext* opCtx,
+        const CollectionPtr& collection,
+        RetrySkippedRecordMode mode = RetrySkippedRecordMode::kKeyGenerationAndInsertion);
 
     /**
      * Check any constraits that may have been temporarily violated during the index build for
@@ -332,12 +337,13 @@ private:
                                      const BSONObj& doc,
                                      unsigned long long iteration) const;
 
-    Status _insert(OperationContext* opCtx,
-                   const CollectionPtr& collection,
-                   const BSONObj& wholeDocument,
-                   const RecordId& loc,
-                   const std::function<void()>& saveCursorBeforeWrite,
-                   const std::function<void()>& restoreCursorAfterWrite);
+    Status _insert(
+        OperationContext* opCtx,
+        const CollectionPtr& collection,
+        const BSONObj& wholeDocument,
+        const RecordId& loc,
+        const IndexAccessMethod::OnSuppressedErrorFn& onSuppressedError,
+        const IndexAccessMethod::ShouldRelaxConstraintsFn& shouldRelaxConstraints = nullptr);
 
     /**
      * Performs a collection scan on the given collection and inserts the relevant index keys into

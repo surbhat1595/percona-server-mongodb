@@ -41,6 +41,9 @@
 
 namespace mongo::optimizer {
 
+// Default selectivity of predicates used by HintedCE to force certain plans.
+constexpr SelectivityType kDefaultSelectivity{0.1};
+
 void maybePrintABT(const ABT& abt);
 
 std::string getPropsStrForExplain(const OptPhaseManager& phaseManager);
@@ -101,6 +104,13 @@ std::string getPropsStrForExplain(const OptPhaseManager& phaseManager);
 
 #define ASSERT_INTERVAL_AUTO(expected, interval) \
     ASSERT_STR_EQ_AUTO(expected, ExplainGenerator::explainIntervalExpr(interval))
+
+
+#define ASSERT_RESIDUAL_REQS(expected, residReqs) \
+    ASSERT_EQ(expected, ExplainGenerator::explainResidualRequirements(residReqs))
+
+#define ASSERT_RESIDUAL_REQS_AUTO(expected, residReqs) \
+    ASSERT_STR_EQ_AUTO(expected, ExplainGenerator::explainResidualRequirements(residReqs))
 
 
 #define ASSERT_BSON_PATH(expected, bson, path)                      \

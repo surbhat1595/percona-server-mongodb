@@ -148,7 +148,8 @@ class ReshardingTxnClonerTest : public ShardServerTestFixture {
                 return repl::OpTimeWith<std::vector<ShardType>>(shardTypes);
             }
 
-            std::pair<CollectionType, std::vector<IndexCatalogType>> getCollectionAndGlobalIndexes(
+            std::pair<CollectionType, std::vector<IndexCatalogType>>
+            getCollectionAndShardingIndexCatalogEntries(
                 OperationContext* opCtx,
                 const NamespaceString& nss,
                 const repl::ReadConcernArgs& readConcern) override {
@@ -339,11 +340,6 @@ protected:
             Client::initThread(threadName.c_str());
             auto* client = Client::getCurrent();
             AuthorizationSession::get(*client)->grantInternalAuthorization(client);
-
-            {
-                stdx::lock_guard<Client> lk(*client);
-                client->setSystemOperationKillableByStepdown(lk);
-            }
         };
 
         auto hookList = std::make_unique<rpc::EgressMetadataHookList>();

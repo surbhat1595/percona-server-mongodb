@@ -1505,8 +1505,10 @@ void ExecCommandDatabase::_initiateCommand() {
         (serverGlobalParams.clusterRole == ClusterRole::ConfigServer ||
          serverGlobalParams.clusterRole == ClusterRole::ShardServer);
 
+    const auto invocationNss = _invocation->ns();
+
     validateSessionOptions(
-        _sessionOptions, command->getName(), _invocation->ns(), allowTransactionsOnConfigDatabase);
+        _sessionOptions, command->getName(), invocationNss, allowTransactionsOnConfigDatabase);
 
     BSONElement cmdOptionMaxTimeMSField;
     BSONElement maxTimeMSOpOnlyField;
@@ -1711,11 +1713,12 @@ void ExecCommandDatabase::_initiateCommand() {
         // expect all versioned commands to be sent over 'system.buckets' namespace. But it is
         // possible that a stale mongos may send the request over a view namespace. In this case, we
         // initialize the 'OperationShardingState' with buckets namespace.
-        auto bucketNss = _invocation->ns().makeTimeseriesBucketsNamespace();
-        auto coll =
-            CollectionCatalog::get(opCtx)->lookupCollectionByNamespaceForRead(opCtx, bucketNss);
+        auto bucketNss = invocationNss.makeTimeseriesBucketsNamespace();
+        // Hold reference to the catalog for collection lookup without locks to be safe.
+        auto catalog = CollectionCatalog::get(opCtx);
+        auto coll = catalog->lookupCollectionByNamespace(opCtx, bucketNss);
         auto namespaceForSharding =
-            (coll && coll->getTimeseriesOptions()) ? bucketNss : _invocation->ns();
+            (coll && coll->getTimeseriesOptions()) ? bucketNss : invocationNss;
         boost::optional<ShardVersion> shardVersion;
         if (auto shardVersionElem = request.body[ShardVersion::kShardVersionField]) {
             shardVersion = ShardVersion::parse(shardVersionElem);
@@ -1831,7 +1834,7 @@ Future<void> ExecCommandDatabase::_commandExec() {
                     bool stableLocalVersion = !inCriticalSection && sce->getVersionWanted();
 
                     if (stableLocalVersion &&
-                        ShardVersion::isIgnoredVersion(sce->getVersionReceived())) {
+                        ShardVersion::isPlacementVersionIgnored(sce->getVersionReceived())) {
                         // Shard is recovered, but the router didn't sent a shard version, therefore
                         // we just need to tell the router how much it needs to advance to
                         // (getVersionWanted).

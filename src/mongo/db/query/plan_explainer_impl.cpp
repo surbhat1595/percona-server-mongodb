@@ -454,6 +454,8 @@ void statsToBSON(const PlanStageStats& stats,
                               static_cast<long long>(spec->totalDataSizeBytes));
             bob->appendBool("usedDisk", (spec->spills > 0));
             bob->appendNumber("spills", static_cast<long long>(spec->spills));
+            bob->appendNumber("spilledDataStorageSize",
+                              static_cast<long long>(spec->spilledDataStorageSize));
         }
     } else if (STAGE_SORT_MERGE == stats.stageType) {
         MergeSortStats* spec = static_cast<MergeSortStats*>(stats.specific.get());
@@ -480,6 +482,14 @@ void statsToBSON(const PlanStageStats& stats,
         if (verbosity >= ExplainOptions::Verbosity::kExecStats) {
             bob->appendNumber("docsExamined", static_cast<long long>(spec->fetches));
         }
+    } else if (STAGE_TIMESERIES_MODIFY == stats.stageType) {
+        TimeseriesModifyStats* spec = static_cast<TimeseriesModifyStats*>(stats.specific.get());
+
+        if (verbosity >= ExplainOptions::Verbosity::kExecStats) {
+            bob->appendNumber("bucketsUnpacked", static_cast<long long>(spec->bucketsUnpacked));
+            bob->appendNumber("measurementsDeleted",
+                              static_cast<long long>(spec->measurementsDeleted));
+        }
     } else if (STAGE_UNPACK_TIMESERIES_BUCKET == stats.stageType) {
         UnpackTimeseriesBucketStats* spec =
             static_cast<UnpackTimeseriesBucketStats*>(stats.specific.get());
@@ -494,6 +504,13 @@ void statsToBSON(const PlanStageStats& stats,
             bob->appendNumber("nMatched", static_cast<long long>(spec->nMatched));
             bob->appendNumber("nWouldModify", static_cast<long long>(spec->nModified));
             bob->appendNumber("nWouldUpsert", static_cast<long long>(spec->nUpserted));
+        }
+    } else if (STAGE_SPOOL == stats.stageType) {
+        SpoolStats* spec = static_cast<SpoolStats*>(stats.specific.get());
+
+        if (verbosity >= ExplainOptions::Verbosity::kExecStats) {
+            bob->appendNumber("totalDataSizeSpooled",
+                              static_cast<long long>(spec->totalDataSizeBytes));
         }
     }
 

@@ -1,3 +1,30 @@
+/*-
+ * Public Domain 2014-present MongoDB, Inc.
+ * Public Domain 2008-2014 WiredTiger, Inc.
+ *
+ * This is free and unencumbered software released into the public domain.
+ *
+ * Anyone is free to copy, modify, publish, use, compile, sell, or
+ * distribute this software, either in source code form or as a compiled
+ * binary, for any purpose, commercial or non-commercial, and by any
+ * means.
+ *
+ * In jurisdictions that recognize copyright laws, the author or authors
+ * of this software dedicate any and all copyright interest in the
+ * software to the public domain. We make this dedication for the benefit
+ * of the public at large and to the detriment of our heirs and
+ * successors. We intend this dedication to be an overt act of
+ * relinquishment in perpetuity of all present and future rights to this
+ * software under copyright law.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+ * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
+ */
 #include "wiredtiger.h"
 #include "wiredtiger_ext.h"
 #include <fstream>
@@ -7,6 +34,7 @@
 #include <mutex>
 
 #include "gcp_connection.h"
+#include "gcp_log_system.h"
 #include "wt_internal.h"
 
 struct gcp_file_system;
@@ -18,6 +46,8 @@ struct gcp_file_handle;
 struct gcp_store {
     WT_STORAGE_SOURCE storage_source;
     WT_EXTENSION_API *wt_api;
+    std::shared_ptr<gcp_log_system> log;
+    google::cloud::LogSink::BackendId log_id;
     std::mutex fs_list_mutex;
     std::vector<gcp_file_system *> fs_list;
     uint32_t reference_count;
@@ -42,37 +72,34 @@ struct gcp_file_handle {
 };
 
 static gcp_file_system *get_gcp_file_system(WT_FILE_SYSTEM *);
-static int gcp_customize_file_system(WT_STORAGE_SOURCE *, WT_SESSION *, const char *, const char *,
-  const char *, WT_FILE_SYSTEM **) __attribute__((__unused__));
-static int gcp_add_reference(WT_STORAGE_SOURCE *) __attribute__((__unused__));
-static int gcp_file_system_terminate(WT_FILE_SYSTEM *, WT_SESSION *) __attribute__((__unused__));
-static int gcp_flush(WT_STORAGE_SOURCE *, WT_SESSION *, WT_FILE_SYSTEM *, const char *,
-  const char *, const char *) __attribute__((__unused__));
-static int gcp_flush_finish(WT_STORAGE_SOURCE *, WT_SESSION *, WT_FILE_SYSTEM *, const char *,
-  const char *, const char *) __attribute__((__unused__));
-static int gcp_file_close(WT_FILE_HANDLE *, WT_SESSION *) __attribute__((__unused__));
-static int gcp_file_exists(WT_FILE_SYSTEM *, WT_SESSION *, const char *, bool *)
-  __attribute__((__unused__));
-static int gcp_file_open(WT_FILE_SYSTEM *, WT_SESSION *, const char *, WT_FS_OPEN_FILE_TYPE,
-  uint32_t, WT_FILE_HANDLE **) __attribute__((__unused__));
-static int gcp_remove(WT_FILE_SYSTEM *, WT_SESSION *, const char *, uint32_t)
-  __attribute__((__unused__));
-static int gcp_rename(WT_FILE_SYSTEM *, WT_SESSION *, const char *, const char *, uint32_t)
-  __attribute__((__unused__));
-static int gcp_file_lock(WT_FILE_HANDLE *, WT_SESSION *, bool) __attribute__((__unused__));
-static int gcp_file_size(WT_FILE_HANDLE *, WT_SESSION *, wt_off_t *) __attribute__((__unused__));
-static int gcp_object_size(WT_FILE_SYSTEM *, WT_SESSION *, const char *, wt_off_t *)
-  __attribute__((__unused__));
+static int gcp_customize_file_system(
+  WT_STORAGE_SOURCE *, WT_SESSION *, const char *, const char *, const char *, WT_FILE_SYSTEM **);
+static int gcp_add_reference(WT_STORAGE_SOURCE *);
+static int gcp_file_close(WT_FILE_HANDLE *, WT_SESSION *);
+static int gcp_file_system_terminate(WT_FILE_SYSTEM *, WT_SESSION *);
+static int gcp_flush(
+  WT_STORAGE_SOURCE *, WT_SESSION *, WT_FILE_SYSTEM *, const char *, const char *, const char *);
+static int gcp_flush_finish(
+  WT_STORAGE_SOURCE *, WT_SESSION *, WT_FILE_SYSTEM *, const char *, const char *, const char *);
+static int gcp_file_system_exists(WT_FILE_SYSTEM *, WT_SESSION *, const char *, bool *);
+static int gcp_file_open(
+  WT_FILE_SYSTEM *, WT_SESSION *, const char *, WT_FS_OPEN_FILE_TYPE, uint32_t, WT_FILE_HANDLE **);
+static int gcp_remove(WT_FILE_SYSTEM *, WT_SESSION *, const char *, uint32_t);
+static int gcp_rename(WT_FILE_SYSTEM *, WT_SESSION *, const char *, const char *, uint32_t);
+static int gcp_file_lock(WT_FILE_HANDLE *, WT_SESSION *, bool);
+static int gcp_file_size(WT_FILE_HANDLE *, WT_SESSION *, wt_off_t *);
+static int gcp_object_size(WT_FILE_SYSTEM *, WT_SESSION *, const char *, wt_off_t *);
+static int gcp_object_list_helper(
+  WT_FILE_SYSTEM *, WT_SESSION *, const char *, const char *, char ***, uint32_t *, bool);
 static int gcp_file_read(WT_FILE_HANDLE *, WT_SESSION *, wt_off_t, size_t, void *);
 static int gcp_object_list(
   WT_FILE_SYSTEM *, WT_SESSION *, const char *, const char *, char ***, uint32_t *);
-static int gcp_object_list_add(const gcp_store &, char ***, const std::vector<std::string> &,
-  const uint32_t) __attribute__((__unused__));
-static int gcp_object_list_single(WT_FILE_SYSTEM *, WT_SESSION *, const char *, const char *,
-  char ***, uint32_t *) __attribute__((__unused__));
-static int gcp_object_list_free(WT_FILE_SYSTEM *, WT_SESSION *, char **, uint32_t)
-  __attribute__((__unused__));
-static int gcp_terminate(WT_STORAGE_SOURCE *, WT_SESSION *) __attribute__((__unused__));
+static int make_object_list(
+  gcp_store *, char ***, const std::vector<std::string> &, const uint32_t);
+static int gcp_object_list_single(
+  WT_FILE_SYSTEM *, WT_SESSION *, const char *, const char *, char ***, uint32_t *);
+static int gcp_object_list_free(WT_FILE_SYSTEM *, WT_SESSION *, char **, uint32_t);
+static int gcp_terminate(WT_STORAGE_SOURCE *, WT_SESSION *);
 
 static gcp_file_system *
 get_gcp_file_system(WT_FILE_SYSTEM *file_system)
@@ -80,30 +107,30 @@ get_gcp_file_system(WT_FILE_SYSTEM *file_system)
     return reinterpret_cast<gcp_file_system *>(file_system);
 }
 
+// Return a customized file system to access GCP storage source.
 static int
 gcp_customize_file_system(WT_STORAGE_SOURCE *storage_source, WT_SESSION *session,
   const char *bucket, const char *auth_file, const char *config, WT_FILE_SYSTEM **file_system)
 {
+    gcp_store *gcp = reinterpret_cast<gcp_store *>(storage_source);
+
     // Check if bucket name is given
     if (bucket == nullptr || strlen(bucket) == 0) {
-        std::cerr << "gcp_customize_file_system: bucket not specified." << std::endl;
+        gcp->log->log_error_message("gcp_customize_file_system: bucket not specified.");
         return EINVAL;
     }
 
     // Fail if there is no authentication provided.
     if (auth_file == nullptr || strlen(auth_file) == 0) {
-        std::cerr << "gcp_customize_file_system: auth_file not specified." << std::endl;
+        gcp->log->log_error_message("gcp_customize_file_system: auth_file not specified.");
         return EINVAL;
     }
 
     if (std::filesystem::path(auth_file).extension() != ".json") {
-        std::cerr << "gcp_customize_file_system: improper auth_file: " + std::string(auth_file) +
-            " should be a .json file."
-                  << std::endl;
+        gcp->log->log_error_message("gcp_customize_file_system: improper auth_file: " +
+          std::string(auth_file) + " should be a .json file.");
         return EINVAL;
     }
-
-    gcp_store *gcp = reinterpret_cast<gcp_store *>(storage_source);
     int ret;
 
     // Get any prefix to be used for the object keys.
@@ -113,16 +140,16 @@ gcp_customize_file_system(WT_STORAGE_SOURCE *storage_source, WT_SESSION *session
            gcp->wt_api, session, config, "prefix", &obj_prefix_conf)) == 0)
         obj_prefix = std::string(obj_prefix_conf.str, obj_prefix_conf.len);
     else if (ret != WT_NOTFOUND) {
-        std::cerr << "gcp_customize_file_system: error parsing config for object prefix."
-                  << std::endl;
+        gcp->log->log_error_message(
+          "gcp_customize_file_system: error parsing config for object prefix.");
         return ret;
     }
 
     // Fetch the native WiredTiger file system.
     WT_FILE_SYSTEM *wt_file_system;
     if ((ret = gcp->wt_api->file_system_get(gcp->wt_api, session, &wt_file_system)) != 0) {
-        std::cerr << "gcp_customize_file_system: failed to fetch the native WireTiger file system"
-                  << std::endl;
+        gcp->log->log_error_message(
+          "gcp_customize_file_system: failed to fetch the native WiredTiger file system");
         return ret;
     }
 
@@ -131,7 +158,7 @@ gcp_customize_file_system(WT_STORAGE_SOURCE *storage_source, WT_SESSION *session
     try {
         fs = new gcp_file_system;
     } catch (std::bad_alloc &e) {
-        std::cerr << "gcp_customize_file_system: " << e.what() << std::endl;
+        gcp->log->log_error_message("gcp_customize_file_system: " + std::string(e.what()));
         return ENOMEM;
     }
 
@@ -144,7 +171,7 @@ gcp_customize_file_system(WT_STORAGE_SOURCE *storage_source, WT_SESSION *session
     try {
         fs->gcp_conn = std::make_unique<gcp_connection>(bucket, obj_prefix);
     } catch (std::invalid_argument &e) {
-        std::cerr << "gcp_customize_file_system: " << e.what() << std::endl;
+        gcp->log->log_error_message("gcp_customize_file_system: " + std::string(e.what()));
         return EINVAL;
     }
 
@@ -153,7 +180,7 @@ gcp_customize_file_system(WT_STORAGE_SOURCE *storage_source, WT_SESSION *session
     fs->file_system.fs_directory_list_single = gcp_object_list_single;
     fs->file_system.fs_directory_list_free = gcp_object_list_free;
     fs->file_system.terminate = gcp_file_system_terminate;
-    fs->file_system.fs_exist = gcp_file_exists;
+    fs->file_system.fs_exist = gcp_file_system_exists;
     fs->file_system.fs_open_file = gcp_file_open;
     fs->file_system.fs_remove = gcp_remove;
     fs->file_system.fs_rename = gcp_rename;
@@ -166,38 +193,35 @@ gcp_customize_file_system(WT_STORAGE_SOURCE *storage_source, WT_SESSION *session
     }
 
     *file_system = &fs->file_system;
-
     return 0;
 }
 
+// Add a reference to the storage source so we can reference count to know when to terminate.
 static int
 gcp_add_reference(WT_STORAGE_SOURCE *storage_source)
 {
     gcp_store *gcp = reinterpret_cast<gcp_store *>(storage_source);
 
     if (gcp->reference_count == 0) {
-        std::cerr << "gcp_add_reference: gcp storage source extension hasn't been initialized."
-                  << std::endl;
+        gcp->log->log_error_message(
+          "gcp_add_reference: gcp storage source extension hasn't been initialized.");
         return EINVAL;
     }
 
     if (gcp->reference_count + 1 == 0) {
-        std::cerr << "gcp_add_reference: adding reference will overflow reference count."
-                  << std::endl;
+        gcp->log->log_error_message(
+          "gcp_add_reference: adding reference will overflow reference count.");
         return EINVAL;
     }
 
     ++gcp->reference_count;
-
     return 0;
 }
 
 // File handle close.
 static int
-gcp_file_close(WT_FILE_HANDLE *file_handle, WT_SESSION *session)
+gcp_file_close(WT_FILE_HANDLE *file_handle, [[maybe_unused]] WT_SESSION *session)
 {
-    WT_UNUSED(session);
-
     gcp_file_handle *gcp_fh = reinterpret_cast<gcp_file_handle *>(file_handle);
 
     // If there are other active instances of the file being open, do not close file handle.
@@ -219,12 +243,10 @@ gcp_file_close(WT_FILE_HANDLE *file_handle, WT_SESSION *session)
 }
 
 static int
-gcp_file_system_terminate(WT_FILE_SYSTEM *file_system, WT_SESSION *session)
+gcp_file_system_terminate(WT_FILE_SYSTEM *file_system, [[maybe_unused]] WT_SESSION *session)
 {
     gcp_file_system *fs = reinterpret_cast<gcp_file_system *>(file_system);
     gcp_store *gcp = reinterpret_cast<gcp_file_system *>(fs)->storage_source;
-
-    WT_UNUSED(session);
 
     // Remove the current filesystem from the active filesystems list. The lock will be freed when
     // the scope is exited.
@@ -240,19 +262,20 @@ gcp_file_system_terminate(WT_FILE_SYSTEM *file_system, WT_SESSION *session)
     return 0;
 }
 
+// Flush a file to the GCP storage.
 static int
-gcp_flush([[maybe_unused]] WT_STORAGE_SOURCE *storage_source, WT_SESSION *session,
-  WT_FILE_SYSTEM *file_system, const char *source, const char *object,
-  [[maybe_unused]] const char *config)
+gcp_flush(WT_STORAGE_SOURCE *storage_source, WT_SESSION *session, WT_FILE_SYSTEM *file_system,
+  const char *source, const char *object, [[maybe_unused]] const char *config)
 {
-
+    gcp_store *gcp = reinterpret_cast<gcp_store *>(storage_source);
     gcp_file_system *fs = get_gcp_file_system(file_system);
     WT_FILE_SYSTEM *wt_file_system = fs->wt_file_system;
 
     // std::filesystem::canonical will throw an exception if object does not exist so
     // check if the object exists.
     if (!std::filesystem::exists(source)) {
-        std::cerr << "gcp_flush: Object: " << object << " does not exist." << std::endl;
+        gcp->log->log_error_message(
+          "gcp_flush: Object: " + std::string(object) + " does not exist.");
         return ENOENT;
     }
 
@@ -267,6 +290,7 @@ gcp_flush([[maybe_unused]] WT_STORAGE_SOURCE *storage_source, WT_SESSION *sessio
     return fs->gcp_conn->put_object(object, path);
 }
 
+// Check if a file has been flushed successfully by checking if it exists in the cloud.
 static int
 gcp_flush_finish([[maybe_unused]] WT_STORAGE_SOURCE *storage, [[maybe_unused]] WT_SESSION *session,
   WT_FILE_SYSTEM *file_system, const char *source, const char *object,
@@ -285,35 +309,50 @@ gcp_flush_finish([[maybe_unused]] WT_STORAGE_SOURCE *storage, [[maybe_unused]] W
     return 0;
 }
 
+// Check if the object exists in the GCP storage source.
 static int
-gcp_file_exists(
-  WT_FILE_SYSTEM *file_system, WT_SESSION *session, const char *name, bool *file_exists)
+gcp_file_system_exists(
+  WT_FILE_SYSTEM *file_system, [[maybe_unused]] WT_SESSION *session, const char *name, bool *existp)
 {
-    WT_UNUSED(file_system);
-    WT_UNUSED(session);
-    WT_UNUSED(name);
-    WT_UNUSED(file_exists);
+    gcp_file_system *fs = reinterpret_cast<gcp_file_system *>(file_system);
+    gcp_store *gcp = fs->storage_source;
+    size_t size;
+    int ret = 0;
 
-    return 0;
+    gcp->log->log_debug_message(
+      "gcp_file_system_exists: Checking object: " + std::string(name) + " exists in GCP.");
+    ret = fs->gcp_conn->object_exists(name, *existp, size);
+    if (ret != 0)
+        gcp->log->log_error_message(
+          "gcp_file_system_exists: Error with searching for object: " + std::string(name));
+    else if (!*existp)
+        gcp->log->log_debug_message(
+          "gcp_file_system_exists: Object: " + std::string(name) + " does not exist in GCP.");
+    else
+        gcp->log->log_debug_message(
+          "gcp_file_system_exists: Object: " + std::string(name) + " exists in GCP.");
+
+    return ret;
 }
 
 static int
-gcp_file_open(WT_FILE_SYSTEM *file_system, WT_SESSION *session, const char *name,
+gcp_file_open(WT_FILE_SYSTEM *file_system, [[maybe_unused]] WT_SESSION *session, const char *name,
   WT_FS_OPEN_FILE_TYPE file_type, uint32_t flags, WT_FILE_HANDLE **file_handle_ptr)
 {
-    WT_UNUSED(session);
     gcp_file_system *fs = reinterpret_cast<gcp_file_system *>(file_system);
+    gcp_store *gcp = fs->storage_source;
+
     *file_handle_ptr = nullptr;
 
     // Google cloud only supports opening the file in read only mode.
     if ((flags & WT_FS_OPEN_READONLY) == 0 || (flags & WT_FS_OPEN_CREATE) != 0) {
-        std::cerr << "gcp_file_open: read-only access required." << std::endl;
+        gcp->log->log_error_message("gcp_file_open: read-only access required.");
         return EINVAL;
     }
 
     // Only data files and regular files should be opened.
     if (file_type != WT_FS_OPEN_FILE_TYPE_DATA && file_type != WT_FS_OPEN_FILE_TYPE_REGULAR) {
-        std::cerr << "gcp_file_open: only data file and regular types supported." << std::endl;
+        gcp->log->log_error_message("gcp_file_open: only data file and regular types supported.");
         return EINVAL;
     }
 
@@ -322,18 +361,18 @@ gcp_file_open(WT_FILE_SYSTEM *file_system, WT_SESSION *session, const char *name
     size_t size;
     int ret;
     if (ret = (fs->gcp_conn->object_exists(name, exists, size) != 0)) {
-        std::cerr << "gcp_file_open: object_exists request to google cloud failed." << std::endl;
+        gcp->log->log_error_message("gcp_file_open: object_exists request to google cloud failed.");
         return ret;
     }
     if (!exists) {
-        std::cerr << "gcp_file_open: object named " << name << " does not exist in the bucket."
-                  << std::endl;
+        gcp->log->log_error_message(
+          "gcp_file_open: object named " + std::string(name) + " does not exist in the bucket.");
         return EINVAL;
     }
 
     // Check if there is already an existing file handle open.
     auto fh_iterator = std::find_if(fs->fh_list.begin(), fs->fh_list.end(),
-      [name](gcp_file_handle *fh) { return (fh->name.compare(name) == 0); });
+      [name](gcp_file_handle *fh) { return fh->name.compare(name) == 0; });
 
     if (fh_iterator != fs->fh_list.end()) {
         (*fh_iterator)->reference_count++;
@@ -347,7 +386,7 @@ gcp_file_open(WT_FILE_SYSTEM *file_system, WT_SESSION *session, const char *name
     try {
         gcp_fh = new gcp_file_handle;
     } catch (std::bad_alloc &e) {
-        std::cerr << "gcp_file_open: " << e.what() << std::endl;
+        gcp->log->log_error_message("gcp_file_open: " + std::string(e.what()));
         return ENOMEM;
     }
     gcp_fh->file_system = fs;
@@ -383,28 +422,28 @@ gcp_file_open(WT_FILE_SYSTEM *file_system, WT_SESSION *session, const char *name
     return 0;
 }
 
+// POSIX remove is not supported for cloud objects.
 static int
-gcp_remove(WT_FILE_SYSTEM *file_system, WT_SESSION *session, const char *name, uint32_t flags)
+gcp_remove(WT_FILE_SYSTEM *file_system, [[maybe_unused]] WT_SESSION *session,
+  [[maybe_unused]] const char *name, [[maybe_unused]] uint32_t flags)
 {
-    WT_UNUSED(file_system);
-    WT_UNUSED(session);
-    WT_UNUSED(name);
-    WT_UNUSED(flags);
+    gcp_file_system *fs = reinterpret_cast<gcp_file_system *>(file_system);
+    gcp_store *gcp = fs->storage_source;
 
-    return 0;
+    gcp->log->log_error_message("gcp_remove: file removal is not supported.");
+    return ENOTSUP;
 }
 
+// POSIX rename is not supported for cloud objects.
 static int
-gcp_rename(WT_FILE_SYSTEM *file_system, WT_SESSION *session, const char *from, const char *to,
-  uint32_t flags)
+gcp_rename(WT_FILE_SYSTEM *file_system, [[maybe_unused]] WT_SESSION *session,
+  [[maybe_unused]] const char *from, const char *to, uint32_t flags)
 {
-    WT_UNUSED(file_system);
-    WT_UNUSED(session);
-    WT_UNUSED(from);
-    WT_UNUSED(to);
-    WT_UNUSED(flags);
+    gcp_file_system *fs = reinterpret_cast<gcp_file_system *>(file_system);
+    gcp_store *gcp = fs->storage_source;
 
-    return 0;
+    gcp->log->log_error_message("gcp_rename: file renaming is not supported.");
+    return ENOTSUP;
 }
 
 static int
@@ -416,18 +455,19 @@ gcp_file_lock([[maybe_unused]] WT_FILE_HANDLE *file_handle, [[maybe_unused]] WT_
 }
 
 static int
-gcp_file_size([[maybe_unused]] WT_FILE_HANDLE *file_handle, WT_SESSION *session, wt_off_t *sizep)
+gcp_file_size(WT_FILE_HANDLE *file_handle, [[maybe_unused]] WT_SESSION *session, wt_off_t *sizep)
 {
     gcp_file_handle *gcp_fh = reinterpret_cast<gcp_file_handle *>(file_handle);
     gcp_file_system *fs = gcp_fh->file_system;
+    gcp_store *gcp = fs->storage_source;
     bool exists;
     size_t size;
     int ret;
     *sizep = 0;
 
     // Get file size if the object exists.
-    if ((fs->gcp_conn->object_exists(gcp_fh->name, exists, size))) {
-        std::cerr << "gcp_file_size: object_exists request to google cloud failed." << std::endl;
+    if ((ret = fs->gcp_conn->object_exists(gcp_fh->name, exists, size)) != 0) {
+        gcp->log->log_error_message("gcp_file_size: object_exists request to google cloud failed.");
         return ret;
     }
 
@@ -439,25 +479,71 @@ gcp_file_size([[maybe_unused]] WT_FILE_HANDLE *file_handle, WT_SESSION *session,
 static int
 gcp_object_size(WT_FILE_SYSTEM *file_system, WT_SESSION *session, const char *name, wt_off_t *sizep)
 {
-    WT_UNUSED(file_system);
-    WT_UNUSED(session);
-    WT_UNUSED(name);
-    WT_UNUSED(sizep);
+    bool exists;
+    size_t size;
+    gcp_file_system *fs = reinterpret_cast<gcp_file_system *>(file_system);
+    gcp_store *gcp = fs->storage_source;
+    int ret = fs->gcp_conn->object_exists(name, exists, size);
+    if (ret != 0) {
+        gcp->log->log_error_message(
+          "gcp_object_size: GetObjectMetadata request to google cloud failed.");
+        return ret;
+    }
+    *sizep = size;
 
     return 0;
 }
 
+// Helper function to return a list of object names for the given location.
 static int
-gcp_file_read([[maybe_unused]] WT_FILE_HANDLE *file_handle, WT_SESSION *session, wt_off_t offset,
-  size_t len, void *buf)
+gcp_object_list_helper(WT_FILE_SYSTEM *file_system, WT_SESSION *session, const char *directory,
+  const char *prefix, char ***object_list, uint32_t *count, bool list_single)
+{
+    gcp_file_system *fs = reinterpret_cast<gcp_file_system *>(file_system);
+    gcp_store *gcp = fs->storage_source;
+    std::vector<std::string> objects;
+    std::string complete_prefix;
+
+    *count = 0;
+
+    if (directory != nullptr) {
+        complete_prefix += directory;
+        // Add a terminating '/' if one doesn't exist.
+        if (!complete_prefix.empty() && complete_prefix.back() != '/')
+            complete_prefix += '/';
+    }
+
+    if (prefix != nullptr)
+        complete_prefix += prefix;
+
+    int ret = list_single ? fs->gcp_conn->list_objects(complete_prefix, objects, true) :
+                            fs->gcp_conn->list_objects(complete_prefix, objects, false);
+
+    if (ret != 0) {
+        gcp->log->log_error_message(
+          "gcp_object_list_helper: ListObjects request to google cloud failed.");
+        return ret;
+    }
+    *count = objects.size();
+    gcp->log->log_debug_message(
+      "gcp_object_list_helper: ListObjects request to google cloud succeeded. Received " +
+      std::to_string(*count) + " objects.");
+    return make_object_list(gcp, object_list, objects, *count);
+}
+
+// Return a list of object names for the given location.
+static int
+gcp_file_read(
+  WT_FILE_HANDLE *file_handle, WT_SESSION *session, wt_off_t offset, size_t len, void *buf)
 {
     gcp_file_handle *gcp_fh = reinterpret_cast<gcp_file_handle *>(file_handle);
     gcp_file_system *fs = gcp_fh->file_system;
+    gcp_store *gcp = fs->storage_source;
 
     int ret;
 
     if ((ret = fs->gcp_conn->read_object(gcp_fh->name, offset, len, buf)) != 0)
-        std::cerr << "gcp_file_read: read attempt failed." << std::endl;
+        gcp->log->log_error_message("gcp_file_read: read attempt failed.");
 
     return ret;
 }
@@ -466,50 +552,67 @@ static int
 gcp_object_list(WT_FILE_SYSTEM *file_system, WT_SESSION *session, const char *directory,
   const char *prefix, char ***object_list, uint32_t *count)
 {
-    WT_UNUSED(file_system);
-    WT_UNUSED(session);
-    WT_UNUSED(directory);
-    WT_UNUSED(prefix);
-    WT_UNUSED(object_list);
-    WT_UNUSED(count);
-
-    return 0;
+    return gcp_object_list_helper(
+      file_system, session, directory, prefix, object_list, count, false);
 }
 
+// Allocate and initialize an array of C strings from vector of strings.
+//
+// Requires count <= objects.size().
+// count==0 is valid, and in this case object_list will be set to nullptr.
+// Caller is responsible for memory allocated for object_list.
 static int
-gcp_object_list_add(const gcp_store &gcp_, char ***object_list,
-  const std::vector<std::string> &objects, const uint32_t count)
+make_object_list(gcp_store *gcp, char ***object_list, const std::vector<std::string> &objects,
+  const uint32_t count)
 {
-    WT_UNUSED(gcp_);
-    WT_UNUSED(object_list);
-    WT_UNUSED(objects);
-    WT_UNUSED(count);
+    if (count == 0) {
+        *object_list = nullptr;
+        return 0;
+    }
 
+    char **entries;
+    if ((entries = reinterpret_cast<char **>(malloc(sizeof(char *) * count))) == nullptr) {
+        gcp->log->log_error_message("make_object_list: unable to allocate memory for object list.");
+        return ENOMEM;
+    }
+
+    uint32_t copied;
+    for (copied = 0; copied < count; copied++) {
+        if ((entries[copied] = strdup(objects[copied].c_str())) == nullptr)
+            break;
+    }
+
+    if (copied < count) {
+        for (uint32_t i = 0; i < copied; i++)
+            free(entries[i]);
+        free(entries);
+        gcp->log->log_error_message("make_object_list: unable to allocate memory for object list.");
+        return ENOMEM;
+    }
+
+    *object_list = entries;
     return 0;
 }
 
+// Return a single object name for the given location.
 static int
 gcp_object_list_single(WT_FILE_SYSTEM *file_system, WT_SESSION *session, const char *directory,
   const char *prefix, char ***object_list, uint32_t *count)
 {
-    WT_UNUSED(file_system);
-    WT_UNUSED(session);
-    WT_UNUSED(directory);
-    WT_UNUSED(prefix);
-    WT_UNUSED(object_list);
-    WT_UNUSED(count);
-
-    return 0;
+    return gcp_object_list_helper(
+      file_system, session, directory, prefix, object_list, count, true);
 }
 
+// Free memory allocated by gcp_object_list.
 static int
-gcp_object_list_free(
-  WT_FILE_SYSTEM *file_system, WT_SESSION *session, char **object_list, uint32_t count)
+gcp_object_list_free([[maybe_unused]] WT_FILE_SYSTEM *file_system,
+  [[maybe_unused]] WT_SESSION *session, char **object_list, uint32_t count)
 {
-    WT_UNUSED(file_system);
-    WT_UNUSED(session);
-    WT_UNUSED(object_list);
-    WT_UNUSED(count);
+    if (object_list != nullptr) {
+        while (count > 0)
+            free(object_list[--count]);
+        free(object_list);
+    }
 
     return 0;
 }
@@ -522,6 +625,9 @@ gcp_terminate(WT_STORAGE_SOURCE *storage_source, WT_SESSION *session)
     if (--gcp->reference_count != 0)
         return 0;
 
+    // Remove logging system from the google cloud system.
+    google::cloud::LogSink::Instance().RemoveBackend(gcp->log_id);
+
     /*
      * Terminate any active filesystems. There are no references to the storage source, so it is
      * safe to walk the active filesystem list without a lock. The removal from the list happens
@@ -532,7 +638,7 @@ gcp_terminate(WT_STORAGE_SOURCE *storage_source, WT_SESSION *session)
         gcp_file_system_terminate(&fs->file_system, session);
     }
 
-    std::cout << "gcp_terminate: terminated GCP storage source." << std::endl;
+    gcp->log->log_debug_message("gcp_terminate: terminated GCP storage source.");
     delete (gcp);
 
     return 0;
@@ -548,14 +654,22 @@ wiredtiger_extension_init(WT_CONNECTION *connection, WT_CONFIG_ARG *config)
     gcp->wt_api = connection->get_extension_api(connection);
     int ret = gcp->wt_api->config_get(gcp->wt_api, nullptr, config, "verbose.tiered", &v);
 
+    // Create a logger for the storage source. Verbose level defaults to WT_VERBOSE_ERROR (-3) if it
+    // is outside the valid range or not found.
+    gcp->verbose = WT_VERBOSE_ERROR;
+    gcp->log = std::make_shared<gcp_log_system>(gcp->wt_api, gcp->verbose);
     if (ret == 0 && v.val >= WT_VERBOSE_ERROR && v.val <= WT_VERBOSE_DEBUG_5) {
         gcp->verbose = (WT_VERBOSE_LEVEL)v.val;
+        gcp->log->set_wt_verbosity_level(gcp->verbose);
     } else if (ret != WT_NOTFOUND) {
-        std::cerr << "wiredtiger_extension_init: error parsing config for verbosity level." << v.val
-                  << std::endl;
-        delete (gcp);
-        return (ret != 0 ? ret : EINVAL);
+        gcp->log->log_error_message(
+          "wiredtiger_extension_init: error parsing config for verbosity level." + v.val);
+        delete gcp;
+        return ret != 0 ? ret : EINVAL;
     }
+
+    // Initialize the GCP logging.
+    gcp->log_id = google::cloud::LogSink::Instance().AddBackend(gcp->log);
 
     // Allocate a gcp storage structure, with a WT_STORAGE structure as the first field.
     // This allows us to treat references to either type of structure as a reference to the other
@@ -572,8 +686,8 @@ wiredtiger_extension_init(WT_CONNECTION *connection, WT_CONFIG_ARG *config)
     // Load the storage.
     if ((ret = connection->add_storage_source(
            connection, "gcp_store", &gcp->storage_source, nullptr)) != 0) {
-        std::cerr << "wiredtiger_extension_init: could not load GCP storage source, shutting down."
-                  << std::endl;
+        gcp->log->log_error_message(
+          "wiredtiger_extension_init: could not load GCP storage source, shutting down.");
         delete (gcp);
     }
 

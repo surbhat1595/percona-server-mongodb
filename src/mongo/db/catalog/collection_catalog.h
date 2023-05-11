@@ -247,7 +247,7 @@ public:
     /**
      * Returns a shared_ptr to a drop pending index if it's found and not expired.
      */
-    std::shared_ptr<IndexCatalogEntry> findDropPendingIndex(const std::string& ident) const;
+    std::shared_ptr<IndexCatalogEntry> findDropPendingIndex(StringData ident) const;
 
     /**
      * Handles committing a collection to the catalog within a WriteUnitOfWork.
@@ -367,26 +367,56 @@ public:
     void notifyIdentDropped(const std::string& ident);
 
     /**
-     * This function gets the Collection pointer that corresponds to the UUID.
+     * Returns a Collection pointer that corresponds to the provided
+     * NamespaceString/UUID/NamespaceOrUUID.
      *
-     * The required locks must be obtained prior to calling this function, or else the found
-     * Collection pointer might no longer be valid when the call returns.
+     * For the returned collection instance to remain valid remains valid, one of two preconditions
+     * needs to be met:
+     * 1. A collection lock of at least MODE_IS is being held.
+     * 2. A reference to this catalog instance is held or stashed AND the storage snapshot remains
+     *    open.
      *
-     * 'lookupCollectionByUUIDForMetadataWrite' requires a MODE_X collection lock, returns a copy to
-     * the caller because catalog updates are copy-on-write.
+     * Releasing the collection lock, catalog instance or storage snapshot will invalidate the
+     * returned collection instance.
      *
-     * 'lookupCollectionByUUID' requires a MODE_IS collection lock.
+     * A read or write AutoGetCollection style RAII object meets the requirements and ensures
+     * validity for collection instances during its lifetime.
      *
-     * 'lookupCollectionByUUIDForRead' does not require locks and should only be used in the context
-     * of a lock-free read wherein we also have a consistent storage snapshot.
+     * It is NOT safe to cache this pointer or any pointer obtained from this instance across
+     * storage snapshots such as query yield.
+     *
+     * Returns nullptr if no collection is known.
+     */
+    const Collection* lookupCollectionByUUID(OperationContext* opCtx, UUID uuid) const;
+    const Collection* lookupCollectionByNamespace(OperationContext* opCtx,
+                                                  const NamespaceString& nss) const;
+    const Collection* lookupCollectionByNamespaceOrUUID(
+        OperationContext* opCtx, const NamespaceStringOrUUID& nssOrUUID) const;
+
+    /**
+     * Returns a non-const Collection pointer that corresponds to the provided NamespaceString/UUID
+     * for a DDL operation.
+     *
+     * A MODE_X collection lock is required to call this function, unless the namespace/UUID
+     * corresponds to an uncommitted collection creation in which case a MODE_IX lock is sufficient.
+     *
+     * A WriteUnitOfWork must be active and the instance returned will be created using
+     * copy-on-write and will be different than prior calls to lookupCollection. However, subsequent
+     * calls to lookupCollection will return the same instance as this function as long as the
+     * WriteUnitOfWork remains active.
+     *
+     * When the WriteUnitOfWork commits future versions of the CollectionCatalog will return this
+     * instance. If the WriteUnitOfWork rolls back the instance will be discarded.
+     *
+     * It is safe to write to the returned instance in onCommit handlers but not in onRollback
+     * handlers.
      *
      * Returns nullptr if the 'uuid' is not known.
      */
     Collection* lookupCollectionByUUIDForMetadataWrite(OperationContext* opCtx,
                                                        const UUID& uuid) const;
-    const Collection* lookupCollectionByUUID(OperationContext* opCtx, UUID uuid) const;
-    std::shared_ptr<const Collection> lookupCollectionByUUIDForRead(OperationContext* opCtx,
-                                                                    const UUID& uuid) const;
+    Collection* lookupCollectionByNamespaceForMetadataWrite(OperationContext* opCtx,
+                                                            const NamespaceString& nss) const;
 
     /**
      * Returns true if the collection has been registered in the CollectionCatalog but not yet made
@@ -394,39 +424,16 @@ public:
      */
     bool isCollectionAwaitingVisibility(UUID uuid) const;
 
-    /**
-     * These functions fetch a Collection pointer that corresponds to the NamespaceString.
-     *
-     * The required locks must be obtained prior to calling this function, or else the found
-     * Collection pointer may no longer be valid when the call returns.
-     *
-     * 'lookupCollectionByNamespaceForMetadataWrite' requires a MODE_X collection lock, returns a
-     * copy to the caller because catalog updates are copy-on-write.
-     *
-     * 'lookupCollectionByNamespace' requires a MODE_IS collection lock.
-     *
-     * 'lookupCollectionByNamespaceForRead' does not require locks and should only be used in the
-     * context of a lock-free read wherein we also have a consistent storage snapshot.
-     *
-     * Returns nullptr if the namespace is unknown.
-     */
-    Collection* lookupCollectionByNamespaceForMetadataWrite(OperationContext* opCtx,
-                                                            const NamespaceString& nss) const;
-    const Collection* lookupCollectionByNamespace(OperationContext* opCtx,
-                                                  const NamespaceString& nss) const;
-    std::shared_ptr<const Collection> lookupCollectionByNamespaceForRead(
-        OperationContext* opCtx, const NamespaceString& nss) const;
-
-    /**
-     * Fetches a collection pointer that corresponds to the NamespaceString or UUID.
-     *
-     * Requires a MODE_IS collection lock to be obtained prior to calling this function, or else the
-     * found Collection pointer might no longer be valid when the call returns.
-     *
-     * Returns nullptr is the namespace or uuid is unknown.
-     */
-    const Collection* lookupCollectionByNamespaceOrUUID(
-        OperationContext* opCtx, const NamespaceStringOrUUID& nssOrUUID) const;
+    // TODO SERVER-74468: Remove this function
+    std::shared_ptr<const Collection> lookupCollectionByNamespaceForRead_DONT_USE(
+        OperationContext* opCtx, const NamespaceString& nss) const {
+        return _getCollectionByNamespace(opCtx, nss);
+    }
+    // TODO SERVER-74468: Remove this function
+    std::shared_ptr<const Collection> lookupCollectionByUUIDForRead_DONT_USE(
+        OperationContext* opCtx, const UUID& uuid) const {
+        return _getCollectionByUUID(opCtx, uuid);
+    }
 
     /**
      * This function gets the NamespaceString from the collection catalog entry that
@@ -686,6 +693,15 @@ private:
     class PublishCatalogUpdates;
 
     /**
+     * Gets shared_ptr to Collections by UUID/Namespace.
+     */
+    std::shared_ptr<const Collection> _getCollectionByNamespace(OperationContext* opCtx,
+                                                                const NamespaceString& nss) const;
+
+    std::shared_ptr<const Collection> _getCollectionByUUID(OperationContext* opCtx,
+                                                           const UUID& uuid) const;
+
+    /**
      * Register the collection with `uuid`.
      *
      * If 'twoPhase' is true, this call must be followed by 'onCreateCollection' which continues the
@@ -803,7 +819,7 @@ private:
 
     // Inserts a catalogId for namespace and UUID at given Timestamp, if not boost::none. Used after
     // scanning the durable catalog for a correct mapping at the given timestamp.
-    void _insertCatalogIdForNSSAndUUIDAfterScan(boost::optional<NamespaceString> nss,
+    void _insertCatalogIdForNSSAndUUIDAfterScan(boost::optional<const NamespaceString&> nss,
                                                 boost::optional<UUID> uuid,
                                                 boost::optional<RecordId> catalogId,
                                                 Timestamp ts);
@@ -843,10 +859,8 @@ private:
                                       boost::optional<Timestamp> readTimestamp) const;
 
     // Helpers to perform openCollection at latest or at point-in-time on Namespace/UUID.
-    const Collection* _openCollectionAtLatestByNamespace(OperationContext* opCtx,
-                                                         const NamespaceString& nss) const;
-    const Collection* _openCollectionAtLatestByUUID(OperationContext* opCtx,
-                                                    const UUID& uuid) const;
+    const Collection* _openCollectionAtLatestByNamespaceOrUUID(
+        OperationContext* opCtx, const NamespaceStringOrUUID& nssOrUUID) const;
     const Collection* _openCollectionAtPointInTimeByNamespaceOrUUID(
         OperationContext* opCtx,
         const NamespaceStringOrUUID& nssOrUUID,

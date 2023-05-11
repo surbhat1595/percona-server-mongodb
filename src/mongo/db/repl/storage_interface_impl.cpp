@@ -51,7 +51,6 @@
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/db_raii.h"
@@ -225,6 +224,12 @@ StorageInterfaceImpl::createCollectionForBulkLoading(
         getGlobalServiceContext()->makeClient(str::stream() << nss.ns() << " loader"));
     auto opCtx = cc().makeOperationContext();
     opCtx->setEnforceConstraints(false);
+
+    // TODO(SERVER-74656): Please revisit if this thread could be made killable.
+    {
+        stdx::lock_guard<Client> lk(cc());
+        cc().setSystemOperationUnKillableByStepdown(lk);
+    }
 
     // DocumentValidationSettings::kDisableInternalValidation is currently inert.
     // But, it's logically ok to disable internal validation as this function gets called
@@ -1408,11 +1413,11 @@ bool StorageInterfaceImpl::supportsRecoveryTimestamp(ServiceContext* serviceCtx)
 
 void StorageInterfaceImpl::initializeStorageControlsForReplication(
     ServiceContext* serviceCtx) const {
-    // The storage engine may support the use of OplogStones to more finely control
+    // The storage engine may support the use of OplogTruncateMarkers to more finely control
     // oplog history deletion, in which case we need to start the thread to
-    // periodically execute deletion via oplog stones. OplogStones are a replacement
-    // for capped collection deletion of the oplog collection history.
-    if (serviceCtx->getStorageEngine()->supportsOplogStones()) {
+    // periodically execute deletion via oplog truncate markers. OplogTruncateMarkers are a
+    // replacement for capped collection deletion of the oplog collection history.
+    if (serviceCtx->getStorageEngine()->supportsOplogTruncateMarkers()) {
         BackgroundJob* backgroundThread = new OplogCapMaintainerThread();
         backgroundThread->go();
     }
@@ -1427,7 +1432,8 @@ void StorageInterfaceImpl::waitForAllEarlierOplogWritesToBeVisible(OperationCont
                                                                    bool primaryOnly) {
     // Waiting for oplog writes to be visible in the oplog does not use any storage engine resources
     // and must not wait for ticket acquisition to avoid deadlocks with updating oplog visibility.
-    SetAdmissionPriorityForLock setTicketAquisition(opCtx, AdmissionContext::Priority::kImmediate);
+    ScopedAdmissionPriorityForLock setTicketAquisition(opCtx->lockState(),
+                                                       AdmissionContext::Priority::kImmediate);
 
     AutoGetOplog oplogRead(opCtx, OplogAccessMode::kRead);
     if (primaryOnly &&
@@ -1443,7 +1449,8 @@ void StorageInterfaceImpl::oplogDiskLocRegister(OperationContext* opCtx,
                                                 bool orderedCommit) {
     // Setting the oplog visibility does not use any storage engine resources and must skip ticket
     // acquisition to avoid deadlocks with updating oplog visibility.
-    SetAdmissionPriorityForLock setTicketAquisition(opCtx, AdmissionContext::Priority::kImmediate);
+    ScopedAdmissionPriorityForLock setTicketAquisition(opCtx->lockState(),
+                                                       AdmissionContext::Priority::kImmediate);
 
     AutoGetOplog oplogRead(opCtx, OplogAccessMode::kRead);
     fassert(28557,

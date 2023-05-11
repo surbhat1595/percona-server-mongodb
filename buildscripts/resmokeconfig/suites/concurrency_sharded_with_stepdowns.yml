@@ -169,6 +169,8 @@ executor:
   archive:
     hooks:
       - CheckReplDBHash
+      # TODO (SERVER-74721): Enable when this will work with kill primary and stepdown suites.
+      # - CheckMetadataConsistencyInBackground
       - ValidateCollections
     tests: true
   config:
@@ -177,7 +179,6 @@ executor:
         TestData:
           runningWithConfigStepdowns: true
           runningWithShardStepdowns: true
-          runningWithAutoSplit: false
           runningWithBalancer: false
           useActionPermittedFile: true
   hooks:
@@ -186,6 +187,8 @@ executor:
     shard_stepdown: true
     use_action_permitted_file: true
   - class: CheckReplDBHash
+  # TODO (SERVER-74721): Enable when this will work with kill primary and stepdown suites.
+  # - class: CheckMetadataConsistencyInBackground
   - class: CheckOrphansDeleted
   - class: CheckRoutingTableConsistency
   - class: CheckShardFilteringMetadata
@@ -194,7 +197,6 @@ executor:
   fixture:
     class: ShardedClusterFixture
     enable_balancer: false
-    enable_autosplit: false
     mongos_options:
       set_parameters:
         enableTestCommands: 1

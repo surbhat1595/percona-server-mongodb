@@ -171,28 +171,6 @@ public:
     };
 
     /**
-     * RAII lock to protect checkpointing. Operations performing a checkpoint take this lock in
-     * exclusive mode. Operations which need to conflict with checkpointing but do not need to
-     * conflict with each other may take this lock in shared mode.
-     */
-    class CheckpointLock {
-    public:
-        enum class Mode {
-            kShared,
-            kExclusive,
-        };
-
-        CheckpointLock(const CheckpointLock&) = delete;
-        CheckpointLock(CheckpointLock&&) = delete;
-        CheckpointLock& operator=(const CheckpointLock&) = delete;
-
-        virtual ~CheckpointLock() = default;
-
-    protected:
-        CheckpointLock() = default;
-    };
-
-    /**
      * The destructor should only be called if we are tearing down but not exiting the process.
      */
     virtual ~StorageEngine() {}
@@ -254,11 +232,6 @@ public:
                              boost::optional<Timestamp> stableTs,
                              LastShutdownState lastShutdownState) = 0;
     virtual void closeCatalog(OperationContext* opCtx) = 0;
-
-    /**
-     * Closes all file handles associated with a database.
-     */
-    virtual Status closeDatabase(OperationContext* opCtx, const DatabaseName& dbName) = 0;
 
     /**
      * Deletes all data and metadata for a database.
@@ -444,11 +417,11 @@ public:
     virtual bool supportsReadConcernMajority() const = 0;
 
     /**
-     * Returns true if the storage engine uses oplog stones to more finely control
+     * Returns true if the storage engine uses oplog truncate markers to more finely control
      * deletion of oplog history, instead of the standard capped collection controls on
      * the oplog collection size.
      */
-    virtual bool supportsOplogStones() const = 0;
+    virtual bool supportsOplogTruncateMarkers() const = 0;
 
     virtual bool supportsResumableIndexBuilds() const = 0;
 
@@ -491,7 +464,7 @@ public:
      * Returns nullptr if the ident is not known to the reaper, is already being dropped, or is
      * already dropped.
      */
-    virtual std::shared_ptr<Ident> markIdentInUse(const std::string& ident) = 0;
+    virtual std::shared_ptr<Ident> markIdentInUse(StringData ident) = 0;
 
     /**
      * Starts the timestamp monitor. This periodically drops idents queued by addDropPendingIdent,
@@ -505,12 +478,6 @@ public:
      * Acquires a resource mutex before taking the checkpoint.
      */
     virtual void checkpoint(OperationContext* opCtx) = 0;
-
-    /**
-     * Returns a checkpoint lock in the requested mode.
-     */
-    virtual std::unique_ptr<CheckpointLock> getCheckpointLock(OperationContext* opCtx,
-                                                              CheckpointLock::Mode mode) = 0;
 
     /**
      * Recovers the storage engine state to the last stable timestamp. "Stable" in this case
@@ -681,12 +648,6 @@ public:
     virtual const KVEngine* getEngine() const = 0;
     virtual DurableCatalog* getCatalog() = 0;
     virtual const DurableCatalog* getCatalog() const = 0;
-
-    virtual void addIndividuallyCheckpointedIndex(const std::string& ident) = 0;
-
-    virtual void clearIndividuallyCheckpointedIndexes() = 0;
-
-    virtual bool isInIndividuallyCheckpointedIndexes(const std::string& ident) const = 0;
 
     /**
      * A service that would like to pin the oldest timestamp registers its request here. If the

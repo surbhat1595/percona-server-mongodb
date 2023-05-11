@@ -146,10 +146,6 @@ BSONObj commitOrAbortTransaction(OperationContext* opCtx,
     // that have been run on this opCtx would have set the timeout in the locker on the opCtx, but
     // commit should not have a lock timeout.
     auto newClient = getGlobalServiceContext()->makeClient("ShardingCatalogManager");
-    {
-        stdx::lock_guard<Client> lk(*newClient);
-        newClient->setSystemOperationKillableByStepdown(lk);
-    }
     AlternativeClientRegion acr(newClient);
     auto newOpCtx = cc().makeOperationContext();
     newOpCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
@@ -217,7 +213,7 @@ Status createIndexesForConfigChunks(OperationContext* opCtx) {
         BSON(ChunkType::collectionUUID() << 1 << ChunkType::min() << 1),
         unique);
     if (!result.isOK()) {
-        return result.withContext("couldn't create uuid_1_min_1 index on config db");
+        return result.withContext("couldn't create uuid_1_min_1 index on config.chunks");
     }
 
     result = createIndexOnConfigCollection(
@@ -226,7 +222,7 @@ Status createIndexesForConfigChunks(OperationContext* opCtx) {
         BSON(ChunkType::collectionUUID() << 1 << ChunkType::shard() << 1 << ChunkType::min() << 1),
         unique);
     if (!result.isOK()) {
-        return result.withContext("couldn't create uuid_1_shard_1_min_1 index on config db");
+        return result.withContext("couldn't create uuid_1_shard_1_min_1 index on config.chunks");
     }
 
     result = createIndexOnConfigCollection(
@@ -235,7 +231,18 @@ Status createIndexesForConfigChunks(OperationContext* opCtx) {
         BSON(ChunkType::collectionUUID() << 1 << ChunkType::lastmod() << 1),
         unique);
     if (!result.isOK()) {
-        return result.withContext("couldn't create uuid_1_lastmod_1 index on config db");
+        return result.withContext("couldn't create uuid_1_lastmod_1 index on config.chunks");
+    }
+
+    result = createIndexOnConfigCollection(opCtx,
+                                           ChunkType::ConfigNS,
+                                           BSON(ChunkType::collectionUUID()
+                                                << 1 << ChunkType::shard() << 1
+                                                << ChunkType::onCurrentShardSince() << 1),
+                                           false /* unique */);
+    if (!result.isOK()) {
+        return result.withContext(
+            "couldn't create uuid_1_shard_1_onCurrentShardSince_1 index on config.chunks");
     }
 
     return Status::OK();
@@ -657,7 +664,7 @@ Status ShardingCatalogManager::_initConfigIndexes(OperationContext* opCtx) {
 
     if (feature_flags::gGlobalIndexesShardingCatalog.isEnabled(
             serverGlobalParams.featureCompatibility)) {
-        result = sharding_util::createGlobalIndexesIndexes(opCtx);
+        result = sharding_util::createShardingIndexCatalogIndexes(opCtx);
         if (!result.isOK()) {
             return result;
         }
@@ -971,10 +978,6 @@ void ShardingCatalogManager::withTransaction(
 
     AlternativeSessionRegion asr(opCtx);
     auto* const client = asr.opCtx()->getClient();
-    {
-        stdx::lock_guard<Client> lk(*client);
-        client->setSystemOperationKillableByStepdown(lk);
-    }
     asr.opCtx()->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
     AuthorizationSession::get(client)->grantInternalAuthorization(client);
     TxnNumber txnNumber = 0;

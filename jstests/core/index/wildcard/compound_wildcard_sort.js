@@ -5,7 +5,9 @@
  *   # We may choose a different plan if other indexes are created, which would break the test.
  *   assumes_no_implicit_index_creation,
  *   assumes_read_concern_local,
+ *   does_not_support_stepdowns,
  *   featureFlagCompoundWildcardIndexes,
+ *   requires_fcv_70,
  * ]
  */
 (function() {
@@ -195,11 +197,8 @@ function testIndexesForWildcardField(wildcardField, subFields) {
                 const wildFieldPred = {[subFields[0]]: {$gt: ""}, [subFields[1]]: {$lte: 43}};
                 const pred = makeIndexCompatPred(keyPattern, wildFieldPred);
 
-                // A sort on both fields results in a blocking sort.
-                // However, in the case where 'kp' == {pre: +-1}, we can use a non-blocking sort as
-                // the 'sort' generated above wouldn't include the wildcard fields in this case.
-                const isSortOnlyOnPre = Object.keys(sort).length == 1 && sort["pre"];
-                runSortTest({pred, sort, proj, blockingSort: !isSortOnlyOnPre});
+                // A sort on both fields always results in a blocking sort.
+                runSortTest({pred, sort, proj, blockingSort: true});
             }
         }
 

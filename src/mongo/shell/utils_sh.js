@@ -61,6 +61,36 @@ sh._writeBalancerStateDeprecated = function(onOrNot) {
                                           {upsert: true, writeConcern: {w: 'majority'}}));
 };
 
+/**
+ * Asserts the specified command is executed successfully. However, if a retryable error occurs, the
+ * command is retried.
+ */
+sh._assertRetryableCommandWorked = function(cmd, msg) {
+    var res = undefined;
+    assert.soon(function() {
+        try {
+            res = cmd();
+            return true;
+        } catch (err) {
+            if (err instanceof WriteError && ErrorCodes.isRetriableError(err.code)) {
+                return false;
+            }
+            if (err instanceof WriteResult) {
+                if (err.hasWriteError() && ErrorCodes.isRetriableError(err.getWriteError().code)) {
+                    return false;
+                }
+                if (err.hasWriteConcernError() &&
+                    ErrorCodes.isRetriableError(err.getWriteConcernError().code)) {
+                    return false;
+                }
+            }
+            throw err;
+        }
+    }, msg);
+
+    return res;
+};
+
 sh.help = function() {
     print("\tsh.addShard( host )                       server:port OR setname/server:port");
     print("\tsh.addShardToZone(shard,zone)             adds the shard to the zone");
@@ -88,9 +118,6 @@ sh.help = function() {
     print("\tsh.status()                               prints a general overview of the cluster");
     print(
         "\tsh.stopBalancer()                         stops the balancer so chunks are not balanced automatically");
-    print("\tsh.disableAutoSplit()                   disable autoSplit on one collection");
-    print("\tsh.enableAutoSplit()                    re-enable autoSplit on one collection");
-    print("\tsh.getShouldAutoSplit()                 returns whether autosplit is enabled");
     print("\tsh.disableAutoMerge()                   disable autoMerge on one collection");
     print("\tsh.enableAutoMerge()                    re-enable autoMerge on one collection");
     print("\tsh.shouldAutoMerge()                    returns whether autoMerge is enabled");
@@ -173,7 +200,7 @@ sh.getBalancerState = function(configDB, balancerStatus) {
         balancerStatus = assert.commandWorked(configDB.adminCommand({balancerStatus: 1}));
     }
 
-    return balancerStatus.mode !== "off" && balancerStatus.mode !== "autoSplitOnly";
+    return balancerStatus.mode !== "off";
 };
 
 sh.isBalancerRunning = function(configDB) {
@@ -196,34 +223,6 @@ sh.startBalancer = function(timeoutMs, interval) {
 
     var result = globalThis.db.adminCommand({balancerStart: 1, maxTimeMS: timeoutMs});
     return assert.commandWorked(result);
-};
-
-sh.enableAutoSplit = function(configDB) {
-    if (configDB === undefined)
-        configDB = sh._getConfigDB();
-    return assert.commandWorked(
-        configDB.settings.update({_id: 'autosplit'},
-                                 {$set: {enabled: true}},
-                                 {upsert: true, writeConcern: {w: 'majority', wtimeout: 30000}}));
-};
-
-sh.disableAutoSplit = function(configDB) {
-    if (configDB === undefined)
-        configDB = sh._getConfigDB();
-    return assert.commandWorked(
-        configDB.settings.update({_id: 'autosplit'},
-                                 {$set: {enabled: false}},
-                                 {upsert: true, writeConcern: {w: 'majority', wtimeout: 30000}}));
-};
-
-sh.getShouldAutoSplit = function(configDB) {
-    if (configDB === undefined)
-        configDB = sh._getConfigDB();
-    var autosplit = configDB.settings.findOne({_id: 'autosplit'});
-    if (autosplit == null) {
-        return true;
-    }
-    return autosplit.enabled;
 };
 
 sh.enableAutoMerge = function(configDB) {
@@ -325,10 +324,12 @@ sh.disableBalancing = function(coll) {
         sh._checkMongos();
     }
 
-    return assert.commandWorked(dbase.getSiblingDB("config").collections.update(
-        {_id: coll + ""},
-        {$set: {"noBalance": true}},
-        {writeConcern: {w: 'majority', wtimeout: 60000}}));
+    return sh._assertRetryableCommandWorked(() => {
+        dbase.getSiblingDB("config").collections.update(
+            {_id: coll + ""},
+            {$set: {"noBalance": true}},
+            {writeConcern: {w: 'majority', wtimeout: 60000}});
+    }, 'Timed out waiting for disabling balancer');
 };
 
 sh.enableBalancing = function(coll) {
@@ -342,10 +343,12 @@ sh.enableBalancing = function(coll) {
         sh._checkMongos();
     }
 
-    return assert.commandWorked(dbase.getSiblingDB("config").collections.update(
-        {_id: coll + ""},
-        {$set: {"noBalance": false}},
-        {writeConcern: {w: 'majority', wtimeout: 60000}}));
+    return sh._assertRetryableCommandWorked(() => {
+        dbase.getSiblingDB("config").collections.update(
+            {_id: coll + ""},
+            {$set: {"noBalance": false}},
+            {writeConcern: {w: 'majority', wtimeout: 60000}});
+    }, 'Timed out waiting for enabling balancer');
 };
 
 sh.awaitCollectionBalance = function(coll, timeout, interval) {
@@ -786,11 +789,6 @@ function printShardingStatus(configDB, verbose) {
                 });
         }
     }
-
-    output(1, "autosplit:");
-
-    // Is autosplit currently enabled
-    output(2, "Currently enabled: " + (sh.getShouldAutoSplit(configDB) ? "yes" : "no"));
 
     output(1, "automerge:");
 

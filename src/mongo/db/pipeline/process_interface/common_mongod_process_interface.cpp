@@ -75,6 +75,7 @@
 #include "mongo/logv2/log.h"
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/query/document_source_merge_cursors.h"
+#include "mongo/s/query_analysis_sample_counters.h"
 #include "mongo/s/query_analysis_sampler_util.h"
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/namespace_string_util.h"
@@ -282,8 +283,9 @@ std::deque<BSONObj> CommonMongodProcessInterface::listCatalog(OperationContext* 
         }
 
         for (const auto& svns : systemViewsNamespaces) {
-            auto collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespaceForRead(
-                opCtx, *svns.nss());
+            // Hold reference to the catalog for collection lookup without locks to be safe.
+            auto catalog = CollectionCatalog::get(opCtx);
+            auto collection = catalog->lookupCollectionByNamespace(opCtx, *svns.nss());
             if (!collection) {
                 continue;
             }
@@ -698,7 +700,7 @@ void CommonMongodProcessInterface::_reportCurrentOpsForIdleSessions(
 void CommonMongodProcessInterface::_reportCurrentOpsForQueryAnalysis(
     OperationContext* opCtx, std::vector<BSONObj>* ops) const {
     if (analyze_shard_key::supportsPersistingSampledQueries()) {
-        analyze_shard_key::QueryAnalysisWriter::get(opCtx)->reportForCurrentOp(ops);
+        analyze_shard_key::QueryAnalysisSampleCounters::get(opCtx).reportForCurrentOp(ops);
     }
 }
 
@@ -736,15 +738,15 @@ std::pair<std::set<FieldPath>, boost::optional<ChunkVersion>>
 CommonMongodProcessInterface::ensureFieldsUniqueOrResolveDocumentKey(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     boost::optional<std::set<FieldPath>> fieldPaths,
-    boost::optional<ChunkVersion> targetCollectionVersion,
+    boost::optional<ChunkVersion> targetCollectionPlacementVersion,
     const NamespaceString& outputNs) const {
     uassert(51123,
             "Unexpected target chunk version specified",
-            !targetCollectionVersion || expCtx->fromMongos);
+            !targetCollectionPlacementVersion || expCtx->fromMongos);
 
     if (!fieldPaths) {
         uassert(51124, "Expected fields to be provided from mongos", !expCtx->fromMongos);
-        return {std::set<FieldPath>{"_id"}, targetCollectionVersion};
+        return {std::set<FieldPath>{"_id"}, targetCollectionPlacementVersion};
     }
 
     // Make sure the 'fields' array has a supporting index. Skip this check if the command is sent
@@ -754,7 +756,7 @@ CommonMongodProcessInterface::ensureFieldsUniqueOrResolveDocumentKey(
                 "Cannot find index to verify that join fields will be unique",
                 fieldsHaveSupportingUniqueIndex(expCtx, outputNs, *fieldPaths));
     }
-    return {*fieldPaths, targetCollectionVersion};
+    return {*fieldPaths, targetCollectionPlacementVersion};
 }
 
 write_ops::InsertCommandRequest CommonMongodProcessInterface::buildInsertOp(

@@ -171,24 +171,6 @@ constexpr bool kThreadSanitizerEnabled = true;
 constexpr bool kThreadSanitizerEnabled = false;
 #endif
 
-class WiredTigerCheckpointLock : public StorageEngine::CheckpointLock {
-public:
-    WiredTigerCheckpointLock(OperationContext* opCtx, StorageEngine::CheckpointLock::Mode mode)
-        : _lock([&]() -> stdx::variant<Lock::SharedLock, Lock::ExclusiveLock> {
-              static Lock::ResourceMutex mutex{"checkpoint"};
-              switch (mode) {
-                  case StorageEngine::CheckpointLock::Mode::kShared:
-                      return Lock::SharedLock{opCtx, mutex};
-                  case StorageEngine::CheckpointLock::Mode::kExclusive:
-                      return Lock::ExclusiveLock{opCtx, mutex};
-              }
-              MONGO_UNREACHABLE;
-          }()) {}
-
-private:
-    stdx::variant<Lock::SharedLock, Lock::ExclusiveLock> _lock;
-};
-
 boost::filesystem::path getOngoingBackupPath() {
     return boost::filesystem::path(storageGlobalParams.dbpath) /
         WiredTigerBackup::kOngoingBackupFile;
@@ -3370,7 +3352,7 @@ void WiredTigerKVEngine::_checkpoint(OperationContext* opCtx, WT_SESSION* sessio
     // is only to protect our internal updates.
     // TODO: SERVER-64507: Investigate whether we can smartly rely on one checkpointer if two or
     // more threads checkpoint at the same time.
-    auto checkpointLock = getCheckpointLock(opCtx, StorageEngine::CheckpointLock::Mode::kExclusive);
+    stdx::lock_guard lk(_checkpointMutex);
 
     const Timestamp stableTimestamp = getStableTimestamp();
     const Timestamp initialDataTimestamp = getInitialDataTimestamp();
@@ -3407,7 +3389,6 @@ void WiredTigerKVEngine::_checkpoint(OperationContext* opCtx, WT_SESSION* sessio
                            2,
                            "Completed unstable checkpoint.",
                            "initialDataTimestamp"_attr = initialDataTimestamp.toString());
-        clearIndividuallyCheckpointedIndexes();
     } else if (stableTimestamp < initialDataTimestamp) {
         LOGV2_FOR_RECOVERY(
             23985,
@@ -3424,10 +3405,7 @@ void WiredTigerKVEngine::_checkpoint(OperationContext* opCtx, WT_SESSION* sessio
                            "stableTimestamp"_attr = stableTimestamp,
                            "oplogNeededForRollback"_attr = toString(oplogNeededForRollback));
 
-        {
-            invariantWTOK(session->checkpoint(session, "use_timestamp=true"), session);
-            clearIndividuallyCheckpointedIndexes();
-        }
+        invariantWTOK(session->checkpoint(session, "use_timestamp=true"), session);
 
         if (oplogNeededForRollback.isOK()) {
             // Now that the checkpoint is durable, publish the oplog needed to recover from it.
@@ -3444,21 +3422,13 @@ void WiredTigerKVEngine::_checkpoint(OperationContext* opCtx, WT_SESSION* sessio
 } catch (const WriteConflictException&) {
     LOGV2_WARNING(22346, "Checkpoint encountered a write conflict exception.");
 } catch (const AssertionException& exc) {
-    invariant(exc.code() == ErrorCodes::InterruptedAtShutdown ||
-                  exc.code() == ErrorCodes::Interrupted,
-              exc.toString());
-    LOGV2(7021300, "Skipping checkpoint due to exception", "exception"_attr = exc.toStatus());
+    invariant(ErrorCodes::isShutdownError(exc.code()), exc.what());
 }
 
 void WiredTigerKVEngine::checkpoint(OperationContext* opCtx) {
     UniqueWiredTigerSession session = _sessionCache->getSession();
     WT_SESSION* s = session->getSession();
     return _checkpoint(opCtx, s);
-}
-
-std::unique_ptr<StorageEngine::CheckpointLock> WiredTigerKVEngine::getCheckpointLock(
-    OperationContext* opCtx, StorageEngine::CheckpointLock::Mode mode) {
-    return std::make_unique<WiredTigerCheckpointLock>(opCtx, mode);
 }
 
 bool WiredTigerKVEngine::hasIdent(OperationContext* opCtx, StringData ident) const {
@@ -4029,7 +3999,7 @@ bool WiredTigerKVEngine::supportsReadConcernMajority() const {
     return true;
 }
 
-bool WiredTigerKVEngine::supportsOplogStones() const {
+bool WiredTigerKVEngine::supportsOplogTruncateMarkers() const {
     return true;
 }
 

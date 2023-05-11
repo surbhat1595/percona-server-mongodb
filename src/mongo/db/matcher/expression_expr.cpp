@@ -78,8 +78,7 @@ Value ExprMatchExpression::evaluateExpression(const MatchableDocument* doc) cons
 }
 
 void ExprMatchExpression::serialize(BSONObjBuilder* out, SerializationOptions opts) const {
-    // TODO aggregation expressions should support some of the new options.
-    *out << "$expr" << _expression->serialize(false);
+    *out << "$expr" << _expression->serialize(opts);
 }
 
 bool ExprMatchExpression::equivalent(const MatchExpression* other) const {
@@ -112,7 +111,7 @@ void ExprMatchExpression::_doSetCollator(const CollatorInterface* collator) {
 }
 
 
-std::unique_ptr<MatchExpression> ExprMatchExpression::shallowClone() const {
+std::unique_ptr<MatchExpression> ExprMatchExpression::clone() const {
     // TODO SERVER-31003: Replace Expression clone via serialization with Expression::clone().
     BSONObjBuilder bob;
     bob << "" << _expression->serialize(false);

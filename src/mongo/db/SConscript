@@ -919,6 +919,7 @@ env.Library(
 env.Library(
     target='fle_crud',
     source=[
+        'commands/fle2_get_count_info_command.idl',
         'fle_crud.cpp',
         'query/fle/encrypted_predicate.cpp',
         'query/fle/equality_predicate.cpp',
@@ -978,6 +979,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/ops/write_ops',
         '$BUILD_DIR/mongo/db/repl/storage_interface_impl',
         'fle_crud',
+        'fle_crud_mongod',
     ],
 )
 
@@ -1403,10 +1405,11 @@ env.Library(
         'exec/skip.cpp',
         'exec/sort.cpp',
         'exec/sort_key_generator.cpp',
+        'exec/spool.cpp',
         'exec/subplan.cpp',
         'exec/text_match.cpp',
         'exec/text_or.cpp',
-        'exec/timeseries_write.cpp',
+        'exec/timeseries_modify.cpp',
         'exec/trial_period_utils.cpp',
         'exec/trial_stage.cpp',
         'exec/unpack_timeseries_bucket.cpp',
@@ -1530,7 +1533,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/query/ce/query_ce_histogram',
         '$BUILD_DIR/mongo/db/query/ce/query_ce_sampling',
         '$BUILD_DIR/mongo/db/query/optimizer/optimizer',
-        '$BUILD_DIR/mongo/db/repl/wait_for_majority_service',
         '$BUILD_DIR/mongo/db/session/kill_sessions',
         '$BUILD_DIR/mongo/db/sorter/sorter_stats',
         '$BUILD_DIR/mongo/db/stats/resource_consumption_metrics',
@@ -2478,6 +2480,7 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/rpc/rpc',
         '$BUILD_DIR/mongo/unittest/unittest',
+        '$BUILD_DIR/mongo/util/periodic_runner_factory',
         'auth/auth',
         'auth/authmocks',
         'catalog/catalog_impl',

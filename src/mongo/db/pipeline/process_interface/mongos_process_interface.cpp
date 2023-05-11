@@ -40,6 +40,7 @@
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/redaction.h"
+#include "mongo/s/analyze_shard_key_role.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/grid.h"
@@ -47,7 +48,7 @@
 #include "mongo/s/query/document_source_merge_cursors.h"
 #include "mongo/s/query/establish_cursors.h"
 #include "mongo/s/query/router_exec_stage.h"
-#include "mongo/s/query_analysis_sampler.h"
+#include "mongo/s/query_analysis_sample_counters.h"
 #include "mongo/s/stale_shard_version_helpers.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/util/fail_point.h"
@@ -293,7 +294,7 @@ void MongosProcessInterface::_reportCurrentOpsForPrimaryOnlyServices(
 void MongosProcessInterface::_reportCurrentOpsForQueryAnalysis(OperationContext* opCtx,
                                                                std::vector<BSONObj>* ops) const {
     if (analyze_shard_key::supportsSamplingQueries()) {
-        analyze_shard_key::QueryAnalysisSampler::get(opCtx).reportForCurrentOp(ops);
+        analyze_shard_key::QueryAnalysisSampleCounters::get(opCtx).reportForCurrentOp(ops);
     }
 }
 
@@ -338,11 +339,12 @@ std::pair<std::set<FieldPath>, boost::optional<ChunkVersion>>
 MongosProcessInterface::ensureFieldsUniqueOrResolveDocumentKey(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     boost::optional<std::set<FieldPath>> fieldPaths,
-    boost::optional<ChunkVersion> targetCollectionVersion,
+    boost::optional<ChunkVersion> targetCollectionPlacementVersion,
     const NamespaceString& outputNs) const {
     invariant(expCtx->inMongos);
-    uassert(
-        51179, "Received unexpected 'targetCollectionVersion' on mongos", !targetCollectionVersion);
+    uassert(51179,
+            "Received unexpected 'targetCollectionPlacementVersion' on mongos",
+            !targetCollectionPlacementVersion);
 
     if (fieldPaths) {
         uassert(51190,
@@ -367,14 +369,16 @@ MongosProcessInterface::ensureFieldsUniqueOrResolveDocumentKey(
     // collection was dropped a long time ago. Because of this, we are okay with piggy-backing
     // off another thread's request to refresh the cache, simply waiting for that request to
     // return instead of forcing another refresh.
-    boost::optional<ShardVersion> targetVersion = refreshAndGetCollectionVersion(expCtx, outputNs);
-    targetCollectionVersion =
-        targetVersion ? boost::make_optional(targetVersion->placementVersion()) : boost::none;
+    boost::optional<ShardVersion> targetCollectionVersion =
+        refreshAndGetCollectionVersion(expCtx, outputNs);
+    targetCollectionPlacementVersion = targetCollectionVersion
+        ? boost::make_optional(targetCollectionVersion->placementVersion())
+        : boost::none;
 
     auto docKeyPaths = collectDocumentKeyFieldsActingAsRouter(expCtx->opCtx, outputNs);
     return {std::set<FieldPath>(std::make_move_iterator(docKeyPaths.begin()),
                                 std::make_move_iterator(docKeyPaths.end())),
-            targetCollectionVersion};
+            targetCollectionPlacementVersion};
 }
 
 }  // namespace mongo

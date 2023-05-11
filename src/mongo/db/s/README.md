@@ -9,6 +9,12 @@ of horizontal scaling or "sharding", the
 and the concept of a
 [**shard key in MongoDB**](https://docs.mongodb.com/manual/sharding/#shard-keys).
 
+## Sharding acronyms
+
+* CSRS: **C**onfig **S**erver as a **R**eplica **S**et. This is a fancy name for the [Config server](https://www.mongodb.com/docs/manual/core/sharded-cluster-config-servers/). Comes from the times of version 3.2 and earlier, when there was a legacy type of Config server called [SCCC](https://www.mongodb.com/docs/manual/release-notes/3.4-compatibility/#removal-of-support-for-sccc-config-servers).
+* Config Shard: Same as CSRS.
+* ConfigData: The set of collections residing on the CSRS, which contain state about the cluster.
+
 ---
 
 # Routing
@@ -42,6 +48,8 @@ copy of the routing table cache exists on each router and shard.
 Operations consult the routing table cache in order to route requests to shards that hold data for
 a collection.
 
+This [section](README_routing_info_cache_consistency_model.md#consistency-model-of-the-routing-table-cache) describes the conceptual consistency model of the routing table cache.
+
 ### How the routing table cache refreshes
 
 The authoritative routing information exists persisted to disk on the config server. Certain node
@@ -63,17 +71,17 @@ will update its in-memory state with its corresponding source.
 
 ### When the routing table cache will refresh
 
-The routing table cache is “lazy.” It does not refresh from its source unless necessary. The cache
+The routing table cache is "lazy." It does not refresh from its source unless necessary. The cache
 will refresh in two scenarios:
 
 1. A request sent to a shard returns an error indicating that the shard’s known routing information for that request doesn't match the sender's routing information.
 2. The cache attempts to access information for a collection that has been locally marked as having out-of-date routing information (stale).
 
 Operations that change a collection’s routing information (for example, a moveChunk command that
-updates a chunk’s location) will mark the local node’s routing table cache as “stale” for affected
+updates a chunk’s location) will mark the local node’s routing table cache as "stale" for affected
 shards. Subsequent attempts to access routing information for affected shards will block on a
 routing table cache refresh. Some operations, such as dropCollection, will affect all shards. In
-this case, the entire collection will be marked as “stale.” Accordingly, subsequent attempts to
+this case, the entire collection will be marked as "stale." Accordingly, subsequent attempts to
 access any routing information for the collection will block on a routing table cache refresh.
 
 ### Types of refreshes
@@ -145,7 +153,7 @@ The database versioning protocol tracks the placement of databases for unsharded
 
 ### Versioning updates
 
-Nodes that track chunk/database versions “lazily” load versioning information. A router or shard
+Nodes that track chunk/database versions "lazily" load versioning information. A router or shard
 will only find out that its internally-stored versioning information is stale via receiving changed
 version information from another node.
 
@@ -259,7 +267,7 @@ A chunk is moved from one shard to another by the moveChunk command. This comman
 1. **Start the migration** - The ActiveMigrationsRegistry is [updated on the donor side](https://github.com/mongodb/mongo/blob/3f849d508692c038afb643b1acb99b8a8cb98d38/src/mongo/db/s/move_chunk_command.cpp#L138) to reflect that a specific chunk is being moved. This prevents any other chunk migrations from happening on this shard until the migration is completed. If an existing incoming or outgoing migration is in flight then the registration will fail and the migration will be aborted. If the inflight operation is for the same chunk then the the registration call will return an object that the moveChunk command can use to join the current operation.
 1. **Start cloning the chunk** - After validating the migration parameters, the donor starts the migration process by sending the _recvChunkStart message to the recipient. This causes the recipient to then [initiate the transfer of documents](https://github.com/mongodb/mongo/blob/5c72483523561c0331769abc3250cf623817883f/src/mongo/db/s/migration_destination_manager.cpp#L955) from the donor. The initial transfer of documents is done by [repeatedly sending the _migrateClone command to the donor](https://github.com/mongodb/mongo/blob/5c72483523561c0331769abc3250cf623817883f/src/mongo/db/s/migration_destination_manager.cpp#L1042) and inserting the fetched documents on the recipient.
 1. **Transfer queued modifications** - Once the initial batch of documents are copied, the recipient then needs to retrieve any modifications that have been queued up on the donor. This is done by  [repeatedly sending the _transferMods command to the donor](https://github.com/mongodb/mongo/blob/5c72483523561c0331769abc3250cf623817883f/src/mongo/db/s/migration_destination_manager.cpp#L1060-L1111). These are [inserts, updates and deletes](https://github.com/mongodb/mongo/blob/11eddfac181ff6ff9faf3e1d55c050373bc6fc24/src/mongo/db/s/migration_chunk_cloner_source_legacy.cpp#L534-L550) that occurred on the donor while the initial batch was being transferred.
-1. **Wait for recipient to clone documents** - The donor [polls the recipient](https://github.com/mongodb/mongo/blob/3f849d508692c038afb643b1acb99b8a8cb98d38/src/mongo/db/s/migration_chunk_cloner_source_legacy.cpp#L984) to see when the transfer of documents has been completed or the timeout has been exceeded. This is indicated when the recipient returns a state of “steady” as a result of the _recvChunkStatus command.
+1. **Wait for recipient to clone documents** - The donor [polls the recipient](https://github.com/mongodb/mongo/blob/3f849d508692c038afb643b1acb99b8a8cb98d38/src/mongo/db/s/migration_chunk_cloner_source_legacy.cpp#L984) to see when the transfer of documents has been completed or the timeout has been exceeded. This is indicated when the recipient returns a state of "steady" as a result of the _recvChunkStatus command.
 1. **Enter the critical section** - Once the recipient has cloned the initial documents, the donor then [declares that it is in a critical section](https://github.com/mongodb/mongo/blob/3f849d508692c038afb643b1acb99b8a8cb98d38/src/mongo/db/s/migration_source_manager.cpp#L344). This indicates that the next operations must not be interrupted and will require recovery actions if they are interrupted. Writes to the donor shard will be suspended while the critical section is in effect. The mechanism to implement the critical section writes the ShardingStateRecovery document to store the minimum optime of the sharding config metadata. If this document exists on stepup it is used to update the optime so that the correct metadata is used.
 1. **Commit on the recipient** - While in the critical section, the [_recvChunkCommit](https://github.com/mongodb/mongo/blob/3f849d508692c038afb643b1acb99b8a8cb98d38/src/mongo/db/s/migration_chunk_cloner_source_legacy.cpp#L360) command is sent to the recipient directing it to fetch any remaining documents for this chunk. The recipient responds by sending _transferMods to fetch the remaining documents while writes are blocked on the donor. Once the documents are transferred successfully, the _recvChunkCommit command returns its status to unblock the donor.
 1. **Commit on the config server** - The donor sends the _configsvrCommitChunkMigration command to the config server. Before the command is sent, [reads are also suspended](https://github.com/mongodb/mongo/blob/3f849d508692c038afb643b1acb99b8a8cb98d38/src/mongo/db/s/migration_source_manager.cpp#L436) on the donor shard.
@@ -795,7 +803,7 @@ thirty (30) minutes out by default, but is user-configurable. This means that if
 in that use a session for thirty minutes, the TTL index will remove the session from the sessions
 collection. When the logical session cache performs its periodic refresh (defined below), it will
 find all sessions that currently exist in the cache that no longer exist in the sessions
-collection. This is the set of sessions that we consider “expired.” The expired sessions are then
+collection. This is the set of sessions that we consider "expired". The expired sessions are then
 removed from the in-memory cache.
 
 ### How a session gets placed into the logical session cache
@@ -958,7 +966,7 @@ For retry images saved in the image collection, the source will "downconvert" op
 `needsRetryImage: true` into two oplog entries, simulating the old format. As chunk migrations use
 internal commands, [this downconverting procedure](https://github.com/mongodb/mongo/blob/0beb0cacfcaf7b24259207862e1d0d489e1c16f1/src/mongo/db/s/session_catalog_migration_source.cpp#L58-L97)
 is installed under the hood. For resharding and tenant migrations, a new aggregation stage,
-[_internalFindAndModifyImageLookup](https://github.com/10gen/mongo/blob/e27dfa10b994f6deff7c59a122b87771cdfa8aba/src/mongo/db/pipeline/document_source_find_and_modify_image_lookup.cpp#L61),
+[_internalFindAndModifyImageLookup](https://github.com/mongodb/mongo/blob/e27dfa10b994f6deff7c59a122b87771cdfa8aba/src/mongo/db/pipeline/document_source_find_and_modify_image_lookup.cpp#L61),
 was introduced to perform the identical substitution. In order for this stage to have a valid timestamp
 to assign to the forged no-op oplog entry as result of the "downconvert", we must always assign an
 extra oplog slot when writing the original retryable findAndModify oplog entry with
@@ -1367,23 +1375,23 @@ privilege.
 The `UserWriteBlockModeOpObserver` is responsible for blocking disallowed writes. Upon any operation
 which writes, this `OpObserver` checks whether the `GlobalUserWriteBlockState` [allows writes to the
 target
-namespace](https://github.com/10gen/mongo/blob/387f8c0e26a352b95ecfc6bc51f749d26a929390/src/mongo/db/op_observer/user_write_block_mode_op_observer.cpp#L281-L288).
+namespace](https://github.com/mongodb/mongo/blob/387f8c0e26a352b95ecfc6bc51f749d26a929390/src/mongo/db/op_observer/user_write_block_mode_op_observer.cpp#L281-L288).
 The `GlobalUserWriteBlockState` stores whether user write blocking is enabled in a given
 `ServiceContext`. As part of its write access check, it [checks whether the `WriteBlockBypass`
 associated with the given `OperationContext` is
-enabled](https://github.com/10gen/mongo/blob/25377181476e4140c970afa5b018f9b4fcc951e8/src/mongo/db/s/global_user_write_block_state.cpp#L59-L67).
+enabled](https://github.com/mongodb/mongo/blob/25377181476e4140c970afa5b018f9b4fcc951e8/src/mongo/db/s/global_user_write_block_state.cpp#L59-L67).
 The `WriteBlockBypass` stores whether the user that initiated the write is able to perform writes
 when user write blocking is enabled.  On internal requests (i.e. from other `mongod` or `mongos`
 instances in the sharded cluster/replica set), the request originator propagates `WriteBlockBypass`
 [through the request
-metadata](https://github.com/10gen/mongo/blob/182616b7b45a1e360839c612c9ee8acaa130fe17/src/mongo/rpc/metadata.cpp#L115).
+metadata](https://github.com/mongodb/mongo/blob/182616b7b45a1e360839c612c9ee8acaa130fe17/src/mongo/rpc/metadata.cpp#L115).
 On external requests, `WriteBlockBypass` is enabled [if the authenticated user is privileged to
 bypass user
-writes](https://github.com/10gen/mongo/blob/07c3d2ebcd3ca8127ed5a5aaabf439b57697b530/src/mongo/db/write_block_bypass.cpp#L60-L63).
+writes](https://github.com/mongodb/mongo/blob/07c3d2ebcd3ca8127ed5a5aaabf439b57697b530/src/mongo/db/write_block_bypass.cpp#L60-L63).
 The `AuthorizationSession`, which is responsible for maintaining the authorization state, keeps track
 of whether the user has the privilege to bypass user write blocking by [updating a cached variable
 upon any changes to the authorization
-state](https://github.com/10gen/mongo/blob/e4032fe5c39f1974c76de4cefdc07d98ab25aeef/src/mongo/db/auth/authorization_session_impl.cpp#L1119-L1121).
+state](https://github.com/mongodb/mongo/blob/e4032fe5c39f1974c76de4cefdc07d98ab25aeef/src/mongo/db/auth/authorization_session_impl.cpp#L1119-L1121).
 This structure enables, for example, sharded writes to work correctly with user write blocking,
 because the `WriteBlockBypass` state is initially set on the `mongos` based on the
 `AuthorizationSession`, which knows the privileges of the user making the write request, and then
@@ -1407,26 +1415,26 @@ those operations from completing.
 
 #### Code references
 * The [`UserWriteBlockModeOpObserver`
-  class](https://github.com/10gen/mongo/blob/387f8c0e26a352b95ecfc6bc51f749d26a929390/src/mongo/db/op_observer/user_write_block_mode_op_observer.h#L40)
+  class](https://github.com/mongodb/mongo/blob/387f8c0e26a352b95ecfc6bc51f749d26a929390/src/mongo/db/op_observer/user_write_block_mode_op_observer.h#L40)
 * The [`GlobalUserWriteBlockState`
-  class](https://github.com/10gen/mongo/blob/25377181476e4140c970afa5b018f9b4fcc951e8/src/mongo/db/s/global_user_write_block_state.h#L37)
+  class](https://github.com/mongodb/mongo/blob/25377181476e4140c970afa5b018f9b4fcc951e8/src/mongo/db/s/global_user_write_block_state.h#L37)
 * The [`WriteBlockBypass`
-  class](https://github.com/10gen/mongo/blob/07c3d2ebcd3ca8127ed5a5aaabf439b57697b530/src/mongo/db/write_block_bypass.h#L38)
+  class](https://github.com/mongodb/mongo/blob/07c3d2ebcd3ca8127ed5a5aaabf439b57697b530/src/mongo/db/write_block_bypass.h#L38)
 * The [`abortUserIndexBuildsForUserWriteBlocking`
-  function](https://github.com/10gen/mongo/blob/25377181476e4140c970afa5b018f9b4fcc951e8/src/mongo/db/index_builds_coordinator.cpp#L850),
+  function](https://github.com/mongodb/mongo/blob/25377181476e4140c970afa5b018f9b4fcc951e8/src/mongo/db/index_builds_coordinator.cpp#L850),
   used to abort and drain all current user index builds
 * The [`SetUserWriteBlockModeCoordinator`
-  class](https://github.com/10gen/mongo/blob/ce908a66890bcdd87e709b584682c6b3a3a851be/src/mongo/db/s/config/set_user_write_block_mode_coordinator.h#L38),
+  class](https://github.com/mongodb/mongo/blob/ce908a66890bcdd87e709b584682c6b3a3a851be/src/mongo/db/s/config/set_user_write_block_mode_coordinator.h#L38),
   used to coordinate the `setUserWriteBlockMode` command for sharded clusters
 * The [`UserWritesRecoverableCriticalSectionService`
-  class](https://github.com/10gen/mongo/blob/1c4e5ba241829145026f8aa0db70707f15fbe7b3/src/mongo/db/s/user_writes_recoverable_critical_section_service.h#L88),
+  class](https://github.com/mongodb/mongo/blob/1c4e5ba241829145026f8aa0db70707f15fbe7b3/src/mongo/db/s/user_writes_recoverable_critical_section_service.h#L88),
   used to manage and persist the user write blocking state
 * The `setUserWriteBlockMode` command invocation:
     - [On a non-sharded
-      `mongod`](https://github.com/10gen/mongo/blob/25377181476e4140c970afa5b018f9b4fcc951e8/src/mongo/db/commands/set_user_write_block_mode_command.cpp#L68)
+      `mongod`](https://github.com/mongodb/mongo/blob/25377181476e4140c970afa5b018f9b4fcc951e8/src/mongo/db/commands/set_user_write_block_mode_command.cpp#L68)
     - [On a shard
-      server](https://github.com/10gen/mongo/blob/25377181476e4140c970afa5b018f9b4fcc951e8/src/mongo/db/s/shardsvr_set_user_write_block_mode_command.cpp#L61)
+      server](https://github.com/mongodb/mongo/blob/25377181476e4140c970afa5b018f9b4fcc951e8/src/mongo/db/s/shardsvr_set_user_write_block_mode_command.cpp#L61)
     - [On a config
-      server](https://github.com/10gen/mongo/blob/c96f8dacc4c71b4774c932a07be4fac71b6db628/src/mongo/db/s/config/configsvr_set_user_write_block_mode_command.cpp#L56)
+      server](https://github.com/mongodb/mongo/blob/c96f8dacc4c71b4774c932a07be4fac71b6db628/src/mongo/db/s/config/configsvr_set_user_write_block_mode_command.cpp#L56)
     - [On a
-      `mongos`](https://github.com/10gen/mongo/blob/4ba31bc8627426538307848866d3165a17aa29fb/src/mongo/s/commands/cluster_set_user_write_block_mode_command.cpp#L61)
+      `mongos`](https://github.com/mongodb/mongo/blob/4ba31bc8627426538307848866d3165a17aa29fb/src/mongo/s/commands/cluster_set_user_write_block_mode_command.cpp#L61)

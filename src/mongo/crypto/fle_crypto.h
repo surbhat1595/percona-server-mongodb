@@ -331,6 +331,8 @@ struct ESCDocument {
  */
 class FLETagQueryInterface {
 public:
+    enum class TagQueryType { kInsert, kQuery };
+
     virtual ~FLETagQueryInterface();
 
     /**
@@ -347,6 +349,17 @@ public:
      * Throws if the collection is not found.
      */
     virtual uint64_t countDocuments(const NamespaceString& nss) = 0;
+
+    /**
+     * Get the set of counts from ESC for a set of tags. Returns counts for these fields suitable
+     * either for query or insert based on the type parameter.
+     *
+     * Returns a vector of zeros if the collection does not exist.
+     */
+    virtual std::vector<std::vector<FLEEdgeCountInfo>> getTags(
+        const NamespaceString& nss,
+        const std::vector<std::vector<FLEEdgePrfBlock>>& tokensSets,
+        TagQueryType type) = 0;
 };
 
 
@@ -513,6 +526,17 @@ public:
                                                 const ESCTwiceDerivedValueToken& valueToken,
                                                 boost::optional<uint64_t> x,
                                                 FLEStatusSection::EmuBinaryTracker& tracker);
+
+    /**
+     * Get the set of counts from ESC for a set of tags. Returns counts for these fields suitable
+     * either for query or insert based on the type parameter.
+     *
+     * Returns a vector of zeros if the collection does not exist.
+     */
+    static std::vector<std::vector<FLEEdgeCountInfo>> getTags(
+        const FLEStateCollectionReader& reader,
+        const std::vector<std::vector<FLEEdgePrfBlock>>& tokensSets,
+        FLETagQueryInterface::TagQueryType type);
 };
 
 
@@ -853,7 +877,7 @@ public:
     ESCDerivedFromDataTokenAndContentionFactorToken esc;
 };
 
-
+// TODO: SERVER-73303 delete when v2 is enabled by default
 struct ECOCCompactionDocument {
 
     bool operator==(const ECOCCompactionDocument& other) const {
@@ -871,13 +895,27 @@ struct ECOCCompactionDocument {
     ECCDerivedFromDataTokenAndContentionFactorToken ecc;
 };
 
+struct ECOCCompactionDocumentV2 {
+    bool operator==(const ECOCCompactionDocumentV2& other) const {
+        return (fieldName == other.fieldName) && (esc == other.esc);
+    }
+
+    template <typename H>
+    friend H AbslHashValue(H h, const ECOCCompactionDocumentV2& doc) {
+        return H::combine(std::move(h), doc.fieldName, doc.esc);
+    }
+
+    // Id is not included as it unimportant
+    std::string fieldName;
+    ESCDerivedFromDataTokenAndContentionFactorToken esc;
+};
+
 /**
  * ECOC Collection schema
  * {
  *    _id : ObjectId() -- omitted so MongoDB can auto choose it
  *    fieldName : String,S
- *    value : Encrypt(ECOCToken, ESCDerivedFromDataTokenAndContentionFactorToken ||
- * ECCDerivedFromDataTokenAndContentionFactorToken)
+ *    value : Encrypt(ECOCToken, ESCDerivedFromDataTokenAndContentionFactorToken)
  * }
  *
  * where
@@ -891,7 +929,10 @@ class ECOCCollection {
 public:
     static BSONObj generateDocument(StringData fieldName, ConstDataRange payload);
 
+    // TODO: SERVER-73303 delete when v2 is enabled by default
     static ECOCCompactionDocument parseAndDecrypt(const BSONObj& doc, ECOCToken token);
+
+    static ECOCCompactionDocumentV2 parseAndDecryptV2(const BSONObj& doc, ECOCToken token);
 };
 
 
@@ -998,11 +1039,13 @@ struct FLE2TagAndEncryptedMetadataBlock {
     static StatusWith<FLE2TagAndEncryptedMetadataBlock> decryptAndParse(
         ServerDerivedFromDataToken token, ConstDataRange serializedBlock);
 
+    static StatusWith<PrfBlock> parseTag(ConstDataRange serializedBlock);
+
     /*
      * Decrypts and returns only the zeros blob from the serialized
      * FLE2TagAndEncryptedMetadataBlock in serializedBlock.
      */
-    static StatusWith<ZerosBlob> decryptZerosBlob(ServerDerivedFromDataToken token,
+    static StatusWith<ZerosBlob> decryptZerosBlob(ServerZerosEncryptionToken token,
                                                   ConstDataRange serializedBlock);
 
     static bool isValidZerosBlob(const ZerosBlob& blob);
@@ -1056,6 +1099,8 @@ struct FLE2IndexedEqualityEncryptedValueV2 {
     static StatusWith<FLE2TagAndEncryptedMetadataBlock> parseAndDecryptMetadataBlock(
         ServerDerivedFromDataToken serverDataDerivedToken, ConstDataRange serializedServerValue);
 
+    static StatusWith<PrfBlock> parseMetadataBlockTag(ConstDataRange serializedServerValue);
+
     static StatusWith<UUID> readKeyId(ConstDataRange serializedServerValue);
 
     static StatusWith<BSONType> readBsonType(ConstDataRange serializedServerValue);
@@ -1070,6 +1115,7 @@ struct FLE2IndexedEqualityEncryptedValueV2 {
     FLE2TagAndEncryptedMetadataBlock metadataBlock;
 };
 
+// TODO: SERVER-73303 delete when v2 is enabled by default
 /**
  * Class to read/write FLE2 Unindexed Encrypted Values
  *
@@ -1090,6 +1136,47 @@ struct FLE2UnindexedEncryptedValue {
     static std::pair<BSONType, std::vector<uint8_t>> deserialize(FLEKeyVault* keyVault,
                                                                  ConstDataRange blob);
 
+    static constexpr crypto::aesMode mode = crypto::aesMode::ctr;
+    static constexpr EncryptedBinDataType fleType =
+        EncryptedBinDataType::kFLE2UnindexedEncryptedValue;
+    static constexpr size_t assocDataSize = sizeof(uint8_t) + sizeof(UUID) + sizeof(uint8_t);
+};
+
+/**
+ * Class to read/write FLE2 Unindexed Encrypted Values (for protocol version 2)
+ *
+ * Fields are encrypted with the following:
+ *
+ * struct {
+ *   uint8_t fle_blob_subtype = 16;
+ *   uint8_t key_uuid[16];
+ *   uint8_t original_bson_type;
+ *   ciphertext[ciphertext_length];
+ * } blob;
+ *
+ * The specification needs to be in sync with the validation in 'bson_validate.cpp'.
+ */
+struct FLE2UnindexedEncryptedValueV2 {
+    static std::vector<uint8_t> serialize(const FLEUserKeyAndId& userKey,
+                                          const BSONElement& element);
+    static std::pair<BSONType, std::vector<uint8_t>> deserialize(FLEKeyVault* keyVault,
+                                                                 ConstDataRange blob);
+
+    /*
+     * The block cipher mode used with AES to encrypt/decrypt the value
+     */
+    static constexpr crypto::aesMode mode = crypto::aesMode::cbc;
+
+    /*
+     * The FLE type associated with this unindexed value
+     */
+    static constexpr EncryptedBinDataType fleType =
+        EncryptedBinDataType::kFLE2UnindexedEncryptedValueV2;
+
+    /*
+     * The size of the AAD used in AEAD encryption. The AAD consists of the fleType (1), the
+     * key UUID (16), and the BSON type of the value (1).
+     */
     static constexpr size_t assocDataSize = sizeof(uint8_t) + sizeof(UUID) + sizeof(uint8_t);
 };
 
@@ -1200,6 +1287,9 @@ struct FLE2IndexedRangeEncryptedValueV2 {
 
     static StatusWith<std::vector<FLE2TagAndEncryptedMetadataBlock>> parseAndDecryptMetadataBlocks(
         const std::vector<ServerDerivedFromDataToken>& serverDataDerivedTokens,
+        ConstDataRange serializedServerValue);
+
+    static StatusWith<std::vector<PrfBlock>> parseMetadataBlockTags(
         ConstDataRange serializedServerValue);
 
     static StatusWith<UUID> readKeyId(ConstDataRange serializedServerValue);
@@ -1330,6 +1420,14 @@ public:
                                            bool bypassDocumentValidation);
 
     /**
+     * Validates that the on-disk encrypted values in the input document are
+     * compatible with the current QE protocol version.
+     * Used during updates to verify that the modified document's pre-image can be
+     * safely updated per the protocol compatibility rules.
+     */
+    static void validateModifiedDocumentCompatibility(BSONObj& originalDocument);
+
+    /**
      * Get information about all FLE2InsertUpdatePayload payloads
      */
     static std::vector<EDCServerPayloadInfo> getEncryptedFieldInfo(BSONObj& obj);
@@ -1381,6 +1479,7 @@ public:
     static BSONObj finalizeForUpdate(const BSONObj& doc,
                                      const std::vector<EDCServerPayloadInfo>& serverPayload);
 
+    // TODO: SERVER-73303 remove once v2 is enabled by default
     /**
      * Generate an update modifier document with $pull to remove stale tags.
      *
@@ -1392,12 +1491,21 @@ public:
                                               const StringMap<FLEDeleteToken>& tokenMap);
 
     /**
+     * Generate an update modifier document with $pull to remove stale tags.
+     *
+     * Generates:
+     *
+     * { $pull : {__safeContent__ : {$in : [tag..] } } }
+     */
+    static BSONObj generateUpdateToRemoveTags(const std::vector<PrfBlock>& tagsToPull);
+
+    /**
      * Get a list of encrypted, indexed fields.
      */
     static std::vector<EDCIndexedFields> getEncryptedIndexedFields(BSONObj& obj);
 
     /**
-     * Get a list of tags to remove and add.
+     * Get a list of fields to remove.
      *
      * An update is performed in two steps:
      * 1. Perform the update of the encrypted fields
@@ -1409,9 +1517,20 @@ public:
      * fields in both and subtract the fields in the newDocument from originalDocument. The
      * remaining fields are the ones we need to remove.
      */
-    static std::vector<EDCIndexedFields> getRemovedTags(
+    static std::vector<EDCIndexedFields> getRemovedFields(
         std::vector<EDCIndexedFields>& originalDocument,
         std::vector<EDCIndexedFields>& newDocument);
+
+    /**
+     * Generates the list of stale tags that need to be removed on an update.
+     * This first calculates the set difference between the original document and
+     * the new document using getRemovedFields(), then acquires the tags for each of the
+     * fields left over. These are the tags that need to be removed from __safeContent__.
+     *
+     * This sorts the input vectors.
+     */
+    static std::vector<PrfBlock> getRemovedTags(std::vector<EDCIndexedFields>& originalDocument,
+                                                std::vector<EDCIndexedFields>& newDocument);
 };
 
 
@@ -1701,8 +1820,27 @@ std::vector<std::string> minCoverDecimal128(Decimal128 lowerBound,
                                             boost::optional<Decimal128> min,
                                             boost::optional<Decimal128> max,
                                             boost::optional<uint32_t> precision,
-
                                             int sparsity);
+
+class FLEUtil {
+public:
+    static std::vector<uint8_t> vectorFromCDR(ConstDataRange cdr);
+    static PrfBlock blockToArray(const SHA256Block& block);
+
+    /**
+     * Compute HMAC-SHA-256
+     */
+    static PrfBlock prf(ConstDataRange key, ConstDataRange cdr);
+
+    static PrfBlock prf(ConstDataRange key, uint64_t value);
+
+    /**
+     * Decrypt AES-256-CTR encrypted data. Exposed for benchmarking purposes.
+     */
+    static StatusWith<std::vector<uint8_t>> decryptData(ConstDataRange key,
+                                                        ConstDataRange cipherText);
+};
+
 /**
  * Utility functions manipulating buffers.
  */

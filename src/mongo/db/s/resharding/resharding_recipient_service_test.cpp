@@ -98,8 +98,8 @@ public:
                                                boost::none /* chunkSizeBytes */,
                                                true /* allowMigrations */,
                                                chunks);
-        IndexCatalogTypeMap globalIndexesMap;
-        globalIndexesMap.emplace(
+        IndexCatalogTypeMap shardingIndexesCatalogMap;
+        shardingIndexesCatalogMap.emplace(
             "randomKey_1",
             IndexCatalogType(
                 "randomKey_1", BSON("randomKey" << 1), BSONObj(), Timestamp(1, 0), _sourceUUID));
@@ -109,8 +109,8 @@ public:
                          DatabaseVersion(UUID::gen(), Timestamp(1, 1)),
                          _makeStandaloneRoutingTableHistory(std::move(rt)),
                          boost::none /* clusterTime */),
-            GlobalIndexesCache(CollectionIndexes(_sourceUUID, Timestamp(1, 0)),
-                               std::move(globalIndexesMap))};
+            ShardingIndexesCatalogCache(CollectionIndexes(_sourceUUID, Timestamp(1, 0)),
+                                        std::move(shardingIndexesCatalogMap))};
     }
 
     MigrationDestinationManager::CollectionOptionsAndUUID getCollectionOptions(
@@ -133,7 +133,7 @@ public:
         return {std::vector<BSONObj>{}, BSONObj()};
     }
 
-    boost::optional<GlobalIndexesCache> getCollectionIndexInfoWithRefresh(
+    boost::optional<ShardingIndexesCatalogCache> getCollectionIndexInfoWithRefresh(
         OperationContext* opCtx, const NamespaceString& nss) {
         return boost::none;
     }
@@ -386,10 +386,18 @@ TEST_F(ReshardingRecipientServiceTest, CanTransitionThroughEachStateToCompletion
         // in memory.
         auto persistedRecipientDocument = getStateDoc(opCtx.get());
 
-        Date_t copyBegin = recipient->getMetrics().getCopyingBegin();
-        Date_t copyEnd = recipient->getMetrics().getCopyingEnd();
-        Date_t applyBegin = recipient->getMetrics().getApplyingBegin();
-        Date_t applyEnd = recipient->getMetrics().getApplyingEnd();
+        Date_t copyBegin = recipient->getMetrics()
+                               .getStartFor(ReshardingMetrics::TimedPhase::kCloning)
+                               .value_or(Date_t::min());
+        Date_t copyEnd = recipient->getMetrics()
+                             .getEndFor(ReshardingMetrics::TimedPhase::kCloning)
+                             .value_or(Date_t::min());
+        Date_t applyBegin = recipient->getMetrics()
+                                .getStartFor(ReshardingMetrics::TimedPhase::kApplying)
+                                .value_or(Date_t::min());
+        Date_t applyEnd = recipient->getMetrics()
+                              .getEndFor(ReshardingMetrics::TimedPhase::kApplying)
+                              .value_or(Date_t::min());
 
         auto copyBeginDoc = persistedRecipientDocument.getMetrics()->getDocumentCopy()->getStart();
         auto copyEndDoc = persistedRecipientDocument.getMetrics()->getDocumentCopy()->getStop();

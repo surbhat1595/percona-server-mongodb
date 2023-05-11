@@ -45,6 +45,8 @@ public:
                       TicketHolder* writeTicketHolder,
                       Milliseconds interval);
 
+    virtual void appendStats(BSONObjBuilder& builder) const override;
+
 private:
     // TODO (SERVER-71286): Replace constants with server parameters.
     static constexpr int kMinConcurrency = 5;
@@ -58,17 +60,27 @@ private:
 
     void _run(Client*) override;
 
-    void _probeStable(OperationContext* opCtx, double throughput);
-    void _probeUp(OperationContext* opCtx, double throughput);
-    void _probeDown(OperationContext* opCtx, double throughput);
+    void _probeStable(double throughput);
+    void _probeUp(double throughput);
+    void _probeDown(double throughput);
 
-    void _setConcurrency(OperationContext* opCtx, int concurrency);
+    void _setConcurrency(int32_t concurrency);
 
-    int _stableConcurrency;
+    int32_t _stableConcurrency;
     double _stableThroughput = 0;
     ProbingState _state = ProbingState::kStable;
 
     int64_t _prevNumFinishedProcessing = 0;
+
+    struct Stats {
+        void serialize(BSONObjBuilder& builder) const;
+
+        AtomicWord<double> throughput;
+        AtomicWord<int64_t> timesDecreased;
+        AtomicWord<int64_t> timesIncreased;
+        AtomicWord<int64_t> totalAmountDecreased;
+        AtomicWord<int64_t> totalAmountIncreased;
+    } _stats;
 };
 
 }  // namespace mongo::execution_control

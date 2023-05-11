@@ -78,8 +78,15 @@ void appendShardedTelemetryKeyIfApplicable(BSONObjBuilder& objToModify,
                                            std::string hostAndPort,
                                            OperationContext* opCtx);
 /**
- * An aggregated metric stores a compressed view of data. It balances the loss of information with
- * the reduction in required storage.
+ * Serialize the FindCommandRequest according to the Options passed in. Returns the serialized BSON
+ * with all field names and literals redacted.
+ */
+BSONObj redactFindRequest(const FindCommandRequest& findCommand,
+                          const SerializationOptions& opts,
+                          const boost::intrusive_ptr<ExpressionContext>& expCtx);
+/**
+ * An aggregated metric stores a compressed view of data. It balances the loss of information
+ * with the reduction in required storage.
  */
 struct AggregatedMetric {
 
@@ -103,8 +110,8 @@ struct AggregatedMetric {
     }
 
     uint64_t sum = 0;
-    // Default to the _signed_ maximum (which fits in unsigned range) because we cast to BSONNumeric
-    // when serializing.
+    // Default to the _signed_ maximum (which fits in unsigned range) because we cast to
+    // BSONNumeric when serializing.
     uint64_t min = (uint64_t)std::numeric_limits<int64_t>::max;
     uint64_t max = 0;
 
@@ -124,11 +131,8 @@ public:
         BSONObjBuilder builder{sizeof(TelemetryMetrics) + 100};
         builder.append("lastExecutionMicros", (BSONNumeric)lastExecutionMicros);
         builder.append("execCount", (BSONNumeric)execCount);
-        queryOptMicros.appendTo(builder, "queryOptMicros");
         queryExecMicros.appendTo(builder, "queryExecMicros");
         docsReturned.appendTo(builder, "docsReturned");
-        docsScanned.appendTo(builder, "docsScanned");
-        keysScanned.appendTo(builder, "keysScanned");
         builder.append("firstSeenTimestamp", firstSeenTimestamp);
         return builder.obj();
     }
@@ -153,15 +157,9 @@ public:
      */
     uint64_t execCount = 0;
 
-    AggregatedMetric queryOptMicros;
-
     AggregatedMetric queryExecMicros;
 
     AggregatedMetric docsReturned;
-
-    AggregatedMetric docsScanned;
-
-    AggregatedMetric keysScanned;
 
 private:
     /**
@@ -197,11 +195,11 @@ using TelemetryStore = PartitionedCache<BSONObj,
 TelemetryStore& getTelemetryStore(OperationContext* opCtx);
 
 /**
- * Register a request for telemetry collection. The telemetry machinery may decide not to collect
- * anything but this should be called for all requests. The decision is made based on the feature
- * flag and telemetry parameters such as rate limiting.
+ * Register a request for telemetry collection. The telemetry machinery may decide not to
+ * collect anything but this should be called for all requests. The decision is made based on
+ * the feature flag and telemetry parameters such as rate limiting.
  *
- * The caller is still responsible for subsequently calling collectTelemetry() once the request is
+ * The caller is still responsible for subsequently calling writeTelemetry() once the request is
  * completed.
  *
  * Note that calling this affects internal state. It should be called once for each request for
@@ -211,34 +209,14 @@ void registerAggRequest(const AggregateCommandRequest& request, OperationContext
 
 void registerFindRequest(const FindCommandRequest& request,
                          const NamespaceString& collection,
-                         OperationContext* opCtx);
-
-void registerGetMoreRequest(OperationContext* opCtx);
-
-// recordExecution is called between registering the query and collecting metrics post execution.
-// Its purpose is to track the number of times a given query shape has been ran. The execution count
-// is incremented outside of registering the command because the originating command could be an
-// explain request and therefore the query is not actually executed.
-// TODO SERVER-73727 remove this function
-void recordExecution(OperationContext* opCtx, bool isFle);
-
-/**
- * Collect telemetry for the operation identified by the telemetryKey stored on
- * opDebug.
- * TODO SERVER-73727 remove this function
- */
-void collectTelemetry(OperationContext* opCtx, const OpDebug& opDebug);
-
+                         OperationContext* ocCtx);
 
 /**
  * Writes telemetry to the telemetry store for the operation identified by `telemetryKey`.
  */
 void writeTelemetry(OperationContext* opCtx,
                     boost::optional<BSONObj> telemetryKey,
-                    uint64_t queryOptMicros,
                     uint64_t queryExecMicros,
-                    uint64_t docsReturned,
-                    uint64_t docsScanned,
-                    uint64_t keysScanned);
+                    uint64_t docsReturned);
 }  // namespace telemetry
 }  // namespace mongo

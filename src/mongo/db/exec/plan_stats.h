@@ -792,6 +792,9 @@ struct SortStats : public SpecificStats {
 
     // The number of times that we spilled data to disk during the execution of this query.
     uint64_t spills = 0u;
+
+    // The maximum size of the spill file written to disk, or 0 if no spilling occurred.
+    uint64_t spilledDataStorageSize = 0u;
 };
 
 struct MergeSortStats : public SpecificStats {
@@ -1161,9 +1164,9 @@ struct UnpackTimeseriesBucketStats final : public SpecificStats {
     size_t nBucketsUnpacked = 0u;
 };
 
-struct TimeseriesWriteStats final : public SpecificStats {
+struct TimeseriesModifyStats final : public SpecificStats {
     std::unique_ptr<SpecificStats> clone() const final {
-        return std::make_unique<TimeseriesWriteStats>(*this);
+        return std::make_unique<TimeseriesModifyStats>(*this);
     }
 
     uint64_t estimateObjectSizeInBytes() const {
@@ -1178,6 +1181,7 @@ struct TimeseriesWriteStats final : public SpecificStats {
         visitor->visit(this);
     }
 
+    size_t bucketsUnpacked = 0u;
     size_t measurementsDeleted = 0u;
 };
 
@@ -1201,5 +1205,28 @@ struct SampleFromTimeseriesBucketStats final : public SpecificStats {
     size_t nBucketsDiscarded = 0u;
     size_t dupsTested = 0u;
     size_t dupsDropped = 0u;
+};
+
+struct SpoolStats : public SpecificStats {
+    std::unique_ptr<SpecificStats> clone() const {
+        return std::make_unique<SpoolStats>(*this);
+    }
+
+    uint64_t estimateObjectSizeInBytes() const {
+        return sizeof(*this);
+    }
+
+    void acceptVisitor(PlanStatsConstVisitor* visitor) const final {
+        visitor->visit(this);
+    }
+
+    void acceptVisitor(PlanStatsMutableVisitor* visitor) final {
+        visitor->visit(this);
+    }
+
+    // The amount of data we've spooled in bytes.
+    uint64_t totalDataSizeBytes = 0u;
+
+    // TODO SERVER-74437 add more stats for spilling metrics
 };
 }  // namespace mongo

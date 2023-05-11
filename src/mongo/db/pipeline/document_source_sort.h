@@ -74,6 +74,11 @@ public:
         std::vector<Value>& array,
         boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
 
+    void serializeToArray(std::vector<Value>& array,
+                          SerializationOptions opts) const final override {
+        MONGO_UNIMPLEMENTED;
+    };
+
     boost::intrusive_ptr<DocumentSource> clone(
         const boost::intrusive_ptr<ExpressionContext>& newExpCtx) const final;
 
@@ -189,6 +194,10 @@ public:
         return &_sortExecutor->stats();
     }
 
+    SorterFileStats* getSorterFileStats() const {
+        return _sortExecutor->getSorterFileStats();
+    }
+
 protected:
     GetNextResult doGetNext() final;
     /**
@@ -205,6 +214,10 @@ private:
 
     Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final {
         MONGO_UNREACHABLE;  // Should call serializeToArray instead.
+    }
+
+    Value serialize(SerializationOptions opts) const final override {
+        MONGO_UNIMPLEMENTED;
     }
 
     /**

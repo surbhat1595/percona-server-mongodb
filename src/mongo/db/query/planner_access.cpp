@@ -359,7 +359,7 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::makeCollectionScan(
     // Make the (only) node, a collection scan.
     auto csn = std::make_unique<CollectionScanNode>();
     csn->name = query.ns();
-    csn->filter = query.root()->shallowClone();
+    csn->filter = query.root()->clone();
     csn->tailable = tailable;
     csn->shouldTrackLatestOplogTimestamp =
         params.options & QueryPlannerParams::TRACK_LATEST_OPLOG_TS;
@@ -773,7 +773,7 @@ void buildTextSubPlan(TextMatchNode* tn) {
         // If we will be adding a TEXT_OR or OR stage, then it is responsible for applying the
         // filter. Otherwise, the index scan applies the filter.
         if (!needOrStage && tn->filter) {
-            ixscan->filter = tn->filter->shallowClone();
+            ixscan->filter = tn->filter->clone();
         }
 
         indexScanList.push_back(std::move(ixscan));
@@ -1424,7 +1424,7 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::buildIndexedAnd(
     // match expression to be sure that the FETCH stage will recheck the entire predicate. It is not
     // correct to trim predicates for index intersection plans, as this can lead to spurious matches
     // (see SERVER-16750).
-    auto clonedRoot = root->shallowClone();
+    auto clonedRoot = root->clone();
 
     std::vector<std::unique_ptr<QuerySolutionNode>> ixscanNodes;
     const bool inArrayOperator = !ownedRoot;
@@ -1446,6 +1446,21 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::buildIndexedAnd(
 
     // Short-circuit: an AND of one child is just the child.
     if (ixscanNodes.size() == 1) {
+        if (feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabledAndIgnoreFCV() &&
+            ixscanNodes[0]->getType() == StageType::STAGE_IXSCAN && root->numChildren() > 0) {
+            const auto* ixScanNode = static_cast<IndexScanNode*>(ixscanNodes[0].get());
+            const auto& index = ixScanNode->index;
+            if (index.type == INDEX_WILDCARD &&
+                wildcard_planning::canOnlyAnswerWildcardPrefixQuery(index, ixScanNode->bounds)) {
+                // If we get here, we have a compound wildcard index which can answer one or more of
+                // the predicates in the $and, but we also have at least one additional node
+                // attached to the filter. Normally, we would be able to satisfy this case using a
+                // FETCH + FILTER + IXSCAN; however, in the case of a $not query which is not
+                // supported by the index, the index entry will be expanded in such a way that we
+                // won't be able to satisfy the query.
+                return nullptr;
+            }
+        }
         andResult = std::move(ixscanNodes[0]);
     } else {
         // $** indexes are prohibited from participating in either AND_SORTED or AND_HASH.
@@ -1751,7 +1766,7 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::scanWholeIndex(
         isn->direction = -1;
     }
 
-    unique_ptr<MatchExpression> filter = query.root()->shallowClone();
+    unique_ptr<MatchExpression> filter = query.root()->clone();
 
     // If it's find({}) remove the no-op root.
     if (MatchExpression::AND == filter->matchType() && (0 == filter->numChildren())) {
@@ -1789,7 +1804,7 @@ void QueryPlannerAccess::addFilterToSolutionNode(QuerySolutionNode* node,
             verify(MatchExpression::OR == type);
             listFilter = std::make_unique<OrMatchExpression>();
         }
-        unique_ptr<MatchExpression> oldFilter = node->filter->shallowClone();
+        unique_ptr<MatchExpression> oldFilter = node->filter->clone();
         listFilter->add(std::move(oldFilter));
         listFilter->add(std::move(match));
         node->filter = std::move(listFilter);
@@ -1881,7 +1896,7 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::makeIndexScan(
     isn->bounds.boundInclusion = BoundInclusion::kIncludeStartKeyOnly;
     isn->queryCollator = query.getCollator();
 
-    unique_ptr<MatchExpression> filter = query.root()->shallowClone();
+    unique_ptr<MatchExpression> filter = query.root()->clone();
 
     // If it's find({}) remove the no-op root.
     if (MatchExpression::AND == filter->matchType() && (0 == filter->numChildren())) {

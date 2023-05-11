@@ -1,7 +1,7 @@
 /**
  * Tests support for the analyzeShardKey command.
  *
- * @tags: [requires_fcv_63, featureFlagAnalyzeShardKey]
+ * @tags: [requires_fcv_63, featureFlagAnalyzeShardKey, temporary_catalog_shard_incompatible]
  */
 (function() {
 "use strict";
@@ -46,7 +46,7 @@ function testExistingUnshardedCollection(writeConn, testCases) {
             // primary shard.
             let expectedErrCode = (() => {
                 if (testCase.isMongos || testCase.isNonShardsvrMongod) {
-                    return ErrorCodes.InvalidOptions;
+                    return ErrorCodes.IllegalOperation;
                 } else if (testCase.isPrimaryShardMongod) {
                     return ErrorCodes.CollectionIsEmptyLocally;
                 }
@@ -115,7 +115,7 @@ function testExistingShardedCollection(st, testCases) {
         if (testCase.isSupported) {
             const expectedErrCode = (() => {
                 if (testCase.isMongos) {
-                    return ErrorCodes.InvalidOptions;
+                    return ErrorCodes.IllegalOperation;
                 }
                 if (testCase.doNotExpectColl) {
                     return ErrorCodes.NamespaceNotFound;

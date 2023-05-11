@@ -145,6 +145,7 @@ executor:
     hooks:
       - CheckReplDBHashInBackground
       - CheckReplDBHash
+      - CheckMetadataConsistencyInBackground
       - ValidateCollections
     tests: true
   config:
@@ -152,13 +153,13 @@ executor:
       global_vars:
         TestData:
           runInsideTransaction: true
-          runningWithAutoSplit: false
           runningWithBalancer: false
           runningWithSessions: true
           traceExceptions: false
   hooks:
   - class: CheckReplDBHashInBackground
   - class: CheckReplDBHash
+  - class: CheckMetadataConsistencyInBackground
   - class: CheckOrphansDeleted
   - class: CheckRoutingTableConsistency
   - class: CheckShardFilteringMetadata
@@ -167,7 +168,6 @@ executor:
   fixture:
     class: ShardedClusterFixture
     enable_balancer: false
-    enable_autosplit: false
     mongos_options:
       set_parameters:
         enableTestCommands: 1

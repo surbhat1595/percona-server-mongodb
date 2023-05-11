@@ -103,11 +103,13 @@ function assertWriteMetricsNonEmptySampleSize(actual, expected, isHashed) {
 }
 
 function assertMetricsEmptySampleSize(actual) {
+    AnalyzeShardKeyUtil.assertContainReadWriteDistributionMetrics(actual);
     assertReadMetricsEmptySampleSize(actual.readDistribution);
     assertWriteMetricsEmptySampleSize(actual.writeDistribution);
 }
 
 function assertMetricsNonEmptySampleSize(actual, expected, isHashed) {
+    AnalyzeShardKeyUtil.assertContainReadWriteDistributionMetrics(actual);
     assertReadMetricsNonEmptySampleSize(
         actual.readDistribution, expected.readDistribution, isHashed);
     assertWriteMetricsNonEmptySampleSize(
@@ -115,8 +117,7 @@ function assertMetricsNonEmptySampleSize(actual, expected, isHashed) {
 }
 
 function assertNoMetrics(actual) {
-    assert(!actual.hasOwnProperty("readDistribution"));
-    assert(!actual.hasOwnProperty("writeDistribution"));
+    AnalyzeShardKeyUtil.assertNotContainReadWriteDistributionMetrics(actual);
 }
 
 function getRandomCount() {
@@ -449,13 +450,14 @@ const analyzeShardKeyNumRanges = 10;
             assert.commandWorked(db.runCommand(cmdObjs[i]));
         }
 
-        // Turn off query sampling and wait for sampling to become inactive on all mongoses. The
-        // wait is necessary for preventing the internal aggregate commands run by the
+        // Turn off query sampling and wait for sampling to become inactive on all mongoses and
+        // mongods. The wait is necessary for preventing the internal aggregate commands run by the
         // analyzeShardKey commands below from getting sampled.
         assert.commandWorked(st.s0.adminCommand({configureQueryAnalyzer: ns, mode: "off"}));
         for (let i = 0; i < numMongoses; i++) {
             QuerySamplingUtil.waitForInactiveSampling(st["s" + String(i)]);
         }
+        QuerySamplingUtil.waitForInactiveSamplingOnAllShards(st);
 
         // Wait for all sampled queries and diffs to get flushed to disk.
         let numTries = 0;

@@ -332,6 +332,14 @@ last-continuous:
     ticket: SERVER-74124
   - test_file: jstests/core/query/partial_index_logical.js
     ticket: SERVER-68434
+  - test_file: jstests/core/timeseries/timeseries_collmod.js
+    ticket: SERVER-74507
+  - test_file: jstests/core/timeseries/timeseries_filter_extended_range.js
+    ticket: SERVER-69952
+  - test_file: jstests/core/query/sbe_plan_cache_autoparameterize_ixscan.js
+    ticket: SERVER-74262
+  - test_file: jstests/replsets/log_ddl_ops.js
+    ticket: SERVER-73601
   suites: null
 last-lts:
   all:
@@ -737,4 +745,8 @@ last-lts:
     ticket: SERVER-73938
   - test_file: jstests/sharding/shard_keys_with_dollar_sign.js
     ticket: SERVER-74124
+  - test_file: jstests/core/timeseries/timeseries_filter_extended_range.js
+    ticket: SERVER-69952
+  - test_file: jstests/replsets/log_ddl_ops.js
+    ticket: SERVER-73601
   suites: null

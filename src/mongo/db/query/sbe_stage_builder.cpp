@@ -44,7 +44,6 @@
 #include "mongo/db/exec/sbe/stages/project.h"
 #include "mongo/db/exec/sbe/stages/sort.h"
 #include "mongo/db/exec/sbe/stages/sorted_merge.h"
-#include "mongo/db/exec/sbe/stages/traverse.h"
 #include "mongo/db/exec/sbe/stages/union.h"
 #include "mongo/db/exec/sbe/stages/unique.h"
 #include "mongo/db/exec/sbe/values/sort_spec.h"
@@ -60,7 +59,6 @@
 #include "mongo/db/query/bind_input_params.h"
 #include "mongo/db/query/expression_walker.h"
 #include "mongo/db/query/index_bounds_builder.h"
-#include "mongo/db/query/optimizer/rewrites/const_eval.h"
 #include "mongo/db/query/query_utils.h"
 #include "mongo/db/query/sbe_stage_builder_abt_helpers.h"
 #include "mongo/db/query/sbe_stage_builder_accumulator.h"
@@ -146,17 +144,23 @@ std::unique_ptr<sbe::RuntimeEnvironment> makeRuntimeEnvironment(
 sbe::value::SlotVector getSlotsToForward(const PlanStageReqs& reqs,
                                          const PlanStageSlots& outputs,
                                          const sbe::value::SlotVector& exclude) {
-    auto excludeSet = sbe::value::SlotSet{exclude.begin(), exclude.end()};
-
     std::vector<std::pair<PlanStageSlots::Name, sbe::value::SlotId>> pairs;
-    outputs.forEachSlot(reqs, [&](auto&& slot, const PlanStageSlots::Name& name) {
-        if (!excludeSet.count(slot)) {
+    if (exclude.empty()) {
+        outputs.forEachSlot(reqs, [&](auto&& slot, const PlanStageSlots::Name& name) {
             pairs.emplace_back(name, slot);
-        }
-    });
+        });
+    } else {
+        auto excludeSet = sbe::value::SlotSet{exclude.begin(), exclude.end()};
+        outputs.forEachSlot(reqs, [&](auto&& slot, const PlanStageSlots::Name& name) {
+            if (!excludeSet.count(slot)) {
+                pairs.emplace_back(name, slot);
+            }
+        });
+    }
     std::sort(pairs.begin(), pairs.end());
 
     auto outputSlots = sbe::makeSV();
+    outputSlots.reserve(pairs.size());
     for (auto&& p : pairs) {
         outputSlots.emplace_back(p.second);
     }
@@ -237,10 +241,8 @@ void prepareSlotBasedExecutableTree(OperationContext* opCtx,
 
 PlanStageSlots::PlanStageSlots(const PlanStageReqs& reqs,
                                sbe::value::SlotIdGenerator* slotIdGenerator) {
-    for (auto&& [slotName, isRequired] : reqs._slots) {
-        if (isRequired) {
-            _slots[slotName] = slotIdGenerator->generate();
-        }
+    for (const auto& slotName : reqs._slots) {
+        _slots[slotName] = slotIdGenerator->generate();
     }
 }
 
@@ -487,30 +489,38 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         indexKeyPatternSet.emplace(elt.fieldNameStringData());
     }
 
+    sbe::IndexKeysInclusionSet fieldBitset, sortKeyBitset;
     auto [fields, additionalFields] = splitVector(
         reqs.getFields(), [&](const std::string& s) { return indexKeyPatternSet.count(s); });
     auto fieldsSet = StringDataSet{fields.begin(), fields.end()};
-    auto sortKeys = reqs.getSortKeys();
-    auto sortKeysSet = StringDataSet{sortKeys.begin(), sortKeys.end()};
-
-    for (auto&& key : sortKeys) {
-        tassert(7097208,
-                str::stream() << "Expected sort key '" << key << "' to be part of index pattern",
-                indexKeyPatternSet.count(key));
-    }
-
-    sbe::IndexKeysInclusionSet fieldBitset;
-    sbe::IndexKeysInclusionSet sortKeyBitset;
     size_t i = 0;
     for (const auto& elt : ixn->index.keyPattern) {
         StringData name = elt.fieldNameStringData();
         if (fieldsSet.count(name)) {
             fieldBitset.set(i);
         }
-        if (sortKeysSet.count(name)) {
-            sortKeyBitset.set(i);
-        }
         ++i;
+    }
+
+    if (reqs.hasSortKeys()) {
+        auto sortKeys = reqs.getSortKeys();
+        auto sortKeysSet = StringDataSet{sortKeys.begin(), sortKeys.end()};
+
+        for (auto&& key : sortKeys) {
+            tassert(7097208,
+                    str::stream() << "Expected sort key '" << key
+                                  << "' to be part of index pattern",
+                    indexKeyPatternSet.count(key));
+        }
+
+        i = 0;
+        for (const auto& elt : ixn->index.keyPattern) {
+            StringData name = elt.fieldNameStringData();
+            if (sortKeysSet.count(name)) {
+                sortKeyBitset.set(i);
+            }
+            ++i;
+        }
     }
 
     if (reqs.has(kReturnKey) || reqs.has(kResult) || !additionalFields.empty()) {
@@ -982,7 +992,10 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         }
     }
 
-    auto fieldsSet = StringSet{fields.begin(), fields.end()};
+    // Keep track of the number of entries in the "fields" vector that represent our output;
+    // anything that gets added past this point by appendVectorUnique is coming from the vector of
+    // sort keys.
+    size_t numOfFields = fields.size();
     auto sortKeysSet = StringSet{sortKeys.begin(), sortKeys.end()};
     auto fieldsAndSortKeys = appendVectorUnique(std::move(fields), std::move(sortKeys));
 
@@ -1010,7 +1023,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             projects.insert({slot, std::move(sortKeyExpr)});
             outputs.set(std::make_pair(PlanStageSlots::kSortKey, name), slot);
         }
-        if (fieldsSet.count(name)) {
+        if (i < numOfFields) {
             outputs.set(std::make_pair(PlanStageSlots::kField, std::move(name)), outSlots[i]);
         }
     }
@@ -1349,27 +1362,66 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             std::move(stage), std::move(sortExpressions), root->nodeId());
 
     } else {
-        // Handle the case where two or more parts of the sort pattern have a common prefix.
-        orderBy = _slotIdGenerator.generateMultiple(1);
-        direction = {sbe::value::SortDirection::Ascending};
+        // When there's no limit on the sort, the dominating factor is number of comparisons
+        // (nlogn). A sort with a limit of k requires only nlogk comparisons. When k is small, the
+        // number of key generations (n) can actually dominate the runtime. So for all top-k sorts
+        // we use a "cheap" sort key: it's cheaper to construct but more expensive to compare. The
+        // assumption here is that k << n.
+
+        StringData sortKeyGenerator = sn->limit ? "generateCheapSortKey" : "generateSortKey";
 
         auto sortSpec = std::make_unique<sbe::value::SortSpec>(sn->pattern);
         auto sortSpecExpr =
             makeConstant(sbe::value::TypeTags::sortSpec,
                          sbe::value::bitcastFrom<sbe::value::SortSpec*>(sortSpec.release()));
 
+        const auto fullSortKeySlot = _slotIdGenerator.generate();
+
         // generateSortKey() will handle the parallel arrays check and sort key traversal for us,
         // so we don't need to generate our own sort key traversal logic in the SBE plan.
         stage = sbe::makeProjectStage(std::move(stage),
                                       root->nodeId(),
-                                      orderBy[0],
-                                      collatorSlot ? makeFunction("generateSortKey",
+                                      fullSortKeySlot,
+                                      collatorSlot ? makeFunction(sortKeyGenerator,
                                                                   std::move(sortSpecExpr),
                                                                   makeVariable(outputSlotId),
                                                                   makeVariable(*collatorSlot))
-                                                   : makeFunction("generateSortKey",
+                                                   : makeFunction(sortKeyGenerator,
                                                                   std::move(sortSpecExpr),
                                                                   makeVariable(outputSlotId)));
+
+        if (sortKeyGenerator == "generateSortKey") {
+            // In this case generateSortKey() produces a mem-comparable KeyString so we use for
+            // the comparison. We always sort in ascending order because the KeyString takes the
+            // ordering into account.
+            orderBy = {fullSortKeySlot};
+            direction = {sbe::value::SortDirection::Ascending};
+        } else {
+            // Generate the cheap sort key represented as an array then extract each component into
+            // a slot:
+            //
+            // sort [s1, s2] [asc, dsc] ...
+            // project s1=getElement(fullSortKey,0), s2=getElement(fullSortKey,1)
+            // project fullSortKey=generateSortKeyCheap(bson)
+            sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>> prjSlotToExprMap;
+
+            int i = 0;
+            for (const auto& part : sortPattern) {
+                auto sortKeySlot = _slotIdGenerator.generate();
+
+                orderBy.push_back(sortKeySlot);
+                direction.push_back(part.isAscending ? sbe::value::SortDirection::Ascending
+                                                     : sbe::value::SortDirection::Descending);
+
+                prjSlotToExprMap[sortKeySlot] =
+                    makeFunction("sortKeyComponentVectorGetElement",
+                                 makeVariable(fullSortKeySlot),
+                                 makeConstant(sbe::value::TypeTags::NumberInt32, i));
+                ++i;
+            }
+            stage = sbe::makeS<sbe::ProjectStage>(
+                std::move(stage), std::move(prjSlotToExprMap), root->nodeId());
+        }
     }
 
     // Slots for sort stage to forward to parent stage. Values in these slots are not used during

@@ -31,6 +31,7 @@
 
 #include <boost/optional.hpp>
 #include <functional>
+#include <set>
 
 #include "mongo/bson/mutable/damage_vector.h"
 #include "mongo/db/exec/collection_scan_common.h"
@@ -211,6 +212,11 @@ public:
      */
     virtual void saveUnpositioned() {
         save();
+    }
+
+    virtual uint64_t getCheckpointId() const {
+        uasserted(ErrorCodes::CommandNotSupported,
+                  "The current storage engine does not support checkpoint ids");
     }
 };
 
@@ -500,8 +506,13 @@ public:
 
     /**
      * Prints any storage engine provided metadata for the record with 'recordId'.
+     *
+     * If provided, saves any valid timestamps (startTs, startDurableTs, stopTs, stopDurableTs)
+     * related to this record in 'recordTimestamps'.
      */
-    virtual void printRecordMetadata(OperationContext* opCtx, const RecordId& recordId) const = 0;
+    virtual void printRecordMetadata(OperationContext* opCtx,
+                                     const RecordId& recordId,
+                                     std::set<Timestamp>* recordTimestamps) const = 0;
 
     /**
      * Returns a new cursor over this record store.
@@ -532,9 +543,23 @@ public:
     // higher level
 
     /**
-     * removes all Records
+     * Removes all Records.
      */
     Status truncate(OperationContext* opCtx);
+
+    /**
+     * Removes all Records in the range [minRecordId, maxRecordId] inclusive of both. The hint*
+     * arguments serve as a hint to the record store of how much data will be truncated. This is
+     * necessary for some implementations to avoid reading the data between the two RecordIds in
+     * order to update numRecords and dataSize correctly. Implementations are free to ignore the
+     * hints if they have a way of obtaining the correct values without the help of external
+     * callers.
+     */
+    Status rangeTruncate(OperationContext* opCtx,
+                         const RecordId& minRecordId = RecordId(),
+                         const RecordId& maxRecordId = RecordId(),
+                         int64_t hintDataSizeIncrement = 0,
+                         int64_t hintNumRecordsIncrement = 0);
 
     /**
      * Truncate documents newer than the document at 'end' from the capped
@@ -651,25 +676,26 @@ public:
 
     /**
      * Returns false if the oplog was dropped while waiting for a deletion request.
-     * This should only be called if StorageEngine::supportsOplogStones() is true.
-     * Storage engines supporting oplog stones must implement this function.
+     * This should only be called if StorageEngine::supportsOplogTruncateMarkers() is true.
+     * Storage engines supporting oplog truncate markers must implement this function.
      */
     virtual bool yieldAndAwaitOplogDeletionRequest(OperationContext* opCtx) {
         MONGO_UNREACHABLE;
     }
 
     /**
-     * This should only be called if StorageEngine::supportsOplogStones() is true.
-     * Storage engines supporting oplog stones must implement this function.
+     * This should only be called if StorageEngine::supportsOplogTruncateMarkers() is true.
+     * Storage engines supporting oplog truncate markers must implement this function.
      */
     virtual void reclaimOplog(OperationContext* opCtx) {
         MONGO_UNREACHABLE;
     }
 
     /**
-     * This should only be called if StorageEngine::supportsOplogStones() is true.
-     * Storage engines supporting oplog stones must implement this function.
-     * Populates `builder` with various statistics pertaining to oplog stones and oplog truncation.
+     * This should only be called if StorageEngine::supportsOplogTruncateMarkers() is true.
+     * Storage engines supporting oplog truncate markers must implement this function.
+     * Populates `builder` with various statistics pertaining to oplog truncate markers and oplog
+     * truncation.
      */
     virtual void getOplogTruncateStats(BSONObjBuilder& builder) const {
         MONGO_UNREACHABLE;
@@ -721,6 +747,11 @@ protected:
         const char* damageSource,
         const mutablebson::DamageVector& damages) = 0;
     virtual Status doTruncate(OperationContext* opCtx) = 0;
+    virtual Status doRangeTruncate(OperationContext* opCtx,
+                                   const RecordId& minRecordId,
+                                   const RecordId& maxRecordId,
+                                   int64_t hintDataSizeDiff,
+                                   int64_t hintNumRecordsDiff) = 0;
     virtual void doCappedTruncateAfter(OperationContext* opCtx,
                                        const RecordId& end,
                                        bool inclusive,

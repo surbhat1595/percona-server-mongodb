@@ -382,17 +382,6 @@ TenantMigrationDonorService::Instance::_makeRecipientCmdExecutor() {
         Client::initThread(threadName.c_str());
         auto client = Client::getCurrent();
         AuthorizationSession::get(*client)->grantInternalAuthorization(&cc());
-
-        // Ideally, we should also associate the client created by _recipientCmdExecutor with the
-        // TenantMigrationDonorService to make the opCtxs created by the task executor get
-        // registered in the TenantMigrationDonorService, and killed on stepdown. But that would
-        // require passing the pointer to the TenantMigrationService into the Instance and making
-        // constructInstance not const so we can set the client's decoration here. Right now there
-        // is no need for that since the task executor is only used with scheduleRemoteCommand and
-        // no opCtx will be created (the cancellation token is responsible for canceling the
-        // outstanding work on the task executor).
-        stdx::lock_guard<Client> lk(*client);
-        client->setSystemOperationKillableByStepdown(lk);
     };
 
     auto hookList = std::make_unique<rpc::EgressMetadataHookList>();
@@ -609,6 +598,8 @@ ExecutorFuture<repl::OpTime> TenantMigrationDonorService::Instance::_updateState
                            // Start blocking writes before getting an oplog slot to guarantee no
                            // writes to the tenant's data can commit with a timestamp after the
                            // block timestamp.
+                           // TODO (SERVER-72213) we should not pass _tenantId for shard merge
+                           // since shard merge does not have a _tenantId (empty string).
                            auto mtab = tenant_migration_access_blocker::
                                getTenantMigrationDonorAccessBlocker(_serviceContext, _tenantId);
                            invariant(mtab);

@@ -417,9 +417,16 @@ public:
         }
 
         const ProjectionName& scanProjectionName = indexingAvailability.getScanProjection();
-        for (const auto& [key, req] : reqMap.conjuncts()) {
-            if (key._projectionName != scanProjectionName) {
-                // We can only satisfy partial schema requirements using our root projection.
+
+        // We can only satisfy partial schema requirements using our root projection.
+        {
+            bool anyNonRoot = false;
+            PSRExpr::visitAnyShape(reqMap.getRoot(), [&](const PartialSchemaEntry& e) {
+                if (e.first._projectionName != scanProjectionName) {
+                    anyNonRoot = true;
+                }
+            });
+            if (anyNonRoot) {
                 return;
             }
         }
@@ -438,11 +445,8 @@ public:
                 requiresRootProjection = projectionsLeftToSatisfy.erase(scanProjectionName);
             }
 
-            for (const auto& entry : reqMap.conjuncts()) {
-                if (const auto& boundProjName = entry.second.getBoundProjectionName()) {
-                    // Project field only if it required.
-                    projectionsLeftToSatisfy.erase(*boundProjName);
-                }
+            for (const auto& [key, boundProjName] : getBoundProjections(reqMap.getRoot())) {
+                projectionsLeftToSatisfy.erase(boundProjName);
             }
             if (!projectionsLeftToSatisfy.getVector().empty()) {
                 // Unknown projections remain. Reject.
@@ -513,31 +517,27 @@ public:
 
                 // Compute the selectivities of predicates covered by index bounds and by residual
                 // predicates.
-                ResidualRequirementsWithCE residualReqsWithCE;
                 std::vector<SelectivityType> indexPredSels;
                 std::map<size_t, SelectivityType> indexPredSelMap;
                 {
-                    PartialSchemaKeySet residualQueryKeySet;
-                    for (const auto& [residualKey, residualReq, entryIndex] : residualReqs) {
-                        // Find the indexed requirement this residual requirement refers to.
-                        auto entryIt = reqMap.conjuncts().cbegin();
-                        std::advance(entryIt, entryIndex);
-
-                        residualQueryKeySet.emplace(entryIt->first);
-                        residualReqsWithCE.emplace_back(
-                            residualKey, residualReq, partialSchemaKeyCE.at(entryIndex).second);
+                    std::set<size_t> residIndexes;
+                    if (residualReqs) {
+                        ResidualRequirements::visitDNF(
+                            *residualReqs, [&](const ResidualRequirement& residReq) {
+                                residIndexes.emplace(residReq._entryIndex);
+                            });
                     }
 
+                    // Compute the selectivity of the indexed requirements by excluding reqs tracked
+                    // in 'residIndexes'.
                     if (scanGroupCE > 0.0) {
-                        size_t entryIndex = 0;
-                        for (const auto& [key, req] : reqMap.conjuncts()) {
-                            if (residualQueryKeySet.count(key) == 0) {
+                        for (size_t entryIndex = 0; entryIndex < reqMap.numLeaves(); entryIndex++) {
+                            if (residIndexes.count(entryIndex) == 0) {
                                 const SelectivityType sel =
                                     partialSchemaKeyCE.at(entryIndex).second / scanGroupCE;
                                 indexPredSels.push_back(sel);
                                 indexPredSelMap.emplace(entryIndex, sel);
                             }
-                            entryIndex++;
                         }
                     }
                 }
@@ -599,11 +599,14 @@ public:
                                                currentGroupCE,
                                                scanGroupCE);
 
-                lowerPartialSchemaRequirements(scanGroupCE,
-                                               std::move(indexPredSels),
-                                               residualReqsWithCE,
-                                               _pathToInterval,
-                                               builder);
+                if (residualReqs) {
+                    auto reqsWithCE = createResidualReqsWithCE(*residualReqs, partialSchemaKeyCE);
+                    lowerPartialSchemaRequirements(scanGroupCE,
+                                                   std::move(indexPredSels),
+                                                   std::move(reqsWithCE),
+                                                   _pathToInterval,
+                                                   builder);
+                }
 
                 if (needsUniqueStage) {
                     // Insert unique stage if we need to, after the residual requirements.
@@ -634,7 +637,7 @@ public:
             }
 
             FieldProjectionMap fieldProjectionMap = scanParams->_fieldProjectionMap;
-            ResidualRequirements residualReqs = scanParams->_residualRequirements;
+            auto residualReqs = scanParams->_residualRequirements;
             removeRedundantResidualPredicates(
                 requiredProjections, residualReqs, fieldProjectionMap);
 
@@ -668,14 +671,12 @@ public:
                 rule = PhysicalRewriteType::SargableToSeek;
             }
 
-            ResidualRequirementsWithCE residualReqsWithCE;
-            for (const auto& [residualKey, residualReq, entryIndex] : residualReqs) {
-                residualReqsWithCE.emplace_back(
-                    residualKey, residualReq, partialSchemaKeyCE.at(entryIndex).second);
+            if (residualReqs) {
+                auto reqsWithCE = createResidualReqsWithCE(*residualReqs, partialSchemaKeyCE);
+                lowerPartialSchemaRequirements(
+                    baseCE, {} /*indexPredSels*/, std::move(reqsWithCE), _pathToInterval, builder);
             }
 
-            lowerPartialSchemaRequirements(
-                baseCE, {} /*indexPredSels*/, residualReqsWithCE, _pathToInterval, builder);
             optimizeChildrenNoAssert(_queue,
                                      kDefaultPriority,
                                      rule,

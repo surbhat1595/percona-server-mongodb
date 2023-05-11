@@ -446,9 +446,6 @@ bool CurOp::completeAndLogOperation(logv2::LogComponent component,
     _debug.executionTime = duration_cast<Microseconds>(elapsedTimeExcludingPauses());
     const auto executionTimeMillis = durationCount<Milliseconds>(_debug.executionTime);
 
-    // TODO SERVER-73727 remove telemetry collection here once metrics are aggregated in cursor
-    telemetry::collectTelemetry(opCtx, CurOp::get(opCtx)->debug());
-
     if (_debug.isReplOplogGetMore) {
         oplogGetMoreStats.recordMillis(executionTimeMillis);
     }
@@ -911,8 +908,12 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->add("databaseVersionRefreshDuration", databaseVersionRefreshMillis);
     }
 
-    if (shardVersionRefreshMillis > Milliseconds::zero()) {
-        pAttrs->add("shardVersionRefreshDuration", shardVersionRefreshMillis);
+    if (placementVersionRefreshMillis > Milliseconds::zero()) {
+        pAttrs->add("placementVersionRefreshDuration", placementVersionRefreshMillis);
+    }
+
+    if (totalOplogSlotDurationMicros > Microseconds::zero()) {
+        pAttrs->add("totalOplogSlotDuration", totalOplogSlotDurationMicros);
     }
 
     if (dataThroughputLastSecond) {
@@ -1259,6 +1260,11 @@ void OpDebug::append(OperationContext* opCtx,
         b.appendNumber("planningTimeMicros", durationCount<Microseconds>(planningTime));
     }
 
+    if (totalOplogSlotDurationMicros > Microseconds::zero()) {
+        b.appendNumber("totalOplogSlotDurationMicros",
+                       durationCount<Microseconds>(totalOplogSlotDurationMicros));
+    }
+
     if (!execStats.isEmpty()) {
         b.append("execStats", std::move(execStats));
     }
@@ -1586,6 +1592,13 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
 
     addIfNeeded("planningTimeMicros", [](auto field, auto args, auto& b) {
         b.appendNumber(field, durationCount<Microseconds>(args.op.planningTime));
+    });
+
+    addIfNeeded("totalOplogSlotDurationMicros", [](auto field, auto args, auto& b) {
+        if (args.op.totalOplogSlotDurationMicros > Nanoseconds::zero()) {
+            b.appendNumber(field,
+                           durationCount<Microseconds>(args.op.totalOplogSlotDurationMicros));
+        }
     });
 
     addIfNeeded("execStats", [](auto field, auto args, auto& b) {

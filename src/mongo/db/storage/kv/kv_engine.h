@@ -240,21 +240,6 @@ public:
                       "The current storage engine doesn't support backup mode");
     }
 
-    virtual void addIndividuallyCheckpointedIndex(const std::string& ident) {
-        uasserted(ErrorCodes::CommandNotSupported,
-                  "The current storage engine does not support checkpoints");
-    }
-
-    virtual void clearIndividuallyCheckpointedIndexes() {
-        uasserted(ErrorCodes::CommandNotSupported,
-                  "The current storage engine does not support checkpoints");
-    }
-
-    virtual bool isInIndividuallyCheckpointedIndexes(const std::string& ident) const {
-        uasserted(ErrorCodes::CommandNotSupported,
-                  "The current storage engine does not support checkpoints");
-    }
-
     /**
      * Returns whether the KVEngine supports checkpoints.
      */
@@ -263,12 +248,6 @@ public:
     }
 
     virtual void checkpoint(OperationContext* opCtx) {}
-
-    virtual std::unique_ptr<StorageEngine::CheckpointLock> getCheckpointLock(
-        OperationContext* opCtx, StorageEngine::CheckpointLock::Mode mode) {
-        uasserted(ErrorCodes::CommandNotSupported,
-                  "The current storage engine does not support checkpoints");
-    }
 
     /**
      * Returns true if the KVEngine is ephemeral -- that is, it is NOT persistent and all data is
@@ -408,9 +387,9 @@ public:
     }
 
     /**
-     * See `StorageEngine::supportsOplogStones`
+     * See `StorageEngine::supportsOplogTruncateMarkers`
      */
-    virtual bool supportsOplogStones() const {
+    virtual bool supportsOplogTruncateMarkers() const {
         return false;
     }
 

@@ -29,91 +29,39 @@
 
 #pragma once
 
-#include "mongo/db/s/cumulative_metrics_state_holder.h"
+#include "mongo/db/s/global_index/global_index_cloner_gen.h"
+#include "mongo/db/s/global_index/global_index_coordinator_state_enum_placeholder.h"
 #include "mongo/db/s/global_index/global_index_cumulative_metrics_field_name_provider.h"
-#include "mongo/db/s/sharding_data_transform_cumulative_metrics.h"
+#include "mongo/db/s/metrics/cumulative_metrics_state_holder.h"
+#include "mongo/db/s/metrics/sharding_data_transform_cumulative_metrics.h"
+#include "mongo/db/s/metrics/sharding_data_transform_metrics_macros.h"
+#include "mongo/db/s/metrics/with_state_management_for_cumulative_metrics.h"
 
 namespace mongo {
 namespace global_index {
 
-class GlobalIndexCumulativeMetrics : public ShardingDataTransformCumulativeMetrics {
+DEFINE_IDL_ENUM_SIZE_TEMPLATE_HELPER(GlobalIndexMetrics,
+                                     GlobalIndexCoordinatorStateEnumPlaceholder,
+                                     GlobalIndexClonerStateEnum)
+
+using Base = WithStateManagementForCumulativeMetrics<ShardingDataTransformCumulativeMetrics,
+                                                     GlobalIndexMetricsEnumSizeTemplateHelper,
+                                                     GlobalIndexCoordinatorStateEnumPlaceholder,
+                                                     GlobalIndexClonerStateEnum>;
+
+
+class GlobalIndexCumulativeMetrics : public Base {
 public:
-    // TODO: Replace with actual Global Index Cumulative Metrics state enums by role
-    enum class CoordinatorStateEnum : int32_t {
-        kUnused = -1,
-        kInitializing,
-        kPreparingToDonate,
-        kCloning,
-        kApplying,
-        kBlockingWrites,
-        kAborting,
-        kCommitting,
-        kDone,
-        kNumStates
-    };
-
-    enum class RecipientStateEnum : int32_t {
-        kUnused = -1,
-        kCloning,
-        kReadyToCommit,
-        kDone,
-        kNumStates
-    };
-
     GlobalIndexCumulativeMetrics();
 
-    template <typename T>
-    void onStateTransition(boost::optional<T> before, boost::optional<T> after);
-    static StringData fieldNameFor(CoordinatorStateEnum state,
+    static StringData fieldNameFor(GlobalIndexCoordinatorStateEnumPlaceholder state,
                                    const GlobalIndexCumulativeMetricsFieldNameProvider* provider);
-    static StringData fieldNameFor(RecipientStateEnum state,
+    static StringData fieldNameFor(GlobalIndexClonerStateEnum state,
                                    const GlobalIndexCumulativeMetricsFieldNameProvider* provider);
 
 private:
-    template <typename T>
-    const AtomicWord<int64_t>* getStateCounter(T state) const;
     const GlobalIndexCumulativeMetricsFieldNameProvider* _fieldNames;
-
-    CumulativeMetricsStateHolder<CoordinatorStateEnum,
-                                 static_cast<size_t>(CoordinatorStateEnum::kNumStates)>
-        _coordinatorStateList;
-    CumulativeMetricsStateHolder<RecipientStateEnum,
-                                 static_cast<size_t>(RecipientStateEnum::kNumStates)>
-        _recipientStateList;
-
-    template <typename T>
-    auto getStateListForRole() const {
-        if constexpr (std::is_same<T, CoordinatorStateEnum>::value) {
-            return &_coordinatorStateList;
-        } else if constexpr (std::is_same<T, RecipientStateEnum>::value) {
-            return &_recipientStateList;
-        } else {
-            MONGO_UNREACHABLE;
-        }
-    }
-
-    template <typename T>
-    auto getMutableStateListForRole() {
-        if constexpr (std::is_same<T, CoordinatorStateEnum>::value) {
-            return &_coordinatorStateList;
-        } else if constexpr (std::is_same<T, RecipientStateEnum>::value) {
-            return &_recipientStateList;
-        } else {
-            MONGO_UNREACHABLE;
-        }
-    }
 };
-
-template <typename T>
-void GlobalIndexCumulativeMetrics::onStateTransition(boost::optional<T> before,
-                                                     boost::optional<T> after) {
-    getMutableStateListForRole<T>()->onStateTransition(before, after);
-}
-
-template <typename T>
-const AtomicWord<int64_t>* GlobalIndexCumulativeMetrics::getStateCounter(T state) const {
-    return getStateListForRole<T>()->getStateCounter(state);
-}
 
 }  // namespace global_index
 }  // namespace mongo

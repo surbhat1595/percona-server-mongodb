@@ -59,14 +59,21 @@
 #include "windows_shim.h"
 #endif
 
-#define TESTUTIL_ENV_CONFIG_TIERED \
-    ",tiered_storage=(bucket=./"   \
-    "bucket,bucket_prefix=pfx-,local_retention=%d,name=%s)"
+#define DIR_STORE_BUCKET_NAME "bucket"
+#define S3_DEFAULT_BUCKET_NAME "s3testext;ap-southeast-2"
+
+#define DIR_STORE "dir_store"
+#define S3_STORE "s3_store"
+
+#define TESTUTIL_ENV_CONFIG_TIERED                   \
+    ",tiered_storage=(bucket=%s"                     \
+    ",bucket_prefix=pfx-,local_retention=%d,name=%s" \
+    ",auth_token=%s)"
 #define TESTUTIL_ENV_CONFIG_TIERED_EXT                                         \
     ",extensions=(%s/ext/storage_sources/%s/"                                  \
     "libwiredtiger_%s.so=(early_load=true,"                                    \
     "config=\"(delay_ms=%" PRIu64 ",error_ms=%" PRIu64 ",force_delay=%" PRIu64 \
-    ",force_error=%" PRIu64 ",verbose=1)\"))"
+    ",force_error=%" PRIu64 ",verbose=0)\"))"
 #define TESTUTIL_ENV_CONFIG_REC \
     ",log=(recover=on,remove=false),statistics=(all),statistics_log=(json,on_close,wait=1)"
 #define TESTUTIL_ENV_CONFIG_COMPAT ",compatibility=(release=\"2.9\")"
@@ -427,6 +434,7 @@ void op_create_unique(void *);
 void op_cursor(void *);
 void op_drop(void *);
 bool testutil_is_flag_set(const char *);
+bool testutil_is_dir_store(TEST_OPTS *);
 void testutil_build_dir(TEST_OPTS *, char *, int);
 void testutil_clean_test_artifacts(const char *);
 void testutil_clean_work_dir(const char *);
@@ -455,12 +463,14 @@ void testutil_random_from_seed(WT_RAND_STATE *, uint64_t);
 #ifndef _WIN32
 void testutil_sleep_wait(uint32_t, pid_t);
 #endif
+void testutil_system(const char *fmt, ...) WT_GCC_FUNC_ATTRIBUTE((format(printf, 1, 2)));
 void testutil_wiredtiger_open(
   TEST_OPTS *, const char *, const char *, WT_EVENT_HANDLER *, WT_CONNECTION **, bool, bool);
 void testutil_tiered_begin(TEST_OPTS *);
 void testutil_tiered_flush_complete(TEST_OPTS *, WT_SESSION *, void *);
 void testutil_tiered_sleep(TEST_OPTS *, WT_SESSION *, uint64_t, bool *);
 uint64_t testutil_time_us(WT_SESSION *);
+void testutil_verify_src_backup(WT_CONNECTION *, const char *, const char *, char *);
 void testutil_work_dir_from_path(char *, size_t, const char *);
 WT_THREAD_RET thread_append(void *);
 

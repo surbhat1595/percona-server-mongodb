@@ -78,6 +78,281 @@ index build on `{lastName: 1}`:
   'ns': 'test.employees'}
 ```
 
+### $listCatalog Aggregation Pipeline Operator
+
+[$listCatalog](https://github.com/mongodb/mongo/blob/532c0679ef4fc8313a9e00a1334ca18e04ff6914/src/mongo/db/pipeline/document_source_list_catalog.h#L46) is an internal aggregation pipeline operator that may be used to inspect the contents
+of the durable catalog on a running server. For catalog entries that refer to views, additional
+information is retrieved from the enclosing database's `system.views` collection. The $listCatalog
+is generally run on the admin database to obtain a complete view of the durable catalog, provided
+the caller has the required
+[administrative privileges](https://github.com/mongodb/mongo/blob/532c0679ef4fc8313a9e00a1334ca18e04ff6914/src/mongo/db/pipeline/document_source_list_catalog.cpp#L55).
+Example command invocation and output from
+[list_catalog.js](https://github.com/mongodb/mongo/blob/532c0679ef4fc8313a9e00a1334ca18e04ff6914/jstests/core/catalog/list_catalog.js#L98)):
+
+```
+> const adminDB = db.getSiblingDB('admin');
+> adminDB.aggregate([{$listCatalog: {}}]);
+
+Collectionless $listCatalog: [
+    {
+        "db" : "test",
+        "name" : "system.views",
+        "type" : "collection",
+        "md" : {
+            "ns" : "test.system.views",
+            "options" : {
+                "uuid" : UUID("a132c4ee-a1f4-4251-8eb2-c9f4afbeb9c1")
+            },
+            "indexes" : [
+                {
+                    "spec" : {
+                        "v" : 2,
+                        "key" : {
+                            "_id" : 1
+                        },
+                        "name" : "_id_"
+                    },
+                    "ready" : true,
+                    "multikey" : false,
+                    "multikeyPaths" : {
+                        "_id" : BinData(0,"AA==")
+                    },
+                    "head" : NumberLong(0),
+                    "backgroundSecondary" : false
+                }
+            ]
+        },
+        "idxIdent" : {
+            "_id_" : "index-6-2245557986372974053"
+        },
+        "ns" : "test.system.views",
+        "ident" : "collection-5-2245557986372974053"
+    },
+    {
+        "db" : "list_catalog",
+        "name" : "simple",
+        "type" : "collection",
+        "md" : {
+            "ns" : "list_catalog.simple",
+            "options" : {
+                "uuid" : UUID("a86445c2-3e3c-42ae-96be-5d451c977ed6")
+            },
+            "indexes" : [
+                {
+                    "spec" : {
+                        "v" : 2,
+                        "key" : {
+                            "_id" : 1
+                        },
+                        "name" : "_id_"
+                    },
+                    "ready" : true,
+                    "multikey" : false,
+                    "multikeyPaths" : {
+                        "_id" : BinData(0,"AA==")
+                    },
+                    "head" : NumberLong(0),
+                    "backgroundSecondary" : false
+                },
+                {
+                    "spec" : {
+                        "v" : 2,
+                        "key" : {
+                            "a" : 1
+                        },
+                        "name" : "a_1"
+                    },
+                    "ready" : true,
+                    "multikey" : false,
+                    "multikeyPaths" : {
+                        "a" : BinData(0,"AA==")
+                    },
+                    "head" : NumberLong(0),
+                    "backgroundSecondary" : false
+                }
+            ]
+        },
+        "idxIdent" : {
+            "_id_" : "index-62-2245557986372974053",
+            "a_1" : "index-63-2245557986372974053"
+        },
+        "ns" : "list_catalog.simple",
+        "ident" : "collection-61-2245557986372974053"
+    },
+    {
+        "db" : "list_catalog",
+        "name" : "system.views",
+        "type" : "collection",
+        "md" : {
+            "ns" : "list_catalog.system.views",
+            "options" : {
+                "uuid" : UUID("2f76dd14-1d9a-42e1-8716-c1165cdbb00f")
+            },
+            "indexes" : [
+                {
+                    "spec" : {
+                        "v" : 2,
+                        "key" : {
+                            "_id" : 1
+                        },
+                        "name" : "_id_"
+                    },
+                    "ready" : true,
+                    "multikey" : false,
+                    "multikeyPaths" : {
+                        "_id" : BinData(0,"AA==")
+                    },
+                    "head" : NumberLong(0),
+                    "backgroundSecondary" : false
+                }
+            ]
+        },
+        "idxIdent" : {
+            "_id_" : "index-65-2245557986372974053"
+        },
+        "ns" : "list_catalog.system.views",
+        "ident" : "collection-64-2245557986372974053"
+    },
+    {
+        "db" : "list_catalog",
+        "name" : "simple_view",
+        "type" : "view",
+        "ns" : "list_catalog.simple_view",
+        "_id" : "list_catalog.simple_view",
+        "viewOn" : "simple",
+        "pipeline" : [
+            {
+                "$project" : {
+                    "a" : 0
+                }
+            }
+        ]
+    },
+    ...
+]
+
+```
+
+The `$listCatalog` also supports running on a specific collection. See example in
+[list_catalog.js](https://github.com/mongodb/mongo/blob/532c0679ef4fc8313a9e00a1334ca18e04ff6914/jstests/core/catalog/list_catalog.js#L77).
+
+This aggregation pipeline operator is primarily intended for internal diagnostics and applications that require information not
+currently provided by [listDatabases](https://www.mongodb.com/docs/v6.0/reference/command/listDatabases/),
+[listCollections](https://www.mongodb.com/docs/v6.0/reference/command/listCollections/), and
+[listIndexes](https://www.mongodb.com/docs/v6.0/reference/command/listIndexes/). The three commands referenced are part of the
+[Stable API](https://www.mongodb.com/docs/v6.0/reference/stable-api/) with a well-defined output format (see
+[listIndexes IDL](https://github.com/mongodb/mongo/blob/532c0679ef4fc8313a9e00a1334ca18e04ff6914/src/mongo/db/list_indexes.idl#L225)).
+
+#### Read Concern Support
+
+In terms of accessing the current state of databases, collections, and indexes in a running server,
+the `$listCatalog` provides a consistent snapshot of the catalog in a single command invocation
+using the default or user-provided
+[read concern](https://www.mongodb.com/docs/v6.0/reference/method/db.collection.aggregate/). The
+[list_catalog_read_concern.js](https://github.com/mongodb/mongo/blob/532c0679ef4fc8313a9e00a1334ca18e04ff6914/jstests/noPassthrough/list_catalog_read_concern.js#L46)
+contains examples of using $listCatalog with a variety of read concern settings.
+
+The tradtional alternative would have involved a `listDatabases` command followed by a series of
+`listCollections` and `listIndexes` calls, with the downside of reading the catalog at a different
+point in time during each command invocation.
+
+#### Examples of differences between listIndexes and $listCatalog results
+
+The `$listCatalog` operator does not format its results with the IDL-derived formatters generated for the `listIndexes` command.
+This has implications for applications that read the durable catalog using $listCatalog rather than the recommended listIndexes
+command. Below are a few examples where the `listIndexes` results may differ from `$listCatalog`.
+
+| Index Type | Index Option | createIndexes | listIndexes | $listCatalog |
+| ---------- | ------------ | ------------- | ----------- | ------------ |
+| [Sparse](https://www.mongodb.com/docs/v6.0/core/index-sparse/) | [sparse (safeBool)](https://github.com/mongodb/mongo/blob/532c0679ef4fc8313a9e00a1334ca18e04ff6914/src/mongo/db/list_indexes.idl#L84) | `db.t.createIndex({a: 1}, {sparse: 12345})` | `{ "v" : 2, "key" : { "a" : 1 }, "name" : "a_1", "sparse" : true }` | `{ "v" : 2, "key" : { "a" : 1 }, "name" : "a_1", "sparse" : 12345 }` |
+| [TTL](https://www.mongodb.com/docs/v6.0/core/index-ttl/) | [expireAfterSeconds (safeInt)](https://github.com/mongodb/mongo/blob/532c0679ef4fc8313a9e00a1334ca18e04ff6914/src/mongo/db/list_indexes.idl#L88) | `db.t.createIndex({created: 1}, {expireAfterSeconds: 10.23})` | `{ "v" : 2, "key" : { "created" : 1 }, "name" : "created_1", "expireAfterSeconds" : 10 }` | `{ "v" : 2, "key" : { "created" : 1 }, "name" : "created_1", "expireAfterSeconds" : 10.23 }` |
+| [Geo](https://www.mongodb.com/docs/v6.0/tutorial/build-a-2d-index/) | [bits (safeInt)](https://github.com/mongodb/mongo/blob/532c0679ef4fc8313a9e00a1334ca18e04ff6914/src/mongo/db/list_indexes.idl#L117) | `db.t.createIndex({p: '2d'}, {bits: 16.578})` | `{ "v" : 2, "key" : { "p" : "2d" }, "name" : "p_2d", "bits" : 16 }` | `{ "v" : 2, "key" : { "p" : "2d" }, "name" : "p_2d", "bits" : 16.578 }` |
+
+#### $listCatalog in a sharded cluster
+
+The `$listCatalog` operator supports running in a sharded cluster where the `$listCatalog`
+result from each shard is combined at the router with additional identifying information similar
+to the [shard](https://www.mongodb.com/docs/v6.0/reference/operator/aggregation/indexStats/#std-label-indexStats-output-shard) output field
+of the `$indexStats` operator. The following is a sample test output from
+[sharding/list_catalog.js](https://github.com/mongodb/mongo/blob/532c0679ef4fc8313a9e00a1334ca18e04ff6914/jstests/sharding/list_catalog.js#L40):
+
+```
+[
+    {
+        "db" : "list_catalog",
+        "name" : "coll",
+        "type" : "collection",
+        "shard" : "list_catalog-rs0",
+        "md" : {
+            "ns" : "list_catalog.coll",
+            "options" : {
+                "uuid" : UUID("17886eb0-f157-45c9-9b63-efb8273f51da")
+            },
+            "indexes" : [
+                {
+                    "spec" : {
+                        "v" : 2,
+                        "key" : {
+                            "_id" : 1
+                        },
+                        "name" : "_id_"
+                    },
+                    "ready" : true,
+                    "multikey" : false,
+                    "multikeyPaths" : {
+                        "_id" : BinData(0,"AA==")
+                    },
+                    "head" : NumberLong(0),
+                    "backgroundSecondary" : false
+                }
+            ]
+        },
+        "idxIdent" : {
+            "_id_" : "index-56--2997668048670645427"
+        },
+        "ns" : "list_catalog.coll",
+        "ident" : "collection-55--2997668048670645427"
+    },
+    {
+        "db" : "list_catalog",
+        "name" : "coll",
+        "type" : "collection",
+        "shard" : "list_catalog-rs1",
+        "md" : {
+            "ns" : "list_catalog.coll",
+            "options" : {
+                "uuid" : UUID("17886eb0-f157-45c9-9b63-efb8273f51da")
+            },
+            "indexes" : [
+                {
+                    "spec" : {
+                        "v" : 2,
+                        "key" : {
+                            "_id" : 1
+                        },
+                        "name" : "_id_"
+                    },
+                    "ready" : true,
+                    "multikey" : false,
+                    "multikeyPaths" : {
+                        "_id" : BinData(0,"AA==")
+                    },
+                    "head" : NumberLong(0),
+                    "backgroundSecondary" : false
+                }
+            ]
+        },
+        "idxIdent" : {
+            "_id_" : "index-55--2220352983339007214"
+        },
+        "ns" : "list_catalog.coll",
+        "ident" : "collection-53--2220352983339007214"
+    }
+]
+
+```
+
+
 ## Collection Catalog
 The `CollectionCatalog` class holds in-memory state about all collections in all databases and is a
 cache of the [durable catalog](#durable-catalog) state. It provides the following functionality:
@@ -1112,26 +1387,26 @@ their own WT table. [The appendix](#Collection-and-Index-to-Table-relationship) 
 relationship between creating/dropping a collection and the underlying creation/deletion
 of a WT table which justifies the following logic. When reconciling, every WT table
 that is not "pointed to" by a MongoDB record store or index [gets
-dropped](https://github.com/mongodb/mongo/blob/e485c1a8011d85682cb8dafa87ab92b9c23daa66/src/mongo/db/storage/storage_engine_impl.cpp#L406-L408
+dropped](https://github.com/mongodb/mongo/blob/6c9adc9a2d518fa046c7739e043a568f9bee6931/src/mongo/db/storage/storage_engine_impl.cpp#L663-L676
 "Github"). A MongoDB record store that points to a WT table that doesn't exist is considered [a
 fatal
-error](https://github.com/mongodb/mongo/blob/e485c1a8011d85682cb8dafa87ab92b9c23daa66/src/mongo/db/storage/storage_engine_impl.cpp#L412-L425
-"Github"). An index that doesn't point to a WT table is [scheduled to be
-rebuilt](https://github.com/mongodb/mongo/blob/e485c1a8011d85682cb8dafa87ab92b9c23daa66/src/mongo/db/storage/storage_engine_impl.cpp#L479
-"Github"). The index logic is more relaxed because indexes do not go through two-phase drop when
-running with enableMajorityReadConcern=false.
+error](https://github.com/mongodb/mongo/blob/6c9adc9a2d518fa046c7739e043a568f9bee6931/src/mongo/db/storage/storage_engine_impl.cpp#L679-L693
+"Github"). An index that doesn't point to a WT table is [ignored and logged](https://github.com/mongodb/mongo/blob/6c9adc9a2d518fa046c7739e043a568f9bee6931/src/mongo/db/storage/storage_engine_impl.cpp#L734-L746
+"Github") because there are cetain cases where the catalog entry may reference an index ident which
+is no longer present, such as when an unclean shutdown occurs before a checkpoint is taken during
+startup recovery.
 
-The second step of recovering the catalog is [reconciling unfinished index builds](https://github.com/mongodb/mongo/blob/e485c1a8011d85682cb8dafa87ab92b9c23daa66/src/mongo/db/storage/storage_engine_impl.cpp#L427-L432
-"Github"). In 4.7+ the story will simplify, but right now there are a few outcomes:
-* An [unfinished FCV 4.2- background index build on the primary](https://github.com/mongodb/mongo/blob/e485c1a8011d85682cb8dafa87ab92b9c23daa66/src/mongo/db/storage/storage_engine_impl.cpp#L527-L542 "Github") will be discarded (no oplog entry
-  was ever written saying the index exists).
-* An [unfinished FCV 4.2- background index build on a secondary](https://github.com/mongodb/mongo/blob/e485c1a8011d85682cb8dafa87ab92b9c23daa66/src/mongo/db/storage/storage_engine_impl.cpp#L513-L525 "Github") will be rebuilt in the foreground
-  (an oplog entry was written saying the index exists).
-* An [unfinished FCV 4.4\+](https://github.com/mongodb/mongo/blob/e485c1a8011d85682cb8dafa87ab92b9c23daa66/src/mongo/db/storage/storage_engine_impl.cpp#L483-L511 "Github") background index build will be restarted in the background.
-    * If the server was previously shut down cleanly, we may be able to [resume the index build](#resumable-index-builds)
-      at the phase that it was stopped in. This resume information is stored in an internal ident
-      written at shutdown. If we fail to resume the index build, we will clean up the internal ident
-      and restart the index build in the background.
+The second step of recovering the catalog is [reconciling unfinished index builds](https://github.com/mongodb/mongo/blob/6c9adc9a2d518fa046c7739e043a568f9bee6931/src/mongo/db/storage/storage_engine_impl.cpp#L695-L699
+"Github"), that could have different outcomes:
+* An [index build with a UUID](https://github.com/mongodb/mongo/blob/6c9adc9a2d518fa046c7739e043a568f9bee6931/src/mongo/db/storage/storage_engine_impl.cpp#L748-L751 "Github")
+is an unfinished two-phase build and must be restarted, unless we are
+[resuming it](#resumable-index-builds). This resume information is stored in an internal ident
+written at (clean) shutdown. If we fail to resume the index build, we will clean up the internal
+ident and restart the index build in the background.
+* An [unfinished index build on standalone](https://github.com/mongodb/mongo/blob/6c9adc9a2d518fa046c7739e043a568f9bee6931/src/mongo/db/storage/storage_engine_impl.cpp#L792-L794 "Github")
+will be discarded (no oplog entry was ever written saying the index exists).
+
+
 
 After storage completes its recovery, control is passed to [replication
 recovery](https://github.com/mongodb/mongo/blob/master/src/mongo/db/repl/README.md#startup-recovery
@@ -1277,7 +1552,7 @@ Flow Control is only concerned whether an operation is 'immediate' priority and 
 * `kNormal` - An operation that should be throttled when the server is under load. If an operation is throttled, it will not affect availability or observability. Most operations, both user and internal, should use this priority unless they qualify as 'kLow' or 'kImmediate' priority.
 * `kLow` - It's of low importance that the operation acquires a ticket in Execution Admission Control. Reserved for background tasks that have no other operations dependent on them. The operation will be throttled under load and make significantly less progress compared to operations of higher priorities in the Execution Admission Control.
 
-Developers should consciously decide admission priority when adding new features. Admission priority can be set through the [SetAdmissionPriorityForLock](https://github.com/10gen/mongo/blob/r6.3.0-rc0/src/mongo/db/concurrency/lock_state.h#L428) RAII.
+Developers should consciously decide admission priority when adding new features. Admission priority can be set through the [ScopedAdmissionPriorityForLock](https://github.com/mongodb/mongo/blob/r6.3.0-rc0/src/mongo/db/concurrency/lock_state.h#L428) RAII.
 
 ### Developer Guidelines for Declaring Low Admission Priority
 Developers must evaluate the consequences of each low priority operation from falling too far behind, and implement safeguards to avoid any undesirable behaviors for excessive delays in low priority operations.
@@ -1288,7 +1563,7 @@ GlobalLock with low priority.
 
 For example, since TTL deletes can be an expensive background task, they should default to low
 priority. However, it's important they don't fall too far behind TTL inserts - otherwise, there is a risk of
-unbounded collection growth. To remedy this issue, TTL deletes on a collection [are reprioritized](https://github.com/10gen/mongo/blob/d1a0e34e1e67d4a2b23104af2512d14290b25e5f/src/mongo/db/ttl.idl#L96) to normal priority if they can't catch up after n-subpasses.
+unbounded collection growth. To remedy this issue, TTL deletes on a collection [are reprioritized](https://github.com/mongodb/mongo/blob/d1a0e34e1e67d4a2b23104af2512d14290b25e5f/src/mongo/db/ttl.idl#L96) to normal priority if they can't catch up after n-subpasses.
 
 ## Execution Admission Control
 A ticketing mechanism that limits the number of concurrent storage engine transactions in a single mongod to reduce contention on storage engine resources.
@@ -1377,9 +1652,8 @@ by another configurable constant (the ticket "multiplier" constant). This produc
 of tickets to be assigned in the next period.
 
 When the Flow Control mechanism is disabled, the ticket refresher mechanism always allows one
-billion flow control ticket acquisitions per second. The Flow Control mechanism can be disabled
-explicitly via a server parameter and implicitly via setting enableMajorityReadConcern to
-false. Additionally, the mechanism is disabled on nodes that cannot accept writes.
+billion flow control ticket acquisitions per second. The Flow Control mechanism can be disabled via 
+a server parameter. Additionally, the mechanism is disabled on nodes that cannot accept writes.
 
 Criteria #2 and #3 are determined using a sampling mechanism that periodically stores the necessary
 data as primaries process writes. The sampling mechanism executes regardless of whether Flow Control
@@ -1603,32 +1877,34 @@ The oplog collection can be truncated both at the front end (most recent entries
 (the oldest entries). The capped setting on the oplog collection causes the oldest oplog entries to
 be deleted when new writes increase the collection size past the cap. MongoDB using the WiredTiger
 storage engine with `--replSet` handles oplog collection deletion specially via a purpose built
-[OplogStones](#wiredtiger-oplogstones) mechanism, ignoring the generic capped collection deletion
+[OplogTruncateMarkers](#wiredtiger-oplogtruncatemarkers) mechanism, ignoring the generic capped collection deletion
 mechanism. The front of the oplog may be truncated back to a particular timestamp during replication
 startup recovery or replication rollback.
 
-### WiredTiger OplogStones
+### WiredTiger OplogTruncateMarkers
 
 The WiredTiger storage engine disregards the regular capped collection deletion mechanism for the
-oplog collection and instead uses `OplogStones` to improve performance by batching deletes. The
-oplog is broken up into a number of stones. Each stone tracks a range of the oplog, the number of
-bytes in that range, and the last (newest) entry's record ID. A new stone is created when existing
-stones fill up; and the oldest stone's oplog is deleted when the oplog size exceeds its cap size
-setting.
+oplog collection and instead uses `OplogTruncateMarkers` to improve performance by batching deletes.
+The oplog is broken up into a number of truncate markers. Each truncate marker tracks a range of the
+oplog, the number of bytes in that range, and the last (newest) entry's record ID. A new truncate
+marker is created when the in-progress marker segment contains more than the minimum bytes needed to
+complete the segment; and the oldest truncate marker's oplog is deleted when the oplog size exceeds
+its cap size setting.
 
 ### Special Timestamps That Will Not Be Truncated
 
-The WiredTiger integration layer's `OplogStones` implementation will stall deletion waiting for
-certain significant tracked timestamps to move forward past entries in the oldest stone. This is
+The WiredTiger integration layer's `OplogTruncateMarkers` implementation will stall deletion waiting for
+certain significant tracked timestamps to move forward past entries in the oldest truncate marker. This is
 done for correctness. Backup pins truncation in order to maintain a consistent view of the oplog;
 and startup recovery after an unclean shutdown and rollback both require oplog history back to
 certain timestamps.
 
 ### Min Oplog Retention
 
-WiredTiger `OplogStones` obey an `oplogMinRetentionHours` configurable setting. When
-`oplogMinRetentionHours` is active, the WT `OplogStones` will only truncate the oplog if a stone (a
-sequential range of oplog) is not within the minimum time range required to remain.
+WiredTiger `OplogTruncateMarkers` obey an `oplogMinRetentionHours` configurable setting. When
+`oplogMinRetentionHours` is active, the WT `OplogTruncateMarkers` will only truncate the oplog if a
+truncate marker (a sequential range of oplog) is not within the minimum time range required to
+remain.
 
 ### Oplog Hole Truncation
 

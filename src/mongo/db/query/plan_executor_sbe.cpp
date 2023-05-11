@@ -62,7 +62,7 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
       _nss(std::move(nss)),
       _mustReturnOwnedBson(returnOwnedBson),
       _root{std::move(candidates.winner().root)},
-      _rootData{std::move(candidates.winner().data)},
+      _rootData{std::move(candidates.winner().data.stageData)},
       _solution{std::move(candidates.winner().solution)},
       _stash{std::move(candidates.winner().results)},
       _cq{std::move(cq)},
@@ -273,13 +273,14 @@ PlanExecutor::ExecState PlanExecutorSBE::getNextImpl(ObjectType* out, RecordId* 
     //
     // Note that we need to hold a database intent lock before acquiring a notifier.
     boost::optional<AutoGetCollectionForReadMaybeLockFree> coll;
-    std::unique_ptr<insert_listener::Notifier> notifier;
+    insert_listener::CappedInsertNotifierData cappedInsertNotifierData;
     if (insert_listener::shouldListenForInserts(_opCtx, _cq.get())) {
         if (!_opCtx->lockState()->isCollectionLockedForMode(_nss, MODE_IS)) {
             coll.emplace(_opCtx, _nss);
         }
 
-        notifier = insert_listener::getCappedInsertNotifier(_opCtx, _nss, _yieldPolicy.get());
+        cappedInsertNotifierData.notifier =
+            insert_listener::getCappedInsertNotifier(_opCtx, _nss, _yieldPolicy.get());
     }
 
     for (;;) {
@@ -324,7 +325,7 @@ PlanExecutor::ExecState PlanExecutorSBE::getNextImpl(ObjectType* out, RecordId* 
                 return PlanExecutor::ExecState::IS_EOF;
             }
 
-            insert_listener::waitForInserts(_opCtx, _yieldPolicy.get(), notifier);
+            insert_listener::waitForInserts(_opCtx, _yieldPolicy.get(), &cappedInsertNotifierData);
             // There may be more results, keep going.
             continue;
         } else if (_resumeRecordIdSlot) {

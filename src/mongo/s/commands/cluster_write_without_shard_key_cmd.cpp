@@ -79,6 +79,14 @@ BSONObj _createCmdObj(OperationContext* opCtx,
             updateRequest.setWriteCommandRequestBase(writeCommandRequestBase);
         }
 
+        // This field is only set for writes that could modify the shard key.
+        uassert(ErrorCodes::InvalidOptions,
+                "$_allowShardKeyUpdatesWithoutFullShardKeyInQuery is an internal parameter",
+                !updateRequest.getUpdates()
+                     .front()
+                     .getAllowShardKeyUpdatesWithoutFullShardKeyInQuery());
+        updateRequest.getUpdates().front().setAllowShardKeyUpdatesWithoutFullShardKeyInQuery(true);
+
         updateRequest.getUpdates().front().setQ(targetDocId);
 
         // Unset the collation because targeting by _id uses default collation.
@@ -121,6 +129,12 @@ BSONObj _createCmdObj(OperationContext* opCtx,
             findAndModifyRequest.setOriginalQuery(findAndModifyRequest.getQuery());
             findAndModifyRequest.setOriginalCollation(findAndModifyRequest.getCollation());
         }
+
+        // This field is only set for writes that could modify the shard key.
+        uassert(ErrorCodes::InvalidOptions,
+                "$_allowShardKeyUpdatesWithoutFullShardKeyInQuery is an internal parameter",
+                !findAndModifyRequest.getAllowShardKeyUpdatesWithoutFullShardKeyInQuery());
+        findAndModifyRequest.setAllowShardKeyUpdatesWithoutFullShardKeyInQuery(true);
 
         findAndModifyRequest.setQuery(targetDocId);
 
@@ -184,8 +198,9 @@ public:
                 Shard::RetryPolicy::kNoRetry);
 
             auto response = uassertStatusOK(ars.next().swResponse);
+            auto status = getStatusFromWriteCommandReply(response.data);
 
-            if (getStatusFromCommandResult(response.data) == ErrorCodes::WouldChangeOwningShard) {
+            if (status == ErrorCodes::WouldChangeOwningShard) {
                 // Parse into OpMsgRequest to append the $db field, which is required for command
                 // parsing.
                 auto opMsgRequest = OpMsgRequest::fromDBAndBody(ns().db(), cmdObj);
@@ -221,6 +236,10 @@ public:
                     return Response(res.obj(), shardId.toString());
                 }
             }
+
+            // We uassert on the extracted write status in order to preserve error labels for the
+            // transaction api to use in case of a retry.
+            uassertStatusOK(status);
             return Response(response.data, shardId.toString());
         }
 

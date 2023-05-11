@@ -136,9 +136,6 @@ public:
 
     void checkpoint(OperationContext* opCtx) override;
 
-    std::unique_ptr<StorageEngine::CheckpointLock> getCheckpointLock(
-        OperationContext* opCtx, StorageEngine::CheckpointLock::Mode mode) override;
-
     bool isEphemeral() const override {
         return _ephemeral;
     }
@@ -306,7 +303,7 @@ public:
 
     bool supportsReadConcernSnapshot() const final override;
 
-    bool supportsOplogStones() const final override;
+    bool supportsOplogTruncateMarkers() const final override;
 
     bool supportsReadConcernMajority() const final;
 
@@ -397,21 +394,6 @@ public:
 
     ClockSource* getClockSource() const {
         return _clockSource;
-    }
-
-    void addIndividuallyCheckpointedIndex(const std::string& ident) override {
-        stdx::lock_guard lk(_checkpointedIndexesMutex);
-        _checkpointedIndexes.insert(ident);
-    }
-
-    void clearIndividuallyCheckpointedIndexes() override {
-        stdx::lock_guard lk(_checkpointedIndexesMutex);
-        _checkpointedIndexes.clear();
-    }
-
-    bool isInIndividuallyCheckpointedIndexes(const std::string& ident) const override {
-        stdx::lock_guard lk(_checkpointedIndexesMutex);
-        return _checkpointedIndexes.find(ident) != _checkpointedIndexes.end();
     }
 
     StatusWith<Timestamp> pinOldestTimestamp(OperationContext* opCtx,
@@ -567,15 +549,6 @@ private:
     // timestamp. Provided by replication layer because WT does not persist timestamps.
     AtomicWord<std::uint64_t> _initialDataTimestamp;
 
-    // Required for accessing '_checkpointedIndexes'.
-    mutable Mutex _checkpointedIndexesMutex =
-        MONGO_MAKE_LATCH("WiredTigerKVEngine::_checkpointedIndexesMutex");
-
-    // A set of indexes that were individually checkpoint'ed and are not consistent with the rest
-    // of the checkpoint's PIT view of the storage data. This set is reset when a storage-wide WT
-    // checkpoint is taken that makes the PIT view consistent again.
-    StringSet _checkpointedIndexes;
-
     AtomicWord<std::uint64_t> _oplogNeededForCrashRecovery;
 
     std::unique_ptr<WiredTigerEngineRuntimeConfigParameter> _runTimeConfigParam;
@@ -584,9 +557,11 @@ private:
         MONGO_MAKE_LATCH("WiredTigerKVEngine::_oldestTimestampPinRequestsMutex");
     std::map<std::string, Timestamp> _oldestTimestampPinRequests;
 
-    // Pins the oplog so that OplogStones will not truncate oplog history equal or newer to this
-    // timestamp.
+    // Pins the oplog so that OplogTruncateMarkers will not truncate oplog history equal or newer to
+    // this timestamp.
     AtomicWord<std::uint64_t> _pinnedOplogTimestamp;
+
+    Mutex _checkpointMutex = MONGO_MAKE_LATCH("WiredTigerKVEngine::_checkpointMutex");
 
     // The amount of memory alloted for the WiredTiger cache.
     size_t _cacheSizeMB;

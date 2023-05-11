@@ -56,10 +56,6 @@ namespace {
 
 const WriteConcernOptions kNoWaitWriteConcern{1, WriteConcernOptions::SyncMode::UNSET, Seconds(0)};
 
-GlobalIndexMetrics::RecipientState toMetrics(GlobalIndexClonerStateEnum state) {
-    return GlobalIndexMetrics::RecipientState{state};
-}
-
 }  // namespace
 
 GlobalIndexCloningService::GlobalIndexCloningService(ServiceContext* serviceContext)
@@ -200,8 +196,7 @@ ExecutorFuture<void> GlobalIndexCloningService::CloningStateMachine::_cleanup(
                         _cloningService->releaseInstance(instanceId, Status::OK());
                     }
 
-                    _metrics->onStateTransition(toMetrics(GlobalIndexClonerStateEnum::kDone),
-                                                boost::none);
+                    _metrics->onStateTransition(GlobalIndexClonerStateEnum::kDone, boost::none);
                 });
         })
         .onTransientError([](const auto& status) {})
@@ -217,8 +212,14 @@ void GlobalIndexCloningService::CloningStateMachine::_init(
         _metadata.getNss(), indexSpec.getName(), _metadata.getIndexCollectionUUID(), **executor);
 
     auto client = _serviceContext->makeClient("globalIndexClonerServiceInit");
-    AlternativeClientRegion clientRegion(client);
 
+    // TODO(SERVER-74658): Please revisit if this thread could be made killable.
+    {
+        stdx::lock_guard<Client> lk(*client.get());
+        client.get()->setSystemOperationUnKillableByStepdown(lk);
+    }
+
+    AlternativeClientRegion clientRegion(client);
     auto opCtx = _serviceContext->makeOperationContext(Client::getCurrent());
 
     auto routingInfo =
@@ -328,8 +329,7 @@ ExecutorFuture<void> GlobalIndexCloningService::CloningStateMachine::_persistSta
                 _mutableState.setState(GlobalIndexClonerStateEnum::kCloning);
             }
 
-            _metrics->onStateTransition(boost::none,
-                                        toMetrics(GlobalIndexClonerStateEnum::kCloning));
+            _metrics->onStateTransition(boost::none, GlobalIndexClonerStateEnum::kCloning);
         })
         .onTransientError([](const Status& status) {})
         .onUnrecoverableError([](const Status& status) {})
@@ -346,7 +346,7 @@ GlobalIndexCloningService::CloningStateMachine::_transitionToReadyToCommit(
         return ExecutorFuture<repl::OpTime>(**executor, repl::OpTime());
     }
 
-    _metrics->onCopyingEnd();
+    _metrics->setEndFor(GlobalIndexMetrics::TimedPhase::kCloning, now());
 
     return _retryingCancelableOpCtxFactory
         ->withAutomaticRetry([this, executor](auto& cancelableFactory) {
@@ -382,7 +382,7 @@ ExecutorFuture<void> GlobalIndexCloningService::CloningStateMachine::_clone(
         return ExecutorFuture<void>(**executor);
     }
 
-    _metrics->onCopyingBegin();
+    _metrics->setStartFor(GlobalIndexMetrics::TimedPhase::kCloning, now());
 
     return AsyncTry([this, executor, cancelToken, cancelableOpCtxFactory] {
                auto cancelableOpCtx =
@@ -535,7 +535,11 @@ void GlobalIndexCloningService::CloningStateMachine::_updateMutableState(
 
     const auto oldState = _mutableState.getState();
     _mutableState = std::move(newMutableState);
-    _metrics->onStateTransition(toMetrics(oldState), toMetrics(_mutableState.getState()));
+    _metrics->onStateTransition(oldState, _mutableState.getState());
+}
+
+Date_t GlobalIndexCloningService::CloningStateMachine::now() const {
+    return _serviceContext->getFastClockSource()->now();
 }
 
 }  // namespace global_index

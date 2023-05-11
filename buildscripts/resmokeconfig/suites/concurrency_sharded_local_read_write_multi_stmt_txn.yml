@@ -145,6 +145,7 @@ executor:
     hooks:
       - CheckReplDBHashInBackground
       - CheckReplDBHash
+      - CheckMetadataConsistencyInBackground
       - ValidateCollections
     tests: true
   config:
@@ -156,7 +157,6 @@ executor:
           defaultTransactionReadConcernLevel: "local"
           defaultTransactionWriteConcernW: 1
           runInsideTransaction: true
-          runningWithAutoSplit: false
           runningWithBalancer: false
           # Neither causal consistency nor majority write concern is required because tests in this
           # suite only read from primaries, only one node is electable in each shard, and they use
@@ -169,6 +169,7 @@ executor:
   hooks:
   - class: CheckReplDBHashInBackground
   - class: CheckReplDBHash
+  - class: CheckMetadataConsistencyInBackground
   - class: CheckOrphansDeleted
   - class: CheckRoutingTableConsistency
   - class: CheckShardFilteringMetadata
@@ -177,7 +178,6 @@ executor:
   fixture:
     class: ShardedClusterFixture
     enable_balancer: false
-    enable_autosplit: false
     mongos_options:
       set_parameters:
         enableTestCommands: 1

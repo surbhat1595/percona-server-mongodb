@@ -168,7 +168,9 @@ public:
                                                const char* damageSource,
                                                const mutablebson::DamageVector& damages) final;
 
-    virtual void printRecordMetadata(OperationContext* opCtx, const RecordId& recordId) const;
+    virtual void printRecordMetadata(OperationContext* opCtx,
+                                     const RecordId& recordId,
+                                     std::set<Timestamp>* recordTimestamps) const;
 
     virtual std::unique_ptr<SeekableRecordCursor> getCursor(OperationContext* opCtx,
                                                             bool forward) const = 0;
@@ -176,6 +178,11 @@ public:
     std::unique_ptr<RecordCursor> getRandomCursor(OperationContext* opCtx) const final;
 
     Status doTruncate(OperationContext* opCtx) final;
+    Status doRangeTruncate(OperationContext* opCtx,
+                           const RecordId& minRecordId,
+                           const RecordId& maxRecordId,
+                           int64_t hintDataSizeDiff,
+                           int64_t hintNumRecordsDiff) final;
 
     virtual bool compactSupported() const {
         return !_isEphemeral;
@@ -252,11 +259,11 @@ public:
     StatusWith<Timestamp> getLatestOplogTimestamp(OperationContext* opCtx) const override;
     StatusWith<Timestamp> getEarliestOplogTimestamp(OperationContext* opCtx) override;
 
-    class OplogStones;
+    class OplogTruncateMarkers;
 
     // Exposed only for testing.
-    OplogStones* oplogStones() {
-        return _oplogStones.get();
+    OplogTruncateMarkers* oplogTruncateMarkers() {
+        return _oplogTruncateMarkers.get();
     };
 
     typedef stdx::variant<int64_t, WiredTigerItem> CursorKey;
@@ -352,7 +359,7 @@ private:
     WiredTigerKVEngine* _kvEngine;  // not owned.
 
     // Non-null if this record store is underlying the active oplog.
-    std::shared_ptr<OplogStones> _oplogStones;
+    std::shared_ptr<OplogTruncateMarkers> _oplogTruncateMarkers;
 
     AtomicWord<int64_t>
         _totalTimeTruncating;            // Cumulative amount of time spent truncating the oplog.
@@ -399,6 +406,13 @@ public:
 
     void setSaveStorageCursorOnDetachFromOperationContext(bool saveCursor) override {
         _saveStorageCursorOnDetachFromOperationContext = saveCursor;
+    }
+
+    /**
+     *  Returns the checkpoint ID for checkpoint cursors, otherwise 0.
+     */
+    uint64_t getCheckpointId() const override {
+        return _cursor->getCheckpointId();
     }
 
 protected:

@@ -28,6 +28,9 @@
  */
 
 #include "mongo/db/s/balancer/auto_merger_policy.h"
+#include "mongo/db/dbdirectclient.h"
+#include "mongo/db/pipeline/document_source_lookup.h"
+#include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/sharding_config_server_parameters_gen.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/client/shard_registry.h"
@@ -55,10 +58,11 @@ void AutoMergerPolicy::disable() {
     stdx::lock_guard<Latch> lk(_mutex);
     _enabled = false;
     _collectionsToMergePerShard.clear();
+    _maxHistoryTimeCurrentRound = Timestamp(0, 0);
+    _maxHistoryTimePreviousRound = Timestamp(0, 0);
 }
 
 bool AutoMergerPolicy::isEnabled() {
-    stdx::lock_guard<Latch> lk(_mutex);
     return _enabled;
 }
 
@@ -89,9 +93,19 @@ boost::optional<BalancerStreamAction> AutoMergerPolicy::getNextStreamingAction(
     bool applyThrottling = false;
 
     if (_firstAction) {
-        _firstAction = false;
+        try {
+            _collectionsToMergePerShard = _getNamespacesWithMergeableChunksPerShard(opCtx);
+        } catch (DBException& e) {
+            e.addContext("Failed to fetch collections with mergeable chunks");
+            throw;
+        }
         applyThrottling = true;
-        _collectionsToMergePerShard = _getNamespacesWithMergeableChunksPerShard(opCtx);
+        _firstAction = false;
+    }
+
+    // Issue at most 10 concurrent auto merge requests
+    if (_outstandingActions >= MAX_NUMBER_OF_CONCURRENT_MERGE_ACTIONS) {
+        return boost::none;
     }
 
     // Get next <shardId, collection> pair to merge
@@ -107,6 +121,8 @@ boost::optional<BalancerStreamAction> AutoMergerPolicy::getNextStreamingAction(
         mergeAction.applyThrottling = applyThrottling;
 
         collections.pop_back();
+        ++_outstandingActions;
+
         return boost::optional<BalancerStreamAction>(mergeAction);
     }
 
@@ -116,84 +132,146 @@ boost::optional<BalancerStreamAction> AutoMergerPolicy::getNextStreamingAction(
 void AutoMergerPolicy::applyActionResult(OperationContext* opCtx,
                                          const BalancerStreamAction& action,
                                          const BalancerStreamActionResponse& response) {
-    stdx::visit(OverloadedVisitor{[&](const MergeAllChunksOnShardInfo& action) {
-                                      const auto& status = stdx::get<Status>(response);
-                                      if (!status.isOK()) {
-                                          LOGV2_DEBUG(7312600,
-                                                      1,
-                                                      "Hit error while automerging chunks",
-                                                      "shard"_attr = action.shardId,
-                                                      "error"_attr = redact(status));
-                                      }
-                                  },
-                                  [&](const DataSizeInfo& _) {
-                                      uasserted(ErrorCodes::BadValue, "Unexpected action type");
-                                  },
-                                  [&](const MigrateInfo& _) {
-                                      uasserted(ErrorCodes::BadValue, "Unexpected action type");
-                                  },
-                                  [&](const MergeInfo& _) {
-                                      uasserted(ErrorCodes::BadValue, "Unexpected action type");
-                                  }},
+    stdx::unique_lock<Latch> lk(_mutex);
 
-                action);
-}
+    const auto& mergeAction = stdx::get<MergeAllChunksOnShardInfo>(action);
+    const auto& swResponse = stdx::get<StatusWith<NumMergedChunks>>(response);
 
-void AutoMergerPolicy::_init(WithLock lk) {
-    if (_enabled) {
-        _intervalTimer.reset();
-        _collectionsToMergePerShard.clear();
-        _firstAction = true;
+    --_outstandingActions;
+    if (_outstandingActions < MAX_NUMBER_OF_CONCURRENT_MERGE_ACTIONS) {
         _onStateUpdated();
+    }
+
+    if (!swResponse.isOK()) {
+        // Reset the history window to consider during next round
+        // because chunk merges may have been potentially missed
+        _maxHistoryTimeCurrentRound = _maxHistoryTimePreviousRound;
+        LOGV2_DEBUG(7312600,
+                    1,
+                    "Hit error while automerging chunks",
+                    "shard"_attr = mergeAction.shardId,
+                    "nss"_attr = mergeAction.nss,
+                    "error"_attr = redact(swResponse.getStatus()));
     }
 }
 
+void AutoMergerPolicy::_init(WithLock lk) {
+    _maxHistoryTimePreviousRound = _maxHistoryTimeCurrentRound;
+    _intervalTimer.reset();
+    _collectionsToMergePerShard.clear();
+    _firstAction = true;
+    _onStateUpdated();
+}
+
 void AutoMergerPolicy::_checkInternalUpdatesWithLock(WithLock lk) {
-    // Triggers automerger every `autoMergerIntervalSecs` seconds
-    if (_collectionsToMergePerShard.empty() && _enabled &&
-        _intervalTimer.seconds() > autoMergerIntervalSecs) {
+    if (!_enabled || !_collectionsToMergePerShard.empty() || _outstandingActions) {
+        return;
+    }
+
+    // Trigger Automerger every `autoMergerIntervalSecs` seconds
+    if (_intervalTimer.seconds() > autoMergerIntervalSecs) {
         _init(lk);
     }
 }
 
 std::map<ShardId, std::vector<NamespaceString>>
 AutoMergerPolicy::_getNamespacesWithMergeableChunksPerShard(OperationContext* opCtx) {
-    const auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
-
-    // Fetch all the sharded collections which are not on defragmentation state
     std::map<ShardId, std::vector<NamespaceString>> collectionsToMerge;
-
-    // TODO SERVER-73378 filter by collections with mergeable chunks
-    std::vector<BSONObj> shardCollections =
-        uassertStatusOK(configShard->exhaustiveFindOnConfig(
-                            opCtx,
-                            ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                            repl::ReadConcernLevel::kMajorityReadConcern,
-                            CollectionType::ConfigNS,
-                            BSON(CollectionType::kDefragmentCollectionFieldName
-                                 << BSON("$ne" << true) << CollectionType::kEnableAutoMergeFieldName
-                                 << BSON("$ne" << false)),
-                            BSONObj() /* no sort */,
-                            boost::none /* no limit */))
-            .docs;
 
     const auto& shardIds = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
     for (const auto& shard : shardIds) {
-        collectionsToMerge[shard].reserve(shardCollections.size());
-        collectionsToMerge[shard] = [&] {
-            std::vector<NamespaceString> collectionsOnShard;
-            std::transform(shardCollections.begin(),
-                           shardCollections.end(),
-                           std::back_inserter(collectionsOnShard),
-                           [](const BSONObj& doc) {
-                               return NamespaceString(
-                                   boost::none, doc.getStringField(CollectionType::kNssFieldName));
-                           });
-            return collectionsOnShard;
-        }();
-    }
-    return collectionsToMerge;
-};
+        // Build an aggregation pipeline to get the collections with mergeable chunks placed on a
+        // specific shard
+        Pipeline::SourceContainer stages;
 
+        auto expCtx = make_intrusive<ExpressionContext>(opCtx, nullptr, ChunkType::ConfigNS);
+        StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespaces;
+        resolvedNamespaces[ChunkType::ConfigNS.coll()] = {ChunkType::ConfigNS,
+                                                          std::vector<BSONObj>()};
+        resolvedNamespaces[CollectionType::ConfigNS.coll()] = {CollectionType::ConfigNS,
+                                                               std::vector<BSONObj>()};
+        expCtx->setResolvedNamespaces(resolvedNamespaces);
+
+        // 1. Match all collections where `automerge` is enabled and `defragmentation` is disabled
+        // {
+        //     $match : {
+        //         enableAutoMerge : { $ne : false },
+        //         defragmentCollection : { $ne : true }
+        //     }
+        // }
+        stages.emplace_back(DocumentSourceMatch::create(
+            BSON(CollectionType::kEnableAutoMergeFieldName
+                 << BSON("$ne" << false) << CollectionType::kDefragmentCollectionFieldName
+                 << BSON("$ne" << true)),
+            expCtx));
+
+        // 2. Lookup stage to get at most 2 mergeable chunk per collection
+        // {
+        //     $lookup : {
+        //         from : "chunks",
+        //         localField : "uuid",
+        //         foreignField : "collectionUUID",
+        //         pipeline : [
+        //             {
+        //                 $match : {
+        //                     shard : <shard>,
+        //                     onCurrentShardSince : { $lt : <_maxHistoryTimeCurrentRound>,
+        //                                             $gte : <_maxHistoryTimePreviousRound> }
+        //                 }
+        //             },
+        //             {
+        //                 $limit : 1
+        //             }
+        //         ],
+        //         as : "chunks"
+        //     }
+        // }
+        const auto _maxHistoryTimeCurrentRound =
+            ShardingCatalogManager::getOldestTimestampSupportedForSnapshotHistory(opCtx);
+
+        stages.emplace_back(DocumentSourceLookUp::createFromBson(
+            BSON("$lookup" << BSON(
+                     "from"
+                     << ChunkType::ConfigNS.coll() << "localField" << CollectionType::kUuidFieldName
+                     << "foreignField" << ChunkType::collectionUUID() << "pipeline"
+                     << BSON_ARRAY(BSON("$match" << BSON(
+                                            ChunkType::shard(shard.toString())
+                                            << ChunkType::onCurrentShardSince()
+                                            << BSON("$lt" << _maxHistoryTimeCurrentRound << "$gte"
+                                                          << _maxHistoryTimePreviousRound)))
+                                   << BSON("$limit" << 1))
+                     << "as"
+                     << "chunks"))
+                .firstElement(),
+            expCtx));
+
+        // 3. Unwind stage to get the list of collections with mergeable chunks
+        stages.emplace_back(
+            DocumentSourceUnwind::createFromBson(BSON("$unwind" << BSON("path"
+                                                                        << "$chunks"))
+                                                     .firstElement(),
+                                                 expCtx));
+
+        auto pipeline = Pipeline::create(std::move(stages), expCtx);
+        auto aggRequest =
+            AggregateCommandRequest(CollectionType::ConfigNS, pipeline->serializeToBson());
+        aggRequest.setReadConcern(
+            repl::ReadConcernArgs(repl::ReadConcernLevel::kMajorityReadConcern).toBSONInner());
+
+        DBDirectClient client(opCtx);
+        auto cursor = uassertStatusOKWithContext(
+            DBClientCursor::fromAggregationRequest(
+                &client, aggRequest, true /* secondaryOk */, true /* useExhaust */),
+            "Failed to establish a cursor for aggregation");
+
+        while (cursor->more()) {
+            const auto doc = cursor->nextSafe();
+            const auto nss = NamespaceString(doc.getStringField(CollectionType::kNssFieldName));
+            collectionsToMerge[shard].push_back(nss);
+        }
+    }
+
+    return collectionsToMerge;
+}
 
 }  // namespace mongo

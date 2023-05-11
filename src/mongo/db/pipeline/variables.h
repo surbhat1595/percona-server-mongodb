@@ -96,6 +96,7 @@ public:
     static constexpr auto kJsScopeId = Id(-5);
     static constexpr auto kIsMapReduceId = Id(-6);
     static constexpr auto kSearchMetaId = Id(-7);
+    static constexpr auto kUserRolesId = Id(-8);
 
     // Map from builtin var name to reserved id number.
     static const StringMap<Id> kBuiltinVarNameToId;
@@ -207,6 +208,11 @@ public:
     static auto isBuiltin(Variables::Id variable) {
         return kIdToBuiltinVarName.find(variable) != kIdToBuiltinVarName.end();
     }
+
+    /**
+     * Define the value of the $$USER_ROLES variable.
+     */
+    void defineUserRoles(OperationContext* opCtx);
 
 private:
     struct ValueAndState {

@@ -79,12 +79,19 @@ public:
                                                const char* damageSource,
                                                const mutablebson::DamageVector& damages) override;
 
-    virtual void printRecordMetadata(OperationContext* opCtx, const RecordId& recordId) const {}
+    virtual void printRecordMetadata(OperationContext* opCtx,
+                                     const RecordId& recordId,
+                                     std::set<Timestamp>* recordTimestamps) const {}
 
     std::unique_ptr<SeekableRecordCursor> getCursor(OperationContext* opCtx,
                                                     bool forward) const final;
 
     Status doTruncate(OperationContext* opCtx) override;
+    Status doRangeTruncate(OperationContext* opCtx,
+                           const RecordId& minRecordId,
+                           const RecordId& maxRecordId,
+                           int64_t hintDataSizeDiff,
+                           int64_t hintNumRecordsDiff) override;
 
     void doCappedTruncateAfter(OperationContext* opCtx,
                                const RecordId& end,

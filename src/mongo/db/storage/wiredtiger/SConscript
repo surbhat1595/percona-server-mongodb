@@ -30,7 +30,7 @@ wtEnv.Library(
     target='storage_wiredtiger_core',
     source=[
         'encryption_keydb.cpp',
-        'oplog_stones_server_status_section.cpp',
+        'oplog_truncate_markers_server_status_section.cpp',
         'wiredtiger_backup_cursor_hooks.cpp',
         'wiredtiger_begin_transaction_block.cpp',
         'wiredtiger_column_store.cpp',
@@ -99,7 +99,7 @@ wtEnv.Library(
         '$BUILD_DIR/mongo/db/storage/storage_repair_observer',
         '$BUILD_DIR/mongo/util/log_and_backoff',
         '$BUILD_DIR/mongo/util/options_parser/options_parser',
-        'oplog_stone_parameters',
+        'oplog_truncate_marker_parameters',
     ],
     SYSLIBDEPS=[
         # S3 and its dependencies
@@ -179,6 +179,7 @@ wtEnv.CppUnitTest(
         'wiredtiger_c_api_test.cpp',
         'wiredtiger_kv_engine_no_fixture_test.cpp',
         'wiredtiger_kv_engine_test.cpp',
+        'wiredtiger_prepare_conflict_test.cpp',
         'wiredtiger_stats_test.cpp',
         'wiredtiger_recovery_unit_test.cpp',
         'wiredtiger_session_cache_test.cpp',
@@ -233,9 +234,9 @@ wtEnv.Library(
 )
 
 wtEnv.Library(
-    target='oplog_stone_parameters',
+    target='oplog_truncate_marker_parameters',
     source=[
-        'oplog_stone_parameters.idl',
+        'oplog_truncate_marker_parameters.idl',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/server_base',

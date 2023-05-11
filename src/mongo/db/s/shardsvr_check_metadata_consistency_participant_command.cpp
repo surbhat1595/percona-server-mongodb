@@ -30,11 +30,13 @@
 
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/collection_catalog.h"
+#include "mongo/db/clientcursor.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/s/metadata_consistency_util.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/request_types/sharded_ddl_commands_gen.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -71,10 +73,10 @@ public:
 
         Response typedRun(OperationContext* opCtx) {
             uassertStatusOK(ShardingState::get(opCtx)->canAcceptShardedCommands());
+            opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
 
             const auto& nss = ns();
             const auto& shardId = ShardingState::get(opCtx)->shardId();
-            const auto& collectionCatalog = CollectionCatalog::get(opCtx);
             const auto& primaryShardId = request().getPrimaryShardId();
 
             // Get the list of collections from configsvr sorted by namespace
@@ -84,24 +86,64 @@ public:
                 repl::ReadConcernLevel::kMajorityReadConcern,
                 BSON(CollectionType::kNssFieldName << 1) /*sort*/);
 
-            // Get the list of local collections sorted by namespace
-            Lock::DBLock dbLock(opCtx, nss.db(), MODE_S);
-            auto localNssCollections =
-                collectionCatalog->getAllCollectionNamesFromDb(opCtx, nss.db());
-            std::sort(localNssCollections.begin(), localNssCollections.end());
-            std::vector<CollectionPtr> localCollection;
-            for (const auto& localNss : localNssCollections) {
-                localCollection.push_back(
-                    CollectionPtr(collectionCatalog->lookupCollectionByNamespace(opCtx, localNss)));
-            }
+            const auto localCollectionsSorted = [&] {
+                std::vector<CollectionPtr> colls;
+
+                // Get the list of local collections sorted by namespace
+                AutoGetDbForReadMaybeLockFree lockFreeReadBlock(opCtx, nss.dbName());
+                tassert(7466700, "Lock-free mode not avaialable", opCtx->isLockFreeReadsOp());
+                // Take a snapshot of the catalog;
+                auto collectionCatalog = CollectionCatalog::get(opCtx);
+                for (auto it = collectionCatalog->begin(opCtx, nss.dbName());
+                     it != collectionCatalog->end(opCtx);
+                     ++it) {
+                    if (!(*it)->ns().isNormalCollection()) {
+                        continue;
+                    }
+                    colls.emplace_back(CollectionPtr(*it));
+                }
+                std::sort(colls.begin(),
+                          colls.end(),
+                          [](const CollectionPtr& prev, const CollectionPtr& next) {
+                              return prev->ns() < next->ns();
+                          });
+                return colls;
+            }();
 
             // Check consistency between local metadata and configsvr metadata
             auto inconsistencies =
                 metadata_consistency_util::checkCollectionMetadataInconsistencies(
-                    opCtx, shardId, primaryShardId, catalogClientCollections, localCollection);
+                    opCtx,
+                    shardId,
+                    primaryShardId,
+                    catalogClientCollections,
+                    localCollectionsSorted);
 
-            return metadata_consistency_util::makeCursor(
-                opCtx, std::move(inconsistencies), nss, request().toBSON({}));
+            auto exec = metadata_consistency_util::makeQueuedPlanExecutor(
+                opCtx, std::move(inconsistencies), nss);
+
+            ClientCursorParams cursorParams{
+                std::move(exec),
+                nss,
+                AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserName(),
+                APIParameters::get(opCtx),
+                opCtx->getWriteConcern(),
+                repl::ReadConcernArgs::get(opCtx),
+                ReadPreferenceSetting::get(opCtx),
+                request().toBSON({}),
+                {Privilege(ResourcePattern::forClusterResource(), ActionType::internal)}};
+
+            const auto batchSize = [&]() -> long long {
+                const auto& cursorOpts = request().getCursor();
+                if (cursorOpts && cursorOpts->getBatchSize()) {
+                    return *cursorOpts->getBatchSize();
+                } else {
+                    return query_request_helper::kDefaultBatchSize;
+                }
+            }();
+
+            return metadata_consistency_util::createInitialCursorReplyMongod(
+                opCtx, std::move(cursorParams), batchSize);
         }
 
     private:

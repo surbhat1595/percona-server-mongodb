@@ -334,12 +334,27 @@ SemiFuture<DataSizeResponse> BalancerCommandsSchedulerImpl::requestDataSize(
         .semi();
 }
 
-SemiFuture<void> BalancerCommandsSchedulerImpl::requestMergeAllChunksOnShard(
+SemiFuture<NumMergedChunks> BalancerCommandsSchedulerImpl::requestMergeAllChunksOnShard(
     OperationContext* opCtx, const NamespaceString& nss, const ShardId& shardId) {
     auto commandInfo = std::make_shared<MergeAllChunksOnShardCommandInfo>(nss, shardId);
     return _buildAndEnqueueNewRequest(opCtx, std::move(commandInfo))
-        .then([](const executor::RemoteCommandResponse& remoteResponse) {
-            return processRemoteResponse(remoteResponse);
+        .then([](const executor::RemoteCommandResponse& remoteResponse)
+                  -> StatusWith<NumMergedChunks> {
+            auto responseStatus = processRemoteResponse(remoteResponse);
+            if (!responseStatus.isOK()) {
+                return responseStatus;
+            }
+
+            try {
+                return MergeAllChunksOnShardResponse::parse(
+                           IDLParserContext{"MergeAllChunksOnShardResponse"}, remoteResponse.data)
+                    .getNumMergedChunks();
+            } catch (const DBException&) {
+                // TODO SERVER-74573 remove try-catch once 7.0 branches out
+                // It may happen in multiversion scenarios for the command not to return a
+                // MergeAllChunksOnShardResponse (in v6.3 the reply was empty)
+                return 0;
+            }
         })
         .semi();
 }
@@ -384,40 +399,43 @@ CommandSubmissionResult BalancerCommandsSchedulerImpl::_submit(
     OperationContext* opCtx, const CommandSubmissionParameters& params) {
     LOGV2_DEBUG(
         5847203, 2, "Balancer command request submitted for execution", "reqId"_attr = params.id);
-
-    const auto shardWithStatus =
-        Grid::get(opCtx)->shardRegistry()->getShard(opCtx, params.commandInfo->getTarget());
-    if (!shardWithStatus.isOK()) {
-        return CommandSubmissionResult(params.id, shardWithStatus.getStatus());
-    }
-
-    const auto shardHostWithStatus = shardWithStatus.getValue()->getTargeter()->findHost(
-        opCtx, ReadPreferenceSetting{ReadPreference::PrimaryOnly});
-    if (!shardHostWithStatus.isOK()) {
-        return CommandSubmissionResult(params.id, shardHostWithStatus.getStatus());
-    }
-
-    if (params.commandInfo->requiresRecoveryOnCrash()) {
-        auto writeStatus = persistRecoveryInfo(opCtx, *(params.commandInfo));
-        if (!writeStatus.isOK()) {
-            return CommandSubmissionResult(params.id, writeStatus);
+    try {
+        const auto shardWithStatus =
+            Grid::get(opCtx)->shardRegistry()->getShard(opCtx, params.commandInfo->getTarget());
+        if (!shardWithStatus.isOK()) {
+            return CommandSubmissionResult(params.id, shardWithStatus.getStatus());
         }
+
+        const auto shardHostWithStatus = shardWithStatus.getValue()->getTargeter()->findHost(
+            opCtx, ReadPreferenceSetting{ReadPreference::PrimaryOnly});
+        if (!shardHostWithStatus.isOK()) {
+            return CommandSubmissionResult(params.id, shardHostWithStatus.getStatus());
+        }
+
+        if (params.commandInfo->requiresRecoveryOnCrash()) {
+            auto writeStatus = persistRecoveryInfo(opCtx, *(params.commandInfo));
+            if (!writeStatus.isOK()) {
+                return CommandSubmissionResult(params.id, writeStatus);
+            }
+        }
+
+        const executor::RemoteCommandRequest remoteCommand =
+            executor::RemoteCommandRequest(shardHostWithStatus.getValue(),
+                                           params.commandInfo->getTargetDb(),
+                                           params.commandInfo->serialise(),
+                                           opCtx);
+        auto onRemoteResponseReceived =
+            [this,
+             requestId = params.id](const executor::TaskExecutor::RemoteCommandCallbackArgs& args) {
+                _applyCommandResponse(requestId, args.response);
+            };
+
+        auto swRemoteCommandHandle =
+            (*_executor)->scheduleRemoteCommand(remoteCommand, onRemoteResponseReceived);
+        return CommandSubmissionResult(params.id, swRemoteCommandHandle.getStatus());
+    } catch (const DBException& e) {
+        return CommandSubmissionResult(params.id, e.toStatus());
     }
-
-    const executor::RemoteCommandRequest remoteCommand =
-        executor::RemoteCommandRequest(shardHostWithStatus.getValue(),
-                                       params.commandInfo->getTargetDb(),
-                                       params.commandInfo->serialise(),
-                                       opCtx);
-    auto onRemoteResponseReceived =
-        [this,
-         requestId = params.id](const executor::TaskExecutor::RemoteCommandCallbackArgs& args) {
-            _applyCommandResponse(requestId, args.response);
-        };
-
-    auto swRemoteCommandHandle =
-        (*_executor)->scheduleRemoteCommand(remoteCommand, onRemoteResponseReceived);
-    return CommandSubmissionResult(params.id, swRemoteCommandHandle.getStatus());
 }
 
 void BalancerCommandsSchedulerImpl::_applySubmissionResult(

@@ -33,17 +33,15 @@
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/s/balancer_stats_registry.h"
-#include "mongo/db/s/chunk_split_state_driver.h"
-#include "mongo/db/s/chunk_splitter.h"
 #include "mongo/db/s/collection_critical_section_document_gen.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/database_sharding_state.h"
-#include "mongo/db/s/global_index_ddl_util.h"
 #include "mongo/db/s/migration_source_manager.h"
 #include "mongo/db/s/migration_util.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
 #include "mongo/db/s/shard_identity_rollback_notifier.h"
+#include "mongo/db/s/sharding_index_catalog_ddl_util.h"
 #include "mongo/db/s/sharding_initialization_mongod.h"
 #include "mongo/db/s/sharding_recovery_service.h"
 #include "mongo/db/s/sharding_state.h"
@@ -74,18 +72,18 @@ bool isStandaloneOrPrimary(OperationContext* opCtx) {
 }
 
 /**
- * Used to notify the catalog cache loader of a new collection version and invalidate the in-memory
+ * Used to notify the catalog cache loader of a new placement version and invalidate the in-memory
  * routing table cache once the oplog updates are committed and become visible.
  */
-class CollectionVersionLogOpHandler final : public RecoveryUnit::Change {
+class CollectionPlacementVersionLogOpHandler final : public RecoveryUnit::Change {
 public:
-    CollectionVersionLogOpHandler(const NamespaceString& nss, bool droppingCollection)
+    CollectionPlacementVersionLogOpHandler(const NamespaceString& nss, bool droppingCollection)
         : _nss(nss), _droppingCollection(droppingCollection) {}
 
     void commit(OperationContext* opCtx, boost::optional<Timestamp>) override {
         invariant(opCtx->lockState()->isCollectionLockedForMode(_nss, MODE_IX));
 
-        CatalogCacheLoader::get(opCtx).notifyOfCollectionVersionUpdate(_nss);
+        CatalogCacheLoader::get(opCtx).notifyOfCollectionPlacementVersionUpdate(_nss);
 
         // Force subsequent uses of the namespace to refresh the filtering metadata so they can
         // synchronize with any work happening on the primary (e.g., migration critical section).
@@ -152,65 +150,13 @@ void onConfigDeleteInvalidateCachedCollectionMetadataAndNotify(OperationContext*
             bsonExtractStringField(query, ShardCollectionType::kNssFieldName, &deletedCollection));
     const NamespaceString deletedNss(deletedCollection);
 
-    // Need the WUOW to retain the lock for CollectionVersionLogOpHandler::commit().
+    // Need the WUOW to retain the lock for CollectionPlacementVersionLogOpHandler::commit().
     // TODO SERVER-58223: evaluate whether this is safe or whether acquiring the lock can block.
     AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(opCtx->lockState());
     AutoGetCollection autoColl(opCtx, deletedNss, MODE_IX);
 
-    opCtx->recoveryUnit()->registerChange(
-        std::make_unique<CollectionVersionLogOpHandler>(deletedNss, /* droppingCollection */ true));
-}
-
-/**
- * If the collection is sharded, finds the chunk that contains the specified document and increments
- * the size tracked for that chunk by the specified amount of data written, in bytes. Returns the
- * number of total bytes on that chunk after the data is written.
- */
-void incrementChunkOnInsertOrUpdate(OperationContext* opCtx,
-                                    const NamespaceString& nss,
-                                    const ChunkManager& chunkManager,
-                                    const BSONObj& document,
-                                    long dataWritten,
-                                    bool fromMigrate) {
-    const auto& shardKeyPattern = chunkManager.getShardKeyPattern();
-    BSONObj shardKey = shardKeyPattern.extractShardKeyFromDocThrows(document);
-
-    // Use the shard key to locate the chunk into which the document was updated, and increment the
-    // number of bytes tracked for the chunk.
-    //
-    // Note that we can assume the simple collation, because shard keys do not support non-simple
-    // collations.
-    auto chunk = chunkManager.findIntersectingChunkWithSimpleCollation(shardKey);
-    auto chunkWritesTracker = chunk.getWritesTracker();
-    chunkWritesTracker->addBytesWritten(dataWritten);
-    // Don't trigger chunk splits from inserts happening due to migration since
-    // we don't necessarily own that chunk yet
-    if (!fromMigrate) {
-        const auto balancerConfig = Grid::get(opCtx)->getBalancerConfiguration();
-
-        const uint64_t maxChunkSizeBytes = [&] {
-            const boost::optional<uint64_t> csb = chunkManager.maxChunkSizeBytes();
-            if (csb) {
-                return *csb;
-            }
-            return balancerConfig->getMaxChunkSizeBytes();
-        }();
-
-        if (!feature_flags::gNoMoreAutoSplitter.isEnabled(
-                serverGlobalParams.featureCompatibility) &&
-            balancerConfig->getShouldAutoSplit() && chunkManager.allowAutoSplit() &&
-            chunkWritesTracker->shouldSplit(maxChunkSizeBytes)) {
-            auto chunkSplitStateDriver =
-                ChunkSplitStateDriver::tryInitiateSplit(chunkWritesTracker);
-            if (chunkSplitStateDriver) {
-                ChunkSplitter::get(opCtx).trySplitting(std::move(chunkSplitStateDriver),
-                                                       nss,
-                                                       chunk.getMin(),
-                                                       chunk.getMax(),
-                                                       dataWritten);
-            }
-        }
-    }
+    opCtx->recoveryUnit()->registerChange(std::make_unique<CollectionPlacementVersionLogOpHandler>(
+        deletedNss, /* droppingCollection */ true));
 }
 
 /**
@@ -322,22 +268,6 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
                     }
                 });
         }
-
-        if (!nss.isNamespaceAlwaysUnsharded() &&
-            !feature_flags::gNoMoreAutoSplitter.isEnabled(
-                serverGlobalParams.featureCompatibility)) {
-            auto metadata =
-                CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, nss)
-                    ->getCurrentMetadataIfKnown();
-            if (metadata && metadata->isSharded()) {
-                incrementChunkOnInsertOrUpdate(opCtx,
-                                               nss,
-                                               *metadata->getChunkManager(),
-                                               insertedDoc,
-                                               insertedDoc.objsize(),
-                                               fromMigrate);
-            }
-        }
     }
 }
 
@@ -358,12 +288,13 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
         // This logic runs on updates to the shard's persisted cache of the config server's
         // config.collections collection.
         //
-        // If an update occurs to the 'lastRefreshedCollectionVersion' field it notifies the catalog
-        // cache loader of a new collection version and clears the routing table so the next caller
-        // with routing information will provoke a routing table refresh.
+        // If an update occurs to the 'lastRefreshedCollectionPlacementVersion' field it notifies
+        // the catalog cache loader of a new placement version and clears the routing table so the
+        // next caller with routing information will provoke a routing table refresh.
         //
-        // When 'lastRefreshedCollectionVersion' is in 'update', it means that a chunk metadata
-        // refresh has finished being applied to the collection's locally persisted metadata store.
+        // When 'lastRefreshedCollectionPlacementVersion' is in 'update', it means that a chunk
+        // metadata refresh has finished being applied to the collection's locally persisted
+        // metadata store.
         //
         // If an update occurs to the 'enterCriticalSectionSignal' field, simply clear the routing
         // table immediately. This will provoke the next secondary caller to refresh through the
@@ -383,13 +314,14 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
         auto refreshingFieldNewVal = update_oplog_entry::extractNewValueForField(
             updateDoc, ShardCollectionType::kRefreshingFieldName);
 
-        // Need the WUOW to retain the lock for CollectionVersionLogOpHandler::commit().
+        // Need the WUOW to retain the lock for CollectionPlacementVersionLogOpHandler::commit().
         // TODO SERVER-58223: evaluate whether this is safe or whether acquiring the lock can block.
         AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(opCtx->lockState());
         AutoGetCollection autoColl(opCtx, updatedNss, MODE_IX);
         if (refreshingFieldNewVal.isBoolean() && !refreshingFieldNewVal.boolean()) {
-            opCtx->recoveryUnit()->registerChange(std::make_unique<CollectionVersionLogOpHandler>(
-                updatedNss, /* droppingCollection */ false));
+            opCtx->recoveryUnit()->registerChange(
+                std::make_unique<CollectionPlacementVersionLogOpHandler>(
+                    updatedNss, /* droppingCollection */ false));
         }
 
         if (enterCriticalSectionFieldNewVal.ok()) {
@@ -499,19 +431,15 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
             });
     }
 
-    if (!args.coll->ns().isNamespaceAlwaysUnsharded() &&
-        !feature_flags::gNoMoreAutoSplitter.isEnabled(serverGlobalParams.featureCompatibility)) {
-        auto metadata = CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(
-                            opCtx, args.coll->ns())
-                            ->getCurrentMetadataIfKnown();
-        if (metadata && metadata->isSharded()) {
-            incrementChunkOnInsertOrUpdate(opCtx,
-                                           args.coll->ns(),
-                                           *metadata->getChunkManager(),
-                                           args.updateArgs->updatedDoc,
-                                           args.updateArgs->updatedDoc.objsize(),
-                                           args.updateArgs->source ==
-                                               OperationSource::kFromMigrate);
+    const auto& nss = args.coll->ns();
+    if (nss == NamespaceString::kServerConfigurationNamespace) {
+        auto idElem = args.updateArgs->criteria["_id"];
+        auto shardName = updateDoc["shardName"];
+        if (idElem && idElem.str() == ShardIdentityType::IdName && shardName) {
+            auto updatedShardIdentityDoc = args.updateArgs->updatedDoc;
+            auto shardIdentityDoc = uassertStatusOK(
+                ShardIdentityType::fromShardIdentityDocument(updatedShardIdentityDoc));
+            uassertStatusOK(shardIdentityDoc.validate());
         }
     }
 }
@@ -530,22 +458,23 @@ void ShardServerOpObserver::aboutToDelete(OperationContext* opCtx,
     }
 }
 
-void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
-    OperationContext* opCtx, const NamespaceString& nss, const UUID& uuid, BSONObj indexDoc) {
+void ShardServerOpObserver::onModifyCollectionShardingIndexCatalog(OperationContext* opCtx,
+                                                                   const NamespaceString& nss,
+                                                                   const UUID& uuid,
+                                                                   BSONObj indexDoc) {
     // If we are in recovery mode (STARTUP or ROLLBACK) let the sharding recovery service to take
     // care of the in-memory state.
     if (sharding_recovery_util::inRecoveryMode(opCtx)) {
         return;
     }
-    LOGV2_DEBUG(
-        6712303,
-        1,
-        "Updating sharding in-memory state onModifyShardedCollectionGlobalIndexCatalogEntry",
-        "indexDoc"_attr = indexDoc);
+    LOGV2_DEBUG(6712303,
+                1,
+                "Updating sharding in-memory state onModifyCollectionShardingIndexCatalog",
+                "indexDoc"_attr = indexDoc);
     auto indexCatalogOplog = ShardingIndexCatalogOplogEntry::parse(
-        IDLParserContext("onModifyShardedCollectionGlobalIndexCatalogEntry"), indexDoc);
+        IDLParserContext("onModifyCollectionShardingIndexCatalogCtx"), indexDoc);
     switch (indexCatalogOplog.getOp()) {
-        case ShardingIndexCatalogOpEnumEnum::insert: {
+        case ShardingIndexCatalogOpEnum::insert: {
             auto indexEntry = ShardingIndexCatalogInsertEntry::parse(
                 IDLParserContext("OplogModifyCatalogEntryContext"), indexDoc);
             opCtx->recoveryUnit()->onCommit([nss, indexEntry](OperationContext* opCtx,
@@ -559,7 +488,7 @@ void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
             });
             break;
         }
-        case ShardingIndexCatalogOpEnumEnum::remove: {
+        case ShardingIndexCatalogOpEnum::remove: {
             auto removeEntry = ShardingIndexCatalogRemoveEntry::parse(
                 IDLParserContext("OplogModifyCatalogEntryContext"), indexDoc);
             opCtx->recoveryUnit()->onCommit([nss, removeEntry](OperationContext* opCtx,
@@ -572,7 +501,7 @@ void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
             });
             break;
         }
-        case ShardingIndexCatalogOpEnumEnum::replace: {
+        case ShardingIndexCatalogOpEnum::replace: {
             auto replaceEntry = ShardingIndexCatalogReplaceEntry::parse(
                 IDLParserContext("OplogModifyCatalogEntryContext"), indexDoc);
             opCtx->recoveryUnit()->onCommit([nss, replaceEntry](OperationContext* opCtx,
@@ -585,7 +514,7 @@ void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
             });
             break;
         }
-        case ShardingIndexCatalogOpEnumEnum::clear:
+        case ShardingIndexCatalogOpEnum::clear:
             opCtx->recoveryUnit()->onCommit([nss](OperationContext* opCtx,
                                                   boost::optional<Timestamp>) {
                 auto scsr = CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
@@ -594,7 +523,7 @@ void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
             });
 
             break;
-        case ShardingIndexCatalogOpEnumEnum::drop: {
+        case ShardingIndexCatalogOpEnum::drop: {
             opCtx->recoveryUnit()->onCommit([nss](OperationContext* opCtx,
                                                   boost::optional<Timestamp>) {
                 auto scsr = CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
@@ -604,7 +533,7 @@ void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
 
             break;
         }
-        case ShardingIndexCatalogOpEnumEnum::rename: {
+        case ShardingIndexCatalogOpEnum::rename: {
             auto renameEntry = ShardingIndexCatalogRenameEntry::parse(
                 IDLParserContext("OplogModifyCatalogEntryContext"), indexDoc);
             opCtx->recoveryUnit()->onCommit([renameEntry](OperationContext* opCtx,
@@ -615,7 +544,7 @@ void ShardServerOpObserver::onModifyShardedCollectionGlobalIndexCatalogEntry(
                     auto fromCSR =
                         CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(
                             opCtx, renameEntry.getFromNss());
-                    auto indexCache = fromCSR->getIndexes(opCtx, true);
+                    auto indexCache = fromCSR->getIndexesInCritSec(opCtx);
                     indexCache->forEachGlobalIndex([&](const auto& index) {
                         fromIndexes.push_back(index);
                         return true;
@@ -801,7 +730,7 @@ void ShardServerOpObserver::onCreateCollection(OperationContext* opCtx,
             oss._allowCollectionCreation);
 
     // If the check above passes, this means the collection doesn't exist and is being created and
-    // that the caller will be responsible to eventially set the proper shard version
+    // that the caller will be responsible to eventially set the proper placement version
     auto scopedCsr =
         CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, collectionName);
     if (!scopedCsr->getCurrentMetadataIfKnown()) {

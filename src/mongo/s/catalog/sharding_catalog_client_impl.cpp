@@ -577,8 +577,11 @@ std::vector<CollectionType> ShardingCatalogClientImpl::getCollections(
 }
 
 std::vector<NamespaceString> ShardingCatalogClientImpl::getAllShardedCollectionsForDb(
-    OperationContext* opCtx, StringData dbName, repl::ReadConcernLevel readConcern) {
-    auto collectionsOnConfig = getCollections(opCtx, dbName, readConcern, BSONObj());
+    OperationContext* opCtx,
+    StringData dbName,
+    repl::ReadConcernLevel readConcern,
+    const BSONObj& sort) {
+    auto collectionsOnConfig = getCollections(opCtx, dbName, readConcern, sort);
 
     std::vector<NamespaceString> collectionsToReturn;
     collectionsToReturn.reserve(collectionsOnConfig.size());
@@ -788,9 +791,8 @@ std::pair<CollectionType, std::vector<ChunkType>> ShardingCatalogClientImpl::get
 };
 
 std::pair<CollectionType, std::vector<IndexCatalogType>>
-ShardingCatalogClientImpl::getCollectionAndGlobalIndexes(OperationContext* opCtx,
-                                                         const NamespaceString& nss,
-                                                         const repl::ReadConcernArgs& readConcern) {
+ShardingCatalogClientImpl::getCollectionAndShardingIndexCatalogEntries(
+    OperationContext* opCtx, const NamespaceString& nss, const repl::ReadConcernArgs& readConcern) {
     auto aggRequest = makeCollectionAndIndexesAggregation(opCtx, nss);
 
     std::vector<BSONObj> aggResult = runCatalogAggregation(opCtx,

@@ -29,6 +29,8 @@
 
 #include "mongo/db/index_builds_coordinator.h"
 
+#include "mongo/db/catalog/index_builds_manager.h"
+#include "mongo/util/future.h"
 #include <boost/filesystem/operations.hpp>
 #include <boost/iterator/transform_iterator.hpp>
 #include <fmt/format.h>
@@ -41,7 +43,6 @@
 #include "mongo/db/catalog/index_build_entry_gen.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
@@ -1058,6 +1059,16 @@ void IndexBuildsCoordinator::applyStartIndexBuild(OperationContext* opCtx,
                     uassertStatusOK(
                         indexCatalog->dropIndex(opCtx, coll.getWritableCollection(opCtx), desc));
                 }
+
+                const IndexDescriptor* desc = indexCatalog->findIndexByKeyPatternAndOptions(
+                    opCtx,
+                    spec.getObjectField(IndexDescriptor::kKeyPatternFieldName),
+                    spec,
+                    IndexCatalog::InclusionPolicy::kReady);
+                if (desc) {
+                    uassertStatusOK(
+                        indexCatalog->dropIndex(opCtx, coll.getWritableCollection(opCtx), desc));
+                }
             }
 
             wuow.commit();
@@ -1608,6 +1619,86 @@ void IndexBuildsCoordinator::onStepUp(OperationContext* opCtx) {
         }
     };
     forEachIndexBuild(indexBuilds, "IndexBuildsCoordinator::onStepUp"_sd, onIndexBuild);
+
+    if (_stepUpThread.joinable()) {
+        // Under normal circumstances this should not result in a wait. The thread's opCtx should
+        // be interrupted on replication state change, or finish while being primary. If this
+        // results in a wait, it means the thread which started in the previous stepUp did not yet
+        // exit. It should eventually exit.
+        _stepUpThread.join();
+    }
+
+    PromiseAndFuture<void> promiseAndFuture;
+    _stepUpThread = stdx::thread([this, &promiseAndFuture] {
+        Client::initThread("IndexBuildsCoordinator-StepUp");
+
+        auto threadCtx = Client::getCurrent()->makeOperationContext();
+        threadCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
+        promiseAndFuture.promise.emplaceValue();
+
+        _onStepUpAsyncTaskFn(threadCtx.get());
+        return;
+    });
+
+    // Wait until the async thread has started and marked its opCtx to always be interrupted at
+    // step-down. We ensure the RSTL is taken and no interrupts are lost.
+    promiseAndFuture.future.wait(opCtx);
+}
+
+void IndexBuildsCoordinator::_onStepUpAsyncTaskFn(OperationContext* opCtx) {
+    auto indexBuilds = _getIndexBuilds();
+    const auto retrySkippedRecords = [this, opCtx](
+                                         const std::shared_ptr<ReplIndexBuildState>& replState) {
+        if (replState->protocol == IndexBuildProtocol::kTwoPhase) {
+            try {
+                // We don't need to check if we are primary because the opCtx is interrupted at
+                // stepdown, so it is guaranteed that if taking the locks succeeds, we are primary.
+                // Take an intent lock, the actual index build should keep running in parallel.
+                const NamespaceStringOrUUID dbAndUUID(replState->dbName, replState->collectionUUID);
+                AutoGetCollection autoColl(opCtx, dbAndUUID, MODE_IX);
+
+                // The index build might have committed or aborted while looping and not holding the
+                // collection lock. Re-check it is still active after taking locks.
+                auto indexBuilds = activeIndexBuilds.filterIndexBuilds(
+                    [&replState](const ReplIndexBuildState& filterState) {
+                        return filterState.buildUUID == replState->buildUUID;
+                    });
+
+                if (indexBuilds.empty()) {
+                    return;
+                }
+
+                // Only checks if key generation is valid, does not actually insert.
+                uassertStatusOK(_indexBuildsManager.retrySkippedRecords(
+                    opCtx,
+                    replState->buildUUID,
+                    autoColl.getCollection(),
+                    IndexBuildsManager::RetrySkippedRecordMode::kKeyGeneration));
+
+            } catch (const DBException& ex) {
+                // Shutdown or replication state change might happen while iterating the index
+                // builds. In both cases, the opCtx is interrupted, in which case we want to stop
+                // the verification process and exit. This might also be the case for a killOp.
+                opCtx->checkForInterrupt();
+
+                // All other errors must be due to key generation. We can abort the build early as
+                // it would eventually fail anyways during the commit phase retry.
+                auto status = ex.toStatus().withContext("Skipped records retry failed on step-up");
+                abortIndexBuildByBuildUUID(
+                    opCtx, replState->buildUUID, IndexBuildAction::kPrimaryAbort, status.reason());
+            }
+        }
+    };
+
+    try {
+        forEachIndexBuild(
+            indexBuilds, "IndexBuildsCoordinator::_onStepUpAsyncTaskFn"_sd, retrySkippedRecords);
+    } catch (const DBException& ex) {
+        LOGV2_DEBUG(7333100,
+                    1,
+                    "Step-up retry of skipped records for all index builds interrupted",
+                    "exception"_attr = ex);
+    }
 }
 
 IndexBuilds IndexBuildsCoordinator::stopIndexBuildsForRollback(OperationContext* opCtx) {
@@ -2312,9 +2403,9 @@ Status IndexBuildsCoordinator::_setUpIndexBuild(OperationContext* opCtx,
             _setUpIndexBuildInner(opCtx, replState, startTimestamp, indexBuildOptions);
     } catch (const DBException& ex) {
         auto status = ex.toStatus();
-        auto collectionSharedPtr = CollectionCatalog::get(opCtx)->lookupCollectionByUUIDForRead(
-            opCtx, replState->collectionUUID);
-        CollectionPtr collection(collectionSharedPtr.get());
+        // Hold reference to the catalog for collection lookup without locks to be safe.
+        auto catalog = CollectionCatalog::get(opCtx);
+        CollectionPtr collection(catalog->lookupCollectionByUUID(opCtx, replState->collectionUUID));
         invariant(collection,
                   str::stream() << "Collection with UUID " << replState->collectionUUID
                                 << " should exist because an index build is in progress: "
@@ -2416,6 +2507,13 @@ namespace {
 template <typename Func>
 void runOnAlternateContext(OperationContext* opCtx, std::string name, Func func) {
     auto newClient = opCtx->getServiceContext()->makeClient(name);
+
+    // TODO(SERVER-74657): Please revisit if this thread could be made killable.
+    {
+        stdx::lock_guard<Client> lk(*newClient.get());
+        newClient.get()->setSystemOperationUnKillableByStepdown(lk);
+    }
+
     AlternativeClientRegion acr(newClient);
     const auto newCtx = cc().makeOperationContext();
     func(newCtx.get());
@@ -2612,9 +2710,11 @@ void IndexBuildsCoordinator::_runIndexBuildInner(
         }
     }
 
-    // If the index build has already been cleaned-up because it encountered an error at
-    // commit-time, there is no work to do. This is the most routine case, since index
-    // constraint checking happens at commit-time for index builds.
+    // If the index build has already been cleaned-up because it encountered an error, there is no
+    // work to do. If feature flag IndexBuildGracefulErrorHandling is not enabled, the most routine
+    // case is for this to be due to a self-abort caused by constraint checking during the commit
+    // phase. When the flag is enabled, constraint violations cause the index build to abort
+    // immediately on primaries, and an async external abort is requested.
     if (replState->isAborted()) {
         if (ErrorCodes::isTenantMigrationError(replState->getAbortStatus()))
             uassertStatusOK(replState->getAbortStatus());
@@ -2625,9 +2725,8 @@ void IndexBuildsCoordinator::_runIndexBuildInner(
     // dropped while the index build is still registered for the collection -- until abortIndexBuild
     // is called. The collection can be renamed, but it is OK for the name to be stale just for
     // logging purposes.
-    auto collectionSharedPtr = CollectionCatalog::get(opCtx)->lookupCollectionByUUIDForRead(
-        opCtx, replState->collectionUUID);
-    CollectionPtr collection(collectionSharedPtr.get());
+    auto catalog = CollectionCatalog::get(opCtx);
+    CollectionPtr collection(catalog->lookupCollectionByUUID(opCtx, replState->collectionUUID));
     invariant(collection,
               str::stream() << "Collection with UUID " << replState->collectionUUID
                             << " should exist because an index build is in progress: "
@@ -2645,9 +2744,9 @@ void IndexBuildsCoordinator::_runIndexBuildInner(
 
     // If IndexBuildGracefulErrorHandling is not enabled, crash on unexpected build errors. When the
     // feature flag is enabled, two-phase builds can handle unexpected errors by requesting an abort
-    // to the primary node.
-    if (!feature_flags::gIndexBuildGracefulErrorHandling.isEnabledAndIgnoreFCV() ||
-        IndexBuildProtocol::kSinglePhase == replState->protocol) {
+    // to the primary node. Single-phase builds can also abort immediately, as the primary or
+    // standalone is the only node aware of the build.
+    if (!feature_flags::gIndexBuildGracefulErrorHandling.isEnabledAndIgnoreFCV()) {
         // Index builds only check index constraints when committing. If an error occurs at that
         // point, then the build is cleaned up while still holding the appropriate locks. The only
         // errors that we cannot anticipate are user interrupts and shutdown errors.
@@ -2852,7 +2951,7 @@ void IndexBuildsCoordinator::_scanCollectionAndInsertSortedKeysIntoIndex(
     // impact on user operations. Other steps of the index builds such as the draining phase have
     // normal priority because index builds are required to eventually catch-up with concurrent
     // writers. Otherwise we risk never finishing the index build.
-    SetAdmissionPriorityForLock priority(opCtx, AdmissionContext::Priority::kLow);
+    ScopedAdmissionPriorityForLock priority(opCtx->lockState(), AdmissionContext::Priority::kLow);
     {
         indexBuildsSSS.scanCollection.addAndFetch(1);
 
@@ -2887,7 +2986,7 @@ void IndexBuildsCoordinator::_insertSortedKeysIntoIndexForResume(
     // impact on user operations. Other steps of the index builds such as the draining phase have
     // normal priority because index builds are required to eventually catch-up with concurrent
     // writers. Otherwise we risk never finishing the index build.
-    SetAdmissionPriorityForLock priority(opCtx, AdmissionContext::Priority::kLow);
+    ScopedAdmissionPriorityForLock priority(opCtx->lockState(), AdmissionContext::Priority::kLow);
     {
         Lock::DBLock autoDb(opCtx, replState->dbName, MODE_IX);
         const NamespaceStringOrUUID dbAndUUID(replState->dbName, replState->collectionUUID);

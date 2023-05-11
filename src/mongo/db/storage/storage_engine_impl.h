@@ -86,8 +86,6 @@ public:
         return _supportsCappedCollections;
     }
 
-    virtual Status closeDatabase(OperationContext* opCtx, const DatabaseName& dbName) override;
-
     virtual Status dropDatabase(OperationContext* opCtx, const DatabaseName& dbName) override;
 
     virtual void flushAllFiles(OperationContext* opCtx, bool callerHoldsReadLock) override;
@@ -162,7 +160,7 @@ public:
 
     bool supportsReadConcernMajority() const final;
 
-    bool supportsOplogStones() const final;
+    bool supportsOplogTruncateMarkers() const final;
 
     bool supportsResumableIndexBuilds() const final;
 
@@ -327,14 +325,11 @@ public:
 
     void dropIdentsOlderThan(OperationContext* opCtx, const Timestamp& ts) override;
 
-    std::shared_ptr<Ident> markIdentInUse(const std::string& ident) override;
+    std::shared_ptr<Ident> markIdentInUse(StringData ident) override;
 
     void startTimestampMonitor() override;
 
     void checkpoint(OperationContext* opCtx) override;
-
-    std::unique_ptr<CheckpointLock> getCheckpointLock(OperationContext* opCtx,
-                                                      CheckpointLock::Mode mode) override;
 
     StatusWith<ReconcileResult> reconcileCatalogAndIdents(
         OperationContext* opCtx, Timestamp stableTs, LastShutdownState lastShutdownState) override;
@@ -344,18 +339,6 @@ public:
     DurableCatalog* getCatalog() override;
 
     const DurableCatalog* getCatalog() const override;
-
-    void addIndividuallyCheckpointedIndex(const std::string& ident) override {
-        return _engine->addIndividuallyCheckpointedIndex(ident);
-    }
-
-    void clearIndividuallyCheckpointedIndexes() override {
-        return _engine->clearIndividuallyCheckpointedIndexes();
-    }
-
-    bool isInIndividuallyCheckpointedIndexes(const std::string& ident) const override {
-        return _engine->isInIndividuallyCheckpointedIndexes(ident);
-    }
 
     /**
      * When loading after an unclean shutdown, this performs cleanup on the DurableCatalogImpl.
@@ -408,7 +391,7 @@ private:
                          Timestamp minVisibleTs,
                          Timestamp minValidTs);
 
-    Status _dropCollectionsNoTimestamp(OperationContext* opCtx, const std::vector<UUID>& toDrop);
+    Status _dropCollections(OperationContext* opCtx, const std::vector<UUID>& toDrop);
 
     /**
      * When called in a repair context (_options.forRepair=true), attempts to recover a collection

@@ -400,7 +400,6 @@ let testCases = {
     abortShardSplit: {skip: "internal command"},
     commitShardSplit: {skip: "internal command"},
     forgetShardSplit: {skip: "internal command"},
-    driverOIDTest: {skip: "internal command"},
     drop: {
         setUp: function(conn) {
             assert.commandWorked(conn.getDB(db).runCommand({create: coll, writeConcern: {w: 1}}));
@@ -507,6 +506,23 @@ let testCases = {
     getLog: {skip: "does not accept read or write concern"},
     getMore: {skip: "does not accept read or write concern"},
     getParameter: {skip: "does not accept read or write concern"},
+    getQueryableEncryptionCountInfo: {
+        // TODO SERVER-69563 - Enable this test once the feature flag is enabled
+        skip: "requires feature flag"
+        // setUp: function(conn) {
+        //     assert.commandWorked(conn.getCollection(nss).insert({x: 1}, {writeConcern: {w: 1}}));
+        // },
+        // command: {
+        //     getQueryableEncryptionCountInfo: coll,
+        //     tokens: [
+        //         {tokens: [{"s": BinData(0, "lUBO7Mov5Sb+c/D4cJ9whhhw/+PZFLCk/AQU2+BpumQ=")}]},
+        //     ],
+        //     "forInsert": true,
+        // },
+        // checkReadConcern: true,
+        // checkWriteConcern: false,
+        // useLogs: true,
+    },
     getShardMap: {skip: "internal command"},
     getShardVersion: {skip: "internal command"},
     getnonce: {skip: "removed in v6.3"},

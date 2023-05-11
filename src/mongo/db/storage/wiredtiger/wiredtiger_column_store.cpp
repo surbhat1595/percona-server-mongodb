@@ -232,9 +232,6 @@ IndexValidateResults WiredTigerColumnStore::validate(OperationContext* opCtx, bo
     }
 
     WiredTigerIndexUtil::validateStructure(opCtx, _uri, results);
-    if (results.valid) {
-        results.keysTraversedFromFullValidate = numEntries(opCtx);
-    }
 
     return results;
 }
@@ -327,6 +324,13 @@ public:
     }
     void setSaveStorageCursorOnDetachFromOperationContext(bool detach) {
         WiredTigerIndexCursorGeneric::setSaveStorageCursorOnDetachFromOperationContext(detach);
+    }
+
+    /**
+     *  Returns the checkpoint ID for checkpoint cursors, otherwise 0.
+     */
+    uint64_t getCheckpointId() const override {
+        return _cursor->getCheckpointId();
     }
 
 private:

@@ -131,7 +131,9 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    virtual void printRecordMetadata(OperationContext* opCtx, const RecordId& recordId) const {
+    virtual void printRecordMetadata(OperationContext* opCtx,
+                                     const RecordId& recordId,
+                                     std::set<Timestamp>* recordTimestamps) const {
         MONGO_UNREACHABLE;
     }
 
@@ -141,6 +143,14 @@ public:
     }
 
     Status doTruncate(OperationContext* opCtx) override {
+        return Status::OK();
+    }
+
+    Status doRangeTruncate(OperationContext* opCtx,
+                           const RecordId& minRecordId,
+                           const RecordId& maxRecordId,
+                           int64_t hintDataSizeDiff,
+                           int64_t hintNumRecordsDiff) override {
         return Status::OK();
     }
 

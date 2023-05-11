@@ -48,13 +48,12 @@ enum class ExplainVersion { V1, V2, V2Compact, V3, Vmax };
  */
 class ABTPrinter : public AbstractABTPrinter {
 public:
-    ABTPrinter(ABT abt, NodeToGroupPropsMap nodeToPropsMap, ExplainVersion explainVersion);
+    ABTPrinter(PlanAndProps planAndProps, ExplainVersion explainVersion);
 
     BSONObj explainBSON() const override final;
 
 private:
-    ABT _abt;
-    NodeToGroupPropsMap _nodeToPropsMap;
+    PlanAndProps _planAndProps;
     ExplainVersion _explainVersion;
 };
 
@@ -114,7 +113,7 @@ public:
 
     static std::string explainPartialSchemaReqMap(const PartialSchemaRequirements& reqMap);
 
-    static std::string explainResidualRequirements(const ResidualRequirements& resReqs);
+    static std::string explainResidualRequirements(const ResidualRequirements::Node& resReqs);
 
     static std::string explainInterval(const IntervalRequirement& interval);
 

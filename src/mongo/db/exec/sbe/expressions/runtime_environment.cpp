@@ -39,9 +39,10 @@ RuntimeEnvironment::RuntimeEnvironment(const RuntimeEnvironment& other)
 
 RuntimeEnvironment::~RuntimeEnvironment() {
     if (_state.use_count() == 1) {
-        for (size_t idx = 0; idx < _state->vals.size(); ++idx) {
-            if (_state->owned[idx]) {
-                releaseValue(_state->typeTags[idx], _state->vals[idx]);
+        for (size_t idx = 0; idx < _state->values.size(); ++idx) {
+            auto [owned, tag, val] = _state->values[idx];
+            if (owned) {
+                releaseValue(tag, val);
             }
         }
     }
@@ -94,7 +95,7 @@ void RuntimeEnvironment::resetSlot(value::SlotId slot,
         return;
     }
 
-    uasserted(4946300, str::stream() << "undefined slot accessor:" << slot);
+    tasserted(4946300, str::stream() << "undefined slot accessor:" << slot);
 }
 
 RuntimeEnvironment::Accessor* RuntimeEnvironment::getAccessor(value::SlotId slot) {
@@ -102,7 +103,7 @@ RuntimeEnvironment::Accessor* RuntimeEnvironment::getAccessor(value::SlotId slot
         return &it->second;
     }
 
-    uasserted(4946301, str::stream() << "undefined slot accessor:" << slot);
+    tasserted(4946301, str::stream() << "undefined slot accessor:" << slot);
 }
 
 const RuntimeEnvironment::Accessor* RuntimeEnvironment::getAccessor(value::SlotId slot) const {
@@ -110,7 +111,7 @@ const RuntimeEnvironment::Accessor* RuntimeEnvironment::getAccessor(value::SlotI
         return &it->second;
     }
 
-    uasserted(4946303, str::stream() << "undefined slot accessor:" << slot);
+    tasserted(4946303, str::stream() << "undefined slot accessor:" << slot);
 }
 
 std::unique_ptr<RuntimeEnvironment> RuntimeEnvironment::makeCopy() const {

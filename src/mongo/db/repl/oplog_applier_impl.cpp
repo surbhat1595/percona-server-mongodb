@@ -39,7 +39,6 @@
 #include "mongo/db/change_stream_serverless_helpers.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/fsync.h"
-#include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/repl/apply_ops.h"
 #include "mongo/db/repl/oplog_applier_utils.h"
@@ -98,7 +97,7 @@ Status finishAndLogApply(OperationContext* opCtx,
             logv2::DynamicAttributes attrs;
 
             auto redacted = redact(entryOrGroupedInserts.toBSON());
-            if (entryOrGroupedInserts.getOp().getOpType() == OpTypeEnum::kCommand) {
+            if (entryOrGroupedInserts.getOp()->getOpType() == OpTypeEnum::kCommand) {
                 attrs.add("command", redacted);
             } else {
                 attrs.add("CRUD", redacted);
@@ -260,6 +259,11 @@ void ApplyBatchFinalizerForJournal::record(const OpTimeAndWallTime& newOpTimeAnd
 void ApplyBatchFinalizerForJournal::_run() {
     Client::initThread("ApplyBatchFinalizerForJournal");
 
+    {
+        stdx::lock_guard<Client> lk(cc());
+        cc().setSystemOperationUnKillableByStepdown(lk);
+    }
+
     while (true) {
         OpTimeAndWallTime latestOpTimeAndWallTime = {OpTime(), Date_t()};
 
@@ -325,7 +329,8 @@ void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
         // The oplog applier is crucial for stability of the replica set. As a result we mark it as
         // having Immediate priority. This makes the operation skip waiting for ticket acquisition
         // and flow control.
-        SetAdmissionPriorityForLock priority(&opCtx, AdmissionContext::Priority::kImmediate);
+        ScopedAdmissionPriorityForLock priority(opCtx.lockState(),
+                                                AdmissionContext::Priority::kImmediate);
 
         // For pausing replication in tests.
         if (MONGO_unlikely(rsSyncApplyStop.shouldFail())) {
@@ -440,8 +445,8 @@ void scheduleWritesToOplogAndChangeCollection(OperationContext* opCtx,
             // Oplog writes are crucial to the stability of the replica set. We mark the operations
             // as having Immediate priority so that it skips waiting for ticket acquisition and flow
             // control.
-            SetAdmissionPriorityForLock priority(opCtx.get(),
-                                                 AdmissionContext::Priority::kImmediate);
+            ScopedAdmissionPriorityForLock priority(opCtx->lockState(),
+                                                    AdmissionContext::Priority::kImmediate);
 
             UnreplicatedWritesBlock uwb(opCtx.get());
             ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(
@@ -576,7 +581,6 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
         }
 
         {
-
             std::vector<Status> statusVector(_writerPool->getStats().options.maxThreads,
                                              Status::OK());
             // Doles out all the work to the writer pool threads. writerVectors is not modified,
@@ -598,8 +602,8 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
                     // Applying an Oplog batch is crucial to the stability of the Replica Set. We
                     // mark it as having Immediate priority so that it skips waiting for ticket
                     // acquisition and flow control.
-                    SetAdmissionPriorityForLock priority(opCtx.get(),
-                                                         AdmissionContext::Priority::kImmediate);
+                    opCtx->lockState()->setAdmissionPriority(
+                        AdmissionContext::Priority::kImmediate);
 
                     opCtx->setEnforceConstraints(false);
 
@@ -902,16 +906,16 @@ Status applyOplogEntryOrGroupedInserts(OperationContext* opCtx,
                                                                            &replOpCounters);
 
     auto op = entryOrGroupedInserts.getOp();
-    if (op.getOpType() == OpTypeEnum::kNoop) {
+    if (op->getOpType() == OpTypeEnum::kNoop) {
         // No-ops should never fail application, since there's nothing to do.
         invariant(status.isOK());
 
-        auto opObj = op.getObject();
+        auto opObj = op->getObject();
         if (opObj.hasField(ReplicationCoordinator::newPrimaryMsgField) &&
             opObj.getField(ReplicationCoordinator::newPrimaryMsgField).str() ==
                 ReplicationCoordinator::newPrimaryMsg) {
 
-            ReplicationMetrics::get(opCtx).setParticipantNewTermDates(op.getWallClockTime(),
+            ReplicationMetrics::get(opCtx).setParticipantNewTermDates(op->getWallClockTime(),
                                                                       applyStartTime);
         }
 

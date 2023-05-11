@@ -313,10 +313,10 @@ CursorId runQueryWithoutRetrying(OperationContext* opCtx,
         // deadline so that we have time to return partial results before the opCtx is killed.
         auto deadline = opCtx->getDeadline();
         if (findCommand.getAllowPartialResults() && findCommand.getMaxTimeMS()) {
-            // Reserve 10% of the time budget (up to 100,000 microseconds max) for processing
+            // Reserve 25% of the time budget (up to 100,000 microseconds max) for processing
             // buffered partial results.
             deadline -=
-                Microseconds{std::min(1000LL * (*findCommand.getMaxTimeMS()) / 10, 100'000LL)};
+                Microseconds{std::min(1000LL * findCommand.getMaxTimeMS().get() / 4, 100'000LL)};
             LOGV2_DEBUG(
                 5746901,
                 0,
@@ -459,6 +459,7 @@ CursorId runQueryWithoutRetrying(OperationContext* opCtx,
         if (shardIds.size() > 0) {
             updateNumHostsTargetedMetrics(opCtx, cm, shardIds.size());
         }
+        collectTelemetryMongos(opCtx);
         return CursorId(0);
     }
 
@@ -470,6 +471,7 @@ CursorId runQueryWithoutRetrying(OperationContext* opCtx,
         : ClusterCursorManager::CursorLifetime::Mortal;
     auto authUser = AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserName();
     ccc->incNBatches();
+    collectTelemetryMongos(opCtx, ccc);
 
     auto cursorId = uassertStatusOK(cursorManager->registerCursor(
         opCtx, ccc.releaseCursor(), query.nss(), cursorType, cursorLifetime, authUser));
@@ -850,8 +852,6 @@ StatusWith<CursorResponse> ClusterFind::runGetMore(OperationContext* opCtx,
                                                          "waitWithPinnedCursorDuringGetMoreBatch");
     }
 
-    telemetry::registerGetMoreRequest(opCtx);
-
     while (!FindCommon::enoughForGetMore(batchSize, batch.size())) {
         StatusWith<ClusterQueryResult> next =
             Status{ErrorCodes::InternalError, "uninitialized cluster query result"};
@@ -931,16 +931,18 @@ StatusWith<CursorResponse> ClusterFind::runGetMore(OperationContext* opCtx,
         postBatchResumeToken = pinnedCursor.getValue()->getPostBatchResumeToken();
     }
 
-    const bool partialResultsReturned = pinnedCursor.getValue()->partialResultsReturned();
-    pinnedCursor.getValue()->setLeftoverMaxTimeMicros(opCtx->getRemainingMaxTimeMicros());
-    pinnedCursor.getValue()->incNBatches();
-    // Upon successful completion, transfer ownership of the cursor back to the cursor manager. If
-    // the cursor has been exhausted, the cursor manager will clean it up for us.
-    pinnedCursor.getValue().returnCursor(cursorState);
-
     // Set nReturned and whether the cursor has been exhausted.
     CurOp::get(opCtx)->debug().cursorExhausted = (idToReturn == 0);
     CurOp::get(opCtx)->debug().nreturned = batch.size();
+
+    const bool partialResultsReturned = pinnedCursor.getValue()->partialResultsReturned();
+    pinnedCursor.getValue()->setLeftoverMaxTimeMicros(opCtx->getRemainingMaxTimeMicros());
+    pinnedCursor.getValue()->incNBatches();
+    collectTelemetryMongos(opCtx, pinnedCursor.getValue());
+
+    // Upon successful completion, transfer ownership of the cursor back to the cursor manager. If
+    // the cursor has been exhausted, the cursor manager will clean it up for us.
+    pinnedCursor.getValue().returnCursor(cursorState);
 
     if (MONGO_unlikely(waitBeforeUnpinningOrDeletingCursorAfterGetMoreBatch.shouldFail())) {
         CurOpFailpointHelpers::waitWhileFailPointEnabled(

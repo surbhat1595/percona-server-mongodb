@@ -39,6 +39,7 @@
 #include "mongo/db/catalog/index_key_validate.h"
 #include "mongo/db/catalog/local_oplog_info.h"
 #include "mongo/db/catalog/uncommitted_multikey.h"
+#include "mongo/db/catalog_shard_feature_flag_gen.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/curop.h"
@@ -152,7 +153,8 @@ Status validateChangeStreamPreAndPostImagesOptionIsPermitted(const NamespaceStri
         return validationStatus;
     }
 
-    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&
+        !gFeatureFlagCatalogShard.isEnabled(serverGlobalParams.featureCompatibility)) {
         return {
             ErrorCodes::InvalidOptions,
             "changeStreamPreAndPostImages collection option is not supported on config servers"};
@@ -230,7 +232,7 @@ StatusWith<std::shared_ptr<Ident>> findSharedIdentForIndex(OperationContext* opC
     }
 
     // Next check the CollectionCatalog for a compatible drop pending index.
-    auto dropPendingEntry = CollectionCatalog::get(opCtx)->findDropPendingIndex(ident.toString());
+    auto dropPendingEntry = CollectionCatalog::get(opCtx)->findDropPendingIndex(ident);
 
     // The index entries are incompatible with the read timestamp, but we need to use the same
     // shared ident to prevent the reaper from dropping idents prematurely.
@@ -442,7 +444,7 @@ Status CollectionImpl::initFromExisting(OperationContext* opCtx,
         sharedIdents.emplace(indexName, swIndexIdent.getValue());
     }
 
-    getIndexCatalog()->initFromExisting(opCtx, this, readTimestamp);
+    getIndexCatalog()->init(opCtx, this, /*isPointInTimeRead=*/true);
 
     // Update the idents for the newly initialized indexes. We must reuse the same shared_ptr<Ident>
     // objects from existing indexes to prevent the index idents from being dropped by the drop

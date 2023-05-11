@@ -60,6 +60,22 @@ function setUpData() {
 }
 
 function runReplacementUpdateTestsForHashedShardKey() {
+    // Make sure the chunk containing key {_id: -100} is on shard0.
+    assert.commandWorked(mongosDB.adminCommand({
+        moveChunk: mongosColl.getFullName(),
+        find: {_id: -100},
+        to: st.shard0.shardName,
+        _waitForDelete: true
+    }));
+
+    // Make sure the chunk containing key {_id: -101} is on shard1.
+    assert.commandWorked(mongosDB.adminCommand({
+        moveChunk: mongosColl.getFullName(),
+        find: {_id: 101},
+        to: st.shard1.shardName,
+        _waitForDelete: true
+    }));
+
     setUpData();
 
     // Perform a replacement update whose query is an exact match on _id and whose replacement
@@ -187,7 +203,7 @@ st.shardColl(mongosColl, {_id: 1, a: 1}, {_id: 0, a: 0}, {_id: 1, a: 1}, mongosD
 // Run the replacement behaviour tests that are relevant to a compound key that includes _id.
 runReplacementUpdateTestsForCompoundShardKey();
 
-// Drop and reshard the collection on {_id: "hashed"}, which will autosplit across both shards.
+// Drop and reshard the collection on {_id: "hashed"}, which will spread chunks across both shards.
 assert(mongosColl.drop());
 mongosDB.adminCommand({shardCollection: mongosColl.getFullName(), key: {_id: "hashed"}});
 

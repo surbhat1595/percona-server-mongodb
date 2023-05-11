@@ -511,13 +511,7 @@ bool ClusterWriteCmd::InvocationBase::runImpl(OperationContext* opCtx,
     // The batched request will only have WC if it was supplied by the client. Otherwise, the
     // batched request should use the WC from the opCtx.
     if (!batchedRequest.hasWriteConcern()) {
-        if (opCtx->getWriteConcern().usedDefaultConstructedWC) {
-            // Pass writeConcern: {}, rather than {w: 1, wtimeout: 0}, so as to not override the
-            // configsvr w:majority upconvert.
-            batchedRequest.setWriteConcern(BSONObj());
-        } else {
-            batchedRequest.setWriteConcern(opCtx->getWriteConcern().toBSON());
-        }
+        batchedRequest.setWriteConcern(opCtx->getWriteConcern().toBSON());
     }
 
     // Write ops are never allowed to have writeConcern inside transactions. Normally
@@ -556,22 +550,17 @@ bool ClusterWriteCmd::InvocationBase::runImpl(OperationContext* opCtx,
 
     // TODO: increase opcounters by more than one
     auto& debug = CurOp::get(opCtx)->debug();
-    auto catalogCache = Grid::get(opCtx)->catalogCache();
     switch (_batchedRequest.getBatchType()) {
         case BatchedCommandRequest::BatchType_Insert:
             for (size_t i = 0; i < numAttempts; ++i) {
                 globalOpCounters.gotInsert();
             }
-            catalogCache->checkAndRecordOperationBlockedByRefresh(opCtx,
-                                                                  mongo::LogicalOp::opInsert);
             debug.additiveMetrics.ninserted = response.getN();
             break;
         case BatchedCommandRequest::BatchType_Update:
             for (size_t i = 0; i < numAttempts; ++i) {
                 globalOpCounters.gotUpdate();
             }
-            catalogCache->checkAndRecordOperationBlockedByRefresh(opCtx,
-                                                                  mongo::LogicalOp::opUpdate);
 
             // The response.getN() count is the sum of documents matched and upserted.
             if (response.isUpsertDetailsSet()) {
@@ -604,8 +593,6 @@ bool ClusterWriteCmd::InvocationBase::runImpl(OperationContext* opCtx,
             for (size_t i = 0; i < numAttempts; ++i) {
                 globalOpCounters.gotDelete();
             }
-            catalogCache->checkAndRecordOperationBlockedByRefresh(opCtx,
-                                                                  mongo::LogicalOp::opDelete);
             debug.additiveMetrics.ndeleted = response.getN();
             break;
     }

@@ -108,17 +108,19 @@ struct RightChildAccessor {
 };
 
 /**
- * Used to access and manipulate the first child of a n-ary node.
+ * Used to access children of a n-ary node. By default, it accesses the first child.
  */
 template <class NodeType>
-struct FirstChildAccessor {
+struct IndexedChildAccessor {
     const ABT& operator()(const ABT& node) const {
-        return node.cast<NodeType>()->nodes().front();
+        return node.cast<NodeType>()->nodes().at(index);
     }
 
     ABT& operator()(ABT& node) {
-        return node.cast<NodeType>()->nodes().front();
+        return node.cast<NodeType>()->nodes().at(index);
     }
+
+    size_t index = 0;
 };
 
 /**
@@ -168,8 +170,6 @@ private:
 };
 
 using SpoolIdGenerator = IdGenerator<int64_t>;
-
-ProjectionNameOrderedSet convertToOrderedSet(ProjectionNameSet unordered);
 
 void combineLimitSkipProperties(properties::LimitSkipRequirement& aboveProp,
                                 const properties::LimitSkipRequirement& belowProp);
@@ -244,8 +244,8 @@ boost::optional<PartialSchemaReqConversion> convertExprToPartialSchemaReq(
  * Schema Requirement structure. Following that the intervals of any remaining non-multikey paths
  * (following simplification) on the same key are intersected. Intervals of multikey paths are
  * checked for subsumption and if one subsumes the other, the subsuming one is retained. Returns
- * true if we have an empty result after simplification. Each redundant binding gets an entry in
- * 'projectionRenames', which maps redundant name to the de-duplicated name.
+ * true if we have an always-false predicate after simplification. Each redundant binding gets an
+ * entry in 'projectionRenames', which maps redundant name to the de-duplicated name.
  */
 [[nodiscard]] bool simplifyPartialSchemaReqPaths(
     const boost::optional<ProjectionName>& scanProjName,
@@ -303,16 +303,12 @@ size_t decodeIndexKeyName(const std::string& fieldName);
  * Compute a list of candidate indexes. A CandidateIndexEntry describes intervals that could be
  * used for accessing each of the indexes in the map. The intervals themselves are derived from
  * 'reqMap'.
- * If the intersection of any of the interval requirements in 'reqMap' results in an empty
- * interval, return an empty mapping and set 'hasEmptyInterval' to true.
- * Otherwise return the computed mapping, and set 'hasEmptyInterval' to false.
  */
 CandidateIndexes computeCandidateIndexes(PrefixId& prefixId,
                                          const ProjectionName& scanProjectionName,
                                          const PartialSchemaRequirements& reqMap,
                                          const ScanDefinition& scanDef,
                                          const QueryHints& hints,
-                                         bool& hasEmptyInterval,
                                          const ConstFoldFn& constFold);
 
 /**
@@ -338,18 +334,39 @@ void lowerPartialSchemaRequirement(const PartialSchemaKey& key,
                                    boost::optional<CEType> residualCE,
                                    PhysPlanBuilder& builder);
 
+/**
+ * Lower ResidualRequirementsWithCE to a subtree consisting of functionally equivalent Filter and
+ * Eval nodes. Note that we take indexPredSels by value here because the implementation needs its
+ * own copy.
+ */
 void lowerPartialSchemaRequirements(CEType scanGroupCE,
                                     std::vector<SelectivityType> indexPredSels,
-                                    ResidualRequirementsWithCE& requirements,
+                                    ResidualRequirementsWithCE::Node requirements,
                                     const PathToIntervalFn& pathToInterval,
                                     PhysPlanBuilder& builder);
 
-void sortResidualRequirements(ResidualRequirementsWithCE& residualReq);
+/**
+ * Build ResidualRequirementsWithCE by combining 'residReqs' with the corresponding entries in
+ * 'partialSchemaKeyCE'.
+ */
+ResidualRequirementsWithCE::Node createResidualReqsWithCE(
+    const ResidualRequirements::Node& residReqs, const PartialSchemaKeyCE& partialSchemaKeyCE);
+
+/**
+ * Sort requirements under a Conjunction by estimated cost.
+ */
+void sortResidualRequirements(ResidualRequirementsWithCE::Node& residualReq);
 
 void applyProjectionRenames(ProjectionRenames projectionRenames, ABT& node);
 
+/**
+ * Remove unused requirements from 'residualReqs' and remove unused projections from
+ * 'fieldProjectionMap'. A boost::none 'residualReqs' indicates that there are no residual
+ * requirements to be applied after the IndexScan, PhysicalScan or Seek (can be thought of as
+ * "trivially true" residual requirements).
+ */
 void removeRedundantResidualPredicates(const ProjectionNameOrderPreservingSet& requiredProjections,
-                                       ResidualRequirements& residualReqs,
+                                       boost::optional<ResidualRequirements::Node>& residualReqs,
                                        FieldProjectionMap& fieldProjectionMap);
 
 /**

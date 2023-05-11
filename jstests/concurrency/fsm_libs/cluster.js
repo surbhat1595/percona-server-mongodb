@@ -40,7 +40,6 @@ var Cluster = function(options) {
             'sameDB',
             'setupFunctions',
             'sharded.enabled',
-            'sharded.enableAutoSplit',
             'sharded.enableBalancer',
             'sharded.numMongos',
             'sharded.numShards',
@@ -82,14 +81,6 @@ var Cluster = function(options) {
 
         options.sharded.enabled = options.sharded.enabled || false;
         assert.eq('boolean', typeof options.sharded.enabled);
-
-        if (typeof options.sharded.enableAutoSplit !== 'undefined') {
-            assert(options.sharded.enabled,
-                   "Must have sharded.enabled be true if 'sharded.enableAutoSplit' is specified");
-        }
-
-        options.sharded.enableAutoSplit = options.sharded.enableAutoSplit || false;
-        assert.eq('boolean', typeof options.sharded.enableAutoSplit);
 
         if (typeof options.sharded.enableBalancer !== 'undefined') {
             assert(options.sharded.enabled,
@@ -472,10 +463,6 @@ var Cluster = function(options) {
         return this.isSharded() && options.sharded.enableBalancer;
     };
 
-    this.isAutoSplitEnabled = function isAutoSplitEnabled() {
-        return this.isSharded() && options.sharded.enableAutoSplit;
-    };
-
     this.validateAllCollections = function validateAllCollections(phase) {
         assert(initialized, 'cluster must be initialized first');
 
@@ -604,6 +591,22 @@ var Cluster = function(options) {
 
     this.shouldPerformContinuousStepdowns = function shouldPerformContinuousStepdowns() {
         return this.isSharded() && (typeof options.sharded.stepdownOptions !== 'undefined');
+    };
+
+    /*
+     * Returns true if this cluster has a catalog shard.
+     * Catalog shard always have shard ID equal to "config".
+     */
+    this.hasCatalogShard = function hasCatalogShard() {
+        if (!this.isSharded()) {
+            return false;
+        }
+        let i = 0;
+        while (st.shard(i)) {
+            if (st.shard(i++).shardName === "config")
+                return true;
+        }
+        return false;
     };
 
     this.isSteppingDownConfigServers = function isSteppingDownConfigServers() {

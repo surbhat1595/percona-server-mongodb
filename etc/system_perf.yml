@@ -696,6 +696,13 @@ tasks:
         vars:
           test_control: "tpcc"
 
+  - name: tpcc_majority
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "tpcc_majority"
+
   - name: industry_benchmarks
     priority: 5
     commands:
@@ -1323,13 +1330,24 @@ tasks:
              exclude_filter: single_threaded,
              threads: "1 2 4 8",
              read_cmd: 'true'}
-  - name: compound-wildcard-index-insert
+  - name: compound_wildcard_index_write_commands
     commands:
       - func: f_run_dsi_workload
         vars:
           test_control: mongo-perf.2023-02
           test_control_params: |
-            {include_filter_1: compound-wildcard-insert,
+            {include_filter_1: compound-wildcard-insert compound-wildcard-remove compound-wildcard-update,
+             include_filter_2: core regression,
+             exclude_filter: single_threaded,
+             threads: "1 2 4 8",
+             read_cmd: 'true'}
+  - name: compound_wildcard_index_read_commands
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: mongo-perf.2023-02
+          test_control_params: |
+            {include_filter_1: compound-wildcard-query,
              include_filter_2: core regression,
              exclude_filter: single_threaded,
              threads: "1 2 4 8",
@@ -1662,96 +1680,109 @@ buildvariants:
   #     - name: column_store_index_charts_events_1G
   #     - name: ssb_column_store_comparison
 
-  # - name: linux-standalone-classic-query-engine
-  #   display_name: Linux Standalone (Classic Query Engine) Legacy
-  #   # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-  #   cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
-  #   modules: *modules
-  #   expansions:
-  #     mongodb_setup: standalone-classic-query-engine
-  #     infrastructure_provisioning: single
-  #     platform: linux
-  #     project_dir: *project_dir
-  #     authentication: enabled
-  #     storageEngine: wiredTiger
-  #   run_on:
-  #     - "rhel70-perf-single"
-  #   depends_on: *_compile_amazon2
-  #   tasks: &classic_engine_tasks
-  #     - name: schedule_patch_auto_tasks
-  #     - name: schedule_variant_auto_tasks
-  #     - name: industry_benchmarks
-  #     - name: ycsb_60GB
-  #     - name: ycsb_60GB.long
-  #     - name: crud_workloads
-  #     - name: bestbuy_agg
-  #     - name: bestbuy_agg_merge_different_db
-  #     - name: bestbuy_agg_merge_same_db
-  #     - name: bestbuy_agg_merge_wordcount
-  #     - name: bestbuy_query
-  #     - name: cursor_manager
-  #     - name: map_reduce_workloads
-  #     - name: tpcc
-  #     - name: tpch_1_normalized
-  #     - name: tpch_1_denormalized
-  #     - name: tpch_10_normalized
-  #     - name: tpch_10_denormalized
+  - name: linux-intel-standalone-classic-query-engine
+    display_name: Linux Intel Standalone (Classic Query Engine)
+    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
+    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    modules: *modules
+    expansions:
+      mongodb_setup_release: 2022-11
+      mongodb_setup: standalone-classic-query-engine
+      infrastructure_provisioning_release: 2022-11
+      infrastructure_provisioning: single-intel
+      workload_setup: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+    run_on:
+      - "rhel70-perf-single"
+    depends_on: *_compile_amazon2
+    tasks: &classic_engine_tasks
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
+      - name: industry_benchmarks
+      - name: ycsb_60GB
+      - name: ycsb_60GB.long
+      - name: crud_workloads_majority
+      - name: bestbuy_agg
+      - name: bestbuy_agg_merge_different_db
+      - name: bestbuy_agg_merge_same_db
+      - name: bestbuy_agg_merge_wordcount
+      - name: bestbuy_query
+      - name: cursor_manager
+      - name: map_reduce_workloads
+      - name: tpcc
+      - name: tpcc_majority
+      - name: tpch_1_normalized
+      - name: tpch_1_denormalized
+      - name: tpch_10_normalized
+      - name: tpch_10_denormalized
 
-  # - name: linux-standalone-sbe
-  #   display_name: Linux Standalone (SBE) Legacy
-  #   # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-  #   cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
-  #   modules: *modules
-  #   expansions:
-  #     mongodb_setup: standalone-sbe
-  #     infrastructure_provisioning: single
-  #     platform: linux
-  #     project_dir: *project_dir
-  #     authentication: enabled
-  #     storageEngine: wiredTiger
-  #   run_on:
-  #     - "rhel70-perf-single"
-  #   depends_on: *_compile_amazon2
-  #   tasks: *classic_engine_tasks
+  - name: linux-intel-standalone-sbe
+    display_name: Linux Intel Standalone (SBE)
+    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
+    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    modules: *modules
+    expansions:
+      mongodb_setup_release: 2022-11
+      mongodb_setup: standalone-sbe
+      infrastructure_provisioning_release: 2022-11
+      infrastructure_provisioning: single-intel
+      workload_setup: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+    run_on:
+      - "rhel70-perf-single"
+    depends_on: *_compile_amazon2
+    tasks: *classic_engine_tasks
 
-  # - name: linux-1-node-replSet-classic-query-engine
-  #   display_name: Linux 1-Node ReplSet (Classic Query Engine) Legacy
-  #   # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-  #   cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
-  #   modules: *modules
-  #   expansions:
-  #     mongodb_setup: single-replica-classic-query-engine
-  #     infrastructure_provisioning: single
-  #     platform: linux
-  #     project_dir: *project_dir
-  #     authentication: enabled
-  #     storageEngine: wiredTiger
-  #   run_on:
-  #     - "rhel70-perf-single"
-  #   depends_on: *_compile_amazon2
-  #   tasks: &classic_engine_1nodereplset_tasks
-  #     - name: schedule_patch_auto_tasks
-  #     - name: schedule_variant_auto_tasks
-  #     - name: linkbench
-  #     - name: linkbench2
-  #     - name: snapshot_reads
+  - name: linux-intel-1-node-replSet-classic-query-engine
+    display_name: Linux Intel 1-Node ReplSet (Classic Query Engine)
+    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
+    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    modules: *modules
+    expansions:
+      mongodb_setup_release: 2022-11
+      mongodb_setup: single-replica-classic-query-engine
+      infrastructure_provisioning_release: 2022-11
+      infrastructure_provisioning: single-intel
+      workload_setup: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+    run_on:
+      - "rhel70-perf-single"
+    depends_on: *_compile_amazon2
+    tasks: &classic_engine_1nodereplset_tasks
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
+      - name: linkbench
+      - name: linkbench2
+      - name: snapshot_reads
 
-  # - name: linux-1-node-replSet-sbe
-  #   display_name: Linux 1-Node ReplSet (SBE) Legacy
-  #   # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-  #   cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
-  #   modules: *modules
-  #   expansions:
-  #     mongodb_setup: single-replica-sbe
-  #     infrastructure_provisioning: single
-  #     platform: linux
-  #     project_dir: *project_dir
-  #     authentication: enabled
-  #     storageEngine: wiredTiger
-  #   run_on:
-  #     - "rhel70-perf-single"
-  #   depends_on: *_compile_amazon2
-  #   tasks: *classic_engine_1nodereplset_tasks
+  - name: linux-intel-1-node-replSet-sbe
+    display_name: Linux Intel 1-Node ReplSet (SBE)
+    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
+    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    modules: *modules
+    expansions:
+      mongodb_setup_release: 2022-11
+      mongodb_setup: single-replica-sbe
+      infrastructure_provisioning_release: 2022-11
+      infrastructure_provisioning: single-intel
+      workload_setup: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+    run_on:
+      - "rhel70-perf-single"
+    depends_on: *_compile_amazon2
+    tasks: *classic_engine_1nodereplset_tasks
 
   # - name: linux-1-node-replSet-all-feature-flags
   #   display_name: Linux 1-Node ReplSet (all feature flags) Legacy
@@ -2680,6 +2711,8 @@ buildvariants:
       atlas_setup: M60-repl
       use_custom_build: true
       infrastructure_provisioning: workload_client
+      infrastructure_provisioning_release: 2022-11
+      workload_setup: 2022-11
       platform: linux
       project_dir: *project_dir
       storageEngine: wiredTiger
@@ -2702,6 +2735,7 @@ buildvariants:
       - name: industry_benchmarks
       - name: ycsb_60GB
       - name: tpcc
+      - name: tpcc_majority
       - name: linkbench
       - name: linkbench2
 
@@ -2715,8 +2749,9 @@ buildvariants:
       atlas_setup: M60-repl-azure
       use_custom_build_azure: true
       compile_variant: -rhel70
-      run_on_azure: true
       infrastructure_provisioning: workload_client
+      infrastructure_provisioning_release: 2022-11
+      workload_setup: 2022-11
       platform: linux
       project_dir: *project_dir
       storageEngine: wiredTiger
@@ -2737,6 +2772,7 @@ buildvariants:
       - name: industry_benchmarks
       - name: ycsb_60GB
       - name: tpcc
+      - name: tpcc_majority
       - name: linkbench
       - name: linkbench2
 
@@ -2776,6 +2812,7 @@ buildvariants:
       - name: ycsb_60GB
       - name: ycsb_60GB.long
       - name: crud_workloads_majority
+      - name: crud_workloads_w1
       - name: genny_canaries
       - name: cursor_manager
       - name: mixed_workloads
@@ -2787,6 +2824,8 @@ buildvariants:
       - name: bestbuy_agg_merge_same_db
       - name: bestbuy_agg_merge_wordcount
       - name: bestbuy_query
+      - name: tpcc
+      - name: tpcc_majority
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
       - name: tpch_10_normalized
@@ -2828,6 +2867,7 @@ buildvariants:
       - name: cursor_manager
       - name: map_reduce_workloads
       - name: tpcc
+      - name: tpcc_majority
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
       - name: tpch_10_normalized
@@ -2856,25 +2896,7 @@ buildvariants:
     run_on:
       - "rhel70-perf-single"
     depends_on: *_compile_amazon_linux2_arm64
-    tasks: &classic_engine_tasks
-      - name: schedule_patch_auto_tasks
-      - name: schedule_variant_auto_tasks
-      - name: industry_benchmarks
-      - name: ycsb_60GB
-      - name: ycsb_60GB.long
-      - name: crud_workloads_majority
-      - name: bestbuy_agg
-      - name: bestbuy_agg_merge_different_db
-      - name: bestbuy_agg_merge_same_db
-      - name: bestbuy_agg_merge_wordcount
-      - name: bestbuy_query
-      - name: cursor_manager
-      - name: map_reduce_workloads
-      - name: tpcc
-      - name: tpch_1_normalized
-      - name: tpch_1_denormalized
-      - name: tpch_10_normalized
-      - name: tpch_10_denormalized
+    tasks: *classic_engine_tasks
 
   - name: linux-standalone-sbe.2022-11
     display_name: Linux Standalone (SBE) 2022-11
@@ -2916,12 +2938,7 @@ buildvariants:
     run_on:
       - "rhel70-perf-single"
     depends_on: *_compile_amazon_linux2_arm64
-    tasks: &classic_engine_1nodereplset_tasks
-      - name: schedule_patch_auto_tasks
-      - name: schedule_variant_auto_tasks
-      - name: linkbench
-      - name: linkbench2
-      - name: snapshot_reads
+    tasks: *classic_engine_1nodereplset_tasks
 
   - name: linux-1-node-replSet-sbe.2022-11
     display_name: Linux 1-Node ReplSet (SBE) 2022-11
@@ -2945,36 +2962,110 @@ buildvariants:
     tasks: *classic_engine_1nodereplset_tasks
 
   - name: linux-standalone-telemetry
-    display_name: Linux Standalone (Telemetry)
+    display_name: Linux Standalone 2022-11 (Telemetry)
     cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
     modules: *modules
     expansions:
+      mongodb_setup_release: 2022-11
       mongodb_setup: standalone-telemetry
+      infrastructure_provisioning_release: 2022-11
       infrastructure_provisioning: single
+      workload_setup: 2022-11
       platform: linux
       project_dir: *project_dir
       authentication: enabled
       storageEngine: wiredTiger
+      compile_variant: "-arm64"
     run_on:
       - "rhel70-perf-single"
-    depends_on: *_compile_amazon2
-    tasks: *classic_engine_tasks
+    depends_on: *_compile_amazon_linux2_arm64
+    tasks:
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
+      - name: ycsb_60GB
+      - name: ycsb_60GB.long
+      - name: crud_workloads_majority
+      - name: tpcc
 
   - name: linux-1-node-replSet-telemetry
-    display_name: Linux 1-Node ReplSet (Telemetry)
+    display_name: Linux 1-Node ReplSet 2022-11 (Telemetry)
     cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
     modules: *modules
     expansions:
+      mongodb_setup_release: 2022-11
       mongodb_setup: single-replica-telemetry
+      infrastructure_provisioning_release: 2022-11
       infrastructure_provisioning: single
+      workload_setup: 2022-11
       platform: linux
       project_dir: *project_dir
       authentication: enabled
       storageEngine: wiredTiger
+      compile_variant: "-arm64"
     run_on:
       - "rhel70-perf-single"
-    depends_on: *_compile_amazon2
-    tasks: *classic_engine_1nodereplset_tasks
+    depends_on: *_compile_amazon_linux2_arm64
+    tasks:
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
+      - name: ycsb_60GB
+      - name: ycsb_60GB.long
+      - name: crud_workloads_majority
+      - name: mixed_workloads
+      - name: tpcc
+
+  - name: linux-3-node-replSet-telemetry
+    display_name: Linux 3-Node ReplSet 2022-11 (Telemetry)
+    cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
+    modules: *modules
+    expansions:
+      mongodb_setup_release: 2022-11
+      mongodb_setup: replica-telemetry
+      infrastructure_provisioning_release: 2022-11
+      infrastructure_provisioning: replica
+      workload_setup: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+      compile_variant: "-arm64"
+    run_on:
+      - "rhel70-perf-replset"
+    depends_on: *_compile_amazon_linux2_arm64
+    tasks:
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
+      - name: ycsb_60GB
+      - name: ycsb_60GB.long
+      - name: crud_workloads_majority
+      - name: crud_workloads_w1
+      - name: mixed_workloads
+      - name: tpcc
+
+  - name: linux-3-shard-telemetry
+    display_name: Linux 3-Shard Cluster 2022-11 (Telemetry)
+    cron: "0 0 * * 0,2,3,4,5" # Run it every day except Saturday and Monday.
+    modules: *modules
+    expansions:
+      mongodb_setup_release: 2022-11
+      mongodb_setup: shard-telemetry
+      infrastructure_provisioning_release: 2022-11
+      infrastructure_provisioning: shard
+      workload_setup: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+      compile_variant: "-arm64"
+    run_on:
+      - "rhel70-perf-shard"
+    depends_on: *_compile_amazon_linux2_arm64
+    tasks:
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
+      - name: crud_workloads_majority
+      - name: crud_workloads_w1
+      - name: mixed_workloads
 
   - name: linux-1-node-replSet-all-feature-flags.2022-11
     display_name: Linux 1-Node ReplSet (all feature flags) 2022-11
@@ -3046,6 +3137,7 @@ buildvariants:
       - name: tsbs_query_finance
       - name: tsbs_query_manual_bucketing
       - name: tpcc
+      - name: tpcc_majority
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
       - name: tpch_10_normalized
@@ -3546,6 +3638,7 @@ buildvariants:
       - name: snapshot_reads
       - name: secondary_reads
       - name: tpcc
+      - name: tpcc_majority
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
       # TODO: Enable in SERVER-66572.
@@ -3633,6 +3726,7 @@ buildvariants:
       - name: snapshot_reads
       - name: secondary_reads
       - name: tpcc
+      - name: tpcc_majority
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
       # TODO: Enable in SERVER-66572.
@@ -3691,6 +3785,7 @@ buildvariants:
       - name: snapshot_reads
       - name: secondary_reads
       - name: tpcc
+      - name: tpcc_majority
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
       # TODO: Enable in SERVER-66572.
@@ -3751,6 +3846,7 @@ buildvariants:
       - name: snapshot_reads
       - name: secondary_reads
       - name: tpcc
+      - name: tpcc_majority
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
       # TODO: Enable in SERVER-66572.
@@ -3987,6 +4083,8 @@ buildvariants:
     - name: singleThreaded_read_commands
     - name: pipeline-updates
     - name: javascript
+    - name: compound_wildcard_index_write_commands
+    - name: compound_wildcard_index_read_commands
 
   - &linux-microbenchmarks-repl-arm
     name: linux-microbenchmarks-repl-arm.2023-01
@@ -4024,7 +4122,7 @@ buildvariants:
     expansions:
       <<: *standalone-arm-expansions
       mongodb_setup: mongo-perf-standalone-all-feature-flags.2023-02
-    # Same as standalone tasks, but with compound-wildcard-index-insert added
+    # Same as standalone tasks, but with tasks required all feature flags added
     tasks: &mirobenchmarks-all-feature-flags-tasks
     - name: big_collection
     - name: genny_scale_InsertRemove
@@ -4051,7 +4149,8 @@ buildvariants:
     - name: singleThreaded_read_commands
     - name: pipeline-updates
     - name: javascript
-    - name: compound-wildcard-index-insert
+    - name: compound_wildcard_index_write_commands
+    - name: compound_wildcard_index_read_commands
 
   - <<: *linux-microbenchmarks-standalone-arm
     name: linux-microbenchmarks-standalone-classic-query-engine-arm.2023-01

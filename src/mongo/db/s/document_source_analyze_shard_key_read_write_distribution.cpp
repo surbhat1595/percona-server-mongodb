@@ -108,6 +108,7 @@ CollectionRoutingInfoTargeter makeCollectionRoutingInfoTargeter(
                                    << repl::ReadConcernArgs::kAfterClusterTimeFieldName
                                    << splitPointsAfterClusterTime));
     aggRequest.setWriteConcern(WriteConcernOptions());
+    aggRequest.setUnwrappedReadPref(ReadPreferenceSetting::get(opCtx).toContainingBSON());
 
     uassertStatusOK(shard->runAggregation(
         opCtx,
@@ -118,7 +119,9 @@ CollectionRoutingInfoTargeter makeCollectionRoutingInfoTargeter(
                     IDLParserContext(
                         DocumentSourceAnalyzeShardKeyReadWriteDistribution::kStageName),
                     doc);
-                appendChunk(lastChunkMax, splitPointDoc.getSplitPoint());
+                auto splitPoint = splitPointDoc.getSplitPoint();
+                uassertShardKeyValueNotContainArrays(splitPoint);
+                appendChunk(lastChunkMax, splitPoint);
             }
             return true;
         }));
@@ -143,8 +146,8 @@ CollectionRoutingInfoTargeter makeCollectionRoutingInfoTargeter(
                                std::move(routingTableHistory))),
                            boost::none);
 
-    return CollectionRoutingInfoTargeter(
-        CollectionRoutingInfo{std::move(cm), boost::optional<GlobalIndexesCache>(boost::none)});
+    return CollectionRoutingInfoTargeter(CollectionRoutingInfo{
+        std::move(cm), boost::optional<ShardingIndexesCatalogCache>(boost::none)});
 }
 
 /**
@@ -281,12 +284,10 @@ DocumentSource::GetNextResult DocumentSourceAnalyzeShardKeyReadWriteDistribution
         return GetNextResult::makeEOF();
     }
 
-    uassert(ErrorCodes::NamespaceNotFound,
-            str::stream() << "Cannot analyze a shard key for a non-existing collection",
-            pExpCtx->uuid);
-    auto collUuid = *pExpCtx->uuid;
     _finished = true;
 
+    auto collUuid = uassertStatusOK(validateCollectionOptions(
+        pExpCtx->opCtx, pExpCtx->ns, AnalyzeShardKey::kCommandParameterFieldName));
     auto targeter = makeCollectionRoutingInfoTargeter(pExpCtx->opCtx,
                                                       pExpCtx->ns,
                                                       _spec.getKey(),

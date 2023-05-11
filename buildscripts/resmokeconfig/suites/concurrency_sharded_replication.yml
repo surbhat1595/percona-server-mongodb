@@ -107,19 +107,20 @@ executor:
       # - RunDBCheckInBackground
       - CheckReplDBHashInBackground
       - CheckReplDBHash
+      - CheckMetadataConsistencyInBackground
       - ValidateCollections
     tests: true
   config:
     shell_options:
       global_vars:
         TestData:
-          runningWithAutoSplit: false
           runningWithBalancer: false
   hooks:
   # TODO (SERVER-63855): remove 'RunDBCheckInBackground' or put it back.
   # - class: RunDBCheckInBackground
   - class: CheckReplDBHashInBackground
   - class: CheckReplDBHash
+  - class: CheckMetadataConsistencyInBackground
   - class: CheckOrphansDeleted
   - class: CheckRoutingTableConsistency
   - class: CheckShardFilteringMetadata
@@ -128,7 +129,6 @@ executor:
   fixture:
     class: ShardedClusterFixture
     enable_balancer: false
-    enable_autosplit: false
     mongos_options:
       set_parameters:
         enableTestCommands: 1

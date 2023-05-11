@@ -40,6 +40,7 @@
 #include "mongo/s/client/shard.h"
 #include "mongo/s/grid.h"
 #include "mongo/util/cancellation.h"
+#include "mongo/util/concurrency/semaphore_ticketholder.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/producer_consumer_queue.h"
 
@@ -138,6 +139,8 @@ private:
     // Indicates if source is prepared to service _migrateClone requests in parallel.
     bool _isParallelFetchingSupported;
 
+    SemaphoreTicketHolder _secondaryThrottleTicket;
+
     // Given session id and namespace, create migrateCloneRequest.
     // Only should be created once for the lifetime of the object.
     BSONObj _createMigrateCloneRequest() const {
@@ -158,10 +161,6 @@ private:
 
     static void onCreateThread(const std::string& threadName) {
         Client::initThread(threadName, getGlobalServiceContext(), nullptr);
-        {
-            stdx::lock_guard<Client> lk(cc());
-            cc().setSystemOperationKillableByStepdown(lk);
-        }
     }
 
 };  // namespace mongo

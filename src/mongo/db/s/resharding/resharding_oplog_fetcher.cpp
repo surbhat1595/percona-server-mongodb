@@ -42,9 +42,9 @@
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/s/metrics/sharding_data_transform_cumulative_metrics.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_util.h"
-#include "mongo/db/s/sharding_data_transform_cumulative_metrics.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/logv2/log.h"
@@ -164,6 +164,13 @@ ExecutorFuture<void> ReshardingOplogFetcher::_reschedule(
                                             _reshardingUUID.toString(),
                                             _donorShard.toString()),
                                 _service());
+
+            // TODO(SERVER-74658): Please revisit if this thread could be made killable.
+            {
+                stdx::lock_guard<Client> lk(*client.get());
+                client.get()->setSystemOperationUnKillableByStepdown(lk);
+            }
+
             return iterate(client.get(), factory);
         })
         .then([executor, cancelToken](bool moreToCome) {
@@ -316,8 +323,9 @@ bool ReshardingOplogFetcher::consume(Client* client,
         [this, &batchesProcessed, &moreToCome, &opCtxRaii, &batchFetchTimer, factory](
             const std::vector<BSONObj>& batch,
             const boost::optional<BSONObj>& postBatchResumeToken) {
-            _env->metrics()->onOplogEntriesFetched(batch.size(),
-                                                   Milliseconds(batchFetchTimer.millis()));
+            _env->metrics()->onOplogEntriesFetched(batch.size());
+            _env->metrics()->onBatchRetrievedDuringOplogFetching(
+                Milliseconds(batchFetchTimer.millis()));
 
             ThreadClient client(fmt::format("ReshardingFetcher-{}-{}",
                                             _reshardingUUID.toString(),
@@ -326,6 +334,12 @@ bool ReshardingOplogFetcher::consume(Client* client,
                                 nullptr);
             auto opCtxRaii = factory.makeOperationContext(client.get());
             auto opCtx = opCtxRaii.get();
+
+            // TODO(SERVER-74658): Please revisit if this thread could be made killable.
+            {
+                stdx::lock_guard<Client> lk(*client.get());
+                client.get()->setSystemOperationUnKillableByStepdown(lk);
+            }
 
             // Noting some possible optimizations:
             //
@@ -394,7 +408,7 @@ bool ReshardingOplogFetcher::consume(Client* client,
 
                     // Also include synthetic oplog in the fetched count so it can match up with the
                     // total oplog applied count in the end.
-                    _env->metrics()->onOplogEntriesFetched(1, Milliseconds(0));
+                    _env->metrics()->onOplogEntriesFetched(1);
 
                     auto [p, f] = makePromiseFuture<void>();
                     {

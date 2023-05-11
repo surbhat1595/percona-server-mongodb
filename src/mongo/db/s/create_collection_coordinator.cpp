@@ -320,10 +320,6 @@ void insertChunks(OperationContext* opCtx,
     {
         auto newClient =
             opCtx->getServiceContext()->makeClient("CreateCollectionCoordinator::insertChunks");
-        {
-            stdx::lock_guard<Client> lk(*newClient.get());
-            newClient->setSystemOperationKillableByStepdown(lk);
-        }
 
         AlternativeClientRegion acr(newClient);
         auto executor =
@@ -425,7 +421,6 @@ void broadcastDropCollection(OperationContext* opCtx,
                              const NamespaceString& nss,
                              const std::shared_ptr<executor::TaskExecutor>& executor,
                              const OperationSessionInfo& osi) {
-    const ShardsvrDropCollectionParticipant dropCollectionParticipant(nss);
     const auto primaryShardId = ShardingState::get(opCtx)->shardId();
 
     auto participants = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
@@ -708,7 +703,7 @@ CreateCollectionCoordinator::_checkIfCollectionAlreadyShardedWithSameOptions(
         uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithRefresh(
             opCtx, originalNss()));
     auto& cm = cri.cm;
-    auto& gii = cri.gii;
+    auto& sii = cri.sii;
     if (cm.isSharded()) {
         auto requestMatchesExistingCollection = [&] {
             // No timeseries fields in request
@@ -752,7 +747,7 @@ CreateCollectionCoordinator::_checkIfCollectionAlreadyShardedWithSameOptions(
     cri = uassertStatusOK(
         Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithRefresh(opCtx, bucketsNss));
     cm = cri.cm;
-    gii = cri.gii;
+    sii = cri.sii;
     if (!cm.isSharded()) {
         return boost::none;
     }
@@ -887,8 +882,9 @@ TranslatedRequestParams CreateCollectionCoordinator::_translateRequestParameters
     };
 
     auto bucketsNs = originalNss().makeTimeseriesBucketsNamespace();
-    auto existingBucketsColl =
-        CollectionCatalog::get(opCtx)->lookupCollectionByNamespaceForRead(opCtx, bucketsNs);
+    // Hold reference to the catalog for collection lookup without locks to be safe.
+    auto catalog = CollectionCatalog::get(opCtx);
+    auto existingBucketsColl = catalog->lookupCollectionByNamespace(opCtx, bucketsNs);
 
     auto targetingStandardCollection = !_request.getTimeseries() && !existingBucketsColl;
 
@@ -1160,8 +1156,7 @@ void CreateCollectionCoordinator::_createPolicy(OperationContext* opCtx,
         _request.getPresplitHashedZones() ? *_request.getPresplitHashedZones() : false,
         getTagsAndValidate(opCtx, nss(), shardKeyPattern.toBSON()),
         getNumShards(opCtx),
-        *_collectionEmpty,
-        !feature_flags::gNoMoreAutoSplitter.isEnabled(serverGlobalParams.featureCompatibility));
+        *_collectionEmpty);
 }
 
 void CreateCollectionCoordinator::_createChunks(OperationContext* opCtx,
@@ -1257,8 +1252,8 @@ void CreateCollectionCoordinator::_commit(OperationContext* opCtx,
     // the memory footprint, such variables get instantiated as shared_ptrs.
     auto coll =
         std::make_shared<CollectionType>(nss(),
-                                         _initialChunks->collVersion().epoch(),
-                                         _initialChunks->collVersion().getTimestamp(),
+                                         _initialChunks->collPlacementVersion().epoch(),
+                                         _initialChunks->collPlacementVersion().getTimestamp(),
                                          Date_t::now(),
                                          *_collectionUUID,
                                          _doc.getTranslatedRequestParams()->getKeyPattern());
@@ -1304,11 +1299,11 @@ void CreateCollectionCoordinator::_commit(OperationContext* opCtx,
         forceShardFilteringMetadataRefresh(opCtx, nss());
     } catch (const DBException& ex) {
         LOGV2(5277908,
-              "Failed to obtain collection's shard version, so it will be recovered",
+              "Failed to obtain collection's placement version, so it will be recovered",
               "namespace"_attr = nss(),
               "error"_attr = redact(ex));
 
-        // If the refresh fails, then set the shard version to UNKNOWN and let a future
+        // If the refresh fails, then set the placement version to UNKNOWN and let a future
         // operation to refresh the metadata.
 
         // TODO (SERVER-71444): Fix to be interruptible or document exception.
@@ -1341,7 +1336,7 @@ void CreateCollectionCoordinator::_commit(OperationContext* opCtx,
           "Created initial chunk(s)",
           "namespace"_attr = nss(),
           "numInitialChunks"_attr = _initialChunks->chunks.size(),
-          "initialCollectionVersion"_attr = _initialChunks->collVersion());
+          "initialCollectionPlacementVersion"_attr = _initialChunks->collPlacementVersion());
 
     auto result = CreateCollectionResponse(ShardVersionFactory::make(
         placementVersion, boost::optional<CollectionIndexes>(boost::none)));
@@ -1352,7 +1347,7 @@ void CreateCollectionCoordinator::_commit(OperationContext* opCtx,
           "Collection created",
           "namespace"_attr = nss(),
           "UUID"_attr = _result->getCollectionUUID(),
-          "version"_attr = _result->getCollectionVersion());
+          "placementVersion"_attr = _result->getCollectionVersion());
 }
 
 void CreateCollectionCoordinator::_logStartCreateCollection(OperationContext* opCtx) {
@@ -1367,7 +1362,7 @@ void CreateCollectionCoordinator::_logStartCreateCollection(OperationContext* op
 void CreateCollectionCoordinator::_logEndCreateCollection(OperationContext* opCtx) {
     BSONObjBuilder collectionDetail;
     _result->getCollectionUUID()->appendToBuilder(&collectionDetail, "uuid");
-    collectionDetail.append("version", _result->getCollectionVersion().toString());
+    collectionDetail.append("placementVersion", _result->getCollectionVersion().toString());
     if (_collectionEmpty)
         collectionDetail.append("empty", *_collectionEmpty);
     if (_initialChunks)

@@ -169,8 +169,24 @@ void warnOnMultiVersion(const vector<ClusterStatistics::ShardStatistics>& cluste
                   "shardVersions"_attr = shardVersions.done());
 }
 
+Chunk getChunkForMaxBound(const ChunkManager& cm, const BSONObj& max) {
+    boost::optional<Chunk> chunkWithMaxBound;
+    cm.forEachChunk([&](const auto& chunk) {
+        if (chunk.getMax().woCompare(max) == 0) {
+            chunkWithMaxBound.emplace(chunk);
+            return false;
+        }
+        return true;
+    });
+    if (chunkWithMaxBound) {
+        return *chunkWithMaxBound;
+    }
+    return cm.findIntersectingChunkWithSimpleCollation(max);
+}
+
 Status processManualMigrationOutcome(OperationContext* opCtx,
-                                     const BSONObj& chunkMin,
+                                     const boost::optional<BSONObj>& min,
+                                     const boost::optional<BSONObj>& max,
                                      const NamespaceString& nss,
                                      const ShardId& destination,
                                      Status outcome) {
@@ -190,9 +206,11 @@ Status processManualMigrationOutcome(OperationContext* opCtx,
     if (!swCM.isOK()) {
         return swCM.getStatus();
     }
+    const auto& cm = swCM.getValue().cm;
 
     const auto currentChunkInfo =
-        swCM.getValue().cm.findIntersectingChunkWithSimpleCollation(chunkMin);
+        min ? cm.findIntersectingChunkWithSimpleCollation(*min) : getChunkForMaxBound(cm, *max);
+
     if (currentChunkInfo.getShardId() == destination &&
         outcome != ErrorCodes::BalancerInterrupted) {
         // Migration calls can be interrupted after the metadata is committed but before the command
@@ -395,7 +413,8 @@ Status Balancer::rebalanceSingleChunk(OperationContext* opCtx,
         _commandScheduler
             ->requestMoveChunk(opCtx, *migrateInfo, settings, true /* issuedByRemoteUser */)
             .getNoThrow(opCtx);
-    return processManualMigrationOutcome(opCtx, chunk.getMin(), nss, migrateInfo->to, response);
+    return processManualMigrationOutcome(
+        opCtx, chunk.getMin(), boost::none, nss, migrateInfo->to, response);
 }
 
 Status Balancer::moveSingleChunk(OperationContext* opCtx,
@@ -422,7 +441,8 @@ Status Balancer::moveSingleChunk(OperationContext* opCtx,
         _commandScheduler
             ->requestMoveChunk(opCtx, migrateInfo, settings, true /* issuedByRemoteUser */)
             .getNoThrow(opCtx);
-    return processManualMigrationOutcome(opCtx, chunk.getMin(), nss, newShardId, response);
+    return processManualMigrationOutcome(
+        opCtx, chunk.getMin(), boost::none, nss, newShardId, response);
 }
 
 Status Balancer::moveRange(OperationContext* opCtx,
@@ -434,13 +454,16 @@ Status Balancer::moveRange(OperationContext* opCtx,
         catalogClient->getCollection(opCtx, nss, repl::ReadConcernLevel::kMajorityReadConcern);
     const auto maxChunkSize = getMaxChunkSizeBytes(opCtx, coll);
 
-    const auto [fromShardId, min] = [&]() {
+    const auto fromShardId = [&]() {
         const auto [cm, _] = uassertStatusOK(
             Grid::get(opCtx)->catalogCache()->getShardedCollectionRoutingInfoWithPlacementRefresh(
                 opCtx, nss));
-        // TODO SERVER-64926 do not assume min always present
-        const auto& chunk = cm.findIntersectingChunkWithSimpleCollation(*request.getMin());
-        return std::tuple<ShardId, BSONObj>{chunk.getShardId(), chunk.getMin()};
+        if (request.getMin()) {
+            const auto& chunk = cm.findIntersectingChunkWithSimpleCollation(*request.getMin());
+            return chunk.getShardId();
+        } else {
+            return getChunkForMaxBound(cm, *request.getMax()).getShardId();
+        }
     }();
 
     ShardsvrMoveRange shardSvrRequest(nss);
@@ -457,8 +480,12 @@ Status Balancer::moveRange(OperationContext* opCtx,
     auto response =
         _commandScheduler->requestMoveRange(opCtx, shardSvrRequest, wc, issuedByRemoteUser)
             .getNoThrow(opCtx);
-    return processManualMigrationOutcome(
-        opCtx, min, nss, shardSvrRequest.getToShard(), std::move(response));
+    return processManualMigrationOutcome(opCtx,
+                                         request.getMin(),
+                                         request.getMax(),
+                                         nss,
+                                         shardSvrRequest.getToShard(),
+                                         std::move(response));
 }
 
 void Balancer::report(OperationContext* opCtx, BSONObjBuilder* builder) {
@@ -494,6 +521,13 @@ void Balancer::_consumeActionStreamLoop() {
                                         ActionsStreamPolicy* policy) {
         invariant(_outstandingStreamingOps.addAndFetch(-1) >= 0);
         ThreadClient tc("BalancerSecondaryThread::applyActionResponse", getGlobalServiceContext());
+
+        // TODO(SERVER-74658): Please revisit if this thread could be made killable.
+        {
+            stdx::lock_guard<Client> lk(*tc.get());
+            tc.get()->setSystemOperationUnKillableByStepdown(lk);
+        }
+
         auto opCtx = tc->makeOperationContext();
         policy->applyActionResult(opCtx.get(), action, response);
     };
@@ -513,21 +547,40 @@ void Balancer::_consumeActionStreamLoop() {
         lastActionTime = Date_t::now();
     };
 
-    // allStreamsDrained is used to keep asking actions until all streams are drained
-    bool allStreamsDrained = false;
+    auto backOff = Backoff(Seconds(1), Milliseconds::max());
+    bool errorOccurred = false;
 
     while (true) {
         {
             stdx::unique_lock<Latch> ul(_mutex);
-            _actionStreamCondVar.wait(ul, [&] {
+
+            // Keep asking for more actions if we meet all these conditions:
+            //  - Balancer is in kRunning state
+            //  - There are less than kMaxOutstandingStreamingOperations
+            //  - There were  actions to schedule on the previous iteration or there is an update on
+            //  the streams state
+            auto stopWaitingCondition = [&] {
                 return _state != kRunning ||
                     (_outstandingStreamingOps.load() <= kMaxOutstandingStreamingOperations &&
-                     (_actionStreamsStateUpdated.load() || !allStreamsDrained));
-            });
+                     _actionStreamsStateUpdated.load());
+            };
+
+            if (!errorOccurred) {
+                _actionStreamCondVar.wait(ul, stopWaitingCondition);
+            } else {
+                // Enable retries in case of error by performing a backoff
+                _actionStreamCondVar.wait_for(
+                    ul, backOff.nextSleep().toSystemDuration(), stopWaitingCondition);
+            }
+
             if (_state != kRunning) {
                 break;
             }
         }
+
+        // Clear flags
+        errorOccurred = false;
+        _actionStreamsStateUpdated.store(false);
 
         // Get active streams
         auto activeStreams = [&]() -> std::vector<ActionsStreamPolicy*> {
@@ -541,27 +594,36 @@ void Balancer::_consumeActionStreamLoop() {
             return streams;
         }();
 
-        // Clear notification flag
-        _actionStreamsStateUpdated.store(false);
-
         // Get next action from a random stream together with its stream
         auto [nextAction, sourcedStream] =
             [&]() -> std::tuple<boost::optional<BalancerStreamAction>, ActionsStreamPolicy*> {
             std::shuffle(activeStreams.begin(), activeStreams.end(), _random);
             for (auto stream : activeStreams) {
-                auto action = stream->getNextStreamingAction(opCtx.get());
-                if (action.has_value()) {
-                    return std::make_tuple(std::move(action), stream);
+
+                try {
+                    auto action = stream->getNextStreamingAction(opCtx.get());
+                    if (action.has_value()) {
+                        return std::make_tuple(std::move(action), stream);
+                    }
+
+                } catch (const DBException& e) {
+                    LOGV2_WARNING(7435001,
+                                  "Failed to get next action from action stream",
+                                  "error"_attr = redact(e),
+                                  "stream"_attr = stream->getName());
+
+                    errorOccurred = true;
                 }
             }
             return std::make_tuple(boost::none, nullptr);
         }();
 
         if (!nextAction.has_value()) {
-            allStreamsDrained = true;
             continue;
         }
-        allStreamsDrained = false;
+
+        // Signal there are still actions to be consumed by next iteration
+        _actionStreamsStateUpdated.store(true);
 
         _outstandingStreamingOps.fetchAndAdd(1);
         stdx::visit(
@@ -574,7 +636,7 @@ void Balancer::_consumeActionStreamLoop() {
                                                  mergeAction.nss,
                                                  mergeAction.shardId,
                                                  mergeAction.chunkRange,
-                                                 mergeAction.collectionVersion)
+                                                 mergeAction.collectionPlacementVersion)
                             .thenRunOn(*executor)
                             .onCompletion([this,
                                            stream,
@@ -613,12 +675,14 @@ void Balancer::_consumeActionStreamLoop() {
                             ->requestMergeAllChunksOnShard(
                                 opCtx.get(), mergeAllChunksAction.nss, mergeAllChunksAction.shardId)
                             .thenRunOn(*executor)
-                            .onCompletion([this,
-                                           stream,
-                                           &applyActionResponseTo,
-                                           action = mergeAllChunksAction](const Status& status) {
-                                applyActionResponseTo(action, status, stream);
-                            });
+                            .onCompletion(
+                                [this,
+                                 stream,
+                                 &applyActionResponseTo,
+                                 action = mergeAllChunksAction](
+                                    const StatusWith<NumMergedChunks>& swNumMergedChunks) {
+                                    applyActionResponseTo(action, swNumMergedChunks, stream);
+                                });
                 },
                 [](MigrateInfo&& _) {
                     uasserted(ErrorCodes::BadValue,
@@ -990,15 +1054,15 @@ Status Balancer::_splitChunksIfNeeded(OperationContext* opCtx) {
 
         const auto& [cm, _] = routingInfoStatus.getValue();
 
-        auto splitStatus =
-            shardutil::splitChunkAtMultiplePoints(opCtx,
-                                                  splitInfo.shardId,
-                                                  splitInfo.nss,
-                                                  cm.getShardKeyPattern(),
-                                                  splitInfo.collectionVersion.epoch(),
-                                                  splitInfo.collectionVersion.getTimestamp(),
-                                                  ChunkRange(splitInfo.minKey, splitInfo.maxKey),
-                                                  splitInfo.splitKeys);
+        auto splitStatus = shardutil::splitChunkAtMultiplePoints(
+            opCtx,
+            splitInfo.shardId,
+            splitInfo.nss,
+            cm.getShardKeyPattern(),
+            splitInfo.collectionPlacementVersion.epoch(),
+            splitInfo.collectionPlacementVersion.getTimestamp(),
+            ChunkRange(splitInfo.minKey, splitInfo.maxKey),
+            splitInfo.splitKeys);
         if (!splitStatus.isOK()) {
             LOGV2_WARNING(21879,
                           "Failed to split chunk {splitInfo} {error}",

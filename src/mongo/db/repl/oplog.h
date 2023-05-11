@@ -37,6 +37,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/catalog/collection_options.h"
+#include "mongo/db/repl/oplog_constraint_violation_logger.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_or_grouped_inserts.h"
 #include "mongo/db/repl/optime.h"
@@ -202,6 +203,16 @@ inline std::ostream& operator<<(std::ostream& s, OplogApplication::Mode mode) {
 }
 
 /**
+ * Logs an oplog constraint violation and writes an entry into the health log.
+ */
+void logOplogConstraintViolation(OperationContext* opCtx,
+                                 const NamespaceString& nss,
+                                 OplogConstraintViolationEnum type,
+                                 const std::string& operation,
+                                 const BSONObj& opObj,
+                                 boost::optional<Status> status);
+
+/**
  * Used for applying from an oplog entry or grouped inserts.
  * @param opOrGroupedInserts a single oplog entry or grouped inserts to be applied.
  * @param alwaysUpsert convert some updates to upserts for idempotency reasons
@@ -223,7 +234,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
  * Returns failure status if the op that could not be applied.
  */
 Status applyCommand_inlock(OperationContext* opCtx,
-                           const OplogEntry& entry,
+                           const ApplierOperation& op,
                            OplogApplication::Mode mode);
 
 /**

@@ -35,7 +35,6 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/create_indexes_gen.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/index_builds_coordinator.h"
@@ -111,6 +110,13 @@ void killSessionTokens(OperationContext* opCtx,
             invariant(status);
 
             ThreadClient tc("Kill-Sessions", service);
+
+            // TODO(SERVER-74658): Please revisit if this thread could be made killable.
+            {
+                stdx::lock_guard<Client> lk(*tc.get());
+                tc.get()->setSystemOperationUnKillableByStepdown(lk);
+            }
+
             auto uniqueOpCtx = tc->makeOperationContext();
             const auto opCtx = uniqueOpCtx.get();
             const auto catalog = SessionCatalog::get(opCtx);
@@ -509,13 +515,18 @@ void MongoDSessionCatalog::onStepUp(OperationContext* opCtx) {
     {
         // Create a new opCtx because we need an empty locker to refresh the locks.
         auto newClient = opCtx->getServiceContext()->makeClient("restore-prepared-txn");
+
+        {
+            stdx::lock_guard<Client> lk(*newClient.get());
+            newClient.get()->setSystemOperationUnKillableByStepdown(lk);
+        }
+
         AlternativeClientRegion acr(newClient);
         for (const auto& sessionInfo : sessionsToReacquireLocks) {
             auto newOpCtx = cc().makeOperationContext();
 
             // Avoid ticket acquisition during step up.
-            SetAdmissionPriorityForLock setTicketAquisition(newOpCtx.get(),
-                                                            AdmissionContext::Priority::kImmediate);
+            newOpCtx->lockState()->setAdmissionPriority(AdmissionContext::Priority::kImmediate);
 
             // Synchronize with killOps to make this unkillable.
             {

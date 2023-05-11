@@ -71,6 +71,13 @@ DocumentSourceOut::~DocumentSourceOut() {
         if (_tempNs.size() || (_timeseries && !_timeseriesViewCreated)) {
             auto cleanupClient =
                 pExpCtx->opCtx->getServiceContext()->makeClient("$out_replace_coll_cleanup");
+
+            // TODO(SERVER-74662): Please revisit if this thread could be made killable.
+            {
+                stdx::lock_guard<Client> lk(*cleanupClient.get());
+                cleanupClient.get()->setSystemOperationUnKillableByStepdown(lk);
+            }
+
             AlternativeClientRegion acr(cleanupClient);
             // Create a new operation context so that any interrupts on the current operation will
             // not affect the dropCollection operation below.
@@ -138,12 +145,13 @@ void DocumentSourceOut::validateTimeseries() {
     } else {
         // if a time-series collection doesn't exist, the namespace should not have a
         // collection nor a conflicting view.
-        auto collection = CollectionCatalog::get(pExpCtx->opCtx)
-                              ->lookupCollectionByNamespaceForRead(pExpCtx->opCtx, outNs);
+        // Hold reference to the catalog for collection lookup without locks to be safe.
+        auto catalog = CollectionCatalog::get(pExpCtx->opCtx);
+        auto collection = catalog->lookupCollectionByNamespace(pExpCtx->opCtx, outNs);
         uassert(7268700,
                 "Cannot create a time-series collection from a non time-series collection.",
                 !collection);
-        auto view = CollectionCatalog::get(pExpCtx->opCtx)->lookupView(pExpCtx->opCtx, outNs);
+        auto view = catalog->lookupView(pExpCtx->opCtx, outNs);
         uassert(
             7268703, "Cannot create a time-series collection from a non time-series view.", !view);
     }

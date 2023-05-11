@@ -92,6 +92,10 @@ public:
     Value serialize(
         boost::optional<ExplainOptions::Verbosity> explain = boost::none) const override;
 
+    Value serialize(SerializationOptions opts) const final {
+        MONGO_UNIMPLEMENTED;
+    }
+
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final {
         return boost::none;
     }

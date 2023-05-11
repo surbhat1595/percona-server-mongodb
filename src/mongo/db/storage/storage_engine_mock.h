@@ -57,9 +57,6 @@ public:
                      boost::optional<Timestamp> stableTs,
                      LastShutdownState lastShutdownState) final {}
     void closeCatalog(OperationContext* opCtx) final {}
-    Status closeDatabase(OperationContext* opCtx, const DatabaseName& dbName) final {
-        return Status::OK();
-    }
     Status dropDatabase(OperationContext* opCtx, const DatabaseName& dbName) final {
         return Status::OK();
     }
@@ -119,7 +116,7 @@ public:
     bool supportsReadConcernMajority() const final {
         return false;
     }
-    bool supportsOplogStones() const final {
+    bool supportsOplogTruncateMarkers() const final {
         return false;
     }
     bool supportsResumableIndexBuilds() const final {
@@ -174,17 +171,12 @@ public:
                              std::shared_ptr<Ident> ident,
                              DropIdentCallback&& onDrop) final {}
     void dropIdentsOlderThan(OperationContext* opCtx, const Timestamp& ts) final {}
-    std::shared_ptr<Ident> markIdentInUse(const std::string& ident) final {
+    std::shared_ptr<Ident> markIdentInUse(StringData ident) final {
         return nullptr;
     }
     void startTimestampMonitor() final {}
 
     void checkpoint(OperationContext* opCtx) final {}
-
-    std::unique_ptr<CheckpointLock> getCheckpointLock(OperationContext* opCtx,
-                                                      CheckpointLock::Mode mode) final {
-        return nullptr;
-    }
 
     int64_t sizeOnDiskForDb(OperationContext* opCtx, const DatabaseName& dbName) final {
         return 0;
@@ -206,11 +198,6 @@ public:
     }
     const DurableCatalog* getCatalog() const final {
         return nullptr;
-    }
-    void addIndividuallyCheckpointedIndex(const std::string& ident) final {}
-    void clearIndividuallyCheckpointedIndexes() final {}
-    bool isInIndividuallyCheckpointedIndexes(const std::string& ident) const final {
-        return false;
     }
 
     StatusWith<Timestamp> pinOldestTimestamp(OperationContext* opCtx,

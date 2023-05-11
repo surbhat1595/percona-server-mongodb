@@ -61,8 +61,10 @@ public:
                                                repl::ReadConcernLevel readConcernLevel,
                                                const BSONObj& sort) override;
 
-    std::vector<NamespaceString> getAllShardedCollectionsForDb(
-        OperationContext* opCtx, StringData dbName, repl::ReadConcernLevel readConcern) override;
+    std::vector<NamespaceString> getAllShardedCollectionsForDb(OperationContext* opCtx,
+                                                               StringData dbName,
+                                                               repl::ReadConcernLevel readConcern,
+                                                               const BSONObj& sort) override;
 
     StatusWith<std::vector<std::string>> getDatabasesForShard(OperationContext* opCtx,
                                                               const ShardId& shardName) override;
@@ -83,10 +85,10 @@ public:
         const ChunkVersion& sinceVersion,
         const repl::ReadConcernArgs& readConcern) override;
 
-    std::pair<CollectionType, std::vector<IndexCatalogType>> getCollectionAndGlobalIndexes(
-        OperationContext* opCtx,
-        const NamespaceString& nss,
-        const repl::ReadConcernArgs& readConcern) override;
+    std::pair<CollectionType, std::vector<IndexCatalogType>>
+    getCollectionAndShardingIndexCatalogEntries(OperationContext* opCtx,
+                                                const NamespaceString& nss,
+                                                const repl::ReadConcernArgs& readConcern) override;
 
     StatusWith<std::vector<TagsType>> getTagsForCollection(OperationContext* opCtx,
                                                            const NamespaceString& nss) override;

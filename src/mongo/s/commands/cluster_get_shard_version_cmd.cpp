@@ -100,7 +100,7 @@ public:
             result.append("version", cachedDbInfo->getVersion().toBSON());
         } else {
             // Return the collection's information.
-            const auto [cm, gii] =
+            const auto [cm, sii] =
                 uassertStatusOK(catalogCache->getCollectionRoutingInfo(opCtx, nss));
             uassert(ErrorCodes::NamespaceNotSharded,
                     str::stream() << "Collection " << nss.ns() << " is not sharded.",
@@ -109,6 +109,11 @@ public:
             result.appendTimestamp("version", cm.getVersion().toLong());
             result.append("versionEpoch", cm.getVersion().epoch());
             result.append("versionTimestamp", cm.getVersion().getTimestamp());
+
+
+            if (sii) {
+                result.append("indexVersion", sii->getCollectionIndexes().indexVersion());
+            }
 
             if (cmdObj["fullMetadata"].trueValue()) {
                 BSONArrayBuilder chunksArrBuilder;
@@ -135,6 +140,23 @@ public:
 
                 if (!exceedsSizeLimit) {
                     result.append("chunks", chunksArrBuilder.arr());
+
+                    if (sii) {
+                        BSONArrayBuilder indexesArrBuilder;
+                        sii->forEachIndex([&](const auto& index) {
+                            BSONObjBuilder indexB(index.toBSON());
+                            if (result.len() + indexesArrBuilder.len() + indexB.len() >
+                                BSONObjMaxUserSize) {
+                                exceedsSizeLimit = true;
+                            } else {
+                                indexesArrBuilder.append(indexB.done());
+                            }
+
+                            return !exceedsSizeLimit;
+                        });
+
+                        result.append("indexes", indexesArrBuilder.arr());
+                    }
                 }
             }
         }

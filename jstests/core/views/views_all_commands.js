@@ -365,7 +365,6 @@ let viewsCommandTests = {
     abortShardSplit: {skip: isUnrelated},
     commitShardSplit: {skip: isUnrelated},
     forgetShardSplit: {skip: isUnrelated},
-    driverOIDTest: {skip: isUnrelated},
     drop: {command: {drop: "view"}},
     dropAllRolesFromDatabase: {skip: isUnrelated},
     dropAllUsersFromDatabase: {skip: isUnrelated},
@@ -447,6 +446,7 @@ let viewsCommandTests = {
         }
     },
     getParameter: {skip: isUnrelated},
+    getQueryableEncryptionCountInfo: {skip: isAnInternalCommand},
     getShardMap: {skip: isUnrelated},
     getShardVersion: {
         command: {getShardVersion: "test.view"},

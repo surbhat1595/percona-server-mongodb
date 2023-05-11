@@ -82,14 +82,14 @@ void CollectionTruncateMarkers::awaitHasExcessMarkersOrDead(OperationContext* op
             MONGO_IDLE_THREAD_BLOCK;
             stdx::lock_guard<Latch> lk(_markersMutex);
             if (_hasExcessMarkers(opCtx)) {
-                const auto& marker = _markers.front();
-                invariant(marker.lastRecord.isValid());
+                const auto& oldestMarker = _markers.front();
+                invariant(oldestMarker.lastRecord.isValid());
 
                 LOGV2_DEBUG(7393215,
                             2,
                             "Collection has excess markers",
-                            "lastRecord"_attr = marker.lastRecord,
-                            "wallTime"_attr = marker.wallTime);
+                            "lastRecord"_attr = oldestMarker.lastRecord,
+                            "wallTime"_attr = oldestMarker.wallTime);
                 return;
             }
         }
@@ -195,7 +195,7 @@ void CollectionTruncateMarkers::updateCurrentMarkerAfterInsertOnCommit(
         collectionMarkers->_currentRecords.addAndFetch(countInserted);
         int64_t newCurrentBytes = collectionMarkers->_currentBytes.addAndFetch(bytesInserted);
         if (wallTime != Date_t() && newCurrentBytes >= collectionMarkers->_minBytesPerMarker) {
-            // When other InsertChanges commit concurrently, an uninitialized wallTime may delay
+            // When other transactions commit concurrently, an uninitialized wallTime may delay
             // the creation of a new marker. This delay is limited to the number of concurrently
             // running transactions, so the size difference should be inconsequential.
             collectionMarkers->createNewMarkerIfNeeded(opCtx, recordId, wallTime);
@@ -475,7 +475,7 @@ CollectionTruncateMarkers::createFromExistingRecordStore(
     // If the collection doesn't contain enough records to make sampling more efficient, then scan
     // the collection to determine where to put down markers.
     auto numMarkers = dataSize / minBytesPerMarker;
-    if (numRecords < 0 || dataSize < 0 ||
+    if (numRecords <= 0 || dataSize <= 0 ||
         uint64_t(numRecords) <
             kMinSampleRatioForRandCursor * kRandomSamplesPerMarker * numMarkers) {
         return CollectionTruncateMarkers::createMarkersByScanning(

@@ -76,7 +76,9 @@ public:
         return false;
     }
 
-    void printRecordMetadata(OperationContext*, const RecordId&) const final {
+    void printRecordMetadata(OperationContext*,
+                             const RecordId&,
+                             std::set<Timestamp>* recordTimestamps) const final {
         unimplementedTasserted();
     }
 
@@ -123,6 +125,15 @@ protected:
     }
 
     Status doTruncate(OperationContext* opCtx) final {
+        unimplementedTasserted();
+        return {ErrorCodes::Error::UnknownError, "Unknown error"};
+    }
+
+    Status doRangeTruncate(OperationContext* opCtx,
+                           const RecordId& minRecordId,
+                           const RecordId& maxRecordId,
+                           int64_t hintDataSizeIncrement,
+                           int64_t hintNumRecordsIncrement) final {
         unimplementedTasserted();
         return {ErrorCodes::Error::UnknownError, "Unknown error"};
     }

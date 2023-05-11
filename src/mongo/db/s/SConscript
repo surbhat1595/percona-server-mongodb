@@ -27,6 +27,65 @@ env.Library(
 )
 
 env.Library(
+    target='move_primary_shared_data',
+    source=[
+        'move_primary/move_primary_shared_data.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/repl/repl_sync_shared_data',
+    ],
+)
+
+env.Library(
+    target='move_primary_cloners',
+    source=[
+        'move_primary/move_primary_base_cloner.cpp',
+        'move_primary/move_primary_collection_cloner.cpp',
+        'move_primary/move_primary_database_cloner.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/repl/base_cloner',
+        '$BUILD_DIR/mongo/db/repl/cloner_utils',
+        '$BUILD_DIR/mongo/db/repl/task_runner',
+        'move_primary_shared_data',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/catalog/collection_catalog',
+        '$BUILD_DIR/mongo/db/catalog/document_validation',
+        '$BUILD_DIR/mongo/db/commands/list_collections_filter',
+        '$BUILD_DIR/mongo/db/dbdirectclient',
+        '$BUILD_DIR/mongo/db/ops/write_ops_exec',
+        '$BUILD_DIR/mongo/db/repl/oplog',
+        '$BUILD_DIR/mongo/db/repl/repl_server_parameters',
+        '$BUILD_DIR/mongo/db/shard_role_api',
+        '$BUILD_DIR/mongo/rpc/metadata',
+        '$BUILD_DIR/mongo/util/progress_meter',
+    ],
+)
+
+env.Library(
+    target='move_primary_test_fixtures',
+    source=[
+        'move_primary/move_primary_cloner_test_fixture.cpp',
+    ],
+    LIBDEPS=[
+        # Required for service context test fixture
+        '$BUILD_DIR/mongo/db/auth/authmocks',
+        '$BUILD_DIR/mongo/db/catalog/collection_options',
+        '$BUILD_DIR/mongo/db/repl/cloner_test_fixtures',
+        '$BUILD_DIR/mongo/db/repl/repl_server_parameters',
+        '$BUILD_DIR/mongo/db/repl/replmocks',
+        '$BUILD_DIR/mongo/db/repl/storage_interface_impl',
+        '$BUILD_DIR/mongo/db/service_context_d_test_fixture',
+        '$BUILD_DIR/mongo/dbtests/mocklib',
+        '$BUILD_DIR/mongo/util/clock_source_mock',
+        'move_primary_shared_data',
+    ],
+)
+
+env.Library(
     target='balancer_stats_registry',
     source=[
         'balancer_stats_registry.cpp',
@@ -42,8 +101,8 @@ env.Library(
 env.Library(
     target='sharding_catalog',
     source=[
-        'global_index_ddl_util.cpp',
         'shard_authoritative_catalog.idl',
+        'sharding_index_catalog_ddl_util.cpp',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
@@ -83,8 +142,6 @@ env.Library(
         'auto_split_vector.cpp',
         'chunk_move_write_concern_options.cpp',
         'chunk_operation_precondition_checks.cpp',
-        'chunk_split_state_driver.cpp',
-        'chunk_splitter.cpp',
         'collection_critical_section_document.idl',
         'collection_sharding_runtime.cpp',
         'collection_sharding_state_factory_shard.cpp',
@@ -108,6 +165,13 @@ env.Library(
         'global_index_crud_commands.idl',
         'metadata_consistency_util.cpp',
         'metadata_manager.cpp',
+        'metrics/phase_duration.cpp',
+        'metrics/sharding_data_transform_cumulative_metrics.cpp',
+        'metrics/sharding_data_transform_instance_metrics.cpp',
+        'metrics/sharding_data_transform_metrics.cpp',
+        'metrics/sharding_data_transform_metrics_observer.cpp',
+        'metrics/field_names/sharding_data_transform_cumulative_metrics_field_name_provider.cpp',
+        'metrics/field_names/sharding_data_transform_instance_metrics_field_name_provider.cpp',
         'migration_batch_fetcher.cpp',
         'migration_batch_inserter.cpp',
         'migration_chunk_cloner_source.cpp',
@@ -119,7 +183,11 @@ env.Library(
         'migration_source_manager.cpp',
         'migration_util.cpp',
         'move_primary_source_manager.cpp',
+        'move_primary/move_primary_common_metadata.idl',
+        'move_primary/move_primary_cumulative_metrics.cpp',
         'move_primary/move_primary_donor_service.cpp',
+        'move_primary/move_primary_metrics.cpp',
+        'move_primary/move_primary_metrics_field_name_provider.cpp',
         'move_primary/move_primary_recipient_cmds.idl',
         'move_primary/move_primary_server_parameters.idl',
         'move_primary/move_primary_state_machine.idl',
@@ -149,7 +217,6 @@ env.Library(
         'resharding/resharding_coordinator_observer.cpp',
         'resharding/resharding_coordinator_service.cpp',
         'resharding/resharding_cumulative_metrics.cpp',
-        'resharding/resharding_cumulative_metrics_field_name_provider.cpp',
         'resharding/resharding_data_copy_util.cpp',
         'resharding/resharding_data_replication.cpp',
         'resharding/resharding_donor_oplog_iterator.cpp',
@@ -158,7 +225,6 @@ env.Library(
         'resharding/resharding_future_util.cpp',
         'resharding/resharding_manual_cleanup.cpp',
         'resharding/resharding_metrics.cpp',
-        'resharding/resharding_metrics_field_name_provider.cpp',
         'resharding/resharding_metrics_helpers.cpp',
         'resharding/resharding_op_observer.cpp',
         'resharding/resharding_oplog_application.cpp',
@@ -186,12 +252,6 @@ env.Library(
         'shard_metadata_util.cpp',
         'shard_server_catalog_cache_loader.cpp',
         'shard_server_op_observer.cpp',
-        'sharding_data_transform_cumulative_metrics.cpp',
-        'sharding_data_transform_cumulative_metrics_field_name_provider.cpp',
-        'sharding_data_transform_instance_metrics.cpp',
-        'sharding_data_transform_instance_metrics_field_name_provider.cpp',
-        'sharding_data_transform_metrics.cpp',
-        'sharding_data_transform_metrics_observer.cpp',
         'sharding_initialization_mongod.cpp',
         'sharding_recovery_service.cpp',
         'sharding_runtime_d_params.idl',
@@ -255,6 +315,7 @@ env.Library(
         '$BUILD_DIR/mongo/s/common_s',
         '$BUILD_DIR/mongo/util/future_util',
         'balancer_stats_registry',
+        'move_primary_cloners',
         'query_analysis_writer',
         'sharding_catalog',
         'sharding_logging',
@@ -559,6 +620,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/bson/dotted_path_support',
         '$BUILD_DIR/mongo/db/catalog/catalog_helpers',
+        '$BUILD_DIR/mongo/db/catalog/collection_uuid_mismatch_info',
         '$BUILD_DIR/mongo/db/cloner',
         '$BUILD_DIR/mongo/db/cluster_transaction_api',
         '$BUILD_DIR/mongo/db/commands/cluster_server_parameter_commands_invocation',
@@ -681,7 +743,6 @@ env.CppUnitTest(
         'analyze_shard_key_read_write_distribution_test.cpp',
         'auto_split_vector_test.cpp',
         'balancer/balance_stats_test.cpp',
-        'chunk_split_state_driver_test.cpp',
         'collection_metadata_filtering_test.cpp',
         'collection_metadata_test.cpp',
         'collection_sharding_runtime_test.cpp',
@@ -693,11 +754,17 @@ env.CppUnitTest(
         'global_index/global_index_metrics_test.cpp',
         'implicit_collection_creation_test.cpp',
         'metadata_manager_test.cpp',
+        'metrics/phase_duration_test.cpp',
+        'metrics/sharding_data_transform_cumulative_metrics_test.cpp',
+        'metrics/sharding_data_transform_instance_metrics_test.cpp',
+        'metrics/sharding_data_transform_metrics_macros_test.cpp',
         'migration_batch_fetcher_test.cpp',
         'migration_chunk_cloner_source_legacy_test.cpp',
         'migration_destination_manager_test.cpp',
         'migration_session_id_test.cpp',
         'migration_util_test.cpp',
+        'move_primary/move_primary_collection_cloner_test.cpp',
+        'move_primary/move_primary_database_cloner_test.cpp',
         'move_primary/move_primary_donor_service_test.cpp',
         'move_primary/move_primary_recipient_service_test.cpp',
         'namespace_metadata_change_notifications_test.cpp',
@@ -737,8 +804,6 @@ env.CppUnitTest(
         'shard_local_test.cpp',
         'shard_metadata_util_test.cpp',
         'shard_server_catalog_cache_loader_test.cpp',
-        'sharding_data_transform_cumulative_metrics_test.cpp',
-        'sharding_data_transform_instance_metrics_test.cpp',
         'sharding_initialization_mongod_test.cpp',
         'sharding_initialization_op_observer_test.cpp',
         'sharding_logging_test.cpp',
@@ -789,6 +854,8 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/s/analyze_shard_key_util',
         '$BUILD_DIR/mongo/s/catalog/sharding_catalog_client_mock',
         '$BUILD_DIR/mongo/s/sharding_router_test_fixture',
+        'move_primary_cloners',
+        'move_primary_test_fixtures',
         'query_analysis_writer',
         'shard_server_test_fixture',
         'sharding_catalog',
@@ -801,6 +868,7 @@ env.CppUnitTest(
 env.CppUnitTest(
     target='db_s_config_server_test',
     source=[
+        'balancer/auto_merger_policy_test.cpp',
         'balancer/balancer_chunk_selection_policy_test.cpp',
         'balancer/balancer_defragmentation_policy_test.cpp',
         'balancer/balancer_policy_test.cpp',

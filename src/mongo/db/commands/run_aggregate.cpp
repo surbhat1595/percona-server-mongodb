@@ -458,6 +458,9 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
         expCtx->changeStreamTokenVersion = 1;
     }
 
+    // Set the value of $$USER_ROLES for the aggregation.
+    expCtx->setUserRoles();
+
     return expCtx;
 }
 
@@ -1177,8 +1180,11 @@ Status runAggregate(OperationContext* opCtx,
         curOp->debug().setPlanSummaryMetrics(stats);
         curOp->debug().nreturned = stats.nReturned;
 
-        boost::optional<ClientCursorPin&> cursorForTelemetry = pins[0];
-        collectTelemetry(opCtx, keepCursor ? cursorForTelemetry : boost::none, false);
+        if (keepCursor) {
+            collectTelemetryMongod(opCtx, pins[0]);
+        } else {
+            collectTelemetryMongod(opCtx);
+        }
 
         // For an optimized away pipeline, signal the cache that a query operation has completed.
         // For normal pipelines this is done in DocumentSourceCursor.

@@ -189,15 +189,20 @@ void OptPhaseManager::runMemoLogicalRewrite(const OptPhase phase,
     }
 }
 
-bool OptPhaseManager::runMemoPhysicalRewrite(const OptPhase phase,
-                                             VariableEnvironment& env,
-                                             const GroupIdType rootGroupId,
-                                             std::unique_ptr<LogicalRewriter>& logicalRewriter,
-                                             ABT& input) {
+PlanExtractorResult OptPhaseManager::runMemoPhysicalRewrite(
+    const OptPhase phase,
+    VariableEnvironment& env,
+    const GroupIdType rootGroupId,
+    const bool includeRejected,
+    std::unique_ptr<LogicalRewriter>& logicalRewriter,
+    ABT& input) {
     using namespace properties;
 
+    PlanExtractorResult result;
     if (!hasPhase(phase)) {
-        return true;
+        // If we are skipping the implementation phase, return the input without a props map.
+        result.emplace_back(std::move(input), NodeToGroupPropsMap{});
+        return result;
     }
 
     tassert(6808704,
@@ -235,24 +240,25 @@ bool OptPhaseManager::runMemoPhysicalRewrite(const OptPhase phase,
     auto optGroupResult =
         rewriter.optimizeGroup(rootGroupId, std::move(physProps), CostType::kInfinity);
     if (!optGroupResult._success) {
-        return false;
+        return {};
     }
 
     _physicalNodeId = {rootGroupId, optGroupResult._index};
-    std::tie(input, _nodeToGroupPropsMap) =
-        extractPhysicalPlan(_physicalNodeId, _metadata, _ridProjections, _memo);
-    if (_supportExplain) {
-        _postMemoPlan = input;
-    }
+    result =
+        extractPhysicalPlans(includeRejected, _physicalNodeId, _metadata, _ridProjections, _memo);
 
-    env.rebuild(input);
-    if (env.hasFreeVariables()) {
-        tasserted(6808707, "Plan has free variables: " + generateFreeVarsAssertMsg(env));
+    for (const auto& planEntry : result) {
+        env.rebuild(planEntry._node);
+        if (env.hasFreeVariables()) {
+            tasserted(6808707, "Plan has free variables: " + generateFreeVarsAssertMsg(env));
+        }
     }
-    return true;
+    return result;
 }
 
-bool OptPhaseManager::runMemoRewritePhases(VariableEnvironment& env, ABT& input) {
+PlanExtractorResult OptPhaseManager::runMemoRewritePhases(const bool includeRejected,
+                                                          VariableEnvironment& env,
+                                                          ABT& input) {
     GroupIdType rootGroupId = -1;
     std::unique_ptr<LogicalRewriter> logicalRewriter;
 
@@ -273,61 +279,118 @@ bool OptPhaseManager::runMemoRewritePhases(VariableEnvironment& env, ABT& input)
                           input);
 
 
-    return runMemoPhysicalRewrite(
-        OptPhase::MemoImplementationPhase, env, rootGroupId, logicalRewriter, input);
+    return runMemoPhysicalRewrite(OptPhase::MemoImplementationPhase,
+                                  env,
+                                  rootGroupId,
+                                  includeRejected,
+                                  logicalRewriter,
+                                  input);
 }
 
-bool OptPhaseManager::optimizeNoAssert(ABT& input) {
+PlanExtractorResult OptPhaseManager::optimizeNoAssert(ABT input, const bool includeRejected) {
+    tassert(6624173,
+            "Requesting rejected plans without the requiring to keep them first.",
+            !includeRejected || _hints._keepRejectedPlans);
+
     VariableEnvironment env = VariableEnvironment::build(input);
     if (env.hasFreeVariables()) {
         tasserted(6808711, "Plan has free variables: " + generateFreeVarsAssertMsg(env));
     }
 
-    const auto sargableCheckFn = [this](const ABT& expr) {
-        return convertExprToPartialSchemaReq(expr, false /*isFilterContext*/, _pathToInterval)
-            .has_value();
+    const auto canInlineEvalPre = [this](const EvaluationNode& node) {
+        // We are not allowed to inline if we can convert to SargableNode.
+        return !convertExprToPartialSchemaReq(
+            node.getProjection(), false /*isFilterContext*/, _pathToInterval);
     };
 
     runStructuralPhases<OptPhase::ConstEvalPre, OptPhase::PathFuse, ConstEval, PathFusion>(
-        ConstEval{env, sargableCheckFn}, PathFusion{env}, env, input);
+        ConstEval{env, canInlineEvalPre}, PathFusion{env}, env, input);
 
-    const bool success = runMemoRewritePhases(env, input);
-    if (!success) {
-        return false;
+    auto planExtractionResult = runMemoRewritePhases(includeRejected, env, input);
+    // At this point "input" has been siphoned out.
+
+    if (_supportExplain && !planExtractionResult.empty()) {
+        // Retain first post-memo plan for explain purposes.
+        _postMemoPlan = planExtractionResult.front();
     }
 
-    runStructuralPhase<OptPhase::PathLower, PathLowering>(PathLowering{_prefixId, env}, env, input);
+    for (auto& planEntry : planExtractionResult) {
+        runStructuralPhase<OptPhase::PathLower, PathLowering>(
+            PathLowering{_prefixId, env}, env, planEntry._node);
 
-    ProjectionNameSet erasedProjNames;
+        // The constant folding phase below may inline or erase projections which are referred to by
+        // the plan's projection requirement properties. We need to respond to the ConstEval's
+        // actions by removing them or renaming them as appropriate. For this purpose we have a
+        // usage map, which keeps track of the projection sets where each projection is present.
+        // Note: we currently only update the ProjectionRequirement property which is used for
+        // lowering.
+        // Key: projection name, value: set of pointers to projection sets which contain it.
+        ProjectionNameMap<opt::unordered_set<ProjectionNameOrderPreservingSet*>> usageMap;
 
-    runStructuralPhase<OptPhase::ConstEvalPost, ConstEval>(
-        ConstEval{env, {} /*disableInline*/, &erasedProjNames}, env, input);
-
-    if (!erasedProjNames.empty()) {
-        // If we have erased some eval nodes, make sure to delete the corresponding projection names
-        // from the node property map.
-        for (auto& [nodePtr, props] : _nodeToGroupPropsMap) {
-            if (properties::hasProperty<properties::ProjectionRequirement>(props._physicalProps)) {
-                auto& requiredProjNames =
-                    properties::getProperty<properties::ProjectionRequirement>(props._physicalProps)
-                        .getProjections();
-                for (const ProjectionName& projName : erasedProjNames) {
-                    requiredProjNames.erase(projName);
+        // Populate the initial usage map.
+        for (auto& [nodePtr, props] : planEntry._map) {
+            using namespace properties;
+            if (hasProperty<ProjectionRequirement>(props._physicalProps)) {
+                auto& projSet =
+                    getProperty<ProjectionRequirement>(props._physicalProps).getProjections();
+                for (const auto& projName : projSet.getVector()) {
+                    usageMap[projName].insert(&projSet);
                 }
             }
         }
+
+        // Respond to projection deletions.
+        const auto erasedProjFn = [&](const ProjectionName& target) {
+            if (auto it = usageMap.find(target); it != usageMap.cend()) {
+                for (const auto& projSet : it->second) {
+                    projSet->erase(target);
+                }
+                usageMap.erase(it);
+            }
+        };
+
+        // Respond to projection renames.
+        const auto renamedProjFn = [&](const ProjectionName& target, const ProjectionName& source) {
+            auto it = usageMap.find(target);
+            if (it == usageMap.cend()) {
+                return;
+            }
+
+            auto projSetSet = it->second;
+            for (auto& projSet : projSetSet) {
+                projSet->erase(target);
+                projSet->emplace_back(source);
+                usageMap[source].insert(projSet);
+            }
+            usageMap.erase(target);
+        };
+
+        runStructuralPhase<OptPhase::ConstEvalPost, ConstEval>(
+            ConstEval{env, {} /*canInlineEvalFn*/, erasedProjFn, renamedProjFn},
+            env,
+            planEntry._node);
+
+        env.rebuild(planEntry._node);
+        if (env.hasFreeVariables()) {
+            tasserted(6808710, "Plan has free variables: " + generateFreeVarsAssertMsg(env));
+        }
     }
 
-    env.rebuild(input);
-    if (env.hasFreeVariables()) {
-        tasserted(6808710, "Plan has free variables: " + generateFreeVarsAssertMsg(env));
-    }
-    return true;
+    tassert(6624174,
+            "Returning more than one plan without including rejected.",
+            planExtractionResult.size() <= 1 || includeRejected);
+    return planExtractionResult;
 }
 
 void OptPhaseManager::optimize(ABT& input) {
-    const bool success = optimizeNoAssert(input);
-    tassert(6808706, "Optimization failed.", success);
+    auto result = optimizeAndReturnProps(std::move(input));
+    std::swap(input, result._node);
+}
+
+PlanAndProps OptPhaseManager::optimizeAndReturnProps(ABT input) {
+    auto result = optimizeNoAssert(std::move(input), false /*includeRejected*/);
+    tassert(6808706, "Optimization failed.", result.size() == 1);
+    return std::move(result.front());
 }
 
 bool OptPhaseManager::hasPhase(const OptPhase phase) const {
@@ -342,7 +405,7 @@ MemoPhysicalNodeId OptPhaseManager::getPhysicalNodeId() const {
     return _physicalNodeId;
 }
 
-const boost::optional<ABT>& OptPhaseManager::getPostMemoPlan() const {
+const boost::optional<PlanAndProps>& OptPhaseManager::getPostMemoPlan() const {
     return _postMemoPlan;
 }
 
@@ -364,14 +427,6 @@ const PathToIntervalFn& OptPhaseManager::getPathToInterval() const {
 
 const Metadata& OptPhaseManager::getMetadata() const {
     return _metadata;
-}
-
-const NodeToGroupPropsMap& OptPhaseManager::getNodeToGroupPropsMap() const {
-    return _nodeToGroupPropsMap;
-}
-
-NodeToGroupPropsMap& OptPhaseManager::getNodeToGroupPropsMap() {
-    return _nodeToGroupPropsMap;
 }
 
 }  // namespace mongo::optimizer

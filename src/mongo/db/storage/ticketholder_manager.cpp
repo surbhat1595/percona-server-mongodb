@@ -68,6 +68,13 @@ TicketHolderManager::TicketHolderManager(ServiceContext* svcCtx,
 }
 
 Status TicketHolderManager::updateConcurrentWriteTransactions(const int32_t& newWriteTransactions) {
+    if (feature_flags::gFeatureFlagExecutionControl.isEnabledAndIgnoreFCV() &&
+        !gStorageEngineConcurrencyAdjustmentAlgorithm.empty()) {
+        return {ErrorCodes::IllegalOperation,
+                "Cannot modify concurrent write transactions limit when it is being dynamically "
+                "adjusted"};
+    }
+
     if (auto client = Client::getCurrent()) {
         auto ticketHolderManager = TicketHolderManager::get(client->getServiceContext());
         if (!ticketHolderManager) {
@@ -80,7 +87,7 @@ Status TicketHolderManager::updateConcurrentWriteTransactions(const int32_t& new
         }
         auto& writer = ticketHolderManager->_writeTicketHolder;
         if (writer) {
-            writer->resize(client->getOperationContext(), newWriteTransactions);
+            writer->resize(newWriteTransactions);
             return Status::OK();
         }
         LOGV2_WARNING(6754202,
@@ -94,6 +101,13 @@ Status TicketHolderManager::updateConcurrentWriteTransactions(const int32_t& new
 };
 
 Status TicketHolderManager::updateConcurrentReadTransactions(const int32_t& newReadTransactions) {
+    if (feature_flags::gFeatureFlagExecutionControl.isEnabledAndIgnoreFCV() &&
+        !gStorageEngineConcurrencyAdjustmentAlgorithm.empty()) {
+        return {ErrorCodes::IllegalOperation,
+                "Cannot modify concurrent read transactions limit when it is being dynamically "
+                "adjusted"};
+    }
+
     if (auto client = Client::getCurrent()) {
         auto ticketHolderManager = TicketHolderManager::get(client->getServiceContext());
         if (!ticketHolderManager) {
@@ -106,7 +120,7 @@ Status TicketHolderManager::updateConcurrentReadTransactions(const int32_t& newR
         }
         auto& reader = ticketHolderManager->_readTicketHolder;
         if (reader) {
-            reader->resize(client->getOperationContext(), newReadTransactions);
+            reader->resize(newReadTransactions);
             return Status::OK();
         }
 
@@ -194,6 +208,11 @@ void TicketHolderManager::appendStats(BSONObjBuilder& b) {
     {
         BSONObjBuilder bbb(b.subobjStart("read"));
         _readTicketHolder->appendStats(bbb);
+        bbb.done();
+    }
+    if (_monitor) {
+        BSONObjBuilder bbb(b.subobjStart("monitor"));
+        _monitor->appendStats(bbb);
         bbb.done();
     }
 }

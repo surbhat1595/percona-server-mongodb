@@ -798,8 +798,8 @@ TEST(LogicalRewriter, FilterUnionUnionPushdown) {
         "|   |   |   scanParams: \n"
         "|   |   |       {'a': evalTemp_0}\n"
         "|   |   |           residualReqs: \n"
-        "|   |   |               refProjection: evalTemp_0, path: 'PathTraverse [1] PathIdentity "
-        "[]', intervals: {{{=Const [1]}}}, entryIndex: 0\n"
+        "|   |   |               {{{refProjection: evalTemp_0, path: 'PathTraverse [1] "
+        "PathIdentity []', intervals: {{{=Const [1]}}}, entryIndex: 0}}}\n"
         "|   Scan [test3, {ptest}]\n"
         "Union [{ptest}]\n"
         "|   Sargable [Complete]\n"
@@ -810,8 +810,8 @@ TEST(LogicalRewriter, FilterUnionUnionPushdown) {
         "|   |   |   scanParams: \n"
         "|   |   |       {'a': evalTemp_2}\n"
         "|   |   |           residualReqs: \n"
-        "|   |   |               refProjection: evalTemp_2, path: 'PathTraverse [1] PathIdentity "
-        "[]', intervals: {{{=Const [1]}}}, entryIndex: 0\n"
+        "|   |   |               {{{refProjection: evalTemp_2, path: 'PathTraverse [1] "
+        "PathIdentity []', intervals: {{{=Const [1]}}}, entryIndex: 0}}}\n"
         "|   Scan [test2, {ptest}]\n"
         "Sargable [Complete]\n"
         "|   |   |   |   requirements: \n"
@@ -821,8 +821,8 @@ TEST(LogicalRewriter, FilterUnionUnionPushdown) {
         "|   |   scanParams: \n"
         "|   |       {'a': evalTemp_1}\n"
         "|   |           residualReqs: \n"
-        "|   |               refProjection: evalTemp_1, path: 'PathTraverse [1] PathIdentity []', "
-        "intervals: {{{=Const [1]}}}, entryIndex: 0\n"
+        "|   |               {{{refProjection: evalTemp_1, path: 'PathTraverse [1] PathIdentity "
+        "[]', intervals: {{{=Const [1]}}}, entryIndex: 0}}}\n"
         "Scan [test1, {ptest}]\n",
         latest);
 }
@@ -1107,23 +1107,24 @@ TEST(LogicalRewriter, SargableCE) {
         "    |       logicalNodeId: 0, rule: Root\n"
         "    |           Sargable [Complete]\n"
         "    |           |   |   |   |   requirements: \n"
-        "    |           |   |   |   |       {\n"
-        "    |           |   |   |   |           {\n"
-        "    |           |   |   |   |               {refProjection: ptest, path: 'PathGet [a] "
+        "    |           |   |   |   |       {{\n"
+        "    |           |   |   |   |           {refProjection: ptest, path: 'PathGet [a] "
         "PathIdentity []', intervals: {{{=Const [1]}}}}\n"
-        "    |           |   |   |   |            ^ \n"
-        "    |           |   |   |   |               {refProjection: ptest, path: 'PathGet [b] "
+        "    |           |   |   |   |        ^ \n"
+        "    |           |   |   |   |           {refProjection: ptest, path: 'PathGet [b] "
         "PathIdentity []', intervals: {{{=Const [2]}}}}\n"
-        "    |           |   |   |   |           }\n"
-        "    |           |   |   |   |       }\n"
+        "    |           |   |   |   |       }}\n"
         "    |           |   |   |   candidateIndexes: \n"
         "    |           |   |   scanParams: \n"
         "    |           |   |       {'a': evalTemp_2, 'b': evalTemp_3}\n"
         "    |           |   |           residualReqs: \n"
-        "    |           |   |               refProjection: evalTemp_2, path: 'PathIdentity []', "
-        "intervals: {{{=Const [1]}}}, entryIndex: 0\n"
-        "    |           |   |               refProjection: evalTemp_3, path: 'PathIdentity []', "
-        "intervals: {{{=Const [2]}}}, entryIndex: 1\n"
+        "    |           |   |               {{\n"
+        "    |           |   |                   {refProjection: evalTemp_2, path: 'PathIdentity "
+        "[]', intervals: {{{=Const [1]}}}, entryIndex: 0}\n"
+        "    |           |   |                ^ \n"
+        "    |           |   |                   {refProjection: evalTemp_3, path: 'PathIdentity "
+        "[]', intervals: {{{=Const [2]}}}, entryIndex: 1}\n"
+        "    |           |   |               }}\n"
         "    |           MemoLogicalDelegator [groupId: 0]\n"
         "    physicalNodes: \n"
         "    groupId: 2\n"
@@ -1146,6 +1147,51 @@ TEST(LogicalRewriter, SargableCE) {
         "    |           MemoLogicalDelegator [groupId: 1]\n"
         "    physicalNodes: \n",
         phaseManager.getMemo());
+}
+
+TEST(LogicalRewriter, SargableCEWithIdEq) {
+    using namespace unit_test_abt_literals;
+    using namespace properties;
+    auto prefixId = PrefixId::createForTests();
+
+    // Construct a query which tests coll.find({_id: 1})
+    ABT rootNode = NodeBuilder{}
+                       .root("root")
+                       .filter(_evalf(_get("_id", _cmp("Eq", "1"_cint64)), "root"_var))
+                       .finish(_scan("root", "test"));
+
+    auto phaseManager =
+        makePhaseManager({OptPhase::MemoSubstitutionPhase, OptPhase::MemoExplorationPhase},
+                         prefixId,
+                         {{{"test", createScanDef({}, {})}}},
+                         boost::none /*costModel*/,
+                         DebugInfo::kDefaultForTests);
+    ABT latest = std::move(rootNode);
+    phaseManager.optimize(latest);
+
+    CardinalityEstimate ceProperty =
+        getPropertyConst<CardinalityEstimate>(phaseManager.getMemo().getLogicalProps(1));
+
+    // Assert that the cost estimate of a simple _id lookup is 1.
+    ASSERT_EQ(1.0, ceProperty.getEstimate()._value);
+    ASSERT_EQ(1, ceProperty.getPartialSchemaKeyCE().size());
+    ASSERT_EQ(1.0, ceProperty.getPartialSchemaKeyCE().front().second._value);
+
+    // Construct a query which tests a traverse.
+    ABT rootNode1 = NodeBuilder{}
+                        .root("root")
+                        .filter(_evalf(_get("_id", _traverse1(_cmp("Eq", "1"_cint64))), "root"_var))
+                        .finish(_scan("root", "test"));
+
+    latest = std::move(rootNode1);
+    phaseManager.optimize(latest);
+
+    ceProperty = getPropertyConst<CardinalityEstimate>(phaseManager.getMemo().getLogicalProps(1));
+
+    // Assert that the cost estimate of a traverse into a simple _id lookup is 1.
+    ASSERT_EQ(1.0, ceProperty.getEstimate()._value);
+    ASSERT_EQ(1, ceProperty.getPartialSchemaKeyCE().size());
+    ASSERT_EQ(1.0, ceProperty.getPartialSchemaKeyCE().front().second._value);
 }
 
 TEST(LogicalRewriter, RemoveNoopFilter) {
@@ -1415,8 +1461,8 @@ TEST(LogicalRewriter, NotPushdownUnderLambdaSuccess) {
         "|   |   scanParams: \n"
         "|   |       {'a': evalTemp_2}\n"
         "|   |           residualReqs: \n"
-        "|   |               refProjection: evalTemp_2, path: 'PathIdentity []', intervals: "
-        "{{{[Const [[]], Const [BinData(0, )])}}}, entryIndex: 0\n"
+        "|   |               {{{refProjection: evalTemp_2, path: 'PathIdentity []', intervals: "
+        "{{{[Const [[]], Const [BinData(0, )])}}}, entryIndex: 0}}}\n"
         "Scan [coll, {scan_0}]\n",
         latest);
 }
@@ -1491,21 +1537,19 @@ TEST(LogicalRewriter, NotPushdownUnderLambdaKeepOuterTraverse) {
         "|   PathArr []\n"
         "Sargable [Complete]\n"
         "|   |   |   |   requirements: \n"
-        "|   |   |   |       {\n"
-        "|   |   |   |           {\n"
-        "|   |   |   |               {refProjection: scan_0, path: 'PathGet [a] PathIdentity []', "
+        "|   |   |   |       {{\n"
+        "|   |   |   |           {refProjection: scan_0, path: 'PathGet [a] PathIdentity []', "
         "intervals: {{{[Const [[]], Const [BinData(0, )])}}}}\n"
-        "|   |   |   |            ^ \n"
-        "|   |   |   |               {refProjection: scan_0, path: 'PathGet [a] PathTraverse [1] "
+        "|   |   |   |        ^ \n"
+        "|   |   |   |           {refProjection: scan_0, path: 'PathGet [a] PathTraverse [1] "
         "PathIdentity []', intervals: {{{[Const [{}], Const [BinData(0, )])}}}, perfOnly}\n"
-        "|   |   |   |           }\n"
-        "|   |   |   |       }\n"
+        "|   |   |   |       }}\n"
         "|   |   |   candidateIndexes: \n"
         "|   |   scanParams: \n"
         "|   |       {'a': evalTemp_1}\n"
         "|   |           residualReqs: \n"
-        "|   |               refProjection: evalTemp_1, path: 'PathIdentity []', intervals: "
-        "{{{[Const [[]], Const [BinData(0, )])}}}, entryIndex: 0\n"
+        "|   |               {{{refProjection: evalTemp_1, path: 'PathIdentity []', intervals: "
+        "{{{[Const [[]], Const [BinData(0, )])}}}, entryIndex: 0}}}\n"
         "Scan [coll, {scan_0}]\n",
         latest);
 }
@@ -1617,8 +1661,8 @@ TEST(LogicalRewriter, RemoveTraverseSplitComposeM) {
         "|   |   scanParams: \n"
         "|   |       {'a': evalTemp_2}\n"
         "|   |           residualReqs: \n"
-        "|   |               refProjection: evalTemp_2, path: 'PathGet [b] PathIdentity []', "
-        "intervals: {{{(Const [3], Const [8])}}}, entryIndex: 0\n"
+        "|   |               {{{refProjection: evalTemp_2, path: 'PathGet [b] PathIdentity []', "
+        "intervals: {{{(Const [3], Const [8])}}}, entryIndex: 0}}}\n"
         "Scan [coll, {scan_0}]\n",
         latest);
 }
@@ -1696,16 +1740,14 @@ TEST(LogicalRewriter, TraverseComposeMTraverse) {
         "|   PathArr []\n"
         "Sargable [Complete]\n"
         "|   |   |   |   requirements: \n"
-        "|   |   |   |       {\n"
-        "|   |   |   |           {\n"
-        "|   |   |   |               {refProjection: scan_0, path: 'PathGet [a] PathTraverse [1] "
+        "|   |   |   |       {{\n"
+        "|   |   |   |           {refProjection: scan_0, path: 'PathGet [a] PathTraverse [1] "
         "PathIdentity []', intervals: {{{[Const [{}], Const [BinData(0, )])}}}, perfOnly}\n"
-        "|   |   |   |            ^ \n"
-        "|   |   |   |               {refProjection: scan_0, path: 'PathGet [a] PathTraverse [1] "
+        "|   |   |   |        ^ \n"
+        "|   |   |   |           {refProjection: scan_0, path: 'PathGet [a] PathTraverse [1] "
         "PathTraverse [1] PathGet [b] PathTraverse [1] PathIdentity []', intervals: {{{>Const "
         "[3]}}}, perfOnly}\n"
-        "|   |   |   |           }\n"
-        "|   |   |   |       }\n"
+        "|   |   |   |       }}\n"
         "|   |   |   candidateIndexes: \n"
         "|   |   scanParams: \n"
         "|   |       {}\n"
@@ -1837,18 +1879,16 @@ TEST(LogicalRewriter, SargableNodeRIN) {
     // Demonstrate we encode intervals for "a", "c", and "e".
     ASSERT_STR_EQ_AUTO(
         "requirements: \n"
-        "    {\n"
-        "        {\n"
-        "            {refProjection: root, path: 'PathGet [a] PathIdentity []', intervals: "
-        "{{{=Const [1]}}}}\n"
-        "         ^ \n"
-        "            {refProjection: root, path: 'PathGet [c] PathIdentity []', intervals: "
-        "{{{=Const [2]}}}}\n"
-        "         ^ \n"
-        "            {refProjection: root, path: 'PathGet [e] PathIdentity []', intervals: "
-        "{{{=Const [3]}}}}\n"
-        "        }\n"
-        "    }\n",
+        "    {{\n"
+        "        {refProjection: root, path: 'PathGet [a] PathIdentity []', intervals: {{{=Const "
+        "[1]}}}}\n"
+        "     ^ \n"
+        "        {refProjection: root, path: 'PathGet [c] PathIdentity []', intervals: {{{=Const "
+        "[2]}}}}\n"
+        "     ^ \n"
+        "        {refProjection: root, path: 'PathGet [e] PathIdentity []', intervals: {{{=Const "
+        "[3]}}}}\n"
+        "    }}\n",
         ExplainGenerator::explainPartialSchemaReqMap(node.getReqMap()));
 
     const auto& ci = node.getCandidateIndexes();
@@ -1871,13 +1911,16 @@ TEST(LogicalRewriter, SargableNodeRIN) {
     ASSERT_EQ(0, ci.at(0)._eqPrefixes.front()._startPos);
 
     // We have two residual predicates for "c" and "e".
-    ASSERT_EQ(
+    ASSERT_RESIDUAL_REQS_AUTO(
         "residualReqs: \n"
-        "    refProjection: evalTemp_24, path: 'PathIdentity []', intervals: {{{=Const [2]}}}, "
-        "entryIndex: 1\n"
-        "    refProjection: evalTemp_25, path: 'PathIdentity []', intervals: {{{=Const [3]}}}, "
-        "entryIndex: 2\n",
-        ExplainGenerator::explainResidualRequirements(ci.at(0)._residualRequirements));
+        "    {{\n"
+        "        {refProjection: evalTemp_24, path: 'PathIdentity []', intervals: {{{=Const "
+        "[2]}}}, entryIndex: 1}\n"
+        "     ^ \n"
+        "        {refProjection: evalTemp_25, path: 'PathIdentity []', intervals: {{{=Const "
+        "[3]}}}, entryIndex: 2}\n"
+        "    }}\n",
+        *ci.at(0)._residualRequirements);
 
 
     // The second candidate index has two equality prefixes.
@@ -1904,12 +1947,11 @@ TEST(LogicalRewriter, SargableNodeRIN) {
     ASSERT_EQ(2, ci.at(1)._correlatedProjNames.getVector().size());
 
     // We have only one residual predicates for "e".
-    ASSERT_EQ(
+    ASSERT_RESIDUAL_REQS_AUTO(
         "residualReqs: \n"
-        "    refProjection: evalTemp_28, path: 'PathIdentity []', intervals: {{{=Const [3]}}}, "
-        "entryIndex: 2\n",
-        ExplainGenerator::explainResidualRequirements(ci.at(1)._residualRequirements));
-
+        "    {{{refProjection: evalTemp_28, path: 'PathIdentity []', intervals: {{{=Const [3]}}}, "
+        "entryIndex: 2}}}\n",
+        *ci.at(1)._residualRequirements);
 
     // The third candidate index has three equality prefixes.
     ASSERT_EQ(3, ci.at(2)._eqPrefixes.size());
@@ -1985,5 +2027,61 @@ TEST(LogicalRewriter, EmptyArrayIndexBounds) {
         rootNode);
 }
 
+TEST(LogicalRewriter, MakeSargableNodeWithTopLevelDisjunction) {
+    using namespace unit_test_abt_literals;
+
+    // Hand-build SargableNode with top-level disjunction.
+    auto req = PartialSchemaRequirement(
+        boost::none, _disj(_conj(_interval(_incl("1"_cint32), _incl("1"_cint32)))), false);
+
+    auto makeKey = [](std::string pathName) {
+        return PartialSchemaKey("ptest",
+                                make<PathGet>(FieldNameType{pathName}, make<PathIdentity>()));
+    };
+    PSRExpr::Builder builder;
+    builder.pushDisj()
+        .pushConj()
+        .atom({makeKey("a"), req})
+        .atom({makeKey("b"), req})
+        .pop()
+        .pushConj()
+        .atom({makeKey("c"), req})
+        .atom({makeKey("d"), req})
+        .pop();
+    auto reqs = PartialSchemaRequirements(builder.finish().get());
+
+    ABT scanNode = make<ScanNode>("ptest", "test");
+    ABT sargableNode = make<SargableNode>(
+        reqs, CandidateIndexes(), boost::none, IndexReqTarget::Index, std::move(scanNode));
+    ABT rootNode = make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{"ptest"}},
+                                  std::move(sargableNode));
+    ASSERT_EXPLAIN_V2_AUTO(
+        "Root [{ptest}]\n"
+        "Sargable [Index]\n"
+        "|   |   |   requirements: \n"
+        "|   |   |       {\n"
+        "|   |   |           {\n"
+        "|   |   |               {refProjection: ptest, path: 'PathGet [a] PathIdentity []', "
+        "intervals: {{{=Const [1]}}}}\n"
+        "|   |   |            ^ \n"
+        "|   |   |               {refProjection: ptest, path: 'PathGet [b] PathIdentity []', "
+        "intervals: {{{=Const [1]}}}}\n"
+        "|   |   |           }\n"
+        "|   |   |        U \n"
+        "|   |   |           {\n"
+        "|   |   |               {refProjection: ptest, path: 'PathGet [c] PathIdentity []', "
+        "intervals: {{{=Const [1]}}}}\n"
+        "|   |   |            ^ \n"
+        "|   |   |               {refProjection: ptest, path: 'PathGet [d] PathIdentity []', "
+        "intervals: {{{=Const [1]}}}}\n"
+        "|   |   |           }\n"
+        "|   |   |       }\n"
+        "|   |   candidateIndexes: \n"
+        "Scan [test, {ptest}]\n",
+        rootNode);
+
+    // Show that hashing a top-level disjunction doesn't throw.
+    ABTHashGenerator::generate(rootNode);
+}
 }  // namespace
 }  // namespace mongo::optimizer

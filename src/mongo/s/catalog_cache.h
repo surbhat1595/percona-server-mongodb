@@ -36,8 +36,8 @@
 #include "mongo/s/catalog/type_index_catalog.h"
 #include "mongo/s/catalog_cache_loader.h"
 #include "mongo/s/chunk_manager.h"
-#include "mongo/s/global_index_cache.h"
 #include "mongo/s/shard_version.h"
+#include "mongo/s/sharding_index_catalog_cache.h"
 #include "mongo/s/type_collection_common_types_gen.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/read_through_cache.h"
@@ -54,10 +54,10 @@ using CachedDatabaseInfo = DatabaseTypeValueHandle;
 
 struct CollectionRoutingInfo {
     CollectionRoutingInfo(ChunkManager&& chunkManager,
-                          boost::optional<GlobalIndexesCache>&& globalIndexes)
-        : cm(std::move(chunkManager)), gii(std::move(globalIndexes)) {}
+                          boost::optional<ShardingIndexesCatalogCache>&& shardingIndexesCatalog)
+        : cm(std::move(chunkManager)), sii(std::move(shardingIndexesCatalog)) {}
     ChunkManager cm;
-    boost::optional<GlobalIndexesCache> gii;
+    boost::optional<ShardingIndexesCatalogCache> sii;
 
     ShardVersion getCollectionVersion() const;
     ShardVersion getShardVersion(const ShardId& shardId) const;
@@ -293,13 +293,6 @@ public:
     void report(BSONObjBuilder* builder) const;
 
     /**
-     * Checks if the current operation was ever marked as needing refresh. If the curent operation
-     * was marked as needing refresh, updates the relevant counters inside the Stats struct.
-     */
-    void checkAndRecordOperationBlockedByRefresh(OperationContext* opCtx, mongo::LogicalOp opType);
-
-
-    /**
      * Non-blocking method that marks the current database entry for the dbName as needing
      * refresh. Will cause all further targetting attempts to block on a catalog cache refresh,
      * even if they do not require causal consistency.
@@ -377,7 +370,7 @@ private:
         void _updateRefreshesStats(bool isIncremental, bool add);
     };
 
-    class IndexCache : public GlobalIndexesCacheBase {
+    class IndexCache : public ShardingIndexesCatalogRTCBase {
     public:
         IndexCache(ServiceContext* service, ThreadPoolInterface& threadPool);
 
@@ -394,9 +387,8 @@ private:
                                                            boost::optional<Timestamp> atClusterTime,
                                                            bool allowLocks = false);
 
-    boost::optional<GlobalIndexesCache> _getCollectionIndexInfoAt(OperationContext* opCtx,
-                                                                  const NamespaceString& nss,
-                                                                  bool allowLocks = false);
+    boost::optional<ShardingIndexesCatalogCache> _getCollectionIndexInfoAt(
+        OperationContext* opCtx, const NamespaceString& nss, bool allowLocks = false);
 
     void _triggerPlacementVersionRefresh(OperationContext* opCtx, const NamespaceString& nss);
 
@@ -425,18 +417,6 @@ private:
         // Cumulative, always-increasing counter of how much time threads waiting for refresh
         // combined
         AtomicWord<long long> totalRefreshWaitTimeMicros{0};
-
-        // Cumulative, always-increasing counter of how many operations have been blocked by a
-        // catalog cache refresh. Broken down by operation type to match the operations tracked
-        // by the OpCounters class.
-        struct OperationsBlockedByRefresh {
-            AtomicWord<long long> countAllOperations{0};
-            AtomicWord<long long> countInserts{0};
-            AtomicWord<long long> countQueries{0};
-            AtomicWord<long long> countUpdates{0};
-            AtomicWord<long long> countDeletes{0};
-            AtomicWord<long long> countCommands{0};
-        } operationsBlockedByRefresh;
 
         /**
          * Reports the accumulated statistics for serverStatus.

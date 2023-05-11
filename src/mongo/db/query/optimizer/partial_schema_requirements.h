@@ -36,9 +36,7 @@ namespace mongo::optimizer {
 
 using PartialSchemaEntry = std::pair<PartialSchemaKey, PartialSchemaRequirement>;
 using PSRExpr = BoolExpr<PartialSchemaEntry>;
-using PSRExprBuilder = PSRExpr::Builder<false /*simplifyEmptyOrSingular*/,
-                                        false /*removeDups*/,
-                                        NoOpNegator<PartialSchemaEntry>>;
+using PSRExprBuilder = PSRExpr::Builder<false /*simplifyEmptyOrSingular*/, false /*removeDups*/>;
 
 /**
  * Represents a set of predicates and projections. Cannot represent all predicates/projections:
@@ -150,8 +148,6 @@ public:
      */
     size_t numConjuncts() const;
 
-    std::set<ProjectionName> getBoundNames() const;
-
     /**
      * Return the bound projection name corresponding to the first conjunct matching the given key.
      * Assert on non-DNF requirements.
@@ -168,7 +164,9 @@ public:
 
     // TODO SERVER-74101: Remove these methods in favor of visitDis/Conjuncts().
     Range<true> conjuncts() const {
-        assertIsSingletonDisjunction();
+        tassert(7453905,
+                "Expected PartialSchemaRequirement to be a singleton disjunction",
+                PSRExpr::isSingletonDisjunction(_expr));
         const auto& atoms = _expr.cast<PSRExpr::Disjunction>()
                                 ->nodes()
                                 .begin()
@@ -178,7 +176,9 @@ public:
     }
 
     Range<false> conjuncts() {
-        assertIsSingletonDisjunction();
+        tassert(7453904,
+                "Expected PartialSchemaRequirement to be a singleton disjunction",
+                PSRExpr::isSingletonDisjunction(_expr));
         auto& atoms = _expr.cast<PSRExpr::Disjunction>()
                           ->nodes()
                           .begin()
@@ -187,22 +187,11 @@ public:
         return {atoms.begin(), atoms.end()};
     }
 
-    using Bindings = std::vector<std::pair<PartialSchemaKey, ProjectionName>>;
-    Bindings iterateBindings() const;
-
     /**
      * Add an entry to the first AND under a top-level OR. Asserts on non-DNF requirements.
      * TODO SERVER-74101 In the follow up ticket to update callsites, remove or clarify this method.
      */
     void add(PartialSchemaKey, PartialSchemaRequirement);
-
-    /**
-     * Apply an in-place transformation to each PartialSchemaRequirement.
-     *
-     * Since the key is only exposed read-only to the callback, we don't need to
-     * worry about restoring the no-Traverseless-duplicates invariant.
-     */
-    void transform(std::function<void(const PartialSchemaKey&, PartialSchemaRequirement&)>);
 
     /**
      * Apply a simplification to each PartialSchemaRequirement.
@@ -223,16 +212,25 @@ public:
         return _expr;
     }
 
+    auto& getRoot() {
+        return _expr;
+    }
+
 private:
     // Restore the invariant that the entries are sorted by key.
     // TODO SERVER-73827: Consider applying this normalization during BoolExpr building.
     void normalize();
 
-    // Asserts that _expr is in DNF form where the disjunction has a single conjunction child.
-    void assertIsSingletonDisjunction() const;
-
     // _expr is currently always in DNF.
     PSRExpr::Node _expr;
 };
+
+/**
+ * Returns a vector of ((input binding, path), output binding). The output binding names
+ * are unique and you can think of the vector as a product: every row has all the projections
+ * available.
+ */
+std::vector<std::pair<PartialSchemaKey, ProjectionName>> getBoundProjections(
+    const PartialSchemaRequirements& reqs);
 
 }  // namespace mongo::optimizer

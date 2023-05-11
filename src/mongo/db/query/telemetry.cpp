@@ -34,17 +34,22 @@
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/locker.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/exec/projection_executor_builder.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/query/find_command_gen.h"
 #include "mongo/db/query/plan_explainer.h"
+#include "mongo/db/query/projection_ast_util.h"
+#include "mongo/db/query/projection_parser.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/rate_limiting.h"
+#include "mongo/db/query/sort_pattern.h"
 #include "mongo/db/query/telemetry_util.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/md5.hpp"
+#include "mongo/util/processinfo.h"
 #include "mongo/util/system_clock_source.h"
 #include <array>
 #include <optional>
@@ -79,6 +84,233 @@ boost::optional<BSONObj> getTelemetryKeyFromOpCtx(OperationContext* opCtx) {
     return CurOp::get(opCtx)->debug().telemetryStoreKey;
 }
 
+/**
+ * Redacts all BSONObj field names as if they were paths, unless the field name is a special hint
+ * operator.
+ */
+namespace {
+static std::string hintSpecialField = "$hint";
+void addLiteralFieldsWithRedaction(BSONObjBuilder* bob,
+                                   const FindCommandRequest& findCommand,
+                                   StringData newLiteral) {
+
+    if (findCommand.getLimit()) {
+        bob->append(FindCommandRequest::kLimitFieldName, newLiteral);
+    }
+    if (findCommand.getSkip()) {
+        bob->append(FindCommandRequest::kSkipFieldName, newLiteral);
+    }
+    if (findCommand.getBatchSize()) {
+        bob->append(FindCommandRequest::kBatchSizeFieldName, newLiteral);
+    }
+    if (findCommand.getMaxTimeMS()) {
+        bob->append(FindCommandRequest::kMaxTimeMSFieldName, newLiteral);
+    }
+    if (findCommand.getNoCursorTimeout()) {
+        bob->append(FindCommandRequest::kNoCursorTimeoutFieldName, newLiteral);
+    }
+}
+
+void addLiteralFieldsWithoutRedaction(BSONObjBuilder* bob, const FindCommandRequest& findCommand) {
+    if (auto param = findCommand.getLimit()) {
+        bob->append(FindCommandRequest::kLimitFieldName, param.get());
+    }
+    if (auto param = findCommand.getSkip()) {
+        bob->append(FindCommandRequest::kSkipFieldName, param.get());
+    }
+    if (auto param = findCommand.getBatchSize()) {
+        bob->append(FindCommandRequest::kBatchSizeFieldName, param.get());
+    }
+    if (auto param = findCommand.getMaxTimeMS()) {
+        bob->append(FindCommandRequest::kMaxTimeMSFieldName, param.get());
+    }
+    if (findCommand.getNoCursorTimeout().has_value()) {
+        bob->append(FindCommandRequest::kNoCursorTimeoutFieldName,
+                    findCommand.getNoCursorTimeout().value_or(false));
+    }
+}
+
+
+static std::vector<
+    std::pair<StringData, std::function<const OptionalBool(const FindCommandRequest&)>>>
+    boolArgMap = {
+        {FindCommandRequest::kSingleBatchFieldName, &FindCommandRequest::getSingleBatch},
+        {FindCommandRequest::kAllowDiskUseFieldName, &FindCommandRequest::getAllowDiskUse},
+        {FindCommandRequest::kReturnKeyFieldName, &FindCommandRequest::getReturnKey},
+        {FindCommandRequest::kShowRecordIdFieldName, &FindCommandRequest::getShowRecordId},
+        {FindCommandRequest::kTailableFieldName, &FindCommandRequest::getTailable},
+        {FindCommandRequest::kAwaitDataFieldName, &FindCommandRequest::getAwaitData},
+        {FindCommandRequest::kAllowPartialResultsFieldName,
+         &FindCommandRequest::getAllowPartialResults},
+        {FindCommandRequest::kMirroredFieldName, &FindCommandRequest::getMirrored},
+};
+std::vector<std::pair<StringData, std::function<const BSONObj(const FindCommandRequest&)>>>
+    objArgMap = {
+        {FindCommandRequest::kCollationFieldName, &FindCommandRequest::getCollation},
+
+};
+
+void addRemainingFindCommandFields(BSONObjBuilder* bob, const FindCommandRequest& findCommand) {
+    for (auto [fieldName, getterFunction] : boolArgMap) {
+        auto optBool = getterFunction(findCommand);
+        if (optBool.has_value()) {
+            bob->append(fieldName, optBool.value_or(false));
+        }
+    }
+    if (auto optObj = findCommand.getReadConcern()) {
+        bob->append(FindCommandRequest::kReadConcernFieldName, optObj.get());
+    }
+    auto collation = findCommand.getCollation();
+    if (!collation.isEmpty()) {
+        bob->append(FindCommandRequest::kCollationFieldName, collation);
+    }
+}
+}  // namespace
+BSONObj redactHintComponent(BSONObj obj, const SerializationOptions& opts, bool redactValues) {
+    BSONObjBuilder bob;
+    for (BSONElement elem : obj) {
+        if (hintSpecialField.compare(elem.fieldName()) == 0) {
+            tassert(7421703,
+                    "Hinted field must be a string with $hint operator",
+                    elem.type() == BSONType::String);
+            if (opts.redactFieldNames) {
+                bob.append(hintSpecialField, FieldPath(elem.String()).redactedFullPath(opts));
+            } else {
+                bob.append(hintSpecialField, elem.String());
+            }
+            continue;
+        }
+
+        std::string fieldName = elem.fieldName();
+        if (opts.redactFieldNames) {
+            fieldName = FieldPath(fieldName).redactedFullPath(opts);
+        }
+        if (opts.replacementForLiteralArgs && redactValues) {
+            bob.append(fieldName, opts.replacementForLiteralArgs.get());
+        } else {
+            bob.appendAs(elem, fieldName);
+        }
+    }
+    return bob.obj();
+}
+
+/**
+ * In a let specification all field names are variable names, and all values are either expressions
+ * or constants.
+ */
+BSONObj redactLetSpec(BSONObj letSpec,
+                      const SerializationOptions& opts,
+                      boost::intrusive_ptr<ExpressionContext> expCtx) {
+
+    BSONObjBuilder bob;
+    for (BSONElement elem : letSpec) {
+        auto redactedValue =
+            Expression::parseOperand(expCtx.get(), elem, expCtx->variablesParseState)
+                ->serialize(opts);
+        // Note that this will throw on deeply nested let variables.
+        redactedValue.addToBsonObj(&bob, opts.serializeFieldName(elem.fieldName()));
+    }
+    return bob.obj();
+}
+
+BSONObj redactFindRequest(const FindCommandRequest& findCommand,
+                          const SerializationOptions& opts,
+                          const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+    if (!opts.redactFieldNames && !opts.replacementForLiteralArgs) {
+        // Short circuit if no redaction needs to be done.
+        BSONObjBuilder bob;
+        findCommand.serialize({}, &bob);
+        return bob.obj();
+    }
+
+    // This function enumerates all the fields in a find command and either copies or attempts to
+    // redact them.
+    BSONObjBuilder bob;
+    // Redact the namespace of the command.
+    {
+        auto nssOrUUID = findCommand.getNamespaceOrUUID();
+        std::string toSerialize;
+        if (nssOrUUID.uuid()) {
+            toSerialize = opts.serializeFieldName(nssOrUUID.toString());
+        } else {
+            // Database is set at the command level, only serialize the collection here.
+            toSerialize = opts.serializeFieldName(nssOrUUID.nss()->coll());
+        }
+        bob.append(FindCommandRequest::kCommandName, toSerialize);
+    }
+
+    // Filter.
+    {
+        auto filter = findCommand.getFilter();
+        if (!filter.isEmpty()) {
+            auto filterParsed = MatchExpressionParser::parse(findCommand.getFilter(), expCtx);
+            uassert(7421701,
+                    "Expected to be able to parse match expression for redaction",
+                    filterParsed.isOK());
+
+            bob.append(FindCommandRequest::kFilterFieldName,
+                       filterParsed.getValue()->serialize(opts));
+        }
+    }
+
+    // Let Spec.
+    if (auto letSpec = findCommand.getLet()) {
+        auto redactedObj = redactLetSpec(letSpec.get(), opts, expCtx);
+        auto ownedObj = redactedObj.getOwned();
+        bob.append(FindCommandRequest::kLetFieldName, std::move(ownedObj));
+    }
+
+    if (!findCommand.getProjection().isEmpty()) {
+        // Parse to Projection
+        auto projection = projection_ast::parseAndAnalyze(
+            expCtx, findCommand.getProjection(), ProjectionPolicies::findProjectionPolicies());
+
+        bob.append(FindCommandRequest::kProjectionFieldName,
+                   projection_ast::serialize(projection, opts));
+    }
+
+    // Assume the hint is correct and contains field names. It is possible that this hint
+    // doesn't actually represent an index, but we can't detect that here.
+    // Hint, max, and min won't serialize if the object is empty.
+    if (!findCommand.getHint().isEmpty()) {
+        bob.append(FindCommandRequest::kHintFieldName,
+                   redactHintComponent(findCommand.getHint(), opts, false));
+        // Max/Min aren't valid without hint.
+        if (!findCommand.getMax().isEmpty()) {
+            bob.append(FindCommandRequest::kMaxFieldName,
+                       redactHintComponent(findCommand.getMax(), opts, true));
+        }
+        if (!findCommand.getMin().isEmpty()) {
+            bob.append(FindCommandRequest::kMinFieldName,
+                       redactHintComponent(findCommand.getMin(), opts, true));
+        }
+    }
+
+    // Sort.
+    {
+        auto sortSpec = findCommand.getSort();
+        if (!sortSpec.isEmpty()) {
+            auto sort = SortPattern(sortSpec, expCtx);
+            bob.append(
+                FindCommandRequest::kSortFieldName,
+                sort.serialize(SortPattern::SortKeySerialization::kForPipelineSerialization, opts)
+                    .toBson());
+        }
+    }
+
+    // Fields for literal redaction. Adds limit, skip, batchSize, maxTimeMS, and noCursorTimeOut
+    if (opts.replacementForLiteralArgs) {
+        addLiteralFieldsWithRedaction(&bob, findCommand, opts.replacementForLiteralArgs.get());
+    } else {
+        addLiteralFieldsWithoutRedaction(&bob, findCommand);
+    }
+
+    // Add the fields that require no redaction.
+    addRemainingFindCommandFields(&bob, findCommand);
+
+    return bob.obj();
+}
+
 void appendShardedTelemetryKeyIfApplicable(MutableDocument& objToModify,
                                            std::string hostAndPort,
                                            OperationContext* opCtx) {
@@ -110,6 +342,7 @@ void appendShardedTelemetryKeyIfApplicable(BSONObjBuilder& objToModify,
 namespace {
 
 CounterMetric telemetryEvictedMetric("telemetry.numEvicted");
+CounterMetric telemetryRateLimitedRequestsMetric("telemetry.numRateLimitedRequests");
 
 /**
  * Cap the telemetry store size.
@@ -205,8 +438,9 @@ ServiceContext::ConstructorActionRegisterer telemetryStoreManagerRegisterer{
             std::make_unique<TelemetryOnParamChangeUpdaterImpl>();
         size_t size = getTelemetryStoreSize();
         auto&& globalTelemetryStoreManager = telemetryStoreDecoration(serviceCtx);
-        // Many partitions reduces lock contention on both reading and write telemetry data.
-        size_t numPartitions = 1024;
+        // The plan cache and telemetry store should use the same number of partitions.
+        // That is, the number of cpu cores.
+        size_t numPartitions = ProcessInfo::getNumCores();
         size_t partitionBytes = size / numPartitions;
         size_t metricsSize = sizeof(TelemetryMetrics);
         if (partitionBytes < metricsSize * 10) {
@@ -229,12 +463,14 @@ bool shouldCollect(const ServiceContext* serviceCtx) {
     if (!isTelemetryEnabled()) {
         return false;
     }
-    // Cannot collect telemetry if sampling rate is not greater than 0.
+    // Cannot collect telemetry if sampling rate is not greater than 0. Note that we do not
+    // increment telemetryRateLimitedRequestsMetric here since telemetry is entirely disabled.
     if (telemetryRateLimiter(serviceCtx)->getSamplingRate() <= 0) {
         return false;
     }
     // Check if rate limiting allows us to collect telemetry for this request.
     if (!telemetryRateLimiter(serviceCtx)->handleRequestSlidingWindow()) {
+        telemetryRateLimitedRequestsMetric.increment();
         return false;
     }
     return true;
@@ -272,50 +508,6 @@ void throwIfEncounteringFLEPayload(const BSONElement& e) {
                 len > 1 && data[1] != char(EncryptedBinDataType::kDeterministic));
     }
 }
-
-/**
- * Get the metrics for a given key holding the appropriate locks.
- */
-class LockedMetrics {
-    LockedMetrics(TelemetryMetrics* metrics,
-                  TelemetryStore& telemetryStore,
-                  TelemetryStore::Partition partitionLock)
-        : _metrics(metrics),
-          _telemetryStore(telemetryStore),
-          _partitionLock(std::move(partitionLock)) {}
-
-public:
-    static LockedMetrics get(OperationContext* opCtx, const BSONObj& telemetryKey) {
-        auto&& telemetryStore = getTelemetryStore(opCtx);
-        auto&& [statusWithMetrics, partitionLock] =
-            telemetryStore.getWithPartitionLock(telemetryKey);
-        TelemetryMetrics* metrics;
-        if (statusWithMetrics.isOK()) {
-            metrics = statusWithMetrics.getValue();
-        } else {
-            size_t numEvicted = telemetryStore.put(telemetryKey, {}, partitionLock);
-            telemetryEvictedMetric.increment(numEvicted);
-            auto newMetrics = partitionLock->get(telemetryKey);
-            // This can happen if the budget is immediately exceeded. Specifically if the there is
-            // not enough room for a single new entry if the number of partitions is too high
-            // relative to the size.
-            tassert(7064700, "Should find telemetry store entry", newMetrics.isOK());
-            metrics = &newMetrics.getValue()->second;
-        }
-        return LockedMetrics{metrics, telemetryStore, std::move(partitionLock)};
-    }
-
-    TelemetryMetrics* operator->() const {
-        return _metrics;
-    }
-
-private:
-    TelemetryMetrics* _metrics;
-
-    TelemetryStore& _telemetryStore;
-
-    TelemetryStore::Partition _partitionLock;
-};
 
 /**
  * Upon reading telemetry data, we redact some keys. This is the list. See
@@ -524,80 +716,38 @@ void registerFindRequest(const FindCommandRequest& request,
     CurOp::get(opCtx)->debug().telemetryStoreKey = telemetryKey.obj();
 }
 
-// TODO SERVER-73727 registerGetMoreRequest should be removed once metrics are aggregated on cursors
-// across getMores on mongos
-void registerGetMoreRequest(OperationContext* opCtx) {
-    if (!isTelemetryEnabled()) {
-        return;
-    }
-
-    // Rate limiting is important in all cases as it limits the amount of CPU telemetry uses to
-    // prevent degrading query throughput. This is essential in the case of a large find
-    // query with a batchsize of 1, where collecting metrics on every getMore would quickly impact
-    // the number of queries the system can process per second (query throughput). This is why not
-    // only are originating queries rate limited but also their subsequent getMore operations.
-    if (!shouldCollect(opCtx->getServiceContext())) {
-        return;
-    }
-}
-
 TelemetryStore& getTelemetryStore(OperationContext* opCtx) {
     uassert(6579000, "Telemetry is not enabled without the feature flag on", isTelemetryEnabled());
     return telemetryStoreDecoration(opCtx->getServiceContext())->getTelemetryStore();
 }
 
-void recordExecution(OperationContext* opCtx, bool isFle) {
-    if (!isTelemetryEnabled()) {
-        return;
-    }
-    if (isFle) {
-        return;
-    }
-    // Confirms that this is an operation the telemetry machinery has decided to collect metrics
-    // from.
-    auto&& opDebug = CurOp::get(opCtx)->debug();
-    if (!opDebug.telemetryStoreKey) {
-        return;
-    }
-    auto&& metrics = LockedMetrics::get(opCtx, *opDebug.telemetryStoreKey);
-    metrics->execCount++;
-    metrics->queryOptMicros.aggregate(opDebug.planningTime.count());
-}
-
-void collectTelemetry(OperationContext* opCtx, const OpDebug& opDebug) {
-    // Confirms that this is an operation the telemetry machinery has decided to collect metrics
-    // from.
-    if (!opDebug.telemetryStoreKey) {
-        return;
-    }
-
-    auto&& metrics = LockedMetrics::get(opCtx, *opDebug.telemetryStoreKey);
-    metrics->docsReturned.aggregate(opDebug.nreturned);
-    metrics->docsScanned.aggregate(opDebug.additiveMetrics.docsExamined.value_or(0));
-    metrics->keysScanned.aggregate(opDebug.additiveMetrics.keysExamined.value_or(0));
-    metrics->lastExecutionMicros = opDebug.executionTime.count();
-    metrics->queryExecMicros.aggregate(opDebug.executionTime.count());
-}
-
 void writeTelemetry(OperationContext* opCtx,
                     boost::optional<BSONObj> telemetryKey,
-                    const uint64_t queryOptMicros,
                     const uint64_t queryExecMicros,
-                    const uint64_t docsReturned,
-                    const uint64_t docsScanned,
-                    const uint64_t keysScanned) {
+                    const uint64_t docsReturned) {
     if (!telemetryKey) {
         return;
     }
-    auto&& metrics = LockedMetrics::get(opCtx, *telemetryKey);
+    auto&& telemetryStore = getTelemetryStore(opCtx);
+    auto&& [statusWithMetrics, partitionLock] = telemetryStore.getWithPartitionLock(*telemetryKey);
+    TelemetryMetrics* metrics;
+    if (statusWithMetrics.isOK()) {
+        metrics = statusWithMetrics.getValue();
+    } else {
+        size_t numEvicted = telemetryStore.put(*telemetryKey, {}, partitionLock);
+        telemetryEvictedMetric.increment(numEvicted);
+        auto newMetrics = partitionLock->get(*telemetryKey);
+        // This can happen if the budget is immediately exceeded. Specifically if the there is
+        // not enough room for a single new entry if the number of partitions is too high
+        // relative to the size.
+        tassert(7064700, "Should find telemetry store entry", newMetrics.isOK());
+        metrics = &newMetrics.getValue()->second;
+    }
 
     metrics->lastExecutionMicros = queryExecMicros;
     metrics->execCount++;
-    metrics->queryOptMicros.aggregate(queryOptMicros);
     metrics->queryExecMicros.aggregate(queryExecMicros);
     metrics->docsReturned.aggregate(docsReturned);
-    metrics->docsScanned.aggregate(docsScanned);
-    metrics->keysScanned.aggregate(keysScanned);
 }
 }  // namespace telemetry
 }  // namespace mongo

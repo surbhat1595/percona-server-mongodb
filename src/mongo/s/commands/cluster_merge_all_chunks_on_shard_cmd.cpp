@@ -65,13 +65,16 @@ public:
         void typedRun(OperationContext* opCtx) {
             const auto nss = ns();
             const auto& req = request();
+            const auto& shardId = req.getShard();
 
             auto shard =
-                uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, req.getShard()));
+                uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, shardId));
 
             ShardSvrMergeAllChunksOnShard shardSvrMergeAllChunksOnShard(nss);
             shardSvrMergeAllChunksOnShard.setDbName(DatabaseName::kAdmin);
-            shardSvrMergeAllChunksOnShard.setShard(req.getShard());
+            shardSvrMergeAllChunksOnShard.setShard(shardId);
+            shardSvrMergeAllChunksOnShard.setMaxNumberOfChunksToMerge(
+                req.getMaxNumberOfChunksToMerge());
 
             auto swCommandResponse = shard->runCommandWithFixedRetryAttempts(
                 opCtx,
@@ -81,6 +84,11 @@ public:
                 Shard::RetryPolicy::kIdempotent);
 
             uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(swCommandResponse));
+
+            Grid::get(opCtx)
+                ->catalogCache()
+                ->invalidateShardOrEntireCollectionEntryForShardedCollection(
+                    nss, boost::none, shardId);
         }
 
     private:

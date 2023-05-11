@@ -42,6 +42,10 @@ ThroughputProbing::ThroughputProbing(ServiceContext* svcCtx,
     : TicketHolderMonitor(svcCtx, readTicketHolder, writeTicketHolder, interval),
       _stableConcurrency(_readTicketHolder->outof()) {}
 
+void ThroughputProbing::appendStats(BSONObjBuilder& builder) const {
+    _stats.serialize(builder);
+}
+
 void ThroughputProbing::_run(Client* client) {
     auto numFinishedProcessing =
         _readTicketHolder->numFinishedProcessing() + _writeTicketHolder->numFinishedProcessing();
@@ -49,26 +53,27 @@ void ThroughputProbing::_run(Client* client) {
 
     auto throughput = (numFinishedProcessing - _prevNumFinishedProcessing) /
         static_cast<double>(durationCount<Milliseconds>(_interval()));
+    _stats.throughput.store(throughput);
 
     switch (_state) {
         case ProbingState::kStable:
-            _probeStable(client->getOperationContext(), throughput);
+            _probeStable(throughput);
             break;
         case ProbingState::kUp:
-            _probeUp(client->getOperationContext(), throughput);
+            _probeUp(throughput);
             break;
         case ProbingState::kDown:
-            _probeDown(client->getOperationContext(), throughput);
+            _probeDown(throughput);
             break;
     }
 
     _prevNumFinishedProcessing = numFinishedProcessing;
 }
 
-void ThroughputProbing::_probeStable(OperationContext* opCtx, double throughput) {
+void ThroughputProbing::_probeStable(double throughput) {
     invariant(_state == ProbingState::kStable);
 
-    LOGV2(7346000, "ThroughputProbing: stable", "throughput"_attr = throughput);
+    LOGV2_DEBUG(7346000, 3, "Throughput Probing: stable", "throughput"_attr = throughput);
 
     // Record the baseline reading.
     _stableThroughput = throughput;
@@ -80,64 +85,76 @@ void ThroughputProbing::_probeStable(OperationContext* opCtx, double throughput)
         // At least one of the ticket pools is exhausted, so try increasing concurrency.
         _state = ProbingState::kUp;
         _setConcurrency(
-            opCtx,
             std::lround(_stableConcurrency * (1 + throughput_probing::gStepMultiple.load())));
     } else if (_readTicketHolder->used() > kMinConcurrency ||
                _writeTicketHolder->used() > kMinConcurrency) {
         // Neither of the ticket pools are exhausted, so try decreasing concurrency to just below
         // the current level of usage.
         _state = ProbingState::kDown;
-        _setConcurrency(opCtx,
-                        std::lround(peakUsed * (1 - throughput_probing::gStepMultiple.load())));
+        _setConcurrency(std::lround(peakUsed * (1 - throughput_probing::gStepMultiple.load())));
     }
 }
 
-void ThroughputProbing::_probeUp(OperationContext* opCtx, double throughput) {
+void ThroughputProbing::_probeUp(double throughput) {
     invariant(_state == ProbingState::kUp);
 
-    LOGV2(7346001, "ThroughputProbing: up", "throughput"_attr = throughput);
+    LOGV2_DEBUG(7346001, 3, "Throughput Probing: up", "throughput"_attr = throughput);
 
     if (throughput > _stableThroughput) {
         // Increasing concurrency caused throughput to increase, so promote this new level of
         // concurrency to stable.
+        auto concurrency = _readTicketHolder->outof();
+        _stats.timesIncreased.fetchAndAdd(1);
+        _stats.totalAmountIncreased.fetchAndAdd(concurrency - _stableConcurrency);
         _state = ProbingState::kStable;
         _stableThroughput = throughput;
-        _stableConcurrency = _readTicketHolder->outof();
+        _stableConcurrency = concurrency;
     } else if (_readTicketHolder->outof() > kMinConcurrency) {
         // Increasing concurrency did not cause throughput to increase, so try decreasing
         // concurrency instead.
         _state = ProbingState::kDown;
         _setConcurrency(
-            opCtx,
             std::lround(_stableConcurrency * (1 - throughput_probing::gStepMultiple.load())));
     }
 }
 
-void ThroughputProbing::_probeDown(OperationContext* opCtx, double throughput) {
+void ThroughputProbing::_probeDown(double throughput) {
     invariant(_state == ProbingState::kDown);
 
-    LOGV2(7346002, "ThroughputProbing: down", "throughput"_attr = throughput);
+    LOGV2_DEBUG(7346002, 3, "Throughput Probing: down", "throughput"_attr = throughput);
 
     if (throughput > _stableThroughput) {
         // Decreasing concurrency caused throughput to increase, so promote this new level of
         // concurrency to stable.
+        auto concurrency = _readTicketHolder->outof();
+        _stats.timesDecreased.fetchAndAdd(1);
+        _stats.totalAmountDecreased.fetchAndAdd(_stableConcurrency - concurrency);
         _state = ProbingState::kStable;
         _stableThroughput = throughput;
-        _stableConcurrency = _readTicketHolder->outof();
+        _stableConcurrency = concurrency;
     } else {
         // Decreasing concurrency did not cause throughput to increase, so go back to stable and get
         // a new baseline to compare against.
         _state = ProbingState::kStable;
-        _setConcurrency(opCtx, _stableConcurrency);
+        _setConcurrency(_stableConcurrency);
     }
 }
 
-void ThroughputProbing::_setConcurrency(OperationContext* opCtx, int concurrency) {
+void ThroughputProbing::_setConcurrency(int32_t concurrency) {
     concurrency = std::clamp(concurrency, kMinConcurrency, kMaxConcurrency);
-    _readTicketHolder->resize(opCtx, concurrency);
-    _writeTicketHolder->resize(opCtx, concurrency);
+    _readTicketHolder->resize(concurrency);
+    _writeTicketHolder->resize(concurrency);
 
-    LOGV2(7346003, "ThroughputProbing: set concurrency", "concurrency"_attr = concurrency);
+    LOGV2_DEBUG(
+        7346003, 3, "Throughput Probing: set concurrency", "concurrency"_attr = concurrency);
+}
+
+void ThroughputProbing::Stats::serialize(BSONObjBuilder& builder) const {
+    builder.append("throughput", throughput.load());
+    builder.append("timesDecreased", static_cast<long long>(timesDecreased.load()));
+    builder.append("timesIncreased", static_cast<long long>(timesIncreased.load()));
+    builder.append("totalAmountDecreased", static_cast<long long>(totalAmountDecreased.load()));
+    builder.append("totalAmountIncreased", static_cast<long long>(totalAmountIncreased.load()));
 }
 
 }  // namespace mongo::execution_control

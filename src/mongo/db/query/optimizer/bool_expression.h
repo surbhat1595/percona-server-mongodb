@@ -41,11 +41,13 @@
 namespace mongo::optimizer {
 
 template <class T>
-struct NoOpNegator {
+struct TassertNegator {
     T operator()(const T v) const {
+        tassert(7453909, "No negator specified", false);
         return v;
     }
 };
+
 
 /**
  * Represents a generic boolean expression with arbitrarily nested conjunctions and disjunction
@@ -189,6 +191,62 @@ struct BoolExpr {
         visitor(node.template cast<Atom>()->getExpr());
     }
 
+    static void visitCNF(const Node& node, const AtomVisitorConst& visitor) {
+        visitConjuncts(node, [&](const Node& child, const size_t) {
+            visitDisjuncts(child, [&](const Node& grandChild, const size_t) {
+                visitAtom(grandChild, visitor);
+            });
+        });
+    }
+
+    static void visitDNF(const Node& node, const AtomVisitorConst& visitor) {
+        visitDisjuncts(node, [&](const Node& child, const size_t) {
+            visitConjuncts(child, [&](const Node& grandChild, const size_t) {
+                visitAtom(grandChild, visitor);
+            });
+        });
+    }
+
+    static void visitAnyShape(const Node& node, const AtomVisitorConst& atomVisitor) {
+        struct AtomTransport {
+            void transport(const Conjunction&, const NodeVector&) {}
+            void transport(const Disjunction&, const NodeVector&) {}
+            void transport(const Atom& node) {
+                atomVisitor(node.getExpr());
+            }
+            const AtomVisitorConst& atomVisitor;
+        };
+        AtomTransport impl{atomVisitor};
+        algebra::transport<false>(node, impl);
+    }
+
+    static void visitCNF(Node& node, const AtomVisitor& visitor) {
+        visitConjuncts(node, [&](Node& child, const size_t) {
+            visitDisjuncts(child,
+                           [&](Node& grandChild, const size_t) { visitAtom(grandChild, visitor); });
+        });
+    }
+
+    static void visitDNF(Node& node, const AtomVisitor& visitor) {
+        visitDisjuncts(node, [&](Node& child, const size_t) {
+            visitConjuncts(child,
+                           [&](Node& grandChild, const size_t) { visitAtom(grandChild, visitor); });
+        });
+    }
+
+    static void visitAnyShape(Node& node, const AtomVisitor& atomVisitor) {
+        struct AtomTransport {
+            void transport(Conjunction&, NodeVector&) {}
+            void transport(Disjunction&, NodeVector&) {}
+            void transport(Atom& node) {
+                atomVisitor(node.getExpr());
+            }
+            const AtomVisitor& atomVisitor;
+        };
+        AtomTransport impl{atomVisitor};
+        algebra::transport<false>(node, impl);
+    }
+
 
     static bool isCNF(const Node& n) {
         if (n.template is<Conjunction>()) {
@@ -210,6 +268,11 @@ struct BoolExpr {
             return conjunctions;
         }
         return false;
+    }
+
+    static bool isSingletonDisjunction(const Node& node) {
+        auto* disjunction = node.template cast<Disjunction>();
+        return disjunction && disjunction->nodes().size() == 1;
     }
 
     static size_t numLeaves(const Node& n) {
@@ -237,7 +300,7 @@ struct BoolExpr {
      */
     template <bool simplifyEmptyOrSingular = false,
               bool removeDups = false,
-              class Negator = NoOpNegator<T>>
+              class Negator = TassertNegator<T>>
     class Builder {
         enum class NodeType { Conj, Disj };
 

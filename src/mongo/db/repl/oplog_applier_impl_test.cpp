@@ -48,6 +48,7 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/feature_compatibility_version_parser.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/ops/write_ops.h"
@@ -56,6 +57,7 @@
 #include "mongo/db/repl/bgsync.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/idempotency_test_fixture.h"
+#include "mongo/db/repl/image_collection_entry_gen.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_applier.h"
 #include "mongo/db/repl/oplog_batcher.h"
@@ -768,6 +770,83 @@ TEST_F(OplogApplierImplTest, RenameCollectionCommandMultitenantAcrossTenantsRequ
     ASSERT_TRUE(collectionExists(_opCtx.get(), sourceNss));
     ASSERT_FALSE(collectionExists(_opCtx.get(), targetNss));
     ASSERT_FALSE(collectionExists(_opCtx.get(), wrongTargetNss));
+}
+
+TEST_F(OplogApplierImplTest, applyOplogEntryToInvalidateChangeStreamPreImages) {
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
+    CollectionOptions options;
+    createCollection(_opCtx.get(), NamespaceString::kConfigImagesNamespace, options);
+
+    auto document = BSON("_id" << 0);
+
+    const auto sessionId = makeLogicalSessionIdForTest();
+    OperationSessionInfo sessionInfo;
+    sessionInfo.setSessionId(sessionId);
+    sessionInfo.setTxnNumber(3);
+
+    const BSONObj preImage(BSON("_id" << 2 << "post" << 1));
+    OpTime opTime = OpTime();
+
+    repl::ImageEntry imageEntry;
+    imageEntry.set_id(sessionId);
+    imageEntry.setTxnNumber(2);
+    imageEntry.setTs(opTime.getTimestamp());
+    imageEntry.setImageKind(repl::RetryImageEnum::kPreImage);
+    imageEntry.setImage(preImage);
+    imageEntry.setInvalidated(false);
+
+    ASSERT_OK(getStorageInterface()->insertDocument(
+        _opCtx.get(), NamespaceString::kConfigImagesNamespace, {imageEntry.toBSON()}, 0));
+
+    {
+        AutoGetCollection sideCollection(
+            _opCtx.get(), NamespaceString::kConfigImagesNamespace, MODE_IS);
+        auto imageEntry = ImageEntry::parse(
+            IDLParserContext("test"),
+            Helpers::findOneForTesting(
+                _opCtx.get(), sideCollection.getCollection(), BSON("_id" << sessionId.toBSON())));
+        ASSERT_FALSE(imageEntry.getInvalidated());
+    }
+
+    // Make an oplog entry to invalidate the pre image.
+    OplogEntry invalidateOp =
+        DurableOplogEntry(OpTime(),                   // optime
+                          OpTypeEnum::kUpdate,        // opType
+                          std::move(nss),             // namespace
+                          kUuid,                      // uuid
+                          boost::none,                // fromMigrate
+                          OplogEntry::kOplogVersion,  // version
+                          document,                   // o
+                          boost::none,                // o2
+                          sessionInfo,                // sessionInfo
+                          boost::none,                // upsert
+                          Date_t(),                   // wall clock time
+                          {},                         // statement ids
+                          boost::none,  // optime of previous write within same transaction
+                          boost::none,  // pre-image optime
+                          boost::none,  // post-image optime
+                          boost::none,  // ShardId of resharding recipient
+                          boost::none,  // _id
+                          RetryImageEnum::kPreImage);  // needsRetryImage
+
+    // Apply the oplog entry.
+    {
+        repl::UnreplicatedWritesBlock uwb(_opCtx.get());
+        DisableDocumentValidation validationDisabler(_opCtx.get());
+        ASSERT_THROWS(applyOplogEntryOrGroupedInserts(_opCtx.get(),
+                                                      ApplierOperation{&invalidateOp},
+                                                      OplogApplication::Mode::kInitialSync,
+                                                      /* isDataConsistent */ false),
+                      ExceptionFor<ErrorCodes::NamespaceNotFound>);
+    }
+
+    AutoGetCollection sideCollection(
+        _opCtx.get(), NamespaceString::kConfigImagesNamespace, MODE_IS);
+    imageEntry = ImageEntry::parse(IDLParserContext("test"),
+                                   Helpers::findOneForTesting(_opCtx.get(),
+                                                              sideCollection.getCollection(),
+                                                              BSON("_id" << sessionId.toBSON())));
+    ASSERT(imageEntry.getInvalidated());
 }
 
 TEST_F(IdempotencyTest, CollModCommandMultitenant) {
@@ -1860,7 +1939,7 @@ protected:
             _lsid,
             _txnNum,
             {StmtId(1)},
-            _prepareWithPrevOp->getOpTime());
+            _singlePrepareApplyOp->getOpTime());
         _abortPrepareWithPrevOp =
             makeCommandOplogEntryWithSessionInfoAndStmtIds({Timestamp(Seconds(1), 4), 1LL},
                                                            _nss1,
@@ -2405,6 +2484,182 @@ TEST_F(MultiOplogEntryPreparedTransactionTest,
                   _commitSinglePrepareApplyOp->getWallClockTime(),
                   boost::none,
                   DurableTxnStateEnum::kCommitted);
+}
+
+class MultiPreparedTransactionsInOneBatchTest : public MultiOplogEntryOplogApplierImplTest {
+protected:
+    void setUp() override {
+        MultiOplogEntryOplogApplierImplTest::setUp();
+
+        const NamespaceString cmdNss("admin.$cmd");
+        _lsid1 = makeLogicalSessionId(_opCtx.get());
+        _lsid2 = makeLogicalSessionId(_opCtx.get());
+        _txnNum1 = _txnNum2 = 1;
+
+        _prepareWithInsertsOp = makeCommandOplogEntryWithSessionInfoAndStmtIds(
+            {Timestamp(Seconds(2), 1), 1LL},
+            cmdNss,
+            BSON("applyOps" << BSON_ARRAY(BSON("op"
+                                               << "i"
+                                               << "ns" << _nss1.ns() << "ui" << *_uuid1 << "o"
+                                               << BSON("_id" << 1))
+                                          << BSON("op"
+                                                  << "i"
+                                                  << "ns" << _nss1.ns() << "ui" << *_uuid1 << "o"
+                                                  << BSON("_id" << 2)))
+                            << "prepare" << true),
+            _lsid1,
+            _txnNum1,
+            {StmtId(0)},
+            OpTime());
+        _nonTxnInsertOp1 =
+            makeInsertDocumentOplogEntry({Timestamp(Seconds(2), 2), 1LL}, _nss1, BSON("_id" << 3));
+        _nonTxnInsertOp2 =
+            makeInsertDocumentOplogEntry({Timestamp(Seconds(2), 3), 1LL}, _nss1, BSON("_id" << 4));
+        _prepareWithDeletesOp = makeCommandOplogEntryWithSessionInfoAndStmtIds(
+            {Timestamp(Seconds(2), 4), 1LL},
+            cmdNss,
+            BSON("applyOps" << BSON_ARRAY(BSON("op"
+                                               << "d"
+                                               << "ns" << _nss1.ns() << "ui" << *_uuid1 << "o"
+                                               << BSON("_id" << 3))
+                                          << BSON("op"
+                                                  << "d"
+                                                  << "ns" << _nss1.ns() << "ui" << *_uuid1 << "o"
+                                                  << BSON("_id" << 4)))
+                            << "prepare" << true),
+            _lsid2,
+            _txnNum2,
+            {StmtId(0)},
+            OpTime());
+        _commitPrepareWithInsertsOp = makeCommandOplogEntryWithSessionInfoAndStmtIds(
+            {Timestamp(Seconds(3), 1), 1LL},
+            cmdNss,
+            BSON("commitTransaction" << 1 << "commitTimestamp" << Timestamp(Seconds(3), 1)),
+            _lsid1,
+            _txnNum1,
+            {StmtId(1)},
+            _prepareWithInsertsOp->getOpTime());
+        _abortPrepareWithDeletesOp =
+            makeCommandOplogEntryWithSessionInfoAndStmtIds({Timestamp(Seconds(3), 2), 1LL},
+                                                           cmdNss,
+                                                           BSON("abortTransaction" << 1),
+                                                           _lsid2,
+                                                           _txnNum2,
+                                                           {StmtId(1)},
+                                                           _prepareWithDeletesOp->getOpTime());
+
+        _writerPool = makeReplWriterPool(64);
+
+        _opObserver->onDeleteFn = [&](OperationContext*,
+                                      const CollectionPtr& coll,
+                                      StmtId,
+                                      const OplogDeleteEntryArgs& args) {
+            stdx::lock_guard<Latch> lock(_deleteMutex);
+            auto nss = coll->ns();
+            if (nss == _nss1 || nss == _nss2 ||
+                nss == NamespaceString::kSessionTransactionsTableNamespace) {
+                // Storing the deleted documents in a sorted data structure to make checking
+                // for valid results easier. The delete will be performed by different threads
+                // and there's no guarantee of the order.
+                _deletedDocs[nss]++;
+            } else
+                FAIL("Unexpected delete") << " from " << nss;
+        };
+    }
+
+protected:
+    LogicalSessionId _lsid1, _lsid2;
+    TxnNumber _txnNum1, _txnNum2;
+    boost::optional<OplogEntry> _nonTxnInsertOp1, _nonTxnInsertOp2;
+    boost::optional<OplogEntry> _prepareWithInsertsOp, _prepareWithDeletesOp;
+    boost::optional<OplogEntry> _commitPrepareWithInsertsOp, _abortPrepareWithDeletesOp;
+    std::map<NamespaceString, int> _deletedDocs;
+
+private:
+    Mutex _insertMutex = MONGO_MAKE_LATCH("MultiPreparedTransactionInOneBatchTest::_insertMutex");
+    Mutex _deleteMutex = MONGO_MAKE_LATCH("MultiPreparedTransactionInOneBatchTest::_deleteMutex");
+};
+
+TEST_F(MultiPreparedTransactionsInOneBatchTest, CommitAndAbortMultiPreparedTransactionsInOneBatch) {
+    RAIIServerParameterControllerForTest controller("featureFlagApplyPreparedTxnsInParallel", true);
+
+    NoopOplogApplierObserver observer;
+    OplogApplierImpl oplogApplier(
+        nullptr,  // executor
+        nullptr,  // oplogBuffer
+        &observer,
+        ReplicationCoordinator::get(_opCtx.get()),
+        getConsistencyMarkers(),
+        getStorageInterface(),
+        repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary),
+        _writerPool.get());
+
+    // Apply a batch with multiple prepares and regular CRUD ops.
+    getStorageInterface()->oplogDiskLocRegister(
+        _opCtx.get(), _prepareWithDeletesOp->getTimestamp(), true);
+    ASSERT_OK(oplogApplier.applyOplogBatch(
+        _opCtx.get(),
+        {*_prepareWithInsertsOp, *_nonTxnInsertOp1, *_nonTxnInsertOp2, *_prepareWithDeletesOp}));
+    ASSERT_EQ(4U, oplogDocs().size());
+    ASSERT_EQ(4U, _insertedDocs[_nss1].size());
+    ASSERT_EQ(2, _deletedDocs[_nss1]);
+    checkTxnTable(_lsid1,
+                  _txnNum1,
+                  _prepareWithInsertsOp->getOpTime(),
+                  _prepareWithInsertsOp->getWallClockTime(),
+                  _prepareWithInsertsOp->getOpTime(),
+                  DurableTxnStateEnum::kPrepared);
+    checkTxnTable(_lsid2,
+                  _txnNum2,
+                  _prepareWithDeletesOp->getOpTime(),
+                  _prepareWithDeletesOp->getWallClockTime(),
+                  _prepareWithDeletesOp->getOpTime(),
+                  DurableTxnStateEnum::kPrepared);
+
+    // Apply a batch with only the commit for the first prepare.
+    getStorageInterface()->oplogDiskLocRegister(
+        _opCtx.get(), _commitPrepareWithInsertsOp->getTimestamp(), true);
+    ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_commitPrepareWithInsertsOp}));
+
+    ASSERT_BSONOBJ_EQ(_commitPrepareWithInsertsOp->getEntry().toBSON(), oplogDocs().back());
+    ASSERT_EQ(5U, oplogDocs().size());
+    ASSERT_EQ(4U, _insertedDocs[_nss1].size());
+    ASSERT_EQ(2, _deletedDocs[_nss1]);
+    checkTxnTable(_lsid1,
+                  _txnNum1,
+                  _commitPrepareWithInsertsOp->getOpTime(),
+                  _commitPrepareWithInsertsOp->getWallClockTime(),
+                  boost::none,
+                  DurableTxnStateEnum::kCommitted);
+    checkTxnTable(_lsid2,
+                  _txnNum2,
+                  _prepareWithDeletesOp->getOpTime(),
+                  _prepareWithDeletesOp->getWallClockTime(),
+                  _prepareWithDeletesOp->getOpTime(),
+                  DurableTxnStateEnum::kPrepared);
+
+    // Apply a batch with only the abort for the second prepare.
+    getStorageInterface()->oplogDiskLocRegister(
+        _opCtx.get(), _abortPrepareWithDeletesOp->getTimestamp(), true);
+    ASSERT_OK(oplogApplier.applyOplogBatch(_opCtx.get(), {*_abortPrepareWithDeletesOp}));
+
+    ASSERT_BSONOBJ_EQ(_abortPrepareWithDeletesOp->getEntry().toBSON(), oplogDocs().back());
+    ASSERT_EQ(6U, oplogDocs().size());
+    ASSERT_EQ(4U, _insertedDocs[_nss1].size());
+    ASSERT_EQ(2, _deletedDocs[_nss1]);
+    checkTxnTable(_lsid1,
+                  _txnNum1,
+                  _commitPrepareWithInsertsOp->getOpTime(),
+                  _commitPrepareWithInsertsOp->getWallClockTime(),
+                  boost::none,
+                  DurableTxnStateEnum::kCommitted);
+    checkTxnTable(_lsid2,
+                  _txnNum2,
+                  _abortPrepareWithDeletesOp->getOpTime(),
+                  _abortPrepareWithDeletesOp->getWallClockTime(),
+                  boost::none,
+                  DurableTxnStateEnum::kAborted);
 }
 
 void testWorkerMultikeyPaths(OperationContext* opCtx,
@@ -5088,13 +5343,17 @@ protected:
         NamespaceString nss = NamespaceString::createNamespaceString_forTest("system"_sd);
         for (const auto& op : batch) {
             if (op.type == GlobalIndexCrudOp::Type::Insert) {
-                arrBuilder << MutableOplogEntry::makeInsertGlobalIndexKeyOperation(
-                                  nss, op.uuid, op.key, op.docKey)
-                                  .toBSON();
+                arrBuilder
+                    << MutableOplogEntry::makeGlobalIndexCrudOperation(
+                           repl::OpTypeEnum::kInsertGlobalIndexKey, nss, op.uuid, op.key, op.docKey)
+                           .toReplOperation()
+                           .toBSON();
             } else {
-                arrBuilder << MutableOplogEntry::makeDeleteGlobalIndexKeyOperation(
-                                  nss, op.uuid, op.key, op.docKey)
-                                  .toBSON();
+                arrBuilder
+                    << MutableOplogEntry::makeGlobalIndexCrudOperation(
+                           repl::OpTypeEnum::kDeleteGlobalIndexKey, nss, op.uuid, op.key, op.docKey)
+                           .toReplOperation()
+                           .toBSON();
             }
         }
         return BSON("applyOps" << arrBuilder.arr());

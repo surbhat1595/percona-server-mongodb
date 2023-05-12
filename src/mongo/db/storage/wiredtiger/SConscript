@@ -15,6 +15,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/encryption/encryption_options',
         '$BUILD_DIR/mongo/db/service_context',
     ],
 )

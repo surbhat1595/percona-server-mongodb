@@ -16,7 +16,8 @@ env.Library(
         '$BUILD_DIR/mongo/db/encryption/encryption_kmip',
         '$BUILD_DIR/mongo/db/encryption/encryption_options',
         '$BUILD_DIR/mongo/db/encryption/encryption_vault',
-        '$BUILD_DIR/mongo/util/secure_zero_memory'
+        '$BUILD_DIR/mongo/util/secure_zero_memory',
+        'secret_string'
     ],
 )
 
@@ -49,7 +50,9 @@ env.Library(
         'winhttp' if env.TargetOSIs('windows') else 'curl',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/encryption/secret_string'
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/encryption/secret_string',
+        'encryption_options'
     ],
 )
 
@@ -71,7 +74,9 @@ env.Library(
     source=[
         'encryption_kmip.cpp',
     ],
-    LIBDEPS=[
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/third_party/shim_kmippp',
+        'encryption_options'
     ],
 )

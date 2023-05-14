@@ -86,38 +86,38 @@ public:
                 repl::ReadConcernLevel::kMajorityReadConcern,
                 BSON(CollectionType::kNssFieldName << 1) /*sort*/);
 
-            const auto localCollectionsSorted = [&] {
-                std::vector<CollectionPtr> colls;
+            auto inconsistencies = [&] {
+                auto collCatalogSnapshot = [&] {
+                    // Lock db in mode IS while taking the collection catalog snapshot to ensure
+                    // that we serialize with non-atomic collection and index creation performed by
+                    // the MigrationDestinationManager.
+                    // Without this lock we could potentially acquire a snapshot in which a
+                    // collection have been already created by the MigrationDestinationManager but
+                    // the relative shardkey index is still missing.
+                    AutoGetDb autoDb(opCtx, nss.dbName(), MODE_IS);
+                    return CollectionCatalog::get(opCtx);
+                }();
 
-                // Get the list of local collections sorted by namespace
-                AutoGetDbForReadMaybeLockFree lockFreeReadBlock(opCtx, nss.dbName());
-                tassert(7466700, "Lock-free mode not avaialable", opCtx->isLockFreeReadsOp());
-                // Take a snapshot of the catalog;
-                auto collectionCatalog = CollectionCatalog::get(opCtx);
-                for (auto it = collectionCatalog->begin(opCtx, nss.dbName());
-                     it != collectionCatalog->end(opCtx);
+                std::vector<CollectionPtr> localCollections;
+                for (auto it = collCatalogSnapshot->begin(opCtx, nss.dbName());
+                     it != collCatalogSnapshot->end(opCtx);
                      ++it) {
-                    if (!(*it)->ns().isNormalCollection()) {
+                    const auto coll = *it;
+                    if (!coll || !coll->ns().isNormalCollection()) {
                         continue;
                     }
-                    colls.emplace_back(CollectionPtr(*it));
+                    localCollections.emplace_back(CollectionPtr(coll));
                 }
-                std::sort(colls.begin(),
-                          colls.end(),
+                std::sort(localCollections.begin(),
+                          localCollections.end(),
                           [](const CollectionPtr& prev, const CollectionPtr& next) {
                               return prev->ns() < next->ns();
                           });
-                return colls;
-            }();
 
-            // Check consistency between local metadata and configsvr metadata
-            auto inconsistencies =
-                metadata_consistency_util::checkCollectionMetadataInconsistencies(
-                    opCtx,
-                    shardId,
-                    primaryShardId,
-                    catalogClientCollections,
-                    localCollectionsSorted);
+                // Check consistency between local metadata and configsvr metadata
+                return metadata_consistency_util::checkCollectionMetadataInconsistencies(
+                    opCtx, shardId, primaryShardId, catalogClientCollections, localCollections);
+            }();
 
             auto exec = metadata_consistency_util::makeQueuedPlanExecutor(
                 opCtx, std::move(inconsistencies), nss);

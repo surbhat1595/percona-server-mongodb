@@ -328,10 +328,13 @@ public:
     /**
      * Assigns an optional input parameter ID to each node which is eligible for
      * auto-parameterization.
+     * - maxParameterCount - Maximum number of parameters that can be created. If the number of
+     *   parameters would exceed this value, no parameterization will be performed.
      *
      * Returns a map to a parameterized MatchExpression from assigned InputParamId.
      */
-    static std::vector<const MatchExpression*> parameterize(MatchExpression* tree);
+    static std::vector<const MatchExpression*> parameterize(
+        MatchExpression* tree, boost::optional<size_t> maxParameterCount = boost::none);
 
     MatchExpression(MatchType type, clonable_ptr<ErrorAnnotation> annotation = nullptr);
     virtual ~MatchExpression() {}
@@ -409,14 +412,6 @@ public:
      * lifetime of the clone.
      */
     virtual std::unique_ptr<MatchExpression> clone() const = 0;
-
-    /**
-     * Temporary method to allow for calling shallowClone() from the enterprise module. This will
-     * be removed in the next PR.
-     */
-    std::unique_ptr<MatchExpression> shallowClone() const {
-        return clone();
-    }
 
     // XXX document
     virtual bool equivalent(const MatchExpression* other) const = 0;
@@ -577,6 +572,16 @@ protected:
     virtual void _doSetCollator(const CollatorInterface* collator){};
 
     void _debugAddSpace(StringBuilder& debug, int indentationLevel) const;
+
+    /** Adds the tag information to the debug string. */
+    void _debugStringAttachTagInfo(StringBuilder* debug) const {
+        MatchExpression::TagData* td = getTag();
+        if (nullptr != td) {
+            td->debugString(debug);
+        } else {
+            *debug << "\n";
+        }
+    }
 
     clonable_ptr<ErrorAnnotation> _errorAnnotation;
 

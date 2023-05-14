@@ -2966,6 +2966,7 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::getRecordStore(OperationContext
 
     WiredTigerRecordStore::Params params;
     params.nss = nss;
+    params.uuid = options.uuid;
     params.ident = ident.toString();
     params.engineName = _canonicalName;
     params.isCapped = options.capped;
@@ -2987,7 +2988,7 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::getRecordStore(OperationContext
 
     std::unique_ptr<WiredTigerRecordStore> ret;
     ret = std::make_unique<StandardWiredTigerRecordStore>(this, opCtx, params);
-    ret->postConstructorInit(opCtx);
+    ret->postConstructorInit(opCtx, nss);
 
     // Sizes should always be checked when creating a collection during rollback or replication
     // recovery. This is in case the size storer information is no longer accurate. This may be
@@ -3180,6 +3181,7 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::makeTemporaryRecordStore(Operat
 
     WiredTigerRecordStore::Params params;
     params.nss = NamespaceString("");
+    params.uuid = boost::none;
     params.ident = ident.toString();
     params.engineName = _canonicalName;
     params.isCapped = false;
@@ -3195,7 +3197,7 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::makeTemporaryRecordStore(Operat
 
     std::unique_ptr<WiredTigerRecordStore> rs;
     rs = std::make_unique<StandardWiredTigerRecordStore>(this, opCtx, params);
-    rs->postConstructorInit(opCtx);
+    rs->postConstructorInit(opCtx, params.nss);
 
     return std::move(rs);
 }

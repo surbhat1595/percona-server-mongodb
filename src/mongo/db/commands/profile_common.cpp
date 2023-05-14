@@ -56,7 +56,9 @@ Status ProfileCmdBase::checkAuthForOperation(OperationContext* opCtx,
         // If the user just wants to view the current values of 'slowms' and 'sampleRate', they
         // only need read rights on system.profile, even if they can't change the profiling level.
         if (authzSession->isAuthorizedForActionsOnResource(
-                ResourcePattern::forExactNamespace({dbName, "system.profile"}), ActionType::find)) {
+                ResourcePattern::forExactNamespace(
+                    NamespaceStringUtil::parseNamespaceFromRequest(dbName, "system.profile")),
+                ActionType::find)) {
             return Status::OK();
         }
     }
@@ -155,7 +157,7 @@ bool ProfileCmdBase::run(OperationContext* opCtx,
             newState.append("filter"_sd, newSettings.filter->serialize());
         }
         attrs.add("to", newState.obj());
-        attrs.add("db", dbName.db());
+        attrs.add("db", dbName);
 
         LOGV2(48742, "Profiler settings changed", attrs);
     }

@@ -29,6 +29,9 @@
 
 #pragma once
 #include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/util/assert_util.h"
 #include <boost/optional.hpp>
@@ -48,7 +51,16 @@ std::string defaultRedactionStrategy(StringData s) {
 struct SerializationOptions {
     SerializationOptions() {}
 
-    SerializationOptions(bool explain_) : explain(explain_) {}
+    SerializationOptions(bool explain_)
+        // kQueryPlanner is the "base" explain level, used as default in the case explain is
+        // specified without a specific verbosity level
+        : verbosity(explain_ ? boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)
+                             : boost::none) {}
+
+    SerializationOptions(boost::optional<ExplainOptions::Verbosity> verbosity_)
+        : verbosity(verbosity_) {}
+
+    SerializationOptions(ExplainOptions::Verbosity verbosity_) : verbosity(verbosity_) {}
 
     SerializationOptions(std::function<std::string(StringData)> redactFieldNamesStrategy_,
                          boost::optional<StringData> replacementForLiteralArgs_)
@@ -61,6 +73,56 @@ struct SerializationOptions {
             return redactFieldNamesStrategy(str);
         }
         return str.toString();
+    }
+
+    // Helper functions for redacting BSONObj. Does not take into account anything to do with MQL
+    // semantics, redacts all field names and literals in the passed in obj.
+    void redactArrayToBuilder(BSONArrayBuilder* bab, std::vector<BSONElement> array) {
+        for (const auto& elem : array) {
+            if (elem.type() == BSONType::Object) {
+                BSONObjBuilder subObj(bab->subobjStart());
+                redactObjToBuilder(&subObj, elem.Obj());
+                subObj.done();
+            } else if (elem.type() == BSONType::Array) {
+                BSONArrayBuilder subArr(bab->subarrayStart());
+                redactArrayToBuilder(&subArr, elem.Array());
+                subArr.done();
+            } else {
+                if (replacementForLiteralArgs) {
+                    bab->append(replacementForLiteralArgs.get());
+                } else {
+                    bab->append(elem);
+                }
+            }
+        }
+    }
+    void redactObjToBuilder(BSONObjBuilder* bob, BSONObj objToRedact) {
+        for (const auto& elem : objToRedact) {
+            auto fieldName = serializeFieldName(elem.fieldName());
+            if (elem.type() == BSONType::Object) {
+                BSONObjBuilder subObj(bob->subobjStart(fieldName));
+                redactObjToBuilder(&subObj, elem.Obj());
+                subObj.done();
+            } else if (elem.type() == BSONType::Array) {
+                BSONArrayBuilder subArr(bob->subarrayStart(fieldName));
+                redactArrayToBuilder(&subArr, elem.Array());
+                subArr.done();
+            } else {
+                if (replacementForLiteralArgs) {
+                    bob->append(fieldName, replacementForLiteralArgs.get());
+                } else {
+                    bob->appendAs(elem, fieldName);
+                }
+            }
+        }
+    }
+
+    template <class T>
+    Value serializeLiteralValue(T n) {
+        if (replacementForLiteralArgs) {
+            return Value(*replacementForLiteralArgs);
+        }
+        return Value(n);
     }
 
     // 'replacementForLiteralArgs' is an independent option to serialize in a genericized format
@@ -94,7 +156,6 @@ struct SerializationOptions {
     bool includePath = true;
 
     // For aggregation indicate whether we should use the more verbose serialization format.
-    bool explain = false;
     boost::optional<ExplainOptions::Verbosity> verbosity = boost::none;
 };
 

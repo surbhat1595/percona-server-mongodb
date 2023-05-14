@@ -360,6 +360,7 @@ std::pair<FLEBatchResult, write_ops::InsertCommandReply> processInsert(
     const write_ops::InsertCommandRequest& insertRequest,
     GetTxnCallback getTxns) {
 
+    CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
     auto documents = insertRequest.getDocuments();
 
     std::vector<write_ops::WriteError> writeErrors;
@@ -439,6 +440,7 @@ write_ops::DeleteCommandReply processDelete(OperationContext* opCtx,
         }
     }
 
+    CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
     std::shared_ptr<txn_api::SyncTransactionWithRetries> trun = getTxns(opCtx);
 
     auto reply = std::make_shared<write_ops::DeleteCommandReply>();
@@ -533,6 +535,7 @@ write_ops::UpdateCommandReply processUpdate(OperationContext* opCtx,
                         write_ops::UpdateModification::Type::kReplacement);
     }
 
+    CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
     std::shared_ptr<txn_api::SyncTransactionWithRetries> trun = getTxns(opCtx);
 
     // The function that handles the transaction may outlive this function so we need to use
@@ -611,7 +614,8 @@ void processFieldsForInsertV1(FLEQueryInterface* queryImpl,
                               int32_t* pStmtId,
                               bool bypassDocumentValidation) {
 
-    const NamespaceString nssEsc(edcNss.dbName(), efc.getEscCollection().value());
+    const NamespaceString nssEsc = NamespaceStringUtil::parseNamespaceFromRequest(
+        edcNss.dbName(), efc.getEscCollection().value());
 
     auto docCount = queryImpl->countDocuments(nssEsc);
 
@@ -673,7 +677,8 @@ void processFieldsForInsertV1(FLEQueryInterface* queryImpl,
             checkWriteErrors(escInsertReply);
 
 
-            const NamespaceString nssEcoc(edcNss.dbName(), efc.getEcocCollection().value());
+            const NamespaceString nssEcoc = NamespaceStringUtil::parseNamespaceFromRequest(
+                edcNss.dbName(), efc.getEcocCollection().value());
 
             // TODO - should we make this a batch of ECOC updates?
             const auto ecocInsertReply = uassertStatusOK(queryImpl->insertDocuments(
@@ -705,12 +710,12 @@ void processFieldsForInsertV2(FLEQueryInterface* queryImpl,
                               const EncryptedFieldConfig& efc,
                               int32_t* pStmtId,
                               bool bypassDocumentValidation) {
-
     if (serverPayload.empty()) {
         return;
     }
 
-    const NamespaceString nssEsc(edcNss.dbName(), efc.getEscCollection().value());
+    const NamespaceString nssEsc = NamespaceStringUtil::parseNamespaceFromRequest(
+        edcNss.dbName(), efc.getEscCollection().value());
 
     uint32_t totalTokens = 0;
 
@@ -772,7 +777,8 @@ void processFieldsForInsertV2(FLEQueryInterface* queryImpl,
         uassertStatusOK(queryImpl->insertDocuments(nssEsc, escDocuments, pStmtId, true));
     checkWriteErrors(escInsertReply);
 
-    NamespaceString nssEcoc(edcNss.dbName(), efc.getEcocCollection().value());
+    NamespaceString nssEcoc = NamespaceStringUtil::parseNamespaceFromRequest(
+        edcNss.dbName(), efc.getEcocCollection().value());
     std::vector<BSONObj> ecocDocuments;
     ecocDocuments.reserve(totalTokens);
 
@@ -861,7 +867,8 @@ void processRemovedFieldsHelper(FLEQueryInterface* queryImpl,
         true));
     checkWriteErrors(eccInsertReply);
 
-    const NamespaceString nssEcoc(edcNss.dbName(), efc.getEcocCollection().value());
+    const NamespaceString nssEcoc = NamespaceStringUtil::parseNamespaceFromRequest(
+        edcNss.dbName(), efc.getEcocCollection().value());
 
     // TODO - make this a batch of ECOC updates?
     EncryptedStateCollectionTokens tokens(esc, ecc);
@@ -881,7 +888,8 @@ void processRemovedFields(FLEQueryInterface* queryImpl,
                           const std::vector<EDCIndexedFields>& deletedFields,
                           int32_t* pStmtId) {
 
-    const NamespaceString eccNss(edcNss.dbName(), efc.getEccCollection().value());
+    const NamespaceString eccNss = NamespaceStringUtil::parseNamespaceFromRequest(
+        edcNss.dbName(), efc.getEccCollection().value());
 
     auto docCount = queryImpl->countDocuments(eccNss);
 
@@ -1012,6 +1020,7 @@ StatusWith<std::pair<ReplyType, OpMsgRequest>> processFindAndModifyRequest(
     GetTxnCallback getTxns,
     ProcessFindAndModifyCallback<ReplyType> processCallback) {
 
+    CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
     validateFindAndModifyRequest(findAndModifyRequest);
 
     std::shared_ptr<txn_api::SyncTransactionWithRetries> trun = getTxns(opCtx);
@@ -1362,6 +1371,7 @@ FLEBatchResult processFLEBatch(OperationContext* opCtx,
                                BatchedCommandResponse* response,
                                boost::optional<OID> targetEpoch) {
 
+    CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
     if (request.getWriteCommandRequestBase().getEncryptionInformation()->getCrudProcessed()) {
         return FLEBatchResult::kNotProcessed;
     }
@@ -1431,6 +1441,8 @@ std::unique_ptr<BatchedCommandRequest> processFLEBatchExplain(
         return expCtx;
     };
 
+    CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+
     if (request.getBatchType() == BatchedCommandRequest::BatchType_Delete) {
         auto deleteRequest = request.getDeleteRequest();
         auto newDeleteOp = deleteRequest.getDeletes()[0];
@@ -1471,6 +1483,7 @@ write_ops::FindAndModifyCommandReply processFindAndModify(
     FLEQueryInterface* queryImpl,
     const write_ops::FindAndModifyCommandRequest& findAndModifyRequest) {
 
+    CurOp::get(expCtx->opCtx)->debug().shouldOmitDiagnosticInformation = true;
     auto edcNss = findAndModifyRequest.getNamespace();
     auto ei = findAndModifyRequest.getEncryptionInformation().value();
 
@@ -2082,4 +2095,53 @@ std::unique_ptr<Pipeline, PipelineDeleter> processFLEPipelineS(
         opCtx, nss, encryptInfo, std::move(toRewrite), &getTransactionWithRetriesForMongoS);
 }
 
+FLETagNoTXNQuery::FLETagNoTXNQuery(OperationContext* opCtx) : _opCtx(opCtx) {}
+
+BSONObj FLETagNoTXNQuery::getById(const NamespaceString& nss, BSONElement element) {
+    invariant(false);
+    return {};
+};
+
+uint64_t FLETagNoTXNQuery::countDocuments(const NamespaceString& nss) {
+    invariant(false);
+    return 0;
+}
+
+std::vector<std::vector<FLEEdgeCountInfo>> FLETagNoTXNQuery::getTags(
+    const NamespaceString& nss,
+    const std::vector<std::vector<FLEEdgePrfBlock>>& tokensSets,
+    TagQueryType type) {
+
+    invariant(!_opCtx->inMultiDocumentTransaction());
+
+    // Pop off the current op context so we can get a fresh set of read concern settings
+    auto client = _opCtx->getServiceContext()->makeClient("FLETagNoTXNQuery");
+    AlternativeClientRegion clientRegion(client);
+    auto opCtx = cc().makeOperationContext();
+    auto as = AuthorizationSession::get(cc());
+    as->grantInternalAuthorization(opCtx.get());
+
+    GetQueryableEncryptionCountInfo getCountsCmd(nss);
+
+    const auto tenantId = nss.tenantId();
+    if (tenantId && gMultitenancySupport) {
+        getCountsCmd.setDollarTenant(tenantId);
+    }
+
+    getCountsCmd.setTokens(toTagSets(tokensSets));
+    getCountsCmd.setForInsert(type == FLEQueryInterface::TagQueryType::kInsert);
+
+    DBDirectClient directClient(opCtx.get());
+
+    auto uniqueReply = directClient.runCommand(getCountsCmd.serialize({}));
+
+    auto response = uniqueReply->getCommandReply();
+
+    auto status = getStatusFromWriteCommandReply(response);
+    uassertStatusOK(status);
+
+    auto reply = QECountInfosReply::parse(IDLParserContext("reply"), response);
+
+    return toEdgeCounts(reply.getCounts());
+}
 }  // namespace mongo

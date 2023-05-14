@@ -223,18 +223,28 @@ bool affectedByCollator(const BSONElement& element) {
     }
 }
 
-void setMinRecord(CollectionScanNode* collScan, const BSONObj& min) {
-    const auto newMinRecord = record_id_helpers::keyForObj(min);
-    if (!collScan->minRecord || newMinRecord > collScan->minRecord->recordId()) {
-        collScan->minRecord = RecordIdBound(newMinRecord, min);
+// Set 'curr' to 'newMin' if 'newMin' < 'curr'
+void setLowestRecord(boost::optional<RecordIdBound>& curr, const RecordIdBound& newMin) {
+    if (!curr || newMin.recordId() < curr->recordId()) {
+        curr = newMin;
     }
 }
 
-void setMaxRecord(CollectionScanNode* collScan, const BSONObj& max) {
-    const auto newMaxRecord = record_id_helpers::keyForObj(max);
-    if (!collScan->maxRecord || newMaxRecord < collScan->maxRecord->recordId()) {
-        collScan->maxRecord = RecordIdBound(newMaxRecord, max);
+// Set 'curr' to 'newMax' if 'newMax' > 'curr'
+void setHighestRecord(boost::optional<RecordIdBound>& curr, const RecordIdBound& newMax) {
+    if (!curr || newMax.recordId() > curr->recordId()) {
+        curr = newMax;
     }
+}
+
+// Set 'curr' to 'newMin' if 'newMin' < 'curr'
+void setLowestRecord(boost::optional<RecordIdBound>& curr, const BSONObj& newMin) {
+    setLowestRecord(curr, RecordIdBound(record_id_helpers::keyForObj(newMin), newMin));
+}
+
+// Set 'curr' to 'newMax' if 'newMax' > 'curr'
+void setHighestRecord(boost::optional<RecordIdBound>& curr, const BSONObj& newMax) {
+    setHighestRecord(curr, RecordIdBound(record_id_helpers::keyForObj(newMax), newMax));
 }
 
 // Returns whether element is not affected by collators or query and collection collators are
@@ -276,12 +286,14 @@ void handleRIDRangeMinMax(const CanonicalQuery& query,
         // Assumes clustered collection scans are only supported with the forward direction.
         collScan->boundInclusion =
             CollectionScanParams::ScanBoundInclusion::kIncludeStartRecordOnly;
-        setMaxRecord(collScan, IndexBoundsBuilder::objFromElement(maxObj.firstElement(), collator));
+        setLowestRecord(collScan->maxRecord,
+                        IndexBoundsBuilder::objFromElement(maxObj.firstElement(), collator));
     }
 
     if (!minObj.isEmpty() && compatibleCollator(params, collator, minObj.firstElement())) {
         // The min() is inclusive as are bounded collection scans by default.
-        setMinRecord(collScan, IndexBoundsBuilder::objFromElement(minObj.firstElement(), collator));
+        setHighestRecord(collScan->minRecord,
+                         IndexBoundsBuilder::objFromElement(minObj.firstElement(), collator));
     }
 }
 
@@ -314,6 +326,45 @@ void handleRIDRangeScan(const MatchExpression* conjunct,
         return;
     }
 
+    // TODO SERVER-62707: Allow $in with regex to use a clustered index.
+    auto inMatch = dynamic_cast<const InMatchExpression*>(conjunct);
+    if (inMatch && !inMatch->hasRegex()) {
+        // Iterate through the $in equalities to find the min/max values. The min/max bounds for the
+        // collscan need to be loose enough to cover all of these values.
+        boost::optional<RecordIdBound> minBound;
+        boost::optional<RecordIdBound> maxBound;
+
+        bool allEltsCollationCompatible = true;
+        for (const auto& element : inMatch->getEqualities()) {
+            if (compatibleCollator(params, collator, element)) {
+                const auto collated = IndexBoundsBuilder::objFromElement(element, collator);
+                setLowestRecord(minBound, collated);
+                setHighestRecord(maxBound, collated);
+            } else {
+                // Set coarse min/max bounds based on type when we can't set tight bounds.
+                allEltsCollationCompatible = false;
+
+                BSONObjBuilder bMin;
+                bMin.appendMinForType("", element.type());
+                setLowestRecord(minBound, bMin.obj());
+
+                BSONObjBuilder bMax;
+                bMax.appendMaxForType("", element.type());
+                setHighestRecord(maxBound, bMax.obj());
+            }
+        }
+        collScan->hasCompatibleCollation = allEltsCollationCompatible;
+
+        // Finally, tighten the collscan bounds with the min/max bounds for the $in.
+        if (minBound) {
+            setHighestRecord(collScan->minRecord, *minBound);
+        }
+        if (maxBound) {
+            setLowestRecord(collScan->maxRecord, *maxBound);
+        }
+        return;
+    }
+
     auto match = dynamic_cast<const ComparisonMatchExpression*>(conjunct);
     if (match == nullptr) {
         return;  // Not a comparison match expression.
@@ -324,11 +375,11 @@ void handleRIDRangeScan(const MatchExpression* conjunct,
     // Set coarse min/max bounds based on type in case we can't set tight bounds.
     BSONObjBuilder minb;
     minb.appendMinForType("", element.type());
-    setMinRecord(collScan, minb.obj());
+    setHighestRecord(collScan->minRecord, minb.obj());
 
     BSONObjBuilder maxb;
     maxb.appendMaxForType("", element.type());
-    setMaxRecord(collScan, maxb.obj());
+    setLowestRecord(collScan->maxRecord, maxb.obj());
 
     bool compatible = compatibleCollator(params, collator, element);
     if (!compatible) {
@@ -341,15 +392,35 @@ void handleRIDRangeScan(const MatchExpression* conjunct,
 
     const auto collated = IndexBoundsBuilder::objFromElement(element, collator);
     if (dynamic_cast<const EqualityMatchExpression*>(match)) {
-        setMinRecord(collScan, collated);
-        setMaxRecord(collScan, collated);
+        setHighestRecord(collScan->minRecord, collated);
+        setLowestRecord(collScan->maxRecord, collated);
     } else if (dynamic_cast<const LTMatchExpression*>(match) ||
                dynamic_cast<const LTEMatchExpression*>(match)) {
-        setMaxRecord(collScan, collated);
+        setLowestRecord(collScan->maxRecord, collated);
     } else if (dynamic_cast<const GTMatchExpression*>(match) ||
                dynamic_cast<const GTEMatchExpression*>(match)) {
-        setMinRecord(collScan, collated);
+        setHighestRecord(collScan->minRecord, collated);
     }
+}
+
+/**
+ * Sets the lowPriority parameter on the given index scan node.
+ */
+void deprioritizeUnboundedIndexScan(IndexScanNode* solnRoot,
+                                    const FindCommandRequest& findCommand) {
+    auto sort = findCommand.getSort();
+    if (findCommand.getLimit() &&
+        (sort.isEmpty() || sort[query_request_helper::kNaturalSortField])) {
+        // There is a limit with either no sort or the natural sort.
+        return;
+    }
+
+    auto indexScan = checked_cast<IndexScanNode*>(solnRoot);
+    if (!indexScan->bounds.isUnbounded()) {
+        return;
+    }
+
+    indexScan->lowPriority = true;
 }
 
 }  // namespace
@@ -1446,20 +1517,16 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::buildIndexedAnd(
 
     // Short-circuit: an AND of one child is just the child.
     if (ixscanNodes.size() == 1) {
-        if (feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabledAndIgnoreFCV() &&
-            ixscanNodes[0]->getType() == StageType::STAGE_IXSCAN && root->numChildren() > 0) {
-            const auto* ixScanNode = static_cast<IndexScanNode*>(ixscanNodes[0].get());
-            const auto& index = ixScanNode->index;
-            if (index.type == INDEX_WILDCARD &&
-                wildcard_planning::canOnlyAnswerWildcardPrefixQuery(index, ixScanNode->bounds)) {
-                // If we get here, we have a compound wildcard index which can answer one or more of
-                // the predicates in the $and, but we also have at least one additional node
-                // attached to the filter. Normally, we would be able to satisfy this case using a
-                // FETCH + FILTER + IXSCAN; however, in the case of a $not query which is not
-                // supported by the index, the index entry will be expanded in such a way that we
-                // won't be able to satisfy the query.
-                return nullptr;
-            }
+        if (root->numChildren() > 0 &&
+            feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabledAndIgnoreFCV() &&
+            wildcard_planning::canOnlyAnswerWildcardPrefixQuery(ixscanNodes)) {
+            // If we get here, we have a compound wildcard index which can answer one or more of the
+            // predicates in the $and, but we also have at least one additional node attached to the
+            // filter. Normally, we would be able to satisfy this case using a FETCH + FILTER +
+            // IXSCAN; however, in the case of a $not query which is not supported by the index, the
+            // index entry will be expanded in such a way that we won't be able to satisfy the
+            // query.
+            return nullptr;
         }
         andResult = std::move(ixscanNodes[0]);
     } else {
@@ -1591,6 +1658,14 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::buildIndexedOr(
         orResult = std::move(ixscanNodes[0]);
     } else {
         std::vector<bool> shouldReverseScan;
+
+        if (feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabledAndIgnoreFCV() &&
+            wildcard_planning::canOnlyAnswerWildcardPrefixQuery(ixscanNodes)) {
+            // If we get here, we have a an OR of IXSCANs, one of which is a compound wildcard
+            // index, but at least one of them can only support a FETCH + IXSCAN on queries on the
+            // prefix. This means this plan will produce incorrect results.
+            return nullptr;
+        }
 
         if (query.getSortPattern()) {
             // If all ixscanNodes can provide the sort, shouldReverseScan is populated with which
@@ -1765,6 +1840,8 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::scanWholeIndex(
         QueryPlannerCommon::reverseScans(isn.get());
         isn->direction = -1;
     }
+
+    deprioritizeUnboundedIndexScan(isn.get(), query.getFindCommandRequest());
 
     unique_ptr<MatchExpression> filter = query.root()->clone();
 

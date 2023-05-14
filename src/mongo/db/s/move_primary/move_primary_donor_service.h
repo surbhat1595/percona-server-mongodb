@@ -30,11 +30,15 @@
 #pragma once
 
 #include "mongo/db/repl/primary_only_service.h"
+#include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/move_primary/move_primary_metrics.h"
 #include "mongo/db/s/move_primary/move_primary_state_machine_gen.h"
 #include "mongo/db/s/resharding/resharding_future_util.h"
+#include "mongo/s/client/shard.h"
 
 namespace mongo {
+
+struct MovePrimaryDonorDependencies;
 
 class MovePrimaryDonorService : public repl::PrimaryOnlyService {
 public:
@@ -55,6 +59,10 @@ public:
 
     std::shared_ptr<PrimaryOnlyService::Instance> constructInstance(BSONObj initialState) override;
 
+protected:
+    virtual MovePrimaryDonorDependencies _makeDependencies(
+        const MovePrimaryDonorDocument& initialDoc);
+
 private:
     ServiceContext* _serviceContext;
 };
@@ -64,6 +72,8 @@ public:
     MovePrimaryDonorCancelState(const CancellationToken& stepdownToken);
     const CancellationToken& getStepdownToken();
     const CancellationToken& getAbortToken();
+    bool isSteppingDown() const;
+    void abort();
 
 private:
     CancellationToken _stepdownToken;
@@ -71,48 +81,91 @@ private:
     CancellationToken _abortToken;
 };
 
+// Retries indefinitely unless this node is stepping down. Intended to be used with
+// resharding::RetryingCancelableOperationContextFactory for cases where an operation failure is not
+// allowed to abort the task being performed by a PrimaryOnlyService (e.g. because that
+// task is already aborted, or past the point where aborts are allowed).
+template <typename BodyCallable>
+class [[nodiscard]] IndefiniteRetryProvider {
+public:
+    explicit IndefiniteRetryProvider(BodyCallable&& body) : _body{std::move(body)} {}
+
+    template <typename Predicate>
+    auto until(Predicate&& predicate) && {
+        using StatusType =
+            decltype(std::declval<Future<FutureContinuationResult<BodyCallable>>>().getNoThrow());
+        static_assert(
+            std::is_invocable_r_v<bool, Predicate, StatusType>,
+            "Predicate to until() must implement call operator accepting Status or StatusWith "
+            "type that would be returned by this class's BodyCallable, and must return bool");
+        return AsyncTry(std::move(_body))
+            .until([predicate = std::move(predicate)](const auto& statusLike) {
+                return predicate(statusLike);
+            });
+    }
+
+private:
+    BodyCallable _body;
+};
 class MovePrimaryDonorRetryHelper {
 public:
-    MovePrimaryDonorRetryHelper(std::shared_ptr<executor::ScopedTaskExecutor> executor,
+    MovePrimaryDonorRetryHelper(const MovePrimaryCommonMetadata& metadata,
+                                std::shared_ptr<executor::ScopedTaskExecutor> executor,
                                 MovePrimaryDonorCancelState* cancelState);
 
     template <typename Fn>
-    auto untilStepdownOrSuccess(Fn&& fn) {
-        return untilImpl(
-            std::forward<Fn>(fn), _cancelOnStepdownFactory, _cancelState->getStepdownToken());
+    auto untilStepdownOrMajorityCommit(const std::string& operationName, Fn&& fn) {
+        return _untilStepdownOrSuccess(operationName, std::forward<Fn>(fn))
+            .then([this, operationName] { return _waitForMajorityOrStepdown(operationName); });
     }
 
     template <typename Fn>
-    auto untilAbortOrSuccess(Fn&& fn) {
-        return untilImpl(
-            std::forward<Fn>(fn), _cancelOnAbortFactory, _cancelState->getAbortToken());
+    auto untilAbortOrMajorityCommit(const std::string& operationName, Fn&& fn) {
+        return _untilAbortOrSuccess(operationName, std::forward<Fn>(fn))
+            .then([this, operationName] { return _waitForMajorityOrStepdown(operationName); });
     }
 
 private:
     template <typename Fn>
-    using FuturizedResultType =
-        FutureContinuationResult<Fn, const CancelableOperationContextFactory&>;
-
-    template <typename Fn>
-    using StatusifiedResultType =
-        decltype(std::declval<Future<FuturizedResultType<Fn>>>().getNoThrow());
-
-    template <typename Fn>
-    auto untilImpl(Fn&& fn,
-                   const resharding::RetryingCancelableOperationContextFactory& factory,
-                   const CancellationToken& token) {
-        return factory.withAutomaticRetry(std::forward<Fn>(fn))
-            .onTransientError([this](const Status& status) { handleTransientError(status); })
-            .onUnrecoverableError(
-                [this](const Status& status) { handleUnrecoverableError(status); })
-            .template until<StatusifiedResultType<Fn>>(
-                [](const auto& statusLike) { return statusLike.isOK(); })
-            .on(**_taskExecutor, token);
+    auto _untilStepdownOrSuccess(const std::string& operationName, Fn&& fn) {
+        return _cancelOnStepdownFactory
+            .withAutomaticRetry<decltype(fn), IndefiniteRetryProvider>(std::forward<Fn>(fn))
+            .until([this, operationName](const auto& statusLike) {
+                if (!statusLike.isOK()) {
+                    _handleTransientError(operationName, statusLike);
+                }
+                return statusLike.isOK();
+            })
+            .withBackoffBetweenIterations(kBackoff)
+            .on(**_taskExecutor, _cancelState->getStepdownToken());
     }
 
-    void handleTransientError(const Status& status);
-    void handleUnrecoverableError(const Status& status);
+    template <typename Fn>
+    auto _untilAbortOrSuccess(const std::string& operationName, Fn&& fn) {
+        using FuturizedResultType =
+            FutureContinuationResult<Fn, const CancelableOperationContextFactory&>;
+        using StatusifiedResultType =
+            decltype(std::declval<Future<FuturizedResultType>>().getNoThrow());
+        return _cancelOnAbortFactory.withAutomaticRetry(std::forward<Fn>(fn))
+            .onTransientError([this, operationName](const Status& status) {
+                _handleTransientError(operationName, status);
+            })
+            .onUnrecoverableError([this, operationName](const Status& status) {
+                _handleUnrecoverableError(operationName, status);
+            })
+            .template until<StatusifiedResultType>(
+                [](const auto& statusLike) { return statusLike.isOK(); })
+            .withBackoffBetweenIterations(kBackoff)
+            .on(**_taskExecutor, _cancelState->getAbortToken());
+    }
 
+    void _handleTransientError(const std::string& operationName, const Status& status);
+    void _handleUnrecoverableError(const std::string& operationName, const Status& status);
+    ExecutorFuture<void> _waitForMajorityOrStepdown(const std::string& operationName);
+
+    const static Backoff kBackoff;
+
+    const MovePrimaryCommonMetadata _metadata;
     std::shared_ptr<executor::ScopedTaskExecutor> _taskExecutor;
     std::shared_ptr<ThreadPool> _markKilledExecutor;
     MovePrimaryDonorCancelState* _cancelState;
@@ -120,11 +173,57 @@ private:
     resharding::RetryingCancelableOperationContextFactory _cancelOnAbortFactory;
 };
 
+class MovePrimaryDonorExternalState {
+public:
+    MovePrimaryDonorExternalState(const MovePrimaryCommonMetadata& metadata);
+    virtual ~MovePrimaryDonorExternalState() = default;
+
+    void syncDataOnRecipient(OperationContext* opCtx);
+    void syncDataOnRecipient(OperationContext* opCtx, boost::optional<Timestamp> timestamp);
+    void abortMigrationOnRecipient(OperationContext* opCtx);
+    void forgetMigrationOnRecipient(OperationContext* opCtx);
+
+protected:
+    virtual StatusWith<Shard::CommandResponse> runCommand(OperationContext* opCtx,
+                                                          const ShardId& shardId,
+                                                          const ReadPreferenceSetting& readPref,
+                                                          const std::string& dbName,
+                                                          const BSONObj& cmdObj,
+                                                          Shard::RetryPolicy retryPolicy) = 0;
+
+    const MovePrimaryCommonMetadata& getMetadata() const;
+    ShardId getRecipientShardId() const;
+
+private:
+    void _runCommandOnRecipient(OperationContext* opCtx, const BSONObj& command);
+
+    MovePrimaryCommonMetadata _metadata;
+};
+
+class MovePrimaryDonorExternalStateImpl : public MovePrimaryDonorExternalState {
+public:
+    MovePrimaryDonorExternalStateImpl(const MovePrimaryCommonMetadata& metadata);
+
+protected:
+    StatusWith<Shard::CommandResponse> runCommand(OperationContext* opCtx,
+                                                  const ShardId& shardId,
+                                                  const ReadPreferenceSetting& readPref,
+                                                  const std::string& dbName,
+                                                  const BSONObj& cmdObj,
+                                                  Shard::RetryPolicy retryPolicy) override;
+};
+
+struct MovePrimaryDonorDependencies {
+    std::unique_ptr<MovePrimaryDonorExternalState> externalState;
+};
+
 class MovePrimaryDonor : public repl::PrimaryOnlyService::TypedInstance<MovePrimaryDonor> {
 public:
     MovePrimaryDonor(ServiceContext* serviceContext,
                      MovePrimaryDonorService* donorService,
-                     MovePrimaryDonorDocument initialState);
+                     MovePrimaryDonorDocument initialState,
+                     const std::shared_ptr<executor::TaskExecutor>& cleanupExecutor,
+                     MovePrimaryDonorDependencies dependencies);
 
     SemiFuture<void> run(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                          const CancellationToken& stepdownToken) noexcept override;
@@ -139,24 +238,51 @@ public:
 
     const MovePrimaryCommonMetadata& getMetadata() const;
 
+    void onBeganBlockingWrites(StatusWith<Timestamp> blockingWritesTimestamp);
+    void onReadyToForget();
+
+    void abort(Status reason);
+    bool isAborted() const;
+
+    SharedSemiFuture<void> getReadyToBlockWritesFuture() const;
+    SharedSemiFuture<void> getDecisionFuture() const;
     SharedSemiFuture<void> getCompletionFuture() const;
 
 private:
-    MovePrimaryDonorStateEnum getCurrentState() const;
-    MovePrimaryDonorMutableFields getMutableFields() const;
-    MovePrimaryDonorDocument buildCurrentStateDocument() const;
+    MovePrimaryDonorStateEnum _getCurrentState() const;
+    MovePrimaryDonorMutableFields _getMutableFields() const;
+    bool _isAborted(WithLock) const;
+    boost::optional<Status> _getAbortReason() const;
+    Status _getOperationStatus() const;
+    MovePrimaryDonorDocument _buildCurrentStateDocument() const;
 
-    void initializeRun(std::shared_ptr<executor::ScopedTaskExecutor> executor,
-                       const CancellationToken& stepdownToken);
-    ExecutorFuture<void> runDonorWorkflow();
-    ExecutorFuture<void> transitionToState(MovePrimaryDonorStateEnum state);
-    ExecutorFuture<void> doInitializing();
-    void updateOnDiskState(OperationContext* opCtx,
-                           const MovePrimaryDonorDocument& newStateDocument);
-    void updateInMemoryState(const MovePrimaryDonorDocument& newStateDocument);
+    void _initializeRun(std::shared_ptr<executor::ScopedTaskExecutor> executor,
+                        const CancellationToken& stepdownToken);
+    ExecutorFuture<void> _runDonorWorkflow();
+    ExecutorFuture<void> _transitionToState(MovePrimaryDonorStateEnum state);
+    ExecutorFuture<void> _doNothing();
+    ExecutorFuture<void> _doInitializing();
+    ExecutorFuture<void> _doCloning();
+    ExecutorFuture<void> _doWaitingToBlockWrites();
+    ExecutorFuture<void> _doBlockingWrites();
+    ExecutorFuture<void> _waitUntilReadyToBlockWrites();
+    ExecutorFuture<Timestamp> _waitUntilCurrentlyBlockingWrites();
+    ExecutorFuture<void> _persistBlockingWritesTimestamp(Timestamp blockingWritesTimestamp);
+    ExecutorFuture<void> _doPrepared();
+    ExecutorFuture<void> _waitForForgetThenDoCleanup();
+    ExecutorFuture<void> _doCleanup();
+    ExecutorFuture<void> _doAbortIfRequired();
+    ExecutorFuture<void> _doAbort();
+    ExecutorFuture<void> _doForget();
+    bool _allowedToAbortDuringStateTransition(MovePrimaryDonorStateEnum newState) const;
+    void _tryTransitionToStateOnce(OperationContext* opCtx, MovePrimaryDonorStateEnum newState);
+    void _updateOnDiskState(OperationContext* opCtx,
+                            const MovePrimaryDonorDocument& newStateDocument);
+    void _updateInMemoryState(const MovePrimaryDonorDocument& newStateDocument);
+    void _ensureProgressPromisesAreFulfilled(Status result);
 
     template <typename Fn>
-    auto runOnTaskExecutor(Fn&& fn) {
+    auto _runOnTaskExecutor(Fn&& fn) {
         return ExecutorFuture(**_taskExecutor).then(std::forward<Fn>(fn));
     }
 
@@ -168,9 +294,18 @@ private:
     MovePrimaryDonorMutableFields _mutableFields;
     std::unique_ptr<MovePrimaryMetrics> _metrics;
 
+    std::shared_ptr<executor::TaskExecutor> _cleanupExecutor;
     std::shared_ptr<executor::ScopedTaskExecutor> _taskExecutor;
     boost::optional<MovePrimaryDonorCancelState> _cancelState;
     boost::optional<MovePrimaryDonorRetryHelper> _retry;
+
+    std::unique_ptr<MovePrimaryDonorExternalState> _externalState;
+
+    SharedPromise<void> _progressedToReadyToBlockWritesPromise;
+    SharedPromise<void> _progressedToDecisionPromise;
+
+    SharedPromise<Timestamp> _currentlyBlockingWritesPromise;
+    SharedPromise<void> _readyToForgetPromise;
 
     SharedPromise<void> _completionPromise;
 };

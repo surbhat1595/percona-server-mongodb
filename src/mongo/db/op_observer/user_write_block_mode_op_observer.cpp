@@ -51,10 +51,11 @@ void UserWriteBlockModeOpObserver::onInserts(OperationContext* opCtx,
                                              const CollectionPtr& coll,
                                              std::vector<InsertStatement>::const_iterator first,
                                              std::vector<InsertStatement>::const_iterator last,
-                                             bool fromMigrate) {
+                                             std::vector<bool> fromMigrate,
+                                             bool defaultFromMigrate) {
     const auto& nss = coll->ns();
 
-    if (!fromMigrate) {
+    if (!defaultFromMigrate) {
         _checkWriteAllowed(opCtx, nss);
     }
 
@@ -222,7 +223,7 @@ void UserWriteBlockModeOpObserver::onCollMod(OperationContext* opCtx,
 
 void UserWriteBlockModeOpObserver::onDropDatabase(OperationContext* opCtx,
                                                   const DatabaseName& dbName) {
-    _checkWriteAllowed(opCtx, NamespaceString(dbName, ""));
+    _checkWriteAllowed(opCtx, NamespaceString(dbName));
 }
 
 repl::OpTime UserWriteBlockModeOpObserver::onDropCollection(OperationContext* opCtx,

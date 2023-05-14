@@ -352,6 +352,7 @@ std::unique_ptr<QuerySolutionNode> CollectionScanNode::clone() const {
     copy->shouldWaitForOplogVisibility = this->shouldWaitForOplogVisibility;
     copy->clusteredIndex = this->clusteredIndex;
     copy->hasCompatibleCollation = this->hasCompatibleCollation;
+    copy->lowPriority = this->lowPriority;
     return copy;
 }
 
@@ -1137,6 +1138,7 @@ std::unique_ptr<QuerySolutionNode> IndexScanNode::clone() const {
     copy->addKeyMetadata = this->addKeyMetadata;
     copy->bounds = this->bounds;
     copy->queryCollator = this->queryCollator;
+    copy->lowPriority = this->lowPriority;
 
     return copy;
 }

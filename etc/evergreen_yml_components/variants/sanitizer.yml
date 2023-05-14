@@ -32,7 +32,7 @@ buildvariants:
     compile_variant: rhel80-asan
   tasks:
     - name: compile_test_and_package_serial_TG
-    - name: .aggfuzzer .common
+    - name: .aggfuzzer .common !.feature_flag_guarded
     - name: free_monitoring
     - name: .jstestfuzz !.initsync
 
@@ -76,7 +76,10 @@ buildvariants:
     compile_variant: rhel80-debug-asan
   tasks:
   - name: compile_test_benchmark_and_package_serial_TG
-  - name: .aggregation
+  - name: compile_integration_and_test_parallel_stream_TG
+    distros:
+    - rhel80-large
+  - name: .aggregation !.feature_flag_guarded
   - name: .auth
   - name: audit
   - name: .benchmarks
@@ -90,7 +93,6 @@ buildvariants:
   - name: external_auth_aws
   - name: external_auth_oidc
   - name: initial_sync_fuzzer_gen
-  - name: .integration !.standalone !.audit
   - name: .jscore .common
   - name: jsCore_min_batch_repeat_queries_ese_gsm
   - name: jsCore_txns_large_txns_format
@@ -159,7 +161,10 @@ buildvariants:
     compile_variant: rhel80-debug-ubsan
   tasks:
   - name: compile_test_benchmark_and_package_serial_TG
-  - name: .aggregation
+  - name: compile_integration_and_test_parallel_stream_TG
+    distros:
+    - rhel80-large
+  - name: .aggregation !.feature_flag_guarded
   - name: .auth
   - name: audit
   - name: .benchmarks
@@ -171,7 +176,6 @@ buildvariants:
   - name: .encrypt
   - name: free_monitoring
   - name: initial_sync_fuzzer_gen
-  - name: .integration !.audit
   - name: .jscore .common
   - name: jsCore_min_batch_repeat_queries_ese_gsm
   - name: jsCore_txns_large_txns_format

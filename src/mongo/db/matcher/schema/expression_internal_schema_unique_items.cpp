@@ -40,14 +40,8 @@ void InternalSchemaUniqueItemsMatchExpression::debugString(StringBuilder& debug,
 
     BSONObjBuilder builder;
     serialize(&builder, {});
-    debug << builder.obj().toString() << "\n";
-
-    const auto* tag = getTag();
-    if (tag) {
-        debug << " ";
-        tag->debugString(&debug);
-    }
-    debug << "\n";
+    debug << builder.obj().toString();
+    _debugStringAttachTagInfo(&debug);
 }
 
 bool InternalSchemaUniqueItemsMatchExpression::equivalent(const MatchExpression* expr) const {
@@ -61,7 +55,6 @@ bool InternalSchemaUniqueItemsMatchExpression::equivalent(const MatchExpression*
 
 BSONObj InternalSchemaUniqueItemsMatchExpression::getSerializedRightHandSide(
     SerializationOptions opts) const {
-    // TODO SERVER-73678 respect 'replacementForLiteralArgs.'
     BSONObjBuilder bob;
     bob.append(kName, true);
     return bob.obj();

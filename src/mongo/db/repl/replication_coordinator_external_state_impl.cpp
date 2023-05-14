@@ -82,7 +82,6 @@
 #include "mongo/db/s/config/index_on_config.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/migration_util.h"
-#include "mongo/db/s/periodic_balancer_config_refresher.h"
 #include "mongo/db/s/periodic_sharded_index_consistency_checker.h"
 #include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
 #include "mongo/db/s/shard_local.h"
@@ -837,7 +836,6 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnStepDownHook() {
         TransactionCoordinatorService::get(_service)->onStepDown();
     }
     if (ShardingState::get(_service)->enabled()) {
-        PeriodicBalancerConfigRefresher::get(_service).onStepDown();
         CatalogCacheLoader::get(_service).onStepDown();
 
         if (serverGlobalParams.clusterRole != ClusterRole::ConfigServer) {
@@ -965,7 +963,6 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
             }
             fassert(40107, status);
 
-            PeriodicBalancerConfigRefresher::get(_service).onStepUp(_service);
             CatalogCacheLoader::get(_service).onStepUp();
 
             if (serverGlobalParams.clusterRole != ClusterRole::ConfigServer) {
@@ -1062,7 +1059,7 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
         }
     }
 
-    if (gFeatureFlagCatalogShard.isEnabled(serverGlobalParams.featureCompatibility) &&
+    if (gFeatureFlagCatalogShard.isEnabledAndIgnoreFCV() &&
         serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&
         !ShardingState::get(opCtx)->enabled()) {
         // Note this must be called after the config server has created the cluster ID and also
@@ -1136,7 +1133,7 @@ void ReplicationCoordinatorExternalStateImpl::_dropAllTempCollections(OperationC
                     2,
                     "Removing temporary collections from {db}",
                     "Removing temporary collections",
-                    "db"_attr = dbName);
+                    logAttrs(dbName));
         Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
         clearTempCollections(opCtx, dbName);
     }

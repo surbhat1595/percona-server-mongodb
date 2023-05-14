@@ -404,11 +404,6 @@ public:
     // we would want to fall back on an alternate non-blocking solution.
     bool hasBlockingStage{false};
 
-    // Indicates whether this query solution represents an 'explode for sort' plan when an index
-    // scan over multiple point intervals is 'exploded' into a union of index scans in order to
-    // obtain an indexed sort.
-    bool hasExplodedForSort{false};
-
     // Runner executing this solution might be interested in knowing
     // if the planning process for this solution was based on filtered indices.
     bool indexFilterApplied{false};
@@ -508,6 +503,9 @@ struct CollectionScanNode : public QuerySolutionNodeWithSortSet {
 
     // Once the first matching document is found, assume that all documents after it must match.
     bool stopApplyingFilterAfterFirstMatch = false;
+
+    // Whether the collection scan should have low storage admission priority.
+    bool lowPriority = false;
 };
 
 struct ColumnIndexScanNode : public QuerySolutionNode {
@@ -816,6 +814,8 @@ struct IndexScanNode : public QuerySolutionNodeWithSortSet {
      * A vector of Interval Evaluation Trees (IETs) with the same ordering as the index key pattern.
      */
     std::vector<interval_evaluation_tree::IET> iets;
+
+    bool lowPriority = false;
 };
 
 struct ReturnKeyNode : public QuerySolutionNode {

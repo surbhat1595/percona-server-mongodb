@@ -372,7 +372,8 @@ Value ExpressionInternalOwningShard::evaluate(const Document& root, Variables* v
     }
 
     // Retrieve the values from the incoming document.
-    NamespaceString ns(getExpressionContext()->ns.tenantId(), input["ns"_sd].getStringData());
+    NamespaceString ns(NamespaceStringUtil::parseNamespaceFromDoc(
+        getExpressionContext()->ns.tenantId(), input["ns"_sd].getStringData()));
     const auto shardVersionObj = input["shardVersion"_sd].getDocument().toBson();
     const auto shardVersion = ShardVersion::parse(BSON("" << shardVersionObj).firstElement());
     const auto shardKeyVal = input["shardKeyVal"_sd].getDocument().toBson();
@@ -449,7 +450,7 @@ ExpressionInternalIndexKey::ExpressionInternalIndexKey(ExpressionContext* expCtx
     : Expression(expCtx, {std::move(doc), std::move(spec)}),
       _doc(_children[0]),
       _spec(_children[1]) {
-    expCtx->sbeCompatible = false;
+    expCtx->sbeCompatibility = SbeCompatibility::notCompatible;
 }
 
 boost::intrusive_ptr<Expression> ExpressionInternalIndexKey::optimize() {

@@ -56,13 +56,17 @@ public:
                                             BSONElement elem,
                                             VariablesParseState vps);
 
+    static boost::intrusive_ptr<Expression> parseExpression(ExpressionContext* expCtx,
+                                                            BSONElement elem,
+                                                            VariablesParseState vps);
+
     static boost::intrusive_ptr<AccumulatorState> create(ExpressionContext* expCtx,
                                                          const std::vector<double>& ps,
-                                                         std::unique_ptr<PercentileAlgorithm> algo);
+                                                         int32_t algoType);
 
     AccumulatorPercentile(ExpressionContext* expCtx,
                           const std::vector<double>& ps,
-                          std::unique_ptr<PercentileAlgorithm> algo);
+                          int32_t algoType);
 
     /**
      * Ingressing values and computing the requested percentiles.
@@ -75,9 +79,43 @@ public:
      */
     void reset() final;
 
-private:
+    /**
+     * Necessary for supporting $percentile as window functions.
+     */
+    static std::pair<std::vector<double> /*ps*/, int32_t /*algoType*/> parsePercentileAndAlgoType(
+        BSONElement elem);
+
+    /**
+     * Serializes this accumulator to a valid MQL accumulation statement that would be legal
+     * inside a $group. When executing on a sharded cluster, the result of this function will be
+     * sent to each individual shard.
+     *
+     * The implementation in 'AccumulatorState' assumes the accumulator has the simple syntax {
+     * <name>: <argument> }, such as { $sum: <argument> }. Because $percentile's syntax is more
+     * complex ({$percentile: {p: [0.5, 0.8], input: "$x", algorithm: "approximate"}}) we have to
+     * override this method.
+     */
+    Document serialize(boost::intrusive_ptr<Expression> initializer,
+                       boost::intrusive_ptr<Expression> argument,
+                       SerializationOptions options) const;
+
+    /**
+     * Helper that allows both the accumulator and expression $percentile to serialize their
+     * corresponding instance variables.
+     */
+    static void serializeHelper(const boost::intrusive_ptr<Expression>& argument,
+                                SerializationOptions options,
+                                std::vector<double> percentiles,
+                                int32_t algoType,
+                                MutableDocument& md);
+
+protected:
     std::vector<double> _percentiles;
     std::unique_ptr<PercentileAlgorithm> _algo;
+
+    // TODO SERVER-74894: This should have been 'PercentileAlgorithmTypeEnum' but the generated
+    // header from the IDL includes this header, creating a dependency.
+    const int32_t _algoType;
 };
 
 /*
@@ -98,12 +136,46 @@ public:
                                             BSONElement elem,
                                             VariablesParseState vps);
 
+    static boost::intrusive_ptr<Expression> parseExpression(ExpressionContext* expCtx,
+                                                            BSONElement elem,
+                                                            VariablesParseState vps);
+
     static boost::intrusive_ptr<AccumulatorState> create(ExpressionContext* expCtx,
-                                                         std::unique_ptr<PercentileAlgorithm> algo);
+                                                         const std::vector<double>& unused,
+                                                         int32_t algoType);
 
-    AccumulatorMedian(ExpressionContext* expCtx, std::unique_ptr<PercentileAlgorithm> algo);
+    /**
+     * We are matching the signature of the AccumulatorPercentile for the purpose of using
+     * ExpressionFromAccumulatorQuantile as a template for both $median and $percentile. This is the
+     * reason for passing in `unused` and it will not be referenced.
+     */
+    AccumulatorMedian(ExpressionContext* expCtx,
+                      const std::vector<double>& unused,
+                      int32_t algoType);
 
+    /**
+     * Necessary for supporting $median as window functions.
+     */
+    static std::pair<std::vector<double> /*ps*/, int32_t /*algoType*/> parsePercentileAndAlgoType(
+        BSONElement elem);
+    /**
+     * Modify the base-class implementation to return a single value rather than a single-element
+     * array.
+     */
     Value getValue(bool toBeMerged) final;
-};
 
+    Document serialize(boost::intrusive_ptr<Expression> initializer,
+                       boost::intrusive_ptr<Expression> argument,
+                       SerializationOptions options) const;
+
+    /**
+     * Helper that allows both the accumulator and expression $median to serialize their
+     * corresponding instance variables.
+     */
+    static void serializeHelper(const boost::intrusive_ptr<Expression>& argument,
+                                SerializationOptions options,
+                                std::vector<double> percentiles,
+                                int32_t algoType,
+                                MutableDocument& md);
+};
 }  // namespace mongo

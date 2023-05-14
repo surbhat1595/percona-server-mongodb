@@ -68,15 +68,16 @@ public:
 
         Response typedRun(OperationContext* opCtx) {
             uassert(ErrorCodes::IllegalOperation,
+                    "analyzeShardKey command is not supported on a standalone mongod",
+                    repl::ReplicationCoordinator::get(opCtx)->isReplEnabled());
+            uassert(ErrorCodes::IllegalOperation,
                     "analyzeShardKey command is not supported on a configsvr mongod",
-                    serverGlobalParams.clusterRole == ClusterRole::None ||
-                        serverGlobalParams.clusterRole.isShardRole());
+                    !serverGlobalParams.clusterRole.isExclusivelyConfigSvrRole());
 
             const auto& nss = ns();
             const auto& key = request().getKey();
             uassertStatusOK(validateNamespace(nss));
-            const auto collUuid = uassertStatusOK(
-                validateCollectionOptions(opCtx, nss, AnalyzeShardKey::kCommandParameterFieldName));
+            const auto collUuid = uassertStatusOK(validateCollectionOptionsLocally(opCtx, nss));
 
             LOGV2(6875001,
                   "Start analyzing shard key",
@@ -96,9 +97,9 @@ public:
                 }
             }
 
-            // Calculate metrics about the read and write distribution from sampled queries.
-            // Currently, query sampling is only supported on sharded clusters.
-            if (serverGlobalParams.clusterRole.isShardRole() &&
+            // Calculate metrics about the read and write distribution from sampled queries. Query
+            // sampling is not supported on multitenant replica sets.
+            if (!gMultitenancySupport &&
                 !MONGO_unlikely(
                     analyzeShardKeySkipCalcalutingReadWriteDistributionMetrics.shouldFail())) {
                 auto [readDistribution, writeDistribution] =
@@ -107,7 +108,6 @@ public:
                 response.setReadDistribution(readDistribution);
                 response.setWriteDistribution(writeDistribution);
             }
-
 
             return response;
         }

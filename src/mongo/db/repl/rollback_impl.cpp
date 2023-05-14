@@ -372,7 +372,7 @@ void RollbackImpl::_stopAndWaitForIndexBuilds(OperationContext* opCtx) {
     // complete.
     std::vector<DatabaseName> dbNames(dbs.begin(), dbs.end());
     LOGV2(21595, "Waiting for all background operations to complete before starting rollback");
-    for (auto dbName : dbNames) {
+    for (const auto& dbName : dbNames) {
         auto numInProg = IndexBuildsCoordinator::get(opCtx)->numInProgForDb(dbName);
         if (numInProg > 0) {
             LOGV2_DEBUG(21596,
@@ -381,7 +381,7 @@ void RollbackImpl::_stopAndWaitForIndexBuilds(OperationContext* opCtx) {
                         "background operations to complete on database '{db}'",
                         "Waiting for background operations to complete",
                         "numBackgroundOperationsInProgress"_attr = numInProg,
-                        "db"_attr = dbName);
+                        logAttrs(dbName));
             IndexBuildsCoordinator::get(opCtx)->awaitNoBgOpInProgForDb(opCtx, dbName);
         }
     }
@@ -531,7 +531,7 @@ void RollbackImpl::_restoreTxnsTableEntryFromRetryableWrites(OperationContext* o
         }
         const auto nss = NamespaceString::kSessionTransactionsTableNamespace;
         writeConflictRetry(opCtx, "updateSessionTransactionsTableInRollback", nss.ns(), [&] {
-            opCtx->recoveryUnit()->allowUntimestampedWrite();
+            opCtx->recoveryUnit()->allowOneUntimestampedWrite();
             AutoGetCollection collection(opCtx, nss, MODE_IX);
             auto filter = BSON(SessionTxnRecord::kSessionIdFieldName << sessionId.toBSON());
             UnreplicatedWritesBlock uwb(opCtx);
@@ -563,6 +563,12 @@ void RollbackImpl::_runPhaseFromAbortToReconstructPreparedTxns(
     // prepared transaction. This will require us to scan all sessions and call
     // abortPreparedTransactionForRollback() on any txnParticipant with a prepared transaction.
     killSessionsAbortAllPreparedTransactions(opCtx);
+
+    // Top-level prepared transactions could have been split during secondary oplog application.
+    // killSessionsAbortAllPreparedTransactions iterates the session catalog and aborts all the
+    // split transactions as well as the top-level transactions. After that we need to release
+    // all the split sessions tracked by SplitPrepareSessionManager.
+    _replicationCoordinator->getSplitPrepareSessionManager()->releaseAllSplitSessions();
 
     // Ask the record store for the pre-rollback counts of any collections whose counts will
     // change and create a map with the adjusted counts for post-rollback. While finding the
@@ -665,7 +671,7 @@ void RollbackImpl::_runPhaseFromAbortToReconstructPreparedTxns(
     // transactions were aborted (i.e. the in-memory counts were rolled-back) before computing
     // collection counts, reconstruct the prepared transactions now, adding on any additional counts
     // to the now corrected record store.
-    reconstructPreparedTransactions(opCtx, OplogApplication::Mode::kRecovering);
+    reconstructPreparedTransactions(opCtx, OplogApplication::Mode::kStableRecovering);
 }
 
 void RollbackImpl::_correctRecordStoreCounts(OperationContext* opCtx) {

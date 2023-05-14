@@ -104,7 +104,6 @@ let testCases = {
     _configsvrDropIndexCatalogEntry: {skip: "internal command"},
     _configsvrEnsureChunkVersionIsGreaterThan: {skip: "internal command"},
     _configsvrGetHistoricalPlacement: {skip: "internal command"},  // TODO SERVER-73029 remove
-    _configsvrMoveChunk: {skip: "internal command"},
     _configsvrMovePrimary: {skip: "internal command"},  // Can be removed once 6.0 is last LTS
     _configsvrMoveRange: {skip: "internal command"},
     _configsvrRefineCollectionShardKey: {skip: "internal command"},
@@ -136,6 +135,9 @@ let testCases = {
     _killOperations: {skip: "internal command"},
     _mergeAuthzCollections: {skip: "internal command"},
     _migrateClone: {skip: "internal command"},
+    _movePrimaryRecipientSyncData: {skip: "internal command"},
+    _movePrimaryRecipientAbortMigration: {skip: "internal command"},
+    _movePrimaryRecipientForgetMigration: {skip: "internal command"},
     _recvChunkAbort: {skip: "internal command"},
     _recvChunkCommit: {skip: "internal command"},
     _recvChunkReleaseCritSec: {skip: "internal command"},
@@ -178,6 +180,7 @@ let testCases = {
         skip:
             "does not accept read or write concern (accepts writeConcern, but only explicitly and when _secondaryThrottle is true)"
     },
+    _shardsvrNotifyShardingEvent: {skip: "internal command"},
     _shardsvrRefineCollectionShardKey: {skip: "internal command"},
     _shardsvrRenameCollection: {skip: "internal command"},
     _shardsvrRenameCollectionParticipant: {skip: "internal command"},

@@ -296,7 +296,8 @@ std::deque<BSONObj> CommonMongodProcessInterface::listCatalog(OperationContext* 
 
                 NamespaceString ns(NamespaceStringUtil::deserialize((*svns.nss()).tenantId(),
                                                                     obj.getStringField("_id")));
-                NamespaceString viewOnNs(ns.dbName(), obj.getStringField("viewOn"));
+                NamespaceString viewOnNs(NamespaceStringUtil::parseNamespaceFromDoc(
+                    ns.dbName(), obj.getStringField("viewOn")));
 
                 BSONObjBuilder builder;
                 builder.append("db", DatabaseNameUtil::serialize(ns.dbName()));
@@ -355,7 +356,20 @@ void CommonMongodProcessInterface::appendLatencyStats(OperationContext* opCtx,
                                                       const NamespaceString& nss,
                                                       bool includeHistograms,
                                                       BSONObjBuilder* builder) const {
-    Top::get(opCtx->getServiceContext()).appendLatencyStats(nss, includeHistograms, builder);
+    auto catalog = CollectionCatalog::get(opCtx);
+    auto view = catalog->lookupView(opCtx, nss);
+    if (!view) {
+        AutoGetCollectionForRead collection(opCtx, nss);
+        bool redactForQE =
+            (collection && collection->getCollectionOptions().encryptedFieldConfig) ||
+            nss.isFLE2StateCollection();
+        if (!redactForQE) {
+            Top::get(opCtx->getServiceContext())
+                .appendLatencyStats(nss, includeHistograms, builder);
+        }
+    } else {
+        Top::get(opCtx->getServiceContext()).appendLatencyStats(nss, includeHistograms, builder);
+    }
 }
 
 Status CommonMongodProcessInterface::appendStorageStats(
@@ -382,21 +396,25 @@ Status CommonMongodProcessInterface::appendQueryExecStats(OperationContext* opCt
                 str::stream() << "Collection [" << nss.toString() << "] not found."};
     }
 
-    auto collectionScanStats =
-        CollectionIndexUsageTrackerDecoration::get(collection->getSharedDecorations())
-            .getCollectionScanStats();
+    bool redactForQE =
+        collection->getCollectionOptions().encryptedFieldConfig || nss.isFLE2StateCollection();
+    if (!redactForQE) {
+        auto collectionScanStats =
+            CollectionIndexUsageTrackerDecoration::get(collection->getSharedDecorations())
+                .getCollectionScanStats();
 
-    dassert(collectionScanStats.collectionScans <=
-            static_cast<unsigned long long>(std::numeric_limits<long long>::max()));
-    dassert(collectionScanStats.collectionScansNonTailable <=
-            static_cast<unsigned long long>(std::numeric_limits<long long>::max()));
-    builder->append("queryExecStats",
-                    BSON("collectionScans" << BSON(
-                             "total" << static_cast<long long>(collectionScanStats.collectionScans)
-                                     << "nonTailable"
-                                     << static_cast<long long>(
-                                            collectionScanStats.collectionScansNonTailable))));
-
+        dassert(collectionScanStats.collectionScans <=
+                static_cast<unsigned long long>(std::numeric_limits<long long>::max()));
+        dassert(collectionScanStats.collectionScansNonTailable <=
+                static_cast<unsigned long long>(std::numeric_limits<long long>::max()));
+        builder->append(
+            "queryExecStats",
+            BSON("collectionScans"
+                 << BSON("total" << static_cast<long long>(collectionScanStats.collectionScans)
+                                 << "nonTailable"
+                                 << static_cast<long long>(
+                                        collectionScanStats.collectionScansNonTailable))));
+    }
     return Status::OK();
 }
 
@@ -418,7 +436,8 @@ BSONObj CommonMongodProcessInterface::getCollectionOptions(OperationContext* opC
 }
 
 std::unique_ptr<Pipeline, PipelineDeleter>
-CommonMongodProcessInterface::attachCursorSourceToPipelineForLocalRead(Pipeline* ownedPipeline) {
+CommonMongodProcessInterface::attachCursorSourceToPipelineForLocalRead(
+    Pipeline* ownedPipeline, boost::optional<const AggregateCommandRequest&> aggRequest) {
     auto expCtx = ownedPipeline->getContext();
     std::unique_ptr<Pipeline, PipelineDeleter> pipeline(ownedPipeline,
                                                         PipelineDeleter(expCtx->opCtx));
@@ -435,9 +454,14 @@ CommonMongodProcessInterface::attachCursorSourceToPipelineForLocalRead(Pipeline*
     if (expCtx->eligibleForSampling()) {
         if (auto sampleId = analyze_shard_key::tryGenerateSampleId(
                 expCtx->opCtx, expCtx->ns, analyze_shard_key::SampledCommandNameEnum::kAggregate)) {
+            auto [_, letParameters] =
+                expCtx->variablesParseState.transitionalCompatibilitySerialize(expCtx->variables);
             analyze_shard_key::QueryAnalysisWriter::get(expCtx->opCtx)
-                ->addAggregateQuery(
-                    *sampleId, expCtx->ns, pipeline->getInitialQuery(), expCtx->getCollatorBSON())
+                ->addAggregateQuery(*sampleId,
+                                    expCtx->ns,
+                                    pipeline->getInitialQuery(),
+                                    expCtx->getCollatorBSON(),
+                                    letParameters)
                 .getAsync([](auto) {});
         }
     }
@@ -461,8 +485,9 @@ CommonMongodProcessInterface::attachCursorSourceToPipelineForLocalRead(Pipeline*
                                       autoColl->getNss(),
                                       autoColl->isAnySecondaryNamespaceAViewOrSharded(),
                                       secondaryNamespaces};
+    auto resolvedAggRequest = aggRequest ? &aggRequest.get() : nullptr;
     PipelineD::buildAndAttachInnerQueryExecutorToPipeline(
-        holder, expCtx->ns, nullptr, pipeline.get());
+        holder, expCtx->ns, resolvedAggRequest, pipeline.get());
 
     return pipeline;
 }
@@ -699,7 +724,7 @@ void CommonMongodProcessInterface::_reportCurrentOpsForIdleSessions(
 
 void CommonMongodProcessInterface::_reportCurrentOpsForQueryAnalysis(
     OperationContext* opCtx, std::vector<BSONObj>* ops) const {
-    if (analyze_shard_key::supportsPersistingSampledQueries()) {
+    if (analyze_shard_key::supportsPersistingSampledQueries(opCtx)) {
         analyze_shard_key::QueryAnalysisSampleCounters::get(opCtx).reportForCurrentOp(ops);
     }
 }

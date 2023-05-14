@@ -124,6 +124,8 @@ env.Library(
         'accumulator_sum.cpp',
         'map_reduce_options.idl',
         'percentile_algo_sort_and_rank.cpp',
+        'percentile_algo_tdigest.cpp',
+        'percentile_algo_tdigest_parallel.cpp',
         'window_function/window_bounds.cpp',
         'window_function/window_function_covariance.cpp',
         'window_function/window_function_count.cpp',
@@ -390,20 +392,19 @@ pipelineEnv.Library(
         '$BUILD_DIR/mongo/db/storage/encryption_hooks',
         '$BUILD_DIR/mongo/db/storage/index_entry_comparison',
         '$BUILD_DIR/mongo/db/storage/storage_options',
-        '$BUILD_DIR/mongo/db/timeseries/catalog_helper',
         '$BUILD_DIR/mongo/db/update/update_document_diff',
         '$BUILD_DIR/mongo/db/views/resolved_view',
         '$BUILD_DIR/mongo/s/is_mongos',
         '$BUILD_DIR/third_party/shim_snappy',
         'abt_utils',
         'accumulator',
+        'change_stream_helpers',
         'dependencies',
         'document_path_support',
         'document_sources_idl',
         'granularity_rounder',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/catalog/collection_catalog',
         '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
         '$BUILD_DIR/mongo/db/fts/base_fts',
         '$BUILD_DIR/mongo/db/mongohasher',
@@ -464,6 +465,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/server_feature_flags',
         '$BUILD_DIR/mongo/db/update/update_driver',
         '$BUILD_DIR/mongo/s/query/router_exec_stage',
+        'change_stream_helpers',
         'change_stream_preimage',
     ],
 )
@@ -491,7 +493,6 @@ env.Library(
         'document_source_merge.idl',
         'document_source_merge_modes.idl',
         'document_source_merge_spec.cpp',
-        'document_source_out.idl',
         'document_source_parsing_validators.cpp',
         'document_source_replace_root.idl',
         'document_source_set_window_fields.idl',
@@ -505,7 +506,6 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/exec/document_value/document_value',
         '$BUILD_DIR/mongo/db/storage/key_string',
-        '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         '$BUILD_DIR/mongo/idl/idl_parser',
         '$BUILD_DIR/mongo/s/common_s',
         'runtime_constants_idl',
@@ -534,6 +534,17 @@ env.Library(
         '$BUILD_DIR/mongo/db/shard_role',
         '$BUILD_DIR/mongo/util/periodic_runner',
     ],
+)
+
+env.Library(
+    target="change_stream_helpers",
+    source=[
+        "change_stream_helpers.cpp",
+    ],
+    LIBDEPS=[
+        "document_sources_idl",
+    ],
+    LIBDEPS_PRIVATE=[],
 )
 
 env.Library(
@@ -696,10 +707,13 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/change_stream_options',
         '$BUILD_DIR/mongo/db/change_stream_options_manager',
         '$BUILD_DIR/mongo/db/change_stream_pre_images_collection_manager',
+        '$BUILD_DIR/mongo/db/change_streams_cluster_parameter',
         '$BUILD_DIR/mongo/db/cst/cst',
         '$BUILD_DIR/mongo/db/exec/document_value/document_value',
         '$BUILD_DIR/mongo/db/exec/document_value/document_value_test_util',
         '$BUILD_DIR/mongo/db/mongohasher',
+        '$BUILD_DIR/mongo/db/op_observer/op_observer_impl',
+        '$BUILD_DIR/mongo/db/op_observer/oplog_writer_impl',
         '$BUILD_DIR/mongo/db/pipeline/change_stream_expired_pre_image_remover',
         '$BUILD_DIR/mongo/db/query/collation/collator_interface_mock',
         '$BUILD_DIR/mongo/db/query/optimizer/optimizer',
@@ -709,6 +723,7 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/repl/image_collection_entry',
         '$BUILD_DIR/mongo/db/repl/oplog_entry',
         '$BUILD_DIR/mongo/db/repl/replmocks',
+        '$BUILD_DIR/mongo/db/repl/storage_interface_impl',
         '$BUILD_DIR/mongo/db/s/sharding_runtime_d',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/db/service_context_d_test_fixture',
@@ -723,6 +738,7 @@ env.CppUnitTest(
         'accumulator',
         'aggregation_request_helper',
         'change_stream_pipeline',
+        'change_stream_preimage',
         'change_stream_test_helpers',
         'document_source_internal_apply_oplog_update',
         'document_source_mock',
@@ -735,6 +751,27 @@ env.CppUnitTest(
         'process_interface/mongos_process_interface',
         'process_interface/shardsvr_process_interface',
         'sharded_agg_helpers',
+    ],
+)
+
+env.CppUnitTest(
+    target='db_percentile_algo_test',
+    source=[
+        'percentile_algo_tdigest_test.cpp',
+        'percentile_algo_tdigest_parallel_test.cpp',
+    ],
+    LIBDEPS=[
+        'accumulator',
+    ],
+)
+
+env.Benchmark(
+    target='percentile_algo_bm',
+    source=[
+        'percentile_algo_bm_fixture.cpp',
+    ],
+    LIBDEPS=[
+        'accumulator',
     ],
 )
 
@@ -760,7 +797,8 @@ env.Benchmark(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/query/query_test_service_context',
-        '$BUILD_DIR/mongo/db/query_expressions', '$BUILD_DIR/mongo/db/service_context_test_fixture',
-        'expression_bm_fixture'
+        '$BUILD_DIR/mongo/db/query_expressions',
+        '$BUILD_DIR/mongo/db/service_context_test_fixture',
+        'expression_bm_fixture',
     ],
 )

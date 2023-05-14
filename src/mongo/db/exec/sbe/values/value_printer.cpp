@@ -169,6 +169,9 @@ void ValuePrinter<T>::writeTagToStream(TypeTags tag) {
         case TypeTags::sortKeyComponentVector:
             stream << "SortKeyComponentVector";
             break;
+        case TypeTags::timeZone:
+            stream << "TimeZone";
+            break;
         default:
             stream << "unknown tag";
             break;
@@ -544,10 +547,13 @@ void ValuePrinter<T>::writeValueToStream(TypeTags tag, Value val, size_t depth) 
             break;
         case TypeTags::sortKeyComponentVector:
             stream << "SortKeyComponentVector(";
-            for (auto elt : getSortKeyComponentVectorView(val)->elts) {
+            for (const auto& elt : getSortKeyComponentVectorView(val)->elts) {
                 stream << elt << ", ";
             }
             stream << ")";
+            break;
+        case TypeTags::timeZone:
+            stream << getTimeZoneView(val)->toString();
             break;
         default:
             MONGO_UNREACHABLE;

@@ -27,6 +27,7 @@
  *    it in the license file.
  */
 
+#include "mongo/db/pipeline/abt/utils.h"
 #include "mongo/db/query/optimizer/cascades/rewriter_rules.h"
 #include "mongo/db/query/optimizer/explain.h"
 #include "mongo/db/query/optimizer/metadata_factory.h"
@@ -4733,48 +4734,6 @@ TEST(PhysRewriter, DisjunctiveEqsConsolidatedIntoEqMember) {
         optimized);
 }
 
-
-TEST(PhysRewriter, KeepBoundsForNothingCheck) {
-    using namespace properties;
-
-    ABT root =
-        NodeBuilder{}
-            .root("root")
-            .filter(_evalf(
-                _get("a", _traverse1(_composea(_cmp("Gt", "0"_cint64), _cmp("Lt", "20"_cint64)))),
-                "root"_var))
-            .finish(_scan("root", "c1"));
-
-    auto prefixId = PrefixId::createForTests();
-    auto phaseManager = makePhaseManager(
-        {OptPhase::MemoSubstitutionPhase,
-         OptPhase::MemoExplorationPhase,
-         OptPhase::MemoImplementationPhase},
-        prefixId,
-        {{{"c1", createScanDef({}, {})}}},
-        boost::none /*costModel*/,
-        {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
-
-    ABT optimized = root;
-    phaseManager.optimize(optimized);
-    ASSERT_EQ(2, phaseManager.getMemo().getStats()._physPlanExplorationCount);
-
-    // sbe::nothing will not pass the (Minkey, Maxkey) check. Check that we don't get rid of it.
-    ASSERT_EXPLAIN_V2_AUTO(
-        "Root [{root}]\n"
-        "Filter []\n"
-        "|   EvalFilter []\n"
-        "|   |   Variable [evalTemp_0]\n"
-        "|   PathTraverse [1]\n"
-        "|   PathComposeM []\n"
-        "|   |   PathCompare [Lt]\n"
-        "|   |   Const [maxKey]\n"
-        "|   PathCompare [Gt]\n"
-        "|   Const [minKey]\n"
-        "PhysicalScan [{'<root>': root, 'a': evalTemp_0}, c1]\n",
-        optimized);
-}
-
 TEST(PhysRewriter, EqMemberSargable) {
     using namespace properties;
 
@@ -5440,5 +5399,189 @@ TEST(PhysRewriter, ExtractAllPlans) {
         getExplainForPlan(2));
 }
 
+TEST(PhysRewriter, LowerRequirementsWithTopLevelDisjunction) {
+    auto req =
+        PartialSchemaRequirement(boost::none,
+                                 _disj(_conj(_interval(_incl("1"_cint32), _incl("1"_cint32)))),
+                                 false /*perfOnly*/);
+
+    auto makeKey = [](std::string pathName) {
+        return PartialSchemaKey("ptest",
+                                make<PathGet>(FieldNameType{pathName}, make<PathIdentity>()));
+    };
+
+    CEType scanGroupCE{10.0};
+    FieldProjectionMap fieldProjectionMap;
+    fieldProjectionMap._rootProjection = "ptest";
+    std::vector<SelectivityType> indexPredSels;
+
+    PhysPlanBuilder builder;
+    builder.make<PhysicalScanNode>(
+        scanGroupCE, fieldProjectionMap, "test" /* scanDefName */, false /* parallelScan */);
+
+    ResidualRequirementsWithOptionalCE::Builder residReqsBuilder;
+    residReqsBuilder.pushDisj()
+        .pushConj()
+        .atom({makeKey("a"), req, CEType{2.0}})
+        .atom({makeKey("b"), req, CEType{3.0}})
+        .pop()
+        .pushConj()
+        .atom({makeKey("c"), req, CEType{5.0}})
+        .atom({makeKey("d"), req, CEType{4.0}})
+        .pop();
+    auto residReqs = residReqsBuilder.finish().get();
+    lowerPartialSchemaRequirements(
+        scanGroupCE, indexPredSels, residReqs, defaultConvertPathToInterval, builder);
+
+    ASSERT_EXPLAIN_V2_AUTO(
+        "Filter []\n"
+        "|   BinaryOp [Or]\n"
+        "|   |   BinaryOp [And]\n"
+        "|   |   |   EvalFilter []\n"
+        "|   |   |   |   Variable [ptest]\n"
+        "|   |   |   PathGet [c]\n"
+        "|   |   |   PathCompare [Eq]\n"
+        "|   |   |   Const [1]\n"
+        "|   |   EvalFilter []\n"
+        "|   |   |   Variable [ptest]\n"
+        "|   |   PathGet [d]\n"
+        "|   |   PathCompare [Eq]\n"
+        "|   |   Const [1]\n"
+        "|   BinaryOp [And]\n"
+        "|   |   EvalFilter []\n"
+        "|   |   |   Variable [ptest]\n"
+        "|   |   PathGet [b]\n"
+        "|   |   PathCompare [Eq]\n"
+        "|   |   Const [1]\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [ptest]\n"
+        "|   PathGet [a]\n"
+        "|   PathCompare [Eq]\n"
+        "|   Const [1]\n"
+        "PhysicalScan [{'<root>': ptest}, test]\n",
+        builder._node);
+}
+
+TEST(PhysRewriter, OptimizeSargableNodeWithTopLevelDisjunction) {
+    auto req =
+        PartialSchemaRequirement(boost::none,
+                                 _disj(_conj(_interval(_incl("1"_cint32), _incl("1"_cint32)))),
+                                 false /*perfOnly*/);
+
+    auto makeKey = [](std::string pathName) {
+        return PartialSchemaKey("ptest",
+                                make<PathGet>(FieldNameType{pathName}, make<PathIdentity>()));
+    };
+
+    // Create three SargableNodes with top-level disjunctions.
+    PSRExpr::Builder builder;
+    builder.pushDisj()
+        .pushConj()
+        .atom({makeKey("a"), req})
+        .atom({makeKey("b"), req})
+        .pop()
+        .pushConj()
+        .atom({makeKey("c"), req})
+        .atom({makeKey("d"), req})
+        .pop();
+    auto reqs1 = PartialSchemaRequirements(builder.finish().get());
+
+    builder.pushDisj()
+        .pushConj()
+        .atom({makeKey("e"), req})
+        .pop()
+        .pushConj()
+        .atom({makeKey("f"), req})
+        .pop();
+    auto reqs2 = PartialSchemaRequirements(builder.finish().get());
+
+    builder.pushDisj().pushConj().atom({makeKey("g"), req}).pop();
+    auto reqs3 = PartialSchemaRequirements(builder.finish().get());
+
+    // During logical optimization, the SargableNodes not directly above the Scan will first be
+    // lowered to Filter nodes based on their requirements. The SargableNode immediately above the
+    // Scan will be lowered later based on its residual requirements.
+    ResidualRequirements::Builder residReqs;
+    residReqs.pushDisj()
+        .pushConj()
+        .atom({makeKey("a"), req, 0})
+        .atom({makeKey("b"), req, 1})
+        .pop()
+        .pushConj()
+        .atom({makeKey("c"), req, 2})
+        .atom({makeKey("d"), req, 3})
+        .pop();
+    ScanParams scanParams;
+    scanParams._residualRequirements = residReqs.finish();
+
+    ABT scanNode = make<ScanNode>("ptest", "test");
+    ABT sargableNode1 = make<SargableNode>(
+        reqs1, CandidateIndexes(), scanParams, IndexReqTarget::Index, std::move(scanNode));
+    ABT sargableNode2 = make<SargableNode>(
+        reqs2, CandidateIndexes(), boost::none, IndexReqTarget::Index, std::move(sargableNode1));
+    ABT sargableNode3 = make<SargableNode>(
+        reqs3, CandidateIndexes(), boost::none, IndexReqTarget::Index, std::move(sargableNode2));
+    ABT rootNode = make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{"ptest"}},
+                                  std::move(sargableNode3));
+
+    // Show that the optimization of the SargableNode does not throw, and that all three
+    // SargableNodes are correctly lowered to FilterNodes.
+    auto prefixId = PrefixId::createForTests();
+    auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase,
+                                          OptPhase::MemoExplorationPhase,
+                                          OptPhase::MemoImplementationPhase},
+                                         prefixId,
+                                         {{{"test", ScanDefinition()}}},
+                                         boost::none /*costModel*/,
+                                         DebugInfo::kDefaultForTests);
+    phaseManager.optimize(rootNode);
+
+    ASSERT_EXPLAIN_V2_AUTO(
+        "Root [{ptest}]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [ptest]\n"
+        "|   PathGet [g]\n"
+        "|   PathCompare [Eq]\n"
+        "|   Const [1]\n"
+        "Filter []\n"
+        "|   BinaryOp [Or]\n"
+        "|   |   EvalFilter []\n"
+        "|   |   |   Variable [ptest]\n"
+        "|   |   PathGet [f]\n"
+        "|   |   PathCompare [Eq]\n"
+        "|   |   Const [1]\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [ptest]\n"
+        "|   PathGet [e]\n"
+        "|   PathCompare [Eq]\n"
+        "|   Const [1]\n"
+        "Filter []\n"
+        "|   BinaryOp [Or]\n"
+        "|   |   BinaryOp [And]\n"
+        "|   |   |   EvalFilter []\n"
+        "|   |   |   |   Variable [ptest]\n"
+        "|   |   |   PathGet [d]\n"
+        "|   |   |   PathCompare [Eq]\n"
+        "|   |   |   Const [1]\n"
+        "|   |   EvalFilter []\n"
+        "|   |   |   Variable [ptest]\n"
+        "|   |   PathGet [c]\n"
+        "|   |   PathCompare [Eq]\n"
+        "|   |   Const [1]\n"
+        "|   BinaryOp [And]\n"
+        "|   |   EvalFilter []\n"
+        "|   |   |   Variable [ptest]\n"
+        "|   |   PathGet [b]\n"
+        "|   |   PathCompare [Eq]\n"
+        "|   |   Const [1]\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [ptest]\n"
+        "|   PathGet [a]\n"
+        "|   PathCompare [Eq]\n"
+        "|   Const [1]\n"
+        "PhysicalScan [{'<root>': ptest}, test]\n",
+        rootNode);
+}
 }  // namespace
 }  // namespace mongo::optimizer

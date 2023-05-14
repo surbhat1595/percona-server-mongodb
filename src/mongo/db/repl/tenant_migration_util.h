@@ -55,9 +55,59 @@ const std::set<std::string> kUnsupportedTenantIds{"", "admin", "local", "config"
 
 }  // namespace
 
+namespace repl {
+
+// Common failpoints between ShardMergeRecipientService and TenantMigrationRecipientService.
+extern FailPoint pauseBeforeRunTenantMigrationRecipientInstance;
+extern FailPoint pauseAfterRunTenantMigrationRecipientInstance;
+extern FailPoint skipTenantMigrationRecipientAuth;
+extern FailPoint skipComparingRecipientAndDonorFCV;
+extern FailPoint autoRecipientForgetMigration;
+extern FailPoint skipFetchingCommittedTransactions;
+extern FailPoint skipFetchingRetryableWritesEntriesBeforeStartOpTime;
+extern FailPoint pauseTenantMigrationRecipientBeforeDeletingStateDoc;
+extern FailPoint failWhilePersistingTenantMigrationRecipientInstanceStateDoc;
+extern FailPoint fpAfterPersistingTenantMigrationRecipientInstanceStateDoc;
+extern FailPoint fpBeforeFetchingDonorClusterTimeKeys;
+extern FailPoint fpAfterConnectingTenantMigrationRecipientInstance;
+extern FailPoint fpAfterRecordingRecipientPrimaryStartingFCV;
+extern FailPoint fpAfterComparingRecipientAndDonorFCV;
+extern FailPoint fpAfterRetrievingStartOpTimesMigrationRecipientInstance;
+extern FailPoint fpSetSmallAggregationBatchSize;
+extern FailPoint fpBeforeWaitingForRetryableWritePreFetchMajorityCommitted;
+extern FailPoint pauseAfterRetrievingRetryableWritesBatch;
+extern FailPoint fpAfterFetchingRetryableWritesEntriesBeforeStartOpTime;
+extern FailPoint fpAfterStartingOplogFetcherMigrationRecipientInstance;
+extern FailPoint setTenantMigrationRecipientInstanceHostTimeout;
+extern FailPoint pauseAfterRetrievingLastTxnMigrationRecipientInstance;
+extern FailPoint fpBeforeMarkingCloneSuccess;
+extern FailPoint fpBeforeFetchingCommittedTransactions;
+extern FailPoint fpAfterFetchingCommittedTransactions;
+extern FailPoint fpAfterStartingOplogApplierMigrationRecipientInstance;
+extern FailPoint fpBeforeFulfillingDataConsistentPromise;
+extern FailPoint fpAfterDataConsistentMigrationRecipientInstance;
+extern FailPoint fpBeforePersistingRejectReadsBeforeTimestamp;
+extern FailPoint fpAfterWaitForRejectReadsBeforeTimestamp;
+extern FailPoint hangBeforeTaskCompletion;
+extern FailPoint fpAfterReceivingRecipientForgetMigration;
+extern FailPoint hangAfterCreatingRSM;
+extern FailPoint skipRetriesWhenConnectingToDonorHost;
+extern FailPoint fpBeforeDroppingTempCollections;
+extern FailPoint fpWaitUntilTimestampMajorityCommitted;
+extern FailPoint hangAfterUpdatingTransactionEntry;
+extern FailPoint fpBeforeAdvancingStableTimestamp;
+
+}  // namespace repl
+
 namespace tenant_migration_util {
 
 inline Status validateDatabasePrefix(const std::string& tenantId) {
+    const auto isValidTenantId = OID::parse(tenantId);
+    if (!isValidTenantId.isOK()) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream() << "Invalid tenant id format for tenant \'" << tenantId << "'");
+    }
+
     const bool isPrefixSupported =
         kUnsupportedTenantIds.find(tenantId) == kUnsupportedTenantIds.end() &&
         tenantId.find('_') == std::string::npos;
@@ -80,7 +130,13 @@ inline Status validateDatabasePrefix(const TenantId& tenantId) {
 }
 
 inline Status validateDatabasePrefix(const std::vector<TenantId>& tenantsId) {
+    std::set<TenantId> tenants;
     for (const auto& tenantId : tenantsId) {
+        auto res = tenants.emplace(tenantId);
+        uassert(ErrorCodes::InvalidOptions,
+                str::stream() << "Duplicate tenantIds are not allowed. Duplicate tenantId : "
+                              << tenantId,
+                res.second);
         auto status = validateDatabasePrefix(tenantId);
         if (!status.isOK()) {
             return status;
@@ -204,10 +260,12 @@ inline void protocolTenantIdsCompatibilityCheck(
 
     switch (protocol) {
         case MigrationProtocolEnum::kShardMerge: {
-            uassert(ErrorCodes::InvalidOptions,
-                    str::stream() << "'tenantIds' is required for protocol '"
-                                  << MigrationProtocol_serializer(protocol) << "'",
-                    tenantIds && !tenantIds->empty());
+            {
+                uassert(ErrorCodes::InvalidOptions,
+                        str::stream() << "'tenantIds' is required for protocol '"
+                                      << MigrationProtocol_serializer(protocol) << "'",
+                        tenantIds && !tenantIds->empty());
+            }
             break;
         }
         case MigrationProtocolEnum::kMultitenantMigrations: {
@@ -247,6 +305,26 @@ inline void protocolReadPreferenceCompatibilityCheck(OperationContext* opCtx,
     uassert(ErrorCodes::FailedToSatisfyReadPreference,
             "Shard Merge protocol only supports primary read preference",
             !readPreference.canRunOnSecondary());
+}
+
+inline void protocolCheckRecipientForgetDecision(
+    const MigrationProtocolEnum protocol, const boost::optional<MigrationDecisionEnum>& decision) {
+    switch (protocol) {
+        case MigrationProtocolEnum::kShardMerge:
+            uassert(ErrorCodes::InvalidOptions,
+                    str::stream() << "'decision' is required for protocol '"
+                                  << MigrationProtocol_serializer(protocol) << "'",
+                    decision.has_value());
+            break;
+        case MigrationProtocolEnum::kMultitenantMigrations:
+            uassert(ErrorCodes::InvalidOptions,
+                    str::stream() << "'decision' must be empty for protocol '"
+                                  << MigrationProtocol_serializer(protocol) << "'",
+                    !decision.has_value());
+            break;
+        default:
+            MONGO_UNREACHABLE;
+    }
 }
 
 /*

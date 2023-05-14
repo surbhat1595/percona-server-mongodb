@@ -63,7 +63,7 @@ public:
                        const NamespaceString& nss,
                        const UUID& uuid,
                        BSONObj indexDoc,
-                       bool fromMigrate) override {}
+                       bool fromMigrate) override;
 
     void onStartIndexBuild(OperationContext* opCtx,
                            const NamespaceString& nss,
@@ -95,7 +95,8 @@ public:
                    const CollectionPtr& coll,
                    std::vector<InsertStatement>::const_iterator begin,
                    std::vector<InsertStatement>::const_iterator end,
-                   bool fromMigrate) override;
+                   std::vector<bool> fromMigrate,
+                   bool defaultFromMigrate) override;
 
     void onInsertGlobalIndexKey(OperationContext* opCtx,
                                 const NamespaceString& globalIndexNss,

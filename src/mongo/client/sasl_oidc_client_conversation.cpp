@@ -34,6 +34,7 @@
 #include "mongo/base/data_range.h"
 #include "mongo/bson/json.h"
 #include "mongo/client/mongo_uri.h"
+#include "mongo/client/oauth_discovery_factory.h"
 #include "mongo/client/sasl_client_session.h"
 #include "mongo/client/sasl_oidc_client_params_gen.h"
 #include "mongo/db/auth/oidc_protocol_gen.h"
@@ -44,7 +45,6 @@
 namespace mongo {
 namespace {
 constexpr auto kClientIdParameterName = "client_id"_sd;
-constexpr auto kClientSecretParameterName = "client_secret"_sd;
 constexpr auto kRequestScopesParameterName = "scope"_sd;
 constexpr auto kGrantTypeParameterName = "grant_type"_sd;
 constexpr auto kGrantTypeParameterDeviceCodeValue =
@@ -53,13 +53,8 @@ constexpr auto kGrantTypeParameterRefreshTokenValue = "refresh_token"_sd;
 constexpr auto kDeviceCodeParameterName = "device_code"_sd;
 constexpr auto kRefreshTokenParameterName = kGrantTypeParameterRefreshTokenValue;
 
-inline void appendPostBodyRequiredParams(StringBuilder* sb,
-                                         StringData clientId,
-                                         const boost::optional<StringData>& clientSecret) {
+inline void appendPostBodyRequiredParams(StringBuilder* sb, StringData clientId) {
     *sb << kClientIdParameterName << "=" << uriEncode(clientId);
-    if (clientSecret) {
-        *sb << "&" << kClientSecretParameterName << "=" << uriEncode(clientSecret->toString());
-    }
 }
 
 inline void appendPostBodyDeviceCodeRequestParams(
@@ -95,8 +90,10 @@ BSONObj doPostRequest(HttpClient* httpClient, StringData endPoint, const std::st
 
 // @returns {accessToken, refreshToken}
 std::pair<std::string, std::string> doDeviceAuthorizationGrantFlow(
-    const auth::OIDCMechanismServerStep1& serverReply, StringData principalName) {
-    auto deviceAuthorizationEndpoint = serverReply.getDeviceAuthorizationEndpoint().get();
+    const OAuthAuthorizationServerMetadata& discoveryReply,
+    const auth::OIDCMechanismServerStep1& serverReply,
+    StringData principalName) {
+    auto deviceAuthorizationEndpoint = discoveryReply.getDeviceAuthorizationEndpoint().get();
     uassert(ErrorCodes::BadValue,
             "Device authorization endpoint in server reply must be an https endpoint or localhost",
             deviceAuthorizationEndpoint.startsWith("https://"_sd) ||
@@ -111,7 +108,7 @@ std::pair<std::string, std::string> doDeviceAuthorizationGrantFlow(
     // Construct body of POST request to device authorization endpoint based on provided
     // parameters.
     StringBuilder deviceCodeRequestSb;
-    appendPostBodyRequiredParams(&deviceCodeRequestSb, clientId, serverReply.getClientSecret());
+    appendPostBodyRequiredParams(&deviceCodeRequestSb, clientId);
     appendPostBodyDeviceCodeRequestParams(&deviceCodeRequestSb, serverReply.getRequestScopes());
     auto deviceCodeRequest = deviceCodeRequestSb.str();
 
@@ -131,13 +128,13 @@ std::pair<std::string, std::string> doDeviceAuthorizationGrantFlow(
     // Poll token endpoint for access and refresh tokens. It should return immediately since
     // the shell blocks on the authenticationSimulator until it completes, but poll anyway.
     StringBuilder tokenRequestSb;
-    appendPostBodyRequiredParams(&tokenRequestSb, clientId, serverReply.getClientSecret());
+    appendPostBodyRequiredParams(&tokenRequestSb, clientId);
     appendPostBodyTokenRequestParams(&tokenRequestSb, deviceAuthorizationResponse.getDeviceCode());
     auto tokenRequest = tokenRequestSb.str();
 
     while (true) {
         BSONObj tokenResponseObj =
-            doPostRequest(httpClient.get(), serverReply.getTokenEndpoint(), tokenRequest);
+            doPostRequest(httpClient.get(), discoveryReply.getTokenEndpoint(), tokenRequest);
         auto tokenResponse =
             OIDCTokenResponse::parse(IDLParserContext{"oidcTokenResponse"}, tokenResponseObj);
 
@@ -204,9 +201,7 @@ StatusWith<std::string> SaslOIDCClientConversation::doRefreshFlow() try {
                 !oidcClientGlobalParams.oidcTokenEndpoint.empty());
 
     StringBuilder refreshFlowRequestBuilder;
-    appendPostBodyRequiredParams(&refreshFlowRequestBuilder,
-                                 oidcClientGlobalParams.oidcClientId,
-                                 StringData(oidcClientGlobalParams.oidcClientSecret));
+    appendPostBodyRequiredParams(&refreshFlowRequestBuilder, oidcClientGlobalParams.oidcClientId);
     appendPostBodyRefreshFlowParams(&refreshFlowRequestBuilder,
                                     oidcClientGlobalParams.oidcRefreshToken);
 
@@ -271,8 +266,13 @@ StatusWith<bool> SaslOIDCClientConversation::_secondStep(StringData input,
         auto serverReply = auth::OIDCMechanismServerStep1::parse(
             IDLParserContext{"oidcServerStep1Reply"}, payload);
 
+        auto issuer = serverReply.getIssuer();
+
+        OAuthDiscoveryFactory discoveryFactory(HttpClient::create());
+        OAuthAuthorizationServerMetadata discoveryReply = discoveryFactory.acquire(issuer);
+
         // The token endpoint must be provided for both device auth and authz code flows.
-        auto tokenEndpoint = serverReply.getTokenEndpoint();
+        auto tokenEndpoint = discoveryReply.getTokenEndpoint();
         uassert(ErrorCodes::BadValue,
                 "Missing or invalid token endpoint in server reply",
                 !tokenEndpoint.empty() &&
@@ -284,12 +284,13 @@ StatusWith<bool> SaslOIDCClientConversation::_secondStep(StringData input,
 
         // Try device authorization grant flow first if provided, falling back to authorization code
         // flow.
-        if (serverReply.getDeviceAuthorizationEndpoint()) {
-            auto tokens = doDeviceAuthorizationGrantFlow(serverReply, _principalName);
+        if (discoveryReply.getDeviceAuthorizationEndpoint()) {
+            auto tokens =
+                doDeviceAuthorizationGrantFlow(discoveryReply, serverReply, _principalName);
             _accessToken = tokens.first;
             oidcClientGlobalParams.oidcAccessToken = tokens.first;
             oidcClientGlobalParams.oidcRefreshToken = tokens.second;
-        } else if (serverReply.getAuthorizationEndpoint()) {
+        } else if (discoveryReply.getAuthorizationEndpoint()) {
             auto tokens = doAuthorizationCodeFlow(serverReply);
             _accessToken = tokens.first;
             oidcClientGlobalParams.oidcAccessToken = tokens.first;

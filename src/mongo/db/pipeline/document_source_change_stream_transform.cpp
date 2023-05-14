@@ -32,6 +32,7 @@
 
 #include "mongo/db/pipeline/document_source_change_stream_transform.h"
 
+#include "mongo/db/pipeline/change_stream_helpers.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/resume_token.h"
@@ -80,8 +81,7 @@ DocumentSourceChangeStreamTransform::DocumentSourceChangeStreamTransform(
       _isIndependentOfAnyCollection(expCtx->ns.isCollectionlessAggregateNS()) {
 
     // Extract the resume token or high-water-mark from the spec.
-    auto tokenData =
-        DocumentSourceChangeStream::resolveResumeTokenFromSpec(expCtx, _changeStreamSpec);
+    auto tokenData = change_stream::resolveResumeTokenFromSpec(expCtx, _changeStreamSpec);
 
     // Set the initialPostBatchResumeToken on the expression context.
     expCtx->initialPostBatchResumeToken = ResumeToken(tokenData).toBSON();
@@ -105,16 +105,119 @@ StageConstraints DocumentSourceChangeStreamTransform::constraints(
     return constraints;
 }
 
-Value DocumentSourceChangeStreamTransform::serialize(
-    boost::optional<ExplainOptions::Verbosity> explain) const {
-    if (explain) {
-        return Value(Document{{DocumentSourceChangeStream::kStageName,
-                               Document{{"stage"_sd, "internalTransform"_sd},
-                                        {"options"_sd, _changeStreamSpec.toBSON()}}}});
-    }
+namespace {
 
-    return Value(
-        Document{{DocumentSourceChangeStreamTransform::kStageName, _changeStreamSpec.toBSON()}});
+template <typename T>
+void serializeSpecField(BSONObjBuilder* builder,
+                        SerializationOptions opts,
+                        const StringData& fieldName,
+                        const boost::optional<T>& value) {
+    if (value) {
+        opts.serializeLiteralValue((*value).toBSON()).addToBsonObj(builder, fieldName);
+    }
+}
+
+template <>
+void serializeSpecField(BSONObjBuilder* builder,
+                        SerializationOptions opts,
+                        const StringData& fieldName,
+                        const boost::optional<Timestamp>& value) {
+    if (value) {
+        opts.serializeLiteralValue(*value).addToBsonObj(builder, fieldName);
+    }
+}
+
+template <typename T>
+void serializeSpecField(BSONObjBuilder* builder,
+                        SerializationOptions opts,
+                        const StringData& fieldName,
+                        const T& value) {
+    opts.serializeLiteralValue(value).addToBsonObj(builder, fieldName);
+}
+
+template <>
+void serializeSpecField(BSONObjBuilder* builder,
+                        SerializationOptions opts,
+                        const StringData& fieldName,
+                        const mongo::OptionalBool& value) {
+    if (value.has_value()) {
+        if (opts.replacementForLiteralArgs) {
+            builder->append(fieldName, *opts.replacementForLiteralArgs);
+        } else {
+            value.serializeToBSON(fieldName, builder);
+        }
+    }
+}
+
+void serializeSpec(const DocumentSourceChangeStreamSpec& spec,
+                   SerializationOptions opts,
+                   BSONObjBuilder* builder) {
+    serializeSpecField(builder,
+                       opts,
+                       DocumentSourceChangeStreamSpec::kResumeAfterFieldName,
+                       spec.getResumeAfter());
+    serializeSpecField(
+        builder, opts, DocumentSourceChangeStreamSpec::kStartAfterFieldName, spec.getStartAfter());
+    serializeSpecField(builder,
+                       opts,
+                       DocumentSourceChangeStreamSpec::kStartAtOperationTimeFieldName,
+                       spec.getStartAtOperationTime());
+    serializeSpecField(builder,
+                       opts,
+                       DocumentSourceChangeStreamSpec::kFullDocumentFieldName,
+                       ::mongo::FullDocumentMode_serializer(spec.getFullDocument()));
+    serializeSpecField(
+        builder,
+        opts,
+        DocumentSourceChangeStreamSpec::kFullDocumentBeforeChangeFieldName,
+        ::mongo::FullDocumentBeforeChangeMode_serializer(spec.getFullDocumentBeforeChange()));
+    serializeSpecField(builder,
+                       opts,
+                       DocumentSourceChangeStreamSpec::kAllChangesForClusterFieldName,
+                       spec.getAllChangesForCluster());
+    serializeSpecField(builder,
+                       opts,
+                       DocumentSourceChangeStreamSpec::kShowMigrationEventsFieldName,
+                       spec.getShowMigrationEvents());
+    serializeSpecField(builder,
+                       opts,
+                       DocumentSourceChangeStreamSpec::kShowSystemEventsFieldName,
+                       spec.getShowSystemEvents());
+    serializeSpecField(builder,
+                       opts,
+                       DocumentSourceChangeStreamSpec::kAllowToRunOnConfigDBFieldName,
+                       spec.getAllowToRunOnConfigDB());
+    serializeSpecField(builder,
+                       opts,
+                       DocumentSourceChangeStreamSpec::kAllowToRunOnSystemNSFieldName,
+                       spec.getAllowToRunOnSystemNS());
+    serializeSpecField(builder,
+                       opts,
+                       DocumentSourceChangeStreamSpec::kShowExpandedEventsFieldName,
+                       spec.getShowExpandedEvents());
+    serializeSpecField(builder,
+                       opts,
+                       DocumentSourceChangeStreamSpec::kShowRawUpdateDescriptionFieldName,
+                       spec.getShowRawUpdateDescription());
+}
+
+}  // namespace
+
+Value DocumentSourceChangeStreamTransform::serialize(SerializationOptions opts) const {
+    BSONObjBuilder builder;
+    if (opts.verbosity) {
+        BSONObjBuilder sub(builder.subobjStart(DocumentSourceChangeStream::kStageName));
+        sub.append("stage"_sd, kStageName);
+        BSONObjBuilder options(sub.subobjStart("options"_sd));
+        serializeSpec(_changeStreamSpec, opts, &options);
+        options.done();
+        sub.done();
+    } else {
+        BSONObjBuilder sub(builder.subobjStart(kStageName));
+        serializeSpec(_changeStreamSpec, opts, &sub);
+        sub.done();
+    }
+    return Value(builder.obj());
 }
 
 DepsTracker::State DocumentSourceChangeStreamTransform::getDependencies(DepsTracker* deps) const {

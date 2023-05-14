@@ -98,6 +98,11 @@ var WriteWithoutShardKeyTestUtil = (function() {
         if (operationType === OperationType.updateOne) {
             assert.eq(expectedResponse.n, res.n);
             assert.eq(expectedResponse.nModified, res.nModified);
+            cmdObj.updates.forEach(update => {
+                if (update.upsert) {
+                    assert.eq(expectedResponse.upserted, res.upserted);
+                }
+            });
         } else if (operationType === OperationType.deleteOne) {
             assert.eq(expectedResponse.n, res.n);
         } else {
@@ -105,6 +110,10 @@ var WriteWithoutShardKeyTestUtil = (function() {
             assert.eq(expectedResponse.lastErrorObject.updateExisting,
                       res.lastErrorObject.updateExisting);
             assert((typeof res.value) !== "undefined");
+
+            if (expectedResponse.value) {
+                assert.eq(expectedResponse.value, res.value, res.value);
+            }
 
             // For findAndModify, get the pre/post image document to compare for retryability tests
             Object.assign(expectedRetryResponse, {value: res.value});

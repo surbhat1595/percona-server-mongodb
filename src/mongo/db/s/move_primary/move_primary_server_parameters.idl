@@ -56,4 +56,7 @@ server_parameters:
         set_at: startup
         cpp_vartype: int
         cpp_varname: gMovePrimaryRecipientServiceMaxThreadCount
-        default: 3
+        default: 8
+        validator:
+            gte: 1
+            lte: 256

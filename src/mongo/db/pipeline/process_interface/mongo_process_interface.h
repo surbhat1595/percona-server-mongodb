@@ -178,11 +178,6 @@ public:
                           const WriteConcernOptions& wc,
                           boost::optional<OID> targetEpoch) = 0;
 
-    virtual Status insertTimeseries(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                    const NamespaceString& ns,
-                                    std::vector<BSONObj>&& objs,
-                                    const WriteConcernOptions& wc,
-                                    boost::optional<OID> targetEpoch) = 0;
     /**
      * Updates the documents matching 'queries' with the objects 'updates'. Returns an error Status
      * if any of the updates fail, otherwise returns an 'UpdateResult' objects with the details of
@@ -279,7 +274,6 @@ public:
         const NamespaceString& targetNs,
         bool dropTarget,
         bool stayTemp,
-        bool allowBuckets,
         const BSONObj& originalCollectionOptions,
         const std::list<BSONObj>& originalIndexes) = 0;
 
@@ -290,12 +284,6 @@ public:
     virtual void createCollection(OperationContext* opCtx,
                                   const DatabaseName& dbName,
                                   const BSONObj& cmdObj) = 0;
-
-    virtual void createTimeseries(OperationContext* opCtx,
-                                  const NamespaceString& ns,
-                                  const BSONObj& options,
-                                  bool createView) = 0;
-
 
     /**
      * Runs createIndexes on the given database for the given index specs. If running on a shardsvr
@@ -326,6 +314,18 @@ public:
         boost::optional<BSONObj> readConcern = boost::none) = 0;
 
     /**
+     * Same as above but takes in an aggRequest and pipeline. This preserves any
+     * aggregation options set on the AggregateCommandRequest.
+     */
+    virtual std::unique_ptr<Pipeline, PipelineDeleter> attachCursorSourceToPipeline(
+        const AggregateCommandRequest& aggRequest,
+        Pipeline* pipeline,
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        boost::optional<BSONObj> shardCursorsSortSpec = boost::none,
+        ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
+        boost::optional<BSONObj> readConcern = boost::none) = 0;
+
+    /**
      * Accepts a pipeline and attaches a cursor source to it. Returns a BSONObj of the form
      * {"pipeline": <explainOutput>}. Note that <explainOutput> can be an object (shardsvr) or an
      * array (non_shardsvr).
@@ -348,7 +348,8 @@ public:
      * compiler expects to find an implementation of PipelineDeleter.
      */
     virtual std::unique_ptr<Pipeline, PipelineDeleter> attachCursorSourceToPipelineForLocalRead(
-        Pipeline* pipeline) = 0;
+        Pipeline* pipeline,
+        boost::optional<const AggregateCommandRequest&> aggRequest = boost::none) = 0;
 
     /**
      * Returns a vector of owned BSONObjs, each of which contains details of an in-progress

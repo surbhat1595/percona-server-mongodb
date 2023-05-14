@@ -2,7 +2,7 @@
  * Tests mergeAllChunksOnShard command and auto-merger behavior
  *
  * @tags: [
- *   featureFlagAutoMerger,
+ *   requires_fcv_70,
  *   temporary_catalog_shard_incompatible,
  * ]
  */
@@ -73,27 +73,24 @@ function resetHistoryWindowInSecs(st) {
     });
 }
 
-let defaultChunkDefragmentationThrottlingMS = null;
+let defaultAutoMergerThrottlingMS = null;
 function setBalancerMergeThrottling(st, valueInMS) {
     st.forEachConfigServer((conn) => {
-        const res =
-            conn.adminCommand({setParameter: 1, chunkDefragmentationThrottlingMS: valueInMS});
+        const res = conn.adminCommand({setParameter: 1, autoMergerThrottlingMS: valueInMS});
         assert.commandWorked(res);
-        defaultChunkDefragmentationThrottlingMS = res.was;
+        defaultAutoMergerThrottlingMS = res.was;
     });
 }
 
 function resetBalancerMergeThrottling(st) {
-    if (!defaultChunkDefragmentationThrottlingMS) {
+    if (!defaultAutoMergerThrottlingMS) {
         // Default throttling param was never changed, hence no need to reset it
         return;
     }
 
     st.forEachConfigServer((conn) => {
-        assert.commandWorked(conn.adminCommand({
-            setParameter: 1,
-            chunkDefragmentationThrottlingMS: defaultChunkDefragmentationThrottlingMS
-        }));
+        assert.commandWorked(conn.adminCommand(
+            {setParameter: 1, autoMergerThrottlingMS: defaultAutoMergerThrottlingMS}));
     });
 }
 
@@ -402,7 +399,11 @@ function testConfigurableAutoMergerIntervalSecs(st, testDB) {
 
     // Repeatedly split the only chunk and expect the auto-merger to merge it back right away
     for (var i = 0; i < 3; i++) {
-        splitChunk(st, coll, 0 /* middle */);
+        assert.soonNoExcept(() => {
+            // Split may fail if mongos doesn't see the previous merge (SERVER-54979)
+            splitChunk(st, coll, 0 /* middle */);
+            return true;
+        });
         assert.soon(
             () =>
                 findChunksUtil.findChunksByNs(st.config, coll.getFullName()).toArray().length == 1,

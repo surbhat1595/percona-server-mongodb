@@ -57,13 +57,13 @@ bool InternalSchemaObjectMatchExpression::matchesSingleElement(const BSONElement
 void InternalSchemaObjectMatchExpression::debugString(StringBuilder& debug,
                                                       int indentationLevel) const {
     _debugAddSpace(debug, indentationLevel);
-    debug << kName << "\n";
+    debug << kName;
+    _debugStringAttachTagInfo(&debug);
     _sub->debugString(debug, indentationLevel + 1);
 }
 
 BSONObj InternalSchemaObjectMatchExpression::getSerializedRightHandSide(
     SerializationOptions opts) const {
-    // TODO SERVER-73678 respect 'replacementForLiteralArgs'.
     BSONObjBuilder objMatchBob;
     BSONObjBuilder subBob(objMatchBob.subobjStart(kName));
     _sub->serialize(&subBob, opts);

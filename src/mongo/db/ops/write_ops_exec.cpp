@@ -33,6 +33,7 @@
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/catalog/collection_write_path.h"
+#include "mongo/db/catalog/collection_yield_restore.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog_raii.h"
@@ -61,6 +62,7 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/query/collection_query_info.h"
 #include "mongo/db/query/get_executor.h"
+#include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -94,6 +96,7 @@
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/logv2/log.h"
+#include "mongo/s/query_analysis_sampler_util.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/log_and_backoff.h"
@@ -219,7 +222,7 @@ void finishCurOp(OperationContext* opCtx, CurOp* curOp) {
     try {
         curOp->done();
         auto executionTimeMicros = duration_cast<Microseconds>(curOp->elapsedTimeExcludingPauses());
-        curOp->debug().executionTime = executionTimeMicros;
+        curOp->debug().additiveMetrics.executionTime = executionTimeMicros;
 
         recordCurOpMetrics(opCtx);
         Top::get(opCtx->getServiceContext())
@@ -288,103 +291,6 @@ void makeCollection(OperationContext* opCtx, const NamespaceString& ns) {
             wuow.commit();
         }
     });
-}
-
-/**
- * Returns true if the batch can continue, false to stop the batch, or throws to fail the command.
- */
-bool handleError(OperationContext* opCtx,
-                 const DBException& ex,
-                 const NamespaceString& nss,
-                 const bool ordered,
-                 bool isMultiUpdate,
-                 const boost::optional<UUID> sampleId,
-                 WriteResult* out) {
-    NotPrimaryErrorTracker::get(opCtx->getClient()).recordError(ex.code());
-    auto& curOp = *CurOp::get(opCtx);
-    curOp.debug().errInfo = ex.toStatus();
-
-    if (ErrorCodes::isInterruption(ex.code())) {
-        throw;  // These have always failed the whole batch.
-    }
-
-    if (ErrorCodes::WouldChangeOwningShard == ex.code()) {
-        if (analyze_shard_key::supportsPersistingSampledQueries() && sampleId) {
-            // Sample the diff before rethrowing the error since mongos will handle this update by
-            // by performing a delete on the shard owning the pre-image doc and an insert on the
-            // shard owning the post-image doc. As a result, this update will not show up in the
-            // OpObserver as an update.
-            auto wouldChangeOwningShardInfo = ex.extraInfo<WouldChangeOwningShardInfo>();
-            invariant(wouldChangeOwningShardInfo);
-
-            analyze_shard_key::QueryAnalysisWriter::get(opCtx)
-                ->addDiff(*sampleId,
-                          nss,
-                          *wouldChangeOwningShardInfo->getUuid(),
-                          wouldChangeOwningShardInfo->getPreImage(),
-                          wouldChangeOwningShardInfo->getPostImage())
-                .getAsync([](auto) {});
-        }
-        throw;  // Fail this write so mongos can retry
-    }
-
-    auto txnParticipant = TransactionParticipant::get(opCtx);
-    if (txnParticipant && opCtx->inMultiDocumentTransaction()) {
-        if (isTransientTransactionError(
-                ex.code(), false /* hasWriteConcernError */, false /* isCommitOrAbort */)) {
-            // Tell the client to try the whole txn again, by returning ok: 0 with errorLabels.
-            throw;
-        }
-        // If we are in a transaction, we must fail the whole batch.
-        out->results.emplace_back(ex.toStatus());
-        txnParticipant.abortTransaction(opCtx);
-        return false;
-    }
-
-    if (ex.code() == ErrorCodes::StaleDbVersion || ErrorCodes::isStaleShardVersionError(ex)) {
-        if (!opCtx->getClient()->isInDirectClient()) {
-            auto& oss = OperationShardingState::get(opCtx);
-            oss.setShardingOperationFailedStatus(ex.toStatus());
-        }
-
-        // Since this is a routing error, it is guaranteed that all subsequent operations will fail
-        // with the same cause, so don't try doing any more operations. The command reply serializer
-        // will handle repeating this error for unordered writes.
-        out->results.emplace_back(ex.toStatus());
-        return false;
-    }
-
-    if (ErrorCodes::isTenantMigrationError(ex)) {
-        // Multiple not-idempotent updates are not safe to retry at the cloud level. We treat these
-        // the same as an interruption due to a repl state change and fail the whole batch.
-        if (isMultiUpdate) {
-            if (ex.code() != ErrorCodes::TenantMigrationConflict) {
-                uassertStatusOK(kNonRetryableTenantMigrationStatus);
-            }
-
-            // If the migration is active, we throw a different code that will be caught higher up
-            // and replaced with a non-retryable code after the migration finishes to avoid wasted
-            // retries.
-            auto migrationConflictInfo = ex.toStatus().extraInfo<TenantMigrationConflictInfo>();
-            uassertStatusOK(
-                Status(NonRetryableTenantMigrationConflictInfo(
-                           migrationConflictInfo->getMigrationId(),
-                           migrationConflictInfo->getTenantMigrationAccessBlocker()),
-                       "Multi update must block until this tenant migration commits or aborts"));
-        }
-
-        // If an op fails due to a TenantMigrationError then subsequent ops will also fail due to a
-        // migration blocking, committing, or aborting.
-        out->results.emplace_back(ex.toStatus());
-        return false;
-    }
-
-    if (ex.code() == ErrorCodes::ShardCannotRefreshDueToLocksHeld) {
-        throw;
-    }
-
-    out->results.emplace_back(ex.toStatus());
-    return !ordered;
 }
 
 void insertDocuments(OperationContext* opCtx,
@@ -487,6 +393,100 @@ std::tuple<bool, bool> getDocumentValidationFlags(OperationContext* opCtx,
     return std::make_tuple(req.getBypassDocumentValidation(), fleCrudProcessed);
 }
 }  // namespace
+
+bool handleError(OperationContext* opCtx,
+                 const DBException& ex,
+                 const NamespaceString& nss,
+                 const bool ordered,
+                 bool isMultiUpdate,
+                 const boost::optional<UUID> sampleId,
+                 WriteResult* out) {
+    NotPrimaryErrorTracker::get(opCtx->getClient()).recordError(ex.code());
+    auto& curOp = *CurOp::get(opCtx);
+    curOp.debug().errInfo = ex.toStatus();
+
+    if (ErrorCodes::isInterruption(ex.code())) {
+        throw;  // These have always failed the whole batch.
+    }
+
+    if (ErrorCodes::WouldChangeOwningShard == ex.code()) {
+        if (analyze_shard_key::supportsPersistingSampledQueries(opCtx) && sampleId) {
+            // Sample the diff before rethrowing the error since mongos will handle this update by
+            // by performing a delete on the shard owning the pre-image doc and an insert on the
+            // shard owning the post-image doc. As a result, this update will not show up in the
+            // OpObserver as an update.
+            auto wouldChangeOwningShardInfo = ex.extraInfo<WouldChangeOwningShardInfo>();
+            invariant(wouldChangeOwningShardInfo);
+
+            analyze_shard_key::QueryAnalysisWriter::get(opCtx)
+                ->addDiff(*sampleId,
+                          nss,
+                          *wouldChangeOwningShardInfo->getUuid(),
+                          wouldChangeOwningShardInfo->getPreImage(),
+                          wouldChangeOwningShardInfo->getPostImage())
+                .getAsync([](auto) {});
+        }
+        throw;  // Fail this write so mongos can retry
+    }
+
+    auto txnParticipant = TransactionParticipant::get(opCtx);
+    if (txnParticipant && opCtx->inMultiDocumentTransaction()) {
+        if (isTransientTransactionError(
+                ex.code(), false /* hasWriteConcernError */, false /* isCommitOrAbort */)) {
+            // Tell the client to try the whole txn again, by returning ok: 0 with errorLabels.
+            throw;
+        }
+        // If we are in a transaction, we must fail the whole batch.
+        out->results.emplace_back(ex.toStatus());
+        txnParticipant.abortTransaction(opCtx);
+        return false;
+    }
+
+    if (ex.code() == ErrorCodes::StaleDbVersion || ErrorCodes::isStaleShardVersionError(ex)) {
+        if (!opCtx->getClient()->isInDirectClient()) {
+            auto& oss = OperationShardingState::get(opCtx);
+            oss.setShardingOperationFailedStatus(ex.toStatus());
+        }
+
+        // Since this is a routing error, it is guaranteed that all subsequent operations will fail
+        // with the same cause, so don't try doing any more operations. The command reply serializer
+        // will handle repeating this error for unordered writes.
+        out->results.emplace_back(ex.toStatus());
+        return false;
+    }
+
+    if (ErrorCodes::isTenantMigrationError(ex)) {
+        // Multiple not-idempotent updates are not safe to retry at the cloud level. We treat these
+        // the same as an interruption due to a repl state change and fail the whole batch.
+        if (isMultiUpdate) {
+            if (ex.code() != ErrorCodes::TenantMigrationConflict) {
+                uassertStatusOK(kNonRetryableTenantMigrationStatus);
+            }
+
+            // If the migration is active, we throw a different code that will be caught higher up
+            // and replaced with a non-retryable code after the migration finishes to avoid wasted
+            // retries.
+            auto migrationConflictInfo = ex.toStatus().extraInfo<TenantMigrationConflictInfo>();
+            uassertStatusOK(
+                Status(NonRetryableTenantMigrationConflictInfo(
+                           migrationConflictInfo->getMigrationId(),
+                           migrationConflictInfo->getTenantMigrationAccessBlocker()),
+                       "Multi update must block until this tenant migration commits or aborts"));
+        }
+
+        // If an op fails due to a TenantMigrationError then subsequent ops will also fail due to a
+        // migration blocking, committing, or aborting.
+        out->results.emplace_back(ex.toStatus());
+        return false;
+    }
+
+    if (ex.code() == ErrorCodes::ShardCannotRefreshDueToLocksHeld) {
+        throw;
+    }
+
+    out->results.emplace_back(ex.toStatus());
+    return !ordered;
+}
 
 bool getFleCrudProcessed(OperationContext* opCtx,
                          const boost::optional<EncryptionInformation>& encryptionInfo) {
@@ -664,6 +664,213 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
     }
 
     return true;
+}
+
+boost::optional<BSONObj> advanceExecutor(OperationContext* opCtx,
+                                         PlanExecutor* exec,
+                                         bool isRemove) {
+    BSONObj value;
+    PlanExecutor::ExecState state;
+    try {
+        state = exec->getNext(&value, nullptr);
+    } catch (DBException& exception) {
+        auto&& explainer = exec->getPlanExplainer();
+        auto&& [stats, _] = explainer.getWinningPlanStats(ExplainOptions::Verbosity::kExecStats);
+        LOGV2_WARNING(7267501,
+                      "Plan executor error during findAndModify: {error}, stats: {stats}",
+                      "Plan executor error during findAndModify",
+                      "error"_attr = exception.toStatus(),
+                      "stats"_attr = redact(stats));
+
+        exception.addContext("Plan executor error during findAndModify");
+        throw;
+    }
+
+    if (PlanExecutor::ADVANCED == state) {
+        return {std::move(value)};
+    }
+
+    invariant(state == PlanExecutor::IS_EOF);
+    return boost::none;
+}
+
+UpdateResult writeConflictRetryUpsert(OperationContext* opCtx,
+                                      const NamespaceString& nsString,
+                                      CurOp* curOp,
+                                      OpDebug* opDebug,
+                                      bool inTransaction,
+                                      bool remove,
+                                      bool upsert,
+                                      boost::optional<BSONObj>& docFound,
+                                      ParsedUpdate* parsedUpdate) {
+    AutoGetCollection autoColl(opCtx, nsString, MODE_IX);
+    Database* db = autoColl.ensureDbExists(opCtx);
+
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        CurOp::get(opCtx)->enter_inlock(
+            nsString, CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nsString.dbName()));
+    }
+
+    assertCanWrite_inlock(opCtx, nsString);
+
+    CollectionPtr createdCollection;
+    const CollectionPtr* collectionPtr = &autoColl.getCollection();
+
+    // TODO SERVER-50983: Create abstraction for creating collection when using
+    // AutoGetCollection Create the collection if it does not exist when performing an upsert
+    // because the update stage does not create its own collection
+    if (!*collectionPtr && upsert) {
+        assertCanWrite_inlock(opCtx, nsString);
+
+        createdCollection = CollectionPtr(
+            CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nsString));
+
+        // If someone else beat us to creating the collection, do nothing
+        if (!createdCollection) {
+            uassertStatusOK(userAllowedCreateNS(opCtx, nsString));
+            OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
+                unsafeCreateCollection(opCtx);
+            WriteUnitOfWork wuow(opCtx);
+            CollectionOptions defaultCollectionOptions;
+            uassertStatusOK(db->userCreateNS(opCtx, nsString, defaultCollectionOptions));
+            wuow.commit();
+
+            createdCollection = CollectionPtr(
+                CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nsString));
+        }
+
+        invariant(createdCollection);
+        createdCollection.makeYieldable(opCtx,
+                                        LockedCollectionYieldRestore(opCtx, createdCollection));
+        collectionPtr = &createdCollection;
+    }
+    const auto& collection = *collectionPtr;
+
+    if (collection && collection->isCapped()) {
+        uassert(
+            ErrorCodes::OperationNotSupportedInTransaction,
+            str::stream() << "Collection '" << collection->ns()
+                          << "' is a capped collection. Writes in transactions are not allowed on "
+                             "capped collections.",
+            !inTransaction);
+    }
+
+    const auto exec = uassertStatusOK(
+        getExecutorUpdate(opDebug, &collection, parsedUpdate, boost::none /* verbosity */));
+
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        CurOp::get(opCtx)->setPlanSummary_inlock(exec->getPlanExplainer().getPlanSummary());
+    }
+
+    docFound = advanceExecutor(opCtx, exec.get(), remove);
+    // Nothing after advancing the plan executor should throw a WriteConflictException,
+    // so the following bookkeeping with execution stats won't end up being done
+    // multiple times.
+
+    PlanSummaryStats summaryStats;
+    auto&& explainer = exec->getPlanExplainer();
+    explainer.getSummaryStats(&summaryStats);
+    if (collection) {
+        CollectionQueryInfo::get(collection).notifyOfQuery(opCtx, collection, summaryStats);
+    }
+    auto updateResult = exec->getUpdateResult();
+    write_ops_exec::recordUpdateResultInOpDebug(updateResult, opDebug);
+    opDebug->setPlanSummaryMetrics(summaryStats);
+
+    if (updateResult.containsDotsAndDollarsField) {
+        // If it's an upsert, increment 'inserts' metric, otherwise increment 'updates'.
+        dotsAndDollarsFieldsCounters.incrementForUpsert(!updateResult.upsertedId.isEmpty());
+    }
+
+    if (curOp->shouldDBProfile()) {
+        auto&& [stats, _] = explainer.getWinningPlanStats(ExplainOptions::Verbosity::kExecStats);
+        curOp->debug().execStats = std::move(stats);
+    }
+
+    if (docFound) {
+        ResourceConsumption::DocumentUnitCounter docUnitsReturned;
+        docUnitsReturned.observeOne(docFound->objsize());
+
+        auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
+        metricsCollector.incrementDocUnitsReturned(curOp->getNS(), docUnitsReturned);
+    }
+
+    return updateResult;
+}
+
+long long writeConflictRetryRemove(OperationContext* opCtx,
+                                   const NamespaceString& nsString,
+                                   DeleteRequest* deleteRequest,
+                                   CurOp* curOp,
+                                   OpDebug* opDebug,
+                                   bool inTransaction,
+                                   boost::optional<BSONObj>& docFound) {
+
+    invariant(deleteRequest);
+
+    ParsedDelete parsedDelete(opCtx, deleteRequest);
+    uassertStatusOK(parsedDelete.parseRequest());
+
+    AutoGetCollection collection(opCtx, nsString, MODE_IX);
+
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        CurOp::get(opCtx)->enter_inlock(
+            nsString, CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nsString.dbName()));
+    }
+
+    assertCanWrite_inlock(opCtx, nsString);
+
+    if (collection && collection->isCapped()) {
+        uassert(
+            ErrorCodes::OperationNotSupportedInTransaction,
+            str::stream() << "Collection '" << collection->ns()
+                          << "' is a capped collection. Writes in transactions are not allowed on "
+                             "capped collections.",
+            !inTransaction);
+    }
+
+    const auto exec = uassertStatusOK(getExecutorDelete(
+        opDebug, &collection.getCollection(), &parsedDelete, boost::none /* verbosity */));
+
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        CurOp::get(opCtx)->setPlanSummary_inlock(exec->getPlanExplainer().getPlanSummary());
+    }
+
+    docFound = advanceExecutor(opCtx, exec.get(), true);
+    // Nothing after advancing the plan executor should throw a WriteConflictException,
+    // so the following bookkeeping with execution stats won't end up being done
+    // multiple times.
+
+    PlanSummaryStats summaryStats;
+    exec->getPlanExplainer().getSummaryStats(&summaryStats);
+    if (const auto& coll = collection.getCollection()) {
+        CollectionQueryInfo::get(coll).notifyOfQuery(opCtx, coll, summaryStats);
+    }
+    opDebug->setPlanSummaryMetrics(summaryStats);
+
+    // Fill out OpDebug with the number of deleted docs.
+    auto nDeleted = exec->executeDelete();
+    opDebug->additiveMetrics.ndeleted = nDeleted;
+
+    if (curOp->shouldDBProfile()) {
+        auto&& explainer = exec->getPlanExplainer();
+        auto&& [stats, _] = explainer.getWinningPlanStats(ExplainOptions::Verbosity::kExecStats);
+        curOp->debug().execStats = std::move(stats);
+    }
+
+    if (docFound) {
+        ResourceConsumption::DocumentUnitCounter docUnitsReturned;
+        docUnitsReturned.observeOne(docFound->objsize());
+
+        auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
+        metricsCollector.incrementDocUnitsReturned(curOp->getNS(), docUnitsReturned);
+    }
+
+    return nDeleted;
 }
 
 boost::optional<write_ops::WriteError> generateError(OperationContext* opCtx,
@@ -1033,6 +1240,7 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
     const write_ops::UpdateOpEntry& op,
     LegacyRuntimeConstants runtimeConstants,
     const boost::optional<BSONObj>& letParams,
+    const boost::optional<UUID>& sampleId,
     OperationSource source,
     bool forgoOpCounterIncrements) {
     globalOpCounters.gotUpdate();
@@ -1065,6 +1273,9 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
                                ? PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY
                                : PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
     request.setSource(source);
+    if (sampleId) {
+        request.setSampleId(sampleId);
+    }
 
     size_t numAttempts = 0;
     while (true) {
@@ -1181,19 +1392,11 @@ WriteResult performUpdates(OperationContext* opCtx,
             }
         });
 
-        if (analyze_shard_key::supportsPersistingSampledQueries() && singleOp.getSampleId()) {
-            auto updateOp = wholeOp;
-
-            // If the initial query was a write without shard key, the two phase write protocol
-            // modifies the query in the write phase. In order to get correct metrics, we need to
-            // reconstruct the original query prior to sampling.
-            if (wholeOp.getOriginalQuery()) {
-                updateOp.getUpdates().front().setQ(*wholeOp.getOriginalQuery());
-                updateOp.getUpdates().front().setCollation(wholeOp.getOriginalCollation());
-            }
-
+        auto sampleId = analyze_shard_key::getOrGenerateSampleId(
+            opCtx, ns, analyze_shard_key::SampledCommandNameEnum::kUpdate, singleOp);
+        if (sampleId) {
             analyze_shard_key::QueryAnalysisWriter::get(opCtx)
-                ->addUpdateQuery(updateOp, currentOpIndex)
+                ->addUpdateQuery(*sampleId, wholeOp, currentOpIndex)
                 .getAsync([](auto) {});
         }
 
@@ -1219,6 +1422,7 @@ WriteResult performUpdates(OperationContext* opCtx,
                                                      singleOp,
                                                      runtimeConstants,
                                                      wholeOp.getLet(),
+                                                     sampleId,
                                                      source,
                                                      forgoOpCounterIncrements);
             out.results.emplace_back(reply);
@@ -1318,7 +1522,7 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
                     *timeseriesOptions, request.getHint())));
         }
 
-        if (!feature_flags::gTimeseriesUpdatesDeletesSupport.isEnabled(
+        if (!feature_flags::gTimeseriesDeletesSupport.isEnabled(
                 serverGlobalParams.featureCompatibility)) {
             uassert(
                 ErrorCodes::InvalidOptions,
@@ -1455,19 +1659,10 @@ WriteResult performDeletes(OperationContext* opCtx,
             }
         });
 
-        if (analyze_shard_key::supportsPersistingSampledQueries() && singleOp.getSampleId()) {
-            auto deleteOp = wholeOp;
-
-            // If the initial query was a write without shard key, the two phase write protocol
-            // modifies the query in the write phase. In order to get correct metrics, we need to
-            // reconstruct the original query prior to sampling.
-            if (wholeOp.getOriginalQuery()) {
-                deleteOp.getDeletes().front().setQ(*wholeOp.getOriginalQuery());
-                deleteOp.getDeletes().front().setCollation(wholeOp.getOriginalCollation());
-            }
-
+        if (auto sampleId = analyze_shard_key::getOrGenerateSampleId(
+                opCtx, ns, analyze_shard_key::SampledCommandNameEnum::kDelete, singleOp)) {
             analyze_shard_key::QueryAnalysisWriter::get(opCtx)
-                ->addDeleteQuery(deleteOp, currentOpIndex)
+                ->addDeleteQuery(*sampleId, wholeOp, currentOpIndex)
                 .getAsync([](auto) {});
         }
 

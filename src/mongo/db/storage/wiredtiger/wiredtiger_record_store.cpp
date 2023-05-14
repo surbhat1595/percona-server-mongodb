@@ -138,6 +138,15 @@ std::size_t computeRecordIdSize(const RecordId& id) {
     return id.isStr() ? id.getStr().size() : 0;
 }
 
+boost::optional<NamespaceString> namespaceForUUID(OperationContext* opCtx,
+                                                  const boost::optional<UUID>& uuid) {
+    if (!uuid)
+        return boost::none;
+
+    // TODO SERVER-73111: Remove the dependency on CollectionCatalog
+    return CollectionCatalog::get(opCtx)->lookupNSSByUUID(opCtx, *uuid);
+}
+
 }  // namespace
 
 MONGO_FAIL_POINT_DEFINE(WTCompactRecordStoreEBUSY);
@@ -149,7 +158,8 @@ const std::string kWiredTigerEngineName = "wiredTiger";
 
 WiredTigerRecordStore::OplogTruncateMarkers
 WiredTigerRecordStore::OplogTruncateMarkers::createOplogTruncateMarkers(OperationContext* opCtx,
-                                                                        WiredTigerRecordStore* rs) {
+                                                                        WiredTigerRecordStore* rs,
+                                                                        const NamespaceString& ns) {
 
     invariant(rs->_isCapped && rs->_isOplog);
     invariant(rs->_oplogMaxSize && *rs->_oplogMaxSize > 0);
@@ -175,11 +185,16 @@ WiredTigerRecordStore::OplogTruncateMarkers::createOplogTruncateMarkers(Operatio
             minBytesPerTruncateMarker > 0);
 
     auto initialSetOfMarkers = CollectionTruncateMarkers::createFromExistingRecordStore(
-        opCtx, rs, minBytesPerTruncateMarker, [](const Record& record) {
+        opCtx,
+        rs,
+        ns,
+        minBytesPerTruncateMarker,
+        [](const Record& record) {
             BSONObj obj = record.data.toBson();
             auto wallTime = obj.hasField("wall") ? obj["wall"].Date() : obj["ts"].timestampTime();
             return RecordIdAndWallTime(record.id, wallTime);
-        });
+        },
+        numTruncateMarkersToKeep);
     LOGV2(22382,
           "WiredTiger record store oplog processing took {duration}ms",
           "WiredTiger record store oplog processing finished",
@@ -201,11 +216,8 @@ WiredTigerRecordStore::OplogTruncateMarkers::OplogTruncateMarkers(
     Microseconds totalTimeSpentBuilding,
     CollectionTruncateMarkers::MarkersCreationMethod creationMethod,
     WiredTigerRecordStore* rs)
-    : CollectionTruncateMarkers(std::move(markers),
-                                partialMarkerRecords,
-                                partialMarkerBytes,
-                                minBytesPerMarker,
-                                /* supportsExpiringPartialMarkers */ false),
+    : CollectionTruncateMarkers(
+          std::move(markers), partialMarkerRecords, partialMarkerBytes, minBytesPerMarker),
       _rs(rs),
       _totalTimeProcessing(totalTimeSpentBuilding),
       _processBySampling(creationMethod ==
@@ -260,7 +272,7 @@ void WiredTigerRecordStore::OplogTruncateMarkers::adjust(OperationContext* opCtx
     size_t numTruncateMarkersToKeep = std::min(
         kMaxTruncateMarkersToKeep, std::max(kMinTruncateMarkersToKeep, numTruncateMarkers));
     setMinBytesPerMarker(maxSize / numTruncateMarkersToKeep);
-    pokeReclaimThreadIfNeeded(opCtx);
+    pokeReclaimThread(opCtx);
 }
 
 StatusWith<std::string> WiredTigerRecordStore::parseOptionsField(const BSONObj options) {
@@ -496,7 +508,7 @@ StatusWith<std::string> WiredTigerRecordStore::generateCreateString(
 WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
                                              OperationContext* ctx,
                                              Params params)
-    : RecordStore(params.nss.ns(), params.ident, params.isCapped),
+    : RecordStore(params.uuid, params.ident, params.isCapped),
       _uri(WiredTigerKVEngine::kTableUriPrefix + params.ident),
       _tableId(WiredTigerSession::genTableId()),
       _engineName(params.engineName),
@@ -563,7 +575,7 @@ WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
 WiredTigerRecordStore::~WiredTigerRecordStore() {
     if (!isTemp()) {
         LOGV2_DEBUG(
-            22395, 1, "~WiredTigerRecordStore for: {namespace}", logAttrs(NamespaceString(ns())));
+            22395, 1, "~WiredTigerRecordStore", "ident"_attr = getIdent(), "uuid"_attr = uuid());
     } else {
         LOGV2_DEBUG(22396,
                     1,
@@ -579,6 +591,14 @@ WiredTigerRecordStore::~WiredTigerRecordStore() {
         // Delete oplog visibility manager on KV engine.
         _kvEngine->haltOplogManager(this, /*shuttingDown=*/false);
     }
+}
+
+std::string WiredTigerRecordStore::ns(OperationContext* opCtx) const {
+    auto nss = namespaceForUUID(opCtx, _uuid);
+    if (!nss)
+        return "";
+
+    return nss->ns();
 }
 
 void WiredTigerRecordStore::checkSize(OperationContext* opCtx) {
@@ -600,7 +620,7 @@ void WiredTigerRecordStore::checkSize(OperationContext* opCtx) {
                            "Record store was empty; setting count metadata to zero but marking "
                            "record store as needing size adjustment during recovery. ns: "
                            "{isTemp_temp_ns}, ident: {ident}",
-                           "isTemp_temp_ns"_attr = (isTemp() ? "(temp)" : ns()),
+                           "isTemp_temp_ns"_attr = (isTemp() ? "(temp)" : ns(opCtx)),
                            "ident"_attr = getIdent());
         sizeRecoveryState(getGlobalServiceContext())
             .markCollectionAsAlwaysNeedsSizeAdjustment(getIdent());
@@ -612,13 +632,14 @@ void WiredTigerRecordStore::checkSize(OperationContext* opCtx) {
         _sizeStorer->store(_uri, _sizeInfo);
 }
 
-void WiredTigerRecordStore::postConstructorInit(OperationContext* opCtx) {
+void WiredTigerRecordStore::postConstructorInit(OperationContext* opCtx,
+                                                const NamespaceString& ns) {
     // If the server was started in read-only mode, skip calculating the oplog truncate markers. The
     // OplogCapMaintainerThread does not get started in this instance.
-    if (NamespaceString::oplog(ns()) && opCtx->getServiceContext()->userWritesAllowed() &&
+    if (_isOplog && opCtx->getServiceContext()->userWritesAllowed() &&
         !storageGlobalParams.repair) {
         _oplogTruncateMarkers = std::make_shared<OplogTruncateMarkers>(
-            OplogTruncateMarkers::createOplogTruncateMarkers(opCtx, this));
+            OplogTruncateMarkers::createOplogTruncateMarkers(opCtx, this, ns));
     }
 
     if (_isOplog) {
@@ -724,8 +745,6 @@ bool WiredTigerRecordStore::findRecord(OperationContext* opCtx,
 }
 
 void WiredTigerRecordStore::doDeleteRecord(OperationContext* opCtx, const RecordId& id) {
-    // Only check if a write lock is held for regular (non-temporary) record stores.
-    dassert(ns() == "" || opCtx->lockState()->isWriteLocked());
     invariant(opCtx->lockState()->inAWriteUnitOfWork() || opCtx->lockState()->isNoop());
     // SERVER-48453: Initialize the next record id counter before deleting. This ensures we won't
     // reuse record ids, which can be problematic for the _mdb_catalog.
@@ -881,7 +900,9 @@ void WiredTigerRecordStore::reclaimOplog(OperationContext* opCtx) {
 
             // Stash the truncate point for next time to cleanly skip over tombstones, etc.
             _oplogTruncateMarkers->firstRecord = truncateMarker->lastRecord;
-            _oplogFirstRecord = std::move(truncateMarker->lastRecord);
+            Timestamp firstRecordTimestamp{
+                static_cast<uint64_t>(truncateMarker->lastRecord.getLong())};
+            _oplogFirstRecordTimestamp.store(firstRecordTimestamp);
         } catch (const WriteConflictException&) {
             LOGV2_DEBUG(
                 22400, 1, "Caught WriteConflictException while truncating oplog entries, retrying");
@@ -910,8 +931,6 @@ Status WiredTigerRecordStore::_insertRecords(OperationContext* opCtx,
                                              Record* records,
                                              const Timestamp* timestamps,
                                              size_t nRecords) {
-    // Only check if a write lock is held for regular (non-temporary) record stores.
-    dassert(ns() == "" || opCtx->lockState()->isWriteLocked());
     invariant(opCtx->lockState()->inAWriteUnitOfWork() || opCtx->lockState()->isNoop());
 
     int64_t totalLength = 0;
@@ -1086,7 +1105,12 @@ StatusWith<Timestamp> WiredTigerRecordStore::getEarliestOplogTimestamp(Operation
     invariant(_keyFormat == KeyFormat::Long);
     dassert(opCtx->lockState()->isReadLocked());
 
-    if (_oplogFirstRecord == RecordId()) {
+    // Using relaxed loads is fine here. The returned timestamp can be from a deleted oplog entry by
+    // the time we return from the method. Additionally we perform initialisation that uses strong
+    // memory ordering so initialisation will only work if we've actually never initialised the
+    // timestamp.
+    auto firstRecordTimestamp = _oplogFirstRecordTimestamp.loadRelaxed();
+    if (firstRecordTimestamp == Timestamp()) {
         WiredTigerSessionCache* cache = WiredTigerRecoveryUnit::get(opCtx)->getSessionCache();
         auto sessRaii = cache->getSession();
         WT_CURSOR* cursor =
@@ -1101,18 +1125,19 @@ StatusWith<Timestamp> WiredTigerRecordStore::getEarliestOplogTimestamp(Operation
         }
         invariantWTOK(ret, cursor->session);
 
-        _oplogFirstRecord = getKey(cursor);
+        Timestamp ts{static_cast<uint64_t>(getKey(cursor).getLong())};
+        if (_oplogFirstRecordTimestamp.compareAndSwap(&firstRecordTimestamp, ts)) {
+            firstRecordTimestamp = ts;
+        }
     }
 
-    return {Timestamp(static_cast<unsigned long long>(_oplogFirstRecord.getLong()))};
+    return firstRecordTimestamp;
 }
 
 Status WiredTigerRecordStore::doUpdateRecord(OperationContext* opCtx,
                                              const RecordId& id,
                                              const char* data,
                                              int len) {
-    // Only check if a write lock is held for regular (non-temporary) record stores.
-    dassert(ns() == "" || opCtx->lockState()->isWriteLocked());
     invariant(opCtx->lockState()->inAWriteUnitOfWork() || opCtx->lockState()->isNoop());
 
     WiredTigerCursor curwrap(_uri, _tableId, true, opCtx);
@@ -1125,7 +1150,7 @@ Status WiredTigerRecordStore::doUpdateRecord(OperationContext* opCtx,
 
     invariantWTOK(ret,
                   c->session,
-                  str::stream() << "Namespace: " << ns() << "; Key: " << getKey(c)
+                  str::stream() << "Namespace: " << ns(opCtx) << "; Key: " << getKey(c)
                                 << "; Read Timestamp: "
                                 << opCtx->recoveryUnit()
                                        ->getPointInTimeReadTimestamp(opCtx)
@@ -1614,7 +1639,7 @@ void WiredTigerRecordStore::_initNextIdIfNeeded(OperationContext* opCtx) {
         rollbackReason = rollbackReason ? rollbackReason : "undefined";
         throwWriteConflictException(
             fmt::format("Rollback ocurred while performing initial write to '{}'. Reason: '{}'",
-                        _ns,
+                        ns(opCtx),
                         rollbackReason));
     } else if (ret != WT_NOTFOUND) {
         if (ret == ENOTSUP) {
@@ -1624,7 +1649,7 @@ void WiredTigerRecordStore::_initNextIdIfNeeded(OperationContext* opCtx) {
                     6627200,
                     "WiredTiger tables using 'type=lsm' (Log-Structured Merge Tree) are not "
                     "supported.",
-                    "namespace"_attr = _ns,
+                    "namespace"_attr = ns(opCtx),
                     "metadata"_attr = redact(creationMetadata));
             }
         }
@@ -1836,7 +1861,7 @@ WiredTigerRecordStoreCursorBase::WiredTigerRecordStoreCursorBase(OperationContex
       _forward(forward),
       _isOplog(rs._isOplog),
       _isCapped(rs._isCapped),
-      _ns(rs.ns()) {
+      _uuid(rs.uuid()) {
     if (_isCapped) {
         initCappedVisibility(_opCtx);
     }
@@ -1906,7 +1931,7 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::next() {
         (!_forward && !_lastReturnedId.isNull() && id >= _lastReturnedId) ||
         MONGO_unlikely(failWithOutOfOrderForTest)) {
         HealthLogEntry entry;
-        entry.setNss(_ns);
+        entry.setNss(namespaceForUUID(_opCtx, _uuid));
         entry.setTimestamp(Date_t::now());
         entry.setSeverity(SeverityEnum::Error);
         entry.setScope(ScopeEnum::Collection);
@@ -1937,7 +1962,7 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::next() {
                             "next"_attr = id,
                             "last"_attr = _lastReturnedId,
                             "ident"_attr = _ident,
-                            logAttrs(_ns));
+                            "ns"_attr = namespaceForUUID(_opCtx, _uuid));
     }
 
     WT_ITEM value;
@@ -2238,11 +2263,6 @@ std::unique_ptr<SeekableRecordCursor> StandardWiredTigerRecordStore::getCursor(
     OperationContext* opCtx, bool forward) const {
     if (_isOplog && forward) {
         WiredTigerRecoveryUnit* wru = WiredTigerRecoveryUnit::get(opCtx);
-        // If we already have a snapshot we don't know what it can see, unless we know no one
-        // else could be writing (because we hold an exclusive lock).
-        invariant(!wru->isActive() ||
-                  opCtx->lockState()->isCollectionLockedForMode(NamespaceString(_ns), MODE_X) ||
-                  wru->getIsOplogReader());
         wru->setIsOplogReader();
     }
 

@@ -29,26 +29,23 @@
 
 #pragma once
 
+#include "mongo/db/operation_context.h"
 #include "mongo/platform/basic.h"
 
 namespace mongo {
 namespace analyze_shard_key {
 
-bool isFeatureFlagEnabled();
+bool isFeatureFlagEnabled(bool ignoreFCV = false);
 
-bool isFeatureFlagEnabledIgnoreFCV();
+bool supportsCoordinatingQueryAnalysis(bool isReplEnabled, bool ignoreFCV = false);
+bool supportsCoordinatingQueryAnalysis(OperationContext* opCtx, bool ignoreFCV = false);
 
-bool supportsCoordinatingQueryAnalysis();
+bool supportsPersistingSampledQueries(bool isReplEnabled, bool ignoreFCV = false);
+bool supportsPersistingSampledQueries(OperationContext* opCtx, bool ignoreFCV = false);
 
-bool supportsCoordinatingQueryAnalysisIgnoreFCV();
-
-bool supportsPersistingSampledQueries();
-
-bool supportsPersistingSampledQueriesIgnoreFCV();
-
-bool supportsSamplingQueries();
-
-bool supportsSamplingQueriesIgnoreFCV();
+bool supportsSamplingQueries(bool isReplEnabled, bool ignoreFCV = false);
+bool supportsSamplingQueries(OperationContext* opCtx, bool ignoreFCV = false);
+bool supportsSamplingQueries(ServiceContext* serviceContext, bool ignoreFCV = false);
 
 }  // namespace analyze_shard_key
 }  // namespace mongo

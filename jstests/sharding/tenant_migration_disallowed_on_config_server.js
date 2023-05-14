@@ -3,6 +3,9 @@
  *
  * @tags: [
  *   incompatible_with_windows_tls,
+ *   # Shard merge protocol will be tested by
+ *   # tenant_migration_shard_merge_disallowed_on_config_server.js.
+ *   incompatible_with_shard_merge,
  *   requires_majority_read_concern,
  *   requires_persistence,
  *   does_not_support_stepdowns,

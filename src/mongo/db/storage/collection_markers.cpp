@@ -44,16 +44,12 @@ MONGO_FAIL_POINT_DEFINE(slowOplogSamplingReads);
 CollectionTruncateMarkers::CollectionTruncateMarkers(CollectionTruncateMarkers&& other) {
     stdx::lock_guard lk(other._collectionMarkersReclaimMutex);
     stdx::lock_guard lk2(other._markersMutex);
-    stdx::lock_guard lk3(other._lastHighestRecordMutex);
 
     _currentRecords.store(other._currentRecords.swap(0));
     _currentBytes.store(other._currentBytes.swap(0));
     _minBytesPerMarker = other._minBytesPerMarker;
     _markers = std::move(other._markers);
     _isDead = other._isDead;
-    _supportsExpiringPartialMarkers = other._supportsExpiringPartialMarkers;
-    _lastHighestRecordId = std::exchange(other._lastHighestRecordId, RecordId());
-    _lastHighestWallTime = std::exchange(other._lastHighestWallTime, Date_t());
 }
 
 bool CollectionTruncateMarkers::isDead() {
@@ -67,12 +63,6 @@ void CollectionTruncateMarkers::kill() {
     _reclaimCv.notify_one();
 }
 
-void CollectionTruncateMarkers::_replaceNewHighestMarkingIfNecessary(const RecordId& rId,
-                                                                     Date_t wallTime) {
-    stdx::unique_lock lk(_lastHighestRecordMutex);
-    _lastHighestRecordId = std::max(_lastHighestRecordId, rId);
-    _lastHighestWallTime = std::max(_lastHighestWallTime, wallTime);
-}
 
 void CollectionTruncateMarkers::awaitHasExcessMarkersOrDead(OperationContext* opCtx) {
     // Wait until kill() is called or there are too many collection markers.
@@ -166,9 +156,8 @@ void CollectionTruncateMarkers::createNewMarkerIfNeeded(OperationContext* opCtx,
                 "wallTime"_attr = marker.wallTime,
                 "numMarkers"_attr = _markers.size());
 
-    pokeReclaimThreadIfNeeded(opCtx);
+    pokeReclaimThread(opCtx);
 }
-
 
 void CollectionTruncateMarkers::updateCurrentMarkerAfterInsertOnCommit(
     OperationContext* opCtx,
@@ -184,14 +173,6 @@ void CollectionTruncateMarkers::updateCurrentMarkerAfterInsertOnCommit(
         invariant(bytesInserted >= 0);
         invariant(recordId.isValid());
 
-        if (collectionMarkers->_supportsExpiringPartialMarkers) {
-            // By putting the highest marker modification first we can guarantee than in the
-            // event of a race condition between expiring a partial marker the metrics increase
-            // will happen after the marker has been created. This guarantees that the metrics
-            // will eventually be correct as long as the expiration criteria checks for the
-            // metrics and the highest marker expiration.
-            collectionMarkers->_replaceNewHighestMarkingIfNecessary(recordId, wallTime);
-        }
         collectionMarkers->_currentRecords.addAndFetch(countInserted);
         int64_t newCurrentBytes = collectionMarkers->_currentBytes.addAndFetch(bytesInserted);
         if (wallTime != Date_t() && newCurrentBytes >= collectionMarkers->_minBytesPerMarker) {
@@ -251,21 +232,20 @@ void CollectionTruncateMarkers::setMinBytesPerMarker(int64_t size) {
 }
 
 
-void CollectionTruncateMarkers::pokeReclaimThreadIfNeeded(OperationContext* opCtx) {
-    if (_hasExcessMarkers(opCtx)) {
-        _reclaimCv.notify_one();
-    }
+void CollectionTruncateMarkers::pokeReclaimThread(OperationContext* opCtx) {
+    _reclaimCv.notify_one();
 }
 
 CollectionTruncateMarkers::InitialSetOfMarkers CollectionTruncateMarkers::createMarkersByScanning(
     OperationContext* opCtx,
     RecordStore* rs,
+    const NamespaceString& ns,
     int64_t minBytesPerMarker,
     std::function<RecordIdAndWallTime(const Record&)> getRecordIdAndWallTime) {
     auto startTime = curTimeMicros64();
     LOGV2_INFO(7393212,
                "Scanning collection to determine where to place markers for truncation",
-               "namespace"_attr = rs->ns());
+               "namespace"_attr = ns);
 
     int64_t numRecords = 0;
     int64_t dataSize = 0;
@@ -310,6 +290,7 @@ CollectionTruncateMarkers::InitialSetOfMarkers CollectionTruncateMarkers::create
 CollectionTruncateMarkers::InitialSetOfMarkers CollectionTruncateMarkers::createMarkersBySampling(
     OperationContext* opCtx,
     RecordStore* rs,
+    const NamespaceString& ns,
     int64_t estimatedRecordsPerMarker,
     int64_t estimatedBytesPerMarker,
     std::function<RecordIdAndWallTime(const Record&)> getRecordIdAndWallTime) {
@@ -317,7 +298,7 @@ CollectionTruncateMarkers::InitialSetOfMarkers CollectionTruncateMarkers::create
 
     LOGV2_INFO(7393210,
                "Sampling the collection to determine where to place markers for truncation",
-               "namespace"_attr = rs->ns());
+               "namespace"_attr = ns);
     RecordId earliestRecordId, latestRecordId;
 
     {
@@ -331,9 +312,9 @@ CollectionTruncateMarkers::InitialSetOfMarkers CollectionTruncateMarkers::create
             LOGV2(7393209,
                   "Failed to determine the earliest recordId, falling back to scanning the "
                   "collection",
-                  "namespace"_attr = rs->ns());
+                  "namespace"_attr = ns);
             return CollectionTruncateMarkers::createMarkersByScanning(
-                opCtx, rs, estimatedBytesPerMarker, std::move(getRecordIdAndWallTime));
+                opCtx, rs, ns, estimatedBytesPerMarker, std::move(getRecordIdAndWallTime));
         }
         earliestRecordId = record->id;
     }
@@ -349,16 +330,16 @@ CollectionTruncateMarkers::InitialSetOfMarkers CollectionTruncateMarkers::create
             LOGV2(
                 7393208,
                 "Failed to determine the latest recordId, falling back to scanning the collection",
-                "namespace"_attr = rs->ns());
+                "namespace"_attr = ns);
             return CollectionTruncateMarkers::createMarkersByScanning(
-                opCtx, rs, estimatedBytesPerMarker, std::move(getRecordIdAndWallTime));
+                opCtx, rs, ns, estimatedBytesPerMarker, std::move(getRecordIdAndWallTime));
         }
         latestRecordId = record->id;
     }
 
     LOGV2(7393207,
           "Sampling from the collection to determine where to place markers for truncation",
-          "namespace"_attr = rs->ns(),
+          "namespace"_attr = ns,
           "from"_attr = earliestRecordId,
           "to"_attr = latestRecordId);
 
@@ -370,7 +351,7 @@ CollectionTruncateMarkers::InitialSetOfMarkers CollectionTruncateMarkers::create
 
     LOGV2(7393216,
           "Taking samples and assuming each collection section contains equal amounts",
-          "namespace"_attr = rs->ns(),
+          "namespace"_attr = ns,
           "numSamples"_attr = numSamples,
           "containsNumRecords"_attr = estimatedRecordsPerMarker,
           "containsNumBytes"_attr = estimatedBytesPerMarker);
@@ -393,9 +374,9 @@ CollectionTruncateMarkers::InitialSetOfMarkers CollectionTruncateMarkers::create
             // case.
             LOGV2(7393206,
                   "Failed to get enough random samples, falling back to scanning the collection",
-                  "namespace"_attr = rs->ns());
+                  "namespace"_attr = ns);
             return CollectionTruncateMarkers::createMarkersByScanning(
-                opCtx, rs, estimatedBytesPerMarker, std::move(getRecordIdAndWallTime));
+                opCtx, rs, ns, estimatedBytesPerMarker, std::move(getRecordIdAndWallTime));
         }
 
         collectionEstimates.emplace_back(getRecordIdAndWallTime(*record));
@@ -404,7 +385,7 @@ CollectionTruncateMarkers::InitialSetOfMarkers CollectionTruncateMarkers::create
             lastProgressTimer.elapsed() >= Seconds(samplingLogIntervalSeconds)) {
             LOGV2(7393217,
                   "Collection sampling progress",
-                  "namespace"_attr = rs->ns(),
+                  "namespace"_attr = ns,
                   "completed"_attr = (i + 1),
                   "total"_attr = numSamples);
             lastProgressTimer.reset();
@@ -414,7 +395,7 @@ CollectionTruncateMarkers::InitialSetOfMarkers CollectionTruncateMarkers::create
         collectionEstimates.begin(),
         collectionEstimates.end(),
         [](const RecordIdAndWallTime& a, const RecordIdAndWallTime& b) { return a.id < b.id; });
-    LOGV2(7393205, "Collection sampling complete", "namespace"_attr = rs->ns());
+    LOGV2(7393205, "Collection sampling complete", "namespace"_attr = ns);
 
     std::deque<Marker> markers;
     for (int i = 1; i <= wholeMarkers; ++i) {
@@ -426,7 +407,7 @@ CollectionTruncateMarkers::InitialSetOfMarkers CollectionTruncateMarkers::create
         LOGV2_DEBUG(7393204,
                     1,
                     "Marking entry as a potential future truncation point",
-                    "namespace"_attr = rs->ns(),
+                    "namespace"_attr = ns,
                     "wall"_attr = wallTime,
                     "ts"_attr = id);
 
@@ -448,8 +429,10 @@ CollectionTruncateMarkers::InitialSetOfMarkers
 CollectionTruncateMarkers::createFromExistingRecordStore(
     OperationContext* opCtx,
     RecordStore* rs,
+    const NamespaceString& ns,
     int64_t minBytesPerMarker,
-    std::function<RecordIdAndWallTime(const Record&)> getRecordIdAndWallTime) {
+    std::function<RecordIdAndWallTime(const Record&)> getRecordIdAndWallTime,
+    boost::optional<int64_t> numberOfMarkersToKeepLegacy) {
 
     long long numRecords = rs->numRecords(opCtx);
     long long dataSize = rs->dataSize(opCtx);
@@ -474,12 +457,16 @@ CollectionTruncateMarkers::createFromExistingRecordStore(
 
     // If the collection doesn't contain enough records to make sampling more efficient, then scan
     // the collection to determine where to put down markers.
-    auto numMarkers = dataSize / minBytesPerMarker;
+    //
+    // Unless preserving legacy behavior, compute the number of markers which would be generated
+    // based on the estimated data size.
+    auto numMarkers = numberOfMarkersToKeepLegacy ? numberOfMarkersToKeepLegacy.get()
+                                                  : dataSize / minBytesPerMarker;
     if (numRecords <= 0 || dataSize <= 0 ||
         uint64_t(numRecords) <
             kMinSampleRatioForRandCursor * kRandomSamplesPerMarker * numMarkers) {
         return CollectionTruncateMarkers::createMarkersByScanning(
-            opCtx, rs, minBytesPerMarker, std::move(getRecordIdAndWallTime));
+            opCtx, rs, ns, minBytesPerMarker, std::move(getRecordIdAndWallTime));
     }
 
     // Use the collection's average record size to estimate the number of records in each marker,
@@ -490,12 +477,53 @@ CollectionTruncateMarkers::createFromExistingRecordStore(
 
     return CollectionTruncateMarkers::createMarkersBySampling(opCtx,
                                                               rs,
+                                                              ns,
                                                               (int64_t)estimatedRecordsPerMarker,
                                                               (int64_t)estimatedBytesPerMarker,
                                                               std::move(getRecordIdAndWallTime));
 }
 
-void CollectionTruncateMarkers::createPartialMarkerIfNecessary(OperationContext* opCtx) {
+CollectionTruncateMarkersWithPartialExpiration::CollectionTruncateMarkersWithPartialExpiration(
+    CollectionTruncateMarkersWithPartialExpiration&& other)
+    : CollectionTruncateMarkers(std::move(other)) {
+    stdx::lock_guard lk3(other._lastHighestRecordMutex);
+    _lastHighestRecordId = std::exchange(other._lastHighestRecordId, RecordId());
+    _lastHighestWallTime = std::exchange(other._lastHighestWallTime, Date_t());
+}
+
+void CollectionTruncateMarkersWithPartialExpiration::updateCurrentMarkerAfterInsertOnCommit(
+    OperationContext* opCtx,
+    int64_t bytesInserted,
+    const RecordId& highestInsertedRecordId,
+    Date_t wallTime,
+    int64_t countInserted) {
+    opCtx->recoveryUnit()->onCommit([collectionMarkers = this,
+                                     bytesInserted,
+                                     recordId = highestInsertedRecordId,
+                                     wallTime,
+                                     countInserted](OperationContext* opCtx, auto) {
+        invariant(bytesInserted >= 0);
+        invariant(recordId.isValid());
+
+        // By putting the highest marker modification first we can guarantee than in the
+        // event of a race condition between expiring a partial marker the metrics increase
+        // will happen after the marker has been created. This guarantees that the metrics
+        // will eventually be correct as long as the expiration criteria checks for the
+        // metrics and the highest marker expiration.
+        collectionMarkers->updateHighestSeenRecordIdAndWallTime(recordId, wallTime);
+        collectionMarkers->_currentRecords.addAndFetch(countInserted);
+        int64_t newCurrentBytes = collectionMarkers->_currentBytes.addAndFetch(bytesInserted);
+        if (wallTime != Date_t() && newCurrentBytes >= collectionMarkers->_minBytesPerMarker) {
+            // When other transactions commit concurrently, an uninitialized wallTime may delay
+            // the creation of a new marker. This delay is limited to the number of concurrently
+            // running transactions, so the size difference should be inconsequential.
+            collectionMarkers->createNewMarkerIfNeeded(opCtx, recordId, wallTime);
+        }
+    });
+}
+
+void CollectionTruncateMarkersWithPartialExpiration::createPartialMarkerIfNecessary(
+    OperationContext* opCtx) {
     auto logFailedLockAcquisition = [&](const std::string& lock) {
         LOGV2_DEBUG(7393202,
                     2,
@@ -538,7 +566,14 @@ void CollectionTruncateMarkers::createPartialMarkerIfNecessary(OperationContext*
                     "lastRecord"_attr = marker.lastRecord,
                     "wallTime"_attr = marker.wallTime,
                     "numMarkers"_attr = _markers.size());
-        pokeReclaimThreadIfNeeded(opCtx);
+        pokeReclaimThread(opCtx);
     }
+}
+
+void CollectionTruncateMarkersWithPartialExpiration::updateHighestSeenRecordIdAndWallTime(
+    const RecordId& rId, Date_t wallTime) {
+    stdx::unique_lock lk(_lastHighestRecordMutex);
+    _lastHighestRecordId = std::max(_lastHighestRecordId, rId);
+    _lastHighestWallTime = std::max(_lastHighestWallTime, wallTime);
 }
 }  // namespace mongo

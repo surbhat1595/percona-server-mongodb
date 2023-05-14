@@ -787,10 +787,6 @@ AutoGetCollectionForReadPITCatalog::AutoGetCollectionForReadPITCatalog(
 
         auto collDesc = scopedCss->getCollectionDescription(opCtx);
         if (collDesc.isSharded()) {
-            uassert(ErrorCodes::SnapshotTooOld,
-                    str::stream() << "Snapshot too old to read on collection '" << _coll->ns()
-                                  << "' with UUID: " << _coll->uuid(),
-                    collDesc.uuidMatches(_coll->uuid()));
             _coll.setShardKeyPattern(collDesc.getKeyPattern());
         }
 
@@ -1084,10 +1080,28 @@ ConsistentCatalogAndSnapshot getConsistentCatalogAndSnapshot(
 
         const auto catalogBeforeSnapshot = CollectionCatalog::get(opCtx);
 
-        // It is incorrect to resolve the UUID here as we haven't established a consistent view of
-        // this UUID yet. During a concurrent rename it can be wrong. This namespace is only used to
-        // determine if it is an internal namespace.
-        const auto nss = catalogBeforeSnapshot->resolveNamespaceStringOrUUID(opCtx, nsOrUUID);
+        // When a query yields it releases its snapshot, and any point-in-time instantiated
+        // collections stored on the snapshot decoration are destructed. At the start of a query,
+        // collections are fetched using a namespace. However, when a query is restoring from
+        // yield it attempts to fetch collections by UUID. It's possible for a UUID to no longer
+        // resolve to a namespace in the latest collection catalog if that collection was dropped
+        // while the query was yielding. This doesn't conclude that the collection is inaccessible
+        // at an earlier point-in-time as the data files may still be on disk. This namespace is
+        // used to determine if the read source needs to be changed and we only do this if the
+        // original read source is kNoTimestamp or kLastApplied. If it's neither of the two we can
+        // safely continue.
+        NamespaceString nss;
+        try {
+            nss = catalogBeforeSnapshot->resolveNamespaceStringOrUUID(opCtx, nsOrUUID);
+        } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
+            invariant(nsOrUUID.uuid());
+
+            const auto readSource = opCtx->recoveryUnit()->getTimestampReadSource();
+            if (readSource == RecoveryUnit::ReadSource::kNoTimestamp ||
+                readSource == RecoveryUnit::ReadSource::kLastApplied) {
+                throw;
+            }
+        }
 
         // This may modify the read source on the recovery unit for opCtx if the current read source
         // is either kNoTimestamp or kLastApplied.
@@ -1359,11 +1373,6 @@ AutoGetCollectionForReadLockFreePITCatalog::AutoGetCollectionForReadLockFreePITC
         auto scopedCss = CollectionShardingState::acquire(opCtx, _collectionPtr->ns());
         auto collDesc = scopedCss->getCollectionDescription(opCtx);
         if (collDesc.isSharded()) {
-            uassert(ErrorCodes::SnapshotTooOld,
-                    str::stream() << "Snapshot too old to read on collection '"
-                                  << _collectionPtr->ns()
-                                  << "' with UUID: " << _collectionPtr->uuid(),
-                    collDesc.uuidMatches(_collectionPtr->uuid()));
             _collectionPtr.setShardKeyPattern(collDesc.getKeyPattern());
         }
     } else {

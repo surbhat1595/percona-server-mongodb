@@ -351,7 +351,8 @@ public:
                 if (DatabaseHolder::get(opCtx)->dbExists(opCtx, dbName)) {
                     if (auto collNames = _getExactNameMatches(matcher.get())) {
                         for (auto&& collName : *collNames) {
-                            auto nss = NamespaceString(dbName, collName);
+                            auto nss =
+                                NamespaceStringUtil::parseNamespaceFromRequest(dbName, collName);
 
                             // Only validate on a per-collection basis if the user requested
                             // a list of authorized collections
@@ -503,7 +504,7 @@ public:
                     batchSize = *listCollRequest.getCursor()->getBatchSize();
                 }
 
-                size_t bytesBuffered = 0;
+                FindCommon::BSONArrayResponseSizeTracker responseSizeTracker;
                 for (long long objCount = 0; objCount < batchSize; objCount++) {
                     BSONObj nextDoc;
                     PlanExecutor::ExecState state = exec->getNext(&nextDoc, nullptr);
@@ -514,7 +515,7 @@ public:
 
                     // If we can't fit this result inside the current batch, then we stash it for
                     // later.
-                    if (!FindCommon::haveSpaceForNext(nextDoc, objCount, bytesBuffered)) {
+                    if (!responseSizeTracker.haveSpaceForNext(nextDoc)) {
                         exec->stashResult(nextDoc);
                         break;
                     }
@@ -534,7 +535,7 @@ public:
                             "error"_attr = exc);
                         fassertFailed(5254301);
                     }
-                    bytesBuffered += nextDoc.objsize();
+                    responseSizeTracker.add(nextDoc);
                 }
                 if (exec->isEOF()) {
                     return createListCollectionsCursorReply(

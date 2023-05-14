@@ -204,6 +204,18 @@ class ShardedClusterFixture(interface.Fixture):
         client.admin.command({"balancerStart": 1}, maxTimeMS=timeout_ms)
         self.logger.info("Started the balancer")
 
+    def feature_flag_present_and_enabled(self, feature_flag_name):
+        full_ff_name = f"featureFlag{feature_flag_name}"
+        csrs_client = interface.build_client(self.configsvr, self.auth_options)
+        try:
+            res = csrs_client.admin.command({"getParameter": 1, full_ff_name: 1})
+            return bool(res[full_ff_name]['value'])
+        except pymongo.errors.OperationFailure as err:
+            if err.code == 72:  # InvalidOptions
+                # The feature flag is not present
+                return False
+            raise err
+
     def _do_teardown(self, mode=None):
         """Shut down the sharded cluster."""
         self.logger.info("Stopping all members of the sharded cluster...")
@@ -333,6 +345,7 @@ class ShardedClusterFixture(interface.Fixture):
             mongod_options["configsvr"] = ""
             replset_config_options["configsvr"] = True
             mongod_options["set_parameters"]["featureFlagCatalogShard"] = "true"
+            mongod_options["set_parameters"]["featureFlagTransitionToCatalogShard"] = "true"
 
             configsvr_options = self.configsvr_options.copy()
             for option, value in configsvr_options.items():
@@ -651,3 +664,5 @@ def _add_testing_set_parameters(suite_set_parameters):
     """
     suite_set_parameters.setdefault("testingDiagnosticsEnabled", True)
     suite_set_parameters.setdefault("enableTestCommands", True)
+    suite_set_parameters.setdefault("disableTransitionFromLatestToLastContinuous", False)
+    suite_set_parameters.setdefault("requireConfirmInSetFcv", False)

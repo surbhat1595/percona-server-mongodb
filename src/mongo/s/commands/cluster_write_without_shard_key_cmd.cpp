@@ -58,6 +58,7 @@ BSONObj _createCmdObj(OperationContext* opCtx,
             "_clusterWriteWithoutShardKey can only be run against sharded collections.",
             cri.cm.isSharded());
     const auto shardVersion = cri.getShardVersion(shardId);
+    BSONObjBuilder queryBuilder(targetDocId);
 
     // Parse into OpMsgRequest to append the $db field, which is required for command
     // parsing.
@@ -67,6 +68,11 @@ BSONObj _createCmdObj(OperationContext* opCtx,
     if (commandName == write_ops::UpdateCommandRequest::kCommandName) {
         auto updateRequest = write_ops::UpdateCommandRequest::parse(
             IDLParserContext("_clusterWriteWithoutShardKeyForUpdate"), opMsgRequest.body);
+
+        // The targeted query constructed should contain the targetDocId and the original query in
+        // case the original query has importance in terms of the operation being applied, such as
+        // using the positional operator ($) to modify an inner array element.
+        queryBuilder.appendElementsUnique(updateRequest.getUpdates().front().getQ());
 
         // The original query and collation are sent along with the modified command for the
         // purposes of query sampling.
@@ -86,11 +92,7 @@ BSONObj _createCmdObj(OperationContext* opCtx,
                      .front()
                      .getAllowShardKeyUpdatesWithoutFullShardKeyInQuery());
         updateRequest.getUpdates().front().setAllowShardKeyUpdatesWithoutFullShardKeyInQuery(true);
-
-        updateRequest.getUpdates().front().setQ(targetDocId);
-
-        // Unset the collation because targeting by _id uses default collation.
-        updateRequest.getUpdates().front().setCollation(boost::none);
+        updateRequest.getUpdates().front().setQ(queryBuilder.obj());
 
         auto batchedCommandRequest = BatchedCommandRequest(updateRequest);
         batchedCommandRequest.setShardVersion(shardVersion);
@@ -98,6 +100,11 @@ BSONObj _createCmdObj(OperationContext* opCtx,
     } else if (commandName == write_ops::DeleteCommandRequest::kCommandName) {
         auto deleteRequest = write_ops::DeleteCommandRequest::parse(
             IDLParserContext("_clusterWriteWithoutShardKeyForDelete"), opMsgRequest.body);
+
+        // The targeted query constructed should contain the targetDocId and the original query in
+        // case the original query has importance in terms of the operation being applied, such as
+        // using the positional operator ($) to modify an inner array element.
+        queryBuilder.appendElementsUnique(deleteRequest.getDeletes().front().getQ());
 
         // The original query and collation are sent along with the modified command for the
         // purposes of query sampling.
@@ -110,10 +117,8 @@ BSONObj _createCmdObj(OperationContext* opCtx,
             deleteRequest.setWriteCommandRequestBase(writeCommandRequestBase);
         }
 
-        deleteRequest.getDeletes().front().setQ(targetDocId);
+        deleteRequest.getDeletes().front().setQ(queryBuilder.obj());
 
-        // Unset the collation because targeting by _id uses default collation.
-        deleteRequest.getDeletes().front().setCollation(boost::none);
 
         auto batchedCommandRequest = BatchedCommandRequest(deleteRequest);
         batchedCommandRequest.setShardVersion(shardVersion);
@@ -122,6 +127,11 @@ BSONObj _createCmdObj(OperationContext* opCtx,
                commandName == write_ops::FindAndModifyCommandRequest::kCommandAlias) {
         auto findAndModifyRequest = write_ops::FindAndModifyCommandRequest::parse(
             IDLParserContext("_clusterWriteWithoutShardKeyForFindAndModify"), opMsgRequest.body);
+
+        // The targeted query constructed should contain the targetDocId and the original query in
+        // case the original query has importance in terms of the operation being applied, such as
+        // using the positional operator ($) to modify an inner array element.
+        queryBuilder.appendElementsUnique(findAndModifyRequest.getQuery());
 
         // The original query and collation are sent along with the modified command for the
         // purposes of query sampling.
@@ -135,11 +145,8 @@ BSONObj _createCmdObj(OperationContext* opCtx,
                 "$_allowShardKeyUpdatesWithoutFullShardKeyInQuery is an internal parameter",
                 !findAndModifyRequest.getAllowShardKeyUpdatesWithoutFullShardKeyInQuery());
         findAndModifyRequest.setAllowShardKeyUpdatesWithoutFullShardKeyInQuery(true);
+        findAndModifyRequest.setQuery(queryBuilder.obj());
 
-        findAndModifyRequest.setQuery(targetDocId);
-
-        // Unset the collation because targeting by _id uses default collation.
-        findAndModifyRequest.setCollation(boost::none);
 
         // Drop the writeConcern as it cannot be specified for commands run in internal
         // transactions. This object will be used to construct the command request used by
@@ -198,48 +205,10 @@ public:
                 Shard::RetryPolicy::kNoRetry);
 
             auto response = uassertStatusOK(ars.next().swResponse);
-            auto status = getStatusFromWriteCommandReply(response.data);
-
-            if (status == ErrorCodes::WouldChangeOwningShard) {
-                // Parse into OpMsgRequest to append the $db field, which is required for command
-                // parsing.
-                auto opMsgRequest = OpMsgRequest::fromDBAndBody(ns().db(), cmdObj);
-                if (commandName == write_ops::UpdateCommandRequest::kCommandName) {
-                    auto request = BatchedCommandRequest::parseUpdate(opMsgRequest);
-
-                    write_ops::WriteError error(0, getStatusFromCommandResult(response.data));
-                    error.setIndex(0);
-                    BatchedCommandResponse emulatedResponse;
-                    emulatedResponse.setStatus(Status::OK());
-                    emulatedResponse.setN(0);
-                    emulatedResponse.addToErrDetails(std::move(error));
-
-                    auto wouldChangeOwningShardSucceeded =
-                        ClusterWriteCmd::handleWouldChangeOwningShardError(
-                            opCtx, &request, &emulatedResponse, {});
-
-                    if (wouldChangeOwningShardSucceeded) {
-                        BSONObjBuilder bob(emulatedResponse.toBSON());
-                        bob.append("ok", 1);
-                        auto res = bob.obj();
-                        return Response(res, shardId.toString());
-                    }
-                } else {
-                    BSONObjBuilder res;
-                    FindAndModifyCmd::handleWouldChangeOwningShardError(
-                        opCtx,
-                        shardId,
-                        nss,
-                        opMsgRequest.body,
-                        getStatusFromCommandResult(response.data),
-                        &res);
-                    return Response(res.obj(), shardId.toString());
-                }
-            }
-
             // We uassert on the extracted write status in order to preserve error labels for the
             // transaction api to use in case of a retry.
-            uassertStatusOK(status);
+            uassertStatusOK(getStatusFromWriteCommandReply(response.data));
+
             return Response(response.data, shardId.toString());
         }
 
@@ -271,6 +240,15 @@ public:
 
     bool allowedInTransactions() const final {
         return true;
+    }
+
+    // In the current implementation of the Stable API, sub-operations run under a command in the
+    // Stable API where a client specifies {apiStrict: true} are expected to also be Stable API
+    // compliant, when they technically should not be. To satisfy this requirement,
+    // this command is marked as part of the Stable API, but is not truly a part of
+    // it, since it is an internal-only command.
+    const std::set<std::string>& apiVersions() const {
+        return kApiVersions1;
     }
 };
 

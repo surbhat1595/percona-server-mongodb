@@ -181,13 +181,7 @@ std::vector<AsyncRequestsSender::Request> buildVersionedRequestsForTargetedShard
     }
 
     auto expCtx = make_intrusive<ExpressionContext>(opCtx, std::move(collator), nss);
-    getShardIdsForQuery(expCtx,
-                        query,
-                        collation,
-                        cm,
-                        &shardIds,
-                        nullptr /* chunkRanges */,
-                        nullptr /* targetMinKeyToMaxKey */);
+    getShardIdsForQuery(expCtx, query, collation, cm, &shardIds, nullptr /* info */);
 
     const auto targetedSampleId = eligibleForSampling
         ? analyze_shard_key::tryGenerateTargetedSampleId(
@@ -640,7 +634,7 @@ bool appendEmptyResultSet(OperationContext* opCtx,
                           const NamespaceString& nss) {
     invariant(!status.isOK());
 
-    CurOp::get(opCtx)->debug().nreturned = 0;
+    CurOp::get(opCtx)->debug().additiveMetrics.nreturned = 0;
     CurOp::get(opCtx)->debug().nShards = 0;
 
     if (status == ErrorCodes::NamespaceNotFound) {
@@ -662,13 +656,7 @@ std::set<ShardId> getTargetedShardsForQuery(boost::intrusive_ptr<ExpressionConte
         // The collection is sharded. Use the routing table to decide which shards to target based
         // on the query and collation.
         std::set<ShardId> shardIds;
-        getShardIdsForQuery(expCtx,
-                            query,
-                            collation,
-                            cm,
-                            &shardIds,
-                            nullptr /* chunkRanges */,
-                            nullptr /* targetMinKeyToMaxKey */);
+        getShardIdsForQuery(expCtx, query, collation, cm, &shardIds, nullptr /* info */);
         return shardIds;
     }
 

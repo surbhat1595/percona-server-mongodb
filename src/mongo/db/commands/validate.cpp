@@ -117,10 +117,12 @@ void logCollStats(OperationContext* opCtx, const NamespaceString& nss) {
     BSONObj collStatsResult;
     try {
         // Run $collStats via aggregation.
-        // Any command errors will throw and be caught in the 'catch'.
         client.runCommand(nss.dbName() /* DatabaseName */,
                           makeCollStatsCommand(nss.coll()),
                           collStatsResult /* command return results */);
+        // Logging $collStats information is best effort. If the collection doesn't exist, for
+        // example, then the $collStats query will fail and the failure reason will be logged.
+        uassertStatusOK(getStatusFromWriteCommandReply(collStatsResult));
         verifyCommandResponse(collStatsResult);
 
         LOGV2_OPTIONS(7463200,
@@ -195,7 +197,7 @@ public:
                                  const DatabaseName& dbName,
                                  const BSONObj& cmdObj) const override {
         auto* as = AuthorizationSession::get(opCtx->getClient());
-        if (!as->isAuthorizedForActionsOnResource(parseResourcePattern(dbName.db(), cmdObj),
+        if (!as->isAuthorizedForActionsOnResource(parseResourcePattern(dbName, cmdObj),
                                                   ActionType::validate)) {
             return {ErrorCodes::Unauthorized, "unauthorized"};
         }

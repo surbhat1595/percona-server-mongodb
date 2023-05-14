@@ -4,6 +4,9 @@
  *
  * @tags: [
  *   incompatible_with_macos,
+ *   # Shard merge protocol will be tested by
+ *   # tenant_migration_shard_merge_recipient_access_blocker_rollback.js.
+ *   incompatible_with_shard_merge,
  *   incompatible_with_windows_tls,
  *   requires_majority_read_concern,
  *   requires_persistence,
@@ -27,6 +30,7 @@ const migrationX509Options = makeX509OptionsForTest();
 const recipientRst = new ReplSetTest({
     name: "recipRst",
     nodes: 3,
+    serverless: true,
     nodeOptions: Object.assign(migrationX509Options.recipient, {}),
     settings: {catchUpTimeoutMillis: 0, chainingAllowed: false}
 });

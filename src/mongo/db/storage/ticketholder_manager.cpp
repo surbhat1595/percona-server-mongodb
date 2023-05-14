@@ -51,6 +51,9 @@ TicketHolderManager::TicketHolderManager(ServiceContext* svcCtx,
     : _readTicketHolder(std::move(readTicketHolder)),
       _writeTicketHolder(std::move(writeTicketHolder)),
       _monitor([this, svcCtx]() -> std::unique_ptr<TicketHolderMonitor> {
+          if (!feature_flags::gFeatureFlagExecutionControl.isEnabledAndIgnoreFCV()) {
+              return nullptr;
+          }
           switch (StorageEngineConcurrencyAdjustmentAlgorithm_parse(
               IDLParserContext{"storageEngineConcurrencyAdjustmentAlgorithm"},
               gStorageEngineConcurrencyAdjustmentAlgorithm)) {
@@ -58,11 +61,11 @@ TicketHolderManager::TicketHolderManager(ServiceContext* svcCtx,
                   return nullptr;
               case StorageEngineConcurrencyAdjustmentAlgorithmEnum::kThroughputProbing:
                   return std::make_unique<execution_control::ThroughputProbing>(
-                      svcCtx, _readTicketHolder.get(), _writeTicketHolder.get(), Milliseconds{500});
+                      svcCtx, _readTicketHolder.get(), _writeTicketHolder.get(), Milliseconds{100});
           }
           MONGO_UNREACHABLE;
       }()) {
-    if (_monitor && feature_flags::gFeatureFlagExecutionControl.isEnabledAndIgnoreFCV()) {
+    if (_monitor) {
         _monitor->start();
     }
 }
@@ -137,7 +140,7 @@ Status TicketHolderManager::updateConcurrentReadTransactions(const int32_t& newR
 Status TicketHolderManager::updateLowPriorityAdmissionBypassThreshold(
     const int32_t& newBypassThreshold) {
     if (auto client = Client::getCurrent()) {
-        // TODO SERVER-72616: Remove the ifdef once TicketBroker is implemented in a cross-platform
+        // TODO SERVER-72616: Remove the ifdef once TicketPool is implemented in a cross-platform
         // manner.
 #ifdef __linux__
         auto ticketHolderManager = TicketHolderManager::get(client->getServiceContext());

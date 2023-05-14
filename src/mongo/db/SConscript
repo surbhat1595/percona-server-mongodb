@@ -560,6 +560,7 @@ env.Library(
 env.Library(
     target='change_stream_change_collection_manager',
     source=[
+        'change_collection_truncate_markers.cpp',
         'change_stream_change_collection_manager.cpp',
     ],
     LIBDEPS_PRIVATE=[
@@ -571,6 +572,8 @@ env.Library(
         '$BUILD_DIR/mongo/db/dbhelpers',
         '$BUILD_DIR/mongo/db/server_feature_flags',
         '$BUILD_DIR/mongo/db/service_context',
+        'change_stream_options_manager',
+        'record_id_helpers',
     ],
 )
 
@@ -592,6 +595,7 @@ env.Library(
     target='change_stream_pre_images_collection_manager',
     source=[
         'change_stream_pre_images_collection_manager.cpp',
+        'change_stream_pre_images_truncate_markers.cpp'
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/pipeline/change_stream_preimage',
@@ -955,7 +959,9 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/crypto/fle_crypto',
+        '$BUILD_DIR/mongo/db/concurrency/exception_util',
         '$BUILD_DIR/mongo/db/query/query_request',
+        '$BUILD_DIR/mongo/db/record_id_helpers',
         '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
         '$BUILD_DIR/mongo/db/session/logical_session_id',
         '$BUILD_DIR/mongo/db/session/session_catalog',
@@ -966,6 +972,7 @@ env.Library(
         '$BUILD_DIR/mongo/executor/thread_pool_task_executor',
         '$BUILD_DIR/mongo/util/concurrency/thread_pool',
         'fle_crud',
+        'shard_role',
     ],
 )
 
@@ -1082,6 +1089,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/s/query_analysis_sampler',
         'audit',
         'auth/auth',
         'auth/auth_umc',
@@ -1364,6 +1372,35 @@ env.Library(
 )
 
 env.Library(
+    target='working_set_common',
+    source=[
+        'exec/working_set_common.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/catalog/health_log_interface',
+        '$BUILD_DIR/mongo/db/exec/working_set',
+        '$BUILD_DIR/mongo/db/index/index_access_method',
+        '$BUILD_DIR/mongo/db/storage/execution_context',
+        'server_base',
+    ],
+)
+
+env.Library(
+    target='write_stage_common',
+    source=[
+        'exec/write_stage_common.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/exec/document_value/document_value',
+        '$BUILD_DIR/mongo/db/exec/working_set',
+        'server_base',
+        'shard_filterer',
+        'shard_role_api',
+        'working_set_common',
+    ],
+)
+
+env.Library(
     target='query_exec',
     source=[
         'clientcursor.cpp',
@@ -1415,8 +1452,6 @@ env.Library(
         'exec/unpack_timeseries_bucket.cpp',
         'exec/update_stage.cpp',
         'exec/upsert_stage.cpp',
-        'exec/working_set_common.cpp',
-        'exec/write_stage_common.cpp',
         'ops/delete_request.idl',
         'ops/parsed_delete.cpp',
         'ops/update_result.cpp',
@@ -1541,6 +1576,8 @@ env.Library(
         '$BUILD_DIR/mongo/db/timeseries/timeseries_write_util',
         'not_primary_error_tracker',
         'record_id_helpers',
+        'working_set_common',
+        'write_stage_common',
     ],
 )
 
@@ -2387,6 +2424,7 @@ env.Library(
         'repl/repl_coordinator_impl',
         'repl/replication_recovery',
         'repl/serveronly_repl',
+        'repl/shard_merge_recipient_service',
         'repl/storage_interface_impl',
         'repl/tenant_migration_donor_service',
         'repl/tenant_migration_recipient_service',
@@ -2626,6 +2664,7 @@ if wiredtiger:
             '$BUILD_DIR/mongo/util/clock_source_mock',
             '$BUILD_DIR/mongo/util/net/network',
             '$BUILD_DIR/mongo/util/net/ssl_options_server',
+            'change_stream_options_manager',
             'collection_index_usage_tracker',
             'commands',
             'common',

@@ -40,8 +40,8 @@ namespace mongo {
 /**
  * Unpacks time-series bucket documents and writes the modified documents.
  *
- * The stage processes one measurement at a time, but only performs a write after each bucket is
- * exhausted.
+ * The stage processes one bucket at a time, unpacking all the measurements and writing the output
+ * bucket in a single doWork() call.
  */
 class TimeseriesModifyStage final : public RequiresMutableCollectionStage {
 public:
@@ -69,6 +69,14 @@ public:
 
     PlanStage::StageState doWork(WorkingSetID* id);
 
+    bool _isDeleteMulti() {
+        return _params->isMulti;
+    }
+
+    bool _isDeleteOne() {
+        return !_isDeleteMulti();
+    }
+
 protected:
     void doSaveStateRequiresCollection() final {
         _preWriteFilter.saveState();
@@ -78,17 +86,23 @@ protected:
 
 private:
     /**
-     * Writes the modifications to a bucket when the end of the bucket is detected.
+     * Writes the modifications to a bucket.
      */
-    void _writeToTimeseriesBuckets();
-
-    boost::optional<PlanStage::StageState> rememberIfWritingToOrphanedBucket(
-        WorkingSetMember* member);
+    PlanStage::StageState _writeToTimeseriesBuckets(
+        WorkingSetID bucketWsmId,
+        const std::vector<BSONObj>& unchangedMeasurements,
+        const std::vector<BSONObj>& deletedMeasurements,
+        bool bucketFromMigrate);
 
     /**
-     * Fetches the document for the bucket pointed to by this WSM.
+     * Helper to set up state to retry 'bucketId' after yielding and establishing a new storage
+     * snapshot.
      */
-    PlanStage::StageState _fetchBucket(WorkingSetID id);
+    void _retryBucket(WorkingSetID bucketId);
+
+    template <typename F>
+    std::pair<boost::optional<PlanStage::StageState>, bool> _checkIfWritingToOrphanedBucket(
+        ScopeGuard<F>& bucketFreer, WorkingSetID id);
 
     /**
      * Gets the next bucket to process.
@@ -106,19 +120,9 @@ private:
     BucketUnpacker _bucketUnpacker;
 
     // Determines the measurements to delete from this bucket, and by inverse, those to keep
-    // unmodified.
+    // unmodified. This predicate can be null if we have a meta-only or empty predicate on singleton
+    // deletes or updates.
     std::unique_ptr<MatchExpression> _residualPredicate;
-
-    // The RecordId (also "_id" for the clustered collection) value of the current bucket.
-    RecordId _currentBucketRid = RecordId{};
-
-    // The WS id of the next bucket to unpack. This is populated in cases where we successfully read
-    // the RecordId of the next bucket, but receive NEED_YIELD when attempting to fetch the full
-    // document.
-    WorkingSetID _retryFetchBucketId = WorkingSet::INVALID_ID;
-
-    std::vector<BSONObj> _unchangedMeasurements;
-    std::vector<BSONObj> _deletedMeasurements;
 
     /**
      * This member is used to check whether the write should be performed, and if so, any other
@@ -130,11 +134,10 @@ private:
      */
     write_stage_common::PreWriteFilter _preWriteFilter;
 
-    // True if the current bucket is an orphan and we're writing to an orphaned bucket, when such
-    // writes should be excluded from user-visible change stream events. This can be achieved by
-    // setting 'fromMigrate' flag when calling performAtomicWrites().
-    bool _currentBucketFromMigrate = false;
-
     TimeseriesModifyStats _specificStats{};
+
+    // A pending retry to get to after a NEED_YIELD propagation and a new storage snapshot is
+    // established. This can be set when a write fails or when a fetch fails.
+    WorkingSetID _retryBucketId = WorkingSet::INVALID_ID;
 };
 }  //  namespace mongo

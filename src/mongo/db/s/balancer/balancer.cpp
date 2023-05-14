@@ -82,12 +82,6 @@ MONGO_FAIL_POINT_DEFINE(overrideBalanceRoundInterval);
 
 const Milliseconds kBalanceRoundDefaultInterval(10 * 1000);
 
-// Sleep between balancer rounds in the case where the last round found some chunks which needed to
-// be balanced. This value should be set sufficiently low so that imbalanced clusters will quickly
-// reach balanced state, but setting it too low may cause CRUD operations to start failing due to
-// not being able to establish a stable shard version.
-const Milliseconds kBalancerMigrationsThrottling(1 * 1000);
-
 /**
  * Balancer status response
  */
@@ -106,10 +100,13 @@ class BalanceRoundDetails {
 public:
     BalanceRoundDetails() : _executionTimer() {}
 
-    void setSucceeded(int candidateChunks, int chunksMoved) {
+    void setSucceeded(int numCandidateChunks,
+                      int numChunksMoved,
+                      int numImbalancedCachedCollections) {
         invariant(!_errMsg);
-        _candidateChunks = candidateChunks;
-        _chunksMoved = chunksMoved;
+        _numCandidateChunks = numCandidateChunks;
+        _numChunksMoved = numChunksMoved;
+        _numImbalancedCachedCollections = numImbalancedCachedCollections;
     }
 
     void setFailed(const string& errMsg) {
@@ -124,8 +121,9 @@ public:
         if (_errMsg) {
             builder.append("errmsg", *_errMsg);
         } else {
-            builder.append("candidateChunks", _candidateChunks);
-            builder.append("chunksMoved", _chunksMoved);
+            builder.append("candidateChunks", _numCandidateChunks);
+            builder.append("chunksMoved", _numChunksMoved);
+            builder.append("imbalancedCachedCollections", _numImbalancedCachedCollections);
         }
         return builder.obj();
     }
@@ -134,8 +132,9 @@ private:
     const Timer _executionTimer;
 
     // Set only on success
-    int _candidateChunks{0};
-    int _chunksMoved{0};
+    int _numCandidateChunks{0};
+    int _numChunksMoved{0};
+    int _numImbalancedCachedCollections{0};
 
     // Set only on failure
     boost::optional<string> _errMsg;
@@ -258,7 +257,7 @@ const ReplicaSetAwareServiceRegistry::Registerer<Balancer> _balancerRegisterer("
  */
 std::vector<std::string> getDrainingShardNames(OperationContext* opCtx) {
     // Find the shards that are currently draining.
-    const auto configShard{Grid::get(opCtx)->shardRegistry()->getConfigShard()};
+    const auto& configShard = ShardingCatalogManager::get(opCtx)->localConfigShard();
     const auto drainingShardsDocs{
         uassertStatusOK(
             configShard->exhaustiveFindOnConfig(opCtx,
@@ -302,7 +301,8 @@ Balancer::Balancer()
       _defragmentationPolicy(std::make_unique<BalancerDefragmentationPolicyImpl>(
           _clusterStats.get(), [this]() { _onActionsStreamPolicyStateUpdate(); })),
       _autoMergerPolicy(
-          std::make_unique<AutoMergerPolicy>([this]() { _onActionsStreamPolicyStateUpdate(); })) {}
+          std::make_unique<AutoMergerPolicy>([this]() { _onActionsStreamPolicyStateUpdate(); })),
+      _imbalancedCollectionsCache(std::make_unique<stdx::unordered_set<NamespaceString>>()) {}
 
 Balancer::~Balancer() {
     // Terminate the balancer thread so it doesn't leak memory.
@@ -333,6 +333,7 @@ void Balancer::onBecomeArbiter() {
 
 void Balancer::initiateBalancer(OperationContext* opCtx) {
     stdx::lock_guard<Latch> scopedLock(_mutex);
+    _imbalancedCollectionsCache->clear();
     invariant(_state == kStopped);
     _state = kRunning;
 
@@ -375,74 +376,6 @@ void Balancer::joinCurrentRound(OperationContext* opCtx) {
     opCtx->waitForConditionOrInterrupt(_condVar, scopedLock, [&] {
         return !_inBalancerRound || _numBalancerRounds != numRoundsAtStart;
     });
-}
-
-Status Balancer::rebalanceSingleChunk(OperationContext* opCtx,
-                                      const NamespaceString& nss,
-                                      const ChunkType& chunk) {
-    auto migrateStatus = _chunkSelectionPolicy->selectSpecificChunkToMove(opCtx, nss, chunk);
-    if (!migrateStatus.isOK()) {
-        return migrateStatus.getStatus();
-    }
-
-    auto migrateInfo = std::move(migrateStatus.getValue());
-    if (!migrateInfo) {
-        LOGV2_DEBUG(21854,
-                    1,
-                    "Unable to find more appropriate location for chunk {chunk}",
-                    "Unable to find more appropriate location for chunk",
-                    "chunk"_attr = redact(chunk.toString()));
-        return Status::OK();
-    }
-
-    auto balancerConfig = Grid::get(opCtx)->getBalancerConfiguration();
-    Status refreshStatus = balancerConfig->refreshAndCheck(opCtx);
-    if (!refreshStatus.isOK()) {
-        return refreshStatus;
-    }
-
-    const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
-    auto coll =
-        catalogClient->getCollection(opCtx, nss, repl::ReadConcernLevel::kMajorityReadConcern);
-    auto maxChunkSize =
-        coll.getMaxChunkSizeBytes().value_or(balancerConfig->getMaxChunkSizeBytes());
-
-    MoveChunkSettings settings(
-        maxChunkSize, balancerConfig->getSecondaryThrottle(), balancerConfig->waitForDelete());
-    auto response =
-        _commandScheduler
-            ->requestMoveChunk(opCtx, *migrateInfo, settings, true /* issuedByRemoteUser */)
-            .getNoThrow(opCtx);
-    return processManualMigrationOutcome(
-        opCtx, chunk.getMin(), boost::none, nss, migrateInfo->to, response);
-}
-
-Status Balancer::moveSingleChunk(OperationContext* opCtx,
-                                 const NamespaceString& nss,
-                                 const ChunkType& chunk,
-                                 const ShardId& newShardId,
-                                 const MigrationSecondaryThrottleOptions& secondaryThrottle,
-                                 bool waitForDelete,
-                                 bool forceJumbo) {
-    auto moveAllowedStatus = _chunkSelectionPolicy->checkMoveAllowed(opCtx, chunk, newShardId);
-    if (!moveAllowedStatus.isOK()) {
-        return moveAllowedStatus;
-    }
-
-    const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
-    auto coll =
-        catalogClient->getCollection(opCtx, nss, repl::ReadConcernLevel::kMajorityReadConcern);
-    const auto maxChunkSize = getMaxChunkSizeBytes(opCtx, coll);
-
-    MoveChunkSettings settings(maxChunkSize, secondaryThrottle, waitForDelete);
-    MigrateInfo migrateInfo(
-        newShardId, nss, chunk, forceJumbo ? ForceJumbo::kForceManual : ForceJumbo::kDoNotForce);
-    auto response =
-        _commandScheduler
-            ->requestMoveChunk(opCtx, migrateInfo, settings, true /* issuedByRemoteUser */)
-            .getNoThrow(opCtx);
-    return processManualMigrationOutcome(
-        opCtx, chunk.getMin(), boost::none, nss, newShardId, response);
 }
 
 Status Balancer::moveRange(OperationContext* opCtx,
@@ -533,19 +466,19 @@ void Balancer::_consumeActionStreamLoop() {
     };
 
     // Lambda function to sleep for throttling
-    auto applyThrottling = [lastActionTime = Date_t::fromMillisSinceEpoch(0)]() mutable {
-        const Milliseconds throttle{chunkDefragmentationThrottlingMS.load()};
-        auto timeSinceLastAction = Date_t::now() - lastActionTime;
-        if (throttle > timeSinceLastAction) {
-            auto sleepingTime = throttle - timeSinceLastAction;
-            LOGV2_DEBUG(6443700,
-                        2,
-                        "Applying throttling on balancer secondary thread",
-                        "sleepingTime"_attr = sleepingTime);
-            sleepFor(sleepingTime);
-        }
-        lastActionTime = Date_t::now();
-    };
+    auto applyThrottling =
+        [lastActionTime = Date_t::fromMillisSinceEpoch(0)](const Milliseconds throttle) mutable {
+            auto timeSinceLastAction = Date_t::now() - lastActionTime;
+            if (throttle > timeSinceLastAction) {
+                auto sleepingTime = throttle - timeSinceLastAction;
+                LOGV2_DEBUG(6443700,
+                            2,
+                            "Applying throttling on balancer secondary thread",
+                            "sleepingTime"_attr = sleepingTime);
+                sleepFor(sleepingTime);
+            }
+            lastActionTime = Date_t::now();
+        };
 
     auto backOff = Backoff(Seconds(1), Milliseconds::max());
     bool errorOccurred = false;
@@ -599,7 +532,6 @@ void Balancer::_consumeActionStreamLoop() {
             [&]() -> std::tuple<boost::optional<BalancerStreamAction>, ActionsStreamPolicy*> {
             std::shuffle(activeStreams.begin(), activeStreams.end(), _random);
             for (auto stream : activeStreams) {
-
                 try {
                     auto action = stream->getNextStreamingAction(opCtx.get());
                     if (action.has_value()) {
@@ -629,7 +561,7 @@ void Balancer::_consumeActionStreamLoop() {
         stdx::visit(
             OverloadedVisitor{
                 [&, stream = sourcedStream](MergeInfo&& mergeAction) {
-                    applyThrottling();
+                    applyThrottling(Milliseconds(chunkDefragmentationThrottlingMS.load()));
                     auto result =
                         _commandScheduler
                             ->requestMergeChunks(opCtx.get(),
@@ -667,7 +599,7 @@ void Balancer::_consumeActionStreamLoop() {
                 },
                 [&, stream = sourcedStream](MergeAllChunksOnShardInfo&& mergeAllChunksAction) {
                     if (mergeAllChunksAction.applyThrottling) {
-                        applyThrottling();
+                        applyThrottling(Milliseconds(autoMergerThrottlingMS.load()));
                     }
 
                     auto result =
@@ -705,7 +637,6 @@ void Balancer::_mainThread() {
     Client::initThread("Balancer");
     auto opCtx = cc().makeOperationContext();
     auto shardingContext = Grid::get(opCtx.get());
-    const auto catalogClient = ShardingCatalogManager::get(opCtx.get())->localCatalogClient();
 
     LOGV2(21856, "CSRS balancer is starting");
 
@@ -737,10 +668,7 @@ void Balancer::_mainThread() {
 
     LOGV2(6036605, "Starting command scheduler");
 
-    _commandScheduler->start(
-        opCtx.get(),
-        MigrationsRecoveryDefaultValues(balancerConfig->getMaxChunkSizeBytes(),
-                                        balancerConfig->getSecondaryThrottle()));
+    _commandScheduler->start(opCtx.get());
 
     _actionStreamConsumerThread = stdx::thread([&] { _consumeActionStreamLoop(); });
 
@@ -817,13 +745,7 @@ void Balancer::_mainThread() {
             }
 
             // Collect and apply up-to-date configuration values on the cluster collections.
-            {
-                OperationContext* ctx = opCtx.get();
-                auto allCollections = catalogClient->getCollections(ctx, {});
-                for (const auto& coll : allCollections) {
-                    _defragmentationPolicy->startCollectionDefragmentation(ctx, coll);
-                }
-            }
+            _defragmentationPolicy->startCollectionDefragmentations(opCtx.get());
 
             // Reactivate the Automerger if needed.
             _autoMergerPolicy->checkInternalUpdates();
@@ -858,9 +780,11 @@ void Balancer::_mainThread() {
                 const auto chunksToDefragment =
                     _defragmentationPolicy->selectChunksToMove(opCtx.get(), &availableShards);
 
-                const auto chunksToRebalance =
-                    uassertStatusOK(_chunkSelectionPolicy->selectChunksToMove(
-                        opCtx.get(), shardStats, &availableShards));
+                const auto chunksToRebalance = uassertStatusOK(
+                    _chunkSelectionPolicy->selectChunksToMove(opCtx.get(),
+                                                              shardStats,
+                                                              &availableShards,
+                                                              _imbalancedCollectionsCache.get()));
 
                 if (chunksToRebalance.empty() && chunksToDefragment.empty()) {
                     LOGV2_DEBUG(21862, 1, "No need to move any chunk");
@@ -874,7 +798,8 @@ void Balancer::_mainThread() {
                     _sleepFor(opCtx.get(),
                               forcedBalancerRoundInterval
                                   ? *forcedBalancerRoundInterval - timeSinceLastMigration
-                                  : kBalancerMigrationsThrottling - timeSinceLastMigration);
+                                  : Milliseconds(balancerMigrationsThrottlingMs.load()) -
+                                      timeSinceLastMigration);
 
                     _balancedLastTime =
                         _moveChunks(opCtx.get(), chunksToRebalance, chunksToDefragment);
@@ -882,15 +807,22 @@ void Balancer::_mainThread() {
 
                     roundDetails.setSucceeded(
                         static_cast<int>(chunksToRebalance.size() + chunksToDefragment.size()),
-                        _balancedLastTime);
+                        _balancedLastTime,
+                        _imbalancedCollectionsCache->size());
 
+                    auto catalogManager = ShardingCatalogManager::get(opCtx.get());
                     ShardingLogging::get(opCtx.get())
-                        ->logAction(opCtx.get(), "balancer.round", "", roundDetails.toBSON())
+                        ->logAction(opCtx.get(),
+                                    "balancer.round",
+                                    "",
+                                    roundDetails.toBSON(),
+                                    catalogManager->localConfigShard(),
+                                    catalogManager->localCatalogClient())
                         .ignore();
 
                     LOGV2_DEBUG(6679500, 1, "End balancing round");
-                    // Migration throttling of kBalancerMigrationsThrottling will be applied before
-                    // the next call to _moveChunks, so don't sleep here.
+                    // Migration throttling of `balancerMigrationsThrottlingMs` will be applied
+                    // before the next call to _moveChunks, so don't sleep here.
                     _endRound(opCtx.get(), Milliseconds(0));
                 }
             }
@@ -906,8 +838,14 @@ void Balancer::_mainThread() {
             // This round failed, tell the world!
             roundDetails.setFailed(e.what());
 
+            auto catalogManager = ShardingCatalogManager::get(opCtx.get());
             ShardingLogging::get(opCtx.get())
-                ->logAction(opCtx.get(), "balancer.round", "", roundDetails.toBSON())
+                ->logAction(opCtx.get(),
+                            "balancer.round",
+                            "",
+                            roundDetails.toBSON(),
+                            catalogManager->localConfigShard(),
+                            catalogManager->localCatalogClient())
                 .ignore();
 
             // Sleep a fair amount before retrying because of the error

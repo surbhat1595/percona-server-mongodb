@@ -28,9 +28,36 @@
  */
 
 #include "mongo/db/storage/execution_control/throughput_probing.h"
+#include "mongo/db/storage/execution_control/throughput_probing_gen.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo::execution_control {
+namespace throughput_probing {
+namespace {
+
+TEST(ThroughputProbingParameterTest, InitialConcurrency) {
+    ASSERT_OK(validateInitialConcurrency(gMinConcurrency, {}));
+    ASSERT_OK(validateInitialConcurrency(gMaxConcurrency.load(), {}));
+    ASSERT_NOT_OK(validateInitialConcurrency(gMinConcurrency - 1, {}));
+    ASSERT_NOT_OK(validateInitialConcurrency(gMaxConcurrency.load() + 1, {}));
+}
+
+TEST(ThroughputProbingParameterTest, MinConcurrency) {
+    ASSERT_OK(validateMinConcurrency(5, {}));
+    ASSERT_OK(validateMinConcurrency(gMaxConcurrency.load(), {}));
+    ASSERT_NOT_OK(validateMinConcurrency(0, {}));
+    ASSERT_NOT_OK(validateMinConcurrency(gMaxConcurrency.load() + 1, {}));
+}
+
+TEST(ThroughputProbingParameterTest, MaxConcurrency) {
+    ASSERT_OK(validateMaxConcurrency(gMinConcurrency, {}));
+    ASSERT_OK(validateMaxConcurrency(256, {}));
+    ASSERT_NOT_OK(validateMaxConcurrency(gMinConcurrency - 1, {}));
+}
+
+}  // namespace
+}  // namespace throughput_probing
+
 namespace {
 
 class MockPeriodicJob : public PeriodicRunner::ControllableJob {
@@ -85,8 +112,10 @@ protected:
               svcCtx->setPeriodicRunner(std::move(runner));
               return runnerPtr;
           }()),
-          _readTicketHolder(size),
-          _writeTicketHolder(size) {}
+          _throughputProbing([&]() -> ThroughputProbing {
+              throughput_probing::gInitialConcurrency = size;
+              return {_svcCtx.get(), &_readTicketHolder, &_writeTicketHolder, Milliseconds{1}};
+          }()) {}
 
     void _run() {
         _runner->run(_client.get());
@@ -99,18 +128,19 @@ protected:
     MockTicketHolder _readTicketHolder;
     MockTicketHolder _writeTicketHolder;
 
-    ThroughputProbing _througputProbing{
-        _svcCtx.get(), &_readTicketHolder, &_writeTicketHolder, Milliseconds{1}};
+    ThroughputProbing _throughputProbing;
 };
+
+using namespace throughput_probing;
 
 class ThroughputProbingMaxConcurrencyTest : public ThroughputProbingTest {
 protected:
-    ThroughputProbingMaxConcurrencyTest() : ThroughputProbingTest(128) {}
+    ThroughputProbingMaxConcurrencyTest() : ThroughputProbingTest(gMaxConcurrency.load()) {}
 };
 
 class ThroughputProbingMinConcurrencyTest : public ThroughputProbingTest {
 protected:
-    ThroughputProbingMinConcurrencyTest() : ThroughputProbingTest(5) {}
+    ThroughputProbingMinConcurrencyTest() : ThroughputProbingTest(gMinConcurrency) {}
 };
 
 TEST_F(ThroughputProbingTest, ProbeUpSucceeds) {
@@ -260,6 +290,33 @@ TEST_F(ThroughputProbingMinConcurrencyTest, NoProbeDown) {
     _run();
     ASSERT_EQ(_readTicketHolder.outof(), size);
     ASSERT_EQ(_writeTicketHolder.outof(), size);
+}
+
+TEST_F(ThroughputProbingMinConcurrencyTest, StepSizeNonZero) {
+    gStepMultiple.store(0.1);
+    auto size = _readTicketHolder.outof();
+
+    // The concurrency level is low enough that the step multiple on its own is not enough to get to
+    // the next integer.
+    ASSERT_EQ(std::lround(size * (1 + gStepMultiple.load())), size);
+
+    // Tickets are exhausted.
+    _readTicketHolder.setUsed(size);
+    _readTicketHolder.setUsed(size - 1);
+    _readTicketHolder.setNumFinishedProcessing(1);
+
+    // Stable. Probe up next since tickets are exhausted.
+    _run();
+    ASSERT_EQ(_readTicketHolder.outof(), size + 1);
+    ASSERT_EQ(_writeTicketHolder.outof(), size + 1);
+
+    // Throughput inreases.
+    _readTicketHolder.setNumFinishedProcessing(3);
+
+    // Probing up succeeds; the new value is promoted to stable.
+    _run();
+    ASSERT_EQ(_readTicketHolder.outof(), size + 1);
+    ASSERT_EQ(_writeTicketHolder.outof(), size + 1);
 }
 
 }  // namespace

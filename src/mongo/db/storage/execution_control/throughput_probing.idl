@@ -27,6 +27,8 @@
 
 global:
   cpp_namespace: "mongo::execution_control::throughput_probing"
+  cpp_includes:
+      - "mongo/db/storage/execution_control/throughput_probing.h"
 
 server_parameters:
   throughputProbingStepMultiple:
@@ -38,3 +40,32 @@ server_parameters:
     validator:
       gte: 0.1
       lte: 0.5
+
+  throughputProbingInitialConcurrency:
+    description: >-
+      The initial number of concurrent read/write transactions for throughput probing. The default
+      value of 0 means to use the number of logical CPU cores.
+    set_at: startup
+    cpp_vartype: int32_t
+    cpp_varname: gInitialConcurrency
+    default: 0
+    validator:
+      callback: validateInitialConcurrency
+
+  throughputProbingMinConcurrency:
+    description: The minimum number of concurrent read/write transactions for throughput probing.
+    set_at: startup
+    cpp_vartype: int32_t
+    cpp_varname: gMinConcurrency
+    default: 4
+    validator:
+      callback: validateMinConcurrency
+
+  throughputProbingMaxConcurrency:
+    description: The maximum number of concurrent read/write transactions for throughput probing.
+    set_at: [ startup, runtime ]
+    cpp_vartype: AtomicWord<int32_t>
+    cpp_varname: gMaxConcurrency
+    default: 128
+    validator:
+      callback: validateMaxConcurrency

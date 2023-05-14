@@ -226,7 +226,8 @@ BSONObj DocumentSourceChangeStreamHandleTopologyChange::createUpdatedCommandForN
                                                                Document{shardCommand},
                                                                splitPipelines,
                                                                boost::none, /* exhangeSpec */
-                                                               true /* needsMerge */);
+                                                               true /* needsMerge */,
+                                                               boost::none /* explain */);
 }
 
 BSONObj DocumentSourceChangeStreamHandleTopologyChange::replaceResumeTokenInCommand(
@@ -254,9 +255,8 @@ BSONObj DocumentSourceChangeStreamHandleTopologyChange::replaceResumeTokenInComm
     return newCmd.freeze().toBson();
 }
 
-Value DocumentSourceChangeStreamHandleTopologyChange::serialize(
-    boost::optional<ExplainOptions::Verbosity> explain) const {
-    if (explain) {
+Value DocumentSourceChangeStreamHandleTopologyChange::serialize(SerializationOptions opts) const {
+    if (opts.verbosity) {
         return Value(DOC(DocumentSourceChangeStream::kStageName
                          << DOC("stage"
                                 << "internalHandleTopologyChange"_sd)));

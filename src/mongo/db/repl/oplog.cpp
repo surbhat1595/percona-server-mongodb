@@ -51,7 +51,6 @@
 #include "mongo/db/catalog/drop_collection.h"
 #include "mongo/db/catalog/drop_database.h"
 #include "mongo/db/catalog/drop_indexes.h"
-#include "mongo/db/catalog/health_log_interface.h"
 #include "mongo/db/catalog/import_collection_oplog_entry_gen.h"
 #include "mongo/db/catalog/local_oplog_info.h"
 #include "mongo/db/catalog/multi_index_block.h"
@@ -66,7 +65,6 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/exec/write_stage_common.h"
 #include "mongo/db/global_index.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -121,6 +119,7 @@ using std::string;
 using std::stringstream;
 using std::unique_ptr;
 using std::vector;
+using namespace std::string_literals;
 
 using IndexVersion = IndexDescriptor::IndexVersion;
 
@@ -548,10 +547,13 @@ std::vector<OpTime> logInsertOps(
     MutableOplogEntry* oplogEntryTemplate,
     std::vector<InsertStatement>::const_iterator begin,
     std::vector<InsertStatement>::const_iterator end,
+    std::vector<bool> fromMigrate,
     std::function<boost::optional<ShardId>(const BSONObj& doc)> getDestinedRecipientFn,
     const CollectionPtr& collectionPtr) {
     invariant(begin != end);
-    oplogEntryTemplate->setOpType(repl::OpTypeEnum::kInsert);
+    invariant(std::distance(fromMigrate.begin(), fromMigrate.end()) == std::distance(begin, end),
+              oplogEntryTemplate->toReplOperation().toBSON().toString());
+
     // If this oplog entry is from a tenant migration, include the tenant migration
     // UUID.
     const auto& recipientInfo = tenantMigrationInfo(opCtx);
@@ -575,8 +577,6 @@ std::vector<OpTime> logInsertOps(
     // Use OplogAccessMode::kLogOp to avoid recursive locking.
     AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kLogOp);
     auto oplogInfo = oplogWrite.getOplogInfo();
-
-    write_stage_common::PreWriteFilter preWriteFilter(opCtx, nss);
 
     WriteUnitOfWork wuow(opCtx);
 
@@ -607,20 +607,8 @@ std::vector<OpTime> logInsertOps(
         if (i > 0)
             oplogLink.prevOpTime = opTimes[i - 1];
 
-        // Direct inserts to shards of orphan documents should not generate change stream events.
-        if (!oplogEntry.getFromMigrate().value_or(false) &&
-            !OperationShardingState::isComingFromRouter(opCtx) &&
-            preWriteFilter.computeAction(Document(begin[i].doc)) ==
-                write_stage_common::PreWriteFilter::Action::kWriteAsFromMigrate) {
-            LOGV2_DEBUG(6258100,
-                        3,
-                        "Marking insert operation of orphan document with the 'fromMigrate' flag "
-                        "to prevent a wrong change stream event",
-                        "namespace"_attr = nss,
-                        "document"_attr = begin[i].doc);
+        oplogEntry.setFromMigrateIfTrue(fromMigrate[i]);
 
-            oplogEntry.setFromMigrate(true);
-        }
         appendOplogEntryChainInfo(opCtx, &oplogEntry, &oplogLink, begin[i].stmtIds);
 
         opTimes[i] = insertStatementOplogSlot;
@@ -745,6 +733,22 @@ long long getNewOplogSizeBytes(OperationContext* opCtx, const ReplSettings& repl
     }
     long long fivePct = static_cast<long long>(bytes * 0.05);
     auto sz = std::max(fivePct, lowerBound);
+
+    // Round up oplog size to nearest 256 alignment. Ensures that the rollback of the 256-alignment
+    // requirement for capped collections that was removed in SERVER-67246 will not impact this
+    // important user-hidden collection. Since downgrades are blocked on this alignment check, a
+    // fresh install of the server would very likely lead to an inability to downgrade. Keeping the
+    // oplog size 256-aligned avoids this altogether.
+    long long sz_prior = sz;
+    sz += 0xff;
+    sz &= 0xffffffffffffff00LL;
+    if (sz_prior != sz) {
+        LOGV2(7421400,
+              "Oplog size is being rounded to nearest 256-byte-aligned size",
+              "oldSize"_attr = sz_prior,
+              "newSize"_attr = sz);
+    }
+
     // we use 5% of free [disk] space up to 50GB (1TB free)
     const long long upperBound = 50LL * 1024 * 1024 * 1024;
     sz = std::min(sz, upperBound);
@@ -837,7 +841,7 @@ NamespaceString extractNs(DatabaseName dbName, const BSONObj& cmdObj) {
             first.canonicalType() == canonicalizeBSONType(mongo::String));
     StringData coll = first.valueStringData();
     uassert(28635, "no collection name specified", !coll.empty());
-    return NamespaceString(dbName, coll);
+    return NamespaceStringUtil::parseNamespaceFromDoc(dbName, coll);
 }
 
 NamespaceString extractNsFromUUID(OperationContext* opCtx, const UUID& uuid) {
@@ -1329,6 +1333,8 @@ void writeChangeStreamPreImage(OperationContext* opCtx,
 
 constexpr StringData OplogApplication::kInitialSyncOplogApplicationMode;
 constexpr StringData OplogApplication::kRecoveringOplogApplicationMode;
+constexpr StringData OplogApplication::kStableRecoveringOplogApplicationMode;
+constexpr StringData OplogApplication::kUnstableRecoveringOplogApplicationMode;
 constexpr StringData OplogApplication::kSecondaryOplogApplicationMode;
 constexpr StringData OplogApplication::kApplyOpsCmdOplogApplicationMode;
 
@@ -1336,8 +1342,10 @@ StringData OplogApplication::modeToString(OplogApplication::Mode mode) {
     switch (mode) {
         case OplogApplication::Mode::kInitialSync:
             return OplogApplication::kInitialSyncOplogApplicationMode;
-        case OplogApplication::Mode::kRecovering:
-            return OplogApplication::kRecoveringOplogApplicationMode;
+        case OplogApplication::Mode::kUnstableRecovering:
+            return OplogApplication::kUnstableRecoveringOplogApplicationMode;
+        case OplogApplication::Mode::kStableRecovering:
+            return OplogApplication::kStableRecoveringOplogApplicationMode;
         case OplogApplication::Mode::kSecondary:
             return OplogApplication::kSecondaryOplogApplicationMode;
         case OplogApplication::Mode::kApplyOpsCmd:
@@ -1350,7 +1358,9 @@ StatusWith<OplogApplication::Mode> OplogApplication::parseMode(const std::string
     if (mode == OplogApplication::kInitialSyncOplogApplicationMode) {
         return OplogApplication::Mode::kInitialSync;
     } else if (mode == OplogApplication::kRecoveringOplogApplicationMode) {
-        return OplogApplication::Mode::kRecovering;
+        // This only being used in applyOps command which is controlled by the client, so it should
+        // be unstable.
+        return OplogApplication::Mode::kUnstableRecovering;
     } else if (mode == OplogApplication::kSecondaryOplogApplicationMode) {
         return OplogApplication::Mode::kSecondary;
     } else if (mode == OplogApplication::kApplyOpsCmdOplogApplicationMode) {
@@ -1362,34 +1372,31 @@ StatusWith<OplogApplication::Mode> OplogApplication::parseMode(const std::string
     MONGO_UNREACHABLE;
 }
 
-// Logger for oplog constraint violations.
-OplogConstraintViolationLogger* oplogConstraintViolationLogger;
+void OplogApplication::checkOnOplogFailureForRecovery(OperationContext* opCtx,
+                                                      const mongo::BSONObj& oplogEntry,
+                                                      const std::string& errorMsg) {
+    const bool isReplicaSet =
+        repl::ReplicationCoordinator::get(opCtx->getServiceContext())->getReplicationMode() ==
+        repl::ReplicationCoordinator::modeReplSet;
+    // Relax the constraints of oplog application if the node is not a replica set member.
+    if (!isReplicaSet) {
+        return;
+    }
 
-MONGO_INITIALIZER(CreateOplogConstraintViolationLogger)(InitializerContext* context) {
-    oplogConstraintViolationLogger = new OplogConstraintViolationLogger();
-}
-
-void logOplogConstraintViolation(OperationContext* opCtx,
-                                 const NamespaceString& nss,
-                                 OplogConstraintViolationEnum type,
-                                 const std::string& operation,
-                                 const BSONObj& opObj,
-                                 boost::optional<Status> status) {
-    // Log the violation.
-    oplogConstraintViolationLogger->logViolationIfReady(type, opObj, status);
-
-    // Write a new entry to the health log.
-    HealthLogEntry entry;
-    entry.setNss(nss);
-    entry.setTimestamp(Date_t::now());
-    // Oplog constraint violations should always be marked as warning.
-    entry.setSeverity(SeverityEnum::Warning);
-    entry.setScope(ScopeEnum::Document);
-    entry.setMsg(toString(type));
-    entry.setOperation(operation);
-    entry.setData(opObj);
-
-    HealthLogInterface::get(opCtx->getServiceContext())->log(entry);
+    // Only fassert in test environment.
+    if (getTestCommandsEnabled()) {
+        LOGV2_FATAL(5415000,
+                    "Error applying operation while recovering from stable "
+                    "checkpoint. This can lead to data corruption.",
+                    "oplogEntry"_attr = oplogEntry,
+                    "error"_attr = errorMsg);
+    } else {
+        LOGV2_WARNING(5415001,
+                      "Error applying operation while recovering from stable "
+                      "checkpoint. This can lead to data corruption.",
+                      "oplogEntry"_attr = oplogEntry,
+                      "error"_attr = errorMsg);
+    }
 }
 
 // @return failure status if an update should have happened and the document DNE.
@@ -1427,20 +1434,30 @@ Status applyOperation_inlock(OperationContext* opCtx,
         return Status::OK();
     }
 
+    const bool inStableRecovery = mode == OplogApplication::Mode::kStableRecovering;
     NamespaceString requestNss;
     CollectionPtr collection;
     if (auto uuid = op.getUuid()) {
         auto catalog = CollectionCatalog::get(opCtx);
         collection = CollectionPtr(catalog->lookupCollectionByUUID(opCtx, uuid.value()));
+        if (!collection && inStableRecovery) {
+            repl::OplogApplication::checkOnOplogFailureForRecovery(
+                opCtx,
+                redact(opOrGroupedInserts.toBSON()),
+                str::stream()
+                    << "(NamespaceNotFound): Failed to apply operation due to missing collection ("
+                    << uuid.value() << ")");
+        }
+
         // Invalidate the image collection if collectionUUID does not resolve and this op returns
         // a preimage or postimage. We only expect this to happen when in kInitialSync mode but
-        // this can sometimes occur in kRecovering mode during rollback-via-refetch. In either case
+        // this can sometimes occur in recovering mode during rollback-via-refetch. In either case
         // we want to do image invalidation.
         if (!collection && op.getNeedsRetryImage()) {
             tassert(735200,
                     "mode should be in initialSync or recovering",
                     mode == OplogApplication::Mode::kInitialSync ||
-                        mode == OplogApplication::Mode::kRecovering);
+                        OplogApplication::inRecovering(mode));
             writeConflictRetry(opCtx, "applyOps_imageInvalidation", op.getNss().toString(), [&] {
                 WriteUnitOfWork wuow(opCtx);
                 bool upsertConfigImage = true;
@@ -1520,7 +1537,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                 case ReplicationCoordinator::modeNone: {
                     // Only assign timestamps on standalones during replication recovery when
                     // started with the 'recoverFromOplogAsStandalone' flag.
-                    return mode == OplogApplication::Mode::kRecovering;
+                    return OplogApplication::inRecovering(mode);
                 }
             }
         }
@@ -1539,8 +1556,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
         // correct pre-image for them.
         return collection && collection->isChangeStreamPreAndPostImagesEnabled() &&
             isDataConsistent &&
-            (mode == OplogApplication::Mode::kRecovering ||
-             mode == OplogApplication::Mode::kSecondary) &&
+            (OplogApplication::inRecovering(mode) || mode == OplogApplication::Mode::kSecondary) &&
             !op.getFromMigrate().get_value_or(false) &&
             !requestNss.isTemporaryReshardingCollection();
     };
@@ -1681,20 +1697,13 @@ Status applyOperation_inlock(OperationContext* opCtx,
                             return status;
                         }
                         if (mode == OplogApplication::Mode::kSecondary) {
-                            const auto& opObj = redact(op.toBSONForLogging());
-
                             opCounters->gotInsertOnExistingDoc();
-                            logOplogConstraintViolation(
-                                opCtx,
-                                op.getNss(),
-                                OplogConstraintViolationEnum::kInsertOnExistingDoc,
-                                "insert",
-                                opObj,
-                                boost::none /* status */);
-
                             if (oplogApplicationEnforcesSteadyStateConstraints) {
                                 return status;
                             }
+                        } else if (inStableRecovery) {
+                            repl::OplogApplication::checkOnOplogFailureForRecovery(
+                                opCtx, redact(op.toBSONForLogging()), redact(status));
                         }
                         // Continue to the next block to retry the operation as an upsert.
                         needToDoUpsert = true;
@@ -1912,15 +1921,10 @@ Status applyOperation_inlock(OperationContext* opCtx,
                            !ur.upsertedId.isEmpty() && !(collection && collection->isCapped())) {
                     // This indicates we upconverted an update to an upsert, and it did indeed
                     // upsert.  In steady state mode this is unexpected.
-                    const auto& opObj = redact(op.toBSONForLogging());
-
+                    LOGV2_WARNING(2170001,
+                                  "update needed to be converted to upsert",
+                                  "op"_attr = redact(op.toBSONForLogging()));
                     opCounters->gotUpdateOnMissingDoc();
-                    logOplogConstraintViolation(opCtx,
-                                                op.getNss(),
-                                                OplogConstraintViolationEnum::kUpdateOnMissingDoc,
-                                                "update",
-                                                opObj,
-                                                boost::none /* status */);
 
                     // We shouldn't be doing upserts in secondary mode when enforcing steady state
                     // constraints.
@@ -1957,6 +1961,10 @@ Status applyOperation_inlock(OperationContext* opCtx,
             });
 
             if (!status.isOK()) {
+                if (inStableRecovery) {
+                    repl::OplogApplication::checkOnOplogFailureForRecovery(
+                        opCtx, redact(op.toBSONForLogging()), redact(status));
+                }
                 return status;
             }
 
@@ -2038,11 +2046,26 @@ Status applyOperation_inlock(OperationContext* opCtx,
                     writeChangeStreamPreImage(opCtx, collection, op, *(result.requestedPreImage));
                 }
 
+                if (result.nDeleted == 0 && inStableRecovery) {
+                    repl::OplogApplication::checkOnOplogFailureForRecovery(
+                        opCtx,
+                        redact(op.toBSONForLogging()),
+                        !collection ? str::stream()
+                                << "(NamespaceNotFound): Failed to apply operation due "
+                                   "to missing collection ("
+                                << requestNss << ")"
+                                    : "Applied a delete which did not delete anything."s);
+                }
                 // It is legal for a delete operation on the pre-images collection to delete zero
                 // documents - pre-image collections are not guaranteed to contain the same set of
                 // documents at all times.
                 if (result.nDeleted == 0 && mode == OplogApplication::Mode::kSecondary &&
                     !requestNss.isChangeStreamPreImagesCollection()) {
+                    LOGV2_WARNING(2170002,
+                                  "Applied a delete which did not delete anything in steady state "
+                                  "replication",
+                                  "op"_attr = redact(op.toBSONForLogging()));
+
                     // In FCV 4.4, each node is responsible for deleting the excess documents in
                     // capped collections. This implies that capped deletes may not be synchronized
                     // between nodes at times. When upgraded to FCV 5.0, the primary will generate
@@ -2055,25 +2078,11 @@ Status applyOperation_inlock(OperationContext* opCtx,
                     // capped collections when oplog application is enforcing steady state
                     // constraints.
                     bool isCapped = false;
-                    const auto& opObj = redact(op.toBSONForLogging());
                     if (collection) {
                         isCapped = collection->isCapped();
                         opCounters->gotDeleteWasEmpty();
-                        logOplogConstraintViolation(opCtx,
-                                                    op.getNss(),
-                                                    OplogConstraintViolationEnum::kDeleteWasEmpty,
-                                                    "delete",
-                                                    opObj,
-                                                    boost::none /* status */);
                     } else {
                         opCounters->gotDeleteFromMissingNamespace();
-                        logOplogConstraintViolation(
-                            opCtx,
-                            op.getNss(),
-                            OplogConstraintViolationEnum::kDeleteOnMissingNs,
-                            "delete",
-                            opObj,
-                            boost::none /* status */);
                     }
 
                     if (!isCapped) {
@@ -2248,7 +2257,7 @@ Status applyCommand_inlock(OperationContext* opCtx,
             case ReplicationCoordinator::modeNone: {
                 // Only assign timestamps on standalones during replication recovery when
                 // started with 'recoverFromOplogAsStandalone'.
-                return mode == OplogApplication::Mode::kRecovering;
+                return OplogApplication::inRecovering(mode);
             }
         }
         MONGO_UNREACHABLE;
@@ -2300,7 +2309,7 @@ Status applyCommand_inlock(OperationContext* opCtx,
                             1,
                             "Conflicting DDL operation encountered during initial sync; "
                             "aborting index build and retrying",
-                            "db"_attr = nss.db());
+                            logAttrs(nss.dbName()));
                 break;
             }
             case ErrorCodes::BackgroundOperationInProgressForNamespace: {
@@ -2343,28 +2352,24 @@ Status applyCommand_inlock(OperationContext* opCtx,
                                 "application",
                                 "Failed command during oplog application",
                                 "command"_attr = redact(o),
-                                "db"_attr = nss.db(),
+                                logAttrs(nss.dbName()),
                                 "error"_attr = status);
                     return status;
                 }
 
                 if (mode == OplogApplication::Mode::kSecondary &&
                     status.code() != ErrorCodes::IndexNotFound) {
-                    const auto& opObj = redact(op->toBSONForLogging());
-
+                    LOGV2_WARNING(2170000,
+                                  "Acceptable error during oplog application",
+                                  logAttrs(nss.dbName()),
+                                  "error"_attr = status,
+                                  "oplogEntry"_attr = redact(op->toBSONForLogging()));
                     opCounters->gotAcceptableErrorInCommand();
-                    logOplogConstraintViolation(
-                        opCtx,
-                        op->getNss(),
-                        OplogConstraintViolationEnum::kAcceptableErrorInCommand,
-                        "command",
-                        opObj,
-                        status);
                 } else {
                     LOGV2_DEBUG(51776,
                                 1,
                                 "Acceptable error during oplog application",
-                                "db"_attr = nss.db(),
+                                logAttrs(nss.dbName()),
                                 "error"_attr = status,
                                 "oplogEntry"_attr = redact(op->toBSONForLogging()));
                 }

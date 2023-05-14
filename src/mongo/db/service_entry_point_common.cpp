@@ -104,6 +104,7 @@
 #include "mongo/rpc/metadata/tracking_metadata.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/reply_builder_interface.h"
+#include "mongo/s/query_analysis_sampler.h"
 #include "mongo/s/shard_cannot_refresh_due_to_locks_held_exception.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/transport/hello_metrics.h"
@@ -204,8 +205,13 @@ struct HandleRequest {
             }
         }
 
+        /**
+         * Note that DBDirectClient is treated as an internal client in relation to letting
+         * internal errors escape.
+         */
         bool isInternalClient() const {
-            return session() && (session()->getTags() & transport::Session::kInternalClient);
+            return (client().isInDirectClient()) ||
+                (session() && (session()->getTags() & transport::Session::kInternalClient));
         }
 
         std::unique_ptr<const ServiceEntryPointCommon::Hooks> behaviors;
@@ -1514,7 +1520,7 @@ void ExecCommandDatabase::_initiateCommand() {
     BSONElement maxTimeMSOpOnlyField;
     BSONElement helpField;
 
-    StringMap<int> topLevelFields;
+    StringDataSet topLevelFields(8);
     for (auto&& element : request.body) {
         StringData fieldName = element.fieldNameStringData();
         if (fieldName == query_request_helper::cmdOptionMaxTimeMS) {
@@ -1537,7 +1543,7 @@ void ExecCommandDatabase::_initiateCommand() {
         uassert(ErrorCodes::FailedToParse,
                 str::stream() << "Parsed command object contains duplicate top level key: "
                               << fieldName,
-                topLevelFields[fieldName]++ == 0);
+                topLevelFields.insert(fieldName).second);
     }
 
     if (CommandHelpers::isHelpRequest(helpField)) {
@@ -1633,6 +1639,10 @@ void ExecCommandDatabase::_initiateCommand() {
 
     if (command->shouldAffectCommandCounter()) {
         globalOpCounters.gotCommand();
+        if (analyze_shard_key::supportsSamplingQueries(opCtx)) {
+            analyze_shard_key::QueryAnalysisSampler::get(opCtx).gotCommand(
+                request.getCommandName());
+        }
     }
 
     // Parse the 'maxTimeMS' command option, and use it to set a deadline for the operation on the
@@ -1985,9 +1995,8 @@ void curOpCommandSetup(OperationContext* opCtx, const OpMsgRequest& request) {
 
     // We construct a legacy $cmd namespace so we can fill in curOp using
     // the existing logic that existed for OP_QUERY commands
-    NamespaceString nss(
-        DatabaseNameUtil::deserialize(request.getValidatedTenantId(), request.getDatabase()),
-        "$cmd");
+    NamespaceString nss(NamespaceString::makeCommandNamespace(
+        DatabaseNameUtil::deserialize(request.getValidatedTenantId(), request.getDatabase())));
 
     stdx::lock_guard<Client> lk(*opCtx->getClient());
     curop->setNS_inlock(nss);

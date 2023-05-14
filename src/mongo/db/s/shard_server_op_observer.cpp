@@ -182,7 +182,8 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
                                       const CollectionPtr& coll,
                                       std::vector<InsertStatement>::const_iterator begin,
                                       std::vector<InsertStatement>::const_iterator end,
-                                      bool fromMigrate) {
+                                      std::vector<bool> fromMigrate,
+                                      bool defaultFromMigrate) {
     const auto& nss = coll->ns();
 
     for (auto it = begin; it != end; ++it) {
@@ -758,6 +759,14 @@ repl::OpTime ShardServerOpObserver::onDropCollection(OperationContext* opCtx,
     }
 
     return {};
+}
+
+void ShardServerOpObserver::onCreateIndex(OperationContext* opCtx,
+                                          const NamespaceString& nss,
+                                          const UUID& uuid,
+                                          BSONObj indexDoc,
+                                          bool fromMigrate) {
+    abortOngoingMigrationIfNeeded(opCtx, nss);
 }
 
 void ShardServerOpObserver::onStartIndexBuild(OperationContext* opCtx,

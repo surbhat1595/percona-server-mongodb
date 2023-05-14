@@ -29,48 +29,84 @@
 
 #include "mongo/s/analyze_shard_key_role.h"
 
+#include "mongo/db/multitenancy_gen.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/s/analyze_shard_key_feature_flag_gen.h"
 #include "mongo/s/is_mongos.h"
 
 namespace mongo {
 namespace analyze_shard_key {
 
-bool isFeatureFlagEnabled() {
+namespace {
+
+bool isReplEnabled(ServiceContext* serviceContext) {
+    if (isMongos()) {
+        return false;
+    }
+    auto replCoord = repl::ReplicationCoordinator::get(serviceContext);
+    return replCoord && replCoord->isReplEnabled();
+}
+
+}  // namespace
+
+bool isFeatureFlagEnabled(bool ignoreFCV) {
+    if (ignoreFCV) {
+        return gFeatureFlagAnalyzeShardKey.isEnabledAndIgnoreFCV();
+    }
     return serverGlobalParams.featureCompatibility.isVersionInitialized() &&
-        analyze_shard_key::gFeatureFlagAnalyzeShardKey.isEnabled(
-            serverGlobalParams.featureCompatibility);
+        gFeatureFlagAnalyzeShardKey.isEnabled(serverGlobalParams.featureCompatibility);
 }
 
-bool isFeatureFlagEnabledIgnoreFCV() {
-    return analyze_shard_key::gFeatureFlagAnalyzeShardKey.isEnabledAndIgnoreFCV();
+bool supportsCoordinatingQueryAnalysis(bool isReplEnabled, bool ignoreFCV) {
+    if (!isFeatureFlagEnabled(ignoreFCV)) {
+        return false;
+    }
+    if (isMongos()) {
+        return false;
+    }
+    return isReplEnabled && !gMultitenancySupport &&
+        (serverGlobalParams.clusterRole == ClusterRole::ConfigServer ||
+         serverGlobalParams.clusterRole == ClusterRole::None);
 }
 
-bool supportsCoordinatingQueryAnalysis() {
-    return isFeatureFlagEnabled() && serverGlobalParams.clusterRole == ClusterRole::ConfigServer;
+bool supportsCoordinatingQueryAnalysis(OperationContext* opCtx, bool ignoreFCV) {
+    return supportsCoordinatingQueryAnalysis(isReplEnabled(opCtx->getServiceContext()), ignoreFCV);
 }
 
-bool supportsCoordinatingQueryAnalysisIgnoreFCV() {
-    return isFeatureFlagEnabledIgnoreFCV() &&
-        serverGlobalParams.clusterRole == ClusterRole::ConfigServer;
+bool supportsPersistingSampledQueries(bool isReplEnabled, bool ignoreFCV) {
+    if (!isFeatureFlagEnabled(ignoreFCV)) {
+        return false;
+    }
+    if (isMongos()) {
+        return false;
+    }
+    return isReplEnabled && !gMultitenancySupport &&
+        (serverGlobalParams.clusterRole == ClusterRole::ShardServer ||
+         serverGlobalParams.clusterRole == ClusterRole::None);
 }
 
-bool supportsPersistingSampledQueries() {
-    return isFeatureFlagEnabled() && serverGlobalParams.clusterRole == ClusterRole::ShardServer;
+bool supportsPersistingSampledQueries(OperationContext* opCtx, bool ignoreFCV) {
+    return supportsPersistingSampledQueries(isReplEnabled(opCtx->getServiceContext()), ignoreFCV);
 }
 
-bool supportsPersistingSampledQueriesIgnoreFCV() {
-    return isFeatureFlagEnabledIgnoreFCV() &&
-        serverGlobalParams.clusterRole == ClusterRole::ShardServer;
+bool supportsSamplingQueries(bool isReplEnabled, bool ignoreFCV) {
+    if (!isFeatureFlagEnabled(ignoreFCV)) {
+        return false;
+    }
+    if (isMongos()) {
+        return true;
+    }
+    return isReplEnabled && !gMultitenancySupport &&
+        (serverGlobalParams.clusterRole == ClusterRole::ShardServer ||
+         serverGlobalParams.clusterRole == ClusterRole::None);
 }
 
-bool supportsSamplingQueries() {
-    return isFeatureFlagEnabled() &&
-        (isMongos() || serverGlobalParams.clusterRole == ClusterRole::ShardServer);
+bool supportsSamplingQueries(ServiceContext* serviceContext, bool ignoreFCV) {
+    return supportsSamplingQueries(isReplEnabled(serviceContext), ignoreFCV);
 }
 
-bool supportsSamplingQueriesIgnoreFCV() {
-    return isFeatureFlagEnabledIgnoreFCV() &&
-        (isMongos() || serverGlobalParams.clusterRole == ClusterRole::ShardServer);
+bool supportsSamplingQueries(OperationContext* opCtx, bool ignoreFCV) {
+    return supportsSamplingQueries(opCtx->getServiceContext(), ignoreFCV);
 }
 
 }  // namespace analyze_shard_key

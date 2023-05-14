@@ -442,6 +442,18 @@ void ExpressionBenchmarkFixture::benchmarkDateAddEvaluate12HoursWithTimezone(
     testDateAddExpression(1604131115000LL, "hour", 12LL, std::string{"America/New_York"}, state);
 }
 
+void ExpressionBenchmarkFixture::benchmarkDateFromString(benchmark::State& state) {
+    testDateFromStringExpression(
+        "08/14/2023, 12:24:36", std::string{"UTC"}, std::string{"%m/%d/%Y, %H:%M:%S"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkDateFromStringNewYork(benchmark::State& state) {
+    testDateFromStringExpression("08/14/2023, 12:24:36",
+                                 std::string{"America/New_York"},
+                                 std::string{"%m/%d/%Y, %H:%M:%S"},
+                                 state);
+}
+
 void ExpressionBenchmarkFixture::benchmarkDateTruncEvaluateMinute15NewYork(
     benchmark::State& state) {
     testDateTruncExpression(1615460825000LL /* year 2021*/,
@@ -549,6 +561,421 @@ void ExpressionBenchmarkFixture::benchmarkDateTruncEvaluateYear1NewYorkValue2100
                             std::string{"America/New_York"},
                             boost::none /* startOfWeek */,
                             state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkYearNoTZ(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$year", Date_t::fromMillisSinceEpoch(1893466800000LL) /* year 2030*/, boost::none, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkYearConstTzUTC(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$year",
+        Date_t::fromMillisSinceEpoch(1893466800000LL) /* year 2030*/,
+        std::string{"UTC"},
+        state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkYearConstTzUTCMinus0700(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$year",
+        Date_t::fromMillisSinceEpoch(1583924825000LL) /* year 2020*/,
+        std::string{"-07:00"},
+        state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkYearConstTzNewYork(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$year",
+        Date_t::fromMillisSinceEpoch(4108446425000LL) /* year 2100*/,
+        std::string{"America/New_York"},
+        state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkYearUTC(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone(
+        "$year",
+        Date_t::fromMillisSinceEpoch(1893466800000LL) /* year 2030*/,
+        std::string{"UTC"},
+        state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkYearUTCMinus0700(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone(
+        "$year",
+        Date_t::fromMillisSinceEpoch(1583924825000LL) /* year 2020*/,
+        std::string{"-07:00"},
+        state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkYearNewYork(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone("$year",
+                                           Date_t::fromMillisSinceEpoch(4108446425000LL),
+                                           std::string{"America/New_York"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMonthNoTZ(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$month", Date_t::fromMillisSinceEpoch(1893466800000LL), boost::none, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMonthConstTzUTC(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$month", Date_t::fromMillisSinceEpoch(1893466800000LL), std::string{"UTC"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMonthConstTzUTCMinus0700(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$month", Date_t::fromMillisSinceEpoch(1583924825000LL), std::string{"-07:00"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMonthConstTzNewYork(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone("$month",
+                                           Date_t::fromMillisSinceEpoch(4108446425000LL),
+                                           std::string{"America/New_York"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMonthUTC(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone(
+        "$month", Date_t::fromMillisSinceEpoch(1893466800000LL), std::string{"UTC"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMonthUTCMinus0700(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone(
+        "$month", Date_t::fromMillisSinceEpoch(1583924825000LL), std::string{"-07:00"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMonthNewYork(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone("$month",
+                                           Date_t::fromMillisSinceEpoch(4108446425000LL),
+                                           std::string{"America/New_York"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkHourNoTZ(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$hour", Date_t::fromMillisSinceEpoch(1893466800000LL), boost::none, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkHourConstTzUTC(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$hour", Date_t::fromMillisSinceEpoch(1893466800000LL), std::string{"UTC"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkHourConstTzUTCMinus0700(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$hour", Date_t::fromMillisSinceEpoch(1583924825000LL), std::string{"-07:00"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkHourConstTzNewYork(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone("$hour",
+                                           Date_t::fromMillisSinceEpoch(4108446425000LL),
+                                           std::string{"America/New_York"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkHourUTC(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone(
+        "$hour", Date_t::fromMillisSinceEpoch(1893466800000LL), std::string{"UTC"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkHourUTCMinus0700(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone(
+        "$hour", Date_t::fromMillisSinceEpoch(1583924825000LL), std::string{"-07:00"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkHourNewYork(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone("$hour",
+                                           Date_t::fromMillisSinceEpoch(4108446425000LL),
+                                           std::string{"America/New_York"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMinuteNoTZ(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$minute", Date_t::fromMillisSinceEpoch(1893466800000LL), boost::none, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMinuteConstTzUTC(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$minute", Date_t::fromMillisSinceEpoch(1893466800000LL), std::string{"UTC"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMinuteConstTzUTCMinus0700(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$minute", Date_t::fromMillisSinceEpoch(1583924825000LL), std::string{"-07:00"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMinuteConstTzNewYork(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone("$minute",
+                                           Date_t::fromMillisSinceEpoch(4108446425000LL),
+                                           std::string{"America/New_York"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMinuteUTC(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone(
+        "$minute", Date_t::fromMillisSinceEpoch(1893466800000LL), std::string{"UTC"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMinuteUTCMinus0700(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone(
+        "$minute", Date_t::fromMillisSinceEpoch(1583924825000LL), std::string{"-07:00"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMinuteNewYork(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone("$minute",
+                                           Date_t::fromMillisSinceEpoch(4108446425000LL),
+                                           std::string{"America/New_York"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkSecondNoTZ(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$second", Date_t::fromMillisSinceEpoch(1893466800000LL), boost::none, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkSecondConstTzUTC(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$second", Date_t::fromMillisSinceEpoch(1893466800000LL), std::string{"UTC"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkSecondConstTzUTCMinus0700(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$second", Date_t::fromMillisSinceEpoch(1583924825000LL), std::string{"-07:00"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkSecondConstTzNewYork(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone("$second",
+                                           Date_t::fromMillisSinceEpoch(4108446425000LL),
+                                           std::string{"America/New_York"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkSecondUTC(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone(
+        "$second", Date_t::fromMillisSinceEpoch(1893466800000LL), std::string{"UTC"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkSecondUTCMinus0700(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone(
+        "$second", Date_t::fromMillisSinceEpoch(1583924825000LL), std::string{"-07:00"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkSecondNewYork(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone("$second",
+                                           Date_t::fromMillisSinceEpoch(4108446425000LL),
+                                           std::string{"America/New_York"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMillisecondNoTZ(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$millisecond", Date_t::fromMillisSinceEpoch(1893466800000LL), boost::none, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMillisecondConstTzUTC(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$millisecond", Date_t::fromMillisSinceEpoch(1893466800000LL), std::string{"UTC"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMillisecondConstTzUTCMinus0700(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone("$millisecond",
+                                           Date_t::fromMillisSinceEpoch(1583924825000LL),
+                                           std::string{"-07:00"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMillisecondConstTzNewYork(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone("$millisecond",
+                                           Date_t::fromMillisSinceEpoch(4108446425000LL),
+                                           std::string{"America/New_York"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMillisecondUTC(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone(
+        "$millisecond", Date_t::fromMillisSinceEpoch(1893466800000LL), std::string{"UTC"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMillisecondUTCMinus0700(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone("$millisecond",
+                                           Date_t::fromMillisSinceEpoch(1583924825000LL),
+                                           std::string{"-07:00"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkMillisecondNewYork(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone("$millisecond",
+                                           Date_t::fromMillisSinceEpoch(4108446425000LL),
+                                           std::string{"America/New_York"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkWeekNoTZ(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$week", Date_t::fromMillisSinceEpoch(1893466800000LL), boost::none, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkWeekConstTzUTC(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$week", Date_t::fromMillisSinceEpoch(1893466800000LL), std::string{"UTC"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkWeekConstTzUTCMinus0700(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$week", Date_t::fromMillisSinceEpoch(1583924825000LL), std::string{"-07:00"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkWeekConstTzNewYork(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone("$week",
+                                           Date_t::fromMillisSinceEpoch(4108446425000LL),
+                                           std::string{"America/New_York"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkWeekUTC(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone(
+        "$week", Date_t::fromMillisSinceEpoch(1893466800000LL), std::string{"UTC"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkWeekUTCMinus0700(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone(
+        "$week", Date_t::fromMillisSinceEpoch(1583924825000LL), std::string{"-07:00"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkWeekNewYork(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone("$week",
+                                           Date_t::fromMillisSinceEpoch(4108446425000LL),
+                                           std::string{"America/New_York"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISOWeekYearNoTZ(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$isoWeekYear", Date_t::fromMillisSinceEpoch(1893466800000LL), boost::none, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISOWeekYearConstTzUTC(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$isoWeekYear", Date_t::fromMillisSinceEpoch(1893466800000LL), std::string{"UTC"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISOWeekYearConstTzUTCMinus0700(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone("$isoWeekYear",
+                                           Date_t::fromMillisSinceEpoch(1583924825000LL),
+                                           std::string{"-07:00"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISOWeekYearConstTzNewYork(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone("$isoWeekYear",
+                                           Date_t::fromMillisSinceEpoch(4108446425000LL),
+                                           std::string{"America/New_York"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISOWeekYearUTC(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone(
+        "$isoWeekYear", Date_t::fromMillisSinceEpoch(1893466800000LL), std::string{"UTC"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISOWeekYearUTCMinus0700(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone("$isoWeekYear",
+                                           Date_t::fromMillisSinceEpoch(1583924825000LL),
+                                           std::string{"-07:00"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISOWeekYearNewYork(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone("$isoWeekYear",
+                                           Date_t::fromMillisSinceEpoch(4108446425000LL),
+                                           std::string{"America/New_York"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISODayOfWeekNoTZ(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$isoDayOfWeek", Date_t::fromMillisSinceEpoch(1893466800000LL), boost::none, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISODayOfWeekConstTzUTC(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$isoDayOfWeek", Date_t::fromMillisSinceEpoch(1893466800000LL), std::string{"UTC"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISODayOfWeekConstTzUTCMinus0700(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone("$isoDayOfWeek",
+                                           Date_t::fromMillisSinceEpoch(1583924825000LL),
+                                           std::string{"-07:00"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISODayOfWeekConstTzNewYork(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone("$isoDayOfWeek",
+                                           Date_t::fromMillisSinceEpoch(4108446425000LL),
+                                           std::string{"America/New_York"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISODayOfWeekUTC(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone(
+        "$isoDayOfWeek", Date_t::fromMillisSinceEpoch(1893466800000LL), std::string{"UTC"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISODayOfWeekUTCMinus0700(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone("$isoDayOfWeek",
+                                           Date_t::fromMillisSinceEpoch(1583924825000LL),
+                                           std::string{"-07:00"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISODayOfWeekNewYork(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone("$isoDayOfWeek",
+                                           Date_t::fromMillisSinceEpoch(4108446425000LL),
+                                           std::string{"America/New_York"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISOWeekNoTZ(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$isoWeek", Date_t::fromMillisSinceEpoch(1893466800000LL), boost::none, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISOWeekConstTzUTC(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$isoWeek", Date_t::fromMillisSinceEpoch(1893466800000LL), std::string{"UTC"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISOWeekConstTzUTCMinus0700(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone(
+        "$isoWeek", Date_t::fromMillisSinceEpoch(1583924825000LL), std::string{"-07:00"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISOWeekConstTzNewYork(benchmark::State& state) {
+    testDateExpressionWithConstantTimezone("$isoWeek",
+                                           Date_t::fromMillisSinceEpoch(4108446425000LL),
+                                           std::string{"America/New_York"},
+                                           state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISOWeekUTC(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone(
+        "$isoWeek", Date_t::fromMillisSinceEpoch(1893466800000LL), std::string{"UTC"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISOWeekUTCMinus0700(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone(
+        "$isoWeek", Date_t::fromMillisSinceEpoch(1583924825000LL), std::string{"-07:00"}, state);
+}
+
+void ExpressionBenchmarkFixture::benchmarkISOWeekNewYork(benchmark::State& state) {
+    testDateExpressionWithVariableTimezone("$isoWeek",
+                                           Date_t::fromMillisSinceEpoch(4108446425000LL),
+                                           std::string{"America/New_York"},
+                                           state);
 }
 
 /**
@@ -1030,6 +1457,48 @@ void ExpressionBenchmarkFixture::testDateAddExpression(long long startDate,
         BSON("$dateAdd" << objBuilder.obj()),
         state,
         std::vector<Document>(1, {{"startDate"_sd, Date_t::fromMillisSinceEpoch(startDate)}}));
+}
+
+void ExpressionBenchmarkFixture::testDateExpressionWithConstantTimezone(
+    std::string exprName,
+    Date_t date,
+    boost::optional<std::string> timezone,
+    benchmark::State& state) {
+    BSONObjBuilder objBuilder;
+    objBuilder << "date"
+               << "$date";
+    if (timezone) {
+        objBuilder << "timezone" << *timezone;
+    }
+    benchmarkExpression(
+        BSON(exprName << objBuilder.obj()), state, std::vector<Document>(1, {{"date"_sd, date}}));
+}
+
+void ExpressionBenchmarkFixture::testDateExpressionWithVariableTimezone(
+    std::string exprName, Date_t date, boost::optional<std::string> tz, benchmark::State& state) {
+    BSONObjBuilder objBuilder;
+    objBuilder << "date"
+               << "$date"
+               << "timezone"
+               << "$timezone";
+    benchmarkExpression(BSON(exprName << objBuilder.obj()),
+                        state,
+                        std::vector<Document>(1, {{"date"_sd, date}, {"timezone"_sd, *tz}}));
+}
+
+void ExpressionBenchmarkFixture::testDateFromStringExpression(std::string dateString,
+                                                              boost::optional<std::string> timezone,
+                                                              boost::optional<std::string> format,
+                                                              benchmark::State& state) {
+    BSONObjBuilder objBuilder;
+    objBuilder << "dateString" << dateString;
+    if (timezone) {
+        objBuilder << "timezone" << *timezone;
+    }
+    if (format) {
+        objBuilder << "format" << *format;
+    }
+    benchmarkExpression(BSON("$dateFromString" << objBuilder.obj()), state);
 }
 
 void ExpressionBenchmarkFixture::testSetFieldExpression(std::string fieldname,

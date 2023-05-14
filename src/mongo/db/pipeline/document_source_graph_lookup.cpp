@@ -71,7 +71,8 @@ NamespaceString parseGraphLookupFromAndResolveNamespace(const BSONElement& elem,
             elem.type() == String || elem.type() == Object);
 
     if (elem.type() == BSONType::String) {
-        NamespaceString fromNss(defaultDb, elem.valueStringData());
+        NamespaceString fromNss(
+            NamespaceStringUtil::parseNamespaceFromRequest(defaultDb, elem.valueStringData()));
         uassert(ErrorCodes::InvalidNamespace,
                 str::stream() << "invalid $graphLookup namespace: " << fromNss.ns(),
                 fromNss.isValid());
@@ -82,8 +83,9 @@ NamespaceString parseGraphLookupFromAndResolveNamespace(const BSONElement& elem,
     auto spec = NamespaceSpec::parse(
         IDLParserContext{elem.fieldNameStringData(), false /* apiStrict */, defaultDb.tenantId()},
         elem.embeddedObject());
-    // TODO SERVER-62491 Use system tenantId to construct nss.
-    auto nss = NamespaceString(spec.getDb().value_or(DatabaseName()), spec.getColl().value_or(""));
+
+    auto nss = NamespaceStringUtil::parseNamespaceFromRequest(spec.getDb().value_or(DatabaseName()),
+                                                              spec.getColl().value_or(""));
 
     uassert(ErrorCodes::FailedToParse,
             str::stream()
@@ -579,8 +581,13 @@ void DocumentSourceGraphLookUp::checkMemoryUsage() {
     _cache.evictDownTo(_maxMemoryUsageBytes - _frontierUsageBytes - _visitedUsageBytes);
 }
 
-void DocumentSourceGraphLookUp::serializeToArray(
-    std::vector<Value>& array, boost::optional<ExplainOptions::Verbosity> explain) const {
+void DocumentSourceGraphLookUp::serializeToArray(std::vector<Value>& array,
+                                                 SerializationOptions opts) const {
+    auto explain = opts.verbosity;
+    if (opts.redactFieldNames || opts.replacementForLiteralArgs) {
+        MONGO_UNIMPLEMENTED_TASSERT(7484344);
+    }
+
     // Do not include tenantId in serialized 'from' namespace.
     auto fromValue = (pExpCtx->ns.db() == _from.db())
         ? Value(_from.coll())

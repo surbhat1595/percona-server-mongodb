@@ -45,7 +45,7 @@ AccumulationExpression AccumulatorInternalJsReduce::parseInternalJsReduce(
             elem.type() == BSONType::Object);
     BSONObj obj = elem.embeddedObject();
 
-    expCtx->sbeGroupCompatible = false;
+    expCtx->sbeGroupCompatibility = SbeCompatibility::notCompatible;
     std::string funcSource;
     boost::intrusive_ptr<Expression> argument;
 
@@ -196,7 +196,6 @@ void AccumulatorInternalJsReduce::reset() {
 // Returns this accumulator serialized as a Value along with the reduce function.
 Document AccumulatorInternalJsReduce::serialize(boost::intrusive_ptr<Expression> initializer,
                                                 boost::intrusive_ptr<Expression> argument,
-                                                bool explain,
                                                 SerializationOptions options) const {
     if (options.replacementForLiteralArgs) {
         return DOC(kName << DOC("data" << argument->serialize(options) << "eval"
@@ -240,7 +239,6 @@ std::string parseFunction(StringData fieldName,
 
 Document AccumulatorJs::serialize(boost::intrusive_ptr<Expression> initializer,
                                   boost::intrusive_ptr<Expression> argument,
-                                  bool explain,
                                   SerializationOptions options) const {
     MutableDocument args;
 
@@ -287,7 +285,7 @@ AccumulationExpression AccumulatorJs::parse(ExpressionContext* const expCtx,
             elem.type() == BSONType::Object);
     BSONObj obj = elem.embeddedObject();
 
-    expCtx->sbeGroupCompatible = false;
+    expCtx->sbeGroupCompatibility = SbeCompatibility::notCompatible;
     std::string init, accumulate, merge;
     boost::optional<std::string> finalize;
     boost::intrusive_ptr<Expression> initArgs, accumulateArgs;

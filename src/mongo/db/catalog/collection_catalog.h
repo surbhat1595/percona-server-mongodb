@@ -42,6 +42,8 @@
 #include "mongo/db/views/view.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/functional.h"
+#include "mongo/util/immutable/unordered_map.h"
+#include "mongo/util/immutable/unordered_set.h"
 #include "mongo/util/uuid.h"
 
 namespace mongo {
@@ -878,14 +880,15 @@ private:
      */
     boost::optional<mongo::stdx::unordered_map<UUID, NamespaceString, UUID::Hash>> _shadowCatalog;
 
-    using CollectionCatalogMap = stdx::unordered_map<UUID, std::shared_ptr<Collection>, UUID::Hash>;
+    using CollectionCatalogMap =
+        immutable::unordered_map<UUID, std::shared_ptr<Collection>, UUID::Hash>;
     using OrderedCollectionMap =
         std::map<std::pair<DatabaseName, UUID>, std::shared_ptr<Collection>>;
     using NamespaceCollectionMap =
-        stdx::unordered_map<NamespaceString, std::shared_ptr<Collection>>;
-    using UncommittedViewsSet = stdx::unordered_set<NamespaceString>;
-    using DatabaseProfileSettingsMap = stdx::unordered_map<DatabaseName, ProfileSettings>;
-    using ViewsForDatabaseMap = stdx::unordered_map<DatabaseName, ViewsForDatabase>;
+        immutable::unordered_map<NamespaceString, std::shared_ptr<Collection>>;
+    using UncommittedViewsSet = immutable::unordered_set<NamespaceString>;
+    using DatabaseProfileSettingsMap = immutable::unordered_map<DatabaseName, ProfileSettings>;
+    using ViewsForDatabaseMap = immutable::unordered_map<DatabaseName, ViewsForDatabase>;
 
     CollectionCatalogMap _catalog;
     OrderedCollectionMap _orderedCollections;  // Ordered by <dbName, collUUID> pair
@@ -895,18 +898,18 @@ private:
     // Namespaces and UUIDs in pending commit. The opened storage snapshot must be consulted to
     // confirm visibility. The instance may be used if the namespace/uuid are otherwise unoccupied
     // in the CollectionCatalog.
-    absl::flat_hash_map<NamespaceString, std::shared_ptr<Collection>> _pendingCommitNamespaces;
-    absl::flat_hash_map<UUID, std::shared_ptr<Collection>, UUID::Hash> _pendingCommitUUIDs;
+    immutable::unordered_map<NamespaceString, std::shared_ptr<Collection>> _pendingCommitNamespaces;
+    immutable::unordered_map<UUID, std::shared_ptr<Collection>, UUID::Hash> _pendingCommitUUIDs;
 
     // CatalogId mappings for all known namespaces and UUIDs for the CollectionCatalog. The vector
     // is sorted on timestamp. UUIDs will have at most two entries. One for the create and another
     // for the drop. UUIDs stay the same across collection renames.
-    absl::flat_hash_map<NamespaceString, std::vector<TimestampedCatalogId>> _nssCatalogIds;
-    absl::flat_hash_map<UUID, std::vector<TimestampedCatalogId>, UUID::Hash> _uuidCatalogIds;
+    immutable::unordered_map<NamespaceString, std::vector<TimestampedCatalogId>> _nssCatalogIds;
+    immutable::unordered_map<UUID, std::vector<TimestampedCatalogId>, UUID::Hash> _uuidCatalogIds;
     // Set of namespaces and UUIDs that need cleanup when the oldest timestamp advances
     // sufficiently.
-    absl::flat_hash_set<NamespaceString> _nssCatalogIdChanges;
-    absl::flat_hash_set<UUID, UUID::Hash> _uuidCatalogIdChanges;
+    immutable::unordered_set<NamespaceString> _nssCatalogIdChanges;
+    immutable::unordered_set<UUID, UUID::Hash> _uuidCatalogIdChanges;
     // Point at which the oldest timestamp need to advance for there to be any catalogId namespace
     // that can be cleaned up
     Timestamp _lowestCatalogIdTimestampForCleanup = Timestamp::max();
@@ -920,8 +923,11 @@ private:
     // Map of drop pending idents to their instance of Collection/IndexCatalogEntry. To avoid
     // affecting the lifetime and delay of the ident drop from the ident reaper, these need to be a
     // weak_ptr.
-    StringMap<std::weak_ptr<Collection>> _dropPendingCollection;
-    StringMap<std::weak_ptr<IndexCatalogEntry>> _dropPendingIndex;
+    immutable::unordered_map<std::string, std::weak_ptr<Collection>, StringMapHasher, StringMapEq>
+        _dropPendingCollection;
+    immutable::
+        unordered_map<std::string, std::weak_ptr<IndexCatalogEntry>, StringMapHasher, StringMapEq>
+            _dropPendingIndex;
 
     // Incremented whenever the CollectionCatalog gets closed and reopened (onCloseCatalog and
     // onOpenCatalog).

@@ -59,6 +59,7 @@
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/replication_consistency_markers_impl.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/repl/tenant_migration_decoration.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/server_options.h"
@@ -161,10 +162,8 @@ void DatabaseImpl::init(OperationContext* const opCtx) {
     Status status = validateDBName(_name.db());
 
     if (!status.isOK()) {
-        LOGV2_WARNING(20325,
-                      "tried to open invalid db: {name}",
-                      "Tried to open invalid db",
-                      "db"_attr = _name);
+        LOGV2_WARNING(
+            20325, "tried to open invalid db: {name}", "Tried to open invalid db", logAttrs(_name));
         uasserted(10028, status.toString());
     }
 
@@ -244,7 +243,7 @@ void DatabaseImpl::init(OperationContext* const opCtx) {
         } catch (const ExceptionFor<ErrorCodes::InvalidViewDefinition>& e) {
             LOGV2_WARNING(6260805,
                           "Failed to access the view catalog during restore",
-                          "db"_attr = _name,
+                          logAttrs(_name),
                           "reason"_attr = e.reason());
         }
     }
@@ -494,8 +493,14 @@ Status DatabaseImpl::dropCollectionEvenIfSystem(OperationContext* opCtx,
                                                        OpObserver::CollectionDropType::kOnePhase,
                                                        markFromMigrate);
             // OpObserver::onDropCollection should not be writing to the oplog on the secondary.
-            invariant(opTime.isNull(),
-                      str::stream() << "OpTime is not null. OpTime: " << opTime.toString());
+            // The exception is shard merge where, we perform unreplicated timestamped drops of
+            // imported collection on observing the state document update to aborted state via op
+            // observer, both on primary and secondaries. In such cases, on primary, we expect
+            // `opTime` equal to dropOpTime (i.e, state document update opTime).
+            invariant(opTime.isNull() || repl::tenantMigrationInfo(opCtx),
+                      str::stream()
+                          << "OpTime is not null or equal to dropOptime. OpTime: "
+                          << opTime.toString() << " dropOpTime: " << dropOpTime.toString());
         }
 
         return _finishDropCollection(opCtx, nss, collection.getWritableCollection(opCtx));
@@ -569,11 +574,16 @@ Status DatabaseImpl::_finishDropCollection(OperationContext* opCtx,
                                            const NamespaceString& nss,
                                            Collection* collection) const {
     UUID uuid = collection->uuid();
-    LOGV2(20318,
-          "Finishing collection drop for {namespace} ({uuid}).",
-          "Finishing collection drop",
-          "namespace"_attr = nss,
-          "uuid"_attr = uuid);
+
+    // Reduce log verbosity for virtual collections
+    auto debugLevel = collection->getSharedIdent() ? 0 : 1;
+
+    LOGV2_DEBUG(20318,
+                debugLevel,
+                "Finishing collection drop for {namespace} ({uuid}).",
+                "Finishing collection drop",
+                "namespace"_attr = nss,
+                "uuid"_attr = uuid);
 
     // A virtual collection does not have a durable catalog entry.
     if (auto sharedIdent = collection->getSharedIdent()) {
@@ -827,14 +837,18 @@ Collection* DatabaseImpl::_createCollection(
     assertNoMovePrimaryInProgress(opCtx, nss);
     audit::logCreateCollection(opCtx->getClient(), nss);
 
-    LOGV2(20320,
-          "createCollection: {namespace} with {generatedUUID_generated_provided} UUID: "
-          "{optionsWithUUID_uuid_get} and options: {options}",
-          "createCollection",
-          "namespace"_attr = nss,
-          "uuidDisposition"_attr = (generatedUUID ? "generated" : "provided"),
-          "uuid"_attr = optionsWithUUID.uuid.value(),
-          "options"_attr = options);
+    // Reduce log verbosity for virtual collections
+    auto debugLevel = vopts ? 1 : 0;
+
+    LOGV2_DEBUG(20320,
+                debugLevel,
+                "createCollection: {namespace} with {generatedUUID_generated_provided} UUID: "
+                "{optionsWithUUID_uuid_get} and options: {options}",
+                "createCollection",
+                "namespace"_attr = nss,
+                "uuidDisposition"_attr = (generatedUUID ? "generated" : "provided"),
+                "uuid"_attr = optionsWithUUID.uuid.value(),
+                "options"_attr = options);
 
     // Create Collection object
     auto ownedCollection = [&]() -> std::shared_ptr<Collection> {

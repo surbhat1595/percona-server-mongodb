@@ -28,6 +28,7 @@
  */
 
 #include "mongo/db/pipeline/accumulator_percentile.h"
+#include "mongo/db/exec/document_value/value.h"
 #include "mongo/idl/idl_parser.h"
 
 namespace mongo {
@@ -38,10 +39,22 @@ REGISTER_ACCUMULATOR_WITH_FEATURE_FLAG(percentile,
                                        AccumulatorPercentile::parseArgs,
                                        feature_flags::gFeatureFlagApproxPercentiles);
 
+REGISTER_EXPRESSION_WITH_FEATURE_FLAG(percentile,
+                                      AccumulatorPercentile::parseExpression,
+                                      AllowedWithApiStrict::kNeverInVersion1,
+                                      AllowedWithClientType::kAny,
+                                      feature_flags::gFeatureFlagApproxPercentiles);
+
 
 REGISTER_ACCUMULATOR_WITH_FEATURE_FLAG(median,
                                        AccumulatorMedian::parseArgs,
                                        feature_flags::gFeatureFlagApproxPercentiles);
+
+REGISTER_EXPRESSION_WITH_FEATURE_FLAG(median,
+                                      AccumulatorMedian::parseExpression,
+                                      AllowedWithApiStrict::kNeverInVersion1,
+                                      AllowedWithClientType::kAny,
+                                      feature_flags::gFeatureFlagApproxPercentiles);
 
 Status AccumulatorPercentile::validatePercentileArg(const std::vector<double>& pv) {
     if (pv.empty()) {
@@ -61,7 +74,7 @@ Status AccumulatorPercentile::validatePercentileArg(const std::vector<double>& p
 AccumulationExpression AccumulatorPercentile::parseArgs(ExpressionContext* const expCtx,
                                                         BSONElement elem,
                                                         VariablesParseState vps) {
-    expCtx->sbeGroupCompatible = false;
+    expCtx->sbeGroupCompatibility = SbeCompatibility::notCompatible;
 
     uassert(7429703,
             str::stream() << "specification must be an object; found " << elem,
@@ -72,11 +85,10 @@ AccumulationExpression AccumulatorPercentile::parseArgs(ExpressionContext* const
         Expression::parseOperand(expCtx, spec.getInput().getElement(), vps);
     std::vector<double> ps = spec.getP();
 
-    auto factory = [expCtx, ps] {
-        // Temporary implementation! To be replaced based on the user's choice of algorithm.
-        auto algo = PercentileAlgorithm::createDiscreteSortAndRank();
+    PercentileAlgorithmTypeEnum algoType = spec.getAlgorithm();
 
-        return AccumulatorPercentile::create(expCtx, ps, std::move(algo));
+    auto factory = [expCtx, ps, algoType] {
+        return AccumulatorPercentile::create(expCtx, ps, static_cast<int32_t>(algoType));
     };
 
     return {ExpressionConstant::create(expCtx, Value(BSONNULL)) /*initializer*/,
@@ -85,32 +97,47 @@ AccumulationExpression AccumulatorPercentile::parseArgs(ExpressionContext* const
             "$percentile"_sd /*name*/};
 }
 
+std::pair<std::vector<double> /*ps*/, int32_t /*algoType*/>
+AccumulatorPercentile::parsePercentileAndAlgoType(BSONElement elem) {
+    auto spec = AccumulatorPercentileSpec::parse(IDLParserContext(kName), elem.Obj());
+    return std::pair<std::vector<double>, int32_t>(spec.getP(),
+                                                   static_cast<int32_t>(spec.getAlgorithm()));
+}
+
+boost::intrusive_ptr<Expression> AccumulatorPercentile::parseExpression(
+    ExpressionContext* const expCtx, BSONElement elem, VariablesParseState vps) {
+    expCtx->sbeGroupCompatibility = SbeCompatibility::notCompatible;
+    uassert(7436200,
+            str::stream() << "specification must be an object; found " << elem,
+            elem.type() == BSONType::Object);
+
+    auto spec = AccumulatorPercentileSpec::parse(IDLParserContext(kName), elem.Obj());
+
+    boost::intrusive_ptr<Expression> input =
+        Expression::parseOperand(expCtx, spec.getInput().getElement(), vps);
+    std::vector<double> ps = spec.getP();
+    PercentileAlgorithmTypeEnum algoType = spec.getAlgorithm();
+
+    return make_intrusive<ExpressionFromAccumulatorQuantile<AccumulatorPercentile>>(
+        expCtx, ps, input, static_cast<int32_t>(algoType));
+}
+
 void AccumulatorPercentile::processInternal(const Value& input, bool merging) {
     if (merging) {
-        // Merging percentiles from different shards. For approximate percentiels 'input' is a
-        // document with a digest.
-        // TODO SERVER-74358: Support sharded collections
-        uasserted(7429709, "Sharded collections are not yet supported by $percentile");
+        dynamic_cast<PartialPercentile<Value>*>(_algo.get())->combine(input);
         return;
     }
 
     if (!input.numeric()) {
         return;
     }
-
     _algo->incorporate(input.coerceToDouble());
-
-    // TODO SERVER-74558: Could/should we update the memory usage less often?
     _memUsageBytes = sizeof(*this) + _algo->memUsageBytes();
 }
 
 Value AccumulatorPercentile::getValue(bool toBeMerged) {
     if (toBeMerged) {
-        // Return a document, containing the whole digest, because they would need to be merged
-        // on mongos to compute the final result.
-        // TODO SERVER-74358: Support sharded collections
-        uasserted(7429710, "Sharded collections are not yet supported by $percentile");
-        return Value(Document{});
+        return dynamic_cast<PartialPercentile<Value>*>(_algo.get())->serialize();
     }
 
     // Compute the percentiles for each requested one in the order listed. Computing a percentile
@@ -128,31 +155,71 @@ Value AccumulatorPercentile::getValue(bool toBeMerged) {
     return Value(std::vector<Value>(pctls.begin(), pctls.end()));
 }
 
+namespace {
+std::unique_ptr<PercentileAlgorithm> createPercentileAlgorithm(int32_t algoType) {
+    switch (static_cast<PercentileAlgorithmTypeEnum>(algoType)) {
+        case PercentileAlgorithmTypeEnum::Approximate:
+            return createTDigestDistributedClassic();
+        default:
+            tasserted(7435800,
+                      str::stream() << "Currently only approximate percentiles are supported");
+    }
+    return nullptr;
+}
+}  // namespace
+
 AccumulatorPercentile::AccumulatorPercentile(ExpressionContext* const expCtx,
                                              const std::vector<double>& ps,
-                                             std::unique_ptr<PercentileAlgorithm> algo)
-    : AccumulatorState(expCtx), _percentiles(ps), _algo(std::move(algo)) {
+                                             int32_t algoType)
+    : AccumulatorState(expCtx),
+      _percentiles(ps),
+      _algo(createPercentileAlgorithm(algoType)),
+      _algoType(algoType) {
     _memUsageBytes = sizeof(*this) + _algo->memUsageBytes();
 }
 
 void AccumulatorPercentile::reset() {
-    // Temporary implementation! To be replaced based on the user's choice of algorithm.
-    auto algo = PercentileAlgorithm::createDiscreteSortAndRank();
-
+    _algo = createPercentileAlgorithm(_algoType);
     _memUsageBytes = sizeof(*this) + _algo->memUsageBytes();
 }
 
-intrusive_ptr<AccumulatorState> AccumulatorPercentile::create(
-    ExpressionContext* const expCtx,
-    const std::vector<double>& ps,
-    std::unique_ptr<PercentileAlgorithm> algo) {
-    return new AccumulatorPercentile(expCtx, ps, std::move(algo));
+Document AccumulatorPercentile::serialize(boost::intrusive_ptr<Expression> initializer,
+                                          boost::intrusive_ptr<Expression> argument,
+                                          SerializationOptions options) const {
+    ExpressionConstant const* ec = dynamic_cast<ExpressionConstant const*>(initializer.get());
+    invariant(ec);
+    invariant(ec->getValue().nullish());
+
+    MutableDocument md;
+    AccumulatorPercentile::serializeHelper(
+        argument, options, _percentiles, static_cast<int32_t>(_algoType), md);
+
+    return DOC(getOpName() << md.freeze());
+}
+
+void AccumulatorPercentile::serializeHelper(const boost::intrusive_ptr<Expression>& argument,
+                                            SerializationOptions options,
+                                            std::vector<double> percentiles,
+                                            int32_t algoType,
+                                            MutableDocument& md) {
+    md.addField(AccumulatorPercentileSpec::kInputFieldName, Value(argument->serialize(options)));
+    md.addField(AccumulatorPercentileSpec::kPFieldName,
+                Value(std::vector<Value>(percentiles.begin(), percentiles.end())));
+    md.addField(AccumulatorPercentileSpec::kAlgorithmFieldName,
+                Value(PercentileAlgorithmType_serializer(
+                    static_cast<PercentileAlgorithmTypeEnum>(algoType))));
+}
+
+intrusive_ptr<AccumulatorState> AccumulatorPercentile::create(ExpressionContext* const expCtx,
+                                                              const std::vector<double>& ps,
+                                                              int32_t algoType) {
+    return new AccumulatorPercentile(expCtx, ps, algoType);
 }
 
 AccumulationExpression AccumulatorMedian::parseArgs(ExpressionContext* const expCtx,
                                                     BSONElement elem,
                                                     VariablesParseState vps) {
-    expCtx->sbeGroupCompatible = false;
+    expCtx->sbeGroupCompatibility = SbeCompatibility::notCompatible;
 
     uassert(7436100,
             str::stream() << "specification must be an object; found " << elem,
@@ -162,11 +229,10 @@ AccumulationExpression AccumulatorMedian::parseArgs(ExpressionContext* const exp
     boost::intrusive_ptr<Expression> input =
         Expression::parseOperand(expCtx, spec.getInput().getElement(), vps);
 
-    auto factory = [expCtx] {
-        // Temporary implementation! To be replaced based on the user's choice of algorithm.
-        auto algo = PercentileAlgorithm::createDiscreteSortAndRank();
+    PercentileAlgorithmTypeEnum algoType = spec.getAlgorithm();
 
-        return AccumulatorMedian::create(expCtx, std::move(algo));
+    auto factory = [expCtx, algoType] {
+        return AccumulatorMedian::create(expCtx, {} /* unused */, static_cast<int32_t>(algoType));
     };
 
     return {ExpressionConstant::create(expCtx, Value(BSONNULL)) /*initializer*/,
@@ -175,19 +241,53 @@ AccumulationExpression AccumulatorMedian::parseArgs(ExpressionContext* const exp
             "$ median"_sd /*name*/};
 }
 
-AccumulatorMedian::AccumulatorMedian(ExpressionContext* expCtx,
-                                     std::unique_ptr<PercentileAlgorithm> algo)
-    : AccumulatorPercentile(expCtx, {0.5} /* ps */, std::move(algo)){};
+std::pair<std::vector<double> /*ps*/, int32_t /*algoType*/>
+AccumulatorMedian::parsePercentileAndAlgoType(BSONElement elem) {
+    auto spec = AccumulatorMedianSpec::parse(IDLParserContext(kName), elem.Obj());
+    return std::pair<std::vector<double>, int32_t>({0.5},
+                                                   static_cast<int32_t>(spec.getAlgorithm()));
+}
 
-intrusive_ptr<AccumulatorState> AccumulatorMedian::create(
-    ExpressionContext* expCtx, std::unique_ptr<PercentileAlgorithm> algo) {
-    return new AccumulatorMedian(expCtx, std::move(algo));
+boost::intrusive_ptr<Expression> AccumulatorMedian::parseExpression(ExpressionContext* const expCtx,
+                                                                    BSONElement elem,
+                                                                    VariablesParseState vps) {
+    expCtx->sbeGroupCompatibility = SbeCompatibility::notCompatible;
+    uassert(7436201,
+            str::stream() << "specification must be an object; found " << elem,
+            elem.type() == BSONType::Object);
+
+    auto spec = AccumulatorMedianSpec::parse(IDLParserContext(kName), elem.Obj());
+
+    boost::intrusive_ptr<Expression> input =
+        Expression::parseOperand(expCtx, spec.getInput().getElement(), vps);
+    std::vector<double> p = {0.5};
+    PercentileAlgorithmTypeEnum algoType = spec.getAlgorithm();
+
+    return make_intrusive<ExpressionFromAccumulatorQuantile<AccumulatorMedian>>(
+        expCtx, p, input, static_cast<int32_t>(algoType));
+}
+
+AccumulatorMedian::AccumulatorMedian(ExpressionContext* expCtx,
+                                     const std::vector<double>& /* unused */,
+                                     int32_t algoType)
+    : AccumulatorPercentile(expCtx, {0.5} /* ps */, algoType){};
+
+intrusive_ptr<AccumulatorState> AccumulatorMedian::create(ExpressionContext* expCtx,
+                                                          const std::vector<double>& /* unused */,
+                                                          int32_t algoType) {
+    return new AccumulatorMedian(expCtx, {} /* unused */, algoType);
 }
 
 Value AccumulatorMedian::getValue(bool toBeMerged) {
-    // Modify the base-class implementation to return a single value rather than a single-element
-    // array.
     auto result = AccumulatorPercentile::getValue(toBeMerged);
+
+    // $median only adjusts the output of the final result, the internal logic for merging is up to
+    // the implementation of $percentile.
+    if (toBeMerged) {
+        return result;
+    }
+
+    // Currently $percentile returns _scalar_ null if all inputs were non-numeric.
     if (result.getType() == jstNULL) {
         return result;
     }
@@ -197,5 +297,30 @@ Value AccumulatorMedian::getValue(bool toBeMerged) {
             result.getArrayLength() == 1);
 
     return Value(result.getArray().front());
+}
+
+Document AccumulatorMedian::serialize(boost::intrusive_ptr<Expression> initializer,
+                                      boost::intrusive_ptr<Expression> argument,
+                                      SerializationOptions options) const {
+    ExpressionConstant const* ec = dynamic_cast<ExpressionConstant const*>(initializer.get());
+    invariant(ec);
+    invariant(ec->getValue().nullish());
+
+    MutableDocument md;
+    AccumulatorMedian::serializeHelper(
+        argument, options, _percentiles, static_cast<int32_t>(_algoType), md);
+
+    return DOC(getOpName() << md.freeze());
+}
+
+void AccumulatorMedian::serializeHelper(const boost::intrusive_ptr<Expression>& argument,
+                                        SerializationOptions options,
+                                        std::vector<double> percentiles,
+                                        int32_t algoType,
+                                        MutableDocument& md) {
+    md.addField(AccumulatorPercentileSpec::kInputFieldName, Value(argument->serialize(options)));
+    md.addField(AccumulatorPercentileSpec::kAlgorithmFieldName,
+                Value(PercentileAlgorithmType_serializer(
+                    static_cast<PercentileAlgorithmTypeEnum>(algoType))));
 }
 }  // namespace mongo

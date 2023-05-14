@@ -190,12 +190,12 @@ variables:
     distros:
     - windows-vsCurrent-large
   - name: burn_in_tests_gen
-  - name: .aggfuzzer .common
+  - name: .aggfuzzer .common !.feature_flag_guarded
   - name: audit
   - name: auth_audit_gen
   - name: buildscripts_test
   - name: causally_consistent_jscore_txns_passthrough
-  - name: .encrypt !.aggregation !.gcm
+  - name: .encrypt !.aggregation !.gcm !.feature_flag_guarded
   - name: external_auth
   - name: external_auth_aws
   - name: external_auth_windows
@@ -250,7 +250,7 @@ variables:
   - name: compile_build_tools_next_TG
     distros:
     - rhel70
-  - name: .aggfuzzer
+  - name: .aggfuzzer !.feature_flag_guarded
   - name: audit
   - name: auth_audit_gen
   - name: auth_gen
@@ -279,7 +279,8 @@ variables:
   - name: test_packages
     distros:
     - ubuntu2004-package
-  - name: selinux_rhel7_enterprise
+      # TODO: BF-24515 re-enable when build failure cause determined and resolved
+      # - name: selinux_rhel7_enterprise
   - name: generate_buildid_to_debug_symbols_mapping
 
 
@@ -312,7 +313,7 @@ buildvariants:
     large_distro_name: rhel80-medium
     compile_variant: *linux_x86_dynamic_debug_compile_variant_name
   tasks:
-  - name: .aggregation !.encrypt
+  - name: .aggregation !.encrypt !.feature_flag_guarded
   - name: .auth !.audit !.multiversion
   - name: sharding_auth_gen
   - name: .causally_consistent !.wo_snapshot
@@ -426,9 +427,12 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-xlarge
+  - name: compile_integration_and_test_parallel_stream_TG
+    distros:
+    - rhel80-large
   - name: test_api_version_compatibility
-  - name: .aggfuzzer !.multiversion
-  - name: .aggregation !.multiversion
+  - name: .aggfuzzer !.multiversion !.feature_flag_guarded
+  - name: .aggregation !.multiversion !.feature_flag_guarded
   - name: audit
   - name: .auth !.multiversion
   - name: .causally_consistent !.sharding
@@ -441,9 +445,6 @@ buildvariants:
   - name: disk_wiredtiger
   - name: .encrypt !.multiversion
   - name: idl_tests
-  - name: .integration !.multiversion
-    distros:
-    - rhel80-xlarge
   - name: jsCore
     distros:
     - rhel80-xlarge
@@ -654,9 +655,12 @@ buildvariants:
     - name: compile_test_and_package_parallel_dbtest_stream_TG
       distros:
       - rhel80-xlarge
+    - name: compile_integration_and_test_parallel_stream_TG
+      distros:
+      - rhel80-large
     - name: test_api_version_compatibility
-    - name: .aggfuzzer !.multiversion
-    - name: .aggregation !.multiversion
+    - name: .aggfuzzer !.multiversion !.feature_flag_guarded
+    - name: .aggregation !.multiversion !.feature_flag_guarded
     - name: audit
     - name: .auth !.multiversion
     - name: .causally_consistent !.sharding
@@ -669,9 +673,6 @@ buildvariants:
     - name: disk_wiredtiger
     - name: .encrypt !.multiversion
     - name: idl_tests
-    - name: .integration !.multiversion
-      distros:
-      - rhel80-xlarge
     - name: jsCore
       distros:
       - rhel80-xlarge
@@ -766,7 +767,6 @@ buildvariants:
   stepback: false
   tasks:
   - name: tooling_metrics_test
-  - name: publish_metrics
 
 ###########################################
 #         Windows buildvariants           #
@@ -802,7 +802,10 @@ buildvariants:
   - name: compile_build_tools_next_TG
     distros:
     - windows-vsCurrent-xlarge
-  - name: .aggregation !.auth !.encrypt
+  - name: compile_integration_and_test_no_audit_parallel_stream_TG
+    distros:
+    - windows-vsCurrent-xlarge
+  - name: .aggregation !.auth !.encrypt !.feature_flag_guarded
   - name: aggregation_expression_multiversion_fuzzer_gen
   - name: aggregation_expression_optimization_fuzzer_gen
   - name: auth_gen
@@ -815,9 +818,6 @@ buildvariants:
   - name: disk_wiredtiger
   - name: free_monitoring
   - name: initial_sync_fuzzer_gen
-  - name: .integration !.audit
-    distros:
-    - windows-vsCurrent-large
   - name: .jscore .common !.auth !.sharding
   - name: jsCore_txns_large_txns_format
   - name: json_schema
@@ -959,6 +959,7 @@ buildvariants:
   - name: jsCore_column_store_indexes
   - name: jsCore_ese
   - name: jsCore_txns_large_txns_format
+  - name: jsCore_wildcard_indexes
   - name: .jstestfuzz .common
   - name: mqlrun
   - name: noPassthrough_gen
@@ -1016,8 +1017,8 @@ buildvariants:
   - name: compile_test_and_package_serial_TG
     distros:
     - windows-vsCurrent-large
-  - name: .aggfuzzer
-  - name: .aggregation !.auth !.encrypt !.unwind
+  - name: .aggfuzzer !.feature_flag_guarded
+  - name: .aggregation !.auth !.encrypt !.unwind !.feature_flag_guarded
   - name: auth_gen
   - name: causally_consistent_jscore_txns_passthrough
   - name: .misc_js
@@ -1110,7 +1111,7 @@ buildvariants:
   tasks:
   - name: compile_test_and_package_serial_TG
   - name: compile_build_tools_next_TG
-  - name: aggregation
+  - name: aggregation !.feature_flag_guarded
   - name: auth_gen
   - name: causally_consistent_jscore_txns_passthrough
   - name: disk_wiredtiger
@@ -1226,61 +1227,6 @@ buildvariants:
   - name: .crypt
 
 ###########################################
-#          Embedded SDK buildvariants     #
-###########################################
-
-- name: &embedded-sdk-macos embedded-sdk-macos
-  display_name: "Embedded SDK - macOS"
-  run_on:
-  - macos-1100
-  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
-  expansions:
-    compile_variant: *embedded-sdk-macos
-    test_flags: --excludeWithAnyTags=uses_transactions,incompatible_with_macos
-    cmake_path: /Applications/cmake-3.11.0-Darwin-x86_64/CMake.app/Contents/bin/cmake
-    compile_env: DEVELOPER_DIR=/Applications/Xcode13.app
-    compile_flags: >-
-      --lto
-      --variables-files=etc/scons/xcode_macosx.vars
-      -j$(sysctl -n hw.logicalcpu)
-      LIBPATH="\$BUILD_ROOT/mongo-embedded-sdk-\$MONGO_VERSION/lib"
-    cdriver_cmake_osx_deployment_target: "10.14"
-    cdriver_cmake_flags: >-
-      -DCMAKE_BUILD_TYPE=RelWithDebInfo
-      -DCMAKE_OSX_SYSROOT="$(xcrun --sdk macosx --show-sdk-path)"
-      -DCMAKE_OSX_ARCHITECTURES=x86_64
-      -DENABLE_SSL=DARWIN
-      -DENABLE_ZLIB=BUNDLED
-      -DCMAKE_C_FLAGS="-Wunguarded-availability"
-      -DCMAKE_INSTALL_RPATH=@loader_path/../lib
-    disable_unit_tests: true
-  tasks:
-  - name: embedded_sdk_build_and_test
-
-- name: &embedded-sdk-ubuntu-1804-x86_64 embedded-sdk-ubuntu-1804-x86_64
-  display_name: "Embedded SDK - Ubuntu 18.04 x86_64"
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  run_on:
-  - ubuntu1804-build
-  expansions:
-    compile_variant: *embedded-sdk-ubuntu-1804-x86_64
-    test_flags: --excludeWithAnyTags=uses_transactions
-    # We need --allocator=system here to work around SERVER-27675
-    compile_flags: >-
-      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-      -j$(grep -c ^processor /proc/cpuinfo)
-      LIBPATH="\$BUILD_ROOT/mongo-embedded-sdk-\$MONGO_VERSION/lib"
-    cdriver_cmake_flags: >-
-      -DCMAKE_BUILD_TYPE=RelWithDebInfo
-      -DCMAKE_C_COMPILER=/opt/mongodbtoolchain/v4/bin/gcc
-      -DCMAKE_CXX_COMPILER=/opt/mongodbtoolchain/v4/bin/g++
-      -DCMAKE_C_FLAGS="-flto"
-      -DCMAKE_INSTALL_RPATH=\$ORIGIN/../lib
-    disable_unit_tests: true
-  tasks:
-  - name: embedded_sdk_build_and_test
-
-###########################################
 #          Redhat buildvariants           #
 ###########################################
 
@@ -1321,8 +1267,8 @@ buildvariants:
     variant: generate-tasks-for-version
   tasks:
   - name: burn_in_tests_gen
-  - name: .aggfuzzer
-  - name: .aggregation
+  - name: .aggfuzzer !.feature_flag_guarded
+  - name: .aggregation !.feature_flag_guarded
   - name: aggregation_repeat_queries
   - name: audit
   - name: .auth
@@ -1425,9 +1371,12 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-xlarge
+  - name: compile_integration_and_test_parallel_stream_TG
+    distros:
+    - rhel80-large
   - name: test_api_version_compatibility
-  - name: .aggfuzzer !.no_debug_mode
-  - name: .aggregation !.no_debug_mode
+  - name: .aggfuzzer !.feature_flag_guarded !.no_debug_mode
+  - name: .aggregation !.feature_flag_guarded !.no_debug_mode
   - name: audit
   - name: .auth !.no_debug_mode
   - name: .causally_consistent !.sharding
@@ -1449,9 +1398,6 @@ buildvariants:
   - name: .encrypt !.no_debug_mode
   - name: idl_tests
   - name: initial_sync_fuzzer_gen
-  - name: .integration
-    distros:
-    - rhel80-medium
   - name: jsCore
     distros:
     - rhel80-xlarge
@@ -1594,6 +1540,7 @@ buildvariants:
   - name: jsCore_column_store_indexes
   - name: jsCore_min_batch_repeat_queries_ese_gsm
   - name: jsCore_txns_large_txns_format
+  - name: jsCore_wildcard_indexes
   - name: json_schema
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   - name: libunwind_tests
@@ -1907,7 +1854,7 @@ buildvariants:
   - name: compile_test_and_package_serial_no_unittests_TG
     distros:
     - rhel80-xlarge
-  - name: .aggfuzzer
+  - name: .aggfuzzer !.feature_flag_guarded
   - name: audit
   - name: auth_audit_gen
   - name: auth_gen
@@ -1934,7 +1881,8 @@ buildvariants:
   - name: test_packages
     distros:
     - ubuntu2004-package
-  - name: selinux_rhel8_enterprise
+      # TODO: BF-24515 re-enable when build failure cause determined and resolved
+      #- name: selinux_rhel8_enterprise
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: &enterprise-rhel-80-64-bit-build-metrics enterprise-rhel-80-64-bit-build-metrics
@@ -2204,6 +2152,7 @@ buildvariants:
   - name: jsCore_column_store_indexes
   - name: jsCore_min_batch_repeat_queries_ese_gsm
   - name: jsCore_txns_large_txns_format
+  - name: jsCore_wildcard_indexes
   - name: json_schema
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   - name: libunwind_tests
@@ -2303,7 +2252,9 @@ buildvariants:
   - name: external_auth_aws
   - name: external_auth_oidc
   - name: initial_sync_fuzzer_gen
-  - name: .integration !.standalone !.audit
+  - name: compile_integration_and_test_parallel_stream_TG
+    distros:
+    - rhel80-large
   - name: .jscore .common !.sbe_only
   - name: jsCore_min_batch_repeat_queries_ese_gsm
   - name: jsCore_txns_large_txns_format
@@ -2423,7 +2374,9 @@ buildvariants:
   - name: .encrypt
   - name: free_monitoring
   - name: initial_sync_fuzzer_gen
-  - name: .integration !.audit
+  - name: compile_integration_and_test_parallel_stream_TG
+    distros:
+    - rhel80-large
   - name: .jscore .common !.sbe_only
   - name: jsCore_min_batch_repeat_queries_ese_gsm
   - name: jsCore_txns_large_txns_format
@@ -2493,6 +2446,7 @@ buildvariants:
   - name: jsCore
   - name: jsCore_txns
   - name: jsCore_column_store_indexes
+  - name: jsCore_wildcard_indexes
 
 - <<: *rhel80-debug-aubsan-lite-template
   name: &rhel80-debug-aubsan-all-feature-flags rhel80-debug-aubsan-all-feature-flags
@@ -2530,6 +2484,7 @@ buildvariants:
   - name: jsCore_column_store_indexes
   - name: jsCore_min_batch_repeat_queries_ese_gsm
   - name: jsCore_txns_large_txns_format
+  - name: jsCore_wildcard_indexes
   - name: json_schema
   - name: .logical_session_cache
   - name: .misc_js
@@ -2606,11 +2561,12 @@ buildvariants:
     multiversion_edition: enterprise
   tasks:
   - name: compile_test_and_package_serial_TG
+  # - name: compile_integration_and_test_parallel_stream_TG # Not passing
   # - name: test_api_version_compatibility # Not relevant for TSAN
   # - name: burn_in_tests_gen # No burn in tests needed
   - name: check_feature_flag_tags
-  # - name: .aggfuzzer # Not passing
-  # - name: .aggregation # Not passing
+  # - name: .aggfuzzer !.feature_flag_guarded # Not passing
+  # - name: .aggregation !.feature_flag_guarded # Not passing
   - name: audit
   # - name: .auth  # Not passing
   # - name: burn_in_tags_gen # No burn in tests needed
@@ -2635,7 +2591,6 @@ buildvariants:
   # - name: .encrypt # Not passing
   # - name: idl_tests # Not relevant for TSAN
   # - name: initial_sync_fuzzer_gen # Not passing
-  # - name: .integration # Not passing
   #   distros:
   #   - rhel80-medium
   - name: jsCore
@@ -2717,8 +2672,9 @@ buildvariants:
     compile_variant: *enterprise-rhel80-debug-complete-tsan
   tasks:
   - name: compile_test_and_package_serial_TG
-  - name: .aggfuzzer
-  - name: .aggregation
+  - name: compile_integration_and_test_parallel_stream_TG
+  - name: .aggfuzzer !.feature_flag_guarded
+  - name: .aggregation !.feature_flag_guarded
   - name: .auth
   - name: resmoke_end2end_tests
   - name: unittest_shell_hang_analyzer_gen
@@ -2729,13 +2685,10 @@ buildvariants:
   - name: .concurrency !.large !.ubsan !.no_txns !.debug_only !.compute_mode
   - name: .concurrency .large !.ubsan !.no_txns !.debug_only !.compute_mode
     distros:
-    - rhel80-medium
+    - rhel80-large
   - name: .config_fuzzer
   - name: .encrypt
   - name: initial_sync_fuzzer_gen
-  - name: .integration
-    distros:
-    - rhel80-medium
   - name: .jscore .common !jsCore
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   # - name: libunwind_tests # Cant be used because tsan does not use libunwind
@@ -2865,11 +2818,13 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-build
-  - name: .aggregation !.no_async
+  - name: compile_integration_and_test_parallel_stream_TG
+    distros:
+    - rhel80-large
+  - name: .aggregation !.no_async !.feature_flag_guarded
   - name: sharding_auth_gen
   - name: .sharding .causally_consistent !.wo_snapshot
   - name: .concurrency .common !.kill_terminate
-  - name: .integration !.audit
   - name: .jscore .common
   - name: noPassthrough_gen
   - name: noPassthroughWithMongod_gen
@@ -2908,11 +2863,13 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-build
-  - name: .aggregation !.no_async
+  - name: compile_integration_and_test_parallel_stream_TG
+    distros:
+    - rhel80-large
+  - name: .aggregation !.no_async !.feature_flag_guarded
   - name: sharding_auth_gen
   - name: .sharding .causally_consistent !.wo_snapshot
   - name: .concurrency .common !.kill_terminate
-  - name: .integration !.audit
   - name: .jscore .common
   - name: .logical_session_cache .one_sec
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
@@ -2948,11 +2905,13 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-build
-  - name: .aggregation !.no_async
+  - name: compile_integration_and_test_parallel_stream_TG
+    distros:
+    - rhel80-large
+  - name: .aggregation !.no_async !.feature_flag_guarded
   - name: sharding_auth_gen
   - name: .sharding .causally_consistent !.wo_snapshot
   - name: .concurrency .common !.kill_terminate
-  - name: .integration !.audit
   - name: .jscore .common
   - name: .logical_session_cache .one_sec
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
@@ -2993,11 +2952,13 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-build
-  - name: .aggregation !.no_async
+  - name: compile_integration_and_test_parallel_stream_TG
+    distros:
+    - rhel80-large
+  - name: .aggregation !.no_async !.feature_flag_guarded
   - name: sharding_auth_gen
   - name: .sharding .causally_consistent !.wo_snapshot
   - name: .concurrency .common !.kill_terminate
-  - name: .integration !.audit
   - name: .jscore .common
   - name: .logical_session_cache .one_sec
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
@@ -3038,11 +2999,13 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-build
-  - name: .aggregation !.no_async
+  - name: compile_integration_and_test_parallel_stream_TG
+    distros:
+    - rhel80-large
+  - name: .aggregation !.no_async !.feature_flag_guarded
   - name: sharding_auth_gen
   - name: .sharding .causally_consistent !.wo_snapshot
   - name: .concurrency .common !.kill_terminate
-  - name: .integration !.audit
   - name: .jscore .common
   - name: .logical_session_cache .one_sec
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
@@ -3076,15 +3039,17 @@ buildvariants:
     distros:
     - rhel80-build
     patch_only: true
-  - name: .aggregation !.no_async
+  - name: compile_integration_and_test_no_audit_parallel_stream_TG
+    distros:
+    - rhel80-large
+    patch_only: true
+  - name: .aggregation !.no_async !.feature_flag_guarded
     patch_only: true
   - name: sharding_auth_gen
     patch_only: true
   - name: .sharding .causally_consistent !.wo_snapshot
     patch_only: true
   - name: .concurrency .common !.kill_terminate
-    patch_only: true
-  - name: .integration !.audit
     patch_only: true
   - name: .jscore .common
     patch_only: true

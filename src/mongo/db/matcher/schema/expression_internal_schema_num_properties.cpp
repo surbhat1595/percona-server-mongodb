@@ -38,13 +38,17 @@ void InternalSchemaNumPropertiesMatchExpression::debugString(StringBuilder& debu
     _debugAddSpace(debug, indentationLevel);
     BSONObjBuilder builder;
     serialize(&builder, {});
-    debug << builder.obj().toString() << "\n";
+    debug << builder.obj().toString();
+    _debugStringAttachTagInfo(&debug);
 }
 
 void InternalSchemaNumPropertiesMatchExpression::serialize(BSONObjBuilder* out,
                                                            SerializationOptions opts) const {
-    // TODO SERVER-73678 respect 'opts'.
-    out->append(_name, _numProperties);
+    if (opts.replacementForLiteralArgs) {
+        out->append(_name, opts.replacementForLiteralArgs.get());
+    } else {
+        out->append(_name, _numProperties);
+    }
 }
 
 bool InternalSchemaNumPropertiesMatchExpression::equivalent(const MatchExpression* other) const {

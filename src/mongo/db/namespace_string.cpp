@@ -157,7 +157,7 @@ bool NamespaceString::isLegalClientSystemNS(
  * Process updates to 'admin.system.version' individually as well so the secondary's FCV when
  * processing each operation matches the primary's when committing that operation.
  *
- * Process updates to 'config.tenantMigrationRecipients' individually so they serialize after
+ * Process updates to 'config.shardMergeRecipients' individually so they serialize after
  * inserts into 'config.donatedFiles.<migrationId>'.
  *
  * Oplog entries on 'config.shards' should be processed one at a time, otherwise the in-memory state
@@ -170,7 +170,7 @@ bool NamespaceString::mustBeAppliedInOwnOplogBatch() const {
     return isSystemDotViews() || isServerConfigurationCollection() || isPrivilegeCollection() ||
         _ns == kDonorReshardingOperationsNamespace.ns() ||
         _ns == kForceOplogBatchBoundaryNamespace.ns() ||
-        _ns == kTenantMigrationDonorsNamespace.ns() ||
+        _ns == kTenantMigrationDonorsNamespace.ns() || _ns == kShardMergeRecipientsNamespace.ns() ||
         _ns == kTenantMigrationRecipientsNamespace.ns() || _ns == kShardSplitDonorsNamespace.ns() ||
         _ns == kConfigsvrShardsNamespace.ns();
 }
@@ -189,6 +189,10 @@ NamespaceString NamespaceString::makeSystemDotViewsNamespace(const DatabaseName&
     return NamespaceString(dbName, kSystemDotViewsCollectionName);
 }
 
+NamespaceString NamespaceString::makeSystemDotProfileNamespace(const DatabaseName& dbName) {
+    return NamespaceString(dbName, kSystemDotProfileCollectionName);
+}
+
 NamespaceString NamespaceString::makeListCollectionsNSS(const DatabaseName& dbName) {
     NamespaceString nss(dbName, listCollectionsCursorCol);
     dassert(nss.isValid());
@@ -198,6 +202,10 @@ NamespaceString NamespaceString::makeListCollectionsNSS(const DatabaseName& dbNa
 
 NamespaceString NamespaceString::makeGlobalConfigCollection(StringData collName) {
     return NamespaceString(DatabaseName::kConfig, collName);
+}
+
+NamespaceString NamespaceString::makeLocalCollection(StringData collName) {
+    return NamespaceString(DatabaseName::kLocal, collName);
 }
 
 NamespaceString NamespaceString::makeCollectionlessAggregateNSS(const DatabaseName& dbName) {
@@ -215,6 +223,11 @@ NamespaceString NamespaceString::makeChangeCollectionNSS(
 NamespaceString NamespaceString::makeGlobalIndexNSS(const UUID& id) {
     return NamespaceString(DatabaseName::kSystem,
                            NamespaceString::kGlobalIndexCollectionPrefix + id.toString());
+}
+
+NamespaceString NamespaceString::makeMovePrimaryOplogBufferNSS(const UUID& migrationId) {
+    return NamespaceString(DatabaseName::kConfig,
+                           "movePrimaryOplogBuffer." + migrationId.toString());
 }
 
 NamespaceString NamespaceString::makePreImageCollectionNSS(
@@ -236,10 +249,23 @@ NamespaceString NamespaceString::makeReshardingLocalConflictStashNSS(
                                donorShardId);
 }
 
+NamespaceString NamespaceString::makeTenantUsersCollection(
+    const boost::optional<TenantId>& tenantId) {
+    return NamespaceString(tenantId, DatabaseName::kAdmin.db(), NamespaceString::kSystemUsers);
+}
+
+NamespaceString NamespaceString::makeTenantRolesCollection(
+    const boost::optional<TenantId>& tenantId) {
+    return NamespaceString(tenantId, DatabaseName::kAdmin.db(), NamespaceString::kSystemRoles);
+}
+
+NamespaceString NamespaceString::makeCommandNamespace(const DatabaseName& dbName) {
+    return NamespaceString(dbName, "$cmd");
+}
+
 NamespaceString NamespaceString::makeDummyNamespace(const boost::optional<TenantId>& tenantId) {
     return NamespaceString(tenantId, DatabaseName::kConfig.db(), "dummy.namespace");
 }
-
 
 std::string NamespaceString::getSisterNS(StringData local) const {
     verify(local.size() && local[0] != '.');

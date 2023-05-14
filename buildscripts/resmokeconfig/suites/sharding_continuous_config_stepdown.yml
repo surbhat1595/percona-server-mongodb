@@ -71,6 +71,7 @@ selector:
   - jstests/sharding/printShardingStatus.js
   - jstests/sharding/refresh_sessions.js
   - jstests/sharding/shard_collection_existing_zones.js
+  - jstests/sharding/catalog_shard_mongos_ops_on_config_and_admin.js
   # Balancer writes (direct write to config database with no retries)
   - jstests/sharding/convert_to_and_from_sharded.js
   - jstests/sharding/remove2.js
@@ -85,7 +86,7 @@ selector:
   - jstests/sharding/analyze_shard_key/persist_sampled_diffs.js
   - jstests/sharding/analyze_shard_key/persist_sampled_read_queries.js
   - jstests/sharding/analyze_shard_key/persist_sampled_write_queries.js
-  - jstests/sharding/analyze_shard_key/refresh_sample_rates_sharded.js
+  - jstests/sharding/analyze_shard_key/refresh_sample_rates.js
   - jstests/sharding/configsvr_metadata_commands_require_majority_write_concern.js
   - jstests/sharding/min_optime_recovery_on_successful_move_chunk_commit.js
   - jstests/sharding/read_after_optime.js

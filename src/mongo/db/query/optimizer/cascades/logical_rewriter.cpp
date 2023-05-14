@@ -664,16 +664,6 @@ static void convertFilterToSargableNode(ABT::reference_type node,
         return true;
     });
 
-    if (conversion->_reqMap.isNoop()) {
-        // If the filter has no constraints after removing no-ops, then replace with its child. We
-        // need to copy the child since we hold it by reference from the memo, and during
-        // subtitution the current group will be erased.
-
-        ABT newNode = filterNode.getChild();
-        ctx.addNode(newNode, true /*substitute*/);
-        return;
-    }
-
     ProjectionRenames projectionRenames_unused;
     const bool hasEmptyInterval = simplifyPartialSchemaReqPaths(scanProjName,
                                                                 scanDef.getMultikeynessTrie(),
@@ -690,6 +680,15 @@ static void convertFilterToSargableNode(ABT::reference_type node,
     }
     if (conversion->_reqMap.numLeaves() > SargableNode::kMaxPartialSchemaReqs) {
         // Too many requirements.
+        return;
+    }
+    if (conversion->_reqMap.isNoop()) {
+        // If the filter has no constraints after removing no-ops, then replace with its child. We
+        // need to copy the child since we hold it by reference from the memo, and during
+        // subtitution the current group will be erased.
+
+        ABT newNode = filterNode.getChild();
+        ctx.addNode(newNode, true /*substitute*/);
         return;
     }
 
@@ -1139,10 +1138,11 @@ struct SubstituteConvert<EvaluationNode> {
 static void lowerSargableNode(const SargableNode& node, RewriteContext& ctx) {
     PhysPlanBuilder builder{node.getChild()};
     const auto& reqMap = node.getReqMap();
-    for (const auto& [key, req] : reqMap.conjuncts()) {
-        lowerPartialSchemaRequirement(
-            key, req, ctx.getPathToInterval(), boost::none /*residualCE*/, builder);
-    }
+    lowerPartialSchemaRequirements(boost::none /*scanGroupCE*/,
+                                   {} /*indexPredSels*/,
+                                   createResidualReqsWithEmptyCE(reqMap.getRoot()),
+                                   ctx.getPathToInterval(),
+                                   builder);
     ctx.addNode(builder._node, true /*clear*/);
 }
 
@@ -1284,6 +1284,11 @@ struct ExploreConvert<SargableNode> {
             !ctx.getMemo().getLogicalNodes(scanGroupId).front().is<ScanNode>()) {
             // We are not sitting above a ScanNode.
             lowerSargableNode(sargableNode, ctx);
+            return;
+        }
+
+        // SERVER-69026: Support "splitting" a top-level disjunction for index ORing.
+        if (!PSRExpr::isSingletonDisjunction(sargableNode.getReqMap().getRoot())) {
             return;
         }
 

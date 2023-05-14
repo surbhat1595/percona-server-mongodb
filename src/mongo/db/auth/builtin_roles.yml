@@ -352,6 +352,8 @@ roles:
                   - getChangeStreamState
                   - telemetryRead
                   - checkMetadataConsistency
+                  - transitionToCatalogShard
+                  - transitionToDedicatedConfigServer
 
             - matchType: any_normal
               actions: &clusterManagerRoleDatabaseActions

@@ -76,26 +76,17 @@ class EphemeralForTestRecordStore::TruncateChange : public RecoveryUnit::Change 
 public:
     TruncateChange(OperationContext* opCtx, Data* data, const RecordId& begin, const RecordId& end)
         : _opCtx(opCtx), _data(data), _dataSize(0) {
-        using std::swap;
-
         stdx::lock_guard<stdx::recursive_mutex> lock(_data->recordsMutex);
 
-        auto it = _data->records.begin();
-        while (it != _data->records.end() && it->first < begin) {
-            it++;
+        for (auto it = _data->records.begin(); it != _data->records.end();) {
+            if (it->first >= begin && it->first <= end) {
+                _deletedRecords.try_emplace(it->first, it->second);
+                _dataSize += it->first.memUsage() + it->second.size;
+                it = _data->records.erase(it);
+            } else {
+                it++;
+            }
         }
-
-        auto beginId = it->first;
-
-        while (it != _data->records.end() && it->first <= end) {
-            _deletedRecords.try_emplace(it->first, it->second);
-            // RecordId size + value size.
-            _dataSize += it->first.memUsage() + it->second.size;
-            it++;
-        }
-        auto endId = it->first;
-
-        _data->records.erase(_data->records.find(beginId), _data->records.find(endId));
         _data->dataSize -= _dataSize;
     }
 
@@ -271,10 +262,11 @@ private:
 //
 
 EphemeralForTestRecordStore::EphemeralForTestRecordStore(StringData ns,
+                                                         boost::optional<UUID> uuid,
                                                          StringData identName,
                                                          std::shared_ptr<void>* dataInOut,
                                                          bool isCapped)
-    : RecordStore(ns, identName, isCapped),
+    : RecordStore(uuid, identName, isCapped),
       _isCapped(isCapped),
       _data(*dataInOut ? static_cast<Data*>(dataInOut->get())
                        : new Data(ns, NamespaceString::oplog(ns))) {
@@ -300,7 +292,7 @@ const EphemeralForTestRecordStore::EphemeralForTestRecord* EphemeralForTestRecor
         LOGV2_ERROR(
             23720,
             "EphemeralForTestRecordStore::recordFor cannot find record for {namespace}:{loc}",
-            logAttrs(NamespaceString(ns())),
+            logAttrs(NamespaceString(_data->ns)),
             "loc"_attr = loc);
     }
     invariant(it != _data->records.end());
@@ -314,7 +306,7 @@ EphemeralForTestRecordStore::EphemeralForTestRecord* EphemeralForTestRecordStore
         LOGV2_ERROR(
             23721,
             "EphemeralForTestRecordStore::recordFor cannot find record for {namespace}:{loc}",
-            logAttrs(NamespaceString(ns())),
+            logAttrs(NamespaceString(_data->ns)),
             "loc"_attr = loc);
     }
     invariant(it != _data->records.end());

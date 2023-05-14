@@ -84,6 +84,29 @@ vm::Instruction::Parameter appendParameter(vm::CodeFragment& code,
     return getParam(var);
 }
 
+/**
+ * Set of functions that allocate one or two labels, constructs code using 'f', and cleans up the
+ * labels before returning the constructed code. These functions should be used when working with
+ * labels in order to guarantee that the generated labels are destroyed _before_ returning the
+ * generated code.
+ */
+vm::CodeFragment withNewLabel(CompileCtx& ctx, std::function<vm::CodeFragment(vm::LabelId)> f) {
+    auto label = ctx.newLabelId();
+    auto code = f(label);
+    code.removeLabel(label);
+    return code;
+}
+
+vm::CodeFragment withNewLabels(CompileCtx& ctx,
+                               std::function<vm::CodeFragment(vm::LabelId, vm::LabelId)> f) {
+    auto label1 = ctx.newLabelId();
+    auto label2 = ctx.newLabelId();
+    auto code = f(label1, label2);
+    code.removeLabel(label1);
+    code.removeLabel(label2);
+    return code;
+}
+
 std::unique_ptr<vm::CodeFragment> EExpression::compile(CompileCtx& ctx) const {
     ctx.lastLabelId = 0;
     auto result = std::make_unique<vm::CodeFragment>(compileDirect(ctx));
@@ -181,7 +204,6 @@ std::unique_ptr<EExpression> EPrimBinary::clone() const {
 
 vm::CodeFragment EPrimBinary::compileDirect(CompileCtx& ctx) const {
     const bool hasCollatorArg = (_nodes.size() == 3);
-    vm::CodeFragment code;
 
     invariant(!hasCollatorArg || isComparisonOp(_op));
 
@@ -205,39 +227,40 @@ vm::CodeFragment EPrimBinary::compileDirect(CompileCtx& ctx) const {
         auto clauses = collectAndClauses();
         invariant(clauses.size() >= 2);
 
-        // Allocate label ids
-        vm::LabelScope endLabel(code, ctx.newLabelId());
-        vm::LabelScope falseLabel(code, ctx.newLabelId());
+        return withNewLabels(ctx, [&](vm::LabelId endLabel, vm::LabelId falseLabel) {
+            vm::CodeFragment code;
 
-        // Build code fragment for @false
-        vm::CodeFragment codeFalseBranch;
-        codeFalseBranch.appendLabel(falseLabel);
-        codeFalseBranch.appendConstVal(value::TypeTags::Boolean, value::bitcastFrom<bool>(false));
+            // Build code fragment for @false
+            vm::CodeFragment codeFalseBranch;
+            codeFalseBranch.appendLabel(falseLabel);
+            codeFalseBranch.appendConstVal(value::TypeTags::Boolean,
+                                           value::bitcastFrom<bool>(false));
 
-        // Build code fragment for @trueN
-        auto it = clauses.rbegin();
-        auto rhs = (*it)->compileDirect(ctx);
-        rhs.appendLabelJump(endLabel);
+            // Build code fragment for @trueN
+            auto it = clauses.rbegin();
+            auto rhs = (*it)->compileDirect(ctx);
+            rhs.appendLabelJump(endLabel);
 
-        code.append(std::move(rhs), std::move(codeFalseBranch));
+            code.append(std::move(rhs), std::move(codeFalseBranch));
 
-        ++it;
-        invariant(it != clauses.rend());
+            ++it;
+            invariant(it != clauses.rend());
 
-        // Build code fragment for @trueN-1 to @true1
-        for (; it != clauses.rend(); ++it) {
-            auto lhs = (*it)->compileDirect(ctx);
-            lhs.appendLabelJumpNothing(endLabel);
-            lhs.appendLabelJumpFalse(falseLabel);
+            // Build code fragment for @trueN-1 to @true1
+            for (; it != clauses.rend(); ++it) {
+                auto lhs = (*it)->compileDirect(ctx);
+                lhs.appendLabelJumpNothing(endLabel);
+                lhs.appendLabelJumpFalse(falseLabel);
 
-            lhs.append(std::move(code));
-            code = std::move(lhs);
-        }
+                lhs.append(std::move(code));
+                code = std::move(lhs);
+            }
 
-        // Append the end label
-        code.appendLabel(endLabel);
+            // Append the end label
+            code.appendLabel(endLabel);
 
-        return code;
+            return code;
+        });
     } else if (_op == EPrimBinary::logicOr) {
         /*
          * We collect all connected OR clauses, named [lhs1,...,lhsN-1, rhs],
@@ -258,43 +281,43 @@ vm::CodeFragment EPrimBinary::compileDirect(CompileCtx& ctx) const {
         auto clauses = collectOrClauses();
         invariant(clauses.size() >= 2);
 
-        // Allocate label ids
-        vm::LabelScope endLabel(code, ctx.newLabelId());
-        vm::LabelScope trueLabel(code, ctx.newLabelId());
+        return withNewLabels(ctx, [&](vm::LabelId endLabel, vm::LabelId trueLabel) {
+            vm::CodeFragment code;
 
-        auto it = clauses.rbegin();
+            auto it = clauses.rbegin();
 
-        // Build code fragment for @true
-        vm::CodeFragment codeTrueBranch;
-        codeTrueBranch.appendLabel(trueLabel);
-        codeTrueBranch.appendConstVal(value::TypeTags::Boolean, value::bitcastFrom<bool>(true));
+            // Build code fragment for @true
+            vm::CodeFragment codeTrueBranch;
+            codeTrueBranch.appendLabel(trueLabel);
+            codeTrueBranch.appendConstVal(value::TypeTags::Boolean, value::bitcastFrom<bool>(true));
 
-        // Build code fragment for @falseN
-        auto rhs = (*it)->compileDirect(ctx);
-        rhs.appendLabelJump(endLabel);
-        code.append(std::move(rhs), std::move(codeTrueBranch));
+            // Build code fragment for @falseN
+            auto rhs = (*it)->compileDirect(ctx);
+            rhs.appendLabelJump(endLabel);
+            code.append(std::move(rhs), std::move(codeTrueBranch));
 
-        ++it;
-        invariant(it != clauses.rend());
+            ++it;
+            invariant(it != clauses.rend());
 
-        // Build code fragment for @falseN-1 to @true1
-        for (; it != clauses.rend(); ++it) {
-            auto lhs = (*it)->compileDirect(ctx);
-            lhs.appendLabelJumpNothing(endLabel);
-            lhs.appendLabelJumpTrue(trueLabel);
+            // Build code fragment for @falseN-1 to @true1
+            for (; it != clauses.rend(); ++it) {
+                auto lhs = (*it)->compileDirect(ctx);
+                lhs.appendLabelJumpNothing(endLabel);
+                lhs.appendLabelJumpTrue(trueLabel);
 
-            lhs.append(std::move(code));
-            code = std::move(lhs);
-        }
+                lhs.append(std::move(code));
+                code = std::move(lhs);
+            }
 
+            // Append the end label
+            code.appendLabel(endLabel);
 
-        // Append the end label
-        code.appendLabel(endLabel);
-
-        return code;
+            return code;
+        });
     } else if (_op == EPrimBinary::fillEmpty) {
         // Special cases: rhs is trivial to evaluate -> avoid a jump
         if (EConstant* rhsConst = _nodes[1]->as<EConstant>()) {
+            vm::CodeFragment code;
             auto [tag, val] = rhsConst->getConstant();
             if (tag == value::TypeTags::Null) {
                 code.append(_nodes[0]->compileDirect(ctx));
@@ -316,20 +339,20 @@ vm::CodeFragment EPrimBinary::compileDirect(CompileCtx& ctx) const {
          *            rhs
          * @end:
          */
-        vm::LabelScope endLabel(code, ctx.newLabelId());
+        return withNewLabel(ctx, [&](vm::LabelId endLabel) {
+            vm::CodeFragment code;
+            code.append(_nodes[0]->compileDirect(ctx));
+            code.appendLabelJumpNotNothing(endLabel);
 
-        code.append(_nodes[0]->compileDirect(ctx));
-        code.appendLabelJumpNotNothing(endLabel);
+            code.appendPop();
+            code.append(_nodes[1]->compileDirect(ctx));
 
-        code.appendPop();
-        code.append(_nodes[1]->compileDirect(ctx));
-
-        code.appendLabel(endLabel);
-
-        return code;
+            code.appendLabel(endLabel);
+            return code;
+        });
     }
 
-
+    vm::CodeFragment code;
     vm::Instruction::Parameter collatorParam;
 
     if (hasCollatorArg) {
@@ -572,12 +595,33 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
      BuiltinFn{[](size_t n) { return n == 3 || n == 4; }, vm::Builtin::dateToParts, false}},
     {"isoDateToParts",
      BuiltinFn{[](size_t n) { return n == 3 || n == 4; }, vm::Builtin::isoDateToParts, false}},
-    {"dayOfYear", BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::dayOfYear, false}},
-    {"dayOfMonth", BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::dayOfMonth, false}},
-    {"dayOfWeek", BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::dayOfWeek, false}},
+    {"dayOfYear",
+     BuiltinFn{[](size_t n) { return n == 2 || n == 3; }, vm::Builtin::dayOfYear, false}},
+    {"dayOfMonth",
+     BuiltinFn{[](size_t n) { return n == 2 || n == 3; }, vm::Builtin::dayOfMonth, false}},
+    {"dayOfWeek",
+     BuiltinFn{[](size_t n) { return n == 2 || n == 3; }, vm::Builtin::dayOfWeek, false}},
+    {"year", BuiltinFn{[](size_t n) { return n == 2 || n == 3; }, vm::Builtin::year, false}},
+    {"month", BuiltinFn{[](size_t n) { return n == 2 || n == 3; }, vm::Builtin::month, false}},
+    {"hour", BuiltinFn{[](size_t n) { return n == 2 || n == 3; }, vm::Builtin::hour, false}},
+    {"minute", BuiltinFn{[](size_t n) { return n == 2 || n == 3; }, vm::Builtin::minute, false}},
+    {"second", BuiltinFn{[](size_t n) { return n == 2 || n == 3; }, vm::Builtin::second, false}},
+    {"millisecond",
+     BuiltinFn{[](size_t n) { return n == 2 || n == 3; }, vm::Builtin::millisecond, false}},
+    {"week", BuiltinFn{[](size_t n) { return n == 2 || n == 3; }, vm::Builtin::week, false}},
+    {"isoWeekYear",
+     BuiltinFn{[](size_t n) { return n == 2 || n == 3; }, vm::Builtin::isoWeekYear, false}},
+    {"isoDayOfWeek",
+     BuiltinFn{[](size_t n) { return n == 2 || n == 3; }, vm::Builtin::isoDayOfWeek, false}},
+    {"isoWeek", BuiltinFn{[](size_t n) { return n == 2 || n == 3; }, vm::Builtin::isoWeek, false}},
     {"datePartsWeekYear",
      BuiltinFn{[](size_t n) { return n == 9; }, vm::Builtin::datePartsWeekYear, false}},
     {"dateToString", BuiltinFn{[](size_t n) { return n == 4; }, vm::Builtin::dateToString, false}},
+    {"dateFromString",
+     BuiltinFn{[](size_t n) { return n == 3 || n == 4; }, vm::Builtin::dateFromString, false}},
+    {"dateFromStringNoThrow",
+     BuiltinFn{
+         [](size_t n) { return n == 3 || n == 4; }, vm::Builtin::dateFromStringNoThrow, false}},
     {"split", BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::split, false}},
     {"regexMatch", BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::regexMatch, false}},
     {"replaceOne", BuiltinFn{[](size_t n) { return n == 3; }, vm::Builtin::replaceOne, false}},
@@ -659,7 +703,7 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
     {"sinh", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::sinh, false}},
     {"tan", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::tan, false}},
     {"tanh", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::tanh, false}},
-    {"round", BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::round, false}},
+    {"round", BuiltinFn{[](size_t n) { return n == 1 || n == 2; }, vm::Builtin::round, false}},
     {"concat", BuiltinFn{kAnyNumberOfArgs, vm::Builtin::concat, false}},
     {"concatArrays", BuiltinFn{kAnyNumberOfArgs, vm::Builtin::concatArrays, false}},
     {"aggConcatArraysCapped",
@@ -675,6 +719,8 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
     {"isTimezone", BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::isTimezone, false}},
     {"isValidToStringFormat",
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::isValidToStringFormat, false}},
+    {"validateFromStringFormat",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::validateFromStringFormat, false}},
     {"setUnion", BuiltinFn{kAnyNumberOfArgs, vm::Builtin::setUnion, false}},
     {"setIntersection", BuiltinFn{kAnyNumberOfArgs, vm::Builtin::setIntersection, false}},
     {"setDifference",
@@ -830,25 +876,25 @@ vm::CodeFragment generateTraverseP(CompileCtx& ctx, const EExpression::Vector& n
         auto [tag, val] = nodes[2]->as<EConstant>()->getConstant();
         if ((tag == value::TypeTags::NumberInt32 && value::bitcastTo<int32_t>(val) == 1) ||
             tag == value::TypeTags::Nothing) {
-            vm::CodeFragment code;
-            vm::LabelScope afterBodyLabel(code, ctx.newLabelId());
+            return withNewLabel(ctx, [&, tag = tag](vm::LabelId afterBodyLabel) {
+                vm::CodeFragment code;
+                auto lambda = nodes[1]->as<ELocalLambda>();
 
-            auto lambda = nodes[1]->as<ELocalLambda>();
+                // Jump around the body.
+                code.appendLabelJump(afterBodyLabel);
 
-            // Jump around the body.
-            code.appendLabelJump(afterBodyLabel);
+                // Remember the position and append the body.
+                auto bodyPosition = code.instrs().size();
+                code.appendNoStack(lambda->compileBodyDirect(ctx));
 
-            // Remember the position and append the body.
-            auto bodyPosition = code.instrs().size();
-            code.appendNoStack(lambda->compileBodyDirect(ctx));
-
-            // Append the traverseP call.
-            code.appendLabel(afterBodyLabel);
-            code.append(nodes[0]->compileDirect(ctx));
-            code.appendTraverseP(bodyPosition,
-                                 tag == value::TypeTags::Nothing ? vm::Instruction::Nothing
-                                                                 : vm::Instruction::Int32One);
-            return code;
+                // Append the traverseP call.
+                code.appendLabel(afterBodyLabel);
+                code.append(nodes[0]->compileDirect(ctx));
+                code.appendTraverseP(bodyPosition,
+                                     tag == value::TypeTags::Nothing ? vm::Instruction::Nothing
+                                                                     : vm::Instruction::Int32One);
+                return code;
+            });
         }
     }
 
@@ -857,25 +903,26 @@ vm::CodeFragment generateTraverseP(CompileCtx& ctx, const EExpression::Vector& n
 
 vm::CodeFragment generateTraverseF(CompileCtx& ctx, const EExpression::Vector& nodes, bool) {
     if (nodes[1]->as<ELocalLambda>() && nodes[2]->as<EConstant>()) {
-        vm::CodeFragment code;
-        auto lambda = nodes[1]->as<ELocalLambda>();
-        auto [tag, val] = nodes[2]->as<EConstant>()->getConstant();
+        return withNewLabel(ctx, [&](vm::LabelId afterBodyLabel) {
+            vm::CodeFragment code;
+            auto lambda = nodes[1]->as<ELocalLambda>();
+            auto [tag, val] = nodes[2]->as<EConstant>()->getConstant();
 
-        // Jump around the body.
-        vm::LabelScope afterBodyLabel(code, ctx.newLabelId());
-        code.appendLabelJump(afterBodyLabel);
+            // Jump around the body.
+            code.appendLabelJump(afterBodyLabel);
 
-        // Remember the position and append the body.
-        auto bodyPosition = code.instrs().size();
-        code.appendNoStack(lambda->compileBodyDirect(ctx));
+            // Remember the position and append the body.
+            auto bodyPosition = code.instrs().size();
+            code.appendNoStack(lambda->compileBodyDirect(ctx));
 
-        // Append the traverseF call.
-        code.appendLabel(afterBodyLabel);
-        code.append(nodes[0]->compileDirect(ctx));
-        code.appendTraverseF(bodyPosition,
-                             value::bitcastTo<bool>(val) ? vm::Instruction::True
-                                                         : vm::Instruction::False);
-        return code;
+            // Append the traverseF call.
+            code.appendLabel(afterBodyLabel);
+            code.append(nodes[0]->compileDirect(ctx));
+            code.appendTraverseF(bodyPosition,
+                                 value::bitcastTo<bool>(val) ? vm::Instruction::True
+                                                             : vm::Instruction::False);
+            return code;
+        });
     }
 
     return generatorLegacy<&vm::CodeFragment::appendTraverseF>(ctx, nodes, false);
@@ -885,23 +932,23 @@ vm::CodeFragment generateTraverseCellValues(CompileCtx& ctx,
                                             const EExpression::Vector& nodes,
                                             bool) {
     if (nodes[1]->as<ELocalLambda>()) {
-        vm::CodeFragment code;
-        auto lambda = nodes[1]->as<ELocalLambda>();
+        return withNewLabel(ctx, [&](vm::LabelId afterBodyLabel) {
+            vm::CodeFragment code;
+            auto lambda = nodes[1]->as<ELocalLambda>();
 
-        // Jump around the body.
-        vm::LabelScope afterBodyLabel(code, ctx.newLabelId());
-        code.appendLabelJump(afterBodyLabel);
+            // Jump around the body.
+            code.appendLabelJump(afterBodyLabel);
 
-        // Remember the position and append the body.
-        auto bodyPosition = code.instrs().size();
-        code.appendNoStack(lambda->compileBodyDirect(ctx));
+            // Remember the position and append the body.
+            auto bodyPosition = code.instrs().size();
+            code.appendNoStack(lambda->compileBodyDirect(ctx));
 
-        // Append the traverseCellValues call.
-        code.appendLabel(afterBodyLabel);
-        code.append(nodes[0]->compileDirect(ctx));
-        code.appendTraverseCellValues(bodyPosition);
-
-        return code;
+            // Append the traverseCellValues call.
+            code.appendLabel(afterBodyLabel);
+            code.append(nodes[0]->compileDirect(ctx));
+            code.appendTraverseCellValues(bodyPosition);
+            return code;
+        });
     }
 
     return generatorLegacy<&vm::CodeFragment::appendTraverseCellValues>(ctx, nodes, false);
@@ -911,23 +958,24 @@ vm::CodeFragment generateTraverseCellTypes(CompileCtx& ctx,
                                            const EExpression::Vector& nodes,
                                            bool) {
     if (nodes[1]->as<ELocalLambda>()) {
-        vm::CodeFragment code;
-        auto lambda = nodes[1]->as<ELocalLambda>();
+        return withNewLabel(ctx, [&](vm::LabelId afterBodyLabel) {
+            vm::CodeFragment code;
+            auto lambda = nodes[1]->as<ELocalLambda>();
 
-        // Jump around the body.
-        vm::LabelScope afterBodyLabel(code, ctx.newLabelId());
-        code.appendLabelJump(afterBodyLabel);
+            // Jump around the body.
+            code.appendLabelJump(afterBodyLabel);
 
-        // Remember the position and append the body.
-        auto bodyPosition = code.instrs().size();
-        code.appendNoStack(lambda->compileBodyDirect(ctx));
+            // Remember the position and append the body.
+            auto bodyPosition = code.instrs().size();
+            code.appendNoStack(lambda->compileBodyDirect(ctx));
 
-        // Append the traverseCellTypes call.
-        code.appendLabel(afterBodyLabel);
-        code.append(nodes[0]->compileDirect(ctx));
-        code.appendTraverseCellTypes(bodyPosition);
+            // Append the traverseCellTypes call.
+            code.appendLabel(afterBodyLabel);
+            code.append(nodes[0]->compileDirect(ctx));
+            code.appendTraverseCellTypes(bodyPosition);
 
-        return code;
+            return code;
+        });
     }
 
     return generatorLegacy<&vm::CodeFragment::appendTraverseCellTypes>(ctx, nodes, false);
@@ -1105,31 +1153,28 @@ vm::CodeFragment EIf::compileDirect(CompileCtx& ctx) const {
      * @then:     thenBranch
      * @end:
      */
+    return withNewLabels(ctx, [&](vm::LabelId endLabel, vm::LabelId thenLabel) {
+        // Compile the condition
+        auto code = _nodes[0]->compileDirect(ctx);
 
-    // Compile the condition
-    auto code = _nodes[0]->compileDirect(ctx);
+        // Compile the jumps
+        code.appendLabelJumpNothing(endLabel);
+        code.appendLabelJumpTrue(thenLabel);
 
-    // Compile the jumps
-    vm::LabelScope endLabel(code, ctx.newLabelId());
-    vm::LabelScope thenLabel(code, ctx.newLabelId());
+        // Compile else-branch
+        auto elseCodeBranch = _nodes[2]->compileDirect(ctx);
+        elseCodeBranch.appendLabelJump(endLabel);
 
-    code.appendLabelJumpNothing(endLabel);
-    code.appendLabelJumpTrue(thenLabel);
+        // Compile then-branch
+        vm::CodeFragment thenCodeBranch;
+        thenCodeBranch.appendLabel(thenLabel);
+        thenCodeBranch.append(_nodes[1]->compileDirect(ctx));
 
-    // Compile else-branch
-    auto elseCodeBranch = _nodes[2]->compileDirect(ctx);
-    elseCodeBranch.appendLabelJump(endLabel);
-
-    // Compile then-branch
-    vm::CodeFragment thenCodeBranch;
-    thenCodeBranch.appendLabel(thenLabel);
-    thenCodeBranch.append(_nodes[1]->compileDirect(ctx));
-
-    // Combine the branches
-    code.append(std::move(elseCodeBranch), std::move(thenCodeBranch));
-    code.appendLabel(endLabel);
-
-    return code;
+        // Combine the branches
+        code.append(std::move(elseCodeBranch), std::move(thenCodeBranch));
+        code.appendLabel(endLabel);
+        return code;
+    });
 }
 
 std::vector<DebugPrinter::Block> EIf::debugPrint() const {
@@ -1260,21 +1305,22 @@ vm::CodeFragment ELocalLambda::compileBodyDirect(CompileCtx& ctx) const {
 }
 
 vm::CodeFragment ELocalLambda::compileDirect(CompileCtx& ctx) const {
-    vm::CodeFragment code;
+    return withNewLabel(ctx, [&](vm::LabelId afterBodyLabel) {
+        vm::CodeFragment code;
 
-    // Jump around the body.
-    vm::LabelScope afterBodyLabel(code, ctx.newLabelId());
-    code.appendLabelJump(afterBodyLabel);
+        // Jump around the body.
+        code.appendLabelJump(afterBodyLabel);
 
-    // Remember the position and append the body.
-    auto bodyPosition = code.instrs().size();
-    code.appendNoStack(compileBodyDirect(ctx));
+        // Remember the position and append the body.
+        auto bodyPosition = code.instrs().size();
+        code.appendNoStack(compileBodyDirect(ctx));
 
-    // Push the lambda value on the stack
-    code.appendLabel(afterBodyLabel);
-    code.appendLocalLambda(bodyPosition);
+        // Push the lambda value on the stack
+        code.appendLabel(afterBodyLabel);
+        code.appendLocalLambda(bodyPosition);
 
-    return code;
+        return code;
+    });
 }
 
 std::vector<DebugPrinter::Block> ELocalLambda::debugPrint() const {

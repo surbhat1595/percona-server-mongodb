@@ -1,4 +1,5 @@
 load("jstests/concurrency/fsm_workload_helpers/server_types.js");  // For isMongos.
+load("jstests/libs/feature_flag_util.js");
 
 /**
  * Create a FLE client that has an unencrypted and encrypted client to the same database
@@ -57,6 +58,7 @@ var EncryptedClient = class {
         var keyVault = shell.getKeyVault();
 
         this._db = conn.getDB(dbName);
+        this._admindb = conn.getDB("admin");
         this._edb = edb;
         this._keyVault = keyVault;
     }
@@ -68,6 +70,15 @@ var EncryptedClient = class {
      */
     getDB() {
         return this._edb;
+    }
+
+    /**
+     * Return an encrypted database
+     *
+     * @returns Database
+     */
+    getAdminDB() {
+        return this._admindb;
     }
 
     /**
@@ -176,7 +187,7 @@ var EncryptedClient = class {
             Object.extend(createIndexCmdObj, {"$tenant": dollarTenant});
         }
         assert.commandWorked(this._edb.runCommand(createIndexCmdObj));
-        let tenantOption = {};
+        let tenantOption = {clusteredIndex: {key: {_id: 1}, unique: true}};
         if (dollarTenant) {
             Object.extend(tenantOption, {"$tenant": dollarTenant});
         }
@@ -387,12 +398,16 @@ var EncryptedClient = class {
 
         const checkMap = {};
 
-        // Always expect ESC and ECC collections, optionally expect ECOC.
+        // Always expect the ESC collection, optionally expect ECOC.
         // ECOC is not expected in sharded clusters.
         checkMap[baseCollInfo.options.encryptedFields.escCollection] = true;
-        checkMap[baseCollInfo.options.encryptedFields.eccCollection] = true;
         checkMap[baseCollInfo.options.encryptedFields.ecocCollection] = ecocExists;
         checkMap[baseCollInfo.options.encryptedFields.ecocCollection + ".compact"] = ecocTempExists;
+
+        // TODO: SERVER-73303 remove once v2 is enabled by default
+        if (!isFLE2ProtocolVersion2Enabled()) {
+            checkMap[baseCollInfo.options.encryptedFields.eccCollection] = true;
+        }
 
         const edb = this._edb;
         Object.keys(checkMap).forEach(function(coll) {
@@ -432,13 +447,11 @@ function isFLE2ReplicationEnabled() {
 }
 
 // TODO SERVER-67760 remove once feature flag is gone
-
 /**
  * @returns Returns true if featureFlagFLE2Range is enabled
  */
-function isFLE2RangeEnabled() {
-    return typeof (testingFLE2Range) !== "undefined" && testingFLE2Range &&
-        (TestData == undefined || TestData.setParameters.featureFlagFLE2Range);
+function isFLE2RangeEnabled(db) {
+    return FeatureFlagUtil.isPresentAndEnabled(db, "FLE2Range");
 }
 
 /**

@@ -4,9 +4,8 @@
  * @tags: [
  *   # We need a timeseries collection.
  *   requires_timeseries,
- *   featureFlagTimeseriesUpdatesDeletesSupport,
- *   # TODO SERVER-73319: Enable this test.
- *   __TEMPORARILY_DISABLED__,
+ *   requires_non_retryable_writes,
+ *   featureFlagTimeseriesDeletesSupport,
  * ]
  */
 
@@ -30,7 +29,7 @@ function testDelete({initialDocList, deleteList, resultDocList, nDeleted}) {
     assert.commandWorked(testDB.createCollection(
         coll.getName(), {timeseries: {timeField: timeFieldName, metaField: metaFieldName}}));
 
-    assert.commandWorked(coll.insert(coll, initialDocList));
+    assert.commandWorked(coll.insert(initialDocList));
 
     const deleteCommand = {delete: coll.getName(), deletes: deleteList};
     const res = assert.commandWorked(testDB.runCommand(deleteCommand));

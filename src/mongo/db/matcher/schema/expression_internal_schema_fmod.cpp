@@ -68,21 +68,21 @@ void InternalSchemaFmodMatchExpression::debugString(StringBuilder& debug,
     _debugAddSpace(debug, indentationLevel);
     debug << path() << " fmod: divisor: " << _divisor.toString()
           << " remainder: " << _remainder.toString();
-    MatchExpression::TagData* td = getTag();
-    if (td) {
-        debug << " ";
-        td->debugString(&debug);
-    }
-    debug << "\n";
+    _debugStringAttachTagInfo(&debug);
 }
 
 BSONObj InternalSchemaFmodMatchExpression::getSerializedRightHandSide(
     SerializationOptions opts) const {
-    // TODO SERVER-73678 respect 'replacementForLiteralArgs'.
     BSONObjBuilder objMatchBob;
     BSONArrayBuilder arrBuilder(objMatchBob.subarrayStart("$_internalSchemaFmod"));
-    arrBuilder.append(_divisor);
-    arrBuilder.append(_remainder);
+    // Divisor and Remainder are always literals.
+    if (opts.replacementForLiteralArgs) {
+        arrBuilder.append(opts.replacementForLiteralArgs.get());
+        arrBuilder.append(opts.replacementForLiteralArgs.get());
+    } else {
+        arrBuilder.append(_divisor);
+        arrBuilder.append(_remainder);
+    }
     arrBuilder.doneFast();
     return objMatchBob.obj();
 }

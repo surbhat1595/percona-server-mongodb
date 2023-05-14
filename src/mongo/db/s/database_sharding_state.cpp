@@ -195,8 +195,7 @@ void DatabaseShardingState::assertMatchingDbVersion(OperationContext* opCtx,
 
 void DatabaseShardingState::assertIsPrimaryShardForDb(OperationContext* opCtx,
                                                       const DatabaseName& dbName) {
-    if (dbName == DatabaseName::kConfig) {
-        // TODO (SERVER-72488): Include the admin database.
+    if (dbName == DatabaseName::kConfig || dbName == DatabaseName::kAdmin) {
         uassert(7393700,
                 "The config server is the primary shard for database: {}"_format(dbName.toString()),
                 serverGlobalParams.clusterRole == ClusterRole::ConfigServer);
@@ -224,7 +223,7 @@ void DatabaseShardingState::setDbInfo(OperationContext* opCtx, const DatabaseTyp
 
     LOGV2(7286900,
           "Setting this node's cached database info",
-          "db"_attr = _dbName,
+          logAttrs(_dbName),
           "dbVersion"_attr = dbInfo.getVersion());
     _dbInfo.emplace(dbInfo);
 }
@@ -233,10 +232,10 @@ void DatabaseShardingState::clearDbInfo(OperationContext* opCtx, bool cancelOngo
     invariant(opCtx->lockState()->isDbLockedForMode(_dbName, MODE_IX));
 
     if (cancelOngoingRefresh) {
-        cancelDbMetadataRefresh();
+        _cancelDbMetadataRefresh();
     }
 
-    LOGV2(7286901, "Clearing this node's cached database info", "db"_attr = _dbName);
+    LOGV2(7286901, "Clearing this node's cached database info", logAttrs(_dbName));
     _dbInfo = boost::none;
 }
 
@@ -249,7 +248,7 @@ void DatabaseShardingState::enterCriticalSectionCatchUpPhase(OperationContext* o
                                                              const BSONObj& reason) {
     _critSec.enterCriticalSectionCatchUpPhase(reason);
 
-    cancelDbMetadataRefresh();
+    _cancelDbMetadataRefresh();
 }
 
 void DatabaseShardingState::enterCriticalSectionCommitPhase(OperationContext* opCtx,
@@ -290,7 +289,7 @@ void DatabaseShardingState::resetDbMetadataRefreshFuture() {
     _dbMetadataRefresh = boost::none;
 }
 
-void DatabaseShardingState::cancelDbMetadataRefresh() {
+void DatabaseShardingState::_cancelDbMetadataRefresh() {
     if (_dbMetadataRefresh) {
         _dbMetadataRefresh->cancellationSource.cancel();
     }

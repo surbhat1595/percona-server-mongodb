@@ -354,20 +354,32 @@ void LockerImpl::reacquireTicket(OperationContext* opCtx) {
     if (clientState != kInactive)
         return;
 
-    if (!_maxLockTimeout || _uninterruptibleLocksRequested) {
-        invariant(_acquireTicket(opCtx, _modeForTicket, Date_t::max()));
-    } else {
-        uassert(ErrorCodes::LockTimeout,
-                str::stream() << "Unable to acquire ticket with mode '" << _modeForTicket
-                              << "' within a max lock request timeout of '" << *_maxLockTimeout
-                              << "' milliseconds.",
-                _acquireTicket(opCtx, _modeForTicket, Date_t::now() + *_maxLockTimeout));
+    if (_acquireTicket(opCtx, _modeForTicket, Date_t::now())) {
+        return;
     }
+
+    do {
+        for (auto it = _requests.begin(); it; it.next()) {
+            invariant(it->mode == LockMode::MODE_IS || it->mode == LockMode::MODE_IX);
+            opCtx->checkForInterrupt();
+
+            // If we've reached this point then that means we tried to acquire a ticket but were
+            // unsuccessful, implying that tickets are currently exhausted. Additionally, since
+            // we're holding an IS or IX lock for this resource, any pending requests for the same
+            // resource must be S or X and will not be able to be granted. Thus, since such a
+            // pending lock request may also be holding a ticket, if there are any present we fail
+            // this ticket reacquisition in order to avoid a deadlock.
+            uassert(ErrorCodes::LockTimeout,
+                    fmt::format("Unable to acquire ticket with mode '{}' due to detected lock "
+                                "conflict for resource {}",
+                                _modeForTicket,
+                                it.key().toString()),
+                    !getGlobalLockManager()->hasConflictingRequests(it.objAddr()));
+        }
+    } while (!_acquireTicket(opCtx, _modeForTicket, Date_t::now() + Milliseconds{100}));
 }
 
 bool LockerImpl::_acquireTicket(OperationContext* opCtx, LockMode mode, Date_t deadline) {
-    _admCtx.setLockMode(mode);
-
     // Upon startup, the holder is not guaranteed to be initialized.
     auto holder = _ticketHolderManager ? _ticketHolderManager->getTicketHolder(mode) : nullptr;
     const bool reader = isSharedLockMode(mode);
@@ -378,17 +390,13 @@ bool LockerImpl::_acquireTicket(OperationContext* opCtx, LockMode mode, Date_t d
         // MODE_X is exclusive of all other locks, thus acquiring a ticket is unnecessary.
         _clientState.store(reader ? kQueuedReader : kQueuedWriter);
         // If the ticket wait is interrupted, restore the state of the client.
-        ScopeGuard restoreStateOnErrorGuard([&] {
-            _clientState.store(kInactive);
-            _admCtx.setLockMode(MODE_NONE);
-        });
+        ScopeGuard restoreStateOnErrorGuard([&] { _clientState.store(kInactive); });
 
         // Acquiring a ticket is a potentially blocking operation. This must not be called after a
         // transaction timestamp has been set, indicating this transaction has created an oplog
         // hole.
         invariant(!opCtx->recoveryUnit()->isTimestamped());
 
-        _admCtx.setLockMode(mode);
         if (auto ticket = holder->waitForTicketUntil(
                 _uninterruptibleLocksRequested ? nullptr : opCtx, &_admCtx, deadline)) {
             _ticket = std::move(*ticket);
@@ -406,12 +414,10 @@ void LockerImpl::lockGlobal(OperationContext* opCtx, LockMode mode, Date_t deadl
     dassert(isLocked() == (_modeForTicket != MODE_NONE));
     if (_modeForTicket == MODE_NONE) {
         if (_uninterruptibleLocksRequested) {
-            // Ignore deadline and _maxLockTimeout.
+            // Ignore deadline.
             invariant(_acquireTicket(opCtx, mode, Date_t::max()));
         } else {
             auto beforeAcquire = Date_t::now();
-            deadline = std::min(deadline,
-                                _maxLockTimeout ? beforeAcquire + *_maxLockTimeout : Date_t::max());
             uassert(ErrorCodes::LockTimeout,
                     str::stream() << "Unable to acquire ticket with mode '" << mode
                                   << "' within a max lock request timeout of '"
@@ -833,9 +839,17 @@ void LockerImpl::restoreLockState(OperationContext* opCtx, const Locker::LockSna
     getFlowControlTicket(opCtx, state.globalMode);
 
     std::vector<OneLock>::const_iterator it = state.locks.begin();
-    // If we locked the PBWM, it must be locked before the resourceIdGlobal and
-    // resourceIdReplicationStateTransitionLock resources.
+    // If we locked the PBWM, it must be locked before the
+    // resourceIdFeatureCompatibilityVersion, resourceIdReplicationStateTransitionLock, and
+    // resourceIdGlobal resources.
     if (it != state.locks.end() && it->resourceId == resourceIdParallelBatchWriterMode) {
+        lock(opCtx, it->resourceId, it->mode);
+        it++;
+    }
+
+    // If we locked the FCV lock, it must be locked before the
+    // resourceIdReplicationStateTransitionLock and resourceIdGlobal resources.
+    if (it != state.locks.end() && it->resourceId == resourceIdFeatureCompatibilityVersion) {
         lock(opCtx, it->resourceId, it->mode);
         it++;
     }
@@ -848,6 +862,8 @@ void LockerImpl::restoreLockState(OperationContext* opCtx, const Locker::LockSna
 
     lockGlobal(opCtx, state.globalMode);
     for (; it != state.locks.end(); it++) {
+        // Ensures we don't acquire locks out of order which can lead to deadlock.
+        invariant(it->resourceId.getType() != ResourceType::RESOURCE_GLOBAL);
         lock(opCtx, it->resourceId, it->mode);
     }
     invariant(_modeForTicket != MODE_NONE);
@@ -1100,7 +1116,6 @@ void LockerImpl::releaseTicket() {
 
 void LockerImpl::_releaseTicket() {
     _ticket.reset();
-    _admCtx.setLockMode(MODE_NONE);
     _clientState.store(kInactive);
 }
 

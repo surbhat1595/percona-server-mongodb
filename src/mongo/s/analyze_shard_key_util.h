@@ -55,15 +55,14 @@ constexpr int kMaxBSONObjSizePerInsertBatch = BSONObjMaxUserSize - 100 * 1024;
 Status validateNamespace(const NamespaceString& nss);
 
 /*
- * If the namespace doesn't exist, returns a NamespaceNotFound error. If the namespace corresponds
- * to a view, returns a CommandNotSupportedOnView error. If the collection has queryable encryption
- * enabled, returns an IllegalOperation error. Throws DBException on any error that occurs during
- * the validation. If the validation passed, returns an OK status and the collection UUID for the
- * collection when the validation occurred.
+ * If the namespace doesn't exist locally, returns a NamespaceNotFound error. If the namespace
+ * corresponds to a view, returns a CommandNotSupportedOnView error. If the collection has
+ * queryable encryption enabled, returns an IllegalOperation error. Throws DBException on any error
+ * that occurs during the validation. If the validation passed, returns an OK status and the
+ * collection UUID for the collection when the validation occurred.
  */
-StatusWith<UUID> validateCollectionOptions(OperationContext* opCtx,
-                                           const NamespaceString& nss,
-                                           StringData cmdName);
+StatusWith<UUID> validateCollectionOptionsLocally(OperationContext* opCtx,
+                                                  const NamespaceString& nss);
 
 /*
  * If the shard key is invalid, returns a BadValue error. Otherwise, returns an OK status. This
@@ -108,15 +107,27 @@ double round(double val, int n);
 double calculatePercentage(double part, double whole);
 
 /*
+ * Runs the command 'cmdObj' against the database 'dbName'. If this mongod is currently the
+ * primary, runs the command locally. Otherwise, runs the command on the remote primary. Then
+ * asserts the command status using the given 'uassertCmdStatusFn' callback. Internally retries
+ * the command on retryable errors for a set number of times so the command must be idempotent.
+ * Returns the command response.
+ */
+BSONObj executeCommandOnPrimary(OperationContext* opCtx,
+                                const DatabaseName& dbName,
+                                const BSONObj& cmdObj,
+                                const std::function<void(const BSONObj&)>& uassertCmdStatusFn);
+
+/*
  * Inserts the documents 'docs' into the collection 'nss'. If this mongod is currently the primary,
- * runs the insert command locally. Otherwise, runs the command on the remote primary. Internally
- * asserts that the top-level command is OK, then asserts the write status using the
- * 'uassertWriteStatusFn' callback. Internally retries the write command on retryable errors.
+ * runs the insert command locally. Otherwise, runs the command on the remote primary. Then asserts
+ * the command status using the 'uassertCmdStatusFn' callback. Internally retries the insert
+ * command on retryable errors.
  */
 void insertDocuments(OperationContext* opCtx,
                      const NamespaceString& nss,
                      const std::vector<BSONObj>& docs,
-                     const std::function<void(const BSONObj&)>& uassertWriteStatusFn);
+                     const std::function<void(const BSONObj&)>& uassertCmdStatusFn);
 
 /*
  * Drops the collection 'nss'. If this mongod is currently the primary, runs the dropCollection

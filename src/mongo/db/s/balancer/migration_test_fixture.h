@@ -30,7 +30,6 @@
 #include <memory>
 
 #include "mongo/client/remote_command_targeter_mock.h"
-#include "mongo/db/s/balancer/type_migration.h"
 #include "mongo/db/s/config/config_server_test_fixture.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/s/catalog/type_collection.h"
@@ -104,15 +103,9 @@ protected:
     void removeAllChunks(const NamespaceString& collName, const UUID& uuid);
 
     /**
-     * Inserts a document into the config.migrations collection as an active migration.
+     * Returns the ShardId by its HostAndPort
      */
-    void setUpMigration(const NamespaceString& ns, const ChunkType& chunk, const ShardId& toShard);
-
-    /**
-     * Asserts that config.migrations is empty, that should be true if the MigrationManager is
-     * inactive and behaving properly.
-     */
-    void checkMigrationsCollectionIsEmpty();
+    ShardId getShardIdByHost(HostAndPort host);
 
     // Random static initialization order can result in X constructor running before Y constructor
     // if X and Y are defined in different source files. Defining variables here to enforce order.

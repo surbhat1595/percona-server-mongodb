@@ -48,6 +48,7 @@ class TenantFileImporterService : public ReplicaSetAwareService<TenantFileImport
 public:
     static constexpr StringData kTenantFileImporterServiceName = "TenantFileImporterService"_sd;
     static TenantFileImporterService* get(ServiceContext* serviceContext);
+    static TenantFileImporterService* get(OperationContext* opCtx);
     TenantFileImporterService() = default;
 
     /**
@@ -99,6 +100,10 @@ private:
     void onStepDown() final {}
 
     void onBecomeArbiter() final {}
+
+    inline std::string getServiceName() const override final {
+        return "TenantFileImporterService";
+    }
 
     /**
      * A worker function that waits for ImporterEvents and handles cloning and importing files.

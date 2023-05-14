@@ -129,6 +129,8 @@
 #include "mongo/db/repl/replication_coordinator_impl_gen.h"
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/repl/replication_recovery.h"
+#include "mongo/db/repl/shard_merge_recipient_op_observer.h"
+#include "mongo/db/repl/shard_merge_recipient_service.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/repl/tenant_migration_donor_op_observer.h"
 #include "mongo/db/repl/tenant_migration_donor_service.h"
@@ -143,6 +145,7 @@
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/config_server_op_observer.h"
 #include "mongo/db/s/migration_util.h"
+#include "mongo/db/s/move_primary/move_primary_recipient_service.h"
 #include "mongo/db/s/op_observer_sharding_impl.h"
 #include "mongo/db/s/periodic_sharded_index_consistency_checker.h"
 #include "mongo/db/s/query_analysis_op_observer.h"
@@ -382,6 +385,10 @@ void registerPrimaryOnlyServices(ServiceContext* serviceContext) {
         services.push_back(std::make_unique<ReshardingRecipientService>(serviceContext));
         services.push_back(std::make_unique<TenantMigrationDonorService>(serviceContext));
         services.push_back(std::make_unique<repl::TenantMigrationRecipientService>(serviceContext));
+        services.push_back(std::make_unique<MovePrimaryRecipientService>(serviceContext));
+        if (getGlobalReplSettings().isServerless()) {
+            services.push_back(std::make_unique<repl::ShardMergeRecipientService>(serviceContext));
+        }
     }
 
     if (serverGlobalParams.clusterRole == ClusterRole::None) {
@@ -389,6 +396,7 @@ void registerPrimaryOnlyServices(ServiceContext* serviceContext) {
         services.push_back(std::make_unique<repl::TenantMigrationRecipientService>(serviceContext));
         if (getGlobalReplSettings().isServerless()) {
             services.push_back(std::make_unique<ShardSplitDonorService>(serviceContext));
+            services.push_back(std::make_unique<repl::ShardMergeRecipientService>(serviceContext));
         }
     }
 
@@ -592,6 +600,12 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     // Ensure FCV document exists and is initialized in-memory. Fatally asserts if there is an
     // error.
     FeatureCompatibilityVersion::fassertInitializedAfterStartup(startupOpCtx.get());
+
+    // TODO (SERVER-74847): Remove this function call once we remove testing around downgrading from
+    // latest to last continuous.
+    if (!mongo::repl::disableTransitionFromLatestToLastContinuous) {
+        FeatureCompatibilityVersion::addTransitionFromLatestToLastContinuous();
+    }
 
     if (gFlowControlEnabled.load()) {
         LOGV2(20536, "Flow Control is enabled on this deployment");
@@ -924,6 +938,11 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     }
 
     LogicalSessionCache::set(serviceContext, makeLogicalSessionCacheD(kind));
+
+    if (analyze_shard_key::supportsSamplingQueries(serviceContext, true /* ignoreFCV */) &&
+        serverGlobalParams.clusterRole == ClusterRole::None) {
+        analyze_shard_key::QueryAnalysisSampler::get(serviceContext).onStartup();
+    }
 
     auto cacheLoader = std::make_unique<stats::StatsCacheLoaderImpl>();
     auto catalog = std::make_unique<stats::StatsCatalog>(serviceContext, std::move(cacheLoader));
@@ -1259,14 +1278,14 @@ void setUpObservers(ServiceContext* serviceContext) {
             std::make_unique<OplogWriterTransactionProxy>(std::make_unique<OplogWriterImpl>())));
         opObserverRegistry->addObserver(std::make_unique<ShardServerOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ReshardingOpObserver>());
-        opObserverRegistry->addObserver(
-            std::make_unique<analyze_shard_key::QueryAnalysisOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<repl::TenantMigrationDonorOpObserver>());
         opObserverRegistry->addObserver(
             std::make_unique<repl::TenantMigrationRecipientOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<UserWriteBlockModeOpObserver>());
         if (getGlobalReplSettings().isServerless()) {
             opObserverRegistry->addObserver(std::make_unique<ShardSplitDonorOpObserver>());
+            opObserverRegistry->addObserver(
+                std::make_unique<repl::ShardMergeRecipientOpObserver>());
         }
     }
 
@@ -1278,8 +1297,6 @@ void setUpObservers(ServiceContext* serviceContext) {
 
         opObserverRegistry->addObserver(std::make_unique<ConfigServerOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ReshardingOpObserver>());
-        opObserverRegistry->addObserver(
-            std::make_unique<analyze_shard_key::QueryAnalysisOpObserver>());
     }
 
     if (serverGlobalParams.clusterRole == ClusterRole::None) {
@@ -1291,6 +1308,8 @@ void setUpObservers(ServiceContext* serviceContext) {
         opObserverRegistry->addObserver(std::make_unique<UserWriteBlockModeOpObserver>());
         if (getGlobalReplSettings().isServerless()) {
             opObserverRegistry->addObserver(std::make_unique<ShardSplitDonorOpObserver>());
+            opObserverRegistry->addObserver(
+                std::make_unique<repl::ShardMergeRecipientOpObserver>());
         }
     }
 
@@ -1299,6 +1318,7 @@ void setUpObservers(ServiceContext* serviceContext) {
         std::make_unique<repl::PrimaryOnlyServiceOpObserver>(serviceContext));
     opObserverRegistry->addObserver(std::make_unique<FcvOpObserver>());
     opObserverRegistry->addObserver(std::make_unique<ClusterServerParameterOpObserver>());
+    opObserverRegistry->addObserver(std::make_unique<analyze_shard_key::QueryAnalysisOpObserver>());
 
     setupFreeMonitoringOpObserver(opObserverRegistry.get());
 
@@ -1415,7 +1435,7 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         lsc->joinOnShutDown();
     }
 
-    if (analyze_shard_key::supportsSamplingQueriesIgnoreFCV()) {
+    if (analyze_shard_key::supportsSamplingQueries(serviceContext, true /* ignoreFCV */)) {
         LOGV2_OPTIONS(7350601, {LogComponent::kDefault}, "Shutting down the QueryAnalysisSampler");
         analyze_shard_key::QueryAnalysisSampler::get(serviceContext).onShutdown();
     }

@@ -105,15 +105,15 @@ NamespaceString parseLookupFromAndResolveNamespace(const BSONElement& elem,
             elem.type() == BSONType::String || elem.type() == BSONType::Object);
 
     if (elem.type() == BSONType::String) {
-        return NamespaceString(defaultDb, elem.valueStringData());
+        return NamespaceStringUtil::parseNamespaceFromRequest(defaultDb, elem.valueStringData());
     }
 
     // Valdate the db and coll names.
     auto spec = NamespaceSpec::parse(
         IDLParserContext{elem.fieldNameStringData(), false /* apiStrict */, defaultDb.tenantId()},
         elem.embeddedObject());
-    // TODO SERVER-62491 Use system tenantId to construct nss if running in serverless.
-    auto nss = NamespaceString(spec.getDb().value_or(DatabaseName()), spec.getColl().value_or(""));
+    auto nss = NamespaceStringUtil::parseNamespaceFromRequest(spec.getDb().value_or(DatabaseName()),
+                                                              spec.getColl().value_or(""));
     uassert(
         ErrorCodes::FailedToParse,
         str::stream() << "$lookup with syntax {from: {db:<>, coll:<>},..} is not supported for db: "
@@ -122,6 +122,69 @@ NamespaceString parseLookupFromAndResolveNamespace(const BSONElement& elem,
             nss == NamespaceString::kTenantMigrationOplogView ||
             nss == NamespaceString::kConfigsvrCollectionsNamespace);
     return nss;
+}
+
+// Creates the conditions for joining the local and foreign fields inside of a $match.
+static BSONObj createMatchStageJoinObj(const Document& input,
+                                       const FieldPath& localFieldPath,
+                                       const std::string& foreignFieldName) {
+    // Add the 'localFieldPath' of 'input' into 'localFieldList'. If 'localFieldPath' references a
+    // field with an array in its path, we may need to join on multiple values, so we add each
+    // element to 'localFieldList'.
+    BSONArrayBuilder arrBuilder;
+    bool containsRegex = false;
+    document_path_support::visitAllValuesAtPath(input, localFieldPath, [&](const Value& nextValue) {
+        arrBuilder << nextValue;
+        if (!containsRegex && nextValue.getType() == BSONType::RegEx) {
+            containsRegex = true;
+        }
+    });
+
+    if (arrBuilder.arrSize() == 0) {
+        // Missing values are treated as null.
+        arrBuilder << BSONNULL;
+    }
+
+    // We construct a query of one of the following forms, depending on the contents of
+    // 'localFieldList'.
+    //
+    //   {<foreignFieldName>: {$eq: <localFieldList[0]>}}
+    //     if 'localFieldList' contains a single element.
+    //
+    //   {<foreignFieldName>: {$in: [<value>, <value>, ...]}}
+    //     if 'localFieldList' contains more than one element but doesn't contain any that are
+    //     regular expressions.
+    //
+    //   {$or: [{<foreignFieldName>: {$eq: <value>}}, {<foreignFieldName>: {$eq: <value>}}, ...]}
+    //     if 'localFieldList' contains more than one element and it contains at least one element
+    //     that is a regular expression.
+    const auto localFieldListSize = arrBuilder.arrSize();
+    const auto localFieldList = arrBuilder.arr();
+    BSONObjBuilder joinObj;
+    if (localFieldListSize > 1) {
+        // A $lookup on an array value corresponds to finding documents in the foreign collection
+        // that have a value of any of the elements in the array value, rather than finding
+        // documents that have a value equal to the entire array value. These semantics are
+        // automatically provided to us by using the $in query operator.
+        if (containsRegex) {
+            // A regular expression inside the $in query operator will perform pattern matching on
+            // any string values. Since we want regular expressions to only match other RegEx types,
+            // we write the query as a $or of equality comparisons instead.
+            return buildEqualityOrQuery(foreignFieldName, localFieldList);
+        } else {
+            // { <foreignFieldName> : { "$in" : <localFieldList> } }
+            BSONObjBuilder subObj(joinObj.subobjStart(foreignFieldName));
+            subObj << "$in" << localFieldList;
+            subObj.doneFast();
+            return joinObj.obj();
+        }
+    }
+    // Otherwise we have a simple $eq.
+    // { <foreignFieldName> : { "$eq" : <localFieldList[0]> } }
+    BSONObjBuilder subObj(joinObj.subobjStart(foreignFieldName));
+    subObj << "$eq" << localFieldList[0];
+    subObj.doneFast();
+    return joinObj.obj();
 }
 
 }  // namespace
@@ -353,12 +416,12 @@ bool DocumentSourceLookUp::foreignShardedLookupAllowed() const {
 }
 
 void DocumentSourceLookUp::determineSbeCompatibility() {
-    _sbeCompatible =
-        // This stage is SBE-compatible only if the context is compatible.
-        pExpCtx->sbeCompatible
+    _sbeCompatibility = pExpCtx->sbeCompatibility;
+    // This stage has the SBE compatibility as least the same as that of the expression context.
+    auto sbeCompatibleByStageConfig =
         // We currently only support lowering equi-join that uses localField/foreignField
         // syntax.
-        && !_userPipeline && _localField &&
+        !_userPipeline && _localField &&
         _foreignField
         // SBE doesn't support match-like paths with numeric components. (Note: "as" field is a
         // project-like field and numbers in it are treated as literal names of fields rather
@@ -370,6 +433,9 @@ void DocumentSourceLookUp::determineSbeCompatibility() {
         // We currently don't lower $lookup against views ('_fromNs' does not correspond to a
         // view).
         && pExpCtx->getResolvedNamespace(_fromNs).pipeline.empty();
+    if (!sbeCompatibleByStageConfig) {
+        _sbeCompatibility = SbeCompatibility::notCompatible;
+    }
 }
 
 StageConstraints DocumentSourceLookUp::constraints(Pipeline::SplitState pipeState) const {
@@ -689,7 +755,7 @@ Pipeline::SourceContainer::iterator DocumentSourceLookUp::doOptimizeAt(
         _unwindSrc = std::move(nextUnwind);
 
         // We cannot push absorbed $unwind stages into SBE.
-        _sbeCompatible = false;
+        _sbeCompatibility = SbeCompatibility::notCompatible;
         container->erase(std::next(itr));
         return itr;
     }
@@ -777,7 +843,9 @@ Pipeline::SourceContainer::iterator DocumentSourceLookUp::doOptimizeAt(
     // We can internalize the $match. This $lookup should already be marked as SBE incompatible
     // because a $match can only be internalized if an $unwind, which is SBE incompatible, was
     // absorbed as well.
-    tassert(5843701, "This $lookup cannot be compatible with SBE", !_sbeCompatible);
+    tassert(5843701,
+            "This $lookup cannot be compatible with SBE",
+            _sbeCompatibility == SbeCompatibility::notCompatible);
     if (!_matchSrc) {
         _matchSrc = nextMatch;
     } else {
@@ -828,83 +896,25 @@ BSONObj DocumentSourceLookUp::makeMatchStageFromInput(const Document& input,
                                                       const FieldPath& localFieldPath,
                                                       const std::string& foreignFieldName,
                                                       const BSONObj& additionalFilter) {
-    // Add the 'localFieldPath' of 'input' into 'localFieldList'. If 'localFieldPath' references a
-    // field with an array in its path, we may need to join on multiple values, so we add each
-    // element to 'localFieldList'.
-    BSONArrayBuilder arrBuilder;
-    bool containsRegex = false;
-    document_path_support::visitAllValuesAtPath(input, localFieldPath, [&](const Value& nextValue) {
-        arrBuilder << nextValue;
-        if (!containsRegex && nextValue.getType() == BSONType::RegEx) {
-            containsRegex = true;
-        }
-    });
-
-    if (arrBuilder.arrSize() == 0) {
-        // Missing values are treated as null.
-        arrBuilder << BSONNULL;
-    }
-
-    const auto localFieldListSize = arrBuilder.arrSize();
-    const auto localFieldList = arrBuilder.arr();
-
-    // We construct a query of one of the following forms, depending on the contents of
-    // 'localFieldList'.
-    //
-    //   {$and: [{<foreignFieldName>: {$eq: <localFieldList[0]>}}, <additionalFilter>]}
-    //     if 'localFieldList' contains a single element.
-    //
-    //   {$and: [{<foreignFieldName>: {$in: [<value>, <value>, ...]}}, <additionalFilter>]}
-    //     if 'localFieldList' contains more than one element but doesn't contain any that are
-    //     regular expressions.
-    //
-    //   {$and: [{$or: [{<foreignFieldName>: {$eq: <value>}},
-    //                  {<foreignFieldName>: {$eq: <value>}}, ...]},
-    //           <additionalFilter>]}
-    //     if 'localFieldList' contains more than one element and it contains at least one element
-    //     that is a regular expression.
-
     // We wrap the query in a $match so that it can be parsed into a DocumentSourceMatch when
     // constructing a pipeline to execute.
     BSONObjBuilder match;
-    BSONObjBuilder query(match.subobjStart("$match"));
 
-    BSONArrayBuilder andObj(query.subarrayStart("$and"));
-    BSONObjBuilder joiningObj(andObj.subobjStart());
+    BSONObj joinObj = createMatchStageJoinObj(input, localFieldPath, foreignFieldName);
 
-    if (localFieldListSize > 1) {
-        // A $lookup on an array value corresponds to finding documents in the foreign collection
-        // that have a value of any of the elements in the array value, rather than finding
-        // documents that have a value equal to the entire array value. These semantics are
-        // automatically provided to us by using the $in query operator.
-        if (containsRegex) {
-            // A regular expression inside the $in query operator will perform pattern matching on
-            // any string values. Since we want regular expressions to only match other RegEx types,
-            // we write the query as a $or of equality comparisons instead.
-            BSONObj orQuery = buildEqualityOrQuery(foreignFieldName, localFieldList);
-            joiningObj.appendElements(orQuery);
-        } else {
-            // { <foreignFieldName> : { "$in" : <localFieldList> } }
-            BSONObjBuilder subObj(joiningObj.subobjStart(foreignFieldName));
-            subObj << "$in" << localFieldList;
-            subObj.doneFast();
-        }
+    // If we have one condition, do not place inside a $and. This BSON could be created many times,
+    // so we want to produce simple queries for the planner if possible.
+    if (additionalFilter.isEmpty()) {
+        match << "$match" << joinObj;
     } else {
-        // { <foreignFieldName> : { "$eq" : <localFieldList[0]> } }
-        BSONObjBuilder subObj(joiningObj.subobjStart(foreignFieldName));
-        subObj << "$eq" << localFieldList[0];
-        subObj.doneFast();
+        BSONObjBuilder query(match.subobjStart("$match"));
+        BSONArrayBuilder andObj(query.subarrayStart("$and"));
+        andObj.append(joinObj);
+        andObj.append(additionalFilter);
+        andObj.doneFast();
+        query.doneFast();
     }
 
-    joiningObj.doneFast();
-
-    BSONObjBuilder additionalFilterObj(andObj.subobjStart());
-    additionalFilterObj.appendElements(additionalFilter);
-    additionalFilterObj.doneFast();
-
-    andObj.doneFast();
-
-    query.doneFast();
     return match.obj();
 }
 
@@ -1011,8 +1021,12 @@ void DocumentSourceLookUp::appendSpecificExecStats(MutableDocument& doc) const {
     doc["indexesUsed"] = Value{std::move(indexesUsedVec)};
 }
 
-void DocumentSourceLookUp::serializeToArray(
-    std::vector<Value>& array, boost::optional<ExplainOptions::Verbosity> explain) const {
+void DocumentSourceLookUp::serializeToArray(std::vector<Value>& array,
+                                            SerializationOptions opts) const {
+    auto explain = opts.verbosity;
+    if (opts.redactFieldNames || opts.replacementForLiteralArgs) {
+        MONGO_UNIMPLEMENTED_TASSERT(7484326);
+    }
 
     // Support alternative $lookup from config.cache.chunks* namespaces.
     //
@@ -1038,8 +1052,7 @@ void DocumentSourceLookUp::serializeToArray(
     if (!hasLocalFieldForeignFieldJoin() || pipeline.size() > 0) {
         MutableDocument exprList;
         for (const auto& letVar : _letVariables) {
-            exprList.addField(letVar.name,
-                              letVar.expression->serialize(static_cast<bool>(explain)));
+            exprList.addField(letVar.name, letVar.expression->serialize(explain));
         }
         output[getSourceName()]["let"] = Value(exprList.freeze());
 

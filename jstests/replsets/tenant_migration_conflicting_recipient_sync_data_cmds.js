@@ -3,6 +3,9 @@
  *
  * @tags: [
  *   incompatible_with_macos,
+ *   # Shard merge protocol will be tested by
+ *   # tenant_migration_shard_merge_conflicting_recipient_sync_data_cmds.js.
+ *   incompatible_with_shard_merge,
  *   requires_fcv_52,
  *   incompatible_with_windows_tls,
  *   requires_majority_read_concern,
@@ -21,7 +24,8 @@ load("jstests/libs/fail_point_util.js");
 load("jstests/libs/parallelTester.js");
 load("jstests/libs/uuid_util.js");
 
-var rst = new ReplSetTest({nodes: 1, nodeOptions: makeX509OptionsForTest().donor});
+var rst =
+    new ReplSetTest({nodes: 1, serverless: true, nodeOptions: makeX509OptionsForTest().donor});
 rst.startSet();
 rst.initiate();
 const primary = rst.getPrimary();

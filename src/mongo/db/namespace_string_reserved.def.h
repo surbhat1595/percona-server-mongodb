@@ -87,6 +87,11 @@ NSS_CONSTANT(kMigrationRecipientsNamespace, DatabaseName::kConfig, "migrationRec
 // Namespace for storing the persisted state of movePrimary operation recipients.
 NSS_CONSTANT(kMovePrimaryRecipientNamespace, DatabaseName::kConfig, "movePrimaryRecipients"_sd)
 
+// Namespace for storing the oplog applier progress of movePrimary operations at recipient.
+NSS_CONSTANT(kMovePrimaryApplierProgressNamespace,
+             DatabaseName::kConfig,
+             "movePrimaryRecipients.applierProgress"_sd)
+
 // Namespace for storing the persisted state of movePrimary operation donors.
 NSS_CONSTANT(kMovePrimaryDonorNamespace, DatabaseName::kConfig, "movePrimaryDonors"_sd)
 
@@ -97,6 +102,9 @@ NSS_CONSTANT(kTenantMigrationDonorsNamespace, DatabaseName::kConfig, "tenantMigr
 NSS_CONSTANT(kTenantMigrationRecipientsNamespace,
              DatabaseName::kConfig,
              "tenantMigrationRecipients"_sd)
+
+// Namespace for storing the persisted state of shard merge recipient service instances.
+NSS_CONSTANT(kShardMergeRecipientsNamespace, DatabaseName::kConfig, "shardMergeRecipients"_sd)
 
 // Namespace for view on local.oplog.rs for tenant migrations.
 NSS_CONSTANT(kTenantMigrationOplogView, DatabaseName::kLocal, "system.tenantMigration.oplogView"_sd)
@@ -258,7 +266,8 @@ NSS_CONSTANT(kLocalClusterManagerNamespace, DatabaseName::kLocal, "clustermanage
 // Namespace used for startup log.
 NSS_CONSTANT(kStartupLogNamespace, DatabaseName::kLocal, "startup_log"_sd)
 
-// Namespace for storing the persisted state of migrations.
+// TODO SERVER-75080 delete unused `config.migrations` namespace
+// Deptecated: namespace for storing the persisted state of migrations on the config server.
 NSS_CONSTANT(kMigrationsNamespace, DatabaseName::kConfig, "migrations"_sd)
 
 // Namespace for changelog on CSRS.

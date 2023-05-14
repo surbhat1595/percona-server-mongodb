@@ -32,6 +32,7 @@
 #include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/internal_transactions_feature_flag_gen.h"
+#include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/process_interface/mongos_process_interface.h"
@@ -41,6 +42,7 @@
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/stats/counters.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/timeseries/timeseries_update_delete_util.h"
@@ -66,6 +68,7 @@ constexpr auto kIdFieldName = "_id"_sd;
 const ShardKeyPattern kVirtualIdShardKey(BSON(kIdFieldName << 1));
 
 using UpdateType = write_ops::UpdateModification::Type;
+using shard_key_pattern_query_util::QueryTargetingInfo;
 
 // Tracks the number of {multi:false} updates with an exact match on _id that are broadcasted to
 // multiple shards.
@@ -453,10 +456,13 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetUpdate(
             uassertStatusOKWithContext(_targetShardKey(shardKey, collation, chunkRanges), msg)};
     };
 
-    // If this is an upsert, then the query must contain an exact match on the shard key. If we were
-    // to target based on the replacement doc, it could result in an insertion even if a document
-    // matching the query exists on another shard.
-    if (isUpsert) {
+    // With the introduction of PM-1632, we can use the two phase write protocol to successfully
+    // target an upsert without the full shard key. Else, the the query must contain an exact match
+    // on the shard key. If we were to target based on the replacement doc, it could result in an
+    // insertion even if a document matching the query exists on another shard.
+    if (!feature_flags::gFeatureFlagUpdateOneWithoutShardKey.isEnabled(
+            serverGlobalParams.featureCompatibility) &&
+        isUpsert) {
         return targetByShardKey(
             extractShardKeyFromBasicQueryWithContext(expCtx, shardKeyPattern, query),
             "Failed to target upsert by query");
@@ -509,6 +515,54 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetUpdate(
     return endPoints;
 }
 
+namespace {
+BSONObj getBucketLevelPredicateForRouting(const BSONObj& originalQuery,
+                                          const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                          boost::optional<StringData> metaField) {
+    if (!metaField) {
+        // In case the time-series collection does not have meta field defined, we target the
+        // request to all shards using empty predicate. Since we allow only delete requests with
+        // 'limit:0', we will not delete any extra documents.
+        //
+        // TODO SERVER-73087 / SERVER-75160: Move this block into the if
+        // gTimeseriesDeletesSupport is not enabled block as soon as we implement either one
+        // of SERVER-73087 and SERVER-75160. As of now, this block is common, irrespective of the
+        // feature flag value.
+        return BSONObj();
+    }
+
+    if (!feature_flags::gTimeseriesDeletesSupport.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        // Translate the delete query into a query on the time-series collection's underlying
+        // buckets collection.
+        return timeseries::translateQuery(originalQuery, *metaField);
+    }
+
+    auto swMatchExpr =
+        MatchExpressionParser::parse(originalQuery,
+                                     expCtx,
+                                     ExtensionsCallbackNoop(),
+                                     MatchExpressionParser::kAllowAllSpecialFeatures);
+    uassertStatusOKWithContext(swMatchExpr.getStatus(), "Failed to parse delete query");
+    auto metaFieldStr = metaField->toString();
+    // Split out the bucket-level predicate from the delete query and rename the meta field to the
+    // internal name, 'meta'.
+    auto [bucketLevelPredicate, _] = expression::splitMatchExpressionBy(
+        std::move(swMatchExpr.getValue()),
+        {metaFieldStr} /*fields*/,
+        {{metaFieldStr, timeseries::kBucketMetaFieldName.toString()}} /*renames*/,
+        expression::isOnlyDependentOn);
+
+    if (bucketLevelPredicate) {
+        return bucketLevelPredicate->serialize();
+    }
+
+    // In case that the delete query does not contain bucket-level predicate that can be split out
+    // and renamed, target the request to all shards using empty predicate.
+    return BSONObj();
+}
+}  // namespace
+
 std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetDelete(
     OperationContext* opCtx, const BatchItemRef& itemRef, std::set<ChunkRange>* chunkRanges) const {
     const auto& deleteOp = itemRef.getDelete();
@@ -534,6 +588,8 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetDelete(
                     feature_flags::gFeatureFlagShardedTimeSeriesUpdateDelete.isEnabled(
                         serverGlobalParams.featureCompatibility));
 
+            // TODO SERVER-73087: Relax this check to allow deleteOne under
+            // gTimeseriesUpdatesDeletesSupport feature flag.
             uassert(ErrorCodes::IllegalOperation,
                     "Cannot perform a non-multi delete on a time-series collection",
                     deleteOp.getMulti());
@@ -541,16 +597,14 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetDelete(
             auto tsFields = _cri.cm.getTimeseriesFields();
             tassert(5918101, "Missing timeseriesFields on buckets collection", tsFields);
 
-            const auto& metaField = tsFields->getMetaField();
-            if (metaField) {
-                // Translate delete query into the query to the time-series buckets collection.
-                deleteQuery = timeseries::translateQuery(deleteQuery, *metaField);
-            } else {
-                // In case the time-series collection does not have meta field defined, we target
-                // the request to all shards using empty predicate. Since we allow only delete
-                // requests with 'limit:0', we will not delete any extra documents.
-                deleteQuery = BSONObj();
-            }
+            // Translate the delete query on a timeseries collection into the bucket-level predicate
+            // so that we can target the request to the correct shard or broadcast the request if
+            // the bucket-level predicate is empty.
+            //
+            // Note: The query returned would match a super set of the documents matched by the
+            // original query.
+            deleteQuery =
+                getBucketLevelPredicateForRouting(deleteQuery, expCtx, tsFields->getMetaField());
         }
 
         // Sharded collections have the following further requirements for targeting:
@@ -617,8 +671,12 @@ StatusWith<std::vector<ShardEndpoint>> CollectionRoutingInfoTargeter::_targetQue
     }
 
     std::set<ShardId> shardIds;
+    QueryTargetingInfo info;
     try {
-        getShardIdsForQuery(expCtx, query, collation, _cri.cm, &shardIds, chunkRanges);
+        getShardIdsForQuery(expCtx, query, collation, _cri.cm, &shardIds, &info);
+        if (chunkRanges) {
+            chunkRanges->swap(info.chunkRanges);
+        }
     } catch (const DBException& ex) {
         return ex.toStatus();
     }

@@ -6,6 +6,8 @@
  *
  * @tags: [
  *   incompatible_with_macos,
+ *   # Shard merge protocol will be tested by tenant_migration_shard_merge_ssl_configuration.js.
+ *   incompatible_with_shard_merge,
  *   requires_majority_read_concern,
  *   requires_persistence,
  *   serverless,
@@ -99,7 +101,7 @@ const kExpiredMigrationCertificates = {
 (() => {
     jsTest.log("Test that donorStartMigration fails if SSL is not enabled on the donor and " +
                "tenantMigrationDisableX509Auth=false");
-    const donorRst = new ReplSetTest({nodes: 1, name: "donor"});
+    const donorRst = new ReplSetTest({nodes: 1, name: "donor", serverless: true});
     donorRst.startSet();
     donorRst.initiate();
 
@@ -127,7 +129,7 @@ const kExpiredMigrationCertificates = {
 (() => {
     jsTest.log("Test that recipientSyncData fails if SSL is not enabled on the recipient and " +
                "tenantMigrationDisableX509Auth=false");
-    const recipientRst = new ReplSetTest({nodes: 1, name: "recipient"});
+    const recipientRst = new ReplSetTest({nodes: 1, name: "recipient", serverless: true});
     recipientRst.startSet();
     recipientRst.initiate();
 
@@ -157,6 +159,7 @@ const kExpiredMigrationCertificates = {
     const recipientRst = new ReplSetTest({
         nodes: 1,
         name: "recipient",
+        serverless: true,
         nodeOptions: Object.assign(migrationX509Options.recipient,
                                    {setParameter: {tenantMigrationDisableX509Auth: true}})
     });
@@ -188,6 +191,7 @@ const kExpiredMigrationCertificates = {
     const recipientRst = new ReplSetTest({
         nodes: 1,
         name: "recipient",
+        serverless: true,
         nodeOptions: Object.assign(migrationX509Options.recipient,
                                    {setParameter: {tenantMigrationDisableX509Auth: true}})
     });
@@ -218,12 +222,14 @@ const kExpiredMigrationCertificates = {
     const donorRst = new ReplSetTest({
         nodes: 1,
         name: "donor",
+        serverless: true,
         nodeOptions: Object.assign(migrationX509Options.donor,
                                    {setParameter: {tenantMigrationDisableX509Auth: true}})
     });
     const recipientRst = new ReplSetTest({
         nodes: 1,
         name: "recipient",
+        serverless: true,
         nodeOptions: Object.assign(migrationX509Options.recipient,
                                    {setParameter: {tenantMigrationDisableX509Auth: true}})
     });
@@ -265,11 +271,13 @@ const kExpiredMigrationCertificates = {
     const donorRst = new ReplSetTest({
         nodes: 1,
         name: "donor",
+        serverless: true,
         nodeOptions: {setParameter: {tenantMigrationDisableX509Auth: true}}
     });
     const recipientRst = new ReplSetTest({
         nodes: 1,
         name: "recipient",
+        serverless: true,
         nodeOptions: {setParameter: {tenantMigrationDisableX509Auth: true}}
     });
 
@@ -308,12 +316,14 @@ const kExpiredMigrationCertificates = {
     const donorRst = new ReplSetTest({
         nodes: 1,
         name: "donor",
+        serverless: true,
         nodeOptions: Object.assign(migrationX509Options.donor,
                                    {setParameter: {tenantMigrationDisableX509Auth: true}})
     });
     const recipientRst = new ReplSetTest({
         nodes: 1,
         name: "recipient",
+        serverless: true,
         nodeOptions: Object.assign(migrationX509Options.recipient,
                                    {setParameter: {tenantMigrationDisableX509Auth: true}})
     });

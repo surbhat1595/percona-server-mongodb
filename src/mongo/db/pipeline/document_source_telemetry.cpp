@@ -31,6 +31,9 @@
 
 #include "mongo/bson/timestamp.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/debug_util.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
 
@@ -95,7 +98,11 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceTelemetry::createFromBson(
                                        parseTelemetryEmbeddedObject(spec.embeddedObject()));
 }
 
-Value DocumentSourceTelemetry::serialize(boost::optional<ExplainOptions::Verbosity> explain) const {
+Value DocumentSourceTelemetry::serialize(SerializationOptions opts) const {
+    if (opts.redactFieldNames || opts.replacementForLiteralArgs) {
+        MONGO_UNIMPLEMENTED_TASSERT(7484308);
+    }
+
     return Value{Document{{kStageName, Document{}}}};
 }
 
@@ -139,7 +146,20 @@ DocumentSource::GetNextResult DocumentSourceTelemetry::doGetNext() {
         const auto partitionReadTime =
             Timestamp{Timestamp(Date_t::now().toMillisSinceEpoch() / 1000, 0)};
         for (auto&& [key, metrics] : *partition) {
-            _materializedPartition.push_back({{"key", metrics.redactKey(key, _redactFieldNames)},
+            auto swKey = metrics.redactKey(key, _redactFieldNames, pExpCtx->opCtx);
+            if (!swKey.isOK()) {
+                LOGV2_DEBUG(7349403,
+                            3,
+                            "Error encountered when redacting query shape, will not publish "
+                            "telemetry for this entry.",
+                            "status"_attr = swKey.getStatus());
+                if (kDebugBuild) {
+                    tasserted(7349401,
+                              "Was not able to re-parse telemetry key when reading telemetry.");
+                }
+                continue;
+            }
+            _materializedPartition.push_back({{"key", std::move(swKey.getValue())},
                                               {"metrics", metrics.toBSON()},
                                               {"asOf", partitionReadTime}});
         }

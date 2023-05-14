@@ -174,8 +174,7 @@ executor:
   archive:
     hooks:
       - CheckReplDBHash
-      # TODO (SERVER-74721): Enable when this will work with kill primary and stepdown suites.
-      # - CheckMetadataConsistencyInBackground
+      - CheckMetadataConsistencyInBackground
       - ValidateCollections
     tests: true
   config:
@@ -192,8 +191,7 @@ executor:
     shard_stepdown: true
     use_action_permitted_file: true
   - class: CheckReplDBHash
-  # TODO (SERVER-74721): Enable when this will work with kill primary and stepdown suites.
-  # - class: CheckMetadataConsistencyInBackground
+  - class: CheckMetadataConsistencyInBackground
   - class: CheckOrphansDeleted
   - class: CheckRoutingTableConsistency
   - class: CheckShardFilteringMetadata
@@ -204,6 +202,7 @@ executor:
     mongos_options:
       set_parameters:
         enableTestCommands: 1
+        queryAnalysisSamplerConfigurationRefreshSecs: 1
     configsvr_options:
       num_nodes: 3
       all_nodes_electable: true
@@ -226,6 +225,7 @@ executor:
         enableElectionHandoff: 0
         roleGraphInvalidationIsFatal: 1
         receiveChunkWaitForRangeDeleterTimeoutMS: 90000
+        queryAnalysisWriterIntervalSecs: 1
     num_rs_nodes_per_shard: 3
     num_shards: 2
     num_mongos: 2

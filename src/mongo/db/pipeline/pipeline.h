@@ -154,12 +154,25 @@ public:
      * - The boolean opts.optimize determines whether the pipeline will be optimized.
      * - If opts.attachCursorSource is false, the pipeline will be returned without attempting to
      * add an initial cursor source.
-     *
-     * This function throws if parsing the pipeline failed.
      */
     static std::unique_ptr<Pipeline, PipelineDeleter> makePipeline(
         const std::vector<BSONObj>& rawPipeline,
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        MakePipelineOptions opts = MakePipelineOptions{});
+
+    /**
+     * Creates a Pipeline from an AggregateCommandRequest. This preserves any aggregation options
+     * set on the aggRequest. The state of the returned pipeline will depend upon the supplied
+     * MakePipelineOptions:
+     * - The boolean opts.optimize determines whether the pipeline will be optimized.
+     *
+     * This function requires opts.attachCursorSource to be true.
+     * This function throws if parsing the pipeline set on aggRequest failed.
+     */
+    static std::unique_ptr<Pipeline, PipelineDeleter> makePipeline(
+        AggregateCommandRequest& aggRequest,
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        boost::optional<BSONObj> shardCursorsSortSpec = boost::none,
         MakePipelineOptions opts = MakePipelineOptions{});
 
     /**
@@ -305,12 +318,15 @@ public:
     /**
      * Helpers to serialize a pipeline.
      */
-    std::vector<Value> serialize(
-        boost::optional<ExplainOptions::Verbosity> explain = boost::none) const;
+    std::vector<Value> serialize(boost::optional<ExplainOptions::Verbosity> explain) const;
+    std::vector<Value> serialize(boost::optional<SerializationOptions> opts = boost::none) const;
+    std::vector<BSONObj> serializeToBson(boost::optional<ExplainOptions::Verbosity> explain) const;
     std::vector<BSONObj> serializeToBson(
-        boost::optional<ExplainOptions::Verbosity> explain = boost::none) const;
+        boost::optional<SerializationOptions> opts = boost::none) const;
     static std::vector<Value> serializeContainer(
-        const SourceContainer& container, boost::optional<ExplainOptions::Verbosity> = boost::none);
+        const SourceContainer& container, boost::optional<ExplainOptions::Verbosity> explain);
+    static std::vector<Value> serializeContainer(
+        const SourceContainer& container, boost::optional<SerializationOptions> opts = boost::none);
 
     // The initial source is special since it varies between mongos and mongod.
     void addInitialSource(boost::intrusive_ptr<DocumentSource> source);

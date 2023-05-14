@@ -123,14 +123,8 @@ public:
                          const boost::intrusive_ptr<ExpressionContext>&);
 
     const char* getSourceName() const final;
-    void serializeToArray(
-        std::vector<Value>& array,
-        boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
-
     void serializeToArray(std::vector<Value>& array,
-                          SerializationOptions opts) const final override {
-        MONGO_UNIMPLEMENTED;
-    };
+                          SerializationOptions opts = SerializationOptions()) const final override;
 
     /**
      * Returns the 'as' path, and possibly fields modified by an absorbed $unwind.
@@ -255,8 +249,8 @@ public:
     boost::intrusive_ptr<DocumentSource> clone(
         const boost::intrusive_ptr<ExpressionContext>& newExpCtx) const final;
 
-    bool sbeCompatible() const {
-        return _sbeCompatible;
+    SbeCompatibility sbeCompatibility() const {
+        return _sbeCompatibility;
     }
 
     const NamespaceString& getFromNs() const {
@@ -310,12 +304,8 @@ private:
     /**
      * Should not be called; use serializeToArray instead.
      */
-    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final {
-        MONGO_UNREACHABLE;
-    }
-
-    Value serialize(SerializationOptions opts) const final override {
-        MONGO_UNIMPLEMENTED;
+    Value serialize(SerializationOptions opts = SerializationOptions()) const final override {
+        MONGO_UNREACHABLE_TASSERT(7484304);
     }
 
     GetNextResult unwindResult();
@@ -375,8 +365,8 @@ private:
     bool foreignShardedLookupAllowed() const;
 
     /**
-     * Checks conditions necessary for SBE compatibility and sets _sbeCompatible flag. Note: when
-     * optimizing the pipeline the flag might be modified.
+     * Checks conditions necessary for SBE compatibility and sets '_sbeCompatibility' flag. Note:
+     * when optimizing the pipeline the flag might be modified.
      */
     void determineSbeCompatibility();
 
@@ -416,7 +406,7 @@ private:
     bool _hasExplicitCollation = false;
 
     // Can this $lookup be pushed down into SBE?
-    bool _sbeCompatible = false;
+    SbeCompatibility _sbeCompatibility = SbeCompatibility::notCompatible;
 
     // The aggregation pipeline to perform against the '_resolvedNs' namespace. Referenced view
     // namespaces have been resolved.

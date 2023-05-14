@@ -180,10 +180,25 @@ if (WriteWithoutShardKeyTestUtil.isWriteWithoutShardKeyFeatureEnabled(st.s)) {
 
     assert.commandWorked(testColl.insert({x: 1, _id: 1}));
     assert.commandWorked(testColl.insert({x: -1, _id: 0}));
-    let updateRes = assert.commandWorked(testColl.update({}, {x: 110, y: 55, z: 3, a: 110}, false));
-    assert.eq(1, updateRes.nMatched);
-    assert.eq(1, updateRes.nModified);
-    assert.eq(testColl.find({x: 110, y: 55, z: 3, a: 110}).itcount(), 1);
+
+    // TODO: SERVER-67429 Remove this try/catch since we can run in all configurations.
+    // If we have a WouldChangeOwningShard update and we aren't running as a retryable
+    // write or in a transaction, then this is an acceptable error.
+    let updateRes;
+    try {
+        updateRes = testColl.update({}, {x: 110, y: 55, z: 3, a: 110}, false);
+        assert.commandWorked(updateRes);
+        assert.eq(1, updateRes.nMatched);
+        assert.eq(1, updateRes.nModified);
+        assert.eq(testColl.find({x: 110, y: 55, z: 3, a: 110}).itcount(), 1);
+    } catch (err) {
+        // If a WouldChangeOwningShard update is performed not as a retryable write or in a
+        // transaction, expect an error.
+        assert.eq(updateRes.getWriteError().code, ErrorCodes.IllegalOperation);
+        assert.eq(
+            updateRes.getWriteError().errmsg,
+            "Must run update to document shard key in a transaction or as a retryable write.");
+    }
 
 } else {
     // When query matches a doc and fails to update because shard key needs to be updated.
@@ -225,7 +240,15 @@ assert.eq(1, sessionDB.coll.find(updateDocTxn).itcount());
 
 // Shard key field modifications do not have to specify full shard key.
 if (WriteWithoutShardKeyTestUtil.isWriteWithoutShardKeyFeatureEnabled(st.s)) {
-    // TODO: SERVER-73057 Implement upsert behavior for _clusterQueryWithoutShardKey
+    // Query on partial shard key.
+    assertUpdateWorkedWithNoMatchingDoc({x: 101, y: 50, a: 5},
+                                        {x: 100, y: 55, z: 3, a: 1},
+                                        true /* isUpsert */,
+                                        false /* inTransaction */);
+    assertUpdateWorkedWithNoMatchingDoc({x: 102, y: 50, nonExistingField: true},
+                                        {x: 102, y: 55, z: 3, a: 1},
+                                        true /* isUpsert */,
+                                        false /* inTransaction */);
 } else {
     // Full shard key not specified in query.
 
@@ -348,11 +371,19 @@ assert.eq(1, sessionDB.coll.find(upsertDocTxn["$set"]).itcount());
 
 // Shard key field modifications do not have to specify full shard key.
 if (WriteWithoutShardKeyTestUtil.isWriteWithoutShardKeyFeatureEnabled(st.s)) {
-    // TODO: SERVER-73057 Implement upsert behavior for _clusterQueryWithoutShardKey
+    // Partial shard key updates are successful.
+    assertUpdateWorkedWithNoMatchingDoc(
+        {x: 14}, {"$set": {opStyle: 5}}, true /* isUpsert */, false /* inTransaction */);
+    assertUpdateWorkedWithNoMatchingDoc({x: 100, y: 51, nonExistingField: true},
+                                        {"$set": {x: 110, y: 55, z: 3, a: 8}},
+                                        true /* isUpsert */,
+                                        false /* inTransaction */);
+    assertUpdateWorkedWithNoMatchingDoc(
+        {y: 4}, {"$set": {z: 3, x: 4, y: 3, a: 2}}, true /* isUpsert */, false /* inTransaction */);
 } else {
-    // Full shard key not specified in query.
-
-    // Query on _id doesn't work for upserts.
+    // TODO SERVER-75194: Move test case outside if-else. Should error with ShardKeyNotFound
+    // regardless of updateOneWithoutShardKey feature flag enablement. Query on _id doesn't work for
+    // upserts.
     assert.commandFailedWithCode(
         st.s.getDB(kDbName).coll.update(
             {_id: 0}, {"$set": {x: 2, y: 11, z: 10, opStyle: 7}}, {upsert: true}),
@@ -501,7 +532,10 @@ assert.commandWorked(session.commitTransaction_forTesting());
 assert.eq(1, sessionDB.coll.find(upsertProjectTxnDoc).itcount());
 
 if (WriteWithoutShardKeyTestUtil.isWriteWithoutShardKeyFeatureEnabled(st.s)) {
-    // TODO: SERVER-73057 Implement upsert behavior for _clusterQueryWithoutShardKey
+    assertUpdateWorkedWithNoMatchingDoc({_id: 18, z: 4, x: 3},
+                                        [{$addFields: {foo: 4}}],
+                                        true /* isUpsert */,
+                                        false /* inTransaction */);
 } else {
     // Full shard key not specified in query.
     assert.commandFailedWithCode(

@@ -66,6 +66,7 @@
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/s/query_analysis_sampler_util.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/fail_point.h"
@@ -472,14 +473,20 @@ public:
                             .expectedUUID(findCommand->getCollectionUUID()));
             const auto& nss = ctx->getNss();
 
-            if (analyze_shard_key::supportsPersistingSampledQueries() &&
-                findCommand->getSampleId()) {
-                analyze_shard_key::QueryAnalysisWriter::get(opCtx)
-                    ->addFindQuery(*findCommand->getSampleId(),
-                                   nss,
-                                   findCommand->getFilter(),
-                                   findCommand->getCollation())
-                    .getAsync([](auto) {});
+            if (!findCommand->getMirrored()) {
+                if (auto sampleId = analyze_shard_key::getOrGenerateSampleId(
+                        opCtx,
+                        ns(),
+                        analyze_shard_key::SampledCommandNameEnum::kFind,
+                        *findCommand)) {
+                    analyze_shard_key::QueryAnalysisWriter::get(opCtx)
+                        ->addFindQuery(*sampleId,
+                                       nss,
+                                       findCommand->getFilter(),
+                                       findCommand->getCollation(),
+                                       findCommand->getLet())
+                        .getAsync([](auto) {});
+                }
             }
 
             // Going forward this operation must never ignore interrupt signals while waiting for
@@ -576,8 +583,10 @@ public:
             if (collection) {
                 // Collect telemetry. Exclude queries against collections with encrypted fields.
                 if (!collection.get()->getCollectionOptions().encryptedFieldConfig) {
-                    telemetry::registerFindRequest(
-                        cq->getFindCommandRequest(), collection.get()->ns(), opCtx);
+                    telemetry::registerFindRequest(cq->getFindCommandRequest(),
+                                                   collection.get()->ns(),
+                                                   opCtx,
+                                                   cq->getExpCtx());
                 }
             }
 
@@ -606,7 +615,7 @@ public:
                 // there is no ClientCursor id, and then return.
                 const long long numResults = 0;
                 const CursorId cursorId = 0;
-                endQueryOp(opCtx, collection, *exec, numResults, cursorId);
+                endQueryOp(opCtx, collection, *exec, numResults, boost::none, cmdObj);
                 auto bodyBuilder = result->getBodyBuilder();
                 appendCursorResponseObject(cursorId, nss, BSONArray(), boost::none, &bodyBuilder);
                 return;
@@ -706,11 +715,9 @@ public:
                     pinnedCursor.getCursor()->setLeftoverMaxTimeMicros(
                         opCtx->getRemainingMaxTimeMicros());
                 }
-                pinnedCursor.getCursor()->setNReturnedSoFar(numResults);
-                pinnedCursor.getCursor()->incNBatches();
 
                 // Fill out curop based on the results.
-                endQueryOp(opCtx, collection, *cursorExec, numResults, cursorId);
+                endQueryOp(opCtx, collection, *cursorExec, numResults, pinnedCursor, cmdObj);
 
                 if (stashResourcesForGetMore) {
                     // Collect storage stats now before we stash the recovery unit. These stats are
@@ -724,13 +731,11 @@ public:
                     CurOp::get(opCtx)->debug().storageStats =
                         opCtx->recoveryUnit()->computeOperationStatisticsSinceLastCall();
                 }
-                collectTelemetryMongod(opCtx, pinnedCursor);
             } else {
-                endQueryOp(opCtx, collection, *exec, numResults, cursorId);
+                endQueryOp(opCtx, collection, *exec, numResults, boost::none, cmdObj);
                 // We want to destroy executor as soon as possible to release any resources locks it
                 // may hold.
                 exec.reset();
-                collectTelemetryMongod(opCtx);
             }
 
             // Generate the response object to send to the client.
@@ -790,6 +795,7 @@ public:
                 // Set the telemetryStoreKey to none so telemetry isn't collected when we've done a
                 // FLE rewrite.
                 CurOp::get(opCtx)->debug().telemetryStoreKey = boost::none;
+                CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
             }
 
             if (findCommand->getMirrored().value_or(false)) {

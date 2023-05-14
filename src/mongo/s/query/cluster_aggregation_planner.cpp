@@ -362,15 +362,16 @@ BSONObj establishMergingMongosCursor(OperationContext* opCtx,
     bool exhausted = cursorState != ClusterCursorManager::CursorState::NotExhausted;
     int nShards = ccc->getNumRemotes();
 
+    auto&& opDebug = CurOp::get(opCtx)->debug();
     // Fill out the aggregation metrics in CurOp, and record telemetry metrics, before detaching the
     // cursor from its opCtx.
-    CurOp::get(opCtx)->debug().nShards = std::max(CurOp::get(opCtx)->debug().nShards, nShards);
-    CurOp::get(opCtx)->debug().cursorExhausted = exhausted;
-    CurOp::get(opCtx)->debug().nreturned = responseBuilder.numDocs();
+    opDebug.nShards = std::max(opDebug.nShards, nShards);
+    opDebug.cursorExhausted = exhausted;
+    opDebug.additiveMetrics.nBatches = 1;
     if (exhausted) {
-        collectTelemetryMongos(opCtx);
+        collectTelemetryMongos(opCtx, ccc->getOriginatingCommand(), responseBuilder.numDocs());
     } else {
-        collectTelemetryMongos(opCtx, ccc);
+        collectTelemetryMongos(opCtx, ccc, responseBuilder.numDocs());
     }
 
     ccc->detachFromOperationContext();
@@ -385,7 +386,7 @@ BSONObj establishMergingMongosCursor(OperationContext* opCtx,
             ClusterCursorManager::CursorType::MultiTarget,
             ClusterCursorManager::CursorLifetime::Mortal,
             authUser));
-        CurOp::get(opCtx)->debug().cursorid = clusterCursorId;
+        opDebug.cursorid = clusterCursorId;
     }
 
     responseBuilder.done(clusterCursorId, requestedNss);
@@ -402,6 +403,9 @@ DispatchShardPipelineResults dispatchExchangeConsumerPipeline(
     const NamespaceString& executionNss,
     Document serializedCommand,
     DispatchShardPipelineResults* shardDispatchResults) {
+    tassert(7163600,
+            "dispatchExchangeConsumerPipeline() must not be called for explain operation",
+            !expCtx->explain);
     auto opCtx = expCtx->opCtx;
 
     if (MONGO_unlikely(shardedAggregateFailToDispatchExchangeConsumerPipeline.shouldFail())) {
@@ -438,7 +442,8 @@ DispatchShardPipelineResults dispatchExchangeConsumerPipeline(
                                                                 serializedCommand,
                                                                 consumerPipelines.back(),
                                                                 boost::none, /* exchangeSpec */
-                                                                false /* needsMerge */);
+                                                                false /* needsMerge */,
+                                                                boost::none /* explain */);
 
         requests.emplace_back(shardDispatchResults->exchangeSpec->consumerShards[idx],
                               consumerCmdObj);
@@ -708,7 +713,8 @@ Status dispatchPipelineAndMerge(OperationContext* opCtx,
                                                    hasChangeStream,
                                                    startsWithDocuments,
                                                    eligibleForSampling,
-                                                   std::move(targeter.pipeline));
+                                                   std::move(targeter.pipeline),
+                                                   expCtx->explain);
 
     // If the operation is an explain, then we verify that it succeeded on all targeted
     // shards, write the results to the output builder, and return immediately.

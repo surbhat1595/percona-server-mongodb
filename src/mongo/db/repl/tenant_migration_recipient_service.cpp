@@ -100,7 +100,8 @@ constexpr int kCheckpointTsBackupCursorErrorCode = 6929900;
 constexpr int kCloseCursorBeforeOpenErrorCode = 50886;
 
 NamespaceString getOplogBufferNs(const UUID& migrationUUID) {
-    return NamespaceString(DatabaseName::kConfig, kOplogBufferPrefix + migrationUUID.toString());
+    return NamespaceString::makeGlobalConfigCollection(kOplogBufferPrefix +
+                                                       migrationUUID.toString());
 }
 
 bool isMigrationCompleted(TenantMigrationRecipientStateEnum state) {
@@ -147,49 +148,22 @@ bool isRetriableOplogFetcherError(Status oplogFetcherStatus) {
         oplogFetcherStatus == ErrorCodes::ShutdownInProgress;
 }
 
+// Creates the oplog buffer that will be populated by donor oplog entries from the retryable
+// writes fetching stage and oplog fetching stage.
+std::shared_ptr<OplogBufferCollection> createOplogBuffer(OperationContext* opCtx,
+                                                         const UUID& migrationId) {
+    OplogBufferCollection::Options options;
+    options.peekCacheSize = static_cast<size_t>(tenantMigrationOplogBufferPeekCacheSize);
+    options.dropCollectionAtStartup = false;
+    options.dropCollectionAtShutdown = false;
+    options.useTemporaryCollection = false;
+
+    return std::make_shared<OplogBufferCollection>(
+        StorageInterface::get(opCtx), getOplogBufferNs(migrationId), options);
+}
+
 }  // namespace
 
-// A convenient place to set test-specific parameters.
-MONGO_FAIL_POINT_DEFINE(pauseBeforeRunTenantMigrationRecipientInstance);
-MONGO_FAIL_POINT_DEFINE(pauseAfterRunTenantMigrationRecipientInstance);
-MONGO_FAIL_POINT_DEFINE(skipTenantMigrationRecipientAuth);
-MONGO_FAIL_POINT_DEFINE(skipComparingRecipientAndDonorFCV);
-MONGO_FAIL_POINT_DEFINE(autoRecipientForgetMigration);
-MONGO_FAIL_POINT_DEFINE(skipFetchingCommittedTransactions);
-MONGO_FAIL_POINT_DEFINE(skipFetchingRetryableWritesEntriesBeforeStartOpTime);
-MONGO_FAIL_POINT_DEFINE(pauseTenantMigrationRecipientBeforeDeletingStateDoc);
-
-// Fails before waiting for the state doc to be majority replicated.
-MONGO_FAIL_POINT_DEFINE(failWhilePersistingTenantMigrationRecipientInstanceStateDoc);
-MONGO_FAIL_POINT_DEFINE(fpAfterPersistingTenantMigrationRecipientInstanceStateDoc);
-MONGO_FAIL_POINT_DEFINE(fpBeforeFetchingDonorClusterTimeKeys);
-MONGO_FAIL_POINT_DEFINE(fpAfterConnectingTenantMigrationRecipientInstance);
-MONGO_FAIL_POINT_DEFINE(fpAfterRecordingRecipientPrimaryStartingFCV);
-MONGO_FAIL_POINT_DEFINE(fpAfterComparingRecipientAndDonorFCV);
-MONGO_FAIL_POINT_DEFINE(fpAfterRetrievingStartOpTimesMigrationRecipientInstance);
-MONGO_FAIL_POINT_DEFINE(fpSetSmallAggregationBatchSize);
-MONGO_FAIL_POINT_DEFINE(fpBeforeWaitingForRetryableWritePreFetchMajorityCommitted);
-MONGO_FAIL_POINT_DEFINE(pauseAfterRetrievingRetryableWritesBatch);
-MONGO_FAIL_POINT_DEFINE(fpAfterFetchingRetryableWritesEntriesBeforeStartOpTime);
-MONGO_FAIL_POINT_DEFINE(fpAfterStartingOplogFetcherMigrationRecipientInstance);
-MONGO_FAIL_POINT_DEFINE(setTenantMigrationRecipientInstanceHostTimeout);
-MONGO_FAIL_POINT_DEFINE(pauseAfterRetrievingLastTxnMigrationRecipientInstance);
-MONGO_FAIL_POINT_DEFINE(fpBeforeMarkingCloneSuccess);
-MONGO_FAIL_POINT_DEFINE(fpBeforeFetchingCommittedTransactions);
-MONGO_FAIL_POINT_DEFINE(fpAfterFetchingCommittedTransactions);
-MONGO_FAIL_POINT_DEFINE(fpAfterStartingOplogApplierMigrationRecipientInstance);
-MONGO_FAIL_POINT_DEFINE(fpBeforeFulfillingDataConsistentPromise);
-MONGO_FAIL_POINT_DEFINE(fpAfterDataConsistentMigrationRecipientInstance);
-MONGO_FAIL_POINT_DEFINE(fpBeforePersistingRejectReadsBeforeTimestamp);
-MONGO_FAIL_POINT_DEFINE(fpAfterWaitForRejectReadsBeforeTimestamp);
-MONGO_FAIL_POINT_DEFINE(hangBeforeTaskCompletion);
-MONGO_FAIL_POINT_DEFINE(fpAfterReceivingRecipientForgetMigration);
-MONGO_FAIL_POINT_DEFINE(hangAfterCreatingRSM);
-MONGO_FAIL_POINT_DEFINE(skipRetriesWhenConnectingToDonorHost);
-MONGO_FAIL_POINT_DEFINE(fpBeforeDroppingTempCollections);
-MONGO_FAIL_POINT_DEFINE(fpWaitUntilTimestampMajorityCommitted);
-MONGO_FAIL_POINT_DEFINE(hangAfterUpdatingTransactionEntry);
-MONGO_FAIL_POINT_DEFINE(fpBeforeAdvancingStableTimestamp);
 MONGO_FAIL_POINT_DEFINE(hangMigrationBeforeRetryCheck);
 MONGO_FAIL_POINT_DEFINE(skipCreatingIndexDuringRebuildService);
 MONGO_FAIL_POINT_DEFINE(pauseTenantMigrationRecipientInstanceBeforeDeletingOldStateDoc);
@@ -1584,23 +1558,6 @@ TenantMigrationRecipientService::Instance::_openCommittedTransactionsAggregation
     return std::move(statusWith.getValue());
 }
 
-void TenantMigrationRecipientService::Instance::_createOplogBuffer(WithLock,
-                                                                   OperationContext* opCtx) {
-    OplogBufferCollection::Options options;
-    options.peekCacheSize = static_cast<size_t>(tenantMigrationOplogBufferPeekCacheSize);
-    options.dropCollectionAtStartup = false;
-    options.dropCollectionAtShutdown = false;
-    options.useTemporaryCollection = false;
-
-    auto oplogBufferNS = getOplogBufferNs(getMigrationUUID());
-    if (!_donorOplogBuffer) {
-
-        auto bufferCollection = std::make_unique<OplogBufferCollection>(
-            StorageInterface::get(opCtx), oplogBufferNS, options);
-        _donorOplogBuffer = std::move(bufferCollection);
-    }
-}
-
 void TenantMigrationRecipientService::Instance::_validateTenantIdsForProtocol() {
     switch (_protocol) {
         case MigrationProtocolEnum::kMultitenantMigrations:
@@ -1626,6 +1583,8 @@ TenantMigrationRecipientService::Instance::_fetchRetryableWritesOplogBeforeStart
         return SemiFuture<void>::makeReady();
     }
 
+    Timestamp startFetchingTimestamp;
+    std::shared_ptr<OplogBufferCollection> donorOplogBuffer;
     {
         stdx::lock_guard lk(_mutex);
         if (_stateDoc.getCompletedFetchingRetryableWritesBeforeStartOpTime()) {
@@ -1637,6 +1596,10 @@ TenantMigrationRecipientService::Instance::_fetchRetryableWritesOplogBeforeStart
                         "tenantId"_attr = getTenantId());
             return SemiFuture<void>::makeReady();
         }
+
+        invariant(_stateDoc.getStartFetchingDonorOpTime());
+        startFetchingTimestamp = _stateDoc.getStartFetchingDonorOpTime().value().getTimestamp();
+        donorOplogBuffer = _donorOplogBuffer;
     }
 
     auto opCtx = cc().makeOperationContext();
@@ -1645,7 +1608,7 @@ TenantMigrationRecipientService::Instance::_fetchRetryableWritesOplogBeforeStart
     // through failover before it finished writing all oplog entries to the buffer. Clear it and
     // redo the work.
     auto oplogBufferNS = getOplogBufferNs(getMigrationUUID());
-    if (_donorOplogBuffer->getCount() > 0) {
+    if (donorOplogBuffer->getCount() > 0) {
         // Ensure we are primary when trying to clear the oplog buffer since it will drop and
         // re-create the collection.
         auto coordinator = repl::ReplicationCoordinator::get(opCtx.get());
@@ -1655,14 +1618,7 @@ TenantMigrationRecipientService::Instance::_fetchRetryableWritesOplogBeforeStart
                 Status(ErrorCodes::NotWritablePrimary,
                        "Recipient node is not primary, cannot clear oplog buffer collection."));
         }
-        _donorOplogBuffer->clear(opCtx.get());
-    }
-
-    Timestamp startFetchingTimestamp;
-    {
-        stdx::lock_guard lk(_mutex);
-        invariant(_stateDoc.getStartFetchingDonorOpTime());
-        startFetchingTimestamp = _stateDoc.getStartFetchingDonorOpTime().value().getTimestamp();
+        donorOplogBuffer->clear(opCtx.get());
     }
 
     LOGV2_DEBUG(5535300,
@@ -1731,9 +1687,9 @@ TenantMigrationRecipientService::Instance::_fetchRetryableWritesOplogBeforeStart
 
         if (retryableWritesEntries.size() != 0) {
             // Wait for enough space.
-            _donorOplogBuffer->waitForSpace(opCtx.get(), toApplyDocumentBytes);
+            donorOplogBuffer->waitForSpace(opCtx.get(), toApplyDocumentBytes);
             // Buffer retryable writes entries.
-            _donorOplogBuffer->preload(
+            donorOplogBuffer->preload(
                 opCtx.get(), retryableWritesEntries.begin(), retryableWritesEntries.end());
         }
 
@@ -1790,19 +1746,20 @@ void TenantMigrationRecipientService::Instance::_startOplogFetcher() {
 
     auto opCtx = cc().makeOperationContext();
     OpTime startFetchOpTime;
+    std::shared_ptr<OplogBufferCollection> donorOplogBuffer;
     auto resumingFromOplogBuffer = false;
-
     {
         stdx::lock_guard lk(_mutex);
         _dataReplicatorExternalState =
             std::make_unique<DataReplicatorExternalStateTenantMigration>();
         startFetchOpTime = *_stateDoc.getStartFetchingDonorOpTime();
+        donorOplogBuffer = _donorOplogBuffer;
     }
 
     if (_sharedData->getResumePhase() != ResumePhase::kNone) {
         // If the oplog buffer already contains fetched documents, we must be resuming a
         // migration.
-        if (auto topOfOplogBuffer = _donorOplogBuffer->lastObjectPushed(opCtx.get())) {
+        if (auto topOfOplogBuffer = donorOplogBuffer->lastObjectPushed(opCtx.get())) {
             startFetchOpTime =
                 uassertStatusOK(OpTime::parseFromOplogEntry(topOfOplogBuffer.value()));
             resumingFromOplogBuffer = true;
@@ -1879,15 +1836,19 @@ Status TenantMigrationRecipientService::Instance::_enqueueDocuments(
     OplogFetcher::Documents::const_iterator end,
     const OplogFetcher::DocumentsInfo& info) {
 
-    invariant(_donorOplogBuffer);
+    auto donorOplogBuffer = [&]() {
+        stdx::lock_guard lk(_mutex);
+        invariant(_donorOplogBuffer);
+        return _donorOplogBuffer;
+    }();
 
     auto opCtx = cc().makeOperationContext();
     if (info.toApplyDocumentCount != 0) {
         // Wait for enough space.
-        _donorOplogBuffer->waitForSpace(opCtx.get(), info.toApplyDocumentBytes);
+        donorOplogBuffer->waitForSpace(opCtx.get(), info.toApplyDocumentBytes);
 
         // Buffer docs for later application.
-        _donorOplogBuffer->push(opCtx.get(), begin, end);
+        donorOplogBuffer->push(opCtx.get(), begin, end);
     }
 
     if (_protocol == MigrationProtocolEnum::kShardMerge) {
@@ -1900,7 +1861,7 @@ Status TenantMigrationRecipientService::Instance::_enqueueDocuments(
         return Status(ErrorCodes::Error(5124600), "Resume token returned is null");
     }
 
-    const auto lastPushedTS = _donorOplogBuffer->getLastPushedTimestamp();
+    const auto lastPushedTS = donorOplogBuffer->getLastPushedTimestamp();
     if (lastPushedTS == info.resumeToken) {
         // We don't want to insert a resume token noop if it would be a duplicate.
         return Status::OK();
@@ -1924,7 +1885,7 @@ Status TenantMigrationRecipientService::Instance::_enqueueDocuments(
     noopEntry.setWallClockTime({});
 
     OplogBuffer::Batch noopVec = {noopEntry.toBSON()};
-    _donorOplogBuffer->push(opCtx.get(), noopVec.cbegin(), noopVec.cend());
+    donorOplogBuffer->push(opCtx.get(), noopVec.cbegin(), noopVec.cend());
     return Status::OK();
 }
 
@@ -2770,6 +2731,7 @@ void TenantMigrationRecipientService::Instance::_startOplogApplier() {
 void TenantMigrationRecipientService::Instance::_setup() {
     auto uniqueOpCtx = cc().makeOperationContext();
     auto opCtx = uniqueOpCtx.get();
+    std::shared_ptr<OplogBufferCollection> donorOplogBuffer;
     {
         stdx::lock_guard lk(_mutex);
         // Do not set the internal states if the migration is already interrupted.
@@ -2796,7 +2758,10 @@ void TenantMigrationRecipientService::Instance::_setup() {
         _sharedData = std::make_unique<TenantMigrationSharedData>(
             _serviceContext->getFastClockSource(), getMigrationUUID(), resumePhase);
 
-        _createOplogBuffer(lk, opCtx);
+        if (!_donorOplogBuffer) {
+            _donorOplogBuffer = createOplogBuffer(opCtx, getMigrationUUID());
+        }
+        donorOplogBuffer = _donorOplogBuffer;
     }
 
     // Start the oplog buffer outside the mutex to avoid deadlock on a concurrent stepdown.
@@ -2812,7 +2777,7 @@ void TenantMigrationRecipientService::Instance::_setup() {
                 Status(ErrorCodes::NotWritablePrimary, "Recipient node is no longer a primary."));
         }
 
-        _donorOplogBuffer->startup(opCtx);
+        donorOplogBuffer->startup(opCtx);
     } catch (DBException& ex) {
         ex.addContext("Failed to create oplog buffer collection.");
         throw;

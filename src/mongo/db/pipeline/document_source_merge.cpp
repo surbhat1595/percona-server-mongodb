@@ -286,7 +286,8 @@ DocumentSourceMergeSpec parseMergeSpecAndResolveTargetNamespace(const BSONElemen
     // database name using the shortcut syntax (to match the semantics of the $out stage), the
     // target database will use the default name provided.
     if (spec.type() == BSONType::String) {
-        targetNss = {defaultDb, spec.valueStringData()};
+        targetNss =
+            NamespaceStringUtil::parseNamespaceFromRequest(defaultDb, spec.valueStringData());
     } else {
         mergeSpec = DocumentSourceMergeSpec::parse(
             IDLParserContext(kStageName, false /* apiStrict */, defaultDb.tenantId()),
@@ -299,10 +300,10 @@ DocumentSourceMergeSpec parseMergeSpecAndResolveTargetNamespace(const BSONElemen
             // from the NamespaceString semantics which treats it as a database name. So, if the
             // target namespace collection is empty, we'll use the default database name as a target
             // database, and the provided namespace value as a collection name.
-            targetNss = {defaultDb, targetNss.ns()};
+            targetNss = NamespaceStringUtil::parseNamespaceFromRequest(defaultDb, targetNss.ns());
         } else if (targetNss.dbName().db().empty()) {
             // Use the default database name if it wasn't specified explicilty.
-            targetNss = {defaultDb, targetNss.coll()};
+            targetNss = NamespaceStringUtil::parseNamespaceFromRequest(defaultDb, targetNss.coll());
         }
     }
 
@@ -531,7 +532,12 @@ boost::optional<DocumentSource::DistributedPlanLogic> DocumentSourceMerge::distr
     return DocumentSourceWriter::distributedPlanLogic();
 }
 
-Value DocumentSourceMerge::serialize(boost::optional<ExplainOptions::Verbosity> explain) const {
+Value DocumentSourceMerge::serialize(SerializationOptions opts) const {
+    auto explain = opts.verbosity;
+    if (opts.redactFieldNames || opts.replacementForLiteralArgs) {
+        MONGO_UNIMPLEMENTED_TASSERT(7484324);
+    }
+
     DocumentSourceMergeSpec spec;
     spec.setTargetNss(_outputNs);
     spec.setLet([&]() -> boost::optional<BSONObj> {
@@ -541,7 +547,7 @@ Value DocumentSourceMerge::serialize(boost::optional<ExplainOptions::Verbosity> 
 
         BSONObjBuilder bob;
         for (auto&& [name, expr] : *_letVariables) {
-            bob << name << expr->serialize(static_cast<bool>(explain));
+            bob << name << expr->serialize(explain);
         }
         return bob.obj();
     }());

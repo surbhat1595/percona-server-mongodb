@@ -3,7 +3,6 @@
  * @tags: [featureFlagTelemetry]
  */
 load('jstests/libs/analyze_plan.js');
-load("jstests/libs/feature_flag_util.js");
 
 (function() {
 "use strict";
@@ -98,7 +97,7 @@ runTestWithMongodOptions({
  * */
 runTestWithMongodOptions({
     setParameter: {
-        internalQueryConfigureTelemetryCacheSize: "2MB",
+        internalQueryConfigureTelemetryCacheSize: "4MB",
         internalQueryConfigureTelemetrySamplingRate: 2147483647
     },
 },

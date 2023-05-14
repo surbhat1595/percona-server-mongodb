@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/util/assert_util.h"
@@ -82,14 +83,6 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    Status insertTimeseries(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                            const NamespaceString& ns,
-                            std::vector<BSONObj>&& objs,
-                            const WriteConcernOptions& wc,
-                            boost::optional<OID> targetEpoch) override {
-        MONGO_UNREACHABLE;
-    }
-
     StatusWith<UpdateResult> update(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                     const NamespaceString& ns,
                                     BatchedObjects&& batch,
@@ -114,13 +107,6 @@ public:
     }
 
     std::deque<BSONObj> listCatalog(OperationContext* opCtx) const override {
-        MONGO_UNREACHABLE;
-    }
-
-    void createTimeseries(OperationContext* opCtx,
-                          const NamespaceString& ns,
-                          const BSONObj& options,
-                          bool createView) final {
         MONGO_UNREACHABLE;
     }
 
@@ -166,7 +152,6 @@ public:
         const NamespaceString& targetNs,
         bool dropTarget,
         bool stayTemp,
-        bool allowBuckets,
         const BSONObj& originalCollectionOptions,
         const std::list<BSONObj>& originalIndexes) override {
         MONGO_UNREACHABLE;
@@ -194,13 +179,24 @@ public:
         MONGO_UNREACHABLE;
     }
 
+    std::unique_ptr<Pipeline, PipelineDeleter> attachCursorSourceToPipeline(
+        const AggregateCommandRequest& aggRequest,
+        Pipeline* pipeline,
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        boost::optional<BSONObj> shardCursorsSortSpec = boost::none,
+        ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
+        boost::optional<BSONObj> readConcern = boost::none) override {
+        MONGO_UNREACHABLE;
+    }
+
     BSONObj preparePipelineAndExplain(Pipeline* ownedPipeline,
                                       ExplainOptions::Verbosity verbosity) override {
         MONGO_UNREACHABLE;
     }
 
     std::unique_ptr<Pipeline, PipelineDeleter> attachCursorSourceToPipelineForLocalRead(
-        Pipeline* pipeline) override {
+        Pipeline* pipeline,
+        boost::optional<const AggregateCommandRequest&> aggRequest = boost::none) override {
         MONGO_UNREACHABLE;
     }
 

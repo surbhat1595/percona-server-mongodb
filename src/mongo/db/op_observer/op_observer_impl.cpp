@@ -48,7 +48,6 @@
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/create_indexes_gen.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/exec/write_stage_common.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/keys_collection_document_gen.h"
 #include "mongo/db/logical_time_validator.h"
@@ -571,7 +570,8 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
                                const CollectionPtr& coll,
                                std::vector<InsertStatement>::const_iterator first,
                                std::vector<InsertStatement>::const_iterator last,
-                               bool fromMigrate) {
+                               std::vector<bool> fromMigrate,
+                               bool defaultFromMigrate) {
     auto txnParticipant = TransactionParticipant::get(opCtx);
     const bool inMultiDocumentTransaction =
         txnParticipant && opCtx->writesAreReplicated() && txnParticipant.transactionIsOpen();
@@ -588,9 +588,7 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
     const bool inBatchedWrite = batchedWriteContext.writesAreBatched();
 
     if (inBatchedWrite) {
-        invariant(!fromMigrate);
-
-        write_stage_common::PreWriteFilter preWriteFilter(opCtx, nss);
+        invariant(!defaultFromMigrate);
 
         for (auto iter = first; iter != last; iter++) {
             const auto docKey = repl::getDocumentKey(opCtx, coll, iter->doc).getShardKeyAndId();
@@ -598,23 +596,12 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
             operation.setDestinedRecipient(
                 shardingWriteRouter.getReshardingDestinedRecipient(iter->doc));
 
-            if (!OperationShardingState::isComingFromRouter(opCtx) &&
-                preWriteFilter.computeAction(Document(iter->doc)) ==
-                    write_stage_common::PreWriteFilter::Action::kWriteAsFromMigrate) {
-                LOGV2_DEBUG(6585800,
-                            3,
-                            "Marking insert operation of orphan document with the 'fromMigrate' "
-                            "flag to prevent a wrong change stream event",
-                            "namespace"_attr = nss,
-                            "document"_attr = iter->doc);
-
-                operation.setFromMigrate(true);
-            }
+            operation.setFromMigrateIfTrue(fromMigrate[std::distance(first, iter)]);
 
             batchedWriteContext.addBatchedOperation(opCtx, operation);
         }
     } else if (inMultiDocumentTransaction) {
-        invariant(!fromMigrate);
+        invariant(!defaultFromMigrate);
 
         // Do not add writes to the profile collection to the list of transaction operations, since
         // these are done outside the transaction. There is no top-level WriteUnitOfWork when we are
@@ -626,7 +613,6 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
 
         const bool inRetryableInternalTransaction =
             isInternalSessionForRetryableWrite(*opCtx->getLogicalSessionId());
-        write_stage_common::PreWriteFilter preWriteFilter(opCtx, nss);
 
         for (auto iter = first; iter != last; iter++) {
             const auto docKey = repl::getDocumentKey(opCtx, coll, iter->doc).getShardKeyAndId();
@@ -637,18 +623,7 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
             operation.setDestinedRecipient(
                 shardingWriteRouter.getReshardingDestinedRecipient(iter->doc));
 
-            if (!OperationShardingState::isComingFromRouter(opCtx) &&
-                preWriteFilter.computeAction(Document(iter->doc)) ==
-                    write_stage_common::PreWriteFilter::Action::kWriteAsFromMigrate) {
-                LOGV2_DEBUG(6585801,
-                            3,
-                            "Marking insert operation of orphan document with the 'fromMigrate' "
-                            "flag to prevent a wrong change stream event",
-                            "namespace"_attr = nss,
-                            "document"_attr = iter->doc);
-
-                operation.setFromMigrate(true);
-            }
+            operation.setFromMigrateIfTrue(fromMigrate[std::distance(first, iter)]);
 
             txnParticipant.addTransactionOperation(opCtx, operation);
         }
@@ -658,16 +633,25 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
                 return shardingWriteRouter.getReshardingDestinedRecipient(doc);
             };
 
+        // Ensure well-formed embedded ReplOperation for logging.
+        // This means setting optype, nss, and object at the minimum.
         MutableOplogEntry oplogEntryTemplate;
+        oplogEntryTemplate.setOpType(repl::OpTypeEnum::kInsert);
         oplogEntryTemplate.setTid(nss.tenantId());
         oplogEntryTemplate.setNss(nss);
         oplogEntryTemplate.setUuid(uuid);
-        oplogEntryTemplate.setFromMigrateIfTrue(fromMigrate);
+        oplogEntryTemplate.setObject({});
+        oplogEntryTemplate.setFromMigrateIfTrue(defaultFromMigrate);
         Date_t lastWriteDate = getWallClockTimeForOpLog(opCtx);
         oplogEntryTemplate.setWallClockTime(lastWriteDate);
 
-        opTimeList = _oplogWriter->logInsertOps(
-            opCtx, &oplogEntryTemplate, first, last, getDestinedRecipientFn, coll);
+        opTimeList = _oplogWriter->logInsertOps(opCtx,
+                                                &oplogEntryTemplate,
+                                                first,
+                                                last,
+                                                std::move(fromMigrate),
+                                                getDestinedRecipientFn,
+                                                coll);
         if (!opTimeList.empty())
             lastOpTime = opTimeList.back();
 
@@ -693,7 +677,7 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
                           last,
                           opTimeList,
                           shardingWriteRouter,
-                          fromMigrate,
+                          defaultFromMigrate,
                           inMultiDocumentTransaction);
 
     if (nss.coll() == "system.js") {
@@ -707,7 +691,8 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
                     opCtx,
                     NamespaceStringUtil::deserialize(nss.dbName().tenantId(),
                                                      it->doc.getStringField("_id")),
-                    {nss.dbName(), it->doc.getStringField("viewOn")},
+                    NamespaceStringUtil::parseNamespaceFromDoc(nss.dbName(),
+                                                               it->doc.getStringField("viewOn")),
                     BSONArray{it->doc.getObjectField("pipeline")},
                     view_catalog_helpers::validatePipeline,
                     it->doc.getObjectField("collation"),
@@ -1298,7 +1283,7 @@ void OpObserverImpl::onDropDatabase(OperationContext* opCtx, const DatabaseName&
     oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
 
     oplogEntry.setTid(dbName.tenantId());
-    oplogEntry.setNss({dbName, "$cmd"});
+    oplogEntry.setNss(NamespaceString::makeCommandNamespace(dbName));
     oplogEntry.setObject(BSON("dropDatabase" << 1));
     auto opTime =
         logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _oplogWriter.get());
@@ -1338,7 +1323,7 @@ repl::OpTime OpObserverImpl::onDropCollection(OperationContext* opCtx,
                                               std::uint64_t numRecords,
                                               const CollectionDropType dropType,
                                               bool markFromMigrate) {
-    if (!collectionName.isSystemDotProfile()) {
+    if (!collectionName.isSystemDotProfile() && opCtx->writesAreReplicated()) {
         // Do not replicate system.profile modifications.
         MutableOplogEntry oplogEntry;
         oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
@@ -1351,14 +1336,12 @@ repl::OpTime OpObserverImpl::onDropCollection(OperationContext* opCtx,
         oplogEntry.setObject2(makeObject2ForDropOrRename(numRecords));
         auto opTime =
             logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _oplogWriter.get());
-        if (opCtx->writesAreReplicated()) {
-            LOGV2(7360106,
-                  "Wrote oplog entry for drop",
-                  "namespace"_attr = oplogEntry.getNss(),
-                  "uuid"_attr = oplogEntry.getUuid(),
-                  "opTime"_attr = opTime,
-                  "object"_attr = oplogEntry.getObject());
-        }
+        LOGV2(7360106,
+              "Wrote oplog entry for drop",
+              "namespace"_attr = oplogEntry.getNss(),
+              "uuid"_attr = oplogEntry.getUuid(),
+              "opTime"_attr = opTime,
+              "object"_attr = oplogEntry.getObject());
     }
 
     uassert(50715,
@@ -1556,7 +1539,7 @@ void OpObserverImpl::onApplyOps(OperationContext* opCtx,
     oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
 
     oplogEntry.setTid(dbName.tenantId());
-    oplogEntry.setNss({dbName, "$cmd"});
+    oplogEntry.setNss(NamespaceString::makeCommandNamespace(dbName));
     oplogEntry.setObject(applyOpCmd);
     logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _oplogWriter.get());
 }

@@ -273,14 +273,7 @@ public:
      * Does not require holding locks.
      *
      * Does not stop new index builds from starting. Caller must make that guarantee.
-     *
-     * TODO (SERVER-71669) Keep both methods until tenant migration uses TenantId object instead of
-     * a string. This include changes on both server side and our jstests.
      */
-    void abortTenantIndexBuilds(OperationContext* opCtx,
-                                MigrationProtocolEnum protocol,
-                                StringData tenantId,
-                                const std::string& reason);
 
     void abortTenantIndexBuilds(OperationContext* opCtx,
                                 MigrationProtocolEnum protocol,
@@ -306,7 +299,9 @@ public:
      *
      * Does not stop new index builds from starting. Caller must make that guarantee.
      */
-    void abortAllIndexBuildsDueToDiskSpace(OperationContext* opCtx);
+    void abortAllIndexBuildsDueToDiskSpace(OperationContext* opCtx,
+                                           std::int64_t availableBytes,
+                                           std::int64_t requiredBytes);
 
     /**
      * Aborts an index build by index build UUID. Returns when the index build thread exits.
@@ -595,7 +590,6 @@ private:
     void _abortTenantIndexBuilds(OperationContext* opCtx,
                                  const std::vector<std::shared_ptr<ReplIndexBuildState>>& builds,
                                  MigrationProtocolEnum protocol,
-                                 StringData tenantId,
                                  const std::string& reason);
 
 protected:

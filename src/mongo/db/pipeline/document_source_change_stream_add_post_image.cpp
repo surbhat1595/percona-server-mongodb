@@ -112,7 +112,8 @@ NamespaceString DocumentSourceChangeStreamAddPostImage::assertValidNamespace(
             .getDocument();
     auto dbName = assertFieldHasType(namespaceObject, "db"_sd, BSONType::String);
     auto collectionName = assertFieldHasType(namespaceObject, "coll"_sd, BSONType::String);
-    NamespaceString nss(pExpCtx->ns.tenantId(), dbName.getString(), collectionName.getString());
+    NamespaceString nss(NamespaceStringUtil::parseNamespaceFromDoc(
+        pExpCtx->ns.tenantId(), dbName.getString(), collectionName.getString()));
 
     // Change streams on an entire database only need to verify that the database names match. If
     // the database is 'admin', then this is a cluster-wide $changeStream and we are permitted to
@@ -208,15 +209,24 @@ boost::optional<Document> DocumentSourceChangeStreamAddPostImage::lookupLatestPo
         pExpCtx, nss, *resumeTokenData.uuid, documentKey, std::move(readConcern));
 }
 
-Value DocumentSourceChangeStreamAddPostImage::serialize(
-    boost::optional<ExplainOptions::Verbosity> explain) const {
-    return explain
-        ? Value(Document{
-              {DocumentSourceChangeStream::kStageName,
-               Document{{"stage"_sd, kStageName},
-                        {kFullDocumentFieldName, FullDocumentMode_serializer(_fullDocumentMode)}}}})
-        : Value(Document{{kStageName,
-                          DocumentSourceChangeStreamAddPostImageSpec(_fullDocumentMode).toBSON()}});
+Value DocumentSourceChangeStreamAddPostImage::serialize(SerializationOptions opts) const {
+    BSONObjBuilder builder;
+    if (opts.verbosity) {
+        BSONObjBuilder sub(builder.subobjStart(DocumentSourceChangeStream::kStageName));
+        sub.append("stage"_sd, kStageName);
+        opts.serializeLiteralValue(FullDocumentMode_serializer(_fullDocumentMode))
+            .addToBsonObj(&sub, kFullDocumentFieldName);
+        sub.done();
+    } else {
+        BSONObjBuilder sub(builder.subobjStart(kStageName));
+        if (opts.replacementForLiteralArgs) {
+            sub.append(DocumentSourceChangeStreamAddPostImageSpec::kFullDocumentFieldName,
+                       *opts.replacementForLiteralArgs);
+        } else {
+            DocumentSourceChangeStreamAddPostImageSpec(_fullDocumentMode).serialize(&sub);
+        }
+        sub.done();
+    }
+    return Value(builder.obj());
 }
-
 }  // namespace mongo

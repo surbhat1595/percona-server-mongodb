@@ -2,7 +2,7 @@
  * Tests for the new fcv change path added:
  * kDowngradingFromLatestToLastLTS -> kUpgradingFromLastLTSToLatest -> kLatest.
  *
- * @tags: [featureFlagDowngradingToUpgrading]
+ * @tags: [requires_fcv_70]
  */
 
 (function() {
@@ -49,12 +49,6 @@ function runStandaloneTest() {
         null, conn, "mongod was unable to start up with version=" + latest + " and no data files");
     const adminDB = conn.getDB("admin");
 
-    if (!FeatureFlagUtil.isEnabled(adminDB, "DowngradingToUpgrading")) {
-        jsTestLog("Skipping as featureFlagDowngradingToUpgrading is not enabled");
-        MongoRunner.stopMongod(conn);
-        return;
-    }
-
     downgradingToUpgradingTest(conn, adminDB);
 
     MongoRunner.stopMongod(conn);
@@ -66,12 +60,6 @@ function runReplicaSetTest() {
     rst.initiate();
     const primaryAdminDB = rst.getPrimary().getDB("admin");
     const primary = rst.getPrimary();
-
-    if (!FeatureFlagUtil.isEnabled(primaryAdminDB, "DowngradingToUpgrading")) {
-        jsTestLog("Skipping as featureFlagDowngradingToUpgrading is not enabled");
-        rst.stopSet();
-        return;
-    }
 
     downgradingToUpgradingTest(primary, primaryAdminDB);
 
@@ -85,12 +73,6 @@ function testConfigServerFCVTimestampIsAlwaysNewer() {
     const configPrimary = st.configRS.getPrimary();
     const shardPrimaryAdminDB = st.rs0.getPrimary().getDB("admin");
     checkFCV(shardPrimaryAdminDB, latestFCV);
-
-    if (!FeatureFlagUtil.isEnabled(mongosAdminDB, "DowngradingToUpgrading")) {
-        jsTestLog("Skipping as featureFlagDowngradingToUpgrading is not enabled");
-        st.stop();
-        return;
-    }
 
     downgradingToUpgradingTest(configPrimary, mongosAdminDB);
 
@@ -171,14 +153,14 @@ function runShardingTest() {
 
     // 2. Test downgrading to upgraded with config in downgrading, both shards in upgraded.
     assert.commandWorked(configPrimary.adminCommand(
-        {configureFailPoint: 'failBeforeSendingShardsToDowngrading', mode: "alwaysOn"}));
+        {configureFailPoint: 'failBeforeSendingShardsToDowngradingOrUpgrading', mode: "alwaysOn"}));
     assert.commandFailed(mongosAdminDB.runCommand({setFeatureCompatibilityVersion: lastLTSFCV}));
     checkFCV(configPrimaryAdminDB, lastLTSFCV, lastLTSFCV);
     checkFCV(shard0PrimaryAdminDB, latestFCV);
     checkFCV(shard1PrimaryAdminDB, latestFCV);
 
     assert.commandWorked(configPrimary.adminCommand(
-        {configureFailPoint: 'failBeforeSendingShardsToDowngrading', mode: "off"}));
+        {configureFailPoint: 'failBeforeSendingShardsToDowngradingOrUpgrading', mode: "off"}));
     setFCVToLatestSharding(
         mongosAdminDB, configPrimaryAdminDB, shard0PrimaryAdminDB, shard1PrimaryAdminDB);
 
@@ -197,34 +179,6 @@ function runShardingTest() {
         shard0Primary.adminCommand({configureFailPoint: 'failDowngrading', mode: "off"}));
     assert.commandWorked(
         shard1Primary.adminCommand({configureFailPoint: 'failBeforeTransitioning', mode: "off"}));
-    setFCVToLatestSharding(
-        mongosAdminDB, configPrimaryAdminDB, shard0PrimaryAdminDB, shard1PrimaryAdminDB);
-
-    // 4. Test downgrading to upgraded where both shards succeed initial downgrade but config
-    // fails.
-    assert.commandWorked(configPrimary.adminCommand(
-        {configureFailPoint: 'failBeforeUpdatingFcvDoc', mode: "alwaysOn"}));
-    assert.commandFailed(mongosAdminDB.runCommand({setFeatureCompatibilityVersion: lastLTSFCV}));
-    checkFCV(configPrimaryAdminDB, lastLTSFCV, lastLTSFCV);
-    checkFCV(shard0PrimaryAdminDB, lastLTSFCV);
-    checkFCV(shard1PrimaryAdminDB, lastLTSFCV);
-
-    assert.commandWorked(
-        configPrimary.adminCommand({configureFailPoint: 'failBeforeUpdatingFcvDoc', mode: "off"}));
-    setFCVToLatestSharding(
-        mongosAdminDB, configPrimaryAdminDB, shard0PrimaryAdminDB, shard1PrimaryAdminDB);
-
-    // 5. Test downgrading to upgraded where only one shard failed initial downgrade
-    // (specifically: shard0 in downgraded, shard1 + config in downgrading).
-    assert.commandWorked(shard1PrimaryAdminDB.adminCommand(
-        {configureFailPoint: 'failDowngrading', mode: "alwaysOn"}));
-    assert.commandFailed(mongosAdminDB.runCommand({setFeatureCompatibilityVersion: lastLTSFCV}));
-    checkFCV(configPrimaryAdminDB, lastLTSFCV, lastLTSFCV);
-    checkFCV(shard0PrimaryAdminDB, lastLTSFCV);
-    checkFCV(shard1PrimaryAdminDB, lastLTSFCV, lastLTSFCV);
-
-    assert.commandWorked(
-        shard1PrimaryAdminDB.adminCommand({configureFailPoint: 'failDowngrading', mode: "off"}));
     setFCVToLatestSharding(
         mongosAdminDB, configPrimaryAdminDB, shard0PrimaryAdminDB, shard1PrimaryAdminDB);
 

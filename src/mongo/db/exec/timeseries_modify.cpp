@@ -32,6 +32,8 @@
 #include "mongo/db/query/plan_executor_impl.h"
 #include "mongo/db/timeseries/timeseries_write_util.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
+
 namespace mongo {
 
 const char* TimeseriesModifyStage::kStageType = "TS_MODIFY";
@@ -49,12 +51,17 @@ TimeseriesModifyStage::TimeseriesModifyStage(ExpressionContext* expCtx,
       _bucketUnpacker{std::move(bucketUnpacker)},
       _residualPredicate(std::move(residualPredicate)),
       _preWriteFilter(opCtx(), coll->ns()) {
+    tassert(7308200,
+            "multi is true and no residual predicate was specified",
+            _isDeleteOne() || _residualPredicate);
     _children.emplace_back(std::move(child));
 }
 
 bool TimeseriesModifyStage::isEOF() {
-    return !_bucketUnpacker.hasNext() && child()->isEOF() &&
-        _retryFetchBucketId == WorkingSet::INVALID_ID;
+    if (_isDeleteOne() && _specificStats.measurementsDeleted > 0) {
+        return true;
+    }
+    return child()->isEOF() && _retryBucketId == WorkingSet::INVALID_ID;
 }
 
 std::unique_ptr<PlanStageStats> TimeseriesModifyStage::getStats() {
@@ -67,38 +74,69 @@ std::unique_ptr<PlanStageStats> TimeseriesModifyStage::getStats() {
     return ret;
 }
 
-void TimeseriesModifyStage::_writeToTimeseriesBuckets() {
-    ON_BLOCK_EXIT([&] {
-        _specificStats.measurementsDeleted += _deletedMeasurements.size();
-        _deletedMeasurements.clear();
-        _unchangedMeasurements.clear();
-        _currentBucketFromMigrate = false;
-    });
-
+PlanStage::StageState TimeseriesModifyStage::_writeToTimeseriesBuckets(
+    WorkingSetID bucketWsmId,
+    const std::vector<BSONObj>& unchangedMeasurements,
+    const std::vector<BSONObj>& deletedMeasurements,
+    bool bucketFromMigrate) {
     if (_params->isExplain) {
-        return;
+        _specificStats.measurementsDeleted += deletedMeasurements.size();
+        return PlanStage::NEED_TIME;
     }
 
     // No measurements needed to be deleted from the bucket document.
-    if (_deletedMeasurements.empty()) {
-        return;
+    if (deletedMeasurements.empty()) {
+        return PlanStage::NEED_TIME;
     }
 
-    OID bucketId = record_id_helpers::toBSONAs(_currentBucketRid, "_id")["_id"].OID();
-    if (_unchangedMeasurements.empty()) {
+    handlePlanStageYield(
+        expCtx(),
+        "TimeseriesModifyStage saveState",
+        collection()->ns().ns(),
+        [&] {
+            child()->saveState();
+            return PlanStage::NEED_TIME /* unused */;
+        },
+        [&] {
+            // yieldHandler
+            std::terminate();
+        });
+
+    auto recordId = _ws->get(bucketWsmId)->recordId;
+
+    auto yieldAndRetry = [&](unsigned logId) {
+        LOGV2_DEBUG(logId,
+                    5,
+                    "Retrying bucket due to conflict attempting to write out changes",
+                    "bucket_rid"_attr = recordId);
+        _retryBucket(bucketWsmId);
+        return PlanStage::NEED_YIELD;
+    };
+
+    OID bucketId = record_id_helpers::toBSONAs(recordId, "_id")["_id"].OID();
+    if (unchangedMeasurements.empty()) {
         write_ops::DeleteOpEntry deleteEntry(BSON("_id" << bucketId), false);
         write_ops::DeleteCommandRequest op(collection()->ns(), {deleteEntry});
-        // TODO (SERVER-73093): Handles the write failures through retry.
-        auto result = timeseries::performAtomicWrites(
-            opCtx(), collection(), _currentBucketRid, op, _currentBucketFromMigrate);
+
+        auto result =
+            timeseries::performAtomicWrites(opCtx(), collection(), recordId, op, bucketFromMigrate);
+        if (!result.isOK()) {
+            return yieldAndRetry(7309300);
+        }
     } else {
         auto timeseriesOptions = collection()->getTimeseriesOptions();
         auto metaFieldName = timeseriesOptions->getMetaField();
-        auto metadata =
-            metaFieldName ? _unchangedMeasurements[0].getField(*metaFieldName).wrap() : BSONObj();
+        auto metadata = [&] {
+            if (!metaFieldName) {  // Collection has no metadata field.
+                return BSONObj();
+            }
+            // Look for the metadata field on this bucket and return it if present.
+            auto metaField = unchangedMeasurements[0].getField(*metaFieldName);
+            return metaField ? metaField.wrap() : BSONObj();
+        }();
         auto replaceBucket =
             timeseries::makeNewDocumentForWrite(bucketId,
-                                                _unchangedMeasurements,
+                                                unchangedMeasurements,
                                                 metadata,
                                                 timeseriesOptions,
                                                 collection()->getDefaultCollator());
@@ -106,83 +144,102 @@ void TimeseriesModifyStage::_writeToTimeseriesBuckets() {
         write_ops::UpdateModification u(replaceBucket);
         write_ops::UpdateOpEntry updateEntry(BSON("_id" << bucketId), std::move(u));
         write_ops::UpdateCommandRequest op(collection()->ns(), {updateEntry});
-        // TODO (SERVER-73093): Handles the write failures through retry.
-        auto result = timeseries::performAtomicWrites(
-            opCtx(), collection(), _currentBucketRid, op, _currentBucketFromMigrate);
+
+        auto result =
+            timeseries::performAtomicWrites(opCtx(), collection(), recordId, op, bucketFromMigrate);
+        if (!result.isOK()) {
+            return yieldAndRetry(7309301);
+        }
     }
-}
+    _specificStats.measurementsDeleted += deletedMeasurements.size();
 
-boost::optional<PlanStage::StageState> TimeseriesModifyStage::rememberIfWritingToOrphanedBucket(
-    WorkingSetMember* member) {
-    // If we are in explain mode, we do not need to check if the bucket is orphaned since we're not
-    // writing to bucket. If we are migrating a bucket, we also do not need to check if the bucket
-    // is not writable and just remember it.
-    if (_params->isExplain || _params->fromMigrate) {
-        _currentBucketFromMigrate = _params->fromMigrate;
-        return boost::none;
-    }
-
-    auto [immediateReturnStageState, currentBucketFromMigrate] =
-        _preWriteFilter.checkIfNotWritable(member->doc.value(),
-                                           "timeseriesDelete"_sd,
-                                           collection()->ns(),
-                                           [&](const ExceptionFor<ErrorCodes::StaleConfig>& ex) {
-                                               planExecutorShardingCriticalSectionFuture(opCtx()) =
-                                                   ex->getCriticalSectionSignal();
-                                               // TODO (SERVER-73093): Retry the write if we're in
-                                               // the sharding critical section.
-                                           });
-
-    // We need to immediately return if the bucket is orphaned or we're in the sharding critical
-    // section and hence should yield.
-    if (immediateReturnStageState) {
-        return *immediateReturnStageState;
-    }
-
-    _currentBucketFromMigrate = currentBucketFromMigrate;
-
-    return boost::none;
-}
-
-PlanStage::StageState TimeseriesModifyStage::_fetchBucket(WorkingSetID id) {
+    // As restoreState may restore (recreate) cursors, cursors are tied to the
+    // transaction in which they are created, and a WriteUnitOfWork is a transaction,
+    // make sure to restore the state outside of the WriteUnitOfWork.
     return handlePlanStageYield(
         expCtx(),
-        "TimeseriesModifyStage::_fetchBucket",
+        "TimeseriesModifyStage restoreState",
         collection()->ns().ns(),
         [&] {
-            auto cursor = collection()->getCursor(opCtx());
-            if (!WorkingSetCommon::fetch(
-                    opCtx(), _ws, id, cursor.get(), collection(), collection()->ns())) {
-                return PlanStage::NEED_TIME;
-            }
-            return PlanStage::ADVANCED;
+            child()->restoreState(&collection());
+            return PlanStage::NEED_TIME;
         },
-        [&] { _retryFetchBucketId = id; });
+        // yieldHandler
+        // Note we don't need to retry anything in this case since the delete already
+        // was committed. However, we still need to return the deleted document (if it
+        // was requested).
+        // TODO SERVER-73089 for findAndModify we need to return the deleted doc.
+        [&] { /* noop */ });
+}
+
+template <typename F>
+std::pair<boost::optional<PlanStage::StageState>, bool>
+TimeseriesModifyStage::_checkIfWritingToOrphanedBucket(ScopeGuard<F>& bucketFreer,
+                                                       WorkingSetID id) {
+    // If we are in explain mode, we do not need to check if the bucket is orphaned since
+    // we're not writing to bucket. If we are migrating a bucket, we also do not need to
+    // check if the bucket is not writable and just return it.
+    if (_params->isExplain || _params->fromMigrate) {
+        return {boost::none, _params->fromMigrate};
+    }
+    return _preWriteFilter.checkIfNotWritable(_ws->get(id)->doc.value(),
+                                              "timeseriesDelete"_sd,
+                                              collection()->ns(),
+                                              [&](const ExceptionFor<ErrorCodes::StaleConfig>& ex) {
+                                                  planExecutorShardingCriticalSectionFuture(
+                                                      opCtx()) = ex->getCriticalSectionSignal();
+                                                  // Retry the write if we're in the sharding
+                                                  // critical section.
+                                                  bucketFreer.dismiss();
+                                                  _retryBucket(id);
+                                              });
 }
 
 PlanStage::StageState TimeseriesModifyStage::_getNextBucket(WorkingSetID& id) {
-    if (_retryFetchBucketId == WorkingSet::INVALID_ID) {
+    if (_retryBucketId == WorkingSet::INVALID_ID) {
         auto status = child()->work(&id);
         if (status != PlanStage::ADVANCED) {
             return status;
         }
-
-        auto member = _ws->get(id);
-        // TODO SERVER-73142 remove this assert, we may not have an object if we have a spool child.
-        tassert(7443600, "Child should have provided the whole document", member->hasObj());
-        if (member->hasObj()) {
-            // We already got the whole document from our child, no need to fetch.
-            return PlanStage::ADVANCED;
-        }
     } else {
-        // We have a bucket that we need to fetch before we can unpack it.
-        id = _retryFetchBucketId;
-        _retryFetchBucketId = WorkingSet::INVALID_ID;
+        id = _retryBucketId;
+        _retryBucketId = WorkingSet::INVALID_ID;
     }
 
-    // The result returned from our child had only a RecordId, no document, so we need to fetch it.
-    // This is the case when we have a spool child.
-    return _fetchBucket(id);
+    // We may not have an up-to-date bucket for this RecordId. Fetch it and ensure that it
+    // still exists and matches our bucket-level predicate if it is not believed to be
+    // up-to-date.
+    bool docStillMatches;
+
+    const auto status = handlePlanStageYield(
+        expCtx(),
+        "TimeseriesModifyStage:: ensureStillMatches",
+        collection()->ns().ns(),
+        [&] {
+            docStillMatches = write_stage_common::ensureStillMatches(
+                collection(), opCtx(), _ws, id, _params->canonicalQuery);
+            return PlanStage::NEED_TIME;
+        },
+        [&] {
+            // yieldHandler
+            // There was a problem trying to detect if the document still exists, so retry.
+            _retryBucket(id);
+        });
+    if (status != PlanStage::NEED_TIME) {
+        return status;
+    }
+    return docStillMatches ? PlanStage::ADVANCED : PlanStage::NEED_TIME;
+}
+
+void TimeseriesModifyStage::_retryBucket(WorkingSetID bucketId) {
+    tassert(7309302,
+            "Cannot be in the middle of unpacking a bucket if retrying",
+            !_bucketUnpacker.hasNext());
+    tassert(7309303,
+            "Cannot retry two buckets at the same time",
+            _retryBucketId == WorkingSet::INVALID_ID);
+
+    _retryBucketId = bucketId;
 }
 
 PlanStage::StageState TimeseriesModifyStage::doWork(WorkingSetID* out) {
@@ -190,53 +247,65 @@ PlanStage::StageState TimeseriesModifyStage::doWork(WorkingSetID* out) {
         return PlanStage::IS_EOF;
     }
 
-    // The current bucket is exhausted. Perform an atomic write to modify the bucket and move on to
-    // the next.
-    if (!_bucketUnpacker.hasNext()) {
-        _writeToTimeseriesBuckets();
+    tassert(7495500,
+            "Expected bucketUnpacker's current bucket to be exhausted",
+            !_bucketUnpacker.hasNext());
 
-        auto id = WorkingSet::INVALID_ID;
-        auto status = _getNextBucket(id);
+    auto id = WorkingSet::INVALID_ID;
+    auto status = _getNextBucket(id);
+    if (status != PlanStage::ADVANCED) {
+        if (status == PlanStage::NEED_YIELD) {
+            *out = id;
+        }
+        return status;
+    }
 
-        if (PlanStage::ADVANCED == status) {
-            // We want to free this member when we return because we either have an owned copy of
-            // the bucket for normal write and write to orphan cases, or we skip the bucket, or we
-            // don't retry as of now.
-            // TODO (SERVER-73093): Need to dismiss 'memberFreer' if we're going to retry the write.
-            ScopeGuard memberFreer([&] { _ws->free(id); });
+    // We want to free this member when we return because we either have an owned copy of
+    // the bucket for normal write and write to orphan cases, or we skip the bucket.
+    ScopeGuard bucketFreer([&] { _ws->free(id); });
 
-            auto member = _ws->get(id);
-            tassert(7459100, "Expected a RecordId from the child stage", member->hasRecordId());
+    auto member = _ws->get(id);
+    tassert(7459100, "Expected a RecordId from the child stage", member->hasRecordId());
 
-            if (auto immediateReturnStageState = rememberIfWritingToOrphanedBucket(member)) {
-                return *immediateReturnStageState;
-            }
-            _currentBucketRid = member->recordId;
+    // Determine if we are writing to an orphaned bucket - such writes should be excluded
+    // from user-visible change stream events. This will be achieved later by setting
+    // 'fromMigrate' flag when calling performAtomicWrites().
+    auto [immediateReturnStageState, bucketFromMigrate] =
+        _checkIfWritingToOrphanedBucket(bucketFreer, id);
+    if (immediateReturnStageState) {
+        return *immediateReturnStageState;
+    }
+    tassert(7309304,
+            "Expected no bucket to retry after getting a new bucket",
+            _retryBucketId == WorkingSet::INVALID_ID);
 
-            // Make an owned copy of the bucket document if necessary. The bucket will be
-            // unwound across multiple calls to 'doWork()', so we need to hold our own copy in
-            // the query execution layer in case the storage engine reclaims the memory for the
-            // bucket between calls to 'doWork()'.
-            auto ownedBucket = member->doc.value().toBson().getOwned();
-            _bucketUnpacker.reset(std::move(ownedBucket));
-            ++_specificStats.bucketsUnpacked;
+    // Unpack the bucket and determine which measurements match the residual predicate.
+    auto ownedBucket = member->doc.value().toBson().getOwned();
+    _bucketUnpacker.reset(std::move(ownedBucket));
+    ++_specificStats.bucketsUnpacked;
+
+    std::vector<BSONObj> unchangedMeasurements;
+    std::vector<BSONObj> deletedMeasurements;
+
+    while (_bucketUnpacker.hasNext()) {
+        auto measurement = _bucketUnpacker.getNext().toBson();
+        // We should stop deleting measurements once we hit the limit of one in the not multi case.
+        bool shouldContinueDeleting = _isDeleteMulti() || deletedMeasurements.empty();
+        if (shouldContinueDeleting &&
+            (!_residualPredicate || _residualPredicate->matchesBSON(measurement))) {
+            deletedMeasurements.push_back(measurement);
         } else {
-            if (PlanStage::NEED_YIELD == status) {
-                *out = id;
-            }
-            return status;
+            unchangedMeasurements.push_back(measurement);
         }
     }
 
-    invariant(_bucketUnpacker.hasNext());
-    auto measurement = _bucketUnpacker.getNext().toBson().getOwned();
-    if (_residualPredicate->matchesBSON(measurement)) {
-        _deletedMeasurements.push_back(measurement);
-    } else {
-        _unchangedMeasurements.push_back(measurement);
+    status = _writeToTimeseriesBuckets(
+        id, unchangedMeasurements, deletedMeasurements, bucketFromMigrate);
+    if (status != PlanStage::NEED_TIME) {
+        *out = WorkingSet::INVALID_ID;
+        bucketFreer.dismiss();
     }
-
-    return PlanStage::NEED_TIME;
+    return status;
 }
 
 void TimeseriesModifyStage::doRestoreStateRequiresCollection() {

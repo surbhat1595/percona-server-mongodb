@@ -87,19 +87,23 @@ DocumentSourceGroupBase::~DocumentSourceGroupBase() {
         _stats.spills, _stats.spilledDataStorageSize, _stats.spilledRecords);
 }
 
-Value DocumentSourceGroupBase::serialize(boost::optional<ExplainOptions::Verbosity> explain) const {
+Value DocumentSourceGroupBase::serialize(SerializationOptions opts) const {
+    auto explain = opts.verbosity;
+    if (opts.redactFieldNames || opts.replacementForLiteralArgs) {
+        MONGO_UNIMPLEMENTED_TASSERT(7484343);
+    }
     MutableDocument insides;
 
     // Add the _id.
     if (_idFieldNames.empty()) {
         invariant(_idExpressions.size() == 1);
-        insides["_id"] = _idExpressions[0]->serialize(static_cast<bool>(explain));
+        insides["_id"] = _idExpressions[0]->serialize(explain);
     } else {
         // Decomposed document case.
         invariant(_idExpressions.size() == _idFieldNames.size());
         MutableDocument md;
         for (size_t i = 0; i < _idExpressions.size(); i++) {
-            md[_idFieldNames[i]] = _idExpressions[i]->serialize(static_cast<bool>(explain));
+            md[_idFieldNames[i]] = _idExpressions[i]->serialize(explain);
         }
         insides["_id"] = md.freezeToValue();
     }
@@ -107,10 +111,8 @@ Value DocumentSourceGroupBase::serialize(boost::optional<ExplainOptions::Verbosi
     // Add the remaining fields.
     for (auto&& accumulatedField : _accumulatedFields) {
         intrusive_ptr<AccumulatorState> accum = accumulatedField.makeAccumulator();
-        insides[accumulatedField.fieldName] =
-            Value(accum->serialize(accumulatedField.expr.initializer,
-                                   accumulatedField.expr.argument,
-                                   static_cast<bool>(explain)));
+        insides[accumulatedField.fieldName] = Value(accum->serialize(
+            accumulatedField.expr.initializer, accumulatedField.expr.argument, explain));
     }
 
     if (_doingMerge) {
@@ -258,8 +260,8 @@ intrusive_ptr<DocumentSource> DocumentSourceGroupBase::optimize() {
     //
     // TODO SERVER-XXXXX: replace this hack with a proper per-stage tracking of SBE compatibility.
     auto expCtx = _idExpressions[0]->getExpressionContext();
-    auto orgSbeCompatible = expCtx->sbeCompatible;
-    expCtx->sbeCompatible = true;
+    auto origSbeCompatibility = expCtx->sbeCompatibility;
+    expCtx->sbeCompatibility = SbeCompatibility::fullyCompatible;
 
     // TODO: If all _idExpressions are ExpressionConstants after optimization, then we know there
     // will be only one group. We should take advantage of that to avoid going through the hash
@@ -273,8 +275,8 @@ intrusive_ptr<DocumentSource> DocumentSourceGroupBase::optimize() {
         accumulatedField.expr.argument = accumulatedField.expr.argument->optimize();
     }
 
-    _sbeCompatible = _sbeCompatible && expCtx->sbeCompatible;
-    expCtx->sbeCompatible = orgSbeCompatible;
+    _sbeCompatibility = std::min(_sbeCompatibility, expCtx->sbeCompatibility);
+    expCtx->sbeCompatibility = origSbeCompatibility;
 
     return this;
 }
@@ -363,7 +365,7 @@ DocumentSourceGroupBase::DocumentSourceGroupBase(StringData stageName,
       _executionStarted(false),
       _groups(expCtx->getValueComparator().makeUnorderedValueMap<Accumulators>()),
       _spilled(false),
-      _sbeCompatible(false) {}
+      _sbeCompatibility(SbeCompatibility::notCompatible) {}
 
 void DocumentSourceGroupBase::addAccumulator(AccumulationStatement accumulationStatement) {
     _accumulatedFields.push_back(accumulationStatement);
@@ -446,7 +448,7 @@ void DocumentSourceGroupBase::initializeFromBson(BSONElement elem) {
     BSONObj groupObj(elem.Obj());
     BSONObjIterator groupIterator(groupObj);
     VariablesParseState vps = pExpCtx->variablesParseState;
-    pExpCtx->sbeGroupCompatible = true;
+    pExpCtx->sbeGroupCompatibility = SbeCompatibility::fullyCompatible;
     while (groupIterator.more()) {
         BSONElement groupField(groupIterator.next());
         StringData pFieldName = groupField.fieldNameStringData();
@@ -466,7 +468,7 @@ void DocumentSourceGroupBase::initializeFromBson(BSONElement elem) {
                 AccumulationStatement::parseAccumulationStatement(pExpCtx.get(), groupField, vps));
         }
     }
-    _sbeCompatible = pExpCtx->sbeGroupCompatible && pExpCtx->sbeCompatible;
+    _sbeCompatibility = std::min(pExpCtx->sbeGroupCompatibility, pExpCtx->sbeCompatibility);
 
     uassert(15955, "a group specification must include an _id", !_idExpressions.empty());
 }

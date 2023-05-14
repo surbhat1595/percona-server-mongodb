@@ -92,6 +92,7 @@ env.SConscript(
     dirs=[
         'cmdline_utils',
         'concurrency',
+        'immutable',
         'net',
         'options_parser',
         'version',
@@ -260,6 +261,16 @@ env.CppUnitTest(
     ],
     LIBDEPS=[
         'namespace_string_database_name_util',
+    ],
+)
+
+env.CppUnitTest(
+    target='concurrent_shared_values_map_test',
+    source=[
+        'concurrent_shared_values_map_test.cpp',
+    ],
+    LIBDEPS=[
+        "$BUILD_DIR/mongo/base",
     ],
 )
 
@@ -833,6 +844,8 @@ if env.TargetOSIs('windows'):
             env['LIBS'],
         ],
     )
+
+env.CppUnitTest(target='immutable_test', source=['immutable_test.cpp'], LIBDEPS=[])
 
 env.Benchmark(
     target='base64_bm',

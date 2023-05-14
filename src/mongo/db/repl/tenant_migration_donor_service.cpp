@@ -598,15 +598,19 @@ ExecutorFuture<repl::OpTime> TenantMigrationDonorService::Instance::_updateState
                            // Start blocking writes before getting an oplog slot to guarantee no
                            // writes to the tenant's data can commit with a timestamp after the
                            // block timestamp.
-                           // TODO (SERVER-72213) we should not pass _tenantId for shard merge
-                           // since shard merge does not have a _tenantId (empty string).
-                           auto mtab = tenant_migration_access_blocker::
-                               getTenantMigrationDonorAccessBlocker(_serviceContext, _tenantId);
-                           invariant(mtab);
-                           mtab->startBlockingWrites();
+                           auto mtabVector =
+                               TenantMigrationAccessBlockerRegistry::get(_serviceContext)
+                                   .getDonorAccessBlockersForMigration(_migrationUuid);
+                           invariant(!mtabVector.empty());
+                           for (auto& mtab : mtabVector) {
+                               mtab->startBlockingWrites();
+                           }
 
-                           opCtx->recoveryUnit()->onRollback(
-                               [mtab](OperationContext*) { mtab->rollBackStartBlocking(); });
+                           opCtx->recoveryUnit()->onRollback([mtabVector](OperationContext*) {
+                               for (auto& mtab : mtabVector) {
+                                   mtab->rollBackStartBlocking();
+                               }
+                           });
                        }
 
                        // Reserve an opTime for the write.
@@ -1077,8 +1081,11 @@ void TenantMigrationDonorService::Instance::_abortIndexBuilds(const Cancellation
         auto opCtxHolder = cc().makeOperationContext();
         auto* opCtx = opCtxHolder.get();
         auto* indexBuildsCoordinator = IndexBuildsCoordinator::get(opCtx);
-        indexBuildsCoordinator->abortTenantIndexBuilds(
-            opCtx, _protocol, _tenantId, "tenant migration");
+        boost::optional<TenantId> tid = boost::none;
+        if (!_tenantId.empty()) {
+            tid = TenantId::parseFromString(_tenantId);
+        }
+        indexBuildsCoordinator->abortTenantIndexBuilds(opCtx, _protocol, tid, "tenant migration");
     }
 }
 
@@ -1435,9 +1442,10 @@ ExecutorFuture<void> TenantMigrationDonorService::Instance::_handleErrorOrEnterA
         status = Status(ErrorCodes::TenantMigrationAborted, "Aborted due to donorAbortMigration.");
     }
 
-    auto mtab = tenant_migration_access_blocker::getTenantMigrationDonorAccessBlocker(
-        _serviceContext, _tenantId);
-    if (!_initialDonorStateDurablePromise.getFuture().isReady() || !mtab) {
+
+    auto mtabVector = TenantMigrationAccessBlockerRegistry::get(_serviceContext)
+                          .getDonorAccessBlockersForMigration(_migrationUuid);
+    if (!_initialDonorStateDurablePromise.getFuture().isReady()) {
         // The migration failed either before or during inserting the state doc. Use the status to
         // fulfill the _initialDonorStateDurablePromise to fail the donorStartMigration command
         // immediately.
@@ -1522,7 +1530,7 @@ TenantMigrationDonorService::Instance::_waitForForgetMigrationThenMarkMigrationG
                 // If the abortReason is ConflictingServerlessOperation, it means there are no
                 // document on the recipient. Do not send the forget command.
                 stdx::lock_guard<Latch> lg(_mutex);
-                if (_abortReason &&
+                if (_protocol == MigrationProtocolEnum::kMultitenantMigrations && _abortReason &&
                     _abortReason->code() == ErrorCodes::ConflictingServerlessOperation) {
                     return ExecutorFuture(**executor);
                 }

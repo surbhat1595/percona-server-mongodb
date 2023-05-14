@@ -54,7 +54,8 @@ void AuthOpObserver::onInserts(OperationContext* opCtx,
                                const CollectionPtr& coll,
                                std::vector<InsertStatement>::const_iterator first,
                                std::vector<InsertStatement>::const_iterator last,
-                               bool fromMigrate) {
+                               std::vector<bool> fromMigrate,
+                               bool defaultFromMigrate) {
     for (auto it = first; it != last; it++) {
         audit::logInsertOperation(opCtx->getClient(), coll->ns(), it->doc);
         AuthorizationManager::get(opCtx->getServiceContext())
@@ -125,7 +126,7 @@ void AuthOpObserver::onCollMod(OperationContext* opCtx,
 }
 
 void AuthOpObserver::onDropDatabase(OperationContext* opCtx, const DatabaseName& dbName) {
-    const NamespaceString cmdNss{dbName, "$cmd"};
+    const NamespaceString cmdNss(NamespaceString::makeCommandNamespace(dbName));
     const auto cmdObj = BSON("dropDatabase" << 1);
 
     AuthorizationManager::get(opCtx->getServiceContext())
@@ -205,7 +206,7 @@ void AuthOpObserver::onImportCollection(OperationContext* opCtx,
 void AuthOpObserver::onApplyOps(OperationContext* opCtx,
                                 const DatabaseName& dbName,
                                 const BSONObj& applyOpCmd) {
-    const NamespaceString cmdNss{dbName, "$cmd"};
+    const NamespaceString cmdNss(NamespaceString::makeCommandNamespace(dbName));
 
     AuthorizationManager::get(opCtx->getServiceContext())
         ->logOp(opCtx, "c", cmdNss, applyOpCmd, nullptr);

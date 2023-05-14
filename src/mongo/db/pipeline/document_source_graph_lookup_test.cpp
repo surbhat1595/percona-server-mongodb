@@ -76,6 +76,18 @@ public:
         return pipeline;
     }
 
+    std::unique_ptr<Pipeline, PipelineDeleter> attachCursorSourceToPipeline(
+        const AggregateCommandRequest& aggRequest,
+        Pipeline* pipeline,
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        boost::optional<BSONObj> shardCursorsSortSpec = boost::none,
+        ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
+        boost::optional<BSONObj> readConcern = boost::none) final {
+        // Implement this method should any test cases require setting aggregate command options via
+        // 'aggRequest'.
+        MONGO_UNREACHABLE;
+    }
+
 private:
     std::deque<DocumentSource::GetNextResult> _results;
 };
@@ -880,7 +892,8 @@ TEST_F(DocumentSourceGraphLookupServerlessTest,
     auto tenantId = expCtx->ns.tenantId();
     ASSERT(tenantId);
 
-    NamespaceString graphLookupNs(expCtx->ns.dbName(), "foo");
+    NamespaceString graphLookupNs(
+        NamespaceString::createNamespaceString_forTest(expCtx->ns.dbName(), "foo"));
     expCtx->setResolvedNamespaces(StringMap<ExpressionContext::ResolvedNamespace>{
         {graphLookupNs.coll().toString(), {graphLookupNs, std::vector<BSONObj>()}}});
 

@@ -28,6 +28,8 @@
  */
 
 #include "MongoStdOptionalCheck.h"
+#include "MongoTidyUtils.h"
+
 #include <iostream>
 
 namespace mongo::tidy {
@@ -37,42 +39,6 @@ using namespace clang::ast_matchers;
 
 MongoStdOptionalCheck::MongoStdOptionalCheck(StringRef Name, clang::tidy::ClangTidyContext* Context)
     : ClangTidyCheck(Name, Context) {}
-
-/**
-Matches declarations whose declaration context is the C++ standard library
-namespace std.
-
-Note that inline namespaces are silently ignored during the lookup since
-both libstdc++ and libc++ are known to use them for versioning purposes.
-
-Given:
-\code
-    namespace ns {
-    struct my_type {};
-    using namespace std;
-    }
-
-    using std::optional;
-    using ns:my_type;
-    using ns::optional;
- \code
-
-usingDecl(hasAnyUsingShadowDecl(hasTargetDecl(isFromStdNamespace())))
-matches "using std::optional" and "using ns::optional".
-*/
-AST_MATCHER(Decl, isFromStdNamespace) {
-    const DeclContext* D = Node.getDeclContext();
-
-    while (D->isInlineNamespace())
-        D = D->getParent();
-
-    if (!D->isNamespace() || !D->getParent()->isTranslationUnit())
-        return false;
-
-    const IdentifierInfo* Info = cast<NamespaceDecl>(D)->getIdentifier();
-
-    return (Info && Info->isStr("std"));
-}
 
 void MongoStdOptionalCheck::registerMatchers(ast_matchers::MatchFinder* Finder) {
 

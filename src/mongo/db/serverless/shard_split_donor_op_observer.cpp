@@ -43,10 +43,6 @@ bool isSecondary(const OperationContext* opCtx) {
     return !opCtx->writesAreReplicated();
 }
 
-bool isPrimary(const OperationContext* opCtx) {
-    return opCtx->writesAreReplicated();
-}
-
 struct SplitCleanupDetails {
     UUID migrationId;
     bool shouldReleaseLock;
@@ -153,24 +149,23 @@ void onTransitionToAbortingIndexBuilds(OperationContext* opCtx,
 
     ServerlessOperationLockRegistry::get(opCtx->getServiceContext())
         .acquireLock(ServerlessOperationLockRegistry::LockType::kShardSplit, donorStateDoc.getId());
+    opCtx->recoveryUnit()->onRollback(
+        [migrationId = donorStateDoc.getId()](OperationContext* opCtx) {
+            ServerlessOperationLockRegistry::get(opCtx->getServiceContext())
+                .releaseLock(ServerlessOperationLockRegistry::LockType::kShardSplit, migrationId);
+        });
 
     auto tenantIds = *donorStateDoc.getTenantIds();
     auto mtab = std::make_shared<TenantMigrationDonorAccessBlocker>(opCtx->getServiceContext(),
                                                                     donorStateDoc.getId());
     TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext()).add(tenantIds, mtab);
 
-    if (isPrimary(opCtx)) {
-        // onRollback is not registered on secondaries since secondaries should not fail to
-        // apply the write.
-        opCtx->recoveryUnit()->onRollback([migrationId =
-                                               donorStateDoc.getId()](OperationContext* opCtx) {
-            TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext())
-                .removeAccessBlockersForMigration(
-                    migrationId, TenantMigrationAccessBlocker::BlockerType::kDonor);
-            ServerlessOperationLockRegistry::get(opCtx->getServiceContext())
-                .releaseLock(ServerlessOperationLockRegistry::LockType::kShardSplit, migrationId);
-        });
-    }
+    opCtx->recoveryUnit()->onRollback([migrationId =
+                                           donorStateDoc.getId()](OperationContext* opCtx) {
+        TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext())
+            .removeAccessBlockersForMigration(migrationId,
+                                              TenantMigrationAccessBlocker::BlockerType::kDonor);
+    });
 }
 
 /**
@@ -310,7 +305,8 @@ void ShardSplitDonorOpObserver::onInserts(OperationContext* opCtx,
                                           const CollectionPtr& coll,
                                           std::vector<InsertStatement>::const_iterator first,
                                           std::vector<InsertStatement>::const_iterator last,
-                                          bool fromMigrate) {
+                                          std::vector<bool> fromMigrate,
+                                          bool defaultFromMigrate) {
     if (coll->ns() != NamespaceString::kShardSplitDonorsNamespace ||
         tenant_migration_access_blocker::inRecoveryMode(opCtx)) {
         return;

@@ -57,7 +57,7 @@ ParsedDelete::ParsedDelete(OperationContext* opCtx,
                            const DeleteRequest* request,
                            boost::optional<TimeseriesOptions> timeseriesOptions)
     : _opCtx(opCtx), _request(request) {
-    if (feature_flags::gTimeseriesUpdatesDeletesSupport.isEnabled(
+    if (feature_flags::gTimeseriesDeletesSupport.isEnabled(
             serverGlobalParams.featureCompatibility) &&
         timeseriesOptions) {
         _timeseriesDeleteDetails = std::make_unique<TimeseriesDeleteDetails>(*timeseriesOptions);
@@ -107,10 +107,6 @@ Status ParsedDelete::splitOutBucketMatchExpression(const ExtensionsCallback& ext
     auto& details = _timeseriesDeleteDetails;
     const auto& timeseriesOptions = details->_timeseriesOptions;
 
-    uassert(ErrorCodes::IllegalOperation,
-            "Cannot perform a non-multi delete on a time-series collection",
-            _request->getMulti());
-
     auto swMatchExpr =
         MatchExpressionParser::parse(_request->getQuery(),
                                      _expCtx,
@@ -131,7 +127,7 @@ Status ParsedDelete::splitOutBucketMatchExpression(const ExtensionsCallback& ext
     } else {
         // The '_residualExpr' becomes the same as the original query predicate because nothing is
         // to be split out if there is no meta field in the timeseries collection.
-        details->_residualExpr = swMatchExpr.getValue()->shallowClone();
+        details->_residualExpr = swMatchExpr.getValue()->clone();
     }
 
     return Status::OK();
@@ -224,11 +220,18 @@ std::unique_ptr<CanonicalQuery> ParsedDelete::releaseParsedQuery() {
 }
 
 void ParsedDelete::setCollator(std::unique_ptr<CollatorInterface> collator) {
+    if (_timeseriesDeleteDetails && _timeseriesDeleteDetails->_residualExpr) {
+        _timeseriesDeleteDetails->_residualExpr->setCollator(collator.get());
+    }
     if (_canonicalQuery) {
         _canonicalQuery->setCollator(std::move(collator));
     } else {
         _expCtx->setCollator(std::move(collator));
     }
+}
+
+bool ParsedDelete::isEligibleForArbitraryTimeseriesDelete() const {
+    return _timeseriesDeleteDetails && (getResidualExpr() || !_request->getMulti());
 }
 
 }  // namespace mongo

@@ -54,10 +54,7 @@ public:
     using Accumulators = std::vector<boost::intrusive_ptr<AccumulatorState>>;
     using GroupsMap = ValueUnorderedMap<Accumulators>;
 
-    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
-    Value serialize(SerializationOptions opts) const final override {
-        MONGO_UNIMPLEMENTED;
-    }
+    Value serialize(SerializationOptions opts = SerializationOptions()) const final override;
     boost::intrusive_ptr<DocumentSource> optimize() final;
     DepsTracker::State getDependencies(DepsTracker* deps) const final;
     void addVariableRefs(std::set<Variables::Id>* refs) const final;
@@ -154,8 +151,8 @@ public:
     size_t getMaxMemoryUsageBytes() const;
 
     // True if this $group can be pushed down to SBE.
-    bool sbeCompatible() const {
-        return _sbeCompatible;
+    SbeCompatibility sbeCompatibility() const {
+        return _sbeCompatibility;
     }
 
 protected:
@@ -269,7 +266,7 @@ private:
     std::pair<Value, Value> _firstPartOfNextGroup;
     Accumulators _currentAccumulators;
 
-    bool _sbeCompatible;
+    SbeCompatibility _sbeCompatibility = SbeCompatibility::notCompatible;
 };
 
 }  // namespace mongo

@@ -293,12 +293,13 @@ Pipeline::SourceContainer::iterator DocumentSourceUnwind::doOptimizeAt(
     return std::next(itr);
 }
 
-Value DocumentSourceUnwind::serialize(boost::optional<ExplainOptions::Verbosity> explain) const {
-    return Value(DOC(getSourceName() << DOC(
-                         "path" << _unwindPath.fullPathWithPrefix() << "preserveNullAndEmptyArrays"
-                                << (_preserveNullAndEmptyArrays ? Value(true) : Value())
-                                << "includeArrayIndex"
-                                << (_indexPath ? Value((*_indexPath).fullPath()) : Value()))));
+Value DocumentSourceUnwind::serialize(SerializationOptions opts) const {
+    return Value(DOC(
+        getSourceName() << DOC(
+            "path" << _unwindPath.redactedFullPathWithPrefix(opts) << "preserveNullAndEmptyArrays"
+                   << (_preserveNullAndEmptyArrays ? opts.serializeLiteralValue(true) : Value())
+                   << "includeArrayIndex"
+                   << (_indexPath ? Value((*_indexPath).redactedFullPath(opts)) : Value()))));
 }
 
 DepsTracker::State DocumentSourceUnwind::getDependencies(DepsTracker* deps) const {

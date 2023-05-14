@@ -60,9 +60,7 @@ DocumentSource::GetNextResult DocumentSourceInternalShardServerInfo::doGetNext()
     return DocumentSource::GetNextResult::makeEOF();
 }
 
-Value DocumentSourceInternalShardServerInfo::serialize(
-    boost::optional<ExplainOptions::Verbosity> explain) const {
-
+Value DocumentSourceInternalShardServerInfo::serialize(SerializationOptions opts) const {
     return Value(Document{{getSourceName(), Value{Document{{}}}}});
 }
 

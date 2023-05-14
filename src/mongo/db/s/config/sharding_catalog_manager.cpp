@@ -50,11 +50,11 @@
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/repl/repl_client_info.h"
-#include "mongo/db/s/balancer/type_migration.h"
 #include "mongo/db/s/config/index_on_config.h"
 #include "mongo/db/s/sharding_util.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/logv2/log.h"
+#include "mongo/rpc/metadata/impersonated_user_metadata.h"
 #include "mongo/s/balancer_configuration.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_chunk.h"
@@ -78,6 +78,7 @@ namespace mongo {
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(shardingCatalogManagerWithTransactionFailWCAfterCommit);
+MONGO_FAIL_POINT_DEFINE(shardingCatalogManagerSkipNotifyClusterOnNewDatabases);
 
 const WriteConcernOptions kNoWaitWriteConcern(1, WriteConcernOptions::SyncMode::UNSET, Seconds(0));
 
@@ -602,6 +603,11 @@ ShardingCatalogClient* ShardingCatalogManager::localCatalogClient() {
     return _localCatalogClient.get();
 }
 
+const std::shared_ptr<Shard>& ShardingCatalogManager::localConfigShard() {
+    invariant(serverGlobalParams.clusterRole == ClusterRole::ConfigServer);
+    return _localConfigShard;
+}
+
 void ShardingCatalogManager::discardCachedConfigDatabaseInitializationState() {
     stdx::lock_guard<Latch> lk(_mutex);
     _configInitialized = false;
@@ -633,15 +639,6 @@ Status ShardingCatalogManager::_initConfigIndexes(OperationContext* opCtx) {
     Status result = createIndexesForConfigChunks(opCtx);
     if (result != Status::OK()) {
         return result;
-    }
-
-    result =
-        createIndexOnConfigCollection(opCtx,
-                                      MigrationType::ConfigNS,
-                                      BSON(MigrationType::ns() << 1 << MigrationType::min() << 1),
-                                      unique);
-    if (!result.isOK()) {
-        return result.withContext("couldn't create ns_1_min_1 index on config.migrations");
     }
 
     result = createIndexOnConfigCollection(
@@ -776,6 +773,12 @@ Status ShardingCatalogManager::setFeatureCompatibilityVersionOnShards(OperationC
         }
         const auto shard = shardStatus.getValue();
 
+        if (shard->isConfig()) {
+            // The config server will run shard upgrade/downgrade tasks directly instead of sending
+            // a command to itself.
+            continue;
+        }
+
         auto response = shard->runCommandWithFixedRetryAttempts(
             opCtx,
             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
@@ -850,6 +853,84 @@ StatusWith<bool> ShardingCatalogManager::_isShardRequiredByZoneStillInUse(
     }
 
     return false;
+}
+
+Status ShardingCatalogManager::_notifyClusterOnNewDatabases(
+    OperationContext* opCtx, const DatabasesAdded& event, const std::vector<ShardId>& recipients) {
+    if (MONGO_unlikely(shardingCatalogManagerSkipNotifyClusterOnNewDatabases.shouldFail()) ||
+        event.getNames().empty() || recipients.empty()) {
+        // Nothing to be notified.
+        return Status::OK();
+    }
+    try {
+        // Setup an AlternativeClientRegion and a non-interruptible Operation Context to ensure that
+        // the notification may be also sent out while the node is stepping down.
+        auto altClient = opCtx->getServiceContext()->makeClient("_notifyClusterOnNewDatabases");
+        AlternativeClientRegion acr(altClient);
+        auto altOpCtxHolder = cc().makeOperationContext();
+        auto altOpCtx = altOpCtxHolder.get();
+
+        // Compose the request and decorate it with the needed write concern and auth parameters.
+        ShardsvrNotifyShardingEventRequest request(EventTypeEnum::kDatabasesAdded, event.toBSON());
+        BSONObjBuilder bob;
+        request.serialize(
+            BSON(WriteConcernOptions::kWriteConcernField << WriteConcernOptions::Majority), &bob);
+        rpc::writeAuthDataToImpersonatedUserMetadata(altOpCtx, &bob);
+
+        // send cmd
+        auto executor = Grid::get(altOpCtx)->getExecutorPool()->getFixedExecutor();
+        auto responses = sharding_util::sendCommandToShards(altOpCtx,
+                                                            DatabaseName::kAdmin.db(),
+                                                            bob.obj(),
+                                                            recipients,
+                                                            executor,
+                                                            false /*throwOnError*/);
+
+        size_t successfulNotifications = 0, incompatibleRecipients = 0, retriableFailures = 0;
+        for (const auto& cmdResponse : responses) {
+            if (cmdResponse.swResponse.isOK()) {
+                ++successfulNotifications;
+            } else {
+                LOGV2_WARNING(7175401,
+                              "Failed to send sharding event notification",
+                              "recipient"_attr = cmdResponse.shardId,
+                              "error"_attr = cmdResponse.swResponse.getStatus());
+                if (cmdResponse.swResponse.getStatus().code() == ErrorCodes::CommandNotFound) {
+                    ++incompatibleRecipients;
+                } else if (ErrorCodes::isA<ErrorCategory::RetriableError>(
+                               cmdResponse.swResponse.getStatus().code())) {
+                    ++retriableFailures;
+                }
+            }
+        }
+
+        /*
+         * The notification is considered succesful when at least one instantiation of the command
+         * is succesfully completed, assuming that:
+         * - each recipient of the notification is reacting with the emission of an entry in its
+         * oplog before returning an OK status
+         * - other processes interested in events of new database creations (e.g, a mongos that
+         * serves a change stream targeting the namespace being created) are tailing the oplogs of
+         * all the shards of the cluster.
+         *
+         * If all the failures reported by the remote nodes are classified as retryable, an error
+         * code of the same category will be returned back to the caller of this function to allow
+         * the re-execution of the original request.
+         *
+         * (Failures caused by recipients running a legacy FCV are ignored).
+         */
+        if (successfulNotifications != 0 || incompatibleRecipients == recipients.size()) {
+            return Status::OK();
+        }
+
+        auto errorCode = successfulNotifications + retriableFailures + incompatibleRecipients ==
+                recipients.size()
+            ? ErrorCodes::HostNotFound
+            : ErrorCodes::InternalError;
+        return Status(errorCode, "Unable to notify any shard on new database additions");
+    } catch (const DBException& e) {
+        return e.toStatus();
+    }
 }
 
 BSONObj ShardingCatalogManager::writeToConfigDocumentInTxn(OperationContext* opCtx,

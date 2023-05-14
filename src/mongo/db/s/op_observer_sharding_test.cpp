@@ -102,8 +102,8 @@ protected:
                                                epoch,
                                                Timestamp(1, 1),
                                                boost::none /* timeseriesFields */,
-                                               boost::none,
-                                               boost::none /* chunkSizeBytes */,
+                                               boost::none /* reshardingFields */,
+
                                                true,
                                                {std::move(chunk)});
 
@@ -254,7 +254,12 @@ TEST_F(DocumentKeyStateTest, CheckDBVersion) {
 
     // OpObserver calls
     auto onInsert = [&]() {
-        opObserver.onInserts(opCtx, *autoColl, toInsert.begin(), toInsert.end(), fromMigrate);
+        opObserver.onInserts(opCtx,
+                             *autoColl,
+                             toInsert.begin(),
+                             toInsert.end(),
+                             /*fromMigrate=*/std::vector<bool>(toInsert.size(), fromMigrate),
+                             /*defaultFromMigrate=*/fromMigrate);
     };
     auto onUpdate = [&]() {
         opObserver.onUpdate(opCtx, update);

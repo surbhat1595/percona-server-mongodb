@@ -348,7 +348,8 @@ protected:
     const UUID uuid3{UUID::gen()};
 
     const TenantId kTenantId = TenantId(OID::gen());
-    const NamespaceString kNssUnderTenantId{boost::none, kTenantId.toString() + "_db", "testColl"};
+    const NamespaceString kNssUnderTenantId = NamespaceString::createNamespaceString_forTest(
+        boost::none, kTenantId.toString() + "_db", "testColl");
     const UUID kNssUnderTenantIdUUID{UUID::gen()};
 
     ReadWriteConcernDefaultsLookupMock _lookupMock;
@@ -904,7 +905,12 @@ TEST_F(OpObserverTest, SingleStatementInsertTestIncludesTenantId) {
 
     OpObserverRegistry opObserver;
     opObserver.addObserver(std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
-    opObserver.onInserts(opCtx.get(), *autoColl, insert.begin(), insert.end(), false);
+    opObserver.onInserts(opCtx.get(),
+                         *autoColl,
+                         insert.begin(),
+                         insert.end(),
+                         /*fromMigrate=*/std::vector<bool>(insert.size(), false),
+                         /*defaultFromMigrate=*/false);
     wuow.commit();
 
     auto oplogEntryObj = getSingleOplogEntry(opCtx.get());
@@ -1281,7 +1287,12 @@ TEST_F(OpObserverTransactionTest, TransactionalPrepareTest) {
     inserts1.emplace_back(1,
                           BSON("_id" << 1 << "data"
                                      << "y"));
-    opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
+    opObserver().onInserts(opCtx(),
+                           *autoColl1,
+                           inserts1.begin(),
+                           inserts1.end(),
+                           /*fromMigrate=*/std::vector<bool>(inserts1.size(), false),
+                           /*defaultFromMigrate=*/false);
 
     const auto criteria = BSON("_id" << 0);
     // Create a fake preImageDoc; the tested code path does not care about this value.
@@ -1361,7 +1372,12 @@ TEST_F(OpObserverTransactionTest, TransactionalPreparedCommitTest) {
     Timestamp prepareTimestamp;
     {
         AutoGetCollection autoColl(opCtx(), nss, MODE_IX);
-        opObserver().onInserts(opCtx(), *autoColl, insert.begin(), insert.end(), false);
+        opObserver().onInserts(opCtx(),
+                               *autoColl,
+                               insert.begin(),
+                               insert.end(),
+                               /*fromMigrate=*/std::vector<bool>(insert.size(), false),
+                               /*defaultFromMigrate=*/false);
 
         const auto prepareSlot = reserveOpTimeInSideTransaction(opCtx());
         txnParticipant.transitionToPreparedforTest(opCtx(), prepareSlot);
@@ -1428,7 +1444,12 @@ TEST_F(OpObserverTransactionTest, TransactionalPreparedAbortTest) {
     OplogSlot abortSlot;
     {
         AutoGetCollection autoColl(opCtx(), nss, MODE_IX);
-        opObserver().onInserts(opCtx(), *autoColl, insert.begin(), insert.end(), false);
+        opObserver().onInserts(opCtx(),
+                               *autoColl,
+                               insert.begin(),
+                               insert.end(),
+                               /*fromMigrate=*/std::vector<bool>(insert.size(), false),
+                               /*defaultFromMigrate=*/false);
 
         const auto prepareSlot = reserveOpTimeInSideTransaction(opCtx());
         txnParticipant.transitionToPreparedforTest(opCtx(), prepareSlot);
@@ -1487,7 +1508,12 @@ TEST_F(OpObserverTransactionTest, TransactionalUnpreparedAbortTest) {
     {
         AutoGetCollection autoColl(opCtx(), nss, MODE_IX);
         WriteUnitOfWork wuow(opCtx());
-        opObserver().onInserts(opCtx(), *autoColl, insert.begin(), insert.end(), false);
+        opObserver().onInserts(opCtx(),
+                               *autoColl,
+                               insert.begin(),
+                               insert.end(),
+                               /*fromMigrate=*/std::vector<bool>(insert.size(), false),
+                               /*defaultFromMigrate=*/false);
 
         txnParticipant.transitionToAbortedWithoutPrepareforTest(opCtx());
         opObserver().onTransactionAbort(opCtx(), boost::none);
@@ -1604,7 +1630,12 @@ TEST_F(OpObserverTransactionTest, CommittingUnpreparedNonEmptyTransactionWritesT
 
     {
         AutoGetCollection autoColl(opCtx(), nss, MODE_IX);
-        opObserver().onInserts(opCtx(), *autoColl, insert.begin(), insert.end(), false);
+        opObserver().onInserts(opCtx(),
+                               *autoColl,
+                               insert.begin(),
+                               insert.end(),
+                               /*fromMigrate=*/std::vector<bool>(insert.size(), false),
+                               /*defaultFromMigrate=*/false);
     }
 
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
@@ -1689,8 +1720,18 @@ TEST_F(OpObserverTransactionTest, TransactionalInsertTest) {
     AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
     AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
     WriteUnitOfWork wuow(opCtx());
-    opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
-    opObserver().onInserts(opCtx(), *autoColl2, inserts2.begin(), inserts2.end(), false);
+    opObserver().onInserts(opCtx(),
+                           *autoColl1,
+                           inserts1.begin(),
+                           inserts1.end(),
+                           /*fromMigrate=*/std::vector<bool>(inserts1.size(), false),
+                           /*defaultFromMigrate=*/false);
+    opObserver().onInserts(opCtx(),
+                           *autoColl2,
+                           inserts2.begin(),
+                           inserts2.end(),
+                           /*fromMigrate=*/std::vector<bool>(inserts2.size(), false),
+                           /*defaultFromMigrate=*/false);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
     ASSERT_EQUALS(txnOps->getNumberOfPrePostImagesToWrite(), 0);
     opObserver().onUnpreparedTransactionCommit(opCtx(), *txnOps);
@@ -1753,8 +1794,18 @@ TEST_F(OpObserverTransactionTest, TransactionalInsertTestIncludesTenantId) {
     AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
     AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
     WriteUnitOfWork wuow(opCtx());
-    opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
-    opObserver().onInserts(opCtx(), *autoColl2, inserts2.begin(), inserts2.end(), false);
+    opObserver().onInserts(opCtx(),
+                           *autoColl1,
+                           inserts1.begin(),
+                           inserts1.end(),
+                           /*fromMigrate=*/std::vector<bool>(inserts1.size(), false),
+                           /*defaultFromMigrate=*/false);
+    opObserver().onInserts(opCtx(),
+                           *autoColl2,
+                           inserts2.begin(),
+                           inserts2.end(),
+                           /*fromMigrate=*/std::vector<bool>(inserts2.size(), false),
+                           /*defaultFromMigrate=*/false);
 
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
     ASSERT_EQUALS(txnOps->getNumberOfPrePostImagesToWrite(), 0);
@@ -2028,7 +2079,12 @@ TEST_F(OpObserverTransactionTest,
 
     {
         AutoGetCollection autoColl(opCtx(), kNssUnderTenantId, MODE_IX);
-        opObserver().onInserts(opCtx(), *autoColl, insert.begin(), insert.end(), false);
+        opObserver().onInserts(opCtx(),
+                               *autoColl,
+                               insert.begin(),
+                               insert.end(),
+                               /*fromMigrate=*/std::vector<bool>(insert.size(), false),
+                               /*defaultFromMigrate=*/false);
     }
 
     donorMtab->startBlockingWrites();
@@ -2616,8 +2672,12 @@ TEST_F(OpObserverTest, TestFundamentalOnInsertsOutputs) {
         // Phase 2: Call the code we're testing.
         AutoGetCollection autoColl(opCtx, nss, MODE_IX);
         WriteUnitOfWork wuow(opCtx);
-        const bool fromMigrate = false;
-        opObserver.onInserts(opCtx, *autoColl, toInsert.begin(), toInsert.end(), fromMigrate);
+        opObserver.onInserts(opCtx,
+                             *autoColl,
+                             toInsert.begin(),
+                             toInsert.end(),
+                             /*fromMigrate=*/std::vector<bool>(toInsert.size(), false),
+                             /*defaultFromMigrate=*/false);
         wuow.commit();
 
         // Phase 3: Analyze the results:
@@ -2806,7 +2866,12 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdate) {
         insert.emplace_back(BSON("_id" << 0 << "data"
                                        << "x"));
         opCtx->getServiceContext()->getOpObserver()->onInserts(
-            opCtx, *autoColl, insert.begin(), insert.end(), false);
+            opCtx,
+            *autoColl,
+            insert.begin(),
+            insert.end(),
+            /*fromMigrate=*/std::vector<bool>(insert.size(), false),
+            /*defaultFromMigrate=*/false);
     }
     // (1) Delete
     {
@@ -2895,7 +2960,12 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdateIncludesTenantId) 
         insert.emplace_back(BSON("_id" << 0 << "data"
                                        << "x"));
         opCtx->getServiceContext()->getOpObserver()->onInserts(
-            opCtx, *autoColl, insert.begin(), insert.end(), false);
+            opCtx,
+            *autoColl,
+            insert.begin(),
+            insert.end(),
+            /*fromMigrate=*/std::vector<bool>(insert.size(), false),
+            /*defaultFromMigrate=*/false);
     }
     // (1) Delete
     {
@@ -3294,7 +3364,12 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionSingleStatementTest) {
 
     AutoGetCollection autoColl(opCtx(), nss, MODE_IX);
     WriteUnitOfWork wuow(opCtx());
-    opObserver().onInserts(opCtx(), *autoColl, inserts.begin(), inserts.end(), false);
+    opObserver().onInserts(opCtx(),
+                           *autoColl,
+                           inserts.begin(),
+                           inserts.end(),
+                           /*fromMigrate=*/std::vector<bool>(inserts.size(), false),
+                           /*defaultFromMigrate=*/false);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
     ASSERT_EQUALS(txnOps->getNumberOfPrePostImagesToWrite(), 0);
     opObserver().onUnpreparedTransactionCommit(opCtx(), *txnOps);
@@ -3327,8 +3402,18 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalInsertTest) {
     WriteUnitOfWork wuow(opCtx());
     AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
     AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
-    opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
-    opObserver().onInserts(opCtx(), *autoColl2, inserts2.begin(), inserts2.end(), false);
+    opObserver().onInserts(opCtx(),
+                           *autoColl1,
+                           inserts1.begin(),
+                           inserts1.end(),
+                           /*fromMigrate=*/std::vector<bool>(inserts1.size(), false),
+                           /*defaultFromMigrate=*/false);
+    opObserver().onInserts(opCtx(),
+                           *autoColl2,
+                           inserts2.begin(),
+                           inserts2.end(),
+                           /*fromMigrate=*/std::vector<bool>(inserts2.size(), false),
+                           /*defaultFromMigrate=*/false);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
     ASSERT_EQUALS(txnOps->getNumberOfPrePostImagesToWrite(), 0);
     opObserver().onUnpreparedTransactionCommit(opCtx(), *txnOps);
@@ -3517,8 +3602,18 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalInsertPrepareTest) {
     inserts2.emplace_back(0, BSON("_id" << 2));
     inserts2.emplace_back(1, BSON("_id" << 3));
 
-    opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
-    opObserver().onInserts(opCtx(), *autoColl2, inserts2.begin(), inserts2.end(), false);
+    opObserver().onInserts(opCtx(),
+                           *autoColl1,
+                           inserts1.begin(),
+                           inserts1.end(),
+                           /*fromMigrate=*/std::vector<bool>(inserts1.size(), false),
+                           /*defaultFromMigrate=*/false);
+    opObserver().onInserts(opCtx(),
+                           *autoColl2,
+                           inserts2.begin(),
+                           inserts2.end(),
+                           /*fromMigrate=*/std::vector<bool>(inserts2.size(), false),
+                           /*defaultFromMigrate=*/false);
 
     auto reservedSlots = reserveOpTimesInSideTransaction(opCtx(), 4);
     auto prepareOpTime = reservedSlots.back();
@@ -3727,7 +3822,12 @@ TEST_F(OpObserverMultiEntryTransactionTest, CommitPreparedTest) {
                           BSON("_id" << 1 << "data"
                                      << "y"));
 
-    opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
+    opObserver().onInserts(opCtx(),
+                           *autoColl1,
+                           inserts1.begin(),
+                           inserts1.end(),
+                           /*fromMigrate=*/std::vector<bool>(inserts1.size(), false),
+                           /*defaultFromMigrate=*/false);
 
     auto reservedSlots = reserveOpTimesInSideTransaction(opCtx(), 2);
     auto prepareOpTime = reservedSlots.back();
@@ -3804,7 +3904,12 @@ TEST_F(OpObserverMultiEntryTransactionTest, AbortPreparedTest) {
                           BSON("_id" << 0 << "data"
                                      << "x"));
 
-    opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
+    opObserver().onInserts(opCtx(),
+                           *autoColl1,
+                           inserts1.begin(),
+                           inserts1.end(),
+                           /*fromMigrate=*/std::vector<bool>(inserts1.size(), false),
+                           /*defaultFromMigrate=*/false);
 
     auto reservedSlots = reserveOpTimesInSideTransaction(opCtx(), 1);
     auto prepareOpTime = reservedSlots.back();
@@ -3872,8 +3977,18 @@ TEST_F(OpObserverMultiEntryTransactionTest, UnpreparedTransactionPackingTest) {
     WriteUnitOfWork wuow(opCtx());
     AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
     AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
-    opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
-    opObserver().onInserts(opCtx(), *autoColl2, inserts2.begin(), inserts2.end(), false);
+    opObserver().onInserts(opCtx(),
+                           *autoColl1,
+                           inserts1.begin(),
+                           inserts1.end(),
+                           /*fromMigrate=*/std::vector<bool>(inserts1.size(), false),
+                           /*defaultFromMigrate=*/false);
+    opObserver().onInserts(opCtx(),
+                           *autoColl2,
+                           inserts2.begin(),
+                           inserts2.end(),
+                           /*fromMigrate=*/std::vector<bool>(inserts2.size(), false),
+                           /*defaultFromMigrate=*/false);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
     ASSERT_EQUALS(txnOps->getNumberOfPrePostImagesToWrite(), 0);
     opObserver().onUnpreparedTransactionCommit(opCtx(), *txnOps);
@@ -3924,8 +4039,18 @@ TEST_F(OpObserverMultiEntryTransactionTest, PreparedTransactionPackingTest) {
 
     AutoGetCollection autoColl1(opCtx(), nss1, MODE_IX);
     AutoGetCollection autoColl2(opCtx(), nss2, MODE_IX);
-    opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
-    opObserver().onInserts(opCtx(), *autoColl2, inserts2.begin(), inserts2.end(), false);
+    opObserver().onInserts(opCtx(),
+                           *autoColl1,
+                           inserts1.begin(),
+                           inserts1.end(),
+                           /*fromMigrate=*/std::vector<bool>(inserts1.size(), false),
+                           /*defaultFromMigrate=*/false);
+    opObserver().onInserts(opCtx(),
+                           *autoColl2,
+                           inserts2.begin(),
+                           inserts2.end(),
+                           /*fromMigrate=*/std::vector<bool>(inserts2.size(), false),
+                           /*defaultFromMigrate=*/false);
 
     auto reservedSlots = reserveOpTimesInSideTransaction(opCtx(), 4);
     auto prepareOpTime = reservedSlots.back();
@@ -3982,7 +4107,12 @@ TEST_F(OpObserverMultiEntryTransactionTest, CommitPreparedPackingTest) {
                           BSON("_id" << 1 << "data"
                                      << "y"));
 
-    opObserver().onInserts(opCtx(), *autoColl1, inserts1.begin(), inserts1.end(), false);
+    opObserver().onInserts(opCtx(),
+                           *autoColl1,
+                           inserts1.begin(),
+                           inserts1.end(),
+                           /*fromMigrate=*/std::vector<bool>(inserts1.size(), false),
+                           /*defaultFromMigrate=*/false);
 
     auto reservedSlots = reserveOpTimesInSideTransaction(opCtx(), 2);
     auto prepareOpTime = reservedSlots.back();
@@ -4165,7 +4295,12 @@ TEST_F(OpObserverTest, OnInsertChecksIfTenantMigrationIsBlockingWrites) {
         AutoGetCollection autoColl(opCtx.get(), kNssUnderTenantId, MODE_IX);
         OpObserverImpl opObserver(std::make_unique<OplogWriterImpl>());
         ASSERT_THROWS_CODE(
-            opObserver.onInserts(opCtx.get(), *autoColl, insert.begin(), insert.end(), false),
+            opObserver.onInserts(opCtx.get(),
+                                 *autoColl,
+                                 insert.begin(),
+                                 insert.end(),
+                                 /*fromMigrate=*/std::vector<bool>(insert.size(), false),
+                                 /*defaultFromMigrate=*/false),
             DBException,
             ErrorCodes::TenantMigrationConflict);
     }

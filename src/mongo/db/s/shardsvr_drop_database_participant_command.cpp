@@ -82,13 +82,13 @@ public:
                             1,
                             "Received a ShardsvrDropDatabaseParticipant but did not find the "
                             "database locally",
-                            "database"_attr = dbName);
+                            logAttrs(dbName));
             }
         }
 
     private:
         NamespaceString ns() const override {
-            return {request().getDbName(), ""};
+            return NamespaceString(request().getDbName());
         }
 
         bool supportsWriteConcern() const override {

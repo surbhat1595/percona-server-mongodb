@@ -73,18 +73,15 @@ public:
     void debugString(StringBuilder& debug, int indentationLevel) const final {
         _debugAddSpace(debug, indentationLevel);
         debug << path() << " " << name() << ": " << _typeSet.toBSONArray().toString();
-
-        MatchExpression::TagData* td = getTag();
-        if (td) {
-            debug << " ";
-            td->debugString(&debug);
-        }
-        debug << "\n";
+        _debugStringAttachTagInfo(&debug);
     }
 
     BSONObj getSerializedRightHandSide(SerializationOptions opts) const final {
-        // TODO SERVER-73678 respect 'replacementForLiteralArgs'.
         BSONObjBuilder subBuilder;
+        if (opts.replacementForLiteralArgs) {
+            subBuilder.append(name(), opts.replacementForLiteralArgs.get());
+            return subBuilder.obj();
+        }
         BSONArrayBuilder arrBuilder(subBuilder.subarrayStart(name()));
         _typeSet.toBSONArray(&arrBuilder);
         arrBuilder.doneFast();
@@ -246,19 +243,16 @@ public:
     void debugString(StringBuilder& debug, int indentationLevel) const final {
         _debugAddSpace(debug, indentationLevel);
         debug << path() << " " << name() << ": " << typeName(_binDataSubType);
-
-        MatchExpression::TagData* td = getTag();
-        if (td) {
-            debug << " ";
-            td->debugString(&debug);
-        }
-        debug << "\n";
+        _debugStringAttachTagInfo(&debug);
     }
 
     BSONObj getSerializedRightHandSide(SerializationOptions opts) const final {
-        // TODO SERVER-73678 respect 'replacementForLiteralArgs'.
         BSONObjBuilder bob;
-        bob.append(name(), _binDataSubType);
+        if (opts.replacementForLiteralArgs) {
+            bob.append(name(), opts.replacementForLiteralArgs.get());
+        } else {
+            bob.append(name(), _binDataSubType);
+        }
         return bob.obj();
     }
 

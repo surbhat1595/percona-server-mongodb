@@ -5,6 +5,7 @@
  *     requires_persistence,
  *     requires_replication,
  *     featureFlagPointInTimeCatalogLookups,
+ *     requires_fcv_70,
  * ]
  */
 (function() {
@@ -17,6 +18,9 @@ const replTest = new ReplSetTest({
             // Set the history window to 1 hour to prevent the oldest timestamp from advancing. This
             // is necessary to avoid removing data files across restarts for this test.
             minSnapshotHistoryWindowInSeconds: 60 * 60,
+            // Exercise yielding and restoring point-in-time collections.
+            internalQueryExecYieldIterations: 0,
+            internalQueryExecYieldPeriodMS: 0
         }
     }
 });

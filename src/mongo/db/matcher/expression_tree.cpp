@@ -160,6 +160,9 @@ MatchExpression::ExpressionOptimizerFunc ListOfMatchExpression::getOptimizer() c
             size_t countEquivEqPaths = 0;
             size_t countNonEquivExpr = 0;
             boost::optional<std::string> childPath;
+            // The collation of the first equality. All other equalities must have the same
+            // collation in order to transform them into a single $in since the $in can have only
+            // one collation. Notice that regex ignore collations.
             const CollatorInterface* eqCollator = nullptr;
 
             auto isRegEx = [](const BSONElement& elm) {
@@ -187,6 +190,9 @@ MatchExpression::ExpressionOptimizerFunc ListOfMatchExpression::getOptimizer() c
                     auto eqExpression =
                         static_cast<EqualityMatchExpression*>(childExpression.get());
                     curCollator = eqExpression->getCollator();
+                    if (!eqCollator && curCollator) {
+                        eqCollator = curCollator;
+                    }
                     if (isRegEx(eqExpression->getData())) {
                         ++countNonEquivExpr;
                         continue;
@@ -199,10 +205,11 @@ MatchExpression::ExpressionOptimizerFunc ListOfMatchExpression::getOptimizer() c
                 if (!childPath) {
                     // The path of the first equality.
                     childPath = childExpression->path().toString();
-                    eqCollator = curCollator;
                     countEquivEqPaths = 1;
                 } else if (*childPath == childExpression->path() &&
+                           // Regex ignore collations.
                            (childExpression->matchType() == MatchExpression::REGEX ||
+                            // All equalities must have the same collation.
                             eqCollator == curCollator)) {
                     ++countEquivEqPaths;  // subsequent equality on the same path
                 } else {
@@ -334,12 +341,7 @@ bool AndMatchExpression::matchesSingleElement(const BSONElement& e, MatchDetails
 void AndMatchExpression::debugString(StringBuilder& debug, int indentationLevel) const {
     _debugAddSpace(debug, indentationLevel);
     debug << "$and";
-    MatchExpression::TagData* td = getTag();
-    if (td) {
-        debug << " ";
-        td->debugString(&debug);
-    }
-    debug << "\n";
+    _debugStringAttachTagInfo(&debug);
     _debugList(debug, indentationLevel);
 }
 
@@ -378,12 +380,7 @@ bool OrMatchExpression::matchesSingleElement(const BSONElement& e, MatchDetails*
 void OrMatchExpression::debugString(StringBuilder& debug, int indentationLevel) const {
     _debugAddSpace(debug, indentationLevel);
     debug << "$or";
-    MatchExpression::TagData* td = getTag();
-    if (td) {
-        debug << " ";
-        td->debugString(&debug);
-    }
-    debug << "\n";
+    _debugStringAttachTagInfo(&debug);
     _debugList(debug, indentationLevel);
 }
 
@@ -425,7 +422,8 @@ bool NorMatchExpression::matchesSingleElement(const BSONElement& e, MatchDetails
 
 void NorMatchExpression::debugString(StringBuilder& debug, int indentationLevel) const {
     _debugAddSpace(debug, indentationLevel);
-    debug << "$nor\n";
+    debug << "$nor";
+    _debugStringAttachTagInfo(&debug);
     _debugList(debug, indentationLevel);
 }
 
@@ -438,7 +436,8 @@ void NorMatchExpression::serialize(BSONObjBuilder* out, SerializationOptions opt
 
 void NotMatchExpression::debugString(StringBuilder& debug, int indentationLevel) const {
     _debugAddSpace(debug, indentationLevel);
-    debug << "$not\n";
+    debug << "$not";
+    _debugStringAttachTagInfo(&debug);
     _exp->debugString(debug, indentationLevel + 1);
 }
 

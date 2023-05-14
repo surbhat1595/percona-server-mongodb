@@ -37,7 +37,6 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/repl/oplog_constraint_violation_logger.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_or_grouped_inserts.h"
 #include "mongo/db/repl/optime.h"
@@ -128,6 +127,7 @@ void createOplog(OperationContext* opCtx);
  * end and generates insert oplog entries based on the augmented oplogEntryTemplate with the "ts",
  * "t", "o", "prevOpTime" and "stmtId" fields replaced by the content of each InsertStatement
  * defined by the begin-end range.
+ * @param fromMigrate: a list of 'fromMigrate' values for the inserts.
  *
  */
 std::vector<OpTime> logInsertOps(
@@ -135,6 +135,7 @@ std::vector<OpTime> logInsertOps(
     MutableOplogEntry* oplogEntryTemplate,
     std::vector<InsertStatement>::const_iterator begin,
     std::vector<InsertStatement>::const_iterator end,
+    std::vector<bool> fromMigrate,
     std::function<boost::optional<ShardId>(const BSONObj& doc)> getDestinedRecipientFn,
     const CollectionPtr& collectionPtr);
 
@@ -171,7 +172,10 @@ using IncrementOpsAppliedStatsFn = std::function<void()>;
 class OplogApplication {
 public:
     static constexpr StringData kInitialSyncOplogApplicationMode = "InitialSync"_sd;
+    // This only being used in 'applyOps' command when sent by client.
     static constexpr StringData kRecoveringOplogApplicationMode = "Recovering"_sd;
+    static constexpr StringData kStableRecoveringOplogApplicationMode = "StableRecovering"_sd;
+    static constexpr StringData kUnstableRecoveringOplogApplicationMode = "UnstableRecovering"_sd;
     static constexpr StringData kSecondaryOplogApplicationMode = "Secondary"_sd;
     static constexpr StringData kApplyOpsCmdOplogApplicationMode = "ApplyOps"_sd;
 
@@ -180,9 +184,12 @@ public:
         kInitialSync,
 
         // Used when we are applying oplog operations to recover the database state following an
-        // unclean shutdown, or when we are recovering from the oplog after we rollback to a
+        // clean/unclean shutdown, or when we are recovering from the oplog after we rollback to a
         // checkpoint.
-        kRecovering,
+        // If recovering from a unstable stable checkpoint.
+        kUnstableRecovering,
+        // If recovering from a stable checkpoint.~
+        kStableRecovering,
 
         // Used when a secondary node is applying oplog operations from the primary during steady
         // state replication.
@@ -193,24 +200,24 @@ public:
         kApplyOpsCmd
     };
 
+    static bool inRecovering(Mode mode) {
+        return mode == Mode::kUnstableRecovering || mode == Mode::kStableRecovering;
+    }
+
     static StringData modeToString(Mode mode);
 
     static StatusWith<Mode> parseMode(const std::string& mode);
+
+    // Server will crash on oplog application failure during recovery from stable checkpoint in the
+    // test environment.
+    static void checkOnOplogFailureForRecovery(OperationContext* opCtx,
+                                               const mongo::BSONObj& oplogEntry,
+                                               const std::string& errorMsg);
 };
 
 inline std::ostream& operator<<(std::ostream& s, OplogApplication::Mode mode) {
     return (s << OplogApplication::modeToString(mode));
 }
-
-/**
- * Logs an oplog constraint violation and writes an entry into the health log.
- */
-void logOplogConstraintViolation(OperationContext* opCtx,
-                                 const NamespaceString& nss,
-                                 OplogConstraintViolationEnum type,
-                                 const std::string& operation,
-                                 const BSONObj& opObj,
-                                 boost::optional<Status> status);
 
 /**
  * Used for applying from an oplog entry or grouped inserts.

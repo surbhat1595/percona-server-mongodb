@@ -50,7 +50,6 @@
 #include "mongo/db/ops/update.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
-#include "mongo/db/s/periodic_balancer_config_refresher.h"
 #include "mongo/db/s/read_only_catalog_cache_loader.h"
 #include "mongo/db/s/shard_local.h"
 #include "mongo/db/s/shard_server_catalog_cache_loader.h"
@@ -379,15 +378,18 @@ bool ShardingInitializationMongoD::initializeShardingAwarenessIfNeeded(Operation
 
     if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
         if (!foundShardIdentity) {
-            LOGV2_WARNING(22074,
-                          "Started with --shardsvr, but no shardIdentity document was found on "
-                          "disk in {namespace}. This most "
-                          "likely means this server has not yet been added to a "
-                          "sharded cluster.",
-                          "Started with --shardsvr, but no shardIdentity document was found on "
-                          "disk. This most likely means this server has not yet been added to a "
-                          "sharded cluster",
-                          "namespace"_attr = NamespaceString::kServerConfigurationNamespace);
+            if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+                LOGV2_WARNING(7445900,
+                              "Started with ShardServer role, but no shardIdentity document was "
+                              "found on disk.",
+                              "namespace"_attr = NamespaceString::kServerConfigurationNamespace);
+            } else {
+                LOGV2_WARNING(22074,
+                              "Started with ShardServer role, but no shardIdentity document was "
+                              "found on disk. This most likely means this server has not yet been "
+                              "added to a sharded cluster.",
+                              "namespace"_attr = NamespaceString::kServerConfigurationNamespace);
+            }
             return false;
         }
 
@@ -726,9 +728,6 @@ void ShardingInitializationMongoD::_initializeShardingEnvironmentOnShardServer(
         TransactionCoordinatorService::get(opCtx)->onShardingInitialization(
             opCtx, isReplSet && isStandaloneOrPrimary);
     }
-
-    PeriodicBalancerConfigRefresher::get(opCtx).onShardingInitialization(service,
-                                                                         isStandaloneOrPrimary);
 
     LOGV2(22071,
           "Finished initializing sharding components for {memberState} node.",

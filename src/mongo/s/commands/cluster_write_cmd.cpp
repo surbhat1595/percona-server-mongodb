@@ -63,6 +63,8 @@
 namespace mongo {
 namespace {
 
+using QuerySamplingOptions = OperationContext::QuerySamplingOptions;
+
 MONGO_FAIL_POINT_DEFINE(hangAfterThrowWouldChangeOwningShardRetryableWrite);
 
 void batchErrorToNotPrimaryErrorTracker(const BatchedCommandRequest& request,
@@ -334,6 +336,15 @@ bool ClusterWriteCmd::handleWouldChangeOwningShardError(OperationContext* opCtx,
         }
     } else {
         // TODO SERVER-67429: Delete this branch.
+        if (!txnRouter && !isRetryableWrite) {
+            response->getErrDetails().back().setStatus(Status(
+                ErrorCodes::IllegalOperation,
+                "Must run update to document shard key in a transaction or as a retryable write."));
+            return false;
+        }
+
+        opCtx->setQuerySamplingOptions(QuerySamplingOptions::kOptOut);
+
         if (isRetryableWrite) {
             if (MONGO_unlikely(hangAfterThrowWouldChangeOwningShardRetryableWrite.shouldFail())) {
                 LOGV2(22759, "Hit hangAfterThrowWouldChangeOwningShardRetryableWrite failpoint");

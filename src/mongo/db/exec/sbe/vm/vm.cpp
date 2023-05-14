@@ -1442,6 +1442,7 @@ void ByteCode::traverseCsiCellTypes(const CodeFragment* code, int64_t position) 
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::setField() {
     auto [newOwn, newTag, newVal] = moveFromStack(0);
+    value::ValueGuard guardNewElem{newTag, newVal};
     auto [fieldOwn, fieldTag, fieldVal] = getFromStack(1);
     // Consider using a moveFromStack optimization.
     auto [objOwn, objTag, objVal] = getFromStack(2);
@@ -1528,6 +1529,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::setField() {
                 }
             }
         }
+        guardNewElem.reset();
         if (!newOwn) {
             auto [copyTag, copyVal] = value::copyValue(newTag, newVal);
             newTag = copyTag;
@@ -2068,8 +2070,9 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinKeepFields(Arity
             auto sv = bson::fieldNameAndLength(be);
 
             if (keepFieldsSet.count(sv) == 1) {
-                auto [tag, val] = bson::convertFrom<false>(be, end, sv.size());
-                obj->push_back(sv, tag, val);
+                auto [tag, val] = bson::convertFrom<true>(be, end, sv.size());
+                auto [copyTag, copyVal] = value::copyValue(tag, val);
+                obj->push_back(sv, copyTag, copyVal);
             }
 
             be = bson::advance(be, sv.size());
@@ -3139,6 +3142,51 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDateToString(Ari
     return {true, strTag, strValue};
 }
 
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDateFromString(ArityType arity) {
+    auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(0);
+    if (timezoneDBTag != value::TypeTags::timeZoneDB) {
+        return {false, value::TypeTags::Nothing, 0};
+    }
+    auto timezoneDB = value::getTimeZoneDBView(timezoneDBValue);
+
+    // Get parameter tuples from stack.
+    auto [dateStringOwn, dateStringTag, dateStringValue] = getFromStack(1);
+    auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(2);
+
+    auto timezone = getTimezone(timezoneTag, timezoneValue, timezoneDB);
+
+    // Attempt to get the date from the string. This may throw a ConversionFailure error.
+    Date_t date;
+    auto dateString = value::getStringView(dateStringTag, dateStringValue);
+    if (arity == 3) {
+        // Format wasn't specified, so we call fromString without it.
+        date = timezoneDB->fromString(dateString, timezone);
+    } else {
+        // Fetch format from the stack, validate it, and call fromString with it.
+        auto [formatOwn, formatTag, formatValue] = getFromStack(3);
+        if (!value::isString(formatTag)) {
+            return {false, value::TypeTags::Nothing, 0};
+        }
+        auto formatString = value::getStringView(formatTag, formatValue);
+        if (!TimeZone::isValidFromStringFormat(formatString)) {
+            return {false, value::TypeTags::Nothing, 0};
+        }
+        date = timezoneDB->fromString(dateString, timezone, formatString);
+    }
+
+    return {true, value::TypeTags::Date, value::bitcastFrom<int64_t>(date.toMillisSinceEpoch())};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDateFromStringNoThrow(
+    ArityType arity) {
+    try {
+        return builtinDateFromString(arity);
+    } catch (const ExceptionFor<ErrorCodes::ConversionFailure>&) {
+        // Upon error, we return Nothing and let the caller decide whether to raise an error.
+        return {false, value::TypeTags::Nothing, 0};
+    }
+}
+
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDateTrunc(ArityType arity) {
     invariant(arity == 6);
 
@@ -3331,33 +3379,198 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinIsoDateToParts(A
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDayOfYear(ArityType arity) {
-    invariant(arity == 3);
+    invariant(arity == 3 || arity == 2);
 
-    auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(0);
-    auto [dateOwn, dateTag, dateValue] = getFromStack(1);
-    auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(2);
-    return genericDayOfYear(
-        timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+    auto [dateOwn, dateTag, dateValue] = getFromStack(0);
+    if (arity == 3) {
+        auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(1);
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(2);
+        return genericDayOfYear(
+            timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+    } else {
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(1);
+        return genericDayOfYear(dateTag, dateValue, timezoneTag, timezoneValue);
+    }
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDayOfMonth(ArityType arity) {
-    invariant(arity == 3);
+    invariant(arity == 3 || arity == 2);
 
-    auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(0);
-    auto [dateOwn, dateTag, dateValue] = getFromStack(1);
-    auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(2);
-    return genericDayOfMonth(
-        timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+    auto [dateOwn, dateTag, dateValue] = getFromStack(0);
+    if (arity == 3) {
+        auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(1);
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(2);
+        return genericDayOfMonth(
+            timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+    } else {
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(1);
+        return genericDayOfMonth(dateTag, dateValue, timezoneTag, timezoneValue);
+    }
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDayOfWeek(ArityType arity) {
-    invariant(arity == 3);
+    invariant(arity == 3 || arity == 2);
 
-    auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(0);
-    auto [dateOwn, dateTag, dateValue] = getFromStack(1);
-    auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(2);
-    return genericDayOfWeek(
-        timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+    auto [dateOwn, dateTag, dateValue] = getFromStack(0);
+    if (arity == 3) {
+        auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(1);
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(2);
+        return genericDayOfWeek(
+            timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+    } else {
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(1);
+        return genericDayOfWeek(dateTag, dateValue, timezoneTag, timezoneValue);
+    }
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinYear(ArityType arity) {
+    invariant(arity == 3 || arity == 2);
+
+    auto [dateOwn, dateTag, dateValue] = getFromStack(0);
+    if (arity == 3) {
+        auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(1);
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(2);
+        return genericYear(
+            timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+    } else {
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(1);
+        return genericYear(dateTag, dateValue, timezoneTag, timezoneValue);
+    }
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMonth(ArityType arity) {
+    invariant(arity == 3 || arity == 2);
+
+    auto [dateOwn, dateTag, dateValue] = getFromStack(0);
+    if (arity == 3) {
+        auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(1);
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(2);
+        return genericMonth(
+            timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+    } else {
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(1);
+        return genericMonth(dateTag, dateValue, timezoneTag, timezoneValue);
+    }
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinHour(ArityType arity) {
+    invariant(arity == 3 || arity == 2);
+
+    auto [dateOwn, dateTag, dateValue] = getFromStack(0);
+    if (arity == 3) {
+        auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(1);
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(2);
+        return genericHour(
+            timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+    } else {
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(1);
+        return genericHour(dateTag, dateValue, timezoneTag, timezoneValue);
+    }
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMinute(ArityType arity) {
+    invariant(arity == 3 || arity == 2);
+
+    auto [dateOwn, dateTag, dateValue] = getFromStack(0);
+    if (arity == 3) {
+        auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(1);
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(2);
+        return genericMinute(
+            timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+    } else {
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(1);
+        return genericMinute(dateTag, dateValue, timezoneTag, timezoneValue);
+    }
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSecond(ArityType arity) {
+    invariant(arity == 3 || arity == 2);
+
+    auto [dateOwn, dateTag, dateValue] = getFromStack(0);
+    if (arity == 3) {
+        auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(1);
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(2);
+        return genericSecond(
+            timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+    } else {
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(1);
+        return genericSecond(dateTag, dateValue, timezoneTag, timezoneValue);
+    }
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMillisecond(ArityType arity) {
+    invariant(arity == 3 || arity == 2);
+
+    auto [dateOwn, dateTag, dateValue] = getFromStack(0);
+    if (arity == 3) {
+        auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(1);
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(2);
+        return genericMillisecond(
+            timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+    } else {
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(1);
+        return genericMillisecond(dateTag, dateValue, timezoneTag, timezoneValue);
+    }
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinWeek(ArityType arity) {
+    invariant(arity == 3 || arity == 2);
+
+    auto [dateOwn, dateTag, dateValue] = getFromStack(0);
+    if (arity == 3) {
+        auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(1);
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(2);
+        return genericWeek(
+            timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+    } else {
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(1);
+        return genericWeek(dateTag, dateValue, timezoneTag, timezoneValue);
+    }
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinISOWeekYear(ArityType arity) {
+    invariant(arity == 3 || arity == 2);
+
+    auto [dateOwn, dateTag, dateValue] = getFromStack(0);
+    if (arity == 3) {
+        auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(1);
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(2);
+        return genericISOWeekYear(
+            timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+    } else {
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(1);
+        return genericISOWeekYear(dateTag, dateValue, timezoneTag, timezoneValue);
+    }
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinISODayOfWeek(ArityType arity) {
+    invariant(arity == 3 || arity == 2);
+
+    auto [dateOwn, dateTag, dateValue] = getFromStack(0);
+    if (arity == 3) {
+        auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(1);
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(2);
+        return genericISODayOfWeek(
+            timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+    } else {
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(1);
+        return genericISODayOfWeek(dateTag, dateValue, timezoneTag, timezoneValue);
+    }
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinISOWeek(ArityType arity) {
+    invariant(arity == 3 || arity == 2);
+
+    auto [dateOwn, dateTag, dateValue] = getFromStack(0);
+    if (arity == 3) {
+        auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(1);
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(2);
+        return genericISOWeek(
+            timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+    } else {
+        auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(1);
+        return genericISOWeek(dateTag, dateValue, timezoneTag, timezoneValue);
+    }
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinBitTestPosition(ArityType arity) {
@@ -3639,39 +3852,85 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinTanh(ArityType a
     return genericTanh(operandTag, operandValue);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinRound(ArityType arity) {
-    invariant(arity == 1);
-    auto [owned, tag, val] = getFromStack(0);
-
-    // Round 'val' to the closest integer, with ties rounding to the closest even integer.
-    // If 'val' is +Inf, -Inf, or NaN, this function will simply return 'val' as-is.
+/**
+ * Converts a number to int32 assuming the input fits the range. This is used for $round "place"
+ * argument, which is checked to be a whole number between -20 and 100, but could still be a
+ * non-int32 type.
+ */
+static int32_t convertNumericToInt32(const value::TypeTags tag, const value::Value val) {
     switch (tag) {
-        case value::TypeTags::NumberInt32:
-        case value::TypeTags::NumberInt64:
-            // The value is already an integer, so just return it as-is.
-            return {false, tag, val};
+        case value::TypeTags::NumberInt32: {
+            return value::bitcastTo<int32_t>(val);
+        }
+        case value::TypeTags::NumberInt64: {
+            return static_cast<int32_t>(value::bitcastTo<int64_t>(val));
+        }
         case value::TypeTags::NumberDouble: {
-            // std::nearbyint()'s behavior relies on a thread-local "rounding mode", so
-            // we use boost::numeric::RoundEven<double>::nearbyint() instead. We should
-            // switch over to roundeven() once it becomes available in the standard library.
-            // (See https://en.cppreference.com/w/c/experimental/fpext1 for details.)
-            auto operand = value::bitcastTo<double>(val);
-            auto rounded = boost::numeric::RoundEven<double>::nearbyint(operand);
-            return {false, tag, value::bitcastFrom<double>(rounded)};
+            return static_cast<int32_t>(value::bitcastTo<double>(val));
         }
         case value::TypeTags::NumberDecimal: {
-            auto operand = value::bitcastTo<Decimal128>(val);
-            auto rounded = operand.round(Decimal128::RoundingMode::kRoundTiesToEven);
-            if (operand.isEqual(rounded)) {
-                // If the output of rounding is equal to the input, then we can just take
-                // ownership of 'operand' and return it. (This is more efficient than calling
-                // makeCopyDecimal(), which would allocate memory on the heap.)
-                topStack(false, value::TypeTags::Nothing, 0);
-                return {owned, tag, val};
-            }
+            Decimal128 dec = value::bitcastTo<Decimal128>(val);
+            return dec.toInt(Decimal128::kRoundTiesToEven);
+        }
+        default:
+            MONGO_UNREACHABLE;
+    }
+}
 
-            auto [tag, val] = value::makeCopyDecimal(rounded);
-            return {true, tag, val};
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinRound(ArityType arity) {
+    invariant(arity == 1 || arity == 2);
+    int32_t place = 0;
+    const auto [numOwn, numTag, numVal] = getFromStack(0);
+    if (arity == 2) {
+        const auto [placeOwn, placeTag, placeVal] = getFromStack(1);
+        if (!value::isNumber(placeTag)) {
+            return {false, value::TypeTags::Nothing, 0};
+        }
+        place = convertNumericToInt32(placeTag, placeVal);
+    }
+
+    // Construct 10^-precisionValue, which will be used as the quantize reference. This is passed to
+    // decimal.quantize() to indicate the precision of our rounding.
+    const auto quantum = Decimal128(0LL, Decimal128::kExponentBias - place, 0LL, 1LL);
+    switch (numTag) {
+        case value::TypeTags::NumberDecimal: {
+            auto dec = value::bitcastTo<Decimal128>(numVal);
+            if (!dec.isInfinite()) {
+                dec = dec.quantize(quantum, Decimal128::kRoundTiesToEven);
+            }
+            auto [resultTag, resultValue] = value::makeCopyDecimal(dec);
+            return {true, resultTag, resultValue};
+        }
+        case value::TypeTags::NumberDouble: {
+            auto asDec = Decimal128(value::bitcastTo<double>(numVal), Decimal128::kRoundTo34Digits);
+            if (!asDec.isInfinite()) {
+                asDec = asDec.quantize(quantum, Decimal128::kRoundTiesToEven);
+            }
+            return {
+                false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(asDec.toDouble())};
+        }
+        case value::TypeTags::NumberInt32:
+        case value::TypeTags::NumberInt64: {
+            if (place >= 0) {
+                return {numOwn, numTag, numVal};
+            }
+            auto numericArgll = numTag == value::TypeTags::NumberInt32
+                ? static_cast<int64_t>(value::bitcastTo<int32_t>(numVal))
+                : value::bitcastTo<int64_t>(numVal);
+            auto out = Decimal128(numericArgll).quantize(quantum, Decimal128::kRoundTiesToEven);
+            uint32_t flags = 0;
+            auto outll = out.toLong(&flags);
+            uassert(5155302,
+                    "Invalid conversion to long during $round.",
+                    !Decimal128::hasFlag(flags, Decimal128::kInvalid));
+            if (numTag == value::TypeTags::NumberInt64 ||
+                outll > std::numeric_limits<int32_t>::max()) {
+                // Even if the original was an int to begin with - it has to be a long now.
+                return {false, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(outll)};
+            }
+            return {false,
+                    value::TypeTags::NumberInt32,
+                    value::bitcastFrom<int32_t>(static_cast<int32_t>(outll))};
         }
         default:
             return {false, value::TypeTags::Nothing, 0};
@@ -3793,12 +4052,10 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggConcatArraysC
     auto [tagNewArray, valNewArray] = newArr->getAt(static_cast<size_t>(AggArrayWithSize::kValues));
     tassert(7039519, "expected value of type 'Array'", tagNewArray == value::TypeTags::Array);
 
-    value::arrayForEach(tagNewArray, valNewArray, [&](value::TypeTags elTag, value::Value elVal) {
-        // TODO SERVER-71952: Since 'valNewArray' is owned here, in the future
-        // we could avoid this copy by moving the element out of the array.
-        auto [copyTag, copyVal] = value::copyValue(elTag, elVal);
-        accArr->push_back(copyTag, copyVal);
-    });
+    value::arrayForEach<true>(
+        tagNewArray, valNewArray, [&](value::TypeTags elTag, value::Value elVal) {
+            accArr->push_back(elTag, elVal);
+        });
 
 
     accumulatorGuard.reset();
@@ -4050,6 +4307,17 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinIsValidToStringF
     return {false, value::TypeTags::Boolean, false};
 }
 
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValidateFromStringFormat(
+    ArityType arity) {
+    auto [formatOwn, formatTag, formatVal] = getFromStack(0);
+    if (!value::isString(formatTag)) {
+        return {false, value::TypeTags::Boolean, false};
+    }
+    auto formatStr = value::getStringView(formatTag, formatVal);
+    TimeZone::validateFromStringFormat(formatStr);
+    return {false, value::TypeTags::Boolean, true};
+}
+
 namespace {
 FastTuple<bool, value::TypeTags, value::Value> setUnion(
     const std::vector<value::TypeTags>& argTags,
@@ -4119,8 +4387,8 @@ FastTuple<bool, value::TypeTags, value::Value> setIntersection(
     return {true, resTag, resVal};
 }
 
-value::ValueSetType valueToSetHelper(const value::TypeTags& tag,
-                                     const value::Value& value,
+value::ValueSetType valueToSetHelper(value::TypeTags tag,
+                                     value::Value value,
                                      const CollatorInterface* collator) {
     value::ValueSetType setValues(0, value::ValueHash(collator), value::ValueEq(collator));
     value::arrayForEach(tag, value, [&](value::TypeTags elemTag, value::Value elemVal) {
@@ -4273,23 +4541,22 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggSetUnionCappedImpl(
         7039525, "expected value of type 'ArraySet'", tagNewValSet == value::TypeTags::ArraySet);
 
 
-    value::arrayForEach(tagNewValSet, valNewValSet, [&](value::TypeTags elTag, value::Value elVal) {
-        int elemSize = value::getApproximateSize(elTag, elVal);
-        // TODO SERVER-71952: Since 'valNewValSet' is owned here, in the future we could avoid this
-        // copy by moving the element out of the array.
-        auto [copyTag, copyVal] = value::copyValue(elTag, elVal);
-        bool inserted = accArrSet->push_back(copyTag, copyVal);
+    value::arrayForEach<true>(
+        tagNewValSet, valNewValSet, [&](value::TypeTags elTag, value::Value elVal) {
+            int elemSize = value::getApproximateSize(elTag, elVal);
+            bool inserted = accArrSet->push_back(elTag, elVal);
 
-        if (inserted) {
-            currentSize += elemSize;
-            if (currentSize >= static_cast<int64_t>(sizeCap)) {
-                uasserted(ErrorCodes::ExceededMemoryLimit,
-                          str::stream() << "Used too much memory for a single array. Memory limit: "
-                                        << sizeCap << ". Current set has " << accArrSet->size()
-                                        << " elements and is " << currentSize << " bytes.");
+            if (inserted) {
+                currentSize += elemSize;
+                if (currentSize >= static_cast<int64_t>(sizeCap)) {
+                    uasserted(ErrorCodes::ExceededMemoryLimit,
+                              str::stream()
+                                  << "Used too much memory for a single array. Memory limit: "
+                                  << sizeCap << ". Current set has " << accArrSet->size()
+                                  << " elements and is " << currentSize << " bytes.");
+                }
             }
-        }
-    });
+        });
 
     // Update the accumulator with the new total size.
     accArray->setAt(static_cast<size_t>(AggArrayWithSize::kSizeOfValues),
@@ -5019,8 +5286,139 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSortKeyComponent
     return {false, outTag, outVal};
 }
 
+std::pair<value::TypeTags, value::Value> ByteCode::produceBsonObject(const value::MakeObjSpec* mos,
+                                                                     value::TypeTags rootTag,
+                                                                     value::Value rootVal,
+                                                                     const size_t startIdx) {
+    auto& allFieldsMap = mos->allFieldsMap;
+    auto& fieldBehavior = mos->fieldBehavior;
+    auto& fields = mos->fields;
+    auto& projects = mos->projects;
+
+    const bool isInclusion = fieldBehavior == value::MakeObjSpec::FieldBehavior::keep;
+
+    auto isFieldProjectedOrRestricted = [&](StringData sv) {
+        // If 'bloomFilter' is initialized, check to see if it can answer our query.
+        if (allFieldsMap.size() <= 64) {
+            size_t bloomIdx = mos->computeBloomIdx1(sv.rawData(), sv.size());
+            size_t fieldIdx = mos->bloomFilter[bloomIdx];
+            size_t k = 0;
+
+            for (;; ++k) {
+                if (MONGO_likely(fieldIdx >= 2)) {
+                    // If fieldIdx >= 2, that means that we may have a match. If 'sv' matches a
+                    // string in 'fields', then we return '!isInclusion' (because if isInclusion is
+                    // true then the field is not restricted or projected, and if isInclusion is
+                    // false then the field is restricted). If 'sv' matches a string in 'projects',
+                    // we return 'true' (because the field is projected).
+                    //
+                    // If 'sv' doesn't match any of the strings in 'fields' or 'projects', then we
+                    // return 'isInclusion' (because if isInclusion is true then the field is
+                    // restricted, and if isInclusion is false then the field not restricted or
+                    // projected).
+                    auto singleName = (fieldIdx - 2 >= mos->fields.size())
+                        ? StringData(mos->projects[fieldIdx - 2 - mos->fields.size()])
+                        : StringData(mos->fields[fieldIdx - 2]);
+
+                    return sv == singleName ? (!isInclusion || fieldIdx - 2 >= mos->fields.size())
+                                            : isInclusion;
+                } else if (MONGO_likely(fieldIdx == 0)) {
+                    // If fieldIdx == 0, then we can deduce that 'sv' is not present in either
+                    // vector and we return 'isInclusion'.
+                    return isInclusion;
+                }
+
+                // If fieldIdx == 1, then we can't determine if 'sv' is present in either vector.
+                if (k == 0) {
+                    // If this was our first attempt, try again using computeBloomIdx2().
+                    bloomIdx = mos->computeBloomIdx2(sv.rawData(), sv.size(), bloomIdx);
+                    fieldIdx = mos->bloomFilter[bloomIdx];
+                } else {
+                    // After two attempts, give up and search for 'sv' in 'allFieldsMap'.
+                    break;
+                }
+            }
+        }
+
+        auto key = StringMapHasher{}.hashed_key(sv);
+
+        bool foundKey = false;
+        bool projected = false;
+        bool restricted = false;
+
+        if (auto it = allFieldsMap.find(key); it != allFieldsMap.end()) {
+            foundKey = true;
+            projected = it->second != std::numeric_limits<size_t>::max();
+            restricted = !isInclusion;
+        }
+
+        if (!foundKey) {
+            restricted = isInclusion;
+        }
+
+        return projected || restricted;
+    };
+
+    UniqueBSONObjBuilder bob;
+
+    if (value::isObject(rootTag)) {
+        size_t nFieldsIfInclusion = fields.size();
+
+        if (rootTag == value::TypeTags::bsonObject) {
+            if (!(nFieldsIfInclusion == 0 && isInclusion)) {
+                auto be = value::bitcastTo<const char*>(rootVal);
+                const auto end = be + ConstDataView(be).read<LittleEndian<uint32_t>>();
+
+                // Skip document length.
+                be += 4;
+                while (be != end - 1) {
+                    auto sv = bson::fieldNameAndLength(be);
+                    auto nextBe = bson::advance(be, sv.size());
+
+                    if (!isFieldProjectedOrRestricted(sv)) {
+                        bob.append(BSONElement(be, sv.size() + 1, nextBe - be));
+                        --nFieldsIfInclusion;
+                    }
+
+                    if (nFieldsIfInclusion == 0 && isInclusion) {
+                        break;
+                    }
+
+                    be = nextBe;
+                }
+            }
+        } else if (rootTag == value::TypeTags::Object) {
+            if (!(nFieldsIfInclusion == 0 && isInclusion)) {
+                auto objRoot = value::getObjectView(rootVal);
+                for (size_t idx = 0; idx < objRoot->size(); ++idx) {
+                    auto sv = StringData(objRoot->field(idx));
+
+                    if (!isFieldProjectedOrRestricted(sv)) {
+                        auto [tag, val] = objRoot->getAt(idx);
+                        bson::appendValueToBsonObj(bob, objRoot->field(idx), tag, val);
+                        --nFieldsIfInclusion;
+                    }
+
+                    if (nFieldsIfInclusion == 0 && isInclusion) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    for (size_t idx = 0; idx < projects.size(); ++idx) {
+        auto argIdx = startIdx + idx;
+        auto [_, tag, val] = getFromStack(argIdx);
+        bson::appendValueToBsonObj(bob, projects[idx], tag, val);
+    }
+
+    bob.doneFast();
+    char* data = bob.bb().release().release();
+    return {value::TypeTags::bsonObject, value::bitcastFrom<char*>(data)};
+}
+
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMakeBsonObj(ArityType arity) {
-    invariant(arity >= 2);
     tassert(6897002,
             str::stream() << "Unsupported number of arguments passed to makeBsonObj(): " << arity,
             arity >= 2);
@@ -5034,13 +5432,9 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMakeBsonObj(Arit
 
     auto mos = value::getMakeObjSpecView(mosVal);
 
-    // For produceBsonObject()'s 'getArg' parameter, we pass in a lambda that will retrieve the
-    // value of each projected field from the VM stack.
-    auto [tag, val] = mos->produceBsonObject(
-        objTag, objVal, [&](size_t idx) -> std::pair<value::TypeTags, value::Value> {
-            auto [_, tag, val] = getFromStack(2 + idx);
-            return {tag, val};
-        });
+    const size_t startIdx = 2;
+
+    auto [tag, val] = produceBsonObject(mos, objTag, objVal, startIdx);
 
     return {true, tag, val};
 }
@@ -5386,6 +5780,10 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinDayOfWeek(arity);
         case Builtin::dateToString:
             return builtinDateToString(arity);
+        case Builtin::dateFromString:
+            return builtinDateFromString(arity);
+        case Builtin::dateFromStringNoThrow:
+            return builtinDateFromStringNoThrow(arity);
         case Builtin::split:
             return builtinSplit(arity);
         case Builtin::regexMatch:
@@ -5532,6 +5930,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinIsTimezone(arity);
         case Builtin::isValidToStringFormat:
             return builtinIsValidToStringFormat(arity);
+        case Builtin::validateFromStringFormat:
+            return builtinValidateFromStringFormat(arity);
         case Builtin::setUnion:
             return builtinSetUnion(arity);
         case Builtin::setIntersection:
@@ -5599,6 +5999,26 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
         case Builtin::internalLeast:
         case Builtin::internalGreatest:
             return builtinMinMaxFromArray(arity, f);
+        case Builtin::year:
+            return builtinYear(arity);
+        case Builtin::month:
+            return builtinMonth(arity);
+        case Builtin::hour:
+            return builtinHour(arity);
+        case Builtin::minute:
+            return builtinMinute(arity);
+        case Builtin::second:
+            return builtinSecond(arity);
+        case Builtin::millisecond:
+            return builtinMillisecond(arity);
+        case Builtin::week:
+            return builtinWeek(arity);
+        case Builtin::isoWeekYear:
+            return builtinISOWeekYear(arity);
+        case Builtin::isoDayOfWeek:
+            return builtinISODayOfWeek(arity);
+        case Builtin::isoWeek:
+            return builtinISOWeek(arity);
     }
 
     MONGO_UNREACHABLE;
@@ -5631,6 +6051,10 @@ std::string builtinToString(Builtin b) {
             return "datePartsWeekYear";
         case Builtin::dateToString:
             return "dateToString";
+        case Builtin::dateFromString:
+            return "dateFromString";
+        case Builtin::dateFromStringNoThrow:
+            return "dateFromStringNoThrow";
         case Builtin::dropFields:
             return "dropFields";
         case Builtin::newArray:
@@ -5771,6 +6195,8 @@ std::string builtinToString(Builtin b) {
             return "isTimezone";
         case Builtin::isValidToStringFormat:
             return "isValidToStringFormat";
+        case Builtin::validateFromStringFormat:
+            return "validateFromStringFormat";
         case Builtin::setUnion:
             return "setUnion";
         case Builtin::setIntersection:
@@ -5839,6 +6265,26 @@ std::string builtinToString(Builtin b) {
             return "internalLeast";
         case Builtin::internalGreatest:
             return "internalGreatest";
+        case Builtin::year:
+            return "year";
+        case Builtin::month:
+            return "month";
+        case Builtin::hour:
+            return "hour";
+        case Builtin::minute:
+            return "minute";
+        case Builtin::second:
+            return "second";
+        case Builtin::millisecond:
+            return "millisecond";
+        case Builtin::week:
+            return "week";
+        case Builtin::isoWeekYear:
+            return "isoWeekYear";
+        case Builtin::isoDayOfWeek:
+            return "isoDayOfWeek";
+        case Builtin::isoWeek:
+            return "isoWeek";
         default:
             MONGO_UNREACHABLE;
     }
@@ -5885,6 +6331,7 @@ MONGO_COMPILER_NORETURN void ByteCode::runFailInstruction() {
 
     uasserted(code, message);
 }
+
 template <typename T>
 void ByteCode::runTagCheck(const uint8_t*& pcPointer, T&& predicate) {
     auto [popParam, offsetParam] = decodeParam(pcPointer);

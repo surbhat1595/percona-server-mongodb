@@ -5063,7 +5063,10 @@ EncryptedFieldConfig EncryptionInformationHelpers::getAndValidateSchema(
 
     auto efc = EncryptedFieldConfig::parse(IDLParserContext("schema"), element.Obj());
 
-    uassert(6371206, "Expected a value for eccCollection", efc.getEccCollection().has_value());
+    // TODO: SERVER-73303 remove when v2 is enabled by default
+    if (!gFeatureFlagFLE2ProtocolVersion2.isEnabled(serverGlobalParams.featureCompatibility)) {
+        uassert(6371206, "Expected a value for eccCollection", efc.getEccCollection().has_value());
+    }
     uassert(6371207, "Expected a value for escCollection", efc.getEscCollection().has_value());
     uassert(6371208, "Expected a value for ecocCollection", efc.getEcocCollection().has_value());
 
@@ -5864,7 +5867,7 @@ bool EncryptedPredicateEvaluatorV2::evaluate(
 
     uassert(7399501, "Invalid encrypted indexed field", subSubType == indexedValueType);
 
-    auto metadataBlocks = extractMetadataBlocks(data);
+    std::vector<ConstDataRange> metadataBlocks = extractMetadataBlocks(data);
 
     for (const auto& zeroDecryptionToken : _zerosDecryptionTokens) {
         for (auto metadataBlock : metadataBlocks) {

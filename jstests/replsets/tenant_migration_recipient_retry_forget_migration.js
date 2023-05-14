@@ -5,6 +5,9 @@
  *   incompatible_with_macos,
  *   incompatible_with_windows_tls,
  *   requires_majority_read_concern,
+ *   # Shard merge protocol will be tested by
+ *   # tenant_migration_shard_merge_recipient_retry_forget_migration.js.
+ *   incompatible_with_shard_merge,
  *   requires_persistence,
  *   serverless,
  *   # The currentOp output field 'state' was changed from an enum value to a string.

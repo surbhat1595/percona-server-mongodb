@@ -68,9 +68,9 @@ const char* DocumentSourceMatch::getSourceName() const {
     return kStageName.rawData();
 }
 
-Value DocumentSourceMatch::serialize(boost::optional<ExplainOptions::Verbosity> explain) const {
-    if (explain) {
-        return Value(DOC(getSourceName() << Document(_expression->serialize())));
+Value DocumentSourceMatch::serialize(SerializationOptions opts) const {
+    if (opts.verbosity || opts.redactFieldNames || opts.replacementForLiteralArgs) {
+        return Value(DOC(getSourceName() << Document(_expression->serialize(opts))));
     }
     return Value(DOC(getSourceName() << Document(getQuery())));
 }

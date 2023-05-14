@@ -51,8 +51,12 @@ public:
 private:
     StringData serializePhase(const Phase& phase) const override;
     void appendCommandInfo(BSONObjBuilder* cmdInfoBuilder) const override;
+    bool _mustAlwaysMakeProgress() override;
     ExecutorFuture<void> _runImpl(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                                   const CancellationToken& token) noexcept override;
+    ExecutorFuture<void> _cleanupOnAbort(std::shared_ptr<executor::ScopedTaskExecutor> executor,
+                                         const CancellationToken& token,
+                                         const Status& status) noexcept override;
 
     ExecutorFuture<void> runMovePrimaryWorkflow(
         std::shared_ptr<executor::ScopedTaskExecutor> executor,
@@ -61,7 +65,9 @@ private:
     /**
      * Logs in the `config.changelog` collection a specific event for `movePrimary` operations.
      */
-    void logChange(OperationContext* opCtx, const std::string& what) const;
+    void logChange(OperationContext* opCtx,
+                   const std::string& what,
+                   const Status& status = Status::OK()) const;
 
     /**
      * Returns the list of unsharded collections for the given database. These are the collections
@@ -79,16 +85,15 @@ private:
     /**
      * Requests to the recipient to clone all the collections of the given database currently owned
      * by this shard. Once the cloning is complete, the recipient returns the list of the actually
-     * cloned collections as part of the response.
+     * cloned collections.
      */
-    StatusWith<Shard::CommandResponse> cloneDataToRecipient(OperationContext* opCtx) const;
+    std::vector<NamespaceString> cloneDataToRecipient(OperationContext* opCtx) const;
 
     /**
-     * Returns `true` whether the list of actually cloned collections (returned by the cloning
-     * command response) matches the list of collection to clone (persisted in the coordinator
-     * document), `false` otherwise.
+     * Ensures that the list of actually cloned collections (returned by the cloning command)
+     * matches the list of collections to clone (persisted in the coordinator document).
      */
-    bool checkClonedData(Shard::CommandResponse cloneResponse) const;
+    void assertClonedData(const std::vector<NamespaceString>& clonedCollections) const;
 
     /**
      * Commits the new primary shard for the given database to the config server. The database

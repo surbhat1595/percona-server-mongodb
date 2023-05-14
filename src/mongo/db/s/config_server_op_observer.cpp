@@ -39,6 +39,7 @@
 #include "mongo/logv2/log.h"
 #include "mongo/s/catalog/type_config_version.h"
 #include "mongo/s/catalog/type_shard.h"
+#include "mongo/s/catalog_cache_loader.h"
 #include "mongo/s/cluster_identity_loader.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
@@ -108,7 +109,19 @@ void ConfigServerOpObserver::onInserts(OperationContext* opCtx,
                                        const CollectionPtr& coll,
                                        std::vector<InsertStatement>::const_iterator begin,
                                        std::vector<InsertStatement>::const_iterator end,
-                                       bool fromMigrate) {
+                                       std::vector<bool> fromMigrate,
+                                       bool defaultFromMigrate) {
+    if (coll->ns().isServerConfigurationCollection()) {
+        auto idElement = begin->doc["_id"];
+        if (idElement.type() == BSONType::String &&
+            idElement.String() == multiversion::kParameterName) {
+            opCtx->recoveryUnit()->onCommit(
+                [](OperationContext* opCtx, boost::optional<Timestamp>) mutable {
+                    CatalogCacheLoader::get(opCtx).onFCVChanged();
+                });
+        }
+    }
+
     if (coll->ns() != NamespaceString::kConfigsvrShardsNamespace) {
         return;
     }
@@ -125,18 +138,35 @@ void ConfigServerOpObserver::onInserts(OperationContext* opCtx,
         }
 
         if (maxTopologyTime) {
+            // Insertions into config.shards may be done inside a transaction. This implies that the
+            // callback from onCommit can be invoked by a different thread. Since the
+            // TopologyTimeTicker is associated to the mongod instance and not to the
+            // OperationContext, we can safely obtain a reference at this point and passed it to the
+            // onCommit callback.
+            auto& topologyTicker = TopologyTimeTicker::get(opCtx);
             opCtx->recoveryUnit()->onCommit(
-                [maxTopologyTime](OperationContext* opCtx,
-                                  boost::optional<Timestamp> commitTime) mutable {
+                [&topologyTicker, maxTopologyTime](OperationContext* opCtx,
+                                                   boost::optional<Timestamp> commitTime) mutable {
                     invariant(commitTime);
-                    TopologyTimeTicker::get(opCtx).onNewLocallyCommittedTopologyTimeAvailable(
-                        *commitTime, *maxTopologyTime);
+                    topologyTicker.onNewLocallyCommittedTopologyTimeAvailable(*commitTime,
+                                                                              *maxTopologyTime);
                 });
         }
     }
 }
 
 void ConfigServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& args) {
+    if (args.coll->ns().isServerConfigurationCollection()) {
+        auto idElement = args.updateArgs->updatedDoc["_id"];
+        if (idElement.type() == BSONType::String &&
+            idElement.String() == multiversion::kParameterName) {
+            opCtx->recoveryUnit()->onCommit(
+                [](OperationContext* opCtx, boost::optional<Timestamp>) mutable {
+                    CatalogCacheLoader::get(opCtx).onFCVChanged();
+                });
+        }
+    }
+
     if (args.coll->ns() != NamespaceString::kConfigsvrShardsNamespace) {
         return;
     }

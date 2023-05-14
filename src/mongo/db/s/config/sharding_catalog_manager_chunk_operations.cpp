@@ -63,6 +63,7 @@
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/future_util.h"
 #include "mongo/util/str.h"
 
 MONGO_FAIL_POINT_DEFINE(overrideHistoryWindowInSecs);
@@ -387,7 +388,9 @@ void logMergeToChangelog(OperationContext* opCtx,
                          const ChunkVersion& mergedVersion,
                          const ShardId& owningShard,
                          const ChunkRange& chunkRange,
-                         const size_t numChunks) {
+                         const size_t numChunks,
+                         std::shared_ptr<Shard> configShard,
+                         ShardingCatalogClient* catalogClient) {
     BSONObjBuilder logDetail;
     prevPlacementVersion.serialize("prevPlacementVersion", &logDetail);
     mergedVersion.serialize("mergedVersion", &logDetail);
@@ -395,8 +398,13 @@ void logMergeToChangelog(OperationContext* opCtx,
     chunkRange.append(&logDetail);
     logDetail.append("numChunks", static_cast<int>(numChunks));
 
-    ShardingLogging::get(opCtx)->logChange(
-        opCtx, "merge", nss.ns(), logDetail.obj(), WriteConcernOptions());
+    ShardingLogging::get(opCtx)->logChange(opCtx,
+                                           "merge",
+                                           nss.ns(),
+                                           logDetail.obj(),
+                                           WriteConcernOptions(),
+                                           std::move(configShard),
+                                           catalogClient);
 }
 
 void mergeAllChunksOnShardInTransaction(OperationContext* opCtx,
@@ -405,7 +413,7 @@ void mergeAllChunksOnShardInTransaction(OperationContext* opCtx,
                                         const std::shared_ptr<std::vector<ChunkType>> newChunks) {
     auto updateChunksFn = [collectionUUID, shardId, newChunks](
                               const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
-        SemiFuture<void> fut = SemiFuture<void>::makeReady();
+        std::vector<ExecutorFuture<void>> statementsChain;
 
         for (auto& chunk : *newChunks) {
             // Prepare deletion of existing chunks in the range
@@ -423,59 +431,33 @@ void mergeAllChunksOnShardInTransaction(OperationContext* opCtx,
                 entry.setMulti(true);
                 return std::vector<write_ops::DeleteOpEntry>{entry};
             }());
-            deleteOp.getWriteCommandRequestBase().setOrdered(false);
 
-            // Prepare insertion of new chunk covering the whole range
+            // Prepare insertion of new chunks covering the whole range
             write_ops::InsertCommandRequest insertOp(ChunkType::ConfigNS, {chunk.toConfigBSON()});
 
-            fut = std::move(fut)
-                      .thenRunOn(txnExec)
-                      .then([&txnClient, deleteOp = std::move(deleteOp)]() {
-                          return txnClient.runCRUDOp(deleteOp, {});
-                      })
-                      .thenRunOn(txnExec)
-                      .then([](auto removeChunksResponse) {
-                          uassertStatusOK(removeChunksResponse.toStatus());
-                      })
-                      .thenRunOn(txnExec)
-                      .then([&txnClient, insertOp = std::move(insertOp)]() {
-                          return txnClient.runCRUDOp(insertOp, {});
-                      })
-                      .thenRunOn(txnExec)
-                      .then([](auto insertChunkResponse) {
-                          uassertStatusOK(insertChunkResponse.toStatus());
-                      })
-                      .thenRunOn(txnExec)
-                      .semi();
+            statementsChain.push_back(txnClient.runCRUDOp(deleteOp, {})
+                                          .thenRunOn(txnExec)
+                                          .then([](auto removeChunksResponse) {
+                                              uassertStatusOK(removeChunksResponse.toStatus());
+                                          })
+                                          .thenRunOn(txnExec)
+                                          .then([&txnClient, insertOp = std::move(insertOp)]() {
+                                              return txnClient.runCRUDOp(insertOp, {});
+                                          })
+                                          .thenRunOn(txnExec)
+                                          .then([](auto insertChunkResponse) {
+                                              uassertStatusOK(insertChunkResponse.toStatus());
+                                          })
+                                          .thenRunOn(txnExec));
         }
 
-        return fut;
+        return whenAllSucceed(std::move(statementsChain));
     };
 
     txn_api::SyncTransactionWithRetries txn(
         opCtx, Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(), nullptr);
     txn.run(opCtx, updateChunksFn);
 }
-
-/*
- * Creates the request to persist a namespace descriptor object into config.placementHistory.
- */
-write_ops::UpdateCommandRequest composePlacementUpsertRequest(
-    const NamespacePlacementType& placementInfo) {
-    write_ops::UpdateCommandRequest upsertRequest(
-        NamespaceString::kConfigsvrPlacementHistoryNamespace);
-    write_ops::UpdateOpEntry upsertEntry;
-    upsertEntry.setQ(BSON(NamespacePlacementType::kNssFieldName
-                          << placementInfo.getNss().ns()
-                          << NamespacePlacementType::kTimestampFieldName
-                          << placementInfo.getTimestamp()));
-    upsertEntry.setU(write_ops::UpdateModification::parseFromClassicUpdate(placementInfo.toBSON()));
-    upsertEntry.setMulti(false);
-    // Upsert to account for concurrent migrations.
-    upsertEntry.setUpsert(true);
-    upsertRequest.setUpdates({std::move(upsertEntry)});
-    return upsertRequest;
-};
 
 }  // namespace
 
@@ -537,7 +519,7 @@ ShardingCatalogManager::_splitChunkInTransaction(OperationContext* opCtx,
     // We need to use a shared pointer to prevent an scenario where the operation context is
     // interrupted and the scope containing SyncTransactionWithRetries goes away but the callback is
     // called from the executor thread.
-    // TODO SERVER-66261: remove after SERVER-66261 is committed.
+    // TODO SERVER-75189: remove after SERVER-66261 is committed.
     struct SharedBlock {
         SharedBlock(const NamespaceString& nss_,
                     const ChunkRange& range_,
@@ -782,8 +764,13 @@ ShardingCatalogManager::commitChunkSplit(OperationContext* opCtx,
         appendShortVersion(&logDetail.subobjStart("right"), splitChunkResult.newChunks->at(1));
         logDetail.append("owningShard", shardName);
 
-        ShardingLogging::get(opCtx)->logChange(
-            opCtx, "split", nss.ns(), logDetail.obj(), WriteConcernOptions());
+        ShardingLogging::get(opCtx)->logChange(opCtx,
+                                               "split",
+                                               nss.ns(),
+                                               logDetail.obj(),
+                                               WriteConcernOptions(),
+                                               _localConfigShard,
+                                               _localCatalogClient.get());
     } else {
         BSONObj beforeDetailObj = logDetail.obj();
         BSONObj firstDetailObj = beforeDetailObj.getOwned();
@@ -798,8 +785,14 @@ ShardingCatalogManager::commitChunkSplit(OperationContext* opCtx,
                                splitChunkResult.newChunks->at(i));
             chunkDetail.append("owningShard", shardName);
 
-            const auto status = ShardingLogging::get(opCtx)->logChangeChecked(
-                opCtx, "multi-split", nss.ns(), chunkDetail.obj(), WriteConcernOptions());
+            const auto status =
+                ShardingLogging::get(opCtx)->logChangeChecked(opCtx,
+                                                              "multi-split",
+                                                              nss.ns(),
+                                                              chunkDetail.obj(),
+                                                              WriteConcernOptions(),
+                                                              _localConfigShard,
+                                                              _localCatalogClient.get());
 
             // Stop logging if the last log op failed because the primary stepped down
             if (status.code() == ErrorCodes::InterruptedDueToReplStateChange)
@@ -1043,8 +1036,15 @@ ShardingCatalogManager::commitChunksMerge(OperationContext* opCtx,
         opCtx, nss, coll.getUuid(), mergeVersion, validAfter, chunkRange, shardId, chunksToMerge);
 
     // 5. log changes
-    logMergeToChangelog(
-        opCtx, nss, initialVersion, mergeVersion, shardId, chunkRange, chunksToMerge->size());
+    logMergeToChangelog(opCtx,
+                        nss,
+                        initialVersion,
+                        mergeVersion,
+                        shardId,
+                        chunkRange,
+                        chunksToMerge->size(),
+                        _localConfigShard,
+                        _localCatalogClient.get());
 
     return ShardAndCollectionPlacementVersions{mergeVersion /*shardPlacementVersion*/,
                                                mergeVersion /*collectionPlacementVersion*/};
@@ -1198,7 +1198,9 @@ ShardingCatalogManager::commitMergeAllChunksOnShard(OperationContext* opCtx,
                                 newChunk.getVersion(),
                                 shardId,
                                 newChunk.getRange(),
-                                numMergedChunks.second.at(i));
+                                numMergedChunks.second.at(i),
+                                _localConfigShard,
+                                _localCatalogClient.get());
 
             // we can know the prevVersion since newChunks vector is sorted by version
             prevVersion = newChunk.getVersion();
@@ -2393,8 +2395,9 @@ void ShardingCatalogManager::_commitChunkMigrationInTransaction(
         // descriptor.
         auto persistPlacementInfoSubchain = [txnExec,
                                              &txnClient](NamespacePlacementType&& placementInfo) {
-            auto upsertRequest = composePlacementUpsertRequest(placementInfo);
-            return txnClient.runCRUDOp(upsertRequest, {})
+            write_ops::InsertCommandRequest insertPlacementEntry(
+                NamespaceString::kConfigsvrPlacementHistoryNamespace, {placementInfo.toBSON()});
+            return txnClient.runCRUDOp(insertPlacementEntry, {})
                 .thenRunOn(txnExec)
                 .then([](const BatchedCommandResponse& insertPlacementEntryResponse) {
                     uassertStatusOK(insertPlacementEntryResponse.toStatus());
@@ -2425,8 +2428,11 @@ void ShardingCatalogManager::_commitChunkMigrationInTransaction(
                         NamespacePlacementType placementInfo(
                             nss, migrationCommitTime, std::move(shardIds));
                         placementInfo.setUuid(collUuid);
-                        auto request = composePlacementUpsertRequest(placementInfo);
-                        return txnClient.runCRUDOp(request, {});
+                        write_ops::InsertCommandRequest insertPlacementEntry(
+                            NamespaceString::kConfigsvrPlacementHistoryNamespace,
+                            {placementInfo.toBSON()});
+
+                        return txnClient.runCRUDOp(insertPlacementEntry, {});
                     })
                     .thenRunOn(txnExec)
                     .then([](const BatchedCommandResponse& insertPlacementEntryResponse) {

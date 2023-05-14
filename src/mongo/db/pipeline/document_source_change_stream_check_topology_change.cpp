@@ -87,9 +87,8 @@ DocumentSource::GetNextResult DocumentSourceChangeStreamCheckTopologyChange::doG
     return nextInput;
 }
 
-Value DocumentSourceChangeStreamCheckTopologyChange::serialize(
-    boost::optional<ExplainOptions::Verbosity> explain) const {
-    if (explain) {
+Value DocumentSourceChangeStreamCheckTopologyChange::serialize(SerializationOptions opts) const {
+    if (opts.verbosity) {
         return Value(DOC(DocumentSourceChangeStream::kStageName
                          << DOC("stage"
                                 << "internalCheckTopologyChange"_sd)));

@@ -119,7 +119,6 @@ protected:
                                          timestamp,
                                          boost::none /* timeseriesFields */,
                                          boost::none /* reshardingFields */,
-                                         boost::none /* maxChunkSizeBytes */,
                                          true /* allowMigrations */,
                                          chunks);
 
@@ -144,10 +143,13 @@ protected:
         return kSampledReadCommandNames[getRandomInt(kSampledReadCommandNames.size())];
     }
 
-    SampledQueryDocument makeSampledReadQueryDocument(SampledCommandNameEnum cmdName,
-                                                      const BSONObj& filter,
-                                                      const BSONObj& collation = BSONObj()) const {
+    SampledQueryDocument makeSampledReadQueryDocument(
+        SampledCommandNameEnum cmdName,
+        const BSONObj& filter,
+        const BSONObj& collation = BSONObj(),
+        const boost::optional<BSONObj>& letParameters = boost::none) const {
         auto cmd = SampledReadCommand{filter, collation};
+        cmd.setLet(letParameters);
         return {UUID::gen(),
                 nss,
                 collUuid,
@@ -159,9 +161,11 @@ protected:
     }
 
     SampledQueryDocument makeSampledUpdateQueryDocument(
-        const std::vector<write_ops::UpdateOpEntry>& updateOps) const {
+        const std::vector<write_ops::UpdateOpEntry>& updateOps,
+        const boost::optional<BSONObj>& letParameters = boost::none) const {
         write_ops::UpdateCommandRequest cmd(nss);
         cmd.setUpdates(updateOps);
+        cmd.setLet(letParameters);
         return {UUID::gen(),
                 nss,
                 collUuid,
@@ -173,9 +177,11 @@ protected:
     }
 
     SampledQueryDocument makeSampledDeleteQueryDocument(
-        const std::vector<write_ops::DeleteOpEntry>& deleteOps) const {
+        const std::vector<write_ops::DeleteOpEntry>& deleteOps,
+        const boost::optional<BSONObj>& letParameters = boost::none) const {
         write_ops::DeleteCommandRequest cmd(nss);
         cmd.setDeletes(deleteOps);
+        cmd.setLet(letParameters);
         return {UUID::gen(),
                 nss,
                 collUuid,
@@ -191,13 +197,15 @@ protected:
         const write_ops::UpdateModification& update,
         bool upsert,
         bool remove,
-        const BSONObj& collation = BSONObj()) const {
+        const BSONObj& collation = BSONObj(),
+        const boost::optional<BSONObj>& letParameters = boost::none) const {
         write_ops::FindAndModifyCommandRequest cmd(nss);
         cmd.setQuery(filter);
         cmd.setUpdate(update);
         cmd.setUpsert(upsert);
         cmd.setRemove(remove);
         cmd.setCollation(collation);
+        cmd.setLet(letParameters);
         return {UUID::gen(),
                 nss,
                 collUuid,
@@ -821,6 +829,27 @@ TEST_F(ReadDistributionFilterByShardKeyEqualityTest, ShardKeyEqualityHashed) {
                         hasCollatableType);
 }
 
+TEST_F(ReadDistributionFilterByShardKeyEqualityTest, ShardKeyEqualityExpressionWithLetParameters) {
+    auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
+    auto filter = BSON("$expr" << BSON("$and" << BSON_ARRAY(BSON("$eq" << BSON_ARRAY("$a.x"
+                                                                                     << "$$value"))
+                                                            << BSON("$eq" << BSON_ARRAY("$b.y"
+                                                                                        << "A")))));
+    auto collation = BSONObj();
+    auto letParameters = BSON("value" << 100);
+
+    auto numByRange = std::vector<int64_t>({0, 0, 1});
+    auto hasSimpleCollation = true;
+    auto hasCollatableType = true;
+
+    assertTargetMetrics(targeter,
+                        makeSampledReadQueryDocument(
+                            getRandomSampledReadCommandName(), filter, collation, letParameters),
+                        numByRange,
+                        hasSimpleCollation,
+                        hasCollatableType);
+}
+
 class ReadDistributionFilterByShardKeyRangeTest : public ReadWriteDistributionTest {
 protected:
     void assertTargetMetrics(const CollectionRoutingInfoTargeter& targeter,
@@ -966,18 +995,35 @@ TEST_F(ReadDistributionNotFilterByShardKeyTest, ShardKeyPrefixEqualityDotted) {
                         makeSampledReadQueryDocument(getRandomSampledReadCommandName(), filter));
 }
 
+TEST_F(ReadDistributionNotFilterByShardKeyTest, RuntimeConstants) {
+    auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
+    auto filter = BSON(
+        "$expr" << BSON("$and" << BSON_ARRAY(BSON("$eq" << BSON_ARRAY("$ts"
+                                                                      << "$$NOW"))
+                                             << BSON("$eq" << BSON_ARRAY("$clusterTime"
+                                                                         << "$$CLUSTER_TIME")))));
+    assertTargetMetrics(targeter,
+                        makeSampledReadQueryDocument(getRandomSampledReadCommandName(), filter));
+}
+
 class WriteDistributionFilterByShardKeyEqualityTest : public ReadWriteDistributionTest {
 protected:
     void assertTargetMetrics(const CollectionRoutingInfoTargeter& targeter,
                              const SampledQueryDocument& queryDoc,
                              const std::vector<int64_t>& numByRange,
                              bool hasSimpleCollation,
-                             bool hasCollatableType) const {
+                             bool hasCollatableType,
+                             bool multi = false) const {
         WriteMetrics metrics;
         if (hasSimpleCollation || !hasCollatableType) {
             metrics.numSingleShard = 1;
         } else {
             metrics.numMultiShard = 1;
+            if (multi) {
+                metrics.numMultiWritesWithoutShardKey = 1;
+            } else {
+                metrics.numSingleWritesWithoutShardKey = 1;
+            }
         }
         metrics.numByRange = numByRange;
         assertMetricsForWriteQuery(targeter, queryDoc, metrics);
@@ -989,32 +1035,38 @@ protected:
     SampledQueryDocument makeSampledUpdateQueryDocument(
         const BSONObj& filter,
         const BSONObj& updateMod,
-        const BSONObj& collation = BSONObj()) const {
+        const BSONObj& collation = BSONObj(),
+        bool multi = false,
+        const boost::optional<BSONObj>& letParameters = boost::none) const {
         auto updateOp = write_ops::UpdateOpEntry(filter, write_ops::UpdateModification(updateMod));
-        updateOp.setMulti(getRandomBool());
+        updateOp.setMulti(multi);
         updateOp.setUpsert(getRandomBool());
         updateOp.setCollation(collation);
-        return ReadWriteDistributionTest::makeSampledUpdateQueryDocument({updateOp});
+        return ReadWriteDistributionTest::makeSampledUpdateQueryDocument({updateOp}, letParameters);
     }
 
     SampledQueryDocument makeSampledDeleteQueryDocument(
-        const BSONObj& filter, const BSONObj& collation = BSONObj()) const {
-        auto deleteOp = write_ops::DeleteOpEntry(filter, getRandomBool() /* multi */);
+        const BSONObj& filter,
+        const BSONObj& collation = BSONObj(),
+        bool multi = false,
+        const boost::optional<BSONObj>& letParameters = boost::none) const {
+        auto deleteOp = write_ops::DeleteOpEntry(filter, multi);
         deleteOp.setCollation(collation);
-        return ReadWriteDistributionTest::makeSampledDeleteQueryDocument({deleteOp});
+        return ReadWriteDistributionTest::makeSampledDeleteQueryDocument({deleteOp}, letParameters);
     }
 
     SampledQueryDocument makeSampledFindAndModifyQueryDocument(
         const BSONObj& filter,
         const BSONObj& updateMod,
-        const BSONObj& collation = BSONObj()) const {
-
+        const BSONObj& collation = BSONObj(),
+        const boost::optional<BSONObj>& letParameters = boost::none) const {
         return ReadWriteDistributionTest::makeSampledFindAndModifyQueryDocument(
             filter,
             updateMod,
             getRandomBool() /* upsert */,
             getRandomBool() /* remove */,
-            collation);
+            collation,
+            letParameters);
     }
 };
 
@@ -1116,29 +1168,35 @@ TEST_F(WriteDistributionFilterByShardKeyEqualityTest,
                              const BSONObj& filter,
                              const BSONObj& updateMod,
                              const std::vector<int64_t>& numByRange) {
-        // The collection has a non-simple default collation and the query specifies an empty
-        // collation.
-        auto targeter0 = makeCollectionRoutingInfoTargeter(
-            chunkSplitInfo,
-            uassertStatusOK(CollatorFactoryInterface::get(getServiceContext())
-                                ->makeFromBSON(caseInsensitiveCollation)));
-        assertTargetMetrics(targeter0,
-                            makeSampledUpdateQueryDocument(filter, updateMod, emptyCollation),
-                            numByRange,
-                            hasSimpleCollation,
-                            hasCollatableType);
+        for (auto& multi : {true, false}) {
+            // The collection has a non-simple default collation and the query specifies an empty
+            // collation.
+            auto targeter0 = makeCollectionRoutingInfoTargeter(
+                chunkSplitInfo,
+                uassertStatusOK(CollatorFactoryInterface::get(getServiceContext())
+                                    ->makeFromBSON(caseInsensitiveCollation)));
+            assertTargetMetrics(
+                targeter0,
+                makeSampledUpdateQueryDocument(filter, updateMod, emptyCollation, multi),
+                numByRange,
+                hasSimpleCollation,
+                hasCollatableType,
+                multi);
 
-        // The collection has a simple default collation and the query specifies a non-simple
-        // collation.
-        auto targeter1 = makeCollectionRoutingInfoTargeter(
-            chunkSplitInfo,
-            uassertStatusOK(
-                CollatorFactoryInterface::get(getServiceContext())->makeFromBSON(simpleCollation)));
-        assertTargetMetrics(targeter1,
-                            makeSampledDeleteQueryDocument(filter, caseInsensitiveCollation),
-                            numByRange,
-                            hasSimpleCollation,
-                            hasCollatableType);
+            // The collection has a simple default collation and the query specifies a non-simple
+            // collation.
+            auto targeter1 = makeCollectionRoutingInfoTargeter(
+                chunkSplitInfo,
+                uassertStatusOK(CollatorFactoryInterface::get(getServiceContext())
+                                    ->makeFromBSON(simpleCollation)));
+            assertTargetMetrics(
+                targeter1,
+                makeSampledDeleteQueryDocument(filter, caseInsensitiveCollation, multi),
+                numByRange,
+                hasSimpleCollation,
+                hasCollatableType,
+                multi);
+        }
 
         // The collection doesn't have a default collation and the query specifies a non-simple
         // collation.
@@ -1346,6 +1404,43 @@ TEST_F(WriteDistributionFilterByShardKeyEqualityTest, ShardKeyEqualitySuffixFiel
                         numByRange,
                         hasSimpleCollation,
                         hasCollatableType);
+}
+
+TEST_F(WriteDistributionFilterByShardKeyEqualityTest, ShardKeyEqualityExpressionWithLetParameters) {
+    auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
+    auto filter = BSON("$expr" << BSON("$and" << BSON_ARRAY(BSON("$eq" << BSON_ARRAY("$a.x"
+                                                                                     << "$$value"))
+                                                            << BSON("$eq" << BSON_ARRAY("$b.y"
+                                                                                        << "A")))));
+    auto updateMod = BSON("$set" << BSON("c" << 100));
+    auto collation = BSONObj();
+    auto letParameters = BSON("value" << 100);
+
+    auto numByRange = std::vector<int64_t>({0, 0, 1});
+    auto hasSimpleCollation = true;
+    auto hasCollatableType = true;
+
+    for (auto& multi : {true, false}) {
+        assertTargetMetrics(
+            targeter,
+            makeSampledUpdateQueryDocument(filter, updateMod, collation, multi, letParameters),
+            numByRange,
+            hasSimpleCollation,
+            hasCollatableType,
+            multi);
+        assertTargetMetrics(targeter,
+                            makeSampledDeleteQueryDocument(filter, collation, multi, letParameters),
+                            numByRange,
+                            hasSimpleCollation,
+                            hasCollatableType,
+                            multi);
+    }
+    assertTargetMetrics(
+        targeter,
+        makeSampledFindAndModifyQueryDocument(filter, updateMod, collation, letParameters),
+        numByRange,
+        hasSimpleCollation,
+        hasCollatableType);
 }
 
 class WriteDistributionFilterByShardKeyRangeTest : public ReadWriteDistributionTest {

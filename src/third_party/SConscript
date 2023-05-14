@@ -11,6 +11,8 @@ Import([
     'use_system_version_of_library',
     'use_vendored_libunwind',
     'wiredtiger',
+    'releaseBuild',
+    'ssl_provider',
 ])
 
 snappySuffix = '-1.1.7'
@@ -33,6 +35,7 @@ thirdPartyEnvironmentModifications = {
     'libkmip': {'CPPPATH': ['#/src/third_party/libkmip' + libkmipSuffix + '/libkmip/include'], },
     'kmippp' : {'CPPPATH': ['#/src/third_party/libkmip' + libkmipSuffix], },
     'fmt': {'CPPPATH': ['#src/third_party/fmt/dist/include'], },
+    'immer': {'CPPPATH': ['#src/third_party/immer/dist'], },
     's2': {'CPPPATH': ['#src/third_party/s2'], },
     'safeint': {
         'CPPPATH': ['#src/third_party/SafeInt'],
@@ -52,6 +55,12 @@ thirdPartyEnvironmentModifications = {
         'FORCEINCLUDES': ['js-config.h', ],
     },
     'murmurhash3': {'CPPPATH': ['#src/third_party/murmurhash3', ], },
+    'librdkafka': {
+        'CPPPATH': [
+            '#/src/third_party/librdkafka/dist/src',
+            '#/src/third_party/librdkafka/dist/src-cpp',
+        ],
+    },
 }
 
 
@@ -237,6 +246,9 @@ if not use_system_version_of_library('protobuf'):
     }
 
 if not use_system_version_of_library('grpc'):
+    thirdPartyEnvironmentModifications['grpc'] = {
+        'CPPPATH': ['#src/third_party/grpc/dist/include'],
+    }
     thirdPartyEnvironmentModifications['re2'] = {
         'CPPPATH': ['#src/third_party/re2/dist'],
     }
@@ -272,6 +284,16 @@ def injectThirdParty(thisEnv, libraries=[], parts=[]):
 
 
 env.AddMethod(injectThirdParty, 'InjectThirdParty')
+
+
+def shouldBuildStreams(thisEnv):
+    # TODO https://jira.mongodb.org/browse/SERVER-74963: Streams release builds.
+    # TODO https://jira.mongodb.org/browse/SERVER-74961: Support other platforms.
+    return not releaseBuild and thisEnv.TargetOSIs(
+        'linux') and thisEnv['TARGET_ARCH'] == 'x86_64' and ssl_provider == 'openssl'
+
+
+env.AddMethod(shouldBuildStreams, 'ShouldBuildStreams')
 
 env = env.Clone()
 
@@ -762,4 +784,13 @@ kmipppEnv.Library(
     target='shim_kmippp',
     source=[
         'shim_kmippp.cpp',
+    ])
+
+if env.ShouldBuildStreams():
+    libKafkaEnv = env.Clone()
+    libKafkaEnv.InjectThirdParty(libraries=['librdkafka'])
+    libKafkaEnv.SConscript('librdkafka/SConscript', exports={'env': libKafkaEnv})
+    libKafkaEnv = libKafkaEnv.Clone(LIBDEPS_INTERFACE=[
+        'librdkafka/rdkafka',
+        'librdkafka/rdkafka++',
     ])

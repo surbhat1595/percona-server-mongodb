@@ -229,10 +229,15 @@ IndexEntry indexEntryFromIndexCatalogEntry(OperationContext* opCtx,
             MultikeyMetadataAccessStats mkAccessStats;
 
             if (canonicalQuery) {
-                stdx::unordered_set<std::string> fields;
-                QueryPlannerIXSelect::getFields(canonicalQuery->root(), &fields);
-                const auto projectedFields = projection_executor_utils::applyProjectionToFields(
-                    wildcardProjection->exec(), fields);
+                RelevantFieldIndexMap fieldIndexProps;
+                QueryPlannerIXSelect::getFields(canonicalQuery->root(), &fieldIndexProps);
+                stdx::unordered_set<std::string> projectedFields;
+                for (auto&& [fieldName, _] : fieldIndexProps) {
+                    if (projection_executor_utils::applyProjectionToOneField(
+                            wildcardProjection->exec(), fieldName)) {
+                        projectedFields.insert(fieldName);
+                    }
+                }
 
                 multikeyPathSet =
                     getWildcardMultikeyPathSet(wam, opCtx, projectedFields, &mkAccessStats);
@@ -1500,6 +1505,10 @@ bool maybeQueryIsColumnScanEligible(OperationContext* opCtx,
  * 'featureFlagSbeFull' being set; false otherwise.
  */
 bool shouldUseRegularSbe(const CanonicalQuery& cq) {
+    if (cq.getExpCtx()->sbeCompatibility != SbeCompatibility::fullyCompatible) {
+        return false;
+    }
+
     const auto* proj = cq.getProj();
 
     // Disallow projections which use expressions.
@@ -1978,7 +1987,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
         !deleteStageParams->numStatsForDoc;
 
     auto expCtxRaw = cq->getExpCtxRaw();
-    if (parsedDelete->getResidualExpr()) {
+    if (parsedDelete->isEligibleForArbitraryTimeseriesDelete()) {
         // Checks if the delete is on a time-series collection and cannot run on bucket documents
         // directly.
         root = std::make_unique<TimeseriesModifyStage>(

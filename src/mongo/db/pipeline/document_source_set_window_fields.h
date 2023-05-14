@@ -77,8 +77,7 @@ struct WindowFunctionStatement {
         }
     }
 
-    void serialize(MutableDocument& outputFields,
-                   boost::optional<ExplainOptions::Verbosity> explain) const;
+    void serialize(MutableDocument& outputFields, SerializationOptions opts) const;
 };
 
 /**
@@ -184,11 +183,7 @@ public:
 
     boost::intrusive_ptr<DocumentSource> optimize() final;
 
-    Value serialize(boost::optional<ExplainOptions::Verbosity> explain) const;
-
-    Value serialize(SerializationOptions opts) const final override {
-        MONGO_UNIMPLEMENTED;
-    }
+    Value serialize(SerializationOptions opts = SerializationOptions()) const final override;
 
     DocumentSource::GetNextResult doGetNext();
 

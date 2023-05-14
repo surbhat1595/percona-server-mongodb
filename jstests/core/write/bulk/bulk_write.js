@@ -5,7 +5,7 @@
  * @tags: [
  *   assumes_against_mongod_not_mongos,
  *   not_allowed_with_security_token,
- *   # Until bulkWrite is compatible with retryable writes.
+ *   # TODO SERVER-72988: Until bulkWrite is compatible with retryable writes.
  *   requires_non_retryable_writes,
  *   # Command is not yet compatible with tenant migration.
  *   tenant_migration_incompatible,
@@ -228,4 +228,6 @@ assert.commandWorked(db.adminCommand({
 }));
 
 assert.eq(1, coll.count({_id: 3}));
+
+coll.drop();
 })();

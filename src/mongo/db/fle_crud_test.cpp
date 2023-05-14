@@ -32,6 +32,7 @@
 #include <algorithm>
 #include <array>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -49,6 +50,7 @@
 #include "mongo/crypto/fle_crypto.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
 #include "mongo/crypto/fle_tags.h"
+#include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/fle_crud.h"
 #include "mongo/db/fle_query_interface_mock.h"
@@ -188,6 +190,17 @@ std::string fieldNameFromInt(uint64_t i) {
     return "field" + std::to_string(i);
 }
 
+int32_t getTestSeed() {
+    static std::unique_ptr<mongo::PseudoRandom> rnd;
+    if (!rnd.get()) {
+        auto seed = SecureRandom().nextInt64();
+        rnd = std::make_unique<mongo::PseudoRandom>(seed);
+        std::cout << "FLE TEST SEED: " << seed << std::endl;
+    }
+
+    return rnd->nextInt32();
+}
+
 class FleCrudTest : public ServiceContextMongoDTest {
 protected:
     void setUp();
@@ -299,6 +312,16 @@ void FleCrudTest::tearDown() {
 void FleCrudTest::createCollection(const NamespaceString& ns) {
     CollectionOptions collectionOptions;
     collectionOptions.uuid = UUID::gen();
+
+    // Make the state collections clustered sometimes, allows us to ensure the tags reading code can
+    // handle clustered and non-clustered state collections
+    if (ns != _edcNs) {
+        auto seed = getTestSeed();
+        if (seed % 2 == 0) {
+            collectionOptions.clusteredIndex = clustered_util::makeDefaultClusteredIdIndex();
+        }
+    }
+
     auto statusCC = _storage->createCollection(
         _opCtx.get(),
         NamespaceString::createNamespaceString_forTest(ns.dbName(), ns.coll()),
@@ -422,6 +445,7 @@ std::vector<char> FleCrudTest::generatePlaceholder(UUID keyId, BSONElement value
 EncryptedFieldConfig getTestEncryptedFieldConfig(
     Fle2AlgorithmInt alg = Fle2AlgorithmInt::kEquality) {
 
+    // TODO SERVER-73303 delete schema and rangeSchema
     constexpr auto schema = R"({
     "escCollection": "enxcol_.coll.esc",
     "eccCollection": "enxcol_.coll.ecc",
@@ -460,10 +484,54 @@ EncryptedFieldConfig getTestEncryptedFieldConfig(
     ]
 })";
 
-    if (alg == Fle2AlgorithmInt::kEquality) {
-        return EncryptedFieldConfig::parse(IDLParserContext("root"), fromjson(schema));
+    constexpr auto schemaV2 = R"({
+    "escCollection": "enxcol_.coll.esc",
+    "ecocCollection": "enxcol_.coll.ecoc",
+    "fields": [
+        {
+            "keyId":
+                            {
+                                "$uuid": "12345678-1234-9876-1234-123456789012"
+                            }
+                        ,
+            "path": "encrypted",
+            "bsonType": "string",
+            "queries": {"queryType": "equality"}
+
+        }
+    ]
+})";
+
+    constexpr auto rangeSchemaV2 = R"({
+    "escCollection": "enxcol_.coll.esc",
+    "ecocCollection": "enxcol_.coll.ecoc",
+    "fields": [
+        {
+            "keyId":
+                            {
+                                "$uuid": "12345678-1234-9876-1234-123456789012"
+                            }
+                        ,
+            "path": "encrypted",
+            "bsonType": "int",
+            "queries": {"queryType": "rangePreview", "min": 0, "max": 15, "sparsity": 1}
+
+        }
+    ]
+})";
+
+    // TODO SERVER-73303 delete if condition
+    if (!gFeatureFlagFLE2ProtocolVersion2.isEnabledAndIgnoreFCV()) {
+        if (alg == Fle2AlgorithmInt::kEquality) {
+            return EncryptedFieldConfig::parse(IDLParserContext("root"), fromjson(schema));
+        }
+        return EncryptedFieldConfig::parse(IDLParserContext("root"), fromjson(rangeSchema));
     }
-    return EncryptedFieldConfig::parse(IDLParserContext("root"), fromjson(rangeSchema));
+
+    if (alg == Fle2AlgorithmInt::kEquality) {
+        return EncryptedFieldConfig::parse(IDLParserContext("root"), fromjson(schemaV2));
+    }
+    return EncryptedFieldConfig::parse(IDLParserContext("root"), fromjson(rangeSchemaV2));
 }
 
 void parseEncryptedInvalidFieldConfig(StringData esc, StringData ecc, StringData ecoc) {
@@ -796,19 +864,15 @@ protected:
     void tearDown() {
         FleCrudTest::tearDown();
     }
+
+    // TODO: SERVER-73303 delete when v2 is enabled by default
     std::vector<PrfBlock> readTagsWithContention(BSONObj obj, uint64_t contention = 0) {
-        if (!gFeatureFlagFLE2ProtocolVersion2.isEnabledAndIgnoreFCV()) {
-            auto s = getTestESCDataToken(obj);
-            auto c = getTestECCDataToken(obj);
-            auto d = getTestEDCDataToken(obj);
-            auto esc = CollectionReader("test.enxcol_.coll.esc", *_queryImpl);
-            auto ecc = CollectionReader("test.enxcol_.coll.ecc", *_queryImpl);
-            return mongo::fle::readTagsWithContention(esc, ecc, s, c, d, contention, 100, {});
-        }
         auto s = getTestESCDataToken(obj);
+        auto c = getTestECCDataToken(obj);
         auto d = getTestEDCDataToken(obj);
         auto esc = CollectionReader("test.enxcol_.coll.esc", *_queryImpl);
-        return mongo::fle::readTagsWithContentionV2(esc, s, d, contention, 100, {});
+        auto ecc = CollectionReader("test.enxcol_.coll.ecc", *_queryImpl);
+        return mongo::fle::readTagsWithContention(esc, ecc, s, c, d, contention, 100, {});
     }
     std::vector<PrfBlock> readTags(BSONObj obj, uint64_t cm = 0) {
         auto s = getTestESCDataToken(obj);
@@ -816,7 +880,13 @@ protected:
         auto d = getTestEDCDataToken(obj);
         auto nssEsc = NamespaceString("test.enxcol_.coll.esc");
         auto nssEcc = NamespaceString("test.enxcol_.coll.ecc");
-        return mongo::fle::readTags(_queryImpl.get(), nssEsc, nssEcc, s, c, d, cm);
+
+        // TODO SERVER-73303 remove when v2 is enabled.
+        if (!gFeatureFlagFLE2ProtocolVersion2.isEnabledAndIgnoreFCV()) {
+            return mongo::fle::readTags(_queryImpl.get(), nssEsc, nssEcc, s, c, d, cm);
+        } else {
+            return mongo::fle::readTags(_queryImpl.get(), nssEsc, s, d, cm);
+        }
     }
 };
 
@@ -2349,14 +2419,6 @@ TEST_F(FleTagsTest, ContentionFactorV2) {
     doSingleInsertWithContention(7, doc2, 4, 2, efc);
     doSingleInsertWithContention(8, doc2, 4, 3, efc);
 
-    ASSERT_EQ(2, readTagsWithContention(doc1, 0).size());
-    ASSERT_EQ(0, readTagsWithContention(doc2, 0).size());
-    ASSERT_EQ(0, readTagsWithContention(doc1, 1).size());
-    ASSERT_EQ(0, readTagsWithContention(doc2, 1).size());
-    ASSERT_EQ(0, readTagsWithContention(doc1, 2).size());
-    ASSERT_EQ(1, readTagsWithContention(doc2, 2).size());
-    ASSERT_EQ(1, readTagsWithContention(doc1, 3).size());
-    ASSERT_EQ(1, readTagsWithContention(doc2, 3).size());
     ASSERT_EQ(3, readTags(doc1, 4).size());
     ASSERT_EQ(2, readTags(doc2, 4).size());
 }

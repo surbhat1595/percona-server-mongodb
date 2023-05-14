@@ -31,8 +31,6 @@
 
 #include "mongo/idl/idl_parser.h"
 #include "mongo/platform/random.h"
-#include "mongo/s/analyze_shard_key_role.h"
-#include "mongo/s/query_analysis_sampler.h"
 #include "mongo/util/static_immortal.h"
 #include "mongo/util/synchronized_value.h"
 
@@ -63,7 +61,7 @@ StringData adjustCmdNameCase(const StringData& cmdName) {
 boost::optional<UUID> tryGenerateSampleId(OperationContext* opCtx,
                                           const NamespaceString& nss,
                                           const SampledCommandNameEnum cmdName) {
-    return supportsSamplingQueries()
+    return supportsSamplingQueries(opCtx)
         ? QueryAnalysisSampler::get(opCtx).tryGenerateSampleId(opCtx, nss, cmdName)
         : boost::none;
 }

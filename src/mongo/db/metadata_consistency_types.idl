@@ -38,8 +38,10 @@ enums:
         type: string
         values:
             kUUIDMismatch: "UUIDMismatch"
-            kHiddenUnshardedCollection: "HiddenUnshardedCollection"
-    
+            kMisplacedCollection: "MisplacedCollection"
+            kHiddenShardedCollection: "HiddenShardedCollection" 
+            kMissingShardKeyIndex: "MissingShardKeyIndex"
+
     MetadataConsistencyCommandLevel:
         description: "Level mode of the metadata consistency command."
         type: string

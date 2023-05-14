@@ -42,15 +42,29 @@
 #include "mongo/s/request_types/sharded_ddl_commands_gen.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
 
-
 namespace mongo {
 namespace {
 
-// We must allow some amount of overhead per result document, since when we make a cursor response
-// the documents are elements of a BSONArray. The overhead is 1 byte/doc for the type + 1 byte/doc
-// for the field name's null terminator + 1 byte per digit in the array index. The index can be no
-// more than 8 decimal digits since the response is at most 16MB, and 16 * 1024 * 1024 < 1 * 10^8.
-static const int kPerDocumentOverheadBytesUpperBound = 10;
+/*
+ * Return the set of shards that are primaries for at least one database
+ */
+stdx::unordered_set<ShardId> getAllDbPrimaryShards(OperationContext* opCtx) {
+    static const std::vector<BSONObj> rawPipeline{fromjson(R"({
+        $group: {
+            _id: '$primary'
+        }
+    })")};
+    AggregateCommandRequest aggRequest{NamespaceString::kConfigDatabasesNamespace, rawPipeline};
+    auto aggResponse = Grid::get(opCtx)->catalogClient()->runCatalogAggregation(
+        opCtx, aggRequest, {repl::ReadConcernLevel::kMajorityReadConcern});
+
+    stdx::unordered_set<ShardId> shardIds;
+    shardIds.reserve(aggResponse.size());
+    for (auto&& responseEntry : aggResponse) {
+        shardIds.insert(responseEntry.firstElement().str());
+    }
+    return shardIds;
+}
 
 MetadataConsistencyCommandLevelEnum getCommandLevel(const NamespaceString& nss) {
     if (nss.isAdminDB()) {
@@ -102,30 +116,18 @@ public:
                 "cluster level mode must be run against the 'admin' database with {aggregate: 1}",
                 nss.isCollectionlessCursorNamespace());
 
-            const auto catalogClient = Grid::get(opCtx)->catalogClient();
-            // TODO: SERVER-73978: Retrieve directly from configsvr a list of shards with its
-            // corresponding primary databases.
-            const auto databases =
-                catalogClient->getAllDBs(opCtx, repl::ReadConcernLevel::kMajorityReadConcern);
-
             std::vector<std::pair<ShardId, BSONObj>> requests;
             ShardsvrCheckMetadataConsistency shardsvrRequest{nss};
-            shardsvrRequest.setDbName(nss.db());
             shardsvrRequest.setCursor(request().getCursor());
 
-            // Send a unique request per shard that is a primary shard for, at least, one database.
-            std::set<ShardId> shardIds;
-            for (const auto& db : databases) {
-                const auto insertionRes = shardIds.insert(db.getPrimary());
-                if (insertionRes.second) {
-                    // The shard was not in the set, so we need to send a request to it.
-                    requests.emplace_back(db.getPrimary(), shardsvrRequest.toBSON({}));
-                }
+            // Send a request to all shards that are primaries for at least one database
+            for (auto&& shardId : getAllDbPrimaryShards(opCtx)) {
+                requests.emplace_back(std::move(shardId), shardsvrRequest.toBSON({}));
             }
 
             // Send a request to the configsvr to check cluster metadata consistency.
-            ConfigsvrCheckClusterMetadataConsistency configsvrRequest{nss};
-            configsvrRequest.setDbName(nss.db());
+            ConfigsvrCheckClusterMetadataConsistency configsvrRequest;
+            configsvrRequest.setDbName(DatabaseName::kAdmin);
             configsvrRequest.setCursor(request().getCursor());
             requests.emplace_back(ShardId::kConfigServerId, configsvrRequest.toBSON({}));
 
@@ -189,7 +191,6 @@ public:
                                            const NamespaceString& nss,
                                            ClusterClientCursorGuard&& ccc) {
             auto cursorState = ClusterCursorManager::CursorState::NotExhausted;
-            size_t bytesBuffered = 0;
             std::vector<BSONObj> firstBatch;
             const auto& cursorOpts = request().getCursor();
             const auto batchSize = [&] {
@@ -199,7 +200,7 @@ public:
                     return query_request_helper::kDefaultBatchSize;
                 }
             }();
-
+            FindCommon::BSONArrayResponseSizeTracker responseSizeTracker;
             for (long long objCount = 0; objCount < batchSize; objCount++) {
                 auto next = uassertStatusOK(ccc->next());
                 if (next.isEOF()) {
@@ -214,12 +215,11 @@ public:
 
                 // If adding this object will cause us to exceed the message size limit, then we
                 // stash it for later.
-                if (!FindCommon::haveSpaceForNext(nextObj, objCount, bytesBuffered)) {
+                if (!responseSizeTracker.haveSpaceForNext(nextObj)) {
                     ccc->queueResult(nextObj);
                     break;
                 }
-
-                bytesBuffered += nextObj.objsize() + kPerDocumentOverheadBytesUpperBound;
+                responseSizeTracker.add(nextObj);
                 firstBatch.push_back(std::move(nextObj));
             }
 

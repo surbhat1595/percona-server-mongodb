@@ -92,6 +92,7 @@
 #include "mongo/db/views/view.h"
 #include "mongo/db/views/view_catalog_helpers.h"
 #include "mongo/logv2/log.h"
+#include "mongo/s/query_analysis_sampler_util.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/string_map.h"
 
@@ -373,8 +374,8 @@ StatusWith<StringMap<ExpressionContext::ResolvedNamespace>> resolveInvolvedNames
                 // collection name references a view on the aggregation request's database. Note
                 // that the inverse scenario (mistaking a view for a collection) is not an issue
                 // because $merge/$out cannot target a view.
-                auto nssToCheck =
-                    NamespaceString(request.getNamespace().dbName(), involvedNs.coll());
+                auto nssToCheck = NamespaceStringUtil::parseNamespaceFromRequest(
+                    request.getNamespace().dbName(), involvedNs.coll());
                 if (catalog->lookupView(opCtx, nssToCheck)) {
                     auto status = resolveViewDefinition(nssToCheck);
                     if (!status.isOK()) {
@@ -929,8 +930,7 @@ Status runAggregate(OperationContext* opCtx,
                                           resolvedView.getNamespace(),
                                           ShardVersion::UNSHARDED() /* shardVersion */,
                                           boost::none /* databaseVersion */);
-            }
-
+            };
             uassert(std::move(resolvedView),
                     "Explain of a resolved view must be executed by mongos",
                     !ShardingState::get(opCtx)->enabled() || !request.getExplain());
@@ -1010,6 +1010,7 @@ Status runAggregate(OperationContext* opCtx,
         // If the aggregate command supports encrypted collections, do rewrites of the pipeline to
         // support querying against encrypted fields.
         if (shouldDoFLERewrite(request)) {
+            CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
             // After this rewriting, the encryption info does not need to be kept around.
             pipeline = processFLEPipelineD(
                 opCtx, nss, request.getEncryptionInformation().value(), std::move(pipeline));
@@ -1024,12 +1025,17 @@ Status runAggregate(OperationContext* opCtx,
         constexpr bool alreadyOptimized = true;
         pipeline->validateCommon(alreadyOptimized);
 
-        if (analyze_shard_key::supportsPersistingSampledQueries() && request.getSampleId()) {
+        if (auto sampleId = analyze_shard_key::getOrGenerateSampleId(
+                opCtx,
+                expCtx->ns,
+                analyze_shard_key::SampledCommandNameEnum::kAggregate,
+                request)) {
             analyze_shard_key::QueryAnalysisWriter::get(opCtx)
-                ->addAggregateQuery(*request.getSampleId(),
+                ->addAggregateQuery(*sampleId,
                                     expCtx->ns,
                                     pipeline->getInitialQuery(),
-                                    expCtx->getCollatorBSON())
+                                    expCtx->getCollatorBSON(),
+                                    request.getLet())
                 .getAsync([](auto) {});
         }
 
@@ -1178,12 +1184,11 @@ Status runAggregate(OperationContext* opCtx,
         PlanSummaryStats stats;
         planExplainer.getSummaryStats(&stats);
         curOp->debug().setPlanSummaryMetrics(stats);
-        curOp->debug().nreturned = stats.nReturned;
 
         if (keepCursor) {
-            collectTelemetryMongod(opCtx, pins[0]);
+            collectTelemetryMongod(opCtx, pins[0], stats.nReturned);
         } else {
-            collectTelemetryMongod(opCtx);
+            collectTelemetryMongod(opCtx, cmdObj, stats.nReturned);
         }
 
         // For an optimized away pipeline, signal the cache that a query operation has completed.

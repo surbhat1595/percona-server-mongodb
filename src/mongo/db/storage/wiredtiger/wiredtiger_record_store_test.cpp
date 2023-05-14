@@ -911,6 +911,55 @@ TEST(WiredTigerRecordStoreTest, OplogTruncateMarkers_AscendingOrder) {
     }
 }
 
+// When the oplog collection is non-empty, but no OplogTruncateMarkers are
+// generated because the estimated 'dataSize' is smaller than the minimum size for a truncate
+// marker, tets that
+//  (1) The oplog is scanned
+//  (2) OplogTruncateMarkers::currentBytes() reflects the actual size of the oplog instead of the
+//  estimated size.
+TEST(WiredTigerRecordStoreTest, OplogTruncateMarkers_NoMarkersGeneratedFromScanning) {
+    std::unique_ptr<RecordStoreHarnessHelper> harnessHelper = newRecordStoreHarnessHelper();
+    auto wtHarnessHelper = dynamic_cast<WiredTigerHarnessHelper*>(harnessHelper.get());
+    std::unique_ptr<RecordStore> rs(wtHarnessHelper->newOplogRecordStoreNoInit());
+
+    WiredTigerRecordStore* wtrs = static_cast<WiredTigerRecordStore*>(rs.get());
+
+    int realNumRecords = 4;
+    int realSizePerRecord = 100;
+    {
+        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        for (int i = 1; i <= realNumRecords; i++) {
+            ASSERT_EQ(insertBSONWithSize(opCtx.get(), rs.get(), Timestamp(i, 0), realSizePerRecord),
+                      RecordId(i, 0));
+        }
+    }
+
+    // Force the oplog visibility timestamp to be up-to-date to the last record.
+    auto wtKvEngine = dynamic_cast<WiredTigerKVEngine*>(harnessHelper->getEngine());
+    wtKvEngine->getOplogManager()->setOplogReadTimestamp(Timestamp(realNumRecords, 0));
+
+
+    // Force the estimates of 'dataSize' and 'numRecords' to be lower than the real values.
+    wtrs->setNumRecords(realNumRecords - 1);
+    wtrs->setDataSize((realNumRecords - 1) * realSizePerRecord);
+
+    // Initialize the truncate markers.
+    ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+    wtrs->postConstructorInit(opCtx.get(), NamespaceString::kRsOplogNamespace);
+
+    auto oplogTruncateMarkers = wtrs->oplogTruncateMarkers();
+    ASSERT_FALSE(oplogTruncateMarkers->processedBySampling());
+
+    auto numMarkers = oplogTruncateMarkers->numMarkers();
+    ASSERT_EQ(numMarkers, 0U);
+
+    // A forced scan over the RecordStore should force the 'currentBytes' to be accurate in the
+    // truncate markers as well as the RecordStore's 'numRecords' and 'dataSize'.
+    ASSERT_EQ(oplogTruncateMarkers->currentBytes(), realNumRecords * realSizePerRecord);
+    ASSERT_EQ(wtrs->dataSize(opCtx.get()), realNumRecords * realSizePerRecord);
+    ASSERT_EQ(wtrs->numRecords(opCtx.get()), realNumRecords);
+}
+
 // Ensure that if we sample and create duplicate oplog truncate markers, perform truncation
 // correctly, and with no crashing behavior. This scenario may be possible if the same record is
 // sampled multiple times during startup, which can be very likely if the size storer is very
@@ -942,7 +991,7 @@ TEST(WiredTigerRecordStoreTest, OplogTruncateMarkers_Duplicates) {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         wtrs->setNumRecords(1024 * 1024);
         wtrs->setDataSize(1024 * 1024 * 1024);
-        wtrs->postConstructorInit(opCtx.get());
+        wtrs->postConstructorInit(opCtx.get(), NamespaceString::kRsOplogNamespace);
     }
 
     auto oplogTruncateMarkers = wtrs->oplogTruncateMarkers();
@@ -1240,6 +1289,7 @@ TEST(WiredTigerRecordStoreTest, ClusteredRecordStore) {
 
     WiredTigerRecordStore::Params params;
     params.nss = nss;
+    params.uuid = boost::none;
     params.ident = ns;
     params.engineName = kWiredTigerEngineName;
     params.isCapped = false;
@@ -1253,7 +1303,7 @@ TEST(WiredTigerRecordStoreTest, ClusteredRecordStore) {
 
     const auto wtKvEngine = dynamic_cast<WiredTigerKVEngine*>(harnessHelper->getEngine());
     auto rs = std::make_unique<StandardWiredTigerRecordStore>(wtKvEngine, opCtx.get(), params);
-    rs->postConstructorInit(opCtx.get());
+    rs->postConstructorInit(opCtx.get(), nss);
 
     const auto id = StringData{"1"};
     const auto rid = RecordId(id.rawData(), id.size());

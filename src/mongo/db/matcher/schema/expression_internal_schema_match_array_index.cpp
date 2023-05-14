@@ -52,14 +52,8 @@ void InternalSchemaMatchArrayIndexMatchExpression::debugString(StringBuilder& de
 
     BSONObjBuilder builder;
     serialize(&builder, {});
-    debug << builder.obj().toString() << "\n";
-
-    const auto* tag = getTag();
-    if (tag) {
-        debug << " ";
-        tag->debugString(&debug);
-    }
-    debug << "\n";
+    debug << builder.obj().toString();
+    _debugStringAttachTagInfo(&debug);
 }
 
 bool InternalSchemaMatchArrayIndexMatchExpression::equivalent(const MatchExpression* expr) const {
@@ -74,12 +68,20 @@ bool InternalSchemaMatchArrayIndexMatchExpression::equivalent(const MatchExpress
 
 BSONObj InternalSchemaMatchArrayIndexMatchExpression::getSerializedRightHandSide(
     SerializationOptions opts) const {
-    // TODO SERVER-73678 respect 'replacementForLiteralArgs'.
     BSONObjBuilder objBuilder;
     {
         BSONObjBuilder matchArrayElemSubobj(objBuilder.subobjStart(kName));
-        matchArrayElemSubobj.append("index", _index);
-        matchArrayElemSubobj.append("namePlaceholder", _expression->getPlaceholder().value_or(""));
+        if (opts.replacementForLiteralArgs) {
+            matchArrayElemSubobj.append("index", opts.replacementForLiteralArgs.get());
+        } else {
+            matchArrayElemSubobj.append("index", _index);
+        }
+        if (auto placeHolder = _expression->getPlaceholder()) {
+            matchArrayElemSubobj.append("namePlaceholder",
+                                        opts.serializeFieldName(placeHolder.get()));
+        } else {
+            matchArrayElemSubobj.append("namePlaceholder", "");
+        }
         {
             BSONObjBuilder subexprSubObj(matchArrayElemSubobj.subobjStart("expression"));
             _expression->getFilter()->serialize(&subexprSubObj, opts);

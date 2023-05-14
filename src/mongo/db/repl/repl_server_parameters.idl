@@ -611,6 +611,17 @@ server_parameters:
         cpp_varname: enableReconfigRollbackCommittedWritesCheck
         default: true
 
+    # TODO (SERVER-74398): Remove special handling of 'confirm: true' in setFCV.
+    requireConfirmInSetFcv:
+        description: >-
+            Determines if we must specify 'confirm: true' in the setFCV command. Enabled by default.
+            Test-only.
+        test_only: true
+        set_at: startup
+        cpp_vartype: bool
+        cpp_varname: requireConfirmInSetFcv
+        default: true
+
     initialSyncMethod:
         description: >-
             Specifies which method of initial sync to use. Valid options are: fileCopyBased,
@@ -693,6 +704,63 @@ server_parameters:
         default:
             expr: 15 * 60 * 1000
 
+    slowServiceOnStepUpBeginThresholdMS:
+        description: >-
+            The maximum amount of time, in milliseconds, that a single replica set aware
+            service's onStepUpBegin method can take without a warning being logged.
+        set_at: [ startup, runtime ]
+        cpp_vartype: AtomicWord<int>
+        cpp_varname: slowServiceOnStepUpBeginThresholdMS
+        default: 200
+        validator:
+            gte: 0
+
+    slowTotalOnStepUpBeginThresholdMS:
+        description: >-
+            The maximum amount of time, in milliseconds, that the total of all replica set
+            aware services' onStepUpBegin methods can take without a warning being logged.
+        set_at: [ startup, runtime ]
+        cpp_vartype: AtomicWord<int>
+        cpp_varname: slowTotalOnStepUpBeginThresholdMS
+        default: 500
+        validator:
+            gte: 0
+
+    slowServiceOnStepUpCompleteThresholdMS:
+        description: >-
+            The maximum amount of time, in milliseconds, that a single replica set aware
+            service or primary-only service's onStepUpComplete method can take without a warning
+            being logged.
+        set_at: [ startup, runtime ]
+        cpp_vartype: AtomicWord<int>
+        cpp_varname: slowServiceOnStepUpCompleteThresholdMS
+        default: 200
+        validator:
+            gte: 0
+
+    slowTotalOnStepUpCompleteThresholdMS:
+        description: >-
+            The maximum amount of time, in milliseconds, that the total of all replica set
+            aware services' and primary-only services' onStepUpComplete methods can take
+            without a warning being logged.
+        set_at: [ startup, runtime ]
+        cpp_vartype: AtomicWord<int>
+        cpp_varname: slowTotalOnStepUpCompleteThresholdMS
+        default: 500
+        validator:
+            gte: 0
+
+    # TODO (SERVER-74847): Remove this server parameter.
+    disableTransitionFromLatestToLastContinuous:
+        description: >-
+            Prohibits downgrading from latest FCV to last continuous FCV. Disabled by default.
+            Test-only.
+        test_only: true
+        set_at: startup
+        cpp_vartype: bool
+        cpp_varname: disableTransitionFromLatestToLastContinuous
+        default: true
+
 feature_flags:
     featureFlagRetryableFindAndModify:
         description: >-
@@ -717,7 +785,8 @@ feature_flags:
         description: When enabled, 
                      allow kDowngradingFromLatestToLastLTS -> kUpgrading -> kUpgraded path.
         cpp_varname: feature_flags::gDowngradingToUpgrading
-        default: false
+        default: true
+        version: 7.0
 
     featureFlagApplyPreparedTxnsInParallel:
         description: when enabled, secondaries will apply prepared transactions in parallel.

@@ -277,6 +277,9 @@ private:
     }
     void onStepDown() override {}
     void onBecomeArbiter() override {}
+    inline std::string getServiceName() const override final {
+        return "TTLMonitorService";
+    }
 };
 
 const auto _ttlMonitorService = ServiceContext::declareDecoration<TTLMonitorService>();
@@ -576,7 +579,7 @@ bool TTLMonitor::_doTTLIndexDelete(OperationContext* opCtx,
                         1,
                         "Postpone TTL of DB because of active tenant migration",
                         "tenantMigrationAccessBlocker"_attr = mtab->getDebugInfo().jsonString(),
-                        "database"_attr = coll.getDb()->name().toString());
+                        logAttrs(coll.getDb()->name()));
             return false;
         }
 

@@ -70,17 +70,21 @@ bool InternalSchemaAllElemMatchFromIndexMatchExpression::equivalent(
 void InternalSchemaAllElemMatchFromIndexMatchExpression::debugString(StringBuilder& debug,
                                                                      int indentationLevel) const {
     _debugAddSpace(debug, indentationLevel);
-    debug << kName << "\n";
+    debug << kName;
+    _debugStringAttachTagInfo(&debug);
     debug << " index: " << _index << ", query:\n";
     _expression->getFilter()->debugString(debug, indentationLevel + 1);
 }
 
 BSONObj InternalSchemaAllElemMatchFromIndexMatchExpression::getSerializedRightHandSide(
     SerializationOptions opts) const {
-    // TODO SERVER-73678 respect 'replacementForLiteralArgs'.
     BSONObjBuilder allElemMatchBob;
     BSONArrayBuilder subArray(allElemMatchBob.subarrayStart(kName));
-    subArray.append(_index);
+    if (opts.replacementForLiteralArgs) {
+        subArray.append(opts.replacementForLiteralArgs.get());
+    } else {
+        subArray.append(_index);
+    }
     {
         BSONObjBuilder eBuilder(subArray.subobjStart());
         _expression->getFilter()->serialize(&eBuilder, opts);

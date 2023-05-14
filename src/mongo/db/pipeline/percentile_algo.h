@@ -66,12 +66,26 @@ struct PercentileAlgorithm {
     /*
      * The owner might need a rough estimate of how much memory the algorithm is using.
      */
-    virtual long memUsageBytes() = 0;
-
-    /**
-     * Factory methods for instantiating concrete algorithms.
-     */
-    static std::unique_ptr<PercentileAlgorithm> createDiscreteSortAndRank();
+    virtual long memUsageBytes() const = 0;
 };
+
+/**
+ * In sharded environment percentiles need to be partially computed on each shard and then combined
+ * together to compute the final result. 'TValue' type used to communicate the partial computation
+ * depends on the engine.
+ */
+template <typename TValue>
+struct PartialPercentile {
+    virtual TValue serialize() = 0;
+    virtual void combine(const TValue& partial) = 0;
+};
+
+/**
+ * Factory methods for instantiating concrete algorithms.
+ */
+std::unique_ptr<PercentileAlgorithm> createDiscreteSortAndRank();
+std::unique_ptr<PercentileAlgorithm> createDiscreteSortAndRankDistributedClassic();
+std::unique_ptr<PercentileAlgorithm> createTDigest();
+std::unique_ptr<PercentileAlgorithm> createTDigestDistributedClassic();
 
 }  // namespace mongo

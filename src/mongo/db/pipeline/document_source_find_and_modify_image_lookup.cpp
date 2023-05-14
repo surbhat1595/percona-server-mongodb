@@ -178,12 +178,12 @@ StageConstraints DocumentSourceFindAndModifyImageLookup::constraints(
                             ChangeStreamRequirement::kDenylist);
 }
 
-Value DocumentSourceFindAndModifyImageLookup::serialize(
-    boost::optional<ExplainOptions::Verbosity> explain) const {
-    return Value(
-        Document{{kStageName,
-                  Value(Document{{kIncludeCommitTransactionTimestampFieldName,
-                                  _includeCommitTransactionTimestamp ? Value(true) : Value()}})}});
+Value DocumentSourceFindAndModifyImageLookup::serialize(SerializationOptions opts) const {
+    return Value(Document{
+        {kStageName,
+         Value(Document{
+             {kIncludeCommitTransactionTimestampFieldName,
+              _includeCommitTransactionTimestamp ? opts.serializeLiteralValue(true) : Value()}})}});
 }
 
 DepsTracker::State DocumentSourceFindAndModifyImageLookup::getDependencies(

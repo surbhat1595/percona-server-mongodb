@@ -78,14 +78,6 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    Status insertTimeseries(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                            const NamespaceString& ns,
-                            std::vector<BSONObj>&& objs,
-                            const WriteConcernOptions& wc,
-                            boost::optional<OID> targetEpoch) final {
-        MONGO_UNREACHABLE;
-    }
-
     StatusWith<UpdateResult> update(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                     const NamespaceString& ns,
                                     BatchedObjects&& batch,
@@ -154,7 +146,6 @@ public:
                                                  const NamespaceString& targetNs,
                                                  bool dropTarget,
                                                  bool stayTemp,
-                                                 bool allowBuckets,
                                                  const BSONObj& originalCollectionOptions,
                                                  const std::list<BSONObj>& originalIndexes) final {
         MONGO_UNREACHABLE;
@@ -163,14 +154,6 @@ public:
     void createCollection(OperationContext* opCtx,
                           const DatabaseName& dbName,
                           const BSONObj& cmdObj) final {
-        MONGO_UNREACHABLE;
-    }
-
-
-    void createTimeseries(OperationContext* opCtx,
-                          const NamespaceString& ns,
-                          const BSONObj& options,
-                          bool createView) final {
         MONGO_UNREACHABLE;
     }
 
@@ -188,7 +171,7 @@ public:
                                       ExplainOptions::Verbosity verbosity) final;
 
     std::unique_ptr<Pipeline, PipelineDeleter> attachCursorSourceToPipelineForLocalRead(
-        Pipeline* pipeline) final {
+        Pipeline* pipeline, boost::optional<const AggregateCommandRequest&> aggRequest) final {
         // It is not meaningful to perform a "local read" on mongos.
         MONGO_UNREACHABLE;
     }
@@ -271,6 +254,14 @@ public:
      */
     std::unique_ptr<Pipeline, PipelineDeleter> attachCursorSourceToPipeline(
         Pipeline* pipeline,
+        ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
+        boost::optional<BSONObj> readConcern = boost::none) final;
+
+    std::unique_ptr<Pipeline, PipelineDeleter> attachCursorSourceToPipeline(
+        const AggregateCommandRequest& aggRequest,
+        Pipeline* pipeline,
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        boost::optional<BSONObj> shardCursorsSortSpec = boost::none,
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
         boost::optional<BSONObj> readConcern = boost::none) final;
 

@@ -1,8 +1,7 @@
 /**
  * Requires no shards.
  * @tags: [
- *   requires_fcv_70,
- *   catalog_shard_incompatible,
+ *   config_shard_incompatible,
  *   requires_fcv_70,
  * ]
  */
@@ -18,13 +17,7 @@ load("jstests/libs/collection_drop_recreate.js");  // For assert[Drop|Create]Col
 // implicit sessions.
 TestData.disableImplicitSessions = true;
 
-var st = new ShardingTest({
-    shards: 0,
-    other: {
-        mongosOptions:
-            {setParameter: {'failpoint.skipClusterParameterRefresh': "{'mode':'alwaysOn'}"}}
-    }
-});
+var st = new ShardingTest({shards: 0});
 var configSvr = st.configRS.getPrimary();
 
 var mongos = st.s;

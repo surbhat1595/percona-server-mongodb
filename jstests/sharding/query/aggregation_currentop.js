@@ -42,11 +42,7 @@ const stParams = {
     name: jsTestName(),
     keyFile: key,
     shards: 3,
-    rs: {nodes: 1, setParameter: {internalQueryExecYieldIterations: 1}},
-    other: {
-        mongosOptions:
-            {setParameter: {'failpoint.skipClusterParameterRefresh': "{'mode':'alwaysOn'}"}}
-    }
+    rs: {nodes: 1, setParameter: {internalQueryExecYieldIterations: 1}}
 };
 
 // Create a new sharded cluster for testing. We set the internalQueryExecYieldIterations
@@ -88,8 +84,8 @@ function createUsers(conn) {
 }
 
 // Create necessary users at both cluster and shard-local level.
-if (!TestData.catalogShard) {
-    // In catalog shard mode, the first shard is the config server, so creating the users via mongos
+if (!TestData.configShard) {
+    // In config shard mode, the first shard is the config server, so creating the users via mongos
     // below will also create them on the shard.
     createUsers(shardConn);
 }
@@ -483,7 +479,7 @@ assert.commandFailedWithCode(clusterAdminDB.currentOp({$ownOps: true}), ErrorCod
 assert(clusterAdminDB.logout());
 assert(clusterAdminDB.auth("user_inprog", "pwd"));
 
-const expectedOutput = TestData.catalogShard ?
+const expectedOutput = TestData.configShard ?
 [
     {_id: {shard: "aggregation_currentop-rs1", host: st.rs1.getPrimary().host}},
     {_id: {shard: "aggregation_currentop-rs2", host: st.rs2.getPrimary().host}},

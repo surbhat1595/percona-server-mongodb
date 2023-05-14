@@ -235,6 +235,11 @@ NamespaceString NamespaceString::makeMovePrimaryCollectionsToCloneNSS(const UUID
                            "movePrimaryCollectionsToClone." + migrationId.toString());
 }
 
+NamespaceString NamespaceString::makeMovePrimaryTempCollectionsPrefix(const UUID& migrationId) {
+    return NamespaceString(DatabaseName::kConfig,
+                           "movePrimaryRecipient." + migrationId.toString() + ".willBeDeleted.");
+}
+
 NamespaceString NamespaceString::makePreImageCollectionNSS(
     const boost::optional<TenantId>& tenantId) {
     return NamespaceString{tenantId, DatabaseName::kConfig.db(), kPreImagesCollectionName};
@@ -357,11 +362,12 @@ bool NamespaceString::isNamespaceAlwaysUnsharded() const {
     if (db() == DatabaseName::kConfig.db())
         return *this != NamespaceString::kLogicalSessionsNamespace;
 
-    if (isSystemDotProfile())
-        return true;
-
-    if (isSystemDotViews())
-        return true;
+    if (isSystem()) {
+        // Only some system collections (<DB>.system.<COLL>) can be sharded,
+        // all the others are always unsharded.
+        // This list does not contain 'config.system.sessions' because we already check it above
+        return !isTemporaryReshardingCollection() && !isTimeseriesBucketsCollection();
+    }
 
     return false;
 }

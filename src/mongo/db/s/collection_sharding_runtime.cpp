@@ -144,14 +144,6 @@ ScopedCollectionFilter CollectionShardingRuntime::getOwnershipFilter(
                                        optReceivedShardVersion,
                                        supportNonVersionedOperations);
 
-    if (!supportNonVersionedOperations) {
-        tassert(7032301,
-                "For sharded collections getOwnershipFilter cannot be relied on without a valid "
-                "shard version",
-                !ShardVersion::isPlacementVersionIgnored(*optReceivedShardVersion) ||
-                    !metadata->get().allowMigrations() || !metadata->get().isSharded());
-    }
-
     return {std::move(metadata)};
 }
 
@@ -365,7 +357,10 @@ Status CollectionShardingRuntime::waitForClean(OperationContext* opCtx,
             // (Ignore FCV check): This feature doesn't have any upgrade/downgrade concerns. The
             // feature flag is used to turn on new range deleter on startup.
             if (feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCVUnsafe()) {
-                return RangeDeleterService::get(opCtx)->getOverlappingRangeDeletionsFuture(
+                const auto rangeDeleterService = RangeDeleterService::get(opCtx);
+                rangeDeleterService->getRangeDeleterServiceInitializationFuture().get(opCtx);
+
+                return rangeDeleterService->getOverlappingRangeDeletionsFuture(
                     self->_metadataManager->getCollectionUuid(), orphanRange);
             } else {
                 return self->_metadataManager->trackOrphanedDataCleanup(orphanRange);

@@ -425,8 +425,8 @@ export const authCommandsLib = {
           ]
         },
         {
-          testname: 'transitionToCatalogShard',
-          command: {transitionToCatalogShard: 1},
+          testname: 'transitionFromDedicatedConfigServer',
+          command: {transitionFromDedicatedConfigServer: 1},
           skipUnlessSharded: true,
           skipTest: (conn) => {
             return !TestData.setParameters.featureFlagCatalogShard;
@@ -435,15 +435,15 @@ export const authCommandsLib = {
             {
               runOnDb: adminDbName, 
               roles: roles_clusterManager, 
-              privileges: [{resource: {cluster: true}, actions: ["transitionToCatalogShard"]}]
+              privileges: [{resource: {cluster: true}, actions: ["transitionFromDedicatedConfigServer"]}]
             },
             {runOnDb: firstDbName, roles: {}},
             {runOnDb: secondDbName, roles: {}}
           ]
         },
         {
-          testname: "_configsvrTransitionToCatalogShard",
-          command: {_configsvrTransitionToCatalogShard: 1},
+          testname: "_configsvrTransitionFromDedicatedConfigServer",
+          command: {_configsvrTransitionFromDedicatedConfigServer: 1},
           skipSharded: true,
           skipTest: (conn) => {
             return !TestData.setParameters.featureFlagCatalogShard;
@@ -5510,6 +5510,36 @@ export const authCommandsLib = {
         {
           testname: "d_moveChunk",
           command: {moveChunk: "test.x", fromShard: "a", toShard: "b", min: {}, max: {}, maxChunkSizeBytes: 1024},
+          skipSharded: true,
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: {__system: 1},
+                privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                expectFail: true
+              },
+              {runOnDb: firstDbName, roles: {}},
+              {runOnDb: secondDbName, roles: {}}
+          ]
+        },
+        {
+          testname: "s_moveRange",
+          command: {moveRange: "test.x", min: {x:1}, toShard:"a"},
+          skipUnlessSharded: true,
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: roles_clusterManager,
+                privileges: [{resource: {db: "test", collection: "x"}, actions: ["moveChunk"]}],
+                expectFail: true
+              },
+              {runOnDb: firstDbName, roles: {}},
+              {runOnDb: secondDbName, roles: {}}
+          ]
+        },
+        {
+          testname: "d_moveRange",
+          command: {_shardsvrMoveRange: "test.x", fromShard: "a", toShard: "b", min: {}, max: {}, maxChunkSizeBytes: 1024},
           skipSharded: true,
           testcases: [
               {

@@ -51,9 +51,11 @@
 #include "mongo/s/request_types/get_stats_for_balancing_gen.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/util/str.h"
+#include "mongo/util/timer.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
+MONGO_FAIL_POINT_DEFINE(overrideStatsForBalancingBatchSize);
 
 namespace mongo {
 
@@ -335,9 +337,8 @@ void getSplitCandidatesForSessionsCollection(OperationContext* opCtx,
 
 }  // namespace
 
-BalancerChunkSelectionPolicyImpl::BalancerChunkSelectionPolicyImpl(ClusterStatistics* clusterStats,
-                                                                   BalancerRandomSource& random)
-    : _clusterStats(clusterStats), _random(random) {}
+BalancerChunkSelectionPolicyImpl::BalancerChunkSelectionPolicyImpl(ClusterStatistics* clusterStats)
+    : _clusterStats(clusterStats) {}
 
 BalancerChunkSelectionPolicyImpl::~BalancerChunkSelectionPolicyImpl() = default;
 
@@ -358,7 +359,8 @@ StatusWith<SplitInfoVector> BalancerChunkSelectionPolicyImpl::selectChunksToSpli
 
     SplitInfoVector splitCandidates;
 
-    std::shuffle(collections.begin(), collections.end(), _random);
+    auto client = opCtx->getClient();
+    std::shuffle(collections.begin(), collections.end(), client->getPrng().urbg());
 
     for (const auto& coll : collections) {
         const NamespaceString& nss(coll.getNss());
@@ -418,6 +420,8 @@ StatusWith<MigrateInfoVector> BalancerChunkSelectionPolicyImpl::selectChunksToMo
         return MigrateInfoVector{};
     }
 
+    Timer chunksSelectionTimer;
+
     const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
     auto collections = catalogClient->getCollections(opCtx,
                                                      {},
@@ -428,8 +432,17 @@ StatusWith<MigrateInfoVector> BalancerChunkSelectionPolicyImpl::selectChunksToMo
     }
 
     MigrateInfoVector candidateChunks;
-    static constexpr auto kStatsForBalancingBatchSize = 50;
-    static constexpr auto kMaxCachedCollectionsSize = int(0.75 * kStatsForBalancingBatchSize);
+
+    const uint32_t kStatsForBalancingBatchSize = [&]() {
+        auto batchSize = 100U;
+        overrideStatsForBalancingBatchSize.execute([&batchSize](const BSONObj& data) {
+            batchSize = data["size"].numberInt();
+            LOGV2(7617200, "Overriding collections batch size", "size"_attr = batchSize);
+        });
+        return batchSize;
+    }();
+
+    const uint32_t kMaxCachedCollectionsSize = 0.75 * kStatsForBalancingBatchSize;
 
     // Lambda function used to get a CollectionType leveraging the `collections` vector
     // The `collections` vector must be sorted by nss when it is called
@@ -471,7 +484,8 @@ StatusWith<MigrateInfoVector> BalancerChunkSelectionPolicyImpl::selectChunksToMo
     const auto processBatch = [&](std::vector<CollectionType>& collBatch) {
         const auto collsDataSizeInfo = getDataSizeInfoForCollections(opCtx, collBatch);
 
-        std::shuffle(collBatch.begin(), collBatch.end(), _random);
+        auto client = opCtx->getClient();
+        std::shuffle(collBatch.begin(), collBatch.end(), client->getPrng().urbg());
         for (const auto& coll : collBatch) {
 
             if (availableShards->size() < 2) {
@@ -533,7 +547,8 @@ StatusWith<MigrateInfoVector> BalancerChunkSelectionPolicyImpl::selectChunksToMo
     }
 
     // Iterate all the remaining collections randomly
-    std::shuffle(collections.begin(), collections.end(), _random);
+    auto client = opCtx->getClient();
+    std::shuffle(collections.begin(), collections.end(), client->getPrng().urbg());
     for (const auto& coll : collections) {
 
         if (canBalanceCollection(coll)) {
@@ -546,6 +561,19 @@ StatusWith<MigrateInfoVector> BalancerChunkSelectionPolicyImpl::selectChunksToMo
                 return candidateChunks;
             }
             collBatch.clear();
+        }
+
+        const auto maxTimeMs = balancerChunksSelectionTimeoutMs.load();
+        if (candidateChunks.size() > 0 && chunksSelectionTimer.millis() > maxTimeMs) {
+            LOGV2_DEBUG(
+                7100900,
+                1,
+                "Exceeded max time while searching for candidate chunks to migrate in this round.",
+                "maxTime"_attr = Milliseconds(maxTimeMs),
+                "chunksSelectionTime"_attr = chunksSelectionTimer.elapsed(),
+                "numCandidateChunks"_attr = candidateChunks.size());
+
+            return candidateChunks;
         }
     }
 

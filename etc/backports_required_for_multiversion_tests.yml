@@ -294,6 +294,8 @@ last-continuous:
     ticket: SERVER-70790
   - test_file: jstests/replsets/apply_ops_strips_hash.js
     ticket: SERVER-70841
+  - test_file: jstests/sharding/analyze_shard_key/deprioritize_query_sampling_inserts.js
+    ticket: SERVER-71064
   - test_file: jstests/sharding/all_collection_stats.js
     ticket: SERVER-71477
   - test_file: jstests/sharding/hidden_index.js
@@ -362,6 +364,10 @@ last-continuous:
     ticket: SERVER-75517
   - test_file: jstests/replsets/startup_recovery_for_restore_needs_rollback.js
     ticket: SERVER-67180
+  - test_file: jstests/core/clustered/clustered_collection_hint.js
+    ticket: SERVER-73482
+  - test_file: jstests/core/command_let_variables.js
+    ticket: SERVER-75356
   suites: null
 last-lts:
   all:
@@ -731,6 +737,8 @@ last-lts:
     ticket: SERVER-70790
   - test_file: jstests/replsets/apply_ops_strips_hash.js
     ticket: SERVER-70841
+  - test_file: jstests/sharding/analyze_shard_key/deprioritize_query_sampling_inserts.js
+    ticket: SERVER-71064
   - test_file: jstests/sharding/all_collection_stats.js
     ticket: SERVER-71477
   - test_file: jstests/sharding/hidden_index.js
@@ -791,4 +799,26 @@ last-lts:
     ticket: SERVER-75517
   - test_file: jstests/replsets/startup_recovery_for_restore_needs_rollback.js
     ticket: SERVER-67180
+  - test_file: jstests/replsets/crud_ops_do_not_throw_locktimeout_on_ticket_exhaustion.js
+    ticket: SERVER-76012
+  - test_file: jstests/replsets/transactions_committed_with_tickets_exhausted.js
+    ticket: SERVER-76012
+  - test_file: jstests/replsets/transactions_reaped_with_tickets_exhausted.js
+    ticket: SERVER-76012
+  - test_file: jstests/sharding/cancel_coordinate_txn_commit_with_tickets_exhausted.js
+    ticket: SERVER-76012
+  - test_file: jstests/sharding/coordinate_txn_commit_with_tickets_exhausted.js
+    ticket: SERVER-76012
+  - test_file: jstests/sharding/analyze_shard_key/cardinality_and_frequency_basic.js
+    ticket: SERVER-75886
+  - test_file: jstests/core/clustered/clustered_collection_hint.js
+    ticket: SERVER-73482
+  - test_file: jstests/core/command_let_variables.js
+    ticket: SERVER-75356
+  - test_file: jstests/sharding/invalid_shard_identity_doc.js
+    ticket: SERVER-76310
+  - test_file: jstests/sharding/auth_catalog_shard_localhost_exception.js
+    ticket: SERVER-76310
+  - test_file: jstests/sharding/catalog_shard_mongos_ops_on_config_and_admin.js
+    ticket: SERVER-76310
   suites: null

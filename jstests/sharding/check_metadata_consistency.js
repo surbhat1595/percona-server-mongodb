@@ -1,11 +1,9 @@
 /*
  * Tests to validate the correct behaviour of checkMetadataConsistency command.
  *
- * TODO SERVER-74445: Fix cluster level checkMetadataConsistency command with a catalog shard.
  * @tags: [
  *    featureFlagCheckMetadataConsistency,
  *    requires_fcv_70,
- *    catalog_shard_incompatible,
  * ]
  */
 
@@ -218,7 +216,8 @@ function getNewDb() {
     inconsistencies = mongos.getDB("admin").checkMetadataConsistency().toArray();
     assert.eq(1, inconsistencies.length, tojson(inconsistencies));
     assert.eq("HiddenShardedCollection", inconsistencies[0].type, tojson(inconsistencies[0]));
-    assert.eq(coll1.getFullName(), inconsistencies[0].details.ns, tojson(inconsistencies[0]));
+    assert.eq(
+        coll1.getFullName(), inconsistencies[0].details.namespace, tojson(inconsistencies[0]));
 
     // Remove db2 so that coll2 also became hidden
     assert.commandWorked(configDatabasesColl.deleteOne({_id: db2.getName()}));
@@ -226,9 +225,11 @@ function getNewDb() {
     inconsistencies = mongos.getDB("admin").checkMetadataConsistency().toArray();
     assert.eq(2, inconsistencies.length, tojson(inconsistencies));
     assert.eq("HiddenShardedCollection", inconsistencies[0].type, tojson(inconsistencies[0]));
-    assert.eq(coll1.getFullName(), inconsistencies[0].details.ns, tojson(inconsistencies[0]));
+    assert.eq(
+        coll1.getFullName(), inconsistencies[0].details.namespace, tojson(inconsistencies[0]));
     assert.eq("HiddenShardedCollection", inconsistencies[1].type, tojson(inconsistencies[1]));
-    assert.eq(coll2.getFullName(), inconsistencies[1].details.ns, tojson(inconsistencies[1]));
+    assert.eq(
+        coll2.getFullName(), inconsistencies[1].details.namespace, tojson(inconsistencies[1]));
 
     // Restore db1 and db2 configuration to ensure the correct behavior of dropDatabase operations
     assert.commandWorked(configDatabasesColl.insertMany([db1ConfigEntry, db2ConfigEntry]));

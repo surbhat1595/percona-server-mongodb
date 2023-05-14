@@ -273,7 +273,7 @@ void CollectionShardingRuntime::setFilteringMetadata(OperationContext* opCtx,
         LOGV2(21917,
               "Marking collection {namespace} as unsharded",
               "Marking collection as unsharded",
-              "namespace"_attr = _nss.ns());
+              logAttrs(_nss));
         _metadataType = MetadataType::kUnsharded;
         _metadataManager.reset();
         ++_numMetadataManagerChanges;
@@ -304,7 +304,7 @@ void CollectionShardingRuntime::_clearFilteringMetadata(OperationContext* opCtx,
                     1,
                     "Clearing metadata for collection {namespace}",
                     "Clearing collection metadata",
-                    "namespace"_attr = _nss,
+                    logAttrs(_nss),
                     "collIsDropped"_attr = collIsDropped);
 
         // If the collection is sharded and it's being dropped we might need to clean up some state.
@@ -328,7 +328,9 @@ void CollectionShardingRuntime::clearFilteringMetadataForDroppedCollection(
 
 SharedSemiFuture<void> CollectionShardingRuntime::cleanUpRange(ChunkRange const& range,
                                                                CleanWhen when) const {
-    if (!feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCV()) {
+    // (Ignore FCV check): This feature doesn't have any upgrade/downgrade concerns. The feature
+    // flag is used to turn on new range deleter on startup.
+    if (!feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCVUnsafe()) {
         stdx::lock_guard lk(_metadataManagerLock);
         invariant(_metadataType == MetadataType::kSharded);
         return _metadataManager->cleanUpRange(range, when == kDelayed);
@@ -360,7 +362,9 @@ Status CollectionShardingRuntime::waitForClean(OperationContext* opCtx,
                         "metadata reset"};
             }
 
-            if (feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCV()) {
+            // (Ignore FCV check): This feature doesn't have any upgrade/downgrade concerns. The
+            // feature flag is used to turn on new range deleter on startup.
+            if (feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCVUnsafe()) {
                 return RangeDeleterService::get(opCtx)->getOverlappingRangeDeletionsFuture(
                     self->_metadataManager->getCollectionUuid(), orphanRange);
             } else {
@@ -378,7 +382,7 @@ Status CollectionShardingRuntime::waitForClean(OperationContext* opCtx,
                           {logv2::LogComponent::kShardingMigration},
                           "Finished waiting for deletion of {namespace} range {orphanRange}",
                           "Finished waiting for deletion of orphans",
-                          "namespace"_attr = nss.ns(),
+                          logAttrs(nss),
                           "orphanRange"_attr = redact(orphanRange.toString()));
             return Status::OK();
         }
@@ -387,7 +391,7 @@ Status CollectionShardingRuntime::waitForClean(OperationContext* opCtx,
                       {logv2::LogComponent::kShardingMigration},
                       "Waiting for deletion of {namespace} range {orphanRange}",
                       "Waiting for deletion of orphans",
-                      "namespace"_attr = nss.ns(),
+                      logAttrs(nss),
                       "orphanRange"_attr = orphanRange);
         try {
             opCtx->runWithDeadline(
@@ -699,6 +703,10 @@ void CollectionShardingRuntime::_cleanupBeforeInstallingNewCollectionMetadata(
     ExecutorFuture<void>{Grid::get(opCtx)->getExecutorPool()->getFixedExecutor()}
         .then([svcCtx{opCtx->getServiceContext()}, oldUUID, oldShardVersion] {
             ThreadClient tc{"CleanUpShardedMetadata", svcCtx};
+            {
+                stdx::lock_guard<Client> lk{*tc.get()};
+                tc->setSystemOperationKillableByStepdown(lk);
+            }
             auto uniqueOpCtx{tc->makeOperationContext()};
             auto opCtx{uniqueOpCtx.get()};
 

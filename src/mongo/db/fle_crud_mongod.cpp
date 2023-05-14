@@ -27,6 +27,7 @@
  *    it in the license file.
  */
 
+#include "mongo/base/status.h"
 #include "mongo/db/fle_crud.h"
 
 #include <string>
@@ -57,6 +58,7 @@
 #include "mongo/db/transaction/transaction_api.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction/transaction_participant_resource_yielder.h"
+#include "mongo/executor/inline_executor.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/idl/idl_parser.h"
@@ -168,6 +170,10 @@ public:
 
         return BSONObj();
     }
+
+    ECStats getStats() const override {
+        return ECStats();
+    }
 };
 
 
@@ -188,8 +194,17 @@ public:
         return _count;
     }
 
+    void incrementRead() const {
+        _stats.setRead(_stats.getRead() + 1);
+    }
+
+    ECStats getStats() const override {
+        return _stats;
+    }
+
     BSONObj getById(PrfBlock block) const override {
         auto record = getRecordById(block);
+
         if (record.has_value()) {
             return record->data.releaseToBson();
         }
@@ -210,6 +225,7 @@ private:
         builder.appendBinData(BSONBinData(block.data(), block.size(), BinDataType::BinDataGeneral));
         auto recordId = RecordId(builder.getBuffer(), builder.getSize());
 
+        incrementRead();
         return _cursor->seekExact(recordId);
     }
 
@@ -218,6 +234,7 @@ private:
     const uint64_t _count;
     const NamespaceStringOrUUID& _nssOrUUID;
     SeekableRecordCursor* _cursor;
+    mutable ECStats _stats;
 };
 
 /**
@@ -245,8 +262,17 @@ public:
         return _count;
     }
 
+    void incrementRead() const {
+        _stats.setRead(_stats.getRead() + 1);
+    }
+
+    ECStats getStats() const override {
+        return _stats;
+    }
+
     BSONObj getById(PrfBlock block) const override {
         auto record = getRecordById(block);
+
         if (record.has_value()) {
             return record->data.releaseToBson();
         }
@@ -268,6 +294,8 @@ private:
 
         kb.appendBinData(BSONBinData(block.data(), block.size(), BinDataGeneral));
         KeyString::Value id(kb.getValueCopy());
+
+        incrementRead();
 
         auto ksEntry = _indexCursor->seekForKeyString(id);
         if (!ksEntry) {
@@ -298,6 +326,7 @@ private:
     SortedDataInterface* _sdi;
     SortedDataInterface::Cursor* _indexCursor;
     SeekableRecordCursor* _cursor;
+    mutable ECStats _stats;
 };
 
 const auto kIdIndexName = "_id_"_sd;
@@ -305,8 +334,15 @@ const auto kIdIndexName = "_id_"_sd;
 
 std::shared_ptr<txn_api::SyncTransactionWithRetries> getTransactionWithRetriesForMongoD(
     OperationContext* opCtx) {
+
+    auto fleInlineCrudExecutor = std::make_shared<executor::InlineExecutor>();
+    auto inlineSleepExecutor = fleInlineCrudExecutor->getSleepableExecutor(_fleCrudExecutor);
+
     return std::make_shared<txn_api::SyncTransactionWithRetries>(
-        opCtx, _fleCrudExecutor, std::make_unique<FLEMongoDResourceYielder>());
+        opCtx,
+        inlineSleepExecutor,
+        std::make_unique<FLEMongoDResourceYielder>(),
+        fleInlineCrudExecutor);
 }
 
 void startFLECrud(ServiceContext* serviceContext) {
@@ -319,6 +355,7 @@ void startFLECrud(ServiceContext* serviceContext) {
     _fleCrudExecutor = std::make_shared<executor::ThreadPoolTaskExecutor>(
         std::make_unique<ThreadPool>(getThreadPoolOptions()),
         executor::makeNetworkInterface("FLECrudNetwork"));
+
     _fleCrudExecutor->startup();
 }
 

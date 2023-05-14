@@ -91,7 +91,7 @@ public:
 
 protected:
     std::string getFieldName() {
-        return _options.serializeFieldName(_context->childPath());
+        return _options.serializeFieldPathFromString(_context->childPath());
     }
 
     PathTrackingVisitorContext<BSONVisitorContext>* _context;
@@ -210,13 +210,13 @@ BSONObj astToDebugBSON(const ASTNode* root) {
     return context.data().builders.top().obj();
 }
 
-BSONObj serialize(const Projection& ast, SerializationOptions options) {
+BSONObj serialize(const ProjectionPathASTNode& root, SerializationOptions options) {
     PathTrackingVisitorContext<BSONVisitorContext> context;
     SerializationPreVisitor preVisitor{&context, options};
     SerializationPostVisitor postVisitor{&context.data()};
     PathTrackingWalker walker{&context, {&preVisitor}, {&postVisitor}};
 
-    tree_walker::walk<true, projection_ast::ASTNode>(ast.root(), &walker);
+    tree_walker::walk<true, projection_ast::ASTNode>(&root, &walker);
 
     invariant(context.data().builders.size() == 1);
     return context.data().builders.top().obj();

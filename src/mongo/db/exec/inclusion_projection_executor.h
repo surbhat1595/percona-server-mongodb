@@ -188,19 +188,24 @@ private:
  */
 class InclusionProjectionExecutor : public ProjectionExecutor {
 public:
-    InclusionProjectionExecutor(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                ProjectionPolicies policies,
-                                std::unique_ptr<InclusionNode> root)
-        : ProjectionExecutor(expCtx, policies), _root(std::move(root)) {}
+    InclusionProjectionExecutor(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        ProjectionPolicies policies,
+        std::unique_ptr<InclusionNode> root,
+        boost::optional<projection_ast::ProjectionPathASTNode> proj = boost::none)
+        : ProjectionExecutor(expCtx, policies, proj), _root(std::move(root)) {}
 
-    InclusionProjectionExecutor(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                ProjectionPolicies policies,
-                                bool allowFastPath = false)
+    InclusionProjectionExecutor(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        ProjectionPolicies policies,
+        bool allowFastPath = false,
+        boost::optional<projection_ast::ProjectionPathASTNode> proj = boost::none)
         : InclusionProjectionExecutor(
               expCtx,
               policies,
               allowFastPath ? std::make_unique<FastPathEligibleInclusionNode>(policies)
-                            : std::make_unique<InclusionNode>(policies)) {}
+                            : std::make_unique<InclusionNode>(policies),
+              proj) {}
 
     TransformerType getType() const final {
         return TransformerType::kInclusionProjection;
@@ -225,7 +230,7 @@ public:
         // included. If the _id node is not present, then explicitly set {_id: false} to avoid
         // ambiguity in the expected behavior of the serialized projection.
         _root->serialize(explain, &output, options);
-        auto idFieldName = options.serializeFieldName("_id");
+        auto idFieldName = options.serializeFieldPath("_id");
         if (output.peek()[idFieldName].missing()) {
             output.addField(idFieldName, Value{false});
         }

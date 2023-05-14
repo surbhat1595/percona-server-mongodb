@@ -140,7 +140,7 @@ WindowFunctionStatement WindowFunctionStatement::parse(BSONElement elem,
 }
 void WindowFunctionStatement::serialize(MutableDocument& outputFields,
                                         SerializationOptions opts) const {
-    outputFields[opts.serializeFieldName(fieldName)] = expr->serialize(opts);
+    outputFields[opts.serializeFieldPathFromString(fieldName)] = expr->serialize(opts);
 }
 
 list<intrusive_ptr<DocumentSource>> document_source_set_window_fields::create(
@@ -307,14 +307,14 @@ Value DocumentSourceInternalSetWindowFields::serialize(SerializationOptions opts
         MutableDocument md;
 
         for (auto&& [fieldName, function] : _executableOutputs) {
-            md[opts.serializeFieldName(fieldName)] =
-                Value(static_cast<long long>(_memoryTracker[fieldName].maxMemoryBytes()));
+            md[opts.serializeFieldPathFromString(fieldName)] = opts.serializeLiteralValue(
+                static_cast<long long>(_memoryTracker[fieldName].maxMemoryBytes()));
         }
 
         out["maxFunctionMemoryUsageBytes"] = Value(md.freezeToValue());
         out["maxTotalMemoryUsageBytes"] =
-            Value(static_cast<long long>(_memoryTracker.maxMemoryBytes()));
-        out["usedDisk"] = Value(_iterator.usedDisk());
+            opts.serializeLiteralValue(static_cast<long long>(_memoryTracker.maxMemoryBytes()));
+        out["usedDisk"] = opts.serializeLiteralValue(_iterator.usedDisk());
     }
 
     return Value(out.freezeToValue());

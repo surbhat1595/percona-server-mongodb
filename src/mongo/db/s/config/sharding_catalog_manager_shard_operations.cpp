@@ -62,6 +62,7 @@
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/s/add_shard_cmd_gen.h"
 #include "mongo/db/s/add_shard_util.h"
+#include "mongo/db/s/range_deletion_task_gen.h"
 #include "mongo/db/s/sharding_ddl_util.h"
 #include "mongo/db/s/sharding_logging.h"
 #include "mongo/db/s/sharding_state.h"
@@ -103,6 +104,7 @@ namespace mongo {
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(hangBeforeNotifyingaddShardCommitted);
+MONGO_FAIL_POINT_DEFINE(hangAfterDroppingCollectionInTransitionToDedicatedConfigServer);
 
 using CallbackHandle = executor::TaskExecutor::CallbackHandle;
 using CallbackArgs = executor::TaskExecutor::CallbackArgs;
@@ -767,6 +769,21 @@ StatusWith<std::string> ShardingCatalogManager::addShard(
             gFeatureFlagCatalogShard.isEnabled(serverGlobalParams.featureCompatibility) ||
                 !isCatalogShard);
 
+        if (isCatalogShard) {
+            // TODO SERVER-75391: Remove.
+            //
+            // At this point we know the config primary is in the latest FCV, but secondaries may
+            // not yet have replicated the FCV update, so write a noop and wait for it to replicate
+            // to all nodes in the config server to guarantee they have replicated up to the latest
+            // FCV.
+            //
+            // This guarantees all secondaries use the shard server method to refresh their
+            // metadata, which contains synchronization to prevent secondaries from serving reads
+            // for owned chunks that have not yet replicated to them.
+            _performLocalNoopWriteWithWAllWriteConcern(
+                opCtx, "w:all write barrier in transitionToCatalogShard");
+        }
+
         uassert(5563603,
                 "Cannot add shard while in upgrading/downgrading FCV state",
                 !fcvRegion->isUpgradingOrDowngrading());
@@ -938,7 +955,47 @@ RemoveShardProgress ShardingCatalogManager::removeShard(OperationContext* opCtx,
 
         return {RemoveShardProgress::ONGOING,
                 boost::optional<RemoveShardProgress::DrainingShardUsage>(
-                    {chunkCount, databaseCount, jumboCount})};
+                    {chunkCount, databaseCount, jumboCount}),
+                boost::none};
+    }
+
+    if (shardId == ShardId::kConfigServerId) {
+        // The config server may be added as a shard again, so we locally drop its drained
+        // sharded collections to enable that without user intervention. But we have to wait for
+        // the range deleter to quiesce to give queries and stale routers time to discover the
+        // migration, to match the usual probabilistic guarantees for migrations.
+        auto pendingRangeDeletions = [opCtx]() {
+            PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
+            return static_cast<long long>(store.count(opCtx, BSONObj()));
+        }();
+        if (pendingRangeDeletions > 0) {
+            LOGV2(7564600,
+                  "removeShard: waiting for range deletions",
+                  "pendingRangeDeletions"_attr = pendingRangeDeletions);
+
+            return {
+                RemoveShardProgress::PENDING_RANGE_DELETIONS, boost::none, pendingRangeDeletions};
+        }
+
+        // Drop the drained collections locally so the config server can transition back to catalog
+        // shard mode in the future without requiring users to manually drop them.
+        LOGV2(7509600, "Locally dropping drained collections", "shardId"_attr = name);
+
+        auto shardedCollections = _localCatalogClient->getCollections(opCtx, {});
+        for (auto&& collection : shardedCollections) {
+            DBDirectClient client(opCtx);
+
+            BSONObj result;
+            if (!client.dropCollection(
+                    collection.getNss(), ShardingCatalogClient::kLocalWriteConcern, &result)) {
+                // Note attempting to drop a non-existent collection does not return an error, so
+                // it's safe to assert the status is ok even if an earlier attempt was interrupted
+                // by a failover.
+                uassertStatusOK(getStatusFromCommandResult(result));
+            }
+
+            hangAfterDroppingCollectionInTransitionToDedicatedConfigServer.pauseWhileSet(opCtx);
+        }
     }
 
     // Draining is done, now finish removing the shard.
@@ -996,6 +1053,63 @@ RemoveShardProgress ShardingCatalogManager::removeShard(OperationContext* opCtx,
 
     return {RemoveShardProgress::COMPLETED,
             boost::optional<RemoveShardProgress::DrainingShardUsage>(boost::none)};
+}
+
+void ShardingCatalogManager::appendShardDrainingStatus(OperationContext* opCtx,
+                                                       BSONObjBuilder& result,
+                                                       RemoveShardProgress shardDrainingStatus,
+                                                       ShardId shardId) {
+    const auto databases =
+        uassertStatusOK(_localCatalogClient->getDatabasesForShard(opCtx, shardId));
+
+    // Get BSONObj containing:
+    // 1) note about moving or dropping databases in a shard
+    // 2) list of databases (excluding 'local' database) that need to be moved
+    const auto dbInfo = [&] {
+        BSONObjBuilder dbInfoBuilder;
+        dbInfoBuilder.append("note", "you need to drop or movePrimary these databases");
+
+        BSONArrayBuilder dbs(dbInfoBuilder.subarrayStart("dbsToMove"));
+        for (const auto& db : databases) {
+            if (db != DatabaseName::kLocal.db()) {
+                dbs.append(db);
+            }
+        }
+        dbs.doneFast();
+
+        return dbInfoBuilder.obj();
+    }();
+
+    switch (shardDrainingStatus.status) {
+        case RemoveShardProgress::STARTED:
+            result.append("msg", "draining started successfully");
+            result.append("state", "started");
+            result.append("shard", shardId);
+            result.appendElements(dbInfo);
+            break;
+        case RemoveShardProgress::ONGOING: {
+            const auto& remainingCounts = shardDrainingStatus.remainingCounts;
+            result.append("msg", "draining ongoing");
+            result.append("state", "ongoing");
+            result.append("remaining",
+                          BSON("chunks" << remainingCounts->totalChunks << "dbs"
+                                        << remainingCounts->databases << "jumboChunks"
+                                        << remainingCounts->jumboChunks));
+            result.appendElements(dbInfo);
+            break;
+        }
+        case RemoveShardProgress::PENDING_RANGE_DELETIONS: {
+            result.append("msg", "waiting for pending range deletions");
+            result.append("state", "pendingRangeDeletions");
+            result.append("pendingRangeDeletions", *shardDrainingStatus.pendingRangeDeletions);
+            break;
+        }
+        case RemoveShardProgress::COMPLETED:
+            result.append("msg", "removeshard completed successfully");
+            result.append("state", "completed");
+            result.append("shard", shardId);
+            break;
+    }
 }
 
 Lock::SharedLock ShardingCatalogManager::enterStableTopologyRegion(OperationContext* opCtx) {
@@ -1389,8 +1503,11 @@ void ShardingCatalogManager::_addShardInTransaction(
             .semi();
     };
 
-    txn_api::SyncTransactionWithRetries txn(
-        opCtx, Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(), nullptr);
+    auto& executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+    auto inlineExecutor = std::make_shared<executor::InlineExecutor>();
+    auto sleepInlineExecutor = inlineExecutor->getSleepableExecutor(executor);
+
+    txn_api::SyncTransactionWithRetries txn(opCtx, sleepInlineExecutor, nullptr, inlineExecutor);
     txn.run(opCtx, transactionChain);
 
     hangBeforeNotifyingaddShardCommitted.pauseWhileSet();
@@ -1450,8 +1567,12 @@ void ShardingCatalogManager::_removeShardInTransaction(OperationContext* opCtx,
             })
             .semi();
     };
-    txn_api::SyncTransactionWithRetries txn(
-        opCtx, Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(), nullptr);
+
+    auto inlineExecutor = std::make_shared<executor::InlineExecutor>();
+    auto sleepInlineExecutor = inlineExecutor->getSleepableExecutor(
+        Grid::get(opCtx)->getExecutorPool()->getFixedExecutor());
+
+    txn_api::SyncTransactionWithRetries txn(opCtx, sleepInlineExecutor, nullptr, inlineExecutor);
 
     txn.run(opCtx, removeShardFn);
 }

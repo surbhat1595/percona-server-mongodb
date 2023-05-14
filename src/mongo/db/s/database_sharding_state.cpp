@@ -176,20 +176,23 @@ void DatabaseShardingState::assertMatchingDbVersion(OperationContext* opCtx,
         const auto critSecSignal = scopedDss->getCriticalSectionSignal(
             opCtx->lockState()->isWriteLocked() ? ShardingMigrationCriticalSection::kWrite
                                                 : ShardingMigrationCriticalSection::kRead);
+        const auto optCritSecReason = scopedDss->getCriticalSectionReason();
+
         uassert(
             StaleDbRoutingVersion(dbName.toString(), receivedVersion, boost::none, critSecSignal),
-            str::stream() << "The critical section for the database " << dbName
+            str::stream() << "The critical section for the database "
+                          << dbName.toStringForErrorMsg()
                           << " is acquired with reason: " << scopedDss->getCriticalSectionReason(),
             !critSecSignal);
     }
 
     const auto wantedVersion = scopedDss->getDbVersion(opCtx);
     uassert(StaleDbRoutingVersion(dbName.toString(), receivedVersion, boost::none),
-            str::stream() << "No cached info for the database " << dbName,
+            str::stream() << "No cached info for the database " << dbName.toStringForErrorMsg(),
             wantedVersion);
 
     uassert(StaleDbRoutingVersion(dbName.toString(), receivedVersion, *wantedVersion),
-            str::stream() << "Version mismatch for the database " << dbName,
+            str::stream() << "Version mismatch for the database " << dbName.toStringForErrorMsg(),
             receivedVersion == *wantedVersion);
 }
 
@@ -198,23 +201,27 @@ void DatabaseShardingState::assertIsPrimaryShardForDb(OperationContext* opCtx,
     if (dbName == DatabaseName::kConfig || dbName == DatabaseName::kAdmin) {
         uassert(7393700,
                 "The config server is the primary shard for database: {}"_format(dbName.toString()),
-                serverGlobalParams.clusterRole == ClusterRole::ConfigServer);
+                serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
         return;
     }
 
+    auto expectedDbVersion = OperationShardingState::get(opCtx).getDbVersion(dbName.toString());
+
     uassert(ErrorCodes::IllegalOperation,
-            str::stream() << "Received request without the version for the database " << dbName,
-            OperationShardingState::get(opCtx).hasDbVersion());
+            str::stream() << "Received request without the version for the database "
+                          << dbName.toStringForErrorMsg(),
+            expectedDbVersion);
 
     Lock::DBLock dbLock(opCtx, dbName, MODE_IS);
-    assertMatchingDbVersion(opCtx, dbName);
+    assertMatchingDbVersion(opCtx, dbName, *expectedDbVersion);
 
     const auto scopedDss = assertDbLockedAndAcquireShared(opCtx, dbName);
     const auto primaryShardId = scopedDss->_dbInfo->getPrimary();
     const auto thisShardId = ShardingState::get(opCtx)->shardId();
     uassert(ErrorCodes::IllegalOperation,
-            str::stream() << "This is not the primary shard for the database " << dbName
-                          << ". Expected: " << primaryShardId << " Actual: " << thisShardId,
+            str::stream() << "This is not the primary shard for the database "
+                          << dbName.toStringForErrorMsg() << ". Expected: " << primaryShardId
+                          << " Actual: " << thisShardId,
             primaryShardId == thisShardId);
 }
 

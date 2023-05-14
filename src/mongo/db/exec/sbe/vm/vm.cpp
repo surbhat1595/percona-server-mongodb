@@ -42,10 +42,10 @@
 #include "mongo/db/client.h"
 #include "mongo/db/exec/js_function.h"
 #include "mongo/db/exec/sbe/accumulator_sum_value_enum.h"
+#include "mongo/db/exec/sbe/makeobj_spec.h"
 #include "mongo/db/exec/sbe/values/arith_common.h"
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/exec/sbe/values/columnar.h"
-#include "mongo/db/exec/sbe/values/makeobj_spec.h"
 #include "mongo/db/exec/sbe/values/sbe_pattern_value_cmp.h"
 #include "mongo/db/exec/sbe/values/sort_spec.h"
 #include "mongo/db/exec/sbe/values/util.h"
@@ -5286,83 +5286,20 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSortKeyComponent
     return {false, outTag, outVal};
 }
 
-std::pair<value::TypeTags, value::Value> ByteCode::produceBsonObject(const value::MakeObjSpec* mos,
+std::pair<value::TypeTags, value::Value> ByteCode::produceBsonObject(const MakeObjSpec* mos,
                                                                      value::TypeTags rootTag,
                                                                      value::Value rootVal,
                                                                      const size_t startIdx) {
-    auto& allFieldsMap = mos->allFieldsMap;
     auto& fieldBehavior = mos->fieldBehavior;
-    auto& fields = mos->fields;
-    auto& projects = mos->projects;
+    auto& fieldsAndProjects = mos->fieldsAndProjects;
+    auto numFields = mos->numFields;
 
-    const bool isInclusion = fieldBehavior == value::MakeObjSpec::FieldBehavior::keep;
-
-    auto isFieldProjectedOrRestricted = [&](StringData sv) {
-        // If 'bloomFilter' is initialized, check to see if it can answer our query.
-        if (allFieldsMap.size() <= 64) {
-            size_t bloomIdx = mos->computeBloomIdx1(sv.rawData(), sv.size());
-            size_t fieldIdx = mos->bloomFilter[bloomIdx];
-            size_t k = 0;
-
-            for (;; ++k) {
-                if (MONGO_likely(fieldIdx >= 2)) {
-                    // If fieldIdx >= 2, that means that we may have a match. If 'sv' matches a
-                    // string in 'fields', then we return '!isInclusion' (because if isInclusion is
-                    // true then the field is not restricted or projected, and if isInclusion is
-                    // false then the field is restricted). If 'sv' matches a string in 'projects',
-                    // we return 'true' (because the field is projected).
-                    //
-                    // If 'sv' doesn't match any of the strings in 'fields' or 'projects', then we
-                    // return 'isInclusion' (because if isInclusion is true then the field is
-                    // restricted, and if isInclusion is false then the field not restricted or
-                    // projected).
-                    auto singleName = (fieldIdx - 2 >= mos->fields.size())
-                        ? StringData(mos->projects[fieldIdx - 2 - mos->fields.size()])
-                        : StringData(mos->fields[fieldIdx - 2]);
-
-                    return sv == singleName ? (!isInclusion || fieldIdx - 2 >= mos->fields.size())
-                                            : isInclusion;
-                } else if (MONGO_likely(fieldIdx == 0)) {
-                    // If fieldIdx == 0, then we can deduce that 'sv' is not present in either
-                    // vector and we return 'isInclusion'.
-                    return isInclusion;
-                }
-
-                // If fieldIdx == 1, then we can't determine if 'sv' is present in either vector.
-                if (k == 0) {
-                    // If this was our first attempt, try again using computeBloomIdx2().
-                    bloomIdx = mos->computeBloomIdx2(sv.rawData(), sv.size(), bloomIdx);
-                    fieldIdx = mos->bloomFilter[bloomIdx];
-                } else {
-                    // After two attempts, give up and search for 'sv' in 'allFieldsMap'.
-                    break;
-                }
-            }
-        }
-
-        auto key = StringMapHasher{}.hashed_key(sv);
-
-        bool foundKey = false;
-        bool projected = false;
-        bool restricted = false;
-
-        if (auto it = allFieldsMap.find(key); it != allFieldsMap.end()) {
-            foundKey = true;
-            projected = it->second != std::numeric_limits<size_t>::max();
-            restricted = !isInclusion;
-        }
-
-        if (!foundKey) {
-            restricted = isInclusion;
-        }
-
-        return projected || restricted;
-    };
+    const bool isInclusion = fieldBehavior == MakeObjSpec::FieldBehavior::keep;
 
     UniqueBSONObjBuilder bob;
 
     if (value::isObject(rootTag)) {
-        size_t nFieldsIfInclusion = fields.size();
+        size_t nFieldsIfInclusion = numFields;
 
         if (rootTag == value::TypeTags::bsonObject) {
             if (!(nFieldsIfInclusion == 0 && isInclusion)) {
@@ -5375,7 +5312,17 @@ std::pair<value::TypeTags, value::Value> ByteCode::produceBsonObject(const value
                     auto sv = bson::fieldNameAndLength(be);
                     auto nextBe = bson::advance(be, sv.size());
 
-                    if (!isFieldProjectedOrRestricted(sv)) {
+                    bool isProjectedOrRestricted;
+                    size_t pos = fieldsAndProjects.findPos(sv);
+                    if (pos == IndexedStringVector::npos) {
+                        isProjectedOrRestricted = isInclusion;
+                    } else if (pos < numFields) {
+                        isProjectedOrRestricted = !isInclusion;
+                    } else {
+                        isProjectedOrRestricted = true;
+                    }
+
+                    if (!isProjectedOrRestricted) {
                         bob.append(BSONElement(be, sv.size() + 1, nextBe - be));
                         --nFieldsIfInclusion;
                     }
@@ -5393,7 +5340,17 @@ std::pair<value::TypeTags, value::Value> ByteCode::produceBsonObject(const value
                 for (size_t idx = 0; idx < objRoot->size(); ++idx) {
                     auto sv = StringData(objRoot->field(idx));
 
-                    if (!isFieldProjectedOrRestricted(sv)) {
+                    bool isProjectedOrRestricted;
+                    size_t pos = fieldsAndProjects.findPos(sv);
+                    if (pos == IndexedStringVector::npos) {
+                        isProjectedOrRestricted = isInclusion;
+                    } else if (pos < numFields) {
+                        isProjectedOrRestricted = !isInclusion;
+                    } else {
+                        isProjectedOrRestricted = true;
+                    }
+
+                    if (!isProjectedOrRestricted) {
                         auto [tag, val] = objRoot->getAt(idx);
                         bson::appendValueToBsonObj(bob, objRoot->field(idx), tag, val);
                         --nFieldsIfInclusion;
@@ -5407,10 +5364,10 @@ std::pair<value::TypeTags, value::Value> ByteCode::produceBsonObject(const value
         }
     }
 
-    for (size_t idx = 0; idx < projects.size(); ++idx) {
-        auto argIdx = startIdx + idx;
+    for (size_t idx = numFields; idx < fieldsAndProjects.size(); ++idx) {
+        auto argIdx = startIdx + (idx - numFields);
         auto [_, tag, val] = getFromStack(argIdx);
-        bson::appendValueToBsonObj(bob, projects[idx], tag, val);
+        bson::appendValueToBsonObj(bob, fieldsAndProjects[idx], tag, val);
     }
 
     bob.doneFast();
@@ -5759,6 +5716,207 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMinMaxFromArray(
     return {fieldOwned, accTag, accVal};
 }
 
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinObjectToArray(ArityType arity) {
+    invariant(arity == 1);
+
+    auto [objOwned, objTag, objVal] = getFromStack(0);
+
+    if (!value::isObject(objTag)) {
+        return {false, value::TypeTags::Nothing, 0};
+    }
+
+    auto [arrTag, arrVal] = value::makeNewArray();
+    value::ValueGuard arrGuard{arrTag, arrVal};
+    auto array = value::getArrayView(arrVal);
+
+    value::ObjectEnumerator objectEnumerator(objTag, objVal);
+    while (!objectEnumerator.atEnd()) {
+        // get key
+        auto fieldName = objectEnumerator.getFieldName();
+        auto [keyTag, keyVal] = value::makeNewString(fieldName);
+        value::ValueGuard keyGuard{keyTag, keyVal};
+
+        // get value
+        auto [valueTag, valueVal] = objectEnumerator.getViewOfValue();
+        auto [valueCopyTag, valueCopyVal] = value::copyValue(valueTag, valueVal);
+
+        // create a new obejct
+        auto [elemTag, elemVal] = value::makeNewObject();
+        value::ValueGuard elemGuard{elemTag, elemVal};
+        auto elemObj = value::getObjectView(elemVal);
+
+        // insert key and value to the object
+        elemObj->push_back("k"_sd, keyTag, keyVal);
+        keyGuard.reset();
+        elemObj->push_back("v"_sd, valueCopyTag, valueCopyVal);
+
+        // insert the object to array
+        array->push_back(elemTag, elemVal);
+        elemGuard.reset();
+
+        objectEnumerator.advance();
+    }
+    if (objOwned) {
+        value::releaseValue(objTag, objVal);
+    }
+    arrGuard.reset();
+    return {true, arrTag, arrVal};
+}
+
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinArrayToObject(ArityType arity) {
+    invariant(arity == 1);
+
+    auto [arrOwned, arrTag, arrVal] = getFromStack(0);
+
+    if (!value::isArray(arrTag)) {
+        return {false, value::TypeTags::Nothing, 0};
+    }
+
+    auto [objTag, objVal] = value::makeNewObject();
+    value::ValueGuard objGuard{objTag, objVal};
+    auto object = value::getObjectView(objVal);
+
+    value::ArrayEnumerator arrayEnumerator(arrTag, arrVal);
+
+    // return empty object for empty array
+    if (arrayEnumerator.atEnd()) {
+        if (arrOwned) {
+            value::releaseValue(arrTag, arrVal);
+        }
+        objGuard.reset();
+        return {true, objTag, objVal};
+    }
+
+    // There are two accepted input formats in an array: [ [key, val] ] or [ {k:key, v:val} ]. The
+    // first array element determines the format for the rest of the array. Mixing input formats is
+    // not allowed.
+    bool inputArrayFormat;
+    auto [firstElemTag, firstElemVal] = arrayEnumerator.getViewOfValue();
+    if (value::isArray(firstElemTag)) {
+        inputArrayFormat = true;
+    } else if (value::isObject(firstElemTag)) {
+        inputArrayFormat = false;
+    } else {
+        uasserted(5153201, "Input to $arrayToObject should be either an array or object");
+    }
+
+    // Use a StringMap to store the indices in object for added fieldNames
+    // Only the last value should be added for duplicate fieldNames.
+    StringMap<int> keyMap{};
+
+    while (!arrayEnumerator.atEnd()) {
+        auto [elemTag, elemVal] = arrayEnumerator.getViewOfValue();
+        if (inputArrayFormat) {
+            uassert(5153202,
+                    "$arrayToObject requires a consistent input format. Expected an array",
+                    value::isArray(elemTag));
+
+            value::ArrayEnumerator innerArrayEnum(elemTag, elemVal);
+            uassert(5153203,
+                    "$arrayToObject requires an array of size 2 arrays",
+                    !innerArrayEnum.atEnd());
+
+            auto [keyTag, keyVal] = innerArrayEnum.getViewOfValue();
+            uassert(5153204,
+                    "$arrayToObject requires an array of key-value pairs, where the key must be of "
+                    "type string",
+                    value::isString(keyTag));
+
+            innerArrayEnum.advance();
+            uassert(5153205,
+                    "$arrayToObject requires an array of size 2 arrays",
+                    !innerArrayEnum.atEnd());
+
+            auto [valueTag, valueVal] = innerArrayEnum.getViewOfValue();
+
+            innerArrayEnum.advance();
+            uassert(5153206,
+                    "$arrayToObject requires an array of size 2 arrays",
+                    innerArrayEnum.atEnd());
+
+            auto keyStringData = value::getStringView(keyTag, keyVal);
+            uassert(5153207,
+                    "Key field cannot contain an embedded null byte",
+                    keyStringData.find('\0') == std::string::npos);
+
+            auto [valueCopyTag, valueCopyVal] = value::copyValue(valueTag, valueVal);
+            if (keyMap.contains(keyStringData)) {
+                auto idx = keyMap[keyStringData];
+                auto oldVal = object->getAt(idx);
+                value::ValueGuard guard{oldVal};
+                object->setAt(idx, valueCopyTag, valueCopyVal);
+            } else {
+                keyMap[keyStringData] = object->size();
+                object->push_back(keyStringData, valueCopyTag, valueCopyVal);
+            }
+        } else {
+            uassert(5153208,
+                    "$arrayToObject requires a consistent input format. Expected an object",
+                    value::isObject(elemTag));
+
+            value::ObjectEnumerator innerObjEnum(elemTag, elemVal);
+            uassert(5153209,
+                    "$arrayToObject requires an object keys of 'k' and 'v'. "
+                    "Found incorrect number of keys",
+                    !innerObjEnum.atEnd());
+
+            auto keyName = innerObjEnum.getFieldName();
+            auto [keyTag, keyVal] = innerObjEnum.getViewOfValue();
+
+            innerObjEnum.advance();
+            uassert(5153210,
+                    "$arrayToObject requires an object keys of 'k' and 'v'. "
+                    "Found incorrect number of keys",
+                    !innerObjEnum.atEnd());
+
+            auto valueName = innerObjEnum.getFieldName();
+            auto [valueTag, valueVal] = innerObjEnum.getViewOfValue();
+
+            innerObjEnum.advance();
+            uassert(5153211,
+                    "$arrayToObject requires an object keys of 'k' and 'v'. "
+                    "Found incorrect number of keys",
+                    innerObjEnum.atEnd());
+
+            uassert(5153212,
+                    "$arrayToObject requires an object with keys 'k' and 'v'.",
+                    ((keyName == "k" && valueName == "v") || (keyName == "k" && valueName == "v")));
+            if (keyName == "v" && valueName == "k") {
+                std::swap(keyTag, valueTag);
+                std::swap(keyVal, valueVal);
+            }
+
+            uassert(5153213,
+                    "$arrayToObject requires an object with keys 'k' and 'v', where "
+                    "the value of 'k' must be of type string",
+                    value::isString(keyTag));
+
+            auto keyStringData = value::getStringView(keyTag, keyVal);
+            uassert(5153214,
+                    "Key field cannot contain an embedded null byte",
+                    keyStringData.find('\0') == std::string::npos);
+
+            auto [valueCopyTag, valueCopyVal] = value::copyValue(valueTag, valueVal);
+            if (keyMap.contains(keyStringData)) {
+                auto idx = keyMap[keyStringData];
+                auto oldVal = object->getAt(idx);
+                value::ValueGuard guard{oldVal};
+                object->setAt(idx, valueCopyTag, valueCopyVal);
+            } else {
+                keyMap[keyStringData] = object->size();
+                object->push_back(keyStringData, valueCopyTag, valueCopyVal);
+            }
+        }
+        arrayEnumerator.advance();
+    }
+    if (arrOwned) {
+        value::releaseValue(arrTag, arrVal);
+    }
+    objGuard.reset();
+    return {true, objTag, objVal};
+}
+
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin f,
                                                                          ArityType arity) {
     switch (f) {
@@ -6019,6 +6177,10 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinISODayOfWeek(arity);
         case Builtin::isoWeek:
             return builtinISOWeek(arity);
+        case Builtin::objectToArray:
+            return builtinObjectToArray(arity);
+        case Builtin::arrayToObject:
+            return builtinArrayToObject(arity);
     }
 
     MONGO_UNREACHABLE;
@@ -6285,6 +6447,10 @@ std::string builtinToString(Builtin b) {
             return "isoDayOfWeek";
         case Builtin::isoWeek:
             return "isoWeek";
+        case Builtin::objectToArray:
+            return "objectToArray";
+        case Builtin::arrayToObject:
+            return "arrayToObject";
         default:
             MONGO_UNREACHABLE;
     }

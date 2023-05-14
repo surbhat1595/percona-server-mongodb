@@ -625,7 +625,7 @@ void MigrationSourceManager::commitChunkMetadataOnConfig() {
               "Waiting for migration cleanup after chunk commit for the namespace {namespace} "
               "and range {range}",
               "Waiting for migration cleanup after chunk commit",
-              "namespace"_attr = nss(),
+              logAttrs(nss()),
               "range"_attr = redact(range.toString()),
               "migrationId"_attr = _coordinator->getMigrationId());
 
@@ -743,6 +743,10 @@ void MigrationSourceManager::_cleanup(bool completeMigration) noexcept {
             }
 
             auto newClient = _opCtx->getServiceContext()->makeClient("MigrationCoordinator");
+            {
+                stdx::lock_guard<Client> lk(*newClient.get());
+                newClient->setSystemOperationKillableByStepdown(lk);
+            }
             AlternativeClientRegion acr(newClient);
             auto newOpCtxPtr = cc().makeOperationContext();
             auto newOpCtx = newOpCtxPtr.get();

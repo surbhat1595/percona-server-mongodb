@@ -350,7 +350,7 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx,
                                   "Failed to recover orphaned data file for collection "
                                   "'{namespace}': {error}",
                                   "Failed to recover orphaned data file for collection",
-                                  "namespace"_attr = entry.nss,
+                                  logAttrs(entry.nss),
                                   "error"_attr = status);
                     WriteUnitOfWork wuow(opCtx);
                     fassert(50716, _catalog->_removeEntry(opCtx, entry.catalogId));
@@ -481,7 +481,7 @@ Status StorageEngineImpl::_recoverOrphanedCollection(OperationContext* opCtx,
     LOGV2(22249,
           "Storage engine is missing collection from its metadata. Attempting to locate and "
           "recover the data",
-          "namespace"_attr = collectionName,
+          logAttrs(collectionName),
           "ident"_attr = collectionIdent);
 
     WriteUnitOfWork wuow(opCtx);
@@ -673,7 +673,9 @@ StatusWith<StorageEngine::ReconcileResult> StorageEngineImpl::reconcileCatalogAn
         }
 
         const auto& toRemove = it;
-        Timestamp identDropTs = feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCV()
+        // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
+        Timestamp identDropTs =
+            feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe()
             ? stableTs
             : Timestamp::min();
         LOGV2(22251, "Dropping unknown ident", "ident"_attr = toRemove, "ts"_attr = identDropTs);
@@ -1367,8 +1369,7 @@ void StorageEngineImpl::TimestampMonitor::_startup() {
                 throw;
             }
         },
-        Seconds(1),
-        false /*isKillableByStepdown*/);
+        Seconds(1));
 
     _job = _periodicRunner->makeJob(std::move(job));
     _job.start();

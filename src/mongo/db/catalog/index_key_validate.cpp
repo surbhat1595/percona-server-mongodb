@@ -124,7 +124,7 @@ BSONObj buildRepairedIndexSpec(
         } else {
             LOGV2_WARNING(23878,
                           "Removing unknown field from index spec",
-                          "namespace"_attr = redact(ns.toString()),
+                          "namespace"_attr = redact(toStringForLogging(ns)),
                           "fieldName"_attr = redact(fieldName),
                           "indexSpec"_attr = redact(indexSpec));
         }
@@ -154,8 +154,10 @@ Status validateKeyPattern(const BSONObj& key,
             return Status(code, str::stream() << "Unknown index plugin '" << pluginName << '\'');
     }
 
+    // (Ignore FCV check): This is intentional because we want clusters which have wildcard indexes
+    // still be able to use the feature even if the FCV is downgraded.
     auto compoundWildcardIndexesAllowed =
-        feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabledAndIgnoreFCV();
+        feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabledAndIgnoreFCVUnsafe();
     if (serverGlobalParams.featureCompatibility.isVersionInitialized() && !inCollValidation) {
         compoundWildcardIndexesAllowed =
             feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabled(
@@ -309,7 +311,7 @@ BSONObj repairIndexSpec(const NamespaceString& ns,
             !indexSpecElem.isNumber() && !indexSpecElem.isBoolean() && indexSpecElem.trueValue()) {
             LOGV2_WARNING(6444400,
                           "Fixing boolean field from index spec",
-                          "namespace"_attr = redact(ns.toString()),
+                          "namespace"_attr = redact(toStringForLogging(ns)),
                           "fieldName"_attr = redact(fieldName),
                           "indexSpec"_attr = redact(indexSpec));
             builder->appendBool(fieldName, true);
@@ -319,7 +321,7 @@ BSONObj repairIndexSpec(const NamespaceString& ns,
                         .isOK()) {
             LOGV2_WARNING(6835900,
                           "Fixing expire field from TTL index spec",
-                          "namespace"_attr = redact(ns.toString()),
+                          "namespace"_attr = redact(toStringForLogging(ns)),
                           "fieldName"_attr = redact(fieldName),
                           "indexSpec"_attr = redact(indexSpec));
             builder->appendNumber(fieldName,
@@ -547,9 +549,12 @@ StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx,
             }
             try {
                 if (isWildcard) {
+                    // (Ignore FCV check): This is intentional because we want clusters which have
+                    // wildcard indexes still be able to use the feature even if the FCV is
+                    // downgraded.
                     if (key.nFields() > 1 &&
                         feature_flags::gFeatureFlagCompoundWildcardIndexes
-                            .isEnabledAndIgnoreFCV()) {
+                            .isEnabledAndIgnoreFCVUnsafe()) {
                         auto validationStatus =
                             validateWildcardProjection(key, indexSpecElem.embeddedObject());
                         if (!validationStatus.isOK()) {

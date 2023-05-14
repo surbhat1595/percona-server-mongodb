@@ -50,9 +50,15 @@ namespace mongo {
 
 namespace {
 
+const auto getMaintainerThread = ServiceContext::declareDecoration<OplogCapMaintainerThread>();
+
 MONGO_FAIL_POINT_DEFINE(hangOplogCapMaintainerThread);
 
 }  // namespace
+
+OplogCapMaintainerThread* OplogCapMaintainerThread::get(ServiceContext* serviceCtx) {
+    return &getMaintainerThread(serviceCtx);
+}
 
 bool OplogCapMaintainerThread::_deleteExcessDocuments() {
     if (!getGlobalServiceContext()->getStorageEngine()) {
@@ -107,20 +113,24 @@ void OplogCapMaintainerThread::run() {
     LOGV2_DEBUG(5295000, 1, "Oplog cap maintainer thread started", "threadName"_attr = _name);
     ThreadClient tc(_name, getGlobalServiceContext());
 
-    {
-        stdx::lock_guard<Client> lk(*tc.get());
-        tc.get()->setSystemOperationUnKillableByStepdown(lk);
-    }
-
     while (!globalInShutdownDeprecated()) {
         if (MONGO_unlikely(hangOplogCapMaintainerThread.shouldFail())) {
             LOGV2(5095500, "Hanging the oplog cap maintainer thread due to fail point");
             hangOplogCapMaintainerThread.pauseWhileSet();
         }
 
-        if (!_deleteExcessDocuments()) {
+        if (!_deleteExcessDocuments() && !globalInShutdownDeprecated()) {
             sleepmillis(1000);  // Back off in case there were problems deleting.
         }
     }
 }
+
+void OplogCapMaintainerThread::waitForFinish() {
+    if (running()) {
+        LOGV2_INFO(7474902, "Shutting down oplog cap maintainer thread");
+        wait();
+        LOGV2(7474901, "Finished shutting down oplog cap maintainer thread");
+    }
+}
+
 }  // namespace mongo

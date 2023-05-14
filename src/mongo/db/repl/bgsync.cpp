@@ -226,11 +226,6 @@ void BackgroundSync::_run() {
     Client::initThread("BackgroundSync");
     AuthorizationSession::get(cc())->grantInternalAuthorization(&cc());
 
-    {
-        stdx::lock_guard<Client> lk(cc());
-        cc().setSystemOperationUnKillableByStepdown(lk);
-    }
-
     while (!inShutdown()) {
         try {
             _runProducer();
@@ -983,7 +978,7 @@ OpTime BackgroundSync::_readLastAppliedOpTime(OperationContext* opCtx) {
         LOGV2_FATAL(18904,
                     "Problem reading {namespace}: {error}",
                     "Problem reading from namespace",
-                    "namespace"_attr = NamespaceString::kRsOplogNamespace.ns(),
+                    logAttrs(NamespaceString::kRsOplogNamespace),
                     "error"_attr = redact(ex));
     }
 

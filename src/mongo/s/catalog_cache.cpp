@@ -271,6 +271,10 @@ CatalogCache::CatalogCache(ServiceContext* const service, CatalogCacheLoader& ca
 CatalogCache::~CatalogCache() {
     // The executor is used by all the caches that correspond to the router role, so it must be
     // joined before these caches are destroyed, per the contract of ReadThroughCache.
+    shutDownAndJoin();
+}
+
+void CatalogCache::shutDownAndJoin() {
     _executor.shutdown();
     _executor.join();
 }
@@ -320,7 +324,7 @@ StatusWith<ChunkManager> CatalogCache::_getCollectionPlacementInfoAt(
                     4947103,
                     2,
                     "Invalidating cached collection entry because its database has been dropped",
-                    "namespace"_attr = nss);
+                    logAttrs(nss));
                 invalidateCollectionEntry_LINEARIZABLE(nss);
             }
             return swDbInfo.getStatus();
@@ -385,7 +389,7 @@ StatusWith<ChunkManager> CatalogCache::_getCollectionPlacementInfoAt(
                 LOGV2_FOR_CATALOG_REFRESH(4086500,
                                           0,
                                           "Collection refresh failed",
-                                          "namespace"_attr = nss,
+                                          logAttrs(nss),
                                           "exception"_attr = redact(ex));
                 acquireTries++;
                 if (acquireTries == kMaxInconsistentCollectionRefreshAttempts) {
@@ -428,7 +432,9 @@ StatusWith<CollectionRoutingInfo> CatalogCache::getCollectionRoutingInfo(Operati
 boost::optional<ShardingIndexesCatalogCache> CatalogCache::_getCollectionIndexInfoAt(
     OperationContext* opCtx, const NamespaceString& nss, bool allowLocks) {
 
-    if (!feature_flags::gGlobalIndexesShardingCatalog.isEnabledAndIgnoreFCV()) {
+    // (Ignore FCV check): It is okay to ignore FCV in mongos. This is a temporary solution to solve
+    // performance issue when fetching index information in mongos.
+    if (!feature_flags::gGlobalIndexesShardingCatalog.isEnabledAndIgnoreFCVUnsafe()) {
         return boost::none;
     }
 
@@ -447,7 +453,7 @@ boost::optional<ShardingIndexesCatalogCache> CatalogCache::_getCollectionIndexIn
                 6686300,
                 2,
                 "Invalidating cached index entry because its database has been dropped",
-                "namespace"_attr = nss);
+                logAttrs(nss));
             invalidateIndexEntry_LINEARIZABLE(nss);
         }
         uasserted(swDbInfo.getStatus().code(),
@@ -491,11 +497,8 @@ boost::optional<ShardingIndexesCatalogCache> CatalogCache::_getCollectionIndexIn
                 throw;
             }
 
-            LOGV2_FOR_CATALOG_REFRESH(6686301,
-                                      0,
-                                      "Index refresh failed",
-                                      "namespace"_attr = nss,
-                                      "exception"_attr = redact(ex));
+            LOGV2_FOR_CATALOG_REFRESH(
+                6686301, 0, "Index refresh failed", logAttrs(nss), "exception"_attr = redact(ex));
 
             acquireTries++;
             if (acquireTries == kMaxInconsistentCollectionRefreshAttempts) {
@@ -676,7 +679,7 @@ void CatalogCache::invalidateEntriesThatReferenceShard(const ShardId& shardId) {
                         "Invalidating cached collection {namespace} that has data "
                         "on shard {shardId}",
                         "Invalidating cached collection",
-                        "namespace"_attr = rt.nss(),
+                        logAttrs(rt.nss()),
                         "shardId"_attr = shardId);
             return shardIds.find(shardId) != shardIds.end();
         });
@@ -724,7 +727,8 @@ void CatalogCache::invalidateCollectionEntry_LINEARIZABLE(const NamespaceString&
 }
 
 void CatalogCache::invalidateIndexEntry_LINEARIZABLE(const NamespaceString& nss) {
-    if (!feature_flags::gGlobalIndexesShardingCatalog.isEnabledAndIgnoreFCV()) {
+    // (Ignore FCV check): It is okay to ignore FCV in mongos.
+    if (!feature_flags::gGlobalIndexesShardingCatalog.isEnabledAndIgnoreFCVUnsafe()) {
         _indexCache.invalidateKey(nss);
     }
 }
@@ -864,7 +868,7 @@ CatalogCache::CollectionCache::LookupResult CatalogCache::CollectionCache::_look
         LOGV2_FOR_CATALOG_REFRESH(4619900,
                                   1,
                                   "Refreshing cached collection",
-                                  "namespace"_attr = nss,
+                                  logAttrs(nss),
                                   "lookupSinceVersion"_attr = lookupVersion,
                                   "timeInStore"_attr = previousVersion);
 
@@ -891,7 +895,7 @@ CatalogCache::CollectionCache::LookupResult CatalogCache::CollectionCache::_look
         LOGV2_FOR_CATALOG_REFRESH(4619901,
                                   isIncremental || newComparableVersion != previousVersion ? 0 : 1,
                                   "Refreshed cached collection",
-                                  "namespace"_attr = nss,
+                                  logAttrs(nss),
                                   "lookupSinceVersion"_attr = lookupVersion,
                                   "newVersion"_attr = newComparableVersion,
                                   "timeInStore"_attr = previousVersion,
@@ -908,7 +912,7 @@ CatalogCache::CollectionCache::LookupResult CatalogCache::CollectionCache::_look
             LOGV2_FOR_CATALOG_REFRESH(4619902,
                                       0,
                                       "Collection has found to be unsharded after refresh",
-                                      "namespace"_attr = nss,
+                                      logAttrs(nss),
                                       "duration"_attr = Milliseconds(t.millis()));
 
             return LookupResult(OptionalRoutingTableHistory(), std::move(newComparableVersion));
@@ -921,7 +925,7 @@ CatalogCache::CollectionCache::LookupResult CatalogCache::CollectionCache::_look
         LOGV2_FOR_CATALOG_REFRESH(4619903,
                                   0,
                                   "Error refreshing cached collection",
-                                  "namespace"_attr = nss,
+                                  logAttrs(nss),
                                   "duration"_attr = Milliseconds(t.millis()),
                                   "error"_attr = redact(ex));
 
@@ -956,12 +960,13 @@ CatalogCache::IndexCache::LookupResult CatalogCache::IndexCache::_lookupIndexes(
         LOGV2_FOR_CATALOG_REFRESH(6686302,
                                   1,
                                   "Refreshing cached indexes",
-                                  "namespace"_attr = nss,
+                                  logAttrs(nss),
                                   "timeInStore"_attr = previousVersion);
 
         const auto readConcern = [&]() -> repl::ReadConcernArgs {
-            if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&
-                !gFeatureFlagCatalogShard.isEnabledAndIgnoreFCV()) {
+            // (Ignore FCV check): This is in mongos so we expect to ignore FCV.
+            if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
+                !gFeatureFlagCatalogShard.isEnabledAndIgnoreFCVUnsafe()) {
                 // When the feature flag is on, the config server may read from a secondary which
                 // may need to wait for replication, so we should use afterClusterTime.
                 return {repl::ReadConcernLevel::kSnapshotReadConcern};
@@ -981,7 +986,7 @@ CatalogCache::IndexCache::LookupResult CatalogCache::IndexCache::_lookupIndexes(
         LOGV2_FOR_CATALOG_REFRESH(6686303,
                                   newComparableVersion != previousVersion ? 0 : 1,
                                   "Refreshed cached indexes",
-                                  "namespace"_attr = nss,
+                                  logAttrs(nss),
                                   "newVersion"_attr = newComparableVersion,
                                   "timeInStore"_attr = previousVersion);
 
@@ -1000,17 +1005,15 @@ CatalogCache::IndexCache::LookupResult CatalogCache::IndexCache::_lookupIndexes(
                             std::move(newComparableVersion));
     } catch (const DBException& ex) {
         if (ex.code() == ErrorCodes::NamespaceNotFound) {
-            LOGV2_FOR_CATALOG_REFRESH(7038200,
-                                      0,
-                                      "Collection has found to be unsharded after refresh",
-                                      "namespace"_attr = nss);
+            LOGV2_FOR_CATALOG_REFRESH(
+                7038200, 0, "Collection has found to be unsharded after refresh", logAttrs(nss));
             return LookupResult(OptionalShardingIndexCatalogInfo(),
                                 std::move(newComparableVersion));
         }
         LOGV2_FOR_CATALOG_REFRESH(6686304,
                                   0,
                                   "Error refreshing cached indexes",
-                                  "namespace"_attr = nss,
+                                  logAttrs(nss),
                                   "error"_attr = redact(ex));
         throw;
     }

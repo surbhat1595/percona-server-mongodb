@@ -2205,6 +2205,25 @@ functions:
     params:
       file_location: ${report_file|src/report.json}
 
+  "combine build metrics":
+    - command: subprocess.exec
+      params:
+        binary: bash
+        add_expansions_to_env: true
+        args:
+        - "src/evergreen/run_python_script.sh"
+        - "site_scons/site_tools/build_metrics/combine_metrics_unittest.py"
+    - command: subprocess.exec
+      params:
+        binary: bash
+        add_expansions_to_env: true
+        args:
+        - "src/evergreen/run_python_script.sh"
+        - "site_scons/site_tools/build_metrics/combine_metrics.py"
+        - "--prefix-name=build_metrics"
+        - "--prefix-name=populate_cache"
+        - "--prefix-name=pull_cache"
+
   "print top N metrics":
     - command: subprocess.exec
       params:
@@ -3496,6 +3515,17 @@ tasks:
 #       resmoke_jobs_max: 1
 #   - func: "send benchmark results"
 #   - func: "analyze benchmark results"
+
+- <<: *benchmark_template
+  name: benchmarks_replication
+  tags: ["benchmarks"]
+  commands:
+    - func: "do benchmark setup"
+    - func: "run tests"
+      vars:
+        suite: benchmarks_replication
+        resmoke_jobs_max: 1
+    - func: "send benchmark results"
 
 - <<: *benchmark_template
   name: benchmarks_expression
@@ -5449,8 +5479,14 @@ tasks:
     vars:
       resmoke_jobs_max: 1
 
+- <<: *gen_task_template
+  name: sharded_collections_jscore_passthrough_gen
+  tags: ["sharding", "jscore"]
+  commands:
+  - func: "generate resmoke tasks"
+
 - <<: *task_template
-  name: sharded_collections_jscore_passthrough
+  name: sharded_collections_jscore_passthrough_with_catalog_shard
   tags: ["sharding", "jscore"]
   commands:
   - func: "do setup"
@@ -5467,6 +5503,13 @@ tasks:
 
 - <<: *task_template
   name: sharding_jscore_passthrough
+  tags: ["sharding", "jscore", "common"]
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
+- <<: *task_template
+  name: sharding_jscore_passthrough_with_catalog_shard
   tags: ["sharding", "jscore", "common"]
   commands:
   - func: "do setup"
@@ -5846,7 +5889,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_with_catalog_shard_gen
-  tags: ["catalog_shard", "large"]
+  tags: ["concurrency", "common", "read_concern_maj", "large", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -5873,7 +5916,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_with_balancer_and_catalog_shard_gen
-  tags: ["catalog_shard", "large"]
+  tags: ["concurrency", "common", "read_concern_maj", "large", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -6194,7 +6237,7 @@ tasks:
 
 - <<: *gen_task_template
   name: sharding_catalog_shard_gen
-  tags: []
+  tags: ["sharding", "common"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -6937,6 +6980,14 @@ tasks:
   - func: "do setup"
   - func: "run tests"
 
+- <<: *task_template
+  name: resmoke_validation_tests
+  tags: []
+  depends_on: []
+  commands:
+  - func: "do non-compile setup"
+  - func: "run tests"
+
 - name: test_packages
   tags: []
   depends_on:
@@ -7212,13 +7263,28 @@ tasks:
       aws_key_remote: ${repo_aws_key}
       aws_secret_remote: ${repo_aws_secret}
   - func: "f_expansions_write"
-  - func: "set up notary client credentials"
+
+  # login to container registry
+  - command: shell.exec
+    params:
+      shell: bash
+      script: |
+        set -oe
+        podman login --username ${release_tools_container_registry_username} --password ${release_tools_container_registry_password} ${release_tools_container_registry}
+
+  # signing windows artifacts
   - command: subprocess.exec
-    type: test
     params:
       binary: bash
       args:
-      - "./src/evergreen/notary_client_run.sh"
+      - "./src/evergreen/garasign_jsign_sign.sh"
+
+  # signing linux artifacts
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "./src/evergreen/garasign_gpg_sign.sh"
 
   # Put the binaries tarball/zipfile
   - command: s3.put
@@ -7331,7 +7397,7 @@ tasks:
       aws_secret: ${aws_secret}
       permissions: public-read
       build_variants: ["enterprise-windows", "windows"]
-      local_file: src/mongodb-${push_name}-${push_arch}-${suffix}-signed.msi
+      local_file: src/mongodb-${push_name}-${push_arch}-${suffix}.msi
       bucket: build-push-testing
       content_type: application/x-msi
       remote_file: ${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}-signed.msi
@@ -7390,7 +7456,7 @@ tasks:
       aws_secret: ${aws_secret}
       permissions: public-read
       build_variants: ["enterprise-windows", "windows"]
-      local_file: src/mongodb-${push_name}-${push_arch}-${suffix}-signed.msi.sha1
+      local_file: src/mongodb-${push_name}-${push_arch}-${suffix}.msi.sha1
       bucket: build-push-testing
       content_type: text/plain
       remote_file: ${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}-signed.msi.sha1
@@ -7448,7 +7514,7 @@ tasks:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
       build_variants: ["enterprise-windows", "windows"]
-      local_file: src/mongodb-${push_name}-${push_arch}-${suffix}-signed.msi.sha256
+      local_file: src/mongodb-${push_name}-${push_arch}-${suffix}.msi.sha256
       bucket: build-push-testing
       permissions: public-read
       remote_file: ${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-${suffix}-${task_id}-signed.msi.sha256
@@ -7507,7 +7573,7 @@ tasks:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
       build_variants: ["enterprise-windows", "windows"]
-      local_file: src/mongodb-${push_name}-${push_arch}-${suffix}-signed.msi.md5
+      local_file: src/mongodb-${push_name}-${push_arch}-${suffix}.msi.md5
       bucket: build-push-testing
       permissions: public-read
       content_type: text/plain
@@ -7761,6 +7827,15 @@ tasks:
 
 - <<: *task_template
   name: search_auth
+  tags: []
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+    vars:
+      resmoke_jobs_max: 1
+
+- <<: *task_template
+  name: search_pinned_connections_auth
   tags: []
   commands:
   - func: "do setup"

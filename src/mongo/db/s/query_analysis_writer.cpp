@@ -47,6 +47,8 @@
 #include "mongo/s/analyze_shard_key_documents_gen.h"
 #include "mongo/s/analyze_shard_key_server_parameters_gen.h"
 #include "mongo/s/analyze_shard_key_util.h"
+#include "mongo/s/query_analysis_client.h"
+#include "mongo/s/query_analysis_sample_tracker.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/future_util.h"
@@ -65,52 +67,29 @@ static ReplicaSetAwareServiceRegistry::Registerer<QueryAnalysisWriter>
     queryAnalysisWriterServiceRegisterer("QueryAnalysisWriter");
 
 MONGO_FAIL_POINT_DEFINE(disableQueryAnalysisWriter);
+MONGO_FAIL_POINT_DEFINE(disableQueryAnalysisWriterFlusher);
 MONGO_FAIL_POINT_DEFINE(hangQueryAnalysisWriterBeforeWritingLocally);
 MONGO_FAIL_POINT_DEFINE(hangQueryAnalysisWriterBeforeWritingRemotely);
 
 const Backoff kExponentialBackoff(Seconds(1), Milliseconds::max());
 
 /**
- * Creates TTL index for the collection storing sampled queries.
+ * Creates index with the requested specs for the given collection.
  */
-BSONObj createSampledQueriesTTLIndex(OperationContext* opCtx) {
+BSONObj createIndex(OperationContext* opCtx, const NamespaceString& nss, const BSONObj& indexSpec) {
     BSONObj resObj;
 
     DBDirectClient client(opCtx);
-    client.runCommand(NamespaceString::kConfigSampledQueriesNamespace.db(),
-                      BSON("createIndexes"
-                           << NamespaceString::kConfigSampledQueriesNamespace.coll().toString()
-                           << "indexes"
-                           << BSON_ARRAY(QueryAnalysisWriter::kSampledQueriesTTLIndexSpec)),
-                      resObj);
+    client.runCommand(
+        nss.db(),
+        BSON("createIndexes" << nss.coll().toString() << "indexes" << BSON_ARRAY(indexSpec)),
+        resObj);
 
     LOGV2_DEBUG(7078401,
                 1,
-                "Creation of the TTL index for the collection storing sampled queries",
-                "namespace"_attr = NamespaceString::kConfigSampledQueriesNamespace,
-                "response"_attr = redact(resObj));
-
-    return resObj;
-}
-
-/**
- * Creates TTL index for the collection storing sampled diffs.
- */
-BSONObj createSampledQueriesDiffTTLIndex(OperationContext* opCtx) {
-    BSONObj resObj;
-
-    DBDirectClient client(opCtx);
-    client.runCommand(NamespaceString::kConfigSampledQueriesDiffNamespace.db(),
-                      BSON("createIndexes"
-                           << NamespaceString::kConfigSampledQueriesDiffNamespace.coll().toString()
-                           << "indexes"
-                           << BSON_ARRAY(QueryAnalysisWriter::kSampledQueriesDiffTTLIndexSpec)),
-                      resObj);
-
-    LOGV2_DEBUG(7078402,
-                1,
-                "Creation of the TTL index for the collection storing sampled diffs",
-                "namespace"_attr = NamespaceString::kConfigSampledQueriesDiffNamespace,
+                "Finished running the command to create index",
+                logAttrs(nss),
+                "indexSpec"_attr = indexSpec,
                 "response"_attr = redact(resObj));
 
     return resObj;
@@ -240,15 +219,27 @@ SampledCommandRequest makeSampledFindAndModifyCommandRequest(
 }  // namespace
 
 const std::string QueryAnalysisWriter::kSampledQueriesTTLIndexName = "SampledQueriesTTLIndex";
+BSONObj QueryAnalysisWriter::kSampledQueriesTTLIndexSpec(
+    BSON("key" << BSON(SampledQueryDocument::kExpireAtFieldName << 1) << "expireAfterSeconds" << 0
+               << "name" << kSampledQueriesTTLIndexName));
+
 const std::string QueryAnalysisWriter::kSampledQueriesDiffTTLIndexName =
     "SampledQueriesDiffTTLIndex";
-BSONObj QueryAnalysisWriter::kSampledQueriesTTLIndexSpec(BSON("key"
-                                                              << BSON("expireAt" << 1)
-                                                              << "expireAfterSeconds" << 0 << "name"
-                                                              << kSampledQueriesTTLIndexName));
 BSONObj QueryAnalysisWriter::kSampledQueriesDiffTTLIndexSpec(
-    BSON("key" << BSON("expireAt" << 1) << "expireAfterSeconds" << 0 << "name"
-               << kSampledQueriesDiffTTLIndexName));
+    BSON("key" << BSON(SampledQueryDiffDocument::kExpireAtFieldName << 1) << "expireAfterSeconds"
+               << 0 << "name" << kSampledQueriesDiffTTLIndexName));
+
+const std::string QueryAnalysisWriter::kAnalyzeShardKeySplitPointsTTLIndexName =
+    "AnalyzeShardKeySplitPointsTTLIndex";
+BSONObj QueryAnalysisWriter::kAnalyzeShardKeySplitPointsTTLIndexSpec(
+    BSON("key" << BSON(AnalyzeShardKeySplitPointDocument::kExpireAtFieldName << 1)
+               << "expireAfterSeconds" << 0 << "name" << kAnalyzeShardKeySplitPointsTTLIndexName));
+
+const std::map<NamespaceString, BSONObj> QueryAnalysisWriter::kTTLIndexes = {
+    {NamespaceString::kConfigSampledQueriesNamespace, kSampledQueriesTTLIndexSpec},
+    {NamespaceString::kConfigSampledQueriesDiffNamespace, kSampledQueriesDiffTTLIndexSpec},
+    {NamespaceString::kConfigAnalyzeShardKeySplitPointsNamespace,
+     kAnalyzeShardKeySplitPointsTTLIndexSpec}};
 
 QueryAnalysisWriter* QueryAnalysisWriter::get(OperationContext* opCtx) {
     return get(opCtx->getServiceContext());
@@ -265,6 +256,10 @@ bool QueryAnalysisWriter::shouldRegisterReplicaSetAwareService() const {
 }
 
 void QueryAnalysisWriter::onStartup(OperationContext* opCtx) {
+    if (MONGO_unlikely(disableQueryAnalysisWriter.shouldFail())) {
+        return;
+    }
+
     auto serviceContext = getQueryAnalysisWriter.owner(this);
     auto periodicRunner = serviceContext->getPeriodicRunner();
     invariant(periodicRunner);
@@ -274,7 +269,7 @@ void QueryAnalysisWriter::onStartup(OperationContext* opCtx) {
     PeriodicRunner::PeriodicJob queryWriterJob(
         "QueryAnalysisQueryWriter",
         [this](Client* client) {
-            if (MONGO_unlikely(disableQueryAnalysisWriter.shouldFail())) {
+            if (MONGO_unlikely(disableQueryAnalysisWriterFlusher.shouldFail())) {
                 return;
             }
             auto opCtx = client->makeOperationContext();
@@ -287,7 +282,7 @@ void QueryAnalysisWriter::onStartup(OperationContext* opCtx) {
     PeriodicRunner::PeriodicJob diffWriterJob(
         "QueryAnalysisDiffWriter",
         [this](Client* client) {
-            if (MONGO_unlikely(disableQueryAnalysisWriter.shouldFail())) {
+            if (MONGO_unlikely(disableQueryAnalysisWriterFlusher.shouldFail())) {
                 return;
             }
             auto opCtx = client->makeOperationContext();
@@ -325,49 +320,39 @@ void QueryAnalysisWriter::onShutdown() {
 }
 
 void QueryAnalysisWriter::onStepUpComplete(OperationContext* opCtx, long long term) {
+    if (MONGO_unlikely(disableQueryAnalysisWriter.shouldFail())) {
+        return;
+    }
+
     createTTLIndexes(opCtx).getAsync([](auto) {});
 }
 
 ExecutorFuture<void> QueryAnalysisWriter::createTTLIndexes(OperationContext* opCtx) {
-    static unsigned int tryCount = 0;
     invariant(_executor);
+
+    static unsigned int tryCount = 0;
     auto future =
-        AsyncTry([this, opCtx] {
+        AsyncTry([this] {
             ++tryCount;
 
             auto opCtxHolder = cc().makeOperationContext();
             auto opCtx = opCtxHolder.get();
 
-            auto status = getStatusFromCommandResult(createSampledQueriesTTLIndex(opCtx));
-            if (!status.isOK() && status != ErrorCodes::IndexAlreadyExists) {
-                if (tryCount % 100 == 0) {
-                    LOGV2_WARNING(
-                        7078404,
-                        "Still retrying to create sampled queries TTL index; "
-                        "please create an index on {namespace} with specification "
-                        "{specification}.",
-                        "namespace"_attr = NamespaceString::kConfigSampledQueriesNamespace,
-                        "specification"_attr = QueryAnalysisWriter::kSampledQueriesTTLIndexSpec,
-                        "tries"_attr = tryCount);
+            for (const auto& [nss, indexSpec] : kTTLIndexes) {
+                auto status = getStatusFromCommandResult(createIndex(opCtx, nss, indexSpec));
+                if (!status.isOK() && status != ErrorCodes::IndexAlreadyExists) {
+                    if (tryCount % 100 == 0) {
+                        LOGV2_WARNING(7078402,
+                                      "Still retrying to create TTL index; "
+                                      "please create an index on {namespace} with specification "
+                                      "{specification}.",
+                                      logAttrs(nss),
+                                      "specification"_attr = indexSpec,
+                                      "tries"_attr = tryCount);
+                    }
+                    return status;
                 }
-                return status;
             }
-
-            status = getStatusFromCommandResult(createSampledQueriesDiffTTLIndex(opCtx));
-            if (!status.isOK() && status != ErrorCodes::IndexAlreadyExists) {
-                if (tryCount % 100 == 0) {
-                    LOGV2_WARNING(
-                        7078405,
-                        "Still retrying to create sampled queries diff TTL index; "
-                        "please create an index on {namespace} with specification "
-                        "{specification}.",
-                        "namespace"_attr = NamespaceString::kConfigSampledQueriesDiffNamespace,
-                        "specification"_attr = QueryAnalysisWriter::kSampledQueriesDiffTTLIndexSpec,
-                        "tries"_attr = tryCount);
-                }
-                return status;
-            }
-
             return Status::OK();
         })
             .until([](Status status) {
@@ -417,7 +402,7 @@ void QueryAnalysisWriter::_flush(OperationContext* opCtx, Buffer* buffer) {
         LOGV2_DEBUG(7372300,
                     1,
                     "About to flush the sample buffer",
-                    "namespace"_attr = nss,
+                    logAttrs(nss),
                     "numDocs"_attr = buffer->getCount());
 
         std::swap(tmpBuffer, *buffer);
@@ -454,45 +439,44 @@ void QueryAnalysisWriter::_flush(OperationContext* opCtx, Buffer* buffer) {
         // We don't add a document that is above the size limit to the buffer so we should have
         // added at least one document to 'docsToInsert'.
         invariant(!docsToInsert.empty());
-        LOGV2_DEBUG(6876102,
-                    2,
-                    "Persisting samples",
-                    "namespace"_attr = nss,
-                    "numDocs"_attr = docsToInsert.size());
+        LOGV2_DEBUG(
+            6876102, 2, "Persisting samples", logAttrs(nss), "numDocs"_attr = docsToInsert.size());
 
-        insertDocuments(opCtx, nss, docsToInsert, [&](const BSONObj& resObj) {
-            BatchedCommandResponse res;
-            std::string errMsg;
+        QueryAnalysisClient::get(opCtx).insert(
+            opCtx, nss, docsToInsert, [&](const BSONObj& resObj) {
+                BatchedCommandResponse res;
+                std::string errMsg;
 
-            if (!res.parseBSON(resObj, &errMsg)) {
-                uasserted(ErrorCodes::FailedToParse, errMsg);
-            }
-
-            if (res.isErrDetailsSet() && res.sizeErrDetails() > 0) {
-                boost::optional<write_ops::WriteError> firstWriteErr;
-
-                for (const auto& err : res.getErrDetails()) {
-                    if (err.getStatus() == ErrorCodes::DuplicateKey ||
-                        err.getStatus() == ErrorCodes::BadValue) {
-                        LOGV2(7075402,
-                              "Ignoring insert error",
-                              "error"_attr = redact(err.getStatus()));
-                        invalid.insert(baseIndex - err.getIndex());
-                        continue;
-                    }
-                    if (!firstWriteErr) {
-                        // Save the error for later. Go through the rest of the errors to see if
-                        // there are any invalid documents so they can be discarded from the buffer.
-                        firstWriteErr.emplace(err);
-                    }
+                if (!res.parseBSON(resObj, &errMsg)) {
+                    uasserted(ErrorCodes::FailedToParse, errMsg);
                 }
-                if (firstWriteErr) {
-                    uassertStatusOK(firstWriteErr->getStatus());
+
+                if (res.isErrDetailsSet() && res.sizeErrDetails() > 0) {
+                    boost::optional<write_ops::WriteError> firstWriteErr;
+
+                    for (const auto& err : res.getErrDetails()) {
+                        if (err.getStatus() == ErrorCodes::DuplicateKey ||
+                            err.getStatus() == ErrorCodes::BadValue) {
+                            LOGV2(7075402,
+                                  "Ignoring insert error",
+                                  "error"_attr = redact(err.getStatus()));
+                            invalid.insert(baseIndex - err.getIndex());
+                            continue;
+                        }
+                        if (!firstWriteErr) {
+                            // Save the error for later. Go through the rest of the errors to see if
+                            // there are any invalid documents so they can be discarded from the
+                            // buffer.
+                            firstWriteErr.emplace(err);
+                        }
+                    }
+                    if (firstWriteErr) {
+                        uassertStatusOK(firstWriteErr->getStatus());
+                    }
+                } else {
+                    uassertStatusOK(res.toStatus());
                 }
-            } else {
-                uassertStatusOK(res.toStatus());
-            }
-        });
+            });
 
         tmpBuffer.truncate(lastIndex, objSize);
         baseIndex -= lastIndex;
@@ -506,17 +490,14 @@ bool QueryAnalysisWriter::Buffer::add(BSONObj doc) {
         LOGV2_DEBUG(7372301,
                     4,
                     "Ignoring a sample due to its size",
-                    "namespace"_attr = _nss,
+                    logAttrs(_nss),
                     "size"_attr = doc.objsize(),
                     "doc"_attr = redact(doc));
         return false;
     }
 
-    LOGV2_DEBUG(7372302,
-                4,
-                "Adding a sample to the buffer",
-                "namespace"_attr = _nss,
-                "doc"_attr = redact(doc));
+    LOGV2_DEBUG(
+        7372302, 4, "Adding a sample to the buffer", logAttrs(_nss), "doc"_attr = redact(doc));
     _docs.push_back(std::move(doc));
     _numBytes += _docs.back().objsize();
     return true;
@@ -589,7 +570,7 @@ ExecutorFuture<void> QueryAnalysisWriter::_addReadQuery(
             auto collUuid =
                 CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, sampledReadCmd.nss);
             if (!collUuid) {
-                LOGV2(7047301, "Found a sampled read query for non-existing collection");
+                LOGV2_WARNING(7047301, "Found a sampled read query for non-existing collection");
                 return;
             }
 
@@ -605,8 +586,8 @@ ExecutorFuture<void> QueryAnalysisWriter::_addReadQuery(
 
             stdx::lock_guard<Latch> lk(_mutex);
             if (_queries.add(doc)) {
-                QueryAnalysisSampleCounters::get(opCtx).incrementReads(
-                    sampledReadCmd.nss, *collUuid, doc.objsize());
+                QueryAnalysisSampleTracker::get(opCtx).incrementReads(
+                    opCtx, sampledReadCmd.nss, *collUuid, doc.objsize());
             }
         })
         .then([this] {
@@ -617,10 +598,8 @@ ExecutorFuture<void> QueryAnalysisWriter::_addReadQuery(
             }
         })
         .onError([this, nss](Status status) {
-            LOGV2(7047302,
-                  "Failed to add read query",
-                  "namespace"_attr = nss,
-                  "error"_attr = redact(status));
+            LOGV2(
+                7047302, "Failed to add read query", logAttrs(nss), "error"_attr = redact(status));
         });
 }
 
@@ -654,8 +633,8 @@ ExecutorFuture<void> QueryAnalysisWriter::addUpdateQuery(
 
             stdx::lock_guard<Latch> lk(_mutex);
             if (_queries.add(doc)) {
-                QueryAnalysisSampleCounters::get(opCtx).incrementWrites(
-                    sampledUpdateCmd.nss, *collUuid, doc.objsize());
+                QueryAnalysisSampleTracker::get(opCtx).incrementWrites(
+                    opCtx, sampledUpdateCmd.nss, *collUuid, doc.objsize());
             }
         })
         .then([this] {
@@ -668,7 +647,7 @@ ExecutorFuture<void> QueryAnalysisWriter::addUpdateQuery(
         .onError([this, nss = updateCmd.getNamespace()](Status status) {
             LOGV2(7075301,
                   "Failed to add update query",
-                  "namespace"_attr = nss,
+                  logAttrs(nss),
                   "error"_attr = redact(status));
         });
 }
@@ -710,8 +689,8 @@ ExecutorFuture<void> QueryAnalysisWriter::addDeleteQuery(
 
             stdx::lock_guard<Latch> lk(_mutex);
             if (_queries.add(doc)) {
-                QueryAnalysisSampleCounters::get(opCtx).incrementWrites(
-                    sampledDeleteCmd.nss, *collUuid, doc.objsize());
+                QueryAnalysisSampleTracker::get(opCtx).incrementWrites(
+                    opCtx, sampledDeleteCmd.nss, *collUuid, doc.objsize());
             }
         })
         .then([this] {
@@ -724,7 +703,7 @@ ExecutorFuture<void> QueryAnalysisWriter::addDeleteQuery(
         .onError([this, nss = deleteCmd.getNamespace()](Status status) {
             LOGV2(7075303,
                   "Failed to add delete query",
-                  "namespace"_attr = nss,
+                  logAttrs(nss),
                   "error"_attr = redact(status));
         });
 }
@@ -767,8 +746,8 @@ ExecutorFuture<void> QueryAnalysisWriter::addFindAndModifyQuery(
 
             stdx::lock_guard<Latch> lk(_mutex);
             if (_queries.add(doc)) {
-                QueryAnalysisSampleCounters::get(opCtx).incrementWrites(
-                    sampledFindAndModifyCmd.nss, *collUuid, doc.objsize());
+                QueryAnalysisSampleTracker::get(opCtx).incrementWrites(
+                    opCtx, sampledFindAndModifyCmd.nss, *collUuid, doc.objsize());
             }
         })
         .then([this] {
@@ -781,7 +760,7 @@ ExecutorFuture<void> QueryAnalysisWriter::addFindAndModifyQuery(
         .onError([this, nss = findAndModifyCmd.getNamespace()](Status status) {
             LOGV2(7075305,
                   "Failed to add findAndModify query",
-                  "namespace"_attr = nss,
+                  logAttrs(nss),
                   "error"_attr = redact(status));
         });
 }
@@ -830,10 +809,7 @@ ExecutorFuture<void> QueryAnalysisWriter::addDiff(const UUID& sampleId,
             }
         })
         .onError([this, nss](Status status) {
-            LOGV2(7075401,
-                  "Failed to add diff",
-                  "namespace"_attr = nss,
-                  "error"_attr = redact(status));
+            LOGV2(7075401, "Failed to add diff", logAttrs(nss), "error"_attr = redact(status));
         });
 }
 

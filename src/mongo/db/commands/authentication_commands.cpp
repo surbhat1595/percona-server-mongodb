@@ -229,7 +229,7 @@ void _authenticateX509(OperationContext* opCtx, AuthenticationSession* session) 
         uassertStatusOK(authorizationSession->addAndAuthorizeUser(opCtx, request, boost::none));
     };
 
-    if (sslConfiguration.isClusterMember(clientName)) {
+    if (sslConfiguration.isClusterMember(clientName, sslPeerInfo.getClusterMembership())) {
         // Handle internal cluster member auth, only applies to server-server connections
         if (!clusterAuthMode.allowsX509()) {
             uassert(ErrorCodes::AuthenticationFailed,
@@ -245,6 +245,18 @@ void _authenticateX509(OperationContext* opCtx, AuthenticationSession* session) 
                     20430,
                     "Client isn't a mongod or mongos, but is connecting with a certificate "
                     "with cluster membership");
+            }
+
+            if (gEnforceUserClusterSeparation && sslConfiguration.isClusterExtensionSet()) {
+                auto* am = AuthorizationManager::get(opCtx->getServiceContext());
+                BSONObj ignored;
+                const bool userExists =
+                    am->getUserDescription(opCtx, request.name, &ignored).isOK();
+                uassert(ErrorCodes::AuthenticationFailed,
+                        "The provided certificate represents both a cluster member and an "
+                        "explicit user which exists in the authzn database. "
+                        "Prohibiting authentication due to enforceUserClusterSeparation setting.",
+                        !userExists);
             }
 
             session->setAsClusterMember();

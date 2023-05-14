@@ -27,8 +27,13 @@
  *    it in the license file.
  */
 
+#include <boost/random/normal_distribution.hpp>
+#include <random>
+
 #include "mongo/db/pipeline/expression_bm_fixture.h"
+
 #include "mongo/db/json.h"
+#include "mongo/db/matcher/expression_geo.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
@@ -39,6 +44,15 @@ BSONArray rangeBSONArray(int count) {
     BSONArrayBuilder builder;
     for (int i = 0; i < count; i++) {
         builder.append(std::to_string(i));
+    }
+    return builder.arr();
+}
+
+template <typename T>
+BSONArray vectorToBSON(const std::vector<T>& vec) {
+    BSONArrayBuilder builder;
+    for (const auto& val : vec) {
+        builder.append(val);
     }
     return builder.arr();
 }
@@ -63,6 +77,19 @@ auto getDecimalGenerator(PseudoRandom& random) {
             .multiply(kHighDigits)
             .add(Decimal128(random.nextInt64(kMax)));
     };
+}
+
+std::vector<double> generateNormal(size_t n) {
+    std::mt19937 generator(2023u);
+    boost::random::normal_distribution<double> dist(0.0 /* mean */, 1.0 /* sigma */);
+
+    std::vector<double> inputs;
+    inputs.reserve(n);
+    for (size_t i = 0; i < n; i++) {
+        inputs.push_back(dist(generator));
+    }
+
+    return inputs;
 }
 
 }  // namespace
@@ -1395,6 +1422,45 @@ void ExpressionBenchmarkFixture::benchmarkValueLiteral(benchmark::State& state) 
                         std::vector<Document>(1, {{"value"_sd, "1"_sd}}));
 }
 
+void ExpressionBenchmarkFixture::benchmarkObjectToArray(benchmark::State& state) {
+    BSONObjBuilder builder{};
+    for (int i = 0; i < 10; ++i) {
+        auto key = "key" + std::to_string(i);
+        auto value = "value" + std::to_string(i);
+        builder.append(key, value);
+    }
+    benchmarkExpression(BSON("$objectToArray"
+                             << "$input"_sd),
+                        state,
+                        std::vector<Document>(1, {{"input"_sd, builder.obj()}}));
+}
+
+void ExpressionBenchmarkFixture::benchmarkArrayToObject1(benchmark::State& state) {
+    BSONArrayBuilder builder{};
+    for (int i = 0; i < 10; ++i) {
+        auto key = "key" + std::to_string(i);
+        auto value = "value" + std::to_string(i);
+        builder.append(BSON_ARRAY(key << value));
+    }
+    benchmarkExpression(BSON("$arrayToObject"
+                             << "$input"_sd),
+                        state,
+                        std::vector<Document>(1, {{"input"_sd, builder.arr()}}));
+}
+
+void ExpressionBenchmarkFixture::benchmarkArrayToObject2(benchmark::State& state) {
+    BSONArrayBuilder builder{};
+    for (int i = 0; i < 10; ++i) {
+        auto key = "key" + std::to_string(i);
+        auto value = "value" + std::to_string(i);
+        builder.append(BSON("k" << key << "v" << value));
+    }
+    benchmarkExpression(BSON("$arrayToObject"
+                             << "$input"_sd),
+                        state,
+                        std::vector<Document>(1, {{"input"_sd, builder.arr()}}));
+}
+
 void ExpressionBenchmarkFixture::testDateDiffExpression(long long startDate,
                                                         long long endDate,
                                                         std::string unit,
@@ -1528,5 +1594,21 @@ BSONArray ExpressionBenchmarkFixture::randomBSONArray(int count, int max, int of
     }
     return builder.arr();
 }
+
+/**
+ * Tests performance of $percentile expression against a single array field of specified size.
+ */
+void ExpressionBenchmarkFixture::benchmarkPercentile(benchmark::State& state,
+                                                     int arraySize,
+                                                     const std::vector<double>& ps) {
+    std::vector<double> inputs = generateNormal(arraySize);
+    benchmarkExpression(BSON("$percentile" << BSON("input"
+                                                   << "$data"
+                                                   << "p" << vectorToBSON(ps) << "method"
+                                                   << "approximate")),
+                        state,
+                        std::vector<Document>(1, {{"data"_sd, vectorToBSON(inputs)}}));
+}
+
 
 }  // namespace mongo

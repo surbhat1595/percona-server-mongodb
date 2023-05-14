@@ -368,7 +368,7 @@ public:
      * Returns the minimum possible Timestamp value in the oplog that replication may need for
      * recovery in the event of a rollback. This value depends on the timestamp passed to
      * `setStableTimestamp` and on the set of active MongoDB transactions. Returns an error if it
-     * times out querying the active transctions.
+     * times out querying the active transactions.
      */
     StatusWith<Timestamp> getOplogNeededForRollback() const;
 
@@ -426,6 +426,12 @@ public:
 
     StatusWith<BSONObj> getSanitizedStorageOptionsForSecondaryReplication(
         const BSONObj& options) const override;
+
+    /**
+     * Flushes any WiredTigerSizeStorer updates to the storage engine if enough time has elapsed, as
+     * dictated by the _sizeStorerSyncTracker.
+     */
+    void sizeStorerPeriodicFlush();
 
 private:
     class WiredTigerSessionSweeper;
@@ -525,6 +531,7 @@ private:
     std::unique_ptr<WiredTigerSizeStorer> _sizeStorer;
     std::string _sizeStorerUri;
     mutable ElapsedTracker _sizeStorerSyncTracker;
+
     bool _ephemeral;  // whether we are using the in-memory mode of the WT engine
     const bool _inRepairMode;
 

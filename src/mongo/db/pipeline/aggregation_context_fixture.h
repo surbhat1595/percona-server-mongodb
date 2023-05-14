@@ -77,14 +77,17 @@ public:
     /*
      * Serialize and redact a document source.
      */
-    BSONObj redact(const DocumentSource& docSource, bool performRedaction = true) {
+    BSONObj redact(const DocumentSource& docSource,
+                   bool performRedaction = true,
+                   boost::optional<ExplainOptions::Verbosity> verbosity = boost::none) {
         SerializationOptions options;
+        options.verbosity = verbosity;
         if (performRedaction) {
             options.replacementForLiteralArgs = "?";
-            options.redactFieldNamesStrategy = [](StringData s) -> std::string {
+            options.identifierRedactionPolicy = [](StringData s) -> std::string {
                 return str::stream() << "HASH<" << s << ">";
             };
-            options.redactFieldNames = true;
+            options.redactIdentifiers = true;
         }
         std::vector<Value> serialized;
         docSource.serializeToArray(serialized, options);

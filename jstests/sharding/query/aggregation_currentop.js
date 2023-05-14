@@ -13,7 +13,7 @@
  * applicable.
  *
  * This test requires replica set configuration and user credentials to persist across a restart.
- * @tags: [requires_persistence, uses_transactions, uses_prepare_transaction]
+ * @tags: [requires_persistence, uses_transactions, uses_prepare_transaction, requires_fcv_70]
  */
 
 // Restarts cause issues with authentication for awaiting replication.
@@ -42,7 +42,11 @@ const stParams = {
     name: jsTestName(),
     keyFile: key,
     shards: 3,
-    rs: {nodes: 1, setParameter: {internalQueryExecYieldIterations: 1}}
+    rs: {nodes: 1, setParameter: {internalQueryExecYieldIterations: 1}},
+    other: {
+        mongosOptions:
+            {setParameter: {'failpoint.skipClusterParameterRefresh': "{'mode':'alwaysOn'}"}}
+    }
 };
 
 // Create a new sharded cluster for testing. We set the internalQueryExecYieldIterations
@@ -416,7 +420,8 @@ function runCommonTests(conn, curOpSpec) {
         explain: true
     }));
 
-    let expectedStages = [{$currentOp: {idleConnections: true}}, {$match: {desc: {$eq: "test"}}}];
+    let expectedStages =
+        [{$currentOp: {idleConnections: true, allUsers: false}}, {$match: {desc: {$eq: "test"}}}];
 
     if (isRemoteShardCurOp) {
         assert.docEq(expectedStages, explainPlan.splitPipeline.shardsPart);

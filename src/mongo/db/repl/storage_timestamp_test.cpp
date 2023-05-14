@@ -87,7 +87,6 @@
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/db/vector_clock_mutable.h"
 #include "mongo/dbtests/dbtests.h"
-#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/stdx/future.h"
@@ -864,16 +863,17 @@ TEST_F(StorageTimestampTest, SecondaryArrayInsertTimes) {
         NamespaceString::createNamespaceString_forTest("unittests.timestampedUpdates");
     create(nss);
 
-    AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_IX);
-
     const std::int32_t docsToInsert = 10;
     const LogicalTime firstInsertTime = _clock->tickClusterTime(docsToInsert);
-
     BSONObjBuilder oplogCommonBuilder;
-    oplogCommonBuilder << "v" << 2 << "op"
-                       << "i"
-                       << "ns" << nss.ns() << "ui" << autoColl.getCollection()->uuid() << "wall"
-                       << Date_t();
+
+    {
+        AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_IX);
+        oplogCommonBuilder << "v" << 2 << "op"
+                           << "i"
+                           << "ns" << nss.ns() << "ui" << autoColl.getCollection()->uuid() << "wall"
+                           << Date_t();
+    }
     auto oplogCommon = oplogCommonBuilder.done();
 
     std::vector<repl::OplogEntry> oplogEntries;

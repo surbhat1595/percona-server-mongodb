@@ -2,7 +2,7 @@
  * Tests that version upgrade creates the TTL indexes for config.sampledQueries and
  * config.sampledQueriesDiff.
  *
- * @tags: [featureFlagAnalyzeShardKey]
+ * @tags: [requires_fcv_70]
  */
 
 (function() {
@@ -36,6 +36,7 @@ function assertTTLIndexExists(node, collName, indexName) {
 function assertTTLIndexesExist(node) {
     assertTTLIndexExists(node, "sampledQueries", "SampledQueriesTTLIndex");
     assertTTLIndexExists(node, "sampledQueriesDiff", "SampledQueriesDiffTTLIndex");
+    assertTTLIndexExists(node, "analyzeShardKeySplitPoints", "AnalyzeShardKeySplitPointsTTLIndex");
 }
 
 for (let oldVersion of ["last-lts", "last-continuous"]) {

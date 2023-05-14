@@ -52,7 +52,6 @@
 #include "mongo/db/pipeline/search_helper.h"
 #include "mongo/db/pipeline/semantic_analysis.h"
 #include "mongo/db/query/cursor_response_gen.h"
-#include "mongo/db/query/telemetry.h"
 #include "mongo/db/vector_clock.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -63,11 +62,9 @@
 #include "mongo/s/query/document_source_merge_cursors.h"
 #include "mongo/s/query/establish_cursors.h"
 #include "mongo/s/query_analysis_sampler_util.h"
-#include "mongo/s/router.h"
-#include "mongo/s/stale_exception.h"
+#include "mongo/s/router_role.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/util/fail_point.h"
-#include "mongo/util/net/socket_utils.h"
 #include "mongo/util/overloaded_visitor.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -760,17 +757,6 @@ void abandonCacheIfSentToShards(Pipeline* shardsPipeline) {
     }
 }
 
-void setTelemetryKeyOnAggRequest(AggregateCommandRequest& request, ExpressionContext* expCtx) {
-    if (!telemetry::isTelemetryEnabled()) {
-        return;
-    }
-
-    if (auto telemetryKey = telemetry::getTelemetryKeyFromOpCtx(expCtx->opCtx)) {
-        request.setHashedTelemetryKey(
-            telemetry::telemetryKeyToShardedStoreId(*telemetryKey, getHostNameCachedAndPort()));
-    }
-}
-
 }  // namespace
 
 std::unique_ptr<Pipeline, PipelineDeleter> targetShardsAndAddMergeCursors(
@@ -817,7 +803,6 @@ std::unique_ptr<Pipeline, PipelineDeleter> targetShardsAndAddMergeCursors(
     LiteParsedPipeline liteParsedPipeline(aggRequest);
     auto hasChangeStream = liteParsedPipeline.hasChangeStream();
     auto startsWithDocuments = liteParsedPipeline.startsWithDocuments();
-    setTelemetryKeyOnAggRequest(aggRequest, expCtx.get());
     auto shardDispatchResults =
         dispatchShardPipeline(aggregation_request_helper::serializeToCommandDoc(aggRequest),
                               hasChangeStream,
@@ -990,9 +975,6 @@ BSONObj createPassthroughCommandForShard(
                        [SimpleCursorOptions::kBatchSizeFieldName] = Value(*overrideBatchSize);
         }
     }
-
-    telemetry::appendShardedTelemetryKeyIfApplicable(
-        targetedCmd, getHostNameCachedAndPort(), expCtx->opCtx);
 
     auto shardCommand = genericTransformForShards(std::move(targetedCmd),
                                                   expCtx,
@@ -1233,7 +1215,7 @@ DispatchShardPipelineResults dispatchShardPipeline(
                                             ReadPreferenceSetting::get(opCtx),
                                             targetEveryShardServer);
 
-        } catch (const StaleConfigException& e) {
+        } catch (const ExceptionFor<ErrorCodes::StaleConfig>& e) {
             // Check to see if the command failed because of a stale shard version or something
             // else.
             auto staleInfo = e.extraInfo<StaleConfigInfo>();
@@ -1531,7 +1513,6 @@ BSONObj targetShardsForExplain(Pipeline* ownedPipeline) {
     }();
 
     AggregateCommandRequest aggRequest(expCtx->ns, rawStages);
-    setTelemetryKeyOnAggRequest(aggRequest, expCtx.get());
     LiteParsedPipeline liteParsedPipeline(aggRequest);
     auto hasChangeStream = liteParsedPipeline.hasChangeStream();
     auto startsWithDocuments = liteParsedPipeline.startsWithDocuments();
@@ -1640,7 +1621,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> attachCursorToPipeline(
 
             if (!cm.isSharded() &&
                 // TODO SERVER-75391: Remove this condition.
-                (serverGlobalParams.clusterRole == ClusterRole::ConfigServer ||
+                (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) ||
                  expCtx->ns != NamespaceString::kConfigsvrCollectionsNamespace)) {
                 // If the collection is unsharded and we are on the primary, we should be able to
                 // do a local read. The primary may be moved right after the primary shard check,

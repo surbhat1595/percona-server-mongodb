@@ -55,6 +55,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/collection_uuid_mismatch_info',
         '$BUILD_DIR/mongo/db/internal_transactions_feature_flag',
         '$BUILD_DIR/mongo/db/transaction/transaction_api',
+        '$BUILD_DIR/mongo/executor/inline_executor',
     ],
 )
 
@@ -80,7 +81,7 @@ env.Library(
         'multi_statement_transaction_requests_sender.cpp',
         'router_transactions_metrics.cpp',
         'router_transactions_stats.idl',
-        'router.cpp',
+        'router_role.cpp',
         'session_catalog_router.cpp',
         'shard_key_pattern_query_util.cpp',
         'stale_shard_version_helpers.cpp',
@@ -90,7 +91,6 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/commands/txn_cmd_request',
         '$BUILD_DIR/mongo/db/pipeline/process_interface/mongo_process_interface',
-        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/db/repl/read_concern_args',
         '$BUILD_DIR/mongo/db/session/logical_session_id_helpers',
         '$BUILD_DIR/mongo/db/session/session_catalog',
@@ -103,6 +103,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/catalog/collection_uuid_mismatch_info',
         '$BUILD_DIR/mongo/db/internal_transactions_feature_flag',
         '$BUILD_DIR/mongo/db/mongohasher',
+        '$BUILD_DIR/mongo/db/query/op_metrics',
         '$BUILD_DIR/mongo/db/query/query_planner',
         '$BUILD_DIR/mongo/db/session/sessions_collection',
     ],
@@ -129,6 +130,7 @@ env.Library(
         '$BUILD_DIR/mongo/executor/async_multicaster',
         '$BUILD_DIR/mongo/executor/connection_pool_executor',
         '$BUILD_DIR/mongo/executor/thread_pool_task_executor',
+        'analyze_shard_key_util',
         'catalog/sharding_catalog_client_impl',
         'coreshard',
         'sharding_task_executor',
@@ -174,7 +176,7 @@ env.Library(
         'analyze_shard_key_feature_flag.idl',
         'analyze_shard_key_server_parameters.idl',
         'analyze_shard_key_role.cpp',
-        'query_analysis_sample_counters.cpp',
+        'query_analysis_sample_tracker.cpp',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/pipeline/runtime_constants_idl',
@@ -189,6 +191,7 @@ env.Library(
     target='analyze_shard_key_util',
     source=[
         'analyze_shard_key_util.cpp',
+        'query_analysis_client.cpp',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/dbdirectclient',
@@ -291,6 +294,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/client/read_preference',
         '$BUILD_DIR/mongo/db/matcher/path',
+        '$BUILD_DIR/mongo/db/metadata_consistency_types_idl',
         '$BUILD_DIR/mongo/db/mongohasher',
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/storage/key_string',
@@ -673,7 +677,7 @@ env.CppUnitTest(
         'mock_ns_targeter.cpp',
         'mongos_core_options_stub.cpp',
         'mongos_topology_coordinator_test.cpp',
-        'query_analysis_sample_counters_test.cpp',
+        'query_analysis_sample_tracker_test.cpp',
         'query_analysis_sampler_test.cpp',
         'request_types/add_shard_request_test.cpp',
         'request_types/add_shard_to_zone_request_test.cpp',

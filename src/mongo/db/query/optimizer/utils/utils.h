@@ -307,6 +307,9 @@ bool isSubsetOfPartialSchemaReq(const PartialSchemaRequirements& lhs,
 bool intersectPartialSchemaReq(PartialSchemaRequirements& target,
                                const PartialSchemaRequirements& source);
 
+PartialSchemaRequirements unionPartialSchemaReq(PartialSchemaRequirements&& left,
+                                                PartialSchemaRequirements&& right);
+
 
 /**
  * Encode an index of an index field as a field name in order to use with a FieldProjectionMap.
@@ -452,7 +455,8 @@ PhysPlanBuilder lowerEqPrefixes(PrefixId& prefixId,
                                 ProjectionNameVector correlatedProjNames,
                                 const std::map<size_t, SelectivityType>& indexPredSelMap,
                                 CEType indexCE,
-                                CEType scanGroupCE);
+                                CEType scanGroupCE,
+                                bool useSortedMerge);
 
 bool hasProperIntervals(const PartialSchemaRequirements& reqMap);
 }  // namespace mongo::optimizer

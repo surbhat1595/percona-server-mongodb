@@ -442,9 +442,6 @@ void Balancer::_consumeActionStreamLoop() {
 
     Client::initThread("BalancerSecondary");
     auto opCtx = cc().makeOperationContext();
-    // This thread never refreshes balancerConfig - instead, it relies on the requests
-    // performed by _mainThread() on each round to eventually see updated information.
-    auto balancerConfig = Grid::get(opCtx.get())->getBalancerConfiguration();
     executor::ScopedTaskExecutor executor(
         Grid::get(opCtx.get())->getExecutorPool()->getFixedExecutor());
 
@@ -454,13 +451,6 @@ void Balancer::_consumeActionStreamLoop() {
                                         ActionsStreamPolicy* policy) {
         invariant(_outstandingStreamingOps.addAndFetch(-1) >= 0);
         ThreadClient tc("BalancerSecondaryThread::applyActionResponse", getGlobalServiceContext());
-
-        // TODO(SERVER-74658): Please revisit if this thread could be made killable.
-        {
-            stdx::lock_guard<Client> lk(*tc.get());
-            tc.get()->setSystemOperationUnKillableByStepdown(lk);
-        }
-
         auto opCtx = tc->makeOperationContext();
         policy->applyActionResult(opCtx.get(), action, response);
     };
@@ -517,11 +507,12 @@ void Balancer::_consumeActionStreamLoop() {
 
         // Get active streams
         auto activeStreams = [&]() -> std::vector<ActionsStreamPolicy*> {
+            auto balancerConfig = Grid::get(opCtx.get())->getBalancerConfiguration();
             std::vector<ActionsStreamPolicy*> streams;
-            if (_autoMergerPolicy->isEnabled()) {
+            if (balancerConfig->shouldBalanceForAutoMerge() && _autoMergerPolicy->isEnabled()) {
                 streams.push_back(_autoMergerPolicy.get());
             }
-            if (balancerConfig->shouldBalanceForAutoSplit()) {
+            if (balancerConfig->shouldBalance()) {
                 streams.push_back(_defragmentationPolicy.get());
             }
             return streams;

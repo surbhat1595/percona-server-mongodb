@@ -5,13 +5,17 @@
  *
  * This workload implicitly assumes that its tid range is [0, $config.threadCount). This isn't
  * guaranteed to be true when it is run in parallel with other workloads.
+ *
+ * TODO (SERVER-75532): Investigate the high variability of the runtime of analyze_shard_key.js in
+ * suites with chunk migration and/or stepdown/kill/terminate.
  * @tags: [
  *  requires_fcv_70,
- *  featureFlagAnalyzeShardKey,
  *  featureFlagUpdateOneWithoutShardKey,
  *  uses_transactions,
  *  resource_intensive,
- *  incompatible_with_concurrency_simultaneous
+ *  incompatible_with_concurrency_simultaneous,
+ *  does_not_support_stepdowns,
+ *  assumes_balancer_off
  * ]
  */
 load("jstests/concurrency/fsm_libs/extend_workload.js");
@@ -513,9 +517,9 @@ var $config = extendWorkload($config, function($config, $super) {
     // with stepdown/kill/terminate in the background due to the presence of retries from the
     // external client.
     $config.data.finalReadDistributionMetricsMaxDiff =
-        (TestData.runInsideTransaction || TestData.runningWithShardStepdowns) ? 15 : 10;
+        (TestData.runInsideTransaction || TestData.runningWithShardStepdowns) ? 15 : 12;
     $config.data.finalWriteDistributionMetricsMaxDiff =
-        (TestData.runInsideTransaction || TestData.runningWithShardStepdowns) ? 15 : 10;
+        (TestData.runInsideTransaction || TestData.runningWithShardStepdowns) ? 15 : 12;
     // The minimum number of sampled queries to wait for before verifying the read and write
     // distribution metrics.
     $config.data.numSampledQueriesThreshold = 1500;
@@ -752,7 +756,11 @@ var $config = extendWorkload($config, function($config, $super) {
     $config.states.disableQuerySampling = function disableQuerySampling(db, collName) {
         print("Starting disableQuerySampling state");
         const ns = db.getName() + "." + collName;
-        assert.commandWorked(db.adminCommand({configureQueryAnalyzer: ns, mode: "off"}));
+        // If query sampling is off, this command is expected to fail with an IllegalOperation
+        // error.
+        assert.commandWorkedOrFailedWithCode(
+            db.adminCommand({configureQueryAnalyzer: ns, mode: "off"}),
+            ErrorCodes.IllegalOperation);
         print("Finished disableQuerySampling state");
     };
 

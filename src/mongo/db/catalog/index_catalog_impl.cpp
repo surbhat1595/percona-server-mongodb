@@ -297,9 +297,9 @@ void IndexCatalogImpl::init(OperationContext* opCtx,
             IndexCatalogEntry* entry =
                 createIndexEntry(opCtx, collection, std::move(descriptor), flags);
             fassert(17340, entry->isReady(opCtx));
-
-            if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCV() && recoveryTs &&
-                !entry->descriptor()->isIdIndex()) {
+            // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
+            if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe() &&
+                recoveryTs && !entry->descriptor()->isIdIndex()) {
                 // When initializing indexes from disk, we conservatively set the
                 // minimumVisibleSnapshot to non _id indexes to the recovery timestamp. The _id
                 // index is left visible. It's assumed if the collection is visible, it's _id is
@@ -593,7 +593,7 @@ IndexCatalogEntry* IndexCatalogImpl::createIndexEntry(OperationContext* opCtx,
         LOGV2_FATAL(28782,
                     "Found an invalid index",
                     "descriptor"_attr = descriptor->infoObj(),
-                    "namespace"_attr = collection->ns(),
+                    logAttrs(collection->ns()),
                     "error"_attr = redact(status));
     }
 
@@ -1195,7 +1195,7 @@ Status IndexCatalogImpl::_doesSpecConflictWithExisting(OperationContext* opCtx,
                                  << " key:" << key;
         LOGV2(20354,
               "Exceeded maximum number of indexes",
-              "namespace"_attr = collection->ns(),
+              logAttrs(collection->ns()),
               "key"_attr = key,
               "maxNumIndexes"_attr = kMaxNumIndexesAllowed);
         return Status(ErrorCodes::CannotCreateIndex, s);

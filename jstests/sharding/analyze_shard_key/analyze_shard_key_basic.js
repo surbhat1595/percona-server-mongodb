@@ -1,7 +1,7 @@
 /**
  * Tests support for the analyzeShardKey command.
  *
- * @tags: [requires_fcv_63, featureFlagAnalyzeShardKey, temporary_catalog_shard_incompatible]
+ * @tags: [requires_fcv_70]
  */
 (function() {
 "use strict";
@@ -225,9 +225,15 @@ function testNotSupportReadWriteConcern(writeConn, testCases) {
     // The analyzeShardKey command is not supported on dedicated configsvr mongods.
     const isCatalogShardEnabled = CatalogShardUtil.isEnabledIgnoringFCV(st);
     st.configRS.nodes.forEach(node => {
-        // Don't expect a sharded collection since the config server isn't enabled as a shard and
-        // won't have chunks.
-        testCases.push({conn: node, isSupported: isCatalogShardEnabled, doNotExpectColl: true});
+        // If catalog shard mode isn't enabled, don't expect a sharded collection since the config
+        // server isn't enabled as a shard and won't have chunks.
+        testCases.push({
+            conn: node,
+            isSupported: isCatalogShardEnabled,
+            // The config server is shard0 in catalog shard mode.
+            isPrimaryShardMongod: TestData.catalogShard,
+            doNotExpectColl: !TestData.catalogShard
+        });
     });
 
     testNonExistingCollection(testCases);
@@ -282,8 +288,8 @@ if (!TestData.auth) {
         adminDb.runCommand({createUser: "admin", pwd: "pwd", roles: ["__system"]}));
     assert(adminDb.auth("admin", "pwd"));
 
-    // The analyzeShardKey command is supported on any mongod.
-    const testCases = [{conn: adminDb, isSupported: true}];
+    // The analyzeShardKey command is not supported in multitenancy.
+    const testCases = [{conn: adminDb, isSupported: false}];
     testNonExistingCollection(testCases, tenantId);
     rst.stopSet();
 }

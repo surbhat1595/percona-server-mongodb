@@ -202,7 +202,9 @@ std::unique_ptr<DbCheckRun> fullDatabaseRun(OperationContext* opCtx,
             dbName.db() != "local");
 
     AutoGetDb agd(opCtx, dbName, MODE_IS);
-    uassert(ErrorCodes::NamespaceNotFound, "Database " + dbName.db() + " not found", agd.getDb());
+    uassert(ErrorCodes::NamespaceNotFound,
+            "Database " + dbName.toStringForErrorMsg() + " not found",
+            agd.getDb());
 
     uassert(6769501, "dbCheck no longer supports snapshotRead:false", invocation.getSnapshotRead());
 
@@ -300,6 +302,12 @@ protected:
     virtual void run() override {
         // Every dbCheck runs in its own client.
         ThreadClient tc(name(), getGlobalServiceContext());
+
+        {
+            stdx::lock_guard<Client> lk(*tc.get());
+            tc.get()->setSystemOperationKillableByStepdown(lk);
+        }
+
         auto uniqueOpCtx = tc->makeOperationContext();
         auto opCtx = uniqueOpCtx.get();
 
@@ -528,7 +536,8 @@ private:
 
         boost::optional<AutoGetCollection> autoColl;
         const Collection* collection = nullptr;
-        if (feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCV()) {
+        // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
+        if (feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe()) {
             // Make sure we get a CollectionCatalog in sync with our snapshot.
             catalog = getConsistentCatalogAndSnapshot(opCtx);
 
@@ -557,7 +566,8 @@ private:
                 readTimestamp);
         auto minVisible = collection->getMinimumVisibleSnapshot();
         if (minVisible && *readTimestamp < *collection->getMinimumVisibleSnapshot()) {
-            invariant(!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCV());
+            // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
+            invariant(!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe());
             return {ErrorCodes::SnapshotUnavailable,
                     str::stream() << "Unable to read from collection " << info.nss
                                   << " due to pending catalog changes"};

@@ -78,8 +78,8 @@ void OperationShardingState::setShardRole(OperationContext* opCtx,
         if (!emplaceResult.second) {
             uassert(640571,
                     str::stream() << "Illegal attempt to change the expected database version for "
-                                  << nss.db() << " from " << tracker.v << " to "
-                                  << *databaseVersion,
+                                  << nss.dbName().toStringForErrorMsg() << " from " << tracker.v
+                                  << " to " << *databaseVersion,
                     tracker.v == *databaseVersion);
         }
         invariant(++tracker.recursion > 0);
@@ -108,10 +108,6 @@ boost::optional<ShardVersion> OperationShardingState::getShardVersion(const Name
         return it->second.v;
     }
     return boost::none;
-}
-
-bool OperationShardingState::hasDbVersion() const {
-    return !_databaseVersions.empty();
 }
 
 boost::optional<DatabaseVersion> OperationShardingState::getDbVersion(StringData dbName) const {

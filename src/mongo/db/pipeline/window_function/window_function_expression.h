@@ -69,7 +69,8 @@ class PartitionIterator;
     (InitializerContext*) {                                                                    \
         if (!__VA_ARGS__ ||                                                                    \
             (boost::optional<FeatureFlag>(featureFlag) != boost::none &&                       \
-             !boost::optional<FeatureFlag>(featureFlag)->isEnabledAndIgnoreFCV())) {           \
+             !boost::optional<FeatureFlag>(featureFlag)                                        \
+                  ->isEnabledAndIgnoreFCVUnsafeAtStartup())) {                                 \
             return;                                                                            \
         }                                                                                      \
         ::mongo::window_function::Expression::registerParser(                                  \
@@ -945,10 +946,10 @@ public:
                        boost::intrusive_ptr<::mongo::Expression> initializeExpr,
                        WindowBounds bounds,
                        std::vector<double> ps,
-                       int32_t algoType)
+                       int32_t method)
         : Expression(expCtx, std::move(accumulatorName), std::move(input), std::move(bounds)),
           _ps(std::move(ps)),
-          _algoType(algoType),
+          _method(method),
           _intializeExpr(std::move(initializeExpr)) {}
 
     Value serialize(SerializationOptions opts) const final;
@@ -959,7 +960,7 @@ public:
 
 private:
     std::vector<double> _ps;
-    int32_t _algoType;
+    int32_t _method;
     boost::intrusive_ptr<::mongo::Expression> _intializeExpr;
 };
 

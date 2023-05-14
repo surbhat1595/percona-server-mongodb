@@ -79,7 +79,7 @@ public:
         void typedRun(OperationContext* opCtx) {
             uassert(ErrorCodes::IllegalOperation,
                     "_configsvrRenameCollectionMetadata can only be run on config servers",
-                    serverGlobalParams.clusterRole == ClusterRole::ConfigServer);
+                    serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
             CommandHelpers::uassertCommandRunWithMajority(Request::kCommandName,
                                                           opCtx->getWriteConcern());
 
@@ -102,6 +102,11 @@ public:
                 auto newClient = opCtx->getServiceContext()->makeClient("RenameCollectionMetadata");
                 AuthorizationSession::get(newClient.get())
                     ->grantInternalAuthorization(newClient.get());
+                {
+                    stdx::lock_guard<Client> lk(*newClient.get());
+                    newClient->setSystemOperationKillableByStepdown(lk);
+                }
+
                 AlternativeClientRegion acr(newClient);
                 auto executor =
                     Grid::get(opCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();

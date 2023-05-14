@@ -50,6 +50,7 @@
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/s/config/index_on_config.h"
 #include "mongo/db/s/sharding_util.h"
 #include "mongo/db/vector_clock.h"
@@ -147,6 +148,10 @@ BSONObj commitOrAbortTransaction(OperationContext* opCtx,
     // that have been run on this opCtx would have set the timeout in the locker on the opCtx, but
     // commit should not have a lock timeout.
     auto newClient = getGlobalServiceContext()->makeClient("ShardingCatalogManager");
+    {
+        stdx::lock_guard<Client> lk(*newClient);
+        newClient->setSystemOperationKillableByStepdown(lk);
+    }
     AlternativeClientRegion acr(newClient);
     auto newOpCtx = cc().makeOperationContext();
     newOpCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
@@ -249,24 +254,6 @@ Status createIndexesForConfigChunks(OperationContext* opCtx) {
     return Status::OK();
 }
 
-Status createIndexForConfigPlacementHistory(OperationContext* opCtx, bool waitForMajority) {
-    auto status = createIndexOnConfigCollection(
-        opCtx,
-        NamespaceString::kConfigsvrPlacementHistoryNamespace,
-        BSON(NamespacePlacementType::kNssFieldName
-             << 1 << NamespacePlacementType::kTimestampFieldName << -1),
-        true /*unique*/);
-    if (status.isOK() && waitForMajority) {
-        auto& replClient = repl::ReplClientInfo::forClient(opCtx->getClient());
-        WriteConcernResult unusedResult;
-        status = waitForWriteConcern(opCtx,
-                                     replClient.getLastOp(),
-                                     ShardingCatalogClient::kMajorityWriteConcern,
-                                     &unusedResult);
-    }
-    return status;
-}
-
 // creates a vector of a vector of BSONObj (one for each batch) from the docs vector
 // each batch can only be as big as the maximum BSON Object size and be below the maximum
 // document count
@@ -327,16 +314,13 @@ public:
         return *this;
     }
 
-    std::vector<BSONObj> toBson() {
-        return build()->serializeToBson();
+    std::vector<BSONObj> buildAsBson() {
+        auto pipelinePtr = Pipeline::create(_stages, _expCtx);
+        return pipelinePtr->serializeToBson();
     }
 
-    AggregateCommandRequest toAggregateCommandRequest() {
-        return AggregateCommandRequest(_expCtx->ns, toBson());
-    }
-
-    std::unique_ptr<Pipeline, PipelineDeleter> build() {
-        return Pipeline::create(std::move(_stages), _expCtx);
+    AggregateCommandRequest buildAsAggregateCommandRequest() {
+        return AggregateCommandRequest(_expCtx->ns, buildAsBson());
     }
 
     boost::intrusive_ptr<ExpressionContext>& getExpCtx() {
@@ -347,8 +331,8 @@ private:
     template <typename T>
     boost::intrusive_ptr<DocumentSource> _toStage(boost::intrusive_ptr<ExpressionContext>& expCtx,
                                                   mongo::BSONObj&& bsonObj) {
-        return T::createFromBson(Document{{T::kStageName, bsonObj}}.toBson().firstElement(),
-                                 expCtx);
+        return T::createFromBson(
+            Document{{T::kStageName, std::move(bsonObj)}}.toBson().firstElement(), expCtx);
     }
 
     boost::intrusive_ptr<ExpressionContext> _expCtx;
@@ -357,85 +341,98 @@ private:
 
 AggregateCommandRequest createInitPlacementHistoryAggregationRequest(
     OperationContext* opCtx, const Timestamp& initTimestamp) {
-    // Compose the pipeline to generate a NamespacePlacementType for every collection and database
-    // in the cluster.
-    // 1. Join config.collections and config.chunks using the collection UUID and group the result
-    // by shards. This will return a set of shards in which each collection is on. The lookup makes
-    // use of the index uuid_1_shard_1_min_1 which will make the query time proportional to the
-    // number of collections in the cluster and almost negligible in terms of number of chunks
-    // 2. Translate the output to a config.placementHistory entry format.
-    // 3. Add the databases placement info to the result.
-    // 4. merge the result into config.placementHistory.
-    /* config.collections.aggregate([
-    [
-    {
-        $lookup:
-        {
-            from: "chunks",
-            localField: "uuid",
-            foreignField: "uuid",
-            as: "lookupResult",
-            pipeline: [
-            {
-                $group: {
-                _id: "$shard",
-                },
-            },
-            ],
-        }
-    },
-    {
-        $project: {
-        _id: 0,
-        nss: "$_id",
-        shards: "$lookupResult._id",
-        uuid: 1,
-        timestamp: <initTimestamp>,
-        },
-        }
-    },
-    {
-        "$unionWith":
-        {
-            "coll": "databases",
-            "pipeline":
-            [
-                {
-                    "$project":
-                    {
-                        "_id": 0,
-                        "nss": "$_id",
-                        "shards": [ "$primary"]
-                        "timestamp": <initTimestamp>,
-                    }
-                }
-            ]
+    /* Compose the pipeline to generate a NamespacePlacementType for each existing collection and
+     * database in the cluster based on the content of the sharding catalog.
+     *
+     * 1. Join config.collections with config.chunks to extract
+     * - the collection name and uuid
+     * - the list of shards containing one or more chunks of the collection
+     * - the timestamp of the most recent collection chunk migration received by each shard
+     *
+     * 2. Project the output to
+     * - select the most recent collection chunk migration across shards (using initTimestamp as a
+     *   fallback in case no timestamp could be retrieved on stage 1)
+     * - fit each document to the  NamespacePlacementType schema
+     *
+     * 3. Add to the previous results a projection of the config.databases entries that fits the
+     *    NamespacePlacementType schema
+     *
+     * 4. merge everything into config.placementHistory.
+     *
+     db.collections.aggregate([
+     {
+         $lookup: {
+         from: "chunks",
+         localField: "uuid",
+         foreignField: "uuid",
+         as: "timestampByShard",
+         pipeline: [
+             {
+              $group: {
+                 _id: "$shard",
+                 value: {
+                 $max: "$onCurrentShardSince"
+                 }
+             }
+             }
+         ],
          }
-
-    },
-    //insertion to placementHistory
-    {
-        "$merge":
-        {
-            "into": "config.placementHistory",
-            "on": ["nss", "timestamp"],
-            "whenMatched": "replace",
-            "whenNotMatched": "insert"
-        }
-    }
-])
-*/
+     },
+     {
+         $project: {
+         _id: 0,
+         nss: "$_id",
+         shards: "$timestampByShard._id",
+         uuid: 1,
+         timestamp: {
+             $ifNull: [
+             {
+                 $max: "$timestampByShard.timestamp"
+             },
+             <initTimestamp>
+             ]
+         },
+         }
+     },
+     {
+         $unionWith: {
+          coll: "databases",
+          pipeline: [
+             {
+             $project: {
+                 _id: 0,
+                 nss: "$_id",
+                 shards: [
+                 "$primary"
+                 ],
+                 timestamp: "$version.timestamp"
+             }
+             }
+         ]
+         }
+     },
+     {
+         $merge:
+         {
+             into: "config.placementHistory",
+             on: ["nss", "timestamp"],
+             whenMatched: "replace",
+             whenNotMatched: "insert"
+         }
+     }
+     ])
+     */
     using Lookup = DocumentSourceLookUp;
     using UnionWith = DocumentSourceUnionWith;
     using Merge = DocumentSourceMerge;
     using Group = DocumentSourceGroup;
     using Project = DocumentSourceProject;
 
+    // Aliases for the field names of the the final projections
     const auto kNss = NamespacePlacementType::kNssFieldName.toString();
     const auto kUuid = NamespacePlacementType::kUuidFieldName.toString();
     const auto kShards = NamespacePlacementType::kShardsFieldName.toString();
     const auto kTimestamp = NamespacePlacementType::kTimestampFieldName.toString();
-    const auto kUuidChunks = ChunkType::collectionUUID.name();
 
     auto pipeline = PipelineBuilder(opCtx,
                                     CollectionType::ConfigNS,
@@ -444,48 +441,144 @@ AggregateCommandRequest createInitPlacementHistoryAggregationRequest(
                                      NamespaceString::kConfigDatabasesNamespace,
                                      NamespaceString::kConfigsvrPlacementHistoryNamespace});
 
-    // Stage 1. Join config.collections and config.chunks using the collection UUID and create a set
-    // of shards
-    pipeline.addStage<Lookup>(BSON("from" << ChunkType::ConfigNS.coll() << "localField"
-                                          << CollectionType::kUuidFieldName << "foreignField"
-                                          << ChunkType::collectionUUID.name() << "as"
-                                          << "lookupResult"
-                                          << "pipeline"
-                                          << PipelineBuilder(pipeline.getExpCtx())
-                                                 .addStage<Group>(BSON("_id"
-                                                                       << "$shard"))
-                                                 .toBson()));
+    // Stage 1. Join config.collections and config.chunks using the collection UUID to create the
+    // placement-by-shard info documents
+    {
+        auto lookupPipelineObj = PipelineBuilder(pipeline.getExpCtx())
+                                     .addStage<Group>(BSON("_id"
+                                                           << "$shard"
+                                                           << "value"
+                                                           << BSON("$max"
+                                                                   << "$onCurrentShardSince")))
+                                     .buildAsBson();
 
-    // Stage 2. Translate the output to a config.placementHistory entry format
-    pipeline.addStage<Project>(BSON("_id" << 0 << kNss << "$_id" << kShards << "$lookupResult._id"
-                                          << kUuid << 1 << kTimestamp << initTimestamp));
+        pipeline.addStage<Lookup>(BSON("from" << ChunkType::ConfigNS.coll() << "localField"
+                                              << CollectionType::kUuidFieldName << "foreignField"
+                                              << ChunkType::collectionUUID.name() << "as"
+                                              << "timestampByShard"
+                                              << "pipeline" << lookupPipelineObj));
+    }
 
-    // Stage 3 Add the databases to the pipeline
-    pipeline.addStage<UnionWith>(
-        BSON("coll" << NamespaceString::kConfigDatabasesNamespace.coll() << "pipeline"
-                    << PipelineBuilder(pipeline.getExpCtx())
-                           .addStage<Project>(BSON("_id" << 0 << kNss << "$_id" << kShards
-                                                         << BSON_ARRAY("$primary") << kUuid << 1
-                                                         << kTimestamp << initTimestamp))
-                           .toBson()));
+    // Stage 2. Adapt the info on collections to the config.placementHistory entry format
+    {
+        // Get the most recent collection placement timestamp among all the shards: if not found,
+        // apply initTimestamp as a fallback.
+        const auto placementTimestampExpr =
+            BSON("$ifNull" << BSON_ARRAY(BSON("$max"
+                                              << "$timestampByShard.value")
+                                         << initTimestamp));
+
+        pipeline.addStage<Project>(BSON("_id" << 0 << kNss << "$_id" << kShards
+                                              << "$timestampByShard._id" << kUuid << 1 << kTimestamp
+                                              << placementTimestampExpr));
+    }
+
+    // Stage 3 Add placement info on each database of the cluster
+    {
+        pipeline.addStage<UnionWith>(
+            BSON("coll" << NamespaceString::kConfigDatabasesNamespace.coll() << "pipeline"
+                        << PipelineBuilder(pipeline.getExpCtx())
+                               .addStage<Project>(BSON("_id" << 0 << kNss << "$_id" << kShards
+                                                             << BSON_ARRAY("$primary") << kTimestamp
+                                                             << "$version.timestamp"))
+                               .buildAsBson()));
+    }
+
     // Stage 4. Merge into the placementHistory collection
-    pipeline.addStage<Merge>(BSON("into"
-                                  << NamespaceString::kConfigsvrPlacementHistoryNamespace.coll()
-                                  << "on" << BSON_ARRAY(kNss << kTimestamp) << "whenMatched"
-                                  << "replace"
-                                  << "whenNotMatched"
-                                  << "insert"));
+    {
+        pipeline.addStage<Merge>(BSON("into"
+                                      << NamespaceString::kConfigsvrPlacementHistoryNamespace.coll()
+                                      << "on" << BSON_ARRAY(kNss << kTimestamp) << "whenMatched"
+                                      << "replace"
+                                      << "whenNotMatched"
+                                      << "insert"));
+    }
 
-    return pipeline.toAggregateCommandRequest();
+    return pipeline.buildAsAggregateCommandRequest();
 }
 
+void setInitializationTimeOnPlacementHistory(
+    OperationContext* opCtx,
+    Timestamp initializationTime,
+    std::vector<ShardId> placementResponseForPreInitQueries) {
+    /*
+     * The initialization metadata of config.placementHistory is composed by two special docs,
+     * identified by kConfigsvrPlacementHistoryFcvMarkerNamespace:
+     * - initializationTimeInfo: contains the time of the initialization and an empty set of shards.
+     *   It will allow ShardingCatalogClient to serve accurate responses to historical placement
+     *   queries within the [initializationTime, +inf) range.
+     * - approximatedPlacementForPreInitQueries:  contains the cluster topology at the time of the
+     *   initialization and is marked with Timestamp(0,1).
+     *   It will be used by ShardingCatalogClient to serve approximated responses to historical
+     *   placement queries within the [-inf, initializationTime) range.
+     */
+    NamespacePlacementType initializationTimeInfo;
+    initializationTimeInfo.setNss(NamespaceString::kConfigsvrPlacementHistoryFcvMarkerNamespace);
+    initializationTimeInfo.setTimestamp(initializationTime);
+    initializationTimeInfo.setShards({});
+
+    NamespacePlacementType approximatedPlacementForPreInitQueries;
+    approximatedPlacementForPreInitQueries.setNss(
+        NamespaceString::kConfigsvrPlacementHistoryFcvMarkerNamespace);
+    approximatedPlacementForPreInitQueries.setTimestamp(Timestamp(0, 1));
+    approximatedPlacementForPreInitQueries.setShards(placementResponseForPreInitQueries);
+
+    auto transactionChain = [initializationTimeInfo = std::move(initializationTimeInfo),
+                             approximatedPlacementForPreInitQueries =
+                                 std::move(approximatedPlacementForPreInitQueries)](
+                                const txn_api::TransactionClient& txnClient,
+                                ExecutorPtr txnExec) -> SemiFuture<void> {
+        // Delete the current initialization metadata
+        write_ops::DeleteCommandRequest deleteRequest(
+            NamespaceString::kConfigsvrPlacementHistoryNamespace);
+        write_ops::DeleteOpEntry entryDelMarker;
+        entryDelMarker.setQ(
+            BSON(NamespacePlacementType::kNssFieldName
+                 << NamespaceString::kConfigsvrPlacementHistoryFcvMarkerNamespace.ns()));
+        entryDelMarker.setMulti(true);
+        deleteRequest.setDeletes({entryDelMarker});
+
+        return txnClient.runCRUDOp(deleteRequest, {})
+            .thenRunOn(txnExec)
+            .then([&](const BatchedCommandResponse& _) {
+                // Insert the new initialization metadata
+                write_ops::InsertCommandRequest insertMarkerRequest(
+                    NamespaceString::kConfigsvrPlacementHistoryNamespace);
+                insertMarkerRequest.setDocuments({initializationTimeInfo.toBSON(),
+                                                  approximatedPlacementForPreInitQueries.toBSON()});
+                return txnClient.runCRUDOp(insertMarkerRequest, {});
+            })
+            .thenRunOn(txnExec)
+            .then([&](const BatchedCommandResponse& _) { return; })
+            .semi();
+    };
+
+    WriteConcernOptions originalWC = opCtx->getWriteConcern();
+    opCtx->setWriteConcern(WriteConcernOptions{WriteConcernOptions::kMajority,
+                                               WriteConcernOptions::SyncMode::UNSET,
+                                               WriteConcernOptions::kNoTimeout});
+
+    ScopeGuard resetWriteConcerGuard([opCtx, &originalWC] { opCtx->setWriteConcern(originalWC); });
+
+    auto inlineExecutor = std::make_shared<executor::InlineExecutor>();
+    auto sleepInlineExecutor = inlineExecutor->getSleepableExecutor(
+        Grid::get(opCtx)->getExecutorPool()->getFixedExecutor());
+
+    txn_api::SyncTransactionWithRetries txn(
+        opCtx, sleepInlineExecutor, nullptr /* resourceYielder */, inlineExecutor);
+    txn.run(opCtx, transactionChain);
+
+    LOGV2(7068807,
+          "Initialization metadata of placement.history have been updated",
+          "initializationTime"_attr = initializationTime);
+}
 }  // namespace
 
 void ShardingCatalogManager::create(ServiceContext* serviceContext,
                                     std::unique_ptr<executor::TaskExecutor> addShardExecutor,
                                     std::shared_ptr<Shard> localConfigShard,
                                     std::unique_ptr<ShardingCatalogClient> localCatalogClient) {
-    invariant(serverGlobalParams.clusterRole == ClusterRole::ConfigServer);
+    invariant(serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
 
     auto& shardingCatalogManager = getShardingCatalogManager(serviceContext);
     invariant(!shardingCatalogManager);
@@ -549,7 +642,6 @@ void ShardingCatalogManager::startup() {
 
 void ShardingCatalogManager::shutDown() {
     Grid::get(_serviceContext)->setCustomConnectionPoolStatsFn(nullptr);
-
     _executorForAddShard->shutdown();
     _executorForAddShard->join();
 }
@@ -599,12 +691,12 @@ Status ShardingCatalogManager::upgradeConfigSettings(OperationContext* opCtx) {
 }
 
 ShardingCatalogClient* ShardingCatalogManager::localCatalogClient() {
-    invariant(serverGlobalParams.clusterRole == ClusterRole::ConfigServer);
+    invariant(serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
     return _localCatalogClient.get();
 }
 
 const std::shared_ptr<Shard>& ShardingCatalogManager::localConfigShard() {
-    invariant(serverGlobalParams.clusterRole == ClusterRole::ConfigServer);
+    invariant(serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
     return _localConfigShard;
 }
 
@@ -667,12 +759,16 @@ Status ShardingCatalogManager::_initConfigIndexes(OperationContext* opCtx) {
         }
     }
 
-    if (feature_flags::gHistoricalPlacementShardingCatalog.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
-        result = createIndexForConfigPlacementHistory(opCtx, false /*waitForMajority*/);
-        if (!result.isOK()) {
-            return result;
-        }
+    auto status = createIndexOnConfigCollection(
+        opCtx,
+        NamespaceString::kConfigsvrPlacementHistoryNamespace,
+        BSON(NamespacePlacementType::kNssFieldName
+             << 1 << NamespacePlacementType::kTimestampFieldName << -1),
+        true /*unique*/);
+
+    if (!result.isOK()) {
+        return result.withContext(
+            "couldn't create nss_1_timestamp_-1 index on config.placementHistory");
     }
 
     return Status::OK();
@@ -707,8 +803,8 @@ Status ShardingCatalogManager::_initConfigSettings(OperationContext* opCtx) {
      *   oneOf: [
      *       {"properties": {_id: {enum: ["chunksize"]}},
      *                      {value: {bsonType: "number", minimum: 1, maximum: 1024}}},
-     *       {"properties": {_id: {enum: ["balancer", "autosplit", "ReadWriteConcernDefaults",
-     *                                    "audit"]}}}
+     *       {"properties": {_id: {enum: ["balancer", "automerge" "ReadWriteConcernDefaults",
+     * "audit"]}}}
      *   ]
      * }
      *
@@ -728,7 +824,7 @@ Status ShardingCatalogManager::_initConfigSettings(OperationContext* opCtx) {
         BSON("properties" << BSON(
                  "_id" << BSON("enum" << BSON_ARRAY(
                                    BalancerSettingsType::kKey
-                                   << AutoSplitSettingsType::kKey << AutoMergeSettingsType::kKey
+                                   << AutoMergeSettingsType::kKey
                                    << ReadWriteConcernDefaults::kPersistedDocumentId << "audit"))));
     const auto fullValidator =
         BSON("$jsonSchema" << BSON("oneOf" << BSON_ARRAY(chunkSizeValidator << noopValidator)));
@@ -1020,10 +1116,12 @@ BSONObj ShardingCatalogManager::findOneConfigDocument(OperationContext* opCtx,
 void ShardingCatalogManager::withTransactionAPI(OperationContext* opCtx,
                                                 const NamespaceString& namespaceForInitialFind,
                                                 txn_api::Callback callback) {
-    auto txn =
-        txn_api::SyncTransactionWithRetries(opCtx,
-                                            Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(),
-                                            nullptr /* resourceYielder */);
+    auto inlineExecutor = std::make_shared<executor::InlineExecutor>();
+    auto sleepInlineExecutor = inlineExecutor->getSleepableExecutor(
+        Grid::get(opCtx)->getExecutorPool()->getFixedExecutor());
+
+    auto txn = txn_api::SyncTransactionWithRetries(
+        opCtx, sleepInlineExecutor, nullptr /* resourceYielder */, inlineExecutor);
     txn.run(opCtx,
             [innerCallback = std::move(callback),
              namespaceForInitialFind](const txn_api::TransactionClient& txnClient,
@@ -1059,6 +1157,10 @@ void ShardingCatalogManager::withTransaction(
 
     AlternativeSessionRegion asr(opCtx);
     auto* const client = asr.opCtx()->getClient();
+    {
+        stdx::lock_guard<Client> lk(*client);
+        client->setSystemOperationKillableByStepdown(lk);
+    }
     asr.opCtx()->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
     AuthorizationSession::get(client)->grantInternalAuthorization(client);
     TxnNumber txnNumber = 0;
@@ -1141,48 +1243,209 @@ void ShardingCatalogManager::withTransaction(
     }
 }
 
-
 void ShardingCatalogManager::initializePlacementHistory(OperationContext* opCtx) {
-    uassertStatusOK(createIndexForConfigPlacementHistory(opCtx, true /*waitForMajority*/));
+    /**
+     * This function will establish an initialization time to collect a consistent description of
+     * the placement of each existing namespace through a snapshot read of the sharding catalog.
+     * Such description will then be persisted in config.placementHistory.
+     *
+     * Concurrently, sharding DDL operations and chunk may also commit - and insert new documents
+     * into config.placementHistory if they alter the distribution of the targeted namespace. All
+     * these writes operations are not supposed to collide, since:
+     * - initializePlacementHistory() will make use of the config time to access already
+     *   majority-committed information
+     * - incoming (or not yet materialized) DDLs will insert more recent placement information,
+     *   which will have the effect of "updating" the snapshot produced by this function.
+     */
+    Timestamp initializationTime;
+    std::vector<ShardId> shardsAtInitializationTime;
+    {
+        Shard::QueryResponse allShardsQueryResponse;
+        {
+            // Ensure isolation from concurrent add/removeShards while the initializationTime is
+            // set. Also, retrieve the content of config.shards (it will later form part of the
+            // metadata describing the initialization of config.placementHistor).
+            auto topologyScopedLock = enterStableTopologyRegion(opCtx);
 
-    // Building a initial state/snapshot for the placementHistory.
-    // The initial state is composed by a set of entries: one for each collection and one for each
-    // database. Since the initial snapshot represents the current state of the cluster, the
-    // timestamp of all the entries is the same. Any other migration or ddl happening in the
-    // background could change the catalog. We don't need to serialize the insert in the
-    // placementhistory since we can order the entries by timestamp.
-    const auto now = VectorClock::get(opCtx)->getTime();
-    const auto initTime = now.configTime().asTimestamp();
+            const auto now = VectorClock::get(opCtx)->getTime();
+            initializationTime = now.configTime().asTimestamp();
 
-    // We need to perform this operation with internal permissions to add an aggregation
-    // $merge stage targeting the catalog.
-    const bool wasInternalClient = isInternalClient(opCtx->getClient());
-    if (!wasInternalClient) {
-        opCtx->getClient()->session()->setTags(transport::Session::kInternalClient);
+            allShardsQueryResponse = uassertStatusOK(_localConfigShard->exhaustiveFindOnConfig(
+                opCtx,
+                ReadPreferenceSetting(ReadPreference::Nearest, TagSet{}),
+                repl::ReadConcernLevel::kMajorityReadConcern,
+                NamespaceString::kConfigsvrShardsNamespace,
+                {},
+                {},
+                boost::none));
+        }
+
+        std::transform(allShardsQueryResponse.docs.begin(),
+                       allShardsQueryResponse.docs.end(),
+                       std::back_inserter(shardsAtInitializationTime),
+                       [](const BSONObj& doc) {
+                           return ShardId(doc.getStringField(ShardType::name.name()).toString());
+                       });
     }
 
-    // We must reset the internal flag.
-    ON_BLOCK_EXIT([&] {
-        if (!wasInternalClient) {
-            opCtx->getClient()->session()->unsetTags(transport::Session::kInternalClient);
-        }
-    });
+    // Setup and run the aggregation that will perform the snapshot read of the sharding catalog and
+    // persist its output into config.placementHistory.
+    // (This operation includes a $merge stage writing into the config database, which requires
+    // internal client credentials).
+    {
+        auto altClient = opCtx->getServiceContext()->makeClient("initializePlacementHistory");
+        AuthorizationSession::get(altClient.get())->grantInternalAuthorization(altClient.get());
+        AlternativeClientRegion acr(altClient);
+        auto executor =
+            Grid::get(opCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();
+        CancelableOperationContext altOpCtx(
+            cc().makeOperationContext(), opCtx->getCancellationToken(), executor);
 
-    auto aggRequest = createInitPlacementHistoryAggregationRequest(opCtx, initTime);
-    aggRequest.setUnwrappedReadPref({});
-    repl::ReadConcernArgs readConcernArgs(repl::ReadConcernLevel::kSnapshotReadConcern);
-    readConcernArgs.setArgsAtClusterTimeForSnapshot(initTime);
+        auto aggRequest =
+            createInitPlacementHistoryAggregationRequest(altOpCtx.get(), initializationTime);
+        aggRequest.setUnwrappedReadPref({});
+        repl::ReadConcernArgs readConcernArgs(repl::ReadConcernLevel::kSnapshotReadConcern);
+        readConcernArgs.setArgsAtClusterTimeForSnapshot(initializationTime);
+        aggRequest.setReadConcern(readConcernArgs.toBSONInner());
+        aggRequest.setWriteConcern({});
+        auto noopCallback = [](const std::vector<BSONObj>& batch,
+                               const boost::optional<BSONObj>& postBatchResumeToken) {
+            return true;
+        };
+
+        Status status = _localConfigShard->runAggregation(altOpCtx.get(), aggRequest, noopCallback);
+        uassertStatusOK(status);
+    }
+
+    /*
+     * config.placementHistory has now a full representation of the cluster at initializationTime.
+     * As a final step, persist also the initialization metadata so that the whole content may be
+     * consistently queried.
+     */
+    setInitializationTimeOnPlacementHistory(
+        opCtx, initializationTime, std::move(shardsAtInitializationTime));
+}
+
+void ShardingCatalogManager::cleanUpPlacementHistory(OperationContext* opCtx,
+                                                     const Timestamp& earliestClusterTime) {
+    LOGV2(
+        7068803, "Cleaning up placement history", "earliestClusterTime"_attr = earliestClusterTime);
+    /*
+     * The method implements the following optimistic approach for data cleanup:
+     * 1. Set earliestOpTime as the new initialization time of config.placementHistory;
+     this will have the effect of hiding older(deletable) documents when the collection is queried
+     by the ShardingCatalogClient.*/
+    auto allShardIds = [&] {
+        const auto clusterPlacementAtEarliestClusterTime =
+            _localCatalogClient->getShardsThatOwnDataAtClusterTime(opCtx, earliestClusterTime);
+        return clusterPlacementAtEarliestClusterTime.getShards();
+    }();
+
+    setInitializationTimeOnPlacementHistory(opCtx, earliestClusterTime, std::move(allShardIds));
+
+    /*
+     * 2. Build up and execute the delete request to remove the disposable documents. This
+     * operation is not atomic and it may be interrupted by a stepdown event, but we rely on the
+     * fact that the cleanup is periodically invoked to ensure that the content in excess will be
+     *    eventually deleted.
+     *
+     * 2.1 For each namespace represented in config.placementHistory, collect the timestamp of its
+     *     most recent placement doc (initialization markers are not part of the output).
+     *
+     *     config.placementHistory.aggregate([
+     *      {
+     *          $group : {
+     *              _id : "$nss",
+     *              mostRecentTimestamp: {$max : "$timestamp"},
+     *          }
+     *      },
+     *      {
+     *          $match : {
+     *              _id : { $ne : "kConfigsvrPlacementHistoryFcvMarkerNamespace"}
+     *          }
+     *      }
+     *  ])
+     */
+    auto pipeline = PipelineBuilder(opCtx,
+                                    NamespaceString::kConfigsvrPlacementHistoryNamespace,
+                                    {NamespaceString::kConfigsvrPlacementHistoryNamespace});
+
+    pipeline.addStage<DocumentSourceGroup>(
+        BSON("_id"
+             << "$" + NamespacePlacementType::kNssFieldName << "mostRecentTimestamp"
+             << BSON("$max"
+                     << "$" + NamespacePlacementType::kTimestampFieldName)));
+    pipeline.addStage<DocumentSourceMatch>(
+        BSON("_id" << BSON(
+                 "$ne" << NamespaceString::kConfigsvrPlacementHistoryFcvMarkerNamespace.ns())));
+
+    auto aggRequest = pipeline.buildAsAggregateCommandRequest();
+
+    repl::ReadConcernArgs readConcernArgs(repl::ReadConcernLevel::kMajorityReadConcern);
     aggRequest.setReadConcern(readConcernArgs.toBSONInner());
-    aggRequest.setWriteConcern({});
 
-    // no-op callback
-    auto callback = [](const std::vector<BSONObj>& batch,
-                       const boost::optional<BSONObj>& postBatchResumeToken) {
+    /*
+     * 2.2 For each namespace found, compose a delete statement.
+     */
+    std::vector<write_ops::DeleteOpEntry> deleteStatements;
+    auto callback = [&deleteStatements,
+                     &earliestClusterTime](const std::vector<BSONObj>& batch,
+                                           const boost::optional<BSONObj>& postBatchResumeToken) {
+        for (const auto& obj : batch) {
+            const auto nss = NamespaceString(obj["_id"].String());
+            const auto timeOfMostRecentDoc = obj["mostRecentTimestamp"].timestamp();
+            write_ops::DeleteOpEntry stmt;
+
+            const auto minTimeToPreserve = std::min(timeOfMostRecentDoc, earliestClusterTime);
+            stmt.setQ(BSON(NamespacePlacementType::kNssFieldName
+                           << nss.ns() << NamespacePlacementType::kTimestampFieldName
+                           << BSON("$lt" << minTimeToPreserve)));
+            stmt.setMulti(true);
+            deleteStatements.emplace_back(std::move(stmt));
+        }
         return true;
     };
 
-    const Status status = _localConfigShard->runAggregation(opCtx, aggRequest, callback);
-    uassertStatusOK(status);
+    uassertStatusOK(_localConfigShard->runAggregation(opCtx, aggRequest, callback));
+
+    LOGV2_DEBUG(7068806,
+                2,
+                "Cleaning up placement history - about to clean entries",
+                "timestamp"_attr = earliestClusterTime,
+                "numNssToClean"_attr = deleteStatements.size());
+
+    /*
+     * Send the delete request.
+     */
+    write_ops::DeleteCommandRequest deleteRequest(
+        NamespaceString::kConfigsvrPlacementHistoryNamespace);
+    deleteRequest.setDeletes(std::move(deleteStatements));
+    uassertStatusOK(_localConfigShard->runCommandWithFixedRetryAttempts(
+        opCtx,
+        ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+        NamespaceString::kConfigsvrPlacementHistoryNamespace.db().toString(),
+        deleteRequest.toBSON({}),
+        Shard::RetryPolicy::kIdempotent));
+
+    LOGV2_DEBUG(7068808, 2, "Cleaning up placement history - done deleting entries");
+}
+
+void ShardingCatalogManager::_performLocalNoopWriteWithWAllWriteConcern(OperationContext* opCtx,
+                                                                        StringData msg) {
+    tenant_migration_access_blocker::performNoopWrite(opCtx, msg);
+
+    auto allMembersWriteConcern =
+        WriteConcernOptions(repl::ReplSetConfig::kConfigAllWriteConcernName,
+                            WriteConcernOptions::SyncMode::NONE,
+                            // Defaults to no timeout if none was set.
+                            opCtx->getWriteConcern().wTimeout);
+
+    const auto& replClient = repl::ReplClientInfo::forClient(opCtx->getClient());
+    auto awaitReplicationResult = repl::ReplicationCoordinator::get(opCtx)->awaitReplication(
+        opCtx, replClient.getLastOp(), allMembersWriteConcern);
+    uassertStatusOKWithContext(awaitReplicationResult.status,
+                               str::stream() << "Waiting for replication of noop with message: \""
+                                             << msg << "\" failed");
 }
 
 }  // namespace mongo

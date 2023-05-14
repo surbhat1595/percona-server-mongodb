@@ -446,6 +446,7 @@ jsTestOptions = function() {
             // in dbpath; additionally, prevent the dbpath from being cleared after a node
             // is shut down.
             alwaysUseLogFiles: TestData.alwaysUseLogFiles || false,
+            skipCheckMetadataConsistency: TestData.skipCheckMetadataConsistency || false,
             skipCheckOrphans: TestData.skipCheckOrphans || false,
             skipCheckRoutingTableConsistency: TestData.skipCheckRoutingTableConsistency || false,
             skipCheckShardFilteringMetadata: TestData.skipCheckShardFilteringMetadata || false,
@@ -1313,6 +1314,18 @@ var Random = (function() {
     function setRandomSeed(s) {
         var seed = srand(s);
         print("setting random seed: " + seed);
+        return seed;
+    }
+
+    // Set the random generator seed with defined seed if it exists or a random seed if it does not.
+    function setRandomFixtureSeed() {
+        var seed = setRandomSeed(TestData.seed).valueOf();
+        print(
+            `Reproduce this randomized jstest fixture topology by adding the --shellSeed 
+            ${seed} option to your resmoke invocation.`);
+        print(
+            `ie: buildscripts/resmoke.py run --suites [suite_name] ... --shellSeed 
+            ${seed} [my_jstest.js]`);
     }
 
     // Generate a random number 0 <= r < 1.
@@ -1374,6 +1387,7 @@ var Random = (function() {
         rand: rand,
         randInt: randInt,
         setRandomSeed: setRandomSeed,
+        setRandomFixtureSeed: setRandomFixtureSeed,
         srand: srand,
     };
 })();

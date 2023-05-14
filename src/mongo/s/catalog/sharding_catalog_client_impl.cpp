@@ -453,8 +453,9 @@ std::vector<BSONObj> ShardingCatalogClientImpl::runCatalogAggregation(
     aggRequest.setWriteConcern(WriteConcernOptions());
 
     const auto readPref = [&]() -> ReadPreferenceSetting {
-        if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&
-            !gFeatureFlagCatalogShard.isEnabledAndIgnoreFCV()) {
+        // (Ignore FCV check): Config servers always use ShardRemote for themselves in 7.0.
+        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
+            !gFeatureFlagCatalogShard.isEnabledAndIgnoreFCVUnsafe()) {
             // When the feature flag is on, the config server may read from any node in its replica
             // set, so we should use the typical config server read preference.
             return {};
@@ -468,7 +469,7 @@ std::vector<BSONObj> ShardingCatalogClientImpl::runCatalogAggregation(
 
     aggRequest.setUnwrappedReadPref(readPref.toContainingBSON());
 
-    if (serverGlobalParams.clusterRole != ClusterRole::ConfigServer) {
+    if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
         // Don't use a timeout on the config server to guarantee it can always refresh.
         const Milliseconds maxTimeMS = std::min(opCtx->getRemainingMaxTimeMillis(), maxTimeout);
         aggRequest.setMaxTimeMS(durationCount<Milliseconds>(maxTimeMS));
@@ -682,7 +683,7 @@ StatusWith<std::vector<ChunkType>> ShardingCatalogClientImpl::getChunks(
     const Timestamp& timestamp,
     repl::ReadConcernLevel readConcern,
     const boost::optional<BSONObj>& hint) {
-    invariant(serverGlobalParams.clusterRole == ClusterRole::ConfigServer ||
+    invariant(serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) ||
               readConcern == repl::ReadConcernLevel::kMajorityReadConcern);
 
     // Convert boost::optional<int> to boost::optional<long long>.
@@ -870,7 +871,11 @@ std::vector<NamespaceString> ShardingCatalogClientImpl::getAllNssThatHaveZonesFo
 
     // Run the aggregation
     const auto readConcern = [&]() -> repl::ReadConcernArgs {
-        if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+        // (Ignore FCV check): Config servers always use ShardRemote for themselves in 7.0.
+        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
+            !gFeatureFlagCatalogShard.isEnabledAndIgnoreFCVUnsafe()) {
+            // When the feature flag is on, the config server may read from a secondary which may
+            // need to wait for replication, so we should use afterClusterTime.
             return {repl::ReadConcernLevel::kMajorityReadConcern};
         } else {
             const auto time = VectorClock::get(opCtx)->getTime();
@@ -1250,7 +1255,7 @@ HistoricalPlacement ShardingCatalogClientImpl::getShardsThatOwnDataForCollAtClus
             "A full collection namespace must be specified",
             !collName.coll().empty());
 
-    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
         return getHistoricalPlacement(opCtx, clusterTime, collName);
     }
 
@@ -1265,7 +1270,7 @@ HistoricalPlacement ShardingCatalogClientImpl::getShardsThatOwnDataForDbAtCluste
             "A full db namespace must be specified",
             dbName.coll().empty() && !dbName.db().empty());
 
-    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
         return getHistoricalPlacement(opCtx, clusterTime, dbName);
     }
 
@@ -1275,7 +1280,7 @@ HistoricalPlacement ShardingCatalogClientImpl::getShardsThatOwnDataForDbAtCluste
 HistoricalPlacement ShardingCatalogClientImpl::getShardsThatOwnDataAtClusterTime(
     OperationContext* opCtx, const Timestamp& clusterTime) {
 
-    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
         return getHistoricalPlacement(opCtx, clusterTime, boost::none);
     }
 
@@ -1290,7 +1295,7 @@ HistoricalPlacement ShardingCatalogClientImpl::getHistoricalPlacement(
     const boost::optional<NamespaceString>& nss) {
 
     // TODO (SERVER-73029): Remove the invariant
-    invariant(serverGlobalParams.clusterRole == ClusterRole::ConfigServer);
+    invariant(serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
     auto configShard = _getConfigShard(opCtx);
     /*
     The aggregation pipeline is split in 2 sub pipelines:
@@ -1507,14 +1512,15 @@ HistoricalPlacement ShardingCatalogClientImpl::getHistoricalPlacement(
 
     // Run the aggregation
     const auto readConcern = [&]() -> repl::ReadConcernArgs {
-        if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&
-            !gFeatureFlagCatalogShard.isEnabledAndIgnoreFCV()) {
+        // (Ignore FCV check): Config servers always use ShardRemote for themselves in 7.0.
+        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
+            !gFeatureFlagCatalogShard.isEnabledAndIgnoreFCVUnsafe()) {
             // When the feature flag is on, the config server may read from a secondary which may
             // need to wait for replication, so we should use afterClusterTime.
-            return {repl::ReadConcernLevel::kMajorityReadConcern};
+            return {repl::ReadConcernLevel::kSnapshotReadConcern};
         } else {
-            const auto time = VectorClock::get(opCtx)->getTime();
-            return {time.configTime(), repl::ReadConcernLevel::kMajorityReadConcern};
+            const auto vcTime = VectorClock::get(opCtx)->getTime();
+            return {vcTime.configTime(), repl::ReadConcernLevel::kSnapshotReadConcern};
         }
     }();
 

@@ -528,7 +528,7 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
                   "{namespace}. Blocking until fail point is disabled",
                   "Batch insert - hangDuringBatchInsert fail point enabled for a namespace. "
                   "Blocking until fail point is disabled",
-                  "namespace"_attr = nss);
+                  logAttrs(nss));
         },
         nss);
 
@@ -589,7 +589,7 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
             if (!collection->getCollection()->isCapped() && !inTxn && batch.size() > 1) {
                 // First try doing it all together. If all goes well, this is all we need to do.
                 // See Collection::_insertDocuments for why we do all capped inserts one-at-a-time.
-                lastOpFixer->startingOp();
+                lastOpFixer->startingOp(nss);
                 insertDocuments(opCtx,
                                 collection->getCollection(),
                                 batch.begin(),
@@ -629,7 +629,7 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
                     // Transactions are not allowed to operate on capped collections.
                     uassertStatusOK(
                         checkIfTransactionOnCappedColl(opCtx, collection->getCollection()));
-                    lastOpFixer->startingOp();
+                    lastOpFixer->startingOp(nss);
                     insertDocuments(opCtx,
                                     collection->getCollection(),
                                     it,
@@ -968,7 +968,7 @@ WriteResult performInserts(OperationContext* opCtx,
     DisableSafeContentValidationIfTrue safeContentValidationDisabler(
         opCtx, disableDocumentValidation, fleCrudProcessed);
 
-    LastOpFixer lastOpFixer(opCtx, wholeOp.getNamespace());
+    LastOpFixer lastOpFixer(opCtx);
 
     WriteResult out;
     out.results.reserve(wholeOp.getDocuments().size());
@@ -1086,7 +1086,7 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
                   "{namespace}. Blocking until fail point is disabled",
                   "Batch update - hangDuringBatchUpdate fail point enabled for a namespace. "
                   "Blocking until fail point is disabled",
-                  "namespace"_attr = ns);
+                  logAttrs(ns));
         },
         ns);
 
@@ -1316,7 +1316,7 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
                           logv2::LogSeverity::Debug(1),
                           numAttempts,
                           "Caught DuplicateKey exception during upsert",
-                          "namespace"_attr = ns.ns());
+                          logAttrs(ns));
         }
     }
 
@@ -1347,7 +1347,7 @@ WriteResult performUpdates(OperationContext* opCtx,
     DisableSafeContentValidationIfTrue safeContentValidationDisabler(
         opCtx, disableDocumentValidation, fleCrudProcessed);
 
-    LastOpFixer lastOpFixer(opCtx, ns);
+    LastOpFixer lastOpFixer(opCtx);
 
     bool containsRetry = false;
     ON_BLOCK_EXIT([&] { updateRetryStats(opCtx, containsRetry); });
@@ -1401,7 +1401,7 @@ WriteResult performUpdates(OperationContext* opCtx,
         }
 
         try {
-            lastOpFixer.startingOp();
+            lastOpFixer.startingOp(ns);
 
             // A time-series insert can combine multiple writes into a single operation, and thus
             // can have multiple statement ids associated with it if it is retryable.
@@ -1615,7 +1615,7 @@ WriteResult performDeletes(OperationContext* opCtx,
     DisableSafeContentValidationIfTrue safeContentValidationDisabler(
         opCtx, disableDocumentValidation, fleCrudProcessed);
 
-    LastOpFixer lastOpFixer(opCtx, ns);
+    LastOpFixer lastOpFixer(opCtx);
 
     bool containsRetry = false;
     ON_BLOCK_EXIT([&] { updateRetryStats(opCtx, containsRetry); });
@@ -1630,6 +1630,14 @@ WriteResult performDeletes(OperationContext* opCtx,
         wholeOp.getLegacyRuntimeConstants().value_or(Variables::generateRuntimeConstants(opCtx));
 
     for (auto&& singleOp : wholeOp.getDeletes()) {
+        if (source == OperationSource::kTimeseriesDelete) {
+            uassert(ErrorCodes::OperationNotSupportedInTransaction,
+                    str::stream() << "Cannot perform a multi delete inside of a multi-document "
+                                     "transaction on a time-series collection: "
+                                  << ns,
+                    !opCtx->inMultiDocumentTransaction() || !singleOp.getMulti());
+        }
+
         const auto currentOpIndex = nextOpIndex++;
         const auto stmtId = getStmtIdForWriteOp(opCtx, wholeOp, currentOpIndex);
         if (opCtx->isRetryableWrite() &&
@@ -1667,7 +1675,7 @@ WriteResult performDeletes(OperationContext* opCtx,
         }
 
         try {
-            lastOpFixer.startingOp();
+            lastOpFixer.startingOp(ns);
 
             boost::optional<Timer> timer;
             if (singleOp.getMulti()) {
@@ -1723,8 +1731,8 @@ Status performAtomicTimeseriesWrites(
 
     DisableDocumentValidation disableDocumentValidation{opCtx};
 
-    LastOpFixer lastOpFixer{opCtx, ns};
-    lastOpFixer.startingOp();
+    LastOpFixer lastOpFixer(opCtx);
+    lastOpFixer.startingOp(ns);
 
     AutoGetCollection coll{opCtx, ns, MODE_IX};
     if (!coll) {
@@ -2880,6 +2888,8 @@ TimeseriesAtomicWriteResult performOrderedTimeseriesWritesAtomically(
  * which were attempted in an update operation, but found no bucket to update. These indices
  * can be passed as the 'indices' parameter in a subsequent call to this function, in order
  * to to be retried.
+ * In rare cases due to collision from OID generation, we will also retry inserting those bucket
+ * documents for a limited number of times.
  */
 std::vector<size_t> performUnorderedTimeseriesWrites(
     OperationContext* opCtx,
@@ -2890,7 +2900,8 @@ std::vector<size_t> performUnorderedTimeseriesWrites(
     boost::optional<repl::OpTime>* opTime,
     boost::optional<OID>* electionId,
     bool* containsRetry,
-    const write_ops::InsertCommandRequest& request) {
+    const write_ops::InsertCommandRequest& request,
+    absl::flat_hash_map<int, int>& retryAttemptsForDup) {
     auto [batches, bucketStmtIds, _, canContinue] =
         insertIntoBucketCatalog(opCtx, start, numDocs, indices, errors, containsRetry, request);
 
@@ -2909,17 +2920,25 @@ std::vector<size_t> performUnorderedTimeseriesWrites(
             auto stmtIds = isTimeseriesWriteRetryable(opCtx)
                 ? std::move(bucketStmtIds[batch->bucketHandle.bucketId.oid])
                 : std::vector<StmtId>{};
-
-            canContinue = commitTimeseriesBucket(opCtx,
-                                                 batch,
-                                                 start,
-                                                 index,
-                                                 std::move(stmtIds),
-                                                 errors,
-                                                 opTime,
-                                                 electionId,
-                                                 &docsToRetry,
-                                                 request);
+            try {
+                canContinue = commitTimeseriesBucket(opCtx,
+                                                     batch,
+                                                     start,
+                                                     index,
+                                                     std::move(stmtIds),
+                                                     errors,
+                                                     opTime,
+                                                     electionId,
+                                                     &docsToRetry,
+                                                     request);
+            } catch (const ExceptionFor<ErrorCodes::DuplicateKey>&) {
+                // Automatically attempts to retry on DuplicateKey error.
+                if (retryAttemptsForDup[index]++ < gTimeseriesInsertMaxRetriesOnDuplicates.load()) {
+                    docsToRetry.push_back(index);
+                } else {
+                    throw;
+                }
+            }
             batch.reset();
             if (!canContinue) {
                 break;
@@ -2944,9 +2963,18 @@ void performUnorderedTimeseriesWritesWithRetries(OperationContext* opCtx,
                                                  bool* containsRetry,
                                                  const write_ops::InsertCommandRequest& request) {
     std::vector<size_t> docsToRetry;
+    absl::flat_hash_map<int, int> retryAttemptsForDup;
     do {
-        docsToRetry = performUnorderedTimeseriesWrites(
-            opCtx, start, numDocs, docsToRetry, errors, opTime, electionId, containsRetry, request);
+        docsToRetry = performUnorderedTimeseriesWrites(opCtx,
+                                                       start,
+                                                       numDocs,
+                                                       docsToRetry,
+                                                       errors,
+                                                       opTime,
+                                                       electionId,
+                                                       containsRetry,
+                                                       request,
+                                                       retryAttemptsForDup);
     } while (!docsToRetry.empty());
 }
 

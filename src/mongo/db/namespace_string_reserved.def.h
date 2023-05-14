@@ -218,9 +218,8 @@ NSS_CONSTANT(kShardCollectionCatalogNamespace, DatabaseName::kConfig, "shard.col
 // Namespace used for storing NamespacePlacementType docs on the CSRS.
 NSS_CONSTANT(kConfigsvrPlacementHistoryNamespace, DatabaseName::kConfig, "placementHistory"_sd)
 
-// Namespace value used to identify the "fcv marker entry" of
-// kConfigsvrPlacementHistoryNamespace collection which marks the start or the end of a FCV
-// upgrade/downgrade.
+// Identifier for the "initialization metadata descriptors" contained by
+// kConfigsvrPlacementHistoryNamespace
 NSS_CONSTANT(kConfigsvrPlacementHistoryFcvMarkerNamespace, DatabaseName::kEmpty, StringData{})
 
 // TODO SERVER-68551: remove once 7.0 becomes last-lts
@@ -238,6 +237,12 @@ NSS_CONSTANT(kSetChangeStreamStateCoordinatorNamespace,
 NSS_CONSTANT(kGlobalIndexClonerNamespace,
              DatabaseName::kConfig,
              "localGlobalIndexOperations.cloner"_sd)
+
+// Namespace used by an analyzeShardKey command to store the split points for the shard key being
+// analyzed.
+NSS_CONSTANT(kConfigAnalyzeShardKeySplitPointsNamespace,
+             DatabaseName::kConfig,
+             "analyzeShardKeySplitPoints"_sd)
 
 // Namespace used for storing query analyzer settings.
 NSS_CONSTANT(kConfigQueryAnalyzersNamespace, DatabaseName::kConfig, "queryAnalyzers"_sd)

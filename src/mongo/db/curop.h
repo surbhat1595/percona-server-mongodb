@@ -264,6 +264,7 @@ public:
     boost::optional<long long> mongotCursorId{boost::none};
     boost::optional<long long> msWaitingForMongot{boost::none};
     long long mongotBatchNum = 0;
+    BSONObj mongotCountVal = BSONObj();
 
     bool hasSortStage{false};  // true if the query plan involves an in-memory sort
 
@@ -557,7 +558,7 @@ public:
     /**
      * Gets the name of the namespace on which the current operation operates.
      */
-    NamespaceString getNSS() const {
+    const NamespaceString& getNSS() const {
         return _nss;
     }
 

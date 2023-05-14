@@ -40,6 +40,7 @@
 #include <memory>
 
 #include "mongo/client/fetcher.h"
+#include "mongo/db/cloner.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/repl/oplog_fetcher.h"
 #include "mongo/db/repl/primary_only_service.h"
@@ -150,9 +151,9 @@ public:
     explicit MovePrimaryRecipientService(ServiceContext* serviceContext);
     ~MovePrimaryRecipientService() = default;
 
-    StringData getServiceName() const final;
+    StringData getServiceName() const override;
 
-    NamespaceString getStateDocumentsNS() const final override {
+    NamespaceString getStateDocumentsNS() const override {
         return NamespaceString::kMovePrimaryRecipientNamespace;
     }
 
@@ -172,7 +173,8 @@ public:
             const MovePrimaryRecipientService* recipientService,
             MovePrimaryRecipientDocument recipientDoc,
             std::shared_ptr<MovePrimaryRecipientExternalState> externalState,
-            ServiceContext* serviceContext);
+            ServiceContext* serviceContext,
+            std::unique_ptr<Cloner> cloner);
 
         SemiFuture<void> run(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                              const CancellationToken& token) noexcept final;
@@ -237,7 +239,7 @@ public:
         ExecutorFuture<void> _transitionToInitializingState(
             const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
 
-        ExecutorFuture<void> _transitionToCloningState(
+        ExecutorFuture<void> _transitionToCloningStateAndClone(
             const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
 
         ExecutorFuture<void> _initializeForCloningState(
@@ -257,6 +259,22 @@ public:
 
         ExecutorFuture<void> _transitionToDoneStateAndFinishMovePrimaryOp(
             const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
+
+        /**
+         * Clears cached database info on recipient shard to trigger a refresh on next request with
+         * DB version. This is done before releasing critical section.
+         */
+        void _clearDatabaseMetadata(OperationContext* opCtx);
+
+        void _createMetadataCollection(OperationContext* opCtx);
+
+        std::vector<NamespaceString> _getUnshardedCollections(OperationContext* opCtx);
+
+        void _persistCollectionsToClone(OperationContext* opCtx);
+
+        std::vector<NamespaceString> _getCollectionsToClone(OperationContext* opCtx) const;
+
+        void _cleanUpOrphanedDataOnRecipient(OperationContext* opCtx);
 
         void _cleanUpOperationMetadata(
             OperationContext* opCtx, const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
@@ -284,6 +302,9 @@ public:
 
         bool _useOnlineCloner() const;
 
+        void _cloneDataFromDonor(OperationContext* opCtx);
+
+        NamespaceString _getCollectionsToCloneNSS() const;
         /**
          * Waits for majority write concern for client's last applied opTime. Cancels on stepDown.
          * This is needed after each state transition completes in future chain because disk updates
@@ -328,6 +349,8 @@ public:
         std::unique_ptr<RecipientCancellationTokenHolder> _ctHolder;
 
         MovePrimaryRecipientStateEnum _state;
+
+        std::unique_ptr<Cloner> _cloner;
 
         // Promise that is resolved when the recipient doc is persisted on disk
         SharedPromise<void> _recipientDocDurablePromise;

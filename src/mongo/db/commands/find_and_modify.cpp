@@ -338,12 +338,15 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
     const BSONObj& cmdObj = request().toBSON(BSONObj() /* commandPassthroughFields */);
 
     auto requestAndMsg = [&]() {
-        if (request().getEncryptionInformation() &&
-            !request().getEncryptionInformation()->getCrudProcessed().value_or(false)) {
-            return processFLEFindAndModifyExplainMongod(opCtx, request());
-        } else {
-            return std::pair{request(), OpMsgRequest()};
+        if (request().getEncryptionInformation()) {
+            CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+
+            if (!request().getEncryptionInformation()->getCrudProcessed().value_or(false)) {
+                return processFLEFindAndModifyExplainMongod(opCtx, request());
+            }
         }
+
+        return std::pair{request(), OpMsgRequest()};
     }();
     auto request = requestAndMsg.first;
 
@@ -351,7 +354,7 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
     uassertStatusOK(userAllowedWriteNS(opCtx, nss));
     auto const curOp = CurOp::get(opCtx);
     OpDebug* const opDebug = &curOp->debug();
-    const std::string dbName = request.getDbName().toString();
+    auto const dbName = request.getDbName();
 
     if (request.getRemove().value_or(false)) {
         auto deleteRequest = DeleteRequest{};
@@ -366,7 +369,7 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
         // locks so that the timing information is more accurate.
         AutoGetCollection collection(opCtx, nss, MODE_IX);
         uassert(ErrorCodes::NamespaceNotFound,
-                str::stream() << "database " << dbName << " does not exist",
+                str::stream() << "database " << dbName.toStringForErrorMsg() << " does not exist",
                 collection.getDb());
 
         CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
@@ -391,7 +394,7 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
         // locks so that the timing information is more accurate.
         AutoGetCollection collection(opCtx, nss, MODE_IX);
         uassert(ErrorCodes::NamespaceNotFound,
-                str::stream() << "database " << dbName << " does not exist",
+                str::stream() << "database " << dbName.toStringForErrorMsg() << " does not exist",
                 collection.getDb());
 
         CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
@@ -555,7 +558,7 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
                                   logv2::LogSeverity::Debug(1),
                                   retryAttempts,
                                   "Caught DuplicateKey exception during findAndModify upsert",
-                                  "namespace"_attr = nsString.ns());
+                                  logAttrs(nsString));
                 } catch (const ExceptionFor<ErrorCodes::WouldChangeOwningShard>& ex) {
                     if (analyze_shard_key::supportsPersistingSampledQueries(opCtx) &&
                         req.getSampleId()) {

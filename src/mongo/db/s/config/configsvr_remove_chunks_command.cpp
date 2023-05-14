@@ -64,7 +64,7 @@ public:
 
             uassert(ErrorCodes::IllegalOperation,
                     "_configsvrRemoveChunks can only be run on config servers",
-                    serverGlobalParams.clusterRole == ClusterRole::ConfigServer);
+                    serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
             CommandHelpers::uassertCommandRunWithMajority(Request::kCommandName,
                                                           opCtx->getWriteConcern());
 
@@ -81,6 +81,11 @@ public:
                 // Use an ACR because we will perform a {multi: true} delete, which is otherwise not
                 // supported on a session.
                 auto newClient = opCtx->getServiceContext()->makeClient("RemoveChunksMetadata");
+                {
+                    stdx::lock_guard<Client> lk(*newClient.get());
+                    newClient->setSystemOperationKillableByStepdown(lk);
+                }
+
                 AlternativeClientRegion acr(newClient);
                 auto executor =
                     Grid::get(opCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();

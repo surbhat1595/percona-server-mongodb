@@ -67,6 +67,7 @@
 #include "mongo/s/initialize_tenant_to_shard_cache.h"
 #include "mongo/s/mongod_and_mongos_server_parameters_gen.h"
 #include "mongo/s/query/cluster_cursor_manager.h"
+#include "mongo/s/query_analysis_client.h"
 #include "mongo/s/query_analysis_sampler.h"
 #include "mongo/s/sharding_task_executor.h"
 #include "mongo/s/sharding_task_executor_pool_controller.h"
@@ -212,6 +213,12 @@ Status initializeGlobalShardingState(
     LogicalTimeValidator::set(service, std::make_unique<LogicalTimeValidator>(keyManager));
     initializeTenantToShardCache(service);
 
+    // The checks below ignore the FCV because FCV is not initialized until after the replica set
+    // is initiated.
+    if (analyze_shard_key::isFeatureFlagEnabled(true /* ignoreFCV */)) {
+        analyze_shard_key::QueryAnalysisClient::get(opCtx).setTaskExecutor(
+            service, Grid::get(service)->getExecutorPool()->getFixedExecutor());
+    }
     if (analyze_shard_key::supportsSamplingQueries(service, true /* ignoreFCV */)) {
         analyze_shard_key::QueryAnalysisSampler::get(service).onStartup();
     }
@@ -220,7 +227,7 @@ Status initializeGlobalShardingState(
 }
 
 void loadCWWCFromConfigServerForReplication(OperationContext* opCtx) {
-    if (!serverGlobalParams.clusterRole.isExclusivelyShardRole()) {
+    if (!serverGlobalParams.clusterRole.exclusivelyHasShardRole()) {
         // Cluster wide read/write concern in a sharded cluster lives on the config server, so a
         // config server node's local cache will be correct and explicitly checking for a default
         // write concern via remote command is unnecessary.
@@ -245,7 +252,7 @@ Status loadGlobalSettingsFromConfigServer(OperationContext* opCtx,
             // inserting a cluster id and adding a shard, there is at least one majority write on
             // the added shard (dropping the sessions collection), so we should be guaranteed the
             // cluster id cannot roll back.
-            auto readConcern = serverGlobalParams.clusterRole == ClusterRole::ConfigServer
+            auto readConcern = serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)
                 ? repl::ReadConcernLevel::kLocalReadConcern
                 : repl::ReadConcernLevel::kMajorityReadConcern;
             uassertStatusOK(ClusterIdentityLoader::get(opCtx)->loadClusterId(
@@ -278,7 +285,7 @@ void preCacheMongosRoutingInfo(OperationContext* opCtx) {
     // mongos, and we'd need to consider the implications of it running on either kind of mongod.
     tassert(71960,
             "Unexpectedly pre caching mongos routing info on shard or config server node",
-            serverGlobalParams.clusterRole == ClusterRole::None);
+            serverGlobalParams.clusterRole.has(ClusterRole::None));
 
     auto grid = Grid::get(opCtx);
     auto catalogClient = grid->catalogClient();
@@ -292,7 +299,7 @@ void preCacheMongosRoutingInfo(OperationContext* opCtx) {
             if (!resp.isOK()) {
                 LOGV2_WARNING(6203600,
                               "Failed to warmup collection routing information",
-                              "namespace"_attr = coll,
+                              logAttrs(coll),
                               "error"_attr = redact(resp.getStatus()));
             }
         }
@@ -308,7 +315,7 @@ Status preWarmConnectionPool(OperationContext* opCtx) {
     // mongos, and we'd need to consider the implications of it running on either kind of mongod.
     tassert(71961,
             "Unexpectedly pre warming connection pool on shard or config server node",
-            serverGlobalParams.clusterRole == ClusterRole::None);
+            serverGlobalParams.clusterRole.has(ClusterRole::None));
 
     std::vector<HostAndPort> allHosts;
     auto const grid = Grid::get(opCtx);

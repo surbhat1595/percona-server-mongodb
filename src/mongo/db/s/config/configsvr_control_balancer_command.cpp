@@ -93,7 +93,7 @@ public:
 
         uassert(ErrorCodes::IllegalOperation,
                 str::stream() << getName() << " can only be run on config servers",
-                serverGlobalParams.clusterRole == ClusterRole::ConfigServer);
+                serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
 
         _run(opCtx, &result);
 
@@ -112,7 +112,6 @@ private:
     void _run(OperationContext* opCtx, BSONObjBuilder* result) override {
         auto balancerConfig = Grid::get(opCtx)->getBalancerConfiguration();
         uassertStatusOK(balancerConfig->setBalancerMode(opCtx, BalancerSettingsType::kFull));
-        uassertStatusOK(balancerConfig->enableAutoSplit(opCtx, true));
         uassertStatusOK(balancerConfig->changeAutoMergeSettings(opCtx, true));
         Balancer::get(opCtx)->notifyPersistedBalancerSettingsChanged(opCtx);
         auto catalogManager = ShardingCatalogManager::get(opCtx);
@@ -140,7 +139,6 @@ private:
 
         auto balancerConfig = Grid::get(opCtx)->getBalancerConfiguration();
         uassertStatusOK(balancerConfig->setBalancerMode(opCtx, BalancerSettingsType::kOff));
-        uassertStatusOK(balancerConfig->enableAutoSplit(opCtx, false));
         uassertStatusOK(balancerConfig->changeAutoMergeSettings(opCtx, false));
 
         Balancer::get(opCtx)->notifyPersistedBalancerSettingsChanged(opCtx);

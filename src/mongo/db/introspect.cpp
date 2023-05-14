@@ -95,13 +95,6 @@ void profile(OperationContext* opCtx, NetworkOp op) {
         // killed or timed out. Those are the case we want to have profiling data.
         auto newClient = opCtx->getServiceContext()->makeClient("profiling");
         auto newCtx = newClient->makeOperationContext();
-
-        // TODO(SERVER-74657): Please revisit if this thread could be made killable.
-        {
-            stdx::lock_guard<Client> lk(*newClient.get());
-            newClient.get()->setSystemOperationUnKillableByStepdown(lk);
-        }
-
         // We swap the lockers as that way we preserve locks held in transactions and any other
         // options set for the locker like maxLockTimeout.
         auto oldLocker = opCtx->getClient()->swapLockState(
@@ -120,7 +113,7 @@ void profile(OperationContext* opCtx, NetworkOp op) {
             LOGV2(20700,
                   "note: not profiling because db went away for {namespace}",
                   "note: not profiling because db went away for namespace",
-                  "namespace"_attr = ns);
+                  logAttrs(ns));
             return;
         }
 
@@ -139,7 +132,7 @@ void profile(OperationContext* opCtx, NetworkOp op) {
                       "{namespace}: {assertion}",
                       "Caught Assertion while trying to profile operation",
                       "operation"_attr = networkOpToString(op),
-                      "namespace"_attr = ns,
+                      logAttrs(ns),
                       "assertion"_attr = redact(assertionEx));
     }
 }
@@ -169,7 +162,7 @@ Status createProfileCollection(OperationContext* opCtx, Database* db) {
         LOGV2(20701,
               "Creating profile collection: {namespace}",
               "Creating profile collection",
-              "namespace"_attr = dbProfilingNS);
+              logAttrs(dbProfilingNS));
 
         CollectionOptions collectionOptions;
         collectionOptions.capped = true;

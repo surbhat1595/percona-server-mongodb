@@ -147,12 +147,6 @@ auto makeThreadPool(const std::string& poolName, const std::string& threadName) 
     threadPoolOptions.poolName = poolName;
     threadPoolOptions.onCreateThread = [](const std::string& threadName) {
         Client::initThread(threadName.c_str());
-
-        {
-            stdx::lock_guard<Client> lk(cc());
-            cc().setSystemOperationUnKillableByStepdown(lk);
-        }
-
         AuthorizationSession::get(cc())->grantInternalAuthorization(&cc());
     };
     return std::make_unique<ThreadPool>(threadPoolOptions);
@@ -831,14 +825,14 @@ void ReplicationCoordinatorExternalStateImpl::onStepDownHook() {
 }
 
 void ReplicationCoordinatorExternalStateImpl::_shardingOnStepDownHook() {
-    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
         PeriodicShardedIndexConsistencyChecker::get(_service).onStepDown();
         TransactionCoordinatorService::get(_service)->onStepDown();
     }
     if (ShardingState::get(_service)->enabled()) {
         CatalogCacheLoader::get(_service).onStepDown();
 
-        if (serverGlobalParams.clusterRole != ClusterRole::ConfigServer) {
+        if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
             // Called earlier for config servers.
             TransactionCoordinatorService::get(_service)->onStepDown();
         }
@@ -901,7 +895,7 @@ void ReplicationCoordinatorExternalStateImpl::_stopAsyncUpdatesOfAndClearOplogTr
 
 void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook(
     OperationContext* opCtx) {
-    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
         Status status = ShardingCatalogManager::get(opCtx)->initializeConfigDatabaseIfNeeded(opCtx);
         if (!status.isOK() && status != ErrorCodes::AlreadyInitialized) {
             // If the node is shutting down or it lost quorum just as it was becoming primary,
@@ -945,11 +939,12 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
         PeriodicShardedIndexConsistencyChecker::get(_service).onStepUp(_service);
         TransactionCoordinatorService::get(_service)->onStepUp(opCtx);
 
-        if (gFeatureFlagCatalogShard.isEnabledAndIgnoreFCV()) {
+        // (Ignore FCV check): TODO(SERVER-75389): add why FCV is ignored here.
+        if (gFeatureFlagCatalogShard.isEnabledAndIgnoreFCVUnsafe()) {
             CatalogCacheLoader::get(_service).onStepUp();
         }
     }
-    if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
         if (ShardingState::get(opCtx)->enabled()) {
             VectorClockMutable::get(opCtx)->recoverDirect(opCtx);
             Status status = ShardingStateRecovery_DEPRECATED::recover(opCtx);
@@ -965,7 +960,7 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
 
             CatalogCacheLoader::get(_service).onStepUp();
 
-            if (serverGlobalParams.clusterRole != ClusterRole::ConfigServer) {
+            if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
                 // Called earlier for config servers.
                 TransactionCoordinatorService::get(_service)->onStepUp(opCtx);
             }
@@ -978,7 +973,9 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
             // Note, these must be done after the configOpTime is recovered via
             // ShardingStateRecovery::recover above, because they may trigger filtering metadata
             // refreshes which should use the recovered configOpTime.
-            if (!mongo::feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCV()) {
+            // (Ignore FCV check): This feature flag doesn't have upgrade/downgrade concern. The
+            // feature flag is used to turn on new range deleter on startup.
+            if (!mongo::feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCVUnsafe()) {
                 migrationutil::resubmitRangeDeletionsOnStepUp(_service);
             }
             migrationutil::resumeMigrationCoordinationsOnStepUp(opCtx);
@@ -1013,7 +1010,8 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
                                         "shard's first transition to primary"));
         }
 
-        if (mongo::feature_flags::gGlobalIndexesShardingCatalog.isEnabledAndIgnoreFCV()) {
+        // (Ignore FCV check): TODO(SERVER-75389): add why FCV is ignored here.
+        if (mongo::feature_flags::gGlobalIndexesShardingCatalog.isEnabledAndIgnoreFCVUnsafe()) {
             // Create indexes in config.shard.indexes if needed.
             indexStatus = sharding_util::createShardingIndexCatalogIndexes(opCtx);
             if (!indexStatus.isOK()) {
@@ -1053,14 +1051,15 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
             }
         }
     }
-    if (serverGlobalParams.clusterRole == ClusterRole::None) {  // unsharded
+    if (serverGlobalParams.clusterRole.has(ClusterRole::None)) {  // unsharded
         if (auto validator = LogicalTimeValidator::get(_service)) {
             validator->enableKeyGenerator(opCtx, true);
         }
     }
 
-    if (gFeatureFlagCatalogShard.isEnabledAndIgnoreFCV() &&
-        serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&
+    // (Ignore FCV check): TODO(SERVER-75389): add why FCV is ignored here.
+    if (gFeatureFlagCatalogShard.isEnabledAndIgnoreFCVUnsafe() &&
+        serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
         !ShardingState::get(opCtx)->enabled()) {
         // Note this must be called after the config server has created the cluster ID and also
         // after the onStepUp logic for the shard role because this triggers sharding state
@@ -1279,7 +1278,7 @@ void ReplicationCoordinatorExternalStateImpl::setupNoopWriter(Seconds waitTime) 
 
 bool ReplicationCoordinatorExternalStateImpl::isShardPartOfShardedCluster(
     OperationContext* opCtx) const {
-    return serverGlobalParams.clusterRole == ClusterRole::ShardServer &&
+    return serverGlobalParams.clusterRole.has(ClusterRole::ShardServer) &&
         ShardingState::get(opCtx)->enabled();
 }
 

@@ -621,12 +621,11 @@ TEST(PhysRewriter, FilterIndexing) {
             "RIDIntersect [root]\n"
             "|   Scan [c1, {root}]\n"
             "Sargable [Index]\n"
-            "|   |   |   requirements: \n"
-            "|   |   |       {{{refProjection: root, path: 'PathGet [a] PathTraverse [1] "
-            "PathIdentity "
-            "[]', intervals: {{{=Const [1]}}}}}}\n"
-            "|   |   candidateIndexes: \n"
-            "|   |       candidateId: 1, index1, {}, {SimpleEquality}, {{{=Const [1]}}}\n"
+            "|   |   requirements: \n"
+            "|   |       {{{root, 'PathGet [a] PathTraverse [1] PathIdentity []', {{{=Const "
+            "[1]}}}}}}\n"
+            "|   candidateIndexes: \n"
+            "|       candidateId: 1, index1, {}, {SimpleEquality}, {{{=Const [1]}}}\n"
             "Scan [c1, {root}]\n",
             optimized);
     }
@@ -1808,15 +1807,12 @@ TEST(PhysRewriter, SargableProjectionRenames) {
         "Root [{root}]\n"
         "Evaluation [{pa1} = Variable [pa]]\n"
         "Sargable [Complete]\n"
-        "|   |   |   |   requirements: \n"
-        "|   |   |   |       {{{refProjection: root, path: 'PathGet [a] PathIdentity []', "
-        "boundProjection: pa, intervals: {{{=Const [1]}}}}}}\n"
-        "|   |   |   candidateIndexes: \n"
-        "|   |   scanParams: \n"
-        "|   |       {'a': pa}\n"
-        "|   |           residualReqs: \n"
-        "|   |               {{{refProjection: pa, path: 'PathIdentity []', intervals: {{{=Const "
-        "[1]}}}, entryIndex: 0}}}\n"
+        "|   |   requirements: \n"
+        "|   |       {{{root, 'PathGet [a] PathIdentity []', pa, {{{=Const [1]}}}}}}\n"
+        "|   scanParams: \n"
+        "|       {'a': pa}\n"
+        "|           residualReqs: \n"
+        "|               {{{pa, 'PathIdentity []', {{{=Const [1]}}}, entryIndex: 0}}}\n"
         "Scan [c1, {root}]\n",
         optimized);
 }
@@ -1854,15 +1850,12 @@ TEST(PhysRewriter, SargableAcquireProjection) {
     ASSERT_EXPLAIN_V2_AUTO(
         "Root [{root}]\n"
         "Sargable [Complete]\n"
-        "|   |   |   |   requirements: \n"
-        "|   |   |   |       {{{refProjection: root, path: 'PathGet [a] PathIdentity []', "
-        "boundProjection: pa, intervals: {{{=Const [1]}}}}}}\n"
-        "|   |   |   candidateIndexes: \n"
-        "|   |   scanParams: \n"
-        "|   |       {'a': pa}\n"
-        "|   |           residualReqs: \n"
-        "|   |               {{{refProjection: pa, path: 'PathIdentity []', intervals: {{{=Const "
-        "[1]}}}, entryIndex: 0}}}\n"
+        "|   |   requirements: \n"
+        "|   |       {{{root, 'PathGet [a] PathIdentity []', pa, {{{=Const [1]}}}}}}\n"
+        "|   scanParams: \n"
+        "|       {'a': pa}\n"
+        "|           residualReqs: \n"
+        "|               {{{pa, 'PathIdentity []', {{{=Const [1]}}}, entryIndex: 0}}}\n"
         "Scan [c1, {root}]\n",
         optimized);
 }
@@ -2771,16 +2764,15 @@ TEST(PhysRewriter, CompoundIndex5) {
 
     // Demonstrate that we create four compound {a, b} index bounds: [=0, =2], [=0, =3], [=1, =2]
     // and [=1, =3].
-    // TODO: SERVER-70298: we should be seeing merge joins instead of union+groupby.
     ASSERT_EXPLAIN_V2_AUTO(
         "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-        "GroupBy [{rid_0}]\n"
-        "|   aggregations: \n"
-        "Union [{rid_0}]\n"
+        "SortedMerge []\n"
+        "|   |   |   |   |   collation: \n"
+        "|   |   |   |   |       rid_0: Ascending\n"
         "|   |   |   IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval"
         ": {=Const [1 | 3]}]\n"
         "|   |   IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {="
@@ -3934,9 +3926,10 @@ TEST(PhysRewriter, ArrayConstantIndex) {
         "|   |   Const [true]\n"
         "|   LimitSkip [limit: 1, skip: 0]\n"
         "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-        "GroupBy [{rid_0}]\n"
-        "|   aggregations: \n"
-        "Union [{rid_0}]\n"
+        "Unique [{rid_0}]\n"
+        "SortedMerge []\n"
+        "|   |   |   collation: \n"
+        "|   |   |       rid_0: Ascending\n"
         "|   IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {=Cons"
         "t [0 | [1, 2, 3]]}]\n"
         "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {=Const [0"
@@ -4770,18 +4763,19 @@ TEST(PhysRewriter, EqMemberSargable) {
         ASSERT_EXPLAIN_V2_AUTO(
             "Root [{root}]\n"
             "Sargable [Complete]\n"
-            "|   |   |   |   requirements: \n"
-            "|   |   |   |       {{{refProjection: root, path: 'PathGet [a] PathIdentity []', "
-            "intervals: {{{=Const [1]}} U {{=Const [2]}} U {{=Const [3]}}}}}}\n"
-            "|   |   |   candidateIndexes: \n"
-            "|   |   |       candidateId: 1, index1, {}, {Compound}, {{{=Const [1]}} U {{=Const "
+            "|   |   |   requirements: \n"
+            "|   |   |       {{{root, 'PathGet [a] PathIdentity []', {{{=Const [1]}} U {{=Const "
             "[2]}} "
-            "U {{=Const [3]}}}\n"
-            "|   |   scanParams: \n"
-            "|   |       {'a': evalTemp_0}\n"
-            "|   |           residualReqs: \n"
-            "|   |               {{{refProjection: evalTemp_0, path: 'PathIdentity []', intervals: "
-            "{{{=Const [1]}} U {{=Const [2]}} U {{=Const [3]}}}, entryIndex: 0}}}\n"
+            "U {{=Const [3]}}}}}}\n"
+            "|   |   candidateIndexes: \n"
+            "|   |       candidateId: 1, index1, {}, {Compound}, {{{=Const [1]}} U {{=Const [2]}} "
+            "U "
+            "{{=Const [3]}}}\n"
+            "|   scanParams: \n"
+            "|       {'a': evalTemp_0}\n"
+            "|           residualReqs: \n"
+            "|               {{{evalTemp_0, 'PathIdentity []', {{{=Const [1]}} U {{=Const [2]}} U "
+            "{{=Const [3]}}}, entryIndex: 0}}}\n"
             "Scan [c1, {root}]\n",
             optimized);
     }
@@ -4804,7 +4798,7 @@ TEST(PhysRewriter, EqMemberSargable) {
 
         // Test sargable filter is satisfied with an index scan.
         ASSERT_EXPLAIN_PROPS_V2_AUTO(
-            "Properties [cost: 0.173038, localCost: 0, adjustedCE: 54.6819]\n"
+            "Properties [cost: 0.163045, localCost: 0, adjustedCE: 54.6819]\n"
             "|   |   Logical:\n"
             "|   |       cardinalityEstimate: \n"
             "|   |           ce: 54.6819\n"
@@ -4824,7 +4818,7 @@ TEST(PhysRewriter, EqMemberSargable) {
             "|       indexingRequirement: \n"
             "|           Complete, dedupRID\n"
             "Root [{root}]\n"
-            "Properties [cost: 0.173038, localCost: 0.0180785, adjustedCE: 54.6819]\n"
+            "Properties [cost: 0.163045, localCost: 0.0180785, adjustedCE: 54.6819]\n"
             "|   |   Logical:\n"
             "|   |       cardinalityEstimate: \n"
             "|   |           ce: 54.6819\n"
@@ -4873,7 +4867,7 @@ TEST(PhysRewriter, EqMemberSargable) {
             "|   |       repetitionEstimate: 54.6819\n"
             "|   LimitSkip [limit: 1, skip: 0]\n"
             "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-            "Properties [cost: 0.0791597, localCost: 0.0791597, adjustedCE: 18.2273]\n"
+            "Properties [cost: 0.0691671, localCost: 0.0691671, adjustedCE: 54.6819]\n"
             "|   |   Logical:\n"
             "|   |       cardinalityEstimate: \n"
             "|   |           ce: 54.6819\n"
@@ -4897,9 +4891,10 @@ TEST(PhysRewriter, EqMemberSargable) {
             "|           type: Centralized\n"
             "|       indexingRequirement: \n"
             "|           Index, dedupRID\n"
-            "GroupBy [{rid_0}]\n"
-            "|   aggregations: \n"
-            "Union [{rid_0}]\n"
+            "Unique [{rid_0}]\n"
+            "SortedMerge []\n"
+            "|   |   |   |   collation: \n"
+            "|   |   |   |       rid_0: Ascending\n"
             "|   |   IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: "
             "{=Const [3]}]\n"
             "|   IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: "
@@ -5397,191 +5392,6 @@ TEST(PhysRewriter, ExtractAllPlans) {
         "IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, interval: {[Const [1 "
         "| minKey], Const [1 | maxKey]]}]\n",
         getExplainForPlan(2));
-}
-
-TEST(PhysRewriter, LowerRequirementsWithTopLevelDisjunction) {
-    auto req =
-        PartialSchemaRequirement(boost::none,
-                                 _disj(_conj(_interval(_incl("1"_cint32), _incl("1"_cint32)))),
-                                 false /*perfOnly*/);
-
-    auto makeKey = [](std::string pathName) {
-        return PartialSchemaKey("ptest",
-                                make<PathGet>(FieldNameType{pathName}, make<PathIdentity>()));
-    };
-
-    CEType scanGroupCE{10.0};
-    FieldProjectionMap fieldProjectionMap;
-    fieldProjectionMap._rootProjection = "ptest";
-    std::vector<SelectivityType> indexPredSels;
-
-    PhysPlanBuilder builder;
-    builder.make<PhysicalScanNode>(
-        scanGroupCE, fieldProjectionMap, "test" /* scanDefName */, false /* parallelScan */);
-
-    ResidualRequirementsWithOptionalCE::Builder residReqsBuilder;
-    residReqsBuilder.pushDisj()
-        .pushConj()
-        .atom({makeKey("a"), req, CEType{2.0}})
-        .atom({makeKey("b"), req, CEType{3.0}})
-        .pop()
-        .pushConj()
-        .atom({makeKey("c"), req, CEType{5.0}})
-        .atom({makeKey("d"), req, CEType{4.0}})
-        .pop();
-    auto residReqs = residReqsBuilder.finish().get();
-    lowerPartialSchemaRequirements(
-        scanGroupCE, indexPredSels, residReqs, defaultConvertPathToInterval, builder);
-
-    ASSERT_EXPLAIN_V2_AUTO(
-        "Filter []\n"
-        "|   BinaryOp [Or]\n"
-        "|   |   BinaryOp [And]\n"
-        "|   |   |   EvalFilter []\n"
-        "|   |   |   |   Variable [ptest]\n"
-        "|   |   |   PathGet [c]\n"
-        "|   |   |   PathCompare [Eq]\n"
-        "|   |   |   Const [1]\n"
-        "|   |   EvalFilter []\n"
-        "|   |   |   Variable [ptest]\n"
-        "|   |   PathGet [d]\n"
-        "|   |   PathCompare [Eq]\n"
-        "|   |   Const [1]\n"
-        "|   BinaryOp [And]\n"
-        "|   |   EvalFilter []\n"
-        "|   |   |   Variable [ptest]\n"
-        "|   |   PathGet [b]\n"
-        "|   |   PathCompare [Eq]\n"
-        "|   |   Const [1]\n"
-        "|   EvalFilter []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathGet [a]\n"
-        "|   PathCompare [Eq]\n"
-        "|   Const [1]\n"
-        "PhysicalScan [{'<root>': ptest}, test]\n",
-        builder._node);
-}
-
-TEST(PhysRewriter, OptimizeSargableNodeWithTopLevelDisjunction) {
-    auto req =
-        PartialSchemaRequirement(boost::none,
-                                 _disj(_conj(_interval(_incl("1"_cint32), _incl("1"_cint32)))),
-                                 false /*perfOnly*/);
-
-    auto makeKey = [](std::string pathName) {
-        return PartialSchemaKey("ptest",
-                                make<PathGet>(FieldNameType{pathName}, make<PathIdentity>()));
-    };
-
-    // Create three SargableNodes with top-level disjunctions.
-    PSRExpr::Builder builder;
-    builder.pushDisj()
-        .pushConj()
-        .atom({makeKey("a"), req})
-        .atom({makeKey("b"), req})
-        .pop()
-        .pushConj()
-        .atom({makeKey("c"), req})
-        .atom({makeKey("d"), req})
-        .pop();
-    auto reqs1 = PartialSchemaRequirements(builder.finish().get());
-
-    builder.pushDisj()
-        .pushConj()
-        .atom({makeKey("e"), req})
-        .pop()
-        .pushConj()
-        .atom({makeKey("f"), req})
-        .pop();
-    auto reqs2 = PartialSchemaRequirements(builder.finish().get());
-
-    builder.pushDisj().pushConj().atom({makeKey("g"), req}).pop();
-    auto reqs3 = PartialSchemaRequirements(builder.finish().get());
-
-    // During logical optimization, the SargableNodes not directly above the Scan will first be
-    // lowered to Filter nodes based on their requirements. The SargableNode immediately above the
-    // Scan will be lowered later based on its residual requirements.
-    ResidualRequirements::Builder residReqs;
-    residReqs.pushDisj()
-        .pushConj()
-        .atom({makeKey("a"), req, 0})
-        .atom({makeKey("b"), req, 1})
-        .pop()
-        .pushConj()
-        .atom({makeKey("c"), req, 2})
-        .atom({makeKey("d"), req, 3})
-        .pop();
-    ScanParams scanParams;
-    scanParams._residualRequirements = residReqs.finish();
-
-    ABT scanNode = make<ScanNode>("ptest", "test");
-    ABT sargableNode1 = make<SargableNode>(
-        reqs1, CandidateIndexes(), scanParams, IndexReqTarget::Index, std::move(scanNode));
-    ABT sargableNode2 = make<SargableNode>(
-        reqs2, CandidateIndexes(), boost::none, IndexReqTarget::Index, std::move(sargableNode1));
-    ABT sargableNode3 = make<SargableNode>(
-        reqs3, CandidateIndexes(), boost::none, IndexReqTarget::Index, std::move(sargableNode2));
-    ABT rootNode = make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{"ptest"}},
-                                  std::move(sargableNode3));
-
-    // Show that the optimization of the SargableNode does not throw, and that all three
-    // SargableNodes are correctly lowered to FilterNodes.
-    auto prefixId = PrefixId::createForTests();
-    auto phaseManager = makePhaseManager({OptPhase::MemoSubstitutionPhase,
-                                          OptPhase::MemoExplorationPhase,
-                                          OptPhase::MemoImplementationPhase},
-                                         prefixId,
-                                         {{{"test", ScanDefinition()}}},
-                                         boost::none /*costModel*/,
-                                         DebugInfo::kDefaultForTests);
-    phaseManager.optimize(rootNode);
-
-    ASSERT_EXPLAIN_V2_AUTO(
-        "Root [{ptest}]\n"
-        "Filter []\n"
-        "|   EvalFilter []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathGet [g]\n"
-        "|   PathCompare [Eq]\n"
-        "|   Const [1]\n"
-        "Filter []\n"
-        "|   BinaryOp [Or]\n"
-        "|   |   EvalFilter []\n"
-        "|   |   |   Variable [ptest]\n"
-        "|   |   PathGet [f]\n"
-        "|   |   PathCompare [Eq]\n"
-        "|   |   Const [1]\n"
-        "|   EvalFilter []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathGet [e]\n"
-        "|   PathCompare [Eq]\n"
-        "|   Const [1]\n"
-        "Filter []\n"
-        "|   BinaryOp [Or]\n"
-        "|   |   BinaryOp [And]\n"
-        "|   |   |   EvalFilter []\n"
-        "|   |   |   |   Variable [ptest]\n"
-        "|   |   |   PathGet [d]\n"
-        "|   |   |   PathCompare [Eq]\n"
-        "|   |   |   Const [1]\n"
-        "|   |   EvalFilter []\n"
-        "|   |   |   Variable [ptest]\n"
-        "|   |   PathGet [c]\n"
-        "|   |   PathCompare [Eq]\n"
-        "|   |   Const [1]\n"
-        "|   BinaryOp [And]\n"
-        "|   |   EvalFilter []\n"
-        "|   |   |   Variable [ptest]\n"
-        "|   |   PathGet [b]\n"
-        "|   |   PathCompare [Eq]\n"
-        "|   |   Const [1]\n"
-        "|   EvalFilter []\n"
-        "|   |   Variable [ptest]\n"
-        "|   PathGet [a]\n"
-        "|   PathCompare [Eq]\n"
-        "|   Const [1]\n"
-        "PhysicalScan [{'<root>': ptest}, test]\n",
-        rootNode);
 }
 }  // namespace
 }  // namespace mongo::optimizer

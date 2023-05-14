@@ -117,7 +117,7 @@ NamespaceString parseLookupFromAndResolveNamespace(const BSONElement& elem,
     uassert(
         ErrorCodes::FailedToParse,
         str::stream() << "$lookup with syntax {from: {db:<>, coll:<>},..} is not supported for db: "
-                      << nss.db() << " and coll: " << nss.coll(),
+                      << nss.dbName().toStringForErrorMsg() << " and coll: " << nss.coll(),
         nss.isConfigDotCacheDotChunks() || nss == NamespaceString::kRsOplogNamespace ||
             nss == NamespaceString::kTenantMigrationOplogView ||
             nss == NamespaceString::kConfigsvrCollectionsNamespace);
@@ -450,11 +450,11 @@ StageConstraints DocumentSourceLookUp::constraints(Pipeline::SplitState pipeStat
         // is allowed.
         hostRequirement = HostTypeRequirement::kAnyShard;
     } else if (_fromNs == NamespaceString::kConfigsvrCollectionsNamespace &&
-               // If the catalog shard feature flag is enabled, the config server should have the
-               // components necessary to handle a merge. Config servers are upgraded first and
-               // downgraded last, so if any server is running the latest binary, we can assume the
-               // conifg servers are too.
-               !gFeatureFlagCatalogShard.isEnabledAndIgnoreFCV()) {
+               // (Ignore FCV check): If the catalog shard feature flag is enabled, the config
+               // server should have the components necessary to handle a merge. Config servers are
+               // upgraded first and downgraded last, so if any server is running the latest binary,
+               // we can assume the conifg servers are too.
+               !gFeatureFlagCatalogShard.isEnabledAndIgnoreFCVUnsafe()) {
         // This is an unsharded collection, but the primary shard would be the config server, and
         // the config servers are not prepared to take queries. Instead, we'll merge on any of the
         // other shards.
@@ -595,6 +595,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> DocumentSourceLookUp::buildPipeline(
     const Document& inputDoc) {
     // Copy all 'let' variables into the foreign pipeline's expression context.
     _variables.copyToExpCtx(_variablesParseState, _fromExpCtx.get());
+    _fromExpCtx->forcePlanCache = true;
 
     // Resolve the 'let' variables to values per the given input document.
     resolveLetVariables(inputDoc, &_fromExpCtx->variables);
@@ -1024,7 +1025,7 @@ void DocumentSourceLookUp::appendSpecificExecStats(MutableDocument& doc) const {
 void DocumentSourceLookUp::serializeToArray(std::vector<Value>& array,
                                             SerializationOptions opts) const {
     auto explain = opts.verbosity;
-    if (opts.redactFieldNames || opts.replacementForLiteralArgs) {
+    if (opts.redactIdentifiers || opts.replacementForLiteralArgs) {
         MONGO_UNIMPLEMENTED_TASSERT(7484326);
     }
 

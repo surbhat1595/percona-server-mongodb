@@ -64,11 +64,7 @@ const auto documentIdDecoration = OperationContext::declareDecoration<BSONObj>()
 
 bool isStandaloneOrPrimary(OperationContext* opCtx) {
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-    const bool isReplSet =
-        replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet;
-    return !isReplSet ||
-        (repl::ReplicationCoordinator::get(opCtx)->getMemberState() ==
-         repl::MemberState::RS_PRIMARY);
+    return replCoord->canAcceptWritesForDatabase(opCtx, DatabaseName::kAdmin.toString());
 }
 
 /**
@@ -114,7 +110,9 @@ public:
         : _opCtx(opCtx), _task(std::move(task)) {}
 
     void commit(OperationContext* opCtx, boost::optional<Timestamp>) override {
-        if (!feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCV()) {
+        // (Ignore FCV check): This feature doesn't have any upgrade/downgrade concerns. The feature
+        // flag is used to turn on new range deleter on startup.
+        if (!feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCVUnsafe()) {
             migrationutil::submitRangeDeletionTask(_opCtx, _task).getAsync([](auto) {});
         }
     }

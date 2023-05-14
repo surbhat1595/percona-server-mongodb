@@ -53,6 +53,16 @@ env.Library(
 )
 
 env.Library(
+    target='oplog_constraint_violation_logger',
+    source=[
+        'oplog_constraint_violation_logger.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/base',
+    ],
+)
+
+env.Library(
     target='oplog',
     source=[
         'apply_ops.cpp',
@@ -68,6 +78,7 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/catalog/catalog_helpers',
         '$BUILD_DIR/mongo/db/catalog/collection_crud',
+        '$BUILD_DIR/mongo/db/catalog/health_log_interface',
         '$BUILD_DIR/mongo/db/catalog/import_collection_oplog_entry',
         '$BUILD_DIR/mongo/db/catalog/index_build_oplog_entry',
         '$BUILD_DIR/mongo/db/catalog/local_oplog_info',
@@ -98,6 +109,7 @@ env.Library(
         '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'dbcheck',
         'image_collection_entry',
+        'oplog_constraint_violation_logger',
         'repl_coordinator_interface',
         'repl_server_parameters',
         'repl_settings',
@@ -1654,6 +1666,8 @@ if wiredtiger:
         LIBDEPS=[
             '$BUILD_DIR/mongo/db/catalog/database_holder',
             '$BUILD_DIR/mongo/db/catalog/document_validation',
+            '$BUILD_DIR/mongo/db/catalog/health_log',
+            '$BUILD_DIR/mongo/db/catalog/health_log_interface',
             '$BUILD_DIR/mongo/db/index_builds_coordinator_interface',
             '$BUILD_DIR/mongo/db/multitenancy',
             '$BUILD_DIR/mongo/db/service_context_d_test_fixture',
@@ -1748,6 +1762,7 @@ if wiredtiger:
             'rollback_checker_test.cpp',
             'rollback_impl_test.cpp',
             'scatter_gather_test.cpp',
+            'shard_merge_recipient_op_observer_test.cpp',
             'speculative_majority_read_info_test.cpp',
             'split_horizon_test.cpp',
             'split_prepare_session_manager_test.cpp',
@@ -1773,7 +1788,9 @@ if wiredtiger:
             '$BUILD_DIR/mongo/db/auth/authmocks',
             '$BUILD_DIR/mongo/db/auth/authorization_manager_global',
             '$BUILD_DIR/mongo/db/catalog/catalog_helpers',
+            '$BUILD_DIR/mongo/db/catalog/health_log',
             '$BUILD_DIR/mongo/db/change_stream_pre_images_collection_manager',
+            '$BUILD_DIR/mongo/db/commands/create_command',
             '$BUILD_DIR/mongo/db/commands/mongod_fcv',
             '$BUILD_DIR/mongo/db/commands/txn_cmd_request',
             '$BUILD_DIR/mongo/db/dbdirectclient',
@@ -1843,6 +1860,7 @@ if wiredtiger:
             'rollback_test_fixture',
             'rs_rollback',
             'scatter_gather',
+            'shard_merge_recipient_service',
             'speculative_majority_read_info',
             'split_horizon',
             'split_prepare_session_manager',
@@ -2110,5 +2128,38 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/session/logical_session_id',
         '$BUILD_DIR/mongo/db/session/logical_session_id_helpers',
+    ],
+)
+
+env.Benchmark(
+    target='oplog_application_bm',
+    source=[
+        'oplog_application_bm.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/auth/authmocks',
+        '$BUILD_DIR/mongo/db/catalog/catalog_helpers',
+        '$BUILD_DIR/mongo/db/catalog/catalog_impl',
+        '$BUILD_DIR/mongo/db/index_builds_coordinator_mongod',
+        '$BUILD_DIR/mongo/db/op_observer/op_observer',
+        '$BUILD_DIR/mongo/db/op_observer/op_observer_impl',
+        '$BUILD_DIR/mongo/db/op_observer/oplog_writer_impl',
+        '$BUILD_DIR/mongo/db/server_base',
+        '$BUILD_DIR/mongo/db/service_context_d',
+        '$BUILD_DIR/mongo/db/session/session_catalog',
+        '$BUILD_DIR/mongo/db/session/session_catalog_mongod',
+        '$BUILD_DIR/mongo/db/shard_role_api',
+        '$BUILD_DIR/mongo/db/storage/storage_control',
+        '$BUILD_DIR/mongo/db/storage/storage_options',
+        '$BUILD_DIR/mongo/db/storage/wiredtiger/storage_wiredtiger',
+        '$BUILD_DIR/mongo/unittest/unittest',
+        '$BUILD_DIR/mongo/util/periodic_runner_factory',
+        'drop_pending_collection_reaper',
+        'repl_coordinator_impl',
+        'repl_coordinator_interface',
+        'replication_consistency_markers_impl',
+        'replication_recovery',
+        'replmocks',
+        'storage_interface_impl',
     ],
 )

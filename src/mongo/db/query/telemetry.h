@@ -36,10 +36,10 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/partitioned_cache.h"
 #include "mongo/db/query/plan_explainer.h"
-#include "mongo/db/query/telemetry_gen.h"
 #include "mongo/db/query/util/memory_util.h"
 #include "mongo/db/service_context.h"
 #include <cstdint>
+#include <memory>
 
 namespace mongo {
 
@@ -55,30 +55,6 @@ using BSONNumeric = long long;
 }  // namespace
 
 namespace telemetry {
-
-bool isTelemetryEnabled();
-
-/**
- * Generate a Telemetry Store key to be used on a shard from a Telemetry Store key that is being
- * used on mongos.
- */
-ShardedTelemetryStoreKey telemetryKeyToShardedStoreId(const BSONObj& key, std::string hostAndPort);
-/**
- * Get the telemetry query shape from the opCtx.
- */
-boost::optional<BSONObj> getTelemetryKeyFromOpCtx(OperationContext* opCtx);
-
-/**
- * Given an object builder these functions append the telemetry key to it in the form
- * for sharded commands {hostAndPort and hashedKey}. If there is no telemetry key available
- * on the opCtx, does not modify the object.
- */
-void appendShardedTelemetryKeyIfApplicable(MutableDocument& objToModify,
-                                           std::string hostAndPort,
-                                           OperationContext* opCtx);
-void appendShardedTelemetryKeyIfApplicable(BSONObjBuilder& objToModify,
-                                           std::string hostAndPort,
-                                           OperationContext* opCtx);
 
 /**
  * An aggregated metric stores a compressed view of data. It balances the loss of information
@@ -118,6 +94,7 @@ struct AggregatedMetric {
     uint64_t sumOfSquares = 0;
 };
 
+extern CounterMetric telemetryStoreSizeEstimateBytesMetric;
 // Used to aggregate the metrics for one telemetry key over all its executions.
 class TelemetryMetrics {
 public:
@@ -127,7 +104,15 @@ public:
         : firstSeenTimestamp(Date_t::now().toMillisSinceEpoch() / 1000, 0),
           cmdObj(cmdObj.copy()),
           applicationName(applicationName),
-          nss(nss) {}
+          nss(nss) {
+        telemetryStoreSizeEstimateBytesMetric.increment(sizeof(TelemetryMetrics) + sizeof(BSONObj) +
+                                                        cmdObj.objsize());
+    }
+
+    ~TelemetryMetrics() {
+        telemetryStoreSizeEstimateBytesMetric.decrement(sizeof(TelemetryMetrics) + sizeof(BSONObj) +
+                                                        cmdObj.objsize());
+    }
 
     BSONObj toBSON() const {
         BSONObjBuilder builder{sizeof(TelemetryMetrics) + 100};
@@ -140,10 +125,10 @@ public:
     }
 
     /**
-     * Redact a given telemetry key.
+     * Redact a given telemetry key and set _keySize.
      */
     StatusWith<BSONObj> redactKey(const BSONObj& key,
-                                  bool redactFieldNames,
+                                  bool redactIdentifiers,
                                   OperationContext* opCtx) const;
 
     /**
@@ -193,15 +178,17 @@ struct TelemetryPartitioner {
     }
 };
 
-
 struct TelemetryStoreEntryBudgetor {
-    size_t operator()(const BSONObj& key, const TelemetryMetrics& value) {
+    size_t operator()(const BSONObj& key, const std::shared_ptr<TelemetryMetrics>& value) {
+        // The buget estimator for <key,value> pair in LRU cache accounts for size of value
+        // (TelemetryMetrics) size of the key, and size of the key's underlying data struture
+        // (BSONObj).
         return sizeof(TelemetryMetrics) + sizeof(BSONObj) + key.objsize();
     }
 };
 
 using TelemetryStore = PartitionedCache<BSONObj,
-                                        TelemetryMetrics,
+                                        std::shared_ptr<TelemetryMetrics>,
                                         TelemetryStoreEntryBudgetor,
                                         TelemetryPartitioner,
                                         SimpleBSONObjComparator::Hasher,

@@ -443,7 +443,7 @@ void SortedDataIndexAccessMethod::removeOneKey(OperationContext* opCtx,
               "Assertion failure: _unindex failed",
               "error"_attr = redact(e),
               "keyString"_attr = keyString,
-              "namespace"_attr = ns,
+              logAttrs(ns),
               "indexName"_attr = _descriptor->indexName());
         printStackTrace();
     }
@@ -1232,7 +1232,8 @@ Status SortedDataIndexAccessMethod::_indexKeysOrWriteToSideTable(
         }
     } else {
         // Ensure that our snapshot is compatible with the index's minimum visibile snapshot.
-        if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCV()) {
+        // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
+        if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe()) {
             const auto minVisibleTimestamp = _indexCatalogEntry->getMinimumVisibleSnapshot();
             const auto readTimestamp =
                 opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx).value_or(
@@ -1301,7 +1302,8 @@ void SortedDataIndexAccessMethod::_unindexKeysOrWriteToSideTable(
     options.dupsAllowed = options.dupsAllowed || checkRecordId == CheckRecordId::On;
 
     // Ensure that our snapshot is compatible with the index's minimum visibile snapshot.
-    if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCV()) {
+    // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
+    if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe()) {
         const auto minVisibleTimestamp = _indexCatalogEntry->getMinimumVisibleSnapshot();
         const auto readTimestamp =
             opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx).value_or(
@@ -1320,7 +1322,7 @@ void SortedDataIndexAccessMethod::_unindexKeysOrWriteToSideTable(
         LOGV2(20362,
               "Couldn't unindex record",
               "record"_attr = redact(obj),
-              "namespace"_attr = ns,
+              logAttrs(ns),
               "error"_attr = redact(status));
     }
 

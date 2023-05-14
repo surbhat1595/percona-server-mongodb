@@ -199,7 +199,7 @@ StorageInterfaceImpl::createCollectionForBulkLoading(
                 2,
                 "StorageInterfaceImpl::createCollectionForBulkLoading called for ns: {namespace}",
                 "StorageInterfaceImpl::createCollectionForBulkLoading called",
-                "namespace"_attr = nss.ns());
+                logAttrs(nss));
 
     class StashClient {
     public:
@@ -224,12 +224,6 @@ StorageInterfaceImpl::createCollectionForBulkLoading(
         getGlobalServiceContext()->makeClient(str::stream() << nss.ns() << " loader"));
     auto opCtx = cc().makeOperationContext();
     opCtx->setEnforceConstraints(false);
-
-    // TODO(SERVER-74656): Please revisit if this thread could be made killable.
-    {
-        stdx::lock_guard<Client> lk(cc());
-        cc().setSystemOperationUnKillableByStepdown(lk);
-    }
 
     // DocumentValidationSettings::kDisableInternalValidation is currently inert.
     // But, it's logically ok to disable internal validation as this function gets called
@@ -566,9 +560,9 @@ Status StorageInterfaceImpl::renameCollection(OperationContext* opCtx,
         AutoGetDb autoDB(opCtx, fromNS.dbName(), MODE_X);
         if (!autoDB.getDb()) {
             return Status(ErrorCodes::NamespaceNotFound,
-                          str::stream()
-                              << "Cannot rename collection from " << fromNS.ns() << " to "
-                              << toNS.ns() << ". Database " << fromNS.db() << " not found.");
+                          str::stream() << "Cannot rename collection from " << fromNS.ns() << " to "
+                                        << toNS.ns() << ". Database "
+                                        << fromNS.dbName().toStringForErrorMsg() << " not found.");
         }
         WriteUnitOfWork wunit(opCtx);
         const auto status = autoDB.getDb()->renameCollection(opCtx, fromNS, toNS, stayTemp);
@@ -1420,8 +1414,8 @@ void StorageInterfaceImpl::initializeStorageControlsForReplication(
     // periodically execute deletion via oplog truncate markers. OplogTruncateMarkers are a
     // replacement for capped collection deletion of the oplog collection history.
     if (serviceCtx->getStorageEngine()->supportsOplogTruncateMarkers()) {
-        BackgroundJob* backgroundThread = new OplogCapMaintainerThread();
-        backgroundThread->go();
+        auto maintainerThread = OplogCapMaintainerThread::get(serviceCtx);
+        maintainerThread->go();
     }
 }
 

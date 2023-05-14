@@ -116,7 +116,7 @@ IndexCatalogEntryImpl::IndexCatalogEntryImpl(OperationContext* const opCtx,
         LOGV2_DEBUG(20350,
                     2,
                     "have filter expression for {namespace} {indexName} {filter}",
-                    "namespace"_attr = collection->ns(),
+                    logAttrs(collection->ns()),
                     "indexName"_attr = _descriptor->indexName(),
                     "filter"_attr = redact(filter));
     }
@@ -134,8 +134,9 @@ bool IndexCatalogEntryImpl::isReady(OperationContext* opCtx) const {
     // out-of-sync index catalog entries.  To fix this, we uassert if we detect that the
     // in-memory catalog is out-of-sync with the on-disk catalog. This check is not necessary when
     // point-in-time catalog lookups are enabled as the snapshot is always in sync.
+    // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
     if (opCtx->inMultiDocumentTransaction() &&
-        !feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCV()) {
+        !feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe()) {
         if (!isPresentInMySnapshot(opCtx) || isReadyInMySnapshot(opCtx) != _isReady) {
             uasserted(ErrorCodes::SnapshotUnavailable,
                       str::stream() << "Unable to read from a snapshot due to pending collection"
@@ -426,7 +427,7 @@ void IndexCatalogEntryImpl::_catalogSetMultikey(OperationContext* opCtx,
         LOGV2_DEBUG(4718705,
                     1,
                     "Index set to multi key, clearing query plan cache",
-                    "namespace"_attr = collection->ns(),
+                    logAttrs(collection->ns()),
                     "keyPattern"_attr = _descriptor->keyPattern());
         CollectionQueryInfo::get(collection).clearQueryCacheForSetMultikey(collection);
     }

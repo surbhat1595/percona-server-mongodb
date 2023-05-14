@@ -145,6 +145,7 @@
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/config_server_op_observer.h"
 #include "mongo/db/s/migration_util.h"
+#include "mongo/db/s/move_primary/move_primary_donor_service.h"
 #include "mongo/db/s/move_primary/move_primary_recipient_service.h"
 #include "mongo/db/s/op_observer_sharding_impl.h"
 #include "mongo/db/s/periodic_sharded_index_consistency_checker.h"
@@ -182,6 +183,7 @@
 #include "mongo/db/storage/flow_control.h"
 #include "mongo/db/storage/flow_control_parameters_gen.h"
 #include "mongo/db/storage/master_key_rotation_completed.h"
+#include "mongo/db/storage/oplog_cap_maintainer_thread.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_engine_init.h"
 #include "mongo/db/storage/storage_engine_lock_file.h"
@@ -208,6 +210,7 @@
 #include "mongo/s/catalog/sharding_catalog_client_impl.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/query_analysis_client.h"
 #include "mongo/s/query_analysis_sampler.h"
 #include "mongo/scripting/dbdirectclient_factory.h"
 #include "mongo/scripting/engine.h"
@@ -373,25 +376,26 @@ void registerPrimaryOnlyServices(ServiceContext* serviceContext) {
 
     std::vector<std::unique_ptr<repl::PrimaryOnlyService>> services;
 
-    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
         services.push_back(std::make_unique<ReshardingCoordinatorService>(serviceContext));
         services.push_back(std::make_unique<ConfigsvrCoordinatorService>(serviceContext));
     }
 
-    if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
         services.push_back(std::make_unique<RenameCollectionParticipantService>(serviceContext));
         services.push_back(std::make_unique<ShardingDDLCoordinatorService>(serviceContext));
         services.push_back(std::make_unique<ReshardingDonorService>(serviceContext));
         services.push_back(std::make_unique<ReshardingRecipientService>(serviceContext));
         services.push_back(std::make_unique<TenantMigrationDonorService>(serviceContext));
         services.push_back(std::make_unique<repl::TenantMigrationRecipientService>(serviceContext));
+        services.push_back(std::make_unique<MovePrimaryDonorService>(serviceContext));
         services.push_back(std::make_unique<MovePrimaryRecipientService>(serviceContext));
         if (getGlobalReplSettings().isServerless()) {
             services.push_back(std::make_unique<repl::ShardMergeRecipientService>(serviceContext));
         }
     }
 
-    if (serverGlobalParams.clusterRole == ClusterRole::None) {
+    if (serverGlobalParams.clusterRole.has(ClusterRole::None)) {
         services.push_back(std::make_unique<TenantMigrationDonorService>(serviceContext));
         services.push_back(std::make_unique<repl::TenantMigrationRecipientService>(serviceContext));
         if (getGlobalReplSettings().isServerless()) {
@@ -721,7 +725,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
 
     WaitForMajorityService::get(serviceContext).startup(serviceContext);
 
-    if (serverGlobalParams.clusterRole != ClusterRole::ConfigServer) {
+    if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
         // A catalog shard initializes sharding awareness after setting up its config server state.
 
         // This function may take the global lock.
@@ -729,8 +733,8 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     }
 
     try {
-        if ((serverGlobalParams.clusterRole == ClusterRole::ConfigServer ||
-             serverGlobalParams.clusterRole == ClusterRole::None) &&
+        if ((serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) ||
+             serverGlobalParams.clusterRole.has(ClusterRole::None)) &&
             replSettings.usingReplSets()) {
             ReadWriteConcernDefaults::get(startupOpCtx.get()->getServiceContext())
                 .refreshIfNecessary(startupOpCtx.get());
@@ -774,7 +778,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
 
         startFreeMonitoring(serviceContext);
 
-        if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+        if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
             // Note: For replica sets, ShardingStateRecovery happens on transition to primary.
             if (!replCoord->isReplEnabled()) {
                 if (ShardingState::get(startupOpCtx.get())->enabled()) {
@@ -783,14 +787,14 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
             }
         }
 
-        if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
             initializeGlobalShardingStateForConfigServerIfNeeded(startupOpCtx.get());
 
             // This function may take the global lock.
             initializeShardingAwarenessIfNeededAndLoadGlobalSettings(startupOpCtx.get());
         }
 
-        if (serverGlobalParams.clusterRole == ClusterRole::None &&
+        if (serverGlobalParams.clusterRole.has(ClusterRole::None) &&
             replSettings.usingReplSets()) {  // standalone replica set
             // The keys client must use local read concern if the storage engine can't support
             // majority read concern.
@@ -903,7 +907,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     }
 
     if (computeModeEnabled) {
-        if (!isStandalone || serverGlobalParams.clusterRole != ClusterRole::None) {
+        if (!isStandalone || !serverGlobalParams.clusterRole.has(ClusterRole::None)) {
             LOGV2_ERROR(6968200, "'enableComputeMode' can be used only in standalone server");
             exitCleanly(ExitCode::badOptions);
         }
@@ -929,9 +933,9 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
 
     // Set up the logical session cache
     LogicalSessionCacheServer kind = LogicalSessionCacheServer::kStandalone;
-    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
         kind = LogicalSessionCacheServer::kConfigServer;
-    } else if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+    } else if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
         kind = LogicalSessionCacheServer::kSharded;
     } else if (replSettings.usingReplSets()) {
         kind = LogicalSessionCacheServer::kReplicaSet;
@@ -940,7 +944,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     LogicalSessionCache::set(serviceContext, makeLogicalSessionCacheD(kind));
 
     if (analyze_shard_key::supportsSamplingQueries(serviceContext, true /* ignoreFCV */) &&
-        serverGlobalParams.clusterRole == ClusterRole::None) {
+        serverGlobalParams.clusterRole.has(ClusterRole::None)) {
         analyze_shard_key::QueryAnalysisSampler::get(serviceContext).onStartup();
     }
 
@@ -1165,7 +1169,7 @@ void startupConfigActions(const std::vector<std::string>& args) {
 }
 
 void setUpCollectionShardingState(ServiceContext* serviceContext) {
-    if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
         CollectionShardingStateFactory::set(
             serviceContext, std::make_unique<CollectionShardingStateFactoryShard>(serviceContext));
     } else {
@@ -1187,9 +1191,6 @@ auto makeReplicaSetNodeExecutor(ServiceContext* serviceContext) {
     tpOptions.maxThreads = ThreadPool::Options::kUnlimited;
     tpOptions.onCreateThread = [](const std::string& threadName) {
         Client::initThread(threadName.c_str());
-
-        stdx::lock_guard<Client> lk(cc());
-        cc().setSystemOperationUnKillableByStepdown(lk);
     };
     auto hookList = std::make_unique<rpc::EgressMetadataHookList>();
     hookList->addHook(std::make_unique<rpc::VectorClockMetadataHook>(serviceContext));
@@ -1206,9 +1207,6 @@ auto makeReplicationExecutor(ServiceContext* serviceContext) {
     tpOptions.maxThreads = 50;
     tpOptions.onCreateThread = [](const std::string& threadName) {
         Client::initThread(threadName.c_str());
-
-        stdx::lock_guard<Client> lk(cc());
-        cc().setSystemOperationUnKillableByStepdown(lk);
     };
     auto hookList = std::make_unique<rpc::EgressMetadataHookList>();
     hookList->addHook(std::make_unique<rpc::VectorClockMetadataHook>(serviceContext));
@@ -1251,9 +1249,19 @@ void setUpReplication(ServiceContext* serviceContext) {
         SecureRandom().nextInt64());
     // Only create a ReplicaSetNodeExecutor if sharding is disabled and replication is enabled.
     // Note that sharding sets up its own executors for scheduling work to remote nodes.
-    if (serverGlobalParams.clusterRole == ClusterRole::None && replCoord->isReplEnabled())
+    if (serverGlobalParams.clusterRole.has(ClusterRole::None) && replCoord->isReplEnabled()) {
         ReplicaSetNodeProcessInterface::setReplicaSetNodeExecutor(
             serviceContext, makeReplicaSetNodeExecutor(serviceContext));
+
+        // The check below ignores the FCV because FCV is not initialized until after the replica
+        // set is initiated.
+        if (analyze_shard_key::isFeatureFlagEnabled(true /* ignoreFCV */)) {
+            analyze_shard_key::QueryAnalysisClient::get(serviceContext)
+                .setTaskExecutor(
+                    serviceContext,
+                    ReplicaSetNodeProcessInterface::getReplicaSetNodeExecutor(serviceContext));
+        }
+    }
 
     repl::ReplicationCoordinator::set(serviceContext, std::move(replCoord));
 
@@ -1271,7 +1279,7 @@ void setUpReplication(ServiceContext* serviceContext) {
 
 void setUpObservers(ServiceContext* serviceContext) {
     auto opObserverRegistry = std::make_unique<OpObserverRegistry>();
-    if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
         DurableHistoryRegistry::get(serviceContext)
             ->registerPin(std::make_unique<ReshardingHistoryHook>());
         opObserverRegistry->addObserver(std::make_unique<OpObserverShardingImpl>(
@@ -1289,8 +1297,8 @@ void setUpObservers(ServiceContext* serviceContext) {
         }
     }
 
-    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
-        if (!gFeatureFlagCatalogShard.isEnabledAndIgnoreFCV()) {
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+        if (!gFeatureFlagCatalogShard.isEnabledAndIgnoreFCVUnsafeAtStartup()) {
             opObserverRegistry->addObserver(
                 std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
         }
@@ -1299,7 +1307,7 @@ void setUpObservers(ServiceContext* serviceContext) {
         opObserverRegistry->addObserver(std::make_unique<ReshardingOpObserver>());
     }
 
-    if (serverGlobalParams.clusterRole == ClusterRole::None) {
+    if (serverGlobalParams.clusterRole.has(ClusterRole::None)) {
         opObserverRegistry->addObserver(
             std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
         opObserverRegistry->addObserver(std::make_unique<repl::TenantMigrationDonorOpObserver>());
@@ -1345,12 +1353,8 @@ MONGO_INITIALIZER_GENERAL(setSSLManagerType, (), ("SSLManager"))
 void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
     // This client initiation pattern is only to be used here, with plans to eliminate this pattern
     // down the line.
-    if (!haveClient()) {
+    if (!haveClient())
         Client::initThread(getThreadName());
-
-        stdx::lock_guard<Client> lk(cc());
-        cc().setSystemOperationUnKillableByStepdown(lk);
-    }
 
     auto const client = Client::getCurrent();
     auto const serviceContext = client->getServiceContext();
@@ -1489,7 +1493,7 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         repl::ReplicationCoordinator::get(serviceContext)->shutdown(opCtx);
 
         // Terminate the index consistency check.
-        if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
             LOGV2_OPTIONS(4784904,
                           {LogComponent::kSharding},
                           "Shutting down the PeriodicShardedIndexConsistencyChecker");
@@ -1571,6 +1575,11 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         validator->shutDown();
     }
 
+    if (auto pool = Grid::get(serviceContext)->getExecutorPool()) {
+        LOGV2_OPTIONS(6773200, {LogComponent::kSharding}, "Shutting down the ExecutorPool");
+        pool->shutdownAndJoin();
+    }
+
     // The migrationutil executor must be shut down before shutting down the CatalogCacheLoader.
     // Otherwise, it may try to schedule work on the CatalogCacheLoader and fail.
     LOGV2_OPTIONS(4784921, {LogComponent::kSharding}, "Shutting down the MigrationUtilExecutor");
@@ -1579,6 +1588,11 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
     migrationUtilExecutor->join();
 
     if (ShardingState::get(serviceContext)->enabled()) {
+        // The CatalogCache must be shuted down before shutting down the CatalogCacheLoader as the
+        // CatalogCache may try to schedule work on CatalogCacheLoader and fail.
+        LOGV2_OPTIONS(6773201, {LogComponent::kSharding}, "Shutting down the CatalogCache");
+        Grid::get(serviceContext)->catalogCache()->shutDownAndJoin();
+
         LOGV2_OPTIONS(4784922, {LogComponent::kSharding}, "Shutting down the CatalogCacheLoader");
         CatalogCacheLoader::get(serviceContext).shutDown();
     }
@@ -1625,6 +1639,11 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         LOGV2(4784930, "Shutting down the storage engine");
         shutdownGlobalStorageEngineCleanly(serviceContext);
     }
+
+    // We wait for the oplog cap maintainer thread to stop. This has to be done after the engine has
+    // been closed since the thread will only die once all references to the oplog have been deleted
+    // and we're performing a shutdown.
+    OplogCapMaintainerThread::get(serviceContext)->waitForFinish();
 
     // We drop the scope cache because leak sanitizer can't see across the
     // thread we use for proxying MozJS requests. Dropping the cache cleans up

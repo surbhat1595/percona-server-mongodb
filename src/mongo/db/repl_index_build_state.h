@@ -29,6 +29,8 @@
 
 #pragma once
 
+#include "mongo/stdx/mutex.h"
+#include "mongo/util/concurrency/with_lock.h"
 #include <algorithm>
 #include <list>
 #include <string>
@@ -308,8 +310,12 @@ public:
     /**
      * Only for two-phase index builds. Requests the primary to abort the build, and transitions
      * into a waiting state.
+     *
+     * Returns true if the thread has transitioned into the waiting state.
+     * Returns false if the build is already in abort state. This can happen if the build detected
+     * an error while an external operation (e.g. a collection drop) is concurrently aborting it.
      */
-    void requestAbortFromPrimary(const Status& abortStatus);
+    bool requestAbortFromPrimary(const Status& abortStatus);
 
     /**
      * Returns timestamp for committing this index build.
@@ -350,6 +356,16 @@ public:
      * Returns true if this index build has been aborted.
      */
     bool isAborted() const;
+
+    /**
+     * Returns true if this index is in the process of aborting.
+     */
+    bool isAborting() const;
+
+    /**
+     * Returns true if this index build has been committed.
+     */
+    bool isCommitted() const;
 
     /**
      * Returns true if this index build is being set up.
@@ -518,6 +534,16 @@ private:
     void _setSignalAndCancelVoteRequestCbkIfActive(WithLock lk,
                                                    OperationContext* opCtx,
                                                    IndexBuildAction signal);
+
+    /**
+     * Clears vote request callback handle set in onVoteRequestScheduled().
+     */
+    void _clearVoteRequestCbk(WithLock);
+
+    /**
+     * Cancels the vote request if valid and clears its callback handle.
+     */
+    void _cancelAndClearVoteRequestCbk(WithLock, OperationContext* opCtx);
 
     // Protects the state below.
     mutable Mutex _mutex = MONGO_MAKE_LATCH("ReplIndexBuildState::_mutex");

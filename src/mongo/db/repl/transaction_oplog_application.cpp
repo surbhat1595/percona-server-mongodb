@@ -540,7 +540,7 @@ Status _applyPrepareTransaction(OperationContext* opCtx,
             LOGV2_WARNING(21849,
                           "Blocking replication until single-phase index builds are finished on "
                           "collection, due to prepared transaction",
-                          "namespace"_attr = redact(ns.toString()),
+                          "namespace"_attr = redact(toStringForLogging(ns)),
                           "uuid"_attr = uuid);
             indexBuildsCoord->awaitNoIndexBuildInProgressForCollection(
                 opCtx, uuid, IndexBuildProtocol::kSinglePhase);
@@ -794,13 +794,6 @@ void reconstructPreparedTransactions(OperationContext* opCtx, repl::OplogApplica
             // transaction oplog entry.
             auto newClient =
                 opCtx->getServiceContext()->makeClient("reconstruct-prepared-transactions");
-
-            // TODO(SERVER-74656): Please revisit if this thread could be made killable.
-            {
-                stdx::lock_guard<Client> lk(*newClient.get());
-                newClient.get()->setSystemOperationUnKillableByStepdown(lk);
-            }
-
             AlternativeClientRegion acr(newClient);
             const auto newOpCtx = cc().makeOperationContext();
 

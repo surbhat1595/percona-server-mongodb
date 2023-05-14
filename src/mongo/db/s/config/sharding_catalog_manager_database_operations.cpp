@@ -49,7 +49,6 @@
 #include "mongo/s/client/shard.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/shard_util.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/pcre.h"
@@ -269,10 +268,12 @@ DatabaseType ShardingCatalogManager::createDatabase(
                     .semi();
             };
 
+            auto& executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+            auto inlineExecutor = std::make_shared<executor::InlineExecutor>();
+            auto sleepInlineExecutor = inlineExecutor->getSleepableExecutor(executor);
+
             txn_api::SyncTransactionWithRetries txn(
-                opCtx,
-                Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(),
-                nullptr /*resourceYielder*/);
+                opCtx, sleepInlineExecutor, nullptr /*resourceYielder*/, inlineExecutor);
             txn.run(opCtx, transactionChain);
 
             hangBeforeNotifyingCreateDatabaseCommitted.pauseWhileSet();
@@ -290,7 +291,6 @@ DatabaseType ShardingCatalogManager::createDatabase(
             return std::make_pair(resolvedPrimaryShard, db);
         }
     }();
-
 
     // Note, making the primary shard refresh its databaseVersion here is not required for
     // correctness, since either:
@@ -373,7 +373,7 @@ void ShardingCatalogManager::commitMovePrimary(OperationContext* opCtx,
             return updateOp;
         }();
 
-        return txnClient.runCRUDOp(updateDatabaseEntryOp, {})
+        return txnClient.runCRUDOp(updateDatabaseEntryOp, {0})
             .thenRunOn(txnExec)
             .then([&txnClient, &txnExec, &dbName, toShardId](
                       const BatchedCommandResponse& updateCatalogDatabaseEntryResponse) {
@@ -381,11 +381,7 @@ void ShardingCatalogManager::commitMovePrimary(OperationContext* opCtx,
 
                 // pre-check to guarantee idempotence: in case of a retry, the placement history
                 // entry may already exist
-                bool isHistoricalPlacementEnabled =
-                    feature_flags::gHistoricalPlacementShardingCatalog.isEnabled(
-                        serverGlobalParams.featureCompatibility);
-                if (!isHistoricalPlacementEnabled ||
-                    updateCatalogDatabaseEntryResponse.getNModified() == 0) {
+                if (updateCatalogDatabaseEntryResponse.getNModified() == 0) {
                     BatchedCommandResponse noOp;
                     noOp.setN(0);
                     noOp.setStatus(Status::OK());
@@ -402,7 +398,7 @@ void ShardingCatalogManager::commitMovePrimary(OperationContext* opCtx,
                     NamespaceString::kConfigsvrPlacementHistoryNamespace);
                 insertPlacementHistoryOp.setDocuments({placementInfo.toBSON()});
 
-                return txnClient.runCRUDOp(insertPlacementHistoryOp, {});
+                return txnClient.runCRUDOp(insertPlacementHistoryOp, {1});
             })
             .thenRunOn(txnExec)
             .then([](const BatchedCommandResponse& insertPlacementHistoryResponse) {
@@ -412,8 +408,14 @@ void ShardingCatalogManager::commitMovePrimary(OperationContext* opCtx,
     };
 
     auto& executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+    auto inlineExecutor = std::make_shared<executor::InlineExecutor>();
+    auto sleepInlineExecutor = inlineExecutor->getSleepableExecutor(executor);
 
-    txn_api::SyncTransactionWithRetries txn(opCtx, executor, nullptr /*resourceYielder*/);
+    txn_api::SyncTransactionWithRetries txn(opCtx,
+                                            sleepInlineExecutor,
+                                            nullptr, /*resourceYielder*/
+                                            inlineExecutor);
     txn.run(opCtx, transactionChain);
 }
+
 }  // namespace mongo

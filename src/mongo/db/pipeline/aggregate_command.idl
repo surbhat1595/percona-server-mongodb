@@ -43,7 +43,6 @@ imports:
     - "mongo/db/pipeline/legacy_runtime_constants.idl"
     - "mongo/db/query/hint.idl"
     - "mongo/db/query/cursor_response.idl"
-    - "mongo/db/query/telemetry.idl"
     - "mongo/db/write_concern_options.idl"
 
 types:
@@ -151,6 +150,10 @@ commands:
                     agg_stage: listCatalog
                     resource_pattern: any_system_buckets
                     action_type: [listCollections, listIndexes]
+                - privilege: # $listSampledQueries
+                    agg_stage: listSampledQueries
+                    resource_pattern: cluster
+                    action_type: [listSampledQueries]
                 - privilege: # $listSessions
                     resource_pattern: cluster
                     action_type: listSessions
@@ -171,6 +174,10 @@ commands:
                      agg_stage: shardedDataDistribution
                      resource_pattern: cluster
                      action_type: shardedDataDistribution
+                - privilege: # $_analyzeShardKeyReadWriteDistribution
+                     agg_stage: _analyzeShardKeyReadWriteDistribution
+                     resource_pattern: exact_namespace
+                     action_type: analyzeShardKey
         # Note that the 'CursorInitialReply' is not the only response that an aggregate command
         # could return. With 'explain' or 'exchange', the response would not include the fields in
         # 'CursorInitialReply'. But using 'explain' or 'exchange' is unstable, but otherwise the
@@ -309,10 +316,5 @@ commands:
                               aggregate."
                 type: optionalBool
                 cpp_name: isClusterQueryWithoutShardKeyCmd
-                stability: internal
-            hashedTelemetryKey:
-                description: "For sharded queries the telemetry key is calculated on mongos instead of from the full query shape locally"
-                type: ShardedTelemetryStoreKey 
-                optional: true
                 stability: internal
             

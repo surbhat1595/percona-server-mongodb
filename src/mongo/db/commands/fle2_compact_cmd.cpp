@@ -43,6 +43,7 @@
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/create_gen.h"
+#include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/logv2/log.h"
@@ -64,23 +65,37 @@ Lock::ResourceMutex commandMutex("compactStructuredEncryptionDataCommandMutex");
 CompactStats compactEncryptedCompactionCollection(OperationContext* opCtx,
                                                   const CompactStructuredEncryptionData& request) {
 
+    CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+
     uassert(6583201,
             str::stream() << CompactStructuredEncryptionData::kCommandName
                           << " must be run through mongos in a sharded cluster",
             !ShardingState::get(opCtx)->enabled());
 
+    uassert(
+        7592901,
+        "The preview version of compactStructuredEncryptionData is no longer supported in this "
+        "binary version",
+        gFeatureFlagFLE2CompactForProtocolV2.isEnabled(serverGlobalParams.featureCompatibility));
+
     // Only allow one instance of compactStructuredEncryptionData to run at a time.
     Lock::ExclusiveLock fleCompactCommandLock(opCtx, commandMutex);
 
-    const auto& edcNss = request.getNamespace();
-    const bool useV1Protocol =
-        !gFeatureFlagFLE2ProtocolVersion2.isEnabled(serverGlobalParams.featureCompatibility);
+    // Since this command holds an IX lock on the DB and the global lock throughout
+    // the lifetime of this operation, setFCV should not be allowed to abort the transaction
+    // performing the compaction. Otherwise, on retry, the transaction may attempt to
+    // acquire the global lock in IX mode, while setFCV is already waiting to acquire it
+    // in S mode, causing a deadlock.
+    FixedFCVRegion fixedFcv(opCtx);
 
-    LOGV2(6319900, "Compacting the encrypted compaction collection", "namespace"_attr = edcNss);
+    const auto& edcNss = request.getNamespace();
+
+    LOGV2(6319900, "Compacting the encrypted compaction collection", logAttrs(edcNss));
 
     AutoGetDb autoDb(opCtx, edcNss.dbName(), MODE_IX);
     uassert(ErrorCodes::NamespaceNotFound,
-            str::stream() << "Database '" << edcNss.db() << "' does not exist",
+            str::stream() << "Database '" << edcNss.dbName().toStringForErrorMsg()
+                          << "' does not exist",
             autoDb.getDb());
 
     auto catalog = CollectionCatalog::get(opCtx);
@@ -97,7 +112,6 @@ CompactStats compactEncryptedCompactionCollection(OperationContext* opCtx,
     }
 
     validateCompactRequest(request, *edc);
-    CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
 
     auto namespaces =
         uassertStatusOK(EncryptedStateCollectionsNamespaces::createFromDataCollection(*edc));
@@ -109,24 +123,10 @@ CompactStats compactEncryptedCompactionCollection(OperationContext* opCtx,
     CompactStats stats({}, {});
     FLECompactESCDeleteSet escDeleteSet;
 
-    if (useV1Protocol) {
-        stats.setEcc({});
-    }
-
     if (!ecoc && !ecocRename) {
         // nothing to compact
         LOGV2(6548306, "Skipping compaction as there is no ECOC collection to compact");
         return stats;
-    } else if (ecoc && !ecocRename && useV1Protocol) {
-        // TODO: SERVER-73303 delete this branch when v2 is enabled by default
-        LOGV2(6319901,
-              "Renaming the encrypted compaction collection",
-              "ecocNss"_attr = namespaces.ecocNss,
-              "ecocRenameNss"_attr = namespaces.ecocRenameNss);
-        RenameCollectionOptions renameOpts;
-        validateAndRunRenameCollection(
-            opCtx, namespaces.ecocNss, namespaces.ecocRenameNss, renameOpts);
-        ecoc = nullptr;
     } else if (ecoc && !ecocRename) {
         // load the random set of ESC non-anchor entries to be deleted post-compact
         auto memoryLimit =
@@ -149,7 +149,7 @@ CompactStats compactEncryptedCompactionCollection(OperationContext* opCtx,
     } else {
         LOGV2(7293610,
               "Resuming compaction from a stale ECOC collection",
-              "namespace"_attr = namespaces.ecocRenameNss);
+              logAttrs(namespaces.ecocRenameNss));
     }
 
     if (!ecoc) {
@@ -171,7 +171,7 @@ CompactStats compactEncryptedCompactionCollection(OperationContext* opCtx,
             LOGV2_DEBUG(7299602,
                         1,
                         "Create collection failed because namespace already exists",
-                        "namespace"_attr = namespaces.ecocNss);
+                        logAttrs(namespaces.ecocNss));
         }
     }
 
@@ -187,30 +187,21 @@ CompactStats compactEncryptedCompactionCollection(OperationContext* opCtx,
                               << " no longer exists prior to compaction",
                 tempEcocColl.getCollection());
 
-        if (useV1Protocol) {
-            // TODO: SERVER-73303 delete this branch when v2 is enabled by default
-            stats =
-                processFLECompact(opCtx, request, &getTransactionWithRetriesForMongoD, namespaces);
-        } else {
-            processFLECompactV2(opCtx,
-                                request,
-                                &getTransactionWithRetriesForMongoD,
-                                namespaces,
-                                &stats.getEsc(),
-                                &stats.getEcoc());
-        }
+        processFLECompactV2(opCtx,
+                            request,
+                            &getTransactionWithRetriesForMongoD,
+                            namespaces,
+                            &stats.getEsc(),
+                            &stats.getEcoc());
     }
 
-    if (!useV1Protocol) {
-        auto tagsPerDelete =
-            ServerParameterSet::getClusterParameterSet()
-                ->get<ClusterParameterWithStorage<FLECompactionOptions>>("fleCompactionOptions")
-                ->getValue(boost::none)
-                .getMaxESCEntriesPerCompactionDelete();
-        cleanupESCNonAnchors(
-            opCtx, namespaces.escNss, escDeleteSet, tagsPerDelete, &stats.getEsc());
-        FLEStatusSection::get().updateCompactionStats(stats);
-    }
+    auto tagsPerDelete =
+        ServerParameterSet::getClusterParameterSet()
+            ->get<ClusterParameterWithStorage<FLECompactionOptions>>("fleCompactionOptions")
+            ->getValue(boost::none)
+            .getMaxESCEntriesPerCompactionDelete();
+    cleanupESCNonAnchors(opCtx, namespaces.escNss, escDeleteSet, tagsPerDelete, &stats.getEsc());
+    FLEStatusSection::get().updateCompactionStats(stats);
 
     if (MONGO_unlikely(fleCompactSkipECOCDropUnsharded.shouldFail())) {
         LOGV2(7299612,
@@ -228,7 +219,7 @@ CompactStats compactEncryptedCompactionCollection(OperationContext* opCtx,
 
     LOGV2(6319902,
           "Done compacting the encrypted compaction collection",
-          "namespace"_attr = request.getNamespace());
+          logAttrs(request.getNamespace()));
     return stats;
 }
 
@@ -273,6 +264,10 @@ public:
 
     bool adminOnly() const final {
         return false;
+    }
+
+    std::set<StringData> sensitiveFieldNames() const final {
+        return {CompactStructuredEncryptionData::kCompactionTokensFieldName};
     }
 } compactStructuredEncryptionDataCmd;
 

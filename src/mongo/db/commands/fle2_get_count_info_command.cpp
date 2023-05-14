@@ -70,6 +70,32 @@ std::vector<std::vector<FLEEdgePrfBlock>> toNestedTokens(
     return nestedBlocks;
 }
 
+QECountInfoReplyTokens tokenFromCountInfo(const FLEEdgeCountInfo& countInfo) {
+    QECountInfoReplyTokens token(FLEUtil::vectorFromCDR(countInfo.tagToken.toCDR()),
+                                 countInfo.count);
+
+    if (countInfo.edc) {
+        token.setEDCDerivedFromDataTokenAndContentionFactorToken(countInfo.edc.value().toCDR());
+    }
+
+    if (countInfo.cpos || countInfo.apos) {
+        ESCOptionalPositionsPair spos;
+        if (countInfo.cpos) {
+            spos.setCpos(countInfo.cpos.get());
+        }
+        if (countInfo.apos) {
+            spos.setApos(countInfo.apos.get());
+        }
+        token.setSearchedPositions(spos);
+    }
+
+    if (countInfo.stats) {
+        token.setStats(countInfo.stats.get());
+    }
+
+    return token;
+}
+
 std::vector<QECountInfoReplyTokenSet> toGetTagRequestTupleSet(
     const std::vector<std::vector<FLEEdgeCountInfo>>& countInfoSets) {
 
@@ -82,14 +108,7 @@ std::vector<QECountInfoReplyTokenSet> toGetTagRequestTupleSet(
         tokens.reserve(countInfos.size());
 
         for (auto& countInfo : countInfos) {
-            tokens.emplace_back(FLEUtil::vectorFromCDR(countInfo.tagToken.toCDR()),
-                                countInfo.count);
-
-            if (countInfo.edc.has_value()) {
-                auto& replyTuple = tokens.back();
-                replyTuple.setEDCDerivedFromDataTokenAndContentionFactorToken(
-                    countInfo.edc.value().toCDR());
-            }
+            tokens.emplace_back(tokenFromCountInfo(countInfo));
         }
 
         nestedBlocks.emplace_back(std::move(tokens));
@@ -98,21 +117,28 @@ std::vector<QECountInfoReplyTokenSet> toGetTagRequestTupleSet(
     return nestedBlocks;
 }
 
+FLEQueryInterface::TagQueryType queryTypeTranslation(QECountInfoQueryTypeEnum type) {
+    switch (type) {
+        case QECountInfoQueryTypeEnum::Insert:
+            return FLEQueryInterface::TagQueryType::kInsert;
+        case QECountInfoQueryTypeEnum::Query:
+            return FLEQueryInterface::TagQueryType::kQuery;
+        case QECountInfoQueryTypeEnum::Compact:
+            return FLEQueryInterface::TagQueryType::kCompact;
+        default:
+            uasserted(7517102, "Invalid QECountInfoQueryTypeEnum value.");
+    }
+}
+
 QECountInfosReply getTagsLocal(OperationContext* opCtx,
                                const GetQueryableEncryptionCountInfo& request) {
 
-    uassert(741503,
-            "FeatureFlagFLE2ProtocolVersion2 is not enabled",
-            gFeatureFlagFLE2ProtocolVersion2.isEnabled(serverGlobalParams.featureCompatibility));
+    CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
 
     auto nestedTokens = toNestedTokens(request.getTokens());
 
-    auto countInfoSets =
-        getTagsFromStorage(opCtx,
-                           request.getNamespace(),
-                           nestedTokens,
-                           request.getForInsert() ? FLETagQueryInterface::TagQueryType::kInsert
-                                                  : FLETagQueryInterface::TagQueryType::kQuery);
+    auto countInfoSets = getTagsFromStorage(
+        opCtx, request.getNamespace(), nestedTokens, queryTypeTranslation(request.getQueryType()));
 
     QECountInfosReply reply;
     reply.setCounts(toGetTagRequestTupleSet(countInfoSets));
@@ -171,6 +197,10 @@ public:
 
     bool allowedInTransactions() const final {
         return true;
+    }
+
+    std::set<StringData> sensitiveFieldNames() const final {
+        return {GetQueryableEncryptionCountInfo::kTokensFieldName};
     }
 } getQueryableEncryptionCountInfoCmd;
 

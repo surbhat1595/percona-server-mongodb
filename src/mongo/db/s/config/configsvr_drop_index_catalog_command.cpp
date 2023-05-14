@@ -85,8 +85,14 @@ void dropIndexInTransaction(OperationContext* opCtx,
         return entry;
     }()});
 
+    auto inlineExecutor = std::make_shared<executor::InlineExecutor>();
+    auto sleepInlineExecutor = inlineExecutor->getSleepableExecutor(executor);
+
     txn_api::SyncTransactionWithRetries txn(
-        opCtx, executor, TransactionParticipantResourceYielder::make("dropIndexCatalogEntry"));
+        opCtx,
+        sleepInlineExecutor,
+        TransactionParticipantResourceYielder::make("dropIndexCatalogEntry"),
+        inlineExecutor);
 
     txn.run(opCtx,
             [updateCollectionOp, deleteOp](const txn_api::TransactionClient& txnClient,
@@ -142,7 +148,7 @@ public:
             uassert(
                 ErrorCodes::IllegalOperation,
                 format(FMT_STRING("{} can only be run on config servers"), definition()->getName()),
-                serverGlobalParams.clusterRole == ClusterRole::ConfigServer);
+                serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
 
             CommandHelpers::uassertCommandRunWithMajority(Request::kCommandName,
                                                           opCtx->getWriteConcern());

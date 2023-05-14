@@ -454,8 +454,11 @@ void mergeAllChunksOnShardInTransaction(OperationContext* opCtx,
         return whenAllSucceed(std::move(statementsChain));
     };
 
-    txn_api::SyncTransactionWithRetries txn(
-        opCtx, Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(), nullptr);
+    auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+    auto inlineExecutor = std::make_shared<executor::InlineExecutor>();
+    auto sleepInlineExecutor = inlineExecutor->getSleepableExecutor(executor);
+
+    txn_api::SyncTransactionWithRetries txn(opCtx, sleepInlineExecutor, nullptr, inlineExecutor);
     txn.run(opCtx, updateChunksFn);
 }
 
@@ -669,8 +672,11 @@ ShardingCatalogManager::_splitChunkInTransaction(OperationContext* opCtx,
             .semi();
     };
 
-    txn_api::SyncTransactionWithRetries txn(
-        opCtx, Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(), nullptr);
+    auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+    auto inlineExecutor = std::make_shared<executor::InlineExecutor>();
+    auto sleepInlineExecutor = inlineExecutor->getSleepableExecutor(executor);
+
+    txn_api::SyncTransactionWithRetries txn(opCtx, sleepInlineExecutor, nullptr, inlineExecutor);
 
     // TODO: SERVER-72431 Make split chunk commit idempotent, with that we won't need anymore the
     // transaction precondition and we will be able to remove the try/catch on the transaction run
@@ -695,8 +701,7 @@ ShardingCatalogManager::commitChunkSplit(OperationContext* opCtx,
                                          const boost::optional<Timestamp>& requestTimestamp,
                                          const ChunkRange& range,
                                          const std::vector<BSONObj>& splitPoints,
-                                         const std::string& shardName,
-                                         const bool fromChunkSplitter) {
+                                         const std::string& shardName) {
 
     // Mark opCtx as interruptible to ensure that all reads and writes to the metadata collections
     // under the exclusive _kChunkOpLock happen on the same term.
@@ -715,13 +720,6 @@ ShardingCatalogManager::commitChunkSplit(OperationContext* opCtx,
     }
 
     const auto [coll, version] = std::move(swCollAndVersion.getValue());
-
-    // Don't allow auto-splitting if the collection is being defragmented
-    uassert(ErrorCodes::ConflictingOperationInProgress,
-            str::stream() << "Can't commit auto-split while `" << nss.ns()
-                          << "` is undergoing a defragmentation.",
-            !(coll.getDefragmentCollection() && fromChunkSplitter));
-
     auto collPlacementVersion = version;
 
     // Return an error if collection epoch does not match epoch of request.
@@ -901,8 +899,11 @@ void ShardingCatalogManager::_mergeChunksInTransaction(
                 .semi();
         };
 
-    txn_api::SyncTransactionWithRetries txn(
-        opCtx, Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(), nullptr);
+    auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+    auto inlineExecutor = std::make_shared<executor::InlineExecutor>();
+    auto sleepInlineExecutor = inlineExecutor->getSleepableExecutor(executor);
+
+    txn_api::SyncTransactionWithRetries txn(opCtx, sleepInlineExecutor, nullptr, inlineExecutor);
     txn.run(opCtx, updateChunksFn);
 }
 
@@ -1543,7 +1544,7 @@ void ShardingCatalogManager::upgradeChunksHistory(OperationContext* opCtx,
         LOGV2(620650,
               "Resetting the 'historyIsAt40' field for all chunks in collection {namespace} in "
               "order to force all chunks' history to get recreated",
-              "namespace"_attr = nss.ns());
+              logAttrs(nss));
 
         BatchedCommandRequest request([collUuid = coll.getUuid()] {
             write_ops::UpdateCommandRequest updateOp(ChunkType::ConfigNS);
@@ -1647,57 +1648,57 @@ void ShardingCatalogManager::upgradeChunksHistory(OperationContext* opCtx,
     }
 }
 
-Status ShardingCatalogManager::setOnCurrentShardSinceFieldOnChunks(OperationContext* opCtx) {
-    // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk modifications
-    Lock::ExclusiveLock lk(opCtx, _kChunkOpLock);
+void ShardingCatalogManager::setOnCurrentShardSinceFieldOnChunks(OperationContext* opCtx) {
+    {
+        // Take _kChunkOpLock in exclusive mode to prevent concurrent chunk modifications
+        Lock::ExclusiveLock lk(opCtx, _kChunkOpLock);
 
-    DBDirectClient dbClient(opCtx);
+        DBDirectClient dbClient(opCtx);
 
-    // 1st match only chunks with non empty history
-    BSONObj query = BSON("history.0" << BSON("$exists" << true));
+        // 1st match only chunks with non empty history
+        BSONObj query = BSON("history.0" << BSON("$exists" << true));
 
-    // 2nd use the $set aggregation stage pipeline to set `onCurrentShardSince` to the same value as
-    // the `validAfter` field on the first element of `history` array
-    // [
-    //    {
-    //        $set: {
-    //            onCurrentShardSince: {
-    //                $getField: { field: "validAfter", input: { $first : "$history" } }
-    //        }
-    //    }
-    //  ]
+        // 2nd use the $set aggregation stage pipeline to set `onCurrentShardSince` to the same
+        // value as the `validAfter` field on the first element of `history` array
+        // [
+        //    {
+        //        $set: {
+        //            onCurrentShardSince: {
+        //                $getField: { field: "validAfter", input: { $first : "$history" } }
+        //        }
+        //    }
+        //  ]
 
-    BSONObj update = BSON(
-        "$set" << BSON(
-            ChunkType::onCurrentShardSince() << BSON(
-                "$getField" << BSON("field" << ChunkHistoryBase::kValidAfterFieldName << "input"
-                                            << BSON("$first" << ("$" + ChunkType::history()))))));
+        BSONObj update =
+            BSON("$set" << BSON(
+                     ChunkType::onCurrentShardSince()
+                     << BSON("$getField"
+                             << BSON("field" << ChunkHistoryBase::kValidAfterFieldName << "input"
+                                             << BSON("$first" << ("$" + ChunkType::history()))))));
 
-    auto response = dbClient.runCommand([&] {
-        write_ops::UpdateCommandRequest updateOp(ChunkType::ConfigNS);
+        auto response = dbClient.runCommand([&] {
+            write_ops::UpdateCommandRequest updateOp(ChunkType::ConfigNS);
 
-        updateOp.setUpdates({[&] {
-            // Sending a vector as an update to make sure we use an aggregation pipeline
-            write_ops::UpdateOpEntry entry;
-            entry.setQ(query);
-            entry.setU(std::vector<BSONObj>{update.getOwned()});
-            entry.setMulti(true);
-            entry.setUpsert(false);
-            return entry;
-        }()});
-        updateOp.getWriteCommandRequestBase().setOrdered(false);
-        return updateOp.serialize({});
-    }());
+            updateOp.setUpdates({[&] {
+                // Sending a vector as an update to make sure we use an aggregation pipeline
+                write_ops::UpdateOpEntry entry;
+                entry.setQ(query);
+                entry.setU(std::vector<BSONObj>{update.getOwned()});
+                entry.setMulti(true);
+                entry.setUpsert(false);
+                return entry;
+            }()});
+            updateOp.getWriteCommandRequestBase().setOrdered(false);
+            return updateOp.serialize({});
+        }());
 
-    auto status = getStatusFromWriteCommandReply(response->getCommandReply());
-    if (!status.isOK()) {
-        LOGV2_ERROR(7161602,
-                    "Failed to set onCurrentShardSince field on all config.chunks entries",
-                    "error"_attr = status);
+        uassertStatusOK(getStatusFromWriteCommandReply(response->getCommandReply()));
     }
 
-    // There is no need to wait for majority since it will be done at the end of the upgrade
-    return status;
+    const auto clientOpTime = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
+    WriteConcernResult unusedWCResult;
+    uassertStatusOK(waitForWriteConcern(
+        opCtx, clientOpTime, ShardingCatalogClient::kMajorityWriteConcern, &unusedWCResult));
 }
 
 void ShardingCatalogManager::clearJumboFlag(OperationContext* opCtx,
@@ -2122,7 +2123,7 @@ void ShardingCatalogManager::splitOrMarkJumbo(OperationContext* opCtx,
                       "Couldn't mark chunk with namespace {namespace} and min key {minKey} as "
                       "jumbo due to {error}",
                       "Couldn't mark chunk as jumbo",
-                      "namespace"_attr = redact(nss.ns()),
+                      "namespace"_attr = redact(toStringForLogging(nss)),
                       "minKey"_attr = redact(chunk.getMin()),
                       "error"_attr = redact(status.getStatus()));
             }
@@ -2301,21 +2302,13 @@ void ShardingCatalogManager::_commitChunkMigrationInTransaction(
     std::shared_ptr<const std::vector<ChunkType>> splitChunks,
     std::shared_ptr<ChunkType> controlChunk,
     const ShardId& donorShardId) {
-
-    const auto includePlacementData = feature_flags::gHistoricalPlacementShardingCatalog.isEnabled(
-        serverGlobalParams.featureCompatibility);
-
     // Verify the placement info for collectionUUID needs to be updated because the donor is losing
     // its last chunk for the namespace.
-    const auto donorToBeRemoved = includePlacementData && !controlChunk && splitChunks->empty();
+    const auto removeDonorFromPlacementHistory = !controlChunk && splitChunks->empty();
 
     // Verify the placement info for collectionUUID needs to be updated because the recipient is
     // acquiring its first chunk for the namespace.
-    const auto recipientToBeAdded = [&] {
-        if (!includePlacementData) {
-            return false;
-        }
-
+    const auto addRecipientToPlacementHistory = [&] {
         const auto chunkQuery =
             BSON(ChunkType::collectionUUID << migratedChunk->getCollectionUUID() << ChunkType::shard
                                            << migratedChunk->getShard());
@@ -2362,16 +2355,16 @@ void ShardingCatalogManager::_commitChunkMigrationInTransaction(
         return updateOp;
     }();
 
-    auto transactionChain = [nss,
-                             collUuid = migratedChunk->getCollectionUUID(),
-                             donorShardId,
-                             recipientShardId = migratedChunk->getShard(),
-                             migrationCommitTime =
-                                 migratedChunk->getHistory().front().getValidAfter(),
-                             configChunksUpdateRequest = std::move(configChunksUpdateRequest),
-                             donorToBeRemoved,
-                             recipientToBeAdded](const txn_api::TransactionClient& txnClient,
-                                                 ExecutorPtr txnExec) -> SemiFuture<void> {
+    auto transactionChain =
+        [nss,
+         collUuid = migratedChunk->getCollectionUUID(),
+         donorShardId,
+         recipientShardId = migratedChunk->getShard(),
+         migrationCommitTime = migratedChunk->getHistory().front().getValidAfter(),
+         configChunksUpdateRequest = std::move(configChunksUpdateRequest),
+         removeDonorFromPlacementHistory,
+         addRecipientToPlacementHistory](const txn_api::TransactionClient& txnClient,
+                                         ExecutorPtr txnExec) -> SemiFuture<void> {
         const long long nChunksToUpdate = configChunksUpdateRequest.getUpdates().size();
 
         auto updateConfigChunksFuture =
@@ -2386,7 +2379,7 @@ void ShardingCatalogManager::_commitChunkMigrationInTransaction(
                             updateResponse.getN() == nChunksToUpdate);
                 });
 
-        if (!(donorToBeRemoved || recipientToBeAdded)) {
+        if (!(removeDonorFromPlacementHistory || addRecipientToPlacementHistory)) {
             // End the transaction here.
             return std::move(updateConfigChunksFuture).semi();
         }
@@ -2483,7 +2476,7 @@ void ShardingCatalogManager::_commitChunkMigrationInTransaction(
                 const auto& originalShardList = placementInfo.getShards();
                 std::vector<ShardId> updatedShardList;
                 updatedShardList.reserve(originalShardList.size() + 1);
-                if (recipientToBeAdded) {
+                if (addRecipientToPlacementHistory) {
                     updatedShardList.push_back(recipientShardId);
                 }
 
@@ -2491,10 +2484,11 @@ void ShardingCatalogManager::_commitChunkMigrationInTransaction(
                              std::make_move_iterator(originalShardList.end()),
                              std::back_inserter(updatedShardList),
                              [&](const ShardId& shardId) {
-                                 if (donorToBeRemoved && shardId == donorShardId) {
+                                 if (removeDonorFromPlacementHistory && shardId == donorShardId) {
                                      return false;
                                  }
-                                 if (recipientToBeAdded && shardId == recipientShardId) {
+                                 if (addRecipientToPlacementHistory &&
+                                     shardId == recipientShardId) {
                                      // Ensure that the added recipient will only appear once.
                                      return false;
                                  }
@@ -2507,8 +2501,11 @@ void ShardingCatalogManager::_commitChunkMigrationInTransaction(
             .semi();
     };
 
-    txn_api::SyncTransactionWithRetries txn(
-        opCtx, Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(), nullptr);
+    auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+    auto inlineExecutor = std::make_shared<executor::InlineExecutor>();
+    auto sleepInlineExecutor = inlineExecutor->getSleepableExecutor(executor);
+
+    txn_api::SyncTransactionWithRetries txn(opCtx, sleepInlineExecutor, nullptr, inlineExecutor);
 
     txn.run(opCtx, transactionChain);
 }

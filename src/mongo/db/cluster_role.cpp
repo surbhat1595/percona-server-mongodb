@@ -33,8 +33,9 @@
 
 namespace mongo {
 
-bool ClusterRole::operator==(const ClusterRole& other) const {
-    if (gFeatureFlagCatalogShard.isEnabledAndIgnoreFCV() && _value == ClusterRole::ConfigServer) {
+bool ClusterRole::has(const ClusterRole& other) const {
+    if (gFeatureFlagCatalogShard.isEnabledAndIgnoreFCVUnsafeAtStartup() &&
+        _value == ClusterRole::ConfigServer) {
         return other._value == ClusterRole::ConfigServer ||
             other._value == ClusterRole::ShardServer;
     }
@@ -42,16 +43,12 @@ bool ClusterRole::operator==(const ClusterRole& other) const {
     return _value == other._value;
 }
 
-bool ClusterRole::isShardRole() {
-    return _value == ClusterRole::ShardServer ||
-        (gFeatureFlagCatalogShard.isEnabledAndIgnoreFCV() && _value == ClusterRole::ConfigServer);
-}
-
-bool ClusterRole::isExclusivelyShardRole() {
+bool ClusterRole::exclusivelyHasShardRole() {
     return _value == ClusterRole::ShardServer;
 }
 
-bool ClusterRole::isExclusivelyConfigSvrRole() {
-    return _value == ClusterRole::ConfigServer && !gFeatureFlagCatalogShard.isEnabledAndIgnoreFCV();
+bool ClusterRole::exclusivelyHasConfigRole() {
+    return _value == ClusterRole::ConfigServer &&
+        !gFeatureFlagCatalogShard.isEnabledAndIgnoreFCVUnsafeAtStartup();
 }
 }  // namespace mongo

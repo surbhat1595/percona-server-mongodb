@@ -526,8 +526,6 @@ TEST_F(ShardServerCatalogCacheLoaderTest, CollAndChunkTasksConsistency) {
 }
 
 TEST_F(ShardServerCatalogCacheLoaderTest, setFCVForGetChunks) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagCatalogShard", true);
-
     const auto kOriginalRole = serverGlobalParams.clusterRole;
     const auto kOriginalFCV = serverGlobalParams.featureCompatibility.getVersion();
 
@@ -562,8 +560,11 @@ TEST_F(ShardServerCatalogCacheLoaderTest, setFCVForGetChunks) {
 
         // Should be able to join since downgrade should interrupt ongoing refreshes.
         (void)getChunksFuture.waitNoThrow();
-        _shardLoader->waitForCollectionFlush(operationContext(), kNss);
     }
+
+    ASSERT_THROWS_CODE(_shardLoader->waitForCollectionFlush(operationContext(), kNss),
+                       DBException,
+                       ErrorCodes::StaleConfig);
 
     auto cachedDoc = client.findOne(persistedCacheQuery);
     ASSERT_TRUE(cachedDoc.isEmpty()) << cachedDoc;
@@ -573,7 +574,6 @@ TEST_F(ShardServerCatalogCacheLoaderTest, setFCVForGetChunks) {
     auto newChunks = getChunksFuture.get().changedChunks;
     ASSERT_EQ(5, newChunks.size());
 
-    _shardLoader->waitForCollectionFlush(operationContext(), kNss);
     cachedDoc = client.findOne(persistedCacheQuery);
     ASSERT_TRUE(cachedDoc.isEmpty()) << cachedDoc;
 
@@ -592,8 +592,6 @@ TEST_F(ShardServerCatalogCacheLoaderTest, setFCVForGetChunks) {
 }
 
 TEST_F(ShardServerCatalogCacheLoaderTest, setFCVForGetDatabase) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagCatalogShard", true);
-
     const auto kOriginalRole = serverGlobalParams.clusterRole;
     const auto kOriginalFCV = serverGlobalParams.featureCompatibility.getVersion();
 
@@ -623,15 +621,18 @@ TEST_F(ShardServerCatalogCacheLoaderTest, setFCVForGetDatabase) {
 
         // Should be able to join since downgrade should interrupt ongoing refreshes.
         (void)getDbFuture.waitNoThrow();
-        _shardLoader->waitForDatabaseFlush(operationContext(), kDb);
     }
+
+    ASSERT_THROWS_CODE(_shardLoader->waitForDatabaseFlush(operationContext(), kDb),
+                       DBException,
+                       ErrorCodes::StaleDbVersion);
 
     auto cachedDoc = client.findOne(persistedCacheQuery);
     ASSERT_TRUE(cachedDoc.isEmpty()) << cachedDoc;
 
     auto getDbFuture = _shardLoader->getDatabase(kDb);
     getDbFuture.wait();
-    _shardLoader->waitForDatabaseFlush(operationContext(), kDb);
+
     cachedDoc = client.findOne(persistedCacheQuery);
     ASSERT_TRUE(cachedDoc.isEmpty()) << cachedDoc;
 

@@ -104,8 +104,8 @@ Status checkSourceAndTargetNamespaces(OperationContext* opCtx,
     auto db = DatabaseHolder::get(opCtx)->getDb(opCtx, source.dbName());
     if (!db || db->isDropPending(opCtx))
         return Status(ErrorCodes::NamespaceNotFound,
-                      str::stream()
-                          << "Database " << source.db() << " does not exist or is drop pending");
+                      str::stream() << "Database " << source.dbName().toStringForErrorMsg()
+                                    << " does not exist or is drop pending");
 
     auto catalog = CollectionCatalog::get(opCtx);
     const auto sourceColl = catalog->lookupCollectionByNamespace(opCtx, source);
@@ -447,13 +447,6 @@ Status renameCollectionWithinDBForApplyOps(OperationContext* opCtx,
     });
 }
 
-/*
- * This is a duplicate of renameBetweenDBs that is intended to replace it.
- * The feature flag - InternalWritesAreReplicatedTransactionally - toggles
- * between the two functions. This function provides batching of all the inserts
- * into the new temporary collection.
- * TODO: SERVER-71596 is tracking the removal of renameBetweenDBs.
- */
 Status renameCollectionAcrossDatabases(OperationContext* opCtx,
                                        const NamespaceString& source,
                                        const NamespaceString& target,

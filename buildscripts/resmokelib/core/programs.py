@@ -6,6 +6,8 @@ Handles all the nitty-gritty parameter conversion.
 import json
 import os
 import os.path
+from packaging import version
+import re
 import stat
 
 from buildscripts.resmokelib import config
@@ -43,6 +45,31 @@ def get_path_env_var(env_vars):
     return path
 
 
+def get_binary_version(executable):
+    """Return the string for the binary version of the given executable."""
+
+    # pylint: disable=wrong-import-position
+    from buildscripts.resmokelib.multiversionconstants import LATEST_FCV
+
+    split_executable = executable.split("-")
+    version_regex = re.compile(version.VERSION_PATTERN, re.VERBOSE | re.IGNORECASE)
+    if len(split_executable) > 1 and version_regex.match(split_executable[-1]):
+        return split_executable[-1]
+    return LATEST_FCV
+
+
+def remove_set_parameter_if_before_version(set_parameters, parameter_name, bin_version,
+                                           required_bin_version):
+    """
+    Used for removing a server parameter that does not exist prior to a specified version.
+
+    Remove 'parameter_name' from the 'set_parameters' dictionary if 'bin_version' is older than
+    'required_bin_version'.
+    """
+    if version.parse(bin_version) < version.parse(required_bin_version):
+        set_parameters.pop(parameter_name, None)
+
+
 def mongod_program(logger, job_num, executable, process_kwargs, mongod_options):
     """
     Return a Process instance that starts mongod arguments constructed from 'mongod_options'.
@@ -54,12 +81,18 @@ def mongod_program(logger, job_num, executable, process_kwargs, mongod_options):
     @param mongod_options - A HistoryDict describing the various options to pass to the mongod.
     """
 
+    bin_version = get_binary_version(executable)
     args = [executable]
     mongod_options = mongod_options.copy()
 
     if "port" not in mongod_options:
         mongod_options["port"] = network.PortAllocator.next_fixture_port(job_num)
+
     suite_set_parameters = mongod_options.get("set_parameters", {})
+    remove_set_parameter_if_before_version(
+        suite_set_parameters, "queryAnalysisSamplerConfigurationRefreshSecs", bin_version, "7.0.0")
+    remove_set_parameter_if_before_version(suite_set_parameters, "queryAnalysisWriterIntervalSecs",
+                                           bin_version, "7.0.0")
     _apply_set_parameters(args, suite_set_parameters)
     mongod_options.pop("set_parameters")
 
@@ -78,13 +111,17 @@ def mongod_program(logger, job_num, executable, process_kwargs, mongod_options):
 
 def mongos_program(logger, job_num, executable=None, process_kwargs=None, mongos_options=None):
     """Return a Process instance that starts a mongos with arguments constructed from 'kwargs'."""
+    bin_version = get_binary_version(executable)
     args = [executable]
 
     mongos_options = mongos_options.copy()
 
     if "port" not in mongos_options:
         mongos_options["port"] = network.PortAllocator.next_fixture_port(job_num)
+
     suite_set_parameters = mongos_options.get("set_parameters", {})
+    remove_set_parameter_if_before_version(
+        suite_set_parameters, "queryAnalysisSamplerConfigurationRefreshSecs", bin_version, "7.0.0")
     _apply_set_parameters(args, suite_set_parameters)
     mongos_options.pop("set_parameters")
 
@@ -157,6 +194,9 @@ def mongo_shell_program(logger, executable=None, connection_string=None, filenam
     if config.EVERGREEN_TASK_ID is not None:
         test_data["inEvergreen"] = True
         test_data["evergreenTaskId"] = config.EVERGREEN_TASK_ID
+
+    if config.SHELL_SEED is not None:
+        test_data["seed"] = int(config.SHELL_SEED)
 
     # Initialize setParameters for mongod and mongos, to be passed to the shell via TestData. Since
     # they are dictionaries, they will be converted to JavaScript objects when passed to the shell
@@ -238,6 +278,9 @@ def mongo_shell_program(logger, executable=None, connection_string=None, filenam
     if "eval" in kwargs:
         eval_sb.append(str(kwargs.pop("eval")))
 
+    # Load a callback to check that the cluster-wide metadata is consistent.
+    eval_sb.append("load('jstests/libs/override_methods/check_metadata_consistency.js');")
+
     # Load this file to allow a callback to validate collections before shutting down mongod.
     eval_sb.append("load('jstests/libs/override_methods/validate_collections_on_shutdown.js');")
 
@@ -286,11 +329,6 @@ def mongo_shell_program(logger, executable=None, connection_string=None, filenam
 
         if "host" in kwargs:
             kwargs.pop("host")
-
-    # if featureFlagFLE2ProtocolVersion2 is enabled in setParameter, enable it in the shell also
-    # TODO: SERVER-73303 remove once v2 is enabled by default
-    if mongod_set_parameters.get("featureFlagFLE2ProtocolVersion2"):
-        args.append("--setShellParameter=featureFlagFLE2ProtocolVersion2=true")
 
     # Apply the rest of the command line arguments.
     _apply_kwargs(args, kwargs)

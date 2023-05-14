@@ -91,7 +91,6 @@ DEFAULTS = {
     "repeat_tests_min": None,
     "repeat_tests_secs": None,
     "replay_file": None,
-    "report_failure_status": "fail",
     "report_file": None,
     "run_all_feature_flag_tests": False,
     "run_no_feature_flag_tests": False,
@@ -104,6 +103,7 @@ DEFAULTS = {
     "shuffle": None,
     "stagger_jobs": None,
     "majority_read_concern": "on",
+    "shell_seed": None,
     "storage_engine": "wiredTiger",
     "storage_engine_cache_size_gb": None,
     "suite_files": "with_server",
@@ -170,7 +170,6 @@ _SuiteOptions = collections.namedtuple("_SuiteOptions", [
     "num_repeat_tests_max",
     "num_repeat_tests_min",
     "time_repeat_tests_secs",
-    "report_failure_status",
 ])
 
 
@@ -237,7 +236,6 @@ class SuiteOptions(_SuiteOptions):
                     REPEAT_TESTS_MAX,
                     REPEAT_TESTS_MIN,
                     REPEAT_TESTS_SECS,
-                    REPORT_FAILURE_STATUS,
                 ])))
 
         options = self._asdict()
@@ -449,9 +447,6 @@ REPEAT_TESTS_MIN = None
 # If set, then each test is repeated the specified time (seconds) inside the suites.
 REPEAT_TESTS_SECS = None
 
-# Controls if the test failure status should be reported as failed or be silently ignored.
-REPORT_FAILURE_STATUS = None
-
 # If set, then resmoke.py will write out a report file with the status of each test that ran.
 REPORT_FILE = None
 
@@ -461,6 +456,9 @@ SERVICE_EXECUTOR = None
 # If set, resmoke will override the default fixture and connect to the fixture specified by this
 # connection string instead.
 SHELL_CONN_STRING = None
+
+# If set, resmoke will override the random seed for jstests.
+SHELL_SEED = None
 
 # If true, then the order the tests run in is randomized. Otherwise the tests will run in
 # alphabetical (case-insensitive) order.

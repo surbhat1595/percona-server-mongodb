@@ -158,15 +158,10 @@ public:
             LOGV2(6859700, "Skipping hash computation for temporary collections");
         }
 
-        // For empty databasename on first command field, the following code depends on the "."
-        // on ns to find the invalid empty db name instead of checking empty db name directly.
-        const std::string ns = parseNs(dbName, cmdObj).ns();
-        const auto emptyDb = cmdObj.firstElement().type() == mongo::String &&
-            cmdObj.firstElement().valueStringData().empty();
         uassert(ErrorCodes::InvalidNamespace,
-                str::stream() << "Invalid db name: " << ns,
-                NamespaceString::validDBName(ns, NamespaceString::DollarInDbNameBehavior::Allow) &&
-                    !emptyDb);
+                "Cannot pass empty string for 'dbHash' field",
+                !(cmdObj.firstElement().type() == mongo::String &&
+                  cmdObj.firstElement().valueStringData().empty()));
 
         if (auto elem = cmdObj["$_internalReadAtClusterTime"]) {
             uassert(ErrorCodes::InvalidOptions,
@@ -250,14 +245,16 @@ public:
 
         // The CollectionCatalog to use for lock-free reads with point-in-time catalog lookups.
         std::shared_ptr<const CollectionCatalog> catalog;
-        if (feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCV()) {
+        // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
+        if (feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe()) {
             // Make sure we get a CollectionCatalog in sync with our snapshot.
             catalog = getConsistentCatalogAndSnapshot(opCtx);
         }
 
         boost::optional<AutoGetDb> autoDb;
         if (isPointInTimeRead) {
-            if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCV()) {
+            // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
+            if (!feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe()) {
                 // We only need to lock the database in intent mode and then collection in intent
                 // mode as well to ensure that none of the collections get dropped. This is no
                 // longer necessary with point-in-time catalog lookups.
@@ -321,7 +318,8 @@ public:
             return true;
         };
 
-        if (feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCV()) {
+        // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
+        if (feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe()) {
             for (auto it = catalog->begin(opCtx, dbName); it != catalog->end(opCtx); ++it) {
                 UUID uuid = it.uuid();
 
@@ -449,7 +447,7 @@ private:
             exec = InternalPlanner::collectionScan(
                 opCtx, &collection, PlanYieldPolicy::YieldPolicy::NO_YIELD);
         } else {
-            LOGV2(20455, "Can't find _id index for namespace", "namespace"_attr = collection->ns());
+            LOGV2(20455, "Can't find _id index for namespace", logAttrs(collection->ns()));
             return "no _id _index";
         }
 
@@ -463,9 +461,8 @@ private:
                 md5_append(&st, (const md5_byte_t*)c.objdata(), c.objsize());
             }
         } catch (DBException& exception) {
-            LOGV2_WARNING(20456,
-                          "Error while hashing, db possibly dropped",
-                          "namespace"_attr = collection->ns());
+            LOGV2_WARNING(
+                20456, "Error while hashing, db possibly dropped", logAttrs(collection->ns()));
             exception.addContext("Plan executor error while running dbHash command");
             throw;
         }

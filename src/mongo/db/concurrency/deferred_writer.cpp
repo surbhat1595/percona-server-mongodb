@@ -49,10 +49,7 @@ auto kLogInterval = stdx::chrono::minutes(1);
 
 void DeferredWriter::_logFailure(const Status& status) {
     if (TimePoint::clock::now() - _lastLogged > kLogInterval) {
-        LOGV2(20516,
-              "Unable to write to collection",
-              "namespace"_attr = _nss.toString(),
-              "error"_attr = status);
+        LOGV2(20516, "Unable to write to collection", logAttrs(_nss), "error"_attr = status);
         _lastLogged = stdx::chrono::system_clock::now();
     }
 }
@@ -154,6 +151,9 @@ void DeferredWriter::startup(std::string workerName) {
     options.maxThreads = 1;
     options.onCreateThread = [](const std::string& name) {
         Client::initThread(name);
+
+        stdx::lock_guard<Client> lk(cc());
+        cc().setSystemOperationKillableByStepdown(lk);
     };
     _pool = std::make_unique<ThreadPool>(options);
     _pool->startup();

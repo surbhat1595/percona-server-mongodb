@@ -35,6 +35,7 @@
 
 #include "mongo/base/compare_numbers.h"
 #include "mongo/config.h"
+#include "mongo/db/exec/sbe/makeobj_spec.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/vm/datetime.h"
@@ -749,6 +750,8 @@ enum class Builtin : uint8_t {
     isoWeekYear,
     isoDayOfWeek,
     isoWeek,
+    objectToArray,
+    arrayToObject,
 };
 
 std::string builtinToString(Builtin b);
@@ -1386,7 +1389,7 @@ private:
                                                              TimeZone timezone,
                                                              DayOfWeek startOfWeek);
 
-    std::pair<value::TypeTags, value::Value> produceBsonObject(const value::MakeObjSpec* mos,
+    std::pair<value::TypeTags, value::Value> produceBsonObject(const MakeObjSpec* mos,
                                                                value::TypeTags rootTag,
                                                                value::Value rootVal,
                                                                size_t startIdx);
@@ -1541,6 +1544,8 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinISODayOfWeek(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinISOWeek(ArityType arity);
 
+    FastTuple<bool, value::TypeTags, value::Value> builtinObjectToArray(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinArrayToObject(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> dispatchBuiltin(Builtin f, ArityType arity);
 
     static constexpr size_t offsetOwned = 0;

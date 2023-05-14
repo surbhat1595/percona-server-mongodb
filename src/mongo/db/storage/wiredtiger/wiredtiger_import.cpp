@@ -57,8 +57,6 @@ bool shouldImport(const NamespaceString& ns, const UUID& migrationId) {
     const auto tenantId =
         tenant_migration_access_blocker::parseTenantIdFromDatabaseName(ns.dbName());
 
-    // TODO SERVER-62491: Update this code path to handle TenantId::kSystemTenantId for internal
-    // collections.
     tenant_migration_access_blocker::validateNssIsBeingMigrated(tenantId, ns, migrationId);
 
     return !!tenantId;
@@ -103,7 +101,7 @@ SizeInfo getSizeInfo(const NamespaceString& ns,
     if (ret != 0) {
         LOGV2_WARNING(6113803,
                       "No sizeStorer info for donor collection",
-                      "ns"_attr = ns.toString(),
+                      "ns"_attr = ns,
                       "uri"_attr = sizeStorerUri,
                       "reason"_attr = wiredtiger_strerror(ret));
         // TODO (SERVER-61476): Handle missing sizeStorer info.

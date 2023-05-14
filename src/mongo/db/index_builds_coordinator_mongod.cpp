@@ -70,6 +70,8 @@ MONGO_FAIL_POINT_DEFINE(hangBeforeInitializingIndexBuild);
 MONGO_FAIL_POINT_DEFINE(hangIndexBuildAfterSignalPrimaryForCommitReadiness);
 MONGO_FAIL_POINT_DEFINE(hangBeforeRunningIndexBuild);
 MONGO_FAIL_POINT_DEFINE(hangIndexBuildBeforeSignalingPrimaryForAbort);
+MONGO_FAIL_POINT_DEFINE(hangIndexBuildBeforeTransitioningReplStateTokAwaitPrimaryAbort);
+MONGO_FAIL_POINT_DEFINE(hangBeforeVoteCommitIndexBuild);
 
 const StringData kMaxNumActiveUserIndexBuildsServerParameterName = "maxNumActiveUserIndexBuilds"_sd;
 
@@ -91,9 +93,6 @@ ThreadPool::Options makeDefaultThreadPoolOptions() {
     // Ensure all threads have a client.
     options.onCreateThread = [](const std::string& threadName) {
         Client::initThread(threadName.c_str());
-
-        stdx::lock_guard<Client> lk(cc());
-        cc().setSystemOperationUnKillableByStepdown(lk);
     };
 
     return options;
@@ -380,14 +379,12 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
 
     auto& oss = OperationShardingState::get(opCtx);
 
-    // Task in thread pool should have similar CurOp representation to the caller so that it can be
-    // identified as a createIndexes operation.
-    LogicalOp logicalOp = LogicalOp::opInvalid;
+    // The builder thread updates to curOp description to be that of a createIndexes command, but we
+    // still want to transfer whatever extra information there is available from the caller.
     BSONObj opDesc;
     {
         stdx::unique_lock<Client> lk(*opCtx->getClient());
         auto curOp = CurOp::get(opCtx);
-        logicalOp = curOp->getLogicalOp();
         opDesc = curOp->opDescription().getOwned();
     }
 
@@ -416,7 +413,6 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
                           dbName,
                           nss,
                           indexBuildOptions,
-                          logicalOp,
                           opDesc,
                           replState,
                           startPromise = std::move(startPromise),
@@ -444,6 +440,10 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
         // Indicate that the index build is scheduled and running under this opCtx.
         replState->onThreadScheduled(opCtx.get());
 
+        // Set up the thread's currentOp information to display createIndexes cmd information,
+        // merged with the caller's opDesc.
+        updateCurOpOpDescription(opCtx.get(), nss, replState->indexSpecs, opDesc);
+
         // Forward the forwardable operation metadata from the external client to this thread's
         // client.
         forwardableOpMetadata.setOn(opCtx.get());
@@ -456,13 +456,6 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
         }
 
         ScopedSetShardRole scopedSetShardRole(opCtx.get(), nss, shardVersion, dbVersion);
-
-        {
-            stdx::unique_lock<Client> lk(*opCtx->getClient());
-            auto curOp = CurOp::get(opCtx.get());
-            curOp->setLogicalOp_inlock(logicalOp);
-            curOp->setOpDescription_inlock(opDesc);
-        }
 
         while (MONGO_unlikely(hangBeforeInitializingIndexBuild.shouldFail())) {
             sleepmillis(100);
@@ -562,6 +555,8 @@ Status IndexBuildsCoordinatorMongod::voteAbortIndexBuild(OperationContext* opCtx
 Status IndexBuildsCoordinatorMongod::voteCommitIndexBuild(OperationContext* opCtx,
                                                           const UUID& buildUUID,
                                                           const HostAndPort& votingNode) {
+    hangBeforeVoteCommitIndexBuild.pauseWhileSet(opCtx);
+
     auto swReplState = _getIndexBuild(buildUUID);
     if (!swReplState.isOK()) {
         // Index build might have got torn down.
@@ -612,7 +607,7 @@ void IndexBuildsCoordinatorMongod::_sendCommitQuorumSatisfiedSignal(
     replState->setCommitQuorumSatisfied(opCtx);
 }
 
-void IndexBuildsCoordinatorMongod::_signalIfCommitQuorumIsSatisfied(
+bool IndexBuildsCoordinatorMongod::_signalIfCommitQuorumIsSatisfied(
     OperationContext* opCtx, std::shared_ptr<ReplIndexBuildState> replState) {
 
     // Acquire the commitQuorumLk in shared mode to make sure commit quorum value did not change
@@ -628,17 +623,18 @@ void IndexBuildsCoordinatorMongod::_signalIfCommitQuorumIsSatisfied(
     // This can occur when no vote got received and stepup tries to check if commit quorum is
     // satisfied.
     if (!voteMemberList)
-        return;
+        return false;
 
     bool commitQuorumSatisfied = repl::ReplicationCoordinator::get(opCtx)->isCommitQuorumSatisfied(
         indexBuildEntry.getCommitQuorum(), voteMemberList.value());
 
     if (!commitQuorumSatisfied)
-        return;
+        return false;
 
     LOGV2(
         3856201, "Index build: commit quorum satisfied", "indexBuildEntry"_attr = indexBuildEntry);
     _sendCommitQuorumSatisfiedSignal(opCtx, replState);
+    return true;
 }
 
 bool IndexBuildsCoordinatorMongod::_signalIfCommitQuorumNotEnabled(
@@ -683,13 +679,28 @@ bool IndexBuildsCoordinatorMongod::_signalIfCommitQuorumNotEnabled(
 
 void IndexBuildsCoordinatorMongod::_signalPrimaryForAbortAndWaitForExternalAbort(
     OperationContext* opCtx, ReplIndexBuildState* replState, const Status& abortStatus) {
+
+    hangIndexBuildBeforeTransitioningReplStateTokAwaitPrimaryAbort.pauseWhileSet(opCtx);
+
     LOGV2(7419402,
           "Index build: signaling primary to abort index build",
           "buildUUID"_attr = replState->buildUUID,
           logAttrs(replState->dbName),
           "collectionUUID"_attr = replState->collectionUUID,
           "reason"_attr = abortStatus);
-    replState->requestAbortFromPrimary(abortStatus);
+    const auto transitionedToWaitForAbort = replState->requestAbortFromPrimary(abortStatus);
+
+    if (!transitionedToWaitForAbort) {
+        // The index build has likely been aborted externally (e.g. its underlying collection was
+        // dropped), and it's in the midst of tearing down. There's nothing else to do here.
+        LOGV2(7530800,
+              "Index build: the build is already in aborted state; not signaling primary to abort",
+              "buildUUID"_attr = replState->buildUUID,
+              "db"_attr = replState->dbName,
+              "collectionUUID"_attr = replState->collectionUUID,
+              "reason"_attr = abortStatus);
+        return;
+    }
 
     hangIndexBuildBeforeSignalingPrimaryForAbort.pauseWhileSet(opCtx);
 
@@ -770,8 +781,19 @@ void IndexBuildsCoordinatorMongod::_signalPrimaryForCommitReadiness(
     // Before voting see if we are eligible to skip voting and signal
     // to commit index build if the node is primary.
     if (_signalIfCommitQuorumNotEnabled(opCtx, replState)) {
+        LOGV2(7568001,
+              "Index build: skipping vote for commit readiness",
+              "buildUUID"_attr = replState->buildUUID,
+              logAttrs(replState->dbName),
+              "collectionUUID"_attr = replState->collectionUUID);
         return;
     }
+
+    LOGV2(7568000,
+          "Index build: vote for commit readiness",
+          "buildUUID"_attr = replState->buildUUID,
+          logAttrs(replState->dbName),
+          "collectionUUID"_attr = replState->collectionUUID);
 
     const auto generateCmd = [](const UUID& uuid, const std::string& address) {
         return BSON("voteCommitIndexBuild" << uuid << "hostAndPort" << address << "writeConcern"

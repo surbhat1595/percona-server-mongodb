@@ -1,7 +1,8 @@
 /**
  * Tests that $percentile is computed correctly for sharded collections.
  * @tags: [
- *   featureFlagApproxPercentiles,
+ *   requires_fcv_70,
+ *   featureFlagApproxPercentiles
  * ]
  */
 
@@ -34,7 +35,7 @@ assert.commandWorked(
 
 function runTest({testName}) {
     const p = 0.9;
-    const percentileSpec = {$percentile: {p: [p], input: "$x", algorithm: "approximate"}};
+    const percentileSpec = {$percentile: {p: [p], input: "$x", method: "approximate"}};
 
     const res = coll.aggregate([{$group: {_id: null, p: percentileSpec}}]).toArray();
     const resUnsharded =
@@ -47,7 +48,7 @@ function runTest({testName}) {
                 [{$match: {x: {$type: "number"}}}, {$group: {_id: null, data: {$push: "$x"}}}])
             .toArray();
 
-    let expectedResult = null;
+    let expectedResult = [null];
     if (expected[0]) {
         const data = expected[0].data;
         data.sort(function(a, b) {

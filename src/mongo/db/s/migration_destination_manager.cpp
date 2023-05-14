@@ -534,7 +534,8 @@ Status MigrationDestinationManager::start(OperationContext* opCtx,
     _sessionMigration = std::make_unique<SessionCatalogMigrationDestination>(
         _nss, _fromShard, *_sessionId, _cancellationSource.token());
     ShardingStatistics::get(opCtx).countRecipientMoveChunkStarted.addAndFetch(1);
-    if (mongo::feature_flags::gConcurrencyInChunkMigration.isEnabledAndIgnoreFCV())
+    // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
+    if (mongo::feature_flags::gConcurrencyInChunkMigration.isEnabledAndIgnoreFCVUnsafe())
         ShardingStatistics::get(opCtx).chunkMigrationConcurrencyCnt.store(
             chunkMigrationConcurrency.load());
 
@@ -594,6 +595,11 @@ repl::OpTime MigrationDestinationManager::fetchAndApplyBatch(
 
     stdx::thread applicationThread{[&] {
         Client::initThread("batchApplier", opCtx->getServiceContext(), nullptr);
+        auto client = Client::getCurrent();
+        {
+            stdx::lock_guard lk(*client);
+            client->setSystemOperationKillableByStepdown(lk);
+        }
         auto executor =
             Grid::get(opCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();
         auto applicationOpCtx = CancelableOperationContext(
@@ -1091,6 +1097,11 @@ void MigrationDestinationManager::_migrateThread(CancellationToken cancellationT
 
     Client::initThread("migrateThread");
     auto client = Client::getCurrent();
+    {
+        stdx::lock_guard lk(*client);
+        client->setSystemOperationKillableByStepdown(lk);
+    }
+
     bool recovering = false;
     while (true) {
         const auto executor =
@@ -1190,7 +1201,7 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
             "Starting receiving end of chunk migration",
             "chunkMin"_attr = redact(_min),
             "chunkMax"_attr = redact(_max),
-            "namespace"_attr = _nss.ns(),
+            logAttrs(_nss),
             "fromShard"_attr = _fromShard,
             "epoch"_attr = _epoch,
             "sessionId"_attr = *_sessionId,
@@ -1241,7 +1252,7 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
                   "overlaps with a range already scheduled for deletion",
                   "Migration paused because the requested range overlaps with a range already "
                   "scheduled for deletion",
-                  "namespace"_attr = _nss.ns(),
+                  logAttrs(_nss),
                   "range"_attr = redact(range.toString()),
                   "migrationId"_attr = _migrationId->toBSON());
 
@@ -1284,6 +1295,11 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
         outerOpCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
         {
             auto newClient = outerOpCtx->getServiceContext()->makeClient("MigrationCoordinator");
+            {
+                stdx::lock_guard<Client> lk(*newClient.get());
+                newClient->setSystemOperationKillableByStepdown(lk);
+            }
+
             AlternativeClientRegion acr(newClient);
             auto executor =
                 Grid::get(outerOpCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();
@@ -1344,6 +1360,10 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
         }
 
         auto newClient = outerOpCtx->getServiceContext()->makeClient("MigrationCoordinator");
+        {
+            stdx::lock_guard<Client> lk(*newClient.get());
+            newClient->setSystemOperationKillableByStepdown(lk);
+        }
         AlternativeClientRegion acr(newClient);
         auto executor =
             Grid::get(outerOpCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();
@@ -1611,6 +1631,10 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
     } else {
         outerOpCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
         auto newClient = outerOpCtx->getServiceContext()->makeClient("MigrationCoordinator");
+        {
+            stdx::lock_guard<Client> lk(*newClient.get());
+            newClient->setSystemOperationKillableByStepdown(lk);
+        }
         AlternativeClientRegion acr(newClient);
         auto executor =
             Grid::get(outerOpCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();
@@ -1640,6 +1664,10 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
 
     outerOpCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
     auto newClient = outerOpCtx->getServiceContext()->makeClient("MigrationCoordinator");
+    {
+        stdx::lock_guard<Client> lk(*newClient.get());
+        newClient->setSystemOperationKillableByStepdown(lk);
+    }
     AlternativeClientRegion acr(newClient);
     auto executor =
         Grid::get(outerOpCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();
@@ -1780,7 +1808,7 @@ bool MigrationDestinationManager::_flushPendingWrites(OperationContext* opCtx,
                   "{chunkMin} -> {chunkMax}; waiting to reach this operation: {lastOpApplied}",
                   "Migration commit waiting for majority replication; waiting until the last "
                   "operation applied has been replicated",
-                  "namespace"_attr = _nss.ns(),
+                  logAttrs(_nss),
                   "chunkMin"_attr = redact(_min),
                   "chunkMax"_attr = redact(_max),
                   "lastOpApplied"_attr = op,
@@ -1792,7 +1820,7 @@ bool MigrationDestinationManager::_flushPendingWrites(OperationContext* opCtx,
     LOGV2(22008,
           "Migration commit succeeded flushing to secondaries for {namespace}, {min} -> {max}",
           "Migration commit succeeded flushing to secondaries",
-          "namespace"_attr = _nss.ns(),
+          logAttrs(_nss),
           "chunkMin"_attr = redact(_min),
           "chunkMax"_attr = redact(_max),
           "migrationId"_attr = _migrationId->toBSON());

@@ -53,6 +53,9 @@ def _validate_options(parser, args):
             "Cannot use --replayFile with additional test files listed on the command line invocation."
         )
 
+    if args.shell_seed and (not args.test_files or len(args.test_files) != 1):
+        parser.error("The --shellSeed argument must be used with only one test.")
+
     if args.additional_feature_flags_file and not os.path.isfile(
             args.additional_feature_flags_file):
         parser.error("The specified additional feature flags file does not exist.")
@@ -332,10 +335,10 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
     _config.REPEAT_TESTS_MAX = config.pop("repeat_tests_max")
     _config.REPEAT_TESTS_MIN = config.pop("repeat_tests_min")
     _config.REPEAT_TESTS_SECS = config.pop("repeat_tests_secs")
-    _config.REPORT_FAILURE_STATUS = config.pop("report_failure_status")
     _config.REPORT_FILE = config.pop("report_file")
     _config.SERVICE_EXECUTOR = config.pop("service_executor")
     _config.EXPORT_MONGOD_CONFIG = config.pop("export_mongod_config")
+    _config.SHELL_SEED = config.pop("shell_seed")
     _config.STAGGER_JOBS = config.pop("stagger_jobs") == "on"
     _config.STORAGE_ENGINE = config.pop("storage_engine")
     _config.STORAGE_ENGINE_CACHE_SIZE = config.pop("storage_engine_cache_size_gb")

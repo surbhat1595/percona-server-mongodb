@@ -58,7 +58,11 @@ BSONObj _createCmdObj(OperationContext* opCtx,
             "_clusterWriteWithoutShardKey can only be run against sharded collections.",
             cri.cm.isSharded());
     const auto shardVersion = cri.getShardVersion(shardId);
-    BSONObjBuilder queryBuilder(targetDocId);
+    // For time-series collections, the 'targetDocId' corresponds to a measurement document's '_id'
+    // field which is not guaranteed to exist and does not uniquely identify a measurement so we
+    // cannot use this ID to reliably target a document in this write phase. Instead, we will
+    // forward the full query to the chosen shard and it will be executed again on the target shard.
+    BSONObjBuilder queryBuilder(nss.isTimeseriesBucketsCollection() ? BSONObj() : targetDocId);
 
     // Parse into OpMsgRequest to append the $db field, which is required for command
     // parsing.
@@ -84,14 +88,6 @@ BSONObj _createCmdObj(OperationContext* opCtx,
                 updateRequest.getUpdates().front().getCollation());
             updateRequest.setWriteCommandRequestBase(writeCommandRequestBase);
         }
-
-        // This field is only set for writes that could modify the shard key.
-        uassert(ErrorCodes::InvalidOptions,
-                "$_allowShardKeyUpdatesWithoutFullShardKeyInQuery is an internal parameter",
-                !updateRequest.getUpdates()
-                     .front()
-                     .getAllowShardKeyUpdatesWithoutFullShardKeyInQuery());
-        updateRequest.getUpdates().front().setAllowShardKeyUpdatesWithoutFullShardKeyInQuery(true);
         updateRequest.getUpdates().front().setQ(queryBuilder.obj());
 
         auto batchedCommandRequest = BatchedCommandRequest(updateRequest);
@@ -139,14 +135,7 @@ BSONObj _createCmdObj(OperationContext* opCtx,
             findAndModifyRequest.setOriginalQuery(findAndModifyRequest.getQuery());
             findAndModifyRequest.setOriginalCollation(findAndModifyRequest.getCollation());
         }
-
-        // This field is only set for writes that could modify the shard key.
-        uassert(ErrorCodes::InvalidOptions,
-                "$_allowShardKeyUpdatesWithoutFullShardKeyInQuery is an internal parameter",
-                !findAndModifyRequest.getAllowShardKeyUpdatesWithoutFullShardKeyInQuery());
-        findAndModifyRequest.setAllowShardKeyUpdatesWithoutFullShardKeyInQuery(true);
         findAndModifyRequest.setQuery(queryBuilder.obj());
-
 
         // Drop the writeConcern as it cannot be specified for commands run in internal
         // transactions. This object will be used to construct the command request used by

@@ -12,6 +12,7 @@ selector:
   - jstests/sharding/**/libs/**/*.js
   # Skip any tests that run with auth explicitly.
   - jstests/sharding/*[aA]uth*.js
+  - jstests/sharding/analyze_shard_key/*[aA]uth*.js
   - jstests/sharding/query/*[aA]uth*.js
   - jstests/sharding/change_streams/*[aA]uth*.js
 
@@ -52,4 +53,7 @@ executor:
           keyFile: *keyFile
           keyFileData: *keyFileData
           roleGraphInvalidationIsFatal: true
+          # TODO (SERVER-74534): Enable the metadata consistency check when it will work with
+          # co-located configsvr.
+          skipCheckMetadataConsistency: true
       nodb: ''

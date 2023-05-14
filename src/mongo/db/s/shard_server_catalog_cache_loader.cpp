@@ -47,6 +47,8 @@
 #include "mongo/logv2/log.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/shard_version_factory.h"
+#include "mongo/s/stale_exception.h"
 #include "mongo/util/fail_point.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
@@ -80,7 +82,7 @@ void dropChunksIfEpochChanged(OperationContext* opCtx,
 
     LOGV2(5990400,
           "Dropped persisted chunk metadata due to epoch change",
-          "namespace"_attr = nss,
+          logAttrs(nss),
           "currentEpoch"_attr = currentEpoch,
           "previousEpoch"_attr = maxLoaderVersion.epoch());
 }
@@ -135,7 +137,7 @@ Status persistCollectionAndChangedChunks(OperationContext* opCtx,
         return status;
     }
 
-    LOGV2(3463204, "Persisted collection entry and chunk metadata", "namespace"_attr = nss);
+    LOGV2(3463204, "Persisted collection entry and chunk metadata", logAttrs(nss));
 
     return Status::OK();
 }
@@ -291,12 +293,12 @@ StatusWith<CollectionAndChangedChunks> getIncompletePersistedMetadataSinceVersio
         if (status == ErrorCodes::NamespaceNotFound) {
             return CollectionAndChangedChunks();
         }
-        return status.withContext(str::stream() << "Failed to load local metadata.");
+        return status.withContext(str::stream() << "Failed to read local metadata.");
     }
 }
 
 ShardId getSelfShardId(OperationContext* opCtx) {
-    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
         return ShardId::kConfigServerId;
     }
 
@@ -353,7 +355,7 @@ void forcePrimaryDatabaseRefreshAndWaitForReplication(OperationContext* opCtx, S
 // TODO: SERVER-74105 remove
 bool shouldSkipStoringLocally() {
     // Note: cannot use isExclusivelyConfigSvrRole as it ignores fcv.
-    return serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&
+    return serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
         !gFeatureFlagCatalogShard.isEnabled(serverGlobalParams.featureCompatibility);
 }
 
@@ -455,13 +457,6 @@ SemiFuture<CollectionAndChangedChunks> ShardServerCatalogCacheLoader::getChunksS
             ThreadClient tc("ShardServerCatalogCacheLoader::getChunksSince",
                             getGlobalServiceContext());
             auto context = _contexts.makeOperationContext(*tc);
-
-            // TODO(SERVER-74658): Please revisit if this thread could be made killable.
-            {
-                stdx::lock_guard<Client> lk(*tc.get());
-                tc.get()->setSystemOperationUnKillableByStepdown(lk);
-            }
-
             {
                 // We may have missed an OperationContextGroup interrupt since this operation
                 // began but before the OperationContext was added to the group. So we'll check
@@ -503,12 +498,6 @@ SemiFuture<DatabaseType> ShardServerCatalogCacheLoader::getDatabase(StringData d
                             getGlobalServiceContext());
             auto context = _contexts.makeOperationContext(*tc);
 
-            // TODO(SERVER-74658): Please revisit if this thread could be made killable.
-            {
-                stdx::lock_guard<Client> lk(*tc.get());
-                tc.get()->setSystemOperationUnKillableByStepdown(lk);
-            }
-
             {
                 // We may have missed an OperationContextGroup interrupt since this operation began
                 // but before the OperationContext was added to the group. So we'll check that we're
@@ -541,6 +530,13 @@ void ShardServerCatalogCacheLoader::waitForCollectionFlush(OperationContext* opC
                 str::stream() << "Unable to wait for collection metadata flush for " << nss.ns()
                               << " because the node's replication role changed.",
                 _role == ReplicaSetRole::Primary && _term == initialTerm);
+
+        uassert(StaleConfigInfo(nss,
+                                ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
+                                boost::none,
+                                getSelfShardId(opCtx)),
+                "config server is not storing cached metadata",
+                !shouldSkipStoringLocally());
 
         auto it = _collAndChunkTaskLists.find(nss);
 
@@ -588,7 +584,7 @@ void ShardServerCatalogCacheLoader::waitForCollectionFlush(OperationContext* opC
             opCtx->waitForConditionOrInterrupt(*condVar, lg, [&]() {
                 const auto it = _collAndChunkTaskLists.find(nss);
                 return it == _collAndChunkTaskLists.end() || it->second.empty() ||
-                    it->second.front().taskNum != activeTaskNum;
+                    it->second.front().taskNum != activeTaskNum || shouldSkipStoringLocally();
             });
         }
     }
@@ -608,6 +604,10 @@ void ShardServerCatalogCacheLoader::waitForDatabaseFlush(OperationContext* opCtx
                               << dbName.toString()
                               << " because the node's replication role changed.",
                 _role == ReplicaSetRole::Primary && _term == initialTerm);
+
+        uassert(StaleDbRoutingVersion(dbName.toString(), DatabaseVersion::makeFixed(), boost::none),
+                "config server is not storing cached metadata",
+                !shouldSkipStoringLocally());
 
         auto it = _dbTaskLists.find(dbName.toString());
 
@@ -656,7 +656,7 @@ void ShardServerCatalogCacheLoader::waitForDatabaseFlush(OperationContext* opCtx
             opCtx->waitForConditionOrInterrupt(*condVar, lg, [&]() {
                 const auto it = _dbTaskLists.find(dbName.toString());
                 return it == _dbTaskLists.end() || it->second.empty() ||
-                    it->second.front().taskNum != activeTaskNum;
+                    it->second.front().taskNum != activeTaskNum || shouldSkipStoringLocally();
             });
         }
     }
@@ -666,13 +666,18 @@ StatusWith<CollectionAndChangedChunks> ShardServerCatalogCacheLoader::_runSecond
     OperationContext* opCtx,
     const NamespaceString& nss,
     const ChunkVersion& catalogCacheSinceVersion) {
+
+    if (shouldSkipStoringLocally()) {
+        return _configServerLoader->getChunksSince(nss, catalogCacheSinceVersion).getNoThrow();
+    }
+
     Timer t;
     forcePrimaryCollectionRefreshAndWaitForReplication(opCtx, nss);
     LOGV2_FOR_CATALOG_REFRESH(5965800,
                               2,
                               "Cache loader on secondary successfully waited for primary refresh "
                               "and replication of collection",
-                              "namespace"_attr = nss,
+                              logAttrs(nss),
                               "duration"_attr = Milliseconds(t.millis()));
 
     // Read the local metadata.
@@ -735,7 +740,7 @@ ShardServerCatalogCacheLoader::_schedulePrimaryGetChunksSince(
             "Cache loader remotely refreshed for collection {namespace} from version "
             "{oldCollectionPlacementVersion} and no metadata was found",
             "Cache loader remotely refreshed for collection and no metadata was found",
-            "namespace"_attr = nss,
+            logAttrs(nss),
             "oldCollectionPlacementVersion"_attr = maxLoaderVersion);
         return swCollectionAndChangedChunks;
     }
@@ -773,7 +778,7 @@ ShardServerCatalogCacheLoader::_schedulePrimaryGetChunksSince(
         "version {oldCollectionPlacementVersion} and found collection placement version "
         "{refreshedCollectionPlacementVersion}",
         "Cache loader remotely refreshed for collection",
-        "namespace"_attr = nss,
+        logAttrs(nss),
         "oldCollectionPlacementVersion"_attr = maxLoaderVersion,
         "refreshedCollectionPlacementVersion"_attr =
             collAndChunks.changedChunks.back().getVersion());
@@ -818,6 +823,10 @@ ShardServerCatalogCacheLoader::_schedulePrimaryGetChunksSince(
 
 StatusWith<DatabaseType> ShardServerCatalogCacheLoader::_runSecondaryGetDatabase(
     OperationContext* opCtx, StringData dbName) {
+    if (shouldSkipStoringLocally()) {
+        return _configServerLoader->getDatabase(dbName).getNoThrow();
+    }
+
     Timer t;
     forcePrimaryDatabaseRefreshAndWaitForReplication(opCtx, dbName);
     LOGV2_FOR_CATALOG_REFRESH(5965801,
@@ -1019,7 +1028,6 @@ void ShardServerCatalogCacheLoader::_ensureMajorityPrimaryAndScheduleCollAndChun
             if (ErrorCodes::isCancellationError(status)) {
                 return;
             }
-
             fassertFailedWithStatus(4826400, status);
         }
 
@@ -1063,33 +1071,27 @@ void ShardServerCatalogCacheLoader::_runCollAndChunksTasks(const NamespaceString
                     getGlobalServiceContext());
     auto context = _contexts.makeOperationContext(*tc);
 
-    // TODO(SERVER-74658): Please revisit if this thread could be made killable.
-    {
-        stdx::lock_guard<Client> lk(*tc.get());
-        tc.get()->setSystemOperationUnKillableByStepdown(lk);
-    }
-
-    if (MONGO_unlikely(hangCollectionFlush.shouldFail())) {
-        LOGV2(5710200, "Hit hangCollectionFlush failpoint");
-        hangCollectionFlush.pauseWhileSet(context.opCtx());
-    }
-
     bool taskFinished = false;
     bool inShutdown = false;
     try {
+        if (MONGO_unlikely(hangCollectionFlush.shouldFail())) {
+            LOGV2(5710200, "Hit hangCollectionFlush failpoint");
+            hangCollectionFlush.pauseWhileSet(context.opCtx());
+        }
+
         _updatePersistedCollAndChunksMetadata(context.opCtx(), nss);
         taskFinished = true;
     } catch (const ExceptionForCat<ErrorCategory::ShutdownError>&) {
         LOGV2(22094,
               "Failed to persist chunk metadata update for collection {namespace} due to shutdown",
               "Failed to persist chunk metadata update for collection due to shutdown",
-              "namespace"_attr = nss);
+              logAttrs(nss));
         inShutdown = true;
     } catch (const DBException& ex) {
         LOGV2(22095,
               "Failed to persist chunk metadata update for collection {namespace} {error}",
               "Failed to persist chunk metadata update for collection",
-              "namespace"_attr = nss,
+              logAttrs(nss),
               "error"_attr = redact(ex));
     }
 
@@ -1131,7 +1133,7 @@ void ShardServerCatalogCacheLoader::_runCollAndChunksTasks(const NamespaceString
                   "Cache loader failed to schedule a persisted metadata update task. Clearing task "
                   "list so that scheduling will be attempted by the next caller to refresh this "
                   "namespace",
-                  "namespace"_attr = nss,
+                  logAttrs(nss),
                   "error"_attr = redact(status));
 
             {
@@ -1148,19 +1150,13 @@ void ShardServerCatalogCacheLoader::_runDbTasks(StringData dbName) {
     ThreadClient tc("ShardServerCatalogCacheLoader::runDbTasks", getGlobalServiceContext());
     auto context = _contexts.makeOperationContext(*tc);
 
-    if (MONGO_unlikely(hangDatabaseFlush.shouldFail())) {
-        hangDatabaseFlush.pauseWhileSet(context.opCtx());
-    }
-
-    // TODO(SERVER-74658): Please revisit if this thread could be made killable.
-    {
-        stdx::lock_guard<Client> lk(*tc.get());
-        tc.get()->setSystemOperationUnKillableByStepdown(lk);
-    }
-
     bool taskFinished = false;
     bool inShutdown = false;
     try {
+        if (MONGO_unlikely(hangDatabaseFlush.shouldFail())) {
+            hangDatabaseFlush.pauseWhileSet(context.opCtx());
+        }
+
         _updatePersistedDbMetadata(context.opCtx(), dbName);
         taskFinished = true;
     } catch (const ExceptionForCat<ErrorCategory::ShutdownError>&) {
@@ -1269,7 +1265,7 @@ void ShardServerCatalogCacheLoader::_updatePersistedCollAndChunksMetadata(
         "{oldCollectionPlacementVersion} to collection placement version "
         "{newCollectionPlacementVersion}",
         "Successfully updated persisted chunk metadata for collection",
-        "namespace"_attr = nss,
+        logAttrs(nss),
         "oldCollectionPlacementVersion"_attr = task.minQueryVersion,
         "newCollectionPlacementVersion"_attr = task.maxQueryVersion);
 }

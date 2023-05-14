@@ -39,6 +39,7 @@
 #include "mongo/db/repl/oplog_batcher_test_fixture.h"
 #include "mongo/db/repl/oplog_buffer_blocking_queue.h"
 #include "mongo/db/service_context_test_fixture.h"
+#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source_mock.h"
 
@@ -125,18 +126,6 @@ TEST_F(OplogApplierTest, GetNextApplierBatchGroupsCrudOps) {
     ASSERT_EQUALS(srcOps[1], batch[1]);
 }
 
-TEST_F(OplogApplierTest, GetNextApplierBatchReturnsPreparedApplyOpsOpInOwnBatch) {
-    std::vector<OplogEntry> srcOps;
-    srcOps.push_back(makeApplyOpsOplogEntry(1, true));
-    srcOps.push_back(
-        makeInsertOplogEntry(2, NamespaceString::createNamespaceString_forTest(dbName, "bar")));
-    _applier->enqueue(opCtx(), srcOps.cbegin(), srcOps.cend());
-
-    auto batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits));
-    ASSERT_EQUALS(1U, batch.size()) << toString(batch);
-    ASSERT_EQUALS(srcOps[0], batch[0]);
-}
-
 TEST_F(OplogApplierTest, GetNextApplierBatchGroupsUnpreparedApplyOpsOpWithOtherOps) {
     std::vector<OplogEntry> srcOps;
     srcOps.push_back(makeApplyOpsOplogEntry(1, false));
@@ -186,18 +175,6 @@ TEST_F(OplogApplierTest, GetNextApplierBatchReturnsConfigReshardingDonorOpInOwnB
     ASSERT_EQUALS(srcOps[0], batch[0]);
 }
 
-TEST_F(OplogApplierTest, GetNextApplierBatchReturnsPreparedCommitTransactionOpInOwnBatch) {
-    std::vector<OplogEntry> srcOps;
-    srcOps.push_back(makeCommitTransactionOplogEntry(1, dbName, true, 3));
-    srcOps.push_back(
-        makeInsertOplogEntry(2, NamespaceString::createNamespaceString_forTest(dbName, "bar")));
-    _applier->enqueue(opCtx(), srcOps.cbegin(), srcOps.cend());
-
-    auto batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits));
-    ASSERT_EQUALS(1U, batch.size()) << toString(batch);
-    ASSERT_EQUALS(srcOps[0], batch[0]);
-}
-
 TEST_F(OplogApplierTest, GetNextApplierBatchGroupsUnpreparedCommitTransactionOpWithOtherOps) {
     std::vector<OplogEntry> srcOps;
     srcOps.push_back(makeCommitTransactionOplogEntry(1, dbName, false, 3));
@@ -209,6 +186,73 @@ TEST_F(OplogApplierTest, GetNextApplierBatchGroupsUnpreparedCommitTransactionOpW
     ASSERT_EQUALS(2U, batch.size()) << toString(batch);
     ASSERT_EQUALS(srcOps[0], batch[0]);
     ASSERT_EQUALS(srcOps[1], batch[1]);
+}
+
+TEST_F(OplogApplierTest, GetNextApplierBatchGroupsPreparedApplyOpsOrPreparedCommits) {
+    std::vector<OplogEntry> srcOps;
+    srcOps.push_back(makeApplyOpsOplogEntry(1, true /* prepare */));
+    srcOps.push_back(makeApplyOpsOplogEntry(2, true /* prepare */));
+    srcOps.push_back(makeCommitTransactionOplogEntry(3, dbName, true /* prepared */));
+    srcOps.push_back(makeAbortTransactionOplogEntry(4, dbName));
+    srcOps.push_back(makeApplyOpsOplogEntry(5, true /* prepare */));
+    srcOps.push_back(makeApplyOpsOplogEntry(6, true /* prepare */));
+    _applier->enqueue(opCtx(), srcOps.cbegin(), srcOps.cend());
+
+    // Prepares can be batched together.
+    auto batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits));
+    ASSERT_EQUALS(2U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[0], batch[0]);
+    ASSERT_EQUALS(srcOps[1], batch[1]);
+
+    // Prepared commit needs to be processed individually.
+    batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits));
+    ASSERT_EQUALS(1U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[2], batch[0]);
+
+    // Prepared abort needs to be processed individually.
+    batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits));
+    ASSERT_EQUALS(1U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[3], batch[0]);
+
+    // Prepares can be batched together.
+    batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits));
+    ASSERT_EQUALS(2U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[4], batch[0]);
+    ASSERT_EQUALS(srcOps[5], batch[1]);
+}
+
+TEST_F(OplogApplierTest, GetNextApplierBatchGroupsCrudOpsWithPreparedApplyOpsOrPreparedCommits) {
+    std::vector<OplogEntry> srcOps;
+    auto nss = NamespaceString::createNamespaceString_forTest(dbName, "bar");
+    srcOps.push_back(makeInsertOplogEntry(1, nss));
+    srcOps.push_back(makeApplyOpsOplogEntry(2, true /* prepare */));
+    srcOps.push_back(makeApplyOpsOplogEntry(3, true /* prepare */));
+    srcOps.push_back(makeCommitTransactionOplogEntry(4, dbName, true /* prepared */));
+    srcOps.push_back(makeInsertOplogEntry(5, nss));
+    srcOps.push_back(makeAbortTransactionOplogEntry(6, dbName));
+    _applier->enqueue(opCtx(), srcOps.cbegin(), srcOps.cend());
+
+    // Prepares can be batched together with normal CRUDs.
+    auto batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits));
+    ASSERT_EQUALS(3U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[0], batch[0]);
+    ASSERT_EQUALS(srcOps[1], batch[1]);
+    ASSERT_EQUALS(srcOps[2], batch[2]);
+
+    // Prepared commit needs to be processed individually.
+    batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits));
+    ASSERT_EQUALS(1U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[3], batch[0]);
+
+    // Due to the next prepared abort, this insert is in a batch of 1.
+    batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits));
+    ASSERT_EQUALS(1U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[4], batch[0]);
+
+    // Prepared abort needs to be processed individually.
+    batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits));
+    ASSERT_EQUALS(1U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[5], batch[0]);
 }
 
 TEST_F(OplogApplierTest, GetNextApplierBatchChecksBatchLimitsForNumberOfOperations) {

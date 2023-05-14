@@ -83,7 +83,8 @@ Status checkReplState(OperationContext* opCtx,
     if (writesAreReplicatedAndNotPrimary) {
         return Status(ErrorCodes::NotWritablePrimary,
                       str::stream() << "Not primary while dropping indexes on database "
-                                    << dbAndUUID.db() << " with collection " << dbAndUUID.uuid());
+                                    << dbAndUUID.dbName()->toStringForErrorMsg()
+                                    << " with collection " << dbAndUUID.uuid());
     }
 
     // Disallow index drops on drop-pending namespaces (system.drop.*) if we are primary.
@@ -92,8 +93,8 @@ Status checkReplState(OperationContext* opCtx,
     if (isPrimary && nss.isDropPendingNamespace()) {
         return Status(ErrorCodes::NamespaceNotFound,
                       str::stream() << "Cannot drop indexes on drop-pending namespace " << nss
-                                    << " in database " << dbAndUUID.db() << " with uuid "
-                                    << dbAndUUID.uuid());
+                                    << " in database " << dbAndUUID.dbName()->toStringForErrorMsg()
+                                    << " with uuid " << dbAndUUID.uuid());
     }
 
     return Status::OK();
@@ -374,7 +375,7 @@ void assertNoMovePrimaryInProgress(OperationContext* opCtx, const NamespaceStrin
 
         if (!collDesc.isSharded()) {
             if (scopedDss->isMovePrimaryInProgress()) {
-                LOGV2(4976500, "assertNoMovePrimaryInProgress", "namespace"_attr = nss.toString());
+                LOGV2(4976500, "assertNoMovePrimaryInProgress", logAttrs(nss));
 
                 uasserted(ErrorCodes::MovePrimaryInProgress,
                           "movePrimary is in progress for namespace " + nss.toString());
@@ -409,7 +410,7 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
     if (!serverGlobalParams.quiet.load()) {
         LOGV2(51806,
               "CMD: dropIndexes",
-              "namespace"_attr = nss,
+              logAttrs(nss),
               "uuid"_attr = collectionUUID,
               "indexes"_attr =
                   stdx::visit(OverloadedVisitor{[](const std::string& arg) { return arg; },
@@ -473,7 +474,8 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
         if (!*collection) {
             uasserted(ErrorCodes::NamespaceNotFound,
                       str::stream() << "Collection '" << nss << "' with UUID " << dbAndUUID.uuid()
-                                    << " in database " << dbAndUUID.db() << " does not exist.");
+                                    << " in database " << dbAndUUID.dbName()->toStringForErrorMsg()
+                                    << " does not exist.");
         }
 
         // The collection could have been renamed when we dropped locks.
@@ -590,7 +592,7 @@ Status dropIndexesForApplyOps(OperationContext* opCtx,
         if (!serverGlobalParams.quiet.load()) {
             LOGV2(20344,
                   "CMD: dropIndexes",
-                  "namespace"_attr = nss,
+                  logAttrs(nss),
                   "indexes"_attr = cmdObj[kIndexFieldName].toString(false));
         }
 

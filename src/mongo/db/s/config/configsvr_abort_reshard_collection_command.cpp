@@ -108,7 +108,7 @@ public:
 
             uassert(ErrorCodes::IllegalOperation,
                     "_configsvrAbortReshardCollection can only be run on config servers",
-                    serverGlobalParams.clusterRole == ClusterRole::ConfigServer);
+                    serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
             CommandHelpers::uassertCommandRunWithMajority(Request::kCommandName,
                                                           opCtx->getWriteConcern());
 
@@ -116,7 +116,7 @@ public:
 
             LOGV2(5403501,
                   "Aborting resharding operation",
-                  "namespace"_attr = ns(),
+                  logAttrs(ns()),
                   "reshardingUUID"_attr = reshardingUUID);
 
             assertExistsReshardingDocument(opCtx, reshardingUUID);

@@ -75,7 +75,7 @@
 #include "mongo/logv2/log.h"
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/query/document_source_merge_cursors.h"
-#include "mongo/s/query_analysis_sample_counters.h"
+#include "mongo/s/query_analysis_sample_tracker.h"
 #include "mongo/s/query_analysis_sampler_util.h"
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/namespace_string_util.h"
@@ -183,10 +183,8 @@ std::vector<Document> CommonMongodProcessInterface::getIndexStats(OperationConte
 
     std::vector<Document> indexStats;
     if (!collection) {
-        LOGV2_DEBUG(23881,
-                    2,
-                    "Collection not found on index stats retrieval: {ns_ns}",
-                    "ns_ns"_attr = ns.ns());
+        LOGV2_DEBUG(
+            23881, 2, "Collection not found on index stats retrieval: {ns_ns}", "ns_ns"_attr = ns);
         return indexStats;
     }
 
@@ -583,6 +581,9 @@ std::vector<BSONObj> CommonMongodProcessInterface::getMatchingPlanCacheEntryStat
     };
 
     const auto predicate = [&matchExp](const BSONObj& obj) {
+        if (obj.hasField("securityLevel")) {
+            return false;
+        }
         return !matchExp ? true : matchExp->matchesBSON(obj);
     };
 
@@ -662,6 +663,12 @@ BSONObj CommonMongodProcessInterface::_reportCurrentOpForClient(
     OperationContext* clientOpCtx = client->getOperationContext();
 
     if (clientOpCtx) {
+        bool omitAndRedactInformation =
+            CurOp::get(clientOpCtx)->debug().shouldOmitDiagnosticInformation;
+        if (omitAndRedactInformation) {
+            return builder.obj();
+        }
+
         if (auto txnParticipant = TransactionParticipant::get(clientOpCtx)) {
             txnParticipant.reportUnstashedState(clientOpCtx, &builder);
         }
@@ -725,7 +732,7 @@ void CommonMongodProcessInterface::_reportCurrentOpsForIdleSessions(
 void CommonMongodProcessInterface::_reportCurrentOpsForQueryAnalysis(
     OperationContext* opCtx, std::vector<BSONObj>* ops) const {
     if (analyze_shard_key::supportsPersistingSampledQueries(opCtx)) {
-        analyze_shard_key::QueryAnalysisSampleCounters::get(opCtx).reportForCurrentOp(ops);
+        analyze_shard_key::QueryAnalysisSampleTracker::get(opCtx).reportForCurrentOp(ops);
     }
 }
 

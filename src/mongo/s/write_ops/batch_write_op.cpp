@@ -406,12 +406,14 @@ StatusWith<bool> targetWriteOps(OperationContext* opCtx,
             bool isMultiWrite = false;
             BSONObj query;
             BSONObj collation;
+            bool isUpsert = false;
 
             if (writeItem.getOpType() == BatchedCommandRequest::BatchType_Update) {
                 auto updateReq = writeItem.getUpdate();
                 isMultiWrite = updateReq.getMulti();
                 query = updateReq.getQ();
                 collation = updateReq.getCollation().value_or(BSONObj());
+                isUpsert = updateReq.getUpsert();
             } else {
                 auto deleteReq = writeItem.getDelete();
                 isMultiWrite = deleteReq.getMulti();
@@ -420,8 +422,12 @@ StatusWith<bool> targetWriteOps(OperationContext* opCtx,
             }
 
             if (!isMultiWrite &&
-                write_without_shard_key::useTwoPhaseProtocol(
-                    opCtx, targeter.getNS(), true /* isUpdateOrDelete */, query, collation)) {
+                write_without_shard_key::useTwoPhaseProtocol(opCtx,
+                                                             targeter.getNS(),
+                                                             true /* isUpdateOrDelete */,
+                                                             isUpsert,
+                                                             query,
+                                                             collation)) {
 
                 // Writes without shard key should be in their own batch.
                 if (!batchMap.empty()) {
@@ -521,8 +527,10 @@ StatusWith<bool> BatchWriteOp::targetBatch(const NSTargeter& targeter,
     return targetStatus;
 }
 
-BatchedCommandRequest BatchWriteOp::buildBatchRequest(const TargetedWriteBatch& targetedBatch,
-                                                      const NSTargeter& targeter) const {
+BatchedCommandRequest BatchWriteOp::buildBatchRequest(
+    const TargetedWriteBatch& targetedBatch,
+    const NSTargeter& targeter,
+    boost::optional<bool> allowShardKeyUpdatesWithoutFullShardKeyInQuery) const {
     const auto batchType = _clientRequest.getBatchType();
 
     boost::optional<std::vector<int32_t>> stmtIdsForOp;
@@ -550,6 +558,18 @@ BatchedCommandRequest BatchWriteOp::buildBatchRequest(const TargetedWriteBatch& 
                 updates->emplace_back(
                     _clientRequest.getUpdateRequest().getUpdates().at(writeOpRef.first));
                 updates->back().setSampleId(targetedWrite->sampleId);
+
+                // If we are using the two phase write protocol introduced in PM-1632, we allow
+                // shard key updates without specifying the full shard key in the query if we
+                // execute the update in a retryable write/transaction.
+                if (allowShardKeyUpdatesWithoutFullShardKeyInQuery.has_value()) {
+                    uassert(
+                        ErrorCodes::InvalidOptions,
+                        "$_allowShardKeyUpdatesWithoutFullShardKeyInQuery is an internal parameter",
+                        !updates->back().getAllowShardKeyUpdatesWithoutFullShardKeyInQuery());
+                    updates->back().setAllowShardKeyUpdatesWithoutFullShardKeyInQuery(
+                        allowShardKeyUpdatesWithoutFullShardKeyInQuery);
+                }
                 break;
             case BatchedCommandRequest::BatchType_Delete:
                 if (!deletes)

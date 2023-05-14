@@ -54,7 +54,6 @@
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/flush_database_cache_updates_gen.h"
 #include "mongo/s/request_types/sharded_ddl_commands_gen.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -66,7 +65,8 @@ void removeDatabaseFromConfigAndUpdatePlacementHistory(
     OperationContext* opCtx,
     const std::shared_ptr<executor::TaskExecutor>& executor,
     StringData& dbName,
-    const DatabaseVersion& dbVersion) {
+    const DatabaseVersion& dbVersion,
+    const OperationSessionInfo& osi) {
 
     // Run the remove database command on the config server and placemetHistory update in a
     // multistatement transaction
@@ -75,21 +75,6 @@ void removeDatabaseFromConfigAndUpdatePlacementHistory(
     // restore the original write concern on exit).
     IgnoreAPIParametersBlock ignoreApiParametersBlock(opCtx);
 
-    WriteConcernOptions originalWC = opCtx->getWriteConcern();
-    opCtx->setWriteConcern(WriteConcernOptions{WriteConcernOptions::kMajority,
-                                               WriteConcernOptions::SyncMode::UNSET,
-                                               WriteConcernOptions::kNoTimeout});
-
-    ScopeGuard guard([&, dbName = dbName.toString()] {
-        opCtx->setWriteConcern(originalWC);
-        Grid::get(opCtx)->catalogCache()->purgeDatabase(dbName);
-    });
-
-    auto txnClient = std::make_unique<txn_api::details::SEPTransactionClient>(
-        opCtx,
-        executor,
-        std::make_unique<txn_api::details::ClusterSEPTransactionClientBehaviors>(
-            opCtx->getServiceContext()));
     /*
      * The transactionChain callback may be run on a separate thread. For this reason, all the
      * referenced parameters have to be captured by value (shared_ptrs are used to reduce the memory
@@ -109,7 +94,7 @@ void removeDatabaseFromConfigAndUpdatePlacementHistory(
         write_ops::DeleteCommandRequest deleteDatabaseEntry(
             NamespaceString::kConfigDatabasesNamespace, {deleteDatabaseEntryOp});
 
-        return txnClient.runCRUDOp(deleteDatabaseEntry, {})
+        return txnClient.runCRUDOp(deleteDatabaseEntry, {0})
             .thenRunOn(txnExec)
             .then([&](const BatchedCommandResponse& deleteDatabaseEntryResponse) {
                 uassertStatusOKWithContext(
@@ -119,10 +104,7 @@ void removeDatabaseFromConfigAndUpdatePlacementHistory(
 
                 // pre-check to guarantee idempotence: in case of a retry, the placement history
                 // entry may already exist
-                bool isHistoricalPlacementEnabled =
-                    feature_flags::gHistoricalPlacementShardingCatalog.isEnabled(
-                        serverGlobalParams.featureCompatibility);
-                if (!isHistoricalPlacementEnabled || deleteDatabaseEntryResponse.getN() == 0) {
+                if (deleteDatabaseEntryResponse.getN() == 0) {
                     BatchedCommandResponse noOp;
                     noOp.setN(0);
                     noOp.setStatus(Status::OK());
@@ -136,7 +118,7 @@ void removeDatabaseFromConfigAndUpdatePlacementHistory(
 
                 write_ops::InsertCommandRequest insertPlacementEntry(
                     NamespaceString::kConfigsvrPlacementHistoryNamespace, {placementInfo.toBSON()});
-                return txnClient.runCRUDOp(insertPlacementEntry, {});
+                return txnClient.runCRUDOp(insertPlacementEntry, {1});
             })
             .thenRunOn(txnExec)
             .then([](const BatchedCommandResponse& insertPlacementEntryResponse) {
@@ -145,11 +127,14 @@ void removeDatabaseFromConfigAndUpdatePlacementHistory(
             .semi();
     };
 
-    txn_api::SyncTransactionWithRetries txn(
-        opCtx, executor, nullptr /*resourceYielder*/, std::move(txnClient));
-    txn.run(opCtx, transactionChain);
+    auto wc = WriteConcernOptions{WriteConcernOptions::kMajority,
+                                  WriteConcernOptions::SyncMode::UNSET,
+                                  WriteConcernOptions::kNoTimeout};
+    sharding_ddl_util::runTransactionOnShardingCatalog(
+        opCtx, std::move(transactionChain), wc, osi, executor);
 }
 
+// TODO SERVER-73627: Remove once 7.0 becomes last LTS
 class ScopedDatabaseCriticalSection {
 public:
     ScopedDatabaseCriticalSection(OperationContext* opCtx,
@@ -177,6 +162,9 @@ public:
             DatabaseShardingState::assertDbLockedAndAcquireExclusive(_opCtx, databaseName);
         scopedDss->exitCriticalSection(_opCtx, _reason);
     }
+
+    ScopedDatabaseCriticalSection(const ScopedDatabaseCriticalSection&) = delete;
+    ScopedDatabaseCriticalSection(ScopedDatabaseCriticalSection&&) = delete;
 
 private:
     OperationContext* _opCtx;
@@ -241,8 +229,9 @@ void DropDatabaseCoordinator::_dropShardedCollection(
             **executor);
     }
 
+    _updateSession(opCtx);
     sharding_ddl_util::removeCollAndChunksMetadataFromConfig(
-        opCtx, coll, ShardingCatalogClient::kMajorityWriteConcern);
+        opCtx, coll, ShardingCatalogClient::kMajorityWriteConcern, getCurrentSession(), **executor);
 
     _updateSession(opCtx);
     sharding_ddl_util::removeTagsMetadataFromConfig(opCtx, nss, getCurrentSession());
@@ -346,7 +335,7 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
                 // ensure we do not delete collections of a different DB
                 if (!_firstExecution &&
                     isDbAlreadyDropped(opCtx, _doc.getDatabaseVersion(), _dbName)) {
-                    if (!_isPre70Compatible()) {
+                    if (_isPre70Compatible()) {
                         // Clear the database sharding state so that all subsequent write operations
                         // with the old database version will fail due to StaleDbVersion.
                         // Note: because we are using an scoped critical section it could happen
@@ -365,13 +354,13 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
                     LOGV2_DEBUG(5494504,
                                 2,
                                 "Completing collection drop from previous primary",
-                                "namespace"_attr = coll.getNss());
+                                logAttrs(coll.getNss()));
                     _dropShardedCollection(opCtx, coll, executor);
                 }
 
                 for (const auto& coll : allCollectionsForDb) {
                     const auto& nss = coll.getNss();
-                    LOGV2_DEBUG(5494505, 2, "Dropping collection", "namespace"_attr = nss);
+                    LOGV2_DEBUG(5494505, 2, "Dropping collection", logAttrs(nss));
 
                     sharding_ddl_util::stopMigrations(opCtx, nss, coll.getUuid());
 
@@ -414,8 +403,7 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
                             _critSecReason,
                             ShardingCatalogClient::kLocalWriteConcern);
                     } else {
-                        scopedCritSec.emplace(ScopedDatabaseCriticalSection(
-                            opCtx, _dbName.toString(), _critSecReason));
+                        scopedCritSec.emplace(opCtx, _dbName.toString(), _critSecReason);
                     }
 
                     auto dropDatabaseParticipantCmd = ShardsvrDropDatabaseParticipant();
@@ -468,8 +456,13 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
                     _clearDatabaseInfoOnPrimary(opCtx);
                     _clearDatabaseInfoOnSecondaries(opCtx);
 
+                    _updateSession(opCtx);
                     removeDatabaseFromConfigAndUpdatePlacementHistory(
-                        opCtx, **executor, _dbName, *metadata().getDatabaseVersion());
+                        opCtx,
+                        **executor,
+                        _dbName,
+                        *metadata().getDatabaseVersion(),
+                        getCurrentSession());
 
                     VectorClockMutable::get(opCtx)->waitForDurableConfigTime().get(opCtx);
                 }

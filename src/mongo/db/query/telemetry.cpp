@@ -51,10 +51,8 @@
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/debug_util.h"
-#include "mongo/util/md5.hpp"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/system_clock_source.h"
-#include <array>
 #include <optional>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -62,23 +60,6 @@
 namespace mongo {
 
 namespace telemetry {
-
-// This is defined by IDL in the find and aggregate command, but we don't want to pull in those
-// files/libraries here. Instead define here as well.
-static const std::string kTelemetryKeyInShardedCommand = "hashedTelemetryKey";
-
-
-ShardedTelemetryStoreKey telemetryKeyToShardedStoreId(const BSONObj& key, std::string hostAndPort) {
-    md5digest finishedMD5;
-    std::array<unsigned char, 16> md5Bin;
-    md5(key.objdata(), 16, finishedMD5);
-    std::copy(std::begin(finishedMD5), std::end(finishedMD5), std::begin(md5Bin));
-    return ShardedTelemetryStoreKey(hostAndPort, md5Bin);
-}
-
-boost::optional<BSONObj> getTelemetryKeyFromOpCtx(OperationContext* opCtx) {
-    return CurOp::get(opCtx)->debug().telemetryStoreKey;
-}
 
 /**
  * Redacts all BSONObj field names as if they were paths, unless the field name is a special hint
@@ -175,22 +156,15 @@ BSONObj redactHintComponent(BSONObj obj, const SerializationOptions& opts, bool 
             tassert(7421703,
                     "Hinted field must be a string with $hint operator",
                     elem.type() == BSONType::String);
-            if (opts.redactFieldNames) {
-                bob.append(hintSpecialField, FieldPath(elem.String()).redactedFullPath(opts));
-            } else {
-                bob.append(hintSpecialField, elem.String());
-            }
+            bob.append(hintSpecialField, opts.serializeFieldPathFromString(elem.String()));
             continue;
         }
 
-        std::string fieldName = elem.fieldName();
-        if (opts.redactFieldNames) {
-            fieldName = FieldPath(fieldName).redactedFullPath(opts);
-        }
         if (opts.replacementForLiteralArgs && redactValues) {
-            bob.append(fieldName, opts.replacementForLiteralArgs.get());
+            bob.append(opts.serializeFieldPathFromString(elem.fieldName()),
+                       opts.replacementForLiteralArgs.get());
         } else {
-            bob.appendAs(elem, fieldName);
+            bob.appendAs(elem, opts.serializeFieldPathFromString(elem.fieldName()));
         }
     }
     return bob.obj();
@@ -210,7 +184,7 @@ BSONObj redactLetSpec(BSONObj letSpec,
             Expression::parseOperand(expCtx.get(), elem, expCtx->variablesParseState)
                 ->serialize(opts);
         // Note that this will throw on deeply nested let variables.
-        redactedValue.addToBsonObj(&bob, opts.serializeFieldName(elem.fieldName()));
+        redactedValue.addToBsonObj(&bob, opts.serializeFieldPathFromString(elem.fieldName()));
     }
     return bob.obj();
 }
@@ -222,7 +196,7 @@ StatusWith<BSONObj> makeTelemetryKey(const FindCommandRequest& findCommand,
     // TODO: SERVER-75156 Factor query shape out of telemetry. That ticket will involve splitting
     // this function up and moving most of it to another, non-telemetry related header.
 
-    if (!opts.redactFieldNames && !opts.replacementForLiteralArgs) {
+    if (!opts.redactIdentifiers && !opts.replacementForLiteralArgs) {
         // Short circuit if no redaction needs to be done.
         BSONObjBuilder bob;
         findCommand.serialize({}, &bob);
@@ -241,12 +215,12 @@ StatusWith<BSONObj> makeTelemetryKey(const FindCommandRequest& findCommand,
             auto nss = ns.nss().value();
             if (nss.tenantId()) {
                 cmdNs.append("tenantId",
-                             opts.serializeFieldName(nss.tenantId().value().toString()));
+                             opts.serializeIdentifier(nss.tenantId().value().toString()));
             }
-            cmdNs.append("db", opts.serializeFieldName(nss.db()));
-            cmdNs.append("coll", opts.serializeFieldName(nss.coll()));
+            cmdNs.append("db", opts.serializeIdentifier(nss.db()));
+            cmdNs.append("coll", opts.serializeIdentifier(nss.coll()));
         } else {
-            cmdNs.append("uuid", opts.serializeFieldName(ns.uuid()->toString()));
+            cmdNs.append("uuid", opts.serializeIdentifier(ns.uuid()->toString()));
         }
         cmdNs.done();
     }
@@ -256,10 +230,10 @@ StatusWith<BSONObj> makeTelemetryKey(const FindCommandRequest& findCommand,
         auto nssOrUUID = findCommand.getNamespaceOrUUID();
         std::string toSerialize;
         if (nssOrUUID.uuid()) {
-            toSerialize = opts.serializeFieldName(nssOrUUID.toString());
+            toSerialize = opts.serializeIdentifier(nssOrUUID.toString());
         } else {
             // Database is set at the command level, only serialize the collection here.
-            toSerialize = opts.serializeFieldName(nssOrUUID.nss()->coll());
+            toSerialize = opts.serializeIdentifier(nssOrUUID.nss()->coll());
         }
         bob.append(FindCommandRequest::kCommandName, toSerialize);
     }
@@ -298,7 +272,7 @@ StatusWith<BSONObj> makeTelemetryKey(const FindCommandRequest& findCommand,
                                             ProjectionPolicies::findProjectionPolicies());
 
         bob.append(FindCommandRequest::kProjectionFieldName,
-                   projection_ast::serialize(projection, opts));
+                   projection_ast::serialize(*projection.root(), opts));
     }
 
     // Assume the hint is correct and contains field names. It is possible that this hint
@@ -354,39 +328,13 @@ StatusWith<BSONObj> makeTelemetryKey(const FindCommandRequest& findCommand,
         return boost::none;
     }();
     if (appName.has_value()) {
-        bob.append("applicationName", opts.serializeFieldName(appName.value()));
+        bob.append("applicationName", opts.serializeIdentifier(appName.value()));
     }
 
     return bob.obj();
 }
 
-void appendShardedTelemetryKeyIfApplicable(MutableDocument& objToModify,
-                                           std::string hostAndPort,
-                                           OperationContext* opCtx) {
-    if (!isTelemetryEnabled()) {
-        return;
-    }
-    if (auto telemetryKey = getTelemetryKeyFromOpCtx(opCtx)) {
-        objToModify.addField(
-            kTelemetryKeyInShardedCommand,
-            Value(telemetryKeyToShardedStoreId(*telemetryKey, hostAndPort).toBSON()));
-    }
-}
-
-void appendShardedTelemetryKeyIfApplicable(BSONObjBuilder& objToModify,
-                                           std::string hostAndPort,
-                                           OperationContext* opCtx) {
-    if (!isTelemetryEnabled()) {
-        return;
-    }
-    auto telemetryKey = getTelemetryKeyFromOpCtx(opCtx);
-    if (!telemetryKey) {
-        return;
-    }
-    objToModify.append(kTelemetryKeyInShardedCommand,
-                       telemetryKeyToShardedStoreId(*telemetryKey, hostAndPort).toBSON());
-}
-
+CounterMetric telemetryStoreSizeEstimateBytesMetric("telemetry.telemetryStoreSizeEstimateBytes");
 
 namespace {
 
@@ -433,9 +381,9 @@ size_t getTelemetryStoreSize() {
 class TelemetryStoreManager {
 public:
     template <typename... TelemetryStoreArgs>
-    TelemetryStoreManager(TelemetryStoreArgs... args)
-        : _telemetryStore(
-              std::make_unique<TelemetryStore>(std::forward<TelemetryStoreArgs>(args)...)) {}
+    TelemetryStoreManager(size_t cacheSize, size_t numPartitions)
+        : _telemetryStore(std::make_unique<TelemetryStore>(cacheSize, numPartitions)),
+          _maxSize(cacheSize) {}
 
     /**
      * Acquire the instance of the telemetry store.
@@ -444,8 +392,27 @@ public:
         return *_telemetryStore;
     }
 
+    size_t getMaxSize() {
+        return _maxSize;
+    }
+
+    /**
+     * Resize the telemetry store and return the number of evicted
+     * entries.
+     */
+    size_t resetSize(size_t cacheSize) {
+        _maxSize = cacheSize;
+        return _telemetryStore->reset(cacheSize);
+    }
+
 private:
     std::unique_ptr<TelemetryStore> _telemetryStore;
+
+    /**
+     * Max size of the telemetry store. Tracked here to avoid having to recompute after it's divided
+     * up into partitions.
+     */
+    size_t _maxSize;
 };
 
 const auto telemetryStoreDecoration =
@@ -460,9 +427,12 @@ public:
         auto requestedSize = memory_util::convertToSizeInBytes(memSize);
         auto cappedSize = capTelemetryStoreSize(requestedSize);
         auto& telemetryStoreManager = telemetryStoreDecoration(serviceCtx);
-        auto&& telemetryStore = telemetryStoreManager->getTelemetryStore();
-        size_t numEvicted = telemetryStore.reset(cappedSize);
+        size_t numEvicted = telemetryStoreManager->resetSize(cappedSize);
         telemetryEvictedMetric.increment(numEvicted);
+    }
+
+    void updateSamplingRate(ServiceContext* serviceCtx, int samplingRate) {
+        telemetryRateLimiter(serviceCtx).get()->setSamplingRate(samplingRate);
     }
 };
 
@@ -473,7 +443,7 @@ ServiceContext::ConstructorActionRegisterer telemetryStoreManagerRegisterer{
         // changed to a supported version later.
         // TODO SERVER-73907. Move this to run after FCV is initialized. It could be we'd have to
         // re-run this function if FCV changes later during the life of the process.
-        if (!feature_flags::gFeatureFlagTelemetry.isEnabledAndIgnoreFCV()) {
+        if (!feature_flags::gFeatureFlagTelemetry.isEnabledAndIgnoreFCVUnsafeAtStartup()) {
             // featureFlags are not allowed to be changed at runtime. Therefore it's not an issue
             // to not create a telemetry store in ConstructorActionRegisterer at start up with the
             // flag off - because the flag can not be turned on at any point afterwards.
@@ -498,9 +468,23 @@ ServiceContext::ConstructorActionRegisterer telemetryStoreManagerRegisterer{
             }
         }
         globalTelemetryStoreManager = std::make_unique<TelemetryStoreManager>(size, numPartitions);
-        telemetryRateLimiter(serviceCtx) =
-            std::make_unique<RateLimiting>(queryTelemetrySamplingRate.load());
+        auto configuredSamplingRate = queryTelemetrySamplingRate.load();
+        telemetryRateLimiter(serviceCtx) = std::make_unique<RateLimiting>(
+            configuredSamplingRate < 0 ? INT_MAX : configuredSamplingRate);
     }};
+
+/**
+ * Top-level checks for whether telemetry collection is enabled. If this returns false, we must go
+ * no further.
+ */
+bool isTelemetryEnabled(const ServiceContext* serviceCtx) {
+    // During initialization FCV may not yet be setup but queries could be run. We can't
+    // check whether telemetry should be enabled without FCV, so default to not recording
+    // those queries.
+    return serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+        feature_flags::gFeatureFlagTelemetry.isEnabled(serverGlobalParams.featureCompatibility) &&
+        telemetryStoreDecoration(serviceCtx)->getMaxSize() > 0;
+}
 
 /**
  * Internal check for whether we should collect metrics. This checks the rate limiting
@@ -508,7 +492,7 @@ ServiceContext::ConstructorActionRegisterer telemetryStoreManagerRegisterer{
  */
 bool shouldCollect(const ServiceContext* serviceCtx) {
     // Quick escape if telemetry is turned off.
-    if (!isTelemetryEnabled()) {
+    if (!isTelemetryEnabled(serviceCtx)) {
         return false;
     }
     // Cannot collect telemetry if sampling rate is not greater than 0. Note that we do not
@@ -517,7 +501,8 @@ bool shouldCollect(const ServiceContext* serviceCtx) {
         return false;
     }
     // Check if rate limiting allows us to collect telemetry for this request.
-    if (!telemetryRateLimiter(serviceCtx)->handleRequestSlidingWindow()) {
+    if (telemetryRateLimiter(serviceCtx)->getSamplingRate() < INT_MAX &&
+        !telemetryRateLimiter(serviceCtx)->handleRequestSlidingWindow()) {
         telemetryRateLimitedRequestsMetric.increment();
         return false;
     }
@@ -611,13 +596,13 @@ static const StringData replacementForLiteralArgs = "?"_sd;
 }  // namespace
 
 StatusWith<BSONObj> TelemetryMetrics::redactKey(const BSONObj& key,
-                                                bool redactFieldNames,
+                                                bool redactIdentifiers,
                                                 OperationContext* opCtx) const {
     // The redacted key for each entry is cached on first computation. However, if the redaction
     // straegy has flipped (from no redaction to SHA256, vice versa), we just return the key passed
     // to the function, so entries returned to the user match the redaction strategy requested in
     // the most recent telemetry command.
-    if (!redactFieldNames) {
+    if (!redactIdentifiers) {
         return key;
     }
     if (_redactedKey) {
@@ -692,19 +677,6 @@ StatusWith<BSONObj> TelemetryMetrics::redactKey(const BSONObj& key,
     return *_redactedKey;
 }
 
-/**
- * Top-level checks for whether telemetry collection is enabled. If this returns false, we must go
- * no further.
- */
-bool isTelemetryEnabled() {
-    // During initialization FCV may not yet be setup but queries could be run. We can't
-    // check whether telemetry should be enabled without FCV, so default to not recording
-    // those queries.
-    return serverGlobalParams.featureCompatibility.isVersionInitialized() &&
-        feature_flags::gFeatureFlagTelemetry.isEnabled(serverGlobalParams.featureCompatibility) &&
-        getTelemetryStoreSize() != 0;
-}
-
 // The originating command/query does not persist through the end of query execution. In order to
 // pair the telemetry metrics that are collected at the end of execution with the original query, it
 // is necessary to register the original query during planning and persist it after
@@ -720,7 +692,7 @@ bool isTelemetryEnabled() {
 // Once query execution is complete, the telemetry context is grabbed from OpDebug, a telemetry key
 // is generated from this and metrics are paired to this key in the telemetry store.
 void registerAggRequest(const AggregateCommandRequest& request, OperationContext* opCtx) {
-    if (!isTelemetryEnabled()) {
+    if (!isTelemetryEnabled(opCtx->getServiceContext())) {
         return;
     }
 
@@ -732,13 +704,7 @@ void registerAggRequest(const AggregateCommandRequest& request, OperationContext
     if (!shouldCollect(opCtx->getServiceContext())) {
         return;
     }
-    if (auto hashKey = request.getHashedTelemetryKey()) {
-        // The key is in the command request in "telemetryKey".
-        CurOp::get(opCtx)->debug().telemetryStoreKey = hashKey->toBSON();
-        return;
-    }
 
-    // On standalone build the key from the request.
     BSONObjBuilder telemetryKey;
     BSONObjBuilder pipelineBuilder = telemetryKey.subarrayStart("pipeline"_sd);
     try {
@@ -766,7 +732,7 @@ void registerFindRequest(const FindCommandRequest& request,
                          const NamespaceString& collection,
                          OperationContext* opCtx,
                          const boost::intrusive_ptr<ExpressionContext>& expCtx) {
-    if (!isTelemetryEnabled()) {
+    if (!isTelemetryEnabled(opCtx->getServiceContext())) {
         return;
     }
 
@@ -776,12 +742,6 @@ void registerFindRequest(const FindCommandRequest& request,
     }
 
     if (!shouldCollect(opCtx->getServiceContext())) {
-        return;
-    }
-
-    if (auto hashKey = request.getHashedTelemetryKey()) {
-        // The key is in the command request in "hashedTelemetryKey".
-        CurOp::get(opCtx)->debug().telemetryStoreKey = hashKey->toBSON();
         return;
     }
 
@@ -801,7 +761,7 @@ TelemetryStore& getTelemetryStore(OperationContext* opCtx) {
     uassert(6579000,
             "Telemetry is not enabled without the feature flag on and a cache size greater than 0 "
             "bytes",
-            isTelemetryEnabled());
+            isTelemetryEnabled(opCtx->getServiceContext()));
     return telemetryStoreDecoration(opCtx->getServiceContext())->getTelemetryStore();
 }
 
@@ -815,21 +775,22 @@ void writeTelemetry(OperationContext* opCtx,
     }
     auto&& telemetryStore = getTelemetryStore(opCtx);
     auto&& [statusWithMetrics, partitionLock] = telemetryStore.getWithPartitionLock(*telemetryKey);
-    TelemetryMetrics* metrics;
+    std::shared_ptr<TelemetryMetrics> metrics;
     if (statusWithMetrics.isOK()) {
-        metrics = statusWithMetrics.getValue();
+        metrics = *statusWithMetrics.getValue();
     } else {
-        size_t numEvicted = telemetryStore.put(
-            *telemetryKey,
-            TelemetryMetrics(cmdObj, getApplicationName(opCtx), CurOp::get(opCtx)->getNSS()),
-            partitionLock);
+        size_t numEvicted =
+            telemetryStore.put(*telemetryKey,
+                               std::make_shared<TelemetryMetrics>(
+                                   cmdObj, getApplicationName(opCtx), CurOp::get(opCtx)->getNSS()),
+                               partitionLock);
         telemetryEvictedMetric.increment(numEvicted);
         auto newMetrics = partitionLock->get(*telemetryKey);
         // This can happen if the budget is immediately exceeded. Specifically if the there is
         // not enough room for a single new entry if the number of partitions is too high
         // relative to the size.
         tassert(7064700, "Should find telemetry store entry", newMetrics.isOK());
-        metrics = &newMetrics.getValue()->second;
+        metrics = newMetrics.getValue()->second;
     }
 
     metrics->lastExecutionMicros = queryExecMicros;

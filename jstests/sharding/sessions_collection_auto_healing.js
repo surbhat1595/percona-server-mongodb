@@ -1,7 +1,9 @@
 /**
  * Requires no shards.
  * @tags: [
+ *   requires_fcv_70,
  *   catalog_shard_incompatible,
+ *   requires_fcv_70,
  * ]
  */
 load('jstests/libs/sessions_collection.js');
@@ -16,7 +18,13 @@ load("jstests/libs/collection_drop_recreate.js");  // For assert[Drop|Create]Col
 // implicit sessions.
 TestData.disableImplicitSessions = true;
 
-var st = new ShardingTest({shards: 0});
+var st = new ShardingTest({
+    shards: 0,
+    other: {
+        mongosOptions:
+            {setParameter: {'failpoint.skipClusterParameterRefresh': "{'mode':'alwaysOn'}"}}
+    }
+});
 var configSvr = st.configRS.getPrimary();
 
 var mongos = st.s;
@@ -122,11 +130,8 @@ var shardConfig = shard.getDB("config");
 
     validateSessionsCollection(shard, true, true);
 
-    // TODO SERVER-69106 adapt the test assuming that the flag will be always enabled.
-    const historicalPlacementDataFeatureFlag = FeatureFlagUtil.isEnabled(
-        st.configRS.getPrimary().getDB('admin'), "HistoricalPlacementShardingCatalog");
     const sessionsOpenedByAddShardCmd = 1;
-    const sessionsOpenedByShardCollectionCmd = historicalPlacementDataFeatureFlag ? 3 : 2;
+    const sessionsOpenedByShardCollectionCmd = 2;
     const sessionsOpenedByDDLOps = sessionsOpenedByAddShardCmd + sessionsOpenedByShardCollectionCmd;
 
     // We will have sessionsOpenedByDDLOps sessions because of the sessions used in the

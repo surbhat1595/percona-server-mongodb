@@ -50,6 +50,7 @@
 #include "mongo/db/pipeline/expression_visitor.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/monotonic_expression.h"
+#include "mongo/db/pipeline/percentile_algo_discrete.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/query/datetime/date_time_support.h"
@@ -111,18 +112,18 @@ class DocumentSource;
  * parser and enforce the 'sometimes' behavior during that invocation. No extra validation will be
  * done here.
  */
-#define REGISTER_EXPRESSION_WITH_FEATURE_FLAG(                                               \
-    key, parser, allowedWithApiStrict, allowedClientType, featureFlag)                       \
-    MONGO_INITIALIZER_GENERAL(addToExpressionParserMap_##key,                                \
-                              ("BeginExpressionRegistration"),                               \
-                              ("EndExpressionRegistration"))                                 \
-    (InitializerContext*) {                                                                  \
-        if (boost::optional<FeatureFlag>(featureFlag) != boost::none &&                      \
-            !boost::optional<FeatureFlag>(featureFlag)->isEnabledAndIgnoreFCV()) {           \
-            return;                                                                          \
-        }                                                                                    \
-        Expression::registerExpression(                                                      \
-            "$" #key, (parser), (allowedWithApiStrict), (allowedClientType), (featureFlag)); \
+#define REGISTER_EXPRESSION_WITH_FEATURE_FLAG(                                                    \
+    key, parser, allowedWithApiStrict, allowedClientType, featureFlag)                            \
+    MONGO_INITIALIZER_GENERAL(addToExpressionParserMap_##key,                                     \
+                              ("BeginExpressionRegistration"),                                    \
+                              ("EndExpressionRegistration"))                                      \
+    (InitializerContext*) {                                                                       \
+        if (boost::optional<FeatureFlag>(featureFlag) != boost::none &&                           \
+            !boost::optional<FeatureFlag>(featureFlag)->isEnabledAndIgnoreFCVUnsafeAtStartup()) { \
+            return;                                                                               \
+        }                                                                                         \
+        Expression::registerExpression(                                                           \
+            "$" #key, (parser), (allowedWithApiStrict), (allowedClientType), (featureFlag));      \
     }
 
 /**
@@ -160,7 +161,8 @@ class DocumentSource;
     (InitializerContext*) {                                                                  \
         if (!__VA_ARGS__ ||                                                                  \
             (boost::optional<FeatureFlag>(featureFlag) != boost::none &&                     \
-             !boost::optional<FeatureFlag>(featureFlag)->isEnabledAndIgnoreFCV())) {         \
+             !boost::optional<FeatureFlag>(featureFlag)                                      \
+                  ->isEnabledAndIgnoreFCVUnsafeAtStartup())) {                               \
             return;                                                                          \
         }                                                                                    \
         Expression::registerExpression(                                                      \
@@ -602,8 +604,8 @@ public:
     explicit ExpressionFromAccumulatorQuantile(ExpressionContext* const expCtx,
                                                std::vector<double>& ps,
                                                boost::intrusive_ptr<Expression> input,
-                                               int32_t algo)
-        : Expression(expCtx, {input}), _ps(ps), _input(input), _algo(algo) {
+                                               int32_t method)
+        : Expression(expCtx, {input}), _ps(ps), _input(input), _method(method) {
         expCtx->sbeCompatibility = SbeCompatibility::notCompatible;
     }
 
@@ -613,28 +615,49 @@ public:
 
     Value serialize(SerializationOptions options) const final {
         MutableDocument md;
-        TAccumulator::serializeHelper(_input, options, _ps, _algo, md);
+        TAccumulator::serializeHelper(_input, options, _ps, _method, md);
         return Value(DOC(getOpName() << md.freeze()));
     }
 
     Value evaluate(const Document& root, Variables* variables) const final {
-        // TODO SERVER-75144: investigate performance for this implementation
-        TAccumulator accum(this->getExpressionContext(), _ps, _algo);
-
-        // Verify that '_input' produces an array and pass each element to 'process'.
         auto input = _input->evaluate(root, variables);
+        if (input.numeric()) {
+            // On a scalar value, all percentiles are the same for all methods.
+            return TAccumulator::formatFinalValue(
+                _ps.size(), std::vector<double>(_ps.size(), input.coerceToDouble()));
+        }
+
         if (input.isArray()) {
             uassert(7436202,
                     "Input to $percentile or $median cannot be an empty array.",
                     input.getArray().size() > 0);
-            for (const auto& item : input.getArray()) {
-                accum.process(item, false /* merging */);
+
+            if (_method != 2 /*continuous*/) {
+                std::vector<double> samples;
+                samples.reserve(input.getArrayLength());
+                for (const auto& item : input.getArray()) {
+                    if (item.numeric()) {
+                        samples.push_back(item.coerceToDouble());
+                    }
+                }
+                DiscretePercentile dp;
+                dp.incorporate(samples);
+                return TAccumulator::formatFinalValue(_ps.size(), dp.computePercentiles(_ps));
+            } else {
+                // Delegate to the accumulator. Note: it would be more efficient to use the
+                // percentile algorithms directly rather than an accumulator, as it would reduce
+                // heap alloc, virtual calls and avoid unnecessary for expressions memory tracking.
+                // However, on large datasets these overheads are less noticeable.
+                TAccumulator accum(this->getExpressionContext(), _ps, _method);
+                for (const auto& item : input.getArray()) {
+                    accum.process(item, false /* merging */);
+                }
+                return accum.getValue(false /* toBeMerged */);
             }
-        } else {
-            accum.process(input, false /* merging */);
         }
 
-        return accum.getValue(false /* toBeMerged */);
+        // No numeric values have been found for the expression to process.
+        return TAccumulator::formatFinalValue(_ps.size(), {});
     }
 
     void acceptVisitor(ExpressionMutableVisitor* visitor) final {
@@ -649,7 +672,8 @@ public:
 private:
     std::vector<double> _ps;
     boost::intrusive_ptr<Expression> _input;
-    int32_t _algo;
+    // TODO SERVER-74894: This should be 'PercentileMethodEnum', not 'int32_t'.
+    int32_t _method;
 };
 
 /**
@@ -1207,7 +1231,8 @@ class ExpressionObjectToArray final : public ExpressionFixedArity<ExpressionObje
 public:
     explicit ExpressionObjectToArray(ExpressionContext* const expCtx)
         : ExpressionFixedArity<ExpressionObjectToArray, 1>(expCtx) {
-        expCtx->sbeCompatibility = SbeCompatibility::notCompatible;
+        expCtx->sbeCompatibility =
+            std::min(expCtx->sbeCompatibility, SbeCompatibility::flagGuarded);
     }
 
     Value evaluate(const Document& root, Variables* variables) const final;
@@ -1226,7 +1251,8 @@ class ExpressionArrayToObject final : public ExpressionFixedArity<ExpressionArra
 public:
     explicit ExpressionArrayToObject(ExpressionContext* const expCtx)
         : ExpressionFixedArity<ExpressionArrayToObject, 1>(expCtx) {
-        expCtx->sbeCompatibility = SbeCompatibility::notCompatible;
+        expCtx->sbeCompatibility =
+            std::min(expCtx->sbeCompatibility, SbeCompatibility::flagGuarded);
     }
 
     ExpressionArrayToObject(ExpressionContext* const expCtx, ExpressionVector&& children)
@@ -2354,13 +2380,6 @@ public:
 
 class ExpressionInternalFLEEqual final : public Expression {
 public:
-    // TODO: SERVER-73303 delete constructor when v2 is enabled by default
-    ExpressionInternalFLEEqual(ExpressionContext* expCtx,
-                               boost::intrusive_ptr<Expression> field,
-                               ConstDataRange serverToken,
-                               int64_t contentionFactor,
-                               ConstDataRange edcToken);
-
     ExpressionInternalFLEEqual(ExpressionContext* expCtx,
                                boost::intrusive_ptr<Expression> field,
                                ServerZerosEncryptionToken zerosToken);
@@ -2383,19 +2402,11 @@ public:
     }
 
 private:
-    EncryptedPredicateEvaluator _evaluator;
     EncryptedPredicateEvaluatorV2 _evaluatorV2;
 };
 
 class ExpressionInternalFLEBetween final : public Expression {
 public:
-    // TODO: SERVER-73303 delete constructor when v2 is enabled by default
-    ExpressionInternalFLEBetween(ExpressionContext* expCtx,
-                                 boost::intrusive_ptr<Expression> field,
-                                 ConstDataRange serverToken,
-                                 int64_t contentionFactor,
-                                 std::vector<ConstDataRange> edcTokens);
-
     ExpressionInternalFLEBetween(ExpressionContext* expCtx,
                                  boost::intrusive_ptr<Expression> field,
                                  std::vector<ServerZerosEncryptionToken> serverTokens);
@@ -2418,7 +2429,6 @@ public:
     }
 
 private:
-    EncryptedPredicateEvaluator _evaluator;
     EncryptedPredicateEvaluatorV2 _evaluatorV2;
 };
 

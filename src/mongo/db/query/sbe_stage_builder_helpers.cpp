@@ -478,7 +478,7 @@ EvalStage makeUnion(std::vector<EvalStage> inputStages,
 
 EvalStage makeHashAgg(EvalStage stage,
                       sbe::value::SlotVector gbs,
-                      sbe::SlotExprPairVector aggs,
+                      sbe::HashAggStage::AggExprVector aggs,
                       boost::optional<sbe::value::SlotId> collatorSlot,
                       bool allowDiskUse,
                       sbe::SlotExprPairVector mergingExprs,
@@ -718,7 +718,7 @@ void indexKeyCorruptionCheckCallback(OperationContext* opCtx,
                 "Erroneous index key found with reference to non-existent record id. Consider "
                 "dropping and then re-creating the index and then running the validate command "
                 "on the collection.",
-                "namespace"_attr = nss,
+                logAttrs(nss),
                 "recordId"_attr = rid,
                 "indexKeyData"_attr = hydratedKey);
         }
@@ -1043,7 +1043,7 @@ public:
             if (auto child = node->findChild(part)) {
                 node = child;
             } else {
-                node = node->emplace(part);
+                node = node->emplace_back(std::string(part));
             }
         }
     }

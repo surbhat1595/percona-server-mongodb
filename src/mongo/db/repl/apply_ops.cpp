@@ -254,9 +254,14 @@ Status applyOps(OperationContext* opCtx,
 
     if (userInitiatedWritesAndNotPrimary)
         return Status(ErrorCodes::NotWritablePrimary,
-                      str::stream() << "Not primary while applying ops to database " << dbName);
+                      str::stream() << "Not primary while applying ops to database "
+                                    << dbName.toStringForErrorMsg());
 
-    LOGV2_DEBUG(5854600, 2, "applyOps command", logAttrs(dbName), "cmd"_attr = redact(applyOpCmd));
+    LOGV2_DEBUG(5854600,
+                2,
+                "applyOps command",
+                "dbName"_attr = redact(toStringForLogging(dbName)),
+                "cmd"_attr = redact(applyOpCmd));
 
     auto hasDropDatabase = std::any_of(
         info.getOperations().begin(), info.getOperations().end(), [](const BSONObj& op) {

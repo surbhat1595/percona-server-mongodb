@@ -185,11 +185,6 @@ public:
     // database.
     static constexpr StringData kGlobalIndexCollectionPrefix = "globalIndex."_sd;
 
-    // Prefix for the temporary collection used by an analyzeShardKey command to store the split
-    // points for the shard key being analyzed.
-    static constexpr StringData kAnalyzeShardKeySplitPointsCollectionPrefix =
-        "analyzeShardKey.splitPoints."_sd;
-
 
     // Maintainers Note: The large set of `NamespaceString`-typed static data
     // members of the `NamespaceString` class representing system-reserved
@@ -351,6 +346,11 @@ public:
     static NamespaceString makeMovePrimaryOplogBufferNSS(const UUID& migrationId);
 
     /**
+     * Constructs the NamesapceString to store the collections to clone by the movePrimary op.
+     */
+    static NamespaceString makeMovePrimaryCollectionsToCloneNSS(const UUID& migrationId);
+
+    /**
      * Constructs the oplog buffer NamespaceString for the given UUID and donor shardId.
      */
     static NamespaceString makeReshardingLocalOplogBufferNSS(const UUID& existingUUID,
@@ -429,6 +429,27 @@ public:
             return str::stream() << *tenantId << '_' << ns();
 
         return ns();
+    }
+
+    /**
+     * This function should only be used when logging a NamespaceString in an error message.
+     */
+    std::string toStringForErrorMsg() const {
+        if (auto tenantId = _dbName.tenantId())
+            return str::stream() << *tenantId << '_' << ns();
+
+        return ns();
+    }
+
+    /**
+     * Method to be used only when logging a NamespaceString in a log message.
+     * It is called anytime a NamespaceString is logged by logAttrs or otherwise.
+     */
+    friend std::string toStringForLogging(const NamespaceString& nss) {
+        if (auto tenantId = nss.tenantId())
+            return str::stream() << *tenantId << '_' << nss.ns();
+
+        return nss.ns();
     }
 
     size_t size() const {

@@ -73,42 +73,42 @@ public:
         return AllowedOnSecondary::kNever;
     }
 
+    std::set<StringData> sensitiveFieldNames() const final {
+        return {CompactStructuredEncryptionData::kCompactionTokensFieldName};
+    }
+
     class Invocation final : public InvocationBase {
     public:
         using InvocationBase::InvocationBase;
 
         Reply typedRun(OperationContext* opCtx) {
-            bool usePreview = !gFeatureFlagFLE2ProtocolVersion2.isEnabled(
-                serverGlobalParams.featureCompatibility);
+
+            CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
 
             auto compactCoordinator =
-                [&]() -> std::shared_ptr<CompactStructuredEncryptionDataCoordinator> {
+                [&]() -> std::shared_ptr<ShardingDDLCoordinatorService::Instance> {
                 FixedFCVRegion fixedFcvRegion(opCtx);
 
+                // TODO: SERVER-68373 Remove once 7.0 becomes last LTS
+                uassert(7330300,
+                        "The preview version of compactStructuredEncryptionData is no longer "
+                        "supported in this binary version",
+                        gFeatureFlagFLE2CompactForProtocolV2.isEnabled(
+                            serverGlobalParams.featureCompatibility));
+
+
                 auto compact = makeRequest(opCtx);
-                if (!compact) {
-                    return nullptr;
-                }
-                return checked_pointer_cast<CompactStructuredEncryptionDataCoordinator>(
-                    ShardingDDLCoordinatorService::getService(opCtx)->getOrCreateInstance(
-                        opCtx, compact->toBSON()));
+                return ShardingDDLCoordinatorService::getService(opCtx)->getOrCreateInstance(
+                    opCtx, compact.toBSON());
             }();
 
-            if (!compactCoordinator) {
-                // Nothing to do.
-                LOGV2(6548305, "Skipping compaction as there is no ECOC collection to compact");
-                CompactStats stats({}, {});
-                if (usePreview) {
-                    stats.setEcc(ECStats{});
-                }
-                return stats;
-            }
-
-            return compactCoordinator->getResponse(opCtx);
+            return checked_pointer_cast<CompactStructuredEncryptionDataCoordinator>(
+                       compactCoordinator)
+                ->getResponse(opCtx);
         }
 
     private:
-        boost::optional<CompactStructuredEncryptionDataState> makeRequest(OperationContext* opCtx) {
+        CompactStructuredEncryptionDataState makeRequest(OperationContext* opCtx) {
             const auto& req = request();
             const auto& nss = req.getNamespace();
 
@@ -126,19 +126,7 @@ public:
             AutoGetCollection ecocColl(opCtx, namespaces.ecocNss, MODE_IX);
             AutoGetCollection ecocTempColl(opCtx, namespaces.ecocRenameNss, MODE_IX);
 
-            if (!ecocColl.getCollection() && !ecocTempColl.getCollection()) {
-                return boost::none;
-            }
-
             CompactStructuredEncryptionDataState compact;
-            auto coordinatorType = DDLCoordinatorTypeEnum::kCompactStructuredEncryptionData;
-
-            if (!gFeatureFlagUseNewCompactStructuredEncryptionDataCoordinator.isEnabled(
-                    serverGlobalParams.featureCompatibility)) {
-                // TODO SERVER-68373 remove once 7.0 becomes last LTS
-                coordinatorType =
-                    DDLCoordinatorTypeEnum::kCompactStructuredEncryptionDataPre61Compatible;
-            }
 
             if (ecocColl.getCollection()) {
                 compact.setEcocUuid(ecocColl->uuid());
@@ -147,9 +135,9 @@ public:
                 compact.setEcocRenameUuid(ecocTempColl->uuid());
             }
 
-            compact.setShardingDDLCoordinatorMetadata({{nss, coordinatorType}});
+            compact.setShardingDDLCoordinatorMetadata(
+                {{nss, DDLCoordinatorTypeEnum::kCompactStructuredEncryptionData}});
             compact.setEscNss(namespaces.escNss);
-            compact.setEccNss(namespaces.eccNss);
             compact.setEcocNss(namespaces.ecocNss);
             compact.setEcocRenameNss(namespaces.ecocRenameNss);
             compact.setCompactionTokens(req.getCompactionTokens().getOwned());

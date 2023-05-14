@@ -38,6 +38,7 @@
 
 namespace mongo {
 
+class MovePrimaryDonor;
 struct MovePrimaryDonorDependencies;
 
 class MovePrimaryDonorService : public repl::PrimaryOnlyService {
@@ -58,6 +59,8 @@ public:
         const std::vector<const Instance*>& existingInstances) override;
 
     std::shared_ptr<PrimaryOnlyService::Instance> constructInstance(BSONObj initialState) override;
+
+    std::vector<std::shared_ptr<MovePrimaryDonor>> getAllDonorInstances(OperationContext* opCtx);
 
 protected:
     virtual MovePrimaryDonorDependencies _makeDependencies(
@@ -219,6 +222,13 @@ struct MovePrimaryDonorDependencies {
 
 class MovePrimaryDonor : public repl::PrimaryOnlyService::TypedInstance<MovePrimaryDonor> {
 public:
+    static std::shared_ptr<MovePrimaryDonor> get(OperationContext* opCtx,
+                                                 const DatabaseName& dbName,
+                                                 const ShardId& toShard);
+    static std::shared_ptr<MovePrimaryDonor> create(OperationContext* opCtx,
+                                                    const DatabaseName& dbName,
+                                                    const ShardId& toShard);
+
     MovePrimaryDonor(ServiceContext* serviceContext,
                      MovePrimaryDonorService* donorService,
                      MovePrimaryDonorDocument initialState,
@@ -249,6 +259,10 @@ public:
     SharedSemiFuture<void> getCompletionFuture() const;
 
 private:
+    static bool _matchesArguments(const std::shared_ptr<MovePrimaryDonor>& instance,
+                                  const DatabaseName& dbName,
+                                  const ShardId& toShard);
+
     MovePrimaryDonorStateEnum _getCurrentState() const;
     MovePrimaryDonorMutableFields _getMutableFields() const;
     bool _isAborted(WithLock) const;
@@ -272,6 +286,7 @@ private:
     ExecutorFuture<void> _waitForForgetThenDoCleanup();
     ExecutorFuture<void> _doCleanup();
     ExecutorFuture<void> _doAbortIfRequired();
+    ExecutorFuture<void> _ensureAbortReasonSetInStateDocument();
     ExecutorFuture<void> _doAbort();
     ExecutorFuture<void> _doForget();
     bool _allowedToAbortDuringStateTransition(MovePrimaryDonorStateEnum newState) const;
@@ -291,6 +306,7 @@ private:
     MovePrimaryDonorService* const _donorService;
     const MovePrimaryCommonMetadata _metadata;
 
+    boost::optional<Status> _abortReason;
     MovePrimaryDonorMutableFields _mutableFields;
     std::unique_ptr<MovePrimaryMetrics> _metrics;
 

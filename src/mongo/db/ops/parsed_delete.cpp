@@ -45,6 +45,7 @@
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/db/timeseries/timeseries_update_delete_util.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
@@ -107,27 +108,38 @@ Status ParsedDelete::splitOutBucketMatchExpression(const ExtensionsCallback& ext
     auto& details = _timeseriesDeleteDetails;
     const auto& timeseriesOptions = details->_timeseriesOptions;
 
-    auto swMatchExpr =
-        MatchExpressionParser::parse(_request->getQuery(),
-                                     _expCtx,
-                                     extensionsCallback,
-                                     MatchExpressionParser::kAllowAllSpecialFeatures);
+    auto parseDeleteQuery = [&](const BSONObj deleteQuery) {
+        return MatchExpressionParser::parse(deleteQuery,
+                                            _expCtx,
+                                            extensionsCallback,
+                                            MatchExpressionParser::kAllowAllSpecialFeatures);
+    };
+
+    auto swMatchExpr = parseDeleteQuery(_request->getQuery());
     if (!swMatchExpr.isOK()) {
         return swMatchExpr.getStatus();
     }
 
     if (auto optMetaField = timeseriesOptions.getMetaField()) {
         auto metaField = optMetaField->toString();
-        std::tie(details->_bucketMatchExpr, details->_residualExpr) =
-            expression::splitMatchExpressionBy(
-                swMatchExpr.getValue()->clone(),
-                {metaField},
-                {{metaField, timeseries::kBucketMetaFieldName.toString()}},
-                expression::isOnlyDependentOn);
+        std::tie(details->_bucketExpr, details->_residualExpr) = expression::splitMatchExpressionBy(
+            std::move(swMatchExpr.getValue()),
+            {metaField},
+            {{metaField, timeseries::kBucketMetaFieldName.toString()}},
+            expression::isOnlyDependentOn);
+        details->_bucketExpr =
+            timeseries::getBucketLevelPredicateForWrites(std::move(details->_bucketExpr));
+    } else if (_request->getMulti() && _request->getQuery().isEmpty()) {
+        // Special optimization: if the delete query for multi delete is empty, we don't set
+        // the residual filter. Otherwise, the non-null empty residual filter leads to the TS_MODIFY
+        // plan which is ineffective since it would unpack every bucket. Instead, we set the bucket
+        // filter to be one on "control.closed" so that we don't delete closed buckets.
+        details->_bucketExpr = timeseries::getBucketLevelPredicateForWrites();
     } else {
         // The '_residualExpr' becomes the same as the original query predicate because nothing is
         // to be split out if there is no meta field in the timeseries collection.
-        details->_residualExpr = swMatchExpr.getValue()->clone();
+        details->_residualExpr = std::move(swMatchExpr.getValue());
+        details->_bucketExpr = timeseries::getBucketLevelPredicateForWrites();
     }
 
     return Status::OK();
@@ -152,9 +164,8 @@ Status ParsedDelete::parseQueryToCQ() {
     auto findCommand = std::make_unique<FindCommandRequest>(_request->getNsString());
     if (_timeseriesDeleteDetails) {
         // Only sets the filter if the query predicate has bucket match components.
-        if (_timeseriesDeleteDetails->_bucketMatchExpr) {
-            findCommand->setFilter(
-                _timeseriesDeleteDetails->_bucketMatchExpr->serialize().getOwned());
+        if (_timeseriesDeleteDetails->_bucketExpr) {
+            findCommand->setFilter(_timeseriesDeleteDetails->_bucketExpr->serialize().getOwned());
         }
     } else {
         findCommand->setFilter(_request->getQuery().getOwned());

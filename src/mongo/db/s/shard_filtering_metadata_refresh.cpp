@@ -178,6 +178,11 @@ SharedSemiFuture<void> recoverRefreshDbVersion(OperationContext* opCtx,
                serviceCtx = opCtx->getServiceContext(),
                forwardableOpMetadata = ForwardableOperationMetadata(opCtx)] {
             ThreadClient tc("DbMetadataRefreshThread", serviceCtx);
+            {
+                stdx::lock_guard<Client> lk(*tc.get());
+                tc->setSystemOperationKillableByStepdown(lk);
+            }
+
             const auto opCtxHolder =
                 CancelableOperationContext(tc->makeOperationContext(), cancellationToken, executor);
             auto opCtx = opCtxHolder.get();
@@ -192,7 +197,8 @@ SharedSemiFuture<void> recoverRefreshDbVersion(OperationContext* opCtx,
         })
         .onCompletion([=](Status status) {
             uassert(ErrorCodes::DatabaseMetadataRefreshCanceled,
-                    str::stream() << "Canceled metadata refresh for database " << dbName,
+                    str::stream() << "Canceled metadata refresh for database "
+                                  << dbName.toStringForErrorMsg(),
                     !cancellationToken.isCanceled());
 
             if (status.isOK() || status == ErrorCodes::NamespaceNotFound) {
@@ -359,6 +365,11 @@ SharedSemiFuture<void> recoverRefreshCollectionPlacementVersion(
     return ExecutorFuture<void>(executor)
         .then([=] {
             ThreadClient tc("RecoverRefreshThread", serviceContext);
+            {
+                stdx::lock_guard<Client> lk(*tc.get());
+                tc->setSystemOperationKillableByStepdown(lk);
+            }
+
             if (MONGO_unlikely(hangInRecoverRefreshThread.shouldFail())) {
                 hangInRecoverRefreshThread.pauseWhileSet();
             }
@@ -476,7 +487,7 @@ void onCollectionPlacementVersionMismatch(OperationContext* opCtx,
                 "Metadata refresh requested for {namespace} at chunk version "
                 "{chunkVersionReceived}",
                 "Metadata refresh requested for collection",
-                "namespace"_attr = nss,
+                logAttrs(nss),
                 "chunkVersionReceived"_attr = chunkVersionReceived);
 
     while (true) {
@@ -553,7 +564,7 @@ Status onCollectionPlacementVersionMismatchNoExcept(
         LOGV2(22062,
               "Failed to refresh metadata for {namespace} due to {error}",
               "Failed to refresh metadata for collection",
-              "namespace"_attr = nss,
+              logAttrs(nss),
               "error"_attr = redact(ex));
         return ex.toStatus();
     }
@@ -584,7 +595,7 @@ CollectionMetadata forceGetCurrentMetadata(OperationContext* opCtx, const Namesp
         LOGV2(505070,
               "Namespace {namespace} not found, collection may have been dropped",
               "Namespace not found, collection may have been dropped",
-              "namespace"_attr = nss,
+              logAttrs(nss),
               "error"_attr = redact(ex));
         return CollectionMetadata();
     }
@@ -635,7 +646,7 @@ ChunkVersion forceShardFilteringMetadataRefresh(OperationContext* opCtx,
                 LOGV2_DEBUG(22063,
                             1,
                             "Skipping metadata refresh because collection already is up-to-date",
-                            "namespace"_attr = nss,
+                            logAttrs(nss),
                             "latestCollectionPlacementVersion"_attr =
                                 metadata.getCollPlacementVersion(),
                             "refreshedCollectionPlacementVersion"_attr = cm.getVersion());
@@ -660,7 +671,7 @@ ChunkVersion forceShardFilteringMetadataRefresh(OperationContext* opCtx,
             LOGV2_DEBUG(22064,
                         1,
                         "Skipping metadata refresh because collection already is up-to-date",
-                        "namespace"_attr = nss,
+                        logAttrs(nss),
                         "latestCollectionPlacementVersion"_attr =
                             metadata.getCollPlacementVersion(),
                         "refreshedCollectionPlacementVersion"_attr = cm.getVersion());

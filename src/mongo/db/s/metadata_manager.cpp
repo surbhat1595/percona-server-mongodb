@@ -183,7 +183,7 @@ void MetadataManager::setFilteringMetadata(CollectionMetadata remoteMetadata) {
                     "collection placement version",
                     "Ignoring incoming metadata update for this namespace because the active "
                     "(current) metadata has the same or a newer collection placement version",
-                    "namespace"_attr = _nss.ns(),
+                    logAttrs(_nss),
                     "activeMetadata"_attr = activeMetadata.toStringBasic(),
                     "remoteMetadata"_attr = remoteMetadata.toStringBasic());
         return;
@@ -194,7 +194,7 @@ void MetadataManager::setFilteringMetadata(CollectionMetadata remoteMetadata) {
           "{remoteMetadata} has a newer collection placement version",
           "Updating metadata for this namespace because the remote metadata has a newer "
           "collection placement version",
-          "namespace"_attr = _nss.ns(),
+          logAttrs(_nss),
           "activeMetadata"_attr = activeMetadata.toStringBasic(),
           "remoteMetadata"_attr = remoteMetadata.toStringBasic());
 
@@ -275,7 +275,7 @@ SharedSemiFuture<void> MetadataManager::cleanUpRange(ChunkRange const& range,
                       "dependent queries finish",
                       "Deletion of the collection's specified range will be scheduled after all "
                       "possibly dependent queries finish",
-                      "namespace"_attr = _nss.ns(),
+                      logAttrs(_nss),
                       "range"_attr = redact(range.toString()));
         ++overlapMetadata->numContingentRangeDeletionTasks;
         // Schedule the range for deletion once the overlapping metadata object is destroyed
@@ -291,7 +291,7 @@ SharedSemiFuture<void> MetadataManager::cleanUpRange(ChunkRange const& range,
                       {logv2::LogComponent::kShardingMigration},
                       "Scheduling deletion of {namespace} range {range}",
                       "Scheduling deletion of the collection's specified range",
-                      "namespace"_attr = _nss.ns(),
+                      logAttrs(_nss),
                       "range"_attr = redact(range.toString()));
 
         return _submitRangeForDeletion(
@@ -373,7 +373,9 @@ SharedSemiFuture<void> MetadataManager::_submitRangeForDeletion(
     auto cleanupComplete = [&]() {
         const auto collUUID = _metadata.back()->metadata->getChunkManager()->getUUID();
 
-        if (feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCV()) {
+        // (Ignore FCV check): This feature doesn't have any upgrade/downgrade concerns. The feature
+        // flag is used to turn on new range deleter on startup.
+        if (feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCVUnsafe()) {
             return RangeDeleterService::get(_serviceContext)
                 ->getOverlappingRangeDeletionsFuture(collUUID, range);
         }

@@ -27,27 +27,21 @@
  *    it in the license file.
  */
 
-
-#include "mongo/platform/basic.h"
-
 #include "mongo/s/query/cluster_find.h"
 
 #include <fmt/format.h>
 
-#include <memory>
 #include <set>
 #include <vector>
 
 #include "mongo/base/status_with.h"
 #include "mongo/bson/util/bson_extract.h"
-#include "mongo/client/connpool.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/collection_uuid_mismatch_info.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_failpoint_helpers.h"
-#include "mongo/db/fle_crud.h"
 #include "mongo/db/pipeline/change_stream_invalidation_info.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/canonical_query_encoder.h"
@@ -74,14 +68,11 @@
 #include "mongo/s/stale_exception.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/util/fail_point.h"
-#include "mongo/util/net/socket_utils.h"
 #include "mongo/util/scopeguard.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
-
 namespace mongo {
-
 namespace {
 
 using namespace fmt::literals;
@@ -207,8 +198,6 @@ std::vector<std::pair<ShardId, BSONObj>> constructRequestsForShards(
             analyze_shard_key::appendSampleId(&cmdBuilder, *sampleId);
         }
 
-        telemetry::appendShardedTelemetryKeyIfApplicable(
-            cmdBuilder, getHostNameCachedAndPort(), opCtx);
         requests.emplace_back(shardId, cmdBuilder.obj());
     }
 
@@ -795,6 +784,8 @@ StatusWith<CursorResponse> ClusterFind::runGetMore(OperationContext* opCtx,
     {
         CurOp::get(opCtx)->debug().nShards = pinnedCursor.getValue()->getNumRemotes();
         CurOp::get(opCtx)->debug().cursorid = cursorId;
+        CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation =
+            pinnedCursor.getValue()->shouldOmitDiagnosticInformation();
         stdx::lock_guard<Client> lk(*opCtx->getClient());
         CurOp::get(opCtx)->setOriginatingCommand_inlock(
             pinnedCursor.getValue()->getOriginatingCommand());

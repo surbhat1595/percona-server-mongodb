@@ -487,7 +487,7 @@ const allCommands = {
             assert.commandWorked(
                 conn.getDB('admin').runCommand({shardCollection: fullNs, key: {_id: 1}}));
         },
-        command: {configureCollectionBalancing: fullNs, enableAutoSplitter: true},
+        command: {configureCollectionBalancing: fullNs, chunkSize: 1},
         teardown: function(conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
         },
@@ -1493,10 +1493,7 @@ const allCommands = {
         command: {shardingState: 1},
         isShardSvrOnly: true,
     },
-    shutdown: {
-        // TODO SERVER-74810: Add a separate JS test for this.
-        skip: "tested in a separate JS test"
-    },
+    shutdown: {skip: "tested in multiVersion/genericSetFCVUsage/restart_during_downgrading_fcv.js"},
     sleep: {skip: isAnInternalCommand},
     split: {
         setUp: function(conn) {

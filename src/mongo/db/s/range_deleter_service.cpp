@@ -132,6 +132,10 @@ void RangeDeleterService::ReadyRangeDeletionsProcessor::_completedRangeDeletion(
 
 void RangeDeleterService::ReadyRangeDeletionsProcessor::_runRangeDeletions() {
     Client::initThread(kRangeDeletionThreadName);
+    {
+        stdx::lock_guard<Client> lk(cc());
+        cc().setSystemOperationKillableByStepdown(lk);
+    }
 
     {
         stdx::lock_guard<Latch> lock(_mutex);
@@ -279,8 +283,10 @@ void RangeDeleterService::ReadyRangeDeletionsProcessor::_runRangeDeletions() {
 }
 
 void RangeDeleterService::onStartup(OperationContext* opCtx) {
+    // (Ignore FCV check): This feature doesn't have any upgrade/downgrade concerns. The feature
+    // flag is used to turn on new range deleter on startup.
     if (disableResumableRangeDeleter.load() ||
-        !feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCV()) {
+        !feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCVUnsafe()) {
         return;
     }
 
@@ -290,7 +296,9 @@ void RangeDeleterService::onStartup(OperationContext* opCtx) {
 }
 
 void RangeDeleterService::onStepUpComplete(OperationContext* opCtx, long long term) {
-    if (!feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCV()) {
+    // (Ignore FCV check): This feature doesn't have any upgrade/downgrade concerns. The feature
+    // flag is used to turn on new range deleter on startup.
+    if (!feature_flags::gRangeDeleterService.isEnabledAndIgnoreFCVUnsafe()) {
         return;
     }
 
@@ -509,6 +517,13 @@ SharedSemiFuture<void> RangeDeleterService::registerTask(
             .share();
     }
 
+    LOGV2_DEBUG(7536600,
+                2,
+                "Registering range deletion task",
+                "collectionUUID"_attr = rdt.getCollectionUuid(),
+                "range"_attr = redact(rdt.getRange().toString()),
+                "pending"_attr = pending);
+
     auto scheduleRangeDeletionChain = [&](SharedSemiFuture<void> pendingFuture) {
         (void)pendingFuture.thenRunOn(_executor)
             .then([this,
@@ -516,7 +531,16 @@ SharedSemiFuture<void> RangeDeleterService::registerTask(
                 // Step 1: wait for ongoing queries retaining the range to drain
                 return waitForOngoingQueries;
             })
-            .then([this, when = rdt.getWhenToClean()]() {
+            .then([this,
+                   collectionUUID = rdt.getCollectionUuid(),
+                   range = rdt.getRange(),
+                   when = rdt.getWhenToClean()]() {
+                LOGV2_DEBUG(7536601,
+                            2,
+                            "Finished waiting for ongoing queries for range deletion task",
+                            "collectionUUID"_attr = collectionUUID,
+                            "range"_attr = redact(range.toString()));
+
                 // Step 2: schedule wait for secondaries orphans cleanup delay
                 const auto delayForActiveQueriesOnSecondariesToComplete =
                     when == CleanWhenEnum::kDelayed ? Seconds(orphanCleanupDelaySecs.load())
@@ -530,6 +554,12 @@ SharedSemiFuture<void> RangeDeleterService::registerTask(
                 // Step 3: schedule the actual range deletion task
                 auto lock = _acquireMutexUnconditionally();
                 if (_state != kDown) {
+                    LOGV2_DEBUG(7536602,
+                                2,
+                                "Scheduling range deletion task",
+                                "collectionUUID"_attr = rdt.getCollectionUuid(),
+                                "range"_attr = redact(rdt.getRange().toString()));
+
                     invariant(_readyRangeDeletionsProcessorPtr,
                               "The range deletions processor is not initialized");
                     _readyRangeDeletionsProcessorPtr->emplaceRangeDeletion(rdt);

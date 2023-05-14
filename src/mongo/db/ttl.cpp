@@ -351,6 +351,11 @@ void TTLMonitor::run() {
     ThreadClient tc(name(), getGlobalServiceContext());
     AuthorizationSession::get(cc())->grantInternalAuthorization(&cc());
 
+    {
+        stdx::lock_guard<Client> lk(*tc.get());
+        tc.get()->setSystemOperationKillableByStepdown(lk);
+    }
+
     while (true) {
         {
             auto startTime = Date_t::now();
@@ -579,7 +584,7 @@ bool TTLMonitor::_doTTLIndexDelete(OperationContext* opCtx,
                         1,
                         "Postpone TTL of DB because of active tenant migration",
                         "tenantMigrationAccessBlocker"_attr = mtab->getDebugInfo().jsonString(),
-                        logAttrs(coll.getDb()->name()));
+                        "database"_attr = coll.getDb()->name());
             return false;
         }
 
@@ -608,6 +613,11 @@ bool TTLMonitor::_doTTLIndexDelete(OperationContext* opCtx,
             ExecutorFuture<void>(executor)
                 .then([serviceContext = opCtx->getServiceContext(), nss, staleInfo] {
                     ThreadClient tc("TTLShardVersionRecovery", serviceContext);
+                    {
+                        stdx::lock_guard<Client> lk(*tc.get());
+                        tc->setSystemOperationKillableByStepdown(lk);
+                    }
+
                     auto uniqueOpCtx = tc->makeOperationContext();
                     auto opCtx = uniqueOpCtx.get();
 

@@ -27,14 +27,11 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
 #include <list>
 #include <vector>
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/util/bson_extract.h"
-#include "mongo/client/connpool.h"
 #include "mongo/client/dbclient_connection.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/client.h"
@@ -72,7 +69,6 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kFTDC
 
-
 namespace mongo {
 
 // Hangs in the beginning of each hello command when set.
@@ -82,11 +78,6 @@ MONGO_FAIL_POINT_DEFINE(waitInHello);
 MONGO_FAIL_POINT_DEFINE(hangWaitingForHelloResponseOnStandalone);
 
 MONGO_FAIL_POINT_DEFINE(appendHelloOkToHelloResponse);
-
-using std::list;
-using std::string;
-using std::stringstream;
-using std::unique_ptr;
 
 namespace repl {
 namespace {
@@ -129,7 +120,7 @@ TopologyVersion appendReplicationInfo(OperationContext* opCtx,
         invariant(helloResponse->getTopologyVersion());
 
         // Only shard servers will respond with the isImplicitDefaultMajorityWC field.
-        if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+        if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
             result->append(HelloCommandReply::kIsImplicitDefaultMajorityWCFieldName,
                            replCoord->getConfig().isImplicitDefaultWriteConcernMajority());
 
@@ -480,7 +471,7 @@ public:
 
         timerGuard.reset();  // Resume curOp timer.
 
-        if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
             constexpr int kConfigServerModeNumber = 2;
             result.append(HelloCommandReply::kConfigsvrFieldName, kConfigServerModeNumber);
         }

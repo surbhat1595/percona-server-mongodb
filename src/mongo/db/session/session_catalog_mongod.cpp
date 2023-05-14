@@ -110,13 +110,6 @@ void killSessionTokens(OperationContext* opCtx,
             invariant(status);
 
             ThreadClient tc("Kill-Sessions", service);
-
-            // TODO(SERVER-74658): Please revisit if this thread could be made killable.
-            {
-                stdx::lock_guard<Client> lk(*tc.get());
-                tc.get()->setSystemOperationUnKillableByStepdown(lk);
-            }
-
             auto uniqueOpCtx = tc->makeOperationContext();
             const auto opCtx = uniqueOpCtx.get();
             const auto catalog = SessionCatalog::get(opCtx);
@@ -363,8 +356,10 @@ void createTransactionTable(OperationContext* opCtx) {
 
         if (!collectionIsEmpty) {
             // Unless explicitly enabled, don't create the index to avoid delaying step up.
+            // (Ignore FCV check): This is used to fix a bug in Atlas where the index is not created
+            // in a cluster. This feature flag may no longer be used.
             if (feature_flags::gFeatureFlagAlwaysCreateConfigTransactionsPartialIndexOnStepUp
-                    .isEnabledAndIgnoreFCV()) {
+                    .isEnabledAndIgnoreFCVUnsafe()) {
                 AutoGetCollection autoColl(
                     opCtx, NamespaceString::kSessionTransactionsTableNamespace, LockMode::MODE_X);
                 IndexBuildsCoordinator::get(opCtx)->createIndex(
@@ -515,12 +510,6 @@ void MongoDSessionCatalog::onStepUp(OperationContext* opCtx) {
     {
         // Create a new opCtx because we need an empty locker to refresh the locks.
         auto newClient = opCtx->getServiceContext()->makeClient("restore-prepared-txn");
-
-        {
-            stdx::lock_guard<Client> lk(*newClient.get());
-            newClient.get()->setSystemOperationUnKillableByStepdown(lk);
-        }
-
         AlternativeClientRegion acr(newClient);
         for (const auto& sessionInfo : sessionsToReacquireLocks) {
             auto newOpCtx = cc().makeOperationContext();
@@ -559,7 +548,9 @@ void MongoDSessionCatalog::onStepUp(OperationContext* opCtx) {
     abortInProgressTransactions(opCtx, this, _ti.get());
 
     createTransactionTable(opCtx);
-    if (repl::feature_flags::gFeatureFlagRetryableFindAndModify.isEnabledAndIgnoreFCV()) {
+    // (Ignore FCV check): This is intentional to try creating the image_collection collection if
+    // the feature flag is ever enabled.
+    if (repl::feature_flags::gFeatureFlagRetryableFindAndModify.isEnabledAndIgnoreFCVUnsafe()) {
         createRetryableFindAndModifyTable(opCtx);
     }
 }

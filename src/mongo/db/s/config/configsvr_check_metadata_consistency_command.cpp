@@ -30,6 +30,7 @@
 
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/metadata_consistency_util.h"
 #include "mongo/s/request_types/sharded_ddl_commands_gen.h"
 
@@ -64,16 +65,95 @@ public:
         using InvocationBase::InvocationBase;
 
         Response typedRun(OperationContext* opCtx) {
+            uassert(ErrorCodes::IllegalOperation,
+                    str::stream() << Request::kCommandName
+                                  << " can only be run on the config server",
+                    serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
+
+            opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
+
             const auto nss = ns();
 
-            CursorInitialReply resp;
-            InitialResponseCursor initRespCursor{std::vector<mongo::BSONObj>()};
-            initRespCursor.setResponseCursorBase({0LL /* cursorId */, nss});
-            resp.setCursor(std::move(initRespCursor));
-            return resp;
+            std::vector<MetadataInconsistencyItem> inconsistenciesMerged;
+            const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
+
+            switch (metadata_consistency_util::getCommandLevel(nss)) {
+                case MetadataConsistencyCommandLevelEnum::kDatabaseLevel: {
+                    const auto collections = catalogClient->getCollections(opCtx, nss.db());
+
+                    for (const auto& coll : collections) {
+                        _runChecksForCollection(opCtx, coll, inconsistenciesMerged);
+                    }
+                    break;
+                }
+                case MetadataConsistencyCommandLevelEnum::kCollectionLevel: {
+                    try {
+                        const auto coll = catalogClient->getCollection(opCtx, nss);
+                        _runChecksForCollection(opCtx, coll, inconsistenciesMerged);
+                    } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
+                        // If we don't find the nss, it means that the collection is not sharded.
+                    }
+                    break;
+                }
+                default:
+                    MONGO_UNREACHABLE;
+            }
+
+            auto exec = metadata_consistency_util::makeQueuedPlanExecutor(
+                opCtx, std::move(inconsistenciesMerged), nss);
+
+            ClientCursorParams cursorParams{
+                std::move(exec),
+                nss,
+                AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserName(),
+                APIParameters::get(opCtx),
+                opCtx->getWriteConcern(),
+                repl::ReadConcernArgs::get(opCtx),
+                ReadPreferenceSetting::get(opCtx),
+                request().toBSON({}),
+                {Privilege(ResourcePattern::forClusterResource(), ActionType::internal)}};
+
+            const auto batchSize = [&]() -> long long {
+                const auto& cursorOpts = request().getCursor();
+                if (cursorOpts && cursorOpts->getBatchSize()) {
+                    return *cursorOpts->getBatchSize();
+                } else {
+                    return query_request_helper::kDefaultBatchSize;
+                }
+            }();
+
+            return metadata_consistency_util::createInitialCursorReplyMongod(
+                opCtx, std::move(cursorParams), batchSize);
         }
 
     private:
+        void _runChecksForCollection(
+            OperationContext* opCtx,
+            const CollectionType& coll,
+            std::vector<MetadataInconsistencyItem>& inconsistenciesMerged) {
+            auto chunksInconsistencies = metadata_consistency_util::checkChunksInconsistencies(
+                opCtx, coll, _getCollectionChunks(opCtx, coll));
+
+            inconsistenciesMerged.insert(inconsistenciesMerged.end(),
+                                         std::make_move_iterator(chunksInconsistencies.begin()),
+                                         std::make_move_iterator(chunksInconsistencies.end()));
+        }
+
+        std::vector<ChunkType> _getCollectionChunks(OperationContext* opCtx,
+                                                    const CollectionType& coll) {
+            const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
+            // TODO SERVER-75490: Use kSnapshotReadConcern when getting chunks from the catalog
+            return uassertStatusOK(catalogClient->getChunks(
+                opCtx,
+                BSON(ChunkType::collectionUUID() << coll.getUuid()) /*query*/,
+                BSON(ChunkType::min() << 1) /*sort*/,
+                boost::none /*limit*/,
+                nullptr /*opTime*/,
+                coll.getEpoch(),
+                coll.getTimestamp(),
+                repl::ReadConcernLevel::kMajorityReadConcern));
+        }
+
         NamespaceString ns() const override {
             return request().getNamespace();
         }

@@ -55,11 +55,14 @@ namespace mongo {
 struct RemoveShardProgress {
     /**
      * Used to indicate to the caller of the removeShard method whether draining of chunks for
-     * a particular shard has started, is ongoing, or has been completed.
+     * a particular shard has started, is ongoing, or has been completed. When removing a catalog
+     * shard, there is a new state when waiting for range deletions of all moved away chunks.
+     * Removing other shards will skip this state.
      */
     enum DrainingShardStatus {
         STARTED,
         ONGOING,
+        PENDING_RANGE_DELETIONS,
         COMPLETED,
     };
 
@@ -75,6 +78,7 @@ struct RemoveShardProgress {
 
     DrainingShardStatus status;
     boost::optional<DrainingShardUsage> remainingCounts;
+    boost::optional<long long> pendingRangeDeletions;
 };
 
 /**
@@ -272,8 +276,7 @@ public:
         const boost::optional<Timestamp>& requestTimestamp,
         const ChunkRange& range,
         const std::vector<BSONObj>& splitPoints,
-        const std::string& shardName,
-        bool fromChunkSplitter);
+        const std::string& shardName);
 
     /**
      * Updates metadata in the config.chunks collection so the chunks within the specified key range
@@ -453,7 +456,6 @@ public:
                                       const NamespaceString& nss,
                                       boost::optional<int32_t> chunkSizeMB,
                                       boost::optional<bool> defragmentCollection,
-                                      boost::optional<bool> enableAutoSplitter,
                                       boost::optional<bool> enableAutoMerger);
 
     /**
@@ -538,6 +540,14 @@ public:
     void appendConnectionStats(executor::ConnectionPoolStats* stats);
 
     /**
+     * Appends information on the status of shard draining to the passed in result BSONObjBuilder
+     */
+    void appendShardDrainingStatus(OperationContext* opCtx,
+                                   BSONObjBuilder& result,
+                                   RemoveShardProgress shardDrainingStatus,
+                                   ShardId shardId);
+
+    /**
      * Only used for unit-tests, clears a previously-created catalog manager from the specified
      * service context, so that 'create' can be called again.
      */
@@ -566,7 +576,7 @@ public:
      * Only called on the FCV upgrade
      * TODO (SERVER-72791): Remove the method once FCV 7.0 becomes last-lts.
      */
-    Status setOnCurrentShardSinceFieldOnChunks(OperationContext* opCtx);
+    void setOnCurrentShardSinceFieldOnChunks(OperationContext* opCtx);
 
     /**
      * Returns a catalog client that will always run commands locally. Can only be used on a
@@ -591,6 +601,13 @@ public:
      * Returns the oldest timestamp that is supported for history preservation.
      */
     static Timestamp getOldestTimestampSupportedForSnapshotHistory(OperationContext* opCtx);
+
+    /**
+     * Removes from config.placementHistory any document that is no longer needed to describe
+     * the data distribution of the cluster from earliestClusterTime onwards (and updates the
+     * related initialization metadata).
+     **/
+    void cleanUpPlacementHistory(OperationContext* opCtx, const Timestamp& earliestClusterTime);
 
 private:
     /**
@@ -809,6 +826,13 @@ private:
                                                            const ChunkType& origChunk,
                                                            const ChunkVersion& collPlacementVersion,
                                                            const std::vector<BSONObj>& splitPoints);
+
+    /**
+     * Performs a noop write locally on the current process and waits for all nodes to replicate it.
+     *
+     * TODO SERVER-75391: Remove.
+     */
+    void _performLocalNoopWriteWithWAllWriteConcern(OperationContext* opCtx, StringData msg);
 
     // The owning service context
     ServiceContext* const _serviceContext;

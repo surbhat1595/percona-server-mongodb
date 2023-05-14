@@ -152,6 +152,8 @@ MONGO_FAIL_POINT_DEFINE(WTSetOldestTSToStableTS);
 MONGO_FAIL_POINT_DEFINE(WTWriteConflictExceptionForImportCollection);
 MONGO_FAIL_POINT_DEFINE(WTWriteConflictExceptionForImportIndex);
 MONGO_FAIL_POINT_DEFINE(WTRollbackToStableReturnOnEBUSY);
+MONGO_FAIL_POINT_DEFINE(hangBeforeUnrecoverableRollbackError);
+MONGO_FAIL_POINT_DEFINE(WTDisableFastShutDown);
 
 const std::string kPinOldestTimestampAtStartupName = "_wt_startup";
 
@@ -852,17 +854,18 @@ WiredTigerKVEngine::WiredTigerKVEngine(
         // checkpoints more often.
         const double fourMinutesInSeconds = 240.0;
         int ckptsPerFourMinutes;
-        if (storageGlobalParams.checkpointDelaySecs <= 0.0) {
+        if (storageGlobalParams.syncdelay <= 0.0) {
             ckptsPerFourMinutes = 1;
         } else {
             ckptsPerFourMinutes =
-                static_cast<int>(fourMinutesInSeconds / storageGlobalParams.checkpointDelaySecs);
+                static_cast<int>(fourMinutesInSeconds / storageGlobalParams.syncdelay);
         }
 
         if (ckptsPerFourMinutes < 1) {
             LOGV2_WARNING(8423377,
                           "Unexpected value for checkpoint retention",
-                          "checkpointDelaySecs"_attr = storageGlobalParams.checkpointDelaySecs,
+                          "syncdelay"_attr =
+                              static_cast<std::int64_t>(storageGlobalParams.syncdelay),
                           "ckptsPerFourMinutes"_attr = ckptsPerFourMinutes);
             ckptsPerFourMinutes = 1;
         }
@@ -1152,6 +1155,10 @@ void WiredTigerKVEngine::cleanShutdown() {
     std::string closeConfig = "";
 
     if (RUNNING_ON_VALGRIND) {  // NOLINT
+        leak_memory = false;
+    }
+
+    if (MONGO_unlikely(WTDisableFastShutDown.shouldFail())) {
         leak_memory = false;
     }
 
@@ -2903,7 +2910,7 @@ Status WiredTigerKVEngine::recoverOrphanedIdent(OperationContext* opCtx,
     LOGV2(22333,
           "Creating new RecordStore for collection {namespace} with UUID: {uuid}",
           "Creating new RecordStore",
-          "namespace"_attr = nss,
+          logAttrs(nss),
           "uuid"_attr = options.uuid);
 
     status = createRecordStore(opCtx, nss, ident, options);
@@ -3728,6 +3735,10 @@ StatusWith<Timestamp> WiredTigerKVEngine::recoverToStableTimestamp(OperationCont
     if (!_canRecoverToStableTimestamp()) {
         Timestamp stableTS(_stableTimestamp.load());
         Timestamp initialDataTS(_initialDataTimestamp.load());
+        if (MONGO_unlikely(hangBeforeUnrecoverableRollbackError.shouldFail())) {
+            LOGV2(6718000, "Hit hangBeforeUnrecoverableRollbackError failpoint");
+            hangBeforeUnrecoverableRollbackError.pauseWhileSet(opCtx);
+        }
         return Status(ErrorCodes::UnrecoverableRollbackError,
                       str::stream()
                           << "No stable timestamp available to recover to. Initial data timestamp: "
@@ -4119,6 +4130,12 @@ StatusWith<BSONObj> WiredTigerKVEngine::getSanitizedStorageOptionsForSecondaryRe
     }
 
     return options;
+}
+
+void WiredTigerKVEngine::sizeStorerPeriodicFlush() {
+    if (_sizeStorerSyncTracker.intervalHasElapsed()) {
+        syncSizeInfo(false);
+    }
 }
 
 }  // namespace mongo

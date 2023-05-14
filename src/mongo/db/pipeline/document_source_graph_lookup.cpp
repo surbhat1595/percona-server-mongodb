@@ -90,7 +90,7 @@ NamespaceString parseGraphLookupFromAndResolveNamespace(const BSONElement& elem,
     uassert(ErrorCodes::FailedToParse,
             str::stream()
                 << "$graphLookup with syntax {from: {db:<>, coll:<>},..} is not supported for db: "
-                << nss.db() << " and coll: " << nss.coll(),
+                << nss.dbName().toStringForErrorMsg() << " and coll: " << nss.coll(),
             nss == NamespaceString::kTenantMigrationOplogView);
     return nss;
 }
@@ -584,7 +584,7 @@ void DocumentSourceGraphLookUp::checkMemoryUsage() {
 void DocumentSourceGraphLookUp::serializeToArray(std::vector<Value>& array,
                                                  SerializationOptions opts) const {
     auto explain = opts.verbosity;
-    if (opts.redactFieldNames || opts.replacementForLiteralArgs) {
+    if (opts.redactIdentifiers || opts.replacementForLiteralArgs) {
         MONGO_UNIMPLEMENTED_TASSERT(7484344);
     }
 

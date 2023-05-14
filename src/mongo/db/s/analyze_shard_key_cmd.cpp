@@ -71,18 +71,18 @@ public:
                     "analyzeShardKey command is not supported on a standalone mongod",
                     repl::ReplicationCoordinator::get(opCtx)->isReplEnabled());
             uassert(ErrorCodes::IllegalOperation,
+                    "configQueryAnalyzer command is not supported on a multitenant replica set",
+                    !gMultitenancySupport);
+            uassert(ErrorCodes::IllegalOperation,
                     "analyzeShardKey command is not supported on a configsvr mongod",
-                    !serverGlobalParams.clusterRole.isExclusivelyConfigSvrRole());
+                    !serverGlobalParams.clusterRole.exclusivelyHasConfigRole());
 
             const auto& nss = ns();
             const auto& key = request().getKey();
             uassertStatusOK(validateNamespace(nss));
             const auto collUuid = uassertStatusOK(validateCollectionOptionsLocally(opCtx, nss));
 
-            LOGV2(6875001,
-                  "Start analyzing shard key",
-                  "namespace"_attr = nss,
-                  "shardKey"_attr = key);
+            LOGV2(6875001, "Start analyzing shard key", logAttrs(nss), "shardKey"_attr = key);
 
             Response response;
 
@@ -126,7 +126,7 @@ public:
                     "Unauthorized",
                     AuthorizationSession::get(opCtx->getClient())
                         ->isAuthorizedForActionsOnResource(ResourcePattern::forExactNamespace(ns()),
-                                                           ActionType::shardCollection));
+                                                           ActionType::analyzeShardKey));
         }
     };
 

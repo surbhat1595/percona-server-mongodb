@@ -72,6 +72,7 @@
 #include "mongo/logv2/log.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
+#include "mongo/util/debugger.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/log_with_sampling.h"
 #include "mongo/util/net/socket_utils.h"
@@ -97,6 +98,8 @@ MONGO_FAIL_POINT_DEFINE(skipCommitTxnCheckPrepareMajorityCommitted);
 MONGO_FAIL_POINT_DEFINE(restoreLocksFail);
 
 MONGO_FAIL_POINT_DEFINE(failTransactionNoopWrite);
+
+MONGO_FAIL_POINT_DEFINE(hangInCommitSplitPreparedTxnOnPrimary);
 
 const auto getTransactionParticipant = Session::declareDecoration<TransactionParticipant>();
 
@@ -564,13 +567,6 @@ TransactionParticipant::getOldestActiveTimestamp(Timestamp stableTimestamp) {
     // the server, and it both blocks this thread from querying config.transactions and waits for
     // this thread to terminate.
     auto client = getGlobalServiceContext()->makeClient("OldestActiveTxnTimestamp");
-
-    // TODO(SERVER-74656): Please revisit if this thread could be made killable.
-    {
-        stdx::lock_guard<Client> lk(*client.get());
-        client.get()->setSystemOperationUnKillableByStepdown(lk);
-    }
-
     AlternativeClientRegion acr(client);
 
     try {
@@ -714,7 +710,7 @@ bool TransactionParticipant::Participant::_verifyCanBeginMultiDocumentTransactio
             uassert(ErrorCodes::ConflictingOperationInProgress,
                     "Only servers in a sharded cluster can start a new transaction at the active "
                     "transaction number",
-                    serverGlobalParams.clusterRole != ClusterRole::None);
+                    !serverGlobalParams.clusterRole.has(ClusterRole::None));
 
             if (_isInternalSessionForRetryableWrite() &&
                 o().txnState.isInSet(TransactionState::kCommitted)) {
@@ -946,7 +942,7 @@ void TransactionParticipant::Participant::beginOrContinue(
                 "Transactions are not allowed on shard servers when "
                 "writeConcernMajorityJournalDefault=false",
                 replCoord->getWriteConcernMajorityShouldJournal() ||
-                    serverGlobalParams.clusterRole != ClusterRole::ShardServer || !autocommit ||
+                    !serverGlobalParams.clusterRole.has(ClusterRole::ShardServer) || !autocommit ||
                     getTestCommandsEnabled());
     }
 
@@ -991,7 +987,7 @@ void TransactionParticipant::Participant::beginOrContinue(
     if (txnNumberAndRetryCounter.getTxnRetryCounter()) {
         uassert(ErrorCodes::InvalidOptions,
                 "txnRetryCounter is only supported in sharded clusters",
-                serverGlobalParams.clusterRole != ClusterRole::None);
+                !serverGlobalParams.clusterRole.has(ClusterRole::None));
         invariant(*txnNumberAndRetryCounter.getTxnRetryCounter() >= 0,
                   "Cannot specify a negative txnRetryCounter");
     } else {
@@ -1091,8 +1087,9 @@ TransactionParticipant::Participant::onConflictingInternalTransactionCompletion(
 
 void TransactionParticipant::Participant::_setReadSnapshot(OperationContext* opCtx,
                                                            repl::ReadConcernArgs readConcernArgs) {
+    // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
     bool pitLookupFeatureEnabled =
-        feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCV();
+        feature_flags::gPointInTimeCatalogLookups.isEnabledAndIgnoreFCVUnsafe();
 
     if (readConcernArgs.getArgsAtClusterTime()) {
         // Read concern code should have already set the timestamp on the recovery unit.
@@ -2023,16 +2020,18 @@ void TransactionParticipant::Participant::_commitSplitPreparedTxnOnPrimary(
     for (const auto& sessInfos :
          splitPrepareManager->getSplitSessions(userSessionId, userTxnNumber).get()) {
 
-        auto splitClientOwned = userOpCtx->getServiceContext()->makeClient("tempSplitClient");
-        auto splitOpCtx = splitClientOwned->makeOperationContext();
-
-        // TODO(SERVER-74656): Please revisit if this thread could be made killable.
-        {
-            stdx::lock_guard<Client> lk(*splitClientOwned.get());
-            splitClientOwned.get()->setSystemOperationUnKillableByStepdown(lk);
+        if (MONGO_unlikely(hangInCommitSplitPreparedTxnOnPrimary.shouldFail())) {
+            LOGV2(
+                7369500,
+                "transaction - hangInCommitSplitPreparedTxnOnPrimary fail point enabled. Blocking "
+                "until fail point is disabled");
+            hangInCommitSplitPreparedTxnOnPrimary.pauseWhileSet();
         }
 
+        auto splitClientOwned = userOpCtx->getServiceContext()->makeClient("tempSplitClient");
+        auto splitOpCtx = splitClientOwned->makeOperationContext();
         AlternativeClientRegion acr(splitClientOwned);
+
         std::unique_ptr<MongoDSessionCatalog::Session> checkedOutSession;
 
         repl::UnreplicatedWritesBlock notReplicated(splitOpCtx.get());
@@ -2254,14 +2253,8 @@ void TransactionParticipant::Participant::_abortSplitPreparedTxnOnPrimary(
 
         auto splitClientOwned = opCtx->getServiceContext()->makeClient("tempSplitClient");
         auto splitOpCtx = splitClientOwned->makeOperationContext();
-
-        // TODO(SERVER-74656): Please revisit if this thread could be made killable.
-        {
-            stdx::lock_guard<Client> lk(*splitClientOwned.get());
-            splitClientOwned.get()->setSystemOperationUnKillableByStepdown(lk);
-        }
-
         AlternativeClientRegion acr(splitClientOwned);
+
         std::unique_ptr<MongoDSessionCatalog::Session> checkedOutSession;
 
         repl::UnreplicatedWritesBlock notReplicated(splitOpCtx.get());
@@ -2322,6 +2315,7 @@ void TransactionParticipant::Participant::_abortTransactionOnSession(OperationCo
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
         o(lk).transactionMetricsObserver.onAbort(
+            opCtx,
             ServerTransactionsMetrics::get(opCtx->getServiceContext()),
             tickSource,
             &Top::get(opCtx->getServiceContext()));

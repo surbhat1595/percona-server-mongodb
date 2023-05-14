@@ -74,7 +74,11 @@ bool FeatureFlag::isEnabledUseDefaultFCVWhenUninitialized(
     }
 }
 
-bool FeatureFlag::isEnabledAndIgnoreFCV() const {
+bool FeatureFlag::isEnabledAndIgnoreFCVUnsafe() const {
+    return _enabled;
+}
+
+bool FeatureFlag::isEnabledAndIgnoreFCVUnsafeAtStartup() const {
     return _enabled;
 }
 
@@ -86,7 +90,7 @@ bool FeatureFlag::isEnabledOnVersion(multiversion::FeatureCompatibilityVersion t
     return targetFCV >= _version;
 }
 
-bool FeatureFlag::isEnabledOnTargetFCVButDisabledOnOriginalFCV(
+bool FeatureFlag::isDisabledOnTargetFCVButEnabledOnOriginalFCV(
     multiversion::FeatureCompatibilityVersion targetFCV,
     multiversion::FeatureCompatibilityVersion originalFCV) const {
     if (!_enabled) {
@@ -94,6 +98,16 @@ bool FeatureFlag::isEnabledOnTargetFCVButDisabledOnOriginalFCV(
     }
 
     return originalFCV >= _version && targetFCV < _version;
+}
+
+bool FeatureFlag::isEnabledOnTargetFCVButDisabledOnOriginalFCV(
+    multiversion::FeatureCompatibilityVersion targetFCV,
+    multiversion::FeatureCompatibilityVersion originalFCV) const {
+    if (!_enabled) {
+        return false;
+    }
+
+    return targetFCV >= _version && originalFCV < _version;
 }
 
 multiversion::FeatureCompatibilityVersion FeatureFlag::getVersion() const {
@@ -113,7 +127,7 @@ void FeatureFlagServerParameter::append(OperationContext* opCtx,
                                         BSONObjBuilder* b,
                                         StringData name,
                                         const boost::optional<TenantId>&) {
-    bool enabled = _storage.isEnabledAndIgnoreFCV();
+    bool enabled = _storage.isEnabledAndIgnoreFCVUnsafe();
 
     {
         auto sub = BSONObjBuilder(b->subobjStart(name));
@@ -131,7 +145,7 @@ void FeatureFlagServerParameter::appendSupportingRoundtrip(OperationContext* opC
                                                            BSONObjBuilder* b,
                                                            StringData name,
                                                            const boost::optional<TenantId>&) {
-    bool enabled = _storage.isEnabledAndIgnoreFCV();
+    bool enabled = _storage.isEnabledAndIgnoreFCVUnsafe();
     b->append(name, enabled);
 }
 

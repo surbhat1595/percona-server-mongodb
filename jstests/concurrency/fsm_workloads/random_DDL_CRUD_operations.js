@@ -163,6 +163,21 @@ var $config = (function() {
             const inconsistencies = db.checkMetadataConsistency().toArray();
             assertAlways.eq(0, inconsistencies.length, tojson(inconsistencies));
         },
+        checkCollectionMetadataConsistency: function(db, collName, connCache) {
+            if (this.skipMetadataChecks) {
+                return;
+            }
+
+            let tid = this.tid;
+            while (tid === this.tid)
+                tid = Random.randInt(this.threadCount);
+
+            const targetThreadColl = threadCollectionName(collName, tid);
+            jsTestLog('Check collection metadata state tid:' + tid + ' currentTid:' + this.tid +
+                      ' collection:' + targetThreadColl);
+            const inconsistencies = db[targetThreadColl].checkMetadataConsistency().toArray();
+            assertAlways.eq(0, inconsistencies.length, tojson(inconsistencies));
+        },
         CRUD: function(db, collName, connCache) {
             let tid = this.tid;
             // Pick a tid at random until we pick one that doesn't target this thread's collection.

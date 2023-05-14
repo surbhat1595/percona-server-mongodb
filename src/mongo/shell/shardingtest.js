@@ -512,6 +512,10 @@ var ShardingTest = function(params) {
     };
 
     this.stop = function(opts = {}) {
+        // TODO SERVER-74534: Enable metadata consistency check on catalog shard deployment
+        if (!isCatalogShardMode) {
+            this.checkMetadataConsistency();
+        }
         this.checkUUIDsConsistentAcrossCluster();
         this.checkIndexesConsistentAcrossCluster();
         this.checkOrphansAreDeleted();
@@ -1335,7 +1339,7 @@ var ShardingTest = function(params) {
         // We avoid setting the random seed unequivocally to avoid unexpected behavior in tests
         // that already make use of Random.setRandomSeed(). This conditional can be removed if
         // it becomes the standard to always be generating the seed through ShardingTest.
-        Random.setRandomSeed(jsTest.options().seed);
+        Random.setRandomFixtureSeed();
         randomSeedAlreadySet = true;
     }
 
@@ -1942,6 +1946,11 @@ var ShardingTest = function(params) {
     // This initialization was expected to fail, but it did not.
     assert.neq(
         true, params.shouldFailInit, "This was expected to fail initialization, but it did not");
+};
+
+// Stub for a hook to check that the cluster-wide metadata is consistent.
+ShardingTest.prototype.checkMetadataConsistency = function() {
+    print("Unhooked checkMetadataConsistency function");
 };
 
 // Stub for a hook to check that collection UUIDs are consistent across shards and the config

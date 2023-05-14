@@ -36,7 +36,6 @@
 #include "mongo/logv2/log.h"
 #include "mongo/s/analyze_shard_key_common_gen.h"
 #include "mongo/s/analyze_shard_key_role.h"
-#include "mongo/s/query_analysis_sample_counters.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/util/periodic_runner.h"
 
@@ -70,9 +69,15 @@ class QueryAnalysisWriter final : public std::enable_shared_from_this<QueryAnaly
 
 public:
     static const std::string kSampledQueriesTTLIndexName;
-    static const std::string kSampledQueriesDiffTTLIndexName;
     static BSONObj kSampledQueriesTTLIndexSpec;
+
+    static const std::string kSampledQueriesDiffTTLIndexName;
     static BSONObj kSampledQueriesDiffTTLIndexSpec;
+
+    static const std::string kAnalyzeShardKeySplitPointsTTLIndexName;
+    static BSONObj kAnalyzeShardKeySplitPointsTTLIndexSpec;
+
+    static const std::map<NamespaceString, BSONObj> kTTLIndexes;
 
     /**
      * Temporarily stores documents to be written to disk.

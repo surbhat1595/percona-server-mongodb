@@ -327,7 +327,7 @@ void assertNoMovePrimaryInProgress(OperationContext* opCtx, const NamespaceStrin
         auto collDesc = scopedCss->getCollectionDescription(opCtx);
         if (!collDesc.isSharded()) {
             if (scopedDss->isMovePrimaryInProgress()) {
-                LOGV2(4909200, "assertNoMovePrimaryInProgress", "namespace"_attr = nss.toString());
+                LOGV2(4909200, "assertNoMovePrimaryInProgress", logAttrs(nss));
 
                 uasserted(ErrorCodes::MovePrimaryInProgress,
                           "movePrimary is in progress for namespace " + nss.toString());
@@ -554,7 +554,7 @@ CreateIndexesReply runCreateIndexesWithCoordinator(OperationContext* opCtx,
     LOGV2(20438,
           "Index build: registering",
           "buildUUID"_attr = buildUUID,
-          "namespace"_attr = ns,
+          logAttrs(ns),
           "collectionUUID"_attr = *collectionUUID,
           "indexes"_attr = specs.size(),
           "firstIndex"_attr = specs[0][IndexDescriptor::kIndexNameFieldName],
@@ -632,6 +632,11 @@ CreateIndexesReply runCreateIndexesWithCoordinator(OperationContext* opCtx,
                 // taking locks. Use a new OperationContext to abort the index build.
                 auto newClient = opCtx->getServiceContext()->makeClient("abort-index-build");
 
+                {
+                    stdx::lock_guard<Client> lk(*newClient.get());
+                    newClient.get()->setSystemOperationKillableByStepdown(lk);
+                }
+
                 AlternativeClientRegion acr(newClient);
                 const auto abortCtx = cc().makeOperationContext();
 
@@ -662,7 +667,7 @@ CreateIndexesReply runCreateIndexesWithCoordinator(OperationContext* opCtx,
             LOGV2(20448,
                   "Index build: failed because collection dropped",
                   "buildUUID"_attr = buildUUID,
-                  "namespace"_attr = ns,
+                  logAttrs(ns),
                   "collectionUUID"_attr = *collectionUUID,
                   "exception"_attr = ex);
             return reply;

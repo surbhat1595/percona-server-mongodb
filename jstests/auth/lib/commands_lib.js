@@ -4744,7 +4744,7 @@ export const authCommandsLib = {
             tokens: [
                 {tokens: [{"s": BinData(0, "lUBO7Mov5Sb+c/D4cJ9whhhw/+PZFLCk/AQU2+BpumQ=")}]},
             ],
-            "forInsert": true,
+            "queryType": "insert",
         },
           skipTest: (conn) => {
               return !TestData.setParameters.featureFlagFLE2ProtocolVersion2;
@@ -6421,32 +6421,6 @@ export const authCommandsLib = {
               }
           ]
         },
-        /*      temporarily removed see SERVER-13555
-                 {
-                    testname: "storageDetails",
-                    command: {storageDetails: "x", analyze: "diskStorage"},
-                    skipSharded: true,
-                    setup: function (db) { assert.writeOK(db.x.save( {} )); },
-                    teardown: function (db) { assert(db.x.drop()); },
-                    testcases: [
-                        {
-                            runOnDb: firstDbName,
-                            roles: roles_dbAdmin,
-                            privileges: [
-                                { resource: {db: firstDbName, collection: "x"}, actions:
-           ["storageDetails"] }
-                            ]
-                        },
-                        {
-                            runOnDb: secondDbName,
-                            roles: roles_dbAdminAny,
-                            privileges: [
-                                { resource: {db: secondDbName, collection: "x"}, actions:
-           ["storageDetails"] }
-                            ]
-                        }
-                    ]
-                }, */
         {
             // Test that only clusterManager has permission to run $telemetry
             testname: "testTelemetryReadPrivilege",

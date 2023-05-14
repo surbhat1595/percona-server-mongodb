@@ -731,13 +731,6 @@ public:
 
         // Subclient used by transaction operations.
         _client = opCtx->getServiceContext()->makeClient(forCommand.toString());
-
-        // TODO(SERVER-74660): Please revisit if this thread could be made killable.
-        {
-            stdx::lock_guard<Client> lk(*_client.get());
-            _client.get()->setSystemOperationUnKillableByStepdown(lk);
-        }
-
         auto as = AuthorizationSession::get(_client.get());
         if (as) {
             as->grantInternalAuthorization(_client.get());
@@ -1037,8 +1030,9 @@ void CmdUMCTyped<CreateUserCommand>::Invocation::typedRun(OperationContext* opCt
 #ifdef MONGO_CONFIG_SSL
     auto& sslManager = opCtx->getClient()->session()->getSSLManager();
 
-    if (isExternal && sslManager &&
-        sslManager->getSSLConfiguration().isClusterMember(userName.getUser())) {
+    if (isExternal && sslManager && sslGlobalParams.clusterAuthX509ExtensionValue.empty() &&
+        sslManager->getSSLConfiguration().isClusterMember(
+            userName.getUser(), boost::none /* clusterExtensionValue */)) {
         if (gEnforceUserClusterSeparation) {
             uasserted(ErrorCodes::BadValue,
                       "Cannot create an x.509 user with a subjectname that would be "
@@ -1972,8 +1966,9 @@ DropAllRolesFromDatabaseReply CmdUMCTyped<DropAllRolesFromDatabaseCommand>::Invo
             txn.update(usersNSS(dbname.tenantId()), rolesMatch, BSON("$pull" << rolesMatch));
         if (!swCount.isOK()) {
             return useDefaultCode(swCount.getStatus(), ErrorCodes::UserModificationFailed)
-                .withContext(str::stream() << "Failed to remove roles from \"" << dbname.db()
-                                           << "\" db from all users");
+                .withContext(str::stream()
+                             << "Failed to remove roles from \"" << dbname.toStringForErrorMsg()
+                             << "\" db from all users");
         }
 
         // Remove these roles from all other roles
@@ -1982,15 +1977,16 @@ DropAllRolesFromDatabaseReply CmdUMCTyped<DropAllRolesFromDatabaseCommand>::Invo
                              BSON("$pull" << rolesMatch));
         if (!swCount.isOK()) {
             return useDefaultCode(swCount.getStatus(), ErrorCodes::RoleModificationFailed)
-                .withContext(str::stream() << "Failed to remove roles from \"" << dbname.db()
-                                           << "\" db from all roles");
+                .withContext(str::stream()
+                             << "Failed to remove roles from \"" << dbname.toStringForErrorMsg()
+                             << "\" db from all roles");
         }
 
         // Finally, remove the actual role documents
         swCount = txn.remove(rolesNSS(dbname.tenantId()), roleMatch);
         if (!swCount.isOK()) {
             return swCount.getStatus().withContext(
-                str::stream() << "Removed roles from \"" << dbname.db()
+                str::stream() << "Removed roles from \"" << dbname.toStringForErrorMsg()
                               << "\" db "
                                  " from all users and roles but failed to actually delete"
                                  " those roles themselves");
@@ -2101,7 +2097,7 @@ CmdUMCTyped<GetUserCacheGenerationCommand, UMCGetUserCacheGenParams>::Invocation
     OperationContext* opCtx) {
     uassert(ErrorCodes::IllegalOperation,
             "_getUserCacheGeneration can only be run on config servers",
-            serverGlobalParams.clusterRole == ClusterRole::ConfigServer);
+            serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
 
     cmdGetUserCacheGeneration.skipApiVersionCheck();
     GetUserCacheGenerationReply reply;

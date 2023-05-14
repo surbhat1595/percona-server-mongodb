@@ -44,6 +44,7 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/transaction/transaction_api.h"
+#include "mongo/executor/inline_executor.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/s/write_ops/batch_write_exec.h"
 #include "mongo/s/write_ops/batched_command_response.h"
@@ -353,6 +354,7 @@ public:
 private:
     const txn_api::TransactionClient& _txnClient;
     ServiceContext* _serviceContext;
+    std::shared_ptr<executor::InlineExecutor::SleepableExecutor> _executor;
 };
 
 /**
@@ -373,32 +375,6 @@ public:
 
 private:
     OperationContext* _opCtx;
-};
-
-/**
- * Implementation of FLEStateCollectionReader for txn_api::TransactionClient
- *
- * Document count is cached since we only need it once per esc or ecc collection.
- */
-class TxnCollectionReader : public FLEStateCollectionReader {
-public:
-    TxnCollectionReader(uint64_t count, FLETagQueryInterface* queryImpl, const NamespaceString& nss)
-        : _count(count), _queryImpl(queryImpl), _nss(nss) {}
-
-    uint64_t getDocumentCount() const override {
-        return _count;
-    }
-
-    BSONObj getById(PrfBlock block) const override {
-        auto doc = BSON("v" << BSONBinData(block.data(), block.size(), BinDataGeneral));
-        BSONElement element = doc.firstElement();
-        return _queryImpl->getById(_nss, element);
-    }
-
-private:
-    uint64_t _count;
-    FLETagQueryInterface* _queryImpl;
-    NamespaceString _nss;
 };
 
 /**

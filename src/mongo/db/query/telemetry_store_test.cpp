@@ -50,13 +50,14 @@ TEST_F(TelemetryStoreTest, BasicUsage) {
     };
 
     auto collectMetrics = [&](BSONObj& key) {
-        TelemetryMetrics* metrics;
+        std::shared_ptr<TelemetryMetrics> metrics;
         auto lookupResult = telStore.lookup(key);
         if (!lookupResult.isOK()) {
-            telStore.put(key, TelemetryMetrics{BSONObj(), boost::none, NamespaceString{}});
+            telStore.put(
+                key, std::make_shared<TelemetryMetrics>(BSONObj(), boost::none, NamespaceString{}));
             lookupResult = telStore.lookup(key);
         }
-        metrics = lookupResult.getValue();
+        metrics = *lookupResult.getValue();
         metrics->execCount += 1;
         metrics->lastExecutionMicros += 123456;
     };
@@ -71,13 +72,13 @@ TEST_F(TelemetryStoreTest, BasicUsage) {
     collectMetrics(query1x);
     collectMetrics(query2);
 
-    ASSERT_EQ(getMetrics(query1).execCount, 3);
-    ASSERT_EQ(getMetrics(query1x).execCount, 3);
-    ASSERT_EQ(getMetrics(query2).execCount, 1);
+    ASSERT_EQ(getMetrics(query1)->execCount, 3);
+    ASSERT_EQ(getMetrics(query1x)->execCount, 3);
+    ASSERT_EQ(getMetrics(query2)->execCount, 1);
 
     auto collectMetricsWithLock = [&](BSONObj& key) {
         auto [lookupResult, lock] = telStore.getWithPartitionLock(key);
-        auto metrics = lookupResult.getValue();
+        auto metrics = *lookupResult.getValue();
         metrics->execCount += 1;
         metrics->lastExecutionMicros += 123456;
     };
@@ -85,13 +86,14 @@ TEST_F(TelemetryStoreTest, BasicUsage) {
     collectMetricsWithLock(query1x);
     collectMetricsWithLock(query2);
 
-    ASSERT_EQ(getMetrics(query1).execCount, 4);
-    ASSERT_EQ(getMetrics(query1x).execCount, 4);
-    ASSERT_EQ(getMetrics(query2).execCount, 2);
+    ASSERT_EQ(getMetrics(query1)->execCount, 4);
+    ASSERT_EQ(getMetrics(query1x)->execCount, 4);
+    ASSERT_EQ(getMetrics(query2)->execCount, 2);
 
     int numKeys = 0;
 
-    telStore.forEach([&](const BSONObj& key, const TelemetryMetrics& entry) { numKeys++; });
+    telStore.forEach(
+        [&](const BSONObj& key, const std::shared_ptr<TelemetryMetrics>& entry) { numKeys++; });
 
     ASSERT_EQ(numKeys, 2);
 }
@@ -105,10 +107,12 @@ TEST_F(TelemetryStoreTest, EvictEntries) {
 
     for (int i = 0; i < 20; i++) {
         auto query = BSON("query" + std::to_string(i) << 1 << "xEquals" << 42);
-        telStore.put(query, TelemetryMetrics{BSONObj(), boost::none, NamespaceString{}});
+        telStore.put(query,
+                     std::make_shared<TelemetryMetrics>(BSONObj(), boost::none, NamespaceString{}));
     }
     int numKeys = 0;
-    telStore.forEach([&](const BSONObj& key, const TelemetryMetrics& entry) { numKeys++; });
+    telStore.forEach(
+        [&](const BSONObj& key, const std::shared_ptr<TelemetryMetrics>& entry) { numKeys++; });
 
     int entriesPerPartition = (cacheSize / numPartitions) / (46 + sizeof(TelemetryMetrics));
     ASSERT_EQ(numKeys, entriesPerPartition * numPartitions);
@@ -126,8 +130,8 @@ TEST_F(TelemetryStoreTest, CorrectlyRedactsFindCommandRequestAllFields) {
     fcr.setFilter(BSON("a" << 1));
     SerializationOptions opts;
     opts.replacementForLiteralArgs = "?";
-    opts.redactFieldNames = true;
-    opts.redactFieldNamesStrategy = redactFieldNameForTest;
+    opts.redactIdentifiers = true;
+    opts.identifierRedactionPolicy = redactFieldNameForTest;
 
     auto redacted = uassertStatusOK(telemetry::makeTelemetryKey(fcr, opts, expCtx));
 
@@ -388,8 +392,8 @@ TEST_F(TelemetryStoreTest, CorrectlyRedactsFindCommandRequestEmptyFields) {
     fcr.setProjection(BSONObj());
     SerializationOptions opts;
     opts.replacementForLiteralArgs = "?";
-    opts.redactFieldNames = true;
-    opts.redactFieldNamesStrategy = redactFieldNameForTest;
+    opts.redactIdentifiers = true;
+    opts.identifierRedactionPolicy = redactFieldNameForTest;
 
     auto redacted = uassertStatusOK(telemetry::makeTelemetryKey(fcr, opts, expCtx));
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
@@ -471,8 +475,8 @@ TEST_F(TelemetryStoreTest, CorrectlyRedactsHintsWithOptions) {
         redacted);
 
     fcr.setHint(BSON("z" << 1 << "c" << 1));
-    opts.redactFieldNamesStrategy = redactFieldNameForTest;
-    opts.redactFieldNames = true;
+    opts.identifierRedactionPolicy = redactFieldNameForTest;
+    opts.redactIdentifiers = true;
     opts.replacementForLiteralArgs = boost::none;
     redacted = uassertStatusOK(telemetry::makeTelemetryKey(fcr, opts, expCtx));
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT

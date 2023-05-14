@@ -140,7 +140,7 @@ public:
         Reply typedRun(OperationContext* opCtx) final {
             auto dbName = request().getDbName();
             // disallow dropping the config database
-            if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&
+            if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
                 (dbName == DatabaseName::kConfig)) {
                 uasserted(ErrorCodes::IllegalOperation,
                           "Cannot drop 'config' database if mongod started "
@@ -151,7 +151,7 @@ public:
                  repl::ReplicationCoordinator::modeNone) &&
                 (dbName == DatabaseName::kLocal)) {
                 uasserted(ErrorCodes::IllegalOperation,
-                          str::stream() << "Cannot drop '" << dbName
+                          str::stream() << "Cannot drop '" << dbName.toStringForErrorMsg()
                                         << "' database while replication is active");
             }
 
@@ -396,7 +396,7 @@ public:
             } catch (DBException& ex) {
                 LOGV2_WARNING(23801,
                               "Internal error while reading",
-                              "namespace"_attr = nss,
+                              logAttrs(nss),
                               "error"_attr = ex.toStatus());
                 ex.addContext("Executor error while reading during dataSize command");
                 throw;
@@ -626,7 +626,7 @@ public:
                 ErrorCodes::BadValue, "Scale factor must be greater than zero", cmd.getScale() > 0);
 
             uassert(ErrorCodes::InvalidNamespace,
-                    str::stream() << "Invalid db name: " << dbname,
+                    str::stream() << "Invalid db name: " << dbname.toStringForErrorMsg(),
                     NamespaceString::validDBName(dbname.db(),
                                                  NamespaceString::DollarInDbNameBehavior::Allow));
 

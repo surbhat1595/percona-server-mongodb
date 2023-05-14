@@ -652,6 +652,10 @@ void IndexScanNode::appendToString(str::stream* ss, int indent) const {
     *ss << "direction = " << direction << '\n';
     addIndent(ss, indent + 1);
     *ss << "bounds = " << bounds.toString(index.collator != nullptr) << '\n';
+    if (!iets.empty()) {
+        addIndent(ss, indent + 1);
+        *ss << "iets = " << ietsToString(index, iets) << '\n';
+    }
     addCommon(ss, indent);
 }
 
@@ -899,27 +903,39 @@ std::set<std::string> extractEqualityFields(
 
             // If we have an IET for this field in our index bounds, we determine whether it
             // guarantees that, upon evaluation, we will have point bounds for the corresponding
-            // field in our index. In particular, if the IET evaluates to a ConstNode or an equality
-            // EvalNode, then this field represents an equality.
+            // field in our index. In particular, if the IET evaluates to a ConstNode, an equality
+            // EvalNode, or an ExplodeNode, then this field represents an equality.
             if (iets && !iets->empty()) {
                 const auto& iet = (*iets)[i];
-                const auto* constNodePtr = iet.cast<interval_evaluation_tree::ConstNode>();
-                const auto* evalNodePtr = iet.cast<interval_evaluation_tree::EvalNode>();
-                const auto isEquality =
-                    evalNodePtr && evalNodePtr->matchType() == MatchExpression::MatchType::EQ;
-                if (!constNodePtr && !isEquality)
-                    continue;
+                auto mustBePointInterval = [&]() {
+                    if (const auto* constNode = iet.cast<interval_evaluation_tree::ConstNode>();
+                        constNode) {
+                        // If we have 'constNodePtr', it must be the case that the interval that it
+                        // contains is the same as 'ival'.
+                        tassert(7426201,
+                                "'constNode' must have a single interval",
+                                constNode->oil.intervals.size() == 1);
+                        tassert(
+                            7426202,
+                            "'constNode' must have the same point interval as the one in 'bounds'",
+                            constNode->oil.intervals[0].equals(ival));
+                        return true;
+                    } else if (const auto* evalNode =
+                                   iet.cast<interval_evaluation_tree::EvalNode>();
+                               evalNode) {
+                        if (evalNode->matchType() == MatchExpression::MatchType::EQ) {
+                            return true;
+                        }
+                    } else if (const auto* explodeNode =
+                                   iet.cast<interval_evaluation_tree::ExplodeNode>();
+                               explodeNode) {
+                        return true;
+                    }
+                    return false;
+                }();
 
-                // If we have 'constNodePtr', it must be the case that the interval that it contains
-                // is the same as 'ival'.
-                if (constNodePtr) {
-                    tassert(7426201,
-                            "'constNodePtr' must have a single interval",
-                            constNodePtr->oil.intervals.size() == 1);
-                    tassert(
-                        7426202,
-                        "'constNodePtr' must have the same point interval as the one in 'bounds'",
-                        constNodePtr->oil.intervals[0].equals(ival));
+                if (!mustBePointInterval) {
+                    continue;
                 }
             }
             equalityFields.insert(oil.name);
@@ -981,7 +997,9 @@ ProvidedSortSet computeSortsForScan(const IndexEntry& index,
         BSONObjBuilder sortPatternStripped;
         // Strip '$_path' and following fields out of 'sortPattern' and then proceed with regular
         // sort analysis.
-        if (feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabledAndIgnoreFCV()) {
+        // (Ignore FCV check): This is intentional because we want clusters which have wildcard
+        // indexes still be able to use the feature even if the FCV is downgraded.
+        if (feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabledAndIgnoreFCVUnsafe()) {
             bool hasPathField = false;
             for (auto elem : sortPatternProvidedByIndex) {
                 if (elem.fieldNameStringData() == "$_path"_sd) {

@@ -53,7 +53,7 @@ public:
                     !gMultitenancySupport);
             uassert(ErrorCodes::IllegalOperation,
                     str::stream() << kStageName << " is not supported on a configsvr mongod",
-                    !serverGlobalParams.clusterRole.isExclusivelyConfigSvrRole());
+                    !serverGlobalParams.clusterRole.exclusivelyHasConfigRole());
             uassert(6875700,
                     str::stream() << kStageName
                                   << " must take a nested object but found: " << specElem,
@@ -72,9 +72,8 @@ public:
 
         PrivilegeVector requiredPrivileges(bool isMongos,
                                            bool bypassDocumentValidation) const override {
-            // TODO (SERVER-69653): Add auth privilege requirements to the analyzeShardKey and
-            // configureQueryAnalyzer commands.
-            return {Privilege(ResourcePattern::forClusterResource(), ActionType::telemetryRead)};
+            return {
+                Privilege(ResourcePattern::forExactNamespace(_nss), ActionType::analyzeShardKey)};
         }
 
         stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const override {

@@ -148,16 +148,14 @@ Status performAtomicWrites(OperationContext* opCtx,
                            const RecordId& recordId,
                            const stdx::variant<write_ops::UpdateCommandRequest,
                                                write_ops::DeleteCommandRequest>& modificationOp,
-                           bool fromMigrate) try {
-    invariant(!opCtx->lockState()->inAWriteUnitOfWork());
-    invariant(!opCtx->inMultiDocumentTransaction());
-
+                           bool fromMigrate,
+                           StmtId stmtId) try {
     NamespaceString ns = coll->ns();
 
     DisableDocumentValidation disableDocumentValidation{opCtx};
 
-    write_ops_exec::LastOpFixer lastOpFixer{opCtx, ns};
-    lastOpFixer.startingOp();
+    write_ops_exec::LastOpFixer lastOpFixer{opCtx};
+    lastOpFixer.startingOp(ns);
 
     auto curOp = CurOp::get(opCtx);
     curOp->raiseDbProfileLevel(CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(ns.dbName()));
@@ -178,9 +176,7 @@ Status performAtomicWrites(OperationContext* opCtx,
 
                 CollectionUpdateArgs args{original.value()};
                 args.criteria = update.getQ();
-                if (const auto& stmtIds = updateOp.getStmtIds()) {
-                    args.stmtIds = *stmtIds;
-                }
+                args.stmtIds = {stmtId};
                 if (fromMigrate) {
                     args.source = OperationSource::kFromMigrate;
                 }
@@ -210,7 +206,7 @@ Status performAtomicWrites(OperationContext* opCtx,
                     record_id_helpers::keyForOID(deleteOp.getDeletes().front().getQ()["_id"].OID());
                 invariant(recordId == deleteId);
                 collection_internal::deleteDocument(
-                    opCtx, coll, kUninitializedStmtId, recordId, &curOp->debug(), fromMigrate);
+                    opCtx, coll, stmtId, recordId, &curOp->debug(), fromMigrate);
             }},
         modificationOp);
 

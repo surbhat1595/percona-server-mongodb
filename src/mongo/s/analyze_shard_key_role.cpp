@@ -51,7 +51,10 @@ bool isReplEnabled(ServiceContext* serviceContext) {
 
 bool isFeatureFlagEnabled(bool ignoreFCV) {
     if (ignoreFCV) {
-        return gFeatureFlagAnalyzeShardKey.isEnabledAndIgnoreFCV();
+        // (Ignore FCV check): In the following cases, ignoreFCV is set to true.
+        // 1. The call is before FCV initialization.
+        // 2. We want to stop QueryAnalysisSampler regardless of FCV.
+        return gFeatureFlagAnalyzeShardKey.isEnabledAndIgnoreFCVUnsafe();
     }
     return serverGlobalParams.featureCompatibility.isVersionInitialized() &&
         gFeatureFlagAnalyzeShardKey.isEnabled(serverGlobalParams.featureCompatibility);
@@ -65,8 +68,8 @@ bool supportsCoordinatingQueryAnalysis(bool isReplEnabled, bool ignoreFCV) {
         return false;
     }
     return isReplEnabled && !gMultitenancySupport &&
-        (serverGlobalParams.clusterRole == ClusterRole::ConfigServer ||
-         serverGlobalParams.clusterRole == ClusterRole::None);
+        (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) ||
+         serverGlobalParams.clusterRole.has(ClusterRole::None));
 }
 
 bool supportsCoordinatingQueryAnalysis(OperationContext* opCtx, bool ignoreFCV) {
@@ -81,8 +84,8 @@ bool supportsPersistingSampledQueries(bool isReplEnabled, bool ignoreFCV) {
         return false;
     }
     return isReplEnabled && !gMultitenancySupport &&
-        (serverGlobalParams.clusterRole == ClusterRole::ShardServer ||
-         serverGlobalParams.clusterRole == ClusterRole::None);
+        (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer) ||
+         serverGlobalParams.clusterRole.has(ClusterRole::None));
 }
 
 bool supportsPersistingSampledQueries(OperationContext* opCtx, bool ignoreFCV) {
@@ -97,8 +100,8 @@ bool supportsSamplingQueries(bool isReplEnabled, bool ignoreFCV) {
         return true;
     }
     return isReplEnabled && !gMultitenancySupport &&
-        (serverGlobalParams.clusterRole == ClusterRole::ShardServer ||
-         serverGlobalParams.clusterRole == ClusterRole::None);
+        (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer) ||
+         serverGlobalParams.clusterRole.has(ClusterRole::None));
 }
 
 bool supportsSamplingQueries(ServiceContext* serviceContext, bool ignoreFCV) {

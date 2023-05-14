@@ -428,6 +428,18 @@ void CurOp::raiseDbProfileLevel(int dbProfileLevel) {
 
 static constexpr size_t appendMaxElementSize = 50 * 1024;
 
+bool shouldOmitDiagnosticInformation(CurOp* curop) {
+    do {
+        if (curop->debug().shouldOmitDiagnosticInformation) {
+            return true;
+        }
+
+        curop = curop->parent();
+    } while (curop != nullptr);
+
+    return false;
+}
+
 bool CurOp::completeAndLogOperation(logv2::LogComponent component,
                                     std::shared_ptr<const ProfileFilter> filter,
                                     boost::optional<size_t> responseLength,
@@ -447,6 +459,11 @@ bool CurOp::completeAndLogOperation(logv2::LogComponent component,
         duration_cast<Microseconds>(elapsedTimeExcludingPauses());
     const auto executionTimeMillis =
         durationCount<Milliseconds>(*_debug.additiveMetrics.executionTime);
+
+    // Do not log the slow query information if asked to omit it
+    if (shouldOmitDiagnosticInformation(this)) {
+        return false;
+    }
 
     if (_debug.isReplOplogGetMore) {
         oplogGetMoreStats.recordMillis(executionTimeMillis);
@@ -683,13 +700,41 @@ void CurOp::reportState(BSONObjBuilder* builder, bool truncateOps) {
     builder->append("op", logicalOpToString(_logicalOp));
     builder->append("ns", NamespaceStringUtil::serialize(_nss));
 
+    bool omitAndRedactInformation = CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation;
+    builder->append("redacted", omitAndRedactInformation);
+
     // When the currentOp command is run, it returns a single response object containing all current
     // operations; this request will fail if the response exceeds the 16MB document limit. By
     // contrast, the $currentOp aggregation stage does not have this restriction. If 'truncateOps'
     // is true, limit the size of each op to 1000 bytes. Otherwise, do not truncate.
     const boost::optional<size_t> maxQuerySize{truncateOps, 1000};
-    appendAsObjOrString(
-        "command", appendCommentField(opCtx, _opDescription), maxQuerySize, builder);
+
+    auto obj = appendCommentField(opCtx, _opDescription);
+
+    // If flag is true, add command field to builder without sensitive information.
+    if (omitAndRedactInformation) {
+        BSONObjBuilder bob;
+        bob.append(obj.firstElement());
+        bob.append(obj["$db"]);
+        auto commentElement = obj["comment"];
+        if (commentElement.ok()) {
+            bob.append(commentElement);
+        }
+
+        if (obj.firstElementFieldNameStringData() == "getMore"_sd) {
+            bob.append(obj["collection"]);
+        }
+
+        appendAsObjOrString("command", bob.done(), maxQuerySize, builder);
+    } else {
+        appendAsObjOrString("command", obj, maxQuerySize, builder);
+    }
+
+
+    // Omit information for for QE user collections, QE state collections and QE user operations.
+    if (omitAndRedactInformation) {
+        return;
+    }
 
     switch (_debug.queryFramework) {
         case PlanExecutor::QueryFramework::kClassicOnly:
@@ -754,7 +799,11 @@ void CurOp::reportState(BSONObjBuilder* builder, bool truncateOps) {
         builder->append("dataThroughputAverage", *_debug.dataThroughputAverage);
     }
 
-    if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations.isEnabledAndIgnoreFCV()) {
+    // (Ignore FCV check): This feature flag is used to initialize ticketing during storage engine
+    // initialization and FCV checking is ignored there, so here we also need to ignore FCV to keep
+    // consistent behavior.
+    if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations
+            .isEnabledAndIgnoreFCVUnsafe()) {
         auto admissionPriority = opCtx->lockState()->getAdmissionPriority();
         if (admissionPriority < AdmissionContext::Priority::kNormal) {
             builder->append("admissionPriority", toString(admissionPriority));
@@ -1002,7 +1051,11 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->add("reslen", responseLength);
     }
 
-    if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations.isEnabledAndIgnoreFCV()) {
+    // (Ignore FCV check): This feature flag is used to initialize ticketing during storage engine
+    // initialization and FCV checking is ignored there, so here we also need to ignore FCV to keep
+    // consistent behavior.
+    if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations
+            .isEnabledAndIgnoreFCVUnsafe()) {
         auto admissionPriority = opCtx->lockState()->getAdmissionPriority();
         if (admissionPriority < AdmissionContext::Priority::kNormal) {
             pAttrs->add("admissionPriority", admissionPriority);
@@ -1692,6 +1745,9 @@ BSONObj OpDebug::makeMongotDebugStatsObject() const {
         cursorBuilder.append("timeWaitingMillis", msWaitingForMongot.value());
     }
     cursorBuilder.append("batchNum", mongotBatchNum);
+    if (!mongotCountVal.isEmpty()) {
+        cursorBuilder.append("resultCount", mongotCountVal);
+    }
     return cursorBuilder.obj();
 }
 

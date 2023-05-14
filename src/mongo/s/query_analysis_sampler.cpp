@@ -36,7 +36,8 @@
 #include "mongo/s/analyze_shard_key_util.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/is_mongos.h"
-#include "mongo/s/query_analysis_sample_counters.h"
+#include "mongo/s/query_analysis_client.h"
+#include "mongo/s/query_analysis_sample_tracker.h"
 #include "mongo/s/refresh_query_analyzer_configuration_cmd_gen.h"
 #include "mongo/util/net/socket_utils.h"
 
@@ -73,7 +74,7 @@ StatusWith<std::vector<CollectionQueryAnalyzerConfiguration>> executeRefreshComm
     cmd.setNumQueriesExecutedPerSecond(lastAvgCount);
 
     BSONObj resObj;
-    if (isMongos() || serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+    if (isMongos() || serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
         const auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
         auto swResponse = configShard->runCommandWithFixedRetryAttempts(
             opCtx,
@@ -85,8 +86,8 @@ StatusWith<std::vector<CollectionQueryAnalyzerConfiguration>> executeRefreshComm
             return status;
         }
         resObj = swResponse.getValue().response;
-    } else if (serverGlobalParams.clusterRole == ClusterRole::None) {
-        resObj = executeCommandOnPrimary(
+    } else if (serverGlobalParams.clusterRole.has(ClusterRole::None)) {
+        resObj = QueryAnalysisClient::get(opCtx).executeCommandOnPrimary(
             opCtx, DatabaseName::kAdmin, cmd.toBSON({}), [&](const BSONObj& resObj) {});
         if (auto status = getStatusFromCommandResult(resObj); !status.isOK()) {
             return status;
@@ -115,6 +116,8 @@ void QueryAnalysisSampler::onStartup() {
     auto serviceContext = getQueryAnalysisSampler.owner(this);
     auto periodicRunner = serviceContext->getPeriodicRunner();
     invariant(periodicRunner);
+
+    stdx::lock_guard<Latch> lk(_mutex);
 
     PeriodicRunner::PeriodicJob queryStatsRefresherJob(
         "QueryAnalysisQueryStatsRefresher",
@@ -170,11 +173,11 @@ double QueryAnalysisSampler::QueryStats::_calculateExponentialMovingAverage(
 
 void QueryAnalysisSampler::QueryStats::refreshTotalCount() {
     long long newTotalCount = [&] {
-        if (isMongos() || serverGlobalParams.clusterRole == ClusterRole::None) {
+        if (isMongos() || serverGlobalParams.clusterRole.has(ClusterRole::None)) {
             return globalOpCounters.getUpdate()->load() + globalOpCounters.getDelete()->load() +
                 _lastFindAndModifyQueriesCount + globalOpCounters.getQuery()->load() +
                 _lastAggregateQueriesCount + _lastCountQueriesCount + _lastDistinctQueriesCount;
-        } else if (serverGlobalParams.clusterRole == ClusterRole::ShardServer) {
+        } else if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
             return globalOpCounters.getNestedAggregate()->load();
         }
         MONGO_UNREACHABLE;
@@ -218,9 +221,9 @@ void QueryAnalysisSampler::SampleRateLimiter::_refill(double numTokensPerSecond,
         _lastRefillTimeTicks = currTicks;
 
         LOGV2_DEBUG(7372303,
-                    2,
+                    3,
                     "Refilled the bucket",
-                    "namespace"_attr = _nss,
+                    logAttrs(_nss),
                     "collectionUUID"_attr = _collUuid,
                     "numSecondsElapsed"_attr = numSecondsElapsed,
                     "numTokensPerSecond"_attr = numTokensPerSecond,
@@ -236,9 +239,9 @@ bool QueryAnalysisSampler::SampleRateLimiter::tryConsume() {
     if (_lastNumTokens >= 1) {
         _lastNumTokens -= 1;
         LOGV2_DEBUG(7372304,
-                    2,
+                    3,
                     "Successfully consumed one token",
-                    "namespace"_attr = _nss,
+                    logAttrs(_nss),
                     "collectionUUID"_attr = _collUuid,
                     "lastNumTokens"_attr = _lastNumTokens);
         return true;
@@ -247,17 +250,17 @@ bool QueryAnalysisSampler::SampleRateLimiter::tryConsume() {
         // if there is nearly one.
         _lastNumTokens = 0;
         LOGV2_DEBUG(7372305,
-                    2,
+                    3,
                     "Successfully consumed approximately one token",
-                    "namespace"_attr = _nss,
+                    logAttrs(_nss),
                     "collectionUUID"_attr = _collUuid,
                     "lastNumTokens"_attr = _lastNumTokens);
         return true;
     }
     LOGV2_DEBUG(7372306,
-                2,
+                3,
                 "Failed to consume one token",
-                "namespace"_attr = _nss,
+                logAttrs(_nss),
                 "collectionUUID"_attr = _collUuid,
                 "lastNumTokens"_attr = _lastNumTokens);
     return false;
@@ -339,7 +342,7 @@ void QueryAnalysisSampler::_refreshConfigurations(OperationContext* opCtx) {
     }
     _sampleRateLimiters = std::move(sampleRateLimiters);
 
-    QueryAnalysisSampleCounters::get(opCtx).refreshConfigurations(configurations);
+    QueryAnalysisSampleTracker::get(opCtx).refreshConfigurations(configurations);
 }
 
 void QueryAnalysisSampler::_incrementCounters(OperationContext* opCtx,
@@ -350,12 +353,12 @@ void QueryAnalysisSampler::_incrementCounters(OperationContext* opCtx,
         case SampledCommandNameEnum::kAggregate:
         case SampledCommandNameEnum::kCount:
         case SampledCommandNameEnum::kDistinct:
-            QueryAnalysisSampleCounters::get(opCtx).incrementReads(nss);
+            QueryAnalysisSampleTracker::get(opCtx).incrementReads(opCtx, nss);
             break;
         case SampledCommandNameEnum::kUpdate:
         case SampledCommandNameEnum::kDelete:
         case SampledCommandNameEnum::kFindAndModify:
-            QueryAnalysisSampleCounters::get(opCtx).incrementWrites(nss);
+            QueryAnalysisSampleTracker::get(opCtx).incrementWrites(opCtx, nss);
             break;
         default:
             MONGO_UNREACHABLE;
@@ -399,7 +402,12 @@ boost::optional<UUID> QueryAnalysisSampler::tryGenerateSampleId(OperationContext
 
     auto& rateLimiter = it->second;
     if (rateLimiter.tryConsume()) {
-        _incrementCounters(opCtx, nss, cmdName);
+        if (isMongos() || serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
+            // On a standalone replica set, sample selection is done by the mongod persisting the
+            // sample itself. To avoid double counting a sample, the counters will be incremented
+            // by the QueryAnalysisWriter when the sample gets added to the buffer.
+            _incrementCounters(opCtx, nss, cmdName);
+        }
         return UUID::gen();
     }
     return boost::none;

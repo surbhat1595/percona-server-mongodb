@@ -76,7 +76,8 @@ feature_flags:
       default: false
 
     featureFlagSbeFull:
-      description: "Feature flag for enabling SBE for a much larger class of queries than what is exposed by default"
+      description: "Feature flag for SBE behaviors, features, or extensions that are not yet enabled
+                    by default"
       cpp_varname: gFeatureFlagSbeFull
       default: false
 
@@ -112,4 +113,10 @@ feature_flags:
     featureFlagApproxPercentiles:
       description: "Feature flag to enable approximate $percentile accumulator/expression."
       cpp_varname: gFeatureFlagApproxPercentiles
+      default: true
+      version: 7.0
+
+    featureFlagSearchBatchSizeLimit:
+      description: "Feature flag to enable the search batchsize and limit optimization."
+      cpp_varname: gFeatureFlagSearchBatchSizeLimit
       default: false

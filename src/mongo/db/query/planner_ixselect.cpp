@@ -380,10 +380,10 @@ bool QueryPlannerIXSelect::_compatible(const BSONElement& keyPatternElt,
         return false;
     }
 
-    // Fields after "$_path" of a compound wildcard index should not be used to answer any query,
-    // because wildcard IndexEntry with reserved field, "$_path", present is used only to answer
-    // query on non-wildcard prefix.
     if (index.type == IndexType::INDEX_WILDCARD) {
+        // Fields after "$_path" of a compound wildcard index should not be used to answer any
+        // query, because wildcard IndexEntry with reserved field, "$_path", present is used only
+        // to answer query on non-wildcard prefix.
         size_t idx = 0;
         for (auto&& elt : index.keyPattern) {
             if (elt.fieldNameStringData() == "$_path") {
@@ -393,6 +393,13 @@ bool QueryPlannerIXSelect::_compatible(const BSONElement& keyPatternElt,
                 break;
             }
             idx++;
+        }
+
+        // If this IndexEntry is considered relevant to a regular field of a compound wildcard
+        // index, the IndexEntry must not have a specific expanded field for the wildcard field.
+        // Instead, the key pattern should contain a reserved "$_path" field.
+        if (keyPatternIdx < index.wildcardFieldPos && !index.keyPattern.hasField("$_path")) {
+            return false;
         }
     }
 
@@ -421,6 +428,10 @@ bool QueryPlannerIXSelect::_compatible(const BSONElement& keyPatternElt,
         index.pathHasMultikeyComponent(keyPatternElt.fieldNameStringData())) {
         // Expression language comparisons cannot be indexed if the field path has multikey
         // components.
+        return false;
+    }
+
+    if (exprtype == MatchExpression::INTERNAL_EQ_HASHED_KEY && index.type != INDEX_HASHED) {
         return false;
     }
 
@@ -733,6 +744,9 @@ bool QueryPlannerIXSelect::nodeIsSupportedByWildcardIndex(const MatchExpression*
 bool QueryPlannerIXSelect::nodeIsSupportedByHashedIndex(const MatchExpression* queryExpr) {
     // Hashed fields can answer simple equality predicates.
     if (ComparisonMatchExpressionBase::isEquality(queryExpr->matchType())) {
+        return true;
+    }
+    if (queryExpr->matchType() == MatchExpression::INTERNAL_EQ_HASHED_KEY) {
         return true;
     }
     // An $in can be answered so long as its operand contains only simple equalities.

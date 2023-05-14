@@ -266,7 +266,7 @@ void openDatabases(OperationContext* opCtx, const StorageEngine* storageEngine, 
     auto databaseHolder = DatabaseHolder::get(opCtx);
     auto dbNames = storageEngine->listDatabases();
     for (const auto& dbName : dbNames) {
-        LOGV2_DEBUG(21010, 1, "    Opening database: {dbName}", logAttrs(dbName));
+        LOGV2_DEBUG(21010, 1, "    Opening database: {dbName}", "dbName"_attr = dbName);
         auto db = databaseHolder->openDb(opCtx, dbName);
         invariant(db);
         onDatabase(db->name());
@@ -403,7 +403,7 @@ void reconcileCatalogAndRebuildUnfinishedIndexes(
             LOGV2(21004,
                   "Rebuilding index. Collection: {collNss} Index: {indexName}",
                   "Rebuilding index",
-                  "namespace"_attr = collNss,
+                  logAttrs(collNss),
                   "index"_attr = indexName);
         }
 

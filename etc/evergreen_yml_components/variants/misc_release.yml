@@ -278,6 +278,7 @@ buildvariants:
   - name: sasl
   - name: search
   - name: search_auth
+  - name: search_pinned_connections_auth
   - name: search_ssl
   - name: session_jscore_passthrough
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
@@ -381,16 +382,7 @@ buildvariants:
     scons_cache_scope: shared
     compile_variant: enterprise-amazon2022
   tasks:
-  - name: compile_test_and_package_parallel_core_stream_TG
-    distros:
-      - amazon2022-large
-  - name: compile_test_and_package_parallel_unittest_stream_TG
-    distros:
-      - amazon2022-large
-  - name: compile_test_and_package_parallel_dbtest_stream_TG
-    distros:
-    - amazon2022-large
-  - name: compile_integration_and_test_parallel_stream_TG
+  - name: compile_test_and_package_serial_no_unittests_TG
     distros:
     - amazon2022-large
   - name: test_api_version_compatibility
@@ -442,6 +434,7 @@ buildvariants:
   - name: sasl
   - name: search
   - name: search_auth
+  - name: search_pinned_connections_auth
   - name: search_ssl
   - name: session_jscore_passthrough
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
@@ -546,16 +539,7 @@ buildvariants:
     scons_cache_scope: shared
     compile_variant: enterprise-amazon2022-arm64
   tasks:
-  - name: compile_test_and_package_parallel_core_stream_TG
-    distros:
-      - amazon2022-arm64-large
-  - name: compile_test_and_package_parallel_unittest_stream_TG
-    distros:
-      - amazon2022-arm64-large
-  - name: compile_test_and_package_parallel_dbtest_stream_TG
-    distros:
-    - amazon2022-arm64-large
-  - name: compile_integration_and_test_parallel_stream_TG
+  - name: compile_test_and_package_serial_no_unittests_TG
     distros:
     - amazon2022-arm64-large
   - name: test_api_version_compatibility
@@ -610,6 +594,7 @@ buildvariants:
   - name: sasl
   - name: search
   - name: search_auth
+  - name: search_pinned_connections_auth
   - name: search_ssl
   - name: session_jscore_passthrough
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
@@ -858,9 +843,6 @@ buildvariants:
   - name: audit
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.replica_sets !.aggregation !.sharding !.jscore
-  - name: .jepsen_docker
-    distros:
-    - debian11-large
   - name: .jscore .common !.decimal !.sharding !.feature_flag_guarded
   - name: .jstestfuzz .common
   - name: .logical_session_cache .one_sec
@@ -955,6 +937,7 @@ buildvariants:
   - name: .ssl
   - name: jsCore
   - name: external_auth
+  - name: generate_buildid_to_debug_symbols_mapping
 
 - name: ubi8
   display_name: "UBI 8"
@@ -981,6 +964,9 @@ buildvariants:
   - name: jsCore
   - name: sharding_gen
   - name: replica_sets_gen
+  - name: generate_buildid_to_debug_symbols_mapping
+    distros:
+    - rhel80-large
 
 - name: rhel80
   display_name: RHEL 8.0
@@ -1139,6 +1125,7 @@ buildvariants:
   - name: sasl
   - name: search
   - name: search_auth
+  - name: search_pinned_connections_auth
   - name: search_ssl
   - name: session_jscore_passthrough
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
@@ -1276,6 +1263,7 @@ buildvariants:
   - name: sasl
   - name: search
   - name: search_auth
+  - name: search_pinned_connections_auth
   - name: search_ssl
   - name: sharding_auth_audit_gen
   - name: .stitch
@@ -1400,6 +1388,7 @@ buildvariants:
   - name: sasl
   - name: search
   - name: search_auth
+  - name: search_pinned_connections_auth
   - name: search_ssl
   - name: sharding_auth_audit_gen
   - name: .stitch
@@ -1526,6 +1515,7 @@ buildvariants:
   - name: sasl
   - name: search
   - name: search_auth
+  - name: search_pinned_connections_auth
   - name: search_ssl
   - name: sharding_auth_audit_gen
   - name: sharding_auth_gen
@@ -2601,7 +2591,6 @@ buildvariants:
   - name: .jstestfuzz !.initsync !.flow_control !.stepdowns
   - name: multiversion_gen
   - name: multiversion_auth_gen
-  - name: powercycle_gen
   - name: .query_fuzzer
   - name: .read_write_concern
   - name: replica_sets_gen
@@ -2670,6 +2659,7 @@ buildvariants:
   - name: .stitch
   - name: unittest_shell_hang_analyzer_gen
   - name: push
+  - name: generate_buildid_to_debug_symbols_mapping
 
 - name: macos-arm64
   display_name: macOS arm64
@@ -2724,6 +2714,7 @@ buildvariants:
   - name: .stitch
   - name: unittest_shell_hang_analyzer_gen
   - name: push
+  - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-macos
   display_name: Enterprise macOS
@@ -2769,6 +2760,7 @@ buildvariants:
   - name: push
   - name: .crypt
   - name: .publish_crypt
+  - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-macos-arm64
   display_name: Enterprise macOS arm64
@@ -2813,6 +2805,7 @@ buildvariants:
   - name: push
   - name: .crypt
   - name: .publish_crypt
+  - name: generate_buildid_to_debug_symbols_mapping
 
 - name: enterprise-rhel-82-arm64-grpc
   display_name: "Enterprise RHEL 8.2 arm64 GRPC"

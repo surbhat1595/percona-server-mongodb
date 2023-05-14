@@ -125,6 +125,8 @@ ClientCursor::ClientCursor(ClientCursorParams params,
       _planCacheKey(CurOp::get(operationUsingCursor)->debug().planCacheKey),
       _queryHash(CurOp::get(operationUsingCursor)->debug().queryHash),
       _telemetryStoreKey(CurOp::get(operationUsingCursor)->debug().telemetryStoreKey),
+      _shouldOmitDiagnosticInformation(
+          CurOp::get(operationUsingCursor)->debug().shouldOmitDiagnosticInformation),
       _opKey(operationUsingCursor->getOperationKey()) {
     invariant(_exec);
     invariant(_operationUsingCursor);
@@ -355,13 +357,6 @@ public:
 
     void run() {
         ThreadClient tc("clientcursormon", getGlobalServiceContext());
-
-        // TODO(SERVER-74662): Please revisit if this thread could be made killable.
-        {
-            stdx::lock_guard<Client> lk(*tc.get());
-            tc.get()->setSystemOperationUnKillableByStepdown(lk);
-        }
-
         while (!globalInShutdownDeprecated()) {
             {
                 const ServiceContext::UniqueOperationContext opCtx = cc().makeOperationContext();

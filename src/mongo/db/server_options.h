@@ -123,14 +123,6 @@ struct ServerGlobalParams {
     std::string auditPath;        // Event destination file path and name.
 #endif
 
-    /**
-     * Switches to enable experimental (unsupported) features.
-     */
-    struct ExperimentalFeatures {
-        ExperimentalFeatures() : storageDetailsCmdEnabled(false) {}
-        bool storageDetailsCmdEnabled;  // -- enableExperimentalStorageDetailsCmd
-    } experimental;
-
     time_t started = ::time(nullptr);
 
     BSONArray argvArray;

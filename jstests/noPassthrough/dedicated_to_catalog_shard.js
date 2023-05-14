@@ -2,11 +2,16 @@
  * Tests catalog shard topology.
  *
  * @tags: [
- *   requires_fcv_63,
+ *   requires_fcv_70,
  *   featureFlagCatalogShard,
  *   featureFlagTransitionToCatalogShard,
  * ]
  */
+
+// TODO (SERVER-74534): Enable the metadata consistency check when it will work with co-located
+// configsvr.
+TestData.skipCheckMetadataConsistency = true;
+
 (function() {
 "use strict";
 

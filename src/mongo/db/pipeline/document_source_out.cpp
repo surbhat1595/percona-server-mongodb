@@ -64,13 +64,6 @@ DocumentSourceOut::~DocumentSourceOut() {
         if (_tempNs.size()) {
             auto cleanupClient =
                 pExpCtx->opCtx->getServiceContext()->makeClient("$out_replace_coll_cleanup");
-
-            // TODO(SERVER-74662): Please revisit if this thread could be made killable.
-            {
-                stdx::lock_guard<Client> lk(*cleanupClient.get());
-                cleanupClient.get()->setSystemOperationUnKillableByStepdown(lk);
-            }
-
             AlternativeClientRegion acr(cleanupClient);
             // Create a new operation context so that any interrupts on the current operation will
             // not affect the dropCollection operation below.
@@ -219,13 +212,11 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceOut::createFromBson(
 }
 
 Value DocumentSourceOut::serialize(SerializationOptions opts) const {
-    if (opts.redactFieldNames || opts.replacementForLiteralArgs) {
-        MONGO_UNIMPLEMENTED_TASSERT(7484321);
-    }
-
+    MutableDocument spec;
     // Do not include the tenantId in the serialized 'outputNs'.
-    return Value(
-        DOC(kStageName << DOC("db" << _outputNs.dbName().db() << "coll" << _outputNs.coll())));
+    spec["db"] = Value(opts.serializeIdentifier(_outputNs.dbName().db()));
+    spec["coll"] = Value(opts.serializeIdentifier(_outputNs.coll()));
+    return Value(Document{{kStageName, spec.freezeToValue()}});
 }
 
 void DocumentSourceOut::waitWhileFailPointEnabled() {

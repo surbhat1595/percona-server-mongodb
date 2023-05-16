@@ -1036,11 +1036,15 @@ build_tarball(){
     }
 
     function fix_sasl_lib {
-        # Details are in tickets PSMDB-950 PSMDB-1153
+        # Details are in tickets PSMDB-950 PSMDB-1153 PSMDB-1261
         patchelf --remove-needed libsasl2.so.3 bin/mongod
         patchelf --remove-needed libsasl2.so.2 bin/mongod
         patchelf --remove-needed libsasl2.so.3 bin/mongo
         patchelf --remove-needed libsasl2.so.2 bin/mongo
+        patchelf --remove-needed libsasl2.so.3 bin/mongos
+        patchelf --remove-needed libsasl2.so.2 bin/mongos
+        patchelf --remove-needed libsasl2.so.3 bin/mongobridge
+        patchelf --remove-needed libsasl2.so.2 bin/mongobridge
         # Details are in tickets PSMDB-1160
         if [ "x$OS" = "xrpm" ]
         then

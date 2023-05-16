@@ -1415,7 +1415,7 @@ public:
             _coordinatorMock,
             _consistencyMarkers,
             storageInterface,
-            repl::OplogApplier::Options(repl::OplogApplication::Mode::kRecovering),
+            repl::OplogApplier::Options(repl::OplogApplication::Mode::kStableRecovering),
             writerPool.get());
 
         uassertStatusOK(oplogApplier.applyOplogBatch(_opCtx, ops));
@@ -1517,7 +1517,7 @@ public:
             _coordinatorMock,
             _consistencyMarkers,
             storageInterface,
-            repl::OplogApplier::Options(repl::OplogApplication::Mode::kRecovering),
+            repl::OplogApplier::Options(repl::OplogApplication::Mode::kStableRecovering),
             writerPool.get());
 
         uassertStatusOK(oplogApplier.applyOplogBatch(_opCtx, ops));
@@ -2277,7 +2277,10 @@ public:
 
         auto indexCatalog = autoColl.getCollection()->getIndexCatalog();
         const IndexCatalogEntry* buildingIndex = indexCatalog->getEntry(
-            indexCatalog->findIndexByName(_opCtx, "a_1", /* includeUnfinished */ true));
+            indexCatalog->findIndexByName(_opCtx,
+                                          "a_1",
+                                          IndexCatalog::InclusionPolicy::kReady |
+                                              IndexCatalog::InclusionPolicy::kUnfinished));
         ASSERT(buildingIndex);
 
         {
@@ -2992,7 +2995,10 @@ public:
 
             auto indexCatalog = collection->getIndexCatalog();
             buildingIndex = indexCatalog->getEntry(
-                indexCatalog->findIndexByName(_opCtx, "a_1_b_1", /* includeUnfinished */ true));
+                indexCatalog->findIndexByName(_opCtx,
+                                              "a_1_b_1",
+                                              IndexCatalog::InclusionPolicy::kReady |
+                                                  IndexCatalog::InclusionPolicy::kUnfinished));
             ASSERT(buildingIndex);
 
             ASSERT_OK(indexer.insertAllDocumentsInCollection(_opCtx, collection.get()));

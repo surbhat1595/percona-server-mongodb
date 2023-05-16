@@ -205,10 +205,15 @@ IndexEntry indexEntryFromIndexCatalogEntry(OperationContext* opCtx,
             MultikeyMetadataAccessStats mkAccessStats;
 
             if (canonicalQuery) {
-                stdx::unordered_set<std::string> fields;
-                QueryPlannerIXSelect::getFields(canonicalQuery->root(), &fields);
-                const auto projectedFields = projection_executor_utils::applyProjectionToFields(
-                    wildcardProjection->exec(), fields);
+                RelevantFieldIndexMap fieldIndexProps;
+                QueryPlannerIXSelect::getFields(canonicalQuery->root(), &fieldIndexProps);
+                stdx::unordered_set<std::string> projectedFields;
+                for (auto&& [fieldName, _] : fieldIndexProps) {
+                    if (projection_executor_utils::applyProjectionToOneField(
+                            wildcardProjection->exec(), fieldName)) {
+                        projectedFields.insert(fieldName);
+                    }
+                }
 
                 multikeyPathSet =
                     getWildcardMultikeyPathSet(wam, opCtx, projectedFields, &mkAccessStats);
@@ -275,7 +280,8 @@ void fillOutPlannerParams(OperationContext* opCtx,
     bool apiStrict = APIParameters::get(opCtx).getAPIStrict().value_or(false);
     // If it's not NULL, we may have indices.  Access the catalog and fill out IndexEntry(s)
     std::unique_ptr<IndexCatalog::IndexIterator> ii =
-        collection->getIndexCatalog()->getIndexIterator(opCtx, false);
+        collection->getIndexCatalog()->getIndexIterator(opCtx,
+                                                        IndexCatalog::InclusionPolicy::kReady);
     while (ii->more()) {
         const IndexCatalogEntry* ice = ii->next();
 
@@ -2176,8 +2182,8 @@ QueryPlannerParams fillOutPlannerParamsForDistinct(OperationContext* opCtx,
     // If the caller did not request a "strict" distinct scan then we may choose a plan which
     // unwinds arrays and treats each element in an array as its own key.
     const bool mayUnwindArrays = !(plannerOptions & QueryPlannerParams::STRICT_DISTINCT_ONLY);
-    std::unique_ptr<IndexCatalog::IndexIterator> ii =
-        collection->getIndexCatalog()->getIndexIterator(opCtx, false);
+    auto ii = collection->getIndexCatalog()->getIndexIterator(
+        opCtx, IndexCatalog::InclusionPolicy::kReady);
     auto query = parsedDistinct.getQuery()->getFindCommandRequest().getFilter();
     while (ii->more()) {
         const IndexCatalogEntry* ice = ii->next();

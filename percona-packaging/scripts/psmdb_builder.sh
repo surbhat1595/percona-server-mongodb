@@ -1043,8 +1043,10 @@ build_tarball(){
         patchelf --remove-needed libsasl2.so.2 bin/mongo
         patchelf --remove-needed libsasl2.so.3 bin/mongos
         patchelf --remove-needed libsasl2.so.2 bin/mongos
+
         patchelf --remove-needed libsasl2.so.3 bin/mongobridge
-        patchelf --remove-needed libsasl2.so.2 bin/mongobridge
+        patchelf --add-needed libsasl2.so.2 bin/mongobridge
+
         # Details are in tickets PSMDB-1160
         if [ "x$OS" = "xrpm" ]
         then

@@ -37,11 +37,10 @@ Copyright (C) 2018-present Percona and/or its affiliates. All rights reserved.
 #include <wiredtiger.h>
 
 #include "mongo/db/encryption/encryption_options.h"
+#include "mongo/db/storage/wiredtiger/encryption_keydb_c_api.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_data_protector.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_encryption_hooks.h"
 #include "mongo/logv2/log.h"
-
-#include <third_party/wiredtiger/ext/encryptors/percona/encryption_keydb_c_api.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 

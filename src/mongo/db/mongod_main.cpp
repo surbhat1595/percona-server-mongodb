@@ -190,7 +190,6 @@
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/system_index.h"
-#include "mongo/db/transaction/internal_transactions_reap_service.h"
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/ttl.h"
@@ -836,6 +835,17 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
                 "maintenance and no other clients are connected. The TTL collection monitor will "
                 "not start because of this. For more info see "
                 "http://dochub.mongodb.org/core/ttlcollections");
+
+            if (gAllowUnsafeUntimestampedWrites &&
+                !repl::ReplSettings::shouldRecoverFromOplogAsStandalone()) {
+                LOGV2_WARNING_OPTIONS(
+                    7692300,
+                    {logv2::LogTag::kStartupWarnings},
+                    "Replica set member is in standalone mode. Performing any writes will result "
+                    "in them being untimestamped. If a write is to an existing document, the "
+                    "document's history will be overwritten with the new value since the beginning "
+                    "of time. This can break snapshot isolation within the storage engine.");
+            }
         } else {
             startTTLMonitor(serviceContext);
         }
@@ -1587,7 +1597,7 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
     migrationUtilExecutor->shutdown();
     migrationUtilExecutor->join();
 
-    if (ShardingState::get(serviceContext)->enabled()) {
+    if (Grid::get(serviceContext)->isShardingInitialized()) {
         // The CatalogCache must be shuted down before shutting down the CatalogCacheLoader as the
         // CatalogCache may try to schedule work on CatalogCacheLoader and fail.
         LOGV2_OPTIONS(6773201, {LogComponent::kSharding}, "Shutting down the CatalogCache");
@@ -1742,8 +1752,6 @@ int mongod_main(int argc, char* argv[]) {
     setUpReplication(service);
     setUpObservers(service);
     service->setServiceEntryPoint(std::make_unique<ServiceEntryPointMongod>(service));
-    SessionCatalog::get(service)->setOnEagerlyReapedSessionsFn(
-        InternalTransactionsReapService::onEagerlyReapedSessions);
 
     ErrorExtraInfo::invariantHaveAllParsers();
 

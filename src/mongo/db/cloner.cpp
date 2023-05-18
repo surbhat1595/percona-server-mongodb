@@ -412,7 +412,8 @@ Status Cloner::_createCollectionsForDb(
 
             {
                 OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
-                    unsafeCreateCollection(opCtx);
+                    unsafeCreateCollection(opCtx,
+                                           /* forceCSRAsUnknownAfterCollectionCreation */ true);
                 Status createStatus = db->userCreateNS(
                     opCtx, nss, collectionOptions, createDefaultIndexes, params.idIndexSpec);
                 if (!createStatus.isOK()) {
@@ -597,7 +598,7 @@ Status Cloner::copyDb(OperationContext* opCtx,
 
         const NamespaceString nss(dBName, params.collectionName);
 
-        clonedColls->insert(nss.ns());
+        clonedColls->insert(nss.ns().toString());
 
         LOGV2_DEBUG(20421, 1, "\t\t cloning", logAttrs(nss), "host"_attr = masterHost);
 

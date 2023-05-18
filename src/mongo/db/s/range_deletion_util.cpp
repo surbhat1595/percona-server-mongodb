@@ -132,7 +132,7 @@ StatusWith<int> deleteNextBatch(OperationContext* opCtx,
 
     if (serverGlobalParams.moveParanoia) {
         deleteStageParams->removeSaver =
-            std::make_unique<RemoveSaver>("moveChunk", nss.ns(), "cleaning");
+            std::make_unique<RemoveSaver>("moveChunk", nss.ns().toString(), "cleaning");
     }
 
     auto exec =
@@ -189,7 +189,7 @@ StatusWith<int> deleteNextBatch(OperationContext* opCtx,
         }
 
         invariant(PlanExecutor::ADVANCED == state);
-        ShardingStatistics::get(opCtx).countDocsDeletedOnDonor.addAndFetch(1);
+        ShardingStatistics::get(opCtx).countDocsDeletedByRangeDeleter.addAndFetch(1);
 
     } while (++numDeleted < numDocsToRemovePerBatch);
 
@@ -261,9 +261,9 @@ ExecutorFuture<void> deleteRangeInBatchesWithExecutor(
     return ExecutorFuture<void>(executor).then([=] {
         return withTemporaryOperationContext(
             [=](OperationContext* opCtx) {
-                return deleteRangeInBatches(opCtx, nss.db(), collectionUuid, keyPattern, range);
+                return deleteRangeInBatches(opCtx, nss.dbName(), collectionUuid, keyPattern, range);
             },
-            nss.db(),
+            nss.dbName(),
             collectionUuid);
     });
 }
@@ -291,7 +291,7 @@ ExecutorFuture<void> waitForDeletionsToMajorityReplicate(
                 .waitUntilMajority(clientOpTime, CancellationToken::uncancelable())
                 .thenRunOn(executor);
         },
-        nss.db(),
+        nss.dbName(),
         collectionUuid);
 }
 
@@ -545,7 +545,7 @@ SharedSemiFuture<void> removeDocumentsInRange(
                     [&](OperationContext* opCtx) {
                         removePersistentRangeDeletionTask(opCtx, collectionUuid, range);
                     },
-                    nss.db(),
+                    nss.dbName(),
                     collectionUuid);
             } catch (const DBException& e) {
                 LOGV2_ERROR(23770,

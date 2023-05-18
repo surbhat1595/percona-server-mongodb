@@ -31,7 +31,6 @@
 
 
 #include "mongo/base/status.h"
-#include "mongo/db/cst/c_node.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
@@ -120,11 +119,11 @@ public:
      */
     static Status isValidNormalized(const MatchExpression* root);
 
-    NamespaceString nss() const {
+    const NamespaceString& nss() const {
         invariant(_findCommand->getNamespaceOrUUID().nss());
         return *_findCommand->getNamespaceOrUUID().nss();
     }
-    std::string ns() const {
+    StringData ns() const {
         return nss().ns();
     }
 
@@ -205,19 +204,6 @@ public:
      */
     static size_t countNodes(const MatchExpression* root, MatchExpression::MatchType type);
 
-    /**
-     * Returns true if this canonical query may have converted extensions such as $where and $text
-     * into no-ops during parsing. This will be the case if it allowed $where and $text in parsing,
-     * but parsed using an ExtensionsCallbackNoop. This does not guarantee that a $where or $text
-     * existed in the query.
-     *
-     * Queries with a no-op extension context are special because they can be parsed and planned,
-     * but they cannot be executed.
-     */
-    bool canHaveNoopMatchNodes() const {
-        return _canHaveNoopMatchNodes;
-    }
-
     bool getExplain() const {
         return _explain;
     }
@@ -232,14 +218,6 @@ public:
 
     bool isSbeCompatible() const {
         return _sbeCompatible;
-    }
-
-    void setUseCqfIfEligible(bool useCqfIfEligible) {
-        _useCqfIfEligible = useCqfIfEligible;
-    }
-
-    bool useCqfIfEligible() const {
-        return _useCqfIfEligible;
     }
 
     bool isParameterized() const {
@@ -304,7 +282,6 @@ private:
     Status init(OperationContext* opCtx,
                 boost::intrusive_ptr<ExpressionContext> expCtx,
                 std::unique_ptr<FindCommandRequest> findCommand,
-                bool canHaveNoopMatchNodes,
                 std::unique_ptr<MatchExpression> root,
                 const ProjectionPolicies& projectionPolicies,
                 std::vector<std::unique_ptr<InnerPipelineStageInterface>> pipeline,
@@ -333,8 +310,6 @@ private:
     // Keeps track of what metadata has been explicitly requested.
     QueryMetadataBitSet _metadataDeps;
 
-    bool _canHaveNoopMatchNodes = false;
-
     bool _explain = false;
 
     // Determines whether the classic engine must be used.
@@ -342,16 +317,6 @@ private:
 
     // True if this query can be executed by the SBE.
     bool _sbeCompatible = false;
-
-    // If true, indicates that we should use CQF if this query is eligible (see the
-    // isEligibleForBonsai() function for eligiblitly requirements).
-    // If false, indicates that we shouldn't use CQF even if this query is eligible. This is used to
-    // prevent hybrid classic and CQF plans in the following cases:
-    // 1. A pipeline that is not eligible for CQF but has an eligible prefix pushed down to find.
-    // 2. A subpipeline pushed down to find as part of a $lookup or $graphLookup.
-    // The default value of false ensures that only codepaths (find command) which opt-in are able
-    // to use CQF.
-    bool _useCqfIfEligible = false;
 
     // True if this query must produce a RecordId output in addition to the BSON objects that
     // constitute the result set of the query. Any generated query solution must not discard record

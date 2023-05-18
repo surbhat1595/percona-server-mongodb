@@ -1150,13 +1150,6 @@ tasks:
           test_control: "initialsync-large"
           mongodb_setup: "replica-2node-fcbis"
 
-  - name: change_streams_throughput
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          test_control: "change_streams_throughput"
-
   - name: change_streams_latency
     priority: 5
     commands:
@@ -1517,6 +1510,7 @@ buildvariants:
         -j$(grep -c ^processor /proc/cpuinfo)
         --release
         --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+        --use-diagnostic-latches=off
         install-mongocryptd
     run_on:
       - "amazon2-xlarge"
@@ -1549,6 +1543,7 @@ buildvariants:
         -j$(grep -c ^processor /proc/cpuinfo)
         --release
         --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+        --use-diagnostic-latches=off
         --allocator=system
         --enable-free-mon=off
         --enterprise-features=fle,search
@@ -1680,6 +1675,7 @@ buildvariants:
         -j$(grep -c ^processor /proc/cpuinfo)
         --release
         --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+        --use-diagnostic-latches=off
       compile_variant: -rhel70
     run_on:
       - rhel70-large
@@ -2067,7 +2063,6 @@ buildvariants:
       - name: bestbuy_agg_merge_same_db
       - name: bestbuy_agg_merge_wordcount
       - name: bestbuy_query
-      - name: change_streams_throughput
       - name: change_streams_latency
       - name: change_streams_listen_throughput
       - name: snapshot_reads
@@ -2354,7 +2349,6 @@ buildvariants:
       - name: smoke_test
       - name: mongos_workloads
       - name: mongos_large_catalog_workloads
-      - name: change_streams_throughput
       - name: change_streams_latency
       - name: change_streams_listen_throughput
       - name: change_streams_multi_mongos
@@ -2413,7 +2407,6 @@ buildvariants:
       - name: bestbuy_query
       - name: change_streams_latency
       - name: change_streams_preimage_latency
-      - name: change_streams_throughput
       - name: change_streams_preimage_throughput
       - name: change_streams_listen_throughput
       - name: industry_benchmarks
@@ -2505,7 +2498,7 @@ buildvariants:
 
   - name: linux-3-node-replSet.2022-11
     display_name: Linux 3-Node ReplSet 2022-11
-    cron: "0 0 * * 1,2,3,4,5,6"  # Everyday except Sunday at 00:00
+    cron: "0 */12 * * *" # Every 12 hours starting at midnight, will change it back after 7.0 release
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2543,7 +2536,6 @@ buildvariants:
       - name: bestbuy_agg_merge_same_db
       - name: bestbuy_agg_merge_wordcount
       - name: bestbuy_query
-      - name: change_streams_throughput
       - name: change_streams_preimage_throughput
       - name: change_streams_latency
       - name: change_streams_preimage_latency

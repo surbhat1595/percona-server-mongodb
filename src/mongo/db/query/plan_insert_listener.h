@@ -65,13 +65,13 @@ public:
 
     void waitUntil(OperationContext* opCtx, Date_t deadline) final {
         auto currentVersion = _notifier->getVersion();
-        _notifier->waitUntil(_lastEOFVersion, deadline);
+        _notifier->waitUntil(opCtx, _lastEOFVersion, deadline);
         _lastEOFVersion = currentVersion;
     }
 
 private:
     std::shared_ptr<CappedInsertNotifier> _notifier;
-    uint64_t _lastEOFVersion;
+    uint64_t _lastEOFVersion = ~uint64_t(0);
 };
 
 // Class used to notify listeners on majority committed point advancement events.

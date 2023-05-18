@@ -51,6 +51,7 @@
 #include "mongo/s/async_requests_sender.h"
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/is_mongos.h"
 #include "mongo/s/multi_statement_transaction_requests_sender.h"
 #include "mongo/s/router_transactions_metrics.h"
 #include "mongo/s/shard_cannot_refresh_due_to_locks_held_exception.h"
@@ -1488,7 +1489,9 @@ void TransactionRouter::Router::_resetRouterState(
     }
 
     OperationContextSession::observeNewTxnNumberStarted(
-        opCtx, _sessionId(), txnNumberAndRetryCounter.getTxnNumber());
+        opCtx,
+        _sessionId(),
+        {txnNumberAndRetryCounter.getTxnNumber(), SessionCatalog::Provenance::kRouter});
 };
 
 void TransactionRouter::Router::_resetRouterStateForStartTransaction(

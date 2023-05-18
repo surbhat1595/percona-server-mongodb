@@ -3859,6 +3859,9 @@ def doConfigure(myenv):
 
     usingLibStdCxx = False
     if has_option('libc++'):
+        # TODO SERVER-54659 - ASIO depends on std::result_of which was removed in C++ 20
+        myenv.Append(CPPDEFINES=["ASIO_HAS_STD_INVOKE_RESULT"])
+
         if not myenv.ToolchainIs('clang'):
             myenv.FatalError('libc++ is currently only supported for clang')
         if myenv.AddToCXXFLAGSIfSupported('-stdlib=libc++'):
@@ -6436,6 +6439,41 @@ if env.get('UNITTESTS_COMPILE_CONCURRENCY'):
         builders={'Object': c_suffixes, 'SharedObject': c_suffixes},
         source_file_regex=r"^.*_test\.cpp$",
     )
+
+first_half_flag = False
+
+
+def half_source_emitter(target, source, env):
+    global first_half_flag
+    if first_half_flag:
+        first_half_flag = False
+        if not 'conftest' in str(target[0]) and not str(source[0]).endswith('_test.cpp'):
+            env.Alias('compile_first_half_non_test_source', target)
+    else:
+        first_half_flag = True
+    return target, source
+
+
+# Cribbed from Tool/cc.py and Tool/c++.py. It would be better if
+# we could obtain this from SCons.
+_CSuffixes = [".c"]
+if not SCons.Util.case_sensitive_suffixes(".c", ".C"):
+    _CSuffixes.append(".C")
+
+_CXXSuffixes = [".cpp", ".cc", ".cxx", ".c++", ".C++"]
+if SCons.Util.case_sensitive_suffixes(".c", ".C"):
+    _CXXSuffixes.append(".C")
+
+for object_builder in SCons.Tool.createObjBuilders(env):
+    emitterdict = object_builder.builder.emitter
+    for suffix in emitterdict.keys():
+        if not suffix in _CSuffixes + _CXXSuffixes:
+            continue
+        base = emitterdict[suffix]
+        emitterdict[suffix] = SCons.Builder.ListEmitter([
+            base,
+            half_source_emitter,
+        ])
 
 # Keep this late in the game so that we can investigate attributes set by all the tools that have run.
 if has_option("cache"):

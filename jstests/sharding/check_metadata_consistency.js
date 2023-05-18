@@ -21,6 +21,43 @@ function getNewDb() {
     return mongos.getDB(dbName + dbCounter++);
 }
 
+function assertNoInconsistencies() {
+    const checkOptions = {'checkIndexes': 1};
+
+    let res = mongos.getDB("admin").checkMetadataConsistency(checkOptions).toArray();
+    assert.eq(0,
+              res.length,
+              "Found unexpected metadata inconsistencies at cluster level: " + tojson(res));
+
+    mongos.getDBNames().forEach(dbName => {
+        if (dbName == 'admin') {
+            return;
+        }
+
+        // TODO BACKPORT-15518: re-enable config db checks once the backport is completed
+        if ((jsTest.options().shardMixedBinVersions ||
+             jsTest.options().useRandomBinVersionsWithinReplicaSet) &&
+            dbName == 'config') {
+            return;
+        }
+
+        let db = mongos.getDB(dbName);
+        res = db.checkMetadataConsistency(checkOptions).toArray();
+        assert.eq(0,
+                  res.length,
+                  "Found unexpected metadata inconsistencies at database level: " + tojson(res));
+
+        db.getCollectionNames().forEach(collName => {
+            let coll = db.getCollection(collName);
+            res = coll.checkMetadataConsistency(checkOptions).toArray();
+            assert.eq(
+                0,
+                res.length,
+                "Found unexpected metadata inconsistencies at collection level: " + tojson(res));
+        });
+    });
+}
+
 (function testCursor() {
     const db = getNewDb();
 
@@ -66,8 +103,7 @@ function getNewDb() {
 
     // Clean up the database to pass the hooks that detect inconsistencies
     db.dropDatabase();
-    res = mongos.getDB("admin").checkMetadataConsistency().toArray();
-    assert.eq(0, res.length, tojson(res));
+    assertNoInconsistencies();
 })();
 
 (function testCollectionUUIDMismatchInconsistency() {
@@ -94,8 +130,7 @@ function getNewDb() {
 
     // Clean up the database to pass the hooks that detect inconsistencies
     db.dropDatabase();
-    inconsistencies = mongos.getDB("admin").checkMetadataConsistency().toArray();
-    assert.eq(0, inconsistencies.length, tojson(inconsistencies));
+    assertNoInconsistencies();
 })();
 
 (function testMisplacedCollection() {
@@ -118,8 +153,7 @@ function getNewDb() {
 
     // Clean up the database to pass the hooks that detect inconsistencies
     db.dropDatabase();
-    inconsistencies = mongos.getDB("admin").checkMetadataConsistency().toArray();
-    assert.eq(0, inconsistencies.length, tojson(inconsistencies));
+    assertNoInconsistencies();
 })();
 
 (function testMissingShardKeyInconsistency() {
@@ -144,8 +178,7 @@ function getNewDb() {
 
     // Clean up the database to pass the hooks that detect inconsistencies
     db.dropDatabase();
-    inconsistencies = mongos.getDB("admin").checkMetadataConsistency().toArray();
-    assert.eq(0, inconsistencies.length, tojson(inconsistencies));
+    assertNoInconsistencies();
 })();
 
 (function testMissingIndex() {
@@ -169,8 +202,7 @@ function getNewDb() {
 
     // Fix inconsistencies and assert none are left
     assert.commandWorked(shard0Coll.dropIndex('index1'));
-    inconsistencies = db.checkMetadataConsistency({'checkIndexes': 1}).toArray();
-    assert.eq(0, inconsistencies.length, tojson(inconsistencies));
+    assertNoInconsistencies();
 
     // Check inconsistent index property across shards
     assert.commandWorked(shard0Coll.createIndex(
@@ -186,8 +218,7 @@ function getNewDb() {
     // Fix inconsistencies and assert none are left
     assert.commandWorked(shard0Coll.dropIndex('index1'));
     assert.commandWorked(shard1Coll.dropIndex('index1'));
-    inconsistencies = db.checkMetadataConsistency({'checkIndexes': 1}).toArray();
-    assert.eq(0, inconsistencies.length, tojson(inconsistencies));
+    assertNoInconsistencies();
 })();
 
 (function testHiddenShardedCollections() {
@@ -207,13 +238,12 @@ function getNewDb() {
     const db2ConfigEntry = configDatabasesColl.findOne({_id: db2.getName()});
 
     // Check that there are no inconsistencies so far
-    let inconsistencies = mongos.getDB("admin").checkMetadataConsistency().toArray();
-    assert.eq(0, inconsistencies.length, tojson(inconsistencies));
+    assertNoInconsistencies();
 
     // Remove db1 so that coll1 became hidden
     assert.commandWorked(configDatabasesColl.deleteOne({_id: db1.getName()}));
 
-    inconsistencies = mongos.getDB("admin").checkMetadataConsistency().toArray();
+    let inconsistencies = mongos.getDB("admin").checkMetadataConsistency().toArray();
     assert.eq(1, inconsistencies.length, tojson(inconsistencies));
     assert.eq("HiddenShardedCollection", inconsistencies[0].type, tojson(inconsistencies[0]));
     assert.eq(
@@ -237,6 +267,48 @@ function getNewDb() {
     // Clean up the database to pass the hooks that detect inconsistencies
     db1.dropDatabase();
     db2.dropDatabase();
+    assertNoInconsistencies();
+})();
+
+(function testRoutingTableInconsistency() {
+    const db = getNewDb();
+    const kSourceCollName = "coll";
+    const ns = db[kSourceCollName].getFullName();
+
+    st.shardColl(db[kSourceCollName], {skey: 1});
+
+    // Insert a RoutingTableRangeOverlap inconsistency
+    const collUuid = st.config.collections.findOne({_id: ns}).uuid;
+    assert.commandWorked(st.config.chunks.updateOne({uuid: collUuid}, {$set: {max: {skey: 10}}}));
+
+    // Insert a ZonesRangeOverlap inconsistency
+    let entry = {
+        _id: {ns: ns, min: {"skey": -100}},
+        ns: ns,
+        min: {"skey": -100},
+        max: {"skey": 100},
+        tag: "a",
+    };
+    assert.commandWorked(st.config.tags.insert(entry));
+    entry = {
+        _id: {ns: ns, min: {"skey": 50}},
+        ns: ns,
+        min: {"skey": 50},
+        max: {"skey": 150},
+        tag: "a",
+    };
+    assert.commandWorked(st.config.tags.insert(entry));
+
+    // Database level mode command
+    let inconsistencies = db.checkMetadataConsistency().toArray();
+    assert.eq(2, inconsistencies.length, tojson(inconsistencies));
+    assert(inconsistencies.some(object => object.type === "RoutingTableRangeOverlap"),
+           tojson(inconsistencies));
+    assert(inconsistencies.some(object => object.type === "ZonesRangeOverlap"),
+           tojson(inconsistencies));
+
+    // Clean up the database to pass the hooks that detect inconsistencies
+    db.dropDatabase();
     inconsistencies = mongos.getDB("admin").checkMetadataConsistency().toArray();
     assert.eq(0, inconsistencies.length, tojson(inconsistencies));
 })();
@@ -284,8 +356,7 @@ function getNewDb() {
     db_MisplacedCollection1.dropDatabase();
     db_MisplacedCollection2.dropDatabase();
     db_CollectionUUIDMismatch.dropDatabase();
-    inconsistencies = mongos.getDB("admin").checkMetadataConsistency().toArray();
-    assert.eq(0, inconsistencies.length, tojson(inconsistencies));
+    assertNoInconsistencies();
 })();
 
 st.stop();

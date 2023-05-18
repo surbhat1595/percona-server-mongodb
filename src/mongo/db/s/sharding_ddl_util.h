@@ -79,7 +79,7 @@ void removeTagsMetadataFromConfig(OperationContext* opCtx,
  * Erase tags metadata from config server for the given namespace.
  */
 void removeTagsMetadataFromConfig_notIdempotent(OperationContext* opCtx,
-                                                Shard* configShard,
+                                                const std::shared_ptr<Shard>& configShard,
                                                 const NamespaceString& nss,
                                                 const WriteConcernOptions& writeConcern);
 
@@ -90,9 +90,12 @@ void removeTagsMetadataFromConfig_notIdempotent(OperationContext* opCtx,
  */
 void removeCollAndChunksMetadataFromConfig(
     OperationContext* opCtx,
+    const std::shared_ptr<Shard>& configShard,
+    ShardingCatalogClient* catalogClient,
     const CollectionType& coll,
     const WriteConcernOptions& writeConcern,
     const OperationSessionInfo& osi,
+    bool useClusterTransaction,
     const std::shared_ptr<executor::TaskExecutor>& executor = nullptr);
 
 /**
@@ -103,16 +106,15 @@ void removeCollAndChunksMetadataFromConfig(
  * Returns true if the collection existed before being removed.
  */
 bool removeCollAndChunksMetadataFromConfig_notIdempotent(OperationContext* opCtx,
+                                                         const std::shared_ptr<Shard>& configShard,
                                                          ShardingCatalogClient* catalogClient,
                                                          const NamespaceString& nss,
                                                          const WriteConcernOptions& writeConcern);
 
 /**
- * Delete the config query analyzer document for the given collection, if it exists.
+ * Delete the query analyzer documents that match the given filter.
  */
-void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx,
-                                           const NamespaceString& nss,
-                                           const boost::optional<UUID>& uuid);
+void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx, const BSONObj& filter);
 
 /**
  * Rename sharded collection metadata as part of a renameCollection operation.
@@ -123,9 +125,9 @@ void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx,
  * This function is idempotent and can just be invoked by the CSRS.
  */
 void shardedRenameMetadata(OperationContext* opCtx,
-                           Shard* configShard,
+                           const std::shared_ptr<Shard>& configShard,
                            ShardingCatalogClient* catalogClient,
-                           CollectionType& fromCollType,
+                           CollectionType fromCollType,
                            const NamespaceString& toNss,
                            const WriteConcernOptions& writeConcern);
 
@@ -235,7 +237,7 @@ BSONObj getCriticalSectionReasonForRename(const NamespaceString& from, const Nam
 
 /**
  * Runs the given transaction chain on the catalog. Transaction will be remote if called by a shard.
- * Important: StmtsIds must be set in the transactionChain if the OperationSessionId is not empty
+ * Important: StmtsIds must be set in the transactionChain if the OperationSessionInfo is not empty
  * since we are spawning a transaction on behalf of a retryable operation.
  */
 void runTransactionOnShardingCatalog(
@@ -243,6 +245,7 @@ void runTransactionOnShardingCatalog(
     txn_api::Callback&& transactionChain,
     const WriteConcernOptions& writeConcern,
     const OperationSessionInfo& osi,
+    bool useClusterTransaction,
     const std::shared_ptr<executor::TaskExecutor>& inputExecutor = nullptr);
 }  // namespace sharding_ddl_util
 }  // namespace mongo

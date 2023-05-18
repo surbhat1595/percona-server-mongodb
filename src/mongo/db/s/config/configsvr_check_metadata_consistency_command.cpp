@@ -32,6 +32,7 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/metadata_consistency_util.h"
+#include "mongo/s/client/shard_remote_gen.h"
 #include "mongo/s/request_types/sharded_ddl_commands_gen.h"
 
 namespace mongo {
@@ -137,21 +138,42 @@ public:
             inconsistenciesMerged.insert(inconsistenciesMerged.end(),
                                          std::make_move_iterator(chunksInconsistencies.begin()),
                                          std::make_move_iterator(chunksInconsistencies.end()));
+
+            auto zonesInconsistencies = metadata_consistency_util::checkZonesInconsistencies(
+                opCtx, coll, _getCollectionZones(opCtx, coll.getNss()));
+
+            inconsistenciesMerged.insert(inconsistenciesMerged.end(),
+                                         std::make_move_iterator(zonesInconsistencies.begin()),
+                                         std::make_move_iterator(zonesInconsistencies.end()));
         }
 
         std::vector<ChunkType> _getCollectionChunks(OperationContext* opCtx,
                                                     const CollectionType& coll) {
+            auto matchStage = BSON("$match" << BSON(ChunkType::collectionUUID() << coll.getUuid()));
+            static const auto sortStage = BSON("$sort" << BSON(ChunkType::min() << 1));
+
+            AggregateCommandRequest aggRequest{ChunkType::ConfigNS,
+                                               {std::move(matchStage), sortStage}};
+            auto aggResponse =
+                ShardingCatalogManager::get(opCtx)->localCatalogClient()->runCatalogAggregation(
+                    opCtx,
+                    aggRequest,
+                    {repl::ReadConcernLevel::kSnapshotReadConcern},
+                    Milliseconds(gFindChunksOnConfigTimeoutMS.load()));
+
+            std::vector<ChunkType> chunks;
+            chunks.reserve(aggResponse.size());
+            for (auto&& responseEntry : aggResponse) {
+                chunks.emplace_back(uassertStatusOK(ChunkType::parseFromConfigBSON(
+                    responseEntry, coll.getEpoch(), coll.getTimestamp())));
+            }
+            return chunks;
+        }
+
+        std::vector<TagsType> _getCollectionZones(OperationContext* opCtx,
+                                                  const NamespaceString& nss) {
             const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
-            // TODO SERVER-75490: Use kSnapshotReadConcern when getting chunks from the catalog
-            return uassertStatusOK(catalogClient->getChunks(
-                opCtx,
-                BSON(ChunkType::collectionUUID() << coll.getUuid()) /*query*/,
-                BSON(ChunkType::min() << 1) /*sort*/,
-                boost::none /*limit*/,
-                nullptr /*opTime*/,
-                coll.getEpoch(),
-                coll.getTimestamp(),
-                repl::ReadConcernLevel::kMajorityReadConcern));
+            return uassertStatusOK(catalogClient->getTagsForCollection(opCtx, nss));
         }
 
         NamespaceString ns() const override {

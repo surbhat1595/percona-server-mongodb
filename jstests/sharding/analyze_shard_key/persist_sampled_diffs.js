@@ -11,9 +11,6 @@
 load("jstests/libs/config_shard_util.js");
 load("jstests/sharding/analyze_shard_key/libs/query_sampling_util.js");
 
-// Set this to allow sample ids to be set by an external client.
-TestData.enableTestCommands = true;
-
 const testCases = [];
 
 // multi=false update.
@@ -176,6 +173,9 @@ function testDiffs(rst, testCase, expectSampling) {
     // It is illegal to create a user database on the config server. Set 'isConfigRS' to true to
     // allow the test helper to know if it should use "config" as the name for the test database.
     st.configRS.isConfigRS = true;
+
+    // Force samples to get persisted even though query sampling is not enabled.
+    QuerySamplingUtil.skipActiveSamplingCheckWhenPersistingSamples(st);
 
     const isConfigShardEnabled = ConfigShardUtil.isEnabledIgnoringFCV(st);
     for (const testCase of testCases) {

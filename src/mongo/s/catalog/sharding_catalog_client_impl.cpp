@@ -808,7 +808,7 @@ StatusWith<std::vector<TagsType>> ShardingCatalogClientImpl::getTagsForCollectio
                                               kConfigReadSelector,
                                               repl::ReadConcernLevel::kMajorityReadConcern,
                                               TagsType::ConfigNS,
-                                              BSON(TagsType::ns(nss.ns())),
+                                              BSON(TagsType::ns(nss.ns().toString())),
                                               BSON(TagsType::min() << 1),
                                               boost::none);  // no limit
     if (!findStatus.isOK()) {
@@ -1394,7 +1394,7 @@ HistoricalPlacement ShardingCatalogClientImpl::getHistoricalPlacement(
                 "timestamp": {
                   "$lte": <clusterTime>
                 },
-                "nss": kConfigsvrPlacementHistoryFcvMarkerNamespace
+                "nss": kConfigPlacementHistoryInitializationMarker
               }
             },
             {
@@ -1425,7 +1425,8 @@ HistoricalPlacement ShardingCatalogClientImpl::getHistoricalPlacement(
     // Build the pipeline for the exact placement data.
     // 1. Get all the history entries prior to the requested time concerning either the collection
     // or the parent database.
-    const auto& kMarkerNss = NamespaceString::kConfigsvrPlacementHistoryFcvMarkerNamespace.ns();
+    const auto& kMarkerNss =
+        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.ns();
     auto matchStage = [&]() {
         bool isClusterSearch = !nss.has_value();
         if (isClusterSearch)

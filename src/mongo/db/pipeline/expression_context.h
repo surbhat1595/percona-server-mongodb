@@ -411,13 +411,34 @@ public:
     void stopExpressionCounters();
 
     bool expressionCountersAreActive() {
-        return _expressionCounters.is_initialized();
+        return static_cast<bool>(_expressionCounters);
     }
 
     /**
      * Sets the value of the $$USER_ROLES system variable.
      */
     void setUserRoles();
+
+    /**
+     * Record that we have seen the given system variable in the query.
+     */
+    void setSystemVarReferencedInQuery(Variables::Id var) {
+        tassert(7612600,
+                "Cannot track references to user-defined variables.",
+                !Variables::isUserDefinedVariable(var));
+        _varsReferencedInQuery.insert(var);
+    }
+
+    /**
+     * Returns true if the given system variable is referenced in the query and false otherwise.
+     */
+    bool isSystemVarReferencedInQuery(Variables::Id var) const {
+        tassert(
+            7612601,
+            "Cannot access whether a variable is referenced to or not for a user-defined variable.",
+            !Variables::isUserDefinedVariable(var));
+        return _varsReferencedInQuery.count(var);
+    }
 
     // The explain verbosity requested by the user, or boost::none if no explain was requested.
     boost::optional<ExplainOptions::Verbosity> explain;
@@ -568,8 +589,12 @@ protected:
     bool _requiresTimeseriesExtendedRangeSupport = false;
 
 private:
-    boost::optional<ExpressionCounters> _expressionCounters = boost::none;
+    std::unique_ptr<ExpressionCounters> _expressionCounters;
     bool _gotTemporarilyUnavailableException = false;
+
+    // We use this set to indicate whether or not a system variable was referenced in the query that
+    // is being executed (if the variable was referenced, it is an element of this set).
+    stdx::unordered_set<Variables::Id> _varsReferencedInQuery;
 };
 
 }  // namespace mongo

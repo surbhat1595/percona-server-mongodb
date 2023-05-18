@@ -139,7 +139,7 @@ class ShardedClusterFixture(interface.Fixture):
 
         # Turn off the balancer if it is not meant to be enabled.
         if not self.enable_balancer:
-            self.stop_balancer()
+            self.stop_balancer(join_migrations=False)
 
         # Inform mongos about each of the shards
         for idx, shard in enumerate(self.shards):
@@ -192,10 +192,15 @@ class ShardedClusterFixture(interface.Fixture):
                                 .format(port, interface.Fixture.AWAIT_READY_TIMEOUT_SECS))
                         time.sleep(0.1)
 
-    def stop_balancer(self, timeout_ms=60000):
+    # TODO SERVER-76343 remove the join_migrations parameter and the if clause depending on it.
+    def stop_balancer(self, timeout_ms=60000, join_migrations=True):
         """Stop the balancer."""
         client = interface.build_client(self, self.auth_options)
         client.admin.command({"balancerStop": 1}, maxTimeMS=timeout_ms)
+        if join_migrations:
+            for shard in self.shards:
+                shard_client = interface.build_client(shard.get_primary(), self.auth_options)
+                shard_client.admin.command({"_shardsvrJoinMigrations": 1})
         self.logger.info("Stopped the balancer")
 
     def start_balancer(self, timeout_ms=60000):
@@ -329,8 +334,8 @@ class ShardedClusterFixture(interface.Fixture):
         auth_options = shard_options.pop("auth_options", self.auth_options)
         preserve_dbpath = shard_options.pop("preserve_dbpath", self.preserve_dbpath)
 
-        replset_config_options = self.fixturelib.make_historic(
-            shard_options.pop("replset_config_options", {}))
+        replset_config_options = shard_options.pop("replset_config_options", {})
+        replset_config_options = replset_config_options.copy()
         replset_config_options["configsvr"] = False
 
         mongod_options = self.mongod_options.copy()
@@ -346,10 +351,19 @@ class ShardedClusterFixture(interface.Fixture):
             replset_config_options["configsvr"] = True
             mongod_options["set_parameters"]["featureFlagCatalogShard"] = "true"
             mongod_options["set_parameters"]["featureFlagTransitionToCatalogShard"] = "true"
+            mongod_options["storageEngine"] = "wiredTiger"
 
             configsvr_options = self.configsvr_options.copy()
+
+            if "mongod_options" in configsvr_options:
+                mongod_options = self.fixturelib.merge_mongo_option_dicts(
+                    mongod_options, configsvr_options["mongod_options"])
+            if "replset_config_options" in configsvr_options:
+                replset_config_options = self.fixturelib.merge_mongo_option_dicts(
+                    replset_config_options, configsvr_options["replset_config_options"])
+
             for option, value in configsvr_options.items():
-                if option == "num_nodes":
+                if option in ("num_nodes", "mongod_options", "replset_config_options"):
                     continue
                 if option in shard_options:
                     if shard_options[option] != value:
@@ -363,8 +377,8 @@ class ShardedClusterFixture(interface.Fixture):
         return {
             "mongod_options": mongod_options, "mongod_executable": self.mongod_executable,
             "auth_options": auth_options, "preserve_dbpath": preserve_dbpath,
-            "replset_config_options": replset_config_options,
-            "shard_logging_prefix": shard_logging_prefix, **shard_options
+            "replset_config_options": replset_config_options, "shard_logging_prefix":
+                shard_logging_prefix, "config_shard": self.config_shard, **shard_options
         }
 
     def install_rs_shard(self, rs_shard):

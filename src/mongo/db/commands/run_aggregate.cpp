@@ -65,8 +65,6 @@
 #include "mongo/db/pipeline/search_helper.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collection_query_info.h"
-#include "mongo/db/query/cqf_command_utils.h"
-#include "mongo/db/query/cqf_get_executor.h"
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/query/get_executor.h"
@@ -459,9 +457,6 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
         expCtx->changeStreamTokenVersion = 1;
     }
 
-    // Set the value of $$USER_ROLES for the aggregation.
-    expCtx->setUserRoles();
-
     return expCtx;
 }
 
@@ -593,7 +588,7 @@ void performValidationChecks(const OperationContext* opCtx,
     aggregation_request_helper::validateRequestFromClusterQueryWithoutShardKey(request);
 }
 
-std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> createLegacyExecutor(
+std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> createExecutor(
     std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
     const LiteParsedPipeline& liteParsedPipeline,
     const NamespaceString& nss,
@@ -654,6 +649,95 @@ std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> createLegacyEx
         resetContextFn();
     }
     return execs;
+}
+
+Status runAggregateOnView(OperationContext* opCtx,
+                          const NamespaceString& origNss,
+                          const AggregateCommandRequest& request,
+                          const MultipleCollectionAccessor& collections,
+                          boost::optional<std::unique_ptr<CollatorInterface>> collatorToUse,
+                          const ViewDefinition* view,
+                          const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                          std::shared_ptr<const CollectionCatalog> catalog,
+                          const PrivilegeVector& privileges,
+                          CurOp* curOp,
+                          rpc::ReplyBuilderInterface* result,
+                          const std::function<void(void)>& resetContextFn) {
+    auto nss = request.getNamespace();
+    checkCollectionUUIDMismatch(
+        opCtx, nss, collections.getMainCollection(), request.getCollectionUUID());
+
+    uassert(ErrorCodes::CommandNotSupportedOnView,
+            "mapReduce on a view is not supported",
+            !request.getIsMapReduceCommand());
+
+    // Check that the default collation of 'view' is compatible with the operation's
+    // collation. The check is skipped if the request did not specify a collation.
+    if (!request.getCollation().get_value_or(BSONObj()).isEmpty()) {
+        invariant(collatorToUse);  // Should already be resolved at this point.
+        if (!CollatorInterface::collatorsMatch(view->defaultCollator(), collatorToUse->get()) &&
+            !view->timeseries()) {
+
+            return {ErrorCodes::OptionNotSupportedOnView,
+                    "Cannot override a view's default collation"};
+        }
+    }
+
+    // Queries on timeseries views may specify non-default collation whereas queries
+    // on all other types of views must match the default collator (the collation use
+    // to originally create that collections). Thus in the case of operations on TS
+    // views, we use the request's collation.
+    auto timeSeriesCollator = view->timeseries() ? request.getCollation() : boost::none;
+
+    auto resolvedView =
+        uassertStatusOK(view_catalog_helpers::resolveView(opCtx, catalog, nss, timeSeriesCollator));
+
+    // With the view & collation resolved, we can relinquish locks.
+    resetContextFn();
+
+    // Set this operation's shard version for the underlying collection to unsharded.
+    // This is prerequisite for future shard versioning checks.
+    boost::optional<ScopedSetShardRole> scopeSetShardRole;
+    if (!serverGlobalParams.clusterRole.has(ClusterRole::None)) {
+        scopeSetShardRole.emplace(opCtx,
+                                  resolvedView.getNamespace(),
+                                  ShardVersion::UNSHARDED() /* shardVersion */,
+                                  boost::none /* databaseVersion */);
+    };
+    uassert(std::move(resolvedView),
+            "Explain of a resolved view must be executed by mongos",
+            !ShardingState::get(opCtx)->enabled() || !request.getExplain());
+
+    // Parse the resolved view into a new aggregation request.
+    auto newRequest = resolvedView.asExpandedViewAggregation(request);
+    auto newCmd = aggregation_request_helper::serializeToCommandObj(newRequest);
+
+    auto status{Status::OK()};
+    try {
+        status = runAggregate(opCtx, origNss, newRequest, newCmd, privileges, result);
+    } catch (const ExceptionForCat<ErrorCategory::StaleShardVersionError>& ex) {
+        // Since we expect the view to be UNSHARDED, if we reached to this point there are
+        // two possibilities:
+        //   1. The shard doesn't know what its shard version/state is and needs to recover
+        //      it (in which case we throw so that the shard can run recovery)
+        //   2. The collection references by the view is actually SHARDED, in which case the
+        //      router must execute it
+        if (const auto staleInfo{ex.extraInfo<StaleConfigInfo>()}) {
+            uassert(std::move(resolvedView),
+                    "Resolved views on sharded collections must be executed by mongos",
+                    !staleInfo->getVersionWanted());
+        }
+        throw;
+    }
+
+    {
+        // Set the namespace of the curop back to the view namespace so ctx records
+        // stats on this view namespace on destruction.
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        curOp->setNS_inlock(nss);
+    }
+
+    return status;
 }
 
 }  // namespace
@@ -886,86 +970,24 @@ Status runAggregate(OperationContext* opCtx,
         // recursively calling runAggregate(), which will re-acquire locks on the underlying
         // collection.  (The lock must be released because recursively acquiring locks on the
         // database will prohibit yielding.)
-        if (ctx && ctx->getView() && !liteParsedPipeline.startsWithCollStats()) {
-            invariant(nss != NamespaceString::kRsOplogNamespace);
-            invariant(!nss.isCollectionlessAggregateNS());
-
-            checkCollectionUUIDMismatch(
-                opCtx, nss, collections.getMainCollection(), request.getCollectionUUID());
-
-            uassert(ErrorCodes::CommandNotSupportedOnView,
-                    "mapReduce on a view is not supported",
-                    !request.getIsMapReduceCommand());
-
-            // Check that the default collation of 'view' is compatible with the operation's
-            // collation. The check is skipped if the request did not specify a collation.
-            if (!request.getCollation().get_value_or(BSONObj()).isEmpty()) {
-                invariant(collatorToUse);  // Should already be resolved at this point.
-                if (!CollatorInterface::collatorsMatch(ctx->getView()->defaultCollator(),
-                                                       collatorToUse->get()) &&
-                    !ctx->getView()->timeseries()) {
-
-                    return {ErrorCodes::OptionNotSupportedOnView,
-                            "Cannot override a view's default collation"};
-                }
-            }
-
-            // Queries on timeseries views may specify non-default collation whereas queries
-            // on all other types of views must match the default collator (the collation use
-            // to originally create that collections). Thus in the case of operations on TS
-            // views, we use the request's collation.
-            auto timeSeriesCollator =
-                ctx->getView()->timeseries() ? request.getCollation() : boost::none;
-
-            auto resolvedView = uassertStatusOK(
-                view_catalog_helpers::resolveView(opCtx, catalog, nss, timeSeriesCollator));
-
-            // With the view & collation resolved, we can relinquish locks.
-            resetContext();
-
-            // Set this operation's shard version for the underlying collection to unsharded.
-            // This is prerequisite for future shard versioning checks.
-            boost::optional<ScopedSetShardRole> scopeSetShardRole;
-            if (!serverGlobalParams.clusterRole.has(ClusterRole::None)) {
-                scopeSetShardRole.emplace(opCtx,
-                                          resolvedView.getNamespace(),
-                                          ShardVersion::UNSHARDED() /* shardVersion */,
-                                          boost::none /* databaseVersion */);
-            };
-            uassert(std::move(resolvedView),
-                    "Explain of a resolved view must be executed by mongos",
-                    !ShardingState::get(opCtx)->enabled() || !request.getExplain());
-
-            // Parse the resolved view into a new aggregation request.
-            auto newRequest = resolvedView.asExpandedViewAggregation(request);
-            auto newCmd = aggregation_request_helper::serializeToCommandObj(newRequest);
-
-            auto status{Status::OK()};
-            try {
-                status = runAggregate(opCtx, origNss, newRequest, newCmd, privileges, result);
-            } catch (const ExceptionForCat<ErrorCategory::StaleShardVersionError>& ex) {
-                // Since we expect the view to be UNSHARDED, if we reached to this point there are
-                // two possibilities:
-                //   1. The shard doesn't know what its shard version/state is and needs to recover
-                //      it (in which case we throw so that the shard can run recovery)
-                //   2. The collection references by the view is actually SHARDED, in which case the
-                //      router must execute it
-                if (const auto staleInfo{ex.extraInfo<StaleConfigInfo>()}) {
-                    uassert(std::move(resolvedView),
-                            "Resolved views on sharded collections must be executed by mongos",
-                            !staleInfo->getVersionWanted());
-                }
-                throw;
-            }
-
-            {
-                // Set the namespace of the curop back to the view namespace so ctx records
-                // stats on this view namespace on destruction.
-                stdx::lock_guard<Client> lk(*opCtx->getClient());
-                curOp->setNS_inlock(nss);
-            }
-
-            return status;
+        // We do not need to expand the view pipeline when there is a $collStats stage, as
+        // $collStats is supported on a view namespace. For a time-series collection, however, the
+        // view is abstracted out for the users, so we needed to resolve the namespace to get the
+        // underlying bucket collection.
+        if (ctx && ctx->getView() &&
+            (!liteParsedPipeline.startsWithCollStats() || ctx->getView()->timeseries())) {
+            return runAggregateOnView(opCtx,
+                                      origNss,
+                                      request,
+                                      collections,
+                                      std::move(collatorToUse),
+                                      ctx->getView(),
+                                      expCtx,
+                                      catalog,
+                                      privileges,
+                                      curOp,
+                                      result,
+                                      resetContext);
         }
 
         // If collectionUUID was provided, verify the collection exists and has the expected UUID.
@@ -993,6 +1015,10 @@ Status runAggregate(OperationContext* opCtx,
         auto pipeline = Pipeline::parse(request.getPipeline(), expCtx);
         curOp->beginQueryPlanningTimer();
         expCtx->stopExpressionCounters();
+
+        // After parsing to detect if $$USER_ROLES is referenced in the query, set the value of
+        // $$USER_ROLES for the aggregation.
+        expCtx->setUserRoles();
 
         if (!request.getAllowDiskUse().value_or(true)) {
             allowDiskUseFalseCounter.increment();
@@ -1043,71 +1069,14 @@ Status runAggregate(OperationContext* opCtx,
                 .getAsync([](auto) {});
         }
 
-        const bool bonsaiEligible =
-            isEligibleForBonsai(request, *pipeline, opCtx, collections.getMainCollection());
-        bool bonsaiExecSuccess = true;
-        if (bonsaiEligible) {
-            uassert(6624344,
-                    "Exchanging is not supported in the Cascades optimizer",
-                    !request.getExchange().has_value());
-            uassert(ErrorCodes::InternalErrorNotSupported,
-                    "let unsupported in CQF",
-                    !request.getLet() || request.getLet()->isEmpty());
-            uassert(ErrorCodes::InternalErrorNotSupported,
-                    "runtimeConstants unsupported in CQF",
-                    !request.getLegacyRuntimeConstants());
-            uassert(ErrorCodes::InternalErrorNotSupported,
-                    "$_requestReshardingResumeToken in CQF",
-                    !request.getRequestReshardingResumeToken());
-            uassert(ErrorCodes::InternalErrorNotSupported,
-                    "collation unsupported in CQF",
-                    !request.getCollation() || request.getCollation()->isEmpty() ||
-                        SimpleBSONObjComparator::kInstance.evaluate(*request.getCollation() ==
-                                                                    CollationSpec::kSimpleSpec));
-
-            optimizer::QueryHints queryHints = getHintsFromQueryKnobs();
-            const bool fastIndexNullHandling = queryHints._fastIndexNullHandling;
-            auto timeBegin = Date_t::now();
-            auto maybeExec = getSBEExecutorViaCascadesOptimizer(opCtx,
-                                                                expCtx,
-                                                                nss,
-                                                                collections.getMainCollection(),
-                                                                std::move(queryHints),
-                                                                request.getHint(),
-                                                                pipeline.get());
-            if (maybeExec) {
-                execs.emplace_back(
-                    uassertStatusOK(makeExecFromParams(nullptr, std::move(*maybeExec))));
-            } else {
-                // If we had an optimization failure, only error if we're not in tryBonsai.
-                bonsaiExecSuccess = false;
-                const auto queryControl =
-                    ServerParameterSet::getNodeParameterSet()->get<QueryFrameworkControl>(
-                        "internalQueryFrameworkControl");
-                tassert(7319401,
-                        "Optimization failed either without tryBonsai set, or without a hint.",
-                        queryControl->_data.get() == QueryFrameworkControlEnum::kTryBonsai &&
-                            request.getHint() && !request.getHint()->isEmpty() &&
-                            !fastIndexNullHandling);
-            }
-
-            auto elapsed =
-                (Date_t::now().toMillisSinceEpoch() - timeBegin.toMillisSinceEpoch()) / 1000.0;
-            OPTIMIZER_DEBUG_LOG(
-                6264804, 5, "Cascades optimization time elapsed", "time"_attr = elapsed);
-        }
-
-        if (!bonsaiEligible || !bonsaiExecSuccess) {
-            execs = createLegacyExecutor(std::move(pipeline),
-                                         liteParsedPipeline,
-                                         nss,
-                                         collections,
-                                         request,
-                                         curOp,
-                                         resetContext);
-        }
+        execs = createExecutor(std::move(pipeline),
+                               liteParsedPipeline,
+                               nss,
+                               collections,
+                               request,
+                               curOp,
+                               resetContext);
         tassert(6624353, "No executors", !execs.empty());
-
 
         {
             auto planSummary = execs[0]->getPlanExplainer().getPlanSummary();

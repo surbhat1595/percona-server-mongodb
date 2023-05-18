@@ -1061,10 +1061,9 @@ void MigrationDestinationManager::cloneCollectionIndexesAndOptions(
                               << collectionByUUID->ns());
             }
 
-            // We do not have a collection by this name. Create the collection with the donor's
-            // options.
+            // We do not have a collection by this name. Create it with the donor's options.
             OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
-                unsafeCreateCollection(opCtx);
+                unsafeCreateCollection(opCtx, /* forceCSRAsUnknownAfterCollectionCreation */ true);
             WriteUnitOfWork wuow(opCtx);
             CollectionOptions collectionOptions = uassertStatusOK(
                 CollectionOptions::parse(collectionOptionsAndIndexes.options,
@@ -1703,7 +1702,7 @@ bool MigrationDestinationManager::_applyMigrateOp(OperationContext* opCtx, const
     if (xfer["deleted"].isABSONObj()) {
         boost::optional<RemoveSaver> rs;
         if (serverGlobalParams.moveParanoia) {
-            rs.emplace("moveChunk", _nss.ns(), "removedDuring");
+            rs.emplace("moveChunk", _nss.ns().toString(), "removedDuring");
         }
 
         BSONObjIterator i(xfer["deleted"].Obj());

@@ -280,8 +280,7 @@ variables:
   - name: test_packages
     distros:
     - ubuntu2004-package
-      # TODO: BF-24515 re-enable when build failure cause determined and resolved
-      # - name: selinux_rhel7_enterprise
+  - name: selinux_rhel7_enterprise
   - name: generate_buildid_to_debug_symbols_mapping
 
 
@@ -813,7 +812,6 @@ buildvariants:
   - name: .ssl
   - name: .stitch
   - name: unittest_shell_hang_analyzer_gen
-  - name: generate_buildid_to_debug_symbols_mapping
 
 - name: &enterprise-macos-rosetta-2 enterprise-macos-rosetta-2
   display_name: "Enterprise macOS Via Rosetta 2"
@@ -847,7 +845,6 @@ buildvariants:
   - name: replica_sets_jscore_passthrough_gen
   - name: sasl
   - name: .crypt
-  - name: generate_buildid_to_debug_symbols_mapping
 
 - name: &enterprise-macos enterprise-macos
   display_name: "Enterprise macOS DEBUG"
@@ -883,7 +880,6 @@ buildvariants:
   - name: replica_sets_jscore_passthrough_gen
   - name: sasl
   - name: .crypt
-  - name: generate_buildid_to_debug_symbols_mapping
 
 - name: &enterprise-macos-arm64 enterprise-macos-arm64
   display_name: "~ Enterprise macOS arm64"
@@ -915,7 +911,6 @@ buildvariants:
   - name: replica_sets_jscore_passthrough
   - name: sasl
   - name: .crypt
-  - name: generate_buildid_to_debug_symbols_mapping
 
 ###########################################
 #          Redhat buildvariants           #
@@ -1216,7 +1211,6 @@ buildvariants:
   - name: .concurrency .large !.ubsan !.no_txns !.debug_only
     distros:
     - rhel80-medium
-  - name: sharding_auth_catalog_shard_gen
   - name: .config_fuzzer !.large
   - name: disk_wiredtiger
   - name: .encrypt
@@ -1280,6 +1274,56 @@ buildvariants:
   - name: .shard_merge
   - name: streams
   - name: telemetry_passthrough
+
+# This build variant is used to test suites that use sharded cluster fixture with config shard mode.
+# TODO (SERVER-75884): Remove this once we switch to config shard as the default.
+- &enterprise-rhel-80-64-bit-dynamic-config-shard
+  <<: *linux_x86_dynamic_compile_variant_dependency
+  name: enterprise-rhel-80-64-bit-dynamic-config-shard
+  display_name: "* Shared Library Enterprise RHEL 8.0 (Config Shard)"
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  modules:
+  - enterprise
+  run_on:
+  - rhel80-small
+  stepback: false
+  expansions: &enterprise-rhel-80-64-bit-dynamic-config-shard-expansions
+    <<: *enterprise-rhel-80-64-bit-dynamic-expansions
+    test_flags: >-
+      --configShard=any
+      --excludeWithAnyTags=config_shard_incompatible
+  tasks:
+  - name: aggregation_mongos_passthrough
+  - name: aggregation_one_shard_sharded_collections
+  - name: aggregation_sharded_collections_causally_consistent_passthrough
+  - name: aggregation_sharded_collections_passthrough
+  - name: causally_consistent_hedged_reads_jscore_passthrough_gen
+  - name: causally_consistent_jscore_passthrough_auth_gen
+  - name: causally_consistent_jscore_passthrough_gen
+  - name: change_streams
+  - name: change_streams_mongos_sessions_passthrough
+  - name: change_streams_multi_stmt_txn_mongos_passthrough
+  - name: change_streams_multi_stmt_txn_sharded_collections_passthrough
+  - name: change_streams_per_shard_cursor_passthrough
+  - name: change_streams_v1_resume_token_sharded_collections_passthrough
+  - name: fle2_sharding_high_cardinality
+  - name: fle2_sharding
+  - name: jstestfuzz_sharded_causal_consistency_gen
+  - name: jstestfuzz_sharded_continuous_stepdown_gen
+  - name: jstestfuzz_sharded_gen
+  - name: jstestfuzz_sharded_session_gen
+  - name: sharded_causally_consistent_jscore_passthrough_gen
+  - name: sharded_causally_consistent_read_concern_snapshot_passthrough_gen
+  - name: sharding_auth_gen
+  - name: .sharding .txns
+  - name: .sharding .common
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: .concurrency .sharded !.large
+  - name: .concurrency .sharded .large
+    distros:
+    - rhel80-medium
+  - name: multi_shard_multi_stmt_txn_jscore_passthrough_gen
+  - name: multi_shard_local_read_write_multi_stmt_txn_jscore_passthrough_gen
 
 - &enterprise-rhel-80-64-bit-dynamic-classic-engine
   <<: *linux_x86_dynamic_compile_variant_dependency
@@ -1571,8 +1615,7 @@ buildvariants:
   - name: test_packages
     distros:
     - ubuntu2004-package
-      # TODO: BF-24515 re-enable when build failure cause determined and resolved
-      #- name: selinux_rhel8_enterprise
+  - name: selinux_rhel8_enterprise
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: &enterprise-rhel-80-64-bit-build-metrics enterprise-rhel-80-64-bit-build-metrics

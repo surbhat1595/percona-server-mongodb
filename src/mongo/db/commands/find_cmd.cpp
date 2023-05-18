@@ -46,8 +46,6 @@
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
-#include "mongo/db/query/cqf_command_utils.h"
-#include "mongo/db/query/cqf_get_executor.h"
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/explain.h"
 #include "mongo/db/query/find.h"
@@ -131,9 +129,6 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
     );
     expCtx->tempDir = storageGlobalParams.dbpath + "/_tmp";
     expCtx->startExpressionCounters();
-
-    // Set the value of $$USER_ROLES for the find command.
-    expCtx->setUserRoles();
 
     return expCtx;
 }
@@ -311,6 +306,10 @@ public:
                                              extensionsCallback,
                                              MatchExpressionParser::kAllowAllSpecialFeatures));
 
+            // After parsing to detect if $$USER_ROLES is referenced in the query, set the value of
+            // $$USER_ROLES for the find command.
+            cq->getExpCtx()->setUserRoles();
+
             // If we are running a query against a view redirect this query through the aggregation
             // system.
             if (ctx->getView()) {
@@ -352,8 +351,6 @@ public:
                 }
                 return;
             }
-
-            cq->setUseCqfIfEligible(true);
 
             // Get the execution plan for the query.
             bool permitYield = true;
@@ -539,6 +536,9 @@ public:
                                              std::move(expCtx),
                                              extensionsCallback,
                                              MatchExpressionParser::kAllowAllSpecialFeatures));
+            // After parsing to detect if $$USER_ROLES is referenced in the query, set the value of
+            // $$USER_ROLES for the find command.
+            cq->getExpCtx()->setUserRoles();
 
             // If we are running a query against a view redirect this query through the aggregation
             // system.
@@ -577,8 +577,6 @@ public:
                 // execution to assume read data will not be needed again and need not be cached.
                 opCtx->recoveryUnit()->setReadOnce(true);
             }
-
-            cq->setUseCqfIfEligible(true);
 
             if (collection) {
                 // Collect telemetry. Exclude queries against collections with encrypted fields.

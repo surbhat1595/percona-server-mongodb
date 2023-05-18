@@ -107,12 +107,12 @@ namespace sharding_ddl_util {
 namespace {
 
 void updateTags(OperationContext* opCtx,
-                Shard* configShard,
+                const std::shared_ptr<Shard>& configShard,
                 const NamespaceString& fromNss,
                 const NamespaceString& toNss,
                 const WriteConcernOptions& writeConcern) {
-    const auto query = BSON(TagsType::ns(fromNss.ns()));
-    const auto update = BSON("$set" << BSON(TagsType::ns(toNss.ns())));
+    const auto query = BSON(TagsType::ns(fromNss.ns().toString()));
+    const auto update = BSON("$set" << BSON(TagsType::ns(toNss.ns().toString())));
 
     BatchedCommandRequest request([&] {
         write_ops::UpdateCommandRequest updateOp(TagsType::ConfigNS);
@@ -135,6 +135,7 @@ void updateTags(OperationContext* opCtx,
 }
 
 void deleteChunks(OperationContext* opCtx,
+                  const std::shared_ptr<Shard>& configShard,
                   const UUID& collectionUUID,
                   const WriteConcernOptions& writeConcern) {
     // Remove config.chunks entries
@@ -155,7 +156,6 @@ void deleteChunks(OperationContext* opCtx,
 
     request.setWriteConcern(writeConcern.toBSON());
 
-    auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
     auto response = configShard->runBatchWriteCommand(
         opCtx, Milliseconds::max(), request, Shard::RetryPolicy::kIdempotentOrCursorInvalidated);
 
@@ -167,7 +167,8 @@ void deleteCollection(OperationContext* opCtx,
                       const UUID& uuid,
                       const WriteConcernOptions& writeConcern,
                       const OperationSessionInfo& osi,
-                      const std::shared_ptr<executor::TaskExecutor>& executor) {
+                      const std::shared_ptr<executor::TaskExecutor>& executor,
+                      bool useClusterTransaction) {
     /* Perform a transaction to delete the collection and append a new placement entry.
      * NOTE: deleteCollectionFn may be run on a separate thread than the one serving
      * deleteCollection(). For this reason, all the referenced parameters have to
@@ -223,10 +224,11 @@ void deleteCollection(OperationContext* opCtx,
     };
 
     runTransactionOnShardingCatalog(
-        opCtx, std::move(transactionChain), writeConcern, osi, executor);
+        opCtx, std::move(transactionChain), writeConcern, osi, useClusterTransaction, executor);
 }
 
 void deleteShardingIndexCatalogMetadata(OperationContext* opCtx,
+                                        const std::shared_ptr<Shard>& configShard,
                                         const UUID& uuid,
                                         const WriteConcernOptions& writeConcern) {
     BatchedCommandRequest request([&] {
@@ -242,7 +244,6 @@ void deleteShardingIndexCatalogMetadata(OperationContext* opCtx,
 
     request.setWriteConcern(writeConcern.toBSON());
 
-    auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
     auto response = configShard->runBatchWriteCommand(
         opCtx, Milliseconds::max(), request, Shard::RetryPolicy::kIdempotentOrCursorInvalidated);
 
@@ -433,28 +434,15 @@ void removeTagsMetadataFromConfig(OperationContext* opCtx,
         str::stream() << "Error removing tags for collection " << nss.toString());
 }
 
-void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx,
-                                           const NamespaceString& nss,
-                                           const boost::optional<UUID>& uuid) {
+void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx, const BSONObj& filter) {
     auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
     write_ops::DeleteCommandRequest deleteCmd(NamespaceString::kConfigQueryAnalyzersNamespace);
-    if (uuid) {
-        deleteCmd.setDeletes({[&] {
-            write_ops::DeleteOpEntry entry;
-            entry.setQ(
-                BSON(analyze_shard_key::QueryAnalyzerDocument::kCollectionUuidFieldName << *uuid));
-            entry.setMulti(false);
-            return entry;
-        }()});
-    } else {
-        deleteCmd.setDeletes({[&] {
-            write_ops::DeleteOpEntry entry;
-            entry.setQ(
-                BSON(analyze_shard_key::QueryAnalyzerDocument::kNsFieldName << nss.toString()));
-            entry.setMulti(true);
-            return entry;
-        }()});
-    }
+    deleteCmd.setDeletes({[&] {
+        write_ops::DeleteOpEntry entry;
+        entry.setQ(filter);
+        entry.setMulti(true);
+        return entry;
+    }()});
 
     const auto deleteResult = configShard->runCommandWithFixedRetryAttempts(
         opCtx,
@@ -463,18 +451,18 @@ void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx,
         CommandHelpers::appendMajorityWriteConcern(deleteCmd.toBSON({})),
         Shard::RetryPolicy::kIdempotent);
 
-    uassertStatusOKWithContext(Shard::CommandResponse::getEffectiveStatus(std::move(deleteResult)),
-                               str::stream()
-                                   << "Error removing query analyzer configurations for collection "
-                                   << nss.toString());
+    uassertStatusOKWithContext(
+        Shard::CommandResponse::getEffectiveStatus(std::move(deleteResult)),
+        str::stream() << "Failed to remove query analyzer documents that match the filter"
+                      << filter);
 }
 
 void removeTagsMetadataFromConfig_notIdempotent(OperationContext* opCtx,
-                                                Shard* configShard,
+                                                const std::shared_ptr<Shard>& configShard,
                                                 const NamespaceString& nss,
                                                 const WriteConcernOptions& writeConcern) {
     // Remove config.tags entries
-    const auto query = BSON(TagsType::ns(nss.ns()));
+    const auto query = BSON(TagsType::ns(nss.ns().toString()));
     const auto hint = BSON(TagsType::ns() << 1 << TagsType::min() << 1);
 
     BatchedCommandRequest request([&] {
@@ -499,9 +487,12 @@ void removeTagsMetadataFromConfig_notIdempotent(OperationContext* opCtx,
 
 void removeCollAndChunksMetadataFromConfig(
     OperationContext* opCtx,
+    const std::shared_ptr<Shard>& configShard,
+    ShardingCatalogClient* catalogClient,
     const CollectionType& coll,
     const WriteConcernOptions& writeConcern,
     const OperationSessionInfo& osi,
+    bool useClusterTransaction,
     const std::shared_ptr<executor::TaskExecutor>& executor) {
     IgnoreAPIParametersBlock ignoreApiParametersBlock(opCtx);
     const auto& nss = coll.getNss();
@@ -517,14 +508,15 @@ void removeCollAndChunksMetadataFromConfig(
     config.placementHistory. In case this operation is run by a ddl coordinator, we can re-use the
     osi in the transaction to guarantee the replay protection.
     */
-    deleteCollection(opCtx, nss, uuid, writeConcern, osi, executor);
+    deleteCollection(opCtx, nss, uuid, writeConcern, osi, executor, useClusterTransaction);
 
-    deleteChunks(opCtx, uuid, writeConcern);
+    deleteChunks(opCtx, configShard, uuid, writeConcern);
 
-    deleteShardingIndexCatalogMetadata(opCtx, uuid, writeConcern);
+    deleteShardingIndexCatalogMetadata(opCtx, configShard, uuid, writeConcern);
 }
 
 bool removeCollAndChunksMetadataFromConfig_notIdempotent(OperationContext* opCtx,
+                                                         const std::shared_ptr<Shard>& configShard,
                                                          ShardingCatalogClient* catalogClient,
                                                          const NamespaceString& nss,
                                                          const WriteConcernOptions& writeConcern) {
@@ -534,11 +526,20 @@ bool removeCollAndChunksMetadataFromConfig_notIdempotent(OperationContext* opCtx
     ON_BLOCK_EXIT(
         [&] { Grid::get(opCtx)->catalogCache()->invalidateCollectionEntry_LINEARIZABLE(nss); });
 
+    // This always runs on the config server and is expected to use a local transaction.
+    bool useClusterTransaction = false;
+
     try {
         auto coll =
             catalogClient->getCollection(opCtx, nss, repl::ReadConcernLevel::kLocalReadConcern);
 
-        removeCollAndChunksMetadataFromConfig(opCtx, coll, writeConcern, {} /* osi */);
+        removeCollAndChunksMetadataFromConfig(opCtx,
+                                              configShard,
+                                              catalogClient,
+                                              coll,
+                                              writeConcern,
+                                              {} /* osi */,
+                                              useClusterTransaction);
         return true;
     } catch (ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
         // The collection is not sharded or doesn't exist
@@ -547,9 +548,9 @@ bool removeCollAndChunksMetadataFromConfig_notIdempotent(OperationContext* opCtx
 }
 
 void shardedRenameMetadata(OperationContext* opCtx,
-                           Shard* configShard,
+                           const std::shared_ptr<Shard>& configShard,
                            ShardingCatalogClient* catalogClient,
-                           CollectionType& fromCollType,
+                           CollectionType fromCollType,
                            const NamespaceString& toNss,
                            const WriteConcernOptions& writeConcern) {
     invariant(serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
@@ -569,44 +570,25 @@ void shardedRenameMetadata(OperationContext* opCtx,
 
         // Delete "TO" chunk/collection entries referring a dropped collection
         removeCollAndChunksMetadataFromConfig_notIdempotent(
-            opCtx, catalogClient, toNss, writeConcern);
+            opCtx, configShard, catalogClient, toNss, writeConcern);
     } catch (ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
         // The "TO" collection is not sharded or doesn't exist
     }
 
+    // This always runs on the config server and is expected to use a local transaction.
+    bool useClusterTransaction = false;
+
     // Delete "FROM" from config.collections.
     // Run Transaction 1 - delete source collection
     // Note: in case of empty osi the transaction performing the deletion will use a new osi.
-    deleteCollection(opCtx, fromNss, fromUUID, writeConcern, {}, nullptr);
+    deleteCollection(opCtx, fromNss, fromUUID, writeConcern, {}, nullptr, useClusterTransaction);
 
     // Update "FROM" tags to "TO".
     updateTags(opCtx, configShard, fromNss, toNss, writeConcern);
 
     auto renamedCollPlacementInfo = [&]() {
-        // Retrieve the latest placement document about "FROM" prior to its deletion (which will
-        // have left an entry with an empty set of shards).
-        auto query = BSON(NamespacePlacementType::kNssFieldName
-                          << fromNss.ns() << NamespacePlacementType::kShardsFieldName
-                          << BSON("$ne" << BSONArray()));
-
-        auto queryResponse =
-            uassertStatusOK(configShard->exhaustiveFindOnConfig(
-                                opCtx,
-                                ReadPreferenceSetting(ReadPreference::Nearest, TagSet{}),
-                                repl::ReadConcernLevel::kMajorityReadConcern,
-                                NamespaceString::kConfigsvrPlacementHistoryNamespace,
-                                query,
-                                BSON(NamespacePlacementType::kTimestampFieldName << -1) /*sort*/,
-                                1 /*limit*/))
-                .docs;
-
-        if (!queryResponse.empty()) {
-            return NamespacePlacementType::parse(IDLParserContext("shardedRenameMetadata"),
-                                                 queryResponse.back());
-        }
-
-        // Persisted placement information may be unavailable as a consequence of FCV
-        // transitions. Use the content of config.chunks as a fallback.
+        // Use the content of config.chunks to obtain the placement of the collection being renamed.
+        // The request is equivalent to 'configDb.chunks.distinct("shard", {uuid:collectionUuid})'.
         DistinctCommandRequest distinctRequest(ChunkType::ConfigNS);
         distinctRequest.setKey(ChunkType::shard.name());
         distinctRequest.setQuery(BSON(ChunkType::collectionUUID.name() << fromUUID));
@@ -672,7 +654,8 @@ void shardedRenameMetadata(OperationContext* opCtx,
 
     // Run Transaction 2 - insert target collection and placement entries
     // Note: in case of empty osi the transaction performing the deletion will use a new osi.
-    runTransactionOnShardingCatalog(opCtx, std::move(transactionChain), writeConcern, {});
+    runTransactionOnShardingCatalog(
+        opCtx, std::move(transactionChain), writeConcern, {}, useClusterTransaction);
 }
 
 void checkCatalogConsistencyAcrossShardsForRename(
@@ -884,6 +867,7 @@ void runTransactionOnShardingCatalog(OperationContext* opCtx,
                                      txn_api::Callback&& transactionChain,
                                      const WriteConcernOptions& writeConcern,
                                      const OperationSessionInfo& osi,
+                                     bool useClusterTransaction,
                                      const std::shared_ptr<executor::TaskExecutor>& inputExecutor) {
     // The Internal Transactions API receives the write concern option and osi through the
     // passed Operation context. We opt for creating a new one to avoid any possible side
@@ -898,8 +882,12 @@ void runTransactionOnShardingCatalog(OperationContext* opCtx,
     AuthorizationSession::get(newClient.get())->grantInternalAuthorization(newClient.get());
     AlternativeClientRegion acr(newClient);
 
+    auto newOpCtxHolder = cc().makeOperationContext();
+    auto newOpCtx = newOpCtxHolder.get();
+    newOpCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
+
     // if executor is provided, use it, otherwise use the fixed executor
-    const auto& executor = [&inputExecutor, ctx = opCtx]() {
+    const auto& executor = [&inputExecutor, ctx = newOpCtx]() {
         if (inputExecutor)
             return inputExecutor;
 
@@ -907,40 +895,36 @@ void runTransactionOnShardingCatalog(OperationContext* opCtx,
     }();
 
     auto inlineExecutor = std::make_shared<executor::InlineExecutor>();
-    auto sleepInlineExecutor = inlineExecutor->getSleepableExecutor(executor);
 
-    // if osi is provided, use it. Otherwise, use the one from the opCtx.
-    auto newOpCtxHolder = cc().makeOperationContext();
-    auto newOpCtx = newOpCtxHolder.get();
-    newOpCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
+    // Instantiate the right custom TXN client to ensure that the queries to the config DB will be
+    // routed to the CSRS.
+    auto customTxnClient = [&]() -> std::unique_ptr<txn_api::TransactionClient> {
+        if (!useClusterTransaction) {
+            tassert(7591900,
+                    "Can only use local transaction client for sharding catalog operations on a "
+                    "config server",
+                    serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
+            return nullptr;
+        }
+
+        auto sleepInlineExecutor = inlineExecutor->getSleepableExecutor(executor);
+        return std::make_unique<txn_api::details::SEPTransactionClient>(
+            newOpCtx,
+            inlineExecutor,
+            sleepInlineExecutor,
+            std::make_unique<txn_api::details::ClusterSEPTransactionClientBehaviors>(
+                newOpCtx->getServiceContext()));
+    }();
 
     if (osi.getSessionId()) {
         newOpCtx->setLogicalSessionId(*osi.getSessionId());
         newOpCtx->setTxnNumber(*osi.getTxnNumber());
-    } else if (opCtx->getLogicalSessionId()) {
-        newOpCtx->setLogicalSessionId(*opCtx->getLogicalSessionId());
-        newOpCtx->setTxnNumber(*opCtx->getTxnNumber());
     }
-    newOpCtx->setWriteConcern(writeConcern);
-    // Instantiate the right custom TXN client to ensure that the queries to the config DB will be
-    // routed to the CSRS.
-    auto customTxnClient = [&]() -> std::unique_ptr<txn_api::TransactionClient> {
-        // TODO SERVER-75919: Investigate if this should always use the remote client.
-        if (serverGlobalParams.clusterRole.exclusivelyHasShardRole()) {
-            return std::make_unique<txn_api::details::SEPTransactionClient>(
-                newOpCtx,
-                inlineExecutor,
-                sleepInlineExecutor,
-                std::make_unique<txn_api::details::ClusterSEPTransactionClientBehaviors>(
-                    newOpCtx->getServiceContext()));
-        }
 
-        invariant(serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
-        return nullptr;
-    }();
+    newOpCtx->setWriteConcern(writeConcern);
 
     txn_api::SyncTransactionWithRetries txn(newOpCtx,
-                                            sleepInlineExecutor,
+                                            executor,
                                             nullptr /*resourceYielder*/,
                                             inlineExecutor,
                                             std::move(customTxnClient));

@@ -39,7 +39,6 @@ class Checker:
         if not(operation.modified or
                operation.durable_gt_stable or
                operation.has_prepared_updates or
-               operation.durable_ts_not_found or
                operation.txnid_gt_recov_ckpt_snap_min):
             raise Exception(f"unnecessary visit to {operation.file}")
 
@@ -47,9 +46,6 @@ class Checker:
             raise Exception(f"incorrect timestamp comparison: thought {operation.durable} > {operation.stable}, but it isn't")
         if not operation.durable_gt_stable and not operation.stable >= operation.durable:
             raise Exception(f"incorrect timestamp comparison: thought {operation.durable} <= {operation.stable}, but it isn't")
-
-        if operation.durable_ts_not_found and operation.durable != Timestamp(0, 0):
-            raise Exception("we thought we didn't have a durable timestamp, but we do")
 
         if operation.stable != self.stable:
             raise Exception(f"stable timestamp spuriously changed from {self.stable} to {operation.stable} while rolling back {operation.file}")
@@ -77,8 +73,9 @@ class Checker:
         self.visited_pages.add(page)
 
     def __apply_check_update_abort(self, operation):
-        if operation.file != self.current_tree.file:
-            raise Exception(f"spurious visit to {operation.file}")
+        # TODO expand this out - not always spurious for the history store.
+        # if operation.file != self.current_tree.file:
+        #     raise Exception(f"spurious visit to {operation.file}")
 
         if not(operation.txnid_not_visible or
                operation.stable_lt_durable or

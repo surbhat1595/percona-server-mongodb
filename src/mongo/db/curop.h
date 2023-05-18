@@ -578,7 +578,7 @@ public:
         if (_dbprofile <= 0)
             return false;
 
-        if (CollectionCatalog::get(opCtx())->getDatabaseProfileSettings(getNSS().db()).filter)
+        if (CollectionCatalog::get(opCtx())->getDatabaseProfileSettings(getNSS().dbName()).filter)
             return true;
 
         return elapsedTimeExcludingPauses() >= Milliseconds{serverGlobalParams.slowMS.load()};
@@ -822,6 +822,12 @@ public:
     }
 
     /**
+     * If the platform supports the CPU timer, and we haven't collected this operation's CPU time
+     * already, then calculates this operation's CPU time and stores it on the 'OpDebug'.
+     */
+    void calculateCpuTime();
+
+    /**
      * 'opDescription' must be either an owned BSONObj or guaranteed to outlive the OperationContext
      * it is associated with.
      */
@@ -965,7 +971,6 @@ private:
     TickSource::Tick startTime();
     Microseconds computeElapsedTimeTotal(TickSource::Tick startTime,
                                          TickSource::Tick endTime) const;
-
     /**
      * Handles failpoints that check whether a command has completed or not.
      * Used for testing purposes instead of the getLog command.

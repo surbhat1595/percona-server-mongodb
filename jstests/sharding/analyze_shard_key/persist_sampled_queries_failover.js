@@ -10,9 +10,6 @@
 load("jstests/libs/fail_point_util.js");
 load("jstests/sharding/analyze_shard_key/libs/query_sampling_util.js");
 
-// Set this to allow sample ids to be set by an external client.
-TestData.enableTestCommands = true;
-
 function testStepDown(rst) {
     const dbName = "testDb";
     const collName = "testCollStepDown";
@@ -100,6 +97,9 @@ const st = new ShardingTest({
         setParameter: {queryAnalysisWriterIntervalSecs: 1}
     }
 });
+
+// Force samples to get persisted even though query sampling is not enabled.
+QuerySamplingUtil.skipActiveSamplingCheckWhenPersistingSamples(st);
 
 testStepDown(st.rs0);
 testStepUp(st.rs0);

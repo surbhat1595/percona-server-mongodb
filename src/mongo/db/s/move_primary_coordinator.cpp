@@ -61,6 +61,7 @@ bool useOnlineCloner() {
 }  // namespace
 
 MONGO_FAIL_POINT_DEFINE(hangBeforeCloningData);
+MONGO_FAIL_POINT_DEFINE(movePrimaryCoordinatorHangBeforeCleaningUp);
 
 MovePrimaryCoordinator::MovePrimaryCoordinator(ShardingDDLCoordinatorService* service,
                                                const BSONObj& initialState)
@@ -233,14 +234,13 @@ ExecutorFuture<void> MovePrimaryCoordinator::runMovePrimaryWorkflow(
                                      auto* opCtx = opCtxHolder.get();
                                      getForwardableOpMetadata().setOn(opCtx);
 
-                                     _updateSession(opCtx);
                                      if (!_firstExecution) {
                                          // Perform a noop write on the recipient in order to
                                          // advance the txnNumber for this coordinator's logical
                                          // session. This prevents requests with older txnNumbers
                                          // from being processed.
                                          _performNoopRetryableWriteOnAllShardsAndConfigsvr(
-                                             opCtx, getCurrentSession(), **executor);
+                                             opCtx, getNewSession(opCtx), **executor);
                                      }
 
                                      blockReads(opCtx);
@@ -286,14 +286,13 @@ ExecutorFuture<void> MovePrimaryCoordinator::runMovePrimaryWorkflow(
                                      auto* opCtx = opCtxHolder.get();
                                      getForwardableOpMetadata().setOn(opCtx);
 
-                                     _updateSession(opCtx);
                                      if (!_firstExecution) {
                                          // Perform a noop write on the recipient in order to
                                          // advance the txnNumber for this coordinator's logical
                                          // session. This prevents requests with older txnNumbers
                                          // from being processed.
                                          _performNoopRetryableWriteOnAllShardsAndConfigsvr(
-                                             opCtx, getCurrentSession(), **executor);
+                                             opCtx, getNewSession(opCtx), **executor);
                                      }
 
                                      unblockReadsAndWrites(opCtx);
@@ -350,8 +349,16 @@ bool MovePrimaryCoordinator::onlineClonerAllowedToBeMissing() const {
 }
 
 void MovePrimaryCoordinator::recoverOnlineCloner(OperationContext* opCtx) {
+    if (_onlineCloner) {
+        return;
+    }
     _onlineCloner = MovePrimaryDonor::get(opCtx, _dbName, _doc.getToShardId());
     if (_onlineCloner) {
+        LOGV2(7687200,
+              "MovePrimaryCoordinator found existing online cloner",
+              "migrationId"_attr = _onlineCloner->getMetadata().getMigrationId(),
+              logAttrs(_dbName),
+              "to"_attr = _doc.getToShardId());
         return;
     }
     invariant(onlineClonerAllowedToBeMissing());
@@ -360,6 +367,11 @@ void MovePrimaryCoordinator::recoverOnlineCloner(OperationContext* opCtx) {
 void MovePrimaryCoordinator::createOnlineCloner(OperationContext* opCtx) {
     invariant(onlineClonerPossiblyNeverCreated());
     _onlineCloner = MovePrimaryDonor::create(opCtx, _dbName, _doc.getToShardId());
+    LOGV2(7687201,
+          "MovePrimaryCoordinator created new online cloner",
+          "migrationId"_attr = _onlineCloner->getMetadata().getMigrationId(),
+          logAttrs(_dbName),
+          "to"_attr = _doc.getToShardId());
 }
 
 void MovePrimaryCoordinator::cloneDataUntilReadyForCatchup(OperationContext* opCtx,
@@ -399,9 +411,13 @@ ExecutorFuture<void> MovePrimaryCoordinator::_cleanupOnAbort(
             auto* opCtx = opCtxHolder.get();
             getForwardableOpMetadata().setOn(opCtx);
 
-            _updateSession(opCtx);
+            if (MONGO_unlikely(movePrimaryCoordinatorHangBeforeCleaningUp.shouldFail())) {
+                LOGV2(7687202, "Hit movePrimaryCoordinatorHangBeforeCleaningUp");
+                movePrimaryCoordinatorHangBeforeCleaningUp.pauseWhileSet(opCtx);
+            }
+
             _performNoopRetryableWriteOnAllShardsAndConfigsvr(
-                opCtx, getCurrentSession(), **executor);
+                opCtx, getNewSession(opCtx), **executor);
 
             if (useOnlineCloner()) {
                 cleanupOnAbortWithOnlineCloner(opCtx, token, status);
@@ -467,6 +483,7 @@ void MovePrimaryCoordinator::cleanupOnAbortWithOnlineCloner(OperationContext* op
                                                             const CancellationToken& token,
                                                             const Status& status) {
     unblockReadsAndWrites(opCtx);
+    recoverOnlineCloner(opCtx);
     if (!_onlineCloner) {
         return;
     }
@@ -592,7 +609,7 @@ std::vector<NamespaceString> MovePrimaryCoordinator::cloneDataToRecipient(
     const auto cloneResponse =
         toShard->runCommand(opCtx,
                             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                            DatabaseName::kAdmin.db(),
+                            DatabaseName::kAdmin.db().toString(),
                             cloneCommand,
                             Shard::RetryPolicy::kNoRetry);
 
@@ -641,7 +658,7 @@ void MovePrimaryCoordinator::commitMetadataToConfig(
     const auto commitResponse =
         config->runCommandWithFixedRetryAttempts(opCtx,
                                                  ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                                 DatabaseName::kAdmin.db(),
+                                                 DatabaseName::kAdmin.db().toString(),
                                                  commitCommand,
                                                  Shard::RetryPolicy::kIdempotent);
 
@@ -722,15 +739,14 @@ void MovePrimaryCoordinator::dropOrphanedDataOnRecipient(
         return;
     }
 
-    // Make a copy of this container since `_updateSession` changes the coordinator document.
+    // Make a copy of this container since `getNewSession` changes the coordinator document.
     const auto collectionsToClone = *_doc.getCollectionsToClone();
     for (const auto& nss : collectionsToClone) {
-        _updateSession(opCtx);
         sharding_ddl_util::sendDropCollectionParticipantCommandToShards(opCtx,
                                                                         nss,
                                                                         {_doc.getToShardId()},
                                                                         **executor,
-                                                                        getCurrentSession(),
+                                                                        getNewSession(opCtx),
                                                                         false /* fromMigrate */);
     }
 }
@@ -762,14 +778,14 @@ void MovePrimaryCoordinator::unblockReadsAndWrites(OperationContext* opCtx) cons
         opCtx, NamespaceString(_dbName), _csReason, ShardingCatalogClient::kLocalWriteConcern);
 }
 
-void MovePrimaryCoordinator::enterCriticalSectionOnRecipient(OperationContext* opCtx) const {
+void MovePrimaryCoordinator::enterCriticalSectionOnRecipient(OperationContext* opCtx) {
     const auto enterCriticalSectionCommand = [&] {
         ShardsvrMovePrimaryEnterCriticalSection request(_dbName);
         request.setDbName(DatabaseName::kAdmin);
         request.setReason(_csReason);
 
         auto command = CommandHelpers::appendMajorityWriteConcern(request.toBSON({}));
-        return command.addFields(getCurrentSession().toBSON());
+        return command.addFields(getNewSession(opCtx).toBSON());
     }();
 
     const auto& toShardId = _doc.getToShardId();
@@ -792,14 +808,14 @@ void MovePrimaryCoordinator::enterCriticalSectionOnRecipient(OperationContext* o
             _dbName.toString(), toShardId.toString()));
 }
 
-void MovePrimaryCoordinator::exitCriticalSectionOnRecipient(OperationContext* opCtx) const {
+void MovePrimaryCoordinator::exitCriticalSectionOnRecipient(OperationContext* opCtx) {
     const auto exitCriticalSectionCommand = [&] {
         ShardsvrMovePrimaryExitCriticalSection request(_dbName);
         request.setDbName(DatabaseName::kAdmin);
         request.setReason(_csReason);
 
         auto command = CommandHelpers::appendMajorityWriteConcern(request.toBSON({}));
-        return command.addFields(getCurrentSession().toBSON());
+        return command.addFields(getNewSession(opCtx).toBSON());
     }();
 
     const auto& toShardId = _doc.getToShardId();

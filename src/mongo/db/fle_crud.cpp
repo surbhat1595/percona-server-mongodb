@@ -235,12 +235,12 @@ std::vector<std::vector<FLEEdgeCountInfo>> toEdgeCounts(
 std::shared_ptr<txn_api::SyncTransactionWithRetries> getTransactionWithRetriesForMongoS(
     OperationContext* opCtx) {
 
+    auto& executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
     auto fleInlineCrudExecutor = std::make_shared<executor::InlineExecutor>();
 
     return std::make_shared<txn_api::SyncTransactionWithRetries>(
         opCtx,
-        fleInlineCrudExecutor->getSleepableExecutor(
-            Grid::get(opCtx)->getExecutorPool()->getFixedExecutor()),
+        executor,
         TransactionRouterResourceYielder::makeForLocalHandoff(),
         fleInlineCrudExecutor);
 }
@@ -1507,7 +1507,7 @@ std::vector<std::vector<FLEEdgeCountInfo>> FLEQueryInterfaceImpl::getTags(
     getCountsCmd.setTokens(toTagSets(tokensSets));
     getCountsCmd.setQueryType(queryTypeTranslation(type));
 
-    auto response = _txnClient.runCommandSync(nss.db(), getCountsCmd.toBSON({}));
+    auto response = _txnClient.runCommandSync(nss.dbName(), getCountsCmd.toBSON({}));
 
     auto status = getStatusFromWriteCommandReply(response);
     uassertStatusOK(status);

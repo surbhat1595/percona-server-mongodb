@@ -37,6 +37,7 @@
 #include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/repl/tenant_migration_donor_access_blocker.h"
 #include "mongo/db/repl/tenant_migration_recipient_access_blocker.h"
+#include "mongo/db/serverless/shard_split_state_machine_gen.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/dbtests/mock/mock_replica_set.h"
@@ -95,7 +96,8 @@ TEST_F(TenantMigrationAccessBlockerUtilTest, HasActiveShardMergeTrueWithDonor) {
         std::make_shared<TenantMigrationDonorAccessBlocker>(getServiceContext(), UUID::gen());
     TenantMigrationAccessBlockerRegistry::get(getServiceContext())
         .addGlobalDonorAccessBlocker(donorMtab);
-    ASSERT_FALSE(tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), "local"_sd));
+    ASSERT_FALSE(
+        tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), DatabaseName::kLocal));
     ASSERT(tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), kTenantDB));
 }
 
@@ -129,7 +131,8 @@ TEST_F(TenantMigrationAccessBlockerUtilTest, HasActiveShardMergeTrueWithBoth) {
     TenantMigrationAccessBlockerRegistry::get(getServiceContext())
         .addGlobalDonorAccessBlocker(donorMtab);
     // Access blocker do not impact ns without tenants.
-    ASSERT_FALSE(tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), "config"_sd));
+    ASSERT_FALSE(
+        tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), DatabaseName::kConfig));
     ASSERT(tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), kTenantDB));
 }
 
@@ -138,7 +141,8 @@ TEST_F(TenantMigrationAccessBlockerUtilTest, HasActiveTenantMigrationDonorFalseF
         std::make_shared<TenantMigrationDonorAccessBlocker>(getServiceContext(), UUID::gen());
     TenantMigrationAccessBlockerRegistry::get(getServiceContext()).add(kTenantId, donorMtab);
 
-    ASSERT_FALSE(tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), StringData()));
+    ASSERT_FALSE(
+        tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), DatabaseName::kEmpty));
 }
 
 TEST_F(TenantMigrationAccessBlockerUtilTest, HasActiveShardMergeDonorFalseForNoDbName) {
@@ -146,14 +150,16 @@ TEST_F(TenantMigrationAccessBlockerUtilTest, HasActiveShardMergeDonorFalseForNoD
         std::make_shared<TenantMigrationDonorAccessBlocker>(getServiceContext(), UUID::gen());
     TenantMigrationAccessBlockerRegistry::get(getServiceContext())
         .addGlobalDonorAccessBlocker(donorMtab);
-    ASSERT_FALSE(tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), StringData()));
+    ASSERT_FALSE(
+        tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), DatabaseName::kEmpty));
 }
 
 TEST_F(TenantMigrationAccessBlockerUtilTest, HasActiveShardMergeRecipientFalseForNoDbName) {
     auto recipientMtab =
         std::make_shared<TenantMigrationRecipientAccessBlocker>(getServiceContext(), UUID::gen());
     TenantMigrationAccessBlockerRegistry::get(getServiceContext()).add(kTenantId, recipientMtab);
-    ASSERT_FALSE(tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), StringData()));
+    ASSERT_FALSE(
+        tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), DatabaseName::kEmpty));
 }
 
 TEST_F(TenantMigrationAccessBlockerUtilTest, HasActiveTenantMigrationFalseForUnrelatedDb) {
@@ -165,7 +171,8 @@ TEST_F(TenantMigrationAccessBlockerUtilTest, HasActiveTenantMigrationFalseForUnr
         std::make_shared<TenantMigrationDonorAccessBlocker>(getServiceContext(), UUID::gen());
     TenantMigrationAccessBlockerRegistry::get(getServiceContext()).add(kTenantId, donorMtab);
 
-    ASSERT_FALSE(tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), "config"_sd));
+    ASSERT_FALSE(
+        tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), DatabaseName::kConfig));
 }
 
 TEST_F(TenantMigrationAccessBlockerUtilTest, HasActiveTenantMigrationFalseAfterRemoveWithBoth) {
@@ -202,20 +209,23 @@ TEST_F(TenantMigrationAccessBlockerUtilTest, HasActiveShardMergeFalseAfterRemove
         .addGlobalDonorAccessBlocker(donorMtab);
 
     ASSERT(tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), kTenantDB));
-    ASSERT_FALSE(tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), "admin"_sd));
+    ASSERT_FALSE(
+        tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), DatabaseName::kAdmin));
 
     // Remove donor, should still be a migration for the tenants migrating to the recipient.
     TenantMigrationAccessBlockerRegistry::get(getServiceContext())
         .removeAccessBlockersForMigration(migrationId,
                                           TenantMigrationAccessBlocker::BlockerType::kDonor);
     ASSERT(tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), kTenantDB));
-    ASSERT_FALSE(tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), "admin"_sd));
+    ASSERT_FALSE(
+        tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), DatabaseName::kAdmin));
 
     // Remove recipient, there should be no migration.
     TenantMigrationAccessBlockerRegistry::get(getServiceContext())
         .remove(kTenantId, TenantMigrationAccessBlocker::BlockerType::kRecipient);
     ASSERT_FALSE(tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), kTenantDB));
-    ASSERT_FALSE(tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), "admin"_sd));
+    ASSERT_FALSE(
+        tenant_migration_access_blocker::hasActiveTenantMigration(opCtx(), DatabaseName::kAdmin));
 }
 
 TEST_F(TenantMigrationAccessBlockerUtilTest, TestValidateNssBeingMigrated) {
@@ -704,6 +714,49 @@ TEST_F(RecoverAccessBlockerTest, ShardMergeDonorAborted) {
 
         ASSERT_OK(mtab->checkIfCanBuildIndex());
     }
+}
+
+TEST_F(RecoverAccessBlockerTest, ShardSplitDonorBlocking) {
+    const auto tagName = "recipientTag";
+    const auto setName = "recipientSet";
+
+    ShardSplitDonorDocument donorDoc(kMigrationId);
+    donorDoc.setTenantIds(_tenantIds);
+    donorDoc.setRecipientSetName(StringData{setName});
+    donorDoc.setRecipientTagName(StringData{tagName});
+    donorDoc.setState(mongo::ShardSplitDonorStateEnum::kBlocking);
+    donorDoc.setBlockOpTime(repl::OpTime{Timestamp{100, 1}, 1});
+
+    insertStateDocument(NamespaceString::kShardSplitDonorsNamespace, donorDoc.toBSON());
+
+    tenant_migration_access_blocker::recoverTenantMigrationAccessBlockers(opCtx());
+
+    auto accessBlockers = TenantMigrationAccessBlockerRegistry::get(getServiceContext())
+                              .getDonorAccessBlockersForMigration(kMigrationId);
+    ASSERT_EQ(accessBlockers.size(), 2);
+
+    // Shard Split use the same access blockers for both tenants.
+    ASSERT_EQ(accessBlockers[0], accessBlockers[1]);
+
+    auto mtab = accessBlockers[0];
+    ASSERT(mtab);
+
+    repl::ReadConcernArgs::get(opCtx()) =
+        repl::ReadConcernArgs(repl::ReadConcernLevel::kMajorityReadConcern);
+    auto readFuture = mtab->getCanReadFuture(opCtx(), "dummyCmd");
+    ASSERT_TRUE(readFuture.isReady());
+    ASSERT_OK(readFuture.getNoThrow());
+
+    repl::ReadConcernArgs::get(opCtx()) =
+        repl::ReadConcernArgs(repl::ReadConcernLevel::kSnapshotReadConcern);
+    repl::ReadConcernArgs::get(opCtx()).setArgsAtClusterTimeForSnapshot(Timestamp{101, 1});
+    auto afterReadFuture = mtab->getCanReadFuture(opCtx(), "dummyCmd");
+    ASSERT_FALSE(afterReadFuture.isReady());
+
+    ASSERT_EQ(mtab->checkIfCanWrite(Timestamp{101, 1}).code(), ErrorCodes::TenantMigrationConflict);
+
+    auto indexStatus = mtab->checkIfCanBuildIndex();
+    ASSERT_EQ(indexStatus.code(), ErrorCodes::TenantMigrationConflict);
 }
 
 }  // namespace mongo

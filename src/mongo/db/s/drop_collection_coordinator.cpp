@@ -42,6 +42,7 @@
 #include "mongo/db/s/sharding_logging.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/logv2/log.h"
+#include "mongo/s/analyze_shard_key_documents_gen.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
@@ -211,6 +212,19 @@ void DropCollectionCoordinator::_checkPreconditionsAndSaveArgumentsOnDoc() {
                                AutoGetCollection::Options{}
                                    .viewMode(auto_get_collection::ViewMode::kViewsPermitted)
                                    .expectedUUID(_doc.getCollectionUUID())};
+
+        // The drop operation is aborted if the namespace does not exist or does not comply with
+        // naming restrictions. Non-system namespaces require additional logic that cannot be done
+        // at this level, such as the time series collection must be resolved to remove the
+        // corresponding bucket collection, or tag documents associated to non-existing collections
+        // must be cleaned up.
+        if (nss().isSystem()) {
+            uassert(ErrorCodes::NamespaceNotFound,
+                    "namespace {} does not exist"_format(nss().toStringForErrorMsg()),
+                    *coll);
+
+            uassertStatusOK(isDroppableCollection(opCtx, nss()));
+        }
     }
 
     _saveCollInfo(opCtx);
@@ -291,15 +305,26 @@ void DropCollectionCoordinator::_commitDropCollection(
 
     LOGV2_DEBUG(5390504, 2, "Dropping collection", logAttrs(nss()), "sharded"_attr = collIsSharded);
 
+    // Remove the query sampling configuration document for this collection, if it exists.
+    sharding_ddl_util::removeQueryAnalyzerMetadataFromConfig(
+        opCtx, BSON(analyze_shard_key::QueryAnalyzerDocument::kNsFieldName << nss().toString()));
+
     _updateSession(opCtx);
     if (collIsSharded) {
         invariant(_doc.getCollInfo());
         const auto& coll = _doc.getCollInfo().value();
+
+        // This always runs in the shard role so should use a cluster transaction to guarantee
+        // targeting the config server.
+        bool useClusterTransaction = true;
         sharding_ddl_util::removeCollAndChunksMetadataFromConfig(
             opCtx,
+            Grid::get(opCtx)->shardRegistry()->getConfigShard(),
+            Grid::get(opCtx)->catalogClient(),
             coll,
             ShardingCatalogClient::kMajorityWriteConcern,
             getCurrentSession(),
+            useClusterTransaction,
             **executor);
     }
 
@@ -327,11 +352,6 @@ void DropCollectionCoordinator::_commitDropCollection(
     // unsharded with a higher optime than all of the drops.
     sharding_ddl_util::sendDropCollectionParticipantCommandToShards(
         opCtx, nss(), {primaryShardId}, **executor, getCurrentSession(), false /*fromMigrate*/);
-
-    // Remove potential query analyzer document only after purging the collection from
-    // the catalog. This ensures no leftover documents referencing an old incarnation of
-    // a collection.
-    sharding_ddl_util::removeQueryAnalyzerMetadataFromConfig(opCtx, nss(), boost::none);
 
     ShardingLogging::get(opCtx)->logChange(opCtx, "dropCollection", nss().ns());
     LOGV2(5390503, "Collection dropped", logAttrs(nss()));

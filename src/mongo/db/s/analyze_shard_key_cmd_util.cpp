@@ -496,15 +496,19 @@ CardinalityFrequencyMetrics calculateCardinalityAndFrequencyGeneric(OperationCon
         }
 
         auto value = [&] {
+            if (doc.hasField(kIndexKeyFieldName)) {
+                return dotted_path_support::extractElementsBasedOnTemplate(
+                    doc.getObjectField(kIndexKeyFieldName).replaceFieldNames(shardKey), shardKey);
+            }
             if (doc.hasField(kDocFieldName)) {
                 return dotted_path_support::extractElementsBasedOnTemplate(
                     doc.getObjectField(kDocFieldName), shardKey);
-            } else if (doc.hasField(kIndexKeyFieldName)) {
-                return dotted_path_support::extractElementsBasedOnTemplate(
-                    doc.getObjectField(kIndexKeyFieldName).replaceFieldNames(shardKey), shardKey);
-            } else
-                uasserted(7588600,
-                          str::stream() << "Found a document with unexpected format " << doc);
+            }
+            uasserted(7588600,
+                      str::stream() << "Failed to look up documents for most common shard key "
+                                       "values. This is likely caused by concurrent deletions. "
+                                       "Please try running the analyzeShardKey command again. "
+                                    << doc);
         }();
         if (value.objsize() > maxSizeBytesPerValue) {
             value = truncateBSONObj(value, maxSizeBytesPerValue);
@@ -542,9 +546,15 @@ MonotonicityMetrics calculateMonotonicity(OperationContext* opCtx,
         return metrics;
     }
 
-    if (KeyPattern::isHashedKeyPattern(shardKey) && shardKey.nFields() == 1) {
-        metrics.setType(MonotonicityTypeEnum::kNotMonotonic);
-        metrics.setRecordIdCorrelationCoefficient(0);
+    if (KeyPattern::isHashedKeyPattern(shardKey)) {
+        if (shardKey.nFields() == 1 || shardKey.firstElement().valueStringDataSafe() == "hashed") {
+            metrics.setType(MonotonicityTypeEnum::kNotMonotonic);
+            metrics.setRecordIdCorrelationCoefficient(0);
+        } else {
+            // The monotonicity cannot be inferred from the recordIds in the index since hashing
+            // introduces randomness.
+            metrics.setType(MonotonicityTypeEnum::kUnknown);
+        }
         return metrics;
     }
 
@@ -705,7 +715,7 @@ std::pair<BSONObj, Timestamp> generateSplitPoints(OperationContext* opCtx,
             str::stream() << "Cannot analyze a shard key for a non-existing collection",
             origCollUuid);
     // Perform best-effort validation that the collection has not been dropped and recreated.
-    uassert(CollectionUUIDMismatchInfo(nss.db(), collUuid, nss.coll().toString(), boost::none),
+    uassert(CollectionUUIDMismatchInfo(nss.dbName(), collUuid, nss.coll().toString(), boost::none),
             str::stream() << "Found that the collection UUID has changed from " << collUuid
                           << " to " << origCollUuid << " since the command started",
             origCollUuid == collUuid);
@@ -823,10 +833,11 @@ KeyCharacteristicsMetrics calculateKeyCharacteristicsMetrics(OperationContext* o
                 str::stream() << "Cannot analyze a shard key for a non-existing collection",
                 collection);
         // Perform best-effort validation that the collection has not been dropped and recreated.
-        uassert(CollectionUUIDMismatchInfo(nss.db(), collUuid, nss.coll().toString(), boost::none),
-                str::stream() << "Found that the collection UUID has changed from " << collUuid
-                              << " to " << collection->uuid() << " since the command started",
-                collection->uuid() == collUuid);
+        uassert(
+            CollectionUUIDMismatchInfo(nss.dbName(), collUuid, nss.coll().toString(), boost::none),
+            str::stream() << "Found that the collection UUID has changed from " << collUuid
+                          << " to " << collection->uuid() << " since the command started",
+            collection->uuid() == collUuid);
 
         // Performs best-effort validation that the shard key does not contain an array field by
         // extracting the shard key value from a random document in the collection and asserting

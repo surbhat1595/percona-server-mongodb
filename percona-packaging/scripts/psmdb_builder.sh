@@ -996,7 +996,7 @@ build_tarball(){
     if [ ! -d lib/private ]; then
         mkdir -p lib/private
     fi
-    LIBLIST="libcrypto.so libssl.so librtmp.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so libssl3.so liblzma.so libidn.so"
+    LIBLIST="libsasl2.so.3 libcrypto.so libssl.so librtmp.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so libssl3.so liblzma.so libidn.so"
     DIRLIST="bin lib/private"
 
     LIBPATH=""
@@ -1057,9 +1057,6 @@ build_tarball(){
         patchelf --remove-needed libsasl2.so.2 bin/mongo
         patchelf --remove-needed libsasl2.so.3 bin/mongos
         patchelf --remove-needed libsasl2.so.2 bin/mongos
-
-        patchelf --remove-needed libsasl2.so.3 bin/mongobridge
-        patchelf --add-needed libsasl2.so.2 bin/mongobridge
 
         # Details are in tickets PSMDB-1160
         if [ "x$OS" = "xrpm" ]

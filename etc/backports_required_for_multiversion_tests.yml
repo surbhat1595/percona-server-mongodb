@@ -372,12 +372,16 @@ last-continuous:
     ticket: SERVER-76394
   - test_file: jstests/sharding/implicit_create_collection_triggered_by_DDLs.js
     ticket: SERVER-76489
+  - test_file: jstests/sharding/ddl_commits_with_two_phase_oplog_notification.js
+    ticket: SERVER-76908
   - test_file: jstests/sharding/shard_keys_with_dollar_sign.js
     ticket: SERVER-76948
   - test_file: jstests/sharding/resharding_with_multi_deletes_reduced_ticket_pool_size.js
     ticket: SERVER-77097
   - test_file: jstests/sharding/move_primary_donor_cleaned_up_if_coordinator_steps_up_aborted.js
     ticket: SERVER-76872
+  - test_file: jstests/sharding/merge_let_params_size_estimation.js
+    ticket: SERVER-74806
   suites: null
 last-lts:
   all:
@@ -835,10 +839,14 @@ last-lts:
     ticket: SERVER-76394
   - test_file: jstests/sharding/implicit_create_collection_triggered_by_DDLs.js
     ticket: SERVER-76489
+  - test_file: jstests/sharding/ddl_commits_with_two_phase_oplog_notification.js
+    ticket: SERVER-76908
   - test_file: jstests/sharding/shard_keys_with_dollar_sign.js
     ticket: SERVER-76948
   - test_file: jstests/sharding/resharding_with_multi_deletes_reduced_ticket_pool_size.js
     ticket: SERVER-77097
   - test_file: jstests/sharding/move_primary_donor_cleaned_up_if_coordinator_steps_up_aborted.js
     ticket: SERVER-76872
+  - test_file: jstests/sharding/merge_let_params_size_estimation.js
+    ticket: SERVER-74806
   suites: null

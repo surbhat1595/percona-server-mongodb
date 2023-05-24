@@ -89,8 +89,6 @@ variables:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
-  - name: version_burn_in_gen
-    variant: generate-tasks-for-version
 
 - &linux_x86_dynamic_debug_compile_variant_dependency
   depends_on:
@@ -121,8 +119,6 @@ variables:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
-  - name: version_burn_in_gen
-    variant: generate-tasks-for-version
 
 - &linux_x86_generic_expansions
   multiversion_platform: rhel80
@@ -190,6 +186,11 @@ variables:
     distros:
     - windows-vsCurrent-large
   - name: burn_in_tests_gen
+    depends_on:
+    - name: version_burn_in_gen
+      variant: generate-tasks-for-version
+      omit_generated_tasks: true
+    - name: archive_dist_test_debug
   - name: .aggfuzzer .common !.feature_flag_guarded
   - name: audit
   - name: auth_audit_gen
@@ -569,7 +570,11 @@ buildvariants:
   - name: .causally_consistent !.sharding
   - name: .change_streams
   - name: .misc_js !.non_win_dbg
-  - name: .concurrency .debug_only
+  - name: .concurrency
+    distros:
+    - windows-vsCurrent-large
+  - name: .config_fuzzer !.large
+  - name: .config_fuzzer .large
     distros:
     - windows-vsCurrent-large
   - name: disk_wiredtiger
@@ -633,6 +638,12 @@ buildvariants:
     external_auth_jobs_max: 1
   tasks:
   - name: burn_in_tests_gen
+    depends_on:
+    - name: version_burn_in_gen
+      variant: generate-tasks-for-version
+      omit_generated_tasks: true
+    - name: archive_dist_test_debug
+      variant: *windows_compile_variant_name
   - name: audit
   - name: auth_audit_gen
   - name: causally_consistent_jscore_txns_passthrough
@@ -698,7 +709,19 @@ buildvariants:
   - name: query_golden_classic
   - name: query_golden_cqf
   - name: burn_in_tests_gen
+    depends_on:
+    - name: version_burn_in_gen
+      variant: generate-tasks-for-version
+      omit_generated_tasks: true
+    - name: archive_dist_test_debug
+      variant: *windows_compile_variant_name
   # - name: burn_in_tasks_gen
+  #   depends_on:
+  #   - name: version_burn_in_gen
+  #     variant: generate-tasks-for-version
+  #     omit_generated_tasks: true
+  #   - name: archive_dist_test_debug
+  #     variant: *windows_compile_variant_name
   - name: audit
   - name: auth_audit_gen
   - name: buildscripts_test
@@ -949,10 +972,14 @@ buildvariants:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
-  - name: version_burn_in_gen
-    variant: generate-tasks-for-version
   tasks:
   - name: burn_in_tests_gen
+    depends_on:
+    - name: version_burn_in_gen
+      variant: generate-tasks-for-version
+      omit_generated_tasks: true
+    - name: archive_dist_test_debug
+      variant: *linux_x86_dynamic_compile_variant_name
   - name: .aggfuzzer !.feature_flag_guarded
   - name: .aggregation !.feature_flag_guarded
   - name: aggregation_repeat_queries
@@ -964,8 +991,8 @@ buildvariants:
   - name: .change_streams
   - name: .change_stream_fuzzer
   - name: .misc_js
-  - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
-  - name: .concurrency .large !.ubsan !.no_txns !.debug_only
+  - name: .concurrency !.large !.ubsan !.no_txns
+  - name: .concurrency .large !.ubsan !.no_txns
     distros:
     - rhel80-medium
   - name: .config_fuzzer !.large
@@ -1071,8 +1098,8 @@ buildvariants:
   - name: .change_streams !.no_debug_mode
   - name: .change_stream_fuzzer
   - name: .misc_js !.no_debug_mode
-  - name: .concurrency !.large !.ubsan !.no_txns !.debug_only !.no_debug_mode
-  - name: .concurrency .large !.ubsan !.no_txns !.debug_only !.no_debug_mode
+  - name: .concurrency !.large !.ubsan !.no_txns !.no_debug_mode
+  - name: .concurrency .large !.ubsan !.no_txns !.no_debug_mode
     distros:
     - rhel80-medium
   - name: .config_fuzzer !.large
@@ -1175,8 +1202,6 @@ buildvariants:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
-  - name: version_burn_in_gen
-    variant: generate-tasks-for-version
   tasks:
   - name: analyze_shard_key_jscore_passthrough_gen
   - name: cqf
@@ -1188,8 +1213,26 @@ buildvariants:
   - name: lint_fuzzer_sanity_patch
   - name: test_api_version_compatibility
   - name: burn_in_tests_gen
+    depends_on:
+    - name: version_burn_in_gen
+      variant: generate-tasks-for-version
+      omit_generated_tasks: true
+    - name: archive_dist_test_debug
+      variant: *linux_x86_dynamic_compile_variant_name
   - name: burn_in_tags_gen
+    depends_on:
+    - name: version_burn_in_gen
+      variant: generate-tasks-for-version
+      omit_generated_tasks: true
+    - name: archive_dist_test_debug
+      variant: *linux_x86_dynamic_compile_variant_name
   # - name: burn_in_tasks_gen
+  #   depends_on:
+  #   - name: version_burn_in_gen
+  #     variant: generate-tasks-for-version
+  #     omit_generated_tasks: true
+  #   - name: archive_dist_test_debug
+  #     variant: *linux_x86_dynamic_compile_variant_name
   - name: check_feature_flag_tags
   - name: check_for_todos
   - name: .aggfuzzer
@@ -1203,12 +1246,13 @@ buildvariants:
   - name: .causally_consistent !.sharding
   - name: .change_streams
   - name: .change_stream_fuzzer
+  # TODO SERVER-57866: Remove the explicit mentions of change stream multitenant suites.
   - name: change_streams_multitenant_passthrough
   - name: change_streams_multitenant_sharded_collections_passthrough
   - name: .misc_js
   - name: .clustered_collections
-  - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
-  - name: .concurrency .large !.ubsan !.no_txns !.debug_only
+  - name: .concurrency !.large !.ubsan !.no_txns
+  - name: .concurrency .large !.ubsan !.no_txns
     distros:
     - rhel80-medium
   - name: .config_fuzzer !.large
@@ -1356,8 +1400,6 @@ buildvariants:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
-  - name: version_burn_in_gen
-    variant: generate-tasks-for-version
   tasks:
   - name: .aggfuzzer !.sbe_only
   - name: .aggregation !.sbe_only
@@ -1365,8 +1407,8 @@ buildvariants:
   - name: .causally_consistent !.sharding
   - name: .change_stream_fuzzer
   - name: .change_streams
-  - name: .concurrency !.large !.ubsan !.no_txns !.debug_only !.compute_mode
-  - name: .concurrency .large !.ubsan !.no_txns !.debug_only !.compute_mode
+  - name: .concurrency !.large !.ubsan !.no_txns !.compute_mode
+  - name: .concurrency .large !.ubsan !.no_txns !.compute_mode
     distros:
     - rhel80-medium
   - name: .encrypt
@@ -1395,7 +1437,19 @@ buildvariants:
   - name: aggregation_repeat_queries
   - name: audit
   - name: burn_in_tags_gen
+    depends_on:
+    - name: version_burn_in_gen
+      variant: generate-tasks-for-version
+      omit_generated_tasks: true
+    - name: archive_dist_test_debug
+      variant: *linux_x86_dynamic_compile_variant_name
   - name: burn_in_tests_gen
+    depends_on:
+    - name: version_burn_in_gen
+      variant: generate-tasks-for-version
+      omit_generated_tasks: true
+    - name: archive_dist_test_debug
+      variant: *linux_x86_dynamic_compile_variant_name
   - name: check_feature_flag_tags
   - name: check_for_todos
   - name: disk_wiredtiger
@@ -1644,14 +1698,14 @@ buildvariants:
   modules:
   - enterprise
   run_on:
-  - amazon2022-arm64-large
+  - amazon2023.0-arm64-large
   expansions:
     compile_flags: >-
       --ssl
       MONGO_DISTMOD=rhel82
       -j$(grep -c ^processor /proc/cpuinfo)
     repo_edition: enterprise
-    large_distro_name: amazon2022-arm64-large
+    large_distro_name: amazon2023.0-arm64-large
     num_scons_link_jobs_available: 0.1
   tasks:
   - name: build_metrics_gen_TG
@@ -1853,6 +1907,12 @@ buildvariants:
   - name: lint_fuzzer_sanity_patch
   - name: test_api_version_compatibility
   - name: burn_in_tests_gen
+    depends_on:
+    - name: version_burn_in_gen
+      variant: generate-tasks-for-version
+      omit_generated_tasks: true
+    - name: archive_dist_test_debug
+      variant: *amazon_linux2_arm64_compile_variant_name
   - name: check_feature_flag_tags
   - name: check_for_todos
   - name: .aggfuzzer
@@ -1860,19 +1920,26 @@ buildvariants:
   - name: aggregation_repeat_queries
   - name: audit
   - name: .auth
-  #- name: burn_in_tags_gen
+  # - name: burn_in_tags_gen
+  #   depends_on:
+  #   - name: version_burn_in_gen
+  #     variant: generate-tasks-for-version
+  #     omit_generated_tasks: true
+  #   - name: archive_dist_test_debug
+  #     variant: *amazon_linux2_arm64_compile_variant_name
   - name: buildscripts_test
   - name: resmoke_end2end_tests
   - name: unittest_shell_hang_analyzer_gen
   - name: .causally_consistent !.sharding
   - name: .change_streams
   - name: .change_stream_fuzzer
+  # TODO SERVER-57866: Remove the explicit mentions of change stream multitenant suites.
   - name: change_streams_multitenant_passthrough
   - name: change_streams_multitenant_sharded_collections_passthrough
   - name: .misc_js
   - name: .clustered_collections
-  - name: .concurrency !.large !.ubsan !.no_txns !.debug_only
-  - name: .concurrency .large !.ubsan !.no_txns !.debug_only
+  - name: .concurrency !.large !.ubsan !.no_txns
+  - name: .concurrency .large !.ubsan !.no_txns
   - name: .config_fuzzer !.large
   - name: .config_fuzzer .large
     distros:
@@ -2213,6 +2280,7 @@ buildvariants:
   - name: cqf_parallel
   - name: .causally_consistent !.wo_snapshot
   - name: .change_streams
+  # TODO SERVER-57866: Remove the explicit mentions of change stream multitenant suites.
   - name: change_streams_multitenant_passthrough
   - name: change_streams_multitenant_sharded_collections_passthrough
   - name: external_auth
@@ -2305,12 +2373,24 @@ buildvariants:
   # - name: compile_integration_and_test_parallel_stream_TG # Not passing
   # - name: test_api_version_compatibility # Not relevant for TSAN
   # - name: burn_in_tests_gen # No burn in tests needed
+  #   depends_on:
+  #   - name: version_burn_in_gen
+  #     variant: generate-tasks-for-version
+  #     omit_generated_tasks: true
+  #   - name: archive_dist_test_debug
+  #     variant: *enterprise-rhel80-debug-tsan
   - name: check_feature_flag_tags
   # - name: .aggfuzzer !.feature_flag_guarded # Not passing
   # - name: .aggregation !.feature_flag_guarded # Not passing
   - name: audit
   # - name: .auth  # Not passing
   # - name: burn_in_tags_gen # No burn in tests needed
+  #   depends_on:
+  #   - name: version_burn_in_gen
+  #     variant: generate-tasks-for-version
+  #     omit_generated_tasks: true
+  #   - name: archive_dist_test_debug
+  #     variant: *enterprise-rhel80-debug-tsan
   - name: buildscripts_test
   # - name: resmoke_end2end_tests # Not passing
   # - name: unittest_shell_hang_analyzer_gen # Not passing
@@ -2324,8 +2404,8 @@ buildvariants:
   # - name: .change_streams # Not passing
   # - name: .change_stream_fuzzer # Not passing
   # - name: .misc_js # Not passing
-  # - name: .concurrency !.large !.ubsan !.no_txns !.debug_only # Not passing
-  # - name: .concurrency .large !.ubsan !.no_txns !.debug_only # Not passing
+  # - name: .concurrency !.large !.ubsan !.no_txns # Not passing
+  # - name: .concurrency .large !.ubsan !.no_txns # Not passing
   #   distros:
   #   - rhel80-medium
   - name: disk_wiredtiger
@@ -2425,8 +2505,8 @@ buildvariants:
   - name: .change_streams
   - name: .change_stream_fuzzer
   - name: .misc_js
-  - name: .concurrency !.large !.ubsan !.no_txns !.debug_only !.compute_mode
-  - name: .concurrency .large !.ubsan !.no_txns !.debug_only !.compute_mode
+  - name: .concurrency !.large !.ubsan !.no_txns !.compute_mode
+  - name: .concurrency .large !.ubsan !.no_txns !.compute_mode
     distros:
     - rhel80-large
   - name: .config_fuzzer
@@ -2981,6 +3061,12 @@ buildvariants:
     max_sub_suites: 15
   tasks:
   - name: burn_in_tests_gen
+    depends_on:
+    - name: version_burn_in_gen
+      variant: generate-tasks-for-version
+      omit_generated_tasks: true
+    - name: archive_dist_test_debug
+      variant: *linux_x86_dynamic_compile_variant_name
   - name: .audit .patch_build
   - name: .sasl .patch_build
   - name: .encrypt .patch_build

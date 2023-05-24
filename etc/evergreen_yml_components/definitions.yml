@@ -96,6 +96,9 @@ variables:
   depends_on:
   - name: version_gen
     variant: generate-tasks-for-version
+    # This is added because of EVG-18211.
+    # Without this we are adding extra dependencies on evergreen and it is causing strain
+    omit_generated_tasks: true
   - name: archive_dist_test_debug
   commands:
   - func: "generate resmoke tasks"
@@ -105,10 +108,11 @@ variables:
 - &gen_burn_in_task_template
   name: gen_burn_in_task_template
   depends_on:
-  - name: version_gen
-    variant: generate-tasks-for-version
   - name: version_burn_in_gen
     variant: generate-tasks-for-version
+    # This is added because of EVG-18211.
+    # Without this we are adding extra dependencies on evergreen and it is causing strain
+    omit_generated_tasks: true
   - name: archive_dist_test_debug
   commands:
   - func: "generate resmoke tasks"
@@ -175,6 +179,9 @@ variables:
   depends_on:
   - name: version_gen
     variant: generate-tasks-for-version
+    # This is added because of EVG-18211.
+    # Without this we are adding extra dependencies on evergreen and it is causing strain
+    omit_generated_tasks: true
   - archive_dist_test_debug
   commands:
   - func: "generate resmoke tasks"
@@ -291,8 +298,8 @@ variables:
 - mongocryptd_variants: &mongocryptd_variants
   - enterprise-amazon2
   - enterprise-amazon2-arm64
-  - enterprise-amazon2022
-  - enterprise-amazon2022-arm64
+  - enterprise-amazon2023
+  - enterprise-amazon2023-arm64
   - enterprise-debian10-64
   - enterprise-debian11-64
   - enterprise-linux-64-amazon-ami
@@ -338,8 +345,8 @@ variables:
   - enterprise-rhel-90-64-bit
   - enterprise-rhel-90-arm64
   - enterprise-amazon2-arm64
-  - enterprise-amazon2022
-  - enterprise-amazon2022-arm64
+  - enterprise-amazon2023
+  - enterprise-amazon2023-arm64
   - enterprise-ubuntu1804-64
   - enterprise-ubuntu2004-64
   - enterprise-ubuntu2204-64
@@ -350,12 +357,12 @@ variables:
   - amazon
   - enterprise-linux-64-amazon-ami
   - amazon2
-  - amazon2022
-  - amazon2022-arm64
+  - amazon2023
+  - amazon2023-arm64
   - enterprise-amazon2
   - enterprise-amazon2-arm64
-  - enterprise-amazon2022
-  - enterprise-amazon2022-arm64
+  - enterprise-amazon2023
+  - enterprise-amazon2023-arm64
   - debian10
   - debian11
   - enterprise-debian10-64
@@ -4906,14 +4913,14 @@ tasks:
 
 - <<: *task_template
   name: change_streams_multitenant_passthrough
-  tags: ["change_streams"]
+  tags: []  # TODO SERVER-57866: Add the "change_streams" tag here.
   commands:
   - func: "do setup"
   - func: "run tests"
 
 - <<: *task_template
   name: change_streams_multitenant_sharded_collections_passthrough
-  tags: ["change_streams"]
+  tags: []  # TODO SERVER-57866: Add the "change_streams" tag here.
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -5140,6 +5147,18 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       suite: concurrency_replication
+      resmoke_args: >-
+        --fuzzMongodConfigs=normal
+        --excludeWithAnyTags=does_not_support_config_fuzzer
+      use_large_distro: "true"
+
+- <<: *task_template
+  name: config_fuzzer_concurrency_simultaneous_replication_gen
+  tags: ["config_fuzzer", "large"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      suite: concurrency_simultaneous_replication
       resmoke_args: >-
         --fuzzMongodConfigs=normal
         --excludeWithAnyTags=does_not_support_config_fuzzer
@@ -5564,12 +5583,11 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
 
-- <<: *task_template
-  name: sharded_collections_jscore_passthrough_with_config_shard
+- <<: *gen_task_template
+  name: sharded_collections_jscore_passthrough_with_config_shard_gen
   tags: ["sharding", "jscore"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
 
 - <<: *gen_task_template
   name: sharded_collections_jscore_multiversion_gen
@@ -5591,12 +5609,11 @@ tasks:
   - func: "do setup"
   - func: "run tests"
 
-- <<: *task_template
-  name: sharding_jscore_passthrough_with_config_shard
+- <<: *gen_task_template
+  name: sharding_jscore_passthrough_with_config_shard_gen
   tags: ["sharding", "jscore", "common"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
 
 - <<: *gen_task_template
   name: sharding_jscore_multiversion_gen
@@ -5958,22 +5975,6 @@ tasks:
       resmoke_jobs_max: 1
 
 - <<: *gen_task_template
-  name: concurrency_replication_wiredtiger_cursor_sweeps_gen
-  tags: ["concurrency", "repl"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      resmoke_jobs_max: 1
-
-- <<: *gen_task_template
-  name: concurrency_replication_wiredtiger_eviction_debug_gen
-  tags: ["concurrency", "repl", "debug_only"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      resmoke_jobs_max: 1
-
-- <<: *gen_task_template
   name: concurrency_sharded_replication_gen
   tags: ["concurrency", "common", "read_concern_maj", "large", "sharded", "no_debug_mode"]
   commands:
@@ -6192,24 +6193,6 @@ tasks:
   tags: ["concurrency", "common", "large", "repl", "random_name"]
   commands:
   - func: "generate resmoke tasks"
-    vars:
-      resmoke_jobs_max: 1
-
-- <<: *task_template
-  name: concurrency_simultaneous_replication_wiredtiger_cursor_sweeps
-  tags: ["concurrency", "repl", "random_name"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_jobs_max: 1
-
-- <<: *task_template
-  name: concurrency_simultaneous_replication_wiredtiger_eviction_debug
-  tags: ["concurrency", "repl", "debug_only", "random_name"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
     vars:
       resmoke_jobs_max: 1
 

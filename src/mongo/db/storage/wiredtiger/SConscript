@@ -15,6 +15,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/encryption/encryption_options',
         '$BUILD_DIR/mongo/db/service_context',
     ],
 )
@@ -29,6 +30,7 @@ wtEnv.InjectThirdParty(libraries=['valgrind'])
 wtEnv.Library(
     target='storage_wiredtiger_core',
     source=[
+        'encryption_extension.c',
         'encryption_keydb.cpp',
         'oplog_truncate_markers_server_status_section.cpp',
         'wiredtiger_backup_cursor_hooks.cpp',
@@ -111,6 +113,7 @@ wtEnv.Library(
         'aws-c-event-stream',
         'aws-c-common',
         'aws-checksums',
+        'curl',
     ],
 )
 

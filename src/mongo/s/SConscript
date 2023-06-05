@@ -3,6 +3,7 @@
 Import([
     "env",
     "get_option",
+    "has_option",
     "version_extra",
     "version_parts",
 ])
@@ -458,6 +459,7 @@ env.Library(
         # NOTE: If you need to add a static or mongo initializer to mongos startup,
         # please add that library here, as a private library dependency.
         '$BUILD_DIR/mongo/db/audit',
+        '$BUILD_DIR/mongo/db/audit_commands' if has_option('audit') else [],
         '$BUILD_DIR/mongo/db/auth/authmongos',
         '$BUILD_DIR/mongo/db/commands/server_status_core',
         '$BUILD_DIR/mongo/db/commands/server_status_servers',
@@ -535,6 +537,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/change_streams_cluster_parameter',
         '$BUILD_DIR/mongo/db/commands/rwc_defaults_commands',
         '$BUILD_DIR/mongo/db/ftdc/ftdc_mongos',
+        '$BUILD_DIR/mongo/db/ldap/ldapmanager',
         '$BUILD_DIR/mongo/db/process_health/fault_manager',
         '$BUILD_DIR/mongo/db/read_write_concern_defaults',
         '$BUILD_DIR/mongo/db/serverinit',

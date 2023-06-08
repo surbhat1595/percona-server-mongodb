@@ -466,7 +466,7 @@ namespace audit {
 
     protected:
         void appendMatched(const BSONObj &obj, const bool affects_durable_state) override {
-            verify(!obj.jsonString(auditJsonFormat).empty());
+            MONGO_verify(!obj.jsonString(auditJsonFormat).empty());
         }
 
     };

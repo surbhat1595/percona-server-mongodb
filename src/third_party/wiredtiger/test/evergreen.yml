@@ -549,8 +549,15 @@ functions:
       script: |
         set -o errexit
         set -o verbose
+        # Fail, show the configuration file.
+        fail() {
+          echo "======= FAILURE =========="
+          [ -f RUNDIR/CONFIG ] && cat RUNDIR/CONFIG
+          exit 1
+        }
+
         for i in $(seq ${times|1}); do
-          ./t -c ${config|../../../test/format/CONFIG.stress} ${trace_args|-T bulk,txn,retain=50} ${extra_args|} || ( [ -f RUNDIR/CONFIG ] && cat RUNDIR/CONFIG ) 2>&1
+          ./t -c ${config|../../../test/format/CONFIG.stress} ${trace_args|-T bulk,txn,retain=50} ${extra_args|} || fail
         done
   "format test predictable":
     command: shell.exec
@@ -5552,6 +5559,7 @@ buildvariants:
     # Remove that configuration here and let MacOS use the default Xcode toolchain instead.
     # We'll explicitly use the python3 in /usr/bin, we use the same in configuring cmake.
     CMAKE_TOOLCHAIN_FILE:
+    CC_OPTIMIZE_LEVEL: -DCC_OPTIMIZE_LEVEL=-O0
     python_binary: '/usr/bin/python3'
     smp_command: -j $(sysctl -n hw.logicalcpu)
     cmake_generator: "Unix Makefiles"

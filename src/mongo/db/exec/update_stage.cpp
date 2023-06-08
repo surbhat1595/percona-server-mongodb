@@ -186,7 +186,7 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj,
         matchDetails.requestElemMatchKey();
 
         dassert(cq);
-        verify(cq->root()->matchesBSON(oldObjValue, &matchDetails));
+        MONGO_verify(cq->root()->matchesBSON(oldObjValue, &matchDetails));
 
         std::string matchedField;
         if (matchDetails.hasElemMatchKey())
@@ -256,6 +256,7 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj,
 
         args.retryableWrite = write_stage_common::isRetryableWrite(opCtx());
 
+        bool indexesAffected = false;
         if (inPlace) {
             if (!request->explain()) {
                 const RecordData oldRec(oldObj.value().objdata(), oldObj.value().objsize());
@@ -276,6 +277,7 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj,
                     source,
                     _damages,
                     diff.has_value() ? &*diff : collection_internal::kUpdateAllIndexes,
+                    &indexesAffected,
                     _params.opDebug,
                     &args));
                 invariant(oldObj.snapshotId() == opCtx()->recoveryUnit()->getSnapshotId());
@@ -306,6 +308,7 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj,
                     oldObj,
                     newObj,
                     diff.has_value() ? &*diff : collection_internal::kUpdateAllIndexes,
+                    &indexesAffected,
                     _params.opDebug,
                     &args);
                 invariant(oldObj.snapshotId() == opCtx()->recoveryUnit()->getSnapshotId());
@@ -317,7 +320,7 @@ BSONObj UpdateStage::transformAndUpdate(const Snapshotted<BSONObj>& oldObj,
         // For an example, see the comment above near declaration of '_updatedRecordIds'.
         //
         // This must be done after the wunit commits so we are sure we won't be rolling back.
-        if (_updatedRecordIds && driver->modsAffectIndices()) {
+        if (_updatedRecordIds && indexesAffected) {
             _updatedRecordIds->insert(recordId);
         }
     }
@@ -595,11 +598,6 @@ void UpdateStage::doRestoreStateRequiresCollection() {
                   str::stream() << "Demoted from primary while performing update on "
                                 << nsString.ns());
     }
-
-    // The set of indices may have changed during yield. Make sure that the update driver has up to
-    // date index information.
-    const auto& updateIndexData = CollectionQueryInfo::get(collection()).getIndexKeys(opCtx());
-    _params.driver->refreshIndexKeys(&updateIndexData);
 
     _preWriteFilter.restoreState();
     _cachedShardingCollectionDescription.restoreState();

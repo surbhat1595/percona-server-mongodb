@@ -672,11 +672,13 @@ boost::optional<BSONObj> advanceExecutor(OperationContext* opCtx,
     PlanExecutor::ExecState state;
     try {
         state = exec->getNext(&value, nullptr);
+    } catch (const WriteConflictException&) {
+        // Propagate the WCE to be retried at a higher-level without logging.
+        throw;
     } catch (DBException& exception) {
         auto&& explainer = exec->getPlanExplainer();
         auto&& [stats, _] = explainer.getWinningPlanStats(ExplainOptions::Verbosity::kExecStats);
         LOGV2_WARNING(7267501,
-                      "Plan executor error during findAndModify: {error}, stats: {stats}",
                       "Plan executor error during findAndModify",
                       "error"_attr = exception.toStatus(),
                       "stats"_attr = redact(stats));
@@ -1817,13 +1819,10 @@ Status performAtomicTimeseriesWrites(
             collection_internal::kUpdateAllIndexes;  // Assume all indexes are affected.
         if (update.getU().type() == write_ops::UpdateModification::Type::kDelta) {
             diffFromUpdate = update.getU().getDiff();
-            auto result = doc_diff::applyDiff(original.value(),
-                                              diffFromUpdate,
-                                              &CollectionQueryInfo::get(*coll).getIndexKeys(opCtx),
-                                              static_cast<bool>(repl::tenantMigrationInfo(opCtx)));
-            updated = result.postImage;
-            diffOnIndexes =
-                result.indexesAffected ? &diffFromUpdate : collection_internal::kUpdateNoIndexes;
+            updated = doc_diff::applyDiff(original.value(),
+                                          diffFromUpdate,
+                                          static_cast<bool>(repl::tenantMigrationInfo(opCtx)));
+            diffOnIndexes = &diffFromUpdate;
             args.update = update_oplog_entry::makeDeltaOplogEntry(diffFromUpdate);
         } else if (update.getU().type() == write_ops::UpdateModification::Type::kTransform) {
             const auto& transform = update.getU().getTransform();
@@ -1843,8 +1842,15 @@ Status performAtomicTimeseriesWrites(
                     opCtx->recoveryUnit()->setTimestamp(args.oplogSlots[0].getTimestamp()));
         }
 
-        collection_internal::updateDocument(
-            opCtx, *coll, recordId, original, updated, diffOnIndexes, &curOp->debug(), &args);
+        collection_internal::updateDocument(opCtx,
+                                            *coll,
+                                            recordId,
+                                            original,
+                                            updated,
+                                            diffOnIndexes,
+                                            nullptr /*indexesAffected*/,
+                                            &curOp->debug(),
+                                            &args);
         if (slot) {
             if (participant) {
                 // Manually sets the timestamp so that the "prevOpTime" field in the oplog entry is
@@ -2302,10 +2308,8 @@ write_ops::UpdateCommandRequest makeTimeseriesDecompressAndUpdateOp(
     const bool mustCheckExistenceForInsertOperations =
         static_cast<bool>(repl::tenantMigrationInfo(opCtx));
     auto diff = makeTimeseriesUpdateOpEntry(opCtx, batch, metadata).getU().getDiff();
-    auto after =
-        doc_diff::applyDiff(
-            batch->decompressed.value().after, diff, nullptr, mustCheckExistenceForInsertOperations)
-            .postImage;
+    auto after = doc_diff::applyDiff(
+        batch->decompressed.value().after, diff, mustCheckExistenceForInsertOperations);
 
     auto bucketDecompressionFunc =
         [before = std::move(batch->decompressed.value().before),

@@ -273,7 +273,7 @@ def _get_field_usage_checker(indented_writer, struct):
 
     # Only use the fast field usage checker if we never expect extra fields that we need to ignore
     # but still wish to do duplicate detection on.
-    if struct.strict:
+    if struct.strict or struct.unsafe_dangerous_disable_extra_field_duplicate_checks:
         return _FastFieldUsageChecker(indented_writer, struct.fields)
 
     return _SlowFieldUsageChecker(indented_writer, struct.fields)
@@ -773,8 +773,7 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
         self._writer.write_line(
             common.template_args('// Map: fieldName -> ${should_forward_name}',
                                  should_forward_name=field_list_info.get_should_forward_name()))
-        self._writer.write_line(
-            "static const stdx::unordered_map<std::string, bool> _genericFields;")
+        self._writer.write_line("static const StaticImmortal<StringMap<bool>> _genericFields;")
         self.write_empty_line()
 
     def gen_known_fields_declaration(self):
@@ -1757,14 +1756,14 @@ class _CppSourceFileWriter(_CppFileWriterBase):
         defn = field_list_info.get_has_field_method().get_definition()
         with self._block('%s {' % (defn, ), '}'):
             self._writer.write_line(
-                'return _genericFields.find(fieldName.toString()) != _genericFields.end();')
+                'return _genericFields->find(fieldName) != _genericFields->end();')
 
         self._writer.write_empty_line()
 
         defn = field_list_info.get_should_forward_method().get_definition()
         with self._block('%s {' % (defn, ), '}'):
-            self._writer.write_line('auto it = _genericFields.find(fieldName.toString());')
-            self._writer.write_line('return (it == _genericFields.end() || it->second);')
+            self._writer.write_line('auto it = _genericFields->find(fieldName);')
+            self._writer.write_line('return (it == _genericFields->end() || it->second);')
 
         self._writer.write_empty_line()
 
@@ -1885,7 +1884,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                         with self._block('else {', '}'):
                             with self._predicate(command_predicate):
                                 self._writer.write_line('ctxt.throwUnknownField(fieldName);')
-                    else:
+                    elif not struct.unsafe_dangerous_disable_extra_field_duplicate_checks:
                         with self._else(not first_field):
                             self._writer.write_line(
                                 'auto push_result = usedFieldSet.insert(fieldName);')
@@ -2601,8 +2600,8 @@ class _CppSourceFileWriter(_CppFileWriterBase):
             common.template_args('// Map: fieldName -> ${should_forward_name}',
                                  should_forward_name=field_list_info.get_should_forward_name()))
         block_name = common.template_args(
-            'const stdx::unordered_map<std::string, bool> ${klass}::_genericFields {', klass=klass)
-        with self._block(block_name, "};"):
+            'const StaticImmortal<StringMap<bool>> ${klass}::_genericFields {{', klass=klass)
+        with self._block(block_name, "}};"):
             sorted_entries = sorted(struct.fields, key=lambda f: f.name)
             for entry in sorted_entries:
                 self._writer.write_line(

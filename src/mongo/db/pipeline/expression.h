@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/base/data_range.h"
+#include "mongo/db/pipeline/percentile_algo.h"
 #include "mongo/platform/basic.h"
 
 #include <algorithm>
@@ -604,7 +605,7 @@ public:
     explicit ExpressionFromAccumulatorQuantile(ExpressionContext* const expCtx,
                                                std::vector<double>& ps,
                                                boost::intrusive_ptr<Expression> input,
-                                               int32_t method)
+                                               PercentileMethod method)
         : Expression(expCtx, {input}), _ps(ps), _input(input), _method(method) {
         expCtx->sbeCompatibility = SbeCompatibility::notCompatible;
     }
@@ -627,12 +628,11 @@ public:
                 _ps.size(), std::vector<double>(_ps.size(), input.coerceToDouble()));
         }
 
-        if (input.isArray()) {
-            uassert(7436202,
-                    "Input to $percentile or $median cannot be an empty array.",
-                    input.getArray().size() > 0);
-
-            if (_method != 2 /*continuous*/) {
+        if (input.isArray() && input.getArrayLength() > 0) {
+            if (_method != PercentileMethod::Continuous) {
+                // On small datasets, which are likely to be the inputs for the expression, creating
+                // t-digests is inefficient, so instead we use DiscretePercentile algo directly for
+                // both "discrete" and "approximate" methods.
                 std::vector<double> samples;
                 samples.reserve(input.getArrayLength());
                 for (const auto& item : input.getArray()) {
@@ -647,7 +647,7 @@ public:
                 // Delegate to the accumulator. Note: it would be more efficient to use the
                 // percentile algorithms directly rather than an accumulator, as it would reduce
                 // heap alloc, virtual calls and avoid unnecessary for expressions memory tracking.
-                // However, on large datasets these overheads are less noticeable.
+                // This path currently cannot be executed as we only support continuous percentiles.
                 TAccumulator accum(this->getExpressionContext(), _ps, _method);
                 for (const auto& item : input.getArray()) {
                     accum.process(item, false /* merging */);
@@ -672,8 +672,7 @@ public:
 private:
     std::vector<double> _ps;
     boost::intrusive_ptr<Expression> _input;
-    // TODO SERVER-74894: This should be 'PercentileMethodEnum', not 'int32_t'.
-    int32_t _method;
+    PercentileMethod _method;
 };
 
 /**

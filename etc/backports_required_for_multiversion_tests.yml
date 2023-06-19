@@ -20,6 +20,8 @@
 #
 last-continuous:
   all:
+  - test_file: jstests/sharding/conn_pool_stats.js
+    ticket: SERVER-75911
   - test_file: jstests/core/administrative/check_shard_index.js
     ticket: SERVER-50792
   - test_file: jstests/sharding/refine_collection_shard_key_basic.js
@@ -200,6 +202,8 @@ last-continuous:
     ticket: SERVER-65022
   - test_file: jstests/sharding/database_versioning_all_commands.js
     ticket: SERVER-65101
+  - test_file: jstests/sharding/database_versioning_all_commands.js
+    ticket: SERVER-75911
   - test_file: jstests/sharding/sessions_collection_auto_healing.js
     ticket: SERVER-65188
   - test_file: jstests/replsets/sessions_collection_auto_healing.js
@@ -265,7 +269,7 @@ last-continuous:
   - test_file: jstests/sharding/collection_uuid_shard_capped_collection.js
     ticket: SERVER-67885
   - test_file: jstests/sharding/prepare_transaction_then_migrate.js
-    ticket: SERVER-68361
+    ticket: SERVER-71219
   - test_file: jstests/core/txns/txn_ops_allowed_on_buckets_coll.js
     ticket: SERVER-68556
   - test_file: jstests/core/txns/no_writes_to_system_collections_in_txn.js
@@ -386,9 +390,15 @@ last-continuous:
     ticket: SERVER-76988
   - test_file: jstests/replsets/tenant_migration_retryable_internal_transaction.js
     ticket: SERVER-77237
+  - test_file: jstests/sharding/move_chunk_deferred_lookup.js
+    ticket: SERVER-78050
   suites: null
 last-lts:
   all:
+  - test_file: jstests/sharding/conn_pool_stats.js
+    ticket: SERVER-75911
+  - test_file: jstests/sharding/database_versioning_all_commands.js
+    ticket: SERVER-75911
   - test_file: jstests/core/query/null_query_semantics.js
     ticket: SERVER-21929
   - test_file: jstests/core/query/or/or_to_in.js
@@ -458,7 +468,7 @@ last-lts:
   - test_file: jstests/core/txns/errors_on_committed_transaction.js
     ticket: SERVER-52547
   - test_file: jstests/sharding/prepare_transaction_then_migrate.js
-    ticket: SERVER-52906
+    ticket: SERVER-71219
   - test_file: jstests/sharding/migration_waits_for_majority_commit.js
     ticket: SERVER-52906
   - test_file: jstests/sharding/migration_ignore_interrupts_1.js
@@ -727,8 +737,6 @@ last-lts:
     ticket: SERVER-67723
   - test_file: jstests/sharding/collection_uuid_shard_capped_collection.js
     ticket: SERVER-67885
-  - test_file: jstests/sharding/prepare_transaction_then_migrate.js
-    ticket: SERVER-68361
   - test_file: jstests/core/txns/txn_ops_allowed_on_buckets_coll.js
     ticket: SERVER-68556
   - test_file: jstests/core/txns/no_writes_to_system_collections_in_txn.js
@@ -857,4 +865,6 @@ last-lts:
     ticket: SERVER-76988
   - test_file: jstests/replsets/tenant_migration_retryable_internal_transaction.js
     ticket: SERVER-77237
+  - test_file: jstests/sharding/move_chunk_deferred_lookup.js
+    ticket: SERVER-78050
   suites: null

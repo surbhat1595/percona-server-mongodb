@@ -28,6 +28,7 @@
  */
 
 
+#include "mongo/db/matcher/expression_algo.h"
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/query/planner_access.h"
@@ -133,7 +134,6 @@ std::vector<bool> canProvideSortWithMergeSort(
     }
     return shouldReverseScan;
 }
-
 }  // namespace
 
 namespace mongo {
@@ -1361,6 +1361,42 @@ bool QueryPlannerAccess::processIndexScans(const CanonicalQuery& query,
         }
     }
 
+    // If the index is partial and we have reached children without index tag, check if they are
+    // covered by the index' filter expression. In this case the child can be removed. In some cases
+    // this enables to remove the fetch stage from the plan.
+    // The check could be put inside the 'handleFilterAnd()' function, but if moved then the
+    // optimization will not be applied if the predicate contains an $elemMatch expression, since
+    // then the 'handleFilterAnd()' is not called.
+    if (IndexTag::kNoIndex != scanState.currentIndexNumber) {
+        const IndexEntry& index = indices[scanState.currentIndexNumber];
+        if (index.filterExpr != nullptr) {
+            while (scanState.curChild < root->numChildren()) {
+                MatchExpression* child = root->getChild(scanState.curChild);
+                if (expression::isSubsetOf(index.filterExpr, child)) {
+                    // When the documents satisfying the index filter predicate are a subset of the
+                    // documents satisfying the child expression, the child predicate is redundant.
+                    // Remove the child from the root's children.
+                    // For example: index on 'a' with a filter {$and: [{a: {$gt: 10}}, {b: {$lt:
+                    // 100}}]} and a query predicate {$and: [{a: {$gt: 20}}, {b: {$lt: 100}}]}. The
+                    // non-indexed child {b: {$lt: 100}} is always satisfied by the index filter and
+                    // can be removed.
+
+                    // In case of index filter predicate with $or, this optimization is not
+                    // applicable, since the subset relationship doesn't hold.
+                    // For example, an index on field 'c' with a filter expression {$or: [{a: {$gt:
+                    // 10}}, {b: {$lt: 100}}]} could be applicable for the query with a predicate
+                    // {$and: [{c: {$gt: 100}}, {b: {$lt: 100}}]}, but the predicate will not be
+                    // removed.
+                    scanState.tightness = IndexBoundsBuilder::EXACT;
+                    refineTightnessForMaybeCoveredQuery(query, scanState.tightness);
+                    handleFilter(&scanState);
+                } else {
+                    ++scanState.curChild;
+                }
+            }
+        }
+    }
+
     // Output the scan we're done with, if it exists.
     if (nullptr != scanState.currentScan.get()) {
         finishAndOutputLeaf(&scanState, out);
@@ -1674,6 +1710,10 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::buildIndexedOr(
         return nullptr;
     }
 
+    if (!wcp::expandWildcardFieldBounds(ixscanNodes)) {
+        return nullptr;
+    }
+
     // If all index scans are identical, then we collapse them into a single scan. This prevents
     // us from creating OR plans where the branches of the OR perform duplicate work.
     ixscanNodes = collapseEquivalentScans(std::move(ixscanNodes));
@@ -1685,15 +1725,6 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::buildIndexedOr(
         orResult = std::move(ixscanNodes[0]);
     } else {
         std::vector<bool> shouldReverseScan;
-        // (Ignore FCV check): This is intentional because we want clusters which have wildcard
-        // indexes still be able to use the feature even if the FCV is downgraded.
-        if (feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabledAndIgnoreFCVUnsafe() &&
-            wildcard_planning::canOnlyAnswerWildcardPrefixQuery(ixscanNodes)) {
-            // If we get here, we have a an OR of IXSCANs, one of which is a compound wildcard
-            // index, but at least one of them can only support a FETCH + IXSCAN on queries on the
-            // prefix. This means this plan will produce incorrect results.
-            return nullptr;
-        }
 
         if (query.getSortPattern()) {
             // If all ixscanNodes can provide the sort, shouldReverseScan is populated with which

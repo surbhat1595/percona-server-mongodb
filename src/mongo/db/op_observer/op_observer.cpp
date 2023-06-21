@@ -29,8 +29,6 @@
 
 #include "mongo/db/op_observer/op_observer.h"
 
-#include "mongo/db/operation_context.h"
-
 namespace mongo {
 namespace {
 const auto getOpObserverTimes = OperationContext::declareDecoration<OpObserver::Times>();

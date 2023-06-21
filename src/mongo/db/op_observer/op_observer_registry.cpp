@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2022-present MongoDB, Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -27,34 +27,12 @@
  *    it in the license file.
  */
 
-#pragma once
-
-#include "mongo/platform/basic.h"
-
-#include "mongo/s/analyze_shard_key_cmd_gen.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
 
 namespace mongo {
-namespace analyze_shard_key {
 
-/**
- * Returns metrics about the characteristics of the shard key (i.e. the cardinality, frequency
- * and monotonicity) if the shard key has a supporting index.
- */
-KeyCharacteristicsMetrics calculateKeyCharacteristicsMetrics(OperationContext* opCtx,
-                                                             const UUID& analyzeShardKeyId,
-                                                             const NamespaceString& nss,
-                                                             const UUID& collUuid,
-                                                             const KeyPattern& shardKey);
+OpObserverRegistry::OpObserverRegistry() = default;
 
-/**
- * Returns metrics about the read and write distribution based on sampled queries.
- */
-std::pair<ReadDistributionMetrics, WriteDistributionMetrics> calculateReadWriteDistributionMetrics(
-    OperationContext* opCtx,
-    const UUID& analyzeShardKeyId,
-    const NamespaceString& nss,
-    const UUID& collUuid,
-    const KeyPattern& shardKey);
+OpObserverRegistry::~OpObserverRegistry() = default;
 
-}  // namespace analyze_shard_key
 }  // namespace mongo

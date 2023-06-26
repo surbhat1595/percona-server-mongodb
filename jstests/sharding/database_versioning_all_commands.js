@@ -247,6 +247,8 @@ let testCases = {
     _isSelf: {skip: "executes locally on mongos (not sent to any remote node)"},
     _killOperations: {skip: "executes locally on mongos (not sent to any remote node)"},
     _mergeAuthzCollections: {skip: "always targets the config server"},
+    _mongotConnPoolStats: {skip: "not on a user database", conditional: true},
+    _dropConnectionsToMongot: {skip: "not on a user database", conditional: true},
     abortReshardCollection: {skip: "always targets the config server"},
     abortTransaction: {skip: "unversioned and uses special targetting rules"},
     addShard: {skip: "not on a user database"},
@@ -347,6 +349,7 @@ let testCases = {
         }
     },
     createRole: {skip: "always targets the config server"},
+    createSearchIndexes: {skip: "executes locally on mongos"},
     createUser: {skip: "always targets the config server"},
     currentOp: {skip: "not on a user database"},
     dataSize: {
@@ -410,6 +413,7 @@ let testCases = {
         }
     },
     dropRole: {skip: "always targets the config server"},
+    dropSearchIndex: {skip: "executes locally on mongos"},
     dropUser: {skip: "always targets the config server"},
     echo: {skip: "does not forward command to primary shard"},
     enableSharding: {skip: "does not forward command to primary shard"},
@@ -511,6 +515,7 @@ let testCases = {
             },
         }
     },
+    listSearchIndexes: {skip: "executes locally on mongos"},
     listShards: {skip: "does not forward command to primary shard"},
     logApplicationMessage: {skip: "not on a user database", conditional: true},
     logMessage: {skip: "not on a user database"},
@@ -691,6 +696,7 @@ let testCases = {
         }
     },
     updateRole: {skip: "always targets the config server"},
+    updateSearchIndex: {skip: "executes locally on mongos"},
     updateUser: {skip: "always targets the config server"},
     updateZoneKeyRange: {skip: "not on a user database"},
     usersInfo: {skip: "always targets the config server"},

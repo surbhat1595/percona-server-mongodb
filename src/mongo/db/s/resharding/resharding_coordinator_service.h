@@ -50,8 +50,7 @@ CollectionType createTempReshardingCollectionType(
     const ChunkVersion& chunkVersion,
     const BSONObj& collation);
 
-void cleanupSourceConfigCollections(OperationContext* opCtx,
-                                    const ReshardingCoordinatorDocument& coordinatorDoc);
+void removeChunkDocs(OperationContext* opCtx, const UUID& collUUID);
 
 void writeDecisionPersistedState(OperationContext* opCtx,
                                  const ReshardingCoordinatorDocument& coordinatorDoc,
@@ -59,7 +58,8 @@ void writeDecisionPersistedState(OperationContext* opCtx,
                                  Timestamp newCollectionTimestamp);
 
 void updateTagsDocsForTempNss(OperationContext* opCtx,
-                              const ReshardingCoordinatorDocument& coordinatorDoc);
+                              const ReshardingCoordinatorDocument& coordinatorDoc,
+                              TxnNumber txnNumber);
 
 void insertCoordDocAndChangeOrigCollEntry(OperationContext* opCtx,
                                           const ReshardingCoordinatorDocument& coordinatorDoc);

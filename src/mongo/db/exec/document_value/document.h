@@ -260,12 +260,38 @@ public:
     void hash_combine(size_t& seed, const StringData::ComparatorInterface* stringComparator) const;
 
     /**
+     * Returns true, if this document is trivially convertible to BSON, meaning the underlying
+     * storage is already in BSON format and there are no damages.
+     */
+    bool isTriviallyConvertible() const {
+        return !storage().isModified() && !storage().bsonHasMetadata();
+    }
+
+    /**
+     * Returns true, if this document is trivially convertible to BSON with metadata, meaning the
+     * underlying storage is already in BSON format and there are no damages.
+     */
+    bool isTriviallyConvertibleWithMetadata() const {
+        return !storage().isModified() && !storage().isMetadataModified();
+    }
+
+    /**
      * Serializes this document to the BSONObj under construction in 'builder'. Metadata is not
      * included. Throws a AssertionException if 'recursionLevel' exceeds the maximum allowable
      * depth.
      */
     void toBson(BSONObjBuilder* builder, size_t recursionLevel = 1) const;
-    BSONObj toBson() const;
+
+    template <typename BSONTraits = BSONObj::DefaultSizeTrait>
+    BSONObj toBson() const {
+        if (isTriviallyConvertible()) {
+            return storage().bsonObj();
+        }
+
+        BSONObjBuilder bb;
+        toBson(&bb);
+        return bb.obj<BSONTraits>();
+    }
 
     /**
      * Serializes this document iff the conversion is "trivial," meaning that the underlying storage
@@ -279,7 +305,18 @@ public:
     /**
      * Like the 'toBson()' method, but includes metadata as top-level fields.
      */
-    BSONObj toBsonWithMetaData() const;
+    void toBsonWithMetaData(BSONObjBuilder* builder) const;
+
+    template <typename BSONTraits = BSONObj::DefaultSizeTrait>
+    BSONObj toBsonWithMetaData() const {
+        if (isTriviallyConvertibleWithMetadata()) {
+            return storage().bsonObj();
+        }
+
+        BSONObjBuilder bb;
+        toBsonWithMetaData(&bb);
+        return bb.obj<BSONTraits>();
+    }
 
     /**
      * Like Document(BSONObj) but treats top-level fields with special names as metadata.
@@ -512,13 +549,11 @@ public:
     }
 
     /**
-     * Replace the current base Document with bson.
-     *
-     * The paramater 'stripMetadata' controls whether we strip the metadata fields from the
-     * underlying bson when converting the document object back to bson.
+     * Replace the current base Document with the BSON object. Setting 'bsonHasMetadata' to true
+     * signals that the BSON object contains metadata fields.
      */
-    void reset(const BSONObj& bson, bool stripMetadata) {
-        storage().reset(bson, stripMetadata);
+    void reset(const BSONObj& bson, bool bsonHasMetadata) {
+        storage().reset(bson, bsonHasMetadata);
     }
 
     /** Add the given field to the Document.
@@ -701,13 +736,13 @@ public:
         storage().makeOwned();
     }
 
-    /** Create a new document storage with the BSON object.
-     *
-     *  The optional paramater 'stripMetadata' controls whether we strip the metadata fields (the
-     *  complete list is in Document::allMetadataFieldNames).
+    /**
+     * Creates a new document storage with the BSON object. Setting 'bsonHasMetadata' to true
+     * signals that the BSON object contains metadata fields (the complete list is in
+     * Document::allMetadataFieldNames).
      */
-    DocumentStorage& newStorageWithBson(const BSONObj& bson, bool stripMetadata) {
-        reset(make_intrusive<DocumentStorage>(bson, stripMetadata, false, 0));
+    DocumentStorage& newStorageWithBson(const BSONObj& bson, bool bsonHasMetadata) {
+        reset(make_intrusive<DocumentStorage>(bson, bsonHasMetadata, false, 0));
         return const_cast<DocumentStorage&>(*storagePtr());
     }
 

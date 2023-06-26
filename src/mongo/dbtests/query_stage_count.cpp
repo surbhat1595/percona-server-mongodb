@@ -203,7 +203,8 @@ public:
     IndexScan* createIndexScan(MatchExpression* expr, WorkingSet* ws) {
         const IndexCatalog* catalog = _coll->getIndexCatalog();
         std::vector<const IndexDescriptor*> indexes;
-        catalog->findIndexesByKeyPattern(&_opCtx, BSON("x" << 1), false, &indexes);
+        catalog->findIndexesByKeyPattern(
+            &_opCtx, BSON("x" << 1), IndexCatalog::InclusionPolicy::kReady, &indexes);
         ASSERT_EQ(indexes.size(), 1U);
         auto descriptor = indexes[0];
 
@@ -326,12 +327,15 @@ public:
 class QueryStageCountUpdateDuringYield : public CountStageTest {
 public:
     void run() {
-        // expected count would be kDocuments-2 but we update the first and second records
-        // after doing the first unit of work so they wind up getting counted later on
         CountCommandRequest request((NamespaceString(ns())));
         request.setQuery(BSON("x" << GTE << 2));
 
-        testCount(request, kDocuments);
+        // We call 'interject' after first unit of work that skips the first document, so it is
+        // not counted.
+        testCount(request, kDocuments - 1);
+
+        // We call 'interject' after first unit of work and even if some documents are skipped,
+        // they are added to the end of the index on x so they are counted later.
         testCount(request, kDocuments, true);
     }
 

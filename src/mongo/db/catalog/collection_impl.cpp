@@ -1782,7 +1782,8 @@ uint64_t CollectionImpl::getIndexSize(OperationContext* opCtx,
                                       int scale) const {
     const IndexCatalog* idxCatalog = getIndexCatalog();
 
-    std::unique_ptr<IndexCatalog::IndexIterator> ii = idxCatalog->getIndexIterator(opCtx, true);
+    auto ii = idxCatalog->getIndexIterator(
+        opCtx, IndexCatalog::InclusionPolicy::kReady | IndexCatalog::InclusionPolicy::kUnfinished);
 
     uint64_t totalSize = 0;
 
@@ -1803,9 +1804,18 @@ uint64_t CollectionImpl::getIndexSize(OperationContext* opCtx,
 }
 
 uint64_t CollectionImpl::getIndexFreeStorageBytes(OperationContext* const opCtx) const {
+    // Unfinished index builds are excluded to avoid a potential deadlock when trying to collect
+    // statistics from the index table while the index build is in the bulk load phase. See
+    // SERVER-77018. This should not be too impactful as:
+    // - During the collection scan phase, the index table is unused.
+    // - During the bulk load phase, getFreeStorageBytes will probably return EBUSY, as the ident is
+    //  in use by the index builder. (And worst case results in the deadlock).
+    // - It might be possible to return meaningful data post bulk-load, but reusable bytes should be
+    //  low anyways as the collection has been bulk loaded. Additionally, this would be a inaccurate
+    //  anyways as the build is in progress.
+    // - Once the index build is finished, this will be eventually accounted for.
     const auto idxCatalog = getIndexCatalog();
-    const bool includeUnfinished = true;
-    auto indexIt = idxCatalog->getIndexIterator(opCtx, includeUnfinished);
+    auto indexIt = idxCatalog->getIndexIterator(opCtx, IndexCatalog::InclusionPolicy::kReady);
 
     uint64_t totalSize = 0;
     while (indexIt->more()) {
@@ -1829,8 +1839,7 @@ Status CollectionImpl::truncate(OperationContext* opCtx) {
     // 1) store index specs
     std::vector<BSONObj> indexSpecs;
     {
-        std::unique_ptr<IndexCatalog::IndexIterator> ii =
-            _indexCatalog->getIndexIterator(opCtx, false);
+        auto ii = _indexCatalog->getIndexIterator(opCtx, IndexCatalog::InclusionPolicy::kReady);
         while (ii->more()) {
             const IndexDescriptor* idx = ii->next()->descriptor();
             indexSpecs.push_back(idx->infoObj().getOwned());

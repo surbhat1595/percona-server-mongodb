@@ -125,6 +125,7 @@ let testCases = {
     _configsvrShardCollection:
         {skip: "internal command"},  // TODO SERVER-58843: Remove once 6.0 becomes last LTS
     _configsvrUpdateZoneKeyRange: {skip: "internal command"},
+    _dropConnectionsToMongot: {skip: "internal command"},
     _flushDatabaseCacheUpdates: {skip: "internal command"},
     _flushDatabaseCacheUpdatesWithWriteConcern: {skip: "internal command"},
     _flushReshardingStateChange: {skip: "internal command"},
@@ -138,6 +139,7 @@ let testCases = {
     _killOperations: {skip: "internal command"},
     _mergeAuthzCollections: {skip: "internal command"},
     _migrateClone: {skip: "internal command"},
+    _mongotConnPoolStats: {skip: "internal command"},
     _recvChunkAbort: {skip: "internal command"},
     _recvChunkCommit: {skip: "internal command"},
     _recvChunkReleaseCritSec: {skip: "internal command"},
@@ -342,6 +344,7 @@ let testCases = {
         shardedTargetsConfigServer: true,
         useLogs: true,
     },
+    createSearchIndexes: {skip: "does not accept read or write concern"},
     createUser: {
         command: {createUser: "foo", pwd: "bar", roles: []},
         checkReadConcern: false,
@@ -442,6 +445,7 @@ let testCases = {
         shardedTargetsConfigServer: true,
         useLogs: true,
     },
+    dropSearchIndex: {skip: "does not accept read or write concern"},
     dropUser: {
         setUp: function(conn) {
             assert.commandWorked(conn.getDB(db).runCommand(
@@ -564,6 +568,7 @@ let testCases = {
     listCommands: {skip: "does not accept read or write concern"},
     listDatabases: {skip: "does not accept read or write concern"},
     listIndexes: {skip: "does not accept read or write concern"},
+    listSearchIndexes: {skip: "does not accept read or write concern"},
     listShards: {skip: "does not accept read or write concern"},
     lockInfo: {skip: "does not accept read or write concern"},
     logApplicationMessage: {skip: "does not accept read or write concern"},
@@ -746,6 +751,7 @@ let testCases = {
         shardedTargetsConfigServer: true,
         useLogs: true,
     },
+    updateSearchIndex: {skip: "does not accept read or write concern"},
     updateUser: {
         setUp: function(conn) {
             assert.commandWorked(conn.getDB(db).runCommand(

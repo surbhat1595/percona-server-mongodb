@@ -119,6 +119,7 @@ MONGO_INITIALIZER(AuthorizationBuiltinRoles)(InitializerContext* context) {
         << ActionType::killCursors
         << ActionType::listCollections
         << ActionType::listIndexes
+        << ActionType::listSearchIndexes
         << ActionType::planCacheRead;
 
     // Read-write role
@@ -128,8 +129,10 @@ MONGO_INITIALIZER(AuthorizationBuiltinRoles)(InitializerContext* context) {
         << ActionType::convertToCapped  // db admin gets this also
         << ActionType::createCollection  // db admin gets this also
         << ActionType::createIndex
+        << ActionType::createSearchIndexes
         << ActionType::dropCollection
         << ActionType::dropIndex
+        << ActionType::dropSearchIndex
         << ActionType::insert
         << ActionType::remove
         << ActionType::renameCollectionSameDB  // db admin gets this also
@@ -163,10 +166,13 @@ MONGO_INITIALIZER(AuthorizationBuiltinRoles)(InitializerContext* context) {
         << ActionType::dropDatabase  // clusterAdmin gets this also TODO(spencer): should
                                      // readWriteAnyDatabase?
         << ActionType::dropIndex
+        << ActionType::dropSearchIndex
         << ActionType::createIndex
+        << ActionType::createSearchIndexes
         << ActionType::enableProfiler
         << ActionType::listCollections
         << ActionType::listIndexes
+        << ActionType::listSearchIndexes
         << ActionType::planCacheIndexFilter
         << ActionType::planCacheRead
         << ActionType::planCacheWrite
@@ -174,6 +180,7 @@ MONGO_INITIALIZER(AuthorizationBuiltinRoles)(InitializerContext* context) {
         << ActionType::renameCollectionSameDB  // read_write gets this also
         << ActionType::startBackup
         << ActionType::storageDetails
+        << ActionType::updateSearchIndex
         << ActionType::validate;
 
     // clusterMonitor role actions that target the cluster resource
@@ -369,7 +376,8 @@ void addUserAdminAnyDbPrivileges(PrivilegeVector* privileges) {
 
     ActionSet readRoleAndIndexActions;
     readRoleAndIndexActions += readRoleActions;
-    readRoleAndIndexActions << ActionType::createIndex << ActionType::dropIndex;
+    readRoleAndIndexActions << ActionType::createIndex << ActionType::dropIndex
+                            << ActionType::createSearchIndexes << ActionType::dropSearchIndex;
 
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forCollectionName("system.users"), readRoleActions));
@@ -527,6 +535,8 @@ void addQueryableBackupPrivileges(PrivilegeVector* privileges) {
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forAnyResource(), ActionType::listIndexes));
     Privilege::addPrivilegeToPrivilegeVector(
+        privileges, Privilege(ResourcePattern::forAnyResource(), ActionType::listSearchIndexes));
+    Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forAnyNormalResource(), ActionType::startBackup));
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forAnySystemBuckets(), ActionType::find));
@@ -609,7 +619,9 @@ void addRestorePrivileges(PrivilegeVector* privileges) {
     ActionSet actions;
     actions << ActionType::bypassDocumentValidation << ActionType::collMod
             << ActionType::convertToCapped << ActionType::createCollection
-            << ActionType::createIndex << ActionType::dropCollection << ActionType::insert;
+            << ActionType::createIndex << ActionType::dropCollection
+            << ActionType::createSearchIndexes << ActionType::updateSearchIndex
+            << ActionType::insert;
 
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forAnyNormalResource(), actions));
@@ -686,6 +698,11 @@ void addRestorePrivileges(PrivilegeVector* privileges) {
         Privilege(
             ResourcePattern::forExactNamespace(AuthorizationManager::rolesCollectionNamespace),
             ActionType::createIndex));
+    Privilege::addPrivilegeToPrivilegeVector(
+        privileges,
+        Privilege(
+            ResourcePattern::forExactNamespace(AuthorizationManager::rolesCollectionNamespace),
+            ActionType::createSearchIndexes));
 
     Privilege::addPrivilegeToPrivilegeVector(
         privileges,

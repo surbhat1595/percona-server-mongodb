@@ -50,6 +50,7 @@
 #include "mongo/unittest/integration_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
 
 namespace mongo {
@@ -160,7 +161,7 @@ public:
     }
 
     void setUp() override {
-        startNet(std::make_unique<WaitForIsMasterHook>(this));
+        startNet(std::make_unique<WaitForHelloHook>(this));
     }
 
     // NetworkInterfaceIntegrationFixture::tearDown() shuts down the NetworkInterface. We always
@@ -253,33 +254,33 @@ public:
         return ++numCurrentOpRan;
     }
 
-    struct IsMasterData {
+    struct HelloData {
         BSONObj request;
         RemoteCommandResponse response;
     };
-    IsMasterData waitForIsMaster() {
+    HelloData waitForHello() {
         stdx::unique_lock<Latch> lk(_mutex);
-        _isMasterCond.wait(lk, [this] { return _isMasterResult != boost::none; });
+        _helloCondVar.wait(lk, [this] { return _helloResult != boost::none; });
 
-        return std::move(*_isMasterResult);
+        return std::move(*_helloResult);
     }
 
-    bool hasIsMaster() {
+    bool hasHelloResult() {
         stdx::lock_guard<Latch> lk(_mutex);
-        return _isMasterResult != boost::none;
+        return _helloResult != boost::none;
     }
 
 private:
-    class WaitForIsMasterHook : public NetworkConnectionHook {
+    class WaitForHelloHook : public NetworkConnectionHook {
     public:
-        explicit WaitForIsMasterHook(NetworkInterfaceTest* parent) : _parent(parent) {}
+        explicit WaitForHelloHook(NetworkInterfaceTest* parent) : _parent(parent) {}
 
         Status validateHost(const HostAndPort& host,
                             const BSONObj& request,
-                            const RemoteCommandResponse& isMasterReply) override {
+                            const RemoteCommandResponse& helloReply) override {
             stdx::lock_guard<Latch> lk(_parent->_mutex);
-            _parent->_isMasterResult = IsMasterData{request, isMasterReply};
-            _parent->_isMasterCond.notify_all();
+            _parent->_helloResult = HelloData{request, helloReply};
+            _parent->_helloCondVar.notify_all();
             return Status::OK();
         }
 
@@ -296,8 +297,8 @@ private:
     };
 
     Mutex _mutex = MONGO_MAKE_LATCH("NetworkInterfaceTest::_mutex");
-    stdx::condition_variable _isMasterCond;
-    boost::optional<IsMasterData> _isMasterResult;
+    stdx::condition_variable _helloCondVar;
+    boost::optional<HelloData> _helloResult;
 };
 
 class NetworkInterfaceInternalClientTest : public NetworkInterfaceTest {
@@ -328,7 +329,7 @@ TEST_F(NetworkInterfaceTest, CancelLocally) {
 
         auto deferred = runCommand(cbh, makeTestCommand(kMaxWait, makeEchoCmdObj()));
 
-        waitForIsMaster();
+        waitForHello();
 
         fpb->waitForTimesEntered(fpb.initialTimesEntered() + 1);
 
@@ -503,13 +504,35 @@ TEST_F(NetworkInterfaceTest, LateCancel) {
     assertNumOps(0u, 0u, 0u, 1u);
 }
 
+TEST_F(NetworkInterfaceTest, ConnectionErrorDropsSingleConnection) {
+    FailPoint* failPoint =
+        globalFailPointRegistry().find("transportLayerASIOasyncConnectReturnsConnectionError");
+    auto timesEntered = failPoint->setMode(FailPoint::nTimes, 1);
+
+    auto cbh = makeCallbackHandle();
+    auto deferred = runCommand(cbh, makeTestCommand(kMaxWait, makeEchoCmdObj()));
+    // Wait for one of the connection attempts to fail with a `ConnectionError`.
+    failPoint->waitForTimesEntered(timesEntered + 1);
+    auto result = deferred.get();
+
+    ASSERT_OK(result.status);
+    ConnectionPoolStats stats;
+    net().appendConnectionStats(&stats);
+
+    ASSERT_EQ(stats.totalCreated, 2);
+    ASSERT_EQ(stats.totalInUse + stats.totalAvailable + stats.totalRefreshing, 1);
+    // Connection dropped during finishRefresh, so the dropped connection still
+    // counts toward the refreshed counter.
+    ASSERT_EQ(stats.totalRefreshed, 2);
+}
+
 TEST_F(NetworkInterfaceTest, AsyncOpTimeout) {
     // Kick off operation
     auto cb = makeCallbackHandle();
     auto request = makeTestCommand(Milliseconds{1000}, makeSleepCmdObj());
     auto deferred = runCommand(cb, request);
 
-    waitForIsMaster();
+    waitForHello();
 
     auto result = deferred.get();
 
@@ -539,7 +562,7 @@ TEST_F(NetworkInterfaceTest, AsyncOpTimeoutWithOpCtxDeadlineSooner) {
 
     auto deferred = runCommand(cb, request);
 
-    waitForIsMaster();
+    waitForHello();
 
     auto result = deferred.get();
 
@@ -574,7 +597,7 @@ TEST_F(NetworkInterfaceTest, AsyncOpTimeoutWithOpCtxDeadlineLater) {
 
     auto deferred = runCommand(cb, request);
 
-    waitForIsMaster();
+    waitForHello();
 
     auto result = deferred.get();
 
@@ -733,13 +756,13 @@ TEST_F(NetworkInterfaceTest, SetAlarm) {
 }
 
 TEST_F(NetworkInterfaceInternalClientTest,
-       IsMasterRequestContainsOutgoingWireVersionInternalClientInfo) {
+       HelloRequestContainsOutgoingWireVersionInternalClientInfo) {
     auto deferred = runCommand(makeCallbackHandle(), makeTestCommand(kNoTimeout, makeEchoCmdObj()));
-    auto isMasterHandshake = waitForIsMaster();
+    auto helloHandshake = waitForHello();
 
-    // Verify that the isMaster reply has the expected internalClient data.
+    // Verify that the "hello" reply has the expected internalClient data.
     auto wireSpec = WireSpec::instance().get();
-    auto internalClientElem = isMasterHandshake.request["internalClient"];
+    auto internalClientElem = helloHandshake.request["internalClient"];
     ASSERT_EQ(internalClientElem.type(), BSONType::Object);
     auto minWireVersionElem = internalClientElem.Obj()["minWireVersion"];
     auto maxWireVersionElem = internalClientElem.Obj()["maxWireVersion"];
@@ -754,14 +777,14 @@ TEST_F(NetworkInterfaceInternalClientTest,
     assertNumOps(0u, 0u, 0u, 1u);
 }
 
-TEST_F(NetworkInterfaceTest, IsMasterRequestMissingInternalClientInfoWhenNotInternalClient) {
+TEST_F(NetworkInterfaceTest, HelloRequestMissingInternalClientInfoWhenNotInternalClient) {
     resetIsInternalClient(false);
 
     auto deferred = runCommand(makeCallbackHandle(), makeTestCommand(kNoTimeout, makeEchoCmdObj()));
-    auto isMasterHandshake = waitForIsMaster();
+    auto helloHandshake = waitForHello();
 
-    // Verify that the isMaster reply has the expected internalClient data.
-    ASSERT_FALSE(isMasterHandshake.request["internalClient"]);
+    // Verify that the "hello" reply has the expected internalClient data.
+    ASSERT_FALSE(helloHandshake.request["internalClient"]);
     // Verify that the ping op is counted as a success.
     auto res = deferred.get();
     ASSERT(res.elapsed);

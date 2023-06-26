@@ -325,11 +325,11 @@ void Balancer::initiateBalancer(OperationContext* opCtx) {
 
 void Balancer::interruptBalancer() {
     stdx::lock_guard<Latch> scopedLock(_mutex);
-    if (_state != kRunning)
+    if (_state != kRunning) {
         return;
+    }
 
     _state = kStopping;
-    _thread.detach();
 
     // Interrupt the balancer thread if it has been started. We are guaranteed that the operation
     // context of that thread is still alive, because we hold the balancer mutex.
@@ -344,8 +344,10 @@ void Balancer::interruptBalancer() {
 
 void Balancer::waitForBalancerToStop() {
     stdx::unique_lock<Latch> scopedLock(_mutex);
-
     _joinCond.wait(scopedLock, [this] { return _state == kStopped; });
+    if (_thread.joinable()) {
+        _thread.join();
+    }
 }
 
 void Balancer::joinCurrentRound(OperationContext* opCtx) {
@@ -484,6 +486,10 @@ void Balancer::_consumeActionStreamLoop() {
     auto balancerConfig = Grid::get(opCtx.get())->getBalancerConfiguration();
     executor::ScopedTaskExecutor executor(
         Grid::get(opCtx.get())->getExecutorPool()->getFixedExecutor());
+
+    // The scoped task executor kills callbacks on destruction which may lead to
+    // _outstandingStreamingOps being non-zero after a step down. Reset it to 0 here on step up.
+    _outstandingStreamingOps.store(0);
 
     auto selectStream = [&]() -> ActionsStreamPolicy* {
         // This policy has higher priority - and once activated, it cannot be disabled through cfg
@@ -646,12 +652,12 @@ void Balancer::_consumeActionStreamLoop() {
 
 void Balancer::_mainThread() {
     ON_BLOCK_EXIT([this] {
-        stdx::lock_guard<Latch> scopedLock(_mutex);
-
-        _state = kStopped;
+        {
+            stdx::lock_guard<Latch> scopedLock(_mutex);
+            _state = kStopped;
+            LOGV2_DEBUG(21855, 1, "Balancer thread terminated");
+        }
         _joinCond.notify_all();
-
-        LOGV2_DEBUG(21855, 1, "Balancer thread terminated");
     });
 
     Client::initThread("Balancer");

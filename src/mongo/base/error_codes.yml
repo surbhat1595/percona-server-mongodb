@@ -496,6 +496,14 @@ error_codes:
 
     - {code: 388, name: TransactionTooLargeForCache}
 
+    # This error code is not generated internally in mongod/s servers, but must be parsed and
+    # reserve an error code. It can be returned by a remote search index management server.
+    - {code: 396, name: IndexInformationTooLarge}
+
+    - {code: 398, name: StreamTerminated, categories: [CloseConnectionError]}
+
+    - {code: 384, name: ConnectionError, categories: [NetworkError,RetriableError,InternalOnly]}
+
     # Error codes 4000-8999 are reserved.
 
     # Non-sequential error codes for compatibility only)

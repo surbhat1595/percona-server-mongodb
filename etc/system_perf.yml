@@ -777,6 +777,28 @@ tasks:
             {scale: 1,
              schema: denormalized}
 
+  - name: tpch_10_normalized
+    priority: 5
+    exec_timeout_secs: 43200 # 12 hours
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "tpch"
+          test_control_params: |
+            {scale: 10,
+             schema: normalized}
+
+  - name: tpch_10_denormalized
+    priority: 5
+    exec_timeout_secs: 43200 # 12 hours
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "tpch"
+          test_control_params: |
+            {scale: 10,
+             schema: denormalized}
+
   - name: non_sharded_workloads
     priority: 5
     commands:
@@ -924,13 +946,6 @@ tasks:
         vars:
           test_control: "initialsync-large"
           mongodb_setup: "replica-2node-fcbis"
-
-  - name: change_streams_throughput
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          test_control: "change_streams_throughput"
 
   - name: change_streams_latency
     priority: 5
@@ -1383,7 +1398,6 @@ buildvariants:
   #     - name: bestbuy_agg_merge_same_db
   #     - name: bestbuy_agg_merge_wordcount
   #     - name: bestbuy_query
-  #     - name: change_streams_throughput
   #     - name: change_streams_latency
   #     - name: change_streams_listen_throughput
   #     - name: snapshot_reads
@@ -1560,7 +1574,6 @@ buildvariants:
   #     - name: industry_benchmarks_wmajority
   #     - name: mongos_workloads
   #     - name: mongos_large_catalog_workloads
-  #     - name: change_streams_throughput
   #     - name: change_streams_latency
   #     - name: change_streams_listen_throughput
   #     - name: change_streams_multi_mongos
@@ -1604,7 +1617,6 @@ buildvariants:
   #     - name: bestbuy_agg_merge_wordcount
   #     - name: bestbuy_query
   #     - name: change_streams_latency
-  #     - name: change_streams_throughput
   #     - name: change_streams_listen_throughput
   #     - name: industry_benchmarks
   #     - name: industry_benchmarks_wmajority
@@ -1708,7 +1720,6 @@ buildvariants:
   #     - name: bestbuy_agg_merge_same_db
   #     - name: bestbuy_agg_merge_wordcount
   #     - name: bestbuy_query
-  #     - name: change_streams_throughput
   #     - name: change_streams_latency
   #     - name: change_streams_listen_throughput
   #     - name: snapshot_reads
@@ -1758,7 +1769,6 @@ buildvariants:
   #     - name: bestbuy_agg_merge_same_db
   #     - name: bestbuy_agg_merge_wordcount
   #     - name: bestbuy_query
-  #     - name: change_streams_throughput
   #     - name: change_streams_latency
   #     - name: change_streams_listen_throughput
   #     - name: snapshot_reads
@@ -1808,7 +1818,6 @@ buildvariants:
   #     - name: bestbuy_agg_merge_same_db
   #     - name: bestbuy_agg_merge_wordcount
   #     - name: bestbuy_query
-  #     - name: change_streams_throughput
   #     - name: change_streams_latency
   #     - name: change_streams_listen_throughput
   #     - name: snapshot_reads
@@ -1860,7 +1869,6 @@ buildvariants:
   #     - name: bestbuy_agg_merge_same_db
   #     - name: bestbuy_agg_merge_wordcount
   #     - name: bestbuy_query
-  #     - name: change_streams_throughput
   #     - name: change_streams_latency
   #     - name: change_streams_listen_throughput
   #     - name: change_streams_preimage_throughput
@@ -1900,7 +1908,6 @@ buildvariants:
   #     - name: mixed_workloads
   #     - name: smoke_test
   #     - name: industry_benchmarks_wmajority
-  #     - name: change_streams_throughput
   #     - name: change_streams_latency
   #     - name: change_streams_listen_throughput
   #     - name: tpcc
@@ -2062,7 +2069,6 @@ buildvariants:
   #     - name: bestbuy_agg_merge_same_db
   #     - name: bestbuy_agg_merge_wordcount
   #     - name: bestbuy_query
-  #     - name: change_streams_throughput
   #     - name: change_streams_latency
   #     - name: change_streams_listen_throughput
   #     - name: snapshot_reads
@@ -2197,6 +2203,7 @@ buildvariants:
       - name: industry_benchmarks
       - name: ycsb_60GB
       - name: crud_workloads
+      - name: crud_workloads_majority
       - name: genny_canaries
       - name: cursor_manager
       - name: mixed_workloads
@@ -2208,6 +2215,9 @@ buildvariants:
       - name: bestbuy_agg_merge_same_db
       - name: bestbuy_agg_merge_wordcount
       - name: bestbuy_query
+      - name: tpcc
+      - name: tpch_10_denormalized
+      - name: tpch_10_normalized
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
 
@@ -2245,7 +2255,6 @@ buildvariants:
       - name: bestbuy_agg_merge_same_db
       - name: bestbuy_agg_merge_wordcount
       - name: bestbuy_query
-      - name: change_streams_throughput
       - name: change_streams_latency
       - name: change_streams_listen_throughput
       - name: snapshot_reads
@@ -2437,7 +2446,6 @@ buildvariants:
       - name: smoke_test
       - name: mongos_workloads
       - name: mongos_large_catalog_workloads
-      - name: change_streams_throughput
       - name: change_streams_latency
       - name: change_streams_listen_throughput
       - name: change_streams_multi_mongos
@@ -2494,7 +2502,6 @@ buildvariants:
       - name: bestbuy_query
       - name: change_streams_latency
       - name: change_streams_preimage_latency
-      - name: change_streams_throughput
       - name: change_streams_preimage_throughput
       - name: change_streams_listen_throughput
       - name: industry_benchmarks
@@ -2619,7 +2626,6 @@ buildvariants:
       - name: bestbuy_agg_merge_same_db
       - name: bestbuy_agg_merge_wordcount
       - name: bestbuy_query
-      - name: change_streams_throughput
       - name: change_streams_preimage_throughput
       - name: change_streams_latency
       - name: change_streams_preimage_latency

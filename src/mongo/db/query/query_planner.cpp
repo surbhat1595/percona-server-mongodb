@@ -252,6 +252,11 @@ void tryToAddColumnScan(const QueryPlannerParams& params,
     // collection scan. Add that solution.
     out.push_back(QueryPlannerAnalysis::analyzeDataAccess(query, params, std::move(columnScan)));
 }
+
+bool collscanIsBounded(const CollectionScanNode* collscan) {
+    return collscan->minRecord || collscan->maxRecord;
+}
+
 }  // namespace
 
 using std::numeric_limits;
@@ -503,13 +508,23 @@ int determineCollscanDirection(const CanonicalQuery& query, const QueryPlannerPa
     return determineClusteredScanDirection(query, params).value_or(1);
 }
 
+std::pair<std::unique_ptr<QuerySolution>, const CollectionScanNode*> buildCollscanSolnWithNode(
+    const CanonicalQuery& query,
+    bool tailable,
+    const QueryPlannerParams& params,
+    boost::optional<int> direction = boost::none) {
+    std::unique_ptr<QuerySolutionNode> solnRoot(QueryPlannerAccess::makeCollectionScan(
+        query, tailable, params, direction.value_or(determineCollscanDirection(query, params))));
+    const auto* collscanNode = checked_cast<const CollectionScanNode*>(solnRoot.get());
+    return std::make_pair(
+        QueryPlannerAnalysis::analyzeDataAccess(query, params, std::move(solnRoot)), collscanNode);
+}
+
 std::unique_ptr<QuerySolution> buildCollscanSoln(const CanonicalQuery& query,
                                                  bool tailable,
                                                  const QueryPlannerParams& params,
                                                  boost::optional<int> direction = boost::none) {
-    std::unique_ptr<QuerySolutionNode> solnRoot(QueryPlannerAccess::makeCollectionScan(
-        query, tailable, params, direction.value_or(determineCollscanDirection(query, params))));
-    return QueryPlannerAnalysis::analyzeDataAccess(query, params, std::move(solnRoot));
+    return buildCollscanSolnWithNode(query, tailable, params, direction).first;
 }
 
 std::unique_ptr<QuerySolution> buildWholeIXSoln(
@@ -712,10 +727,11 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::planFromCache(
                 "filter"_attr = redact(clone->debugString()),
                 "cacheData"_attr = redact(winnerCacheData.toString()));
 
-    stdx::unordered_set<string> fields;
+    RelevantFieldIndexMap fields;
     QueryPlannerIXSelect::getFields(query.root(), &fields);
+    // We will not cache queries with 'hint'.
     std::vector<IndexEntry> expandedIndexes =
-        QueryPlannerIXSelect::expandIndexes(fields, params.indices);
+        QueryPlannerIXSelect::expandIndexes(fields, params.indices, false /* indexHinted */);
 
     // Map from index name to index number.
     map<IndexEntry::Identifier, size_t> indexMap;
@@ -917,13 +933,14 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     }
 
     // Figure out what fields we care about.
-    stdx::unordered_set<string> fields;
+    RelevantFieldIndexMap fields;
     QueryPlannerIXSelect::getFields(query.root(), &fields);
     for (auto&& field : fields) {
-        LOGV2_DEBUG(20970, 5, "Predicate over field", "field"_attr = field);
+        LOGV2_DEBUG(20970, 5, "Predicate over field", "field"_attr = field.first);
     }
 
-    fullIndexList = QueryPlannerIXSelect::expandIndexes(fields, std::move(fullIndexList));
+    fullIndexList = QueryPlannerIXSelect::expandIndexes(
+        fields, std::move(fullIndexList), !hintedIndex.isEmpty());
     std::vector<IndexEntry> relevantIndices;
 
     if (!hintedIndexEntry) {
@@ -1286,24 +1303,6 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
                 }
             }
         }
-
-        // The base index is sorted on some key, so it's possible we might want to use
-        // a collection scan to provide the sort requested
-        if (auto direction = determineClusteredScanDirection(query, params)) {
-            auto soln = buildCollscanSoln(query, isTailable, params, direction);
-            if (soln) {
-                LOGV2_DEBUG(6082401,
-                            5,
-                            "Planner: outputting soln that uses clustered index to "
-                            "provide sort");
-                SolutionCacheData* scd = new SolutionCacheData();
-                scd->solnType = SolutionCacheData::COLLSCAN_SOLN;
-                scd->wholeIXSolnDir = *direction;
-
-                soln->cacheData.reset(scd);
-                out.push_back(std::move(soln));
-            }
-        }
     }
 
     // If a projection exists, there may be an index that allows for a covered plan, even if
@@ -1355,6 +1354,8 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
                       "No indexed plans available, and running with 'notablescan'");
     }
 
+    bool clusteredCollection = params.clusteredInfo.has_value();
+
     // geoNear and text queries *require* an index.
     // Also, if a hint is specified it indicates that we MUST use it.
     bool possibleToCollscan =
@@ -1364,23 +1365,34 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         return Status(ErrorCodes::NoQueryExecutionPlans, "No query solutions");
     }
 
-    if (possibleToCollscan && (collscanRequested || collScanRequired)) {
-        auto direction = determineCollscanDirection(query, params);
-        auto collscan = buildCollscanSoln(query, isTailable, params, direction);
-        if (!collscan && collScanRequired) {
+    if (possibleToCollscan && (collscanRequested || collScanRequired || clusteredCollection)) {
+        auto clusteredScanDirection = determineClusteredScanDirection(query, params);
+        auto direction = clusteredScanDirection.value_or(1);
+        auto [collscanSoln, collscanNode] =
+            buildCollscanSolnWithNode(query, isTailable, params, direction);
+        if (!collscanSoln && collScanRequired) {
             return Status(ErrorCodes::NoQueryExecutionPlans,
                           "Failed to build collection scan soln");
         }
-        if (collscan) {
+
+        // We consider collection scan in the following cases:
+        // 1. collScanRequested - specifically requested by caller.
+        // 2. collScanRequired - there are no other possible plans, so we fallback to full scan.
+        // 3. collscanIsBounded - collection is clustered and clustered index is used.
+        // 4. clusteredScanDirection - collection is clustered and sort, provided by clustered
+        // index, is used
+        if (collscanSoln &&
+            (collscanRequested || collScanRequired || collscanIsBounded(collscanNode) ||
+             clusteredScanDirection)) {
             LOGV2_DEBUG(20984,
                         5,
                         "Planner: outputting a collection scan",
-                        "collectionScan"_attr = redact(collscan->toString()));
+                        "collectionScan"_attr = redact(collscanSoln->toString()));
             SolutionCacheData* scd = new SolutionCacheData();
             scd->solnType = SolutionCacheData::COLLSCAN_SOLN;
             scd->wholeIXSolnDir = direction;
-            collscan->cacheData.reset(scd);
-            out.push_back(std::move(collscan));
+            collscanSoln->cacheData.reset(scd);
+            out.push_back(std::move(collscanSoln));
         }
     }
 

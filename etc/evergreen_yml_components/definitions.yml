@@ -303,6 +303,7 @@ variables:
   - enterprise-rhel-70-64-bit
   #  - enterprise-rhel-70-64-bit-kitchen-sink
   - enterprise-rhel-70-64-bit-no-libunwind
+  - enterprise-rhel-71-ppc64le
   - enterprise-rhel-81-ppc64le
   - enterprise-rhel-72-s390x
   - enterprise-rhel-80-64-bit
@@ -364,6 +365,7 @@ variables:
   - rhel70
   - rhel76_compile_rhel70
   - enterprise-rhel-70-64-bit
+  - enterprise-rhel-71-ppc64le
   - enterprise-rhel-81-ppc64le
   - enterprise-rhel-72-s390x
   - ubi8
@@ -1121,6 +1123,11 @@ functions:
       optional: true
       files:
       - src/generated_resmoke_config/*.json
+
+  "initialize multiversion tasks": &initialize_multiversion_tasks
+  - command: shell.exec
+    params:
+      script: "echo 'noop'"
 
   "generate resmoke tasks":
   - *fetch_artifacts
@@ -2242,6 +2249,21 @@ tasks:
       task_compile_flags: >-
         PREFIX=dist-test
 
+## compile - build all scons targets except unittests ##
+- name: compile_dist_test_half
+  tags: []
+  depends_on:
+  - name: version_expansions_gen
+    variant: generate-tasks-for-version
+  commands:
+  - func: "scons compile"
+    vars:
+      targets: >-
+        compile_first_half_non_test_source
+        ${additional_compile_targets|}
+      task_compile_flags: >-
+        PREFIX=dist-test
+
 - name: determine_patch_tests
   commands:
   - *f_expansions_write
@@ -2745,6 +2767,16 @@ tasks:
   - func: "scons compile"
     vars:
       targets: archive-dbtest archive-dbtest-debug
+      compiling_for_test: true
+
+- name: compile_integration_test
+  tags: []
+  depends_on:
+  - name: compile_dist_test
+  commands:
+  - func: "scons compile"
+    vars:
+      targets: install-integration-tests
       compiling_for_test: true
 
 - name: compile_visibility_test
@@ -3329,6 +3361,21 @@ tasks:
 - <<: *gen_burn_in_task_template
   name: burn_in_tests_gen
   tags: []
+  patch_only: true
+  commands:
+  - func: "generate resmoke tasks"
+
+- <<: *gen_burn_in_task_template
+  name: burn_in_tags_gen
+  tags: []
+  patch_only: true
+  commands:
+  - func: "generate resmoke tasks"
+
+- <<: *gen_burn_in_task_template
+  name: burn_in_tasks_gen
+  tags: []
+  patch_only: true
   commands:
   - func: "generate resmoke tasks"
 
@@ -3463,13 +3510,16 @@ tasks:
   name: initial_sync_multiversion_fuzzer_gen
   tags: ["multiversion_fuzzer", "require_npm", "random_name", "multiversion"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      initial_sync_fuzzer_last_lts: last_lts
+      initial_sync_fuzzer_last_continuous: last_continuous
   - func: "generate resmoke tasks"
     vars:
       <<: *jstestfuzz_config_vars
       num_files: 10
       num_tasks: 5
       npm_command: initsync-fuzzer
-      suite: initial_sync_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
       run_no_feature_flag_tests: "true"
 
@@ -3492,12 +3542,15 @@ tasks:
   name: aggregation_multiversion_fuzzer_gen
   tags: ["aggfuzzer", "common", "multiversion", "require_npm", "random_name", "future_git_tag_incompatible"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      aggregation_multiversion_fuzzer_last_lts: last_lts
+      aggregation_multiversion_fuzzer_last_continuous: last_continuous
   - func: "generate resmoke tasks"
     vars:
       <<: *jstestfuzz_config_vars
       num_files: 5
       num_tasks: 5
-      suite: generational_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
       npm_command: agg-fuzzer
       run_no_feature_flag_tests: "true"
@@ -3507,12 +3560,15 @@ tasks:
   name: aggregation_expression_multiversion_fuzzer_gen
   tags: ["aggfuzzer", "multiversion", "require_npm", "random_name"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      aggregation_expression_multiversion_fuzzer_last_lts: last_lts
+      aggregation_expression_multiversion_fuzzer_last_continuous: last_continuous
   - func: "generate resmoke tasks"
     vars:
       <<: *jstestfuzz_config_vars
       num_files: 5
       num_tasks: 5
-      suite: generational_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
       npm_command: agg-expr-fuzzer
       run_no_feature_flag_tests: "true"
@@ -3627,13 +3683,16 @@ tasks:
   name: update_fuzzer_gen
   tags: ["updatefuzzer", "require_npm", "random_name", "multiversion"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      update_fuzzer_last_lts: last_lts
+      update_fuzzer_last_continuous: last_continuous
   - func: "generate resmoke tasks"
     vars:
       <<: *jstestfuzz_config_vars
       num_files: 5
       num_tasks: 5
       npm_command: update-fuzzer
-      suite: generational_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
       run_no_feature_flag_tests: "true"
 
@@ -3657,13 +3716,16 @@ tasks:
   name: update_fuzzer_replication_gen
   tags: ["updatefuzzer", "require_npm", "random_name", "multiversion"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      update_fuzzer_replication_last_lts: last_lts
+      update_fuzzer_replication_last_continuous: last_continuous
   - func: "generate resmoke tasks"
     vars:
       <<: *jstestfuzz_config_vars
       num_files: 5
       num_tasks: 5
       npm_command: update-fuzzer
-      suite: generational_fuzzer_replication
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
       run_no_feature_flag_tests: "true"
 
@@ -3672,13 +3734,16 @@ tasks:
   name: rollback_multiversion_fuzzer_gen
   tags: ["multiversion_fuzzer", "require_npm", "random_name", "multiversion"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      rollback_fuzzer_last_lts: last_lts
+      rollback_fuzzer_last_continuous: last_continuous
   - func: "generate resmoke tasks"
     vars:
       <<: *jstestfuzz_config_vars
       num_files: 3
       num_tasks: 5
       npm_command: rollback-fuzzer
-      suite: rollback_fuzzer
       # Rollback suites create indexes with majority of nodes not available for replication. So, disabling
       # index build commit quorum.
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}, enableIndexBuildCommitQuorum: false}'"
@@ -3988,12 +4053,19 @@ tasks:
   name: jstestfuzz_replication_multiversion_gen
   tags: ["multiversion_fuzzer", "require_npm", "random_name", "multiversion"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      jstestfuzz_replication_last_continuous_new_new_old: last_continuous
+      jstestfuzz_replication_last_continuous_new_old_new: last_continuous
+      jstestfuzz_replication_last_continuous_old_new_new: last_continuous
+      jstestfuzz_replication_last_lts_new_new_old: last_lts
+      jstestfuzz_replication_last_lts_new_old_new: last_lts
+      jstestfuzz_replication_last_lts_old_new_new: last_lts
   - func: "generate resmoke tasks"
     vars:
       <<: *jstestfuzz_config_vars
       jstestfuzz_vars: --jsTestsDir ../jstests
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
-      suite: jstestfuzz_replication
       npm_command: jstestfuzz
       run_no_feature_flag_tests: "true"
 
@@ -4055,12 +4127,15 @@ tasks:
   name: jstestfuzz_sharded_multiversion_gen
   tags: ["multiversion_fuzzer", "require_npm", "random_name", "multiversion"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      jstestfuzz_sharded_last_continuous_new_old_old_new: last_continuous
+      jstestfuzz_sharded_last_lts_new_old_old_new: last_lts
   - func: "generate resmoke tasks"
     vars:
       <<: *jstestfuzz_config_vars
       jstestfuzz_vars: --jsTestsDir ../jstests
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
-      suite: jstestfuzz_sharded
       npm_command: jstestfuzz
       run_no_feature_flag_tests: "true"
 
@@ -4188,6 +4263,14 @@ tasks:
   name: multiversion_sanity_check_gen
   tags: ["multiversion", "multiversion_sanity_check"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      multiversion_sanity_check_last_continuous_new_new_old: last_continuous
+      multiversion_sanity_check_last_continuous_new_old_new: last_continuous
+      multiversion_sanity_check_last_continuous_old_new_new: last_continuous
+      multiversion_sanity_check_last_lts_new_new_old: last_lts
+      multiversion_sanity_check_last_lts_new_old_new: last_lts
+      multiversion_sanity_check_last_lts_old_new_new: last_lts
   - func: "generate resmoke tasks"
     vars:
       run_no_feature_flag_tests: "true"
@@ -4196,9 +4279,16 @@ tasks:
   name: replica_sets_jscore_multiversion_gen
   tags: ["multiversion", "multiversion_passthrough"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      replica_sets_jscore_passthrough_last_continuous_new_new_old: last_continuous
+      replica_sets_jscore_passthrough_last_continuous_new_old_new: last_continuous
+      replica_sets_jscore_passthrough_last_continuous_old_new_new: last_continuous
+      replica_sets_jscore_passthrough_last_lts_new_new_old: last_lts
+      replica_sets_jscore_passthrough_last_lts_new_old_new: last_lts
+      replica_sets_jscore_passthrough_last_lts_old_new_new: last_lts
   - func: "generate resmoke tasks"
     vars:
-      suite: replica_sets_jscore_passthrough
       run_no_feature_flag_tests: "true"
 
 
@@ -4353,12 +4443,6 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
 
-- <<: *gen_burn_in_task_template
-  name: burn_in_tags_gen
-  tags: []
-  commands:
-  - func: "generate resmoke tasks"
-
 - name: version_gen
   commands:
   - command: manifest.load
@@ -4431,15 +4515,26 @@ tasks:
   name: change_streams_multiversion_gen
   tags: ["multiversion", "multiversion_passthrough"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      change_streams_last_continuous_new_new_old: last_continuous
+      change_streams_last_continuous_new_old_new: last_continuous
+      change_streams_last_continuous_old_new_new: last_continuous
+      change_streams_last_lts_new_new_old: last_lts
+      change_streams_last_lts_new_old_new: last_lts
+      change_streams_last_lts_old_new_new: last_lts
   - func: "generate resmoke tasks"
     vars:
-      suite: change_streams
       run_no_feature_flag_tests: "true"
 
 - <<: *gen_task_template
   name: change_streams_downgrade_gen
   tags: ["multiversion_passthrough", "multiversion"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      change_streams_downgrade_last_continuous_new_old_old_new: last_continuous
+      change_streams_downgrade_last_lts_new_old_old_new: last_lts
   - func: "generate resmoke tasks"
     vars:
       run_no_feature_flag_tests: "true"
@@ -4500,14 +4595,17 @@ tasks:
   name: change_streams_sharded_collections_multiversion_gen
   tags: ["multiversion_passthrough", "multiversion"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      change_streams_sharded_collections_passthrough_last_continuous_new_old_old_new: last_continuous
+      change_streams_sharded_collections_passthrough_last_lts_new_old_old_new: last_lts
   - func: "generate resmoke tasks"
     vars:
-      suite: change_streams_sharded_collections_passthrough
       run_no_feature_flag_tests: "true"
 
 - <<: *gen_task_template
   name: multiversion_future_git_tag_gen
-  tags: ["multiversion", "no_version_combination", "multiversion_future_git_tag"]
+  tags: ["multiversion", "no_multiversion_generate_tasks", "multiversion_future_git_tag"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -4515,7 +4613,7 @@ tasks:
 
 - <<: *gen_task_template
   name: multiversion_auth_future_git_tag_gen
-  tags: ["auth", "multiversion", "no_version_combination", "multiversion_future_git_tag"]
+  tags: ["auth", "multiversion", "no_multiversion_generate_tasks", "multiversion_future_git_tag"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -4659,93 +4757,77 @@ tasks:
 - <<: *task_template
   name: integration_tests_standalone
   tags: ["integration", "standalone"]
+  depends_on:
+  - name: compile_integration_test
   commands:
-  - command: manifest.load
-  - func: "git get project and add git tag"
-  - func: "do setup"
-  - func: "set up win mount script"
-  - func: "generate compile expansions"  # Generate compile expansions needs to be run to mount the shared scons cache.
-  - func: "apply compile expansions"
-  - func: "scons compile"
-    vars:
-      targets: install-integration-tests
-      compiling_for_test: true
-  - func: "attach scons logs"
-  - func: "send scons cedar report"
+  - *f_expansions_write
+  - *run_diskstats
+  - *monitor_process_threads
+  - *collect_system_resource_info
+  - *collect_ulimit_info
   - func: "run tests"
+    vars:
+      install_dir: build/install/bin
 
 - <<: *task_template
   name: integration_tests_standalone_audit
   tags: ["integration", "audit"]
+  depends_on:
+  - name: compile_integration_test
   commands:
-  - command: manifest.load
-  - func: "git get project and add git tag"
-  - func: "do setup"
-  - func: "set up win mount script"
-  - func: "generate compile expansions"  # Generate compile expansions needs to be run to mount the shared scons cache.
-  - func: "apply compile expansions"
-  - func: "scons compile"
-    vars:
-      targets: install-integration-tests
-      compiling_for_test: true
-  - func: "attach scons logs"
-  - func: "send scons cedar report"
+  - *f_expansions_write
+  - *run_diskstats
+  - *monitor_process_threads
+  - *collect_system_resource_info
+  - *collect_ulimit_info
   - func: "run tests"
+    vars:
+      install_dir: build/install/bin
 
 - <<: *task_template
   name: integration_tests_replset
   tags: ["integration"]
+  depends_on:
+  - name: compile_integration_test
   commands:
-  - command: manifest.load
-  - func: "git get project and add git tag"
-  - func: "do setup"
-  - func: "set up win mount script"
-  - func: "generate compile expansions"  # Generate compile expansions needs to be run to mount the shared scons cache.
-  - func: "apply compile expansions"
-  - func: "scons compile"
-    vars:
-      targets: install-integration-tests
-      compiling_for_test: true
-  - func: "attach scons logs"
-  - func: "send scons cedar report"
+  - *f_expansions_write
+  - *run_diskstats
+  - *monitor_process_threads
+  - *collect_system_resource_info
+  - *collect_ulimit_info
   - func: "run tests"
+    vars:
+      install_dir: build/install/bin
 
 - <<: *task_template
   name: integration_tests_replset_ssl_auth
   tags: ["integration"]
+  depends_on:
+  - name: compile_integration_test
   commands:
-  - command: manifest.load
-  - func: "git get project and add git tag"
-  - func: "do setup"
-  - func: "set up win mount script"
-  - func: "generate compile expansions"  # Generate compile expansions needs to be run to mount the shared scons cache.
-  - func: "apply compile expansions"
-  - func: "scons compile"
-    vars:
-      targets: install-integration-tests
-      compiling_for_test: true
-  - func: "attach scons logs"
-  - func: "send scons cedar report"
+  - *f_expansions_write
+  - *run_diskstats
+  - *monitor_process_threads
+  - *collect_system_resource_info
+  - *collect_ulimit_info
   - func: "run tests"
+    vars:
+      install_dir: build/install/bin
 
 - <<: *task_template
   name: integration_tests_sharded
   tags: ["integration", "sharded"]
+  depends_on:
+  - name: compile_integration_test
   commands:
-  - command: manifest.load
-  - func: "git get project and add git tag"
   - *f_expansions_write
-  - func: "do setup"
-  - func: "set up win mount script"
-  - func: "generate compile expansions"  # Generate compile expansions needs to be run to mount the shared scons cache.
-  - func: "apply compile expansions"
-  - func: "scons compile"
-    vars:
-      targets: install-integration-tests
-      compiling_for_test: true
-  - func: "attach scons logs"
-  - func: "send scons cedar report"
+  - *run_diskstats
+  - *monitor_process_threads
+  - *collect_system_resource_info
+  - *collect_ulimit_info
   - func: "run tests"
+    vars:
+      install_dir: build/install/bin
 
 - <<: *task_template
   name: external_auth
@@ -5131,13 +5213,13 @@ tasks:
 
 - <<: *gen_task_template
   name: multiversion_auth_gen
-  tags: ["auth", "multiversion", "no_version_combination", "future_git_tag_incompatible"]
+  tags: ["auth", "multiversion", "no_multiversion_generate_tasks", "future_git_tag_incompatible"]
   commands:
   - func: "generate resmoke tasks"
 
 - <<: *gen_task_template
   name: multiversion_gen
-  tags: ["multiversion", "no_version_combination", "future_git_tag_incompatible"]
+  tags: ["multiversion", "no_multiversion_generate_tasks", "future_git_tag_incompatible"]
   commands:
   - func: "generate resmoke tasks"
 
@@ -5146,7 +5228,7 @@ tasks:
 # build variants that enable this task.
 - <<: *gen_task_template
   name: feature_flag_multiversion_gen
-  tags: ["multiversion", "no_version_combination"]
+  tags: ["multiversion", "no_multiversion_generate_tasks"]
   commands:
   - func: "generate resmoke tasks"
 
@@ -5215,9 +5297,12 @@ tasks:
   name: sharded_collections_jscore_multiversion_gen
   tags: ["multiversion_passthrough", "multiversion"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      sharded_collections_jscore_passthrough_last_continuous_new_old_old_new: last_continuous
+      sharded_collections_jscore_passthrough_last_lts_new_old_old_new: last_lts
   - func: "generate resmoke tasks"
     vars:
-      suite: sharded_collections_jscore_passthrough
       run_no_feature_flag_tests: "true"
 
 - <<: *task_template
@@ -5231,9 +5316,12 @@ tasks:
   name: sharding_jscore_multiversion_gen
   tags: ["multiversion_passthrough", "multiversion"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      sharding_jscore_passthrough_last_lts_new_old_old_new: last_lts
+      sharding_jscore_passthrough_last_continuous_new_old_old_new: last_continuous
   - func: "generate resmoke tasks"
     vars:
-      suite: sharding_jscore_passthrough
       run_no_feature_flag_tests: "true"
 
 - <<: *gen_task_template
@@ -5457,9 +5545,16 @@ tasks:
   name: concurrency_replication_multiversion_gen
   tags: ["multiversion", "multiversion_passthrough"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      concurrency_replication_last_continuous_new_new_old: last_continuous
+      concurrency_replication_last_continuous_new_old_new: last_continuous
+      concurrency_replication_last_continuous_old_new_new: last_continuous
+      concurrency_replication_last_lts_new_new_old: last_lts
+      concurrency_replication_last_lts_new_old_new: last_lts
+      concurrency_replication_last_lts_old_new_new: last_lts
   - func: "generate resmoke tasks"
     vars:
-      suite: concurrency_replication
       run_no_feature_flag_tests: "true"
 
 - <<: *gen_task_template
@@ -5536,9 +5631,12 @@ tasks:
   name: concurrency_sharded_replication_multiversion_gen
   tags: ["multiversion_passthrough", "sharded", "multiversion"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      concurrency_sharded_replication_last_continuous_new_old_old_new: last_continuous
+      concurrency_sharded_replication_last_lts_new_old_old_new: last_lts
   - func: "generate resmoke tasks"
     vars:
-      suite: concurrency_sharded_replication
       run_no_feature_flag_tests: "true"
 
 - <<: *gen_task_template
@@ -5838,9 +5936,12 @@ tasks:
   name: replica_sets_multiversion_gen
   tags: ["random_multiversion_ds", "multiversion"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      replica_sets_last_lts: last_lts
+      replica_sets_last_continuous: last_continuous
   - func: "generate resmoke tasks"
     vars:
-      suite: replica_sets
       run_no_feature_flag_tests: "true"
 
 - <<: *task_template
@@ -5869,10 +5970,13 @@ tasks:
   name: sharding_multiversion_gen
   tags: ["random_multiversion_ds", "multiversion"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      sharding_last_continuous: last_continuous
+      sharding_last_lts: last_lts
   - func: "generate resmoke tasks"
     vars:
       use_large_distro: "true"
-      suite: sharding
       run_no_feature_flag_tests: "true"
 
 - <<: *gen_task_template
@@ -5934,13 +6038,15 @@ tasks:
       resmoke_jobs_max: 1
 
 - <<: *gen_task_template
-  name: sharding_last_lts_mongos_and_mixed_shards_gen
-  tags: ["sharding", "common", "multiversion", "no_version_combination"]
+  name: sharding_mongos_and_mixed_shards_gen
+  tags: ["sharding", "common", "multiversion"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      sharding_last_lts_mongos_and_mixed_shards: last_lts
   - func: "generate resmoke tasks"
     vars:
       use_large_distro: "true"
-      multiversion_exclude_tags_version: last_lts
       run_no_feature_flag_tests: "true"
 
 - <<: *gen_task_template
@@ -6062,21 +6168,25 @@ tasks:
     vars:
       use_large_distro: "true"
 
-# Use explicit task definitions for retryable_writes_downgrade suites to avoid running
-# with all Repl multiversion combinations.
 - <<: *gen_task_template
-  name: retryable_writes_downgrade_last_lts_gen
-  tags: ["multiversion_passthrough", "multiversion", "no_version_combination"]
+  name: retryable_writes_downgrade_gen
+  tags: ["multiversion_passthrough", "multiversion"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      retryable_writes_downgrade_last_lts: last_lts
   - func: "generate resmoke tasks"
     vars:
-      multiversion_exclude_tags_version: last_lts
       run_no_feature_flag_tests: "true"
 
 - <<: *gen_task_template
   name: sharded_retryable_writes_downgrade_gen
   tags: ["multiversion_passthrough", "multiversion"]
   commands:
+  - func: "initialize multiversion tasks"
+    vars:
+      sharded_retryable_writes_downgrade_last_lts_new_old_old_new: last_lts
+      sharded_retryable_writes_downgrade_last_continuous_new_old_old_new: last_continuous
   - func: "generate resmoke tasks"
     vars:
       run_no_feature_flag_tests: "true"
@@ -6418,7 +6528,6 @@ tasks:
   - func: "run powercycle test"
     timeout_secs: 1800 # 30 minute timeout for no output
 
-
 - name: selinux_rhel8_org
   tags: []
   depends_on:
@@ -6453,6 +6562,8 @@ tasks:
   - func: "run selinux tests"
     vars:
       distro: rhel80-selinux
+      test_list: jstests/selinux/*.js src/mongo/db/modules/enterprise/jstests/selinux/*.js
+
 - name: selinux_rhel9_org
   tags: []
   depends_on:
@@ -7717,6 +7828,22 @@ task_groups:
   - compile_all
   - package
 
+# SERVER-76006
+# This is a compile stream meant for non-cached and/or underpowered systems.
+# It joins most of the compile tasks together under a single host spread out
+# across different tasks.
+- <<: *compile_task_group_template
+  name: small_compile_test_and_package_serial_TG
+  tasks:
+  - compile_dist_test_half
+  - compile_dist_test
+  - archive_dist_test
+  - archive_dist_test_debug
+  - compile_dbtest
+  - run_dbtest
+  - archive_dbtest
+  - package
+
 - <<: *compile_task_group_template
   name: compile_and_test_TG
   tasks:
@@ -7764,6 +7891,25 @@ task_groups:
   - compile_dbtest
   - run_dbtest
   - archive_dbtest
+
+- <<: *compile_task_group_template
+  name: compile_integration_and_test_parallel_stream_TG
+  tasks:
+  - compile_integration_test
+  - integration_tests_standalone
+  - integration_tests_standalone_audit
+  - integration_tests_replset
+  - integration_tests_replset_ssl_auth
+  - integration_tests_sharded
+
+- <<: *compile_task_group_template
+  name: compile_integration_and_test_no_audit_parallel_stream_TG
+  tasks:
+  - compile_integration_test
+  - integration_tests_standalone
+  - integration_tests_replset
+  - integration_tests_replset_ssl_auth
+  - integration_tests_sharded
 
 - name: clang_tidy_TG
   setup_group_can_fail_task: true

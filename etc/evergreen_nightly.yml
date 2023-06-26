@@ -47,6 +47,9 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-xlarge
+  - name: compile_integration_and_test_no_audit_parallel_stream_TG
+    distros:
+    - rhel80-xlarge
   - name: .aggregation !.encrypt
   - name: .auth !.audit !.multiversion
   - name: .batched_deletes
@@ -56,7 +59,6 @@ buildvariants:
   - name: .misc_js
   - name: disk_wiredtiger
   - name: free_monitoring
-  - name: .integration !.audit
   - name: .jscore .common
   - name: jsCore_txns_large_txns_format
   - name: json_schema
@@ -184,9 +186,6 @@ buildvariants:
     idle_timeout_factor: 1.5
     exec_timeout_factor: 1.5
     large_distro_name: rhel80-medium
-    burn_in_tag_buildvariants: enterprise-rhel-80-64-bit-dynamic-required
-    burn_in_tag_compile_distro: rhel80-xlarge
-    burn_in_tag_compile_task_group_name: compile_and_archive_dist_test_TG
     num_scons_link_jobs_available: 0.99
   tasks:
   - name: compile_test_and_package_parallel_core_stream_TG
@@ -201,6 +200,9 @@ buildvariants:
   - name: compile_test_and_package_parallel_dbtest_stream_TG
     distros:
     - rhel80-xlarge
+  - name: compile_integration_and_test_parallel_stream_TG
+    distros:
+    - rhel80-xlarge
   - name: .lint
   - name: lint_fuzzer_sanity_patch
   - name: test_api_version_compatibility
@@ -211,7 +213,6 @@ buildvariants:
   - name: .aggregation
   - name: audit
   - name: .auth
-  - name: burn_in_tags_gen
   - name: buildscripts_test
   - name: resmoke_end2end_tests
   - name: unittest_shell_hang_analyzer_gen
@@ -238,9 +239,6 @@ buildvariants:
   - name: .encrypt
   - name: idl_tests
   - name: initial_sync_fuzzer_gen
-  - name: .integration
-    distros:
-    - rhel80-medium
   - name: jsCore
     distros:
     - rhel80-xlarge
@@ -521,9 +519,6 @@ buildvariants:
     distros:
     - rhel80-medium
   - name: .encrypt
-  - name: .integration
-    distros:
-    - rhel80-medium
   - name: .jscore .common !jsCore
   - name: .jstestfuzz !.flow_control
   - name: .misc_js
@@ -549,6 +544,9 @@ buildvariants:
   - name: .updatefuzzer
   - name: audit
   - name: compile_test_and_package_parallel_core_stream_TG
+    distros:
+    - rhel80-xlarge
+  - name: compile_integration_and_test_parallel_stream_TG
     distros:
     - rhel80-xlarge
   - name: disk_wiredtiger

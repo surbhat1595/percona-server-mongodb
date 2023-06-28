@@ -104,11 +104,13 @@ get_sources(){
         return 0
     fi
     PRODUCT=percona-server-mongodb
-    echo "PRODUCT=${PRODUCT}" > percona-server-mongodb-50.properties
-    echo "PSM_BRANCH=${PSM_BRANCH}" >> percona-server-mongodb-50.properties
-    echo "JEMALLOC_TAG=${JEMALLOC_TAG}" >> percona-server-mongodb-50.properties
-    echo "BUILD_NUMBER=${BUILD_NUMBER}" >> percona-server-mongodb-50.properties
-    echo "BUILD_ID=${BUILD_ID}" >> percona-server-mongodb-50.properties
+    JEMALLOC_TAG=psmdb-3.2.11-3.1
+
+    echo "PRODUCT=${PRODUCT}" > percona-server-mongodb-70.properties
+    echo "PSM_BRANCH=${PSM_BRANCH}" >> percona-server-mongodb-70.properties
+    echo "JEMALLOC_TAG=${JEMALLOC_TAG}" >> percona-server-mongodb-70.properties
+    echo "BUILD_NUMBER=${BUILD_NUMBER}" >> percona-server-mongodb-70.properties
+    echo "BUILD_ID=${BUILD_ID}" >> percona-server-mongodb-70.properties
     git clone "$REPO"
     retval=$?
     if [ $retval != 0 ]
@@ -143,12 +145,12 @@ get_sources(){
     #
 
     PRODUCT_FULL=${PRODUCT}-${PSM_VER}-${PSM_RELEASE}
-    echo "PRODUCT_FULL=${PRODUCT_FULL}" >> ${WORKDIR}/percona-server-mongodb-50.properties
-    echo "VERSION=${PSM_VER}" >> ${WORKDIR}/percona-server-mongodb-50.properties
-    echo "RELEASE=${PSM_RELEASE}" >> ${WORKDIR}/percona-server-mongodb-50.properties
-    echo "MONGO_TOOLS_TAG=${MONGO_TOOLS_TAG}" >> ${WORKDIR}/percona-server-mongodb-50.properties
+    echo "PRODUCT_FULL=${PRODUCT_FULL}" >> ${WORKDIR}/percona-server-mongodb-70.properties
+    echo "VERSION=${PSM_VER}" >> ${WORKDIR}/percona-server-mongodb-70.properties
+    echo "RELEASE=${PSM_RELEASE}" >> ${WORKDIR}/percona-server-mongodb-70.properties
+    echo "MONGO_TOOLS_TAG=${MONGO_TOOLS_TAG}" >> ${WORKDIR}/percona-server-mongodb-70.properties
 
-    echo "REVISION=${REVISION}" >> ${WORKDIR}/percona-server-mongodb-50.properties
+    echo "REVISION=${REVISION}" >> ${WORKDIR}/percona-server-mongodb-70.properties
     rm -fr debian rpm
     cp -a percona-packaging/manpages .
     cp -a percona-packaging/docs/* .
@@ -165,8 +167,17 @@ get_sources(){
     echo "export PSMDB_TOOLS_COMMIT_HASH=\"$(git rev-parse HEAD)\"" > set_tools_revision.sh
     echo "export PSMDB_TOOLS_REVISION=\"${PSM_VER}-${PSM_RELEASE}\"" >> set_tools_revision.sh
     chmod +x set_tools_revision.sh
+    export GOROOT="/usr/local/go/"
+    export GOPATH=$PWD/../
+    export PATH="/usr/local/go/bin:$PATH:$GOPATH"
+    export GOBINPATH="/usr/local/go/bin"
+    go mod edit \
+	    -replace golang.org/x/text@v0.3.0=golang.org/x/text@v0.3.8 \
+	    -replace golang.org/x/text@v0.3.7=golang.org/x/text@v0.3.8
+    go mod tidy
+    go mod vendor
     cd ${WORKDIR}
-    source percona-server-mongodb-50.properties
+    source percona-server-mongodb-70.properties
     #
 
     mv percona-server-mongodb ${PRODUCT}-${PSM_VER}-${PSM_RELEASE}
@@ -175,14 +186,17 @@ get_sources(){
             cd aws-sdk-cpp
                 git reset --hard
                 git clean -xdf
-                git checkout 1.9.379
-                git submodule update --init --recursive
+                git checkout 1.8.187
+                if [[ x"${RHEL}" =~ ^x[7,8,9]$ ]]; then
+                    sed -i 's:v0.4.42:v0.6.10:' third-party/CMakeLists.txt
+                    sed -i 's:"-Werror" ::' cmake/compiler_settings.cmake
+                fi
                 mkdir build
     cd ../../
     tar --owner=0 --group=0 --exclude=.* -czf ${PRODUCT}-${PSM_VER}-${PSM_RELEASE}.tar.gz ${PRODUCT}-${PSM_VER}-${PSM_RELEASE}
-    echo "UPLOAD=UPLOAD/experimental/BUILDS/${PRODUCT}-5.0/${PRODUCT}-${PSM_VER}-${PSM_RELEASE}/${PSM_BRANCH}/${REVISION}/${BUILD_ID}" >> percona-server-mongodb-50.properties
-    mkdir $WORKDIR/source_tarball
-    mkdir $CURDIR/source_tarball
+    echo "UPLOAD=UPLOAD/experimental/BUILDS/${PRODUCT}-7.0/${PRODUCT}-${PSM_VER}-${PSM_RELEASE}/${PSM_BRANCH}/${REVISION}/${BUILD_ID}" >> percona-server-mongodb-70.properties
+    mkdir -p $WORKDIR/source_tarball
+    mkdir -p $CURDIR/source_tarball
     cp ${PRODUCT}-${PSM_VER}-${PSM_RELEASE}.tar.gz $WORKDIR/source_tarball
     cp ${PRODUCT}-${PSM_VER}-${PSM_RELEASE}.tar.gz $CURDIR/source_tarball
     cd $CURDIR
@@ -208,11 +222,16 @@ get_system(){
 }
 
 install_golang() {
-    wget https://golang.org/dl/go1.15.7.linux-amd64.tar.gz -O /tmp/golang1.15.tar.gz
-    tar --transform=s,go,go1.15, -zxf /tmp/golang1.15.tar.gz
-    rm -rf /usr/local/go1.15 /usr/local/go1.11  /usr/local/go1.8 /usr/local/go1.9 /usr/local/go1.9.2 /usr/local/go
-    mv go1.15 /usr/local/
-    ln -s /usr/local/go1.15 /usr/local/go
+    if [ x"$ARCH" = "xx86_64" ]; then
+      GO_ARCH="amd64"
+    elif [ x"$ARCH" = "xaarch64" ]; then
+      GO_ARCH="arm64"
+    fi
+    wget https://golang.org/dl/go1.19.1.linux-${GO_ARCH}.tar.gz -O /tmp/golang1.19.tar.gz
+    tar --transform=s,go,go1.19, -zxf /tmp/golang1.19.tar.gz
+    rm -rf /usr/local/go1.19 /usr/local/go1.11  /usr/local/go1.8 /usr/local/go1.9 /usr/local/go1.9.2 /usr/local/go
+    mv go1.19 /usr/local/
+    ln -s /usr/local/go1.19 /usr/local/go
 }
 
 install_gcc_8_centos(){
@@ -226,35 +245,20 @@ install_gcc_8_centos(){
 }
 
 install_gcc_8_deb(){
-    if [ x"${DEBIAN}" = xxenial ]; then
-        wget https://jenkins.percona.com/downloads/gcc8/gcc-8.3.0_Ubuntu-xenial-x64.tar.gz -O /tmp/gcc-8.3.0_Ubuntu-xenial-x64.tar.gz
-        CUR_DIR=$PWD
-        cd /tmp
-        tar -zxf gcc-8.3.0_Ubuntu-xenial-x64.tar.gz
-        rm -rf /usr/local/gcc-8.3.0
-        mv gcc-8.3.0 /usr/local/
-        cd $CUR_DIR
-    fi
-    if [ x"${DEBIAN}" = xfocal -o x"${DEBIAN}" = xbionic -o x"${DEBIAN}" = xdisco -o x"${DEBIAN}" = xbuster ]; then
+    if [ x"${DEBIAN}" = xfocal -o x"${DEBIAN}" = xbionic -o x"${DEBIAN}" = xbuster ]; then
         apt-get -y install gcc-8 g++-8
     fi
-    if [ x"${DEBIAN}" = xbullseye ]; then
+    if [ x"${DEBIAN}" = xbullseye -o x"${DEBIAN}" = xjammy ]; then
         apt-get -y install gcc-10 g++-10
-    fi
-    if [ x"${DEBIAN}" = xstretch ]; then
-        wget https://jenkins.percona.com/downloads/gcc8/gcc-8.3.0_Debian-stretch-x64.tar.gz -O /tmp/gcc-8.3.0_Debian-stretch-x64.tar.gz
-        tar -zxf /tmp/gcc-8.3.0_Debian-stretch-x64.tar.gz
-        rm -rf /usr/local/gcc-8.3.0
-        mv gcc-8.3.0 /usr/local/
     fi
 }
 
 set_compiler(){
     if [ "x$OS" = "xdeb" ]; then
-        if [ x"${DEBIAN}" = xfocal -o x"${DEBIAN}" = xbionic -o x"${DEBIAN}" = xdisco -o x"${DEBIAN}" = xbuster ]; then
+        if [ x"${DEBIAN}" = xfocal -o x"${DEBIAN}" = xbionic -o x"${DEBIAN}" = xbuster ]; then
             export CC=/usr/bin/gcc-8
             export CXX=/usr/bin/g++-8
-	elif [ x"${DEBIAN}" = xbullseye ]; then
+        elif [ x"${DEBIAN}" = xbullseye -o x"${DEBIAN}" = xjammy ]; then
             export CC=/usr/bin/gcc-10
             export CXX=/usr/bin/g++-10
         else
@@ -262,26 +266,26 @@ set_compiler(){
             export CXX=/usr/local/gcc-8.3.0/bin/g++-8.3
         fi
     else
-        if [ "x${RHEL}" == "x8" ]; then
+        if [ "x${RHEL}" == "x7" ]; then
+            export CC=/opt/rh/devtoolset-9/root/usr/bin/gcc
+            export CXX=/opt/rh/devtoolset-9/root/usr/bin/g++
+        elif [ "x${RHEL}" == "x8" ]; then
+            export CC=/opt/rh/gcc-toolset-9/root/usr/bin/gcc
+            export CXX=/opt/rh/gcc-toolset-9/root/usr/bin/g++
+        else
             export CC=/usr/bin/gcc
             export CXX=/usr/bin/g++
-        else
-            export CC=/opt/rh/devtoolset-8/root/usr/bin/gcc
-            export CXX=/opt/rh/devtoolset-8/root/usr/bin/g++
         fi
     fi
 }
 
 fix_rules(){
-    if [ x"${DEBIAN}" = xfocal -o x"${DEBIAN}" = xbionic -o x"${DEBIAN}" = xdisco -o x"${DEBIAN}" = xbuster ]; then
+    if [ x"${DEBIAN}" = xfocal -o x"${DEBIAN}" = xbionic -o x"${DEBIAN}" = xbuster ]; then
         sed -i 's|CC = gcc-5|CC = /usr/bin/gcc-8|' debian/rules
         sed -i 's|CXX = g++-5|CXX = /usr/bin/g++-8|' debian/rules
-    elif [ x"${DEBIAN}" = xbullseye ]; then
+    elif [ x"${DEBIAN}" = xbullseye -o x"${DEBIAN}" = xjammy ]; then
         sed -i 's|CC = gcc-5|CC = /usr/bin/gcc-10|' debian/rules
         sed -i 's|CXX = g++-5|CXX = /usr/bin/g++-10|' debian/rules
-    else
-        sed -i 's|CC = gcc-5|CC = /usr/local/gcc-8.3.0/bin/gcc-8.3|' debian/rules
-        sed -i 's|CXX = g++-5|CXX = /usr/local/gcc-8.3.0/bin/g++-8.3|' debian/rules
     fi
     sed -i 's:release:release --disable-warnings-as-errors :g' debian/rules
 }
@@ -292,24 +296,26 @@ aws_sdk_build(){
         cd aws-sdk-cpp
             git reset --hard
             git clean -xdf
-            git checkout 1.9.379
-            git submodule update --init --recursive
+            git checkout 1.8.187
+            if [[ x"${RHEL}" =~ ^x[7,8,9]$ ]]; then
+                sed -i 's:v0.4.42:v0.6.10:' third-party/CMakeLists.txt
+                sed -i 's:"-Werror" ::' cmake/compiler_settings.cmake
+            fi
             mkdir build
             cd build
             CMAKE_CMD="cmake"
-            if [ -f /etc/redhat-release ]; then
-                RHEL=$(rpm --eval %rhel)
-                if [ x"$RHEL" = x6 ]; then
-                    CMAKE_CMD="cmake3"
-                fi
-            fi
             set_compiler
-            if [ -z "${CC}" -a -z "${CXX}" ]; then
-                ${CMAKE_CMD} .. -DCMAKE_BUILD_TYPE=Release -DBUILD_ONLY="s3;transfer" -DBUILD_SHARED_LIBS=OFF -DMINIMIZE_SIZE=ON || exit $?
-            else
-                ${CMAKE_CMD} CC=${CC} CXX=${CXX} .. -DCMAKE_BUILD_TYPE=Release -DBUILD_ONLY="s3;transfer" -DBUILD_SHARED_LIBS=OFF -DMINIMIZE_SIZE=ON || exit $?
+            CMAKE_CXX_FLAGS=""
+            if [ x"${DEBIAN}" = xjammy ]; then
+                CMAKE_CXX_FLAGS=" -Wno-error=maybe-uninitialized -Wno-error=deprecated-declarations -Wno-error=uninitialized "
+                CMAKE_C_FLAGS=" -Wno-error=maybe-uninitialized -Wno-error=maybe-uninitialized -Wno-error=uninitialized "
             fi
-            make -j4 || exit $?
+            if [ -z "${CC}" -a -z "${CXX}" ]; then
+                ${CMAKE_CMD} .. -DCMAKE_C_FLAGS="${CMAKE_C_FLAGS}" -DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS}" -DCMAKE_BUILD_TYPE=Release -DBUILD_ONLY="s3;transfer" -DBUILD_SHARED_LIBS=OFF -DMINIMIZE_SIZE=ON || exit $?
+            else
+                ${CMAKE_CMD} CC=${CC} CXX=${CXX} .. -DCMAKE_C_FLAGS="${CMAKE_C_FLAGS}" -DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS}" -DCMAKE_BUILD_TYPE=Release -DBUILD_ONLY="s3;transfer" -DBUILD_SHARED_LIBS=OFF -DMINIMIZE_SIZE=ON || exit $?
+            fi
+            make -j${NCPU} || exit $?
             make install
     cd ${WORKDIR}
 }
@@ -327,69 +333,82 @@ install_deps() {
     fi
     CURPLACE=$(pwd)
     if [ "x$OS" = "xrpm" ]; then
+      RHEL=$(rpm --eval %rhel)
       yum -y update
       yum -y install wget
-      add_percona_yum_repo
-      wget http://jenkins.percona.com/yum-repo/percona-dev.repo
-      mv -f percona-dev.repo /etc/yum.repos.d/
-      yum install -y https://repo.percona.com/yum/percona-release-latest.noarch.rpm
-      percona-release enable tools testing
-      yum clean all
-      yum install -y patchelf
+      if [ x"$ARCH" = "xx86_64" ]; then
+        if [ "$RHEL" -lt 9 ]; then
+          add_percona_yum_repo
+        fi
+        yum install -y https://repo.percona.com/yum/percona-release-latest.noarch.rpm
+        percona-release enable tools testing
+        yum clean all
+        yum install -y patchelf
+      fi
       RHEL=$(rpm --eval %rhel)
-      if [ x"$RHEL" = x6 ]; then
-        yum -y install epel-release
-        yum -y install rpmbuild rpm-build libpcap-devel gcc make cmake gcc-c++ openssl-devel git
-        yum -y install cyrus-sasl-devel snappy-devel zlib-devel bzip2-devel libpcap-devel
-        yum -y install scons make rpm-build rpmbuild percona-devtoolset-gcc percona-devtoolset-binutils 
-        yum -y install percona-devtoolset-gcc-c++ percona-devtoolset-libstdc++-devel percona-devtoolset-valgrind-devel
-        yum -y install python27 python27-devel rpmlint libcurl-devel e2fsprogs-devel expat-devel lz4-devel git cmake3
-        yum -y install openldap-devel krb5-devel xz-devel
-        wget https://bootstrap.pypa.io/get-pip.py
-        python2.7 get-pip.py
-        rm -rf /usr/bin/python2
-        ln -s /usr/bin/python2.7 /usr/bin/python2
-      elif [ x"$RHEL" = x7 ]; then
+      if [ x"$RHEL" = x7 ]; then
         yum -y install epel-release
         yum -y install rpmbuild rpm-build libpcap-devel gcc make cmake gcc-c++ openssl-devel
-        yum -y install cyrus-sasl-devel snappy-devel zlib-devel bzip2-devel scons rpmlint
+        yum -y install cyrus-sasl-devel cyrus-sasl-plain snappy-devel zlib-devel bzip2-devel scons rpmlint
         yum -y install rpm-build git libopcodes libcurl-devel rpmlint e2fsprogs-devel expat-devel lz4-devel which
         yum -y install openldap-devel krb5-devel xz-devel
 
         yum -y install centos-release-scl
         yum-config-manager --enable centos-sclo-rh-testing
         yum -y install rh-python38-python rh-python38-python-devel rh-python38-python-pip
+        yum -y install devtoolset-9
+        yum -y install devtoolset-11-elfutils devtoolset-11-dwz
         source /opt/rh/rh-python38/enable
 
         pip install --upgrade pip
         pip install --user setuptools --upgrade
         pip3.8 install --user typing pyyaml regex Cheetah3
         pip2.7 install --user typing pyyaml regex Cheetah Cheetah3
-      else
-        yum -y install bzip2-devel libpcap-devel snappy-devel gcc gcc-c++ rpm-build rpmlint
+      elif [ x"$RHEL" = x8 ]; then
+ yum-config-manager --enable ol8_codeready_builder
+        yum -y install epel-release
+        yum -y install bzip2-devel libpcap-devel snappy-devel rpm-build rpmlint
         yum -y install cmake cyrus-sasl-devel make openssl-devel zlib-devel libcurl-devel git
-        yum -y install python2-scons python2-pip which
+        yum -y install python3-scons python2-pip which
         yum -y install redhat-rpm-config python2-devel e2fsprogs-devel expat-devel lz4-devel
         yum -y install openldap-devel krb5-devel xz-devel
+        yum -y install gcc-toolset-9 gcc-c++
+        yum -y install gcc-toolset-11-dwz gcc-toolset-11-elfutils
         yum -y install python38 python38-devel python38-pip
-      fi
-      if [ "x${RHEL}" == "x8" ]; then
+ ln -sf /usr/bin/scons-3 /usr/bin/scons
         /usr/bin/pip3.8 install --user typing pyyaml regex Cheetah3
-        /usr/bin/pip2.7 install --user typing pyyaml regex Cheetah
+      elif [ x"$RHEL" = x9 ]; then
+        dnf config-manager --enable ol9_codeready_builder
+
+        yum -y install oracle-epel-release-el9
+        yum -y install bzip2-devel libpcap-devel snappy-devel gcc gcc-c++ rpm-build rpmlint
+        yum -y install cmake cyrus-sasl-devel make openssl-devel zlib-devel libcurl-devel git
+        yum -y install python3 python3-scons python3-pip python3-devel
+        yum -y install redhat-rpm-config which e2fsprogs-devel expat-devel lz4-devel
+        yum -y install openldap-devel krb5-devel xz-devel
+        /usr/bin/pip install --user typing pyyaml regex Cheetah3
       fi
-      wget https://curl.se/download/curl-7.66.0.tar.gz
-      tar -xvzf curl-7.66.0.tar.gz
-      cd curl-7.66.0
-        ./configure
-        make
+      wget https://curl.se/download/curl-7.77.0.tar.gz -O curl-7.77.0.tar.gz
+      tar -xvzf curl-7.77.0.tar.gz
+      cd curl-7.77.0
+        ./configure --with-openssl
+        make -j${NCPU}
         make install
       cd ../
 #
       install_golang
-      install_gcc_8_centos
-      if [ -f /opt/rh/devtoolset-8/enable ]; then
-        source /opt/rh/devtoolset-8/enable
-        source /opt/rh/rh-python38/enable
+      if [ x"$RHEL" = x7 ]; then
+        install_gcc_8_centos
+        if [ -f /opt/rh/devtoolset-9/enable ]; then
+          source /opt/rh/devtoolset-9/enable
+          source /opt/rh/rh-python38/enable
+          source /opt/rh/devtoolset-11/enable
+        fi
+      elif [ x"$RHEL" = x8 ]; then
+        if [ -f /opt/rh/gcc-toolset-9/enable ]; then
+          source /opt/rh/gcc-toolset-9/enable
+          source /opt/rh/gcc-toolset-11/enable
+        fi
       fi
       pip install --upgrade pip
 
@@ -399,23 +418,23 @@ install_deps() {
       export DEBIAN=$(lsb_release -sc)
       export ARCH=$(echo $(uname -m) | sed -e 's:i686:i386:g')
       wget https://repo.percona.com/apt/pool/testing/p/percona-release/percona-release_1.0-27.generic_all.deb && dpkg -i percona-release_1.0-27.generic_all.deb
-      if [ x"${DEBIAN}" = "xxenial" -o x"${DEBIAN}" = "xbionic" -o x"${DEBIAN}" = "xfocal" ]; then
+      if [ x"${DEBIAN}" = "xbionic" -o x"${DEBIAN}" = "xfocal" ]; then
         add-apt-repository -y ppa:deadsnakes/ppa
-      elif [ x"${DEBIAN}" = "xstretch" -o x"${DEBIAN}" = "xbuster" ]; then
+      elif [ x"${DEBIAN}" = "xbuster" ]; then
         wget https://people.debian.org/~paravoid/python-all/unofficial-python-all.asc
         mv unofficial-python-all.asc /etc/apt/trusted.gpg.d/
         echo "deb http://people.debian.org/~paravoid/python-all ${DEBIAN} main" | tee /etc/apt/sources.list.d/python-all.list
       fi
       percona-release enable tools testing
       apt-get update
-      if [ x"${DEBIAN}" = "xbullseye" ]; then
+      if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xjammy" ]; then
         INSTALL_LIST="python3 python3-dev python3-pip"
       else
         INSTALL_LIST="python3.7 python3.7-dev dh-systemd"
       fi
       INSTALL_LIST="${INSTALL_LIST} git valgrind scons liblz4-dev devscripts debhelper debconf libpcap-dev libbz2-dev libsnappy-dev pkg-config zlib1g-dev libzlcore-dev libsasl2-dev gcc g++ cmake curl"
-      INSTALL_LIST="${INSTALL_LIST} libssl-dev libcurl4-openssl-dev libldap2-dev libkrb5-dev liblzma-dev patchelf"
-      if [ x"${DEBIAN}" != "xstretch" -a x"${DEBIAN}" != "xbullseye" ]; then
+      INSTALL_LIST="${INSTALL_LIST} libssl-dev libcurl4-openssl-dev libldap2-dev libkrb5-dev liblzma-dev patchelf libexpat1-dev"
+      if [ x"${DEBIAN}" != "xbullseye" -a x"${DEBIAN}" != "xjammy" ]; then
         INSTALL_LIST="${INSTALL_LIST} python3.7-distutils"
       fi
       until apt-get -y install dirmngr; do
@@ -429,9 +448,11 @@ install_deps() {
       apt-get -y install libext2fs-dev || apt-get -y install e2fslibs-dev
       install_golang
       install_gcc_8_deb
-      wget https://bootstrap.pypa.io/get-pip.py
+      wget https://bootstrap.pypa.io/get-pip.py -O get-pip.py
       if [ x"${DEBIAN}" = "xbullseye" ]; then
         update-alternatives --install /usr/bin/python python /usr/bin/python3.9 1
+      elif [ x"${DEBIAN}" = "xjammy" ]; then
+        update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
       else
         update-alternatives --install /usr/bin/python python /usr/bin/python3.7 1
         ln -sf /usr/bin/python3.7 /usr/bin/python3
@@ -439,22 +460,6 @@ install_deps() {
       python get-pip.py
       easy_install pip
       pip install setuptools
-    fi
-    if [ x"${DEBIAN}" = "xstretch" ]; then
-      LIBCURL_DEPS="libidn2-0-dev libldap2-dev libnghttp2-dev libnss3-dev libpsl-dev librtmp-dev libssh2-1-dev libssl1.0-dev"
-      until DEBIAN_FRONTEND=noninteractive apt-get -y install ${LIBCURL_DEPS}; do
-        sleep 1
-        echo "waiting"
-      done
-      wget http://curl.haxx.se/download/curl-7.66.0.tar.gz
-      tar -xvzf curl-7.66.0.tar.gz
-        cd curl-7.66.0
-        ./configure --enable-static --disable-shared --disable-dependency-tracking --disable-symbol-hiding --enable-versioned-symbols --enable-threaded-resolver --with-lber-lib=lber --with-gssapi=/usr --with-libssh2 --with-nghttp2 --with-zsh-functions-dir=/usr/share/zsh/vendor-completions --with-ca-path=/etc/ssl/certs --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt --with-ssl
-        make
-        make install
-      cd ../
-      CURL_LINKFLAGS=$(pkg-config libcurl --static --libs)
-      export LDFLAGS="${LDFLAGS} ${CURL_LINKFLAGS}"
     fi
     aws_sdk_build
     return;
@@ -535,9 +540,17 @@ build_srpm(){
     -e "s:@@SRC_DIR@@:$SRC_DIR:g" \
     ${SPEC_TMPL} > rpmbuild/SPECS/$(basename ${SPEC_TMPL%.template})
     mv -fv ${TARFILE} ${WORKDIR}/rpmbuild/SOURCES
-    if [ -f /opt/rh/devtoolset-8/enable ]; then
-        source /opt/rh/devtoolset-8/enable
+    if [ x"$RHEL" = x7 ]; then
+      if [ -f /opt/rh/devtoolset-9/enable ]; then
+        source /opt/rh/devtoolset-9/enable
         source /opt/rh/rh-python38/enable
+        source /opt/rh/devtoolset-11/enable
+      fi
+    elif [ x"$RHEL" = x8 ]; then
+      if [ -f /opt/rh/gcc-toolset-9/enable ]; then
+        source /opt/rh/gcc-toolset-9/enable
+        source /opt/rh/gcc-toolset-11/enable
+      fi
     fi
     rpmbuild -bs --define "_topdir ${WORKDIR}/rpmbuild" --define "dist .generic" rpmbuild/SPECS/$(basename ${SPEC_TMPL%.template})
     mkdir -p ${WORKDIR}/srpm
@@ -582,13 +595,25 @@ build_rpm(){
     rpm2cpio ${SRC_RPM} | cpio -id
     TARF=$(find . -name 'percona-server-mongodb*.tar.gz' | sort | tail -n1)
     tar vxzf ${TARF} --wildcards '*/etc' --strip=1
-    if [ -f /opt/rh/devtoolset-8/enable ]; then
-        source /opt/rh/devtoolset-8/enable
+    if [ x"$RHEL" = x7 ]; then
+      if [ -f /opt/rh/devtoolset-9/enable ]; then
+        source /opt/rh/devtoolset-9/enable
         source /opt/rh/rh-python38/enable
+        source /opt/rh/devtoolset-11/enable
+      fi
+    elif [ x"$RHEL" = x8 ]; then
+      if [ -f /opt/rh/gcc-toolset-9/enable ]; then
+        source /opt/rh/gcc-toolset-9/enable
+        source /opt/rh/gcc-toolset-11/enable
+      fi
     fi
     RHEL=$(rpm --eval %rhel)
     ARCH=$(echo $(uname -m) | sed -e 's:i686:i386:g')
-    if [ "x${RHEL}" == "x6" ]; then
+    if [ "x${RHEL}" == "x9" ]; then
+        pip install --upgrade pip
+        pip install --user -r etc/pip/dev-requirements.txt
+        pip install --user -r etc/pip/evgtest-requirements.txt
+    elif [ "x${RHEL}" == "x9" ]; then
         pip install --upgrade pip
         pip install --user -r etc/pip/dev-requirements.txt
         pip install --user -r etc/pip/evgtest-requirements.txt
@@ -599,22 +624,21 @@ build_rpm(){
     fi
     #
     cd $WORKDIR
-    if [ -f /opt/rh/devtoolset-8/enable ]; then
-        source /opt/rh/devtoolset-8/enable
-        source /opt/rh/rh-python38/enable
-    fi
 
     echo "CC and CXX should be modified once correct compiller would be installed on Centos"
-    if [ "x${RHEL}" == "x8" ]; then
+    if [ "x${RHEL}" == "x7" ]; then
+        export CC=/opt/rh/devtoolset-9/root/usr/bin/gcc
+        export CXX=/opt/rh/devtoolset-9/root/usr/bin/g++
+    elif [ "x${RHEL}" == "x8" ]; then
+        export CC=/opt/rh/gcc-toolset-9/root/usr/bin/gcc
+        export CXX=/opt/rh/gcc-toolset-9/root/usr/bin/g++
+    else
         export CC=/usr/bin/gcc
         export CXX=/usr/bin/g++
-    else
-        export CC=/opt/rh/devtoolset-8/root/usr/bin/gcc
-        export CXX=/opt/rh/devtoolset-8/root/usr/bin/g++
     fi
     #
-    echo "RHEL=${RHEL}" >> percona-server-mongodb-50.properties
-    echo "ARCH=${ARCH}" >> percona-server-mongodb-50.properties
+    echo "RHEL=${RHEL}" >> percona-server-mongodb-70.properties
+    echo "ARCH=${ARCH}" >> percona-server-mongodb-70.properties
     #
     file /usr/bin/scons
     #
@@ -668,6 +692,10 @@ build_source_deb(){
     sed -i 's:@@LOGDIR@@:mongodb:g' ${BUILDDIR}/debian/mongod.default
     sed -i 's:@@LOGDIR@@:mongodb:g' ${BUILDDIR}/debian/percona-server-mongodb-helper.sh
     #
+    if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xxenial" -o x"${DEBIAN}" = "xjammy" ]; then
+        sed -i 's:dh-systemd,::' ${BUILDDIR}/debian/control
+    fi
+    #
     mv ${BUILDDIR}/debian/mongod.default ${BUILDDIR}/debian/percona-server-mongodb-server.mongod.default
     mv ${BUILDDIR}/debian/mongod.service ${BUILDDIR}/debian/percona-server-mongodb-server.mongod.service
     #
@@ -716,8 +744,8 @@ build_deb(){
     export DEBIAN=$(lsb_release -sc)
     export ARCH=$(echo $(uname -m) | sed -e 's:i686:i386:g')
     #
-    echo "DEBIAN=${DEBIAN}" >> percona-server-mongodb-50.properties
-    echo "ARCH=${ARCH}" >> percona-server-mongodb-50.properties
+    echo "DEBIAN=${DEBIAN}" >> percona-server-mongodb-70.properties
+    echo "ARCH=${ARCH}" >> percona-server-mongodb-70.properties
 
     #
     DSC=$(basename $(find . -name '*.dsc' | sort | tail -n1))
@@ -732,9 +760,8 @@ build_deb(){
     cp -av percona-packaging/debian/rules debian/
     set_compiler
     fix_rules
-    if [ x"${DEBIAN}" = "xbullseye" ]; then
+    if [ x"${DEBIAN}" = "xbullseye" -o x"${DEBIAN}" = "xxenial" -o x"${DEBIAN}" = "xjammy" ]; then
         sed -i 's:dh-systemd,::' debian/control
-        sed -i 's:etc/:/etc/:g' debian/percona-server-mongodb-server.conffiles
     fi
     sed -i 's|VersionStr="$(go run release/release.go get-version)"|VersionStr="$PSMDB_TOOLS_REVISION"|' mongo-tools/set_goenv.sh
     sed -i 's|GitCommit="$(git rev-parse HEAD)"|GitCommit="$PSMDB_TOOLS_COMMIT_HASH"|' mongo-tools/set_goenv.sh
@@ -774,7 +801,7 @@ build_tarball(){
     export PATH=/usr/local/go/bin:$PATH
     #
     #
-    PSM_TARGETS="mongod mongos mongo mongobridge perconadecrypt $SPECIAL_TAR"
+    PSM_TARGETS="mongod mongos mongobridge perconadecrypt $SPECIAL_TAR"
     PSM_REAL_TARGETS=() # transformed targets with 'install-' prefix
     for pp in $PSM_TARGETS
     do
@@ -801,17 +828,28 @@ build_tarball(){
     if [ -f /etc/redhat-release ]; then
     #export OS_RELEASE="centos$(lsb_release -sr | awk -F'.' '{print $1}')"
         RHEL=$(rpm --eval %rhel)
-        if [ -f /opt/rh/devtoolset-8/enable ]; then
-            source /opt/rh/devtoolset-8/enable
-            source /opt/rh/rh-python38/enable
+        if [ x"$RHEL" = x7 ]; then
+            if [ -f /opt/rh/devtoolset-9/enable ]; then
+              source /opt/rh/devtoolset-9/enable
+              source /opt/rh/rh-python38/enable
+              source /opt/rh/devtoolset-11/enable
+            fi
+        elif [ x"$RHEL" = x8 ]; then
+            if [ -f /opt/rh/gcc-toolset-9/enable ]; then
+              source /opt/rh/gcc-toolset-9/enable
+              source /opt/rh/gcc-toolset-11/enable
+            fi
         fi
         echo "CC and CXX should be modified once correct compiller would be installed on Centos"
-        if [ "x${RHEL}" == "x8" ]; then
+        if [ "x${RHEL}" == "x7" ]; then
+            export CC=/opt/rh/devtoolset-9/root/usr/bin/gcc
+            export CXX=/opt/rh/devtoolset-9/root/usr/bin/g++
+        elif [ "x${RHEL}" == "x8" ]; then
+            export CC=/opt/rh/gcc-toolset-9/root/usr/bin/gcc
+            export CXX=/opt/rh/gcc-toolset-9/root/usr/bin/g++
+        else
             export CC=/usr/bin/gcc
             export CXX=/usr/bin/g++
-        else
-            export CC=/opt/rh/devtoolset-8/root/usr/bin/gcc
-            export CXX=/opt/rh/devtoolset-8/root/usr/bin/g++
         fi
     fi
     #
@@ -822,7 +860,6 @@ build_tarball(){
     TOOLSDIR=${PSMDIR}/mongo-tools
     TOOLSDIR_ABS=${WORKDIR}/${TOOLSDIR}
     TOOLS_TAGS="ssl sasl"
-    NJOBS=4
 
     tar xzf $TARFILE
     rm -f $TARFILE
@@ -865,17 +902,24 @@ build_tarball(){
             cd aws-sdk-cpp
             git reset --hard
             git clean -xdf
-            git checkout 1.9.379
-            git submodule update --init --recursive
+            git checkout 1.8.187
+            if [[ x"${RHEL}" =~ ^x[7,8,9]$ ]]; then
+                sed -i 's:v0.4.42:v0.6.10:' third-party/CMakeLists.txt
+                sed -i 's:"-Werror" ::' cmake/compiler_settings.cmake
+            fi
             mkdir build
             cd build
             set_compiler
-            if [ -z "${CC}" -a -z "${CXX}" ]; then
-                cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_ONLY="s3;transfer" -DBUILD_SHARED_LIBS=OFF -DMINIMIZE_SIZE=ON -DCMAKE_INSTALL_PREFIX="${INSTALLDIR_AWS}" || exit $?
-            else
-                cmake CC=${CC} CXX=${CXX} .. -DCMAKE_BUILD_TYPE=Release -DBUILD_ONLY="s3;transfer" -DBUILD_SHARED_LIBS=OFF -DMINIMIZE_SIZE=ON -DCMAKE_INSTALL_PREFIX="${INSTALLDIR_AWS}" || exit $?
+            if [ x"${DEBIAN}" = xjammy ]; then
+                CMAKE_CXX_FLAGS=" -Wno-error=maybe-uninitialized -Wno-error=deprecated-declarations -Wno-error=uninitialized "
+                CMAKE_C_FLAGS=" -Wno-error=maybe-uninitialized -Wno-error=maybe-uninitialized -Wno-error=uninitialized "
             fi
-            make -j4 || exit $?
+            if [ -z "${CC}" -a -z "${CXX}" ]; then
+                cmake .. -DCMAKE_C_FLAGS="${CMAKE_C_FLAGS}" -DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS}" -DCMAKE_BUILD_TYPE=Release -DBUILD_ONLY="s3;transfer" -DBUILD_SHARED_LIBS=OFF -DMINIMIZE_SIZE=ON -DCMAKE_INSTALL_PREFIX="${INSTALLDIR_AWS}" || exit $?
+            else
+                cmake CC=${CC} CXX=${CXX} .. -DCMAKE_C_FLAGS="${CMAKE_C_FLAGS}" -DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS}" -DCMAKE_BUILD_TYPE=Release -DBUILD_ONLY="s3;transfer" -DBUILD_SHARED_LIBS=OFF -DMINIMIZE_SIZE=ON -DCMAKE_INSTALL_PREFIX="${INSTALLDIR_AWS}" || exit $?
+            fi
+            make -j${NCPU} || exit $?
             make install
             mkdir -p ${INSTALLDIR}/include/
             mkdir -p ${INSTALLDIR}/lib/
@@ -891,9 +935,9 @@ build_tarball(){
       export LINKFLAGS="${LINKFLAGS} ${CURL_LINKFLAGS}"
     fi
     if [ ${DEBUG} = 0 ]; then
-        buildscripts/scons.py CC=${CC} CXX=${CXX} --disable-warnings-as-errors --release --ssl --opt=on -j$NJOBS --use-sasl-client --wiredtiger --audit --inmemory --hotbackup CPPPATH="${INSTALLDIR}/include ${AWS_LIBS}/include" LIBPATH="${INSTALLDIR}/lib ${AWS_LIBS}/lib ${AWS_LIBS}/lib64" LINKFLAGS="${LINKFLAGS}" ${PSM_REAL_TARGETS[@]} || exit $?
+        buildscripts/scons.py CC=${CC} CXX=${CXX} --disable-warnings-as-errors --release --ssl --opt=on -j${NCPU} --use-sasl-client --wiredtiger --audit --inmemory --hotbackup CPPPATH="${INSTALLDIR}/include ${AWS_LIBS}/include" LIBPATH="${INSTALLDIR}/lib ${AWS_LIBS}/lib ${AWS_LIBS}/lib64" LINKFLAGS="${LINKFLAGS}" ${PSM_REAL_TARGETS[@]} || exit $?
     else
-        buildscripts/scons.py CC=${CC} CXX=${CXX} --disable-warnings-as-errors --audit --ssl --dbg=on -j$NJOBS --use-sasl-client \
+        buildscripts/scons.py CC=${CC} CXX=${CXX} --disable-warnings-as-errors --audit --ssl --dbg=on -j${NCPU} --use-sasl-client \
         CPPPATH="${INSTALLDIR}/include ${AWS_LIBS}/include" LIBPATH="${INSTALLDIR}/lib ${AWS_LIBS}/lib ${AWS_LIBS}/lib64" LINKFLAGS="${LINKFLAGS}" --wiredtiger --inmemory --hotbackup ${PSM_REAL_TARGETS[@]} || exit $?
     fi
     #
@@ -922,7 +966,7 @@ build_tarball(){
     cd mongo-tools
     . ./set_tools_revision.sh
     sed -i '12d' buildscript/build.go
-    sed -i '167,176d' buildscript/build.go
+    sed -i '168,177d' buildscript/build.go
     sed -i "s:versionStr,:\"$PSMDB_TOOLS_REVISION\",:" buildscript/build.go
     sed -i "s:gitCommit):\"$PSMDB_TOOLS_COMMIT_HASH\"):" buildscript/build.go
     ./make build
@@ -938,7 +982,7 @@ build_tarball(){
     if [ ! -d lib/private ]; then
         mkdir -p lib/private
     fi
-    LIBLIST="libcrypto.so libssl.so libsasl2.so librtmp.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so libssl3.so liblzma.so libidn.so"
+    LIBLIST="libsasl2.so.3 libcrypto.so libssl.so librtmp.so libssl3.so libsmime3.so libnss3.so libnssutil3.so libplds4.so libplc4.so libnspr4.so libssl3.so liblzma.so libidn.so"
     DIRLIST="bin lib/private"
 
     LIBPATH=""
@@ -989,6 +1033,23 @@ build_tarball(){
                 patchelf --set-rpath "${elf_rpath}:${r_path}" ${elf}
             fi
         done
+    }
+
+    function fix_sasl_lib {
+        # Details are in tickets PSMDB-950 PSMDB-1153 PSMDB-1261
+        patchelf --remove-needed libsasl2.so.3 bin/mongod
+        patchelf --remove-needed libsasl2.so.2 bin/mongod
+        patchelf --remove-needed libsasl2.so.3 bin/mongo
+        patchelf --remove-needed libsasl2.so.2 bin/mongo
+        patchelf --remove-needed libsasl2.so.3 bin/mongos
+        patchelf --remove-needed libsasl2.so.2 bin/mongos
+
+        # Details are in tickets PSMDB-1160
+        if [ "x$OS" = "xrpm" ]
+        then
+            patchelf --remove-needed libsasl2.so bin/mongod
+            patchelf --remove-needed libsasl2.so bin/mongo
+        fi
     }
 
     function replace_libs {
@@ -1049,6 +1110,9 @@ build_tarball(){
         for DIR in ${DIRLIST}; do
             replace_libs ${DIR}
         done
+
+        # Use system libsasl2 for some binaries
+        fix_sasl_lib
 
         # Create and replace by sparse file to reduce size
         create_sparse bin
@@ -1111,7 +1175,7 @@ DEB_RELEASE=1
 REVISION=0
 BRANCH="master"
 REPO="https://github.com/percona/percona-server-mongodb.git"
-PSM_VER="5.0.0"
+PSM_VER="7.0.0"
 PSM_RELEASE="1"
 MONGO_TOOLS_TAG="master"
 PRODUCT=percona-server-mongodb
@@ -1123,6 +1187,12 @@ PRODUCT_FULL=${PRODUCT}-${PSM_VER}-${PSM_RELEASE}
 PSM_BRANCH=${BRANCH}
 if [ ${DEBUG} = 1 ]; then
   TARBALL=1
+fi
+if test -e "/proc/cpuinfo"
+then
+    NCPU="$(grep -c ^processor /proc/cpuinfo)"
+else
+    NCPU=4
 fi
 
 check_workdir

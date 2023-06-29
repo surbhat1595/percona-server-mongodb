@@ -1,6 +1,6 @@
 /**
  * Tests to validate the input values accepted by internal query server parameters. The test
- * verfies that the system responds with the expected error code for input values that fall outside
+ * verifies that the system responds with the expected error code for input values that fall outside
  * each parameter's valid bounds, and correctly applies input values which fall within that
  * parameter's valid bounds.
  */
@@ -65,6 +65,9 @@ const expectedParamDefaults = {
     internalQueryColumnScanMinAvgDocSizeBytes: 1024,
     internalQueryColumnScanMinCollectionSizeBytes: -1,
     internalQueryColumnScanMinNumColumnFilters: 3,
+    deprioritizeUnboundedUserCollectionScans: true,
+    deprioritizeUnboundedUserIndexScans: true,
+    internalQueryDocumentSourceWriterBatchExtraReservedBytes: 0,
 };
 
 function assertDefaultParameterValues() {
@@ -282,6 +285,18 @@ assertSetParameterFails("internalQueryColumnScanMinCollectionSizeBytes", -2);
 assertSetParameterSucceeds("internalQueryColumnScanMinNumColumnFilters", 100);
 assertSetParameterSucceeds("internalQueryColumnScanMinNumColumnFilters", 0);
 assertSetParameterFails("internalQueryColumnScanMinNumColumnFilters", -1);
+
+assertSetParameterSucceeds("deprioritizeUnboundedUserCollectionScans", true);
+assertSetParameterSucceeds("deprioritizeUnboundedUserCollectionScans", false);
+assertSetParameterSucceeds("deprioritizeUnboundedUserIndexScans", true);
+assertSetParameterSucceeds("deprioritizeUnboundedUserIndexScans", false);
+
+assertSetParameterSucceeds("internalQueryDocumentSourceWriterBatchExtraReservedBytes", 10);
+assertSetParameterSucceeds("internalQueryDocumentSourceWriterBatchExtraReservedBytes",
+                           4 * 1024 * 1024);
+assertSetParameterFails("internalQueryDocumentSourceWriterBatchExtraReservedBytes", -1);
+assertSetParameterFails("internalQueryDocumentSourceWriterBatchExtraReservedBytes",
+                        9 * 1024 * 1024);
 
 MongoRunner.stopMongod(conn);
 })();

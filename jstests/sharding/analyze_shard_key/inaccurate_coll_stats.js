@@ -12,6 +12,7 @@
 (function() {
 "use strict";
 
+load("jstests/libs/fail_point_util.js");
 load("jstests/libs/uuid_util.js");  // for 'extractUUIDFromObject'
 load("jstests/sharding/analyze_shard_key/libs/analyze_shard_key_util.js");
 
@@ -77,14 +78,14 @@ function runTest(conn, {rst, st}) {
         // this test.
         readWriteDistribution: false
     }));
-    AnalyzeShardKeyUtil.assertKeyCharacteristicsMetrics(resXBefore, {
+    AnalyzeShardKeyUtil.assertKeyCharacteristicsMetrics(resXBefore.keyCharacteristics, {
         numDocs: docs.length,
         isUnique: false,
         numDistinctValues: numDistinctXValues,
         mostCommonValues: mostCommonXValues,
         numMostCommonValues
     });
-    assert.eq(resXBefore.avgDocSizeBytes, Object.bsonsize(docs[0]));
+    assert.eq(resXBefore.keyCharacteristics.avgDocSizeBytes, Object.bsonsize(docs[0]));
 
     const resYBefore = assert.commandWorked(conn.adminCommand({
         analyzeShardKey: ns,
@@ -93,14 +94,14 @@ function runTest(conn, {rst, st}) {
         // this test.
         readWriteDistribution: false
     }));
-    AnalyzeShardKeyUtil.assertKeyCharacteristicsMetrics(resYBefore, {
+    AnalyzeShardKeyUtil.assertKeyCharacteristicsMetrics(resYBefore.keyCharacteristics, {
         numDocs: docs.length,
         isUnique: true,
         numDistinctValues: numDistinctYValues,
         mostCommonValues: mostCommonYValues,
         numMostCommonValues
     });
-    assert.eq(resYBefore.avgDocSizeBytes, Object.bsonsize(docs[0]));
+    assert.eq(resYBefore.keyCharacteristics.avgDocSizeBytes, Object.bsonsize(docs[0]));
 
     assert(rst || st);
     const rstToKill = rst ? rst : st.rs0;
@@ -148,14 +149,14 @@ function runTest(conn, {rst, st}) {
         // this test.
         readWriteDistribution: false
     }));
-    AnalyzeShardKeyUtil.assertKeyCharacteristicsMetrics(resXBefore, {
+    AnalyzeShardKeyUtil.assertKeyCharacteristicsMetrics(resXAfter.keyCharacteristics, {
         numDocs: docs.length,
         isUnique: false,
         numDistinctValues: numDistinctXValues,
         mostCommonValues: mostCommonXValues,
         numMostCommonValues
     });
-    assert.eq(resXAfter.avgDocSizeBytes, Object.bsonsize({}));
+    assert.eq(resXAfter.keyCharacteristics.avgDocSizeBytes, Object.bsonsize({}));
 
     // The cardinality and frequency metrics for {y: 1} should be inaccurate since the metrics
     // calculation for a shard key that is unique depends on fast count (this is optimization that
@@ -171,14 +172,44 @@ function runTest(conn, {rst, st}) {
         // this test.
         readWriteDistribution: false
     }));
-    AnalyzeShardKeyUtil.assertKeyCharacteristicsMetrics(resYAfter, {
+    AnalyzeShardKeyUtil.assertKeyCharacteristicsMetrics(resYAfter.keyCharacteristics, {
         numDocs: numMostCommonValues,
         isUnique: true,
         numDistinctValues: numMostCommonValues,
         mostCommonValues: mostCommonYValues,
         numMostCommonValues
     });
-    assert.eq(resYAfter.avgDocSizeBytes, Object.bsonsize({}));
+    assert.eq(resYAfter.keyCharacteristics.avgDocSizeBytes, Object.bsonsize({}));
+
+    let runAnalyzeShardKeyCmd = (host, ns, key) => {
+        const conn = new Mongo(host);
+        return conn.adminCommand({
+            analyzeShardKey: ns,
+            key: key,
+            // Skip calculating the read and write distribution metrics since there are not needed
+            // by this test.
+            readWriteDistribution: false
+        });
+    };
+
+    for (let shardKey of [{x: 1}, {y: 1}]) {
+        jsTest.log(
+            "Verify that the analyzeShardKey command fails when the collection is actually empty " +
+            tojson({shardKey}));
+        const analyzeShardKeyThread = new Thread(runAnalyzeShardKeyCmd, conn.host, ns, shardKey);
+        const fp =
+            configureFailPoint(st ? st.rs0.nodes[0] : rst.nodes[0],
+                               "analyzeShardKeyPauseBeforeCalculatingKeyCharacteristicsMetrics");
+        analyzeShardKeyThread.start();
+        fp.wait();
+        // Delete all documents in the collection.
+        assert.commandWorked(coll.remove({}));
+        fp.off();
+        assert.commandFailedWithCode(analyzeShardKeyThread.returnData(),
+                                     ErrorCodes.IllegalOperation);
+        // Reinsert the documents.
+        assert.commandWorked(coll.insert(docs));
+    }
 }
 
 {

@@ -94,6 +94,8 @@
 namespace mongo {
 namespace {
 
+MONGO_FAIL_POINT_DEFINE(hangMigrationRecipientBeforeWaitingNoIndexBuildInProgress);
+
 const auto getMigrationDestinationManager =
     ServiceContext::declareDecoration<MigrationDestinationManager>();
 
@@ -335,6 +337,7 @@ MONGO_FAIL_POINT_DEFINE(migrateThreadHangAtStep3);
 MONGO_FAIL_POINT_DEFINE(migrateThreadHangAtStep4);
 MONGO_FAIL_POINT_DEFINE(migrateThreadHangAtStep5);
 MONGO_FAIL_POINT_DEFINE(migrateThreadHangAtStep6);
+MONGO_FAIL_POINT_DEFINE(migrateThreadHangAfterSteadyTransition);
 MONGO_FAIL_POINT_DEFINE(migrateThreadHangAtStep7);
 
 MONGO_FAIL_POINT_DEFINE(failMigrationOnRecipient);
@@ -830,8 +833,8 @@ MigrationDestinationManager::IndexesAndIdIndex MigrationDestinationManager::getC
     // Do not hold any locks while issuing remote calls.
     invariant(!opCtx->lockState()->isLocked());
 
-    auto cmd = nssOrUUID.nss() ? BSON("listIndexes" << nssOrUUID.nss()->coll())
-                               : BSON("listIndexes" << *nssOrUUID.uuid());
+    auto cmd = nssOrUUID.isNamespaceString() ? BSON("listIndexes" << nssOrUUID.nss().coll())
+                                             : BSON("listIndexes" << nssOrUUID.uuid());
     if (cri) {
         cmd = appendShardVersion(cmd, cri->getShardVersion(fromShardId));
     }
@@ -875,9 +878,9 @@ MigrationDestinationManager::getCollectionOptions(OperationContext* opCtx,
 
     BSONObj fromOptions;
 
-    auto cmd = nssOrUUID.nss()
-        ? BSON("listCollections" << 1 << "filter" << BSON("name" << nssOrUUID.nss()->coll()))
-        : BSON("listCollections" << 1 << "filter" << BSON("info.uuid" << *nssOrUUID.uuid()));
+    auto cmd = nssOrUUID.isNamespaceString()
+        ? BSON("listCollections" << 1 << "filter" << BSON("name" << nssOrUUID.nss().coll()))
+        : BSON("listCollections" << 1 << "filter" << BSON("info.uuid" << nssOrUUID.uuid()));
     if (cm) {
         cmd = appendDbVersionIfPresent(cmd, cm->dbVersion());
     }
@@ -943,10 +946,7 @@ void MigrationDestinationManager::_dropLocalIndexesIfNecessary(
         if (auto optMetadata = scopedCsr->getCurrentMetadataIfKnown()) {
             const auto& metadata = *optMetadata;
             if (metadata.isSharded()) {
-                auto chunks = metadata.getChunks();
-                if (chunks.empty()) {
-                    return true;
-                }
+                return !metadata.currentShardHasAnyChunks();
             }
         }
         return false;
@@ -1010,12 +1010,28 @@ void MigrationDestinationManager::cloneCollectionIndexesAndOptions(
                     collection->uuid() == collectionOptionsAndIndexes.uuid);
         };
 
-        // Gets the missing indexes and checks if the collection is empty (auto-healing is
-        // possible).
+        bool isFirstMigration = [&] {
+            AutoGetCollection collection(opCtx, nss, MODE_IS);
+            const auto scopedCsr =
+                CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, nss);
+            if (auto optMetadata = scopedCsr->getCurrentMetadataIfKnown()) {
+                const auto& metadata = *optMetadata;
+                return metadata.isSharded() && !metadata.currentShardHasAnyChunks();
+            }
+            return false;
+        }();
+
+        // Check if there are missing indexes on the recipient shard from the donor.
+        // If it is the first migration, do not consider in-progress index builds. Otherwise,
+        // consider in-progress index builds as ready. Then, if there are missing indexes and the
+        // collection is not empty, fail the migration. On the other hand, if the collection is
+        // empty, wait for index builds to finish if it is the first migration.
+        bool waitForInProgressIndexBuildCompletion = false;
+
         auto checkEmptyOrGetMissingIndexesFromDonor = [&](const CollectionPtr& collection) {
             auto indexCatalog = collection->getIndexCatalog();
             auto indexSpecs = indexCatalog->removeExistingIndexesNoChecks(
-                opCtx, collection, collectionOptionsAndIndexes.indexSpecs);
+                opCtx, collection, collectionOptionsAndIndexes.indexSpecs, !isFirstMigration);
             if (!indexSpecs.empty()) {
                 // Only allow indexes to be copied if the collection does not have any documents.
                 uassert(ErrorCodes::CannotCreateCollection,
@@ -1024,6 +1040,10 @@ void MigrationDestinationManager::cloneCollectionIndexesAndOptions(
                             << "collection is not empty. Non-trivial "
                             << "index creation should be scheduled manually",
                         collection->isEmpty(opCtx));
+
+                // If it is the first migration, mark waitForInProgressIndexBuildCompletion as true
+                // to wait for index builds to be finished after releasing the locks.
+                waitForInProgressIndexBuildCompletion = isFirstMigration;
             }
             return indexSpecs;
         };
@@ -1039,6 +1059,19 @@ void MigrationDestinationManager::cloneCollectionIndexesAndOptions(
                     return;
                 }
             }
+        }
+
+        // Before taking the exclusive database lock for cloning the remaining indexes, wait for
+        // index builds to finish if it is the first migration.
+        if (waitForInProgressIndexBuildCompletion) {
+            if (MONGO_unlikely(
+                    hangMigrationRecipientBeforeWaitingNoIndexBuildInProgress.shouldFail())) {
+                LOGV2(7677900, "Hanging before waiting for in-progress index builds to finish");
+                hangMigrationRecipientBeforeWaitingNoIndexBuildInProgress.pauseWhileSet();
+            }
+
+            IndexBuildsCoordinator::get(opCtx)->awaitNoIndexBuildInProgressForCollection(
+                opCtx, collectionOptionsAndIndexes.uuid);
         }
 
         // Take the exclusive database lock if the collection does not exist or indexes are missing
@@ -1519,6 +1552,7 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
         {
             // 6. Wait for commit
             _setState(kSteady);
+            migrateThreadHangAfterSteadyTransition.pauseWhileSet();
 
             bool transferAfterCommit = false;
             while (getState() == kSteady || getState() == kCommitStart) {
@@ -1546,7 +1580,8 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
 
                 auto mods = res.response;
 
-                if (mods["size"].number() > 0 && _applyMigrateOp(opCtx, mods)) {
+                if (mods["size"].number() > 0) {
+                    (void)_applyMigrateOp(opCtx, mods);
                     lastOpApplied = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
                     continue;
                 }

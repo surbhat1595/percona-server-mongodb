@@ -118,7 +118,9 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(
         findCommand.getAllowDiskUse().value_or(allowDiskUseByDefault.load()),
         false,  // bypassDocumentValidation
         false,  // isMapReduceCommand
-        findCommand.getNamespaceOrUUID().nss().value_or(NamespaceString()),
+        findCommand.getNamespaceOrUUID().isNamespaceString()
+            ? findCommand.getNamespaceOrUUID().nss()
+            : NamespaceString{},
         findCommand.getLegacyRuntimeConstants(),
         std::move(collator),
         nullptr,  // mongoProcessInterface
@@ -296,6 +298,11 @@ public:
             // The collection may be NULL. If so, getExecutor() should handle it by returning an
             // execution tree with an EOFStage.
             const auto& collection = ctx->getCollection();
+            if (!ctx->getView()) {
+                const bool isClusteredCollection = collection && collection->isClustered();
+                uassertStatusOK(query_request_helper::validateResumeAfter(
+                    findCommand->getResumeAfter(), isClusteredCollection));
+            }
             auto expCtx = makeExpressionContext(opCtx, *findCommand, collection, verbosity);
             const bool isExplain = true;
             auto cq = uassertStatusOK(
@@ -396,7 +403,7 @@ public:
                     !(repl::ReadConcernArgs::get(opCtx).isSpeculativeMajority() &&
                       !findCommand->getAllowSpeculativeMajorityRead()));
 
-            const bool isFindByUUID = findCommand->getNamespaceOrUUID().uuid().has_value();
+            const bool isFindByUUID = findCommand->getNamespaceOrUUID().isUUID();
             uassert(ErrorCodes::InvalidOptions,
                     "When using the find command by UUID, the collectionUUID parameter cannot also "
                     "be specified",
@@ -499,10 +506,11 @@ public:
             const auto& collection = ctx->getCollection();
 
             uassert(ErrorCodes::NamespaceNotFound,
-                    str::stream() << "UUID " << *findCommand->getNamespaceOrUUID().uuid()
+                    str::stream() << "UUID " << findCommand->getNamespaceOrUUID().uuid()
                                   << " specified in query request not found",
                     collection || !isFindByUUID);
 
+            bool isClusteredCollection = false;
             if (collection) {
                 if (isFindByUUID) {
                     // Replace the UUID in the find command with the fully qualified namespace of
@@ -514,7 +522,7 @@ public:
                 const bool isTailable = findCommand->getTailable();
                 const bool isMajorityReadConcern = repl::ReadConcernArgs::get(opCtx).getLevel() ==
                     repl::ReadConcernLevel::kMajorityReadConcern;
-                const bool isClusteredCollection = collection->isClustered();
+                isClusteredCollection = collection->isClustered();
                 const bool isCapped = collection->isCapped();
                 const bool isReplicated = collection->ns().isReplicated();
                 if (isClusteredCollection && isCapped && isReplicated && isTailable) {
@@ -523,6 +531,14 @@ public:
                             "read concern",
                             isMajorityReadConcern);
                 }
+            }
+
+            // Views use the aggregation system and the $_resumeAfter parameter is not allowed. A
+            // more descriptive error will be raised later, but we want to validate this parameter
+            // before beginning the operation.
+            if (!ctx->getView()) {
+                uassertStatusOK(query_request_helper::validateResumeAfter(
+                    findCommand->getResumeAfter(), isClusteredCollection));
             }
 
             // Fill out curop information.
@@ -722,9 +738,9 @@ public:
                 if (stashResourcesForGetMore) {
                     // Collect storage stats now before we stash the recovery unit. These stats are
                     // normally collected in the service entry point layer just before a command
-                    // ends, but they must be collected before stashing the
-                    // RecoveryUnit. Otherwise, the service entry point layer will collect the
-                    // stats from the new RecoveryUnit, which wasn't actually used for the query.
+                    // ends, but they must be collected before stashing the RecoveryUnit. Otherwise,
+                    // the service entry point layer will collect the stats from the new
+                    // RecoveryUnit, which wasn't actually used for the query.
                     //
                     // The stats collected here will not get overwritten, as the service entry
                     // point layer will only set these stats when they're not empty.
@@ -789,11 +805,11 @@ public:
 
             // Rewrite any FLE find payloads that exist in the query if this is a FLE 2 query.
             if (shouldDoFLERewrite(findCommand)) {
-                invariant(findCommand->getNamespaceOrUUID().nss());
+                invariant(findCommand->getNamespaceOrUUID().isNamespaceString());
 
                 if (!findCommand->getEncryptionInformation()->getCrudProcessed().value_or(false)) {
                     processFLEFindD(
-                        opCtx, findCommand->getNamespaceOrUUID().nss().value(), findCommand.get());
+                        opCtx, findCommand->getNamespaceOrUUID().nss(), findCommand.get());
                 }
                 // Set the telemetryStoreKey to none so telemetry isn't collected when we've done a
                 // FLE rewrite.

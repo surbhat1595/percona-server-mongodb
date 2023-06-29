@@ -629,7 +629,7 @@ Status renameCollectionAcrossDatabases(OperationContext* opCtx,
             WriteUnitOfWork wunit(opCtx);
             auto fromMigrate = false;
             try {
-                CollectionWriter tmpCollWriter(opCtx, *tmpCollUUID.uuid());
+                CollectionWriter tmpCollWriter(opCtx, tmpCollUUID.uuid());
                 IndexBuildsCoordinator::get(opCtx)->createIndexesOnEmptyCollection(
                     opCtx, tmpCollWriter, indexesToCopy, fromMigrate);
             } catch (DBException& ex) {
@@ -850,9 +850,13 @@ void validateNamespacesForRenameCollection(OperationContext* opCtx,
             "renaming system.js collection or renaming to system.js is not allowed",
             !source.isSystemDotJavascript() && !target.isSystemDotJavascript());
 
-    uassert(ErrorCodes::IllegalOperation,
-            "Renaming system.buckets collections is not allowed",
-            !source.isTimeseriesBucketsCollection());
+    if (source.isTimeseriesBucketsCollection() &&
+        !AuthorizationSession::get(opCtx->getClient())
+             ->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
+                                                ActionType::setUserWriteBlockMode)) {
+        uasserted(ErrorCodes::IllegalOperation,
+                  "Renaming system.buckets collections is not allowed");
+    }
 }
 
 void validateAndRunRenameCollection(OperationContext* opCtx,

@@ -127,7 +127,8 @@ std::vector<BSONObj> parseAndValidateIndexSpecs(OperationContext* opCtx,
             parsedIndexSpec = index_key_validate::removeUnknownFields(ns, parsedIndexSpec);
         }
 
-        parsedIndexSpec = index_key_validate::parseAndValidateIndexSpecs(opCtx, parsedIndexSpec);
+        parsedIndexSpec = index_key_validate::parseAndValidateIndexSpecs(
+            opCtx, parsedIndexSpec, true /* checkFCV */);
         uassert(ErrorCodes::BadValue,
                 "Can't hide index on system collection",
                 !(ns.isSystem() && !ns.isTimeseriesBucketsCollection()) ||
@@ -317,10 +318,10 @@ bool indexesAlreadyExist(OperationContext* opCtx,
 
 void assertNoMovePrimaryInProgress(OperationContext* opCtx, const NamespaceString& nss) {
     try {
+        Lock::CollectionLock collLock(opCtx, nss, MODE_IX);
+
         const auto scopedDss =
             DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx, nss.dbName());
-
-        Lock::CollectionLock collLock(opCtx, nss, MODE_IX);
 
         auto scopedCss = CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss);
 

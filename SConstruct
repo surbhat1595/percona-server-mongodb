@@ -239,6 +239,11 @@ add_option('hotbackup',
     nargs=0,
 )
 
+add_option('enable-fipsmode',
+    help='Enable tls.FIPSMode configuration option',
+    nargs=0,
+)
+
 add_option('ocsp-stapling',
     choices=['on', 'off'],
     default='on',
@@ -2159,6 +2164,9 @@ env['LIBDEPS_TAG_EXPANSIONS'].append(link_guard_libdeps_tag_expand)
 
 if has_option('audit'):
     env.Append( CPPDEFINES=[ 'PERCONA_AUDIT_ENABLED' ] )
+
+if has_option('enable-fipsmode'):
+    env.SetConfigHeaderDefine("PERCONA_FIPSMODE_ENABLED")
 
 env.Tool('forceincludes')
 

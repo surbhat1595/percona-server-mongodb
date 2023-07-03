@@ -182,6 +182,8 @@ configs:
     hidden: true
     condition:
       constexpr: '!kFIPSModeEnabled'
+    validator:
+      callback: validateSslFIPSMode
 
   # Certificate Selectors are only available on OSX/Windows with --ssl-provider=native (or auto)
   "net.tls.certificateSelector":

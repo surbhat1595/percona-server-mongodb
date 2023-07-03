@@ -117,10 +117,11 @@ configs:
     deprecated_short_name: sslFIPSMode
     arg_vartype: Switch
     cpp_varname: "sslGlobalParams.sslFIPSMode"
-    requires: tls
     hidden: true
     condition:
       constexpr: '!kFIPSModeEnabled'
+    validator:
+      callback: validateSslFIPSMode
 
   "tls.certificateSelector":
     description: "TLS Certificate in system store"

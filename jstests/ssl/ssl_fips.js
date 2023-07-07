@@ -6,10 +6,10 @@ let md = undefined;
 try {
     md = MongoRunner.runMongod({
         port: port,
-        sslMode: "requireSSL",
-        sslPEMKeyFile: "jstests/libs/server.pem",
-        sslCAFile: "jstests/libs/ca.pem",
-        sslFIPSMode: ""
+        tlsMode: "requireTLS",
+        tlsCertificateKeyFile: "jstests/libs/server.pem",
+        tlsCAFile: "jstests/libs/ca.pem",
+        tlsFIPSMode: ""
     });
 } catch (e) {
     print("mongod failed to start, checking for FIPS support");

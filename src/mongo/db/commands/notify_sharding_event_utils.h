@@ -29,32 +29,22 @@
 
 #pragma once
 
-#include "mongo/base/checked_cast.h"
-#include "mongo/db/repl/base_cloner.h"
-#include "mongo/db/s/move_primary/move_primary_shared_data.h"
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
 
 namespace mongo {
+namespace notify_sharding_event {
 
-class MovePrimaryBaseCloner : public repl::BaseCloner {
-public:
-    MovePrimaryBaseCloner(StringData clonerName,
-                          MovePrimarySharedData* sharedData,
-                          const HostAndPort& source,
-                          DBClientConnection* client,
-                          repl::StorageInterface* storageInterface,
-                          ThreadPool* dbPool);
-    virtual ~MovePrimaryBaseCloner() = default;
+static constexpr char kDatabasesAdded[] = "databasesAdded";
 
-protected:
-    MovePrimarySharedData* getSharedData() const override {
-        return checked_cast<MovePrimarySharedData*>(BaseCloner::getSharedData());
+inline Status validateEventType(const std::string& eventType) {
+    if (eventType != kDatabasesAdded) {
+        return {ErrorCodes::UnsupportedShardingEventNotification,
+                "Unrecognized EventType: " + eventType};
     }
 
-private:
-    /**
-     * Overriden to allow the BaseCloner to use the move primary log component.
-     */
-    virtual logv2::LogComponent getLogComponent() final;
-};
+    return Status::OK();
+}
 
+}  // namespace notify_sharding_event
 }  // namespace mongo

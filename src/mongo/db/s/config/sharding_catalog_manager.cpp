@@ -98,7 +98,7 @@ OpMsg runCommandInLocalTxn(OperationContext* opCtx,
         bob.append("startTransaction", true);
     }
     bob.append("autocommit", false);
-    bob.append(OperationSessionInfo::kTxnNumberFieldName, txnNumber);
+    bob.append(OperationSessionInfoFromClient::kTxnNumberFieldName, txnNumber);
 
     BSONObjBuilder lsidBuilder(bob.subobjStart("lsid"));
     opCtx->getLogicalSessionId()->serialize(&bob);
@@ -167,7 +167,7 @@ BSONObj commitOrAbortTransaction(OperationContext* opCtx,
     BSONObjBuilder bob;
     bob.append(cmdName, true);
     bob.append("autocommit", false);
-    bob.append(OperationSessionInfo::kTxnNumberFieldName, txnNumber);
+    bob.append(OperationSessionInfoFromClient::kTxnNumberFieldName, txnNumber);
     bob.append(WriteConcernOptions::kWriteConcernField, writeConcern.toBSON());
 
     BSONObjBuilder lsidBuilder(bob.subobjStart("lsid"));
@@ -969,7 +969,8 @@ Status ShardingCatalogManager::_notifyClusterOnNewDatabases(
         auto altOpCtx = altOpCtxHolder.get();
 
         // Compose the request and decorate it with the needed write concern and auth parameters.
-        ShardsvrNotifyShardingEventRequest request(EventTypeEnum::kDatabasesAdded, event.toBSON());
+        ShardsvrNotifyShardingEventRequest request(notify_sharding_event::kDatabasesAdded,
+                                                   event.toBSON());
         BSONObjBuilder bob;
         request.serialize(
             BSON(WriteConcernOptions::kWriteConcernField << WriteConcernOptions::Majority), &bob);
@@ -986,17 +987,30 @@ Status ShardingCatalogManager::_notifyClusterOnNewDatabases(
 
         size_t successfulNotifications = 0, incompatibleRecipients = 0, retriableFailures = 0;
         for (const auto& cmdResponse : responses) {
-            if (cmdResponse.swResponse.isOK()) {
+            const auto responseStatus = [&cmdResponse] {
+                if (!cmdResponse.swResponse.isOK()) {
+                    return cmdResponse.swResponse.getStatus();
+                }
+
+                const auto& remoteCmdResponse = cmdResponse.swResponse.getValue().data;
+                if (auto remoteResponseStatus = getStatusFromCommandResult(remoteCmdResponse);
+                    !remoteResponseStatus.isOK()) {
+                    return remoteResponseStatus;
+                }
+
+                return getWriteConcernStatusFromCommandResult(remoteCmdResponse);
+            }();
+
+            if (responseStatus.isOK()) {
                 ++successfulNotifications;
             } else {
                 LOGV2_WARNING(7175401,
                               "Failed to send sharding event notification",
                               "recipient"_attr = cmdResponse.shardId,
-                              "error"_attr = cmdResponse.swResponse.getStatus());
-                if (cmdResponse.swResponse.getStatus().code() == ErrorCodes::CommandNotFound) {
+                              "error"_attr = responseStatus);
+                if (responseStatus == ErrorCodes::CommandNotFound) {
                     ++incompatibleRecipients;
-                } else if (ErrorCodes::isA<ErrorCategory::RetriableError>(
-                               cmdResponse.swResponse.getStatus().code())) {
+                } else if (ErrorCodes::isA<ErrorCategory::RetriableError>(responseStatus.code())) {
                     ++retriableFailures;
                 }
             }

@@ -27,23 +27,36 @@
  *    it in the license file.
  */
 
-#pragma once
-
-#include "mongo/db/s/metrics/field_names/sharding_data_transform_instance_metrics_field_name_provider.h"
-#include "mongo/db/s/metrics/field_names/with_document_copy_approximation_field_name_overrides.h"
-#include "mongo/db/s/metrics/field_names/with_document_copy_count_field_name_overrides.h"
-#include "mongo/db/s/metrics/field_names/with_oplog_application_count_metrics_field_names.h"
+#include "mongo/s/query/cluster_client_cursor_params.h"
 
 namespace mongo {
 
-class MovePrimaryMetricsFieldNameProvider
-    : public WithOplogApplicationCountFieldNames<
-          WithDocumentCopyApproximationFieldNameOverrides<WithDocumentCopyCountFieldNameOverrides<
-              ShardingDataTransformInstanceMetricsFieldNameProvider>>> {
-public:
-    StringData getForCoordinatorState() const override;
-    StringData getForDonorState() const override;
-    StringData getForRecipientState() const override;
-};
+ClusterClientCursorParams::ClusterClientCursorParams(
+    NamespaceString nss,
+    APIParameters apiParameters,
+    boost::optional<ReadPreferenceSetting> readPreference,
+    boost::optional<repl::ReadConcernArgs> readConcern,
+    OperationSessionInfoFromClient osi)
+    : nsString(std::move(nss)),
+      apiParameters(std::move(apiParameters)),
+      readPreference(std::move(readPreference)),
+      readConcern(std::move(readConcern)),
+      osi(std::move(osi)) {}
+
+AsyncResultsMergerParams ClusterClientCursorParams::extractARMParams() {
+    AsyncResultsMergerParams armParams;
+    if (!sortToApplyOnRouter.isEmpty()) {
+        armParams.setSort(sortToApplyOnRouter);
+    }
+    armParams.setCompareWholeSortKey(compareWholeSortKeyOnRouter);
+    armParams.setRemotes(std::move(remotes));
+    armParams.setTailableMode(tailableMode);
+    armParams.setBatchSize(batchSize);
+    armParams.setNss(nsString);
+    armParams.setAllowPartialResults(isAllowPartialResults);
+    armParams.setOperationSessionInfo(osi);
+
+    return armParams;
+}
 
 }  // namespace mongo

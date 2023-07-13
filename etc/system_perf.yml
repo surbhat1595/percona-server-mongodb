@@ -391,6 +391,9 @@ functions:
           EOF
           fi
           tar czf mongodb${compile_variant|}.tar.gz mongodb
+          # Put all matching mongo debug from the build directory in an archive in the same location
+          # as the library archive (i.e. mongodb/bin).
+          tar czvf mongodb${compile_variant|}-debugsymbols.tar.gz $(find ./build/cached -name mongo\*.debug -type f) --xform 's:^.*/:mongodb/bin/:'
     - command: s3.put
       params:
         aws_key: ${aws_key}
@@ -401,6 +404,16 @@ functions:
         permissions: public-read
         content_type: ${content_type|application/x-gzip}
         display_name: mongodb${compile_variant|}.tar.gz
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/mongodb${compile_variant|}-debugsymbols.tar.gz
+        remote_file: ${project_dir}/${version_id}/${revision}/${platform}/mongodb${compile_variant|}-${version_id}-debugsymbols.tar.gz
+        bucket: mciuploads
+        permissions: public-read
+        content_type: ${content_type|application/x-gzip}
+        display_name: mongo-debugsymbols.tgz
   ###
 
   ###
@@ -414,6 +427,9 @@ functions:
           set -o verbose
           source "${workdir}/compile_venv/bin/activate"
           python ./buildscripts/scons.py ${compile_flags|} ${scons_cache_args|} $extra_args SPLIT_DWARF=0 archive-mongo-crypt-dev MONGO_VERSION=${version} DESTDIR=$(pwd)/crypt-lib-${version} PKGDIR=$(pwd) ${patch_compile_flags|}
+          # Put all matching mongo .debug from the build directory in an archive in the same location
+          # as the library archive (i.e. lib).
+          tar czvf mongo-crypt-dev-debugsymbols.tar.gz $(find ./build/cached -name mongo\*.debug -type f) --xform 's:^.*/:lib/:'
     - command: s3.put
       params:
         aws_key: ${aws_key}
@@ -424,6 +440,16 @@ functions:
         permissions: public-read
         content_type: ${content_type|application/x-gzip}
         display_name: mongo_crypt_shared_v1-${version|}-${compile_variant|}.tgz
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: src/mongo-crypt-dev-debugsymbols.tar.gz
+        remote_file: ${project_dir}/${version_id}/${revision}/${platform}/mongo_crypt_shared_v1-${compile_variant|}-${version_id}-debugsymbols.tgz
+        bucket: mciuploads
+        permissions: public-read
+        content_type: ${content_type|application/x-gzip}
+        display_name: mongo_crypt_shared_v1-debugsymbols.tgz
   ###
 
   ## Schedule Tasks ##
@@ -1560,8 +1586,7 @@ buildvariants:
 
   - name: linux-intel-standalone-classic-query-engine
     display_name: Linux Intel Standalone (Classic Query Engine)
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    activate: false # This task can only be manually scheduled.
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -1599,8 +1624,7 @@ buildvariants:
 
   - name: linux-intel-standalone-sbe
     display_name: Linux Intel Standalone (SBE)
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    activate: false # This task can only be manually scheduled.
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -1619,8 +1643,7 @@ buildvariants:
 
   - name: linux-intel-1-node-replSet-classic-query-engine
     display_name: Linux Intel 1-Node ReplSet (Classic Query Engine)
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    activate: false # This task can only be manually scheduled.
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -1644,8 +1667,7 @@ buildvariants:
 
   - name: linux-intel-1-node-replSet-sbe
     display_name: Linux Intel 1-Node ReplSet (SBE)
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    activate: false # This task can only be manually scheduled.
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -1832,8 +1854,7 @@ buildvariants:
 
   - name: linux-standalone-classic-query-engine.2022-11
     display_name: Linux Standalone (Classic Query Engine) 2022-11
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    activate: false # This task can only be manually scheduled.
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -1853,8 +1874,7 @@ buildvariants:
 
   - name: linux-standalone-sbe.2022-11
     display_name: Linux Standalone (SBE) 2022-11
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    activate: false # This task can only be manually scheduled.
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -1874,8 +1894,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-classic-query-engine.2022-11
     display_name: Linux 1-Node ReplSet (Classic Query Engine) 2022-11
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    activate: false # This task can only be manually scheduled.
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -1895,8 +1914,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-sbe.2022-11
     display_name: Linux 1-Node ReplSet (SBE) 2022-11
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    activate: false # This task can only be manually scheduled.
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2730,8 +2748,7 @@ buildvariants:
   - <<: *linux-microbenchmarks-standalone-arm
     name: linux-microbenchmarks-standalone-classic-query-engine-arm.2023-01
     display_name: MicroBenchmarks Arm Standalone inMemory (Classic Query Engine).2023-01
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    activate: false # This task can only be manually scheduled.
     expansions:
       <<: *standalone-arm-expansions
       mongodb_setup: mongo-perf-standalone-classic-query-engine.2023-02
@@ -2742,8 +2759,7 @@ buildvariants:
   - <<: *linux-microbenchmarks-standalone-arm
     name: linux-microbenchmarks-standalone-sbe-arm.2023-01
     display_name: MicroBenchmarks Arm Standalone inMemory (SBE).2023-01
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    activate: false # This task can only be manually scheduled.
     expansions:
       <<: *standalone-arm-expansions
       mongodb_setup: mongo-perf-standalone-sbe.2023-02
@@ -2786,8 +2802,7 @@ buildvariants:
   - <<: *linux-microbenchmarks-standalone-intel
     name: linux-microbenchmarks-standalone-classic-query-engine.2023-01
     display_name: MicroBenchmarks Intel Standalone inMemory (Classic Query Engine).2023-01
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    activate: false # This task can only be manually scheduled.
     expansions:
       <<: *standalone-intel-expansions
       mongodb_setup: mongo-perf-standalone-classic-query-engine.2023-02
@@ -2798,8 +2813,7 @@ buildvariants:
   - <<: *linux-microbenchmarks-standalone-intel
     name: linux-microbenchmarks-standalone-sbe.2023-01
     display_name: MicroBenchmarks Intel Standalone inMemory (SBE).2023-01
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    activate: false # This task can only be manually scheduled.
     expansions:
       <<: *standalone-intel-expansions
       mongodb_setup: mongo-perf-standalone-sbe.2023-02

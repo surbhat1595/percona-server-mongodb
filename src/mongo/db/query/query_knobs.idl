@@ -520,3 +520,14 @@ server_parameters:
     cpp_varname: internalQueryGlobalProfilingFilter
     cpp_vartype: AtomicWord<bool>
     default: false
+
+  internalQueryDocumentSourceWriterBatchExtraReservedBytes:
+    description: "Space to reserve in document source writer batches for miscellaneous metadata"
+    set_at: [ startup, runtime ]
+    cpp_vartype: AtomicWord<int>
+    cpp_varname: internalQueryDocumentSourceWriterBatchExtraReservedBytes
+    validator:
+      gte: 0
+      lte: 
+        expr: 8 * 1024 * 1024 # 8MB
+    default: 0

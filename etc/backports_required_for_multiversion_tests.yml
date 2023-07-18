@@ -100,8 +100,6 @@ last-continuous:
     ticket: SERVER-73110
   - test_file: jstests/core/doc_validation_with_now_variable.js
     ticket: SERVER-73125
-  - test_file: jstests/sharding/shard_keys_with_dollar_sign.js
-    ticket: SERVER-74124
   - test_file: jstests/core/timeseries/timeseries_filter_extended_range.js
     ticket: SERVER-69952
   - test_file: jstests/noPassthrough/operator_counters_accumulators.js
@@ -116,6 +114,16 @@ last-continuous:
     ticket: SERVER-73229
   - test_file: jstests/core/field_name_validation.js
     ticket: SERVER-75517
+  - test_file: jstests/sharding/shard_keys_with_dollar_sign.js
+    ticket: SERVER-76948
+  - test_file: jstests/sharding/shard_key_index_must_exist.js
+    ticket: SERVER-6491
+  - test_file: jstests/sharding/merge_let_params_size_estimation.js
+    ticket: SERVER-74806
+  - test_file: jstests/sharding/move_chunk_deferred_lookup.js
+    ticket: SERVER-78050
+  - test_file: jstests/sharding/transfer_mods_large_batches.js
+    ticket: SERVER-78414
   suites:
     change_streams_multiversion_passthrough: null
     change_streams_sharded_collections_multiversion_passthrough: null
@@ -125,6 +133,7 @@ last-continuous:
     replica_sets_multiversion: null
     sharded_collections_jscore_multiversion_passthrough: null
     sharding_jscore_multiversion_passthrough: null
+
 last-lts:
   all:
   - test_file: jstests/core/null_query_semantics.js
@@ -311,8 +320,6 @@ last-lts:
     ticket: SERVER-73110
   - test_file: jstests/core/doc_validation_with_now_variable.js
     ticket: SERVER-73125
-  - test_file: jstests/sharding/shard_keys_with_dollar_sign.js
-    ticket: SERVER-74124
   - test_file: jstests/core/timeseries/timeseries_filter_extended_range.js
     ticket: SERVER-69952
   - test_file: jstests/replsets/quiesce_mode_fails_elections.js
@@ -325,6 +332,16 @@ last-lts:
     ticket: SERVER-73229
   - test_file: jstests/core/field_name_validation.js
     ticket: SERVER-75517
+  - test_file: jstests/sharding/shard_keys_with_dollar_sign.js
+    ticket: SERVER-76948
+  - test_file: jstests/sharding/shard_key_index_must_exist.js
+    ticket: SERVER-6491
+  - test_file: jstests/sharding/merge_let_params_size_estimation.js
+    ticket: SERVER-74806
+  - test_file: jstests/sharding/move_chunk_deferred_lookup.js
+    ticket: SERVER-78050
+  - test_file: jstests/sharding/transfer_mods_large_batches.js
+    ticket: SERVER-78414
   suites:
     change_streams_multiversion_passthrough: null
     change_streams_sharded_collections_multiversion_passthrough: null

@@ -45,12 +45,12 @@
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/migration_source_manager.h"
 #include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/s/shard_key_index_util.h"
 #include "mongo/db/s/sharding_runtime_d_params_gen.h"
 #include "mongo/db/s/sharding_statistics.h"
 #include "mongo/db/s/start_chunk_clone_request.h"
@@ -82,6 +82,7 @@ const int kMaxObjectPerChunk{250000};
 const Hours kMaxWaitToCommitCloneForJumboChunk(6);
 
 MONGO_FAIL_POINT_DEFINE(failTooMuchMemoryUsed);
+MONGO_FAIL_POINT_DEFINE(hangAfterProcessingDeferredXferMods);
 
 /**
  * Returns true if the given BSON object in the shard key value pair format is within the given
@@ -850,6 +851,12 @@ void MigrationChunkClonerSourceLegacy::_processDeferredXferMods(OperationContext
             CollectionMetadata::extractDocumentKey(&_shardKeyPattern, newerVersionDoc);
         static_cast<void>(_processUpdateForXferMod(preImageDocKey, postImageDocKey));
     }
+
+    hangAfterProcessingDeferredXferMods.execute([&](const auto& data) {
+        if (!deferredReloadOrDeletePreImageDocKeys.empty()) {
+            hangAfterProcessingDeferredXferMods.pauseWhileSet();
+        }
+    });
 }
 
 Status MigrationChunkClonerSourceLegacy::nextModsBatch(OperationContext* opCtx,
@@ -876,6 +883,11 @@ Status MigrationChunkClonerSourceLegacy::nextModsBatch(OperationContext* opCtx,
         deleteList.splice(deleteList.cbegin(), _deleted);
         updateList.splice(updateList.cbegin(), _reload);
     }
+
+    // It's important to abandon any open snapshots before processing updates so that we are sure
+    // that our snapshot is at least as new as those updates. It's possible for a stale snapshot to
+    // still be open from reads performed by _processDeferredXferMods(), above.
+    opCtx->recoveryUnit()->abandonSnapshot();
 
     auto totalDocSize = _xferDeletes(builder, &deleteList, 0);
     totalDocSize = _xferUpdates(opCtx, db, builder, &updateList, totalDocSize);
@@ -958,10 +970,11 @@ MigrationChunkClonerSourceLegacy::_getIndexScanExecutor(
     InternalPlanner::IndexScanOptions scanOption) {
     // Allow multiKey based on the invariant that shard keys must be single-valued. Therefore, any
     // multi-key index prefixed by shard key cannot be multikey over the shard key fields.
-    const IndexDescriptor* shardKeyIdx =
-        collection->getIndexCatalog()->findShardKeyPrefixedIndex(opCtx,
-                                                                 _shardKeyPattern.toBSON(),
-                                                                 false);  // requireSingleKey
+    auto shardKeyIdx = findShardKeyPrefixedIndex(opCtx,
+                                                 collection,
+                                                 collection->getIndexCatalog(),
+                                                 _shardKeyPattern.toBSON(),
+                                                 /*requireSingleKey=*/false);
     if (!shardKeyIdx) {
         return {ErrorCodes::IndexNotFound,
                 str::stream() << "can't find index with prefix " << _shardKeyPattern.toBSON()

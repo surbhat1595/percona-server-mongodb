@@ -615,8 +615,6 @@ protected:
         writeDecisionPersistedState(
             operationContext(), expectedCoordinatorDoc, _finalEpoch, _finalTimestamp);
 
-        updateTagsDocsForTempNss(operationContext(), expectedCoordinatorDoc);
-
         // Check that config.reshardingOperations and config.collections entries are updated
         // correctly
         assertStateAndCatalogEntriesMatchExpected(opCtx, expectedCoordinatorDoc, _finalEpoch);
@@ -635,7 +633,7 @@ protected:
                                               ReshardingCoordinatorDocument expectedCoordinatorDoc,
                                               std::vector<ChunkType> expectedChunks,
                                               std::vector<TagsType> expectedZones) {
-        cleanupSourceConfigCollections(opCtx, expectedCoordinatorDoc);
+        removeChunkDocs(opCtx, expectedCoordinatorDoc.getSourceUUID());
         // Check that chunks and tags entries previously under the temporary namespace have been
         // correctly updated to the original namespace
 

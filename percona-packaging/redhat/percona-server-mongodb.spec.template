@@ -3,6 +3,11 @@
 %if 0%{?rhel} == 9
 %undefine _debugsource_packages
 %endif
+
+%if 0%{?rhel} == 7
+%global _find_debuginfo_dwz_opts %{nil}
+%endif
+
 #
 Name:           percona-server-mongodb
 Version:        @@VERSION@@
@@ -48,9 +53,9 @@ BuildRequires: snappy-devel, zlib-devel, bzip2-devel, libpcap-devel, openldap-de
 %if 0%{?rhel} == 7
 BuildRequires: /usr/bin/scons
 %endif
-%if 0%{?rhel} >= 8
-BuildRequires: /usr/bin/scons-3
-%endif
+#%if 0%{?rhel} >= 8
+#BuildRequires: /usr/bin/scons-3
+#%endif
 
 Requires: %{name}-mongos = %{version}-%{release}
 Requires: %{name}-server = %{version}-%{release}
@@ -109,9 +114,9 @@ Conflicts: Percona-Server-MongoDB-tools Percona-Server-MongoDB-32-tools Percona-
 
 %build
 
-export CC=${CC:-gcc}
-export CXX=${CXX:-g++}
-export PSM_TARGETS="install-mongod install-mongos install-perconadecrypt install-mongobridge"
+export CC=${CC:-clang}
+export CXX=${CXX:-clang++}
+export PSM_TARGETS="install-mongod install-mongos install-perconadecrypt build/install/bin/mongobridge"
 export INSTALLDIR=$RPM_BUILD_DIR/install
 export INSTALLDIR_AWS=$RPM_BUILD_DIR/install_aws
 export AWS_LIBS="/usr/local"
@@ -119,6 +124,7 @@ export TOOLS_TAGS="ssl sasl"
 export PORTABLE=1
 export USE_SSE=1
 export PATH=/usr/local/go/bin:$PATH
+export OPT_LINKFLAGS="${LINKFLAGS} -Wl,--build-id=sha1"
 
 export PATH=/usr/local/go/bin:${PATH}
 export GOROOT="/usr/local/go/"
@@ -148,7 +154,7 @@ mv ${INSTALLDIR_AWS}/lib*/* ${INSTALLDIR}/lib/
 pushd $RPM_BUILD_DIR/%{src_dir}
 buildscripts/scons.py CC=${CC} CXX=${CXX} --disable-warnings-as-errors --audit --release --ssl --opt=on  \
 %{?_smp_mflags} --use-sasl-client CPPPATH=${INSTALLDIR}/include LIBPATH="${INSTALLDIR}/lib ${AWS_LIBS}/lib ${AWS_LIBS}/lib64" \
---wiredtiger --inmemory --hotbackup ${PSM_TARGETS} || exit $?
+--wiredtiger --inmemory --hotbackup LINKFLAGS="${OPT_LINKFLAGS}" ${PSM_TARGETS} || exit $?
 rm -fr resmoke.ini
 popd
 

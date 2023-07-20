@@ -20,6 +20,8 @@
 #
 last-continuous:
   all:
+  - test_file: jstests/core/timeseries/timeseries_field_parsed_as_bson.js
+    ticket: SERVER-77654
   - test_file: jstests/sharding/conn_pool_stats.js
     ticket: SERVER-75911
   - test_file: jstests/core/administrative/check_shard_index.js
@@ -390,6 +392,8 @@ last-continuous:
     ticket: SERVER-76988
   - test_file: jstests/replsets/tenant_migration_retryable_internal_transaction.js
     ticket: SERVER-77237
+  - test_file: jstests/core/sbe_plan_cache_duplicate_or_clauses.js
+    ticket: SERVER-78752
   - test_file: jstests/sharding/move_chunk_deferred_lookup.js
     ticket: SERVER-78050
   - test_file: jstests/sharding/cluster_time_across_add_shard.js
@@ -402,6 +406,10 @@ last-continuous:
     ticket: SERVER-77386
   - test_file: jstests/replsets/config_txns_reaping_interrupt.js
     ticket: SERVER-78187
+  - test_file: jstests/sharding/internal_txns/transaction_api_distributed_from_shard.js
+    ticket: SERVER-78786
+  - test_file: jstests/sharding/internal_txns/transaction_api_test_command_basic.js
+    ticket: SERVER-78786
   suites: null
 last-lts:
   all:
@@ -887,4 +895,10 @@ last-lts:
     ticket: SERVER-78414
   - test_file: jstests/replsets/config_txns_reaping_interrupt.js
     ticket: SERVER-78187
+  - test_file: jstests/sharding/internal_txns/transaction_api_distributed_from_shard.js
+    ticket: SERVER-78786
+  - test_file: jstests/sharding/internal_txns/transaction_api_test_command_basic.js
+    ticket: SERVER-78786
+  - test_file: src/mongo/db/modules/enterprise/jstests/fle2/txn_snapshot.js
+    ticket: SERVER-78855
   suites: null

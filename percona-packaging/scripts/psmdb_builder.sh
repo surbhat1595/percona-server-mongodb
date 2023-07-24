@@ -334,7 +334,7 @@ aws_sdk_build(){
             CMAKE_CMD="cmake"
             if [ -f /etc/redhat-release ]; then
                 RHEL=$(rpm --eval %rhel)
-                if [ x"$RHEL" = x6 ]; then
+                if [ x"$RHEL" = x7 ]; then
                     CMAKE_CMD="cmake3"
                 fi
             fi
@@ -433,7 +433,7 @@ install_deps() {
       DEBIAN_FRONTEND=noninteractive apt-get -y install curl lsb-release wget apt-transport-https software-properties-common
       export DEBIAN=$(lsb_release -sc)
       export ARCH=$(echo $(uname -m) | sed -e 's:i686:i386:g')
-      wget https://repo.percona.com/apt/pool/testing/p/percona-release/percona-release_1.0-27.generic_all.deb && dpkg -i percona-release_1.0-27.generic_all.deb
+      wget https://repo.percona.com/apt/pool/main/p/percona-release/percona-release_1.0-27.generic_all.deb && dpkg -i percona-release_1.0-27.generic_all.deb
       if [ x"${DEBIAN}" = "xbionic" -o x"${DEBIAN}" = "xfocal" ]; then
         add-apt-repository -y ppa:deadsnakes/ppa
       elif [ x"${DEBIAN}" = "xstretch" -o x"${DEBIAN}" = "xbuster" ]; then
@@ -728,6 +728,10 @@ build_source_deb(){
     mv ${TARFILE} ${PRODUCT}_${VERSION}.orig.tar.gz
     cd ${BUILDDIR}
     pip install --upgrade pip
+
+    # PyYAML pkg installation fix, more info: https://github.com/yaml/pyyaml/issues/724
+    pip install pyyaml==5.4.1 --no-build-isolation
+
     pip install -r etc/pip/dev-requirements.txt
     pip install -r etc/pip/evgtest-requirements.txt
 
@@ -780,6 +784,10 @@ build_deb(){
     #
     cd ${PRODUCT}-${VERSION}
     pip install --upgrade pip
+
+    # PyYAML pkg installation fix, more info: https://github.com/yaml/pyyaml/issues/724
+    pip install pyyaml==5.4.1 --no-build-isolation
+
     pip install -r etc/pip/dev-requirements.txt
     pip install -r etc/pip/evgtest-requirements.txt
     #
